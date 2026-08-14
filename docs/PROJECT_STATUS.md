@@ -151,8 +151,9 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 - importer/public transport/credential 专项 15/15、Python 全量 269/269、broker 15/15、`compileall` 和
   `git diff --check` 全部通过。固定 `SOURCE_DATE_EPOCH=1700000000` 两次 wheel SHA-256 均为
   `c9af233004f0a6bed406572f97c1802cef06ddefc20b0c17728302bf7138ac86`；隔离安装可导入三个新模块、
-  创建 6 张 external metadata 表并找到 2 份新 contract，SQLite integrity 为 `ok`。系统 Python 3.13 的
-  no-build-isolation 路径因本机没有 `setuptools.build_meta` 失败，build isolation 路径已重复通过；
+  创建 6 张 external metadata 表并找到 2 份新 contract，SQLite integrity 为 `ok`。P0-3 复核时 system
+  Python 3.13 曾因缺少 `setuptools.build_meta` 无法走 no-build-isolation；当前项目 `.venv` 是 Python 3.13.14，
+  已含 setuptools 84.0.0 与 `setuptools.build_meta`，本轮 no-build-isolation 重复构建通过，不需要全局安装；
 - 实现提交 `e1ab94c`；GitHub CI 的 broker、Python 3.11 和 Python 3.13 全部通过：
   <https://github.com/everflowinv/dalton-research-agent-os/actions/runs/31828754012>。
 
@@ -222,12 +223,20 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   SourceEnvelope。每个成功页在 page commit 内独立注册 ArtifactVersion；page recovery 覆盖 reserved、
   transport_started、observed、artifact/responded barrier 和第二页 capacity failure；
 - response journal 先持久化 closed result/response/page receipts/commit context，再通过窄 AuthorityPort 做
-  Scheduler reconciliation。Scheduler 从构造时绑定的 trusted RunnerJournal reader 读取 proof，不接收 caller
-  声明的 event hash/time；lease 过期后仍可收敛 lease 期内已持久化的完成事实，later attempt 已重新 claim 时
-  fail closed；
-- committed candidates `9599ea8` 与 `c5fcd41` 经 Fable 5 先后裁决 No-Go。本次第二轮 hardening 关闭了前八类
-  blocker，并拒绝零 journal 或非闭合 parent completion 的伪造 reconciliation；专项 18/18、组合 75/75、
-  Python 全量 314/314、broker 15/15 通过，等待新提交的 committed-tree 增量复核；
+  Scheduler reconciliation。Scheduler 从构造时绑定的 exact RunnerJournal 与同一 Core store 的
+  ConnectorCompletionReceiptReader 读取全部事实，不接收 caller 声明的 event hash/time；只有 parent
+  `recorded_at` 决定 lease 内完成。page observed/transport_started 不足以在过期后完成旧 attempt；lease 内已
+  持久化的 parent completion 可在过期后收敛，later attempt 已重新 claim 时 fail closed；
+- 父级 ResultEnvelope/RunnerResponse 由 deterministic builder 从 request/context、全部 page receipts 和
+  Connector/Artifact/Source authority 唯一生成，并整份精确比较；额外 output/metadata/side effect、空 authority
+  或分页串页即使重算 hash 也不能形成 formal result；
+- Fable 5 对 `9599ea8` 至 `bf7c169` 的多轮复核发现并推动关闭了 fixture/runtime graph、page recovery、输出
+  schema、query/scenario、lease proof、caller 时间、inner fact chain、分页串页和开放 parent completion 等
+  问题。最终候选 `2cb671e` 已通过专项 21/21、组合 81/81、Python 317/317、broker 15/15；两次 archive wheel
+  SHA-256 均为 `ca0e6a9eb84f1d1d287bd839de1b0854da43588d9191d4db0fd2cfdb073c9bd6`，干净安装与
+  SQLite integrity 通过；
+- Claude Fable 5 的最终 committed-tree 增量会话因本机 OAuth 过期未能启动，所以当前仍标记“待独立裁决”，
+  未推送、未部署；
 - 本轮没有部署、没有访问真实数据源、没有使用 credential，也没有写 Evidence/Claim/Thesis。真实 public
   network 仍被 killable total-deadline transport gate 阻塞；AlphaEngine/Guidepoint/雪球等 host/MCP 路径仍被
   runner wire 0.2、credential revoke/max_calls use-time authority 阻塞。

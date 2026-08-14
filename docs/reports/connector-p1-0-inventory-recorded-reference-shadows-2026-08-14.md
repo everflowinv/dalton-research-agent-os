@@ -2,7 +2,7 @@
 
 日期：2026-08-14
 
-状态：P1-0a 已获独立 Go；P1-0b hardening candidate 待 committed-tree 增量复核
+状态：P1-0a 已获独立 Go；P1-0b 最终候选本地验收通过，待 Claude Fable 5 补做最终增量裁决
 范围：离线 contract、synthetic/recorded fixture、authority replay；未部署、未访问真实数据源
 
 ## 阶段裁决
@@ -84,24 +84,36 @@ spool capacity failure 保留第一页已注册 artifact，并关闭 parent retr
 
 跨库收敛顺序改为先把 closed response、ResultEnvelope、page receipts、commit context 和 hash 写入 parent
 RunnerJournal，再幂等完成 Scheduler。恢复先完成闭合校验并与 immutable authority 交叉核对；受限 Scheduler
-reconciliation 从 Scheduler 构造时绑定的 trusted RunnerJournal reader 读取 parent responded event、page receipt
-和实际 completion event，caller 不能提交 event hash/time 充当 proof。lease 期内已持久化的完成事实可在 lease
-过期后收敛，但 later attempt 已重新 claim 时 fail closed。Coordinator 只持有窄 AuthorityPort，不直接持有
-ConnectorStore、Scheduler 或 SQLite connection。
+reconciliation 从 Scheduler 构造时绑定的 exact RunnerJournal 与 ConnectorCompletionReceiptReader 读取 parent
+responded event、全部 page receipts 和真实 reservation/attempt/usage/cost/settlement/artifact/source facts，caller
+不能提交 event hash/time 充当 proof。只有 journal 自己写入的 parent `recorded_at` 决定是否在 lease 内完成；caller
+传入的 `event_at` 只作来源时间，不能回填完成时点。lease 内已持久化的 parent completion 可在 lease 过期后
+收敛，但 page observed/transport_started 本身不够，later attempt 已重新 claim 时也 fail closed。
 
-## Hardening candidate 验证
+父级 ResultEnvelope 与 RunnerResponse 由一份 deterministic builder 从已验证的 request/context、page receipts 和
+SourceEnvelope 唯一生成，并要求整份对象逐字段相等。额外 output、metadata、side effect，或把第二页换成第一页
+request/completion event，即使重算相关 hash 也不能进入 Scheduler formal result。Completion reader 只接受同一
+Core store 上的 exact ConnectorStore 与 ObservabilityStore；Coordinator 只持有窄 AuthorityPort，不直接持有
+完整 store 或 SQLite connection。
 
-- recorded reference shadow 专项：18/18；
-- Runner/transport/inventory/contracts/Scheduler 组合：75/75；
-- Python 全量：314/314；
+## 最终候选验证
+
+- recorded reference shadow 专项：21/21；
+- Runner/transport/inventory/contracts/Scheduler 组合：81/81；
+- Python 全量：317/317；
 - broker：15/15；
 - `compileall`、`git diff --check`：通过。
+- 两次 committed archive、Python 3.13 `--no-isolation` wheel 逐字节一致，SHA-256：
+  `ca0e6a9eb84f1d1d287bd839de1b0854da43588d9191d4db0fd2cfdb073c9bd6`；
+- 干净 venv 安装后 inventory `load == build`，十个 profile 与 CNINFO/SEC fixture 完整，completion builder 可导入，
+  SQLite integrity 为 `ok`。
 
-committed candidates `9599ea8` 与 `c5fcd41` 经 Fable 5 hostile review 先后裁决为 No-Go。第二次裁决复现了
-Scheduler 把 caller 提交的 event ref/hash/time 当 proof、可在零 journal 时伪造成功结果的问题。本次第二轮
-hardening 改为 constructor-bound trusted journal proof，并新增零 journal 与非闭合 parent completion 回归；
-形成新提交后仍需 Fable 5 对 committed tree 增量复核，并完成 deterministic wheel/clean install 和 GitHub CI。
-这些检查完成前，本报告不把 P1-0b 写成 Go。
+Fable 5 对 committed candidates `9599ea8`、`c5fcd41`、`d9b5a0e`、`6eea5c0` 与 `bf7c169` 连续复核，依次
+发现 page recovery、fixture/runtime graph、lease completion proof、caller 时间、inner authority chain、分页
+串页和开放父级 Result/Response 等问题。最终候选 `2cb671e` 已关闭这些已知缝隙并通过上述本地验收。
+
+新的 Claude Fable 5 终审会话因本机 Claude OAuth 过期未能启动，因此本报告不把 `2cb671e` 写成独立 Go，也
+不推送或部署。恢复 Claude 会话后只需对 committed tree 补做增量裁决；若获 Go，再推送并等待 GitHub CI。
 
 ## 仍然 No-Go
 
