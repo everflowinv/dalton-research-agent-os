@@ -152,7 +152,9 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   `git diff --check` 全部通过。固定 `SOURCE_DATE_EPOCH=1700000000` 两次 wheel SHA-256 均为
   `c9af233004f0a6bed406572f97c1802cef06ddefc20b0c17728302bf7138ac86`；隔离安装可导入三个新模块、
   创建 6 张 external metadata 表并找到 2 份新 contract，SQLite integrity 为 `ok`。系统 Python 3.13 的
-  no-build-isolation 路径因本机没有 `setuptools.build_meta` 失败，build isolation 路径已重复通过。
+  no-build-isolation 路径因本机没有 `setuptools.build_meta` 失败，build isolation 路径已重复通过；
+- 实现提交 `e1ab94c`；GitHub CI 的 broker、Python 3.11 和 Python 3.13 全部通过：
+  <https://github.com/everflowinv/dalton-research-agent-os/actions/runs/31828754012>。
 
 ## 蓝图阶段
 

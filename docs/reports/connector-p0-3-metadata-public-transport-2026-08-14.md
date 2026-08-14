@@ -66,6 +66,8 @@ AlphaEngine shadow 已运行。
   创建 6 张 external metadata 表并找到 2 份新 contract，SQLite integrity 为 `ok`；
 - 系统 Python 3.13 的 `pip wheel --no-build-isolation` 因本机没有 `setuptools.build_meta` 失败；使用
   build isolation 的两次构建通过。该环境缺口没有记成代码失败，也没有被隐藏；
+- 实现提交 `e1ab94c`；GitHub CI 的 broker、Python 3.11 和 Python 3.13 全部通过：
+  <https://github.com/everflowinv/dalton-research-agent-os/actions/runs/31828754012>；
 - 本轮没有网络 smoke、OpenClaw live exporter、metadata sync daemon、真实 connector、authenticated runner、
   connector dashboard projection、部署或 Agenda/Ledger 接入；
 - 下一安全步骤是补 exporter/sync 与 connector projection，再发布 A股公告、SEC public profile 的 recorded
