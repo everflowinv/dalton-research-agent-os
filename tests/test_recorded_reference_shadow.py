@@ -9,7 +9,10 @@ from pathlib import Path
 
 from dalton_core.capability_catalog import CapabilityCatalog
 from dalton_core.connector import ConnectorStore
-from dalton_core.connector_authority_port import ConnectorAuthorityPort
+from dalton_core.connector_authority_port import (
+    ConnectorAuthorityPort,
+    ConnectorCompletionReceiptReader,
+)
 from dalton_core.connector_inventory import load_packaged_connector_inventory
 from dalton_core.connector_runner import (
     ConnectorRunnerAdmissionGate,
@@ -144,6 +147,55 @@ class MutatingResponseJournal:
         return self._journal.append(runner_request_ref, state, changed, **kwargs)
 
 
+class DelayedParentResponseJournal:
+    def __init__(
+        self,
+        journal: RunnerJournal,
+        advance_clock: Callable[[int], None],
+        *,
+        backdated_event_at: str | None = None,
+    ):
+        self._journal = journal
+        self._advance_clock = advance_clock
+        self._backdated_event_at = backdated_event_at
+
+    def __getattr__(self, name):
+        return getattr(self._journal, name)
+
+    def append(self, runner_request_ref, state, payload, **kwargs):
+        if state == "responded" and "response" in payload:
+            self._advance_clock(31)
+            if self._backdated_event_at is not None:
+                kwargs["event_at"] = self._backdated_event_at
+        return self._journal.append(runner_request_ref, state, payload, **kwargs)
+
+
+class ReusedPageCompletionJournal:
+    def __init__(self, journal: RunnerJournal):
+        self._journal = journal
+
+    def __getattr__(self, name):
+        return getattr(self._journal, name)
+
+    def append(self, runner_request_ref, state, payload, **kwargs):
+        changed = copy.deepcopy(payload)
+        if (
+            state == "responded"
+            and "response" in changed
+            and len(changed.get("page_receipts", ())) >= 2
+        ):
+            first, second = changed["page_receipts"][:2]
+            for field in (
+                "runner_request_ref",
+                "runner_request_hash",
+                "completion_event_ref",
+                "completion_event_hash",
+                "completion_event_at",
+            ):
+                second[field] = first[field]
+        return self._journal.append(runner_request_ref, state, changed, **kwargs)
+
+
 class ReferenceShadowHarness:
     def __init__(
         self,
@@ -162,9 +214,15 @@ class ReferenceShadowHarness:
         self.core = DaltonStore(":memory:")
         self.journal = RunnerJournal(self.core, clock=self.clock)
         self.connectors = ConnectorStore(self.core, clock=self.clock)
+        self.observability = ObservabilityStore(self.core)
+        self.receipt_reader = ConnectorCompletionReceiptReader(
+            connectors=self.connectors, observability=self.observability
+        )
         self.scheduler = Scheduler(
             ":memory:", clock=self.clock, default_lease_seconds=30,
-            max_lease_seconds=60, trusted_journal_reader=self.journal,
+            max_lease_seconds=60,
+            trusted_journal_reader=self.journal,
+            trusted_completion_reader=self.receipt_reader,
         )
         self.authorities = FakeAuthorities()
         self.authorities.policy_permissions = permissions()
@@ -460,8 +518,9 @@ class ReferenceShadowHarness:
         )
         authority = ConnectorAuthorityPort(
             connectors=self.connectors,
-            observability=ObservabilityStore(self.core),
+            observability=self.observability,
             scheduler=self.scheduler,
+            receipt_reader=self.receipt_reader,
         )
         plan = {
             "schema_version": "0.1",
@@ -963,9 +1022,9 @@ class RecordedReferenceShadowTests(unittest.TestCase):
             "released_recovered",
         )
 
-        for barrier, expected in (
-            ("after_page_transport_started", "retryable"),
-            ("after_page_observed", "succeeded"),
+        for barrier, expected_artifacts in (
+            ("after_page_transport_started", 0),
+            ("after_page_observed", 1),
         ):
             with self.subTest(expired_recovery=barrier):
                 durable = self.harness("sec", "success", fault_at=barrier)
@@ -973,10 +1032,21 @@ class RecordedReferenceShadowTests(unittest.TestCase):
                     durable.execute()
                 durable.coordinator.fault_hook = None
                 durable.clock.advance(31)
-                response = durable.execute()
-                self.assertEqual(response["outcome"], expected)
+                with self.assertRaises(LeaseExpired):
+                    durable.execute()
                 self.assertEqual(
-                    durable.count("scheduler_result_envelopes", scheduler=True), 1
+                    durable.count("scheduler_result_envelopes", scheduler=True), 0
+                )
+                self.assertEqual(durable.count("connector_physical_attempts"), 1)
+                self.assertEqual(
+                    durable.count("observability_artifact_versions_v2"),
+                    expected_artifacts,
+                )
+                durable.scheduler.sweep_expired()
+                self.assertIsNotNone(
+                    durable.scheduler.claim(
+                        "runner:connector", work_order_id=durable.work.id
+                    )
                 )
 
     def test_second_page_capacity_failure_keeps_first_page_registered_and_converges(self) -> None:
@@ -1036,6 +1106,51 @@ class RecordedReferenceShadowTests(unittest.TestCase):
         with self.assertRaises(SchedulerConflict):
             raced.execute()
         self.assertEqual(raced.count("scheduler_result_envelopes", scheduler=True), 0)
+
+    def test_parent_completion_first_journaled_after_expiry_is_not_formal(self) -> None:
+        for backdated in (False, True):
+            with self.subTest(backdated=backdated):
+                harness = self.harness("cninfo", "success")
+                delayed = DelayedParentResponseJournal(
+                    harness.journal,
+                    harness.clock.advance,
+                    backdated_event_at=(
+                        harness.clock().isoformat(timespec="microseconds")
+                        if backdated
+                        else None
+                    ),
+                )
+                harness.journal = delayed
+                harness.coordinator.journal = delayed
+                with self.assertRaises(LeaseExpired):
+                    harness.execute()
+                parent = harness.journal.latest(harness.request()["id"])
+                page_event = harness.journal.event(
+                    parent["payload"]["page_receipts"][-1]["completion_event_ref"]
+                )
+                self.assertLess(
+                    page_event["recorded_at"], harness.claim["lease"]["expires_at"]
+                )
+                if backdated:
+                    self.assertLess(
+                        parent["event_at"], harness.claim["lease"]["expires_at"]
+                    )
+                self.assertGreaterEqual(
+                    parent["recorded_at"], harness.claim["lease"]["expires_at"]
+                )
+                self.assertEqual(harness.count("connector_physical_attempts"), 1)
+                self.assertEqual(
+                    harness.count("observability_artifact_versions_v2"), 1
+                )
+                self.assertEqual(
+                    harness.count("scheduler_result_envelopes", scheduler=True), 0
+                )
+                harness.scheduler.sweep_expired()
+                self.assertIsNotNone(
+                    harness.scheduler.claim(
+                        "runner:connector", work_order_id=harness.work.id
+                    )
+                )
 
     def test_scheduler_reconciliation_rejects_caller_claim_without_journal(self) -> None:
         with self.assertRaises(SchedulerValidationError):
@@ -1101,6 +1216,76 @@ class RecordedReferenceShadowTests(unittest.TestCase):
             )
         self.assertEqual(harness.count("scheduler_result_envelopes", scheduler=True), 0)
 
+        inner = self.harness("cninfo", "success")
+        inner_request = inner.request()
+        inner_result = ResultEnvelope(
+            schema_version="0.1",
+            id="result-envelope:minimal-inner-journal",
+            created_at=inner.clock().isoformat(timespec="microseconds"),
+            work_order_ref=inner.work.id,
+            invocation_ref=inner.execution.id,
+            status="succeeded",
+            outputs={"forged": True},
+            actual_side_effects=(),
+            usage_refs=(),
+            artifact_refs=(),
+            error=None,
+            metadata={"runner_request_ref": inner_request["id"]},
+        )
+        inner_hash = content_hash(inner_result.to_dict())
+        inner.journal.begin_request(inner_request)
+        inner.journal.append(
+            inner_request["id"], "reserved", {"reservation_ref": "reservation:fake"}
+        )
+        observed = inner.journal.append(
+            inner_request["id"],
+            "observed",
+            {
+                "reservation_ref": "reservation:fake",
+                "commit_context": {"request": inner_request},
+            },
+        )
+        inner.journal.append(
+            inner_request["id"],
+            "responded",
+            {
+                "reservation_ref": "reservation:fake",
+                "response": {
+                    "runner_request_ref": inner_request["id"],
+                    "runner_request_hash": inner_request["content_hash"],
+                    "result_envelope_ref": inner_result.id,
+                    "result_envelope_hash": inner_hash,
+                    "outcome": "succeeded",
+                    "retry_at": None,
+                },
+                "result_envelope": inner_result.to_dict(),
+                "result_envelope_hash": inner_hash,
+                "retry_at": None,
+                "page_receipts": [
+                    {
+                        "runner_request_ref": inner_request["id"],
+                        "completion_event_ref": observed["id"],
+                        "completion_event_hash": observed["content_hash"],
+                        "completion_event_at": observed["event_at"],
+                    }
+                ],
+                "commit_context": {"request": inner_request},
+            },
+        )
+        with self.assertRaises(SchedulerConflict):
+            inner.scheduler.reconcile_journaled_completion(
+                inner.work.id,
+                1,
+                inner_request["runner_actor_ref"],
+                inner_result,
+                lease_revision_ref=inner_request["scheduler_lease_revision_ref"],
+                lease_hash=inner_request["scheduler_lease_hash"],
+                work_order_hash=inner_request["work_order_hash"],
+                idempotency_key="minimal-inner-journal-reconciliation",
+                result_envelope_hash=inner_hash,
+            )
+        self.assertEqual(inner.count("scheduler_result_envelopes", scheduler=True), 0)
+
     def test_hostile_parent_response_is_rejected_before_scheduler_reconciliation(self) -> None:
         harness = self.harness(
             "cninfo", "success", fault_at="after_response_journaled"
@@ -1110,6 +1295,20 @@ class RecordedReferenceShadowTests(unittest.TestCase):
         harness.coordinator.journal = hostile_journal
         with self.assertRaises(Exception):
             harness.execute()
+        self.assertEqual(harness.count("scheduler_result_envelopes", scheduler=True), 0)
+
+    def test_paginated_receipts_cannot_reuse_another_pages_request_or_event(self) -> None:
+        harness = self.harness("cninfo", "pagination")
+        reused = ReusedPageCompletionJournal(harness.journal)
+        harness.journal = reused
+        harness.coordinator.journal = reused
+        with self.assertRaises(RecordedReferenceShadowError):
+            harness.execute()
+        parent = harness.journal.latest(harness.request()["id"])
+        first, second = parent["payload"]["page_receipts"]
+        self.assertEqual(first["runner_request_ref"], second["runner_request_ref"])
+        self.assertEqual(first["completion_event_ref"], second["completion_event_ref"])
+        self.assertNotEqual(first["physical_attempt_ref"], second["physical_attempt_ref"])
         self.assertEqual(harness.count("scheduler_result_envelopes", scheduler=True), 0)
 
     def test_shadow_does_not_write_research_beliefs(self) -> None:

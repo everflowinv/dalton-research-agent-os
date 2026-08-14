@@ -139,6 +139,7 @@ class Scheduler:
         max_total_lease_seconds: float = 300.0,
         policy_version_id: str = "scheduler-policy-0.1",
         trusted_journal_reader: Any | None = None,
+        trusted_completion_reader: Any | None = None,
     ) -> None:
         self.path = str(path)
         self.clock = clock or _utc_now
@@ -167,7 +168,19 @@ class Scheduler:
                 raise SchedulerValidationError(
                     "trusted_journal_reader must be an exact RunnerJournal"
                 )
+        if trusted_completion_reader is not None:
+            from .connector_authority_port import ConnectorCompletionReceiptReader
+
+            if type(trusted_completion_reader) is not ConnectorCompletionReceiptReader:
+                raise SchedulerValidationError(
+                    "trusted_completion_reader must be an exact receipt reader"
+                )
+        if (trusted_journal_reader is None) != (trusted_completion_reader is None):
+            raise SchedulerValidationError(
+                "journal and completion readers must be bound together"
+            )
         self._trusted_journal_reader = trusted_journal_reader
+        self._trusted_completion_reader = trusted_completion_reader
         self._authorized = False
         self.connection = connection or sqlite3.connect(self.path, isolation_level=None)
         if connection is None and self.path != ":memory:":
@@ -1067,10 +1080,11 @@ class Scheduler:
         retry_at: str | datetime | None,
     ) -> dict[str, str]:
         reader = self._trusted_journal_reader
+        receipts_reader = self._trusted_completion_reader
         if reader is None or not all(
             callable(getattr(reader, name, None))
             for name in ("request", "latest", "event")
-        ):
+        ) or receipts_reader is None:
             raise SchedulerConflict(
                 "journal reconciliation has no trusted journal reader"
             )
@@ -1119,6 +1133,19 @@ class Scheduler:
             raise SchedulerConflict(
                 "journaled parent completion does not bind ResultEnvelope"
             )
+        try:
+            from .connector_runner import (
+                validate_adapter_transport_observation,
+                validate_connector_runner_request,
+                validate_connector_runner_response,
+            )
+
+            request = validate_connector_runner_request(request)
+            response = validate_connector_runner_response(response)
+        except Exception as exc:
+            raise SchedulerConflict(
+                "journaled request/response wire is not closed"
+            ) from exc
         context_request = context.get("request")
         if not isinstance(context_request, Mapping) or context_request != request:
             raise SchedulerConflict(
@@ -1148,9 +1175,349 @@ class Scheduler:
             raise SchedulerConflict(
                 "journaled completion differs from Scheduler lease/result authority"
             )
-        last_receipt = receipts[-1]
-        if not isinstance(last_receipt, Mapping):
-            raise SchedulerConflict("journaled completion lacks a final page receipt")
+        context_fields = {
+            "schema_version", "plan_hash", "request", "work_order",
+            "work_order_hash", "invocation", "execution", "execution_hash",
+            "profile", "call_spec",
+        }
+        invocation = context.get("invocation")
+        execution = context.get("execution")
+        profile = context.get("profile")
+        call_spec = context.get("call_spec")
+        if (
+            set(context) != context_fields
+            or not all(
+                isinstance(item, Mapping)
+                for item in (invocation, execution, profile, call_spec)
+            )
+            or context.get("work_order_hash") != work_order_hash
+            or context.get("execution_hash") != request.get("execution_hash")
+            or result_wire.get("invocation_ref") != execution.get("id")
+        ):
+            raise SchedulerConflict("journaled commit context is not closed")
+        try:
+            stored_invocation = receipts_reader.get_invocation(invocation["id"])
+            stored_profile = receipts_reader.get_profile(profile["id"])
+            stored_call = receipts_reader.get_call_spec(call_spec["id"])
+            stored_execution = receipts_reader.get_execution(execution["id"])
+        except Exception as exc:
+            raise SchedulerConflict(
+                "journaled commit context lacks immutable Connector authority"
+            ) from exc
+        if (
+            stored_invocation != invocation
+            or stored_profile != profile
+            or stored_call != call_spec
+            or stored_execution is None
+            or stored_execution.get("execution") != execution
+            or stored_execution.get("content_hash") != request.get("execution_hash")
+            or request.get("connector_invocation_ref") != invocation.get("id")
+            or request.get("connector_invocation_hash") != invocation.get("content_hash")
+            or request.get("connector_profile_ref") != profile.get("id")
+            or request.get("connector_profile_hash") != profile.get("content_hash")
+            or request.get("call_spec_ref") != call_spec.get("id")
+            or request.get("call_spec_hash") != call_spec.get("content_hash")
+        ):
+            raise SchedulerConflict(
+                "journaled commit context differs from Connector authority"
+            )
+        receipt_fields = {
+            "idempotency_status", "runner_request_ref", "runner_request_hash",
+            "reservation_ref", "physical_attempt_ref", "physical_attempt_hash",
+            "adapter_request_hash", "usage_entry_ref", "usage_entry_hash",
+            "cost_entry_ref", "cost_entry_hash", "quota_settlement_ref",
+            "quota_settlement_hash", "attempt_outcome", "retry_at",
+            "observation", "raw_object", "error", "raw_artifact_version_ref",
+            "raw_artifact_version_hash", "page_result_envelope",
+            "page_result_envelope_hash", "completion_event_ref",
+            "completion_event_hash", "completion_event_at",
+        }
+        validated_receipts: list[dict[str, Any]] = []
+        prior_artifact_ref = None
+        seen_requests: set[str] = set()
+        seen_events: set[str] = set()
+        for ordinal, raw_receipt in enumerate(receipts, start=1):
+            if not isinstance(raw_receipt, Mapping) or set(raw_receipt) != receipt_fields:
+                raise SchedulerConflict("journaled page receipt is not closed")
+            receipt = dict(raw_receipt)
+            expected_page_request = dict(request)
+            if ordinal > 1:
+                expected_page_request.pop("content_hash", None)
+                expected_page_request["id"] = (
+                    "connector-runner-request:"
+                    + content_hash(
+                        {
+                            "kind": "connector-runner-request",
+                            "idempotency_key": f"{request['id']}:page:{ordinal}",
+                        }
+                    )
+                )
+                expected_page_request["idempotency_key"] = (
+                    f"{request['idempotency_key']}:page:{ordinal}"
+                )
+                expected_page_request["content_hash"] = content_hash(
+                    expected_page_request
+                )
+            try:
+                page_request = validate_connector_runner_request(
+                    reader.request(receipt["runner_request_ref"])
+                )
+                completion_event = reader.event(receipt["completion_event_ref"])
+                reservation = receipts_reader.get_reservation(
+                    receipt["reservation_ref"]
+                )
+                attempt = receipts_reader.get_physical_attempt(
+                    receipt["physical_attempt_ref"]
+                )
+                usage = receipts_reader.get_usage_entry(receipt["usage_entry_ref"])
+                cost = receipts_reader.get_cost_entry(receipt["cost_entry_ref"])
+                settlement = receipts_reader.get_quota_settlement(
+                    receipt["quota_settlement_ref"]
+                )
+            except Exception as exc:
+                raise SchedulerConflict(
+                    "journaled page lacks immutable completion authority"
+                ) from exc
+            event_payload = completion_event.get("payload")
+            event_context = (
+                event_payload.get("commit_context")
+                if isinstance(event_payload, Mapping)
+                else None
+            )
+            event_request = (
+                event_context.get("request")
+                if isinstance(event_context, Mapping)
+                else None
+            )
+            if (
+                page_request != expected_page_request
+                or receipt["runner_request_ref"] in seen_requests
+                or receipt["completion_event_ref"] in seen_events
+                or receipt["runner_request_hash"] != page_request["content_hash"]
+                or completion_event.get("runner_request_ref") != page_request["id"]
+                or completion_event.get("content_hash")
+                != receipt["completion_event_hash"]
+                or completion_event.get("event_at") != receipt["completion_event_at"]
+                or completion_event.get("state") not in {"observed", "transport_started"}
+                or not isinstance(event_payload, Mapping)
+                or not isinstance(event_context, Mapping)
+                or set(event_context) != context_fields
+                or event_request != page_request
+                or any(
+                    event_context.get(name) != context.get(name)
+                    for name in context_fields - {"request"}
+                )
+                or not isinstance(reservation, Mapping)
+                or not isinstance(attempt, Mapping)
+                or not isinstance(usage, Mapping)
+                or not isinstance(cost, Mapping)
+                or not isinstance(settlement, Mapping)
+                or event_payload.get("reservation_ref") != reservation.get("id")
+                or event_payload.get("reservation_hash")
+                != reservation.get("content_hash")
+                or event_payload.get("physical_attempt_number") != ordinal
+                or event_payload.get("adapter_request_hash")
+                != receipt["adapter_request_hash"]
+                or reservation.get("connector_invocation_ref") != invocation["id"]
+                or reservation.get("physical_attempt_number") != ordinal
+                or attempt.get("id") != receipt["physical_attempt_ref"]
+                or attempt.get("content_hash") != receipt["physical_attempt_hash"]
+                or attempt.get("connector_invocation_ref") != invocation["id"]
+                or attempt.get("reservation_ref") != reservation.get("id")
+                or attempt.get("physical_attempt_number") != ordinal
+                or attempt.get("outcome") != receipt["attempt_outcome"]
+                or usage.get("id") != receipt["usage_entry_ref"]
+                or usage.get("content_hash") != receipt["usage_entry_hash"]
+                or usage.get("physical_attempt_ref") != attempt.get("id")
+                or cost.get("id") != receipt["cost_entry_ref"]
+                or cost.get("content_hash") != receipt["cost_entry_hash"]
+                or cost.get("usage_entry_ref") != usage.get("id")
+                or settlement.get("id") != receipt["quota_settlement_ref"]
+                or settlement.get("content_hash") != receipt["quota_settlement_hash"]
+                or settlement.get("reservation_ref") != reservation.get("id")
+                or settlement.get("usage_entry_ref") != usage.get("id")
+                or settlement.get("cost_entry_ref") != cost.get("id")
+            ):
+                raise SchedulerConflict(
+                    "journaled page receipt does not bind its authority chain"
+                )
+            seen_requests.add(receipt["runner_request_ref"])
+            seen_events.add(receipt["completion_event_ref"])
+            observation = receipt["observation"]
+            if observation is not None:
+                try:
+                    observation = validate_adapter_transport_observation(observation)
+                except Exception as exc:
+                    raise SchedulerConflict(
+                        "journaled page observation is not closed"
+                    ) from exc
+                if observation["request_hash"] != receipt["adapter_request_hash"]:
+                    raise SchedulerConflict(
+                        "journaled page observation does not bind AdapterRequest"
+                    )
+            if completion_event["state"] == "observed":
+                observed_fields = {
+                    "reservation_ref", "reservation_hash", "physical_attempt_number",
+                    "adapter_request_hash", "started_at", "completed_at",
+                    "attempt_outcome", "retry_at", "observation", "raw_object",
+                    "error", "commit_context",
+                }
+                if (
+                    set(event_payload) != observed_fields
+                    or event_payload["attempt_outcome"] != receipt["attempt_outcome"]
+                    or event_payload["retry_at"] != receipt["retry_at"]
+                    or event_payload["observation"] != receipt["observation"]
+                    or event_payload["raw_object"] != receipt["raw_object"]
+                    or event_payload["error"] != receipt["error"]
+                ):
+                    raise SchedulerConflict(
+                        "observed event does not bind the exact page receipt"
+                    )
+            else:
+                transport_fields = {
+                    "reservation_ref", "reservation_hash", "physical_attempt_number",
+                    "adapter_request_hash", "started_at", "raw_sink_ref",
+                    "prior_cursor", "commit_context",
+                }
+                if (
+                    set(event_payload) != transport_fields
+                    or receipt["attempt_outcome"] != "indeterminate"
+                    or receipt["observation"] is not None
+                    or receipt["raw_object"] is not None
+                ):
+                    raise SchedulerConflict(
+                        "transport-started receipt is not conservative"
+                    )
+            successful = receipt["attempt_outcome"] == "succeeded"
+            artifact_values = (
+                receipt["raw_artifact_version_ref"],
+                receipt["raw_artifact_version_hash"],
+                receipt["page_result_envelope"],
+                receipt["page_result_envelope_hash"],
+            )
+            if successful != all(item is not None for item in artifact_values):
+                raise SchedulerConflict(
+                    "journaled page success/artifact authority diverges"
+                )
+            if successful:
+                raw_object = receipt["raw_object"]
+                try:
+                    page_result = self._result_wire(
+                        receipt["page_result_envelope"]
+                    )
+                    artifact = receipts_reader.get_artifact_version(
+                        receipt["raw_artifact_version_ref"]
+                    )
+                except Exception as exc:
+                    raise SchedulerConflict(
+                        "successful page lacks immutable artifact authority"
+                    ) from exc
+                if (
+                    not isinstance(raw_object, Mapping)
+                    or content_hash(page_result)
+                    != receipt["page_result_envelope_hash"]
+                    or page_result.get("status") != "succeeded"
+                    or page_result.get("work_order_ref") != work_order_id
+                    or page_result.get("invocation_ref") != execution["id"]
+                    or artifact.get("content_hash")
+                    != receipt["raw_artifact_version_hash"]
+                    or artifact.get("artifact_content_hash")
+                    != raw_object.get("content_hash")
+                    or artifact.get("producer_execution_ref") != execution["id"]
+                    or artifact.get("result_envelope_ref") != page_result["id"]
+                    or artifact.get("result_envelope_hash")
+                    != receipt["page_result_envelope_hash"]
+                    or artifact.get("prior_version_ref") != prior_artifact_ref
+                ):
+                    raise SchedulerConflict(
+                        "successful page artifact chain is not exact"
+                    )
+                prior_artifact_ref = receipt["raw_artifact_version_ref"]
+            elif any(item is not None for item in artifact_values):
+                raise SchedulerConflict("failed page fabricated artifact authority")
+            validated_receipts.append(receipt)
+        last_receipt = validated_receipts[-1]
+        attempt_refs = [item["physical_attempt_ref"] for item in validated_receipts]
+        settlement_refs = [
+            item["quota_settlement_ref"] for item in validated_receipts
+        ]
+        usage_refs = [item["usage_entry_ref"] for item in validated_receipts]
+        retained_artifacts = any(
+            item["raw_artifact_version_ref"] is not None
+            for item in validated_receipts
+        )
+        source_ref = response.get("source_envelope_ref")
+        source = None
+        if source_ref is not None:
+            try:
+                source = receipts_reader.get_source_envelope(source_ref)
+            except Exception as exc:
+                raise SchedulerConflict(
+                    "parent completion lacks immutable SourceEnvelope"
+                ) from exc
+        expected_artifact_refs = (
+            execution.get("output_refs", [])
+            if result_wire["status"] == "succeeded" or retained_artifacts
+            else []
+        )
+        if (
+            payload.get("reservation_ref")
+            != validated_receipts[0]["reservation_ref"]
+            or response.get("physical_attempt_ref")
+            != last_receipt["physical_attempt_ref"]
+            or response.get("physical_attempt_hash")
+            != last_receipt["physical_attempt_hash"]
+            or response.get("usage_entry_ref") != last_receipt["usage_entry_ref"]
+            or response.get("usage_entry_hash") != last_receipt["usage_entry_hash"]
+            or response.get("cost_entry_ref") != last_receipt["cost_entry_ref"]
+            or response.get("cost_entry_hash") != last_receipt["cost_entry_hash"]
+            or response.get("quota_settlement_ref")
+            != last_receipt["quota_settlement_ref"]
+            or response.get("quota_settlement_hash")
+            != last_receipt["quota_settlement_hash"]
+            or result_wire.get("outputs", {}).get("connector_invocation_ref")
+            != invocation["id"]
+            or result_wire.get("outputs", {}).get("physical_attempt_refs")
+            != attempt_refs
+            or result_wire.get("outputs", {}).get("result_physical_attempt_ref")
+            != last_receipt["physical_attempt_ref"]
+            or result_wire.get("outputs", {}).get("quota_settlement_refs")
+            != settlement_refs
+            or result_wire.get("usage_refs") != usage_refs
+            or result_wire.get("artifact_refs") != expected_artifact_refs
+        ):
+            raise SchedulerConflict(
+                "parent Result/response does not bind the page authority chain"
+            )
+        if result_wire["status"] == "succeeded":
+            if (
+                any(item["attempt_outcome"] != "succeeded" for item in validated_receipts)
+                or not isinstance(source, Mapping)
+                or source.get("content_hash") != response.get("source_envelope_hash")
+                or source.get("physical_attempt_refs") != attempt_refs
+                or source.get("result_physical_attempt_ref")
+                != last_receipt["physical_attempt_ref"]
+                or source.get("raw_artifact_version_ref")
+                != last_receipt["raw_artifact_version_ref"]
+                or response.get("raw_artifact_version_ref")
+                != last_receipt["raw_artifact_version_ref"]
+                or response.get("raw_artifact_version_hash")
+                != last_receipt["raw_artifact_version_hash"]
+                or result_wire.get("outputs", {}).get("source_envelope_ref")
+                != source.get("id")
+            ):
+                raise SchedulerConflict(
+                    "successful parent completion lacks exact source authority"
+                )
+        elif (
+            last_receipt["attempt_outcome"] == "succeeded"
+            or source is not None
+            or response.get("raw_artifact_version_ref") is not None
+            or result_wire.get("outputs", {}).get("source_envelope_ref") is not None
+        ):
+            raise SchedulerConflict(
+                "non-success parent completion fabricated success authority"
+            )
         completion_ref = _nonempty(
             last_receipt.get("completion_event_ref"), "completion_event_ref"
         )
@@ -1189,6 +1556,12 @@ class Scheduler:
             raise SchedulerConflict(
                 "journaled completion page proof is not exact"
             )
+        parent_recorded_at = _parse_time(parent_event.get("recorded_at"))
+        completion_recorded_at = _parse_time(completion_event.get("recorded_at"))
+        if parent_recorded_at < completion_recorded_at:
+            raise SchedulerConflict(
+                "parent completion predates its final page authority"
+            )
         return {
             "runner_request_ref": runner_request_ref,
             "parent_event_ref": _nonempty(parent_event.get("id"), "parent_event_ref"),
@@ -1199,9 +1572,8 @@ class Scheduler:
             "completion_event_hash": _sha256(
                 completion_event.get("content_hash"), "completion_event_hash"
             ),
-            "completion_event_at": _timestamp(
-                _parse_time(completion_event.get("event_at"))
-            ),
+            "completion_event_recorded_at": _timestamp(completion_recorded_at),
+            "parent_event_recorded_at": _timestamp(parent_recorded_at),
         }
 
     def reconcile_journaled_completion(
@@ -1257,7 +1629,7 @@ class Scheduler:
             result_hash=calculated_hash,
             retry_at=retry_at,
         )
-        journal_at = _parse_time(proof["completion_event_at"])
+        journal_at = _parse_time(proof["parent_event_recorded_at"])
         retry_at_wire = None
         if retry_at is not None:
             if outcome != "retryable":
@@ -1278,9 +1650,10 @@ class Scheduler:
             "runner_request_ref": proof["runner_request_ref"],
             "parent_journal_event_ref": proof["parent_event_ref"],
             "parent_journal_event_hash": proof["parent_event_hash"],
+            "parent_journal_recorded_at": _timestamp(journal_at),
             "completion_event_ref": proof["completion_event_ref"],
             "completion_event_hash": proof["completion_event_hash"],
-            "completion_event_at": _timestamp(journal_at),
+            "completion_event_recorded_at": proof["completion_event_recorded_at"],
             "result_envelope_id": wire["id"],
             "result_envelope_hash": calculated_hash,
             "outcome": outcome,

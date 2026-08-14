@@ -123,6 +123,7 @@ class RunnerJournal:
                 "admitted",
                 {"request_hash": wire["content_hash"]},
                 event_at=now,
+                recorded_at=now,
             )
             return {"write_status": "fresh", **event}
 
@@ -138,10 +139,12 @@ class RunnerJournal:
             raise RunnerJournalError("runner_request_ref must be non-empty")
         if state not in _TRANSITIONS:
             raise RunnerJournalError("journal state is invalid")
-        at = _stored_timestamp(event_at) if event_at is not None else _timestamp(self._clock())
+        recorded_at = _timestamp(self._clock())
+        at = _stored_timestamp(event_at) if event_at is not None else recorded_at
         with self._store._transaction() as cur:
             result = self._append_with_cursor(
-                cur, runner_request_ref, state, payload, event_at=at
+                cur, runner_request_ref, state, payload,
+                event_at=at, recorded_at=recorded_at,
             )
             return {"write_status": "fresh", **result}
 
@@ -153,6 +156,7 @@ class RunnerJournal:
         payload: Mapping[str, Any],
         *,
         event_at: str,
+        recorded_at: str,
     ) -> dict[str, Any]:
         request = cur.execute(
             "SELECT 1 FROM runner_request_journal WHERE runner_request_ref=?",
@@ -167,6 +171,8 @@ class RunnerJournal:
             raise RunnerJournalConflict(
                 f"invalid runner journal transition {prior_state!r} -> {state!r}"
             )
+        if latest is not None and recorded_at < latest["recorded_at"]:
+            raise RunnerJournalConflict("runner journal recorded time moved backwards")
         reservation_ref = body.get("reservation_ref")
         if reservation_ref is not None and (
             not isinstance(reservation_ref, str) or not reservation_ref
@@ -179,6 +185,7 @@ class RunnerJournal:
             "state": state,
             "reservation_ref": reservation_ref,
             "event_at": event_at,
+            "recorded_at": recorded_at,
             "payload": body,
         }
         digest = content_hash(base)
@@ -196,7 +203,7 @@ class RunnerJournal:
                 "content_hash,created_at) VALUES(?,?,?,?,?,?,?,?)",
                 (
                     event_id, runner_request_ref, state, reservation_ref, event_at,
-                    canonical_json(body), digest, _timestamp(self._clock()),
+                    canonical_json(body), digest, recorded_at,
                 ),
             )
         except sqlite3.IntegrityError as exc:
@@ -210,6 +217,7 @@ class RunnerJournal:
             "state": state,
             "reservation_ref": reservation_ref,
             "event_at": event_at,
+            "recorded_at": recorded_at,
             "payload": body,
             "content_hash": digest,
         }
@@ -309,6 +317,7 @@ class RunnerJournal:
             "state": row["state"],
             "reservation_ref": row["reservation_ref"],
             "event_at": row["event_at"],
+            "recorded_at": row["created_at"],
             "payload": json.loads(row["payload_json"]),
             "content_hash": row["content_hash"],
         }

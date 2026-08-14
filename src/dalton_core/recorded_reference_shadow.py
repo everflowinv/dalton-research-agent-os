@@ -342,6 +342,7 @@ class RecordedReferenceShadowCoordinator:
         *,
         ordinal: int,
         prior_receipt: Mapping[str, Any] | None,
+        parent_request: Mapping[str, Any],
     ) -> dict[str, Any]:
         fields = {
             "idempotency_status", "runner_request_ref", "runner_request_hash",
@@ -355,12 +356,9 @@ class RecordedReferenceShadowCoordinator:
             "completion_event_ref", "completion_event_hash", "completion_event_at",
         }
         receipt = _closed(value, fields, f"page_receipts[{ordinal - 1}]")
-        expected_request = (
-            dict(context.request)
-            if context.request["id"] == receipt["runner_request_ref"]
-            else self._page_request(context.request, ordinal)
-        )
+        expected_request = self._page_request(parent_request, ordinal)
         completion_event = self.journal.event(receipt["completion_event_ref"])
+        event_payload = completion_event.get("payload")
         if (
             receipt["idempotency_status"] not in {"fresh", "duplicate"}
             or receipt["runner_request_ref"] != expected_request["id"]
@@ -369,6 +367,7 @@ class RecordedReferenceShadowCoordinator:
             or completion_event["content_hash"] != receipt["completion_event_hash"]
             or completion_event["event_at"] != receipt["completion_event_at"]
             or completion_event["state"] not in {"transport_started", "observed"}
+            or not isinstance(event_payload, Mapping)
         ):
             raise RecordedReferenceShadowError("page receipt request binding is invalid")
         attempt = self.authority.get_physical_attempt(receipt["physical_attempt_ref"])
@@ -378,8 +377,39 @@ class RecordedReferenceShadowCoordinator:
             receipt["quota_settlement_ref"]
         )
         reservation = self.authority.get_reservation(receipt["reservation_ref"])
+        observed_fields = {
+            "reservation_ref", "reservation_hash", "physical_attempt_number",
+            "adapter_request_hash", "started_at", "completed_at",
+            "attempt_outcome", "retry_at", "observation", "raw_object",
+            "error", "commit_context",
+        }
+        transport_fields = {
+            "reservation_ref", "reservation_hash", "physical_attempt_number",
+            "adapter_request_hash", "started_at", "raw_sink_ref",
+            "prior_cursor", "commit_context",
+        }
+        expected_event_fields = (
+            observed_fields
+            if completion_event["state"] == "observed"
+            else transport_fields
+        )
+        event_context = self._commit_context_from_wire(
+            event_payload.get("commit_context", {})
+        )
         if (
             attempt is None or usage is None or cost is None or settlement is None
+            or set(event_payload) != expected_event_fields
+            or event_context.request != expected_request
+            or event_context.work_order != context.work_order
+            or event_context.invocation != context.invocation
+            or event_context.execution != context.execution
+            or event_context.profile != context.profile
+            or event_context.call_spec != context.call_spec
+            or event_payload["reservation_ref"] != receipt["reservation_ref"]
+            or event_payload["reservation_hash"] != reservation["content_hash"]
+            or int(event_payload["physical_attempt_number"]) != ordinal
+            or event_payload["adapter_request_hash"]
+            != receipt["adapter_request_hash"]
             or attempt["content_hash"] != receipt["physical_attempt_hash"]
             or usage["content_hash"] != receipt["usage_entry_hash"]
             or cost["content_hash"] != receipt["cost_entry_hash"]
@@ -398,6 +428,27 @@ class RecordedReferenceShadowCoordinator:
         ):
             raise RecordedReferenceShadowError(
                 "page receipt differs from immutable Connector authority"
+            )
+        if completion_event["state"] == "observed":
+            if (
+                event_payload["attempt_outcome"] != receipt["attempt_outcome"]
+                or event_payload["retry_at"] != receipt["retry_at"]
+                or event_payload["observation"] != receipt["observation"]
+                or event_payload["raw_object"] != receipt["raw_object"]
+                or event_payload["error"] != receipt["error"]
+            ):
+                raise RecordedReferenceShadowError(
+                    "observed page event does not bind its receipt"
+                )
+        elif (
+            receipt["attempt_outcome"] != "indeterminate"
+            or receipt["observation"] is not None
+            or receipt["raw_object"] is not None
+            or not isinstance(receipt["error"], Mapping)
+            or receipt["error"].get("code") != "transport_indeterminate"
+        ):
+            raise RecordedReferenceShadowError(
+                "transport-started recovery receipt is not conservative"
             )
         observation = receipt["observation"]
         if observation is not None:
@@ -505,6 +556,7 @@ class RecordedReferenceShadowCoordinator:
                 self._validate_page_receipt(
                     item, context, ordinal=ordinal,
                     prior_receipt=None if not receipts else receipts[-1],
+                    parent_request=parent_request,
                 )
             )
         last = receipts[-1]
@@ -651,6 +703,7 @@ class RecordedReferenceShadowCoordinator:
                 ordinal=ordinal,
                 prior_cursor=prior_cursor,
                 prior_receipt=None if not receipts else receipts[-1],
+                parent_request=parent_request,
                 scheduler_lease_token=scheduler_lease_token,
                 is_parent=ordinal == 1,
             )
@@ -855,6 +908,7 @@ class RecordedReferenceShadowCoordinator:
         ordinal: int,
         prior_cursor: str | None,
         prior_receipt: Mapping[str, Any] | None,
+        parent_request: Mapping[str, Any],
         scheduler_lease_token: str,
         is_parent: bool,
     ) -> dict[str, Any]:
@@ -870,7 +924,8 @@ class RecordedReferenceShadowCoordinator:
                 latest["payload"].get("commit_context", {})
             )
             receipt = self._validate_page_receipt(
-                receipt, context, ordinal=ordinal, prior_receipt=prior_receipt
+                receipt, context, ordinal=ordinal, prior_receipt=prior_receipt,
+                parent_request=parent_request,
             )
             return {**receipt, "page_write_status": "duplicate"}
         if latest is not None and latest["state"] in {
@@ -941,6 +996,7 @@ class RecordedReferenceShadowCoordinator:
                 receipt = self._validate_page_receipt(
                     receipt, admission, ordinal=ordinal,
                     prior_receipt=prior_receipt,
+                    parent_request=parent_request,
                 )
             else:
                 recovered = {
