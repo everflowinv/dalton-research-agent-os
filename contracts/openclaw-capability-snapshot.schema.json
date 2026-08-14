@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/openclaw-capability-snapshot.schema.json",
+  "title": "OpenClawCapabilitySnapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "producer", "scope", "skills",
+    "mcp_tools", "content_hash"
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ref": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9+._-]*:[^\\s]+$",
+      "not": {"pattern": "^(file|path|https?):"}
+    },
+    "canonicalName": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "maxLength": 128
+    },
+    "objectSchema": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {"type": {"const": "object"}}
+    }
+  },
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"$ref": "#/$defs/ref"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["openclaw_version", "catalog_generation"],
+      "properties": {
+        "openclaw_version": {"type": "string", "minLength": 1},
+        "catalog_generation": {"type": "string", "minLength": 1}
+      }
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["skills_complete", "mcp_servers_complete"],
+      "properties": {
+        "skills_complete": {"type": "boolean"},
+        "mcp_servers_complete": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/canonicalName"}
+        }
+      }
+    },
+    "skills": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name", "label", "description", "source", "source_version", "eligible",
+          "disabled", "model_visible", "user_invocable", "command_visible",
+          "instruction_ref", "instruction_hash", "metadata_hash"
+        ],
+        "properties": {
+          "name": {"$ref": "#/$defs/canonicalName"},
+          "label": {"type": "string", "minLength": 1, "maxLength": 160},
+          "description": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "source": {
+            "enum": [
+              "openclaw-workspace", "openclaw-managed", "openclaw-extra",
+              "openclaw-plugin", "openclaw-bundled"
+            ]
+          },
+          "source_version": {"type": "string", "minLength": 1, "maxLength": 256},
+          "eligible": {"type": "boolean"},
+          "disabled": {"type": "boolean"},
+          "model_visible": {"type": "boolean"},
+          "user_invocable": {"type": "boolean"},
+          "command_visible": {"type": "boolean"},
+          "instruction_ref": {"$ref": "#/$defs/ref"},
+          "instruction_hash": {"$ref": "#/$defs/hash"},
+          "metadata_hash": {"$ref": "#/$defs/hash"}
+        }
+      }
+    },
+    "mcp_tools": {
+      "type": "array",
+      "maxItems": 10000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "server_name", "safe_server_name", "tool_name", "title", "description",
+          "source_version", "execution_mode", "input_schema_ref", "input_schema",
+          "input_schema_hash", "output_schema_ref", "output_schema",
+          "output_schema_hash", "metadata_hash"
+        ],
+        "properties": {
+          "server_name": {"type": "string", "minLength": 1},
+          "safe_server_name": {"$ref": "#/$defs/canonicalName"},
+          "tool_name": {"$ref": "#/$defs/canonicalName"},
+          "title": {"type": ["string", "null"], "minLength": 1, "maxLength": 160},
+          "description": {"type": ["string", "null"], "minLength": 1, "maxLength": 2000},
+          "source_version": {"type": "string", "minLength": 1, "maxLength": 256},
+          "execution_mode": {"enum": ["sequential", "parallel"]},
+          "input_schema_ref": {"$ref": "#/$defs/ref"},
+          "input_schema": {"$ref": "#/$defs/objectSchema"},
+          "input_schema_hash": {"$ref": "#/$defs/hash"},
+          "output_schema_ref": {"$ref": "#/$defs/ref"},
+          "output_schema": {"$ref": "#/$defs/objectSchema"},
+          "output_schema_hash": {"$ref": "#/$defs/hash"},
+          "metadata_hash": {"$ref": "#/$defs/hash"}
+        }
+      }
+    },
+    "content_hash": {"$ref": "#/$defs/hash"}
+  }
+}

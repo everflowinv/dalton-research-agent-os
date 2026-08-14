@@ -17,6 +17,13 @@ _LAZY_EXPORTS = {
     "UntrustedSandboxReport": (".capability_attestation", "UntrustedSandboxReport"),
     "validate_sandbox_report": (".capability_attestation", "validate_sandbox_report"),
     "CapabilityCatalog": (".capability_catalog", "CapabilityCatalog"),
+    "OpenClawMetadataImporter": (
+        ".openclaw_metadata", "OpenClawMetadataImporter"
+    ),
+    "PublicHttpTransport": (".public_http_transport", "PublicHttpTransport"),
+    "CredentialGrantEnvelope": (
+        ".credential_authority", "CredentialGrantEnvelope"
+    ),
     "ModelRouter": (".model_router", "ModelRouter"),
     "ObservabilityStore": (".observability", "ObservabilityStore"),
     "ConnectorStore": (".connector", "ConnectorStore"),
@@ -51,6 +58,7 @@ def __getattr__(name: str):
 __all__ = [
     "CapabilityAttestation",
     "CapabilityCatalog",
+    "CredentialGrantEnvelope",
     "ConnectorStore",
     "ConnectorRunnerAdmissionGate",
     "StaticAdapterResolver",
@@ -60,9 +68,11 @@ __all__ = [
     "ModelRouter",
     "ObservabilityStore",
     "OpenClawModelAdapter",
+    "OpenClawMetadataImporter",
     "install_openclaw_catalog",
     "migrate_legacy_workspace",
     "ProcessRuntimeAdapter",
+    "PublicHttpTransport",
     "ProjectionWriter",
     "Scheduler",
     "TrustedLaunchContext",

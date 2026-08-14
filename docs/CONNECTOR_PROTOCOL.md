@@ -102,6 +102,32 @@ journal 整体缺失但存在未结算 reservation 时，恢复按 indeterminate
 reservation `created_at` 作为 unknown-start lower bound；它是保守恢复标记，不声称知道真实 provider
 调用时点。journal 不保存 scheduler lease token。
 
+## P0-3 metadata 与 transport safety
+
+OpenClaw skill/MCP 先进入独立的 metadata snapshot authority，不直接进入 live Catalog：
+
+- skill 只导入 compact metadata、opaque instruction ref/hash；不导入 skill instruction 或路径；
+- MCP tool 只导入 compact metadata 与闭合 input/output schema ref/hash/body；不导入 server config、prompt、
+  tool output 或 credential；
+- imported metadata 生成 descriptor proposal 后，仍要经过 Registry 的 active human approval。Catalog 会
+  把 proposal 的 kind/name/summary/source/contract/source hash/schema hash 与 current imported metadata
+  exact 对照；
+- complete scope 的 metadata/source/schema 漂移或删除会撤下 current descriptor 并推进 epoch；partial
+  scope 缺项不作删除。这样旧 lease 在新版本获批前已经 fail closed，而不是继续调用 stale MCP schema。
+
+公开 HTTPS transport 与 authenticated transport 是两条不同权限边界：
+
+- public transport 没有 credential authority 参数，只允许 HTTPS/443、exact host allowlist 和受限
+  header/body；URL、query、header 或 JSON/form body 中出现 credential-shaped 字段即拒绝；
+- 每个 URL/redirect hop 都解析完整 DNS answer set；任一非公网 IP 即拒绝。socket 连接已验证 IP，TLS
+  仍用原 host 做 SNI/证书验证，阻止验证后再次 DNS lookup 的 rebinding；
+- `CredentialGrantEnvelope` 只携带 grant/profile/lease/adapter exact ref/hash、logical slot、operation、
+  expiry 和 max calls。真实 credential 与不可序列化 handle 留在 host-owned `CredentialAuthorityPort`；
+- AdapterRequest 0.1 仍要求 `credential_grant_ref=null`。AlphaEngine 这类 loopback MCP 必须发布独立的
+  mcp-managed profile/runner wire，不能伪装成 public HTTPS host，也不能复用 public transport。
+
+当前 public transport component 尚未接 source-specific adapter 或真实网络；P0-3 仍是离线实现。
+
 `ConnectorCallSpec.parameters` 不保存 token、cookie、password、API key 或其他 credential-shaped 字段；
 凭据只能通过 profile 声明的 slot 交给 Runner。authority 会核对 query hash 和拒绝这些敏感字段；可信
 Runner 使用 operator 安装、由 environment/package manifest 约束的 input validator，按 profile 冻结的

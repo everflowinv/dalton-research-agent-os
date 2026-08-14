@@ -89,6 +89,16 @@ def canonical_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _descriptor_matches_external(
+    descriptor: Mapping[str, Any], metadata: Mapping[str, Any]
+) -> bool:
+    exact_fields = (
+        "kind", "name", "label", "summary", "aliases", "tags",
+        "intent_examples", "source", "contract", "source_hash", "schema_hash",
+    )
+    return all(descriptor.get(field) == metadata.get(field) for field in exact_fields)
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -791,10 +801,36 @@ class CapabilityCatalog:
         current_epoch = self.epoch
         if expected_epoch is not None and expected_epoch != current_epoch:
             raise StaleCatalog(f"catalog epoch is {current_epoch}, not {expected_epoch}")
+        current_import_generation = int(
+            self._conn.execute(
+                "SELECT import_generation FROM external_capability_import_state WHERE singleton=1"
+            ).fetchone()[0]
+        )
         next_epoch = current_epoch + 1
         now = self._time()
         source = CapabilitySource.from_dict(obj["source"])
         permissions = CapabilityPermissions.from_dict(obj["permissions"])
+        eligibility = CapabilityEligibility.from_dict(obj["eligibility"])
+        external_row = self._conn.execute(
+            "SELECT v.source_hash,v.schema_hash,v.metadata_json "
+            "FROM external_capability_metadata_current c "
+            "JOIN external_capability_metadata_versions v ON v.metadata_ref=c.metadata_ref "
+            "WHERE c.capability_id=?",
+            (capability_id,),
+        ).fetchone()
+        if external_row is not None:
+            external_metadata = json.loads(external_row["metadata_json"])
+            if not _descriptor_matches_external(obj, external_metadata):
+                raise StaleCatalog(
+                    "descriptor source/schema does not match current imported metadata"
+                )
+            if (
+                external_metadata["availability_state"] != "ready"
+                and eligibility.state in {"ready", "auth_required"}
+            ):
+                raise StaleCatalog("unavailable imported capability cannot be published ready")
+        elif self._external_scope_is_authoritative(capability_id):
+            raise StaleCatalog("capability is absent from current complete external inventory")
         approval = self._resolve_approval(
             capability_id=capability_id,
             catalog_version=version,
@@ -810,8 +846,11 @@ class CapabilityCatalog:
         wire["catalog_epoch"] = next_epoch
         wire["content_hash"] = canonical_hash(wire)
         descriptor = CapabilityDescriptor.from_dict(wire)
-        row = self._conn.execute("SELECT version FROM capability_current WHERE capability_id=?", (descriptor.id,)).fetchone()
-        expected_version = 1 if row is None else int(row[0]) + 1
+        row = self._conn.execute(
+            "SELECT MAX(version) FROM capability_descriptor_versions WHERE capability_id=?",
+            (descriptor.id,),
+        ).fetchone()
+        expected_version = 1 if row is None or row[0] is None else int(row[0]) + 1
         if descriptor.version != expected_version:
             raise CatalogConflict(f"descriptor version must be {expected_version}")
         try:
@@ -819,6 +858,14 @@ class CapabilityCatalog:
             live_epoch = int(self._conn.execute("SELECT catalog_epoch FROM capability_catalog_meta WHERE singleton=1").fetchone()[0])
             if live_epoch != current_epoch:
                 raise StaleCatalog("catalog changed during publish")
+            live_import_generation = int(
+                self._conn.execute(
+                    "SELECT import_generation FROM external_capability_import_state "
+                    "WHERE singleton=1"
+                ).fetchone()[0]
+            )
+            if live_import_generation != current_import_generation:
+                raise StaleCatalog("external metadata changed during publish")
             self._conn.execute(
                 "INSERT INTO capability_descriptor_versions "
                 "(revision_ref,capability_id,version,catalog_epoch,descriptor_hash,"
@@ -841,6 +888,370 @@ class CapabilityCatalog:
             self._conn.rollback()
             raise
         return descriptor
+
+    def _external_scope_is_authoritative(self, capability_id: str) -> bool:
+        parts = capability_id.split(":")
+        if len(parts) != 4:
+            return False
+        source_type, namespace = parts[1], parts[2]
+        if source_type == "skill" and namespace != "openclaw":
+            return False
+        if source_type not in {"skill", "mcp"}:
+            return False
+        rows = self._conn.execute(
+            "SELECT snapshot_json FROM external_capability_snapshots ORDER BY imported_at DESC"
+        ).fetchall()
+        for row in rows:
+            snapshot = json.loads(row["snapshot_json"])
+            scope = snapshot["scope"]
+            if source_type == "skill" and scope["skills_complete"]:
+                return True
+            if source_type == "mcp" and namespace in scope["mcp_servers_complete"]:
+                return True
+        return False
+
+    def apply_external_metadata_snapshot(
+        self,
+        *,
+        snapshot_ref: str,
+        snapshot_hash: str,
+        producer_version: str,
+        snapshot_json: str,
+        snapshot_created_at: str,
+        entries: Sequence[Mapping[str, Any]],
+        schemas: Sequence[Mapping[str, Any]],
+        skills_complete: bool,
+        mcp_servers_complete: Sequence[str],
+    ) -> dict[str, Any]:
+        """Atomically import a validated external metadata snapshot.
+
+        The importer stores compact metadata and MCP JSON Schemas, never skill
+        instructions, credentials, or executable code.  Drift of a previously
+        observed skill/tool bumps the catalog epoch and withdraws its current
+        descriptor projection before a replacement can be human-approved.
+        """
+
+        snapshot_ref = _ref(snapshot_ref, "snapshot_ref")  # type: ignore[assignment]
+        snapshot_hash = _hash(snapshot_hash, "snapshot_hash")
+        producer_version = _string(producer_version, "producer_version")
+        _parse_time(snapshot_created_at, "snapshot_created_at")
+        if type(skills_complete) is not bool:
+            raise CatalogValidationError("skills_complete must be boolean")
+        complete_servers = _unique_strings(
+            mcp_servers_complete, "mcp_servers_complete"
+        )
+        try:
+            decoded_snapshot = json.loads(snapshot_json)
+        except (TypeError, ValueError) as exc:
+            raise CatalogValidationError("snapshot_json must be valid JSON") from exc
+        if canonical_hash(decoded_snapshot) != snapshot_hash:
+            raise CatalogConflict("snapshot_hash does not bind snapshot_json")
+
+        normalized_entries: list[dict[str, Any]] = []
+        seen_capabilities: set[str] = set()
+        seen_scope_keys: set[tuple[str, str]] = set()
+        entry_fields = {
+            "metadata_ref", "capability_id", "source_type", "source_scope",
+            "source_key", "source_version", "source_hash", "schema_hash",
+            "metadata_hash", "metadata", "created_at",
+        }
+        for index, raw in enumerate(entries):
+            item = dict(_closed(raw, entry_fields, entry_fields, f"entries[{index}]"))
+            for name in (
+                "metadata_ref", "capability_id", "source_scope", "source_key",
+                "source_version",
+            ):
+                item[name] = _string(item[name], f"entries[{index}].{name}")
+            if not _CAPABILITY_RE.fullmatch(item["capability_id"]):
+                raise CatalogValidationError("external capability_id is not canonical")
+            if item["source_type"] not in {"skill", "mcp"}:
+                raise CatalogValidationError("external source_type must be skill or mcp")
+            if item["capability_id"].split(":")[1] != item["source_type"]:
+                raise CatalogValidationError("external source_type does not match capability_id")
+            for name in ("source_hash", "schema_hash", "metadata_hash"):
+                item[name] = _hash(item[name], f"entries[{index}].{name}")
+            _parse_time(item["created_at"], f"entries[{index}].created_at")
+            if not isinstance(item["metadata"], Mapping):
+                raise CatalogValidationError("external metadata must be an object")
+            item["metadata"] = json.loads(canonical_json(item["metadata"]))
+            if canonical_hash(item["metadata"]) != item["metadata_hash"]:
+                raise CatalogConflict("metadata_hash does not bind metadata")
+            scope_key = (item["source_scope"], item["source_key"])
+            if item["capability_id"] in seen_capabilities or scope_key in seen_scope_keys:
+                raise CatalogValidationError("external metadata entries must be unique")
+            seen_capabilities.add(item["capability_id"])
+            seen_scope_keys.add(scope_key)
+            normalized_entries.append(item)
+
+        normalized_schemas: list[dict[str, Any]] = []
+        seen_schemas: set[tuple[str, str]] = set()
+        schema_fields = {"schema_ref", "schema_hash", "schema", "created_at"}
+        for index, raw in enumerate(schemas):
+            item = dict(_closed(raw, schema_fields, schema_fields, f"schemas[{index}]"))
+            item["schema_ref"] = _ref(item["schema_ref"], f"schemas[{index}].schema_ref")
+            item["schema_hash"] = _hash(item["schema_hash"], f"schemas[{index}].schema_hash")
+            _parse_time(item["created_at"], f"schemas[{index}].created_at")
+            if not isinstance(item["schema"], Mapping):
+                raise CatalogValidationError("external schema must be an object")
+            item["schema"] = json.loads(canonical_json(item["schema"]))
+            if canonical_hash(item["schema"]) != item["schema_hash"]:
+                raise CatalogConflict("schema_hash does not bind schema")
+            identity = (str(item["schema_ref"]), item["schema_hash"])
+            if identity in seen_schemas:
+                raise CatalogValidationError("external schema artifacts must be unique")
+            seen_schemas.add(identity)
+            normalized_schemas.append(item)
+
+        observed_import_generation = int(
+            self._conn.execute(
+                "SELECT import_generation FROM external_capability_import_state WHERE singleton=1"
+            ).fetchone()[0]
+        )
+
+        existing_snapshot = self._conn.execute(
+            "SELECT snapshot_hash FROM external_capability_snapshots WHERE snapshot_ref=?",
+            (snapshot_ref,),
+        ).fetchone()
+        if existing_snapshot is not None:
+            if existing_snapshot["snapshot_hash"] != snapshot_hash:
+                raise CatalogConflict("snapshot_ref already binds different content")
+            events = self._conn.execute(
+                "SELECT event_json FROM external_capability_sync_events "
+                "WHERE snapshot_ref=? ORDER BY rowid",
+                (snapshot_ref,),
+            ).fetchall()
+            return {
+                "write_status": "duplicate",
+                "snapshot_ref": snapshot_ref,
+                "snapshot_hash": snapshot_hash,
+                "catalog_epoch": self.epoch,
+                "events": [json.loads(row["event_json"]) for row in events],
+            }
+
+        current_rows = self._conn.execute(
+            "SELECT c.capability_id,c.metadata_ref,c.source_scope,c.source_key,c.metadata_hash "
+            "FROM external_capability_metadata_current c"
+        ).fetchall()
+        current = {row["capability_id"]: dict(row) for row in current_rows}
+        incoming = {item["capability_id"]: item for item in normalized_entries}
+        descriptor_rows = self._conn.execute(
+            "SELECT c.capability_id,v.descriptor_json FROM capability_current c "
+            "JOIN capability_descriptor_versions v ON v.revision_ref=c.revision_ref"
+        ).fetchall()
+        current_descriptors = {
+            row["capability_id"]: json.loads(row["descriptor_json"])
+            for row in descriptor_rows
+        }
+        removals: list[dict[str, Any]] = []
+        complete_scopes = {f"mcp:{server}" for server in complete_servers}
+        for capability_id, prior in current.items():
+            in_complete_scope = (
+                (skills_complete and prior["source_scope"] == "skills")
+                or prior["source_scope"] in complete_scopes
+            )
+            if in_complete_scope and capability_id not in incoming:
+                removals.append(prior)
+        removal_ids = {item["capability_id"] for item in removals}
+        for capability_id, descriptor in current_descriptors.items():
+            if capability_id in incoming or capability_id in removal_ids:
+                continue
+            source = descriptor["source"]
+            in_complete_scope = (
+                skills_complete
+                and source["type"] == "skill"
+                and source["namespace"] == "openclaw"
+            ) or (
+                source["type"] == "mcp"
+                and f"mcp:{source['namespace']}" in complete_scopes
+            )
+            if in_complete_scope:
+                removals.append(
+                    {
+                        "capability_id": capability_id,
+                        "metadata_ref": None,
+                        "source_scope": (
+                            "skills" if source["type"] == "skill"
+                            else f"mcp:{source['namespace']}"
+                        ),
+                        "source_key": capability_id.rsplit(":", 1)[-1],
+                    }
+                )
+                removal_ids.add(capability_id)
+
+        actions: list[tuple[dict[str, Any], str, str | None]] = []
+        has_drift = bool(removals)
+        for item in normalized_entries:
+            prior = current.get(item["capability_id"])
+            descriptor = current_descriptors.get(item["capability_id"])
+            descriptor_drift = descriptor is not None and not _descriptor_matches_external(
+                descriptor, item["metadata"]
+            )
+            if prior is None:
+                action = "changed" if descriptor_drift else "added"
+                prior_ref = None
+            elif prior["metadata_hash"] == item["metadata_hash"]:
+                action = "unchanged"
+                prior_ref = prior["metadata_ref"]
+            else:
+                action = "changed"
+                prior_ref = prior["metadata_ref"]
+                has_drift = True
+            if descriptor_drift:
+                has_drift = True
+            actions.append((item, action, prior_ref))
+
+        current_epoch = self.epoch
+        next_epoch = current_epoch + 1 if has_drift else current_epoch
+        imported_at = _timestamp(self._time())
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            live_epoch = int(
+                self._conn.execute(
+                    "SELECT catalog_epoch FROM capability_catalog_meta WHERE singleton=1"
+                ).fetchone()[0]
+            )
+            if live_epoch != current_epoch:
+                raise StaleCatalog("catalog changed during metadata import")
+            live_import_generation = int(
+                self._conn.execute(
+                    "SELECT import_generation FROM external_capability_import_state "
+                    "WHERE singleton=1"
+                ).fetchone()[0]
+            )
+            if live_import_generation != observed_import_generation:
+                raise StaleCatalog("external metadata changed during import")
+            self._conn.execute(
+                "UPDATE external_capability_import_state "
+                "SET import_generation=import_generation+1 WHERE singleton=1"
+            )
+            self._conn.execute(
+                "INSERT INTO external_capability_snapshots"
+                "(snapshot_ref,snapshot_hash,producer_version,snapshot_json,created_at,imported_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (
+                    snapshot_ref, snapshot_hash, producer_version, snapshot_json,
+                    snapshot_created_at, imported_at,
+                ),
+            )
+            for schema in normalized_schemas:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO external_schema_artifacts"
+                    "(schema_ref,schema_hash,schema_json,snapshot_ref,created_at) VALUES(?,?,?,?,?)",
+                    (
+                        schema["schema_ref"], schema["schema_hash"],
+                        canonical_json(schema["schema"]), snapshot_ref, schema["created_at"],
+                    ),
+                )
+            event_records: list[dict[str, Any]] = []
+            for item, action, prior_ref in actions:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO external_capability_metadata_versions"
+                    "(metadata_ref,capability_id,source_type,source_scope,source_key,source_version,"
+                    "source_hash,schema_hash,metadata_hash,metadata_json,snapshot_ref,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        item["metadata_ref"], item["capability_id"], item["source_type"],
+                        item["source_scope"], item["source_key"], item["source_version"],
+                        item["source_hash"], item["schema_hash"], item["metadata_hash"],
+                        canonical_json(item["metadata"]), snapshot_ref, item["created_at"],
+                    ),
+                )
+                self._conn.execute(
+                    "INSERT INTO external_capability_metadata_current"
+                    "(capability_id,metadata_ref,source_scope,source_key,metadata_hash,snapshot_ref) "
+                    "VALUES(?,?,?,?,?,?) ON CONFLICT(capability_id) DO UPDATE SET "
+                    "metadata_ref=excluded.metadata_ref,source_scope=excluded.source_scope,"
+                    "source_key=excluded.source_key,metadata_hash=excluded.metadata_hash,"
+                    "snapshot_ref=excluded.snapshot_ref",
+                    (
+                        item["capability_id"], item["metadata_ref"], item["source_scope"],
+                        item["source_key"], item["metadata_hash"], snapshot_ref,
+                    ),
+                )
+                if action == "changed":
+                    self._conn.execute(
+                        "DELETE FROM capability_current WHERE capability_id=?",
+                        (item["capability_id"],),
+                    )
+                event_records.append(
+                    {
+                        "snapshot_ref": snapshot_ref,
+                        "capability_id": item["capability_id"],
+                        "action": action,
+                        "prior_metadata_ref": prior_ref,
+                        "metadata_ref": item["metadata_ref"],
+                        "catalog_epoch": next_epoch,
+                    }
+                )
+            for prior in removals:
+                self._conn.execute(
+                    "DELETE FROM external_capability_metadata_current WHERE capability_id=?",
+                    (prior["capability_id"],),
+                )
+                self._conn.execute(
+                    "DELETE FROM capability_current WHERE capability_id=?",
+                    (prior["capability_id"],),
+                )
+                event_records.append(
+                    {
+                        "snapshot_ref": snapshot_ref,
+                        "capability_id": prior["capability_id"],
+                        "action": "removed",
+                        "prior_metadata_ref": prior["metadata_ref"],
+                        "metadata_ref": None,
+                        "catalog_epoch": next_epoch,
+                    }
+                )
+            if has_drift:
+                self._conn.execute(
+                    "UPDATE capability_catalog_meta SET catalog_epoch=? WHERE singleton=1",
+                    (next_epoch,),
+                )
+            for event in event_records:
+                event["content_hash"] = canonical_hash(event)
+                event_ref = f"external-sync:{event['content_hash']}"
+                self._conn.execute(
+                    "INSERT INTO external_capability_sync_events"
+                    "(event_ref,snapshot_ref,capability_id,action,prior_metadata_ref,metadata_ref,"
+                    "catalog_epoch,event_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        event_ref, snapshot_ref, event["capability_id"], event["action"],
+                        event["prior_metadata_ref"], event["metadata_ref"], next_epoch,
+                        canonical_json(event), imported_at,
+                    ),
+                )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        return {
+            "write_status": "fresh",
+            "snapshot_ref": snapshot_ref,
+            "snapshot_hash": snapshot_hash,
+            "catalog_epoch": next_epoch,
+            "events": event_records,
+        }
+
+    def get_external_metadata(self, capability_id: str) -> dict[str, Any]:
+        row = self._conn.execute(
+            "SELECT v.metadata_json FROM external_capability_metadata_current c "
+            "JOIN external_capability_metadata_versions v ON v.metadata_ref=c.metadata_ref "
+            "WHERE c.capability_id=?",
+            (_string(capability_id, "capability_id"),),
+        ).fetchone()
+        if row is None:
+            raise CapabilityNotFound(capability_id)
+        return json.loads(row["metadata_json"])
+
+    def load_external_schema(self, schema_ref: str, schema_hash: str) -> dict[str, Any]:
+        row = self._conn.execute(
+            "SELECT schema_json FROM external_schema_artifacts "
+            "WHERE schema_ref=? AND schema_hash=?",
+            (_ref(schema_ref, "schema_ref"), _hash(schema_hash, "schema_hash")),
+        ).fetchone()
+        if row is None:
+            raise CapabilityNotFound(f"{schema_ref}@{schema_hash}")
+        return json.loads(row["schema_json"])
 
     def _current_descriptors(self) -> list[CapabilityDescriptor]:
         rows = self._conn.execute(

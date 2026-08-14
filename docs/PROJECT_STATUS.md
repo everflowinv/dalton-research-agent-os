@@ -126,13 +126,41 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   确定性 wheel 已通过，Fable 5 最终复核及增量复核均为 **Go**；实现提交 `f0e824f`，GitHub CI 最终
   全部通过。完整结果见本轮实施报告。
 
+### Connector P0-3 当前进度（metadata + public transport safety，未部署）
+
+- 新增闭合 `OpenClawCapabilitySnapshot` 和 `OpenClawMetadataImporter`：skill 只导入 compact metadata、
+  opaque instruction ref/hash；MCP 只导入 metadata 与闭合 input/output JSON Schema。skill 正文、prompt、
+  tool output、路径、server config 和 credential 不进入 Dalton；
+- imported skill/MCP 仍只是候选 metadata，不能自动进入 CapabilityCatalog。`publish` 继续要求现有 human
+  promotion receipt，并强制 descriptor 的名称、摘要、source、contract、source/schema hash 与 current
+  imported metadata exact match；caller 不能借 importer 改写摘要或权限；
+- 完整 scope 中的 source/schema/metadata 变化或 capability 删除，会在同一事务中撤下 current descriptor
+  projection 并推进 catalog epoch；旧 lease 因 epoch 变化 fail closed。重复 snapshot 不推进 epoch；
+- 新增 credential-free `PublicHttpTransport`：只允许 exact-host HTTPS/443，拒绝 URL userinfo、credential-
+  shaped query/body/header、环境代理语义和非幂等 redirect；每一跳都重新检查 allowlist、DNS 全量 IP 与
+  redirect，任一 private/loopback/link-local/reserved 地址即拒绝，并把 socket pin 到已验证 IP、保留原
+  hostname 做 TLS SNI/证书校验；response size 同时检查 Content-Length 和 streaming bytes；
+- 新增 closed `CredentialGrantEnvelope` 与 `CredentialAuthorityPort` 边界。Core 只见 grant metadata 和
+  logical slot ref；credential value、OAuth/MCP auth 与不可序列化 handle 留在 host-owned authority。
+  Public transport 的 API 不接受 credential grant，现有 ConnectorAdapterRequest 0.1 仍强制
+  `credential_grant_ref=null`；
+- 当前只完成离线 control-plane/transport component。尚无 OpenClaw live exporter/sync daemon、真实 HTTP
+  call、authenticated runner、A股/SEC/AlphaEngine connector、dashboard connector projection、部署或数据
+  源访问。AlphaEngine 的 `mcp_managed` profile/runner wire 需要独立版本，不能把 loopback MCP 塞进 public
+  HTTPS `allowed_hosts`；
+- importer/public transport/credential 专项 15/15、Python 全量 269/269、broker 15/15、`compileall` 和
+  `git diff --check` 全部通过。固定 `SOURCE_DATE_EPOCH=1700000000` 两次 wheel SHA-256 均为
+  `c9af233004f0a6bed406572f97c1802cef06ddefc20b0c17728302bf7138ac86`；隔离安装可导入三个新模块、
+  创建 6 张 external metadata 表并找到 2 份新 contract，SQLite integrity 为 `ok`。系统 Python 3.13 的
+  no-build-isolation 路径因本机没有 `setuptools.build_meta` 失败，build isolation 路径已重复通过。
+
 ## 蓝图阶段
 
 ### Phase 0：记录和可观察性——主体完成
 
 已完成：
 
-- 62 份闭合 JSON Schema、9 份 authority SQL schema；
+- 64 份闭合 JSON Schema、10 份 authority SQL schema；
 - immutable DomainEvent、WorkOrder、ResultEnvelope、ModelInvocation；
 - Evidence → Claim → Thesis 版本链、verification 和 commit gate；
 - Workflow、Artifact metadata、模型 Usage/Cost、只读 projection 和静态看板；
@@ -141,8 +169,9 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 
 部分完成：connector authority foundation 已有 16 张 append-only 表、trusted store 和 wire contract，
 并通过六轮独立复核；Runner 控制面、recorded adapter execution、durable journal/raw spool、W0–W4 recovery
-和窄 AuthorityPort 已完成 P0-2b。真实网络/SSRF、credential authority、writer RPC、完整 source-health
-ledger、生产对象存储生命周期和跨机灾难恢复仍未完成。
+和窄 AuthorityPort 已完成 P0-2b；metadata importer、credential-free SSRF-safe public transport 和
+credential authority metadata boundary 已完成 P0-3 离线切片。真实 connector 调用、authenticated runner、
+writer RPC、完整 source-health ledger、生产对象存储生命周期和跨机灾难恢复仍未完成。
 
 ### Phase 1：Agenda Engine Shadow——单公司运行中
 
@@ -331,14 +360,17 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
    usage、physical attempt 和 rate-policy schema；
 3. 已完成 P0-1：trusted store、quota reservation/settlement、幂等、append-only source-health event 和
    最小 `ConnectorIncident` authority（quota drift、schema drift、credential/auth、source outage）；
-4. 已完成 P0-2a：Connector Runner 控制面、CapabilityLease use-time gate、exact static adapter resolver 和
-   authority-derived AdapterRequest；待完成 P0-2b journal/spool/AuthorityPort/recorded transport；
-5. 实现 OpenClaw skill/MCP metadata importer，只导入 metadata/schema/ref/hash，不导入 prompt、凭据或
-   整份 skill；MCP/skill 版本变化必须推动 catalog epoch；
+4. 已完成 P0-2a/P0-2b：Connector Runner 控制面、CapabilityLease use-time gate、exact static adapter
+   resolver、authority-derived AdapterRequest、journal/spool/AuthorityPort/recorded transport；
+5. 已完成 P0-3 importer thin slice：OpenClaw skill/MCP 只导入 metadata/schema/ref/hash，不导入 prompt、
+   凭据或整份 skill；complete scope 内的 MCP/skill 漂移会撤下旧 descriptor 并推动 catalog epoch。待补
+   OpenClaw live exporter/sync daemon；
 6. 把 connector logical/physical usage、quota 和 health 投影到看板；
-7. web fetch runner 增加 DNS/IP/redirect 复核，阻止 SSRF 和 private-network 访问；
-8. 冻结 offline attestation 与 networked canary attestation 的分界，并保留两次 human gate；同 UID
-   runner 不执行自生成代码，独立身份/container 上线前只允许 operator-reviewed adapter 进行 canary。
+7. 已完成 credential-free public HTTPS transport component 的 DNS/IP/pinned socket/TLS/redirect/size
+   复核；待接 web fetch adapter/Runner 后才算真实链路；
+8. 已冻结 public transport 与 credential authority metadata/API 分界；offline attestation 与 networked
+   canary attestation、两次 human gate 仍待完成。同 UID runner 不执行自生成代码，独立身份/container
+   上线前只允许 operator-reviewed adapter 进行 canary。
 
 ### P1：参考 connector 与 shadow
 
