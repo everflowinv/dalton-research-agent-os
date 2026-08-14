@@ -69,8 +69,11 @@ class WriterServiceTests(unittest.TestCase):
             "--socket", str(self.sock), "--token-config", str(self.tokens),
         ], cwd=str(Path(__file__).parents[1]), env=self.env,
            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        deadline = time.time() + 5
-        while time.time() < deadline:
+        # Hosted runners can take more than five seconds to import sqlite-heavy
+        # authority modules under concurrent matrix load.  Keep the early-exit
+        # check, but allow enough time for a healthy server to publish its UDS.
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
             if self.sock.exists():
                 return
             if self.proc.poll() is not None:
