@@ -30,17 +30,24 @@ Adapter 是 source-specific 纯边界。可信 Runner 传入：
 ```json
 {
   "protocol_version": "0.1",
+  "runner_request_ref": "connector-runner-request:...",
+  "runner_request_hash": "<sha256>",
   "connector_invocation_ref": "connector-invocation:...",
   "profile_ref": "connector-profile:...",
   "profile_hash": "<sha256>",
   "call_spec_ref": "connector-call:...",
   "call_spec_hash": "<sha256>",
+  "reservation_ref": "connector-reservation:...",
+  "reservation_hash": "<sha256>",
+  "physical_attempt_number": 1,
   "operation": "list_announcements",
   "parameters": {},
   "allowed_hosts": ["www.cninfo.com.cn"],
-  "credential_handle": null,
-  "deadline": "2026-08-14T12:00:30Z",
-  "max_response_bytes": 1000000
+  "credential_grant_ref": null,
+  "deadline_at": "2026-08-14T12:00:30.000000+00:00",
+  "max_response_bytes": 1000000,
+  "max_records": 1000,
+  "raw_sink_ref": "raw-sink:opaque-handle"
 }
 ```
 
@@ -52,26 +59,36 @@ Adapter 只能返回 transport observation，不得伪造 authority id：
   "request_hash": "<sha256>",
   "outcome": "succeeded",
   "provider_request_id": "...",
-  "started_at": "...",
-  "completed_at": "...",
-  "retry_at": null,
-  "response_bytes": 1234,
-  "record_count": 12,
+  "provider_status_code": 200,
+  "retry_after_ms": null,
+  "structured_output": {"records": []},
+  "source_record_refs": [],
   "cursor": null,
-  "raw_response_ref": "runner-private-spool:...",
-  "raw_response_hash": "<sha256>",
-  "source_record_refs": ["..."],
+  "provider_usage": null,
   "error": null
 }
 ```
 
-Runner 负责 use-time lease/profile/schema/hash 复核、quota reservation、网络策略、credential handle、
-frame/timeout 上限、raw artifact 注册、Usage/Cost/Settlement 和 ResultEnvelope。Adapter 不收到 reservation
-写权限、Core token、真实 credential value 或数据库路径。
+Adapter 不报告 authority 时间、raw hash、artifact ref、Usage/Cost 或 settlement；这些值只能由可信 Runner
+观察、计量并经 writer 登记。Runner 在派生 reservation 前和 transport 前分别重做 use-time gate，且
+transport 前的最后一次 lease gate 必须晚于 reservation use-time validation。Runner 负责
+lease/profile/schema/hash 复核、quota reservation、网络策略、credential grant、frame/timeout 上限、
+durable journal/raw spool、raw artifact 注册、Usage/Cost/Settlement 和 ResultEnvelope。Adapter 不收到
+reservation 写权限、Core token、真实 credential value 或数据库路径。
+
+当前实现只完成上述 control-plane contract、静态 resolver 和双 use-time gate，尚未实现 transport、
+credential grant、journal、raw spool 或 writer commit loop。这个切片只允许 `auth_mode=none`；
+Runner 专用 authority API 派生 policy version、连续 attempt、Profile 最大 bytes/records、保守成本和 TTL，
+并按 invocation/reservation/attempt 派生 opaque raw sink handle。
 
 `ConnectorCallSpec.parameters` 不保存 token、cookie、password、API key 或其他 credential-shaped 字段；
-凭据只能通过 profile 声明的 slot 交给 Runner。authority 会核对 query hash 和拒绝这些敏感字段，可信
-Runner 仍必须用 profile 冻结的 input schema ref/hash 验证完整参数结构。
+凭据只能通过 profile 声明的 slot 交给 Runner。authority 会核对 query hash 和拒绝这些敏感字段；可信
+Runner 使用 operator 安装、由 environment/package manifest 约束的 input validator，按 profile 冻结的
+input schema ref/hash 验证完整参数结构。
+
+CapabilityDescriptor 的 `source` 表示 capability 实现来自 skill/MCP/tool/plugin 的哪一份版本；
+ConnectorProfile 的 `source_identity` 表示 adapter 实际访问的目标数据源。两者不是同一个 ref。Runner
+分别核对 live Descriptor contract 与 target source binding，不能用一个含糊的 `source` 字段替代两者。
 
 ## 自生成模板
 

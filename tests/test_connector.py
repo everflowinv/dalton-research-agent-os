@@ -45,6 +45,16 @@ def validate_json_schema(instance, schema: dict, root: dict, path: str = "$") ->
             matches += 1
         assert matches == 1, f"{path}: oneOf matched {matches} branches"
         return
+    for choice in schema.get("allOf", ()):
+        validate_json_schema(instance, choice, root, path)
+    if "if" in schema:
+        try:
+            validate_json_schema(instance, schema["if"], root, path)
+            branch = schema.get("then")
+        except AssertionError:
+            branch = schema.get("else")
+        if branch is not None:
+            validate_json_schema(instance, branch, root, path)
     if "const" in schema:
         assert instance == schema["const"], f"{path}: const mismatch"
     if "enum" in schema:
@@ -75,6 +85,8 @@ def validate_json_schema(instance, schema: dict, root: dict, path: str = "$") ->
                 validate_json_schema(value, additional, root, f"{path}.{key}")
     if isinstance(instance, list):
         assert len(instance) >= schema.get("minItems", 0), f"{path}: too few items"
+        if "maxItems" in schema:
+            assert len(instance) <= schema["maxItems"], f"{path}: too many items"
         if schema.get("uniqueItems"):
             encoded = [json.dumps(value, sort_keys=True) for value in instance]
             assert len(encoded) == len(set(encoded)), f"{path}: duplicate items"
@@ -142,6 +154,7 @@ def profile_spec(*, version: int = 1, identifier: str = "connector-profile:a-sha
         "completeness": {"list_announcements": "enumerated"},
         "max_response_bytes": 1_000_000,
         "max_records": 1000,
+        "timeout_ms": 30_000,
         "access_policy_ref": "policy:access:public",
         "retention_policy_ref": "policy:retention:filing",
         "terms_policy_ref": "policy:terms:cninfo",
@@ -176,6 +189,7 @@ def rate_policy_spec(
     price_rate_refs: tuple[str, ...] = (),
     required_price_meters: tuple[str, ...] = (),
     limits: dict | None = None,
+    max_concurrency: int = 1,
 ) -> dict:
     price_book = {
         "price_rate_refs": sorted(price_rate_refs),
@@ -187,7 +201,7 @@ def rate_policy_spec(
         "quota_scope_ref": "connector-quota-scope:cninfo:public",
         "version": version, "prior_version_ref": prior_version_ref,
         "connector_profile_ref": profile_ref, "window_seconds": 60,
-        "reset_timezone": "UTC", "max_concurrency": 1,
+        "reset_timezone": "UTC", "max_concurrency": max_concurrency,
         "quota_currency": "USD",
         **price_book,
         "price_book_hash": content_hash(price_book),
@@ -431,6 +445,53 @@ class ConnectorStoreTests(unittest.TestCase):
                 {**profile_spec(), "schema_hash": "0" * 64},
                 idempotency_key="profile:schema-hash-mismatch",
             )
+        with self.assertRaises(ConnectorValidationError):
+            self.connectors.register_profile(
+                {**profile_spec(), "timeout_ms": 0},
+                idempotency_key="profile:timeout-zero",
+            )
+        for field, value in (
+            ("credential_slot_refs", ["credential-slot:unexpected"]),
+            (
+                "network_policy",
+                {
+                    **profile_spec()["network_policy"],
+                    "resolve_public_only": False,
+                },
+            ),
+            (
+                "network_policy",
+                {
+                    **profile_spec()["network_policy"],
+                    "allow_redirects": False,
+                    "max_redirects": 5,
+                },
+            ),
+        ):
+            bad_profile = {**dict(self.profile), field: value}
+            bad_profile.pop("write_status", None)
+            bad_profile["content_hash"] = content_hash(
+                {
+                    key: item
+                    for key, item in bad_profile.items()
+                    if key != "content_hash"
+                }
+            )
+            with self.subTest(field=field, value=value), self.assertRaises(
+                AssertionError
+            ):
+                assert_wire_schema(
+                    self, "connector-profile-version.schema.json", bad_profile
+                )
+            with self.subTest(field=field, value=value), self.assertRaises(
+                ConnectorValidationError
+            ):
+                self.connectors.register_profile(
+                    {**profile_spec(), field: value},
+                    idempotency_key="profile:conditional-schema:" + content_hash(
+                        {"field": field, "value": value}
+                    ),
+                )
         credential_parameters = {"filters": {"api-key": "must-not-enter-call-spec"}}
         with self.assertRaises(ConnectorValidationError):
             self.connectors.register_call_spec(

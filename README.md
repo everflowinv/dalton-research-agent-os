@@ -69,7 +69,9 @@ bridge 投递通知。bridge 使用 claim lease、确定性 marker、发送后 r
 HTML 控制面提交；浏览器反馈与 24 小时超时默认接受使用两个独立 feedback-only principal。超时默认
 接受单独统计，不计入人工标签或认可率。当前不会执行研究，也不会写 Evidence、Claim 或 Thesis。
 
-生产部署仍缺少独立 OS/container identity、正式 capability sandbox、Model IR、原生事件连接器、
+Connector P0-1 authority foundation 和 P0-2a Runner 控制面底座已完成；当前仍未执行 adapter 或访问
+真实数据源，下一段是 recorded journal/spool/authority-port thin slice。生产部署仍缺少独立
+OS/container identity、正式 capability sandbox、Model IR、原生事件连接器、
 研究 worker/verifier coordinator、更多原生投递渠道和完整运维控制面。任何旧工作流
 切换都要逐项验证，不能因文件已导入就视为完成迁移。当前项目状态见
 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，最近一次 Agenda 控制面实施记录见

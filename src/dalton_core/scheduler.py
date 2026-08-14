@@ -110,6 +110,13 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _sha256(value: Any, name: str) -> str:
+    value = _nonempty(value, name)
+    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
+        raise SchedulerValidationError(f"{name} must be lowercase SHA-256 hex")
+    return value
+
+
 class Scheduler:
     """SQLite scheduler with atomic claim and append-only history.
 
@@ -647,6 +654,88 @@ class Scheduler:
         ):
             raise LeaseRejected("lease owner or token does not match")
         return event, lease
+
+    def validate_lease_for_use(
+        self,
+        work_order_id: str,
+        attempt_number: int,
+        owner_ref: str,
+        lease_token: str,
+        *,
+        lease_revision_ref: str,
+        lease_hash: str,
+        work_order_hash: str,
+    ) -> dict[str, Any]:
+        """Revalidate the exact current scheduler lease immediately before use.
+
+        Reading a historical claim is not authorization.  Trusted runtimes call
+        this method with the one-time lease token and the closed refs/hashes from
+        their command frame.  Expired leases are transitioned through the normal
+        append-only expiry path before the method raises.
+        """
+
+        work_order_id = _nonempty(work_order_id, "work_order_id")
+        attempt_number = _positive_int(attempt_number, "attempt_number")
+        owner_ref = _nonempty(owner_ref, "owner_ref")
+        lease_token = _nonempty(lease_token, "lease_token")
+        lease_revision_ref = _nonempty(lease_revision_ref, "lease_revision_ref")
+        lease_hash = _sha256(lease_hash, "lease_hash")
+        work_order_hash = _sha256(work_order_hash, "work_order_hash")
+        now_dt = self._now()
+        now = _timestamp(now_dt)
+        expired = False
+        result: dict[str, Any] | None = None
+        with self._transaction() as cur:
+            event, lease = self._active_lease(
+                cur,
+                work_order_id=work_order_id,
+                attempt_number=attempt_number,
+                owner_ref=owner_ref,
+                lease_token=lease_token,
+            )
+            if _parse_time(lease["expires_at"]) <= now_dt:
+                self._expire_one(cur, event, lease, now)
+                expired = True
+            else:
+                if (
+                    lease["lease_revision_id"] != lease_revision_ref
+                    or lease["content_hash"] != lease_hash
+                ):
+                    raise LeaseRejected("scheduler lease revision or hash is stale")
+                work = cur.execute(
+                    "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
+                    "WHERE work_order_id=?",
+                    (work_order_id,),
+                ).fetchone()
+                if work is None or work["work_order_hash"] != work_order_hash:
+                    raise LeaseRejected("scheduler WorkOrder hash is stale")
+                lease_wire = {
+                    "schema_version": SCHEMA_VERSION,
+                    "id": lease["lease_revision_id"],
+                    "lease_id": lease["lease_id"],
+                    "lease_version": lease["lease_version"],
+                    "created_at": lease["created_at"],
+                    "work_order_ref": lease["work_order_id"],
+                    "attempt_number": lease["attempt_number"],
+                    "owner_ref": lease["owner_ref"],
+                    "lease_token_hash": lease["lease_token_hash"],
+                    "issued_at": lease["issued_at"],
+                    "renewed_at": lease["renewed_at"],
+                    "expires_at": lease["expires_at"],
+                    "prior_lease_ref": lease["prior_lease_revision_id"],
+                    "content_hash": lease["content_hash"],
+                }
+                result = {
+                    "status": "usable",
+                    "lease": lease_wire,
+                    "work_order": json.loads(work["work_order_json"]),
+                    "work_order_hash": work["work_order_hash"],
+                }
+        if expired:
+            raise LeaseExpired("scheduler lease expired before use")
+        if result is None:
+            raise SchedulerConflict("scheduler lease validation produced no result")
+        return result
 
     def renew(
         self,

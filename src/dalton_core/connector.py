@@ -419,7 +419,7 @@ class ConnectorStore:
             "auth_mode", "credential_slot_refs", "input_schema_refs",
             "input_schema_hashes", "output_schema_refs", "output_schema_hashes",
             "pagination", "completeness", "max_response_bytes",
-            "max_records", "access_policy_ref", "retention_policy_ref",
+            "max_records", "timeout_ms", "access_policy_ref", "retention_policy_ref",
             "terms_policy_ref", "network_policy",
         }
         wire = _closed(spec, fields, "ConnectorProfileVersion")
@@ -441,6 +441,7 @@ class ConnectorStore:
             wire["max_response_bytes"], "max_response_bytes", minimum=1
         )
         wire["max_records"] = _integer(wire["max_records"], "max_records", minimum=1)
+        wire["timeout_ms"] = _integer(wire["timeout_ms"], "timeout_ms", minimum=1)
         for name in (
             "descriptor_hash", "source_hash", "schema_hash", "adapter_hash",
             "runner_environment_hash",
@@ -1027,12 +1028,15 @@ class ConnectorStore:
         ttl_seconds: int,
         reservation_id: str | None = None,
         idempotency_key: str,
+        require_single_pending: bool = False,
     ) -> dict[str, Any]:
         connector_invocation_ref = _text(connector_invocation_ref, "connector_invocation_ref")
         policy_version_ref = _text(policy_version_ref, "policy_version_ref")
         attempt_number = int(_integer(physical_attempt_number, "physical_attempt_number", minimum=1))
         ttl = int(_integer(ttl_seconds, "ttl_seconds", minimum=1))
         metrics = _metric_map(reserved, "reserved", calls_required=True)
+        if not isinstance(require_single_pending, bool):
+            raise ConnectorValidationError("require_single_pending must be boolean")
         reservation_id = self._idempotent_id(
             "connector-reservation", reservation_id, idempotency_key
         )
@@ -1098,11 +1102,42 @@ class ConnectorStore:
                 "reserved": metrics,
                 "ttl_seconds": ttl,
                 "reservation_id": reservation_id,
+                "require_single_pending": require_single_pending,
             }
             request_hash = content_hash(request)
             duplicate = self._idem(cur, idempotency_key, "reserve_connector_quota", request_hash)
             if duplicate is not None and drift_reason is None:
                 return duplicate
+            if require_single_pending:
+                latest_attempt = cur.execute(
+                    "SELECT MAX(physical_attempt_number) AS attempt_number "
+                    "FROM connector_quota_reservations "
+                    "WHERE connector_invocation_ref=?",
+                    (connector_invocation_ref,),
+                ).fetchone()
+                expected_attempt = (
+                    1
+                    if latest_attempt is None
+                    or latest_attempt["attempt_number"] is None
+                    else int(latest_attempt["attempt_number"]) + 1
+                )
+                if attempt_number != expected_attempt:
+                    raise ConnectorConflict(
+                        "runner reservation attempt is not the next authority attempt"
+                    )
+                pending = cur.execute(
+                    "SELECT 1 FROM connector_quota_reservations r "
+                    "LEFT JOIN connector_physical_attempts a ON a.reservation_ref=r.reservation_id "
+                    "LEFT JOIN connector_quota_settlements s ON s.reservation_ref=r.reservation_id "
+                    "WHERE r.connector_invocation_ref=? AND a.physical_attempt_id IS NULL "
+                    "AND s.settlement_id IS NULL AND r.expires_at>? "
+                    "AND r.window_ends_at>? LIMIT 1",
+                    (connector_invocation_ref, now, now),
+                ).fetchone()
+                if pending is not None and drift_reason is None:
+                    raise ConnectorBlocked(
+                        "connector invocation already has an open quota reservation"
+                    )
             blocking = cur.execute(
                 "SELECT 1 FROM connector_incidents i WHERE i.connector_profile_ref=? "
                 "AND i.severity='blocking' AND (SELECT e.state FROM connector_incident_events e "
@@ -1244,6 +1279,291 @@ class ConnectorStore:
         if result is None:
             raise ConnectorConflict("quota admission produced no result")
         return result
+
+    def validate_reservation_for_use(
+        self,
+        reservation_ref: str,
+        *,
+        reservation_hash: str,
+        connector_invocation_ref: str,
+        physical_attempt_number: int,
+    ) -> dict[str, Any]:
+        """Revalidate an exact open reservation immediately before transport.
+
+        A reservation record is historical quota authority, not a standing
+        permission to call a provider.  The trusted runner must recheck its
+        time window, active policy, price book, incident/circuit state, and
+        absence of any prior attempt or settlement at the use boundary.
+        """
+
+        reservation_ref = _text(reservation_ref, "reservation_ref")
+        reservation_hash = _hash(reservation_hash, "reservation_hash")
+        connector_invocation_ref = _text(
+            connector_invocation_ref, "connector_invocation_ref"
+        )
+        attempt_number = int(
+            _integer(physical_attempt_number, "physical_attempt_number", minimum=1)
+        )
+        now = self._now()
+        drift_reason: str | None = None
+        result: dict[str, Any] | None = None
+        with self.store._transaction() as cur:
+            row = cur.execute(
+                "SELECT record_json,content_hash FROM connector_quota_reservations "
+                "WHERE reservation_id=?",
+                (reservation_ref,),
+            ).fetchone()
+            if row is None:
+                raise ConnectorNotFound(reservation_ref)
+            reservation = json.loads(row["record_json"])
+            if row["content_hash"] != reservation_hash:
+                raise ConnectorConflict("quota reservation hash is stale")
+            if (
+                reservation["connector_invocation_ref"] != connector_invocation_ref
+                or int(reservation["physical_attempt_number"]) != attempt_number
+            ):
+                raise ConnectorConflict("quota reservation belongs to another attempt")
+            if not (
+                reservation["created_at"] <= now < reservation["expires_at"]
+                and now < reservation["window_ends_at"]
+            ):
+                raise ConnectorBlocked("quota reservation is not usable at the current time")
+            if cur.execute(
+                "SELECT 1 FROM connector_physical_attempts WHERE reservation_ref=?",
+                (reservation_ref,),
+            ).fetchone() is not None:
+                raise ConnectorBlocked("quota reservation already has a physical attempt")
+            if cur.execute(
+                "SELECT 1 FROM connector_quota_settlements WHERE reservation_ref=?",
+                (reservation_ref,),
+            ).fetchone() is not None:
+                raise ConnectorBlocked("quota reservation is already settled")
+            open_rows = cur.execute(
+                "SELECT r.reservation_id FROM connector_quota_reservations r "
+                "LEFT JOIN connector_physical_attempts a ON a.reservation_ref=r.reservation_id "
+                "LEFT JOIN connector_quota_settlements s ON s.reservation_ref=r.reservation_id "
+                "WHERE r.connector_invocation_ref=? AND a.physical_attempt_id IS NULL "
+                "AND s.settlement_id IS NULL AND r.expires_at>? AND r.window_ends_at>?",
+                (connector_invocation_ref, now, now),
+            ).fetchall()
+            if [item["reservation_id"] for item in open_rows] != [reservation_ref]:
+                raise ConnectorBlocked(
+                    "runner requires exactly one open authority reservation"
+                )
+            invocation = cur.execute(
+                "SELECT connector_profile_ref FROM connector_invocations "
+                "WHERE connector_invocation_id=?",
+                (connector_invocation_ref,),
+            ).fetchone()
+            if invocation is None:
+                raise ConnectorNotFound(connector_invocation_ref)
+            profile_row = cur.execute(
+                "SELECT record_json FROM connector_profile_versions WHERE profile_version_id=?",
+                (invocation["connector_profile_ref"],),
+            ).fetchone()
+            if profile_row is None:
+                raise ConnectorNotFound(invocation["connector_profile_ref"])
+            profile = json.loads(profile_row["record_json"])
+            policy_row = cur.execute(
+                "SELECT policy_ref,record_json,content_hash FROM connector_rate_policy_versions "
+                "WHERE policy_version_id=?",
+                (reservation["policy_version_ref"],),
+            ).fetchone()
+            if policy_row is None:
+                raise ConnectorNotFound(reservation["policy_version_ref"])
+            policy = json.loads(policy_row["record_json"])
+            active = self._active_rate_policy(cur, policy_row["policy_ref"], now)
+            if (
+                active["id"] != policy["id"]
+                or active["content_hash"] != reservation["policy_version_hash"]
+                or policy["connector_profile_ref"] != invocation["connector_profile_ref"]
+            ):
+                raise ConnectorBlocked("quota reservation policy is no longer exact and active")
+            reserved = reservation["reserved"]
+            if (
+                int(reserved["calls"]) != 1
+                or int(reserved["bytes"]) != int(profile["max_response_bytes"])
+                or int(reserved["records"]) != int(profile["max_records"])
+                or int(reserved["cost_micros"])
+                < self._conservative_price_book_cost(cur, policy, profile)
+            ):
+                raise ConnectorBlocked(
+                    "quota reservation does not cover the profile's conservative maximum"
+                )
+            attempt_rows = cur.execute(
+                "SELECT physical_attempt_number FROM connector_quota_reservations "
+                "WHERE connector_invocation_ref=? AND physical_attempt_number<=? "
+                "ORDER BY physical_attempt_number",
+                (connector_invocation_ref, attempt_number),
+            ).fetchall()
+            if [int(item["physical_attempt_number"]) for item in attempt_rows] != list(
+                range(1, attempt_number + 1)
+            ):
+                raise ConnectorBlocked("physical attempt reservations are not contiguous")
+            matches, canonical_refs, canonical_meters = self._price_book_matches_at(
+                cur, policy, now
+            )
+            if not matches:
+                drift_reason = "active canonical price book no longer matches quota reservation"
+                self._open_price_book_drift_incident(
+                    cur,
+                    connector_invocation_ref=connector_invocation_ref,
+                    reservation_ref=reservation_ref,
+                    policy_version_ref=policy["id"],
+                    observed_at=now,
+                    policy_rate_refs=policy["price_rate_refs"],
+                    canonical_rate_refs=canonical_refs,
+                    policy_meters=policy["required_price_meters"],
+                    canonical_meters=canonical_meters,
+                )
+            blocking = cur.execute(
+                "SELECT 1 FROM connector_incidents i WHERE i.connector_profile_ref=? "
+                "AND i.severity='blocking' AND (SELECT e.state FROM connector_incident_events e "
+                "WHERE e.incident_ref=i.incident_id ORDER BY e.rowid DESC LIMIT 1)='opened' "
+                "LIMIT 1",
+                (invocation["connector_profile_ref"],),
+            ).fetchone()
+            if blocking is not None and drift_reason is None:
+                raise ConnectorBlocked("blocking connector incident is open")
+            health = cur.execute(
+                "SELECT state FROM connector_source_health_events WHERE connector_profile_ref=? "
+                "ORDER BY rowid DESC LIMIT 1",
+                (invocation["connector_profile_ref"],),
+            ).fetchone()
+            if (
+                health is not None
+                and health["state"] == "open_circuit"
+                and drift_reason is None
+            ):
+                raise ConnectorBlocked("connector source circuit is open")
+            if drift_reason is None:
+                result = reservation
+        if drift_reason is not None:
+            raise ConnectorBlocked(drift_reason)
+        if result is None:
+            raise ConnectorConflict("reservation use-time validation produced no result")
+        return result
+
+    def reserve_quota_for_runner(
+        self,
+        connector_invocation_ref: str,
+        policy_ref: str,
+        deadline_at: str,
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Derive the next conservative reservation for the trusted Runner.
+
+        The Connector writer is the single authority process, so callers do
+        not choose a policy version, attempt number, metrics, or TTL.
+        """
+
+        connector_invocation_ref = _text(
+            connector_invocation_ref, "connector_invocation_ref"
+        )
+        policy_ref = _text(policy_ref, "policy_ref")
+        idempotency_key = _text(idempotency_key, "idempotency_key")
+        deadline_at = _timestamp(deadline_at, "deadline_at")
+        prior = self.connection.execute(
+            "SELECT operation,result_json FROM connector_idempotency_keys "
+            "WHERE idempotency_key=?",
+            (idempotency_key,),
+        ).fetchone()
+        if prior is not None:
+            if prior["operation"] != "reserve_connector_quota":
+                raise ConnectorConflict(
+                    f"idempotency key conflict: {idempotency_key}"
+                )
+            result = json.loads(prior["result_json"])
+            policy_row = self.connection.execute(
+                "SELECT policy_ref FROM connector_rate_policy_versions "
+                "WHERE policy_version_id=?",
+                (result["policy_version_ref"],),
+            ).fetchone()
+            if (
+                result["connector_invocation_ref"] != connector_invocation_ref
+                or policy_row is None
+                or policy_row["policy_ref"] != policy_ref
+            ):
+                raise ConnectorConflict(
+                    f"idempotency key conflict: {idempotency_key}"
+                )
+            result["write_status"] = "duplicate"
+            return result
+        now_dt = self._now_dt()
+        now = now_dt.isoformat(timespec="microseconds")
+        deadline_dt = datetime.fromisoformat(deadline_at)
+        ttl_seconds = int((deadline_dt - now_dt).total_seconds())
+        if ttl_seconds < 1:
+            raise ConnectorBlocked("runner reservation deadline has expired")
+        policy = self._active_rate_policy(self.connection, policy_ref, now)
+        invocation = self.connection.execute(
+            "SELECT connector_profile_ref FROM connector_invocations "
+            "WHERE connector_invocation_id=?",
+            (connector_invocation_ref,),
+        ).fetchone()
+        if invocation is None:
+            raise ConnectorNotFound(connector_invocation_ref)
+        if invocation["connector_profile_ref"] != policy["connector_profile_ref"]:
+            raise ConnectorConflict("runner policy does not belong to invocation profile")
+        profile_row = self.connection.execute(
+            "SELECT record_json FROM connector_profile_versions WHERE profile_version_id=?",
+            (invocation["connector_profile_ref"],),
+        ).fetchone()
+        if profile_row is None:
+            raise ConnectorNotFound(invocation["connector_profile_ref"])
+        profile = json.loads(profile_row["record_json"])
+        latest = self.connection.execute(
+            "SELECT MAX(physical_attempt_number) AS attempt_number "
+            "FROM connector_quota_reservations WHERE connector_invocation_ref=?",
+            (connector_invocation_ref,),
+        ).fetchone()
+        attempt_number = (
+            1
+            if latest is None or latest["attempt_number"] is None
+            else int(latest["attempt_number"]) + 1
+        )
+        reserved = {
+            "calls": 1,
+            "bytes": int(profile["max_response_bytes"]),
+            "records": int(profile["max_records"]),
+            "cost_micros": self._conservative_price_book_cost(
+                self.connection, policy, profile
+            ),
+        }
+        return self.reserve_quota(
+            connector_invocation_ref,
+            policy["id"],
+            attempt_number,
+            reserved,
+            ttl_seconds=ttl_seconds,
+            idempotency_key=idempotency_key,
+            require_single_pending=True,
+        )
+
+    def pending_reservation_for_runner(
+        self, connector_invocation_ref: str
+    ) -> dict[str, Any]:
+        """Return the sole open reservation; callers cannot select its body."""
+
+        connector_invocation_ref = _text(
+            connector_invocation_ref, "connector_invocation_ref"
+        )
+        now = self._now()
+        rows = self.connection.execute(
+            "SELECT r.record_json FROM connector_quota_reservations r "
+            "LEFT JOIN connector_physical_attempts a ON a.reservation_ref=r.reservation_id "
+            "LEFT JOIN connector_quota_settlements s ON s.reservation_ref=r.reservation_id "
+            "WHERE r.connector_invocation_ref=? AND a.physical_attempt_id IS NULL "
+            "AND s.settlement_id IS NULL AND r.expires_at>? AND r.window_ends_at>? "
+            "ORDER BY r.physical_attempt_number",
+            (connector_invocation_ref, now, now),
+        ).fetchall()
+        if len(rows) != 1:
+            raise ConnectorBlocked(
+                "runner requires exactly one open authority reservation"
+            )
+        return json.loads(rows[0]["record_json"])
 
     def record_physical_attempt(
         self,

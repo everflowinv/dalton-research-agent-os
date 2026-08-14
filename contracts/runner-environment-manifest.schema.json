@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunnerEnvironmentManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "runner_runtime_ref", "runner_actor_ref",
+    "resolver_ref", "resolver_version", "package_manifest_ref", "package_manifest_hash",
+    "bindings", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "runner_runtime_ref": {"type": "string", "minLength": 1},
+    "runner_actor_ref": {"type": "string", "minLength": 1},
+    "resolver_ref": {"type": "string", "minLength": 1},
+    "resolver_version": {"type": "string", "minLength": 1},
+    "package_manifest_ref": {"type": "string", "minLength": 1},
+    "package_manifest_hash": {"$ref": "#/$defs/hash"},
+    "bindings": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "binding_ref", "descriptor_revision_ref", "descriptor_hash", "adapter_ref",
+          "adapter_hash", "source_ref", "source_hash", "operation", "input_schema_ref",
+          "input_schema_hash", "output_schema_ref", "output_schema_hash", "auth_mode",
+          "credential_slot_refs", "required_permissions", "side_effects", "rate_policy_ref"
+        ],
+        "properties": {
+          "binding_ref": {"type": "string", "minLength": 1},
+          "descriptor_revision_ref": {"type": "string", "minLength": 1},
+          "descriptor_hash": {"$ref": "#/$defs/hash"},
+          "adapter_ref": {"type": "string", "minLength": 1},
+          "adapter_hash": {"$ref": "#/$defs/hash"},
+          "source_ref": {"type": "string", "minLength": 1},
+          "source_hash": {"$ref": "#/$defs/hash"},
+          "operation": {"type": "string", "minLength": 1},
+          "input_schema_ref": {"type": "string", "minLength": 1},
+          "input_schema_hash": {"$ref": "#/$defs/hash"},
+          "output_schema_ref": {"type": "string", "minLength": 1},
+          "output_schema_hash": {"$ref": "#/$defs/hash"},
+          "auth_mode": {"enum": ["none", "credential_slot", "mcp_managed"]},
+          "credential_slot_refs": {
+            "type": "array", "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "required_permissions": {"$ref": "#/$defs/permissions"},
+          "side_effects": {
+            "type": "array", "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "rate_policy_ref": {"type": "string", "minLength": 1}
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {"auth_mode": {"const": "none"}},
+              "required": ["auth_mode"]
+            },
+            "then": {
+              "properties": {"credential_slot_refs": {"maxItems": 0}}
+            },
+            "else": {
+              "properties": {"credential_slot_refs": {"minItems": 1}}
+            }
+          }
+        ]
+      }
+    },
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "risk_class", "network", "filesystem_read", "filesystem_write",
+        "credential_slot_refs", "core_db", "side_effects"
+      ],
+      "properties": {
+        "risk_class": {"enum": ["none", "low", "medium", "high"]},
+        "network": {"type": "boolean"},
+        "filesystem_read": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "filesystem_write": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "credential_slot_refs": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "core_db": {"type": "boolean"},
+        "side_effects": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}

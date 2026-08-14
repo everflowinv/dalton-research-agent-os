@@ -23,6 +23,10 @@ _LAZY_EXPORTS = {
     "validate_connector_proposal_manifest": (
         ".connector", "validate_connector_proposal_manifest"
     ),
+    "ConnectorRunnerAdmissionGate": (
+        ".connector_runner", "ConnectorRunnerAdmissionGate"
+    ),
+    "StaticAdapterResolver": (".connector_runner", "StaticAdapterResolver"),
     "DashboardProjector": (".dashboard_projector", "DashboardProjector"),
     "project_dashboard": (".dashboard_projector", "project_dashboard"),
     "DashboardQueryService": (".dashboard", "DashboardQueryService"),
@@ -48,6 +52,8 @@ __all__ = [
     "CapabilityAttestation",
     "CapabilityCatalog",
     "ConnectorStore",
+    "ConnectorRunnerAdmissionGate",
+    "StaticAdapterResolver",
     "validate_connector_proposal_manifest",
     "DashboardProjector",
     "DashboardQueryService",

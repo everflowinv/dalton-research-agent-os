@@ -2,8 +2,8 @@
 
 更新日期：2026-08-14  
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前已提交 HEAD：`79bca15`（Connector P0-0 seam，未部署）
-- 当前 dirty work：Connector P0-1 authority 与 protocol template，未提交、未部署
+- 当前提交内容：Connector P0-2a control-plane foundation，未部署
+- live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
 反向改写历史结论。这里的“完成”只表示代码、测试和当前部署已经验收，不表示已达到多租户或
@@ -35,7 +35,7 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 此前 Connector 报告把未实际发生的 Fable 5 复核写成事实。报告已更正；随后完成的真实独立审阅结论
 是“有条件 Go”。
 
-### Connector P0-1 当前进度（partial，未提交、未部署）
+### Connector P0-1 当前进度（authority foundation 已提交，未部署）
 
 - 新增 `ConnectorStore`，已把 connector authority DDL 接入 trusted `DaltonStore` transaction；
 - profile、call spec、logical invocation、physical attempt、Usage/Price/Cost、quota
@@ -72,8 +72,37 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   72 条 artifact index、16 张 connector 表，integrity 为 `ok`；
 - 本机系统 Python 的 `python3 -m build` 仍因已安装的 `build` 包没有 `build.__main__` 而失败；独立 venv 的
   `pip wheel --no-build-isolation` 已通过，这不是 Connector 代码验收通过的替代条件，也不隐藏该环境问题；
-- 可信 Runner、CapabilityLease use-time gate、exact adapter resolver、writer RPC、dashboard projection
-  和第一条真实 A 股公告 connector 尚未实现，因此不能报 P0、P0-1 完成或 E1 通过。
+- P0-1 authority foundation 已提交为 `c4e78db`；完整 Connector P0、Runner、writer RPC、真实 adapter、
+  dashboard projection 和第一条真实 A 股公告 connector 尚未完成，因此不能报完整 P0 或 E1 通过。
+
+### Connector P0-2a 当前进度（control-plane foundation 完成，未部署）
+
+- 新增闭合 `ConnectorRunnerRequest`、`RunnerEnvironmentManifest`、`ConnectorAdapterRequest`、
+  `AdapterTransportObservation` 和 `ConnectorRunnerResponse` contract/schema；
+- Scheduler 新增 exact-current lease use-time gate；旧 revision、错误 hash 和过期 lease 都 fail closed；
+- `StaticAdapterResolver` 只接受 operator 注入的 callable 与冻结 binding，禁止从 proposal path 动态
+  import/exec；CapabilityDescriptor 的实现来源与 ConnectorProfile 的目标数据源分开建模，live descriptor
+  contract 的 adapter/input/output schema refs 必须与 Profile/manifest 一致；
+- Runner admission 从 Core、Scheduler、CapabilityCatalog 和 ConnectorStore 重读 authority，外部 request
+  只携带 refs/hashes；静态 input validator 按冻结 schema 检查完整 parameters；内部 AdapterRequest 的
+  parameters、host、policy、deadline 和 response 上限只使用最后一次 authority 重读结果；
+- Runner 专用 reservation API 派生 exact active policy version、连续 attempt、Profile 最大 bytes/records、
+  保守成本和 TTL；transport gate 只接受唯一 open reservation，并再次核对 hash、有效期、price book、
+  blocking incident 和 circuit state；reservation 验证后再做最终 Scheduler/Capability use-time gate；
+- P0-2a 只接受 `auth_mode=none`，不接受任何 credential grant；raw sink handle 由 Runner 按
+  invocation/reservation/attempt 确定性派生，调用方不能传路径或 handle；
+- Runner reservation 在 `BEGIN IMMEDIATE` 内核对 next authority attempt、同一 invocation 的 pending
+  唯一性并写入；`max_concurrency=2` 的两个独立 SQLite connection 并发探针最终只产生 1 行 reservation；
+- live Descriptor 还必须满足 `kind=connector`、`mode=typed_call`、`instruction_ref=null`；Manifest、
+  AdapterRequest 和 Profile 的 auth/credential、public-only、redirect 条件已在 JSON Schema 与 Python
+  validator 两边统一；
+- Fable 5 前两轮复核均为 No-Go，第三轮在复跑旧探针及上述并发/Schema/Descriptor 探针后给出
+  **Go**，只批准 P0-2a control-plane foundation；相关测试 58/58、Python 全量 236/236、broker 15/15；
+- 固定 `SOURCE_DATE_EPOCH=1700000000` 的两次 wheel 构建得到相同 SHA-256：
+  `0e198638dcde7b52ccc756715eef20da5ca9a1ead8f91fb72cb1c8d3f2d25881`；隔离安装可导入 Runner、创建
+  16 张 connector 表，integrity 为 `ok`；
+- 当前仍只是 control-plane seam：没有执行 adapter、没有 credential grant、durable runner journal、raw spool、
+  writer authority port、SSRF transport 或 recorded success/429/crash replay，不能称 P0-2 完成。
 
 ## 蓝图阶段
 
@@ -81,7 +110,7 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 
 已完成：
 
-- 57 份闭合 JSON Schema、9 份 authority SQL schema；
+- 62 份闭合 JSON Schema、9 份 authority SQL schema；
 - immutable DomainEvent、WorkOrder、ResultEnvelope、ModelInvocation；
 - Evidence → Claim → Thesis 版本链、verification 和 commit gate；
 - Workflow、Artifact metadata、模型 Usage/Cost、只读 projection 和静态看板；
@@ -89,8 +118,8 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 - owner-only writer、每日 SQLite backup、已完成的 restore 演练与数据库完整性检查。
 
 部分完成：connector authority foundation 已有 16 张 append-only 表、trusted store 和 wire contract，
-并通过六轮独立复核，但还没有 writer RPC/Runner。完整 source-health ledger、生产对象存储生命周期和
-跨机灾难恢复仍未完成。
+并通过六轮独立复核；Runner 控制面、双 use-time gate 和静态 resolver 已完成 P0-2a。adapter execution、
+durable journal/raw spool、writer RPC、完整 source-health ledger、生产对象存储生命周期和跨机灾难恢复仍未完成。
 
 ### Phase 1：Agenda Engine Shadow——单公司运行中
 
@@ -112,7 +141,8 @@ Agenda Perception；否则会在 10 日评估窗口中途改变输入分布，�
 已完成：Scheduler lease/retry/idempotency、ProcessRuntimeAdapter、六模型 exact route、OpenClaw 模型
 broker、预算和 pause gate。
 
-未完成：原生事件 connector、connector runner、从 AgendaDecision 到 research DAG 的 planner、
+部分完成：connector runner 控制面已完成，但没有执行 adapter 或接入 transport。未完成：原生事件 connector、
+从 AgendaDecision 到 research DAG 的 planner、
 `ready → connector/worker → verifier → revise/commit` coordinator，以及第一条只读研究 WorkOrder。
 
 ### Phase 3：Verifier 与 Thesis Commit——权威机制完成，运行层未开始
@@ -215,7 +245,8 @@ credential slot、lease 和 human approval。下一阶段复用这些边界，�
 - `ConnectorCostEntry`：绑定 exact usage 与 exact rate，保留 actual/estimated/unpriced/waived 和
   correction chain；
 - `ConnectorRatePolicyVersion`：quota scope（connector/operation/credential slot/provider shared）、
-  burst、并发、window/reset timezone、calls/bytes/records/cost、billable unit、timeout 和 Retry-After；
+  burst、并发、window/reset timezone、calls/bytes/records/cost、billable unit 和 Retry-After；执行 timeout
+  由 ConnectorProfile/RunnerEnvironment 冻结，不属于 quota policy；
   RatePolicy 只做 admission/quota/retry，可以引用 rate card，不能兼任费率或网络权限权威；
 - durable quota reservation/settlement：logical invocation 与 physical provider attempt 分开记；每次
   retry、429、timeout 前都先预占 physical call，结果不确定时保守占额；
@@ -269,15 +300,16 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 ### P0：Connector Protocol 与计量边界
 
-0. P0-0：补齐 seam 敌对测试、在生产数据库副本演练 startup backfill、修正独立复核出处、修复
-   Artifact v0.2 投影，并给 Scheduler attempt event 声明 wire/hash epoch；
-1. 冻结 `ExecutionInvocation` 超类型、Model/Connector 子类型与 ArtifactVersion v0.2 ADR；采用新增表、
+0. 已完成 P0-0：seam 敌对测试、生产数据库副本 startup backfill 演练、复核出处修正、Artifact v0.2
+   projection 和 Scheduler attempt event wire/hash epoch；
+1. 已完成：`ExecutionInvocation` 超类型、Model/Connector 子类型与 ArtifactVersion v0.2；采用新增表、
    回填 link 和新写入原子双写，不重写历史 model/artifact hash；
-2. 冻结 ConnectorCallSpec、ConnectorProfileVersion、connector RPC、SourceEnvelope、usage、physical
-   attempt 和 rate-policy schema；
-3. 实现单写者 authority、quota reservation/settlement、幂等、append-only source-health event，以及
+2. 已完成 authority contract：ConnectorCallSpec、ConnectorProfileVersion、Runner frames、SourceEnvelope、
+   usage、physical attempt 和 rate-policy schema；
+3. 已完成 P0-1：trusted store、quota reservation/settlement、幂等、append-only source-health event 和
    最小 `ConnectorIncident` authority（quota drift、schema drift、credential/auth、source outage）；
-4. 实现可信 Connector Runner、CapabilityLease use-time gate 和 exact adapter resolver；
+4. 已完成 P0-2a：Connector Runner 控制面、CapabilityLease use-time gate、exact static adapter resolver 和
+   authority-derived AdapterRequest；待完成 P0-2b journal/spool/AuthorityPort/recorded transport；
 5. 实现 OpenClaw skill/MCP metadata importer，只导入 metadata/schema/ref/hash，不导入 prompt、凭据或
    整份 skill；MCP/skill 版本变化必须推动 catalog epoch；
 6. 把 connector logical/physical usage、quota 和 health 投影到看板；

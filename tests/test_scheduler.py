@@ -136,6 +136,53 @@ class SchedulerTests(unittest.TestCase):
         self.assertEqual(self.scheduler.formal_result("work-1")["result_envelope_id"], "result-1")
         self.assertIsNone(self.scheduler.claim("worker:b"))
 
+    def test_validate_lease_for_use_requires_exact_current_revision(self):
+        claimed = self.enqueue_claim()
+        validated = self.scheduler.validate_lease_for_use(
+            "work-1", 1, "worker:a", claimed["lease_token"],
+            lease_revision_ref=claimed["lease"]["id"],
+            lease_hash=claimed["lease"]["content_hash"],
+            work_order_hash=claimed["work_order_hash"],
+        )
+        self.assertEqual(validated["status"], "usable")
+        self.assertNotIn("lease_token", validated)
+        with self.assertRaises(LeaseRejected):
+            self.scheduler.validate_lease_for_use(
+                "work-1", 1, "worker:a", claimed["lease_token"],
+                lease_revision_ref=claimed["lease"]["id"],
+                lease_hash="0" * 64,
+                work_order_hash=claimed["work_order_hash"],
+            )
+        renewed = self.scheduler.renew(
+            "work-1", 1, "worker:a", claimed["lease_token"], extend_seconds=5
+        )
+        with self.assertRaises(LeaseRejected):
+            self.scheduler.validate_lease_for_use(
+                "work-1", 1, "worker:a", claimed["lease_token"],
+                lease_revision_ref=claimed["lease"]["id"],
+                lease_hash=claimed["lease"]["content_hash"],
+                work_order_hash=claimed["work_order_hash"],
+            )
+        validated = self.scheduler.validate_lease_for_use(
+            "work-1", 1, "worker:a", claimed["lease_token"],
+            lease_revision_ref=renewed["id"], lease_hash=renewed["content_hash"],
+            work_order_hash=claimed["work_order_hash"],
+        )
+        self.assertEqual(validated["lease"]["id"], renewed["id"])
+        self.clock.advance(16)
+        with self.assertRaises(LeaseExpired):
+            self.scheduler.validate_lease_for_use(
+                "work-1", 1, "worker:a", claimed["lease_token"],
+                lease_revision_ref=renewed["id"], lease_hash=renewed["content_hash"],
+                work_order_hash=claimed["work_order_hash"],
+            )
+        self.assertEqual(self.scheduler.status("work-1")["state"], "ready")
+        self.assertEqual(
+            [row["state"] for row in self.scheduler.attempt_history("work-1")],
+            ["ready", "leased", "expired", "ready"],
+        )
+        self.assertIsNone(self.scheduler.formal_result("work-1"))
+
     def test_owner_token_and_renewal_bounds_are_enforced(self):
         claimed = self.enqueue_claim()
         with self.assertRaises(LeaseRejected):

@@ -11,7 +11,7 @@ database 和 cron 定义，但归档不代表新系统采用旧约束、旧研�
 
 ### 通用规则
 
-- 五十七份 JSON Schema 都是 Draft 2020-12 文档，根对象有
+- 六十二份 JSON Schema 都是 Draft 2020-12 文档，根对象有
   `additionalProperties: false`。
 - 每个对象都有 `schema_version`、稳定 `id` 和 `created_at`；引用字段使用稳定
   ref 字符串，时间字段保持 RFC 3339 形式的字符串（具体时区策略留给实现层）。
@@ -287,6 +287,17 @@ Dalton 可以生成 `ConnectorProposalManifest`、adapter package、schema 和 r
 无凭据、无 Core DB 的 sandbox replay。静态 resolver、networked canary 和 production promotion 都需要
 独立人工 gate；运行时不得从 proposal path 动态 import/exec。
 
+可信 Connector Runner 的外部 command 只携带 authority refs/hashes。Runner 先核对 exact-current
+Scheduler lease、CapabilityLease、Profile/CallSpec/Execution、静态 environment manifest 和 adapter binding，
+再由 Runner 专用 authority API 派生 quota reservation；transport 前先核对 reservation 的 hash、有效期、
+active policy、price book、incident/circuit state，最后再核对两类 lease。`ConnectorAdapterRequest` 的参数、
+host、schema、deadline、上限和 raw sink handle 全部从最后一次 authority 重读结果派生。P0-2a 只允许
+`auth_mode=none`。CapabilityDescriptor 的 source 表示 capability 实现来源，ConnectorProfile 的
+source identity 表示目标数据源；Runner 分别核对 live descriptor contract 和 target source binding。
+Adapter 只能返回 transport observation，不能自报 authority 时间、raw hash、artifact、
+Usage/Cost 或 settlement。durable journal、raw spool、credential grant 和 writer commit loop 属于 P0-2
+后续 slice，当前 control-plane seam 不执行 adapter。
+
 ### OpenClaw model broker adapter
 
 OpenClaw OAuth/provider 复用走外部可信 `dalton-openclaw-model-broker` 插件。插件只调用
@@ -469,6 +480,7 @@ Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把
 | Scheduler → Router → broker adapter → usage/cost → AgendaDecision thin slice | E1 | `tests/test_agenda_coordinator.py` |
 | outbox claim/lease、Discord reconciliation、receipt 与 reaction feedback | E1/E2 | `tests/test_openclaw_agenda_bridge.py` |
 | connector profile/invocation、quota/settlement、provenance、incident 和 self-generated manifest | E1/E2 | `tests/test_connector.py` |
+| connector runner closed frame、双 use-time lease gate、静态 resolver 与 authority-derived adapter request | E2 | `tests/test_connector_runner.py` |
 | authority → read-only dashboard projection 与敏感字段隔离 | E1 | `tests/test_dashboard_projector.py` |
 | dashboard 固定 GET API、只读连接与页面资源 | E2 | `tests/test_dashboard.py` |
 | 实际 hostile-code sandbox backend 与自动 monitoring | E1 | 本 slice 排除 |
