@@ -3,10 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from dalton_core.dashboard import DashboardQueryService
 from dalton_core.agenda import AgendaStore
@@ -15,13 +18,31 @@ from dalton_core.dashboard_projector import (
     DashboardProjectorError,
     ProjectionSourceError,
 )
-from dalton_core.capability_catalog import CapabilityCatalog
+from dalton_core.capability_catalog import (
+    CapabilityCatalog,
+    ExternalSnapshotRejected,
+)
+from dalton_core.connector import ConnectorStore
+from dalton_core.contracts import ExecutionInvocation, ExecutionKind
 from dalton_core.model_router import ModelRouter
+from dalton_core.openclaw_metadata import OpenClawMetadataImporter
 from dalton_core.observability import ObservabilityStore
 from dalton_core.scheduler import Scheduler
 from dalton_core.store import DaltonStore, content_hash
 from tests.test_capability_catalog import FakeAuthorities, descriptor_spec
 from tests.test_model_router import profile
+from tests.test_connector import (
+    MutableClock as ConnectorClock,
+    WHEN as CONNECTOR_WHEN,
+    price_rate_spec as connector_price_rate_spec,
+    profile_spec as connector_profile_spec,
+    rate_policy_spec as connector_rate_policy_spec,
+)
+from tests.test_openclaw_metadata import (
+    FakeAuthorities as MetadataAuthorities,
+    NOW as METADATA_NOW,
+    make_snapshot as make_metadata_snapshot,
+)
 
 
 START = datetime(2026, 8, 14, 6, 0, tzinfo=timezone.utc)
@@ -29,6 +50,7 @@ SECRET_PROMPT = "SECRET-PROMPT-DO-NOT-PROJECT"
 SECRET_USAGE = "SECRET-USAGE-CREDENTIAL"
 SECRET_LOCATOR = "SECRET-ARTIFACT-LOCATOR"
 SECRET_OUTPUT = "SECRET-FULL-OUTPUT"
+SECRET_CONNECTOR = "SECRET-CONNECTOR-AUTHORITY-BODY"
 
 
 class MutableClock:
@@ -323,6 +345,258 @@ class DashboardProjectorTests(unittest.TestCase):
         finally:
             store.close()
 
+    def _seed_connectors(self) -> dict[str, str]:
+        clock = ConnectorClock()
+        store = DaltonStore(self.core_path)
+        connectors = ConnectorStore(store, clock=clock)
+        try:
+            profile_wire = connectors.register_profile(
+                connector_profile_spec(), idempotency_key="dashboard:profile"
+            )
+            parameters = {"stock_code": "600309", "page": 1}
+            call = connectors.register_call_spec(
+                {
+                    "schema_version": "0.1",
+                    "id": "connector-call:dashboard",
+                    "created_at": CONNECTOR_WHEN.isoformat(),
+                    "work_order_ref": "work:connector:dashboard",
+                    "work_order_hash": "e" * 64,
+                    "connector_profile_ref": profile_wire["id"],
+                    "operation": "list_announcements",
+                    "parameters": parameters,
+                    "query_hash": content_hash(
+                        {"operation": "list_announcements", "parameters": parameters}
+                    ),
+                },
+                idempotency_key="dashboard:call",
+            )
+            execution = ExecutionInvocation(
+                schema_version="0.1",
+                id="connector-invocation:dashboard",
+                created_at=CONNECTOR_WHEN.isoformat(),
+                kind=ExecutionKind.CONNECTOR,
+                work_order_ref="work:connector:dashboard",
+                profile_ref=profile_wire["id"],
+                capability=profile_wire["capability_id"],
+                input_refs=(call["id"],),
+                output_refs=("artifact:connector:dashboard:raw",),
+                started_at=CONNECTOR_WHEN.isoformat(),
+                completed_at=None,
+                side_effects=(),
+                runtime_ref="runtime:connector-runner:0.1",
+                actor_ref="runner:connector",
+                environment_hash=profile_wire["runner_environment_hash"],
+            )
+            invocation_wire = connectors.register_invocation(
+                {
+                    "schema_version": "0.1",
+                    "id": execution.id,
+                    "created_at": CONNECTOR_WHEN.isoformat(),
+                    "work_order_ref": execution.work_order_ref,
+                    "work_order_hash": "e" * 64,
+                    "connector_profile_ref": profile_wire["id"],
+                    "connector_profile_hash": profile_wire["content_hash"],
+                    "call_spec_ref": call["id"],
+                    "call_spec_hash": call["content_hash"],
+                    "capability_lease_ref": "lease:connector:dashboard",
+                    "capability_lease_hash": "f" * 64,
+                    "descriptor_revision_ref": profile_wire["descriptor_revision_ref"],
+                    "catalog_epoch": 1,
+                    "logical_invocation_key": "connector-logical:" + content_hash(
+                        {
+                            "work_order_ref": execution.work_order_ref,
+                            "work_order_hash": "e" * 64,
+                            "connector_profile_hash": profile_wire["content_hash"],
+                            "call_spec_hash": call["content_hash"],
+                        }
+                    ),
+                },
+                execution=execution,
+                idempotency_key="dashboard:invocation",
+            )
+            zero_rate = connectors.register_price_rate(
+                connector_price_rate_spec(
+                    profile_wire["id"],
+                    identifier="connector-price:dashboard:calls:v1",
+                    rate_ref="connector-price:dashboard:calls",
+                    meter="calls",
+                    unit_quantity=1,
+                    unit_price_micros=0,
+                ),
+                idempotency_key="dashboard:price",
+            )
+            policy = connectors.register_rate_policy(
+                connector_rate_policy_spec(
+                    profile_wire["id"],
+                    price_rate_refs=(zero_rate["id"],),
+                    required_price_meters=("calls",),
+                ),
+                idempotency_key="dashboard:policy",
+            )
+
+            reservation_one = connectors.reserve_quota(
+                invocation_wire["id"],
+                policy["id"],
+                1,
+                {"calls": 1, "bytes": 1000, "records": 10, "cost_micros": 0},
+                ttl_seconds=30,
+                idempotency_key="dashboard:reserve:1",
+            )
+            first_started = clock.value.isoformat()
+            clock.advance(1)
+            attempt_one = connectors.record_physical_attempt(
+                invocation_wire["id"],
+                reservation_one["id"],
+                1,
+                "succeeded",
+                started_at=first_started,
+                completed_at=clock.value.isoformat(),
+                provider_request_id=SECRET_CONNECTOR,
+                idempotency_key="dashboard:attempt:1",
+            )
+            usage_one = connectors.record_usage(
+                attempt_one["id"],
+                {"calls": 1, "bytes": 80, "records": 1, "cost_micros": 0},
+                measurement_status="partial",
+                metering_source="runner_measured",
+                provider_usage_ref=SECRET_CONNECTOR,
+                idempotency_key="dashboard:usage:1:v1",
+            )
+            usage_one_latest = connectors.record_usage(
+                attempt_one["id"],
+                {"calls": 1, "bytes": 100, "records": 2, "cost_micros": 0},
+                measurement_status="final",
+                metering_source="provider_reported",
+                correction_of_ref=usage_one["id"],
+                idempotency_key="dashboard:usage:1:v2",
+            )
+            cost_one = connectors.record_cost(
+                usage_one_latest["id"],
+                price_rate_refs=[zero_rate["id"]],
+                amount_micros=0,
+                currency="USD",
+                cost_status="actual",
+                calculation_ref="calculator:dashboard",
+                actor_ref="system:cost",
+                idempotency_key="dashboard:cost:1",
+            )
+            settlement_one = connectors.settle_quota(
+                reservation_one["id"],
+                "consumed",
+                {"calls": 1, "bytes": 100, "records": 2, "cost_micros": 0},
+                usage_entry_ref=usage_one_latest["id"],
+                cost_entry_ref=cost_one["id"],
+                idempotency_key="dashboard:settlement:1",
+            )
+
+            reservation_two = connectors.reserve_quota(
+                invocation_wire["id"],
+                policy["id"],
+                2,
+                {"calls": 1, "bytes": 1000, "records": 10, "cost_micros": 0},
+                ttl_seconds=30,
+                idempotency_key="dashboard:reserve:2",
+            )
+            second_started = clock.value.isoformat()
+            clock.advance(1)
+            retry_at = (clock.value + timedelta(seconds=30)).isoformat()
+            attempt_two = connectors.record_physical_attempt(
+                invocation_wire["id"],
+                reservation_two["id"],
+                2,
+                "rate_limited",
+                started_at=second_started,
+                completed_at=clock.value.isoformat(),
+                retry_at=retry_at,
+                provider_request_id=SECRET_CONNECTOR,
+                idempotency_key="dashboard:attempt:2",
+            )
+            usage_two = connectors.record_usage(
+                attempt_two["id"],
+                {"calls": 1, "bytes": 0, "records": 0, "cost_micros": 0},
+                measurement_status="estimated",
+                metering_source="estimated",
+                provider_usage_ref=SECRET_CONNECTOR,
+                idempotency_key="dashboard:usage:2",
+            )
+            cost_two = connectors.record_cost(
+                usage_two["id"],
+                price_rate_refs=[zero_rate["id"]],
+                amount_micros=0,
+                currency="USD",
+                cost_status="estimated",
+                calculation_ref="calculator:dashboard",
+                actor_ref="system:cost",
+                idempotency_key="dashboard:cost:2",
+            )
+            settlement_two = connectors.settle_quota(
+                reservation_two["id"],
+                "indeterminate",
+                {"calls": 1, "bytes": 0, "records": 0, "cost_micros": 0},
+                usage_entry_ref=usage_two["id"],
+                cost_entry_ref=cost_two["id"],
+                idempotency_key="dashboard:settlement:2",
+            )
+            connectors.record_source_health(
+                profile_wire["id"],
+                "open_circuit",
+                actor_ref="system:health",
+                connector_invocation_ref=invocation_wire["id"],
+                event_id="connector-health-event:z-open",
+                idempotency_key="dashboard:health",
+            )
+            connectors.record_source_health(
+                profile_wire["id"],
+                "recovered",
+                actor_ref="system:health",
+                connector_invocation_ref=invocation_wire["id"],
+                event_id="connector-health-event:a-recovered",
+                idempotency_key="dashboard:health:recovered",
+            )
+            with patch("dalton_core.connector.uuid.uuid4") as uuid4:
+                uuid4.side_effect = [
+                    SimpleNamespace(hex="f" * 32),
+                    SimpleNamespace(hex="0" * 32),
+                ]
+                resolved_incident = connectors.open_incident(
+                    profile_wire["id"],
+                    "schema_drift",
+                    "warning",
+                    {"private_detail": SECRET_CONNECTOR},
+                    actor_ref="system:health",
+                    connector_invocation_ref=invocation_wire["id"],
+                    incident_id="connector-incident:dashboard:resolved",
+                    idempotency_key="dashboard:incident:resolved:open",
+                )
+                connectors.resolve_incident(
+                    resolved_incident["id"],
+                    actor_ref="system:health",
+                    idempotency_key="dashboard:incident:resolved:close",
+                )
+            incident = connectors.open_incident(
+                profile_wire["id"],
+                "source_outage",
+                "blocking",
+                {"private_detail": SECRET_CONNECTOR},
+                actor_ref="system:health",
+                connector_invocation_ref=invocation_wire["id"],
+                reservation_ref=reservation_two["id"],
+                idempotency_key="dashboard:incident",
+            )
+            return {
+                "profile": profile_wire["id"],
+                "attempt_one": attempt_one["id"],
+                "attempt_two": attempt_two["id"],
+                "usage_one_latest": usage_one_latest["id"],
+                "settlement_one": settlement_one["id"],
+                "settlement_two": settlement_two["id"],
+                "retry_at": attempt_two["retry_at"],
+                "incident": incident["id"],
+                "resolved_incident": resolved_incident["id"],
+            }
+        finally:
+            store.close()
+
     def projector(self) -> DashboardProjector:
         return DashboardProjector(
             self.core_path,
@@ -545,9 +819,123 @@ class DashboardProjectorTests(unittest.TestCase):
         self.assertNotIn("credential_slot", serialized)
         self.assertNotIn("adapter_ref", serialized)
 
+    def test_connector_and_metadata_source_projection_is_latest_safe_and_read_only(self) -> None:
+        connector_refs = self._seed_connectors()
+        catalog_path = Path(self.temp.name) / "metadata-catalog.sqlite"
+        authorities = MetadataAuthorities()
+        first_snapshot = make_metadata_snapshot()
+        with CapabilityCatalog(
+            catalog_path,
+            clock=lambda: METADATA_NOW,
+            source_registration_resolver=authorities.source_registration,
+        ) as catalog:
+            catalog.register_external_source("openclaw-source:main")
+            importer = OpenClawMetadataImporter(catalog, clock=lambda: METADATA_NOW)
+            importer.import_snapshot(first_snapshot)
+            gap = make_metadata_snapshot(
+                snapshot_id="openclaw-snapshot:dashboard-gap",
+                catalog_generation=3,
+                prior_snapshot=first_snapshot,
+            )
+            with self.assertRaises(ExternalSnapshotRejected):
+                importer.import_snapshot(gap)
+
+        core_before = hashlib.sha256(self.core_path.read_bytes()).hexdigest()
+        catalog_before = hashlib.sha256(catalog_path.read_bytes()).hexdigest()
+        snapshot = DashboardProjector(
+            self.core_path,
+            self.scheduler_path,
+            capability_catalog_db=catalog_path,
+            clock=lambda: METADATA_NOW,
+        ).project(self.projection_path)
+        repeat_path = Path(self.temp.name) / "dashboard-repeat.sqlite"
+        repeat_snapshot = DashboardProjector(
+            self.core_path,
+            self.scheduler_path,
+            capability_catalog_db=catalog_path,
+            clock=lambda: METADATA_NOW,
+        ).project(repeat_path)
+        self.assertEqual(snapshot, repeat_snapshot)
+        self.assertEqual(
+            hashlib.sha256(self.projection_path.read_bytes()).hexdigest(),
+            hashlib.sha256(repeat_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(core_before, hashlib.sha256(self.core_path.read_bytes()).hexdigest())
+        self.assertEqual(
+            catalog_before, hashlib.sha256(catalog_path.read_bytes()).hexdigest()
+        )
+
+        metadata = snapshot["metadata_source_status"]
+        self.assertEqual(1, len(metadata))
+        self.assertTrue(metadata[0]["active"])
+        self.assertEqual(1, metadata[0]["catalog_generation"])
+        self.assertEqual("gap", metadata[0]["latest_ingest_outcome"])
+        self.assertEqual("gap", metadata[0]["latest_reject_outcome"])
+
+        operation = snapshot["connector_operation_status"][0]
+        self.assertEqual("list_announcements", operation["operation"])
+        self.assertEqual("cninfo", operation["source_ref"])
+        self.assertEqual("recovered", operation["health_state"])
+        self.assertEqual("recovering", operation["circuit_state"])
+        self.assertEqual(1, operation["open_blocking_incidents"])
+
+        attempts = {
+            row["physical_attempt_ref"]: row
+            for row in snapshot["connector_attempt_slices"]
+        }
+        first = attempts[connector_refs["attempt_one"]]
+        self.assertEqual(2, first["usage_revision"])
+        self.assertEqual(connector_refs["usage_one_latest"], first["usage_entry_ref"])
+        self.assertEqual(100, first["usage_bytes"])
+        self.assertEqual(2, first["usage_records"])
+        self.assertEqual("actual", first["cost_status"])
+        self.assertEqual("consumed", first["settlement_state"])
+        second = attempts[connector_refs["attempt_two"]]
+        self.assertEqual("rate_limited", second["outcome"])
+        self.assertEqual(connector_refs["retry_at"], second["retry_at"])
+        self.assertEqual("estimated", second["measurement_status"])
+        self.assertEqual("indeterminate", second["settlement_state"])
+
+        quota = snapshot["connector_quota_windows"][0]
+        self.assertEqual(2, quota["reservations"])
+        self.assertEqual(2, quota["reserved_calls"])
+        self.assertEqual(1, quota["consumed_reservations"])
+        self.assertEqual(1, quota["indeterminate_reservations"])
+        self.assertEqual(1, quota["consumed_calls"])
+        self.assertEqual(1, quota["indeterminate_calls"])
+        incidents = {
+            row["incident_ref"]: row
+            for row in snapshot["connector_incident_status"]
+        }
+        incident = incidents[connector_refs["incident"]]
+        self.assertEqual(connector_refs["incident"], incident["incident_ref"])
+        self.assertEqual("blocking", incident["severity"])
+        self.assertEqual("opened", incident["state"])
+        self.assertEqual(
+            "resolved", incidents[connector_refs["resolved_incident"]]["state"]
+        )
+
+        service = DashboardQueryService(self.projection_path)
+        try:
+            connector_api = service.connectors()["data"]
+            source_api = service.metadata_sources()["data"]
+            self.assertEqual(1, len(connector_api["blocking_incidents"]))
+            self.assertEqual("gap", source_api[0]["latest_reject_outcome"])
+        finally:
+            service.close()
+
+        serialized = json.dumps(snapshot, ensure_ascii=False).lower()
+        projected_bytes = self.projection_path.read_bytes().lower()
+        self.assertNotIn(SECRET_CONNECTOR.lower(), serialized)
+        self.assertNotIn(SECRET_CONNECTOR.lower().encode(), projected_bytes)
+        for forbidden in (
+            "record_json", "reserved_json", "actual_json", "provider_request_id",
+            "provider_usage_ref", "private_detail", "credential_slot_refs",
+        ):
+            self.assertNotIn(forbidden, serialized)
+
     def test_missing_required_authority_tables_fail_closed(self) -> None:
         empty = Path(self.temp.name) / "empty.sqlite"
-        import sqlite3
 
         sqlite3.connect(empty).close()
         with self.assertRaises(ProjectionSourceError):
@@ -558,6 +946,180 @@ class DashboardProjectorTests(unittest.TestCase):
         os.link(self.core_path, hardlink)
         with self.assertRaises(DashboardProjectorError):
             self.projector().project(hardlink)
+
+    def test_connector_authority_absence_is_compatible_but_partial_schema_fails_closed(
+        self,
+    ) -> None:
+        connector_tables = (
+            "connector_profile_versions",
+            "connector_call_specs",
+            "connector_invocations",
+            "connector_rate_policy_versions",
+            "connector_rate_policy_activation_events",
+            "connector_quota_reservations",
+            "connector_physical_attempts",
+            "connector_usage_entries",
+            "connector_price_rate_versions",
+            "connector_cost_entries",
+            "connector_quota_settlements",
+            "connector_source_envelopes",
+            "connector_incidents",
+            "connector_incident_events",
+            "connector_source_health_events",
+            "connector_idempotency_keys",
+        )
+
+        def copy_core(name: str) -> Path:
+            target = Path(self.temp.name) / name
+            source = sqlite3.connect(self.core_path)
+            destination = sqlite3.connect(target)
+            try:
+                source.backup(destination)
+            finally:
+                destination.close()
+                source.close()
+            return target
+
+        def drop_tables(path: Path, tables: tuple[str, ...]) -> None:
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("PRAGMA foreign_keys=OFF")
+                for table in tables:
+                    connection.execute(f"DROP TABLE {table}")
+                connection.commit()
+            finally:
+                connection.close()
+
+        def add_connector_schema(path: Path) -> None:
+            store = DaltonStore(path)
+            try:
+                ConnectorStore(store)
+            finally:
+                store.close()
+
+        old_core = copy_core("core-before-connectors.sqlite")
+        old_snapshot = DashboardProjector(
+            old_core, self.scheduler_path, clock=self.clock
+        ).build_snapshot()
+        self.assertEqual([], old_snapshot["connector_operation_status"])
+        self.assertTrue(
+            any("Connector authority" in item for item in old_snapshot["metadata"]["warnings"])
+        )
+
+        only_unprojected = copy_core("core-only-source-envelope.sqlite")
+        add_connector_schema(only_unprojected)
+        drop_tables(
+            only_unprojected,
+            tuple(table for table in connector_tables if table != "connector_source_envelopes"),
+        )
+        with self.assertRaises(ProjectionSourceError):
+            DashboardProjector(
+                only_unprojected, self.scheduler_path, clock=self.clock
+            ).build_snapshot()
+
+        missing_unprojected = copy_core("core-missing-source-envelope.sqlite")
+        add_connector_schema(missing_unprojected)
+        drop_tables(missing_unprojected, ("connector_source_envelopes",))
+        with self.assertRaises(ProjectionSourceError):
+            DashboardProjector(
+                missing_unprojected, self.scheduler_path, clock=self.clock
+            ).build_snapshot()
+
+    def test_partial_metadata_source_schema_cannot_hide_behind_missing_catalog_anchor(
+        self,
+    ) -> None:
+        partial_catalog = Path(self.temp.name) / "partial-catalog.sqlite"
+        connection = sqlite3.connect(partial_catalog)
+        try:
+            connection.execute(
+                "CREATE TABLE external_capability_source_heads "
+                "(source_instance_ref TEXT PRIMARY KEY)"
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with self.assertRaises(ProjectionSourceError):
+            DashboardProjector(
+                self.core_path,
+                self.scheduler_path,
+                capability_catalog_db=partial_catalog,
+                clock=self.clock,
+            ).build_snapshot()
+
+    def test_metadata_source_authority_absence_is_legacy_but_chain_partial_fails_closed(
+        self,
+    ) -> None:
+        authority_tables = (
+            "external_capability_source_registrations",
+            "external_capability_active_source",
+            "external_capability_snapshot_chains",
+            "external_capability_source_heads",
+            "external_capability_snapshot_ingest_events",
+        )
+        complete = Path(self.temp.name) / "complete-metadata-catalog.sqlite"
+        with CapabilityCatalog(complete, clock=self.clock):
+            pass
+
+        def copy_catalog(name: str) -> Path:
+            target = Path(self.temp.name) / name
+            source = sqlite3.connect(complete)
+            destination = sqlite3.connect(target)
+            try:
+                source.backup(destination)
+            finally:
+                destination.close()
+                source.close()
+            return target
+
+        def drop_tables(path: Path, tables: tuple[str, ...]) -> None:
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute("PRAGMA foreign_keys=OFF")
+                for table in tables:
+                    connection.execute(f"DROP TABLE {table}")
+                connection.commit()
+            finally:
+                connection.close()
+
+        legacy = copy_catalog("legacy-p03-catalog.sqlite")
+        drop_tables(legacy, authority_tables)
+        legacy_snapshot = DashboardProjector(
+            self.core_path,
+            self.scheduler_path,
+            capability_catalog_db=legacy,
+            clock=self.clock,
+        ).build_snapshot()
+        self.assertEqual([], legacy_snapshot["metadata_source_status"])
+        self.assertTrue(
+            any("wire 0.2" in item for item in legacy_snapshot["metadata"]["warnings"])
+        )
+
+        only_chain = copy_catalog("catalog-only-p04-chain.sqlite")
+        drop_tables(
+            only_chain,
+            tuple(
+                table
+                for table in authority_tables
+                if table != "external_capability_snapshot_chains"
+            ),
+        )
+        with self.assertRaises(ProjectionSourceError):
+            DashboardProjector(
+                self.core_path,
+                self.scheduler_path,
+                capability_catalog_db=only_chain,
+                clock=self.clock,
+            ).build_snapshot()
+
+        missing_chain = copy_catalog("catalog-missing-p04-chain.sqlite")
+        drop_tables(missing_chain, ("external_capability_snapshot_chains",))
+        with self.assertRaises(ProjectionSourceError):
+            DashboardProjector(
+                self.core_path,
+                self.scheduler_path,
+                capability_catalog_db=missing_chain,
+                clock=self.clock,
+            ).build_snapshot()
 
     def test_projection_replaces_hardlink_swapped_after_alias_check(self) -> None:
         projector = self.projector()

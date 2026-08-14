@@ -21,7 +21,7 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import parse_qs, unquote, urlparse
 
 
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
 _SCHEMA_PATH = Path(__file__).with_name("dashboard_schema.sql")
 _HTML_PATH = Path(__file__).with_name("dashboard.html")
 _MAX_PAGE_SIZE = 200
@@ -94,6 +94,42 @@ _TABLE_FIELDS: dict[str, tuple[str, ...]] = {
         "candidate_ref", "cycle_ref", "decision_ref", "selection_state",
         "selection_rank", "question", "answer_criteria", "rationale",
         "total_score", "features_json",
+    ),
+    "metadata_source_status": (
+        "source_instance_ref", "active", "catalog_generation", "snapshot_ref",
+        "snapshot_hash", "head_updated_at", "freshness_state",
+        "latest_ingest_outcome", "latest_ingest_at", "latest_reject_outcome",
+        "latest_reject_at",
+    ),
+    "connector_operation_status": (
+        "connector_profile_ref", "operation", "connector_ref", "profile_version",
+        "capability_id", "source_ref", "source_type", "source_version",
+        "auth_mode", "health_state", "health_updated_at", "circuit_state",
+        "open_blocking_incidents",
+    ),
+    "connector_attempt_slices": (
+        "physical_attempt_ref", "connector_invocation_ref",
+        "connector_profile_ref", "operation", "physical_attempt_number", "outcome",
+        "started_at", "completed_at", "retry_at", "usage_entry_ref",
+        "usage_revision", "measurement_status", "metering_source", "usage_calls",
+        "usage_bytes", "usage_records", "cost_entry_ref", "cost_revision",
+        "amount_micros", "currency", "cost_status", "settlement_ref",
+        "settlement_revision", "settlement_state", "actual_calls", "actual_bytes",
+        "actual_records", "actual_cost_micros",
+    ),
+    "connector_quota_windows": (
+        "quota_scope_ref", "window_started_at", "window_ends_at", "currency",
+        "reservations", "pending_reservations", "consumed_reservations",
+        "released_reservations", "indeterminate_reservations", "reserved_calls",
+        "reserved_bytes", "reserved_records", "reserved_cost_micros",
+        "consumed_calls", "consumed_bytes", "consumed_records",
+        "consumed_cost_micros", "indeterminate_calls", "indeterminate_bytes",
+        "indeterminate_records", "indeterminate_cost_micros",
+    ),
+    "connector_incident_status": (
+        "incident_ref", "connector_profile_ref", "connector_invocation_ref",
+        "reservation_ref", "incident_type", "severity", "state", "opened_at",
+        "updated_at",
     ),
 }
 
@@ -404,6 +440,61 @@ class DashboardQueryService:
                 questions.append(item)
         return self._envelope({"overview": overview, "cycles": cycles, "questions": questions})
 
+    def metadata_sources(self, *, limit: int = 100) -> dict[str, Any]:
+        rows = []
+        for row in self.connection.execute(
+            "SELECT * FROM metadata_source_status "
+            "ORDER BY active DESC,head_updated_at DESC,source_instance_ref LIMIT ?",
+            (self._limit(limit),),
+        ):
+            item = dict(row)
+            item["active"] = bool(item["active"])
+            rows.append(item)
+        return self._envelope(rows)
+
+    def connectors(self, *, limit: int = 100) -> dict[str, Any]:
+        operations = [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM connector_operation_status "
+                "ORDER BY connector_ref,operation LIMIT ?",
+                (self._limit(limit),),
+            )
+        ]
+        attempts = [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM connector_attempt_slices "
+                "ORDER BY started_at DESC,physical_attempt_ref LIMIT ?",
+                (self._limit(limit),),
+            )
+        ]
+        quota_windows = [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM connector_quota_windows "
+                "ORDER BY window_started_at DESC,quota_scope_ref LIMIT ?",
+                (self._limit(limit),),
+            )
+        ]
+        blocking_incidents = [
+            dict(row)
+            for row in self.connection.execute(
+                "SELECT * FROM connector_incident_status "
+                "WHERE state='opened' AND severity='blocking' "
+                "ORDER BY updated_at DESC,incident_ref LIMIT ?",
+                (self._limit(limit),),
+            )
+        ]
+        return self._envelope(
+            {
+                "operations": operations,
+                "attempts": attempts,
+                "quota_windows": quota_windows,
+                "blocking_incidents": blocking_incidents,
+            }
+        )
+
 
 @dataclass(slots=True)
 class DashboardApplication:
@@ -442,6 +533,12 @@ class DashboardApplication:
                 value = self.service.models(limit=query.get("limit", [100])[0])
             elif path == "/v1/agenda":
                 value = self.service.agenda(limit=query.get("limit", [30])[0])
+            elif path == "/v1/metadata-sources":
+                value = self.service.metadata_sources(
+                    limit=query.get("limit", [100])[0]
+                )
+            elif path == "/v1/connectors":
+                value = self.service.connectors(limit=query.get("limit", [100])[0])
             else:
                 return HTTPStatus.NOT_FOUND, "application/json", b'{"error":"not_found"}'
         except KeyError:

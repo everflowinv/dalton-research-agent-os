@@ -48,8 +48,9 @@
     .card-value { margin-top: 8px; font-family: Georgia, serif; font-size: 32px; line-height: 1.1; font-variant-numeric: tabular-nums; }
     .card-note { margin-top: 8px; color: var(--muted); font-size: 12px; }
     .layout { display: grid; grid-template-columns: minmax(0,1.55fr) minmax(320px,.85fr); gap: 16px; }
-    .agenda-panel { margin-bottom: 16px; }
+    .agenda-panel, .connector-panel { margin-bottom: 16px; }
     .agenda-overview { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; padding: 0 20px 16px; }
+    .connector-panel .agenda-overview { grid-template-columns: repeat(5,minmax(0,1fr)); }
     .agenda-stat { padding: 12px 14px; border: 1px solid var(--line); border-radius: 13px; background: rgba(247,247,242,.72); }
     .agenda-stat strong { display: block; font: 24px/1.1 Georgia, serif; font-variant-numeric: tabular-nums; }
     .agenda-stat span { color: var(--muted); font-size: 11px; }
@@ -64,7 +65,7 @@
     .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 18px 20px 12px; }
     .panel h2 { margin: 0; font-size: 16px; }
     .panel-sub { color: var(--muted); font-size: 12px; }
-    .workflow-list, .task-list, .model-list, .capability-list, .artifact-list { padding: 0 12px 12px; }
+    .workflow-list, .task-list, .model-list, .capability-list, .artifact-list, .connector-list { padding: 0 12px 12px; }
     .workflow { padding: 15px 9px; border-top: 1px solid var(--line); }
     .workflow:first-child { border-top: 0; }
     .row-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
@@ -97,6 +98,7 @@
     @media (max-width: 980px) {
       .metrics { grid-template-columns: repeat(2,minmax(0,1fr)); }
       .agenda-overview { grid-template-columns: repeat(2,minmax(0,1fr)); }
+      .connector-panel .agenda-overview { grid-template-columns: repeat(2,minmax(0,1fr)); }
       .layout { grid-template-columns: 1fr; }
     }
     @media (max-width: 620px) {
@@ -105,6 +107,7 @@
       .freshness { text-align: left; margin-top: 12px; }
       .metrics { grid-template-columns: 1fr; }
       .agenda-overview { grid-template-columns: 1fr; }
+      .connector-panel .agenda-overview { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -129,6 +132,11 @@
       <div class="panel-head"><div><h2>Agenda Shadow</h2><div class="panel-sub">只监督问题选择、投递和人工标签，不执行研究</div></div><span class="pill" id="agenda-state">—</span></div>
       <div class="agenda-overview" id="agenda-overview"></div>
       <div id="agenda-cycles"></div>
+    </article>
+    <article class="panel connector-panel">
+      <div class="panel-head"><div><h2>Connector Shadow</h2><div class="panel-sub">只读展示 source sync、调用、quota 和阻塞事件，不参与 admission</div></div><span class="pill" id="connector-state">—</span></div>
+      <div class="agenda-overview" id="connector-overview"></div>
+      <div class="connector-list" id="connector-operations"></div>
     </article>
     <section class="layout">
       <div class="stack">
@@ -249,10 +257,28 @@
         }); box.append(row);
       });
     }
+    function renderConnectors(data,sources){
+      const stats=$("connector-overview"); stats.replaceChildren(); const state=$("connector-state");
+      const metric=(value,label)=>{ const n=document.createElement("div"); n.className="agenda-stat"; n.append(text("strong",value),text("span",label)); stats.append(n); };
+      metric(data.operations.length,"已登记 operation"); metric(data.attempts.length,"physical attempt");
+      metric(data.quota_windows.length,"quota window");
+      metric(data.blocking_incidents.length,"未解决 blocking incident");
+      const active=sources.find(x=>x.active); metric(active?active.catalog_generation??"待首次同步":"—","active metadata generation");
+      state.textContent=data.blocking_incidents.length?"已阻塞":data.operations.length?"Shadow":"未接入";
+      state.className=`pill ${data.blocking_incidents.length?"failed":data.operations.length?"running":""}`;
+      const box=$("connector-operations"); box.replaceChildren();
+      if(!data.operations.length)return empty(box,"还没有 connector profile");
+      data.operations.slice(0,10).forEach(op=>{
+        const row=document.createElement("div"); row.className="capability";
+        const top=document.createElement("div"); top.className="row-top";
+        const copy=document.createElement("div"); copy.append(text("div",`${op.source_ref} · ${op.operation}`,"title"),text("small",`${op.source_type} · ${op.health_state??"health 未知"} · ${op.open_blocking_incidents} 个 blocking incident`));
+        top.append(copy,text("span",op.circuit_state,"pill")); row.append(top); box.append(row);
+      });
+    }
     async function boot(){
       try {
-        const [summary,workflows,models,capabilities,artifacts,agenda,status]=await Promise.all([
-          get("/v1/dashboard/summary"),get("/v1/workflows"),get("/v1/models"),get("/v1/capabilities"),get("/v1/artifacts"),get("/v1/agenda"),get("/v1/projection/status")
+        const [summary,workflows,models,capabilities,artifacts,agenda,connectors,sources,status]=await Promise.all([
+          get("/v1/dashboard/summary"),get("/v1/workflows"),get("/v1/models"),get("/v1/capabilities"),get("/v1/artifacts"),get("/v1/agenda"),get("/v1/connectors"),get("/v1/metadata-sources"),get("/v1/projection/status")
         ]);
         $("fresh-state").textContent=status.partial_data?"数据不完整":"投影已就绪"; $("as-of").textContent=`截至 ${status.as_of}`;
         if(status.warnings.length){ const n=$("notice"); n.style.display="block"; n.textContent=status.warnings.join("；"); }
@@ -262,7 +288,7 @@
         const priced=s.costs.filter(x=>x.amount_micros!=null); if(priced.length===1){ const c=priced[0]; $("metric-cost").textContent=`${c.currency} ${(c.amount_micros/1e6).toFixed(2)}`; $("metric-cost-note").textContent=c.unpriced_entries?`${c.unpriced_entries} 条尚未定价`:"按历史价格版本计算"; } else { $("metric-cost").textContent=priced.length?`${priced.length} 种币种`:"未定价"; }
         renderWorkflows(workflows.data); const trees=await Promise.all(workflows.data.slice(0,8).map(w=>get(`/v1/workflows/${encodeURIComponent(w.workflow_ref)}/tree`).then(x=>x.data))); renderTasks(trees);
         renderModels(models.data); renderCapabilities(capabilities.data); renderArtifacts(artifacts.data);
-        renderAgenda(agenda.data);
+        renderAgenda(agenda.data); renderConnectors(connectors.data,sources.data);
       } catch(err) { document.querySelector("main").replaceChildren(text("div",`看板读取失败：${err.message}`,"error")); }
     }
     boot();

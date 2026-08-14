@@ -157,6 +157,23 @@ P0-3 的 immutable snapshot base table 不原地 ALTER。Wire 0.2 source instanc
 unique 和 CHECK 约束放在严格 1:1 sidecar table；因此 fresh DB 与升级 DB 使用同一 DDL，legacy wire 0.1
 snapshot 不需要伪造 source registration。
 
+### P0-4a Connector Shadow projection
+
+Connector Shadow projection schema 发布为 0.2。它是可丢弃、可重建的只读派生库，不是 admission
+authority。Projector 以 SQLite `mode=ro`
+读取 Core 和 CapabilityCatalog，完整替换 projection DB；Runner、Scheduler、Catalog 和 quota gate 都不能反向
+读取这个投影。
+
+- metadata source 只投 active source、generation/head、freshness、最新 ingest 和最新 reject outcome；
+- connector 只投 profile/operation/source identity/auth mode、最新 source health/circuit、physical attempt outcome/
+  retry、每个 attempt 最新 Usage revision 及其 Cost、reservation 最新 Settlement、quota window 汇总与 incident
+  状态；
+- projection 不含 raw body、`record_json`、incident detail、credential value/slot、provider request/usage ref、
+  artifact locator 或 Core/Catalog 路径；API 只提供固定 `GET /v1/metadata-sources` 和 `GET /v1/connectors` 查询；
+- 旧 Core/Catalog 完全没有新 authority 表时返回空数据并标 warning；只出现部分 authority 表时 fail closed；
+- source watermark 纳入会影响投影的 connector authority 和 metadata registration/head/ingest event；这些
+  authority 的新事实会让下一次 rebuild 生成新水位。投影失败不会改变 source DB。
+
 `ConnectorCallSpec.parameters` 不保存 token、cookie、password、API key 或其他 credential-shaped 字段；
 凭据只能通过 profile 声明的 slot 交给 Runner。authority 会核对 query hash 和拒绝这些敏感字段；可信
 Runner 使用 operator 安装、由 environment/package manifest 约束的 input validator，按 profile 冻结的

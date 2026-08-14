@@ -72,8 +72,9 @@ HTML 控制面提交；浏览器反馈与 24 小时超时默认接受使用两�
 Connector P0-1 authority foundation、P0-2a Runner 控制面和 P0-2b recorded transport thin slice
 已完成；P0-3 已加入受治理的 OpenClaw skill/MCP metadata importer、credential-free SSRF-safe public
 HTTPS transport 和 closed credential authority metadata boundary。P0-4a 第一笔已加入 trusted source
-registration、单调 snapshot chain、脱敏 ingest event 和 crash-safe exporter retry state；第二笔 connector
-dashboard projection 尚未完成。当前仍只执行仓库内 recorded fixtures，没有网络、凭据或真实数据源；
+registration、单调 snapshot chain、脱敏 ingest event 和 crash-safe exporter retry state；第二笔已把 metadata
+source head/reject 与 connector operation、physical attempt、最新 usage/cost/settlement、quota、health/circuit 和
+blocking incident 投到只读 Connector Shadow。当前仍只执行仓库内 recorded fixtures，没有网络、凭据或真实数据源；
 OpenClaw live inventory attach 与真实 A股/SEC/AlphaEngine connector 尚未接入。生产部署仍缺少独立
 OS/container identity、正式 capability sandbox、Model IR、原生事件连接器、
 研究 worker/verifier coordinator、更多原生投递渠道和完整运维控制面。任何旧工作流

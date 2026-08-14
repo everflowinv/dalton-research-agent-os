@@ -178,6 +178,111 @@ CREATE TABLE IF NOT EXISTS agenda_questions (
     features_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS metadata_source_status (
+    source_instance_ref TEXT PRIMARY KEY,
+    active INTEGER NOT NULL CHECK (active IN (0, 1)),
+    catalog_generation INTEGER CHECK (catalog_generation IS NULL OR catalog_generation > 0),
+    snapshot_ref TEXT,
+    snapshot_hash TEXT,
+    head_updated_at TEXT,
+    freshness_state TEXT NOT NULL CHECK (
+        freshness_state IN ('current','awaiting_first_snapshot','superseded')
+    ),
+    latest_ingest_outcome TEXT,
+    latest_ingest_at TEXT,
+    latest_reject_outcome TEXT,
+    latest_reject_at TEXT,
+    CHECK ((snapshot_ref IS NULL) = (snapshot_hash IS NULL)),
+    CHECK ((snapshot_ref IS NULL) = (catalog_generation IS NULL))
+);
+
+CREATE TABLE IF NOT EXISTS connector_operation_status (
+    connector_profile_ref TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    connector_ref TEXT NOT NULL,
+    profile_version INTEGER NOT NULL CHECK (profile_version > 0),
+    capability_id TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    source_version TEXT NOT NULL,
+    auth_mode TEXT NOT NULL,
+    health_state TEXT,
+    health_updated_at TEXT,
+    circuit_state TEXT NOT NULL CHECK (
+        circuit_state IN ('closed','open','recovering','unknown')
+    ),
+    open_blocking_incidents INTEGER NOT NULL CHECK (open_blocking_incidents >= 0),
+    PRIMARY KEY(connector_profile_ref, operation)
+);
+
+CREATE TABLE IF NOT EXISTS connector_attempt_slices (
+    physical_attempt_ref TEXT PRIMARY KEY,
+    connector_invocation_ref TEXT NOT NULL,
+    connector_profile_ref TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    physical_attempt_number INTEGER NOT NULL CHECK (physical_attempt_number > 0),
+    outcome TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    retry_at TEXT,
+    usage_entry_ref TEXT,
+    usage_revision INTEGER,
+    measurement_status TEXT,
+    metering_source TEXT,
+    usage_calls INTEGER,
+    usage_bytes INTEGER,
+    usage_records INTEGER,
+    cost_entry_ref TEXT,
+    cost_revision INTEGER,
+    amount_micros INTEGER,
+    currency TEXT,
+    cost_status TEXT,
+    settlement_ref TEXT,
+    settlement_revision INTEGER,
+    settlement_state TEXT,
+    actual_calls INTEGER,
+    actual_bytes INTEGER,
+    actual_records INTEGER,
+    actual_cost_micros INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS connector_quota_windows (
+    quota_scope_ref TEXT NOT NULL,
+    window_started_at TEXT NOT NULL,
+    window_ends_at TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    reservations INTEGER NOT NULL CHECK (reservations >= 0),
+    pending_reservations INTEGER NOT NULL CHECK (pending_reservations >= 0),
+    consumed_reservations INTEGER NOT NULL CHECK (consumed_reservations >= 0),
+    released_reservations INTEGER NOT NULL CHECK (released_reservations >= 0),
+    indeterminate_reservations INTEGER NOT NULL CHECK (indeterminate_reservations >= 0),
+    reserved_calls INTEGER NOT NULL CHECK (reserved_calls >= 0),
+    reserved_bytes INTEGER NOT NULL CHECK (reserved_bytes >= 0),
+    reserved_records INTEGER NOT NULL CHECK (reserved_records >= 0),
+    reserved_cost_micros INTEGER NOT NULL CHECK (reserved_cost_micros >= 0),
+    consumed_calls INTEGER NOT NULL CHECK (consumed_calls >= 0),
+    consumed_bytes INTEGER NOT NULL CHECK (consumed_bytes >= 0),
+    consumed_records INTEGER NOT NULL CHECK (consumed_records >= 0),
+    consumed_cost_micros INTEGER NOT NULL CHECK (consumed_cost_micros >= 0),
+    indeterminate_calls INTEGER NOT NULL CHECK (indeterminate_calls >= 0),
+    indeterminate_bytes INTEGER NOT NULL CHECK (indeterminate_bytes >= 0),
+    indeterminate_records INTEGER NOT NULL CHECK (indeterminate_records >= 0),
+    indeterminate_cost_micros INTEGER NOT NULL CHECK (indeterminate_cost_micros >= 0),
+    PRIMARY KEY(quota_scope_ref, window_started_at)
+);
+
+CREATE TABLE IF NOT EXISTS connector_incident_status (
+    incident_ref TEXT PRIMARY KEY,
+    connector_profile_ref TEXT NOT NULL,
+    connector_invocation_ref TEXT,
+    reservation_ref TEXT,
+    incident_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    state TEXT NOT NULL,
+    opened_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS work_items_workflow_idx
 ON work_items(workflow_ref, sequence, work_order_ref);
 CREATE INDEX IF NOT EXISTS invocation_workflow_idx
@@ -192,3 +297,9 @@ CREATE INDEX IF NOT EXISTS agenda_cycles_recent_idx
 ON agenda_cycle_summaries(created_at, cycle_ref);
 CREATE INDEX IF NOT EXISTS agenda_questions_cycle_idx
 ON agenda_questions(cycle_ref, selection_state, selection_rank, candidate_ref);
+CREATE INDEX IF NOT EXISTS connector_attempt_recent_idx
+ON connector_attempt_slices(started_at, physical_attempt_ref);
+CREATE INDEX IF NOT EXISTS connector_quota_recent_idx
+ON connector_quota_windows(window_started_at, quota_scope_ref);
+CREATE INDEX IF NOT EXISTS connector_incident_open_idx
+ON connector_incident_status(state, severity, updated_at);

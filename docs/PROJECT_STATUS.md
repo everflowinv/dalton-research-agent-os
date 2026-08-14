@@ -2,7 +2,7 @@
 
 更新日期：2026-08-14  
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前提交内容：Connector P0-4a trusted metadata sync authority（第一笔提交），未部署
+- 当前提交内容：Connector P0-4a trusted metadata sync + Connector Shadow projection，未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -156,7 +156,7 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 - 实现提交 `e1ab94c`；GitHub CI 的 broker、Python 3.11 和 Python 3.13 全部通过：
   <https://github.com/everflowinv/dalton-research-agent-os/actions/runs/31828754012>。
 
-### Connector P0-4a 当前进度（trusted metadata sync authority，未部署）
+### Connector P0-4a 当前进度（trusted metadata sync + Connector Shadow projection，未部署）
 
 - `OpenClawCapabilitySnapshot` 发布 wire 0.2，新增 exporter source instance、exporter version、严格递增的
   catalog generation 和 exact prior snapshot ref/hash；
@@ -185,8 +185,19 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   `SOURCE_DATE_EPOCH=1700000000` 的两次 wheel SHA-256 均为
   `d06474d8292edcca7efcefaa1c2ee5b4adaec023b941b16aa1e34a1235b4a178`；隔离安装可创建 11 张 external
   metadata authority 表，`foreign_key_check` 无违规，SQLite integrity 为 `ok`；
-- 这笔提交仍未把 exporter 接到 OpenClaw live inventory，也没有 connector dashboard projection、真实网络、
-  数据源访问、部署或研究 WorkOrder。P0-4a 第二笔提交将只做 connector/metadata source 的派生只读投影。
+- 第二笔提交新增 disposable Connector Shadow projection。Projector 以 SQLite `mode=ro` 读取 Core/Catalog，
+  投出 metadata source head/freshness/reject、profile/operation、physical attempt/retry、每个 attempt 最新
+  Usage/Cost/Settlement、quota window、health/circuit 与 incident；固定 API 和静态快照页面同步接入；
+- 投影不含 raw body、authority `record_json`、incident detail、credential、provider request/usage ref 或
+  Core/Catalog 路径，也不参与 admission。完全缺少 P0-4/connector authority 表时向旧 baseline 返回 warning
+  与空集合，部分表存在时 fail closed；watermark 覆盖新增 authority；
+- Fable 5 增量复核关闭同 timestamp latest-event 排序和 partial schema 漏检后给出 **Go**；dashboard/
+  dashboard-projector 20/20、service/static 7/7、Python 全量 284/284、broker 15/15 通过；
+- 固定 `SOURCE_DATE_EPOCH=1700000000` 两次 Python 3.13 no-build-isolation wheel SHA-256 均为
+  `655f4af42fa0db54524ad5512fc29d6eea4320c64777fe3014918622a7fe7910`；隔离安装可创建 projection schema
+  0.2 的 5 张新 read-model 表，HTML 含两个新 API endpoint，SQLite integrity 为 `ok`；
+- 这两笔提交仍未把 exporter 接到 OpenClaw live inventory，也没有真实网络、数据源访问、部署或研究
+  WorkOrder。P0-4a Commit B 的最终测试、wheel、Fable 5 复核与提交信息见本轮独立报告。
 
 ## 蓝图阶段
 
@@ -201,7 +212,8 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 - legacy workspace/database/cron 的 shadow import；
 - owner-only writer、每日 SQLite backup、已完成的 restore 演练与数据库完整性检查。
 
-部分完成：connector authority foundation 已有 16 张 append-only 表、trusted store 和 wire contract，
+部分完成：connector authority foundation 已有 16 张 append-only 表、trusted store、wire contract 和只读
+Connector Shadow projection，
 并通过六轮独立复核；Runner 控制面、recorded adapter execution、durable journal/raw spool、W0–W4 recovery
 和窄 AuthorityPort 已完成 P0-2b；metadata importer、credential-free SSRF-safe public transport 和
 credential authority metadata boundary 已完成 P0-3 离线切片。真实 connector 调用、authenticated runner、
@@ -398,9 +410,9 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
    resolver、authority-derived AdapterRequest、journal/spool/AuthorityPort/recorded transport；
 5. 已完成 P0-3 importer thin slice：OpenClaw skill/MCP 只导入 metadata/schema/ref/hash，不导入 prompt、
    凭据或整份 skill；complete scope 内的 MCP/skill 漂移会撤下旧 descriptor 并推动 catalog epoch；
-6. P0-4a 第一笔已完成 trusted exporter state、source registration、单调 generation/prior chain 与 ingest
-   event；第二笔把 connector logical/physical usage、quota、health、incident 和 metadata source 状态投影
-   到看板。OpenClaw live inventory attach 仍未开放；
+6. 已完成 P0-4a 两笔提交：trusted exporter state、source registration、单调 generation/prior chain、ingest
+   event，以及 connector logical/physical usage、quota、health、incident 和 metadata source 的派生只读
+   看板。OpenClaw live inventory attach 仍未开放；
 7. 已完成 credential-free public HTTPS transport component 的 DNS/IP/pinned socket/TLS/redirect/size
    复核；待接 web fetch adapter/Runner 后才算真实链路；
 8. 已冻结 public transport 与 credential authority metadata/API 分界；offline attestation 与 networked

@@ -59,6 +59,35 @@ _AGENDA_TABLES = frozenset(
         "agenda_outbox_messages", "agenda_outbox_events",
     }
 )
+_CONNECTOR_PROJECTION_TABLES = frozenset(
+    {
+        "connector_profile_versions", "connector_call_specs",
+        "connector_invocations", "connector_rate_policy_versions",
+        "connector_quota_reservations", "connector_physical_attempts",
+        "connector_usage_entries", "connector_cost_entries",
+        "connector_quota_settlements", "connector_incidents",
+        "connector_incident_events", "connector_source_health_events",
+    }
+)
+_CONNECTOR_AUTHORITY_TABLES = _CONNECTOR_PROJECTION_TABLES | frozenset(
+    {
+        "connector_rate_policy_activation_events",
+        "connector_price_rate_versions",
+        "connector_source_envelopes",
+        "connector_idempotency_keys",
+    }
+)
+_METADATA_SOURCE_PROJECTION_TABLES = frozenset(
+    {
+        "external_capability_source_registrations",
+        "external_capability_active_source",
+        "external_capability_source_heads",
+        "external_capability_snapshot_ingest_events",
+    }
+)
+_METADATA_SOURCE_AUTHORITY_TABLES = _METADATA_SOURCE_PROJECTION_TABLES | frozenset(
+    {"external_capability_snapshot_chains"}
+)
 
 
 def _utc_now() -> datetime:
@@ -142,6 +171,23 @@ def _duration_ms(started_at: Any, completed_at: Any) -> int | None:
     except ProjectionSourceError:
         return None
     return max(0, int(delta.total_seconds() * 1000))
+
+
+_CONNECTOR_METRICS = ("calls", "bytes", "records", "cost_micros")
+
+
+def _connector_metrics(value: Any, name: str) -> dict[str, int]:
+    if isinstance(value, str):
+        value = _json(value, name)
+    if not isinstance(value, Mapping) or set(value) != set(_CONNECTOR_METRICS):
+        raise ProjectionSourceError(f"{name} has an invalid closed metric shape")
+    result: dict[str, int] = {}
+    for metric in _CONNECTOR_METRICS:
+        amount = value[metric]
+        if type(amount) is not int or amount < 0:
+            raise ProjectionSourceError(f"{name}.{metric} must be non-negative integer")
+        result[metric] = amount
+    return result
 
 
 class _Warnings:
@@ -242,6 +288,7 @@ class DashboardProjector:
                 "capability_descriptor_versions",
                 "Capability Catalog 不可用；能力状态仅按实际调用推导",
                 warnings,
+                partial_tables=_METADATA_SOURCE_AUTHORITY_TABLES,
             )
             router = self._optional_source(
                 stack,
@@ -352,6 +399,13 @@ class DashboardProjector:
             )
             model_rows = self._models(router, invocation_rows, warnings)
             agenda_overview, agenda_cycles, agenda_questions = self._agenda(core, warnings)
+            metadata_sources = self._metadata_sources(catalog, warnings)
+            (
+                connector_operations,
+                connector_attempts,
+                connector_quota_windows,
+                connector_incidents,
+            ) = self._connectors(core, warnings)
             watermark = self._watermark(core, scheduler, catalog, router)
 
         return {
@@ -373,6 +427,11 @@ class DashboardProjector:
             "agenda_supervision": agenda_overview,
             "agenda_cycle_summaries": agenda_cycles,
             "agenda_questions": agenda_questions,
+            "metadata_source_status": metadata_sources,
+            "connector_operation_status": connector_operations,
+            "connector_attempt_slices": connector_attempts,
+            "connector_quota_windows": connector_quota_windows,
+            "connector_incident_status": connector_incidents,
         }
 
     @staticmethod
@@ -588,10 +647,18 @@ class DashboardProjector:
         table: str,
         warning: str,
         warnings: _Warnings,
+        *,
+        partial_tables: frozenset[str] | None = None,
     ) -> sqlite3.Connection | None:
         if path is None:
-            if table in _tables(core):
+            available = _tables(core)
+            if table in available:
                 return core
+            if partial_tables is not None and partial_tables & available:
+                raise ProjectionSourceError(
+                    f"optional authority lacks {table} but contains partial tables: "
+                    f"{sorted(partial_tables & available)}"
+                )
             warnings.add(warning)
             return None
         try:
@@ -599,7 +666,13 @@ class DashboardProjector:
         except ProjectionSourceError:
             warnings.add(warning)
             return None
-        if table not in _tables(conn):
+        available = _tables(conn)
+        if table not in available:
+            if partial_tables is not None and partial_tables & available:
+                raise ProjectionSourceError(
+                    f"optional authority lacks {table} but contains partial tables: "
+                    f"{sorted(partial_tables & available)}"
+                )
             warnings.add(warning)
             return None
         conn.execute("BEGIN")
@@ -1278,6 +1351,372 @@ class DashboardProjector:
         return result
 
     @staticmethod
+    def _metadata_sources(
+        catalog: sqlite3.Connection | None, warnings: _Warnings
+    ) -> list[dict[str, Any]]:
+        if catalog is None:
+            return []
+        available = _tables(catalog)
+        present = _METADATA_SOURCE_AUTHORITY_TABLES & available
+        if not present:
+            warnings.add("Metadata source authority 尚未升级到 snapshot wire 0.2")
+            return []
+        missing = _METADATA_SOURCE_AUTHORITY_TABLES - available
+        if missing:
+            raise ProjectionSourceError(
+                f"Metadata source authority is missing table(s): {sorted(missing)}"
+            )
+
+        active_row = catalog.execute(
+            "SELECT source_instance_ref FROM external_capability_active_source "
+            "WHERE singleton=1"
+        ).fetchone()
+        active_ref = None if active_row is None else active_row["source_instance_ref"]
+        heads = {
+            row["source_instance_ref"]: row
+            for row in catalog.execute(
+                "SELECT source_instance_ref,catalog_generation,snapshot_ref,"
+                "snapshot_hash,updated_at FROM external_capability_source_heads"
+            )
+        }
+        latest_ingest = {
+            row["source_instance_ref"]: row
+            for row in catalog.execute(
+                "SELECT * FROM (SELECT source.source_instance_ref,source.outcome,"
+                "source.created_at,ROW_NUMBER() OVER (PARTITION BY source_instance_ref "
+                "ORDER BY source.rowid DESC) AS projection_rank "
+                "FROM external_capability_snapshot_ingest_events source) "
+                "WHERE projection_rank=1"
+            )
+        }
+        latest_reject = {
+            row["source_instance_ref"]: row
+            for row in catalog.execute(
+                "SELECT * FROM (SELECT source.source_instance_ref,source.outcome,"
+                "source.created_at,ROW_NUMBER() OVER (PARTITION BY source_instance_ref "
+                "ORDER BY source.rowid DESC) AS projection_rank "
+                "FROM external_capability_snapshot_ingest_events source "
+                "WHERE source.outcome NOT IN ('accepted','duplicate')) "
+                "WHERE projection_rank=1"
+            )
+        }
+        source_refs = {
+            row[0]
+            for row in catalog.execute(
+                "SELECT source_instance_ref FROM external_capability_source_registrations"
+            )
+        }
+        source_refs.update(latest_ingest)
+        rows: list[dict[str, Any]] = []
+        for source_ref in sorted(source_refs):
+            head = heads.get(source_ref)
+            ingest = latest_ingest.get(source_ref)
+            rejected = latest_reject.get(source_ref)
+            active = source_ref == active_ref
+            freshness = (
+                "current" if active and head is not None else
+                "awaiting_first_snapshot" if active else
+                "superseded"
+            )
+            rows.append(
+                {
+                    "source_instance_ref": source_ref,
+                    "active": active,
+                    "catalog_generation": (
+                        None if head is None else int(head["catalog_generation"])
+                    ),
+                    "snapshot_ref": None if head is None else head["snapshot_ref"],
+                    "snapshot_hash": None if head is None else head["snapshot_hash"],
+                    "head_updated_at": None if head is None else head["updated_at"],
+                    "freshness_state": freshness,
+                    "latest_ingest_outcome": (
+                        None if ingest is None else ingest["outcome"]
+                    ),
+                    "latest_ingest_at": (
+                        None if ingest is None else ingest["created_at"]
+                    ),
+                    "latest_reject_outcome": (
+                        None if rejected is None else rejected["outcome"]
+                    ),
+                    "latest_reject_at": (
+                        None if rejected is None else rejected["created_at"]
+                    ),
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _connectors(
+        core: sqlite3.Connection, warnings: _Warnings
+    ) -> tuple[
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+        list[dict[str, Any]],
+    ]:
+        available = _tables(core)
+        present = _CONNECTOR_AUTHORITY_TABLES & available
+        if not present:
+            warnings.add("Connector authority 尚未进入 Core；connector 投影为空")
+            return [], [], [], []
+        missing = _CONNECTOR_AUTHORITY_TABLES - available
+        if missing:
+            raise ProjectionSourceError(
+                f"Connector authority is missing table(s): {sorted(missing)}"
+            )
+
+        latest_health = {
+            row["connector_profile_ref"]: row
+            for row in core.execute(
+                "SELECT * FROM (SELECT source.connector_profile_ref,source.state,"
+                "source.created_at,ROW_NUMBER() OVER (PARTITION BY connector_profile_ref "
+                "ORDER BY source.rowid DESC) AS projection_rank "
+                "FROM connector_source_health_events source) WHERE projection_rank=1"
+            )
+        }
+        latest_incident_events = {
+            row["incident_ref"]: row
+            for row in core.execute(
+                "SELECT * FROM (SELECT source.incident_ref,source.state,source.created_at,"
+                "ROW_NUMBER() OVER (PARTITION BY incident_ref ORDER BY source.rowid DESC) "
+                "AS projection_rank FROM connector_incident_events source) "
+                "WHERE projection_rank=1"
+            )
+        }
+        incident_rows: list[dict[str, Any]] = []
+        blocking_counts: dict[str, int] = defaultdict(int)
+        for incident in core.execute(
+            "SELECT incident_id,connector_profile_ref,connector_invocation_ref,"
+            "reservation_ref,incident_type,severity,created_at FROM connector_incidents "
+            "ORDER BY created_at,incident_id"
+        ):
+            event = latest_incident_events.get(incident["incident_id"])
+            if event is None:
+                raise ProjectionSourceError("connector incident lacks an authority event")
+            if event["state"] == "opened" and incident["severity"] == "blocking":
+                blocking_counts[incident["connector_profile_ref"]] += 1
+            incident_rows.append(
+                {
+                    "incident_ref": incident["incident_id"],
+                    "connector_profile_ref": incident["connector_profile_ref"],
+                    "connector_invocation_ref": incident["connector_invocation_ref"],
+                    "reservation_ref": incident["reservation_ref"],
+                    "incident_type": incident["incident_type"],
+                    "severity": incident["severity"],
+                    "state": event["state"],
+                    "opened_at": incident["created_at"],
+                    "updated_at": event["created_at"],
+                }
+            )
+
+        profile_rows = core.execute(
+            "SELECT source.record_json FROM connector_profile_versions source JOIN ("
+            " SELECT connector_ref,MAX(version_number) AS latest_version "
+            " FROM connector_profile_versions GROUP BY connector_ref"
+            ") latest ON latest.connector_ref=source.connector_ref "
+            "AND latest.latest_version=source.version_number "
+            "ORDER BY source.connector_ref"
+        ).fetchall()
+        operation_rows: list[dict[str, Any]] = []
+        for row in profile_rows:
+            profile = _json(row["record_json"], "connector profile")
+            source = profile["source_identity"]
+            health = latest_health.get(profile["id"])
+            health_state = None if health is None else health["state"]
+            circuit_state = {
+                None: "unknown",
+                "open_circuit": "open",
+                "recovered": "recovering",
+                "healthy": "closed",
+                "degraded": "closed",
+            }.get(health_state)
+            if circuit_state is None:
+                raise ProjectionSourceError("connector health state is invalid")
+            for operation in sorted(profile["allowed_operations"]):
+                operation_rows.append(
+                    {
+                        "connector_profile_ref": profile["id"],
+                        "operation": _safe_token(operation, "unknown-operation"),
+                        "connector_ref": profile["connector_ref"],
+                        "profile_version": int(profile["version"]),
+                        "capability_id": profile["capability_id"],
+                        "source_ref": _safe_token(source["source_ref"], "unknown-source"),
+                        "source_type": _safe_token(source["source_type"], "unknown"),
+                        "source_version": _safe_token(source["source_version"], "unknown"),
+                        "auth_mode": _safe_token(profile["auth_mode"], "unknown"),
+                        "health_state": health_state,
+                        "health_updated_at": (
+                            None if health is None else health["created_at"]
+                        ),
+                        "circuit_state": circuit_state,
+                        "open_blocking_incidents": blocking_counts.get(profile["id"], 0),
+                    }
+                )
+
+        latest_usage = {
+            row["physical_attempt_ref"]: row
+            for row in core.execute(
+                "SELECT * FROM (SELECT source.*,ROW_NUMBER() OVER ("
+                "PARTITION BY physical_attempt_ref ORDER BY revision_number DESC,"
+                "created_at DESC) AS projection_rank FROM connector_usage_entries source) "
+                "WHERE projection_rank=1"
+            )
+        }
+        latest_cost = {
+            row["usage_entry_ref"]: row
+            for row in core.execute(
+                "SELECT * FROM (SELECT source.*,ROW_NUMBER() OVER ("
+                "PARTITION BY usage_entry_ref ORDER BY revision_number DESC,created_at DESC"
+                ") AS projection_rank FROM connector_cost_entries source) "
+                "WHERE projection_rank=1"
+            )
+        }
+        latest_settlement = {
+            row["reservation_ref"]: row
+            for row in core.execute(
+                "SELECT * FROM (SELECT source.*,ROW_NUMBER() OVER ("
+                "PARTITION BY reservation_ref ORDER BY revision_number DESC,created_at DESC"
+                ") AS projection_rank FROM connector_quota_settlements source) "
+                "WHERE projection_rank=1"
+            )
+        }
+        invocation_authority = {
+            row["connector_invocation_id"]: row
+            for row in core.execute(
+                "SELECT i.connector_invocation_id,i.connector_profile_ref,c.operation "
+                "FROM connector_invocations i JOIN connector_call_specs c "
+                "ON c.call_spec_id=i.call_spec_ref"
+            )
+        }
+
+        attempt_rows: list[dict[str, Any]] = []
+        for attempt in core.execute(
+            "SELECT physical_attempt_id,connector_invocation_ref,physical_attempt_number,"
+            "reservation_ref,outcome,started_at,completed_at,retry_at "
+            "FROM connector_physical_attempts ORDER BY started_at,physical_attempt_id"
+        ):
+            authority = invocation_authority.get(attempt["connector_invocation_ref"])
+            if authority is None:
+                raise ProjectionSourceError("connector attempt lacks invocation authority")
+            usage = latest_usage.get(attempt["physical_attempt_id"])
+            usage_metrics = None
+            cost = None
+            if usage is not None:
+                usage_wire = _json(usage["record_json"], "connector usage")
+                usage_metrics = _connector_metrics(
+                    usage_wire["metrics"], "connector usage metrics"
+                )
+                cost = latest_cost.get(usage["usage_entry_id"])
+            settlement = latest_settlement.get(attempt["reservation_ref"])
+            actual = (
+                None
+                if settlement is None
+                else _connector_metrics(settlement["actual_json"], "quota settlement")
+            )
+            attempt_rows.append(
+                {
+                    "physical_attempt_ref": attempt["physical_attempt_id"],
+                    "connector_invocation_ref": attempt["connector_invocation_ref"],
+                    "connector_profile_ref": authority["connector_profile_ref"],
+                    "operation": authority["operation"],
+                    "physical_attempt_number": int(attempt["physical_attempt_number"]),
+                    "outcome": attempt["outcome"],
+                    "started_at": attempt["started_at"],
+                    "completed_at": attempt["completed_at"],
+                    "retry_at": attempt["retry_at"],
+                    "usage_entry_ref": None if usage is None else usage["usage_entry_id"],
+                    "usage_revision": None if usage is None else int(usage["revision_number"]),
+                    "measurement_status": (
+                        None if usage is None else usage["measurement_status"]
+                    ),
+                    "metering_source": None if usage is None else usage["metering_source"],
+                    "usage_calls": None if usage_metrics is None else usage_metrics["calls"],
+                    "usage_bytes": None if usage_metrics is None else usage_metrics["bytes"],
+                    "usage_records": None if usage_metrics is None else usage_metrics["records"],
+                    "cost_entry_ref": None if cost is None else cost["cost_entry_id"],
+                    "cost_revision": None if cost is None else int(cost["revision_number"]),
+                    "amount_micros": None if cost is None else cost["amount_micros"],
+                    "currency": None if cost is None else cost["currency"],
+                    "cost_status": None if cost is None else cost["cost_status"],
+                    "settlement_ref": (
+                        None if settlement is None else settlement["settlement_id"]
+                    ),
+                    "settlement_revision": (
+                        None if settlement is None else int(settlement["revision_number"])
+                    ),
+                    "settlement_state": None if settlement is None else settlement["state"],
+                    "actual_calls": None if actual is None else actual["calls"],
+                    "actual_bytes": None if actual is None else actual["bytes"],
+                    "actual_records": None if actual is None else actual["records"],
+                    "actual_cost_micros": (
+                        None if actual is None else actual["cost_micros"]
+                    ),
+                }
+            )
+
+        quota_groups: dict[tuple[str, str], dict[str, Any]] = {}
+        for reservation in core.execute(
+            "SELECT r.reservation_id,r.quota_scope_ref,r.window_started_at,"
+            "r.window_ends_at,r.reserved_json,p.quota_currency "
+            "FROM connector_quota_reservations r "
+            "JOIN connector_rate_policy_versions p "
+            "ON p.policy_version_id=r.policy_version_ref "
+            "ORDER BY r.window_started_at,r.reservation_id"
+        ):
+            key = (reservation["quota_scope_ref"], reservation["window_started_at"])
+            group = quota_groups.setdefault(
+                key,
+                {
+                    "quota_scope_ref": reservation["quota_scope_ref"],
+                    "window_started_at": reservation["window_started_at"],
+                    "window_ends_at": reservation["window_ends_at"],
+                    "currency": reservation["quota_currency"],
+                    "reservations": 0,
+                    "pending_reservations": 0,
+                    "consumed_reservations": 0,
+                    "released_reservations": 0,
+                    "indeterminate_reservations": 0,
+                    "reserved_calls": 0,
+                    "reserved_bytes": 0,
+                    "reserved_records": 0,
+                    "reserved_cost_micros": 0,
+                    "consumed_calls": 0,
+                    "consumed_bytes": 0,
+                    "consumed_records": 0,
+                    "consumed_cost_micros": 0,
+                    "indeterminate_calls": 0,
+                    "indeterminate_bytes": 0,
+                    "indeterminate_records": 0,
+                    "indeterminate_cost_micros": 0,
+                },
+            )
+            if (
+                group["window_ends_at"] != reservation["window_ends_at"]
+                or group["currency"] != reservation["quota_currency"]
+            ):
+                raise ProjectionSourceError("quota window authority is inconsistent")
+            reserved = _connector_metrics(
+                reservation["reserved_json"], "quota reservation"
+            )
+            group["reservations"] += 1
+            for metric in _CONNECTOR_METRICS:
+                group[f"reserved_{metric}"] += reserved[metric]
+            settlement = latest_settlement.get(reservation["reservation_id"])
+            if settlement is None:
+                group["pending_reservations"] += 1
+                continue
+            state = settlement["state"]
+            group[f"{state}_reservations"] += 1
+            if state in {"consumed", "indeterminate"}:
+                actual = _connector_metrics(
+                    settlement["actual_json"], "quota settlement"
+                )
+                for metric in _CONNECTOR_METRICS:
+                    group[f"{state}_{metric}"] += actual[metric]
+        quota_rows = [quota_groups[key] for key in sorted(quota_groups)]
+        return operation_rows, attempt_rows, quota_rows, incident_rows
+
+    @staticmethod
     def _watermark(
         core: sqlite3.Connection,
         scheduler: sqlite3.Connection,
@@ -1293,6 +1732,11 @@ class DashboardProjector:
                 f"SELECT COUNT(*) AS count,MAX(created_at) AS latest FROM {table}"
             ).fetchone()
             sources["core"][table] = [row["count"], row["latest"]]
+        for table in sorted(_CONNECTOR_PROJECTION_TABLES & core_tables):
+            row = core.execute(
+                f"SELECT COUNT(*) AS count,MAX(created_at) AS latest FROM {table}"
+            ).fetchone()
+            sources["core"][table] = [row["count"], row["latest"]]
         for table in sorted(_SCHEDULER_TABLES):
             row = scheduler.execute(
                 f"SELECT COUNT(*) AS count,MAX(created_at) AS latest FROM {table}"
@@ -1302,7 +1746,21 @@ class DashboardProjector:
             row = catalog.execute(
                 "SELECT COUNT(*) AS count,MAX(created_at) AS latest FROM capability_descriptor_versions"
             ).fetchone()
-            sources["catalog"] = [row["count"], row["latest"]]
+            sources["catalog"] = {"capability_descriptor_versions": [row["count"], row["latest"]]}
+            catalog_tables = _tables(catalog)
+            for table, time_field in (
+                ("external_capability_source_registrations", "registered_at"),
+                ("external_capability_source_heads", "updated_at"),
+                ("external_capability_snapshot_ingest_events", "created_at"),
+            ):
+                if table not in catalog_tables:
+                    continue
+                source_row = catalog.execute(
+                    f"SELECT COUNT(*) AS count,MAX({time_field}) AS latest FROM {table}"
+                ).fetchone()
+                sources["catalog"][table] = [
+                    source_row["count"], source_row["latest"]
+                ]
         if router is not None and "model_endpoint_profile_versions" in _tables(router):
             row = router.execute(
                 "SELECT COUNT(*) AS count,MAX(created_at) AS latest FROM model_endpoint_profile_versions"

@@ -25,7 +25,7 @@ HASH = "a" * 64
 def snapshot() -> dict:
     return {
         "metadata": {
-            "schema_version": "0.1",
+            "schema_version": "0.2",
             "as_of": NOW,
             "source_watermark": "watermark:42",
             "build_state": "ready",
@@ -237,6 +237,11 @@ def snapshot() -> dict:
                 "features_json": json.dumps({"mandate_relevance": 3}),
             }
         ],
+        "metadata_source_status": [],
+        "connector_operation_status": [],
+        "connector_attempt_slices": [],
+        "connector_quota_windows": [],
+        "connector_incident_status": [],
     }
 
 
@@ -331,6 +336,12 @@ class DashboardTests(unittest.TestCase):
             self.assertIn("Dalton", html.decode("utf-8"))
             status, _, _ = app.dispatch("/v1/usage/summary?group_by=not_allowed")
             self.assertEqual(status, 400)
+            status, _, connectors = app.dispatch("/v1/connectors")
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(connectors)["data"]["attempts"], [])
+            status, _, sources = app.dispatch("/v1/metadata-sources")
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(sources)["data"], [])
         finally:
             service.close()
 
