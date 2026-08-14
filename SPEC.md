@@ -1,4 +1,4 @@
-# Dalton Core slices 1–5：契约规格
+# Dalton Core slices 1–7：契约规格
 
 本仓库是独立于 OpenClaw 的 Dalton Core 原型。它冻结可迁移的语义和 interchange contract，
 并可通过受限 broker 接入 OpenClaw 模型。只读导入器能归档 `workspace-chem`、Coverage OS
@@ -310,6 +310,24 @@ caller-controlled 最终路径写入，避免 hardlink/symlink TOCTOU 污染 aut
 locator、完整 outputs 或 credential。成本按 currency 分组，不能用当前价格或汇率重算历史。
 网页用通俗中文显示总任务、任务树、Scheduler 状态、模型/usage、能力批准状态和 artifact
 metadata；批准、暂停、取消仍属于未来 command service，不塞进 query API。
+
+### 常驻 controller 与静态看板插件
+
+`daltond` 是确定性常驻控制进程，不是长生命周期 LLM session。它只负责 Scheduler lease
+回收、authority 变更检测、projection rebuild、内建插件重试和 owner-only heartbeat；当前
+版本不 claim research WorkOrder，也不冒充 Agenda Engine、worker coordinator 或 verifier。
+LaunchAgent 只对 writer 和 controller 设置 `RunAtLoad + KeepAlive`，研究 worker 仍按
+WorkOrder 启动并在完成后退出。
+
+插件只从内建 registry 选择，配置不能任意 import Python 模块。`static_dashboard` 只读
+disposable projection DB，把固定 query surface 嵌入单一 HTML；Tencent COS publisher 只允许
+写 `dalton/index.html`，不得修改 bucket website configuration。上传后必须回读并核对 SHA-256，
+同时确认受保护的站点根页和其他看板没有变化。publisher 只从 macOS Keychain 取 credential，
+配置和 heartbeat 不保存 secret。
+
+heartbeat 的 `starting / running / degraded / stopping` 是服务健康状态，不是研究任务状态。
+健康检查必须同时确认 controller 状态、心跳新鲜度、writer socket、authority/projection 文件和
+插件结果；旧 projection 仍存在时不能把 `degraded` controller 报成健康。
 
 ### 冻结词表
 

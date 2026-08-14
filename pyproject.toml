@@ -8,6 +8,15 @@ version = "0.1.0.dev0"
 description = "Runtime-independent control kernel prototype for Dalton Research Agent OS"
 requires-python = ">=3.11"
 
+[project.optional-dependencies]
+deploy = ["cos-python-sdk-v5==1.9.44"]
+
+[project.scripts]
+dalton-bootstrap = "dalton_core.bootstrap:main"
+dalton-health = "dalton_core.health:main"
+dalton-writer = "dalton_core.writer_server:main"
+daltond = "dalton_core.service:main"
+
 [tool.setuptools]
 package-dir = {"" = "src"}
 include-package-data = true

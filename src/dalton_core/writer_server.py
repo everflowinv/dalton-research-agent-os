@@ -756,12 +756,12 @@ class WriterServer:
         return "writer service failed to complete the request"
 
 
-def _main() -> int:
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Dalton Core owner-only writer service")
     parser.add_argument("--db", required=True)
     parser.add_argument("--socket", required=True)
     parser.add_argument("--token-config", required=True)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     try:
         principals = load_principals(args.token_config)
         server = WriterServer(args.db, args.socket, principals)
@@ -778,4 +778,4 @@ def _main() -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised by subprocess tests
-    raise SystemExit(_main())
+    raise SystemExit(main())

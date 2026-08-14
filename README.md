@@ -2,11 +2,12 @@
 
 Dalton 是面向投研团队的独立研究控制内核。它把任务调度、研究账本、验证、模型路由、成本与产物权威从具体 agent host 中拆出来，让模型和连接器可以替换，研究记录仍可追溯。
 
-项目目前是原型，尚未达到生产部署标准。OpenClaw 只是可选适配层，不是 Dalton 的运行时、数据库或事实来源。
+项目已有本机常驻控制服务，但仍是原型，尚未达到生产部署标准。OpenClaw 只是可选适配层，不是 Dalton 的运行时、数据库或事实来源。
 
 ## 仓库边界
 
 - `src/dalton_core/`：Core 契约、Research Ledger、Scheduler、模型路由、Capability Registry、writer service 和只读 dashboard。
+- `deploy/macos/`：owner-only runtime bootstrap、LaunchAgent 安装、卸载和健康检查。
 - `contracts/`：跨进程 JSON Schema。
 - `integrations/openclaw-model-broker/`：复用 OpenClaw 已管理模型认证的受限 broker。
 - `spikes/`：候选 runtime 的隔离实验，不属于生产执行面。
@@ -41,6 +42,23 @@ npm run check
 
 这些测试不需要真实模型凭据。真实模型 smoke test 属于部署验收，不能放进默认 CI。
 
+## macOS 常驻服务
+
+安装脚本会把 wheel 和 COS 可选依赖装进 Dalton 自己的 venv，在 `~/Library/Application Support/Dalton/` 创建 owner-only 配置和状态，再加载 writer/controller 两个 LaunchAgent：
+
+```bash
+./deploy/macos/install.sh
+./deploy/macos/health.sh
+```
+
+controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回收、authority 变更检测、dashboard projection、插件重试和健康心跳。静态看板插件只读 projection DB，发布到 <https://eve.lumos.space/dalton/>；它不会修改 COS bucket 的站点首页配置。
+
+卸载脚本只停止 LaunchAgent，并把 plist 移到废纸篓；runtime 和 authority data 保留：
+
+```bash
+./deploy/macos/uninstall.sh
+```
+
 ## 开发状态
 
-当前代码已经实现主要契约和本地原型，但生产部署仍缺少独立 OS/container identity、正式 capability sandbox、外部持久化方案、原生事件连接器和完整运维控制面。任何旧工作流切换都要逐项验证，不能因文件已导入就视为完成迁移。
+当前代码已经实现主要契约、本机常驻维护和公开监督看板，但还不会自主形成研究议程或派发研究 worker。生产部署仍缺少独立 OS/container identity、正式 capability sandbox、Model IR、原生事件连接器、Agenda Engine、worker coordinator、outbox 和完整运维控制面。任何旧工作流切换都要逐项验证，不能因文件已导入就视为完成迁移。当前进度审计见 [docs/reports/runtime-service-and-architecture-progress-2026-08-14.md](docs/reports/runtime-service-and-architecture-progress-2026-08-14.md)。

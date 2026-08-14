@@ -140,12 +140,19 @@
     </section>
   </main>
   <script>
+    const EMBEDDED_DATA = null;
     const $ = id => document.getElementById(id);
     const text = (tag, value, cls) => { const n=document.createElement(tag); n.textContent=value ?? "—"; if(cls)n.className=cls; return n; };
     const compact = n => n == null ? "未知" : new Intl.NumberFormat("zh-CN", {notation:"compact", maximumFractionDigits:1}).format(n);
     const statusClass = s => ({"执行中":"running","等待执行":"ready","等待重试":"retry","已完成":"done","已失败":"failed"}[s] || "");
     const empty = (node, message) => { node.replaceChildren(text("div", message, "empty")); };
-    async function get(path){ const r=await fetch(path,{headers:{Accept:"application/json"}}); if(!r.ok)throw new Error(`${r.status} ${path}`); return r.json(); }
+    async function get(path){
+      if(EMBEDDED_DATA!==null){
+        if(!Object.prototype.hasOwnProperty.call(EMBEDDED_DATA,path))throw new Error(`静态快照缺少 ${path}`);
+        return EMBEDDED_DATA[path];
+      }
+      const r=await fetch(path,{headers:{Accept:"application/json"}}); if(!r.ok)throw new Error(`${r.status} ${path}`); return r.json();
+    }
     function renderWorkflows(rows){
       const box=$("workflows"); box.replaceChildren(); $("workflow-count").textContent=`${rows.length} 项`;
       if(!rows.length)return empty(box,"还没有总任务");
