@@ -602,10 +602,6 @@ class RecordedReferenceShadowCoordinator:
                 result,
                 result_hash,
                 retry_at=retry_at,
-                scheduler_lease_token=scheduler_lease_token,
-                journal_event=self.journal.event(
-                    receipts[-1]["completion_event_ref"]
-                ),
             )
             return self._duplicate_response(response)
 
@@ -665,7 +661,6 @@ class RecordedReferenceShadowCoordinator:
                 return self._finish_failure(
                     parent_admission,
                     receipts,
-                    scheduler_lease_token=scheduler_lease_token,
                     idempotency_status="fresh" if all_fresh else "duplicate",
                 )
             observation = receipt["observation"]
@@ -679,7 +674,6 @@ class RecordedReferenceShadowCoordinator:
             parent_admission,
             receipts,
             terminal=terminal,
-            scheduler_lease_token=scheduler_lease_token,
             idempotency_status="fresh" if all_fresh else "duplicate",
         )
 
@@ -1505,7 +1499,6 @@ class RecordedReferenceShadowCoordinator:
         receipts: list[Mapping[str, Any]],
         *,
         terminal: bool,
-        scheduler_lease_token: str,
         idempotency_status: str,
     ) -> dict[str, Any]:
         last = receipts[-1]
@@ -1617,7 +1610,7 @@ class RecordedReferenceShadowCoordinator:
                 "commit_context": self._commit_context_wire(admission),
             },
         )
-        verified_context, verified_result, verified_response, verified_receipts, _ = (
+        verified_context, verified_result, verified_response, _, _ = (
             self._validate_parent_completion_payload(
                 admission.request, journal_event["payload"]
             )
@@ -1625,10 +1618,6 @@ class RecordedReferenceShadowCoordinator:
         self._fault("after_response_journaled")
         self._ensure_scheduler_completion(
             verified_context, verified_result, result_hash, retry_at=None,
-            scheduler_lease_token=scheduler_lease_token,
-            journal_event=self.journal.event(
-                verified_receipts[-1]["completion_event_ref"]
-            ),
         )
         self._fault("after_scheduler_completed")
         return verified_response
@@ -1638,7 +1627,6 @@ class RecordedReferenceShadowCoordinator:
         admission: ValidatedRunnerAdmission | _ShadowCommitContext,
         receipts: list[Mapping[str, Any]],
         *,
-        scheduler_lease_token: str,
         idempotency_status: str,
     ) -> dict[str, Any]:
         last = receipts[-1]
@@ -1690,7 +1678,7 @@ class RecordedReferenceShadowCoordinator:
         )
         (
             verified_context, verified_result, verified_response,
-            verified_receipts, verified_retry_at,
+            _, verified_retry_at,
         ) = self._validate_parent_completion_payload(
             admission.request, journal_event["payload"]
         )
@@ -1698,10 +1686,6 @@ class RecordedReferenceShadowCoordinator:
         self._ensure_scheduler_completion(
             verified_context, verified_result, result_hash,
             retry_at=verified_retry_at,
-            scheduler_lease_token=scheduler_lease_token,
-            journal_event=self.journal.event(
-                verified_receipts[-1]["completion_event_ref"]
-            ),
         )
         self._fault("after_scheduler_completed")
         return verified_response
@@ -1713,10 +1697,7 @@ class RecordedReferenceShadowCoordinator:
         result_hash: str,
         *,
         retry_at: str | None,
-        scheduler_lease_token: str,
-        journal_event: Mapping[str, Any],
     ) -> None:
-        del scheduler_lease_token
         request = context.request
         row = self.authority.get_scheduler_result(result.id)
         expected = (
@@ -1743,9 +1724,6 @@ class RecordedReferenceShadowCoordinator:
             lease_revision_ref=request["scheduler_lease_revision_ref"],
             lease_hash=request["scheduler_lease_hash"],
             work_order_hash=request["work_order_hash"],
-            journal_event_ref=journal_event["id"],
-            journal_event_hash=journal_event["content_hash"],
-            journal_event_at=journal_event["event_at"],
             idempotency_key=(
                 f"runner-shadow:{request['connector_invocation_ref']}:aggregate:"
                 "scheduler-journal-reconcile"

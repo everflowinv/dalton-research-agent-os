@@ -17,7 +17,7 @@ from dalton_core.connector_runner import (
     validate_connector_adapter_request,
     validate_runner_environment_manifest,
 )
-from dalton_core.contracts import ExecutionInvocation, ExecutionKind, WorkOrder
+from dalton_core.contracts import ExecutionInvocation, ExecutionKind, ResultEnvelope, WorkOrder
 from dalton_core.observability import ObservabilityStore
 from dalton_core.raw_spool import RawSpool
 from dalton_core.recorded_reference_shadow import (
@@ -32,7 +32,12 @@ from dalton_core.recorded_source_adapter import (
     validate_recorded_source_fixture,
 )
 from dalton_core.runner_journal import RunnerJournal
-from dalton_core.scheduler import LeaseExpired, Scheduler, SchedulerConflict
+from dalton_core.scheduler import (
+    LeaseExpired,
+    Scheduler,
+    SchedulerConflict,
+    SchedulerValidationError,
+)
 from dalton_core.store import DaltonStore, content_hash
 from tests.test_capability_catalog import FakeAuthorities, descriptor_spec
 from tests.test_connector import (
@@ -155,10 +160,11 @@ class ReferenceShadowHarness:
         self.scenario = scenario
         self.clock = MutableClock()
         self.core = DaltonStore(":memory:")
+        self.journal = RunnerJournal(self.core, clock=self.clock)
         self.connectors = ConnectorStore(self.core, clock=self.clock)
         self.scheduler = Scheduler(
             ":memory:", clock=self.clock, default_lease_seconds=30,
-            max_lease_seconds=60,
+            max_lease_seconds=60, trusted_journal_reader=self.journal,
         )
         self.authorities = FakeAuthorities()
         self.authorities.policy_permissions = permissions()
@@ -449,7 +455,6 @@ class ReferenceShadowHarness:
             connectors=self.connectors, resolver=resolver,
             visibility_scopes=["research"], clock=self.clock,
         )
-        self.journal = RunnerJournal(self.core, clock=self.clock)
         self.spool = RawSpool(
             self.temp.name, max_total_bytes=spool_max_total_bytes
         )
@@ -1031,6 +1036,70 @@ class RecordedReferenceShadowTests(unittest.TestCase):
         with self.assertRaises(SchedulerConflict):
             raced.execute()
         self.assertEqual(raced.count("scheduler_result_envelopes", scheduler=True), 0)
+
+    def test_scheduler_reconciliation_rejects_caller_claim_without_journal(self) -> None:
+        with self.assertRaises(SchedulerValidationError):
+            Scheduler(trusted_journal_reader=object())
+        harness = self.harness("cninfo", "success")
+        request = harness.request()
+        result = ResultEnvelope(
+            schema_version="0.1",
+            id="result-envelope:forged-without-journal",
+            created_at=harness.clock().isoformat(timespec="microseconds"),
+            work_order_ref=harness.work.id,
+            invocation_ref=harness.execution.id,
+            status="succeeded",
+            outputs={},
+            actual_side_effects=(),
+            usage_refs=(),
+            artifact_refs=(),
+            error=None,
+            metadata={"runner_request_ref": request["id"]},
+        )
+        result_hash = content_hash(result.to_dict())
+        with self.assertRaises(SchedulerConflict):
+            harness.scheduler.reconcile_journaled_completion(
+                harness.work.id,
+                1,
+                request["runner_actor_ref"],
+                result,
+                lease_revision_ref=request["scheduler_lease_revision_ref"],
+                lease_hash=request["scheduler_lease_hash"],
+                work_order_hash=request["work_order_hash"],
+                idempotency_key="forged-journal-reconciliation",
+                result_envelope_hash=result_hash,
+            )
+        self.assertEqual(harness.count("runner_attempt_journal_events"), 0)
+        self.assertEqual(harness.count("scheduler_result_envelopes", scheduler=True), 0)
+        harness.journal.begin_request(request)
+        harness.journal.append(
+            request["id"], "reserved", {"reservation_ref": "reservation:synthetic"}
+        )
+        harness.journal.append(
+            request["id"], "observed", {"reservation_ref": "reservation:synthetic"}
+        )
+        harness.journal.append(
+            request["id"],
+            "responded",
+            {
+                "reservation_ref": "reservation:synthetic",
+                "result_envelope": result.to_dict(),
+                "result_envelope_hash": result_hash,
+            },
+        )
+        with self.assertRaises(SchedulerConflict):
+            harness.scheduler.reconcile_journaled_completion(
+                harness.work.id,
+                1,
+                request["runner_actor_ref"],
+                result,
+                lease_revision_ref=request["scheduler_lease_revision_ref"],
+                lease_hash=request["scheduler_lease_hash"],
+                work_order_hash=request["work_order_hash"],
+                idempotency_key="malformed-journal-reconciliation",
+                result_envelope_hash=result_hash,
+            )
+        self.assertEqual(harness.count("scheduler_result_envelopes", scheduler=True), 0)
 
     def test_hostile_parent_response_is_rejected_before_scheduler_reconciliation(self) -> None:
         harness = self.harness(

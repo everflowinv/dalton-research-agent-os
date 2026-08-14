@@ -84,20 +84,24 @@ spool capacity failure 保留第一页已注册 artifact，并关闭 parent retr
 
 跨库收敛顺序改为先把 closed response、ResultEnvelope、page receipts、commit context 和 hash 写入 parent
 RunnerJournal，再幂等完成 Scheduler。恢复先完成闭合校验并与 immutable authority 交叉核对；受限 Scheduler
-reconciliation 允许 lease 期内已持久化的完成事实在 lease 过期后收敛，但 later attempt 已重新 claim 时 fail
-closed。Coordinator 只持有窄 AuthorityPort，不直接持有 ConnectorStore、Scheduler 或 SQLite connection。
+reconciliation 从 Scheduler 构造时绑定的 trusted RunnerJournal reader 读取 parent responded event、page receipt
+和实际 completion event，caller 不能提交 event hash/time 充当 proof。lease 期内已持久化的完成事实可在 lease
+过期后收敛，但 later attempt 已重新 claim 时 fail closed。Coordinator 只持有窄 AuthorityPort，不直接持有
+ConnectorStore、Scheduler 或 SQLite connection。
 
 ## Hardening candidate 验证
 
-- recorded reference shadow 专项：17/17；
-- Runner/transport/inventory/contracts/Scheduler 组合：74/74；
-- Python 全量：313/313；
+- recorded reference shadow 专项：18/18；
+- Runner/transport/inventory/contracts/Scheduler 组合：75/75；
+- Python 全量：314/314；
 - broker：15/15；
 - `compileall`、`git diff --check`：通过。
 
-上一份 committed candidate `9599ea8` 经 Fable 5 hostile review 裁决为 No-Go。本次 hardening 已为其八类
-blocker 加入回归；形成新提交后仍需 Fable 5 对 committed tree 增量复核，并完成 deterministic wheel/clean
-install 和 GitHub CI。这些检查完成前，本报告不把 P1-0b 写成 Go。
+committed candidates `9599ea8` 与 `c5fcd41` 经 Fable 5 hostile review 先后裁决为 No-Go。第二次裁决复现了
+Scheduler 把 caller 提交的 event ref/hash/time 当 proof、可在零 journal 时伪造成功结果的问题。本次第二轮
+hardening 改为 constructor-bound trusted journal proof，并新增零 journal 与非闭合 parent completion 回归；
+形成新提交后仍需 Fable 5 对 committed tree 增量复核，并完成 deterministic wheel/clean install 和 GitHub CI。
+这些检查完成前，本报告不把 P1-0b 写成 Go。
 
 ## 仍然 No-Go
 

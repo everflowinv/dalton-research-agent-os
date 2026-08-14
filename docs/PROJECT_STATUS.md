@@ -222,11 +222,12 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   SourceEnvelope。每个成功页在 page commit 内独立注册 ArtifactVersion；page recovery 覆盖 reserved、
   transport_started、observed、artifact/responded barrier 和第二页 capacity failure；
 - response journal 先持久化 closed result/response/page receipts/commit context，再通过窄 AuthorityPort 做
-  Scheduler reconciliation。lease 过期后仍可收敛 lease 期内已持久化的完成事实；later attempt 已重新 claim
-  时 fail closed，不能覆盖新 authority；
-- 上一份 committed candidate `9599ea8` 经 Fable 5 裁决 No-Go。本次 hardening candidate 已关闭其八类 blocker；
-  专项 17/17、组合 74/74、Python 全量 313/313、broker 15/15、compileall 和 diff-check 通过，等待新提交的
-  committed-tree 增量复核；
+  Scheduler reconciliation。Scheduler 从构造时绑定的 trusted RunnerJournal reader 读取 proof，不接收 caller
+  声明的 event hash/time；lease 过期后仍可收敛 lease 期内已持久化的完成事实，later attempt 已重新 claim 时
+  fail closed；
+- committed candidates `9599ea8` 与 `c5fcd41` 经 Fable 5 先后裁决 No-Go。本次第二轮 hardening 关闭了前八类
+  blocker，并拒绝零 journal 或非闭合 parent completion 的伪造 reconciliation；专项 18/18、组合 75/75、
+  Python 全量 314/314、broker 15/15 通过，等待新提交的 committed-tree 增量复核；
 - 本轮没有部署、没有访问真实数据源、没有使用 credential，也没有写 Evidence/Claim/Thesis。真实 public
   network 仍被 killable total-deadline transport gate 阻塞；AlphaEngine/Guidepoint/雪球等 host/MCP 路径仍被
   runner wire 0.2、credential revoke/max_calls use-time authority 阻塞。

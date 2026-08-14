@@ -138,6 +138,7 @@ class Scheduler:
         max_renew_seconds: float = 30.0,
         max_total_lease_seconds: float = 300.0,
         policy_version_id: str = "scheduler-policy-0.1",
+        trusted_journal_reader: Any | None = None,
     ) -> None:
         self.path = str(path)
         self.clock = clock or _utc_now
@@ -159,6 +160,14 @@ class Scheduler:
                 "max_lease_seconds cannot exceed max_total_lease_seconds"
             )
         self.policy_version_id = _nonempty(policy_version_id, "policy_version_id")
+        if trusted_journal_reader is not None:
+            from .runner_journal import RunnerJournal
+
+            if type(trusted_journal_reader) is not RunnerJournal:
+                raise SchedulerValidationError(
+                    "trusted_journal_reader must be an exact RunnerJournal"
+                )
+        self._trusted_journal_reader = trusted_journal_reader
         self._authorized = False
         self.connection = connection or sqlite3.connect(self.path, isolation_level=None)
         if connection is None and self.path != ":memory:":
@@ -1044,6 +1053,157 @@ class Scheduler:
         assert response is not None
         return response
 
+    def _trusted_journal_completion_proof(
+        self,
+        *,
+        work_order_id: str,
+        attempt_number: int,
+        owner_ref: str,
+        lease_revision_ref: str,
+        lease_hash: str,
+        work_order_hash: str,
+        result_wire: Mapping[str, Any],
+        result_hash: str,
+        retry_at: str | datetime | None,
+    ) -> dict[str, str]:
+        reader = self._trusted_journal_reader
+        if reader is None or not all(
+            callable(getattr(reader, name, None))
+            for name in ("request", "latest", "event")
+        ):
+            raise SchedulerConflict(
+                "journal reconciliation has no trusted journal reader"
+            )
+        metadata = result_wire.get("metadata")
+        runner_request_ref = _nonempty(
+            metadata.get("runner_request_ref")
+            if isinstance(metadata, Mapping)
+            else None,
+            "result_envelope.metadata.runner_request_ref",
+        )
+        try:
+            request = reader.request(runner_request_ref)
+            parent_event = reader.latest(runner_request_ref)
+        except Exception as exc:
+            raise SchedulerConflict(
+                "journal reconciliation lacks an immutable parent completion"
+            ) from exc
+        if not isinstance(request, Mapping) or not isinstance(parent_event, Mapping):
+            raise SchedulerConflict("trusted journal reader returned an invalid record")
+        payload = parent_event.get("payload")
+        if (
+            parent_event.get("runner_request_ref") != runner_request_ref
+            or parent_event.get("state") != "responded"
+            or not isinstance(payload, Mapping)
+            or set(payload)
+            != {
+                "reservation_ref", "response", "result_envelope",
+                "result_envelope_hash", "retry_at", "page_receipts",
+                "commit_context",
+            }
+        ):
+            raise SchedulerConflict(
+                "trusted journal does not contain a closed parent completion"
+            )
+        response = payload.get("response")
+        context = payload.get("commit_context")
+        receipts = payload.get("page_receipts")
+        if (
+            not isinstance(response, Mapping)
+            or not isinstance(context, Mapping)
+            or not isinstance(receipts, list)
+            or not receipts
+            or payload.get("result_envelope") != result_wire
+            or payload.get("result_envelope_hash") != result_hash
+        ):
+            raise SchedulerConflict(
+                "journaled parent completion does not bind ResultEnvelope"
+            )
+        context_request = context.get("request")
+        if not isinstance(context_request, Mapping) or context_request != request:
+            raise SchedulerConflict(
+                "journaled completion context does not bind its RunnerRequest"
+            )
+        expected_retry_at = None
+        if retry_at is not None:
+            expected_retry_at = _timestamp(
+                _parse_time(retry_at) if isinstance(retry_at, str) else retry_at
+            )
+        if (
+            request.get("id") != runner_request_ref
+            or request.get("work_order_ref") != work_order_id
+            or request.get("work_order_hash") != work_order_hash
+            or request.get("scheduler_attempt_number") != attempt_number
+            or request.get("scheduler_lease_revision_ref") != lease_revision_ref
+            or request.get("scheduler_lease_hash") != lease_hash
+            or request.get("runner_actor_ref") != owner_ref
+            or response.get("runner_request_ref") != runner_request_ref
+            or response.get("runner_request_hash") != request.get("content_hash")
+            or response.get("result_envelope_ref") != result_wire.get("id")
+            or response.get("result_envelope_hash") != result_hash
+            or response.get("outcome") != result_wire.get("status")
+            or response.get("retry_at") != expected_retry_at
+            or payload.get("retry_at") != expected_retry_at
+        ):
+            raise SchedulerConflict(
+                "journaled completion differs from Scheduler lease/result authority"
+            )
+        last_receipt = receipts[-1]
+        if not isinstance(last_receipt, Mapping):
+            raise SchedulerConflict("journaled completion lacks a final page receipt")
+        completion_ref = _nonempty(
+            last_receipt.get("completion_event_ref"), "completion_event_ref"
+        )
+        try:
+            completion_event = reader.event(completion_ref)
+            page_request = reader.request(last_receipt.get("runner_request_ref"))
+        except Exception as exc:
+            raise SchedulerConflict(
+                "journaled completion lacks its immutable page event"
+            ) from exc
+        event_context = completion_event.get("payload", {}).get("commit_context")
+        event_request = (
+            event_context.get("request")
+            if isinstance(event_context, Mapping)
+            else None
+        )
+        if (
+            not isinstance(page_request, Mapping)
+            or event_request != page_request
+            or completion_event.get("runner_request_ref")
+            != last_receipt.get("runner_request_ref")
+            or completion_event.get("state") not in {"transport_started", "observed"}
+            or completion_event.get("content_hash")
+            != last_receipt.get("completion_event_hash")
+            or completion_event.get("event_at")
+            != last_receipt.get("completion_event_at")
+            or page_request.get("work_order_ref") != work_order_id
+            or page_request.get("work_order_hash") != work_order_hash
+            or page_request.get("scheduler_attempt_number") != attempt_number
+            or page_request.get("scheduler_lease_revision_ref") != lease_revision_ref
+            or page_request.get("scheduler_lease_hash") != lease_hash
+            or page_request.get("runner_actor_ref") != owner_ref
+            or page_request.get("connector_invocation_ref")
+            != request.get("connector_invocation_ref")
+        ):
+            raise SchedulerConflict(
+                "journaled completion page proof is not exact"
+            )
+        return {
+            "runner_request_ref": runner_request_ref,
+            "parent_event_ref": _nonempty(parent_event.get("id"), "parent_event_ref"),
+            "parent_event_hash": _sha256(
+                parent_event.get("content_hash"), "parent_event_hash"
+            ),
+            "completion_event_ref": completion_ref,
+            "completion_event_hash": _sha256(
+                completion_event.get("content_hash"), "completion_event_hash"
+            ),
+            "completion_event_at": _timestamp(
+                _parse_time(completion_event.get("event_at"))
+            ),
+        }
+
     def reconcile_journaled_completion(
         self,
         work_order_id: str,
@@ -1054,9 +1214,6 @@ class Scheduler:
         lease_revision_ref: str,
         lease_hash: str,
         work_order_hash: str,
-        journal_event_ref: str,
-        journal_event_hash: str,
-        journal_event_at: str,
         idempotency_key: str,
         result_envelope_hash: str,
         retry_at: str | datetime | None = None,
@@ -1064,8 +1221,10 @@ class Scheduler:
         """Accept a trusted durable completion proven to predate lease expiry.
 
         This is a narrow recovery path for a journal owned by another SQLite
-        authority.  It never authorizes new work: a later attempt that has
-        already been claimed or completed makes reconciliation fail closed.
+        authority.  The Scheduler reads its constructor-bound trusted journal;
+        callers cannot submit event hashes or timestamps as proof.  It never
+        authorizes new work: a later attempt that has already been claimed or
+        completed makes reconciliation fail closed.
         """
 
         work_order_id = _nonempty(work_order_id, "work_order_id")
@@ -1074,9 +1233,6 @@ class Scheduler:
         lease_revision_ref = _nonempty(lease_revision_ref, "lease_revision_ref")
         lease_hash = _sha256(lease_hash, "lease_hash")
         work_order_hash = _sha256(work_order_hash, "work_order_hash")
-        journal_event_ref = _nonempty(journal_event_ref, "journal_event_ref")
-        journal_event_hash = _sha256(journal_event_hash, "journal_event_hash")
-        journal_at = _parse_time(journal_event_at)
         idempotency_key = _nonempty(idempotency_key, "idempotency_key")
         wire = self._result_wire(result_envelope)
         calculated_hash = content_hash(wire)
@@ -1090,6 +1246,18 @@ class Scheduler:
         outcome = wire["status"]
         if outcome not in _RESULT_STATES:
             raise SchedulerValidationError("journaled result outcome is invalid")
+        proof = self._trusted_journal_completion_proof(
+            work_order_id=work_order_id,
+            attempt_number=attempt_number,
+            owner_ref=owner_ref,
+            lease_revision_ref=lease_revision_ref,
+            lease_hash=lease_hash,
+            work_order_hash=work_order_hash,
+            result_wire=wire,
+            result_hash=calculated_hash,
+            retry_at=retry_at,
+        )
+        journal_at = _parse_time(proof["completion_event_at"])
         retry_at_wire = None
         if retry_at is not None:
             if outcome != "retryable":
@@ -1107,9 +1275,12 @@ class Scheduler:
             "lease_revision_ref": lease_revision_ref,
             "lease_hash": lease_hash,
             "work_order_hash": work_order_hash,
-            "journal_event_ref": journal_event_ref,
-            "journal_event_hash": journal_event_hash,
-            "journal_event_at": _timestamp(journal_at),
+            "runner_request_ref": proof["runner_request_ref"],
+            "parent_journal_event_ref": proof["parent_event_ref"],
+            "parent_journal_event_hash": proof["parent_event_hash"],
+            "completion_event_ref": proof["completion_event_ref"],
+            "completion_event_hash": proof["completion_event_hash"],
+            "completion_event_at": _timestamp(journal_at),
             "result_envelope_id": wire["id"],
             "result_envelope_hash": calculated_hash,
             "outcome": outcome,
@@ -1272,8 +1443,10 @@ class Scheduler:
                 "work_state": final_state, "result_envelope_id": wire["id"],
                 "result_envelope_hash": calculated_hash,
                 "attempt_event": attempt_event, "next_event": next_event,
-                "journal_event_ref": journal_event_ref,
-                "journal_event_hash": journal_event_hash,
+                "parent_journal_event_ref": proof["parent_event_ref"],
+                "parent_journal_event_hash": proof["parent_event_hash"],
+                "completion_event_ref": proof["completion_event_ref"],
+                "completion_event_hash": proof["completion_event_hash"],
             }
             cur.execute(
                 "INSERT INTO scheduler_completion_idempotency "

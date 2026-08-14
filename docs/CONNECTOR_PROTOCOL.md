@@ -229,10 +229,11 @@ constructor 的隐藏状态改写结果。一个 bounded logical query 可以产
 retryable completion。
 
 Parent runner journal 在 Scheduler completion 前持久化闭合 response、ResultEnvelope、page receipts、commit
-context 及其 hash；任何恢复都先完成 closed validation 和 immutable authority 交叉核对。缺少 Scheduler result
-时，受限 reconciliation 只接受 lease 期内已落 journal 的 exact attempt/result authority；即使恢复发生在 lease
-过期后也可收敛，但 later attempt 已被重新 claim 时必须 fail closed。重放不能多写 SourceEnvelope、artifact、
-usage 或 settlement，也不能让 response outcome 与 Scheduler outcome 分叉。
+context 及其 hash；任何恢复都先完成 closed validation 和 immutable authority 交叉核对。Scheduler 只从构造时
+绑定的 trusted RunnerJournal reader 读取 parent responded event 和 page completion event，caller 不能提交 event
+hash/time 充当 proof。受限 reconciliation 只接受 lease 期内已落 journal 的 exact attempt/result authority；即使
+恢复发生在 lease 过期后也可收敛，但 later attempt 已被重新 claim 时必须 fail closed。重放不能多写
+SourceEnvelope、artifact、usage 或 settlement，也不能让 response outcome 与 Scheduler outcome 分叉。
 
 这两个 shadow 不进入 Research Ledger。只有后续 ContextPack/ClaimIndex builder 和独立 verifier 才能把
 SourceEnvelope 转成 candidate Evidence/Claim；P1-0 不写 Evidence、Claim 或 Thesis。
