@@ -905,7 +905,10 @@ class AgendaStore:
         actor_ref = _text(actor_ref, "actor_ref")
         subject_ref = _text(subject_ref or actor_ref, "subject_ref")
         source = _text(source, "source")
-        if source not in {"local_cli", "openclaw_discord_reaction"}:
+        if source not in {
+            "local_cli", "openclaw_discord_reaction", "tailscale_dashboard",
+            "auto_accept_timeout",
+        }:
             raise AgendaValidationError("feedback source is invalid")
         source_event_ref = None if source_event_ref is None else _text(source_event_ref, "source_event_ref")
         prior_feedback_ref = None if prior_feedback_ref is None else _text(prior_feedback_ref, "prior_feedback_ref")
@@ -971,7 +974,8 @@ class AgendaStore:
             " ) x ON x.decision_id=f.decision_id AND x.subject_ref=COALESCE(f.subject_ref,f.actor_ref) AND x.created_at=f.created_at"
             ")"
             " SELECT m.message_id,m.payload_json,m.payload_hash,d.delivery_receipt_id,d.endpoint_ref,"
-            " f.feedback_id,f.subject_ref,f.verdict"
+            " d.created_at AS delivered_at,f.feedback_id,f.subject_ref,f.verdict,f.source,"
+            " f.created_at AS feedback_created_at"
             " FROM agenda_outbox_messages m JOIN latest_delivery d ON d.message_id=m.message_id"
             " LEFT JOIN latest_feedback f ON f.decision_id=json_extract(m.payload_json,'$.decision_ref')"
             " WHERE d.state='delivered' AND d.endpoint_ref=?"
@@ -988,12 +992,14 @@ class AgendaStore:
                     "payload_hash": row["payload_hash"],
                     "delivery_receipt_id": row["delivery_receipt_id"],
                     "endpoint_ref": row["endpoint_ref"],
+                    "delivered_at": row["delivered_at"],
                     "latest_feedback": {},
                 },
             )
             if row["subject_ref"]:
                 item["latest_feedback"][row["subject_ref"]] = {
                     "feedback_id": row["feedback_id"], "verdict": row["verdict"],
+                    "source": row["source"], "created_at": row["feedback_created_at"],
                 }
         return list(grouped.values())
 

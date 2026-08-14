@@ -44,7 +44,7 @@ npm run check
 
 ## macOS 常驻服务
 
-安装脚本会把 wheel 和 COS 可选依赖装进 Dalton 自己的 venv，在 `~/Library/Application Support/Dalton/` 创建 owner-only 配置和状态，再加载 writer/controller 两个 LaunchAgent：
+安装脚本会把 wheel 和 COS 可选依赖装进 Dalton 自己的 venv，在 `~/Library/Application Support/Dalton/` 创建 owner-only 配置和状态，再加载 writer、controller，以及启用时的 Agenda control LaunchAgent：
 
 ```bash
 ./deploy/macos/install.sh
@@ -64,12 +64,12 @@ controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回
 Phase 1 已进入单公司 Agenda Shadow：controller 每日从规范化 `PerceptionSnapshot` 生成一次
 AgendaCycle，真实经过 Scheduler、Model Router 和 OpenClaw broker，再由确定性权重与稳定
 tie-break 选择 ResearchQuestion。结果进入 append-only AgendaDecision，再由 OpenClaw/Discord
-bridge 投递到监督通道。bridge 使用 claim lease、确定性 marker、发送后 reconciliation 和 receipt
-回写；重启时会先查找已发 marker，避免重复外发。指定 Discord 用户的 ✅/❌ reaction 会由独立
-feedback-only principal 写成 append-only 人工标签。当前不会执行研究，也不会写 Evidence、Claim
-或 Thesis。
+bridge 投递通知。bridge 使用 claim lease、确定性 marker、发送后 reconciliation 和 receipt 回写；
+重启时会先查找已发 marker，避免重复外发。人工 agree/disagree 改由 Tailscale Serve 后的 owner-only
+HTML 控制面提交；浏览器反馈与 24 小时超时默认接受使用两个独立 feedback-only principal。超时默认
+接受单独统计，不计入人工标签或认可率。当前不会执行研究，也不会写 Evidence、Claim 或 Thesis。
 
 生产部署仍缺少独立 OS/container identity、正式 capability sandbox、Model IR、原生事件连接器、
 研究 worker/verifier coordinator、更多原生投递渠道和完整运维控制面。任何旧工作流
 切换都要逐项验证，不能因文件已导入就视为完成迁移。当前进度审计见
-[docs/reports/phase-1-agenda-shadow-implementation-2026-08-14.md](docs/reports/phase-1-agenda-shadow-implementation-2026-08-14.md)。
+[docs/reports/phase-1-agenda-control-2026-08-14.md](docs/reports/phase-1-agenda-control-2026-08-14.md)。

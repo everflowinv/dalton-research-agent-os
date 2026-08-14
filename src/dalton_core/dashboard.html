@@ -231,6 +231,7 @@
       metric(`${overview.decided_cycles}/${overview.total_cycles}`,"已决定 / 总 cycle");
       metric(overview.delivered_cards,"已送达 Agenda 卡");
       metric(overview.labeled_decisions,"有人工标签的决策");
+      metric(overview.auto_accepted_decisions,"超时默认接受");
       metric(overview.agreement_rate==null?"—":`${Math.round(overview.agreement_rate*100)}%`,"当前认可率");
       const box=$("agenda-cycles"); box.replaceChildren(); const questions=new Map();
       data.questions.forEach(q=>{ if(!questions.has(q.cycle_ref))questions.set(q.cycle_ref,[]); questions.get(q.cycle_ref).push(q); });
@@ -238,7 +239,8 @@
       data.cycles.slice(0,10).forEach(c=>{
         const row=document.createElement("div"); row.className="agenda-cycle";
         const head=document.createElement("div"); head.className="agenda-cycle-head";
-        const copy=document.createElement("div"); copy.append(text("div",c.company_ref,"title"),text("div",`${c.delivery_state} · ${c.feedback_state} · 投递 ${c.delivery_attempts} 次`,"agenda-cycle-meta"));
+        const feedbackLabel=c.feedback_state==="auto_accept_timeout"?"超时默认接受":c.feedback_state;
+        const copy=document.createElement("div"); copy.append(text("div",c.company_ref,"title"),text("div",`${c.delivery_state} · ${feedbackLabel} · 投递 ${c.delivery_attempts} 次`,"agenda-cycle-meta"));
         head.append(copy,text("span",c.state,`pill ${c.state==="delivered"?"done":c.state==="failed"?"failed":"ready"}`)); row.append(head);
         (questions.get(c.cycle_ref)||[]).filter(q=>q.selection_state==="selected").forEach(q=>{
           const item=document.createElement("div"); item.className="agenda-question";

@@ -24,6 +24,7 @@ from typing import Any, Iterable, Mapping
 
 from .dashboard_projector import project_dashboard
 from .agenda_coordinator import AgendaCoordinator, AgendaCoordinatorConfig
+from .agenda_control import AgendaControlConfig
 from .backup import DatabaseBackupManager
 from .openclaw_agenda_bridge import OpenClawAgendaBridge, OpenClawAgendaBridgeConfig
 from .plugins.static_dashboard import StaticDashboardPlugin
@@ -72,6 +73,7 @@ class ServiceConfig:
     agenda_interval_seconds: float | None
     outbox: OpenClawAgendaBridgeConfig | None
     outbox_interval_seconds: float | None
+    control: AgendaControlConfig | None
     backup_root: Path | None
     backup_interval_seconds: float | None
 
@@ -83,7 +85,7 @@ class ServiceConfig:
             "writer_socket", "tick_seconds", "projection_min_interval_seconds",
             "plugin_retry_seconds", "plugins",
         }
-        optional = {"agenda", "outbox", "backup"}
+        optional = {"agenda", "outbox", "control", "backup"}
         if not required.issubset(raw) or set(raw) - required - optional or raw.get("schema_version") != SCHEMA_VERSION:
             raise ServiceConfigError("service config has an invalid shape or schema version")
         plugin_rows = raw["plugins"]
@@ -145,6 +147,22 @@ class ServiceConfig:
                 outbox_interval = _positive_number(
                     outbox_raw["interval_seconds"], "outbox.interval_seconds"
                 )
+        control_config = None
+        control_raw = raw.get("control")
+        if control_raw is not None:
+            if (
+                not isinstance(control_raw, Mapping)
+                or set(control_raw) != {"enabled", "config"}
+                or not isinstance(control_raw["enabled"], bool)
+            ):
+                raise ServiceConfigError("Agenda control service config is invalid")
+            if control_raw["enabled"]:
+                if not isinstance(control_raw["config"], Mapping):
+                    raise ServiceConfigError("control.config must be an object")
+                try:
+                    control_config = AgendaControlConfig.from_mapping(control_raw["config"])
+                except Exception as exc:
+                    raise ServiceConfigError("Agenda control config is invalid") from exc
         return cls(
             core_db=_absolute_path(raw["core_db"], "core_db"),
             scheduler_db=_absolute_path(raw["scheduler_db"], "scheduler_db"),
@@ -165,6 +183,7 @@ class ServiceConfig:
             agenda_interval_seconds=agenda_interval,
             outbox=outbox_config,
             outbox_interval_seconds=outbox_interval,
+            control=control_config,
             backup_root=backup_root,
             backup_interval_seconds=backup_interval,
         )

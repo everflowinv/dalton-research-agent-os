@@ -26,6 +26,7 @@ class PackagingTests(unittest.TestCase):
             "dashboard_schema.sql",
             "agenda_schema.sql",
             "dashboard.html",
+            "agenda_control.html",
         ):
             self.assertIn(runtime_asset, package_data["dalton_core"])
         self.assertIn("contracts/*.schema.json", data_files["share/dalton-core/contracts"])

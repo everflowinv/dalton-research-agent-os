@@ -352,11 +352,16 @@ claim，并把 attempt、lease expiry 和 endpoint 写进 append-only event；�
 failed event 带 retry time，旧 attempt 不能覆盖新 claim。发送成功与 receipt commit 之间崩溃时，下一轮
 必须先搜索 marker，再决定是否补投，因此不能把“CLI 已退出”直接当作未发送。
 
-Discord reaction ingestion 使用独立的 feedback-only principal，不复用 Core 或 human governance token。
-bridge 只接受配置白名单中的 Discord user id，并把 ✅/❌ 写成 `agree/disagree`；同一用户同时点两种
-reaction 时不入账。projection 只展示标签计数和认可率，不公开 Discord user id。policy、mandate、
-pause 等人类治理操作仍使用一次性 token CLI：签发、执行一个 RPC、立即移除，token 配置不得保留
-live human principal。
+Discord 只投递通知，不承载审批。agree/disagree 由只监听 loopback 的 HTML control service 接收；
+Tailscale Serve 负责 HTTPS、tailnet ACL 和不可伪造的 `Tailscale-User-Login`，backend 再校验登录 allowlist、
+SameSite session 与 CSRF。control service 使用独立的 feedback-only principal，不复用 Core 或 human
+governance token，且数据库只保存登录名的 SHA-256 派生 subject，不保存原登录名。
+
+已送达 decision 在 24 小时内没有任何显式 human feedback 时，由第二个 automation-only principal 写入
+`source=auto_accept_timeout` 的 agree。这个结果可作为有效默认接受，但 projection 必须与 human agree
+分列；它不计入 `labeled_decisions` 或人工认可率。后到的显式 human feedback 覆盖有效展示，但不能删除
+历史 timeout event。policy、mandate、pause 等人类治理操作仍使用一次性 token CLI：签发、执行一个 RPC、
+立即移除，token 配置不得保留 live human principal。
 
 ### 冻结词表
 

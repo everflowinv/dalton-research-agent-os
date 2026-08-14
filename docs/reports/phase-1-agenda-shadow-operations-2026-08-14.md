@@ -2,6 +2,10 @@
 
 日期：2026-08-14
 
+> 运营入口已由后续的 Tailscale HTML control plane 取代；当前状态见
+> [phase-1-agenda-control-2026-08-14.md](phase-1-agenda-control-2026-08-14.md)。本报告保留首次 Discord
+> reaction 链路的历史验收记录。
+
 ## 结论
 
 Phase 1 的运营链路已上线。Dalton 现在能把 durable outbox 中的 Agenda 卡投递到 OpenClaw Discord，

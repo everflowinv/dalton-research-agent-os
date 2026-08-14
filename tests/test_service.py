@@ -13,7 +13,7 @@ from dalton_core.plugins.static_dashboard import (
     render_static_dashboard,
 )
 from dalton_core.observability import ObservabilityStore
-from dalton_core.macos_launchagent import CONTROLLER_LABEL, WRITER_LABEL, render
+from dalton_core.macos_launchagent import CONTROL_LABEL, CONTROLLER_LABEL, WRITER_LABEL, render
 from dalton_core.health import check
 from dalton_core.service import DaltonService, ServiceConfig, ServiceConfigError
 from dalton_core.store import DaltonStore
@@ -130,6 +130,44 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("dalton-writer", writer["ProgramArguments"][0])
             self.assertIn("daltond", controller["ProgramArguments"][0])
             self.assertNotIn("model", " ".join(controller["ProgramArguments"]).lower())
+
+    def test_enabled_control_plane_gets_a_separate_launchagent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            config.write_text(json.dumps({
+                "schema_version": "0.1",
+                "core_db": str(root / "core.sqlite"),
+                "scheduler_db": str(root / "scheduler.sqlite"),
+                "projection_db": str(root / "projection.sqlite"),
+                "model_router_db": None,
+                "capability_catalog_db": None,
+                "heartbeat_path": str(root / "heartbeat.json"),
+                "writer_socket": str(root / "writer.sock"),
+                "tick_seconds": 1,
+                "projection_min_interval_seconds": 1,
+                "plugin_retry_seconds": 1,
+                "plugins": [],
+                "control": {"enabled": True, "config": {
+                    "host": "127.0.0.1", "port": 8793,
+                    "tailscale_host": "dalton.example.ts.net",
+                    "tailscale_executable": "/usr/bin/true",
+                    "allowed_tailscale_logins": ["owner@example.com"],
+                    "writer_socket": str(root / "writer.sock"),
+                    "token_config": str(root / "tokens.json"),
+                    "endpoint_ref": "openclaw:discord:test",
+                    "feedback_timeout_seconds": 86400,
+                    "sweep_interval_seconds": 60,
+                }},
+            }), encoding="utf-8")
+            paths = render(
+                root / "LaunchAgents", root / "venv" / "bin", root / "state",
+                config, root / "logs",
+            )
+            control = plistlib.loads(Path(paths["control"]).read_bytes())
+            self.assertEqual(control["Label"], CONTROL_LABEL)
+            self.assertTrue(control["KeepAlive"])
+            self.assertIn("dalton-control", control["ProgramArguments"][0])
 
     def test_health_rejects_degraded_controller_even_with_stale_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

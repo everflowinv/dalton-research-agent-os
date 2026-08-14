@@ -131,8 +131,9 @@ class OpenClawAgendaBridgeTests(unittest.TestCase):
             "account": "default", "target": "channel:1481256083589697566",
             "guild_id": "932170193180958741", "channel_id": "1481256083589697566",
             "endpoint_ref": "openclaw:discord:default:channel:1481256083589697566",
+            "control_url": "https://dalton.example.ts.net:8793/",
             "company_labels": {"wanhua": "万华化学"},
-            "feedback_user_ids": ["932169512197955636"],
+            "feedback_user_ids": [],
             "timeout_seconds": 30, "claim_ttl_seconds": 120, "retry_seconds": 60,
             "max_attempts": 5, "batch_size": 1, "feedback_limit": 10,
         })
@@ -143,25 +144,22 @@ class OpenClawAgendaBridgeTests(unittest.TestCase):
             feedback_client=FeedbackClient(self.agenda),
         )
 
-    def test_delivers_once_and_ingests_whitelisted_reaction(self):
+    def test_delivers_once_and_points_to_control_plane(self):
         runner = FakeOpenClaw()
         result = self.bridge(runner).run_once()
         self.assertEqual(result["status"], "ready")
         self.assertEqual(result["delivered"], 1)
-        self.assertEqual(result["feedback"]["recorded"], 1)
+        self.assertEqual(result["feedback"]["recorded"], 0)
         self.assertEqual(runner.send_calls, 1)
         self.assertIn("DALTON-OUTBOX-", runner.sent_body)
-        target = self.agenda.feedback_targets(
-            endpoint_ref=self.config().endpoint_ref
-        )[0]
-        self.assertEqual(
-            target["latest_feedback"]["human:discord-932169512197955636"]["verdict"],
-            "agree",
-        )
+        self.assertIn("https://dalton.example.ts.net:8793/", runner.sent_body)
+        self.assertNotIn("点 ✅", runner.sent_body)
 
     def test_reconciles_existing_marker_without_duplicate_send(self):
         pending = self.agenda.pending_outbox()[0]
-        _body, marker = render_agenda_card(pending, {"wanhua": "万华化学"})
+        _body, marker = render_agenda_card(
+            pending, {"wanhua": "万华化学"}, "https://dalton.example.ts.net:8793/"
+        )
         runner = FakeOpenClaw(recover_existing=True)
         runner.sent_body = marker
         result = self.bridge(runner).run_once()

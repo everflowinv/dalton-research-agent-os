@@ -56,6 +56,15 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
         "token_config": root / "writer-tokens.json",
         "static_output": root / "public" / "index.html",
     }
+    configured_service = ServiceConfig.from_file(config) if config.exists() else None
+    discord_feedback_enabled = bool(
+        configured_service is not None
+        and configured_service.outbox is not None
+        and configured_service.outbox.feedback_user_ids
+    )
+    control_enabled = bool(
+        configured_service is not None and configured_service.control is not None
+    )
     with DaltonStore(paths["core_db"]) as store:
         ObservabilityStore(store)
         AgendaStore(store)
@@ -65,24 +74,43 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
         with ModelRouter(paths["model_router_db"]):
             pass
     if not paths["token_config"].exists():
-        write_token_config(
-            paths["token_config"],
-            [
+        initial_principals = [
+            Principal(
+                principal_id="core",
+                token=secrets.token_urlsafe(48),
+                operations=CORE_OPERATIONS,
+                unrestricted=True,
+                actor_ref="core",
+            ),
+        ]
+        if control_enabled:
+            initial_principals.extend([
                 Principal(
-                    principal_id="core",
-                    token=secrets.token_urlsafe(48),
-                    operations=CORE_OPERATIONS,
-                    unrestricted=True,
-                    actor_ref="core",
-                ),
-                Principal(
-                    principal_id="feedback-bridge",
+                    principal_id="dashboard-control",
                     token=secrets.token_urlsafe(48),
                     operations=FEEDBACK_BRIDGE_OPERATIONS,
                     unrestricted=False,
-                    actor_ref="bridge:openclaw-discord",
+                    actor_ref="bridge:tailscale-dashboard",
                 ),
-            ],
+                Principal(
+                    principal_id="agenda-timeout",
+                    token=secrets.token_urlsafe(48),
+                    operations=FEEDBACK_BRIDGE_OPERATIONS,
+                    unrestricted=False,
+                    actor_ref="automation:agenda-timeout",
+                ),
+            ])
+        if discord_feedback_enabled:
+            initial_principals.append(Principal(
+                principal_id="feedback-bridge",
+                token=secrets.token_urlsafe(48),
+                operations=FEEDBACK_BRIDGE_OPERATIONS,
+                unrestricted=False,
+                actor_ref="bridge:openclaw-discord",
+            ))
+        write_token_config(
+            paths["token_config"],
+            initial_principals,
         )
     else:
         principals = load_principals(paths["token_config"])
@@ -99,26 +127,36 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
                 unrestricted=True,
                 actor_ref=core.actor_ref,
             )
-        feedback_bridge = principals.get("feedback-bridge")
-        if feedback_bridge is None:
+        if discord_feedback_enabled:
+            current_feedback = principals.get("feedback-bridge")
             principals["feedback-bridge"] = Principal(
                 principal_id="feedback-bridge",
-                token=secrets.token_urlsafe(48),
+                token=(
+                    current_feedback.token
+                    if current_feedback is not None else secrets.token_urlsafe(48)
+                ),
                 operations=FEEDBACK_BRIDGE_OPERATIONS,
                 unrestricted=False,
                 actor_ref="bridge:openclaw-discord",
             )
-        elif (
-            feedback_bridge.operations != FEEDBACK_BRIDGE_OPERATIONS
-            or feedback_bridge.resolved_actor_ref != "bridge:openclaw-discord"
-        ):
-            principals["feedback-bridge"] = Principal(
-                principal_id="feedback-bridge",
-                token=feedback_bridge.token,
-                operations=FEEDBACK_BRIDGE_OPERATIONS,
-                unrestricted=False,
-                actor_ref="bridge:openclaw-discord",
-            )
+        else:
+            principals.pop("feedback-bridge", None)
+        if control_enabled:
+            for principal_id, actor_ref in (
+                ("dashboard-control", "bridge:tailscale-dashboard"),
+                ("agenda-timeout", "automation:agenda-timeout"),
+            ):
+                current = principals.get(principal_id)
+                principals[principal_id] = Principal(
+                    principal_id=principal_id,
+                    token=current.token if current is not None else secrets.token_urlsafe(48),
+                    operations=FEEDBACK_BRIDGE_OPERATIONS,
+                    unrestricted=False,
+                    actor_ref=actor_ref,
+                )
+        else:
+            principals.pop("dashboard-control", None)
+            principals.pop("agenda-timeout", None)
         replace_token_config(paths["token_config"], list(principals.values()))
     raw = {
         "schema_version": SCHEMA_VERSION,
@@ -159,9 +197,7 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
             "interval_seconds": 86400,
         },
     }
-    if config.exists():
-        ServiceConfig.from_file(config)
-    else:
+    if not config.exists():
         _write_config(config, raw)
     os.chmod(config, 0o600)
     return {

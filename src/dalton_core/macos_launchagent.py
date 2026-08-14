@@ -9,9 +9,12 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
+from .service import ServiceConfig
+
 
 WRITER_LABEL = "space.lumos.dalton.writer"
 CONTROLLER_LABEL = "space.lumos.dalton.controller"
+CONTROL_LABEL = "space.lumos.dalton.control"
 
 
 def _atomic_plist(path: Path, value: dict[str, Any]) -> None:
@@ -76,7 +79,21 @@ def render(
     controller_path = destination / f"{CONTROLLER_LABEL}.plist"
     _atomic_plist(writer_path, writer)
     _atomic_plist(controller_path, controller)
-    return {"writer": str(writer_path), "controller": str(controller_path)}
+    result = {"writer": str(writer_path), "controller": str(controller_path)}
+    service_config = ServiceConfig.from_file(config) if config.is_file() else None
+    control_path = destination / f"{CONTROL_LABEL}.plist"
+    if service_config is not None and service_config.control is not None:
+        control = common | {
+            "Label": CONTROL_LABEL,
+            "ProgramArguments": [str(bin_dir / "dalton-control"), "--config", str(config)],
+            "StandardOutPath": str(logs / "control.stdout.log"),
+            "StandardErrorPath": str(logs / "control.stderr.log"),
+        }
+        _atomic_plist(control_path, control)
+        result["control"] = str(control_path)
+    elif control_path.exists():
+        control_path.unlink()
+    return result
 
 
 def main(argv: Iterable[str] | None = None) -> int:

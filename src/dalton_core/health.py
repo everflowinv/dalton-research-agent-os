@@ -62,6 +62,17 @@ def check(config_path: str | Path, *, max_age_seconds: float | None = None) -> d
     except OSError:
         socket_ready = False
     checks["writer_socket_ready"] = socket_ready
+    control_ready = True
+    if config.control is not None:
+        control_ready = False
+        try:
+            with socket.create_connection(
+                (config.control.host, config.control.port), timeout=1.0
+            ):
+                control_ready = True
+        except OSError:
+            pass
+    checks["control_socket_ready"] = control_ready
     checks["core_db_present"] = config.core_db.is_file()
     checks["scheduler_db_present"] = config.scheduler_db.is_file()
     checks["projection_present"] = config.projection_db.is_file()
@@ -72,7 +83,7 @@ def check(config_path: str | Path, *, max_age_seconds: float | None = None) -> d
     required = (
         "heartbeat_present", "controller_state_running", "controller_pid_alive", "heartbeat_fresh",
         "writer_socket_ready", "core_db_present", "scheduler_db_present",
-        "projection_present", "plugins_ready",
+        "projection_present", "plugins_ready", "control_socket_ready",
     )
     return {
         "ok": all(checks[name] for name in required),

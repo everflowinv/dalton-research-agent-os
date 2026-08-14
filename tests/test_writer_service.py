@@ -14,6 +14,7 @@ from dalton_core.writer_client import WriterClient
 from dalton_core.writer_protocol import RemoteAuthorizationError, RemoteError, decode_frame
 from dalton_core.writer_server import (
     CORE_OPERATIONS,
+    FEEDBACK_BRIDGE_OPERATIONS,
     MAX_CONNECTIONS,
     VERIFIER_OPERATIONS,
     WORKER_OPERATIONS,
@@ -226,6 +227,29 @@ class WriterServiceTests(unittest.TestCase):
         os.chmod(bad_config, 0o600)
         with self.assertRaises(WriterServerError):
             load_principals(bad_config)
+
+    def test_scoped_feedback_principals_require_exact_actor_and_operations(self):
+        for principal_id, actor_ref in (
+            ("dashboard-control", "bridge:tailscale-dashboard"),
+            ("agenda-timeout", "automation:agenda-timeout"),
+        ):
+            valid = Path(self.tmp.name) / "private" / f"{principal_id}.json"
+            write_token_config(valid, [
+                Principal(
+                    principal_id, f"{principal_id}-token", FEEDBACK_BRIDGE_OPERATIONS,
+                    actor_ref=actor_ref,
+                )
+            ])
+            self.assertIn(principal_id, load_principals(valid))
+            invalid = Path(self.tmp.name) / "private" / f"{principal_id}-invalid.json"
+            write_token_config(invalid, [
+                Principal(
+                    principal_id, f"{principal_id}-bad-token", FEEDBACK_BRIDGE_OPERATIONS,
+                    actor_ref="bridge:openclaw-discord",
+                )
+            ])
+            with self.assertRaises(WriterServerError):
+                load_principals(invalid)
 
     def test_partial_frame_does_not_block_valid_client_and_connection_limit(self):
         partial = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

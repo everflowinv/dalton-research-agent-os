@@ -20,6 +20,7 @@ dalton-gov = "dalton_core.governance_cli:main"
 dalton-agenda = "dalton_core.agenda_coordinator:main"
 dalton-perception-legacy = "dalton_core.perception:main"
 dalton-backup = "dalton_core.backup:main"
+dalton-control = "dalton_core.agenda_control:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -36,6 +37,7 @@ dalton_core = [
   "dashboard_schema.sql",
   "agenda_schema.sql",
   "dashboard.html",
+  "agenda_control.html",
 ]
 
 [tool.setuptools.data-files]

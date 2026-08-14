@@ -82,13 +82,13 @@ _TABLE_FIELDS: dict[str, tuple[str, ...]] = {
         "singleton", "paused", "pause_reason", "policy_version_ref",
         "cutover_enabled", "total_cycles", "decided_cycles", "failed_cycles",
         "pending_deliveries", "delivered_cards", "labeled_decisions",
-        "agreement_rate", "last_cycle_at",
+        "auto_accepted_decisions", "agreement_rate", "last_cycle_at",
     ),
     "agenda_cycle_summaries": (
         "cycle_ref", "cycle_key", "company_ref", "state", "decision_ref",
         "selected_count", "deferred_count", "rejected_count", "delivery_state",
         "delivery_attempts", "feedback_state", "agree_count", "disagree_count",
-        "partial_count", "created_at", "updated_at",
+        "partial_count", "auto_accept_count", "created_at", "updated_at",
     ),
     "agenda_questions": (
         "candidate_ref", "cycle_ref", "decision_ref", "selection_state",

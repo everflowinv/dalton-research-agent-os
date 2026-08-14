@@ -446,12 +446,22 @@ class DashboardProjectorTests(unittest.TestCase):
                 source_event_ref="discord-reaction:test", actor_ref="bridge:openclaw-discord",
                 feedback_id="agenda-feedback:test", idempotency_key="agenda-feedback:test",
             )
+            agenda.record_feedback(
+                decision["id"], verdict="agree", notes="timeout",
+                subject_ref="automation:timeout", source="auto_accept_timeout",
+                source_event_ref="agenda-timeout:test",
+                actor_ref="automation:agenda-timeout",
+                feedback_id="agenda-feedback:auto", idempotency_key="agenda-feedback:auto",
+            )
         finally:
             store.close()
         snapshot = self.projector().project(self.projection_path)
         self.assertEqual(snapshot["agenda_supervision"][0]["delivered_cards"], 1)
         self.assertEqual(snapshot["agenda_supervision"][0]["agreement_rate"], 1.0)
+        self.assertEqual(snapshot["agenda_supervision"][0]["labeled_decisions"], 1)
+        self.assertEqual(snapshot["agenda_supervision"][0]["auto_accepted_decisions"], 1)
         self.assertEqual(snapshot["agenda_cycle_summaries"][0]["feedback_state"], "agree")
+        self.assertEqual(snapshot["agenda_cycle_summaries"][0]["auto_accept_count"], 1)
         serialized = json.dumps(snapshot, ensure_ascii=False)
         self.assertNotIn("932169512197955636", serialized)
 

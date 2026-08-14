@@ -197,6 +197,7 @@ def snapshot() -> dict:
                 "pending_deliveries": 0,
                 "delivered_cards": 1,
                 "labeled_decisions": 1,
+                "auto_accepted_decisions": 0,
                 "agreement_rate": 1.0,
                 "last_cycle_at": NOW,
             }
@@ -217,6 +218,7 @@ def snapshot() -> dict:
                 "agree_count": 1,
                 "disagree_count": 0,
                 "partial_count": 0,
+                "auto_accept_count": 0,
                 "created_at": NOW,
                 "updated_at": NOW,
             }

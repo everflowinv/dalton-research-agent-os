@@ -140,6 +140,7 @@ CREATE TABLE IF NOT EXISTS agenda_supervision (
     pending_deliveries INTEGER NOT NULL CHECK (pending_deliveries >= 0),
     delivered_cards INTEGER NOT NULL CHECK (delivered_cards >= 0),
     labeled_decisions INTEGER NOT NULL CHECK (labeled_decisions >= 0),
+    auto_accepted_decisions INTEGER NOT NULL CHECK (auto_accepted_decisions >= 0),
     agreement_rate REAL,
     last_cycle_at TEXT
 );
@@ -159,6 +160,7 @@ CREATE TABLE IF NOT EXISTS agenda_cycle_summaries (
     agree_count INTEGER NOT NULL CHECK (agree_count >= 0),
     disagree_count INTEGER NOT NULL CHECK (disagree_count >= 0),
     partial_count INTEGER NOT NULL CHECK (partial_count >= 0),
+    auto_accept_count INTEGER NOT NULL CHECK (auto_accept_count >= 0),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );

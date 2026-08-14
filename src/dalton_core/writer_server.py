@@ -134,6 +134,11 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
 FEEDBACK_BRIDGE_OPERATIONS = frozenset({
     "list_agenda_feedback_targets", "record_agenda_feedback",
 })
+SCOPED_FEEDBACK_PRINCIPALS = {
+    "feedback-bridge": ("bridge:openclaw-discord",),
+    "dashboard-control": ("bridge:tailscale-dashboard",),
+    "agenda-timeout": ("automation:agenda-timeout",),
+}
 CORE_OPERATIONS = frozenset({
     "register_invocation", "stage_change", "verify_change", "commit",
     "current_pointer", "get_version", "list_events", "active_policy",
@@ -287,9 +292,9 @@ def load_principals(path: str | Path) -> dict[str, Principal]:
             raise WriterServerError("token config is invalid")
         if principal_id == "verifier" and not set(operations) <= VERIFIER_OPERATIONS:
             raise WriterServerError("token config is invalid")
-        if principal_id == "feedback-bridge" and (
-            set(operations) != FEEDBACK_BRIDGE_OPERATIONS
-            or actor_ref != "bridge:openclaw-discord"
+        scoped_actor = SCOPED_FEEDBACK_PRINCIPALS.get(principal_id)
+        if scoped_actor is not None and (
+            set(operations) != FEEDBACK_BRIDGE_OPERATIONS or actor_ref not in scoped_actor
         ):
             raise WriterServerError("token config is invalid")
         if principal_id in result:
@@ -563,20 +568,42 @@ class WriterServer:
             if supplied_actor is not None and supplied_actor != actor:
                 raise PermissionError("request actor does not match principal")
             result[actor_field] = actor
+        is_scoped_feedback = (
+            principal.principal_id in SCOPED_FEEDBACK_PRINCIPALS
+            and principal.operations == FEEDBACK_BRIDGE_OPERATIONS
+        )
         if operation in HUMAN_GOVERNANCE_OPERATIONS and _HUMAN_ACTOR_RE.fullmatch(
             principal.resolved_actor_ref
         ) is None:
-            if operation != "record_agenda_feedback" or principal.operations != FEEDBACK_BRIDGE_OPERATIONS:
+            if operation != "record_agenda_feedback" or not is_scoped_feedback:
                 raise PermissionError("governance changes require an authenticated human principal")
-        if operation == "record_agenda_feedback" and principal.operations == FEEDBACK_BRIDGE_OPERATIONS:
+        if operation == "record_agenda_feedback" and is_scoped_feedback:
             subject_ref = result.get("subject_ref")
-            if not isinstance(subject_ref, str) or not subject_ref.startswith("human:discord-"):
-                raise PermissionError("feedback bridge requires a Discord human subject")
-            if result.get("source") != "openclaw_discord_reaction":
-                raise PermissionError("feedback bridge source is invalid")
             source_event_ref = result.get("source_event_ref")
-            if not isinstance(source_event_ref, str) or not source_event_ref.startswith("discord-reaction:"):
-                raise PermissionError("feedback bridge source event is invalid")
+            if principal.principal_id == "feedback-bridge":
+                valid = (
+                    isinstance(subject_ref, str) and subject_ref.startswith("human:discord-")
+                    and result.get("source") == "openclaw_discord_reaction"
+                    and isinstance(source_event_ref, str)
+                    and source_event_ref.startswith("discord-reaction:")
+                )
+            elif principal.principal_id == "dashboard-control":
+                valid = (
+                    isinstance(subject_ref, str) and subject_ref.startswith("human:tailscale-")
+                    and result.get("source") == "tailscale_dashboard"
+                    and isinstance(source_event_ref, str)
+                    and source_event_ref.startswith("dashboard-feedback:")
+                )
+            else:
+                valid = (
+                    subject_ref == "automation:timeout"
+                    and result.get("source") == "auto_accept_timeout"
+                    and result.get("verdict") == "agree"
+                    and isinstance(source_event_ref, str)
+                    and source_event_ref.startswith("agenda-timeout:")
+                )
+            if not valid:
+                raise PermissionError("scoped feedback provenance is invalid")
         if operation in {"stage_change", "verify_change"}:
             self._authorize_invocation_subject(principal, operation, result)
         elif operation == "register_claim":

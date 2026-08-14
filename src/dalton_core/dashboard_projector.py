@@ -445,6 +445,7 @@ class DashboardProjector:
         delivered_cards = 0
         pending_deliveries = 0
         labeled_decisions = 0
+        auto_accepted_decisions = 0
         failed_cycles = 0
         decided_cycles = 0
 
@@ -473,7 +474,12 @@ class DashboardProjector:
                 delivered_cards += 1
             elif delivery is not None:
                 pending_deliveries += 1
-            labels = [] if decision_ref is None else list(latest_feedback.get(decision_ref, {}).values())
+            feedback_by_subject = {} if decision_ref is None else latest_feedback.get(decision_ref, {})
+            labels = [
+                value for subject, value in feedback_by_subject.items()
+                if subject.startswith("human:")
+            ]
+            auto_accept_count = int("automation:timeout" in feedback_by_subject)
             counts = {"agree": 0, "disagree": 0, "partial": 0}
             for label in labels:
                 verdict = label["verdict"]
@@ -482,8 +488,14 @@ class DashboardProjector:
                     all_label_counts[verdict] += 1
             if labels:
                 labeled_decisions += 1
+            if auto_accept_count:
+                auto_accepted_decisions += 1
             nonzero = [name for name, count in counts.items() if count]
-            feedback_state = "unlabeled" if not nonzero else nonzero[0] if len(nonzero) == 1 else "mixed"
+            feedback_state = (
+                "unlabeled" if not nonzero and not auto_accept_count else
+                "auto_accept_timeout" if not nonzero else
+                nonzero[0] if len(nonzero) == 1 else "mixed"
+            )
             updated_at = cycle["created_at"] if event is None else event["created_at"]
             cycle_rows.append({
                 "cycle_ref": cycle["cycle_id"], "cycle_key": cycle["cycle_key"],
@@ -494,6 +506,7 @@ class DashboardProjector:
                 "delivery_attempts": 0 if delivery is None else attempt_counts[delivery["message_id"]],
                 "feedback_state": feedback_state, "agree_count": counts["agree"],
                 "disagree_count": counts["disagree"], "partial_count": counts["partial"],
+                "auto_accept_count": auto_accept_count,
                 "created_at": cycle["created_at"], "updated_at": updated_at,
             })
             ranks = {candidate_ref: index + 1 for index, candidate_ref in enumerate(selected)}
@@ -526,6 +539,7 @@ class DashboardProjector:
             "total_cycles": len(cycles), "decided_cycles": decided_cycles,
             "failed_cycles": failed_cycles, "pending_deliveries": pending_deliveries,
             "delivered_cards": delivered_cards, "labeled_decisions": labeled_decisions,
+            "auto_accepted_decisions": auto_accepted_decisions,
             "agreement_rate": None if total_labels == 0 else all_label_counts["agree"] / total_labels,
             "last_cycle_at": None if not cycles else cycles[-1]["created_at"],
         }]

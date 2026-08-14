@@ -75,6 +75,7 @@ class OpenClawAgendaBridgeConfig:
     guild_id: str
     channel_id: str
     endpoint_ref: str
+    control_url: str
     company_labels: Mapping[str, str]
     feedback_user_ids: tuple[str, ...]
     timeout_seconds: float
@@ -88,7 +89,7 @@ class OpenClawAgendaBridgeConfig:
     def from_mapping(cls, raw: Mapping[str, Any]) -> "OpenClawAgendaBridgeConfig":
         expected = {
             "openclaw_executable", "writer_socket", "token_config", "account",
-            "target", "guild_id", "channel_id", "endpoint_ref", "company_labels",
+            "target", "guild_id", "channel_id", "endpoint_ref", "control_url", "company_labels",
             "feedback_user_ids", "timeout_seconds", "claim_ttl_seconds",
             "retry_seconds", "max_attempts", "batch_size", "feedback_limit",
         }
@@ -103,7 +104,6 @@ class OpenClawAgendaBridgeConfig:
         feedback_users = raw["feedback_user_ids"]
         if (
             not isinstance(feedback_users, list)
-            or not feedback_users
             or any(not isinstance(item, str) or not item.isdigit() for item in feedback_users)
             or len(set(feedback_users)) != len(feedback_users)
         ):
@@ -121,6 +121,7 @@ class OpenClawAgendaBridgeConfig:
             guild_id=_string(raw["guild_id"], "guild_id"),
             channel_id=channel_id,
             endpoint_ref=_string(raw["endpoint_ref"], "endpoint_ref"),
+            control_url=_string(raw["control_url"], "control_url"),
             company_labels=dict(labels),
             feedback_user_ids=tuple(feedback_users),
             timeout_seconds=_positive_number(raw["timeout_seconds"], "timeout_seconds", 300),
@@ -166,7 +167,7 @@ def _clip(value: Any, limit: int) -> str:
 
 
 def render_agenda_card(
-    message: Mapping[str, Any], company_labels: Mapping[str, str]
+    message: Mapping[str, Any], company_labels: Mapping[str, str], control_url: str
 ) -> tuple[str, str]:
     payload = message.get("payload")
     if not isinstance(payload, Mapping) or payload.get("kind") != "agenda_shadow_card":
@@ -194,7 +195,7 @@ def render_agenda_card(
         [
             "",
             f"延后 {int(payload.get('deferred_count', 0))} 个；拒绝 {int(payload.get('rejected_count', 0))} 个。",
-            "反馈：请对本消息点 ✅ 同意，或 ❌ 不同意；同时点两种不会入账。",
+            f"处理：请打开 Dalton 控制面 {_clip(control_url, 180)}。Discord 只发通知，不接收审批。",
             f"`{marker}`",
         ]
     )
@@ -209,7 +210,7 @@ def render_agenda_card(
         for index, raw in enumerate(selected, start=1):
             compact.append(f"{index}. {_clip(raw.get('question'), 240)}")
         compact.extend([
-            "", "反馈：✅ 同意；❌ 不同意；冲突反应不入账。", f"`{marker}`",
+            "", f"处理：{_clip(control_url, 180)}", "Discord 只发通知，不接收审批。", f"`{marker}`",
         ])
         body = "\n".join(compact)
     if len(body) > MAX_DISCORD_MESSAGE_CHARS:
@@ -229,14 +230,15 @@ class OpenClawAgendaBridge:
         self.config = config
         self._runner = runner or _default_runner
         principals = None
-        if core_client is None or feedback_client is None:
+        needs_feedback = bool(config.feedback_user_ids)
+        if core_client is None or (needs_feedback and feedback_client is None):
             principals = load_principals(config.token_config)
         if core_client is None:
             core = (principals or {}).get("core")
             if core is None:
                 raise AgendaBridgeError("core writer principal is unavailable")
             core_client = WriterClient(str(config.writer_socket), core.token, timeout=30)
-        if feedback_client is None:
+        if needs_feedback and feedback_client is None:
             feedback = (principals or {}).get("feedback-bridge")
             if feedback is None:
                 raise AgendaBridgeError("feedback bridge principal is unavailable")
@@ -328,7 +330,9 @@ class OpenClawAgendaBridge:
         )
 
     def _deliver(self, claim: Mapping[str, Any], now: datetime) -> dict[str, Any]:
-        body, marker = render_agenda_card(claim, self.config.company_labels)
+        body, marker = render_agenda_card(
+            claim, self.config.company_labels, self.config.control_url
+        )
         try:
             receipt = self._search_receipt(marker)
             recovered = receipt is not None
@@ -387,6 +391,10 @@ class OpenClawAgendaBridge:
         return result
 
     def _poll_feedback(self) -> dict[str, Any]:
+        if not self.config.feedback_user_ids:
+            return {"targets": 0, "checked": 0, "recorded": 0, "conflicts": 0}
+        if self.feedback is None:
+            raise AgendaBridgeError("feedback_bridge_unavailable")
         targets = self.feedback.list_agenda_feedback_targets(
             endpoint_ref=self.config.endpoint_ref, limit=self.config.feedback_limit
         )
