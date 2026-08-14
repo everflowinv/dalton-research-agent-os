@@ -2,7 +2,7 @@
 
 更新日期：2026-08-14  
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前提交内容：Connector P0-2b recorded transport thin slice，未部署
+- 当前提交内容：Connector P0-4a trusted metadata sync authority（第一笔提交），未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -156,13 +156,45 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 - 实现提交 `e1ab94c`；GitHub CI 的 broker、Python 3.11 和 Python 3.13 全部通过：
   <https://github.com/everflowinv/dalton-research-agent-os/actions/runs/31828754012>。
 
+### Connector P0-4a 当前进度（trusted metadata sync authority，未部署）
+
+- `OpenClawCapabilitySnapshot` 发布 wire 0.2，新增 exporter source instance、exporter version、严格递增的
+  catalog generation 和 exact prior snapshot ref/hash；
+- Catalog 内部新增 trusted source registration 和 per-source head authority。只有 operator resolver 返回的
+  active human registration 才能启用新 source instance；实例更换会撤下旧实例的 current metadata 与
+  external-scope descriptor、推进 epoch，旧实例也不能自行复活；registration receipt 还绑定 reset 前的
+  exact active source/hash，两个并发 reset 只能有一个成功；首次注册也会撤下 P0-3 legacy current state；
+  wire 0.1 禁止有限 expiry，只能显式换实例；
+- 同 source instance 只接受 exact next generation 与 exact prior head。同 generation/同 hash 是幂等重放；
+  stale、gap、fork、equivocation 和未注册 source 都 fail closed，只追加脱敏 ingest event，不改 current
+  metadata、descriptor projection 或 catalog epoch；
+- host-owned exporter 使用 owner-only SQLite 保存一个 pending snapshot，Catalog 已接受但 exporter 尚未
+  acknowledge 时，重启后会重放同一 snapshot，不会跳 generation；exporter 只接收已过滤的 compact
+  skill/MCP records，不保存路径、instruction、server config 或 credential；
+- skill 的 approval-bound schema hash 现在也绑定 exact upstream metadata hash。prompt-like description 可以
+  原样进入隔离 staging，但不能在 human approval 前进入可搜索 Catalog；
+- P0-3 既有 SQLite 不改写 snapshot 表：wire 0.2 的严格 source/generation/prior/FK/unique/check authority 放在
+  1:1 sidecar chain 表。旧 snapshot 保持 immutable 历史行且不伪造 operator registration；fresh 与升级库
+  使用同一份 DDL，新注册 source 从 generation 1 建新链；
+- snapshot 接受事务的 snapshot、head、ingest event、schema/metadata 与 descriptor withdrawal 原子提交；故障
+  注入后可以重放同一 generation；同一代并发 loser 会持久化 equivocation event，不再提前变成无事件的
+  `StaleCatalog`；
+- Fable 5 的四轮增量复核先后复现并关闭 incomplete reset、fresh/migrated DDL 分叉、有限 expiry、并发无事件
+  和首次 registration cutover 缝隙，最终裁决为 **Go**，仅批准 P0-4a Commit A；metadata 专项 19/19、
+  Python 全量 280/280、broker 15/15、`compileall` 和 `git diff --check` 通过；固定
+  `SOURCE_DATE_EPOCH=1700000000` 的两次 wheel SHA-256 均为
+  `d06474d8292edcca7efcefaa1c2ee5b4adaec023b941b16aa1e34a1235b4a178`；隔离安装可创建 11 张 external
+  metadata authority 表，`foreign_key_check` 无违规，SQLite integrity 为 `ok`；
+- 这笔提交仍未把 exporter 接到 OpenClaw live inventory，也没有 connector dashboard projection、真实网络、
+  数据源访问、部署或研究 WorkOrder。P0-4a 第二笔提交将只做 connector/metadata source 的派生只读投影。
+
 ## 蓝图阶段
 
 ### Phase 0：记录和可观察性——主体完成
 
 已完成：
 
-- 64 份闭合 JSON Schema、10 份 authority SQL schema；
+- 64 份闭合 JSON Schema、11 份 authority SQL schema；
 - immutable DomainEvent、WorkOrder、ResultEnvelope、ModelInvocation；
 - Evidence → Claim → Thesis 版本链、verification 和 commit gate；
 - Workflow、Artifact metadata、模型 Usage/Cost、只读 projection 和静态看板；
@@ -365,9 +397,10 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 4. 已完成 P0-2a/P0-2b：Connector Runner 控制面、CapabilityLease use-time gate、exact static adapter
    resolver、authority-derived AdapterRequest、journal/spool/AuthorityPort/recorded transport；
 5. 已完成 P0-3 importer thin slice：OpenClaw skill/MCP 只导入 metadata/schema/ref/hash，不导入 prompt、
-   凭据或整份 skill；complete scope 内的 MCP/skill 漂移会撤下旧 descriptor 并推动 catalog epoch。待补
-   OpenClaw live exporter/sync daemon；
-6. 把 connector logical/physical usage、quota 和 health 投影到看板；
+   凭据或整份 skill；complete scope 内的 MCP/skill 漂移会撤下旧 descriptor 并推动 catalog epoch；
+6. P0-4a 第一笔已完成 trusted exporter state、source registration、单调 generation/prior chain 与 ingest
+   event；第二笔把 connector logical/physical usage、quota、health、incident 和 metadata source 状态投影
+   到看板。OpenClaw live inventory attach 仍未开放；
 7. 已完成 credential-free public HTTPS transport component 的 DNS/IP/pinned socket/TLS/redirect/size
    复核；待接 web fetch adapter/Runner 后才算真实链路；
 8. 已冻结 public transport 与 credential authority metadata/API 分界；offline attestation 与 networked

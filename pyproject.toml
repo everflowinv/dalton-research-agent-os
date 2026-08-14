@@ -32,6 +32,7 @@ dalton_core = [
   "capability_schema.sql",
   "scheduler_schema.sql",
   "capability_catalog_schema.sql",
+  "openclaw_exporter_schema.sql",
   "model_router_schema.sql",
   "observability_schema.sql",
   "dashboard_schema.sql",

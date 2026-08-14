@@ -27,16 +27,27 @@
     }
   },
   "properties": {
-    "schema_version": {"const": "0.1"},
+    "schema_version": {"const": "0.2"},
     "id": {"$ref": "#/$defs/ref"},
     "created_at": {"type": "string", "format": "date-time"},
     "producer": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["openclaw_version", "catalog_generation"],
+      "required": [
+        "openclaw_version", "source_instance_ref", "exporter_version",
+        "catalog_generation", "prior_snapshot_ref", "prior_snapshot_hash"
+      ],
       "properties": {
         "openclaw_version": {"type": "string", "minLength": 1},
-        "catalog_generation": {"type": "string", "minLength": 1}
+        "source_instance_ref": {"$ref": "#/$defs/ref"},
+        "exporter_version": {"type": "string", "minLength": 1, "maxLength": 256},
+        "catalog_generation": {"type": "integer", "minimum": 1},
+        "prior_snapshot_ref": {
+          "oneOf": [{"$ref": "#/$defs/ref"}, {"type": "null"}]
+        },
+        "prior_snapshot_hash": {
+          "oneOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]
+        }
       }
     },
     "scope": {

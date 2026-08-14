@@ -45,6 +45,22 @@ CREATE TABLE IF NOT EXISTS external_capability_import_state (
 INSERT OR IGNORE INTO external_capability_import_state(singleton, import_generation)
 VALUES(1, 0);
 
+CREATE TABLE IF NOT EXISTS external_capability_source_registrations (
+    source_instance_ref TEXT PRIMARY KEY,
+    registration_ref TEXT NOT NULL UNIQUE,
+    registration_hash TEXT NOT NULL UNIQUE,
+    registration_json TEXT NOT NULL,
+    registered_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS external_capability_active_source (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    source_instance_ref TEXT NOT NULL
+        REFERENCES external_capability_source_registrations(source_instance_ref),
+    registration_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS external_capability_snapshots (
     snapshot_ref TEXT PRIMARY KEY,
     snapshot_hash TEXT NOT NULL UNIQUE,
@@ -52,6 +68,62 @@ CREATE TABLE IF NOT EXISTS external_capability_snapshots (
     snapshot_json TEXT NOT NULL,
     created_at TEXT NOT NULL,
     imported_at TEXT NOT NULL
+);
+
+-- Wire 0.2 source-chain authority is a strict sidecar so a P0-3 database and
+-- a fresh database share the same DDL. Legacy wire 0.1 snapshots remain in
+-- the base immutable table without forged source registration or generation.
+CREATE TABLE IF NOT EXISTS external_capability_snapshot_chains (
+    snapshot_ref TEXT PRIMARY KEY
+        REFERENCES external_capability_snapshots(snapshot_ref),
+    source_instance_ref TEXT NOT NULL
+        REFERENCES external_capability_source_registrations(source_instance_ref),
+    exporter_version TEXT NOT NULL CHECK (length(exporter_version) > 0),
+    catalog_generation INTEGER NOT NULL CHECK (catalog_generation > 0),
+    prior_snapshot_ref TEXT REFERENCES external_capability_snapshots(snapshot_ref),
+    prior_snapshot_hash TEXT,
+    UNIQUE(source_instance_ref, catalog_generation),
+    CHECK ((prior_snapshot_ref IS NULL) = (prior_snapshot_hash IS NULL)),
+    CHECK (
+        (catalog_generation = 1 AND prior_snapshot_ref IS NULL)
+        OR (catalog_generation > 1 AND prior_snapshot_ref IS NOT NULL)
+    )
+);
+
+CREATE TABLE IF NOT EXISTS external_capability_source_heads (
+    source_instance_ref TEXT PRIMARY KEY
+        REFERENCES external_capability_source_registrations(source_instance_ref),
+    catalog_generation INTEGER NOT NULL CHECK (catalog_generation > 0),
+    snapshot_ref TEXT NOT NULL UNIQUE
+        REFERENCES external_capability_snapshots(snapshot_ref),
+    snapshot_hash TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS external_capability_snapshot_ingest_events (
+    event_ref TEXT PRIMARY KEY,
+    source_instance_ref TEXT NOT NULL,
+    snapshot_ref TEXT NOT NULL,
+    snapshot_hash TEXT NOT NULL,
+    catalog_generation INTEGER NOT NULL CHECK (catalog_generation > 0),
+    prior_snapshot_ref TEXT,
+    prior_snapshot_hash TEXT,
+    observed_head_ref TEXT,
+    observed_head_hash TEXT,
+    observed_head_generation INTEGER,
+    outcome TEXT NOT NULL CHECK (
+        outcome IN (
+            'accepted','duplicate','stale','gap','fork','equivocation','unregistered'
+        )
+    ),
+    event_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    CHECK ((prior_snapshot_ref IS NULL) = (prior_snapshot_hash IS NULL)),
+    CHECK ((observed_head_ref IS NULL) = (observed_head_hash IS NULL)),
+    CHECK (
+        (observed_head_ref IS NULL AND observed_head_generation IS NULL)
+        OR (observed_head_ref IS NOT NULL AND observed_head_generation > 0)
+    )
 );
 
 CREATE TABLE IF NOT EXISTS external_capability_metadata_versions (
@@ -126,6 +198,30 @@ END;
 CREATE TRIGGER IF NOT EXISTS external_snapshot_no_delete
 BEFORE DELETE ON external_capability_snapshots BEGIN
     SELECT RAISE(ABORT, 'external capability snapshots are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS external_snapshot_chain_no_update
+BEFORE UPDATE ON external_capability_snapshot_chains BEGIN
+    SELECT RAISE(ABORT, 'external snapshot chains are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS external_snapshot_chain_no_delete
+BEFORE DELETE ON external_capability_snapshot_chains BEGIN
+    SELECT RAISE(ABORT, 'external snapshot chains are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS external_source_registration_no_update
+BEFORE UPDATE ON external_capability_source_registrations BEGIN
+    SELECT RAISE(ABORT, 'external source registrations are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS external_source_registration_no_delete
+BEFORE DELETE ON external_capability_source_registrations BEGIN
+    SELECT RAISE(ABORT, 'external source registrations are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS external_snapshot_ingest_no_update
+BEFORE UPDATE ON external_capability_snapshot_ingest_events BEGIN
+    SELECT RAISE(ABORT, 'external snapshot ingest events are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS external_snapshot_ingest_no_delete
+BEFORE DELETE ON external_capability_snapshot_ingest_events BEGIN
+    SELECT RAISE(ABORT, 'external snapshot ingest events are append-only');
 END;
 CREATE TRIGGER IF NOT EXISTS external_metadata_no_update
 BEFORE UPDATE ON external_capability_metadata_versions BEGIN

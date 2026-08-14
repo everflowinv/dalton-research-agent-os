@@ -19,12 +19,13 @@ from .capability_catalog import (
     CapabilityCatalog,
     CapabilityPermissions,
     CatalogValidationError,
+    SCHEMA_VERSION as CATALOG_SCHEMA_VERSION,
     canonical_hash,
     canonical_json,
 )
 
 
-SCHEMA_VERSION = "0.1"
+SNAPSHOT_SCHEMA_VERSION = "0.2"
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _REF_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+._-]*:[^\s]+$")
 _CANONICAL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -207,19 +208,53 @@ class OpenClawMetadataImporter:
             "mcp_tools", "content_hash",
         }
         wire = _closed(snapshot, fields, "OpenClawCapabilitySnapshot")
-        if wire["schema_version"] != SCHEMA_VERSION:
+        if wire["schema_version"] != SNAPSHOT_SCHEMA_VERSION:
             raise MetadataValidationError("unsupported metadata snapshot schema_version")
         wire["id"] = _ref(wire["id"], "id")
         wire["created_at"] = _timestamp(wire["created_at"], "created_at")
         producer = _closed(
-            wire["producer"], {"openclaw_version", "catalog_generation"}, "producer"
+            wire["producer"],
+            {
+                "openclaw_version", "source_instance_ref", "exporter_version",
+                "catalog_generation", "prior_snapshot_ref", "prior_snapshot_hash",
+            },
+            "producer",
         )
         producer["openclaw_version"] = _text(
             producer["openclaw_version"], "producer.openclaw_version"
         )
-        producer["catalog_generation"] = _text(
-            producer["catalog_generation"], "producer.catalog_generation"
+        producer["source_instance_ref"] = _ref(
+            producer["source_instance_ref"], "producer.source_instance_ref"
         )
+        producer["exporter_version"] = _text(
+            producer["exporter_version"], "producer.exporter_version"
+        )
+        if len(producer["exporter_version"]) > 256:
+            raise MetadataValidationError("producer.exporter_version is too long")
+        if (
+            type(producer["catalog_generation"]) is not int
+            or producer["catalog_generation"] < 1
+        ):
+            raise MetadataValidationError(
+                "producer.catalog_generation must be a positive integer"
+            )
+        prior_ref = producer["prior_snapshot_ref"]
+        prior_hash = producer["prior_snapshot_hash"]
+        if (prior_ref is None) != (prior_hash is None):
+            raise MetadataValidationError(
+                "producer prior snapshot ref/hash must be paired"
+            )
+        if prior_ref is not None:
+            producer["prior_snapshot_ref"] = _ref(
+                prior_ref, "producer.prior_snapshot_ref"
+            )
+            producer["prior_snapshot_hash"] = _hash(
+                prior_hash, "producer.prior_snapshot_hash"
+            )
+        if producer["catalog_generation"] == 1 and prior_ref is not None:
+            raise MetadataValidationError("first generation cannot declare a prior snapshot")
+        if producer["catalog_generation"] > 1 and prior_ref is None:
+            raise MetadataValidationError("later generations require a prior snapshot")
         wire["producer"] = producer
         scope = _closed(
             wire["scope"], {"skills_complete", "mcp_servers_complete"}, "scope"
@@ -359,7 +394,7 @@ class OpenClawMetadataImporter:
             "adapter_ref": "adapter:openclaw:skill-loader:0.1",
         }
         return {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": CATALOG_SCHEMA_VERSION,
             "capability_id": capability_id,
             "created_at": created_at,
             "kind": "instruction",
@@ -385,6 +420,7 @@ class OpenClawMetadataImporter:
                 {
                     "contract": contract,
                     "instruction_hash": item["instruction_hash"],
+                    "upstream_metadata_hash": item["metadata_hash"],
                 }
             ),
             "upstream_metadata_hash": item["metadata_hash"],
@@ -396,7 +432,7 @@ class OpenClawMetadataImporter:
             f"capability:mcp:{item['safe_server_name']}:{item['tool_name']}"
         )
         return {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": CATALOG_SCHEMA_VERSION,
             "capability_id": capability_id,
             "created_at": created_at,
             "kind": "tool",
@@ -490,6 +526,11 @@ class OpenClawMetadataImporter:
             snapshot_ref=wire["id"],
             snapshot_hash=envelope_hash,
             producer_version=wire["producer"]["openclaw_version"],
+            source_instance_ref=wire["producer"]["source_instance_ref"],
+            exporter_version=wire["producer"]["exporter_version"],
+            catalog_generation=wire["producer"]["catalog_generation"],
+            prior_snapshot_ref=wire["producer"]["prior_snapshot_ref"],
+            prior_snapshot_hash=wire["producer"]["prior_snapshot_hash"],
             snapshot_json=canonical_json(wire),
             snapshot_created_at=created_at,
             entries=entries,
@@ -529,7 +570,7 @@ class OpenClawMetadataImporter:
         if valid_until is not None:
             valid_until = _timestamp(valid_until, "valid_until")
         proposal = {
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": CATALOG_SCHEMA_VERSION,
             "id": metadata["capability_id"],
             "version": version,
             "created_at": created_at or self._now(),
@@ -564,4 +605,5 @@ __all__ = [
     "MetadataImportError",
     "MetadataValidationError",
     "OpenClawMetadataImporter",
+    "SNAPSHOT_SCHEMA_VERSION",
 ]

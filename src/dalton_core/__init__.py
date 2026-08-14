@@ -20,6 +20,9 @@ _LAZY_EXPORTS = {
     "OpenClawMetadataImporter": (
         ".openclaw_metadata", "OpenClawMetadataImporter"
     ),
+    "OpenClawMetadataExporter": (
+        ".openclaw_metadata_exporter", "OpenClawMetadataExporter"
+    ),
     "PublicHttpTransport": (".public_http_transport", "PublicHttpTransport"),
     "CredentialGrantEnvelope": (
         ".credential_authority", "CredentialGrantEnvelope"
@@ -69,6 +72,7 @@ __all__ = [
     "ObservabilityStore",
     "OpenClawModelAdapter",
     "OpenClawMetadataImporter",
+    "OpenClawMetadataExporter",
     "install_openclaw_catalog",
     "migrate_legacy_workspace",
     "ProcessRuntimeAdapter",

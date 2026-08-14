@@ -128,6 +128,35 @@ OpenClaw skill/MCP 先进入独立的 metadata snapshot authority，不直接进
 
 当前 public transport component 尚未接 source-specific adapter 或真实网络；P0-3 仍是离线实现。
 
+### P0-4a trusted snapshot sync
+
+Snapshot wire 0.2 新增 `source_instance_ref`、`exporter_version`、严格整数 `catalog_generation` 和成对的
+`prior_snapshot_ref/prior_snapshot_hash`。Exporter 的本地排序只负责重试效率，真正的顺序 authority 在
+CapabilityCatalog：
+
+- source instance 必须先由 trusted operator resolver 返回 active human registration；source reset 必须换
+  新 instance，旧 instance 不能自行重新注册；reset 会先撤下旧 source 的 current metadata/descriptor，并在
+  存在 live descriptor 时推进 catalog epoch；registration receipt 必须绑定 reset 前的 exact active
+  source/hash，并发 reset 只有一个能提交；首次注册同样会撤下 P0-3 legacy current state；registration
+  wire 0.1 要求 `effective_until=null`；
+- source head 为空时只接受 generation 1 且 prior 为空；之后只接受 exact next generation 和 exact prior
+  head；
+- exact current generation/ref/hash 是 duplicate；低 generation 是 stale；同 generation 异内容是
+  equivocation；跳号是 gap；prior 不匹配是 fork；
+- 所有拒绝都追加只含 ref/hash/generation/outcome 的 ingest event，但不能改 current metadata、descriptor、
+  source head 或 catalog epoch；接受路径把 ingest event、snapshot、head、metadata/schema 和 descriptor
+  withdrawal 放在一个事务；同一 generation 的并发 loser 要在锁内重新分类并写 equivocation event；
+- host-owned exporter 以 owner-only SQLite 保存一个 pending snapshot。Catalog 接受后若在 acknowledge 前
+  崩溃，重启必须先重放同一 snapshot，收到 duplicate 后才能推进下一 generation。
+
+Exporter 只接收已过滤的 compact records，不读取或持久化 skill path/instruction、MCP server config、
+credential 或 tool output。这是可测试的 sync component，不代表已连接 OpenClaw live inventory；live attach
+仍须单独 gate。
+
+P0-3 的 immutable snapshot base table 不原地 ALTER。Wire 0.2 source instance、generation、prior chain、FK、
+unique 和 CHECK 约束放在严格 1:1 sidecar table；因此 fresh DB 与升级 DB 使用同一 DDL，legacy wire 0.1
+snapshot 不需要伪造 source registration。
+
 `ConnectorCallSpec.parameters` 不保存 token、cookie、password、API key 或其他 credential-shaped 字段；
 凭据只能通过 profile 声明的 slot 交给 Runner。authority 会核对 query hash 和拒绝这些敏感字段；可信
 Runner 使用 operator 安装、由 environment/package manifest 约束的 input validator，按 profile 冻结的

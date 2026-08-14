@@ -81,6 +81,18 @@ class LeaseNotUsable(PermissionDenied):
     """A historical lease failed its mandatory use-time checks."""
 
 
+class ExternalSourceRegistrationRequired(PermissionDenied):
+    """An external metadata source lacks an active operator registration."""
+
+
+class ExternalSnapshotRejected(StaleCatalog):
+    """A well-formed external snapshot failed the monotonic source chain."""
+
+    def __init__(self, outcome: str, message: str) -> None:
+        super().__init__(message)
+        self.outcome = outcome
+
+
 def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -677,6 +689,9 @@ class CapabilityCatalog:
         max_lease_seconds: int = 300,
         approval_resolver: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         policy_resolver: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        source_registration_resolver: (
+            Callable[[Mapping[str, Any]], Mapping[str, Any]] | None
+        ) = None,
     ) -> None:
         if type(max_lease_seconds) is not int or max_lease_seconds < 1:
             raise CatalogValidationError("max_lease_seconds must be a positive integer")
@@ -685,6 +700,7 @@ class CapabilityCatalog:
         self.max_lease_seconds = max_lease_seconds
         self.approval_resolver = approval_resolver
         self.policy_resolver = policy_resolver
+        self.source_registration_resolver = source_registration_resolver
         self._conn = sqlite3.connect(self.path, isolation_level=None)
         if self.path != ":memory:":
             os.chmod(self.path, 0o600)
@@ -710,6 +726,229 @@ class CapabilityCatalog:
         value = self.clock()
         _timestamp(value)
         return value.astimezone(timezone.utc)
+
+    def register_external_source(self, source_instance_ref: str) -> dict[str, Any]:
+        """Register one exporter instance through a trusted operator resolver."""
+
+        source_instance_ref = _ref(
+            source_instance_ref, "source_instance_ref"
+        )  # type: ignore[assignment]
+        if self.source_registration_resolver is None:
+            raise ExternalSourceRegistrationRequired(
+                "trusted external source registration resolver is required"
+            )
+        now = self._time()
+        existing = self._conn.execute(
+            "SELECT registration_hash FROM external_capability_source_registrations "
+            "WHERE source_instance_ref=?",
+            (source_instance_ref,),
+        ).fetchone()
+        observed_active = self._conn.execute(
+            "SELECT a.source_instance_ref,r.registration_ref,a.registration_hash "
+            "FROM external_capability_active_source a "
+            "JOIN external_capability_source_registrations r "
+            "ON r.source_instance_ref=a.source_instance_ref WHERE a.singleton=1"
+        ).fetchone()
+        if existing is not None:
+            if (
+                observed_active is None
+                or observed_active["source_instance_ref"] != source_instance_ref
+            ):
+                raise ExternalSourceRegistrationRequired(
+                    "superseded source instances cannot be reactivated; "
+                    "register a new instance"
+                )
+            return {
+                "write_status": "duplicate",
+                "source_instance_ref": source_instance_ref,
+                "registration_hash": existing["registration_hash"],
+                "invalidated_descriptors": 0,
+            }
+        prior_source_instance_ref = (
+            None if observed_active is None else observed_active["source_instance_ref"]
+        )
+        prior_registration_hash = (
+            None if observed_active is None else observed_active["registration_hash"]
+        )
+        prior_registration_ref = (
+            None if observed_active is None else observed_active["registration_ref"]
+        )
+        query = {
+            "source_instance_ref": source_instance_ref,
+            "prior_source_instance_ref": prior_source_instance_ref,
+            "prior_registration_ref": prior_registration_ref,
+            "prior_registration_hash": prior_registration_hash,
+            "at": _timestamp(now),
+        }
+        try:
+            raw = self.source_registration_resolver(query)
+        except CatalogError:
+            raise
+        except Exception as exc:
+            raise ExternalSourceRegistrationRequired(
+                "external source registration lookup failed"
+            ) from exc
+        fields = {
+            "schema_version", "registration_ref", "source_instance_ref",
+            "prior_source_instance_ref", "prior_registration_ref",
+            "prior_registration_hash",
+            "decision", "registered_by", "active", "effective_from",
+            "effective_until", "receipt_hash",
+        }
+        receipt = dict(_closed(raw, fields, fields, "external source registration"))
+        if receipt["schema_version"] != SCHEMA_VERSION:
+            raise ExternalSourceRegistrationRequired(
+                "external source registration schema_version is unsupported"
+            )
+        receipt["registration_ref"] = _ref(
+            receipt["registration_ref"], "registration_ref"
+        )
+        receipt["source_instance_ref"] = _ref(
+            receipt["source_instance_ref"], "source_instance_ref"
+        )
+        if receipt["source_instance_ref"] != source_instance_ref:
+            raise ExternalSourceRegistrationRequired(
+                "registration source instance does not match request"
+            )
+        receipt["prior_source_instance_ref"] = _ref(
+            receipt["prior_source_instance_ref"],
+            "prior_source_instance_ref",
+            nullable=True,
+        )
+        receipt["prior_registration_ref"] = _ref(
+            receipt["prior_registration_ref"],
+            "prior_registration_ref",
+            nullable=True,
+        )
+        if receipt["prior_registration_hash"] is not None:
+            receipt["prior_registration_hash"] = _hash(
+                receipt["prior_registration_hash"], "prior_registration_hash"
+            )
+        if (
+            receipt["prior_source_instance_ref"] != prior_source_instance_ref
+            or receipt["prior_registration_ref"] != prior_registration_ref
+            or receipt["prior_registration_hash"] != prior_registration_hash
+        ):
+            raise ExternalSourceRegistrationRequired(
+                "registration does not bind the observed active source head"
+            )
+        if receipt["decision"] != "approve" or receipt["active"] is not True:
+            raise ExternalSourceRegistrationRequired(
+                "external source is not actively approved"
+            )
+        receipt["registered_by"] = _ref(
+            receipt["registered_by"], "registered_by"
+        )
+        if not str(receipt["registered_by"]).startswith("human:"):
+            raise ExternalSourceRegistrationRequired(
+                "external source registration requires a human operator"
+            )
+        effective_from = _parse_time(receipt["effective_from"], "effective_from")
+        if receipt["effective_until"] is not None:
+            raise ExternalSourceRegistrationRequired(
+                "source registration wire 0.1 requires effective_until=null; "
+                "rotate to a new source instance explicitly"
+            )
+        if effective_from > now:
+            raise ExternalSourceRegistrationRequired(
+                "external source registration is not currently effective"
+            )
+        declared_hash = _hash(receipt.pop("receipt_hash"), "receipt_hash")
+        if canonical_hash(receipt) != declared_hash:
+            raise ExternalSourceRegistrationRequired(
+                "external source registration receipt hash mismatch"
+            )
+        receipt["receipt_hash"] = declared_hash
+        try:
+            self._conn.execute("BEGIN IMMEDIATE")
+            active = self._conn.execute(
+                "SELECT a.source_instance_ref,r.registration_ref,a.registration_hash "
+                "FROM external_capability_active_source a "
+                "JOIN external_capability_source_registrations r "
+                "ON r.source_instance_ref=a.source_instance_ref WHERE a.singleton=1"
+            ).fetchone()
+            live_prior = (
+                None if active is None else active["source_instance_ref"],
+                None if active is None else active["registration_ref"],
+                None if active is None else active["registration_hash"],
+            )
+            if live_prior != (
+                prior_source_instance_ref,
+                prior_registration_ref,
+                prior_registration_hash,
+            ):
+                raise StaleCatalog(
+                    "active external source changed during registration"
+                )
+            existing = self._conn.execute(
+                "SELECT registration_hash FROM external_capability_source_registrations "
+                "WHERE source_instance_ref=?",
+                (source_instance_ref,),
+            ).fetchone()
+            if existing is not None:
+                raise StaleCatalog("source instance was registered concurrently")
+            self._conn.execute(
+                "INSERT INTO external_capability_source_registrations"
+                "(source_instance_ref,registration_ref,registration_hash,"
+                "registration_json,registered_at) VALUES(?,?,?,?,?)",
+                (
+                    source_instance_ref, receipt["registration_ref"], declared_hash,
+                    canonical_json(receipt), _timestamp(now),
+                ),
+            )
+            invalidated_descriptors = 0
+            if active is None or active["source_instance_ref"] != source_instance_ref:
+                descriptor_rows = self._conn.execute(
+                    "SELECT c.capability_id,v.descriptor_json "
+                    "FROM capability_current c JOIN capability_descriptor_versions v "
+                    "ON v.revision_ref=c.revision_ref"
+                ).fetchall()
+                external_descriptor_ids = []
+                for row in descriptor_rows:
+                    descriptor = json.loads(row["descriptor_json"])
+                    source = descriptor["source"]
+                    if (
+                        source["type"] == "mcp"
+                        or (
+                            source["type"] == "skill"
+                            and source["namespace"] == "openclaw"
+                        )
+                    ):
+                        external_descriptor_ids.append(row["capability_id"])
+                invalidated_descriptors = len(external_descriptor_ids)
+                self._conn.executemany(
+                    "DELETE FROM capability_current WHERE capability_id=?",
+                    [(capability_id,) for capability_id in external_descriptor_ids],
+                )
+                self._conn.execute("DELETE FROM external_capability_metadata_current")
+                if invalidated_descriptors:
+                    self._conn.execute(
+                        "UPDATE capability_catalog_meta "
+                        "SET catalog_epoch=catalog_epoch+1 WHERE singleton=1"
+                    )
+            self._conn.execute(
+                "INSERT INTO external_capability_active_source"
+                "(singleton,source_instance_ref,registration_hash,updated_at) "
+                "VALUES(1,?,?,?) ON CONFLICT(singleton) DO UPDATE SET "
+                "source_instance_ref=excluded.source_instance_ref,"
+                "registration_hash=excluded.registration_hash,"
+                "updated_at=excluded.updated_at",
+                (source_instance_ref, declared_hash, _timestamp(now)),
+            )
+            self._conn.execute(
+                "UPDATE external_capability_import_state "
+                "SET import_generation=import_generation+1 WHERE singleton=1"
+            )
+            self._conn.commit()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        return {
+            "write_status": "fresh",
+            "source_instance_ref": source_instance_ref,
+            "registration_hash": declared_hash,
+            "invalidated_descriptors": invalidated_descriptors,
+        }
 
     def _resolve_approval(
         self,
@@ -916,6 +1155,11 @@ class CapabilityCatalog:
         snapshot_ref: str,
         snapshot_hash: str,
         producer_version: str,
+        source_instance_ref: str,
+        exporter_version: str,
+        catalog_generation: int,
+        prior_snapshot_ref: str | None,
+        prior_snapshot_hash: str | None,
         snapshot_json: str,
         snapshot_created_at: str,
         entries: Sequence[Mapping[str, Any]],
@@ -934,6 +1178,25 @@ class CapabilityCatalog:
         snapshot_ref = _ref(snapshot_ref, "snapshot_ref")  # type: ignore[assignment]
         snapshot_hash = _hash(snapshot_hash, "snapshot_hash")
         producer_version = _string(producer_version, "producer_version")
+        source_instance_ref = _ref(
+            source_instance_ref, "source_instance_ref"
+        )  # type: ignore[assignment]
+        exporter_version = _string(exporter_version, "exporter_version")
+        if len(exporter_version) > 256:
+            raise CatalogValidationError("exporter_version is too long")
+        if type(catalog_generation) is not int or catalog_generation < 1:
+            raise CatalogValidationError("catalog_generation must be a positive integer")
+        prior_snapshot_ref = _ref(
+            prior_snapshot_ref, "prior_snapshot_ref", nullable=True
+        )
+        if prior_snapshot_hash is not None:
+            prior_snapshot_hash = _hash(prior_snapshot_hash, "prior_snapshot_hash")
+        if (prior_snapshot_ref is None) != (prior_snapshot_hash is None):
+            raise CatalogValidationError("prior snapshot ref/hash must be paired")
+        if catalog_generation == 1 and prior_snapshot_ref is not None:
+            raise CatalogValidationError("first generation cannot have a prior snapshot")
+        if catalog_generation > 1 and prior_snapshot_ref is None:
+            raise CatalogValidationError("later generations require a prior snapshot")
         _parse_time(snapshot_created_at, "snapshot_created_at")
         if type(skills_complete) is not bool:
             raise CatalogValidationError("skills_complete must be boolean")
@@ -946,6 +1209,24 @@ class CapabilityCatalog:
             raise CatalogValidationError("snapshot_json must be valid JSON") from exc
         if canonical_hash(decoded_snapshot) != snapshot_hash:
             raise CatalogConflict("snapshot_hash does not bind snapshot_json")
+        try:
+            producer = decoded_snapshot["producer"]
+            exact_envelope = (
+                decoded_snapshot["id"] == snapshot_ref
+                and decoded_snapshot["created_at"] == snapshot_created_at
+                and producer["openclaw_version"] == producer_version
+                and producer["source_instance_ref"] == source_instance_ref
+                and producer["exporter_version"] == exporter_version
+                and producer["catalog_generation"] == catalog_generation
+                and producer["prior_snapshot_ref"] == prior_snapshot_ref
+                and producer["prior_snapshot_hash"] == prior_snapshot_hash
+            )
+        except (KeyError, TypeError) as exc:
+            raise CatalogValidationError(
+                "snapshot_json lacks the required wire 0.2 producer fields"
+            ) from exc
+        if not exact_envelope:
+            raise CatalogConflict("snapshot arguments do not match snapshot_json")
 
         normalized_entries: list[dict[str, Any]] = []
         seen_capabilities: set[str] = set()
@@ -1007,26 +1288,6 @@ class CapabilityCatalog:
                 "SELECT import_generation FROM external_capability_import_state WHERE singleton=1"
             ).fetchone()[0]
         )
-
-        existing_snapshot = self._conn.execute(
-            "SELECT snapshot_hash FROM external_capability_snapshots WHERE snapshot_ref=?",
-            (snapshot_ref,),
-        ).fetchone()
-        if existing_snapshot is not None:
-            if existing_snapshot["snapshot_hash"] != snapshot_hash:
-                raise CatalogConflict("snapshot_ref already binds different content")
-            events = self._conn.execute(
-                "SELECT event_json FROM external_capability_sync_events "
-                "WHERE snapshot_ref=? ORDER BY rowid",
-                (snapshot_ref,),
-            ).fetchall()
-            return {
-                "write_status": "duplicate",
-                "snapshot_ref": snapshot_ref,
-                "snapshot_hash": snapshot_hash,
-                "catalog_epoch": self.epoch,
-                "events": [json.loads(row["event_json"]) for row in events],
-            }
 
         current_rows = self._conn.execute(
             "SELECT c.capability_id,c.metadata_ref,c.source_scope,c.source_key,c.metadata_hash "
@@ -1110,27 +1371,169 @@ class CapabilityCatalog:
                     "SELECT catalog_epoch FROM capability_catalog_meta WHERE singleton=1"
                 ).fetchone()[0]
             )
-            if live_epoch != current_epoch:
-                raise StaleCatalog("catalog changed during metadata import")
             live_import_generation = int(
                 self._conn.execute(
                     "SELECT import_generation FROM external_capability_import_state "
                     "WHERE singleton=1"
                 ).fetchone()[0]
             )
-            if live_import_generation != observed_import_generation:
-                raise StaleCatalog("external metadata changed during import")
+
+            active_source = self._conn.execute(
+                "SELECT source_instance_ref FROM external_capability_active_source "
+                "WHERE singleton=1"
+            ).fetchone()
+            registration = self._conn.execute(
+                "SELECT registration_hash FROM external_capability_source_registrations "
+                "WHERE source_instance_ref=?",
+                (source_instance_ref,),
+            ).fetchone()
+            head = self._conn.execute(
+                "SELECT catalog_generation,snapshot_ref,snapshot_hash "
+                "FROM external_capability_source_heads WHERE source_instance_ref=?",
+                (source_instance_ref,),
+            ).fetchone()
+            existing_snapshot = self._conn.execute(
+                "SELECT snapshot_hash FROM external_capability_snapshots "
+                "WHERE snapshot_ref=?",
+                (snapshot_ref,),
+            ).fetchone()
+
+            outcome = "accepted"
+            rejection_message = ""
+            if (
+                registration is None
+                or active_source is None
+                or active_source["source_instance_ref"] != source_instance_ref
+            ):
+                outcome = "unregistered"
+                rejection_message = "snapshot source instance is not the active registration"
+            elif head is None:
+                if catalog_generation != 1:
+                    outcome = "gap"
+                    rejection_message = "first accepted snapshot must have generation 1"
+                elif prior_snapshot_ref is not None:
+                    outcome = "fork"
+                    rejection_message = "first accepted snapshot cannot name a prior head"
+                elif existing_snapshot is not None:
+                    outcome = "equivocation"
+                    rejection_message = "snapshot_ref is already bound to other content"
+            else:
+                head_generation = int(head["catalog_generation"])
+                if catalog_generation < head_generation:
+                    outcome = "stale"
+                    rejection_message = "snapshot generation is older than the current head"
+                elif catalog_generation == head_generation:
+                    if (
+                        snapshot_ref == head["snapshot_ref"]
+                        and snapshot_hash == head["snapshot_hash"]
+                    ):
+                        outcome = "duplicate"
+                    else:
+                        outcome = "equivocation"
+                        rejection_message = (
+                            "snapshot generation conflicts with the current head"
+                        )
+                elif catalog_generation > head_generation + 1:
+                    outcome = "gap"
+                    rejection_message = "snapshot generation skipped the exact next value"
+                elif (
+                    prior_snapshot_ref != head["snapshot_ref"]
+                    or prior_snapshot_hash != head["snapshot_hash"]
+                ):
+                    outcome = "fork"
+                    rejection_message = "snapshot prior ref/hash does not match the current head"
+                elif existing_snapshot is not None:
+                    outcome = "equivocation"
+                    rejection_message = "snapshot_ref is already bound to other content"
+
+            observed_head_ref = None if head is None else head["snapshot_ref"]
+            observed_head_hash = None if head is None else head["snapshot_hash"]
+            observed_head_generation = (
+                None if head is None else int(head["catalog_generation"])
+            )
+            ingest_event = {
+                "schema_version": SCHEMA_VERSION,
+                "source_instance_ref": source_instance_ref,
+                "snapshot_ref": snapshot_ref,
+                "snapshot_hash": snapshot_hash,
+                "catalog_generation": catalog_generation,
+                "prior_snapshot_ref": prior_snapshot_ref,
+                "prior_snapshot_hash": prior_snapshot_hash,
+                "observed_head_ref": observed_head_ref,
+                "observed_head_hash": observed_head_hash,
+                "observed_head_generation": observed_head_generation,
+                "outcome": outcome,
+                "created_at": imported_at,
+            }
+            ingest_event["content_hash"] = canonical_hash(ingest_event)
+            ingest_event_ref = f"external-ingest:{ingest_event['content_hash']}"
+            self._conn.execute(
+                "INSERT OR IGNORE INTO external_capability_snapshot_ingest_events"
+                "(event_ref,source_instance_ref,snapshot_ref,snapshot_hash,"
+                "catalog_generation,prior_snapshot_ref,prior_snapshot_hash,"
+                "observed_head_ref,observed_head_hash,observed_head_generation,"
+                "outcome,event_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    ingest_event_ref, source_instance_ref, snapshot_ref, snapshot_hash,
+                    catalog_generation, prior_snapshot_ref, prior_snapshot_hash,
+                    observed_head_ref, observed_head_hash, observed_head_generation,
+                    outcome, canonical_json(ingest_event), imported_at,
+                ),
+            )
             self._conn.execute(
                 "UPDATE external_capability_import_state "
                 "SET import_generation=import_generation+1 WHERE singleton=1"
             )
+            if outcome == "duplicate":
+                events = self._conn.execute(
+                    "SELECT event_json FROM external_capability_sync_events "
+                    "WHERE snapshot_ref=? ORDER BY rowid",
+                    (snapshot_ref,),
+                ).fetchall()
+                self._conn.commit()
+                return {
+                    "write_status": "duplicate",
+                    "snapshot_ref": snapshot_ref,
+                    "snapshot_hash": snapshot_hash,
+                    "catalog_epoch": live_epoch,
+                    "ingest_event": ingest_event,
+                    "events": [json.loads(row["event_json"]) for row in events],
+                }
+            if outcome != "accepted":
+                self._conn.commit()
+                raise ExternalSnapshotRejected(outcome, rejection_message)
+            if live_epoch != current_epoch:
+                raise StaleCatalog("catalog changed during metadata import")
+            if live_import_generation != observed_import_generation:
+                raise StaleCatalog("external metadata changed during import")
             self._conn.execute(
                 "INSERT INTO external_capability_snapshots"
-                "(snapshot_ref,snapshot_hash,producer_version,snapshot_json,created_at,imported_at) "
-                "VALUES(?,?,?,?,?,?)",
+                "(snapshot_ref,snapshot_hash,producer_version,snapshot_json,created_at,"
+                "imported_at) VALUES(?,?,?,?,?,?)",
                 (
                     snapshot_ref, snapshot_hash, producer_version, snapshot_json,
                     snapshot_created_at, imported_at,
+                ),
+            )
+            self._conn.execute(
+                "INSERT INTO external_capability_snapshot_chains"
+                "(snapshot_ref,source_instance_ref,exporter_version,catalog_generation,"
+                "prior_snapshot_ref,prior_snapshot_hash) VALUES(?,?,?,?,?,?)",
+                (
+                    snapshot_ref, source_instance_ref, exporter_version,
+                    catalog_generation, prior_snapshot_ref, prior_snapshot_hash,
+                ),
+            )
+            self._conn.execute(
+                "INSERT INTO external_capability_source_heads"
+                "(source_instance_ref,catalog_generation,snapshot_ref,snapshot_hash,updated_at) "
+                "VALUES(?,?,?,?,?) ON CONFLICT(source_instance_ref) DO UPDATE SET "
+                "catalog_generation=excluded.catalog_generation,"
+                "snapshot_ref=excluded.snapshot_ref,snapshot_hash=excluded.snapshot_hash,"
+                "updated_at=excluded.updated_at",
+                (
+                    source_instance_ref, catalog_generation, snapshot_ref,
+                    snapshot_hash, imported_at,
                 ),
             )
             for schema in normalized_schemas:
@@ -1229,6 +1632,7 @@ class CapabilityCatalog:
             "snapshot_ref": snapshot_ref,
             "snapshot_hash": snapshot_hash,
             "catalog_epoch": next_epoch,
+            "ingest_event": ingest_event,
             "events": event_records,
         }
 
