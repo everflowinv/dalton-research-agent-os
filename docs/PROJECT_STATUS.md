@@ -123,7 +123,8 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   第二次重放零新行。journal 完全缺失的 reservation 也按 indeterminate，不误放为 released；
 - P0-2b 不含真实网络、SSRF、credential authority、writer RPC、metadata importer、spool lifecycle、
   ContextPack/Checkpoint/ClaimIndex、部署或真实数据源；Python 254/254、broker 15/15、专项 18/18 和
-  确定性 wheel 已通过，Fable 5 最终复核及增量复核均为 **Go**。完整结果见本轮实施报告。
+  确定性 wheel 已通过，Fable 5 最终复核及增量复核均为 **Go**；实现提交 `f0e824f`，GitHub CI 最终
+  全部通过。完整结果见本轮实施报告。
 
 ## 蓝图阶段
 

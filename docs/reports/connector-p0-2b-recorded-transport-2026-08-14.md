@@ -100,11 +100,15 @@ Fable 5 独立复核给出“有条件 Go”：P0-2b 是正确的下一阶段，
   `df03f7c7eca91e820babed3c2cb61c50b516b3e4a777487b7c8971016eeaf313`；
 - wheel 隔离安装后可导入 executor/spool/journal，创建 2 张 runner journal 表，SQLite integrity 为 `ok`；
 - Fable 5 最终独立敌对复核及增量复核均为 **Go**。它独立复跑全量 254/254、专项 18/18，未发现
-  新的阻塞缺陷。
+  新的阻塞缺陷；
+- 实现提交：`f0e824f`；GitHub CI：
+  <https://github.com/everflowinv/dalton-research-agent-os/actions/runs/31824401325>，Python 3.11、3.13 和
+  OpenClaw broker 最终全部通过。第一次 Python 3.11 运行因既有 writer socket 启动等待超时失败；同一提交
+  未改代码直接重跑后通过。
 
 本机系统 Python 的 `python3 -m build` 仍受已安装 `build` 包缺少 `build.__main__` 影响；上述确定性构建
-使用独立 Python 3.13 venv 的 `pip wheel --no-build-isolation`。GitHub CI 要在提交推送后单独核验，未通过前
-不写成通过。
+使用独立 Python 3.13 venv 的 `pip wheel --no-build-isolation`。CI 的 Python 3.11/3.13 `python -m build`
+均已通过。
 
 ## 下一阶段
 
