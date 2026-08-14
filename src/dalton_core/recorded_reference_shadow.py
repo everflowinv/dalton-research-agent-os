@@ -364,7 +364,7 @@ class RecordedReferenceShadowCoordinator:
         completion_event = self.journal.event(receipt["completion_event_ref"])
         event_payload = completion_event.get("payload")
         if (
-            receipt["idempotency_status"] not in {"fresh", "duplicate"}
+            receipt["idempotency_status"] != "fresh"
             or receipt["runner_request_ref"] != expected_request["id"]
             or receipt["runner_request_hash"] != expected_request["content_hash"]
             or completion_event["runner_request_ref"] != expected_request["id"]
@@ -744,6 +744,7 @@ class RecordedReferenceShadowCoordinator:
                 is_parent=ordinal == 1,
             )
             receipt.pop("page_write_status")
+            receipt["idempotency_status"] = "fresh"
             receipts.append(receipt)
             if receipt["attempt_outcome"] != "succeeded":
                 return self._finish_failure(parent_admission, receipts)

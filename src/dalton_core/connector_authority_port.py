@@ -13,6 +13,15 @@ class ConnectorCompletionReceiptReader:
     __slots__ = ("_connectors", "_observability")
 
     def __init__(self, *, connectors: Any, observability: Any):
+        from .connector import ConnectorStore
+        from .observability import ObservabilityStore
+
+        if type(connectors) is not ConnectorStore:
+            raise TypeError("completion reader requires an exact ConnectorStore")
+        if type(observability) is not ObservabilityStore:
+            raise TypeError("completion reader requires an exact ObservabilityStore")
+        if connectors.connection is not observability.connection:
+            raise TypeError("completion reader authorities must share one Core store")
         self._connectors = connectors
         self._observability = observability
 

@@ -1179,6 +1179,17 @@ class RecordedReferenceShadowTests(unittest.TestCase):
     def test_scheduler_reconciliation_rejects_caller_claim_without_journal(self) -> None:
         with self.assertRaises(SchedulerValidationError):
             Scheduler(trusted_journal_reader=object())
+        with self.assertRaises(TypeError):
+            ConnectorCompletionReceiptReader(
+                connectors=object(), observability=object()
+            )
+        first_core = DaltonStore(":memory:")
+        second_core = DaltonStore(":memory:")
+        with self.assertRaises(TypeError):
+            ConnectorCompletionReceiptReader(
+                connectors=ConnectorStore(first_core),
+                observability=ObservabilityStore(second_core),
+            )
         harness = self.harness("cninfo", "success")
         request = harness.request()
         result = ResultEnvelope(

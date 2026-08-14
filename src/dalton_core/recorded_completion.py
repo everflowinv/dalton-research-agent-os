@@ -36,6 +36,8 @@ def build_recorded_parent_result(
         item["raw_artifact_version_ref"] is not None for item in receipts
     )
     if source is not None:
+        if any(item["attempt_outcome"] != "succeeded" for item in receipts):
+            raise ValueError("successful parent requires successful page receipts")
         completeness = source["completeness"]
         if completeness not in {"enumerated", "partial"}:
             raise ValueError("successful source completeness is invalid")
@@ -50,6 +52,8 @@ def build_recorded_parent_result(
         }
         source_ref = source["id"]
     else:
+        if last["attempt_outcome"] == "succeeded":
+            raise ValueError("successful final page requires a SourceEnvelope")
         status = "retryable"
         artifact_refs = list(execution_output_refs) if retained_artifacts else []
         error = last["error"] or {

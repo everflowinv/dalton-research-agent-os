@@ -1294,7 +1294,8 @@ class Scheduler:
                 else None
             )
             if (
-                page_request != expected_page_request
+                receipt["idempotency_status"] != "fresh"
+                or page_request != expected_page_request
                 or receipt["runner_request_ref"] in seen_requests
                 or receipt["completion_event_ref"] in seen_events
                 or receipt["runner_request_hash"] != page_request["content_hash"]
