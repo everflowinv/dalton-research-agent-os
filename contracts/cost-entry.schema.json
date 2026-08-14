@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/cost-entry.schema.json",
+  "title": "CostEntry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "usage_entry_ref", "revision", "price_rate_refs", "amount_micros", "currency", "cost_status", "calculation_ref", "rounding_mode", "correction_of_ref", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "usage_entry_ref": {"type": "string", "minLength": 1},
+    "revision": {"type": "integer", "minimum": 1},
+    "price_rate_refs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "amount_micros": {"type": ["integer", "null"], "minimum": 0},
+    "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "cost_status": {"type": "string", "enum": ["actual", "estimated", "unpriced", "waived"]},
+    "calculation_ref": {"type": "string", "minLength": 1},
+    "rounding_mode": {"type": "string", "const": "half_up"},
+    "correction_of_ref": {"type": ["string", "null"], "minLength": 1},
+    "actor_ref": {"type": "string", "minLength": 1},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

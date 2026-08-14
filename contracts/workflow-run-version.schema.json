@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/workflow-run-version.schema.json",
+  "title": "WorkflowRunVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "workflow_ref", "version", "title", "objective", "scope_refs", "root_work_order_refs", "governance_policy_ref", "actor_ref", "prior_version_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "workflow_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "title": {"type": "string", "minLength": 1},
+    "objective": {"type": "string", "minLength": 1},
+    "scope_refs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "root_work_order_refs": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "governance_policy_ref": {"type": ["string", "null"], "minLength": 1},
+    "actor_ref": {"type": "string", "minLength": 1},
+    "prior_version_ref": {"type": ["string", "null"], "minLength": 1},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

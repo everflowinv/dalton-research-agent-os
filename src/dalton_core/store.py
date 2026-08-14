@@ -1,0 +1,1156 @@
+"""SQLite hybrid-temporal transaction kernel for Dalton Core."""
+
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+import json
+import os
+import sqlite3
+import uuid
+from collections.abc import Mapping
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterator
+from .contracts import (
+    AdjudicatedStatus,
+    AdjudicationVersion,
+    ClaimKind,
+    ClaimVersion,
+    EvidenceRelation,
+    EvidenceRelationType,
+    EvidenceVersion,
+    GovernancePolicyVersion,
+    ModelInvocation,
+    ThesisVersion,
+    VerificationRecord,
+    Verdict,
+)
+
+from .errors import (
+    BadVerdict,
+    GateRejected,
+    IdempotencyConflict,
+    InvocationConflict,
+    IndependenceViolation,
+    NotFound,
+    ValidationError,
+    VerificationRequired,
+)
+from .policy import DEFAULT_POLICY, canonical_policy, evaluate_gate
+
+
+_SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+_THESIS_FIELDS = frozenset({"statement", "mechanism", "confidence", "implied_expectation", "claim_refs", "catalyst_refs", "falsifier_refs", "change_reason"})
+_CLAIM_FIELDS = frozenset({"subject_ref", "metric_or_aspect", "period", "basis", "normalized_statement", "claim_kind", "value", "unit", "producer_invocation_refs", "actor_ref"})
+
+
+def canonical_json(value: Any) -> str:
+    """Serialize JSON deterministically for hashes and durable payloads."""
+    if dataclasses.is_dataclass(value):
+        value = dataclasses.asdict(value)
+    if isinstance(value, Mapping):
+        value = {str(k): v for k, v in value.items()}
+        value = {k: json.loads(canonical_json(v)) for k, v in value.items()}
+    elif isinstance(value, (tuple, list)):
+        value = [json.loads(canonical_json(v)) for v in value]
+    elif isinstance(value, set):
+        value = sorted(value)
+    elif hasattr(value, "value"):
+        value = value.value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def content_hash(value: Any) -> str:
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _id(value: Any = None) -> str:
+    return str(value) if value is not None else uuid.uuid4().hex
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if dataclasses.is_dataclass(value):
+        return dataclasses.asdict(value)
+    if isinstance(value, Mapping):
+        return dict(value)
+    raise ValidationError("expected a mapping or dataclass")
+
+
+def _scalar(value: Any) -> Any:
+    """Turn Enum-like contract values into their wire value."""
+    return getattr(value, "value", value)
+
+
+def _parse_rfc3339(value: str, name: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValidationError(f"{name} must be RFC3339")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValidationError(f"{name} must be RFC3339") from exc
+    if parsed.tzinfo is None:
+        raise ValidationError(f"{name} must include timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+class DaltonStore:
+    """Owns all writes to the hybrid-temporal SQLite database.
+
+    ``stage_change``, ``verify_change`` and ``commit`` each open and commit a
+    separate SQLite transaction.  The connection is intentionally exposed as
+    ``connection`` for read-only projections and for tests of the trigger
+    boundary; direct writes to authoritative tables are rejected by schema
+    triggers.
+    """
+
+    def __init__(self, path: str | Path = ":memory:", *, connection: sqlite3.Connection | None = None):
+        self.path = str(path)
+        self._authorized = False
+        self.connection = connection or sqlite3.connect(self.path, isolation_level=None)
+        if connection is None and self.path != ":memory:":
+            os.chmod(self.path, 0o600)
+        self.connection.row_factory = sqlite3.Row
+        self.connection.execute("PRAGMA foreign_keys = ON")
+        self.connection.execute("PRAGMA busy_timeout = 5000")
+        self.connection.create_function("dalton_authorized", 0, lambda: int(self._authorized))
+        self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._ensure_default_policy()
+
+    @property
+    def conn(self) -> sqlite3.Connection:
+        return self.connection
+
+    def close(self) -> None:
+        self.connection.close()
+
+    def __enter__(self) -> "DaltonStore":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
+
+    @contextmanager
+    def _transaction(self) -> Iterator[sqlite3.Cursor]:
+        if self.connection.in_transaction:
+            raise RuntimeError("DaltonStore operation cannot be nested in an open transaction")
+        self.connection.execute("BEGIN IMMEDIATE")
+        self._authorized = True
+        try:
+            yield self.connection.cursor()
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        finally:
+            self._authorized = False
+
+    def _ensure_default_policy(self) -> None:
+        row = self.connection.execute("SELECT 1 FROM governance_policy_pointer WHERE pointer_id=1").fetchone()
+        if row:
+            return
+        self.create_policy(DEFAULT_POLICY, policy_version_id="policy-1", version_number=1, activate=True)
+
+    @staticmethod
+    def _assert_policy_effective(policy_row: sqlite3.Row | Mapping[str, Any]) -> None:
+        """Reject future or expired active policy pointers consistently."""
+        effective_from = policy_row["effective_from"]
+        effective_until = policy_row["effective_until"]
+        now_dt = datetime.now(timezone.utc)
+        start_dt = _parse_rfc3339(effective_from, "effective_from")
+        end_dt = _parse_rfc3339(effective_until, "effective_until") if effective_until is not None else None
+        if now_dt < start_dt or (end_dt is not None and now_dt >= end_dt):
+            raise GateRejected("active governance policy is outside its effective interval")
+
+    @staticmethod
+    def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        return dict(row) if row is not None else None
+
+    def _ensure_invocation(self, cur: sqlite3.Cursor, invocation: Any, *, required_id: str | None = None) -> dict[str, Any]:
+        data = _mapping(invocation)
+        if dataclasses.is_dataclass(invocation) and hasattr(invocation, "to_dict"):
+            data = dict(invocation.to_dict())
+        if "id" in data and "invocation_id" in data:
+            raise ValidationError("id and invocation_id cannot both be supplied")
+        if "id" in data and "invocation_id" not in data:
+            data["invocation_id"] = data["id"]
+        invocation_id = _id(data.get("invocation_id", data.get("id", required_id)))
+        if required_id and invocation_id != required_id:
+            raise ValidationError("invocation_id does not match the required reference")
+        data["invocation_id"] = invocation_id
+        row = cur.execute("SELECT * FROM model_invocations WHERE invocation_id=?", (invocation_id,)).fetchone()
+        if row:
+            saved = json.loads(row["invocation_json"])
+            # A repeated reference with no metadata is a read-only reference.
+            # Once a payload is supplied, normalize aliases and compare the
+            # complete canonical payload; an id can never identify two facts.
+            supplied = {k: v for k, v in data.items() if k not in {"invocation_id", "id"} and v is not None}
+            if supplied:
+                normalized_saved = self._normalized_invocation_payload(saved)
+                normalized_new = self._normalized_invocation_payload(data)
+                if canonical_json(normalized_saved) != canonical_json(normalized_new):
+                    raise InvocationConflict(f"invocation_id {invocation_id!r} already has a different canonical payload")
+            return dict(row) | {"invocation_id": invocation_id}
+        # A new authoritative invocation must carry contract provenance.  A
+        # reference containing only an id is valid only when the id already
+        # exists (handled above).
+        required = ("schema_version", "created_at", "work_order_ref", "profile_ref", "granularity", "capability", "provider", "model", "runtime_ref", "actor_ref", "usage", "started_at")
+        aliases = {}
+        missing = []
+        for field in required:
+            names = aliases.get(field, (field,))
+            if not any(data.get(name) is not None for name in names):
+                missing.append(field)
+        if data.get("model_family") is None:
+            missing.append("model_family")
+        if missing:
+            raise ValidationError(f"new model invocation is missing required fields: {missing}")
+        if not isinstance(data.get("usage"), Mapping):
+            raise ValidationError("model invocation usage must be a mapping")
+        data.setdefault("input_refs", [])
+        data.setdefault("output_refs", [])
+        data.setdefault("side_effects", [])
+        data.setdefault("completed_at", None)
+        data.setdefault("parent_ref", None)
+        data.setdefault("environment_hash", None)
+        try:
+            contract_data = dict(data)
+            contract_data.pop("invocation_id", None)
+            validated = ModelInvocation.from_dict(contract_data)
+        except Exception as exc:
+            raise ValidationError(str(exc)) from exc
+        data = validated.to_dict()
+        data["invocation_id"] = validated.id
+        created = _now()
+        family = data.get("model_family")
+        profile = data.get("profile_ref")
+        provider = data.get("provider")
+        model = data.get("model")
+        capability = data.get("capability")
+        runtime_ref = data.get("runtime_ref")
+        actor_ref = data.get("actor_ref")
+        environment_hash = data.get("environment_hash")
+        granularity = _scalar(data.get("granularity"))
+        work_order_ref = data.get("work_order_ref")
+        role = None
+        cur.execute(
+            "INSERT INTO model_invocations(invocation_id,profile_ref,provider,model,capability,runtime_ref,actor_ref,environment_hash,granularity,work_order_ref,model_family,invocation_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (invocation_id, profile, provider, model, capability, runtime_ref, actor_ref, environment_hash, granularity, work_order_ref, family, canonical_json(data), created),
+        )
+        return {
+            "invocation_id": invocation_id,
+            "model_family": family,
+            "profile_ref": profile,
+            "provider": provider,
+            "model": model,
+            "capability": capability,
+            "runtime_ref": runtime_ref,
+            "actor_ref": actor_ref,
+            "environment_hash": environment_hash,
+            "granularity": granularity,
+            "invocation_json": canonical_json(data),
+            "created_at": created,
+        }
+
+    @staticmethod
+    def _normalized_invocation_payload(data: Mapping[str, Any]) -> dict[str, Any]:
+        """Normalize contract aliases while retaining complete usage metadata."""
+        result = dict(data)
+        result.pop("id", None)
+        result.pop("invocation_id", None)
+        aliases = {
+            "profile_id": "profile_ref",
+            "provider_model_id": "provider",
+            "model_id": "model",
+        }
+        for old, new in aliases.items():
+            if old in result and new not in result:
+                result[new] = result[old]
+            result.pop(old, None)
+        return result
+
+    def register_invocation(self, invocation: Any = None, **fields: Any) -> dict[str, Any]:
+        data = _mapping(invocation)
+        data.update(fields)
+        if not data.get("invocation_id", data.get("id")):
+            raise ValidationError("invocation_id is required")
+        with self._transaction() as cur:
+            return self._ensure_invocation(cur, data)
+
+    add_model_invocation = register_invocation
+
+    def create_policy(
+        self,
+        policy: Mapping[str, Any] | Any,
+        *,
+        policy_version_id: str | None = None,
+        version_number: int | None = None,
+        activate: bool = True,
+        policy_ref: str | None = None,
+        effective_from: str | None = None,
+        effective_until: str | None = None,
+        actor_ref: str | None = None,
+        prior_version_ref: str | None = None,
+        change_reason: str | None = None,
+        content_hash_value: str | None = None,
+    ) -> dict[str, Any]:
+        raw_policy = _mapping(policy)
+        # GovernancePolicyVersion carries the executable policy under
+        # ``policy`` and predicate records beside it; accept that dataclass
+        # shape without making contracts.py a dependency of the store.
+        metadata = raw_policy
+        if isinstance(raw_policy.get("policy"), Mapping):
+            nested = dict(raw_policy["policy"])
+            if "independence_predicates" not in nested and raw_policy.get("independence_predicates"):
+                nested["independence_predicates"] = raw_policy["independence_predicates"]
+            raw_policy = nested
+        try:
+            p = canonical_policy(raw_policy)
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+        if not isinstance(p.get("allowed_verdicts"), (list, tuple, set)):
+            raise ValidationError("allowed_verdicts must be a sequence")
+        pid = _id(policy_version_id or metadata.get("id"))
+        with self._transaction() as cur:
+            policy_ref = policy_ref or metadata.get("policy_ref", "commit-gate")
+            if version_number is None:
+                version_number = int(metadata.get("version", 0)) or int(cur.execute(
+                    "SELECT COALESCE(MAX(version_number),0)+1 FROM governance_policy_versions WHERE policy_ref=?",
+                    (policy_ref,),
+                ).fetchone()[0])
+            prior = prior_version_ref or metadata.get("prior_version_ref")
+            if version_number == 1:
+                if prior:
+                    raise ValidationError("policy version 1 cannot have a prior version")
+            elif not prior:
+                prior_row = cur.execute("SELECT policy_version_id FROM governance_policy_versions WHERE version_number=? AND policy_ref=?", (version_number - 1, policy_ref)).fetchone()
+                if not prior_row:
+                    raise ValidationError("policy version chain has no immediately prior version")
+                prior = prior_row[0]
+            else:
+                prior_row = cur.execute("SELECT policy_version_id, policy_ref, version_number FROM governance_policy_versions WHERE policy_version_id=?", (prior,)).fetchone()
+                if not prior_row or prior_row[1] != policy_ref or prior_row[2] != version_number - 1:
+                    raise ValidationError("prior policy version must exist, share policy_ref, and be version N-1")
+            effective_from = effective_from or metadata.get("effective_from") or _now()
+            effective_until = effective_until if effective_until is not None else metadata.get("effective_until")
+            actor_ref = actor_ref or metadata.get("actor_ref", "system:dalton-core")
+            change_reason = change_reason or metadata.get("change_reason", "policy update")
+            from_dt = _parse_rfc3339(effective_from, "effective_from")
+            until_dt = _parse_rfc3339(effective_until, "effective_until") if effective_until is not None else None
+            if until_dt is not None and from_dt >= until_dt:
+                raise ValidationError("effective_from must be before effective_until")
+            created = metadata.get("created_at") or _now()
+            predicates = []
+            for pred in p.get("independence_predicates", []):
+                pred = dict(pred)
+                predicates.append({"left_path": pred["left_path"], "operator": pred["operator"], **({"right_path": pred["right_path"]} if "right_path" in pred else {"value": pred.get("value")})})
+            wire_base = {
+                "schema_version": "0.1", "id": pid, "created_at": created,
+                "policy_ref": policy_ref, "version": version_number,
+                "effective_from": effective_from, "effective_until": effective_until,
+                "policy": {k: v for k, v in p.items() if k != "independence_predicates"},
+                "independence_predicates": predicates, "change_reason": change_reason,
+                "actor_ref": actor_ref, "prior_version_ref": prior,
+            }
+            computed_policy_hash = content_hash(wire_base)
+            supplied_hash = content_hash_value or metadata.get("content_hash")
+            if supplied_hash is not None and supplied_hash != computed_policy_hash:
+                raise ValidationError("policy content_hash does not match canonical policy version")
+            version_wire = dict(wire_base, content_hash=computed_policy_hash)
+            try:
+                validated_policy = GovernancePolicyVersion.from_dict(version_wire)
+            except Exception as exc:
+                raise ValidationError(str(exc)) from exc
+            version_encoded = canonical_json(validated_policy.to_dict())
+            encoded = canonical_json(p)
+            cur.execute(
+                "INSERT INTO governance_policy_versions(policy_version_id,version_number,policy_ref,effective_from,effective_until,actor_ref,prior_version_ref,change_reason,version_json,policy_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (pid, version_number, policy_ref, effective_from, effective_until, actor_ref, prior, change_reason, version_encoded, encoded, computed_policy_hash, created),
+            )
+            if activate:
+                cur.execute(
+                    "INSERT INTO governance_policy_pointer(pointer_id,policy_version_id,updated_at) VALUES(1,?,?) "
+                    "ON CONFLICT(pointer_id) DO UPDATE SET policy_version_id=excluded.policy_version_id, updated_at=excluded.updated_at",
+                    (pid, created),
+                )
+            return {"policy_version_id": pid, "version_number": version_number, "policy": p, "content_hash": computed_policy_hash, "policy_ref": policy_ref, "effective_from": effective_from, "effective_until": effective_until, "actor_ref": actor_ref, "prior_version_ref": prior, "change_reason": change_reason}
+
+    install_policy = create_policy
+    set_policy = create_policy
+
+    def active_policy(self) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT v.* FROM governance_policy_pointer p JOIN governance_policy_versions v ON v.policy_version_id=p.policy_version_id WHERE p.pointer_id=1"
+        ).fetchone()
+        if not row:
+            raise NotFound("no active governance policy")
+        result = dict(row)
+        result["policy"] = json.loads(result.pop("policy_json"))
+        return result
+
+    get_active_policy = active_policy
+
+    def active_policy_version(self) -> GovernancePolicyVersion:
+        """Return the active policy as its frozen contract, not an SQL projection."""
+        row = self.connection.execute(
+            "SELECT v.version_json FROM governance_policy_pointer p "
+            "JOIN governance_policy_versions v ON v.policy_version_id=p.policy_version_id "
+            "WHERE p.pointer_id=1"
+        ).fetchone()
+        if not row:
+            raise NotFound("no active governance policy")
+        return GovernancePolicyVersion.from_dict(json.loads(row[0]))
+
+    def stage_change(
+        self,
+        change: Mapping[str, Any] | Any = None,
+        *,
+        change_id: str | None = None,
+        thesis_id: str | None = None,
+        content: Any = None,
+        payload: Any = None,
+        producer_invocation: Any = None,
+        producer_invocation_id: str | None = None,
+        actor_id: str | None = None,
+    ) -> dict[str, Any]:
+        if isinstance(change, str):
+            data = {}
+            change_id = change_id or change
+        else:
+            data = _mapping(change)
+        if change_id is None:
+            change_id = data.get("change_id", data.get("id"))
+        thesis_id = thesis_id or data.get("thesis_id", data.get("thesis_ref"))
+        if content is None:
+            content = payload if payload is not None else data.get("content", data.get("payload", data.get("content_json")))
+            if "content_json" in data and "content" not in data and "payload" not in data:
+                try:
+                    content = json.loads(content)
+                except (TypeError, json.JSONDecodeError) as exc:
+                    raise ValidationError("content_json must contain valid JSON") from exc
+        if content is None:
+            # A change mapping can itself be the content when explicit fields
+            # were supplied by the caller.
+            content = data.get("delta", data)
+        producer = producer_invocation if producer_invocation is not None else data.get("producer_invocation")
+        producer_id = producer_invocation_id or data.get("producer_invocation_id", data.get("producer_invocation_ref"))
+        if producer is None and producer_id is None:
+            producer = data.get("invocation")
+        if not thesis_id:
+            raise ValidationError("thesis_id is required")
+        if producer is None and not producer_id:
+            raise ValidationError("producer invocation is required")
+        if actor_id is not None and (not isinstance(actor_id, str) or not actor_id):
+            raise ValidationError("actor_id must be a non-empty string")
+        cid = _id(change_id)
+        if dataclasses.is_dataclass(content):
+            content = dataclasses.asdict(content)
+        if not isinstance(content, Mapping):
+            raise ValidationError("thesis content must be a mapping")
+        unknown = set(content) - _THESIS_FIELDS
+        missing = _THESIS_FIELDS - set(content)
+        if unknown:
+            raise ValidationError(f"thesis content has unknown fields: {sorted(unknown)}")
+        if missing:
+            raise ValidationError(f"thesis content is missing fields: {sorted(missing)}")
+        encoded = canonical_json(content)
+        now = _now()
+        with self._transaction() as cur:
+            existing = cur.execute("SELECT * FROM staging_changes WHERE change_id=?", (cid,)).fetchone()
+            if existing:
+                raise ValidationError(f"staging change already exists: {cid}")
+            if producer is None:
+                producer = {"invocation_id": producer_id}
+            inv = self._ensure_invocation(cur, producer, required_id=producer_id)
+            cur.execute(
+                "INSERT INTO staging_changes(change_id,thesis_id,content_json,content_hash,producer_invocation_id,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
+                (cid, thesis_id, encoded, hashlib.sha256(encoded.encode()).hexdigest(), inv["invocation_id"], "staged", now, now),
+            )
+            event = {"change_id": cid, "thesis_id": thesis_id, "content_hash": hashlib.sha256(encoded.encode()).hexdigest(), "actor_id": actor_id}
+            self._insert_event(cur, "staged", "thesis", thesis_id, event, change_id=cid, content_hash=event["content_hash"], actor_id=actor_id)
+            return {"change_id": cid, "thesis_id": thesis_id, "content": json.loads(encoded), "content_hash": event["content_hash"], "producer_invocation_id": inv["invocation_id"], "status": "staged"}
+
+    stage = stage_change
+
+    def verify_change(
+        self,
+        change_id: str | Mapping[str, Any],
+        verification: Mapping[str, Any] | Any = None,
+        *,
+        verification_id: str | None = None,
+        verifier_invocation: Any = None,
+        verifier_invocation_id: str | None = None,
+        verdict: str | None = None,
+        findings: Any = None,
+        actor_id: str | None = None,
+    ) -> dict[str, Any]:
+        if isinstance(change_id, Mapping):
+            data = dict(change_id)
+            change_id = data.get("change_id", data.get("staging_id", data.get("target_ref", data.get("id"))))
+            verification = verification or data
+        else:
+            data = _mapping(verification)
+        verification = _mapping(verification)
+        verifier = verifier_invocation if verifier_invocation is not None else data.get("verifier_invocation")
+        verifier_id = verifier_invocation_id or data.get("verifier_invocation_id", data.get("verifier_invocation_ref"))
+        if verifier is None:
+            verifier = data.get("invocation")
+        verdict = verdict if verdict is not None else data.get("verdict")
+        verdict = _scalar(verdict)
+        if verdict not in {v.value for v in Verdict}:
+            raise ValidationError(f"invalid verdict: {verdict!r}")
+        findings = findings if findings is not None else data.get("findings", data.get("result", {}))
+        if not change_id or verifier is None and not verifier_id:
+            raise ValidationError("change_id and verifier invocation are required")
+        if not verdict:
+            raise ValidationError("verdict is required")
+        if actor_id is not None and (not isinstance(actor_id, str) or not actor_id):
+            raise ValidationError("actor_id must be a non-empty string")
+        vid = _id(verification_id or data.get("verification_id", data.get("id")))
+        with self._transaction() as cur:
+            stage = cur.execute("SELECT * FROM staging_changes WHERE change_id=?", (str(change_id),)).fetchone()
+            if not stage:
+                raise NotFound(f"staging change not found: {change_id}")
+            if stage["status"] == "committed":
+                raise ValidationError("cannot verify a committed change")
+            if verifier is None:
+                verifier = {"invocation_id": verifier_id}
+            inv = self._ensure_invocation(cur, verifier, required_id=verifier_id)
+            now = _now()
+            policy = cur.execute("SELECT v.policy_version_id FROM governance_policy_pointer p JOIN governance_policy_versions v ON v.policy_version_id=p.policy_version_id WHERE p.pointer_id=1").fetchone()
+            if not policy:
+                raise GateRejected("no active governance policy")
+            verification_doc = {
+                "schema_version": "0.1", "id": vid, "created_at": now,
+                "target_ref": str(change_id), "verifier_invocation_ref": inv["invocation_id"],
+                "verdict": verdict, "findings": findings if isinstance(findings, list) else [findings],
+                "deterministic_checks": data.get("deterministic_checks", []),
+                "verifier_kind": data.get("verifier_kind", "model"),
+                "revise_round": int(data.get("revise_round", 0)),
+                "independence_policy_ref": policy[0],
+                "subject_invocation_refs": [stage["producer_invocation_id"]],
+                "target_content_hash": stage["content_hash"],
+            }
+            try:
+                validated_verification = VerificationRecord.from_dict(verification_doc)
+            except Exception as exc:
+                raise ValidationError(str(exc)) from exc
+            verification_doc = validated_verification.to_dict()
+            encoded = canonical_json(verification_doc)
+            cur.execute(
+                "INSERT INTO verification_records(verification_id,change_id,producer_invocation_id,verifier_invocation_id,verdict,findings_json,verification_json,content_hash,policy_version_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                # The verification record attests to the staged content.  Its
+                # content hash is therefore the staged hash, not a hash of the
+                # verifier's findings envelope.
+                (vid, str(change_id), stage["producer_invocation_id"], inv["invocation_id"], str(verdict), canonical_json(verification_doc["findings"]), encoded, stage["content_hash"], policy[0], now),
+            )
+            cur.execute("UPDATE staging_changes SET status='verified', updated_at=? WHERE change_id=?", (now, str(change_id)))
+            self._insert_event(cur, "verified", "thesis", stage["thesis_id"], verification_doc, change_id=str(change_id), verification_id=vid, content_hash=stage["content_hash"], actor_id=actor_id)
+            return {"verification_id": vid, "change_id": str(change_id), "verdict": str(verdict), "verifier_invocation_id": inv["invocation_id"], "status": "verified"}
+
+    verify = verify_change
+
+    def _insert_event(
+        self,
+        cur: sqlite3.Cursor,
+        event_type: str,
+        aggregate_type: str,
+        aggregate_id: str,
+        payload: Any,
+        *,
+        change_id: str | None = None,
+        verification_id: str | None = None,
+        version_id: str | None = None,
+        content_hash: str | None = None,
+        actor_id: str | None = None,
+        idempotency_key: str | None = None,
+        correlation_id: str | None = None,
+    ) -> str:
+        event_id = uuid.uuid4().hex
+        occurred_at = _now()
+        actor_id = actor_id or "system:dalton-core"
+        specific_ref = version_id or verification_id or change_id or aggregate_id
+        idempotency_key = idempotency_key or f"{event_type}:{specific_ref}"
+        correlation_id = correlation_id or (change_id or aggregate_id)
+        # A version_ref is reserved for an authoritative committed version.
+        # Staged/verified events carry their own explicit refs in the envelope.
+        version_ref = version_id
+        if content_hash is None:
+            content_hash = globals()["content_hash"](payload)
+        aggregate_version = int(cur.execute(
+            "SELECT COALESCE(MAX(aggregate_version),0)+1 FROM domain_events WHERE aggregate_type=? AND aggregate_id=?",
+            (aggregate_type, aggregate_id),
+        ).fetchone()[0])
+        envelope = {
+            "schema_version": "0.1",
+            "id": event_id,
+            "created_at": occurred_at,
+            "event_type": event_type,
+            "aggregate_type": aggregate_type,
+            "aggregate_id": aggregate_id,
+            "aggregate_version": aggregate_version,
+            "version_ref": version_ref,
+            "change_ref": change_id,
+            "verification_ref": verification_id,
+            "content_hash": content_hash,
+            "occurred_at": occurred_at,
+            "actor_ref": actor_id,
+            "payload": payload,
+            "idempotency_key": idempotency_key,
+            "correlation_id": correlation_id,
+        }
+        cur.execute(
+            "INSERT INTO domain_events(event_id,event_type,aggregate_type,aggregate_id,change_id,verification_id,version_id,aggregate_version,version_ref,content_hash,actor_id,idempotency_key,correlation_id,occurred_at,event_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (event_id, event_type, aggregate_type, aggregate_id, change_id, verification_id, version_id, aggregate_version, version_ref, content_hash, actor_id, idempotency_key, correlation_id, occurred_at, canonical_json(envelope), occurred_at),
+        )
+        return event_id
+
+    def _commit_request_hash(self, change_id: str, verification_id: str, request: Any, stage_hash: str) -> str:
+        return content_hash({"change_id": change_id, "verification_id": verification_id, "content_hash": stage_hash, "request": request})
+
+    def commit(
+        self,
+        change_id: str | None = None,
+        verification_id: str | None = None,
+        idempotency_key: str | None = None,
+        *,
+        request: Any = None,
+        request_hash: str | None = None,
+        actor_id: str | None = None,
+        fault_at: str | None = None,
+    ) -> dict[str, Any]:
+        if not change_id or not verification_id or not idempotency_key:
+            raise ValidationError("change_id, verification_id and idempotency_key are required")
+        if actor_id is not None and (not isinstance(actor_id, str) or not actor_id):
+            raise ValidationError("actor_id must be a non-empty string")
+        with self._transaction() as cur:
+            stage = cur.execute("SELECT * FROM staging_changes WHERE change_id=?", (change_id,)).fetchone()
+            if not stage:
+                raise NotFound(f"staging change not found: {change_id}")
+            actual_stage_hash = content_hash(json.loads(stage["content_json"]))
+            if actual_stage_hash != stage["content_hash"]:
+                raise GateRejected("staged content no longer matches its content hash")
+            computed_hash = self._commit_request_hash(change_id, verification_id, request, stage["content_hash"])
+            if request_hash is not None and request_hash != computed_hash:
+                raise ValidationError("caller request_hash does not match the canonical commit request")
+            prior_key = cur.execute("SELECT * FROM idempotency_keys WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+            if prior_key:
+                if prior_key["request_hash"] == computed_hash:
+                    original = json.loads(prior_key["result_json"])
+                    return {**original, "status": "duplicate", "idempotency_key": idempotency_key}
+                return {"status": "conflict", "idempotency_key": idempotency_key, "existing_request_hash": prior_key["request_hash"], "request_hash": computed_hash}
+            if stage["status"] != "verified":
+                raise VerificationRequired("staging change has no committed verification")
+            verification = cur.execute("SELECT * FROM verification_records WHERE verification_id=? AND change_id=?", (verification_id, change_id)).fetchone()
+            if not verification:
+                raise VerificationRequired("verification record not found for staging change")
+            if verification["content_hash"] != stage["content_hash"]:
+                raise GateRejected("verification content hash does not match staged content hash")
+            if verification["producer_invocation_id"] != stage["producer_invocation_id"]:
+                raise GateRejected("staged producer no longer matches verification provenance")
+            event_rows = cur.execute(
+                "SELECT event_type,aggregate_id,content_hash,verification_id FROM domain_events "
+                "WHERE change_id=? AND event_type IN ('staged','verified') ORDER BY aggregate_version",
+                (change_id,),
+            ).fetchall()
+            staged_events = [row for row in event_rows if row["event_type"] == "staged"]
+            verified_events = [row for row in event_rows if row["event_type"] == "verified" and row["verification_id"] == verification_id]
+            if len(staged_events) != 1 or len(verified_events) != 1:
+                raise GateRejected("staging and verification event provenance is incomplete")
+            if any(row["aggregate_id"] != stage["thesis_id"] or row["content_hash"] != stage["content_hash"] for row in (*staged_events, *verified_events)):
+                raise GateRejected("staging identity no longer matches event provenance")
+            producer = cur.execute("SELECT * FROM model_invocations WHERE invocation_id=?", (stage["producer_invocation_id"],)).fetchone()
+            verifier = cur.execute("SELECT * FROM model_invocations WHERE invocation_id=?", (verification["verifier_invocation_id"],)).fetchone()
+            if not producer or not verifier:
+                raise VerificationRequired("producer/verifier invocation provenance is missing")
+            policy_row = cur.execute("SELECT v.policy_version_id, v.policy_json, v.content_hash, v.effective_from, v.effective_until FROM governance_policy_pointer p JOIN governance_policy_versions v ON v.policy_version_id=p.policy_version_id WHERE p.pointer_id=1").fetchone()
+            if not policy_row:
+                raise GateRejected("no active governance policy")
+            if verification["policy_version_id"] != policy_row[0]:
+                raise GateRejected("verification was produced under a policy that is no longer active")
+            self._assert_policy_effective(policy_row)
+            ok, reason = evaluate_gate(json.loads(policy_row[1]), verification["verdict"], dict(producer), dict(verifier))
+            if not ok:
+                if "verdict" in (reason or ""):
+                    raise BadVerdict(reason)
+                if "verification" in (reason or ""):
+                    raise VerificationRequired(reason)
+                raise IndependenceViolation(reason)
+            current = cur.execute("SELECT * FROM current_pointers WHERE thesis_id=?", (stage["thesis_id"],)).fetchone()
+            if current:
+                prior_id = current["version_id"]
+                version_number = int(current["version_number"]) + 1
+            else:
+                prior_id = None
+                version_number = 1
+            version_id = uuid.uuid4().hex
+            now = _now()
+            actor_ref = actor_id or "system:dalton-core"
+            thesis_payload = json.loads(stage["content_json"])
+            claim_refs = thesis_payload.get("claim_refs", [])
+            for claim_ref in claim_refs:
+                if not isinstance(claim_ref, str) or not claim_ref:
+                    raise ValidationError("thesis claim_refs must contain non-empty ClaimVersion ids")
+                claim_row = cur.execute("SELECT claim_version_id FROM claim_versions WHERE claim_version_id=?", (claim_ref,)).fetchone()
+                if not claim_row:
+                    raise GateRejected(f"thesis claim_ref does not resolve to a ClaimVersion: {claim_ref}")
+                if not cur.execute("SELECT 1 FROM evidence_relations WHERE claim_version_id=? LIMIT 1", (claim_ref,)).fetchone():
+                    raise GateRejected(f"thesis ClaimVersion has no EvidenceRelation: {claim_ref}")
+            thesis_wire = {
+                "schema_version": "0.1", "id": version_id, "created_at": now,
+                "thesis_ref": stage["thesis_id"], "version": version_number,
+                **thesis_payload, "prior_version_ref": prior_id,
+                "verification_ref": verification_id, "committed_by_ref": actor_ref,
+                "content_hash": stage["content_hash"],
+            }
+            try:
+                validated_thesis = ThesisVersion.from_dict(thesis_wire)
+            except Exception as exc:
+                raise ValidationError(str(exc)) from exc
+            thesis_encoded = canonical_json(validated_thesis.to_dict())
+            cur.execute(
+                "INSERT INTO thesis_versions(version_id,thesis_id,version_number,content_json,content_hash,prior_version_id,change_id,verification_id,committed_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (version_id, stage["thesis_id"], version_number, thesis_encoded, stage["content_hash"], prior_id, change_id, verification_id, actor_ref, now),
+            )
+            if fault_at == "after_version":
+                raise RuntimeError("injected commit failure after version insert")
+            event_id = self._insert_event(cur, "committed", "thesis", stage["thesis_id"], {"version_id": version_id, "content_hash": stage["content_hash"], "policy_version_id": policy_row[0], "policy_content_hash": policy_row[2]}, change_id=change_id, verification_id=verification_id, version_id=version_id, content_hash=stage["content_hash"], actor_id=actor_id, idempotency_key=idempotency_key)
+            if fault_at == "after_event":
+                raise RuntimeError("injected commit failure after event insert")
+            pointer_values = (stage["thesis_id"], version_id, version_number, stage["content_hash"], now)
+            if current:
+                cur.execute("UPDATE current_pointers SET version_id=?,version_number=?,content_hash=?,updated_at=? WHERE thesis_id=?", (version_id, version_number, stage["content_hash"], now, stage["thesis_id"]))
+            else:
+                cur.execute("INSERT INTO current_pointers(thesis_id,version_id,version_number,content_hash,updated_at) VALUES(?,?,?,?,?)", pointer_values)
+            if fault_at == "after_pointer":
+                raise RuntimeError("injected commit failure after pointer update")
+            result = {"status": "fresh", "idempotency_key": idempotency_key, "version_id": version_id, "thesis_id": stage["thesis_id"], "version_number": version_number, "prior_version_id": prior_id, "event_id": event_id, "content_hash": stage["content_hash"]}
+            cur.execute("INSERT INTO idempotency_keys(idempotency_key,request_hash,result_json,version_id,created_at) VALUES(?,?,?,?,?)", (idempotency_key, computed_hash, canonical_json(result), version_id, now))
+            cur.execute("UPDATE staging_changes SET status='committed',updated_at=? WHERE change_id=?", (now, change_id))
+            return result
+
+    commit_change = commit
+
+    def current_pointer(self, thesis_id: str) -> dict[str, Any] | None:
+        return self._row(self.connection.execute("SELECT * FROM current_pointers WHERE thesis_id=?", (thesis_id,)).fetchone())
+
+    get_current_pointer = current_pointer
+
+    def get_version(self, version_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute("SELECT * FROM thesis_versions WHERE version_id=?", (version_id,)).fetchone()
+        result = self._row(row)
+        if result:
+            result["content"] = json.loads(result["content_json"])
+        return result
+
+    # ------------------------------------------------------------------
+    # Research ledger: Evidence -> Claim -> Adjudication
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _ledger_hash(wire: Mapping[str, Any]) -> str:
+        base = dict(wire)
+        base.pop("content_hash", None)
+        return content_hash(base)
+
+    @staticmethod
+    def _ledger_payload(value: Any) -> dict[str, Any]:
+        data = _mapping(value)
+        if hasattr(value, "to_dict"):
+            data = dict(value.to_dict())
+        return data
+
+    @staticmethod
+    def _row_json(row: sqlite3.Row, key: str) -> dict[str, Any]:
+        return json.loads(row[key])
+
+    def register_evidence(
+        self,
+        evidence: Mapping[str, Any] | Any = None,
+        *,
+        evidence_ref: str | None = None,
+        evidence_id: str | None = None,
+        evidence_version_id: str | None = None,
+        actor_ref: str | None = None,
+    ) -> dict[str, Any]:
+        """Append an immutable evidence version and its domain event."""
+        data = self._ledger_payload(evidence)
+        stable_ref = evidence_ref or data.get("evidence_ref") or evidence_id or data.get("id")
+        if not stable_ref:
+            raise ValidationError("evidence_ref is required")
+        version_id = evidence_version_id or data.get("version_id") or (data.get("id") if data.get("evidence_ref") else None)
+        created = data.get("created_at") or _now()
+        with self._transaction() as cur:
+            previous = cur.execute(
+                "SELECT * FROM evidence_versions WHERE evidence_ref=? ORDER BY version_number DESC LIMIT 1", (str(stable_ref),)
+            ).fetchone()
+            version = (int(previous["version_number"]) + 1) if previous else 1
+            prior = previous["evidence_version_id"] if previous else None
+            supplied_version = data.get("version")
+            if supplied_version is not None:
+                try:
+                    supplied_version_int = int(supplied_version)
+                except (TypeError, ValueError) as exc:
+                    raise ValidationError("evidence version must be an integer") from exc
+                if isinstance(supplied_version, bool) or supplied_version_int != version:
+                    raise ValidationError(f"evidence version must be the next chain version ({version})")
+            supplied_prior = data.get("prior_version_ref")
+            if supplied_prior is not None and supplied_prior != prior:
+                raise ValidationError("evidence prior_version_ref does not match current version")
+            wire = {
+                "schema_version": data.get("schema_version", "0.1"),
+                "id": version_id or uuid.uuid4().hex,
+                "created_at": created,
+                "evidence_ref": str(stable_ref),
+                "version": version,
+                "source_type": data.get("source_type"),
+                "source_ref": data.get("source_ref"),
+                "retrieved_at": data.get("retrieved_at") or created,
+                "valid_until": data.get("valid_until"),
+                "artifact_refs": list(data.get("artifact_refs", [])),
+                "source_lineage": list(data.get("source_lineage", [data.get("source_ref")] if data.get("source_ref") else [])),
+                "independence_group": data.get("independence_group"),
+                "actor_ref": actor_ref or data.get("actor_ref", "system:dalton-core"),
+                "prior_version_ref": prior,
+            }
+            if wire["source_type"] is None or wire["source_ref"] is None or wire["independence_group"] is None:
+                raise ValidationError("evidence source_type, source_ref and independence_group are required")
+            wire["content_hash"] = self._ledger_hash(wire)
+            supplied_hash = data.get("content_hash")
+            if supplied_hash is not None and supplied_hash != wire["content_hash"]:
+                raise ValidationError("evidence content_hash does not match canonical version")
+            try:
+                validated = EvidenceVersion.from_dict(wire)
+            except Exception as exc:
+                raise ValidationError(str(exc)) from exc
+            encoded = canonical_json(validated.to_dict())
+            try:
+                cur.execute(
+                    "INSERT INTO evidence_versions(evidence_version_id,evidence_ref,version_number,evidence_json,content_hash,prior_version_id,created_at) VALUES(?,?,?,?,?,?,?)",
+                    (validated.id, validated.evidence_ref, validated.version, encoded, validated.content_hash, validated.prior_version_ref, validated.created_at),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise IdempotencyConflict("evidence version id or version number already exists") from exc
+            event_id = self._insert_event(cur, "evidence_versioned", "evidence", validated.evidence_ref, validated.to_dict(), content_hash=validated.content_hash, actor_id=validated.actor_ref, idempotency_key=f"evidence:{validated.id}")
+            return {"evidence_ref": validated.evidence_ref, "evidence_version_id": validated.id, "version": validated.version, "content_hash": validated.content_hash, "event_id": event_id}
+
+    add_evidence = register_evidence
+    create_evidence = register_evidence
+    create_evidence_version = register_evidence
+
+    def register_claim(
+        self,
+        claim: Mapping[str, Any] | Any = None,
+        *,
+        claim_ref: str | None = None,
+        claim_id: str | None = None,
+        claim_version_id: str | None = None,
+        actor_ref: str | None = None,
+    ) -> dict[str, Any]:
+        """Append an immutable claim version; status is never caller supplied."""
+        data = self._ledger_payload(claim)
+        stable_ref = claim_ref or data.get("claim_ref") or claim_id or data.get("id")
+        if not stable_ref:
+            raise ValidationError("claim_ref is required")
+        if "status" in data:
+            raise ValidationError("claim status is a projection and cannot be written")
+        version_id = claim_version_id or data.get("version_id") or (data.get("id") if data.get("claim_ref") else None)
+        created = data.get("created_at") or _now()
+        with self._transaction() as cur:
+            previous = cur.execute("SELECT * FROM claim_versions WHERE claim_ref=? ORDER BY version_number DESC LIMIT 1", (str(stable_ref),)).fetchone()
+            version = int(previous["version_number"]) + 1 if previous else 1
+            prior = previous["claim_version_id"] if previous else None
+            supplied_version = data.get("version")
+            if supplied_version is not None:
+                try:
+                    supplied_version_int = int(supplied_version)
+                except (TypeError, ValueError) as exc:
+                    raise ValidationError("claim version must be an integer") from exc
+                if isinstance(supplied_version, bool) or supplied_version_int != version:
+                    raise ValidationError(f"claim version must be the next chain version ({version})")
+            if data.get("prior_version_ref") is not None and data["prior_version_ref"] != prior:
+                raise ValidationError("claim prior_version_ref does not match current version")
+            wire = {
+                "schema_version": data.get("schema_version", "0.1"), "id": version_id or uuid.uuid4().hex,
+                "created_at": created, "claim_ref": str(stable_ref), "version": version,
+                "subject_ref": data.get("subject_ref"), "metric_or_aspect": data.get("metric_or_aspect", data.get("metric")),
+                "period": data.get("period"), "basis": data.get("basis"), "normalized_statement": data.get("normalized_statement", data.get("statement")),
+                "claim_kind": _scalar(data.get("claim_kind", "qualitative")), "value": data.get("value"), "unit": data.get("unit"),
+                "producer_invocation_refs": list(data.get("producer_invocation_refs", [])),
+                "actor_ref": data.get("actor_ref", actor_ref or "system:dalton-core"), "prior_version_ref": prior,
+            }
+            required = ("subject_ref", "metric_or_aspect", "period", "basis", "normalized_statement")
+            if any(not isinstance(wire[name], str) or not wire[name] for name in required):
+                raise ValidationError("claim subject_ref, metric_or_aspect, period, basis and normalized_statement are required")
+            producer_refs = wire["producer_invocation_refs"]
+            if not isinstance(producer_refs, list) or not producer_refs or not all(isinstance(x, str) and x for x in producer_refs):
+                raise ValidationError("claim producer_invocation_refs must be a non-empty list of invocation ids")
+            for producer_ref in producer_refs:
+                if not cur.execute("SELECT 1 FROM model_invocations WHERE invocation_id=?", (producer_ref,)).fetchone():
+                    raise NotFound(f"claim producer invocation not found: {producer_ref}")
+            wire["content_hash"] = self._ledger_hash(wire)
+            if data.get("content_hash") is not None and data["content_hash"] != wire["content_hash"]:
+                raise ValidationError("claim content_hash does not match canonical version")
+            try:
+                validated = ClaimVersion.from_dict(wire)
+            except Exception as exc:
+                raise ValidationError(str(exc)) from exc
+            encoded = canonical_json(validated.to_dict())
+            try:
+                cur.execute("INSERT INTO claim_versions(claim_version_id,claim_ref,version_number,claim_json,content_hash,prior_version_id,created_at) VALUES(?,?,?,?,?,?,?)", (validated.id, validated.claim_ref, validated.version, encoded, validated.content_hash, validated.prior_version_ref, validated.created_at))
+            except sqlite3.IntegrityError as exc:
+                raise IdempotencyConflict("claim version id or version number already exists") from exc
+            event_id = self._insert_event(cur, "claim_versioned", "claim", validated.claim_ref, validated.to_dict(), content_hash=validated.content_hash, actor_id=actor_ref or data.get("actor_ref", "system:dalton-core"), idempotency_key=f"claim:{validated.id}")
+            self._emit_numeric_challenges(cur, validated)
+            return {"claim_ref": validated.claim_ref, "claim_version_id": validated.id, "version": validated.version, "content_hash": validated.content_hash, "event_id": event_id, "status": self._claim_status(cur, validated.id)}
+
+    add_claim = register_claim
+    create_claim = register_claim
+    create_claim_version = register_claim
+
+    def relate_evidence(
+        self,
+        relation: Mapping[str, Any] | Any = None,
+        *,
+        relation_id: str | None = None,
+        idempotency_key: str | None = None,
+        actor_ref: str | None = None,
+    ) -> dict[str, Any]:
+        data = self._ledger_payload(relation)
+        rid = relation_id or data.get("id")
+        if not isinstance(rid, str) or not rid:
+            raise ValidationError("relation_id is required; use an explicit stable relation id")
+        if idempotency_key is not None and (not isinstance(idempotency_key, str) or not idempotency_key):
+            raise ValidationError("idempotency_key must be a non-empty string")
+        with self._transaction() as cur:
+            evidence_version_id = data.get("evidence_version_ref", data.get("evidence_version_id"))
+            claim_version_id = data.get("claim_version_ref", data.get("claim_version_id"))
+            evidence = cur.execute("SELECT evidence_json FROM evidence_versions WHERE evidence_version_id=?", (evidence_version_id,)).fetchone()
+            claim = cur.execute("SELECT claim_json FROM claim_versions WHERE claim_version_id=?", (claim_version_id,)).fetchone()
+            if not evidence or not claim:
+                raise NotFound("evidence_version_ref and claim_version_ref must exist")
+            e_doc = json.loads(evidence[0]); c_doc = json.loads(claim[0])
+            if data.get("evidence_ref", e_doc["evidence_ref"]) != e_doc["evidence_ref"] or data.get("claim_ref", c_doc["claim_ref"]) != c_doc["claim_ref"]:
+                raise ValidationError("relation stable refs do not match version refs")
+            if "source_lineage" in data and list(data["source_lineage"]) != list(e_doc["source_lineage"]):
+                raise ValidationError("relation source_lineage must exactly inherit its evidence")
+            if "independence_group" in data and data["independence_group"] != e_doc["independence_group"]:
+                raise ValidationError("relation independence_group must exactly inherit its evidence")
+            wire = {
+                "schema_version": data.get("schema_version", "0.1"), "id": rid, "created_at": data.get("created_at") or _now(),
+                "evidence_ref": e_doc["evidence_ref"], "evidence_version_ref": e_doc["id"], "claim_ref": c_doc["claim_ref"], "claim_version_ref": c_doc["id"],
+                "relation": _scalar(data.get("relation")), "source_lineage": list(data.get("source_lineage", e_doc["source_lineage"])),
+                "independence_group": data.get("independence_group", e_doc["independence_group"]), "actor_ref": actor_ref or data.get("actor_ref", "system:dalton-core"),
+            }
+            try:
+                wire["content_hash"] = self._ledger_hash(wire)
+                validated = EvidenceRelation.from_dict(wire)
+            except Exception as exc:
+                raise ValidationError(str(exc)) from exc
+            request_hash = content_hash({
+                "relation_id": validated.id,
+                "evidence_version_ref": validated.evidence_version_ref,
+                "claim_version_ref": validated.claim_version_ref,
+                "relation": validated.relation.value,
+                "source_lineage": list(validated.source_lineage),
+                "independence_group": validated.independence_group,
+            })
+            if idempotency_key is not None:
+                prior_key = cur.execute("SELECT * FROM relation_idempotency_keys WHERE idempotency_key=?", (idempotency_key,)).fetchone()
+                if prior_key:
+                    if prior_key["request_hash"] == request_hash:
+                        original = json.loads(prior_key["result_json"])
+                        return {**original, "status": "duplicate", "idempotency_key": idempotency_key}
+                    return {"status": "conflict", "idempotency_key": idempotency_key, "existing_request_hash": prior_key["request_hash"], "request_hash": request_hash}
+            if cur.execute("SELECT 1 FROM evidence_relations WHERE relation_id=?", (validated.id,)).fetchone():
+                raise IdempotencyConflict(f"relation_id {validated.id!r} already exists")
+            encoded = canonical_json(validated.to_dict())
+            try:
+                cur.execute("INSERT INTO evidence_relations(relation_id,evidence_ref,evidence_version_id,claim_ref,claim_version_id,relation,relation_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?)", (validated.id, validated.evidence_ref, validated.evidence_version_ref, validated.claim_ref, validated.claim_version_ref, validated.relation.value, encoded, validated.content_hash, validated.created_at))
+            except sqlite3.IntegrityError as exc:
+                raise IdempotencyConflict("evidence relation id already exists") from exc
+            event_id = self._insert_event(cur, "evidence_related", "claim", validated.claim_ref, validated.to_dict(), content_hash=validated.content_hash, actor_id=validated.actor_ref, idempotency_key=f"relation:{validated.id}")
+            result = {"status": "fresh", "relation_id": validated.id, "claim_ref": validated.claim_ref, "claim_version_ref": validated.claim_version_ref, "event_id": event_id, "content_hash": validated.content_hash}
+            if idempotency_key is not None:
+                cur.execute("INSERT INTO relation_idempotency_keys(idempotency_key,request_hash,result_json,relation_id,created_at) VALUES(?,?,?,?,?)", (idempotency_key, request_hash, canonical_json(result), validated.id, validated.created_at))
+                result["idempotency_key"] = idempotency_key
+            return result
+
+    add_evidence_relation = relate_evidence
+    create_evidence_relation = relate_evidence
+
+    def adjudicate_claim(
+        self,
+        adjudication: Mapping[str, Any] | Any = None,
+        *,
+        adjudication_version_id: str | None = None,
+        adjudicator_invocation: Any = None,
+        subject_invocation_refs: Any = None,
+        actor_ref: str | None = None,
+    ) -> dict[str, Any]:
+        data = self._ledger_payload(adjudication)
+        adjudicator = adjudicator_invocation if adjudicator_invocation is not None else data.get("adjudicator_invocation")
+        adjudicator_id = data.get("adjudicator_invocation_ref") or data.get("adjudicator_invocation_id")
+        if adjudicator is not None:
+            if isinstance(adjudicator, Mapping):
+                extra = set(adjudicator) - {"id", "invocation_id"}
+                if extra:
+                    raise ValidationError("adjudicator_invocation must be an existing invocation reference, not an inline payload")
+                adjudicator_id = adjudicator.get("invocation_id", adjudicator.get("id"))
+            else:
+                adjudicator_id = str(adjudicator)
+        subjects = subject_invocation_refs if subject_invocation_refs is not None else data.get("subject_invocation_refs", data.get("subject_invocation_ref"))
+        claim_version_id = data.get("claim_version_ref", data.get("claim_version_id"))
+        claim_ref = data.get("claim_ref")
+        if not claim_version_id:
+            raise ValidationError("claim_version_ref is required")
+        if not adjudicator_id:
+            raise ValidationError("adjudicator invocation is required")
+        with self._transaction() as cur:
+            claim_row = cur.execute("SELECT claim_json FROM claim_versions WHERE claim_version_id=?", (claim_version_id,)).fetchone()
+            if not claim_row:
+                raise NotFound(f"claim version not found: {claim_version_id}")
+            claim_doc = json.loads(claim_row[0]); claim_ref = claim_ref or claim_doc["claim_ref"]
+            if claim_doc["claim_ref"] != claim_ref:
+                raise ValidationError("claim_ref does not match claim_version_ref")
+            derived_subjects = list(claim_doc["producer_invocation_refs"])
+            if subjects is None:
+                subjects = list(derived_subjects)
+            elif isinstance(subjects, str):
+                subjects = [subjects]
+            else:
+                subjects = list(subjects)
+                if subjects != derived_subjects:
+                    raise ValidationError("subject_invocation_refs must exactly match ClaimVersion producer_invocation_refs")
+            if not subjects:
+                raise ValidationError("claim has no producer invocation refs")
+            adjudicator_row = cur.execute("SELECT * FROM model_invocations WHERE invocation_id=?", (str(adjudicator_id),)).fetchone()
+            if not adjudicator_row:
+                raise NotFound(f"adjudicator invocation not found: {adjudicator_id}")
+            subject_rows = []
+            for subject_id in subjects:
+                row = cur.execute("SELECT * FROM model_invocations WHERE invocation_id=?", (str(subject_id),)).fetchone()
+                if not row:
+                    raise NotFound(f"claim producer invocation not found: {subject_id}")
+                subject_rows.append(row)
+            policy = cur.execute("SELECT v.policy_version_id,v.policy_json,v.effective_from,v.effective_until FROM governance_policy_pointer p JOIN governance_policy_versions v ON v.policy_version_id=p.policy_version_id WHERE p.pointer_id=1").fetchone()
+            if not policy:
+                raise GateRejected("no active governance policy")
+            self._assert_policy_effective(policy)
+            policy_doc = json.loads(policy[1])
+            for subject in subject_rows:
+                ok, reason = evaluate_gate(policy_doc, "pass", dict(subject), dict(adjudicator_row))
+                if not ok:
+                    raise IndependenceViolation(reason or "adjudication independence failed")
+            latest = cur.execute("SELECT * FROM adjudication_versions WHERE claim_ref=? ORDER BY version_number DESC LIMIT 1", (claim_ref,)).fetchone()
+            prior = latest["adjudication_version_id"] if latest else None
+            if data.get("prior_version_ref") is not None and data["prior_version_ref"] != prior:
+                raise ValidationError("adjudication prior_version_ref does not match current version")
+            version = int(latest["version_number"]) + 1 if latest else 1
+            supplied_version = data.get("version")
+            if supplied_version is not None:
+                try:
+                    supplied_version_int = int(supplied_version)
+                except (TypeError, ValueError) as exc:
+                    raise ValidationError("adjudication version must be an integer") from exc
+                if isinstance(supplied_version, bool) or supplied_version_int != version:
+                    raise ValidationError(f"adjudication version must be the next chain version ({version})")
+            status = _scalar(data.get("adjudicated_status", data.get("status")))
+            if status not in {x.value for x in AdjudicatedStatus}:
+                raise ValidationError("adjudicated_status must be a valid adjudication status")
+            wire = {
+                "schema_version": data.get("schema_version", "0.1"), "id": adjudication_version_id or data.get("id") or uuid.uuid4().hex,
+                "created_at": data.get("created_at") or _now(), "claim_ref": claim_ref, "claim_version_ref": claim_version_id, "version": version,
+                "adjudicated_status": status, "rationale": data.get("rationale"), "findings": list(data.get("findings", [])),
+                "adjudicator_invocation_ref": adjudicator_row["invocation_id"], "subject_invocation_refs": [x["invocation_id"] for x in subject_rows],
+                "independence_policy_ref": policy[0], "prior_version_ref": prior,
+            }
+            if not isinstance(wire["rationale"], str) or not wire["rationale"]:
+                raise ValidationError("rationale is required")
+            wire["content_hash"] = self._ledger_hash(wire)
+            validated = AdjudicationVersion.from_dict(wire)
+            encoded = canonical_json(validated.to_dict())
+            try:
+                cur.execute("INSERT INTO adjudication_versions(adjudication_version_id,claim_ref,claim_version_id,version_number,adjudicated_status,adjudication_json,content_hash,prior_version_id,adjudicator_invocation_id,independence_policy_id,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (validated.id, validated.claim_ref, validated.claim_version_ref, validated.version, validated.adjudicated_status.value, encoded, validated.content_hash, validated.prior_version_ref, validated.adjudicator_invocation_ref, validated.independence_policy_ref, validated.created_at))
+            except sqlite3.IntegrityError as exc:
+                raise IdempotencyConflict("adjudication version id already exists") from exc
+            event_id = self._insert_event(cur, "claim_adjudicated", "claim", claim_ref, validated.to_dict(), content_hash=validated.content_hash, actor_id=actor_ref or data.get("actor_ref", "system:dalton-core"), idempotency_key=f"adjudication:{validated.id}")
+            return {"adjudication_version_id": validated.id, "claim_ref": claim_ref, "claim_version_ref": claim_version_id, "status": status, "event_id": event_id}
+
+    add_adjudication = adjudicate_claim
+    create_adjudication_version = adjudicate_claim
+
+    def _latest_claim_rows(self, cur: sqlite3.Cursor, *, key: tuple[str, str, str, str, str] | None = None) -> list[sqlite3.Row]:
+        rows = cur.execute("SELECT c.* FROM claim_versions c JOIN (SELECT claim_ref,MAX(version_number) version_number FROM claim_versions GROUP BY claim_ref) latest ON latest.claim_ref=c.claim_ref AND latest.version_number=c.version_number").fetchall()
+        if key is None:
+            return rows
+        return [r for r in rows if tuple(json.loads(r["claim_json"])[x] for x in ("subject_ref", "metric_or_aspect", "period", "basis", "unit")) == key]
+
+    def _emit_numeric_challenges(self, cur: sqlite3.Cursor, claim: ClaimVersion) -> None:
+        if claim.claim_kind != ClaimKind.QUANTITATIVE:
+            return
+        key = (claim.subject_ref, claim.metric_or_aspect, claim.period, claim.basis, claim.unit)
+        for other in self._latest_claim_rows(cur, key=key):
+            if other["claim_version_id"] == claim.id:
+                continue
+            other_doc = json.loads(other["claim_json"])
+            if other_doc.get("value") == claim.value:
+                continue
+            ids = sorted((claim.id, other["claim_version_id"]))
+            conflict_key = "numeric:" + ":".join(ids)
+            exists = cur.execute("SELECT 1 FROM claim_challenges WHERE conflict_key=?", (conflict_key,)).fetchone()
+            if exists:
+                continue
+            challenge = {"challenge_id": uuid.uuid4().hex, "conflict_key": conflict_key, "claim_version_id": claim.id, "conflicting_claim_version_id": other["claim_version_id"], "reason": "exact numeric claims conflict", "semantic_key": list(key), "values": [claim.value, other_doc.get("value")]}
+            encoded = canonical_json(challenge)
+            cur.execute("INSERT INTO claim_challenges(challenge_id,conflict_key,claim_version_id,conflicting_claim_version_id,challenge_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?)", (challenge["challenge_id"], conflict_key, claim.id, other["claim_version_id"], encoded, content_hash(challenge), _now()))
+            self._insert_event(cur, "claim_challenged", "claim", claim.claim_ref, challenge, content_hash=content_hash(challenge), actor_id="system:dalton-core", idempotency_key=f"challenge:{conflict_key}")
+
+    def _claim_status(self, cur: sqlite3.Cursor, claim_version_id: str) -> str:
+        row = cur.execute("SELECT claim_json,claim_ref FROM claim_versions WHERE claim_version_id=?", (claim_version_id,)).fetchone()
+        if not row:
+            raise NotFound(f"claim version not found: {claim_version_id}")
+        doc = json.loads(row["claim_json"])
+        if doc["claim_kind"] == ClaimKind.QUANTITATIVE.value:
+            key = tuple(doc[x] for x in ("subject_ref", "metric_or_aspect", "period", "basis", "unit"))
+            for other in self._latest_claim_rows(cur, key=key):
+                other_doc = json.loads(other["claim_json"])
+                if other["claim_version_id"] != claim_version_id and other_doc.get("value") != doc.get("value"):
+                    return AdjudicatedStatus.CONTESTED.value
+        adjudication = cur.execute("SELECT adjudicated_status FROM adjudication_versions WHERE claim_ref=? ORDER BY version_number DESC,adjudication_version_id DESC LIMIT 1", (row["claim_ref"],)).fetchone()
+        return adjudication[0] if adjudication else "proposed"
+
+    def get_claim(self, claim_version_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute("SELECT * FROM claim_versions WHERE claim_version_id=?", (claim_version_id,)).fetchone()
+        if not row:
+            return None
+        result = dict(row); result["claim"] = json.loads(result.pop("claim_json"))
+        relation_rows = self.connection.execute("SELECT relation_json FROM evidence_relations WHERE claim_version_id=? ORDER BY created_at,relation_id", (claim_version_id,)).fetchall()
+        result["evidence_relations"] = [json.loads(r[0]) for r in relation_rows]
+        result["status"] = self._claim_status(self.connection.cursor(), claim_version_id)
+        return result
+
+    claim_projection = get_claim
+
+    def list_claim_challenges(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute("SELECT * FROM claim_challenges ORDER BY created_at,challenge_id").fetchall()
+        return [dict(r) | {"challenge": json.loads(r["challenge_json"])} for r in rows]
+
+    def list_events(self, *, aggregate_id: str | None = None) -> list[dict[str, Any]]:
+        if aggregate_id is None:
+            rows = self.connection.execute("SELECT * FROM domain_events ORDER BY created_at,event_id").fetchall()
+        else:
+            rows = self.connection.execute("SELECT * FROM domain_events WHERE aggregate_id=? ORDER BY created_at,event_id", (aggregate_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+
+# Friendly names for adapters that do not want to couple themselves to the
+# concrete implementation name.
+Store = DaltonStore
+SQLiteStore = DaltonStore

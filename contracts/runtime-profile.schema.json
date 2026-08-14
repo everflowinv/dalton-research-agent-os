@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/runtime-profile.schema.json",
+  "title": "RuntimeProfile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "version", "capabilities", "isolation_level", "allowed_tools", "network", "filesystem", "side_effects", "limits", "supported_input_versions", "supported_result_versions", "runtime_version", "environment_hash"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "version": {"type": "string", "minLength": 1},
+    "capabilities": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "isolation_level": {"type": "string", "minLength": 1},
+    "allowed_tools": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "network": {"type": "string", "minLength": 1},
+    "filesystem": {"type": "string", "minLength": 1},
+    "side_effects": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "limits": {"type": "object"},
+    "supported_input_versions": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "supported_result_versions": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "runtime_version": {"type": "string", "minLength": 1},
+    "environment_hash": {"type": "string", "minLength": 1},
+    "metadata": {"type": "object"}
+  }
+}

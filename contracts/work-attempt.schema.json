@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/work-attempt.schema.json",
+  "title": "WorkAttempt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "work_order_ref", "attempt_number", "state", "lease_ref", "result_envelope_ref", "result_envelope_hash", "reason", "prior_event_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "work_order_ref": {"type": "string", "minLength": 1},
+    "attempt_number": {"type": "integer", "minimum": 1},
+    "state": {"type": "string", "enum": ["ready", "leased", "succeeded", "retryable", "failed", "expired"]},
+    "lease_ref": {"type": ["string", "null"]},
+    "result_envelope_ref": {"type": ["string", "null"]},
+    "result_envelope_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "reason": {"type": ["string", "null"]},
+    "prior_event_ref": {"type": ["string", "null"]},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

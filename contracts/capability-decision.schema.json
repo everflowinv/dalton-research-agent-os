@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/capability-decision.schema.json",
+  "title": "CapabilityDecision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "capability_version_ref", "evaluation_ref", "decision", "actor_ref", "requested_permissions", "rationale", "rollback_to_version_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "capability_version_ref": {"type": "string", "minLength": 1},
+    "evaluation_ref": {"type": ["string", "null"]},
+    "decision": {"type": "string", "enum": ["approve", "reject", "rollback"]},
+    "actor_ref": {"type": "string", "minLength": 1},
+    "requested_permissions": {"type": "object"},
+    "rationale": {"type": "string"},
+    "rollback_to_version_ref": {"type": ["string", "null"]},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/domain-event.schema.json",
+  "title": "DomainEvent",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "event_type", "aggregate_type", "aggregate_id", "aggregate_version", "version_ref", "content_hash", "occurred_at", "actor_ref", "payload", "idempotency_key", "correlation_id"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "event_type": {"type": "string", "minLength": 1},
+    "aggregate_type": {"type": "string", "minLength": 1},
+    "aggregate_id": {"type": "string", "minLength": 1},
+    "aggregate_version": {"type": "integer", "minimum": 0},
+    "version_ref": {"type": ["string", "null"]},
+    "content_hash": {"type": "string", "minLength": 1},
+    "occurred_at": {"type": "string", "minLength": 1},
+    "actor_ref": {"type": "string", "minLength": 1},
+    "payload": {"type": "object"},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "correlation_id": {"type": "string", "minLength": 1},
+    "causation_id": {"type": ["string", "null"]},
+    "change_ref": {"type": ["string", "null"]},
+    "verification_ref": {"type": ["string", "null"]}
+  }
+}

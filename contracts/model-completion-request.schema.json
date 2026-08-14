@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/model-completion-request.schema.json",
+  "title": "ModelCompletionRequest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "invocationId", "workOrderId", "profileId",
+    "model", "prompt", "maxTokens", "timeoutMs", "auth"
+  ],
+  "properties": {
+    "schemaVersion": {"const": "0.1"},
+    "invocationId": {
+      "type": "string",
+      "pattern": "^invocation:[A-Za-z0-9._-]+$"
+    },
+    "workOrderId": {
+      "type": "string",
+      "pattern": "^work:[A-Za-z0-9._-]+$"
+    },
+    "profileId": {
+      "type": "string",
+      "pattern": "^profile:[A-Za-z0-9._-]+$"
+    },
+    "model": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+    },
+    "prompt": {"type": "string", "minLength": 1},
+    "maxTokens": {"type": "integer", "minimum": 1},
+    "timeoutMs": {"type": "integer", "minimum": 1},
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scheme", "clientId", "timestampMs", "nonce", "mac"],
+      "properties": {
+        "scheme": {"const": "hmac-sha256-v1"},
+        "clientId": {
+          "type": "string",
+          "pattern": "^client:[A-Za-z0-9._-]+$"
+        },
+        "timestampMs": {"type": "integer", "minimum": 0},
+        "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+        "mac": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

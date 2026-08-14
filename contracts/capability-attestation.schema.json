@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/capability-attestation.schema.json",
+  "title": "CapabilityAttestation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "capability_ref", "proposal_ref", "proposal_hash",
+    "artifact_hash", "dependency_lock_hash", "environment_hash", "image_hash", "fixtures", "fixture_manifest_hash",
+    "builder_invocation_ref", "evaluator_invocation_ref", "runner_identity", "policy_ref",
+    "policy_hash", "grants", "observed_effects", "observed_usage", "started_at", "completed_at", "exit_code", "limits",
+    "stdout_hash", "stderr_hash", "result_status", "content_hash"
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "fixture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixture_id", "input_hash", "output_hash", "status"],
+      "properties": {
+        "fixture_id": {"type": "string", "minLength": 1},
+        "input_hash": {"$ref": "#/$defs/hash"},
+        "output_hash": {"$ref": "#/$defs/hash"},
+        "status": {"type": "string", "enum": ["passed", "failed"]}
+      }
+    },
+    "runner_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runner_ref", "invocation_ref", "actor_ref"],
+      "properties": {
+        "runner_ref": {"type": "string", "minLength": 1},
+        "invocation_ref": {"type": "string", "minLength": 1},
+        "actor_ref": {"type": "string", "minLength": 1}
+      }
+    },
+    "grants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["network", "filesystem_read", "filesystem_write", "credential_refs", "core_db"],
+      "properties": {
+        "network": {"type": "boolean"},
+        "filesystem_read": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "filesystem_write": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "credential_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "core_db": {"type": "boolean"}
+      }
+    },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_seconds", "max_memory_bytes", "max_stdout_bytes", "max_stderr_bytes"],
+      "properties": {
+        "max_seconds": {"type": "number", "exclusiveMinimum": 0},
+        "max_memory_bytes": {"type": "integer", "minimum": 1},
+        "max_stdout_bytes": {"type": "integer", "minimum": 1},
+        "max_stderr_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "observed_effects": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["network_used", "filesystem_writes", "credential_refs_used", "core_db_accessed"],
+      "properties": {
+        "network_used": {"type": "boolean"},
+        "filesystem_writes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "credential_refs_used": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "core_db_accessed": {"type": "boolean"}
+      }
+    },
+    "observed_usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["duration_seconds", "peak_memory_bytes", "stdout_bytes", "stderr_bytes"],
+      "properties": {
+        "duration_seconds": {"type": "number", "minimum": 0},
+        "peak_memory_bytes": {"type": "integer", "minimum": 0},
+        "stdout_bytes": {"type": "integer", "minimum": 0},
+        "stderr_bytes": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "pattern": "^attestation:[0-9a-f]{64}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "capability_ref": {"type": "string", "minLength": 1},
+    "proposal_ref": {"type": "string", "minLength": 1},
+    "proposal_hash": {"$ref": "#/$defs/hash"},
+    "artifact_hash": {"$ref": "#/$defs/hash"},
+    "dependency_lock_hash": {"$ref": "#/$defs/hash"},
+    "environment_hash": {"$ref": "#/$defs/hash"},
+    "image_hash": {"$ref": "#/$defs/hash"},
+    "fixtures": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/fixture"}},
+    "fixture_manifest_hash": {"$ref": "#/$defs/hash"},
+    "builder_invocation_ref": {"type": "string", "minLength": 1},
+    "evaluator_invocation_ref": {"type": "string", "minLength": 1},
+    "runner_identity": {"$ref": "#/$defs/runner_identity"},
+    "policy_ref": {"type": "string", "minLength": 1},
+    "policy_hash": {"$ref": "#/$defs/hash"},
+    "grants": {"$ref": "#/$defs/grants"},
+    "observed_effects": {"$ref": "#/$defs/observed_effects"},
+    "observed_usage": {"$ref": "#/$defs/observed_usage"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "exit_code": {"type": "integer"},
+    "limits": {"$ref": "#/$defs/limits"},
+    "stdout_hash": {"$ref": "#/$defs/hash"},
+    "stderr_hash": {"$ref": "#/$defs/hash"},
+    "result_status": {"type": "string", "enum": ["passed", "failed", "timeout", "limit_exceeded"]},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  }
+}

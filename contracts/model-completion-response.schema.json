@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/model-completion-response.schema.json",
+  "title": "ModelCompletionResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "brokerVersion", "runtimeVersion", "invocationId",
+    "workOrderId", "profileId", "requestHash", "idempotencyStatus",
+    "ok", "provider", "model", "canonicalModel", "agentId", "text",
+    "usage", "cost", "error", "contentHash"
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableTokenCount": {
+      "oneOf": [
+        {"type": "integer", "minimum": 0},
+        {"type": "null"}
+      ]
+    },
+    "nullableString": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {"type": "null"}
+      ]
+    }
+  },
+  "properties": {
+    "schemaVersion": {"const": "0.1"},
+    "brokerVersion": {"type": "string", "minLength": 1},
+    "runtimeVersion": {"type": "string", "minLength": 1},
+    "invocationId": {
+      "type": "string",
+      "pattern": "^invocation:[A-Za-z0-9._-]+$"
+    },
+    "workOrderId": {
+      "type": "string",
+      "pattern": "^work:[A-Za-z0-9._-]+$"
+    },
+    "profileId": {
+      "type": "string",
+      "pattern": "^profile:[A-Za-z0-9._-]+$"
+    },
+    "requestHash": {"$ref": "#/$defs/hash"},
+    "idempotencyStatus": {"enum": ["fresh", "duplicate", "conflict"]},
+    "ok": {"type": "boolean"},
+    "provider": {"$ref": "#/$defs/nullableString"},
+    "model": {"$ref": "#/$defs/nullableString"},
+    "canonicalModel": {"$ref": "#/$defs/nullableString"},
+    "agentId": {"$ref": "#/$defs/nullableString"},
+    "text": {"$ref": "#/$defs/nullableString"},
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inputTokens", "outputTokens", "cacheReadTokens",
+        "cacheWriteTokens", "totalTokens"
+      ],
+      "properties": {
+        "inputTokens": {"$ref": "#/$defs/nullableTokenCount"},
+        "outputTokens": {"$ref": "#/$defs/nullableTokenCount"},
+        "cacheReadTokens": {"$ref": "#/$defs/nullableTokenCount"},
+        "cacheWriteTokens": {"$ref": "#/$defs/nullableTokenCount"},
+        "totalTokens": {"$ref": "#/$defs/nullableTokenCount"}
+      }
+    },
+    "cost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "usd"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "usd": {
+          "oneOf": [
+            {"type": "number", "minimum": 0},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "error": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"},
+            "message": {"type": "string", "minLength": 1, "maxLength": 512}
+          }
+        },
+        {"type": "null"}
+      ]
+    },
+    "contentHash": {"$ref": "#/$defs/hash"}
+  }
+}

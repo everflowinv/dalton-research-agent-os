@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/governance-policy-version.schema.json",
+  "title": "GovernancePolicyVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "policy_ref", "version", "effective_from", "effective_until", "policy", "independence_predicates", "change_reason", "actor_ref", "prior_version_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "policy_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "effective_from": {"type": "string", "minLength": 1},
+    "effective_until": {"type": ["string", "null"]},
+    "policy": {"type": "object"},
+    "independence_predicates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["left_path", "operator"],
+        "properties": {
+          "left_path": {"type": "string", "enum": ["producer.provider", "producer.model", "producer.model_family", "producer.profile_ref", "producer.capability", "producer.runtime_ref", "producer.actor_ref", "producer.granularity", "producer.environment_hash", "verifier.provider", "verifier.model", "verifier.model_family", "verifier.profile_ref", "verifier.capability", "verifier.runtime_ref", "verifier.actor_ref", "verifier.granularity", "verifier.environment_hash"]},
+          "operator": {"type": "string", "enum": ["eq", "ne", "in", "not_in"]},
+          "right_path": {"type": "string", "enum": ["producer.provider", "producer.model", "producer.model_family", "producer.profile_ref", "producer.capability", "producer.runtime_ref", "producer.actor_ref", "producer.granularity", "producer.environment_hash", "verifier.provider", "verifier.model", "verifier.model_family", "verifier.profile_ref", "verifier.capability", "verifier.runtime_ref", "verifier.actor_ref", "verifier.granularity", "verifier.environment_hash"]},
+          "value": {}
+        },
+        "oneOf": [
+          {"required": ["right_path"], "not": {"required": ["value"]}},
+          {"required": ["value"], "not": {"required": ["right_path"]}}
+        ]
+      }
+    },
+    "change_reason": {"type": "string", "minLength": 1},
+    "actor_ref": {"type": "string", "minLength": 1},
+    "content_hash": {"type": "string", "minLength": 1},
+    "prior_version_ref": {"type": ["string", "null"]}
+  }
+}

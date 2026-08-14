@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/capability-lease.schema.json",
+  "title": "CapabilityLease",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "expires_at", "work_order_ref", "work_order_hash",
+    "capability_id", "revision_ref", "descriptor_hash", "source_hash", "schema_hash", "catalog_epoch",
+    "policy_ref", "policy_hash", "principal_ref", "permissions", "allowed_side_effects",
+    "credential_slot_refs", "content_hash"
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ref": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9+._-]*:[^\\s]+$"},
+    "strings": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "permissions": {
+      "type": "object", "additionalProperties": false,
+      "required": ["risk_class", "network", "filesystem_read", "filesystem_write", "credential_slot_refs", "core_db", "side_effects"],
+      "properties": {
+        "risk_class": {"enum": ["none", "low", "medium", "high"]},
+        "network": {"type": "boolean"},
+        "filesystem_read": {"$ref": "#/$defs/strings"},
+        "filesystem_write": {"$ref": "#/$defs/strings"},
+        "credential_slot_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^credential[-_]slot:[A-Za-z0-9][A-Za-z0-9._:/-]*$"}},
+        "core_db": {"type": "boolean"},
+        "side_effects": {"$ref": "#/$defs/strings"}
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^lease:[0-9a-f]{64}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "work_order_ref": {"type": "string", "minLength": 1},
+    "work_order_hash": {"$ref": "#/$defs/hash"},
+    "capability_id": {"type": "string", "pattern": "^capability:(dalton|skill|tool|mcp|plugin):[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$"},
+    "revision_ref": {"type": "string", "minLength": 1},
+    "descriptor_hash": {"$ref": "#/$defs/hash"},
+    "source_hash": {"$ref": "#/$defs/hash"},
+    "schema_hash": {"$ref": "#/$defs/hash"},
+    "catalog_epoch": {"type": "integer", "minimum": 1},
+    "policy_ref": {"$ref": "#/$defs/ref"},
+    "policy_hash": {"$ref": "#/$defs/hash"},
+    "principal_ref": {"$ref": "#/$defs/ref"},
+    "permissions": {"$ref": "#/$defs/permissions"},
+    "allowed_side_effects": {"$ref": "#/$defs/strings"},
+    "credential_slot_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^credential[-_]slot:[A-Za-z0-9][A-Za-z0-9._:/-]*$"}},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  }
+}

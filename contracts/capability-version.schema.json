@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/capability-version.schema.json",
+  "title": "CapabilityVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "capability_version_ref", "version", "proposal", "content_hash", "artifact_hash", "prior_version_ref", "builder_invocation_ref", "actor_ref"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "capability_version_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "proposal": {"type": "object"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "artifact_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "prior_version_ref": {"type": ["string", "null"]},
+    "builder_invocation_ref": {"type": ["string", "null"]},
+    "actor_ref": {"type": "string", "minLength": 1}
+  }
+}

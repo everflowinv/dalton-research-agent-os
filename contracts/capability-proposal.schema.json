@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/capability-proposal.schema.json",
+  "title": "CapabilityProposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "updated_at", "title", "kind", "gap", "expected_benefit", "contract", "permissions", "fixtures", "fixture_manifest_hash", "participants", "status"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "updated_at": {"type": "string", "minLength": 1},
+    "title": {"type": "string", "minLength": 1},
+    "kind": {"type": "string", "minLength": 1},
+    "gap": {"type": "object"},
+    "expected_benefit": {"type": "object"},
+    "contract": {"type": "object"},
+    "permissions": {"type": "object"},
+    "fixtures": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "fixture_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "participants": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+    "status": {"type": "string", "minLength": 1},
+    "artifact_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "prior_capability_ref": {"type": ["string", "null"]}
+  }
+}

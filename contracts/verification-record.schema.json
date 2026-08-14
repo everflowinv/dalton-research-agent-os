@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/verification-record.schema.json",
+  "title": "VerificationRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "target_ref", "target_content_hash", "verifier_invocation_ref", "verdict", "findings", "deterministic_checks", "verifier_kind", "revise_round", "independence_policy_ref", "subject_invocation_refs"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "target_ref": {"type": "string", "minLength": 1},
+    "target_content_hash": {"type": "string", "minLength": 1},
+    "verifier_invocation_ref": {"type": "string", "minLength": 1},
+    "verdict": {"type": "string", "enum": ["pass", "conditional_pass", "revise", "blocked", "reject"]},
+    "findings": {"type": "array", "items": {"type": "object"}},
+    "deterministic_checks": {"type": "array", "items": {"type": "object"}},
+    "verifier_kind": {"type": "string", "minLength": 1},
+    "revise_round": {"type": "integer", "minimum": 0},
+    "independence_policy_ref": {"type": "string", "minLength": 1},
+    "subject_invocation_refs": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/work-lease.schema.json",
+  "title": "WorkLease",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "lease_id", "lease_version", "created_at", "work_order_ref", "attempt_number", "owner_ref", "lease_token_hash", "issued_at", "renewed_at", "expires_at", "prior_lease_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "lease_id": {"type": "string", "minLength": 1},
+    "lease_version": {"type": "integer", "minimum": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "work_order_ref": {"type": "string", "minLength": 1},
+    "attempt_number": {"type": "integer", "minimum": 1},
+    "owner_ref": {"type": "string", "minLength": 1},
+    "lease_token_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "renewed_at": {"type": ["string", "null"], "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "prior_lease_ref": {"type": ["string", "null"]},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

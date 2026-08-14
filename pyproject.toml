@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dalton-core"
+version = "0.1.0.dev0"
+description = "Runtime-independent control kernel prototype for Dalton Research Agent OS"
+requires-python = ">=3.11"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.package-data]
+dalton_core = [
+  "schema.sql",
+  "capability_schema.sql",
+  "scheduler_schema.sql",
+  "capability_catalog_schema.sql",
+  "model_router_schema.sql",
+  "observability_schema.sql",
+  "dashboard_schema.sql",
+  "dashboard.html",
+]
+
+[tool.setuptools.data-files]
+"share/dalton-core/contracts" = ["contracts/*.schema.json"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

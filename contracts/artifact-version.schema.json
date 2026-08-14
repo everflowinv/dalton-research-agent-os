@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/artifact-version.schema.json",
+  "title": "ArtifactVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "artifact_ref", "version", "title", "kind", "media_type", "artifact_content_hash", "size_bytes", "storage_locator", "producer_invocation_ref", "work_order_ref", "result_envelope_ref", "result_envelope_hash", "access_class", "preview_status", "actor_ref", "prior_version_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "artifact_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "title": {"type": "string", "minLength": 1},
+    "kind": {"type": "string", "minLength": 1},
+    "media_type": {"type": "string", "minLength": 1},
+    "artifact_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "size_bytes": {"type": "integer", "minimum": 0},
+    "storage_locator": {"type": "string", "minLength": 1},
+    "producer_invocation_ref": {"type": "string", "minLength": 1},
+    "work_order_ref": {"type": "string", "minLength": 1},
+    "result_envelope_ref": {"type": "string", "minLength": 1},
+    "result_envelope_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "access_class": {"type": "string", "enum": ["public", "internal", "restricted"]},
+    "preview_status": {"type": "string", "enum": ["unavailable", "available", "redacted"]},
+    "actor_ref": {"type": "string", "minLength": 1},
+    "prior_version_ref": {"type": ["string", "null"], "minLength": 1},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

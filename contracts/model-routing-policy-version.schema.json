@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/model-routing-policy-version.schema.json",
+  "title": "ModelRoutingPolicyVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "policy_version_ref", "version", "created_at",
+    "prior_version_ref", "filters", "ordered_preferences", "content_hash"
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ref": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9+._-]*:[^\\s]+$"},
+    "token": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+\\-]*$"},
+    "refs": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/ref"}},
+    "tokens": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/token"}}
+  },
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"$ref": "#/$defs/ref"},
+    "policy_version_ref": {"$ref": "#/$defs/ref"},
+    "version": {"type": "integer", "minimum": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "prior_version_ref": {
+      "oneOf": [{"$ref": "#/$defs/ref"}, {"type": "null"}]
+    },
+    "filters": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "allowed_profile_ids", "allowed_providers", "allowed_families",
+        "allowed_adapter_refs", "required_modalities", "family_independence_capabilities"
+      ],
+      "properties": {
+        "allowed_profile_ids": {"$ref": "#/$defs/refs"},
+        "allowed_providers": {"$ref": "#/$defs/tokens"},
+        "allowed_families": {"$ref": "#/$defs/tokens"},
+        "allowed_adapter_refs": {"$ref": "#/$defs/refs"},
+        "required_modalities": {"$ref": "#/$defs/tokens"},
+        "family_independence_capabilities": {"$ref": "#/$defs/tokens"}
+      }
+    },
+    "ordered_preferences": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["field", "direction"],
+        "properties": {
+          "field": {
+            "enum": [
+              "estimated_cost_usd", "context.max_context_tokens", "context.max_output_tokens",
+              "limits.max_total_tokens", "cost.input_per_million_usd",
+              "cost.output_per_million_usd", "provider", "model", "family", "profile_id",
+              "profile_version_ref"
+            ]
+          },
+          "direction": {"enum": ["asc", "desc"]}
+        }
+      }
+    },
+    "content_hash": {"$ref": "#/$defs/hash"}
+  }
+}

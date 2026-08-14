@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/work-order.schema.json",
+  "title": "WorkOrder",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "updated_at", "question", "requested_capabilities", "runtime_profile_ref", "budget", "idempotency_key", "declared_side_effects", "status"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "updated_at": {"type": "string", "minLength": 1},
+    "question": {"type": "string", "minLength": 1},
+    "requested_capabilities": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "runtime_profile_ref": {"type": "string", "minLength": 1},
+    "budget": {"type": "object"},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "declared_side_effects": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "status": {"type": "string", "minLength": 1},
+    "input_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "metadata": {"type": "object"}
+  }
+}

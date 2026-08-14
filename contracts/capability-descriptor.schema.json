@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/capability-descriptor.schema.json",
+  "title": "CapabilityDescriptor",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "revision_ref", "version", "created_at", "catalog_epoch",
+    "kind", "name", "label", "summary", "aliases", "tags", "intent_examples",
+    "source", "contract", "permissions", "eligibility", "approval", "source_hash", "schema_hash", "content_hash"
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ref": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9+._-]*:[^\\s]+$"},
+    "strings": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["type", "namespace", "source_ref", "source_version"],
+      "properties": {
+        "type": {"enum": ["dalton", "skill", "tool", "mcp", "plugin"]},
+        "namespace": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+        "source_ref": {"$ref": "#/$defs/ref"},
+        "source_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "contract": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "input_schema_ref", "output_schema_ref", "instruction_ref", "adapter_ref"],
+      "properties": {
+        "mode": {"enum": ["instruction_load", "typed_call", "process"]},
+        "input_schema_ref": {"oneOf": [{"$ref": "#/$defs/ref"}, {"type": "null"}]},
+        "output_schema_ref": {"oneOf": [{"$ref": "#/$defs/ref"}, {"type": "null"}]},
+        "instruction_ref": {"oneOf": [{"$ref": "#/$defs/ref"}, {"type": "null"}]},
+        "adapter_ref": {"$ref": "#/$defs/ref"}
+      }
+    },
+    "permissions": {
+      "type": "object", "additionalProperties": false,
+      "required": ["risk_class", "network", "filesystem_read", "filesystem_write", "credential_slot_refs", "core_db", "side_effects"],
+      "properties": {
+        "risk_class": {"enum": ["none", "low", "medium", "high"]},
+        "network": {"type": "boolean"},
+        "filesystem_read": {"$ref": "#/$defs/strings"},
+        "filesystem_write": {"$ref": "#/$defs/strings"},
+        "credential_slot_refs": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^credential[-_]slot:[A-Za-z0-9][A-Za-z0-9._:/-]*$"}
+        },
+        "core_db": {"type": "boolean"},
+        "side_effects": {"$ref": "#/$defs/strings"}
+      }
+    },
+    "eligibility": {
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "visibility_scopes", "policy_ref", "valid_until"],
+      "properties": {
+        "state": {"enum": ["ready", "auth_required", "unavailable", "quarantined"]},
+        "visibility_scopes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "policy_ref": {"$ref": "#/$defs/ref"},
+        "valid_until": {"oneOf": [{"type": "string", "format": "date-time"}, {"type": "null"}]}
+      }
+    },
+    "approval": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "schema_version", "approval_ref", "capability_id", "registry_revision_ref",
+        "artifact_ref", "artifact_hash", "schema_hash", "fixture_manifest_hash", "attestation_ref",
+        "attestation_hash", "decision_ref", "decision", "approved_by", "approved_permissions", "active",
+        "effective_from", "effective_until", "receipt_hash"
+      ],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "approval_ref": {"$ref": "#/$defs/ref"},
+        "capability_id": {"type": "string", "minLength": 1},
+        "registry_revision_ref": {"$ref": "#/$defs/ref"},
+        "artifact_ref": {"$ref": "#/$defs/ref"},
+        "artifact_hash": {"$ref": "#/$defs/hash"},
+        "schema_hash": {"$ref": "#/$defs/hash"},
+        "fixture_manifest_hash": {"$ref": "#/$defs/hash"},
+        "attestation_ref": {"$ref": "#/$defs/ref"},
+        "attestation_hash": {"$ref": "#/$defs/hash"},
+        "decision_ref": {"$ref": "#/$defs/ref"},
+        "decision": {"const": "approve"},
+        "approved_by": {"type": "string", "pattern": "^human:[A-Za-z0-9._-]+$"},
+        "approved_permissions": {"$ref": "#/$defs/permissions"},
+        "active": {"const": true},
+        "effective_from": {"type": "string", "format": "date-time"},
+        "effective_until": {"oneOf": [{"type": "string", "format": "date-time"}, {"type": "null"}]},
+        "receipt_hash": {"$ref": "#/$defs/hash"}
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^capability:(dalton|skill|tool|mcp|plugin):[a-z0-9][a-z0-9._-]*:[a-z0-9][a-z0-9._-]*$"},
+    "revision_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "catalog_epoch": {"type": "integer", "minimum": 1},
+    "kind": {"enum": ["instruction", "tool", "connector", "transform", "runtime"]},
+    "name": {"type": "string", "minLength": 1},
+    "label": {"type": "string", "minLength": 1},
+    "summary": {"type": "string", "minLength": 1},
+    "aliases": {"$ref": "#/$defs/strings"},
+    "tags": {"$ref": "#/$defs/strings"},
+    "intent_examples": {"$ref": "#/$defs/strings"},
+    "source": {"$ref": "#/$defs/source"},
+    "contract": {"$ref": "#/$defs/contract"},
+    "permissions": {"$ref": "#/$defs/permissions"},
+    "eligibility": {"$ref": "#/$defs/eligibility"},
+    "approval": {"$ref": "#/$defs/approval"},
+    "source_hash": {"$ref": "#/$defs/hash"},
+    "schema_hash": {"$ref": "#/$defs/hash"},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  }
+}

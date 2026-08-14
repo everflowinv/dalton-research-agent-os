@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/writer-command.schema.json",
+  "title": "WriterCommand",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "request_id", "operation", "params", "auth_token"],
+  "properties": {
+    "protocol_version": {"type": "string", "const": "0.1"},
+    "request_id": {"type": "string", "minLength": 1},
+    "operation": {"type": "string", "minLength": 1},
+    "params": {"type": "object"},
+    "auth_token": {"type": "string", "minLength": 1}
+  }
+}

@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/model-route-decision.schema.json",
+  "title": "ModelRouteDecision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "decision_kind", "outcome",
+    "work_order_ref", "work_order_hash", "attempt_number", "capability",
+    "policy_version_ref", "policy_hash", "candidate_snapshot_hash", "candidate_snapshot",
+    "constraints", "selected_profile_version_ref", "selected_profile_hash", "selected_endpoint",
+    "previous_decision_ref", "rejection_reasons", "request_hash", "content_hash"
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ref": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9+._-]*:[^\\s]+$"},
+    "token": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+\\-]*$"},
+    "strings": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+  },
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"$ref": "#/$defs/ref"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "decision_kind": {"enum": ["initial", "retry", "switch"]},
+    "outcome": {"enum": ["selected", "rejected"]},
+    "work_order_ref": {"type": "string", "minLength": 1},
+    "work_order_hash": {"$ref": "#/$defs/hash"},
+    "attempt_number": {"type": "integer", "minimum": 1},
+    "capability": {"$ref": "#/$defs/token"},
+    "policy_version_ref": {"$ref": "#/$defs/ref"},
+    "policy_hash": {"$ref": "#/$defs/hash"},
+    "candidate_snapshot_hash": {"$ref": "#/$defs/hash"},
+    "candidate_snapshot": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": [
+          "profile_version_ref", "profile_hash", "eligible", "rejection_reasons",
+          "estimated_cost_usd"
+        ],
+        "properties": {
+          "profile_version_ref": {"$ref": "#/$defs/ref"},
+          "profile_hash": {"$ref": "#/$defs/hash"},
+          "eligible": {"type": "boolean"},
+          "rejection_reasons": {"$ref": "#/$defs/strings"},
+          "estimated_cost_usd": {"type": "string", "pattern": "^[0-9]+\\.[0-9]{6}$"}
+        }
+      }
+    },
+    "constraints": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "credential_slot_refs", "required_modalities", "required_context_tokens",
+        "estimated_input_tokens", "estimated_output_tokens", "producer_family"
+      ],
+      "properties": {
+        "credential_slot_refs": {
+          "type": "array", "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^credential[-_]slot:[A-Za-z0-9][A-Za-z0-9._:/-]*$"}
+        },
+        "required_modalities": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/token"}
+        },
+        "required_context_tokens": {"type": "integer", "minimum": 1},
+        "estimated_input_tokens": {"type": "integer", "minimum": 1},
+        "estimated_output_tokens": {"type": "integer", "minimum": 1},
+        "producer_family": {
+          "oneOf": [{"$ref": "#/$defs/token"}, {"type": "null"}]
+        }
+      }
+    },
+    "selected_profile_version_ref": {
+      "oneOf": [{"$ref": "#/$defs/ref"}, {"type": "null"}]
+    },
+    "selected_profile_hash": {
+      "oneOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]
+    },
+    "selected_endpoint": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["provider", "model", "family", "adapter_ref", "credential_slot_ref"],
+          "properties": {
+            "provider": {"$ref": "#/$defs/token"},
+            "model": {"$ref": "#/$defs/token"},
+            "family": {"$ref": "#/$defs/token"},
+            "adapter_ref": {"$ref": "#/$defs/ref"},
+            "credential_slot_ref": {
+              "type": "string", "pattern": "^credential[-_]slot:[A-Za-z0-9][A-Za-z0-9._:/-]*$"
+            }
+          }
+        },
+        {"type": "null"}
+      ]
+    },
+    "previous_decision_ref": {
+      "oneOf": [{"$ref": "#/$defs/ref"}, {"type": "null"}]
+    },
+    "rejection_reasons": {"$ref": "#/$defs/strings"},
+    "request_hash": {"$ref": "#/$defs/hash"},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  }
+}

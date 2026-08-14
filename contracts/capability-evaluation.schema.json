@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/capability-evaluation.schema.json",
+  "title": "CapabilityEvaluation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "capability_version_ref", "proposal_content_hash", "fixtures", "baseline", "results", "environment_hash", "evaluator_invocation_ref", "builder_invocation_ref", "policy_version_id", "policy_content_hash", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "capability_version_ref": {"type": "string", "minLength": 1},
+    "proposal_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "fixtures": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "baseline": {"type": "object"},
+    "results": {"type": "object"},
+    "environment_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "evaluator_invocation_ref": {"type": "string", "minLength": 1},
+    "builder_invocation_ref": {"type": ["string", "null"]},
+    "policy_version_id": {"type": "string", "minLength": 1},
+    "policy_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "actor_ref": {"type": "string", "minLength": 1},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

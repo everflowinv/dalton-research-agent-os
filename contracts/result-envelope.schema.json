@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/result-envelope.schema.json",
+  "title": "ResultEnvelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "work_order_ref", "invocation_ref", "status", "outputs", "artifact_refs", "actual_side_effects", "usage_refs"],
+  "properties": {
+    "schema_version": {"type": "string", "const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "work_order_ref": {"type": "string", "minLength": 1},
+    "invocation_ref": {"type": "string", "minLength": 1},
+    "status": {"type": "string", "minLength": 1},
+    "outputs": {"type": "object"},
+    "artifact_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "actual_side_effects": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "usage_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "error": {"type": ["object", "null"]},
+    "metadata": {"type": "object"}
+  }
+}

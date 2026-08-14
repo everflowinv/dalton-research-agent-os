@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dalton/evidence-relation/0.1",
+  "title": "EvidenceRelation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "evidence_ref", "evidence_version_ref", "claim_ref", "claim_version_ref", "relation", "source_lineage", "independence_group", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"}, "id": {"type": "string", "minLength": 1}, "created_at": {"type": "string", "minLength": 1},
+    "evidence_ref": {"type": "string", "minLength": 1}, "evidence_version_ref": {"type": "string", "minLength": 1}, "claim_ref": {"type": "string", "minLength": 1}, "claim_version_ref": {"type": "string", "minLength": 1},
+    "relation": {"enum": ["supports", "contradicts", "qualifies"]}, "source_lineage": {"type": "array", "items": {"type": "string", "minLength": 1}}, "independence_group": {"type": "string", "minLength": 1},
+    "actor_ref": {"type": "string", "minLength": 1}, "content_hash": {"type": "string", "minLength": 1}
+  }
+}

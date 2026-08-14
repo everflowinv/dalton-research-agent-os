@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/writer-response.schema.json",
+  "title": "WriterResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "request_id", "ok", "result", "error"],
+  "properties": {
+    "protocol_version": {"type": "string", "const": "0.1"},
+    "request_id": {"type": "string", "minLength": 1},
+    "ok": {"type": "boolean"},
+    "result": {},
+    "error": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["code", "message"],
+          "properties": {
+            "code": {"type": "string", "minLength": 1},
+            "message": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    }
+  }
+}
