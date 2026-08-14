@@ -1,0 +1,226 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "host_owned",
+    "owner": "host",
+    "use_time_authority": "required_future"
+  },
+  "connector_ref": "connector:guidepoint-library",
+  "content_hash": "4fa7c2ca6c3c2da532f69621b81e483325ac27c0771e6b32f3453d4593fa4b8c",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "20d0f78a0071050014f9a5758c8cde3ea2b4da68d612e1ac9a0f9a074a94ace4",
+  "fixture_manifest_ref": "connector-fixture-manifest:guidepoint:0.1",
+  "id": "connector-profile-template:guidepoint:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "ranked",
+      "input_schema_hash": "b755a2b2615cb7491f3cd58da347ddf833854ee8c417f5830c7629a53c51e09b",
+      "input_schema_ref": "schema:connector-inventory:guidepoint:search_library:input:0.1",
+      "operation": "search_library",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:guidepoint:search_library:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": "cursor",
+        "max_pages": 20,
+        "mode": "cursor"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "search_library"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "4a649b1176cf50d9375b02996b3f0d249ba10593890589db0108aece0e378a65",
+      "input_schema_ref": "schema:connector-inventory:guidepoint:get_transcript:input:0.1",
+      "operation": "get_transcript",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:guidepoint:get_transcript:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": "cursor",
+        "max_pages": 20,
+        "mode": "cursor"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_transcript"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "mcp_managed_runner_v0.2_and_credential_authority"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "mcp-target:guidepoint"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:public-http"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "filters": {
+            "additionalProperties": false,
+            "properties": {
+              "company": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "date_from": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "date_to": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "document_type": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "geography": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "industry": {
+                "minLength": 1,
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "filters"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "b755a2b2615cb7491f3cd58da347ddf833854ee8c417f5830c7629a53c51e09b",
+      "schema_ref": "schema:connector-inventory:guidepoint:search_library:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:guidepoint:search_library:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "document_ref": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_ref"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "4a649b1176cf50d9375b02996b3f0d249ba10593890589db0108aece0e378a65",
+      "schema_ref": "schema:connector-inventory:guidepoint:get_transcript:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:guidepoint:get_transcript:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:guidepoint",
+    "source_type": "authenticated_library",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [],
+    "host_policy": "not_applicable",
+    "kind": "mcp_managed",
+    "target_hash": "22e22327eef0b2879a9a99aee0cf7cc5767093eec6300ce41e74a8dd4567261a",
+    "target_ref": "mcp-target:guidepoint"
+  }
+}

@@ -1,0 +1,142 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "connector_ref": "connector:reddit-last30days",
+  "content_hash": "8d86ad954abb3a38c2c43151eadb65894eb466550d245abf05ed646b52705e2f",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "00d224a2b62e2858ba9a8e0ad45ae4804e680673132d187946e882cacba450d9",
+  "fixture_manifest_ref": "connector-fixture-manifest:reddit-last30days:0.1",
+  "id": "connector-profile-template:reddit-last30days:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "ranked",
+      "input_schema_hash": "6284bded096b2f5f18008755a71e442071b3a1b7dd089f3398a5a08a582979da",
+      "input_schema_ref": "schema:connector-inventory:reddit-last30days:search_posts:input:0.1",
+      "operation": "search_posts",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:reddit-last30days:search_posts:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": "cursor",
+        "max_pages": 20,
+        "mode": "cursor"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "search_posts"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "host_tool_runner_v0.2"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "host-tool:last30days-reddit-keyless"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:agent-reach-reddit-json",
+      "route:browser-cookie",
+      "route:last30days-x"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "date_from": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "date_to": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "subreddits": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "query",
+          "subreddits",
+          "date_from",
+          "date_to"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "6284bded096b2f5f18008755a71e442071b3a1b7dd089f3398a5a08a582979da",
+      "schema_ref": "schema:connector-inventory:reddit-last30days:search_posts:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:reddit-last30days:search_posts:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:reddit",
+    "source_type": "social_search",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [],
+    "host_policy": "not_applicable",
+    "kind": "host_tool",
+    "target_hash": "94eb58cc4b95f88a2dafa6483cfd56b72e69ae95bb65d8362e31073b564e662b",
+    "target_ref": "host-tool:last30days-reddit-keyless"
+  }
+}

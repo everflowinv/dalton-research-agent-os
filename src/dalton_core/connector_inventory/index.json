@@ -1,0 +1,98 @@
+{
+  "content_hash": "0b6f6502feef5b4ff5090ac1d8ef927d136ab3743f6ff29b88cdc32d5f890615",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "id": "connector-inventory:p1-0:0.1",
+  "profiles": [
+    {
+      "connector_ref": "connector:cninfo-announcements",
+      "fixture_manifest_hash": "1d383fdae0494d324f1740613912ff09d5e1bee17bc4cbc9909b8cbfd6bdfc8e",
+      "fixture_manifest_ref": "connector-fixture-manifest:cninfo:0.1",
+      "profile_template_hash": "7e56b2620846df2b8102e73e5f4e648bc421bcd59c757da2d92f08f4c790c1f9",
+      "profile_template_ref": "connector-profile-template:cninfo:0.1",
+      "proposal_manifest_hash": "a15b1f3a751aac7a40e6ae9083275a7150cb9b9779b26c6e43915ecb74ac0aaf",
+      "proposal_manifest_ref": "connector-proposal-manifest:cninfo:0.2"
+    },
+    {
+      "connector_ref": "connector:sec-edgar",
+      "fixture_manifest_hash": "628f896f881e8584ed1e9949611aa0adaf833595fe7517308f55963b28e17ffc",
+      "fixture_manifest_ref": "connector-fixture-manifest:sec:0.1",
+      "profile_template_hash": "2b8cc502b55fa53efd4eff97c1a2f3819e12185f8c38e982b00a23393baa2d07",
+      "profile_template_ref": "connector-profile-template:sec:0.1",
+      "proposal_manifest_hash": "0c94575553a97eea2ef4c2feca4512c131356ecc06b0621f87dd6a9ba41c70fb",
+      "proposal_manifest_ref": "connector-proposal-manifest:sec:0.2"
+    },
+    {
+      "connector_ref": "connector:alphaengine-library",
+      "fixture_manifest_hash": "aab7901cf0833bc495353ef6c436f7c0365cce5f939c754dba378460221c525b",
+      "fixture_manifest_ref": "connector-fixture-manifest:alphaengine:0.1",
+      "profile_template_hash": "dc443f627eec3a266c391262aff4797fb376e94d4849ba3a1ab88ef10871c642",
+      "profile_template_ref": "connector-profile-template:alphaengine:0.1",
+      "proposal_manifest_hash": "385bc1d12abc13de49ac726cc491359849671268cf910d2e016a59ceac937feb",
+      "proposal_manifest_ref": "connector-proposal-manifest:alphaengine:0.2"
+    },
+    {
+      "connector_ref": "connector:x-xreach",
+      "fixture_manifest_hash": "67bb23608e46d77484cbe9f61e6e151a8464db56cf0ba08c9bb081b6a912d50d",
+      "fixture_manifest_ref": "connector-fixture-manifest:x-xreach:0.1",
+      "profile_template_hash": "7bb63f16a3c71c668e0e0acb8390e8d9e18c0641609d3323dbf4c37ee34c413d",
+      "profile_template_ref": "connector-profile-template:x-xreach:0.1",
+      "proposal_manifest_hash": "a56fabe3d3e6fbf99b965c3d89b3e453b9d4ac573b64104d98c86d8544785ea5",
+      "proposal_manifest_ref": "connector-proposal-manifest:x-xreach:0.2"
+    },
+    {
+      "connector_ref": "connector:x-semantic-search",
+      "fixture_manifest_hash": "fadbb47519ad852ae8faaa80a3fc9fc6db1f4f16933aeb272b5fe57c0a056b2f",
+      "fixture_manifest_ref": "connector-fixture-manifest:x-x-search:0.1",
+      "profile_template_hash": "b92dcd451c4f5a9334c5ec9336727ee65c3d8204d308ff0f250400fdff23eaed",
+      "profile_template_ref": "connector-profile-template:x-x-search:0.1",
+      "proposal_manifest_hash": "e2d1faebcc4fb6de8c7c168b5721902204f3b3457e6b1d0fafc65ba752642e25",
+      "proposal_manifest_ref": "connector-proposal-manifest:x-x-search:0.2"
+    },
+    {
+      "connector_ref": "connector:reddit-last30days",
+      "fixture_manifest_hash": "00d224a2b62e2858ba9a8e0ad45ae4804e680673132d187946e882cacba450d9",
+      "fixture_manifest_ref": "connector-fixture-manifest:reddit-last30days:0.1",
+      "profile_template_hash": "8d86ad954abb3a38c2c43151eadb65894eb466550d245abf05ed646b52705e2f",
+      "profile_template_ref": "connector-profile-template:reddit-last30days:0.1",
+      "proposal_manifest_hash": "d17e57edc51826061dbca272d6d09378a7fabf66c66879fa0c83f5e7160bca53",
+      "proposal_manifest_ref": "connector-proposal-manifest:reddit-last30days:0.2"
+    },
+    {
+      "connector_ref": "connector:guidepoint-library",
+      "fixture_manifest_hash": "20d0f78a0071050014f9a5758c8cde3ea2b4da68d612e1ac9a0f9a074a94ace4",
+      "fixture_manifest_ref": "connector-fixture-manifest:guidepoint:0.1",
+      "profile_template_hash": "4fa7c2ca6c3c2da532f69621b81e483325ac27c0771e6b32f3453d4593fa4b8c",
+      "profile_template_ref": "connector-profile-template:guidepoint:0.1",
+      "proposal_manifest_hash": "a8bce93521e5b4d755ac2b6582e870e768044e2114650855a5268891f39d35db",
+      "proposal_manifest_ref": "connector-proposal-manifest:guidepoint:0.2"
+    },
+    {
+      "connector_ref": "connector:gemini-web-search",
+      "fixture_manifest_hash": "abbcc08c1769ac083bb99db2478d009f0d9f0eb67e35c3e171051cb566c8a047",
+      "fixture_manifest_ref": "connector-fixture-manifest:gemini-web-search:0.1",
+      "profile_template_hash": "e09e671609a88522eaedcf80e7bb7f0171385b6c9cd5d3b7635150a03487ed4a",
+      "profile_template_ref": "connector-profile-template:gemini-web-search:0.1",
+      "proposal_manifest_hash": "46bcf7d02c2852653c42b7874c783408a5928a4333b64aec8b9b20db60b751c4",
+      "proposal_manifest_ref": "connector-proposal-manifest:gemini-web-search:0.2"
+    },
+    {
+      "connector_ref": "connector:web-fetch",
+      "fixture_manifest_hash": "46d83a5e102b4b6b366e97e5f44317f338c255c70bbe20532bc325af492302e9",
+      "fixture_manifest_ref": "connector-fixture-manifest:web-fetch:0.1",
+      "profile_template_hash": "674e0a33e5759b586335c1b6e76caf9dfc157b582c71fd359e64bf9ff0e769a1",
+      "profile_template_ref": "connector-profile-template:web-fetch:0.1",
+      "proposal_manifest_hash": "371f3bfc633b683963d9545c46b08b64b872e92a92b18810e747c153ab234113",
+      "proposal_manifest_ref": "connector-proposal-manifest:web-fetch:0.2"
+    },
+    {
+      "connector_ref": "connector:xueqiu",
+      "fixture_manifest_hash": "f1a8d708674c2da614302736457e723e5114d8791a0bfde7242922a1f1cf247f",
+      "fixture_manifest_ref": "connector-fixture-manifest:xueqiu:0.1",
+      "profile_template_hash": "a811f9bd5c7b4086670b5539a7a6cc40911a86aa2a61a80ca0eed2d921050400",
+      "profile_template_ref": "connector-profile-template:xueqiu:0.1",
+      "proposal_manifest_hash": "c5a65f008c34a38fecd8776bd0def726827a2e1ee90f2df9708223532d8061dc",
+      "proposal_manifest_ref": "connector-proposal-manifest:xueqiu:0.2"
+    }
+  ],
+  "schema_version": "0.1"
+}

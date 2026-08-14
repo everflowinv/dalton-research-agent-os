@@ -1,0 +1,84 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:xueqiu:0.1",
+  "adapter_source_hash": "f5901631bfc91ec48bbd5f77d9acff4ae01bbd1cbb8ddbaa118caf2dc5234ff0",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "host_owned",
+    "owner": "host",
+    "use_time_authority": "required_future"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:xueqiu:0.1",
+  "connector_ref": "connector:xueqiu",
+  "content_hash": "c5a65f008c34a38fecd8776bd0def726827a2e1ee90f2df9708223532d8061dc",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "f1a8d708674c2da614302736457e723e5114d8791a0bfde7242922a1f1cf247f",
+  "fixture_manifest_ref": "connector-fixture-manifest:xueqiu:0.1",
+  "id": "connector-proposal-manifest:xueqiu:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "ab0ceb9d25a448b9dcbd12ca8ff05c589a02575607b72d5c46290da055271ae8",
+      "input_schema_ref": "schema:connector-inventory:xueqiu:get_stock_quote:input:0.1",
+      "operation": "get_stock_quote",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:xueqiu:get_stock_quote:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "ranked",
+      "input_schema_hash": "b7c8fb50e2d4708e8b3b367d3be26813787a87d44a28b6dd4eb0dd5e72f32c03",
+      "input_schema_ref": "schema:connector-inventory:xueqiu:get_hot_posts:input:0.1",
+      "operation": "get_hot_posts",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:xueqiu:get_hot_posts:output:0.1",
+      "pagination": "page",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "ranked",
+      "input_schema_hash": "4e8e6cf7fb04b2d104f950e4adc6845290816804936386d7edb164df575d9e01",
+      "input_schema_ref": "schema:connector-inventory:xueqiu:get_hot_stocks:input:0.1",
+      "operation": "get_hot_stocks",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:xueqiu:get_hot_stocks:output:0.1",
+      "pagination": "page",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "ranked",
+      "input_schema_hash": "9f4b791451c2a0a831bfab08f0f18afc1d540de6aeaf2e7de4c04112d9757f07",
+      "input_schema_ref": "schema:connector-inventory:xueqiu:search_stock:input:0.1",
+      "operation": "search_stock",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:xueqiu:search_stock:output:0.1",
+      "pagination": "page",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "a811f9bd5c7b4086670b5539a7a6cc40911a86aa2a61a80ca0eed2d921050400",
+  "profile_template_ref": "connector-profile-template:xueqiu:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "host-tool:agent-reach-xueqiu-channel",
+    "adapter_version": "inventory-0.1",
+    "source": "source:xueqiu",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "host_tool",
+  "transport_target_hash": "186ce21a18529da1b40048b82a5a6223bd59b9be58e9b4314cdfa9040ef6bf90",
+  "transport_target_ref": "host-tool:agent-reach-xueqiu-channel"
+}

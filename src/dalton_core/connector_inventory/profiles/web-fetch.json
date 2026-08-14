@@ -1,0 +1,184 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "connector_ref": "connector:web-fetch",
+  "content_hash": "674e0a33e5759b586335c1b6e76caf9dfc157b582c71fd359e64bf9ff0e769a1",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "46d83a5e102b4b6b366e97e5f44317f338c255c70bbe20532bc325af492302e9",
+  "fixture_manifest_ref": "connector-fixture-manifest:web-fetch:0.1",
+  "id": "connector-profile-template:web-fetch:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "partial",
+      "input_schema_hash": "eb2cc03440fed3a5e8a4a719db3c80391ca341451650ca978706780b33029fb2",
+      "input_schema_ref": "schema:connector-inventory:web-fetch:fetch_get:input:0.1",
+      "operation": "fetch_get",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:web-fetch:fetch_get:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "fetch_get"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "eb2cc03440fed3a5e8a4a719db3c80391ca341451650ca978706780b33029fb2",
+      "input_schema_ref": "schema:connector-inventory:web-fetch:fetch_head:input:0.1",
+      "operation": "fetch_head",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:web-fetch:fetch_head:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "fetch_head"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "killable_total_deadline_public_transport"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "transport:public-http:0.1"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:credential-channel",
+      "route:private-network"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "url_ref": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url_ref"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "eb2cc03440fed3a5e8a4a719db3c80391ca341451650ca978706780b33029fb2",
+      "schema_ref": "schema:connector-inventory:web-fetch:fetch_get:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:web-fetch:fetch_get:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "url_ref": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url_ref"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "eb2cc03440fed3a5e8a4a719db3c80391ca341451650ca978706780b33029fb2",
+      "schema_ref": "schema:connector-inventory:web-fetch:fetch_head:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:web-fetch:fetch_head:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:public-web",
+    "source_type": "public_web",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [],
+    "host_policy": "per_call_authority",
+    "kind": "public_https",
+    "target_hash": "7c8af09dbd955a787ec439b649547cc3520467278acc63a2cea40800a06276e7",
+    "target_ref": "transport:public-http:0.1"
+  }
+}

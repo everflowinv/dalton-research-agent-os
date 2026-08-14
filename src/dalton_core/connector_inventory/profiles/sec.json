@@ -1,0 +1,432 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "connector_ref": "connector:sec-edgar",
+  "content_hash": "2b8cc502b55fa53efd4eff97c1a2f3819e12185f8c38e982b00a23393baa2d07",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "628f896f881e8584ed1e9949611aa0adaf833595fe7517308f55963b28e17ffc",
+  "fixture_manifest_ref": "connector-fixture-manifest:sec:0.1",
+  "id": "connector-profile-template:sec:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "8fbd0650bfcb845f8bddded017551834d39174e9c74f785d1538e657c359cde4",
+      "input_schema_ref": "schema:connector-inventory:sec:list_filings:input:0.1",
+      "operation": "list_filings",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:sec:list_filings:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": "cursor",
+        "max_pages": 20,
+        "mode": "cursor"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "list_filings"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "097e2b5cda735a0ffba6ba7a2eeb0064e9914c2688c21adde50b0384e1d9aa8a",
+      "input_schema_ref": "schema:connector-inventory:sec:list_official_attachments:input:0.1",
+      "operation": "list_official_attachments",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:sec:list_official_attachments:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "list_official_attachments"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "d5930fbd0923de7045d18e55e1bcf3302c5eeecd27bbadbbd5c167dd03bfd4d4",
+      "input_schema_ref": "schema:connector-inventory:sec:get_official_attachment:input:0.1",
+      "operation": "get_official_attachment",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:sec:get_official_attachment:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_official_attachment"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "8c3c5af49c82e39cb70f54b0c2f5d3806416acf81880ee4c604982bb0e40e666",
+      "input_schema_ref": "schema:connector-inventory:sec:read_item:input:0.1",
+      "operation": "read_item",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:sec:read_item:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "read_item"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "3c63067a3576279eb316fa7dedaa0e84b7e8987d556cb854f86a5bd5c3826b80",
+      "input_schema_ref": "schema:connector-inventory:sec:get_company_facts:input:0.1",
+      "operation": "get_company_facts",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:sec:get_company_facts:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": "cursor",
+        "max_pages": 20,
+        "mode": "cursor"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_company_facts"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "recorded_public_reference_shadow"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "transport:public-http:0.1"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:arbitrary-attachment-url"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "date_from": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "date_to": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "form": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "issuer": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "issuer",
+          "form",
+          "date_from",
+          "date_to",
+          "limit"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "8fbd0650bfcb845f8bddded017551834d39174e9c74f785d1538e657c359cde4",
+      "schema_ref": "schema:connector-inventory:sec:list_filings:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:sec:list_filings:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "accession": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "accession"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "097e2b5cda735a0ffba6ba7a2eeb0064e9914c2688c21adde50b0384e1d9aa8a",
+      "schema_ref": "schema:connector-inventory:sec:list_official_attachments:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:sec:list_official_attachments:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "accession": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "attachment_ref": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "accession",
+          "attachment_ref"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "d5930fbd0923de7045d18e55e1bcf3302c5eeecd27bbadbbd5c167dd03bfd4d4",
+      "schema_ref": "schema:connector-inventory:sec:get_official_attachment:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:sec:get_official_attachment:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "accession": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "item": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "accession",
+          "item"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "8c3c5af49c82e39cb70f54b0c2f5d3806416acf81880ee4c604982bb0e40e666",
+      "schema_ref": "schema:connector-inventory:sec:read_item:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:sec:read_item:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "cik": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "cik"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "3c63067a3576279eb316fa7dedaa0e84b7e8987d556cb854f86a5bd5c3826b80",
+      "schema_ref": "schema:connector-inventory:sec:get_company_facts:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:sec:get_company_facts:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:sec-edgar",
+    "source_type": "official_filing",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [
+      "www.sec.gov",
+      "data.sec.gov"
+    ],
+    "host_policy": "literal_allowlist",
+    "kind": "public_https",
+    "target_hash": "38fe9a843e2b843616797db5122885d56c5684a8c22ffebaee86932f69268aeb",
+    "target_ref": "transport:public-http:0.1"
+  }
+}

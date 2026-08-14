@@ -1,0 +1,353 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "host_owned",
+    "owner": "host",
+    "use_time_authority": "required_future"
+  },
+  "connector_ref": "connector:xueqiu",
+  "content_hash": "a811f9bd5c7b4086670b5539a7a6cc40911a86aa2a61a80ca0eed2d921050400",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "f1a8d708674c2da614302736457e723e5114d8791a0bfde7242922a1f1cf247f",
+  "fixture_manifest_ref": "connector-fixture-manifest:xueqiu:0.1",
+  "id": "connector-profile-template:xueqiu:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "ab0ceb9d25a448b9dcbd12ca8ff05c589a02575607b72d5c46290da055271ae8",
+      "input_schema_ref": "schema:connector-inventory:xueqiu:get_stock_quote:input:0.1",
+      "operation": "get_stock_quote",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:xueqiu:get_stock_quote:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_stock_quote"
+    },
+    {
+      "completeness_ceiling": "ranked",
+      "input_schema_hash": "b7c8fb50e2d4708e8b3b367d3be26813787a87d44a28b6dd4eb0dd5e72f32c03",
+      "input_schema_ref": "schema:connector-inventory:xueqiu:get_hot_posts:input:0.1",
+      "operation": "get_hot_posts",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:xueqiu:get_hot_posts:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": "page",
+        "max_pages": 20,
+        "mode": "page"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_hot_posts"
+    },
+    {
+      "completeness_ceiling": "ranked",
+      "input_schema_hash": "4e8e6cf7fb04b2d104f950e4adc6845290816804936386d7edb164df575d9e01",
+      "input_schema_ref": "schema:connector-inventory:xueqiu:get_hot_stocks:input:0.1",
+      "operation": "get_hot_stocks",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:xueqiu:get_hot_stocks:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": "page",
+        "max_pages": 20,
+        "mode": "page"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_hot_stocks"
+    },
+    {
+      "completeness_ceiling": "ranked",
+      "input_schema_hash": "9f4b791451c2a0a831bfab08f0f18afc1d540de6aeaf2e7de4c04112d9757f07",
+      "input_schema_ref": "schema:connector-inventory:xueqiu:search_stock:input:0.1",
+      "operation": "search_stock",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:xueqiu:search_stock:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": "page",
+        "max_pages": 20,
+        "mode": "page"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "search_stock"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "host_tool_runner_v0.2_and_credential_authority"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "host-tool:agent-reach-xueqiu-channel"
+    ],
+    "fallback_routes": [
+      {
+        "adapter_ref": "adapter:cn-hk-findata:xq-hot-rank",
+        "operation": "get_hot_stocks",
+        "provenance_label": "xueqiu_hot_stock_rank_fallback",
+        "source_ref": "source:xueqiu",
+        "target_ref": "host-tool:cn-hk-findata-xq-hot-rank"
+      }
+    ],
+    "forbidden_target_refs": [
+      "route:public-http",
+      "route:reddit-cookie"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "symbol": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "symbol"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "ab0ceb9d25a448b9dcbd12ca8ff05c589a02575607b72d5c46290da055271ae8",
+      "schema_ref": "schema:connector-inventory:xueqiu:get_stock_quote:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:xueqiu:get_stock_quote:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit",
+          "page"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "b7c8fb50e2d4708e8b3b367d3be26813787a87d44a28b6dd4eb0dd5e72f32c03",
+      "schema_ref": "schema:connector-inventory:xueqiu:get_hot_posts:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:xueqiu:get_hot_posts:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "stock_type": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit",
+          "stock_type",
+          "page"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "4e8e6cf7fb04b2d104f950e4adc6845290816804936386d7edb164df575d9e01",
+      "schema_ref": "schema:connector-inventory:xueqiu:get_hot_stocks:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:xueqiu:get_hot_stocks:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "limit",
+          "page"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "9f4b791451c2a0a831bfab08f0f18afc1d540de6aeaf2e7de4c04112d9757f07",
+      "schema_ref": "schema:connector-inventory:xueqiu:search_stock:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:xueqiu:search_stock:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:xueqiu",
+    "source_type": "market_data",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [],
+    "host_policy": "not_applicable",
+    "kind": "host_tool",
+    "target_hash": "186ce21a18529da1b40048b82a5a6223bd59b9be58e9b4314cdfa9040ef6bf90",
+    "target_ref": "host-tool:agent-reach-xueqiu-channel"
+  }
+}

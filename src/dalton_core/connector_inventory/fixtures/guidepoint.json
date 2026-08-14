@@ -1,0 +1,314 @@
+{
+  "authenticated": true,
+  "cases": [
+    {
+      "case_ref": "fixture:guidepoint:search_library:empty:0.1",
+      "completeness": "ranked",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "search_library",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "f141c52919ce56a7e403ecc095c87dff7fd9d27c6a6a2d26e0243b1c699bb1f0",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:guidepoint:search_library:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "search_library",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:guidepoint:search_library:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "search_library",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "d7a66fe970db5ec886dc0d3228e62d1efa9ad557a481f921662fe9ff9bdeb9ef",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:guidepoint:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:guidepoint:search_library:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "search_library",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:guidepoint:search_library:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "search_library",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:guidepoint:search_library:success:0.1",
+      "completeness": "ranked",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "search_library",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "333022c2319ab0cc6c973c119391eb82edc7e12b0a62ca3e8d8385a297d6c0d2",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:guidepoint:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:guidepoint:search_library:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "search_library",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:guidepoint:search_library:pagination:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": "synthetic-next",
+      "operation": "search_library",
+      "outcome": "succeeded",
+      "page": 1,
+      "provider_status": 200,
+      "raw_payload_hash": "23f01a5c2143827bea2679af2251e0b65ca2babad532ab197050224fb7a18b99",
+      "scenario": "pagination",
+      "source_record_refs": [
+        "record:guidepoint:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:guidepoint:search_library:permission_denied:0.1",
+      "completeness": null,
+      "error_code": "permission_denied",
+      "next_cursor": null,
+      "operation": "search_library",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 403,
+      "raw_payload_hash": null,
+      "scenario": "permission_denied",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:guidepoint:search_library:revoked:0.1",
+      "completeness": null,
+      "error_code": "revoked",
+      "next_cursor": null,
+      "operation": "search_library",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 401,
+      "raw_payload_hash": null,
+      "scenario": "revoked",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:guidepoint:get_transcript:empty:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "65f79cc05fc09f412426bf4e94144cc92a52a3c36dae2028603b91b720757186",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:guidepoint:get_transcript:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:guidepoint:get_transcript:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "ac3f2af518b5eab9de956ab6b1719fe84e3452eb0cd278ef5ab476863ce54a6a",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:guidepoint:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:guidepoint:get_transcript:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:guidepoint:get_transcript:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:guidepoint:get_transcript:success:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "188d3d9c4081cba97cdb43ca0efeeab564e706107a672b47990646fb4f49d08a",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:guidepoint:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:guidepoint:get_transcript:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:guidepoint:get_transcript:pagination:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": "synthetic-next",
+      "operation": "get_transcript",
+      "outcome": "succeeded",
+      "page": 1,
+      "provider_status": 200,
+      "raw_payload_hash": "66e9575e92ee1db944e3ec18613c70f37be20343cb0c35f52b7ae704d03c7963",
+      "scenario": "pagination",
+      "source_record_refs": [
+        "record:guidepoint:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:guidepoint:get_transcript:permission_denied:0.1",
+      "completeness": null,
+      "error_code": "permission_denied",
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 403,
+      "raw_payload_hash": null,
+      "scenario": "permission_denied",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:guidepoint:get_transcript:revoked:0.1",
+      "completeness": null,
+      "error_code": "revoked",
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 401,
+      "raw_payload_hash": null,
+      "scenario": "revoked",
+      "source_record_refs": [],
+      "source_status": null
+    }
+  ],
+  "connector_template_ref": "connector-profile-template:guidepoint:0.1",
+  "content_hash": "20d0f78a0071050014f9a5758c8cde3ea2b4da68d612e1ac9a0f9a074a94ace4",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "id": "connector-fixture-manifest:guidepoint:0.1",
+  "operations": [
+    {
+      "operation": "search_library",
+      "pagination_mode": "cursor"
+    },
+    {
+      "operation": "get_transcript",
+      "pagination_mode": "cursor"
+    }
+  ],
+  "recording_boundary": "host_gateway",
+  "schema_version": "0.1",
+  "synthetic": true
+}

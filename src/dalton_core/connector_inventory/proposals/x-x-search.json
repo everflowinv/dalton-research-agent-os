@@ -1,0 +1,60 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:x-x-search:0.1",
+  "adapter_source_hash": "bf04b0f14b52fd97dca033deb53e409a01d5ec89379c157b71f9b6635f15ddc7",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "host_owned",
+    "owner": "host",
+    "use_time_authority": "required_future"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:x-x-search:0.1",
+  "connector_ref": "connector:x-semantic-search",
+  "content_hash": "e2d1faebcc4fb6de8c7c168b5721902204f3b3457e6b1d0fafc65ba752642e25",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "fadbb47519ad852ae8faaa80a3fc9fc6db1f4f16933aeb272b5fe57c0a056b2f",
+  "fixture_manifest_ref": "connector-fixture-manifest:x-x-search:0.1",
+  "id": "connector-proposal-manifest:x-x-search:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "ranked",
+      "input_schema_hash": "ed64acc52ba42be810e5fa6d55299900f91d834e3bdc1ab0d7669c1ac9b9f5f0",
+      "input_schema_ref": "schema:connector-inventory:x-x-search:semantic_search:input:0.1",
+      "operation": "semantic_search",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:x-x-search:semantic_search:output:0.1",
+      "pagination": "cursor",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "ranked",
+      "input_schema_hash": "7c2f1a82a59eb915ff0a1cad8bb36b04727a1031a3c2186c1065348e6f744269",
+      "input_schema_ref": "schema:connector-inventory:x-x-search:analyze_post_media:input:0.1",
+      "operation": "analyze_post_media",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:x-x-search:analyze_post_media:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "b92dcd451c4f5a9334c5ec9336727ee65c3d8204d308ff0f250400fdff23eaed",
+  "profile_template_ref": "connector-profile-template:x-x-search:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "host-tool:x-search",
+    "adapter_version": "inventory-0.1",
+    "source": "source:x",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "host_tool",
+  "transport_target_hash": "aa3a13809caee79d885a7f50e7c2265378bdbd20434d77f3238843c54038fde2",
+  "transport_target_ref": "host-tool:x-search"
+}

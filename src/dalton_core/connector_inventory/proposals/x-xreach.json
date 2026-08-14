@@ -1,0 +1,72 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:x-xreach:0.1",
+  "adapter_source_hash": "8ea3de1cb897d3d89f33dc76451ae6a9be13279c9e9d69375990c463af976150",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "host_owned",
+    "owner": "host",
+    "use_time_authority": "required_future"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:x-xreach:0.1",
+  "connector_ref": "connector:x-xreach",
+  "content_hash": "a56fabe3d3e6fbf99b965c3d89b3e453b9d4ac573b64104d98c86d8544785ea5",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "67bb23608e46d77484cbe9f61e6e151a8464db56cf0ba08c9bb081b6a912d50d",
+  "fixture_manifest_ref": "connector-fixture-manifest:x-xreach:0.1",
+  "id": "connector-proposal-manifest:x-xreach:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "ec981f0c0a82db118c50abb6881927d2c7bfda9e098a9a05e19c507611499784",
+      "input_schema_ref": "schema:connector-inventory:x-xreach:timeline:input:0.1",
+      "operation": "timeline",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:x-xreach:timeline:output:0.1",
+      "pagination": "cursor",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "7c2f1a82a59eb915ff0a1cad8bb36b04727a1031a3c2186c1065348e6f744269",
+      "input_schema_ref": "schema:connector-inventory:x-xreach:get_post:input:0.1",
+      "operation": "get_post",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:x-xreach:get_post:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "52b72c2a02341cbe66ba8434c101ff66fcc07ac16e1a6b8a26e8f15d78a3b8fb",
+      "input_schema_ref": "schema:connector-inventory:x-xreach:get_thread:input:0.1",
+      "operation": "get_thread",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:x-xreach:get_thread:output:0.1",
+      "pagination": "cursor",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "7bb63f16a3c71c668e0e0acb8390e8d9e18c0641609d3323dbf4c37ee34c413d",
+  "profile_template_ref": "connector-profile-template:x-xreach:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "host-tool:xreach",
+    "adapter_version": "inventory-0.1",
+    "source": "source:x",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "host_tool",
+  "transport_target_hash": "282987badcc41baa01a371eb12df6492492cd2adf3ad994332e7150253bf93fa",
+  "transport_target_ref": "host-tool:xreach"
+}

@@ -1,0 +1,60 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:web-fetch:0.1",
+  "adapter_source_hash": "da0e00d7c85a8283ba3cfbfd93db294349bfcc1377bc9a86f1c7344c75225b7f",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:web-fetch:0.1",
+  "connector_ref": "connector:web-fetch",
+  "content_hash": "371f3bfc633b683963d9545c46b08b64b872e92a92b18810e747c153ab234113",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "46d83a5e102b4b6b366e97e5f44317f338c255c70bbe20532bc325af492302e9",
+  "fixture_manifest_ref": "connector-fixture-manifest:web-fetch:0.1",
+  "id": "connector-proposal-manifest:web-fetch:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "partial",
+      "input_schema_hash": "eb2cc03440fed3a5e8a4a719db3c80391ca341451650ca978706780b33029fb2",
+      "input_schema_ref": "schema:connector-inventory:web-fetch:fetch_get:input:0.1",
+      "operation": "fetch_get",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:web-fetch:fetch_get:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "eb2cc03440fed3a5e8a4a719db3c80391ca341451650ca978706780b33029fb2",
+      "input_schema_ref": "schema:connector-inventory:web-fetch:fetch_head:input:0.1",
+      "operation": "fetch_head",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:web-fetch:fetch_head:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "674e0a33e5759b586335c1b6e76caf9dfc157b582c71fd359e64bf9ff0e769a1",
+  "profile_template_ref": "connector-profile-template:web-fetch:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "transport:public-http:0.1",
+    "adapter_version": "inventory-0.1",
+    "source": "source:public-web",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "public_https",
+  "transport_target_hash": "7c8af09dbd955a787ec439b649547cc3520467278acc63a2cea40800a06276e7",
+  "transport_target_ref": "transport:public-http:0.1"
+}

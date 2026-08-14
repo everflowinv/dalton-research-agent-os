@@ -1,0 +1,60 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:alphaengine:0.1",
+  "adapter_source_hash": "ad6b7c0ef2e274c14f6affbe980018e86becfac781de3e5edc88c6b5f1cbd568",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "host_owned",
+    "owner": "host",
+    "use_time_authority": "required_future"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:alphaengine:0.1",
+  "connector_ref": "connector:alphaengine-library",
+  "content_hash": "385bc1d12abc13de49ac726cc491359849671268cf910d2e016a59ceac937feb",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "aab7901cf0833bc495353ef6c436f7c0365cce5f939c754dba378460221c525b",
+  "fixture_manifest_ref": "connector-fixture-manifest:alphaengine:0.1",
+  "id": "connector-proposal-manifest:alphaengine:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "ranked",
+      "input_schema_hash": "b755a2b2615cb7491f3cd58da347ddf833854ee8c417f5830c7629a53c51e09b",
+      "input_schema_ref": "schema:connector-inventory:alphaengine:search_library:input:0.1",
+      "operation": "search_library",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:alphaengine:search_library:output:0.1",
+      "pagination": "cursor",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "4a649b1176cf50d9375b02996b3f0d249ba10593890589db0108aece0e378a65",
+      "input_schema_ref": "schema:connector-inventory:alphaengine:get_document:input:0.1",
+      "operation": "get_document",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:alphaengine:get_document:output:0.1",
+      "pagination": "cursor",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "dc443f627eec3a266c391262aff4797fb376e94d4849ba3a1ab88ef10871c642",
+  "profile_template_ref": "connector-profile-template:alphaengine:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "mcp-target:alphaengine",
+    "adapter_version": "inventory-0.1",
+    "source": "source:alphaengine",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "mcp_managed",
+  "transport_target_hash": "252f468ef2772a17365601f49bd83631c7614a47d1dba0ec13b3dc58e08452aa",
+  "transport_target_ref": "mcp-target:alphaengine"
+}

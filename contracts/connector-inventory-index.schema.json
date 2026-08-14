@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConnectorInventoryIndex",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "profiles", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "profiles": {
+      "type": "array",
+      "minItems": 10,
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["connector_ref", "profile_template_ref", "profile_template_hash", "fixture_manifest_ref", "fixture_manifest_hash", "proposal_manifest_ref", "proposal_manifest_hash"],
+        "properties": {
+          "connector_ref": {"type": "string", "minLength": 1},
+          "profile_template_ref": {"type": "string", "minLength": 1},
+          "profile_template_hash": {"$ref": "#/$defs/hash"},
+          "fixture_manifest_ref": {"type": "string", "minLength": 1},
+          "fixture_manifest_hash": {"$ref": "#/$defs/hash"},
+          "proposal_manifest_ref": {"type": "string", "minLength": 1},
+          "proposal_manifest_hash": {"$ref": "#/$defs/hash"}
+        }
+      }
+    },
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {"hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

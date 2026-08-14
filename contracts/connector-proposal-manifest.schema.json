@@ -1,28 +1,101 @@
 {
-  "$schema":"https://json-schema.org/draft/2020-12/schema",
-  "title":"ConnectorProposalManifest",
-  "type":"object",
-  "additionalProperties":false,
-  "required":["schema_version","id","created_at","capability_proposal_ref","connector_ref","source_identity","adapter_package_ref","adapter_source_hash","profile_template_ref","profile_template_hash","operations","fixture_manifest_ref","fixture_manifest_hash","offline_attestation_policy_ref","requested_canary","promotion_policy_ref","builder_ref","content_hash"],
-  "properties":{
-    "schema_version":{"const":"0.1"},
-    "id":{"type":"string","minLength":1},
-    "created_at":{"type":"string","format":"date-time"},
-    "capability_proposal_ref":{"type":"string","minLength":1},
-    "connector_ref":{"type":"string","minLength":1},
-    "source_identity":{"type":"object","additionalProperties":false,"required":["source","adapter","source_version","adapter_version"],"properties":{"source":{"type":"string","minLength":1},"adapter":{"type":"string","minLength":1},"source_version":{"type":"string","minLength":1},"adapter_version":{"type":"string","minLength":1}}},
-    "adapter_package_ref":{"type":"string","minLength":1},
-    "adapter_source_hash":{"$ref":"#/$defs/hash"},
-    "profile_template_ref":{"type":"string","minLength":1},
-    "profile_template_hash":{"$ref":"#/$defs/hash"},
-    "operations":{"type":"array","minItems":1,"items":{"type":"object","additionalProperties":false,"required":["operation","input_schema_ref","input_schema_hash","output_schema_ref","output_schema_hash","completeness","pagination","side_effects"],"properties":{"operation":{"type":"string","minLength":1},"input_schema_ref":{"type":"string","minLength":1},"input_schema_hash":{"$ref":"#/$defs/hash"},"output_schema_ref":{"type":"string","minLength":1},"output_schema_hash":{"$ref":"#/$defs/hash"},"completeness":{"enum":["enumerated","ranked","partial","unknown"]},"pagination":{"enum":["none","cursor","page"]},"side_effects":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}}}}},
-    "fixture_manifest_ref":{"type":"string","minLength":1},
-    "fixture_manifest_hash":{"$ref":"#/$defs/hash"},
-    "offline_attestation_policy_ref":{"type":"string","minLength":1},
-    "requested_canary":{"type":"object","additionalProperties":false,"required":["allowed_hosts","credential_slot_refs","max_calls","max_bytes","max_records","max_cost_micros","expires_at"],"properties":{"allowed_hosts":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string","minLength":1}},"credential_slot_refs":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},"max_calls":{"type":"integer","minimum":1},"max_bytes":{"type":"integer","minimum":0},"max_records":{"type":"integer","minimum":0},"max_cost_micros":{"type":"integer","minimum":0},"expires_at":{"type":"string","format":"date-time"}}},
-    "promotion_policy_ref":{"type":"string","minLength":1},
-    "builder_ref":{"type":"string","minLength":1},
-    "content_hash":{"$ref":"#/$defs/hash"}
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConnectorProposalManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "capability_proposal_ref", "connector_ref", "source_identity", "adapter_package_ref", "adapter_source_hash", "profile_template_ref", "profile_template_hash", "operations", "fixture_manifest_ref", "fixture_manifest_hash", "offline_attestation_policy_ref", "requested_canary", "promotion_policy_ref", "builder_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"enum": ["0.1", "0.2"]},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "capability_proposal_ref": {"type": "string", "minLength": 1},
+    "connector_ref": {"type": "string", "minLength": 1},
+    "source_identity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source", "adapter", "source_version", "adapter_version"],
+      "properties": {
+        "source": {"type": "string", "minLength": 1},
+        "adapter": {"type": "string", "minLength": 1},
+        "source_version": {"type": "string", "minLength": 1},
+        "adapter_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "adapter_package_ref": {"type": "string", "minLength": 1},
+    "adapter_source_hash": {"$ref": "#/$defs/hash"},
+    "profile_template_ref": {"type": "string", "minLength": 1},
+    "profile_template_hash": {"$ref": "#/$defs/hash"},
+    "transport_kind": {"enum": ["public_https", "host_tool", "mcp_managed"]},
+    "transport_target_ref": {"type": "string", "minLength": 1},
+    "transport_target_hash": {"$ref": "#/$defs/hash"},
+    "auth_boundary": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode", "owner", "credential_material", "use_time_authority"],
+      "properties": {
+        "mode": {"enum": ["none", "host_owned"]},
+        "owner": {"enum": ["none", "host"]},
+        "credential_material": {"const": "forbidden"},
+        "use_time_authority": {"enum": ["none", "required_future"]}
+      }
+    },
+    "inventory_state": {"const": "proposal_only"},
+    "operations": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["operation", "input_schema_ref", "input_schema_hash", "output_schema_ref", "output_schema_hash", "completeness", "pagination", "side_effects"],
+        "properties": {
+          "operation": {"type": "string", "minLength": 1},
+          "input_schema_ref": {"type": "string", "minLength": 1},
+          "input_schema_hash": {"$ref": "#/$defs/hash"},
+          "output_schema_ref": {"type": "string", "minLength": 1},
+          "output_schema_hash": {"$ref": "#/$defs/hash"},
+          "completeness": {"enum": ["enumerated", "ranked", "partial", "unknown"]},
+          "pagination": {"enum": ["none", "cursor", "page"]},
+          "side_effects": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "fixture_manifest_ref": {"type": "string", "minLength": 1},
+    "fixture_manifest_hash": {"$ref": "#/$defs/hash"},
+    "offline_attestation_policy_ref": {"type": "string", "minLength": 1},
+    "requested_canary": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["allowed_hosts", "credential_slot_refs", "max_calls", "max_bytes", "max_records", "max_cost_micros", "expires_at"],
+          "properties": {
+            "allowed_hosts": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+            "credential_slot_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+            "max_calls": {"type": "integer", "minimum": 1},
+            "max_bytes": {"type": "integer", "minimum": 0},
+            "max_records": {"type": "integer", "minimum": 0},
+            "max_cost_micros": {"type": "integer", "minimum": 0},
+            "expires_at": {"type": "string", "format": "date-time"}
+          }
+        }
+      ]
+    },
+    "promotion_policy_ref": {"type": "string", "minLength": 1},
+    "builder_ref": {"type": "string", "minLength": 1},
+    "content_hash": {"$ref": "#/$defs/hash"}
   },
-  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}}
+  "allOf": [
+    {
+      "if": {"properties": {"schema_version": {"const": "0.1"}}, "required": ["schema_version"]},
+      "then": {
+        "properties": {"requested_canary": {"type": "object"}},
+        "not": {"anyOf": [
+          {"required": ["transport_kind"]}, {"required": ["transport_target_ref"]},
+          {"required": ["transport_target_hash"]}, {"required": ["auth_boundary"]},
+          {"required": ["inventory_state"]}
+        ]}
+      },
+      "else": {
+        "required": ["transport_kind", "transport_target_ref", "transport_target_hash", "auth_boundary", "inventory_state"],
+        "properties": {"requested_canary": {"type": "null"}}
+      }
+    }
+  ],
+  "$defs": {"hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
 }

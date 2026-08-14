@@ -1,0 +1,208 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "host_owned",
+    "owner": "host",
+    "use_time_authority": "required_future"
+  },
+  "connector_ref": "connector:x-semantic-search",
+  "content_hash": "b92dcd451c4f5a9334c5ec9336727ee65c3d8204d308ff0f250400fdff23eaed",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "fadbb47519ad852ae8faaa80a3fc9fc6db1f4f16933aeb272b5fe57c0a056b2f",
+  "fixture_manifest_ref": "connector-fixture-manifest:x-x-search:0.1",
+  "id": "connector-profile-template:x-x-search:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "ranked",
+      "input_schema_hash": "ed64acc52ba42be810e5fa6d55299900f91d834e3bdc1ab0d7669c1ac9b9f5f0",
+      "input_schema_ref": "schema:connector-inventory:x-x-search:semantic_search:input:0.1",
+      "operation": "semantic_search",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:x-x-search:semantic_search:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": "cursor",
+        "max_pages": 20,
+        "mode": "cursor"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "semantic_search"
+    },
+    {
+      "completeness_ceiling": "ranked",
+      "input_schema_hash": "7c2f1a82a59eb915ff0a1cad8bb36b04727a1031a3c2186c1065348e6f744269",
+      "input_schema_ref": "schema:connector-inventory:x-x-search:analyze_post_media:input:0.1",
+      "operation": "analyze_post_media",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:x-x-search:analyze_post_media:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "analyze_post_media"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "host_tool_runner_v0.2_and_credential_authority"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "host-tool:x-search"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:xreach-semantic"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "allowed_handles": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "date_from": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "date_to": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "allowed_handles",
+          "date_from",
+          "date_to"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "ed64acc52ba42be810e5fa6d55299900f91d834e3bdc1ab0d7669c1ac9b9f5f0",
+      "schema_ref": "schema:connector-inventory:x-x-search:semantic_search:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:x-x-search:semantic_search:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "post_ref": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "post_ref"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "7c2f1a82a59eb915ff0a1cad8bb36b04727a1031a3c2186c1065348e6f744269",
+      "schema_ref": "schema:connector-inventory:x-x-search:analyze_post_media:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:x-x-search:analyze_post_media:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:x",
+    "source_type": "social_search",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [],
+    "host_policy": "not_applicable",
+    "kind": "host_tool",
+    "target_hash": "aa3a13809caee79d885a7f50e7c2265378bdbd20434d77f3238843c54038fde2",
+    "target_ref": "host-tool:x-search"
+  }
+}

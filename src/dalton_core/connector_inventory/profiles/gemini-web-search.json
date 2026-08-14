@@ -1,0 +1,136 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "host_owned",
+    "owner": "host",
+    "use_time_authority": "required_future"
+  },
+  "connector_ref": "connector:gemini-web-search",
+  "content_hash": "e09e671609a88522eaedcf80e7bb7f0171385b6c9cd5d3b7635150a03487ed4a",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "abbcc08c1769ac083bb99db2478d009f0d9f0eb67e35c3e171051cb566c8a047",
+  "fixture_manifest_ref": "connector-fixture-manifest:gemini-web-search:0.1",
+  "id": "connector-profile-template:gemini-web-search:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "ranked",
+      "input_schema_hash": "353586d293aa0f438fac914de88c7e9b3de14f8d02c902215f83be09e2a36972",
+      "input_schema_ref": "schema:connector-inventory:gemini-web-search:search_web:input:0.1",
+      "operation": "search_web",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:gemini-web-search:search_web:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": "cursor",
+        "max_pages": 20,
+        "mode": "cursor"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "search_web"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "host_tool_runner_v0.2_and_credential_authority"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "host-tool:gemini-web-search"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:web-fetch"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "date_after": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "date_before": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "freshness": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "date_after",
+          "date_before",
+          "freshness"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "353586d293aa0f438fac914de88c7e9b3de14f8d02c902215f83be09e2a36972",
+      "schema_ref": "schema:connector-inventory:gemini-web-search:search_web:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:gemini-web-search:search_web:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:public-web",
+    "source_type": "public_web",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [],
+    "host_policy": "not_applicable",
+    "kind": "host_tool",
+    "target_hash": "b68a44b95176f31222d99fc0e65db1718bed15f04cbf71ad7e3abcb131363ed1",
+    "target_ref": "host-tool:gemini-web-search"
+  }
+}

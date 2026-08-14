@@ -1,0 +1,48 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:gemini-web-search:0.1",
+  "adapter_source_hash": "cbc10ee3db6b50dc2f68a4ec00da98f7b17d17cfaad2764fc076039856fa0fb1",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "host_owned",
+    "owner": "host",
+    "use_time_authority": "required_future"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:gemini-web-search:0.1",
+  "connector_ref": "connector:gemini-web-search",
+  "content_hash": "46bcf7d02c2852653c42b7874c783408a5928a4333b64aec8b9b20db60b751c4",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "abbcc08c1769ac083bb99db2478d009f0d9f0eb67e35c3e171051cb566c8a047",
+  "fixture_manifest_ref": "connector-fixture-manifest:gemini-web-search:0.1",
+  "id": "connector-proposal-manifest:gemini-web-search:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "ranked",
+      "input_schema_hash": "353586d293aa0f438fac914de88c7e9b3de14f8d02c902215f83be09e2a36972",
+      "input_schema_ref": "schema:connector-inventory:gemini-web-search:search_web:input:0.1",
+      "operation": "search_web",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:gemini-web-search:search_web:output:0.1",
+      "pagination": "cursor",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "e09e671609a88522eaedcf80e7bb7f0171385b6c9cd5d3b7635150a03487ed4a",
+  "profile_template_ref": "connector-profile-template:gemini-web-search:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "host-tool:gemini-web-search",
+    "adapter_version": "inventory-0.1",
+    "source": "source:public-web",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "host_tool",
+  "transport_target_hash": "b68a44b95176f31222d99fc0e65db1718bed15f04cbf71ad7e3abcb131363ed1",
+  "transport_target_ref": "host-tool:gemini-web-search"
+}

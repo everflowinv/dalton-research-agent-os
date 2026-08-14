@@ -171,6 +171,61 @@ def _contains_sensitive_parameter(value: Any) -> bool:
     return False
 
 
+def _contains_unsafe_inventory_metadata(value: Any) -> bool:
+    """Reject local paths and control/config material from inventory proposals."""
+
+    if isinstance(value, Mapping):
+        # The v0.2 wire is already closed, so only user-controlled values need
+        # inspection; fixed contract field names such as credential_material
+        # are not metadata payload.
+        return any(_contains_unsafe_inventory_metadata(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_unsafe_inventory_metadata(child) for child in value)
+    if not isinstance(value, str):
+        return False
+    lowered = value.strip().lower()
+    compact = re.sub(r"[^a-z0-9]+", "", lowered)
+    return (
+        "/" in lowered
+        or "\\" in lowered
+        or "%" in lowered
+        or any(char.isspace() for char in lowered)
+        or lowered.startswith("file:")
+        or any(
+            marker in compact
+            for marker in (
+                "systemprompt", "promptbody", "instructionbody", "apikey",
+                "serverconfig", "oauthconfig", "xqatoken", "refreshtoken",
+                "accesstoken", "clientsecret", "authorization", "cookie",
+                "password", "bearer", "secretmaterial",
+            )
+        )
+        or any(
+            marker in lowered
+            for marker in (
+                "server_config", "server-config", "system_prompt", "system-prompt",
+                "prompt_body", "prompt-body", "instruction_body", "instruction-body",
+                "api_key", "api-key", "xq_a_token", "refresh_token", "refresh-token",
+                "access_token", "access-token", "client_secret", "client-secret",
+                "authorization:", "cookie:", "password", "bearer ", "secret-material",
+            )
+        )
+    )
+
+
+def _inventory_ref(value: Any, name: str) -> str:
+    """Validate a v0.2 inventory reference as a closed, data-only identifier."""
+
+    ref = _text(value, name)
+    if re.fullmatch(
+        r"[a-z][a-z0-9-]*(?::[a-z0-9][a-z0-9._-]*)+",
+        ref,
+        flags=re.ASCII,
+    ) is None:
+        raise ConnectorValidationError(f"{name} is not a canonical inventory ref")
+    return ref
+
+
 def _profile_schema_bundle(wire: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "allowed_operations": wire["allowed_operations"],
@@ -233,16 +288,25 @@ def validate_connector_proposal_manifest(
 ) -> dict[str, Any]:
     """Validate the immutable self-generated connector proposal boundary."""
 
-    fields = {
+    base_fields = {
         "schema_version", "id", "created_at", "capability_proposal_ref", "connector_ref",
         "source_identity", "adapter_package_ref", "adapter_source_hash",
         "profile_template_ref", "profile_template_hash", "operations",
         "fixture_manifest_ref", "fixture_manifest_hash", "offline_attestation_policy_ref",
         "requested_canary", "promotion_policy_ref", "builder_ref", "content_hash",
     }
-    wire = _closed(spec, fields, "ConnectorProposalManifest")
-    if wire["schema_version"] != SCHEMA_VERSION:
+    version = spec.get("schema_version") if isinstance(spec, Mapping) else None
+    v2_fields = {
+        "transport_kind", "transport_target_ref", "transport_target_hash",
+        "auth_boundary", "inventory_state",
+    }
+    if version == "0.1":
+        fields = base_fields
+    elif version == "0.2":
+        fields = base_fields | v2_fields
+    else:
         raise ConnectorValidationError("unsupported ConnectorProposalManifest schema_version")
+    wire = _closed(spec, fields, "ConnectorProposalManifest")
     for name in (
         "id", "capability_proposal_ref", "connector_ref", "adapter_package_ref",
         "profile_template_ref", "fixture_manifest_ref", "offline_attestation_policy_ref",
@@ -290,6 +354,73 @@ def validate_connector_proposal_manifest(
         operation["side_effects"] = _refs(operation["side_effects"], "side_effects")
         operations.append(operation)
     wire["operations"] = operations
+    if version == "0.2":
+        for name in (
+            "id", "capability_proposal_ref", "connector_ref", "adapter_package_ref",
+            "profile_template_ref", "fixture_manifest_ref",
+            "offline_attestation_policy_ref", "promotion_policy_ref", "builder_ref",
+        ):
+            wire[name] = _inventory_ref(wire[name], name)
+        for name in ("source", "adapter"):
+            wire["source_identity"][name] = _inventory_ref(
+                wire["source_identity"][name], f"source_identity.{name}"
+            )
+        for index, operation in enumerate(wire["operations"]):
+            for name in ("input_schema_ref", "output_schema_ref"):
+                operation[name] = _inventory_ref(
+                    operation[name], f"operations[{index}].{name}"
+                )
+            operation["side_effects"] = [
+                _inventory_ref(
+                    effect, f"operations[{index}].side_effects[{effect_index}]"
+                )
+                for effect_index, effect in enumerate(operation["side_effects"])
+            ]
+        if wire["transport_kind"] not in {"public_https", "host_tool", "mcp_managed"}:
+            raise ConnectorValidationError("transport_kind is invalid")
+        wire["transport_target_ref"] = _inventory_ref(
+            wire["transport_target_ref"], "transport_target_ref"
+        )
+        wire["transport_target_hash"] = _hash(
+            wire["transport_target_hash"], "transport_target_hash"
+        )
+        auth = _closed(
+            wire["auth_boundary"],
+            {"mode", "owner", "credential_material", "use_time_authority"},
+            "auth_boundary",
+        )
+        if auth["mode"] == "none":
+            expected_auth = {
+                "mode": "none", "owner": "none",
+                "credential_material": "forbidden", "use_time_authority": "none",
+            }
+        elif auth["mode"] == "host_owned":
+            expected_auth = {
+                "mode": "host_owned", "owner": "host",
+                "credential_material": "forbidden",
+                "use_time_authority": "required_future",
+            }
+        else:
+            raise ConnectorValidationError("auth_boundary.mode is invalid")
+        if auth != expected_auth:
+            raise ConnectorValidationError("auth_boundary is inconsistent")
+        wire["auth_boundary"] = auth
+        if wire["inventory_state"] != "proposal_only":
+            raise ConnectorValidationError("inventory_state must be proposal_only")
+        if wire["requested_canary"] is not None:
+            raise ConnectorValidationError(
+                "inventory-only proposal cannot request a canary"
+            )
+        if _contains_unsafe_inventory_metadata(wire):
+            raise ConnectorValidationError(
+                "inventory proposal contains a path, prompt, config, or credential value"
+            )
+        declared_hash = wire.pop("content_hash")
+        expected_hash = content_hash(wire)
+        if declared_hash != expected_hash:
+            raise ConnectorConflict("ConnectorProposalManifest content_hash mismatch")
+        wire["content_hash"] = declared_hash
+        return wire
     canary = _closed(
         wire["requested_canary"],
         {

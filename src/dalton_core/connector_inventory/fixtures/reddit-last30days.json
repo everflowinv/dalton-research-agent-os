@@ -1,0 +1,136 @@
+{
+  "authenticated": false,
+  "cases": [
+    {
+      "case_ref": "fixture:reddit-last30days:search_posts:empty:0.1",
+      "completeness": "ranked",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "search_posts",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "f5ed5e468f121bd64b2e245b0bf0057d20c5f05f24eb02ac48bc066adbc5fb2b",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:reddit-last30days:search_posts:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "search_posts",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:reddit-last30days:search_posts:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "search_posts",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "4bd9136c96337e978da917feb5ea9541000cce413cc6b132db2efdc1f36cd006",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:reddit-last30days:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:reddit-last30days:search_posts:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "search_posts",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:reddit-last30days:search_posts:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "search_posts",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:reddit-last30days:search_posts:success:0.1",
+      "completeness": "ranked",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "search_posts",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "3ff58f6897fba04ae52ce944d930ad8dcd82441eceae82e3ecd281ac003e84a9",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:reddit-last30days:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:reddit-last30days:search_posts:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "search_posts",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:reddit-last30days:search_posts:pagination:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": "synthetic-next",
+      "operation": "search_posts",
+      "outcome": "succeeded",
+      "page": 1,
+      "provider_status": 200,
+      "raw_payload_hash": "5a065c8420ba9a001692ffdc3e4ec961cea2dd8e0ef1349dfc92a3dfd115aa83",
+      "scenario": "pagination",
+      "source_record_refs": [
+        "record:reddit-last30days:synthetic:1"
+      ],
+      "source_status": "partial"
+    }
+  ],
+  "connector_template_ref": "connector-profile-template:reddit-last30days:0.1",
+  "content_hash": "00d224a2b62e2858ba9a8e0ad45ae4804e680673132d187946e882cacba450d9",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "id": "connector-fixture-manifest:reddit-last30days:0.1",
+  "operations": [
+    {
+      "operation": "search_posts",
+      "pagination_mode": "cursor"
+    }
+  ],
+  "recording_boundary": "host_gateway",
+  "schema_version": "0.1",
+  "synthetic": true
+}

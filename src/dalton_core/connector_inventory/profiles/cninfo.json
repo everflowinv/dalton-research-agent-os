@@ -1,0 +1,344 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "connector_ref": "connector:cninfo-announcements",
+  "content_hash": "7e56b2620846df2b8102e73e5f4e648bc421bcd59c757da2d92f08f4c790c1f9",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "1d383fdae0494d324f1740613912ff09d5e1bee17bc4cbc9909b8cbfd6bdfc8e",
+  "fixture_manifest_ref": "connector-fixture-manifest:cninfo:0.1",
+  "id": "connector-profile-template:cninfo:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "47f5fd079679db97a6559251ffadfdff5003ef0a2a21012ace67e7e757f78bc5",
+      "input_schema_ref": "schema:connector-inventory:cninfo:list_announcements:input:0.1",
+      "operation": "list_announcements",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:cninfo:list_announcements:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": "page",
+        "max_pages": 20,
+        "mode": "page"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "list_announcements"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "efba22b748e7603cce01e2265a3b0af365a9a32bdea0f575d6d51a7cf32c01b4",
+      "input_schema_ref": "schema:connector-inventory:cninfo:get_announcement_document:input:0.1",
+      "operation": "get_announcement_document",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:cninfo:get_announcement_document:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_announcement_document"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "efba22b748e7603cce01e2265a3b0af365a9a32bdea0f575d6d51a7cf32c01b4",
+      "input_schema_ref": "schema:connector-inventory:cninfo:get_announcement_text:input:0.1",
+      "operation": "get_announcement_text",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:cninfo:get_announcement_text:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_announcement_text"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "e752bdd89f34036354748ae2a49209167d1e3854f29e57261eca1927e140cd59",
+      "input_schema_ref": "schema:connector-inventory:cninfo:list_revisions:input:0.1",
+      "operation": "list_revisions",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:cninfo:list_revisions:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": "page",
+        "max_pages": 20,
+        "mode": "page"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "list_revisions"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "recorded_public_reference_shadow"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "transport:public-http:0.1"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "date_from": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "date_to": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "page_size": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "stock_code": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "stock_code",
+          "date_from",
+          "date_to",
+          "page",
+          "page_size"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "47f5fd079679db97a6559251ffadfdff5003ef0a2a21012ace67e7e757f78bc5",
+      "schema_ref": "schema:connector-inventory:cninfo:list_announcements:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:cninfo:list_announcements:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "announcement_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "announcement_id"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "efba22b748e7603cce01e2265a3b0af365a9a32bdea0f575d6d51a7cf32c01b4",
+      "schema_ref": "schema:connector-inventory:cninfo:get_announcement_document:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:cninfo:get_announcement_document:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "announcement_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "announcement_id"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "efba22b748e7603cce01e2265a3b0af365a9a32bdea0f575d6d51a7cf32c01b4",
+      "schema_ref": "schema:connector-inventory:cninfo:get_announcement_text:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:cninfo:get_announcement_text:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "announcement_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "announcement_id",
+          "page"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "e752bdd89f34036354748ae2a49209167d1e3854f29e57261eca1927e140cd59",
+      "schema_ref": "schema:connector-inventory:cninfo:list_revisions:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-inventory:cninfo:list_revisions:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:cninfo",
+    "source_type": "official_filing",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [
+      "www.cninfo.com.cn"
+    ],
+    "host_policy": "literal_allowlist",
+    "kind": "public_https",
+    "target_hash": "9d565856de8d317bb6da76da7dbf223a137ea5e1f2ce032dfd81fbdae7479e16",
+    "target_ref": "transport:public-http:0.1"
+  }
+}
