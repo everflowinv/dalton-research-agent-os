@@ -2,7 +2,7 @@
 
 更新日期：2026-08-14  
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前提交内容：Connector P0-2a control-plane foundation，未部署
+- 当前提交内容：Connector P0-2b recorded transport thin slice，未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -104,6 +104,27 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 - 当前仍只是 control-plane seam：没有执行 adapter、没有 credential grant、durable runner journal、raw spool、
   writer authority port、SSRF transport 或 recorded success/429/crash replay，不能称 P0-2 完成。
 
+### Connector P0-2b 当前进度（recorded transport thin slice 完成，未部署）
+
+- Fable 5 先做独立架构复核，结论为“有条件 Go”；P0-2b 仍是正确下一阶段，但必须先修正非成功
+  RunnerResponse 无法表达没有 raw artifact/SourceEnvelope 的契约缺陷；
+- `ConnectorRunnerResponse` 发布 wire 0.2：成功必须带 raw artifact 和 SourceEnvelope，429/timeout/failed
+  可以把两组 ref/hash 同时置空，禁止用空 artifact 凑契约；其余 connector contract 不原地改 epoch；
+- Core DB 新增 append-only runner request/event journal，唯一 `transport_started` barrier 决定恢复只能
+  released 还是必须 indeterminate；journal 不属于 Research Ledger，也不保存 Scheduler lease token；
+- raw spool 使用 write-only bounded sink、SHA-256 content address、原子 finalize、同 hash 去重、全局高水位
+  和 orphan partial GC；adapter 不接收路径；
+- 窄 `ConnectorAuthorityPort` 只开放 attempt、Usage、Cost、Settlement、ArtifactVersion v0.2、
+  SourceEnvelope 和 Scheduler completion 七类写入，不暴露 connection；
+- recorded success、empty、429、timeout、adapter exception 已执行完整事实链。timeout 由 Runner hard
+  watchdog/deadline 判定，observation 不能自报；非最终计量使用 reserved cost upper bound 并按
+  indeterminate 结算；
+- W0–W4 以及 attempt/Usage/Cost/Settlement/Artifact/Source/Scheduler 每个写入缝隙都做故障注入；恢复后
+  第二次重放零新行。journal 完全缺失的 reservation 也按 indeterminate，不误放为 released；
+- P0-2b 不含真实网络、SSRF、credential authority、writer RPC、metadata importer、spool lifecycle、
+  ContextPack/Checkpoint/ClaimIndex、部署或真实数据源；Python 254/254、broker 15/15、专项 18/18 和
+  确定性 wheel 已通过，Fable 5 最终复核及增量复核均为 **Go**。完整结果见本轮实施报告。
+
 ## 蓝图阶段
 
 ### Phase 0：记录和可观察性——主体完成
@@ -118,8 +139,9 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 - owner-only writer、每日 SQLite backup、已完成的 restore 演练与数据库完整性检查。
 
 部分完成：connector authority foundation 已有 16 张 append-only 表、trusted store 和 wire contract，
-并通过六轮独立复核；Runner 控制面、双 use-time gate 和静态 resolver 已完成 P0-2a。adapter execution、
-durable journal/raw spool、writer RPC、完整 source-health ledger、生产对象存储生命周期和跨机灾难恢复仍未完成。
+并通过六轮独立复核；Runner 控制面、recorded adapter execution、durable journal/raw spool、W0–W4 recovery
+和窄 AuthorityPort 已完成 P0-2b。真实网络/SSRF、credential authority、writer RPC、完整 source-health
+ledger、生产对象存储生命周期和跨机灾难恢复仍未完成。
 
 ### Phase 1：Agenda Engine Shadow——单公司运行中
 

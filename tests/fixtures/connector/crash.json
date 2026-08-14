@@ -1,0 +1,7 @@
+{
+  "name": "crash",
+  "behavior": "raise",
+  "advance_seconds": 1,
+  "raw_file": "crash.partial.raw.json",
+  "observation": null
+}

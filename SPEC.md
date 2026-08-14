@@ -295,8 +295,25 @@ host、schema、deadline、上限和 raw sink handle 全部从最后一次 autho
 `auth_mode=none`。CapabilityDescriptor 的 source 表示 capability 实现来源，ConnectorProfile 的
 source identity 表示目标数据源；Runner 分别核对 live descriptor contract 和 target source binding。
 Adapter 只能返回 transport observation，不能自报 authority 时间、raw hash、artifact、
-Usage/Cost 或 settlement。durable journal、raw spool、credential grant 和 writer commit loop 属于 P0-2
-后续 slice，当前 control-plane seam 不执行 adapter。
+Usage/Cost 或 settlement；它只能报告 `succeeded/rate_limited/failed`，timeout 和 indeterminate 必须由
+Runner 的 deadline/journal 证据判定。P0-2b 用 Core DB 内 append-only runner journal 固定
+`admitted → reserved → transport_started → observed → responded` 四个 durable barrier；只有
+`transport_started` 之前的 reservation 能 released，之后崩溃一律按 indeterminate 保守结算。
+
+raw response 经 bounded write-only sink 流入 content-addressed spool，finalize 后才允许登记
+ArtifactVersion/SourceEnvelope；超 `max_response_bytes` 不产 partial success。成功与空结果必须有 raw
+artifact 和 SourceEnvelope，429/timeout/failed 不伪造空 artifact。为表达这项条件，
+`ConnectorRunnerResponse` 使用 wire 0.2，raw artifact 与 SourceEnvelope ref/hash 按 outcome 可空；
+request、adapter observation、SourceEnvelope 和其他既有 domain contract 仍保持各自的 0.1 epoch。
+
+post-transport 写入只经过窄 `ConnectorAuthorityPort`。Core Connector/Observability 共用 DaltonStore，
+Scheduler 是独立 SQLite authority，不存在跨库原子性；journal 与按 invocation/attempt/step 派生的
+幂等 key 负责重放收敛。observed 后任一 authority 写入缝隙崩溃都必须只生成一份 attempt、Usage、Cost、
+Settlement、Artifact、SourceEnvelope 和 ResultEnvelope。W2 恢复不持久化 Scheduler lease token：先做
+indeterminate 结算，再由 Scheduler 自己让 lease 到期重排。
+
+当前只允许 `auth_mode=none` 的 recorded fixture adapter。credential grant、真实网络 transport、SSRF
+防护和 writer RPC 属于后续 slice。
 
 ### OpenClaw model broker adapter
 
@@ -481,6 +498,7 @@ Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把
 | outbox claim/lease、Discord reconciliation、receipt 与 reaction feedback | E1/E2 | `tests/test_openclaw_agenda_bridge.py` |
 | connector profile/invocation、quota/settlement、provenance、incident 和 self-generated manifest | E1/E2 | `tests/test_connector.py` |
 | connector runner closed frame、双 use-time lease gate、静态 resolver 与 authority-derived adapter request | E2 | `tests/test_connector_runner.py` |
+| recorded transport journal、bounded raw spool、W0–W4 recovery 与全链幂等重放 | E1/E2 | `tests/test_runner_journal.py`、`tests/test_raw_spool.py`、`tests/test_connector_transport_executor.py` |
 | authority → read-only dashboard projection 与敏感字段隔离 | E1 | `tests/test_dashboard_projector.py` |
 | dashboard 固定 GET API、只读连接与页面资源 | E2 | `tests/test_dashboard.py` |
 | 实际 hostile-code sandbox backend 与自动 monitoring | E1 | 本 slice 排除 |

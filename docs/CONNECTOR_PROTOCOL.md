@@ -76,10 +76,31 @@ lease/profile/schema/hash 复核、quota reservation、网络策略、credential
 durable journal/raw spool、raw artifact 注册、Usage/Cost/Settlement 和 ResultEnvelope。Adapter 不收到
 reservation 写权限、Core token、真实 credential value 或数据库路径。
 
-当前实现只完成上述 control-plane contract、静态 resolver 和双 use-time gate，尚未实现 transport、
-credential grant、journal、raw spool 或 writer commit loop。这个切片只允许 `auth_mode=none`；
-Runner 专用 authority API 派生 policy version、连续 attempt、Profile 最大 bytes/records、保守成本和 TTL，
+当前实现已完成 control-plane contract、静态 resolver、双 use-time gate、durable journal、bounded
+content-addressed raw spool、窄 AuthorityPort 和 recorded transport executor。它只执行仓库内 fixture，
+没有 socket、credential grant、writer RPC 或真实 source。这个切片只允许 `auth_mode=none`；
+Runner 专用 authority API 派生 policy version、连续 reservation 序号、Profile 最大 bytes/records、保守成本和 TTL；
+released reservation 仍占序号，所以 physical attempt 可以留洞。Runner
 并按 invocation/reservation/attempt 派生 opaque raw sink handle。
+
+`ConnectorRunnerResponse` 从 0.1 升到 wire 0.2：physical attempt、Usage、Cost、Settlement 和
+ResultEnvelope 仍是每份正常 response 的必需引用；raw ArtifactVersion 与 SourceEnvelope 的 ref/hash
+成对可空。`succeeded` 必须两者都有，429/timeout/failed 不用零字节 artifact 伪造来源事实。
+
+Runner journal 在 Core DB 内保存 append-only request/event，状态为：
+
+`admitted → reserved → transport_started → observed → responded`
+
+- W0：reserved 前崩溃不动 quota，Scheduler lease 到期后重排；
+- W1：reserved 后、transport_started 前可证明没调 adapter，恢复为 released；
+- W2：transport_started 后、observed 前结果未知，恢复写 indeterminate attempt、unavailable Usage、
+  reserved upper-bound estimated Cost 和 indeterminate Settlement；Scheduler 独立到期重排；
+- W3：observed 后按确定性 key 重放所有 authority 写入；
+- W4：responded 后恢复为 no-op。
+
+journal 整体缺失但存在未结算 reservation 时，恢复按 indeterminate，不按 released。这个兜底把
+reservation `created_at` 作为 unknown-start lower bound；它是保守恢复标记，不声称知道真实 provider
+调用时点。journal 不保存 scheduler lease token。
 
 `ConnectorCallSpec.parameters` 不保存 token、cookie、password、API key 或其他 credential-shaped 字段；
 凭据只能通过 profile 声明的 slot 交给 Runner。authority 会核对 query hash 和拒绝这些敏感字段；可信
@@ -141,13 +162,16 @@ Dalton 发现同一种 source/operation 重复出现或现有 connector 缺能�
   blocking `quota_drift` incident；这项检查不受 quota window 切换影响；
 - 同一 `price_rate_ref` 的版本生效区间不得重叠，定价按 physical attempt 的 `started_at` 选择 exact rate；
 - 429 写 `rate_limited + retry_at`，交回 Scheduler `not_before`，worker 不 busy wait；
-- timeout 或调用结果不确定写 `indeterminate`，保守占额；
+- timeout 写 physical attempt `timeout`；若计量不完整，settlement 写 `indeterminate` 并保守占额；
+- adapter observation 不能自报 timeout/indeterminate；Runner 用 hard watchdog、deadline 和 journal 判定；
 - provider-reported overage 写 blocking incident，后续 reservation fail closed；
 - local quota 只能保证不主动超发，不能承诺供应商计量永不漂移。
 
 ## 进入研究账本
 
-Connector output 永远先进入 raw ArtifactVersion v0.2 和 SourceEnvelope。SourceEnvelope 必须绑定同一
+成功或空结果永远先进入 raw ArtifactVersion v0.2 和 SourceEnvelope；没有 finalized raw object 就不能
+登记 SourceEnvelope。429/timeout/failed 只保留 attempt、Usage、Cost、Settlement 和 ResultEnvelope，
+不伪造 raw source。SourceEnvelope 必须绑定同一
 execution 生产的 artifact version，并核对 raw hash、source、operation、schema、policy、provider request
 和明确的 `result_physical_attempt_ref`；complete/empty 的 result attempt 必须 succeeded，error 的 result
 attempt 不得 succeeded。`source_content_hash` 对 source、operation、record refs、四类时间、cursor、

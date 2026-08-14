@@ -2120,7 +2120,7 @@ class ConnectorStore:
             ).fetchone()
             usage = json.loads(usage_row["record_json"])
             policy_row = cur.execute(
-                "SELECT p.record_json FROM connector_quota_reservations r "
+                "SELECT p.record_json,r.reserved_json FROM connector_quota_reservations r "
                 "JOIN connector_rate_policy_versions p ON p.policy_version_id=r.policy_version_ref "
                 "WHERE r.reservation_id=?",
                 (usage_row["reservation_ref"],),
@@ -2185,8 +2185,19 @@ class ConnectorStore:
                     quantity * int(rate_row["unit_price_micros"])
                     + int(rate_row["unit_quantity"]) - 1
                 ) // int(rate_row["unit_quantity"])
-            if cost_status in {"actual", "estimated"} and amount_micros != calculated:
+            if cost_status == "actual" and amount_micros != calculated:
                 raise ConnectorConflict("amount_micros does not match exact price rates")
+            if cost_status == "estimated":
+                reserved_cost = int(json.loads(policy_row["reserved_json"])["cost_micros"])
+                expected_estimate = (
+                    reserved_cost
+                    if usage["measurement_status"] in {"estimated", "unavailable"}
+                    else calculated
+                )
+                if amount_micros != expected_estimate:
+                    raise ConnectorConflict(
+                        "estimated cost must use exact measured cost or the reserved upper bound"
+                    )
             latest = cur.execute(
                 "SELECT cost_entry_id,revision_number FROM connector_cost_entries "
                 "WHERE usage_entry_ref=? ORDER BY revision_number DESC LIMIT 1",
@@ -2225,6 +2236,119 @@ class ConnectorStore:
             result = {"write_status": "fresh", **wire}
             self._save_idem(cur, idempotency_key, "record_connector_cost", request_hash, result)
             return result
+
+    def record_cost_for_runner(
+        self,
+        usage_entry_ref: str,
+        *,
+        cost_status: str,
+        calculation_ref: str,
+        actor_ref: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Derive price book, currency, and amount from frozen authority."""
+
+        usage_entry_ref = _text(usage_entry_ref, "usage_entry_ref")
+        usage_row = self.connection.execute(
+            "SELECT u.record_json,a.reservation_ref FROM connector_usage_entries u "
+            "JOIN connector_physical_attempts a ON a.physical_attempt_id=u.physical_attempt_ref "
+            "WHERE u.usage_entry_id=?",
+            (usage_entry_ref,),
+        ).fetchone()
+        if usage_row is None:
+            raise ConnectorNotFound(usage_entry_ref)
+        usage = json.loads(usage_row["record_json"])
+        authority = self.connection.execute(
+            "SELECT p.record_json AS policy_json,r.reserved_json "
+            "FROM connector_quota_reservations r JOIN connector_rate_policy_versions p "
+            "ON p.policy_version_id=r.policy_version_ref WHERE r.reservation_id=?",
+            (usage_row["reservation_ref"],),
+        ).fetchone()
+        if authority is None:
+            raise ConnectorConflict("runner usage has no frozen price authority")
+        policy = json.loads(authority["policy_json"])
+        calculated = 0
+        for rate_ref in policy["price_rate_refs"]:
+            rate = self.connection.execute(
+                "SELECT * FROM connector_price_rate_versions WHERE price_rate_version_id=?",
+                (rate_ref,),
+            ).fetchone()
+            if rate is None:
+                raise ConnectorNotFound(rate_ref)
+            quantity = int(usage["metrics"][rate["meter"]])
+            calculated += (
+                quantity * int(rate["unit_price_micros"])
+                + int(rate["unit_quantity"]) - 1
+            ) // int(rate["unit_quantity"])
+        if cost_status == "actual":
+            amount = calculated
+        elif cost_status == "estimated":
+            amount = (
+                int(json.loads(authority["reserved_json"])["cost_micros"])
+                if usage["measurement_status"] in {"estimated", "unavailable"}
+                else calculated
+            )
+        else:
+            raise ConnectorValidationError(
+                "runner cost_status must be actual or estimated"
+            )
+        return self.record_cost(
+            usage_entry_ref,
+            price_rate_refs=policy["price_rate_refs"],
+            amount_micros=amount,
+            currency=policy["quota_currency"],
+            cost_status=cost_status,
+            calculation_ref=calculation_ref,
+            actor_ref=actor_ref,
+            idempotency_key=idempotency_key,
+        )
+
+    def settle_quota_for_runner(
+        self,
+        reservation_ref: str,
+        state: str,
+        *,
+        usage_entry_ref: str | None,
+        cost_entry_ref: str | None,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        """Derive settlement metrics; callers cannot submit arbitrary actuals."""
+
+        reservation_ref = _text(reservation_ref, "reservation_ref")
+        if state == "released":
+            return self.settle_quota(
+                reservation_ref,
+                "released",
+                {name: 0 for name in _METRICS},
+                idempotency_key=idempotency_key,
+            )
+        if usage_entry_ref is None or cost_entry_ref is None:
+            raise ConnectorValidationError(
+                "runner consumed/indeterminate settlement requires usage and cost"
+            )
+        usage_row = self.connection.execute(
+            "SELECT record_json FROM connector_usage_entries WHERE usage_entry_id=?",
+            (usage_entry_ref,),
+        ).fetchone()
+        cost_row = self.connection.execute(
+            "SELECT amount_micros FROM connector_cost_entries WHERE cost_entry_id=? "
+            "AND usage_entry_ref=?",
+            (cost_entry_ref, usage_entry_ref),
+        ).fetchone()
+        if usage_row is None or cost_row is None:
+            raise ConnectorConflict("runner settlement inputs are not authoritative")
+        actual = dict(json.loads(usage_row["record_json"])["metrics"])
+        actual["cost_micros"] = (
+            0 if cost_row["amount_micros"] is None else int(cost_row["amount_micros"])
+        )
+        return self.settle_quota(
+            reservation_ref,
+            state,
+            actual,
+            usage_entry_ref=usage_entry_ref,
+            cost_entry_ref=cost_entry_ref,
+            idempotency_key=idempotency_key,
+        )
 
     def record_source_envelope(
         self, spec: Mapping[str, Any], *, idempotency_key: str
@@ -2789,6 +2913,23 @@ class ConnectorStore:
             ).fetchone(),
             connector_invocation_id,
         )
+
+    def get_reservation(self, reservation_id: str) -> dict[str, Any]:
+        return self._row_record(
+            self.connection.execute(
+                "SELECT record_json FROM connector_quota_reservations WHERE reservation_id=?",
+                (_text(reservation_id, "reservation_id"),),
+            ).fetchone(),
+            reservation_id,
+        )
+
+    def unsettled_reservations(self) -> list[dict[str, Any]]:
+        rows = self.connection.execute(
+            "SELECT r.record_json FROM connector_quota_reservations r "
+            "LEFT JOIN connector_quota_settlements s ON s.reservation_ref=r.reservation_id "
+            "WHERE s.settlement_id IS NULL ORDER BY r.created_at,r.reservation_id"
+        ).fetchall()
+        return [json.loads(row["record_json"]) for row in rows]
 
 
 ConnectorAuthority = ConnectorStore

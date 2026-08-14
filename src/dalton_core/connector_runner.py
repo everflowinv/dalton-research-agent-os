@@ -23,6 +23,7 @@ from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
 PROTOCOL_VERSION = "0.1"
+RUNNER_RESPONSE_SCHEMA_VERSION = "0.2"
 
 
 class ConnectorRunnerError(Exception):
@@ -374,20 +375,29 @@ _RUNNER_RESPONSE_FIELDS = {
 
 def validate_connector_runner_response(value: Mapping[str, Any]) -> dict[str, Any]:
     wire = _closed(value, _RUNNER_RESPONSE_FIELDS, "ConnectorRunnerResponse")
-    if wire["schema_version"] != SCHEMA_VERSION:
+    if wire["schema_version"] != RUNNER_RESPONSE_SCHEMA_VERSION:
         raise RunnerValidationError("unsupported ConnectorRunnerResponse schema_version")
     for name in (
         "id", "runner_request_ref", "connector_invocation_ref", "physical_attempt_ref",
         "usage_entry_ref", "cost_entry_ref", "quota_settlement_ref",
-        "raw_artifact_version_ref", "source_envelope_ref", "result_envelope_ref",
+        "result_envelope_ref",
     ):
         wire[name] = _text(wire[name], name)
     for name in (
         "runner_request_hash", "connector_invocation_hash", "physical_attempt_hash",
         "usage_entry_hash", "cost_entry_hash", "quota_settlement_hash",
-        "raw_artifact_version_hash", "source_envelope_hash", "result_envelope_hash",
+        "result_envelope_hash",
     ):
         wire[name] = _hash(wire[name], name)
+    for ref_name, hash_name in (
+        ("raw_artifact_version_ref", "raw_artifact_version_hash"),
+        ("source_envelope_ref", "source_envelope_hash"),
+    ):
+        if (wire[ref_name] is None) != (wire[hash_name] is None):
+            raise RunnerValidationError(f"{ref_name}/{hash_name} must be null together")
+        if wire[ref_name] is not None:
+            wire[ref_name] = _text(wire[ref_name], ref_name)
+            wire[hash_name] = _hash(wire[hash_name], hash_name)
     wire["created_at"] = _timestamp(wire["created_at"], "created_at")
     if wire["idempotency_status"] not in {"fresh", "duplicate"}:
         raise RunnerValidationError("idempotency_status is invalid")
@@ -398,6 +408,15 @@ def validate_connector_runner_response(value: Mapping[str, Any]) -> dict[str, An
         raise RunnerValidationError("retryable response requires retry_at")
     if wire["outcome"] != "retryable" and wire["retry_at"] is not None:
         raise RunnerValidationError("retry_at is only valid for retryable response")
+    if wire["source_envelope_ref"] is not None and wire["raw_artifact_version_ref"] is None:
+        raise RunnerValidationError("SourceEnvelope requires a raw artifact")
+    if wire["outcome"] == "succeeded" and (
+        wire["raw_artifact_version_ref"] is None
+        or wire["source_envelope_ref"] is None
+    ):
+        raise RunnerValidationError(
+            "succeeded response requires raw artifact and SourceEnvelope"
+        )
     return _with_hash(wire, "ConnectorRunnerResponse")
 
 

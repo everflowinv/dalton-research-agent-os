@@ -660,7 +660,7 @@ class ConnectorRunnerControlPlaneTests(unittest.TestCase):
             validate_adapter_transport_observation(rate_limited)["retry_after_ms"], 1000
         )
         response_base = {
-            "schema_version": "0.1", "id": "connector-runner-response:1",
+            "schema_version": "0.2", "id": "connector-runner-response:1",
             "created_at": WIRE_WHEN, "runner_request_ref": "runner-request:1",
             "runner_request_hash": "1" * 64, "idempotency_status": "fresh",
             "connector_invocation_ref": "connector-invocation:1",
@@ -689,6 +689,30 @@ class ConnectorRunnerControlPlaneTests(unittest.TestCase):
             )
         with self.assertRaises(RunnerValidationError):
             validate_connector_runner_response(invalid_retryable)
+        failure_base = {
+            **response_base,
+            "raw_artifact_version_ref": None,
+            "raw_artifact_version_hash": None,
+            "source_envelope_ref": None,
+            "source_envelope_hash": None,
+            "outcome": "retryable",
+            "retry_at": (WHEN + timedelta(seconds=1)).isoformat(timespec="microseconds"),
+        }
+        failure = with_hash(failure_base)
+        self.assertEqual(
+            validate_connector_runner_response(failure)["outcome"], "retryable"
+        )
+        assert_wire_schema(
+            self, "connector-runner-response.schema.json", failure
+        )
+        fake_success_base = {**failure_base, "outcome": "succeeded", "retry_at": None}
+        fake_success = with_hash(fake_success_base)
+        with self.assertRaises(AssertionError):
+            assert_wire_schema(
+                self, "connector-runner-response.schema.json", fake_success
+            )
+        with self.assertRaises(RunnerValidationError):
+            validate_connector_runner_response(fake_success)
 
 
 if __name__ == "__main__":

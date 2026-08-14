@@ -1,0 +1,18 @@
+{
+  "name": "empty",
+  "behavior": "return",
+  "advance_seconds": 1,
+  "raw_file": "empty.raw.json",
+  "observation": {
+    "protocol_version": "0.1",
+    "outcome": "succeeded",
+    "provider_request_id": "recorded:empty:1",
+    "provider_status_code": 200,
+    "retry_after_ms": null,
+    "structured_output": {"records": []},
+    "source_record_refs": [],
+    "cursor": null,
+    "provider_usage": {"calls": 1},
+    "error": null
+  }
+}

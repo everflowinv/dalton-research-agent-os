@@ -1,0 +1,18 @@
+{
+  "name": "success",
+  "behavior": "return",
+  "advance_seconds": 1,
+  "raw_file": "success.raw.json",
+  "observation": {
+    "protocol_version": "0.1",
+    "outcome": "succeeded",
+    "provider_request_id": "recorded:success:1",
+    "provider_status_code": 200,
+    "retry_after_ms": null,
+    "structured_output": {"records": [{"announcement_id": "cninfo:announcement:1"}]},
+    "source_record_refs": ["cninfo:announcement:1"],
+    "cursor": null,
+    "provider_usage": {"calls": 1},
+    "error": null
+  }
+}

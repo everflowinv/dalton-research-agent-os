@@ -1,1 +1,77 @@
-{"$schema":"https://json-schema.org/draft/2020-12/schema","title":"ConnectorRunnerResponse","type":"object","additionalProperties":false,"required":["schema_version","id","created_at","runner_request_ref","runner_request_hash","idempotency_status","connector_invocation_ref","connector_invocation_hash","physical_attempt_ref","physical_attempt_hash","usage_entry_ref","usage_entry_hash","cost_entry_ref","cost_entry_hash","quota_settlement_ref","quota_settlement_hash","raw_artifact_version_ref","raw_artifact_version_hash","source_envelope_ref","source_envelope_hash","result_envelope_ref","result_envelope_hash","outcome","retry_at","content_hash"],"properties":{"schema_version":{"const":"0.1"},"id":{"type":"string","minLength":1},"created_at":{"type":"string","format":"date-time"},"runner_request_ref":{"type":"string","minLength":1},"runner_request_hash":{"$ref":"#/$defs/hash"},"idempotency_status":{"enum":["fresh","duplicate"]},"connector_invocation_ref":{"type":"string","minLength":1},"connector_invocation_hash":{"$ref":"#/$defs/hash"},"physical_attempt_ref":{"type":"string","minLength":1},"physical_attempt_hash":{"$ref":"#/$defs/hash"},"usage_entry_ref":{"type":"string","minLength":1},"usage_entry_hash":{"$ref":"#/$defs/hash"},"cost_entry_ref":{"type":"string","minLength":1},"cost_entry_hash":{"$ref":"#/$defs/hash"},"quota_settlement_ref":{"type":"string","minLength":1},"quota_settlement_hash":{"$ref":"#/$defs/hash"},"raw_artifact_version_ref":{"type":"string","minLength":1},"raw_artifact_version_hash":{"$ref":"#/$defs/hash"},"source_envelope_ref":{"type":"string","minLength":1},"source_envelope_hash":{"$ref":"#/$defs/hash"},"result_envelope_ref":{"type":"string","minLength":1},"result_envelope_hash":{"$ref":"#/$defs/hash"},"outcome":{"enum":["succeeded","retryable","failed"]},"retry_at":{"type":["string","null"]},"content_hash":{"$ref":"#/$defs/hash"}},"allOf":[{"if":{"properties":{"outcome":{"const":"retryable"}},"required":["outcome"]},"then":{"properties":{"retry_at":{"type":"string","format":"date-time"}}},"else":{"properties":{"retry_at":{"type":"null"}}}}],"$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}}}
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ConnectorRunnerResponse",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "runner_request_ref",
+    "runner_request_hash", "idempotency_status", "connector_invocation_ref",
+    "connector_invocation_hash", "physical_attempt_ref", "physical_attempt_hash",
+    "usage_entry_ref", "usage_entry_hash", "cost_entry_ref", "cost_entry_hash",
+    "quota_settlement_ref", "quota_settlement_hash", "raw_artifact_version_ref",
+    "raw_artifact_version_hash", "source_envelope_ref", "source_envelope_hash",
+    "result_envelope_ref", "result_envelope_hash", "outcome", "retry_at",
+    "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.2"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "runner_request_ref": {"type": "string", "minLength": 1},
+    "runner_request_hash": {"$ref": "#/$defs/hash"},
+    "idempotency_status": {"enum": ["fresh", "duplicate"]},
+    "connector_invocation_ref": {"type": "string", "minLength": 1},
+    "connector_invocation_hash": {"$ref": "#/$defs/hash"},
+    "physical_attempt_ref": {"type": "string", "minLength": 1},
+    "physical_attempt_hash": {"$ref": "#/$defs/hash"},
+    "usage_entry_ref": {"type": "string", "minLength": 1},
+    "usage_entry_hash": {"$ref": "#/$defs/hash"},
+    "cost_entry_ref": {"type": "string", "minLength": 1},
+    "cost_entry_hash": {"$ref": "#/$defs/hash"},
+    "quota_settlement_ref": {"type": "string", "minLength": 1},
+    "quota_settlement_hash": {"$ref": "#/$defs/hash"},
+    "raw_artifact_version_ref": {"type": ["string", "null"], "minLength": 1},
+    "raw_artifact_version_hash": {"oneOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+    "source_envelope_ref": {"type": ["string", "null"], "minLength": 1},
+    "source_envelope_hash": {"oneOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+    "result_envelope_ref": {"type": "string", "minLength": 1},
+    "result_envelope_hash": {"$ref": "#/$defs/hash"},
+    "outcome": {"enum": ["succeeded", "retryable", "failed"]},
+    "retry_at": {"type": ["string", "null"]},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"outcome": {"const": "retryable"}}, "required": ["outcome"]},
+      "then": {"properties": {"retry_at": {"type": "string", "format": "date-time"}}},
+      "else": {"properties": {"retry_at": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"raw_artifact_version_ref": {"type": "string"}}, "required": ["raw_artifact_version_ref"]},
+      "then": {"properties": {"raw_artifact_version_hash": {"$ref": "#/$defs/hash"}}},
+      "else": {"properties": {"raw_artifact_version_hash": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"source_envelope_ref": {"type": "string"}}, "required": ["source_envelope_ref"]},
+      "then": {
+        "properties": {
+          "source_envelope_hash": {"$ref": "#/$defs/hash"},
+          "raw_artifact_version_ref": {"type": "string", "minLength": 1}
+        }
+      },
+      "else": {"properties": {"source_envelope_hash": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"outcome": {"const": "succeeded"}}, "required": ["outcome"]},
+      "then": {
+        "properties": {
+          "raw_artifact_version_ref": {"type": "string", "minLength": 1},
+          "raw_artifact_version_hash": {"$ref": "#/$defs/hash"},
+          "source_envelope_ref": {"type": "string", "minLength": 1},
+          "source_envelope_hash": {"$ref": "#/$defs/hash"}
+        }
+      }
+    }
+  ],
+  "$defs": {"hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}
