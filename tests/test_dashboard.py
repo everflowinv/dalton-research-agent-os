@@ -153,7 +153,7 @@ def snapshot() -> dict:
                 "content_hash": HASH,
                 "access_class": "internal",
                 "preview_status": "metadata_only",
-                "producer_invocation_ref": "invocation:1",
+                "producer_execution_ref": "invocation:1",
                 "created_at": NOW,
             }
         ],

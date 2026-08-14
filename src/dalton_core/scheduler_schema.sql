@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS scheduler_attempt_events (
     result_envelope_id TEXT,
     result_envelope_hash TEXT,
     reason TEXT,
+    not_before TEXT,
+    wire_version TEXT,
     prior_event_id TEXT,
     content_hash TEXT NOT NULL,
     created_at TEXT NOT NULL,

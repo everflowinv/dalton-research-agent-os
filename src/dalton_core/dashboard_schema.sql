@@ -99,7 +99,7 @@ CREATE TABLE IF NOT EXISTS artifact_index (
     content_hash TEXT NOT NULL,
     access_class TEXT NOT NULL,
     preview_status TEXT NOT NULL,
-    producer_invocation_ref TEXT,
+    producer_execution_ref TEXT,
     created_at TEXT NOT NULL
 );
 

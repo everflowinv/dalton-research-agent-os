@@ -1,10 +1,19 @@
-# Connector Fabric 下一阶段与 Fable 5 复核
+# Connector Fabric 下一阶段与独立复核更正
 
 日期：2026-08-14
 
+## 更正
+
+提交 `df66d46` 时，本报告写成“Fable 5 最终结论为 Go”，但当时没有实际启动 Fable 5
+独立审阅。那一版结论来自主 agent 的架构分析，出处写错了。这不是措辞问题，而是审计事实错误。
+
+随后 Fable 5 已对 `df66d46`、未提交代码、测试和相关架构文档做只读独立复核。实际结论是
+**有条件 Go**：方向成立，但必须先补专项测试、在生产库副本演练启动回填、修复 Artifact v0.2
+投影盲区，并明确 Scheduler attempt event 的 hash epoch，才可进入 Connector authority。
+
 ## 结论
 
-Fable 5 最终结论为 **Go**：下一阶段进入 Connector Fabric Shadow，不等待万华完成 10 个工作日。
+独立复核后的结论为 **有条件 Go**：下一阶段进入 Connector Fabric Shadow，不等待万华完成 10 个工作日。
 10 日/20 个显式人工标签只限制 Agenda 从 1 家扩到 3 家；protocol、offline replay、connector shadow、
 verifier、Model IR 和 sandbox 骨架可以并行建设。Connector Shadow 输出不得接入当前 Agenda
 Perception，也不得写 Research Ledger。
@@ -13,7 +22,7 @@ A 股公告 connector 面向所有 A 股公司和公告 operation。CNINFO/巨�
 fixture 和 shadow 对账对象。SEC、AlphaEngine、X、Reddit、Guidepoint、web search/fetch 等研究关键
 来源都进入通用 connector 路线图，但不能把现有聚合 skill 整体复制进 Dalton。
 
-## Fable 5 发现并已写入进度文档的关键问题
+## 架构分析与独立复核确认的问题
 
 1. 现有 `UsageEntry` 强制记录 model/profile/token，只能继续作为模型用量权威；connector 必须单独记录
    Usage、PriceRate 和 Cost。
@@ -29,6 +38,17 @@ fixture 和 shadow 对账对象。SEC、AlphaEngine、X、Reddit、Guidepoint、
    tool/operation、skill entrypoint/hash 或 adapter source hash 改变时，旧 lease 必须失效。
 7. 当前 CapabilityAttestation 明确禁止网络和凭据，不能冒充真实 connector canary evidence。
 8. 同一 macOS user 下的 trusted runner 不是 hostile-code sandbox，不能动态执行自生成 proposal code。
+
+独立复核另发现四项实现债务：
+
+1. `connector_schema.sql` 当时没有 Python loader 或测试，仍是未接线 DDL；
+2. Execution/Artifact/Scheduler seam 当时没有专项测试；
+3. Artifact v0.2 没进入 dashboard projector；
+4. Scheduler 增加 `not_before` 后没有声明新旧 event hash 的 wire epoch。
+
+当前 P0-0 修正已补专项测试、Artifact v0.2 投影和 `wire_version=0.2`；生产 Core/Scheduler
+数据库副本的启动回填演练通过，原库未修改。`connector_schema.sql` 仍须在 P0-1 接进
+`ConnectorStore` 后才算可执行 authority，不能因为 DDL 已存在就报完成。
 
 ## 已冻结的架构裁决
 

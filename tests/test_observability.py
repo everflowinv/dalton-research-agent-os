@@ -423,6 +423,48 @@ class ObservabilityTests(unittest.TestCase):
             prior_version_ref="artifact-v1",
         )
         self.assertEqual(second["version"], 2)
+        third = self.obs.register_artifact_version_v2(
+            "artifact:report",
+            version_id="artifact-v3",
+            title="Research report",
+            kind="deliverable",
+            media_type="application/pdf",
+            artifact_content_hash="c" * 64,
+            size_bytes=122,
+            storage_locator="artifact-store:reports/three",
+            producer_execution_ref="inv-1",
+            result_envelope_ref="result-3",
+            result_envelope_hash="f" * 64,
+            access_class="restricted",
+            preview_status="unavailable",
+            actor_ref="system:artifact-registry",
+            prior_version_ref="artifact-v2",
+        )
+        self.assertEqual(third["schema_version"], "0.2")
+        self.assertEqual(third["version"], 3)
+        self.assertEqual(
+            self.obs.get_artifact_version("artifact-v3"),
+            {key: value for key, value in third.items() if key != "status"},
+        )
+        self.assertEqual(self.obs.latest_artifact_version("artifact:report")["id"], "artifact-v3")
+        with self.assertRaises(ObservabilityConflict):
+            self.obs.register_artifact_version(
+                "artifact:report",
+                version_id="artifact-v4-legacy",
+                title="Legacy append",
+                kind="deliverable",
+                media_type="application/pdf",
+                artifact_content_hash="d" * 64,
+                size_bytes=123,
+                storage_locator="artifact-store:reports/four",
+                producer_invocation_ref="inv-1",
+                result_envelope_ref="result-4",
+                result_envelope_hash="1" * 64,
+                access_class="restricted",
+                preview_status="unavailable",
+                actor_ref="system:artifact-registry",
+                prior_version_ref="artifact-v3",
+            )
         with self.assertRaises(ObservabilityValidationError):
             self.obs.register_artifact_version(
                 "artifact:inline",
@@ -440,6 +482,53 @@ class ObservabilityTests(unittest.TestCase):
                 preview_status="available",
                 actor_ref="system:artifact-registry",
             )
+
+    def test_artifact_index_backfill_rejects_cross_generation_fork(self):
+        self.obs.register_artifact_version(
+            "artifact:report",
+            version_id="artifact-v1",
+            title="Research report",
+            kind="deliverable",
+            media_type="application/pdf",
+            artifact_content_hash="a" * 64,
+            size_bytes=120,
+            storage_locator="artifact-store:reports/one",
+            producer_invocation_ref="inv-1",
+            result_envelope_ref="result-1",
+            result_envelope_hash="d" * 64,
+            access_class="restricted",
+            preview_status="redacted",
+            actor_ref="system:artifact-registry",
+        )
+        fork = {
+            "schema_version": "0.2", "id": "artifact-v1-fork", "created_at": WHEN,
+            "artifact_ref": "artifact:report", "version": 1, "title": "Fork",
+            "kind": "deliverable", "media_type": "application/pdf",
+            "artifact_content_hash": "b" * 64, "size_bytes": 121,
+            "storage_locator": "artifact-store:reports/fork",
+            "producer_execution_ref": "inv-1", "work_order_ref": "work-1",
+            "result_envelope_ref": "result-fork", "result_envelope_hash": "e" * 64,
+            "access_class": "restricted", "preview_status": "redacted",
+            "actor_ref": "system:artifact-registry", "prior_version_ref": None,
+        }
+        fork["content_hash"] = content_hash(fork)
+        with self.store._transaction() as cur:
+            cur.execute(
+                "INSERT INTO observability_artifact_versions_v2"
+                "(version_id,artifact_ref,version_number,prior_version_ref,artifact_content_hash,"
+                "producer_execution_ref,work_order_ref,result_envelope_ref,result_envelope_hash,"
+                "storage_locator,record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    fork["id"], fork["artifact_ref"], fork["version"], None,
+                    fork["artifact_content_hash"], fork["producer_execution_ref"],
+                    fork["work_order_ref"], fork["result_envelope_ref"],
+                    fork["result_envelope_hash"], fork["storage_locator"],
+                    json.dumps(fork, sort_keys=True, separators=(",", ":")),
+                    fork["content_hash"], fork["created_at"],
+                ),
+            )
+        with self.assertRaises(ObservabilityConflict):
+            ObservabilityStore(self.store)
 
     def test_authority_rows_are_immutable_and_direct_insert_is_guarded(self):
         self.workflow()
@@ -474,6 +563,23 @@ class ObservabilityTests(unittest.TestCase):
             preview_status="unavailable",
             actor_ref="system:artifact-registry",
         )
+        self.obs.register_artifact_version_v2(
+            "artifact:report",
+            version_id="artifact-v2",
+            title="Report",
+            kind="deliverable",
+            media_type="text/plain",
+            artifact_content_hash="b" * 64,
+            size_bytes=2,
+            storage_locator="artifact-store:two",
+            producer_execution_ref="inv-1",
+            result_envelope_ref="result-2",
+            result_envelope_hash="e" * 64,
+            access_class="internal",
+            preview_status="unavailable",
+            actor_ref="system:artifact-registry",
+            prior_version_ref="artifact-v1",
+        )
         tables = [
             "observability_workflow_versions",
             "observability_work_order_links",
@@ -481,6 +587,8 @@ class ObservabilityTests(unittest.TestCase):
             "observability_price_rate_versions",
             "observability_cost_entries",
             "observability_artifact_versions",
+            "observability_artifact_versions_v2",
+            "observability_artifact_version_index",
         ]
         for table in tables:
             with self.subTest(table=table):
@@ -528,6 +636,23 @@ class ObservabilityTests(unittest.TestCase):
             preview_status="unavailable",
             actor_ref="system:artifact-registry",
         )
+        artifact_v2 = self.obs.register_artifact_version_v2(
+            "artifact:report",
+            version_id="artifact-v2",
+            title="Report",
+            kind="deliverable",
+            media_type="text/plain",
+            artifact_content_hash="b" * 64,
+            size_bytes=2,
+            storage_locator="artifact-store:two",
+            producer_execution_ref="inv-1",
+            result_envelope_ref="result-2",
+            result_envelope_hash="e" * 64,
+            access_class="internal",
+            preview_status="unavailable",
+            actor_ref="system:artifact-registry",
+            prior_version_ref="artifact-v1",
+        )
         cases = {
             "workflow-run-version.schema.json": workflow,
             "work-order-link.schema.json": link,
@@ -535,6 +660,7 @@ class ObservabilityTests(unittest.TestCase):
             "price-rate-version.schema.json": rate,
             "cost-entry.schema.json": cost,
             "artifact-version.schema.json": artifact,
+            "artifact-version-v0.2.schema.json": artifact_v2,
         }
         for filename, result in cases.items():
             with self.subTest(schema=filename):

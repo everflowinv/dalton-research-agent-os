@@ -32,6 +32,21 @@ BEFORE DELETE ON staging_changes BEGIN
     SELECT RAISE(ABORT, 'staging_changes cannot be deleted');
 END;
 
+CREATE TABLE IF NOT EXISTS execution_invocations (
+    execution_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('model', 'connector')),
+    work_order_ref TEXT NOT NULL,
+    profile_ref TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    runtime_ref TEXT NOT NULL,
+    actor_ref TEXT NOT NULL,
+    parent_ref TEXT,
+    environment_hash TEXT,
+    execution_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS model_invocations (
     invocation_id TEXT PRIMARY KEY,
     profile_ref TEXT NOT NULL,
@@ -45,6 +60,13 @@ CREATE TABLE IF NOT EXISTS model_invocations (
     work_order_ref TEXT NOT NULL,
     model_family TEXT NOT NULL,
     invocation_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS execution_invocation_model_links (
+    execution_ref TEXT PRIMARY KEY REFERENCES execution_invocations(execution_id),
+    model_invocation_ref TEXT NOT NULL UNIQUE REFERENCES model_invocations(invocation_id),
+    content_hash TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
 
@@ -205,6 +227,22 @@ SELECT pointer_id, policy_version_id, updated_at
 FROM governance_policy_pointer WHERE pointer_id = 1;
 
 -- No update or delete can rewrite authoritative history, even from the store.
+CREATE TRIGGER IF NOT EXISTS execution_invocations_no_update
+BEFORE UPDATE ON execution_invocations BEGIN
+    SELECT RAISE(ABORT, 'execution_invocations is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS execution_invocations_no_delete
+BEFORE DELETE ON execution_invocations BEGIN
+    SELECT RAISE(ABORT, 'execution_invocations is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS execution_invocation_model_links_no_update
+BEFORE UPDATE ON execution_invocation_model_links BEGIN
+    SELECT RAISE(ABORT, 'execution_invocation_model_links is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS execution_invocation_model_links_no_delete
+BEFORE DELETE ON execution_invocation_model_links BEGIN
+    SELECT RAISE(ABORT, 'execution_invocation_model_links is immutable');
+END;
 CREATE TRIGGER IF NOT EXISTS model_invocations_no_update
 BEFORE UPDATE ON model_invocations BEGIN
     SELECT RAISE(ABORT, 'model_invocations is immutable');
@@ -249,6 +287,16 @@ END;
 -- Inserts and pointer changes are allowed only while DaltonStore has entered
 -- its short-lived transaction write context.  SQLite has no per-table grants,
 -- so this trigger/UDF pair is the database-level boundary.
+CREATE TRIGGER IF NOT EXISTS execution_invocations_authorized_insert
+BEFORE INSERT ON execution_invocations
+WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'execution_invocations insert requires DaltonStore');
+END;
+CREATE TRIGGER IF NOT EXISTS execution_invocation_model_links_authorized_insert
+BEFORE INSERT ON execution_invocation_model_links
+WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'execution_invocation_model_links insert requires DaltonStore');
+END;
 CREATE TRIGGER IF NOT EXISTS model_invocations_authorized_insert
 BEFORE INSERT ON model_invocations
 WHEN dalton_authorized() = 0 BEGIN

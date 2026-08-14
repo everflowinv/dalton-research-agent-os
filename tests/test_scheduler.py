@@ -12,9 +12,13 @@ from dalton_core.scheduler import (
     RetryExhausted,
     Scheduler,
     SchedulerConflict,
+    SchedulerValidationError,
 )
 from dalton_core.contracts import ResultEnvelope
 from dalton_core.store import content_hash
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class MutableClock:
@@ -305,6 +309,84 @@ class SchedulerTests(unittest.TestCase):
             "SELECT policy_json FROM scheduler_policy_versions"
         ).fetchone()[0]
         self.assertIn('"max_attempts":2', policy)
+
+    def test_retryable_result_can_be_rescheduled_without_worker_busy_wait(self):
+        lease = self.enqueue_claim()
+        retry_at = self.clock.value + timedelta(minutes=5)
+        completed = self.scheduler.complete(
+            "work-1",
+            1,
+            "worker:a",
+            lease["lease_token"],
+            result("rate-limited", status="retryable"),
+            idempotency_key="retry:rate-limit",
+            retry_at=retry_at,
+        )
+        self.assertEqual(completed["work_state"], "ready")
+        self.assertEqual(
+            self.scheduler.status("work-1")["not_before"],
+            retry_at.isoformat(timespec="microseconds"),
+        )
+        latest = self.scheduler.attempt_history("work-1")[-1]
+        self.assertEqual(latest["wire_version"], "0.2")
+        self.assertIsNone(self.scheduler.claim("worker:b"))
+        self.clock.advance(299)
+        self.assertIsNone(self.scheduler.claim("worker:b"))
+        self.clock.advance(1)
+        claimed = self.scheduler.claim("worker:b")
+        self.assertEqual(claimed["lease"]["attempt_number"], 2)
+
+    def test_retry_at_is_bound_to_retryable_completion_idempotency(self):
+        lease = self.enqueue_claim()
+        retry_at = self.clock.value + timedelta(seconds=60)
+        envelope = result("retry", status="retryable")
+        first = self.scheduler.complete(
+            "work-1", 1, "worker:a", lease["lease_token"], envelope,
+            idempotency_key="retry:bound", retry_at=retry_at,
+        )
+        self.assertEqual(first["status"], "fresh")
+        duplicate = self.scheduler.complete(
+            "work-1", 1, "worker:a", lease["lease_token"], envelope,
+            idempotency_key="retry:bound", retry_at=retry_at,
+        )
+        self.assertEqual(duplicate["status"], "duplicate")
+        conflict = self.scheduler.complete(
+            "work-1", 1, "worker:a", lease["lease_token"], envelope,
+            idempotency_key="retry:bound", retry_at=retry_at + timedelta(seconds=1),
+        )
+        self.assertEqual(conflict["status"], "conflict")
+
+        other = self.enqueue_claim("work-2")
+        with self.assertRaises(SchedulerValidationError):
+            self.scheduler.complete(
+                "work-2", 1, "worker:a", other["lease_token"],
+                result("done", work_ref="work-2"), idempotency_key="done",
+                retry_at=retry_at,
+            )
+
+    def test_existing_scheduler_table_adds_not_before_before_use(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "legacy-scheduler.db"
+            legacy_schema = (ROOT / "src/dalton_core/scheduler_schema.sql").read_text(
+                encoding="utf-8"
+            ).replace("    not_before TEXT,\n", "").replace(
+                "    wire_version TEXT,\n", ""
+            )
+            connection = sqlite3.connect(path)
+            connection.executescript(legacy_schema)
+            connection.close()
+            migrated = Scheduler(path, clock=self.clock)
+            self.addCleanup(migrated.close)
+            columns = {
+                row[1]
+                for row in migrated.conn.execute(
+                    "PRAGMA table_info(scheduler_attempt_events)"
+                ).fetchall()
+            }
+            self.assertIn("not_before", columns)
+            self.assertIn("wire_version", columns)
+            migrated.enqueue(work_order())
+            self.assertIsNotNone(migrated.claim("worker:legacy"))
 
     def test_expired_attempt_exhaustion_is_terminal_without_fake_result(self):
         limited = Scheduler(

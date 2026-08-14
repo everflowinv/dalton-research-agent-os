@@ -181,6 +181,7 @@ class ObservabilityStore:
         self.store = store
         self.connection: sqlite3.Connection = store.connection
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._backfill_artifact_version_index()
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -191,6 +192,64 @@ class ObservabilityStore:
         if row is None:
             raise ObservabilityNotFound(f"{name} not found")
         return json.loads(row["record_json"])
+
+    def _backfill_artifact_version_index(self) -> None:
+        """Add an immutable cross-generation index without rewriting artifacts."""
+
+        rows = self.connection.execute(
+            "SELECT version_id,artifact_ref,version_number,prior_version_id AS prior_version_ref,"
+            "producer_invocation_ref AS producer_execution_ref,content_hash,created_at,'0.1' AS schema_version "
+            "FROM observability_artifact_versions "
+            "UNION ALL "
+            "SELECT version_id,artifact_ref,version_number,prior_version_ref,producer_execution_ref,"
+            "content_hash,created_at,'0.2' AS schema_version "
+            "FROM observability_artifact_versions_v2 "
+            "ORDER BY artifact_ref,version_number"
+        ).fetchall()
+        missing = [
+            row
+            for row in rows
+            if self.connection.execute(
+                "SELECT 1 FROM observability_artifact_version_index WHERE version_id=?",
+                (row["version_id"],),
+            ).fetchone()
+            is None
+        ]
+        if not missing:
+            return
+        with self.store._transaction() as cur:
+            for row in missing:
+                existing = cur.execute(
+                    "SELECT version_id,schema_version,record_hash FROM observability_artifact_version_index "
+                    "WHERE artifact_ref=? AND version_number=?",
+                    (row["artifact_ref"], row["version_number"]),
+                ).fetchone()
+                if existing is not None:
+                    raise ObservabilityConflict(
+                        "artifact version index conflicts with historical authority"
+                    )
+                if row["prior_version_ref"] is not None and cur.execute(
+                    "SELECT 1 FROM observability_artifact_version_index WHERE version_id=?",
+                    (row["prior_version_ref"],),
+                ).fetchone() is None:
+                    raise ObservabilityConflict(
+                        "artifact version index cannot resolve historical prior version"
+                    )
+                cur.execute(
+                    "INSERT INTO observability_artifact_version_index"
+                    "(version_id,artifact_ref,version_number,schema_version,prior_version_ref,"
+                    "producer_execution_ref,record_hash,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        row["version_id"],
+                        row["artifact_ref"],
+                        row["version_number"],
+                        row["schema_version"],
+                        row["prior_version_ref"],
+                        row["producer_execution_ref"],
+                        row["content_hash"],
+                        row["created_at"],
+                    ),
+                )
 
     def _idempotency(
         self,
@@ -1066,7 +1125,8 @@ class ObservabilityStore:
                     "artifact_ref is not declared by the producer invocation output_refs"
                 )
             latest = cur.execute(
-                "SELECT * FROM observability_artifact_versions WHERE artifact_ref=? "
+                "SELECT version_id,version_number,schema_version "
+                "FROM observability_artifact_version_index WHERE artifact_ref=? "
                 "ORDER BY version_number DESC LIMIT 1",
                 (artifact_ref,),
             ).fetchone()
@@ -1075,6 +1135,10 @@ class ObservabilityStore:
                     raise ObservabilityConflict("first artifact version cannot have a prior version")
                 version = 1
             else:
+                if latest["schema_version"] == "0.2":
+                    raise ObservabilityConflict(
+                        "artifact history has migrated to v0.2 and cannot append v0.1"
+                    )
                 if prior_version_ref != latest["version_id"]:
                     raise ObservabilityConflict(
                         "artifact version must continue the latest immutable version"
@@ -1129,11 +1193,205 @@ class ObservabilityStore:
                     created_at,
                 ),
             )
+            cur.execute(
+                "INSERT INTO observability_artifact_version_index"
+                "(version_id,artifact_ref,version_number,schema_version,prior_version_ref,"
+                "producer_execution_ref,record_hash,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    version_id,
+                    artifact_ref,
+                    version,
+                    "0.1",
+                    prior_version_ref,
+                    producer_invocation_ref,
+                    wire["content_hash"],
+                    created_at,
+                ),
+            )
             result = {"status": "fresh", **wire}
             self._save_idempotency(
                 cur, idempotency_key, "register_artifact_version", request_hash, result
             )
             return {**result, **({"idempotency_key": idempotency_key} if idempotency_key else {})}
+
+    def register_artifact_version_v2(
+        self,
+        artifact_ref: str,
+        *,
+        title: str,
+        kind: str,
+        media_type: str,
+        artifact_content_hash: str,
+        size_bytes: int,
+        storage_locator: str,
+        producer_execution_ref: str,
+        result_envelope_ref: str,
+        result_envelope_hash: str,
+        access_class: str,
+        preview_status: str,
+        actor_ref: str,
+        prior_version_ref: str | None = None,
+        version_id: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Append ArtifactVersion v0.2 without fabricating a model invocation."""
+
+        artifact_ref = _nonempty(artifact_ref, "artifact_ref")
+        version_id = self._explicit_id_for_retry(version_id, idempotency_key, "version_id")
+        title = _nonempty(title, "title")
+        kind = _nonempty(kind, "kind")
+        media_type = _nonempty(media_type, "media_type")
+        artifact_content_hash = _sha256(artifact_content_hash, "artifact_content_hash")
+        size_bytes = _nonnegative_int(size_bytes, "size_bytes")
+        storage_locator = _nonempty(storage_locator, "storage_locator")
+        if storage_locator.lower().startswith("data:") or any(
+            ord(char) < 32 for char in storage_locator
+        ):
+            raise ObservabilityValidationError(
+                "storage_locator must identify metadata, not embed artifact content"
+            )
+        producer_execution_ref = _nonempty(
+            producer_execution_ref, "producer_execution_ref"
+        )
+        result_envelope_ref = _nonempty(result_envelope_ref, "result_envelope_ref")
+        result_envelope_hash = _sha256(result_envelope_hash, "result_envelope_hash")
+        if access_class not in _ACCESS_CLASSES:
+            raise ObservabilityValidationError("access_class is invalid")
+        if preview_status not in _PREVIEW_STATUSES:
+            raise ObservabilityValidationError("preview_status is invalid")
+        actor_ref = _nonempty(actor_ref, "actor_ref")
+        prior_version_ref = _optional_ref(prior_version_ref, "prior_version_ref")
+        request = {
+            "operation": "register_artifact_version_v2",
+            "version_id": version_id,
+            "artifact_ref": artifact_ref,
+            "title": title,
+            "kind": kind,
+            "media_type": media_type,
+            "artifact_content_hash": artifact_content_hash,
+            "size_bytes": size_bytes,
+            "storage_locator": storage_locator,
+            "producer_execution_ref": producer_execution_ref,
+            "result_envelope_ref": result_envelope_ref,
+            "result_envelope_hash": result_envelope_hash,
+            "access_class": access_class,
+            "preview_status": preview_status,
+            "actor_ref": actor_ref,
+            "prior_version_ref": prior_version_ref,
+        }
+        request_hash = content_hash(request)
+        with self.store._transaction() as cur:
+            idem = self._idempotency(
+                cur, idempotency_key, "register_artifact_version_v2", request_hash
+            )
+            if idem is not None:
+                return idem
+            execution = cur.execute(
+                "SELECT execution_json FROM execution_invocations WHERE execution_id=?",
+                (producer_execution_ref,),
+            ).fetchone()
+            if execution is None:
+                raise ObservabilityNotFound(
+                    f"producer execution not found: {producer_execution_ref}"
+                )
+            execution_wire = json.loads(execution["execution_json"])
+            if artifact_ref not in execution_wire["output_refs"]:
+                raise ObservabilityConflict(
+                    "artifact_ref is not declared by the producer execution output_refs"
+                )
+            latest = cur.execute(
+                "SELECT version_id,version_number FROM observability_artifact_version_index "
+                "WHERE artifact_ref=? ORDER BY version_number DESC LIMIT 1",
+                (artifact_ref,),
+            ).fetchone()
+            if latest is None:
+                if prior_version_ref is not None:
+                    raise ObservabilityConflict(
+                        "first artifact version cannot have a prior version"
+                    )
+                version = 1
+            else:
+                if prior_version_ref != latest["version_id"]:
+                    raise ObservabilityConflict(
+                        "artifact version must continue the latest immutable version"
+                    )
+                version = int(latest["version_number"]) + 1
+            if cur.execute(
+                "SELECT 1 FROM observability_artifact_versions_v2 WHERE version_id=?",
+                (version_id,),
+            ).fetchone() or cur.execute(
+                "SELECT 1 FROM observability_artifact_versions WHERE version_id=?",
+                (version_id,),
+            ).fetchone():
+                raise ObservabilityConflict(f"artifact version id collision: {version_id}")
+            created_at = _now()
+            wire = _record(
+                {
+                    "schema_version": "0.2",
+                    "id": version_id,
+                    "created_at": created_at,
+                    "artifact_ref": artifact_ref,
+                    "version": version,
+                    "title": title,
+                    "kind": kind,
+                    "media_type": media_type,
+                    "artifact_content_hash": artifact_content_hash,
+                    "size_bytes": size_bytes,
+                    "storage_locator": storage_locator,
+                    "producer_execution_ref": producer_execution_ref,
+                    "work_order_ref": execution_wire["work_order_ref"],
+                    "result_envelope_ref": result_envelope_ref,
+                    "result_envelope_hash": result_envelope_hash,
+                    "access_class": access_class,
+                    "preview_status": preview_status,
+                    "actor_ref": actor_ref,
+                    "prior_version_ref": prior_version_ref,
+                }
+            )
+            cur.execute(
+                "INSERT INTO observability_artifact_versions_v2"
+                "(version_id,artifact_ref,version_number,prior_version_ref,artifact_content_hash,"
+                "producer_execution_ref,work_order_ref,result_envelope_ref,result_envelope_hash,"
+                "storage_locator,record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    version_id,
+                    artifact_ref,
+                    version,
+                    prior_version_ref,
+                    artifact_content_hash,
+                    producer_execution_ref,
+                    execution_wire["work_order_ref"],
+                    result_envelope_ref,
+                    result_envelope_hash,
+                    storage_locator,
+                    canonical_json(wire),
+                    wire["content_hash"],
+                    created_at,
+                ),
+            )
+            cur.execute(
+                "INSERT INTO observability_artifact_version_index"
+                "(version_id,artifact_ref,version_number,schema_version,prior_version_ref,"
+                "producer_execution_ref,record_hash,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    version_id,
+                    artifact_ref,
+                    version,
+                    "0.2",
+                    prior_version_ref,
+                    producer_execution_ref,
+                    wire["content_hash"],
+                    created_at,
+                ),
+            )
+            result = {"status": "fresh", **wire}
+            self._save_idempotency(
+                cur, idempotency_key, "register_artifact_version_v2", request_hash, result
+            )
+            return {
+                **result,
+                **({"idempotency_key": idempotency_key} if idempotency_key else {}),
+            }
 
     def get_workflow_version(self, version_id: str) -> dict[str, Any]:
         row = self.connection.execute(
@@ -1202,20 +1460,41 @@ class ObservabilityStore:
         return total
 
     def get_artifact_version(self, version_id: str) -> dict[str, Any]:
-        """Return immutable metadata only; this method never opens the locator."""
+        """Return immutable metadata from either artifact schema generation."""
+
+        version_id = _nonempty(version_id, "version_id")
+        indexed = self.connection.execute(
+            "SELECT schema_version FROM observability_artifact_version_index WHERE version_id=?",
+            (version_id,),
+        ).fetchone()
+        if indexed is None:
+            raise ObservabilityNotFound("artifact version not found")
+        table = (
+            "observability_artifact_versions"
+            if indexed["schema_version"] == "0.1"
+            else "observability_artifact_versions_v2"
+        )
         row = self.connection.execute(
-            "SELECT record_json FROM observability_artifact_versions WHERE version_id=?",
-            (_nonempty(version_id, "version_id"),),
+            f"SELECT record_json FROM {table} WHERE version_id=?", (version_id,)
         ).fetchone()
         return self._row_record(row, "artifact version")
 
+    def get_artifact_version_v2(self, version_id: str) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT record_json FROM observability_artifact_versions_v2 WHERE version_id=?",
+            (_nonempty(version_id, "version_id"),),
+        ).fetchone()
+        return self._row_record(row, "artifact version v0.2")
+
     def latest_artifact_version(self, artifact_ref: str) -> dict[str, Any]:
         row = self.connection.execute(
-            "SELECT record_json FROM observability_artifact_versions WHERE artifact_ref=? "
+            "SELECT version_id FROM observability_artifact_version_index WHERE artifact_ref=? "
             "ORDER BY version_number DESC LIMIT 1",
             (_nonempty(artifact_ref, "artifact_ref"),),
         ).fetchone()
-        return self._row_record(row, "artifact")
+        if row is None:
+            raise ObservabilityNotFound("artifact not found")
+        return self.get_artifact_version(row["version_id"])
 
 
 ObservabilityAuthority = ObservabilityStore

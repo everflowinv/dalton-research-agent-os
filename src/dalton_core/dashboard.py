@@ -67,7 +67,7 @@ _TABLE_FIELDS: dict[str, tuple[str, ...]] = {
     "artifact_index": (
         "artifact_ref", "workflow_ref", "work_order_ref", "title", "kind",
         "media_type", "size_bytes", "content_hash", "access_class", "preview_status",
-        "producer_invocation_ref", "created_at",
+        "producer_execution_ref", "created_at",
     ),
     "capability_status": (
         "capability_id", "label", "kind", "source_type", "eligibility_state",

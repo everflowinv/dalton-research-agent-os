@@ -46,6 +46,11 @@ class InvocationGranularity(str, Enum):
     SYSTEM = "system"
 
 
+class ExecutionKind(str, Enum):
+    MODEL = "model"
+    CONNECTOR = "connector"
+
+
 class PredicateOperator(str, Enum):
     EQ = "eq"
     NE = "ne"
@@ -341,6 +346,96 @@ class RuntimeProfile:
             result[key] = list(result[key])
         result["limits"] = dict(self.limits)
         result["metadata"] = dict(self.metadata)
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionInvocation:
+    """Runtime-neutral execution provenance shared by all invocation subtypes."""
+
+    schema_version: str
+    id: str
+    created_at: str
+    kind: ExecutionKind
+    work_order_ref: str
+    profile_ref: str
+    capability: str
+    input_refs: tuple[str, ...]
+    output_refs: tuple[str, ...]
+    started_at: str
+    completed_at: str | None
+    side_effects: tuple[str, ...]
+    runtime_ref: str
+    actor_ref: str
+    parent_ref: str | None = None
+    environment_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        _check_common(self.schema_version, self.id, self.created_at)
+        _enum_value(self.kind, ExecutionKind, "kind")
+        for name, value in (
+            ("work_order_ref", self.work_order_ref),
+            ("profile_ref", self.profile_ref),
+            ("capability", self.capability),
+            ("started_at", self.started_at),
+            ("runtime_ref", self.runtime_ref),
+            ("actor_ref", self.actor_ref),
+        ):
+            _require_string(value, name)
+        for name, value in (
+            ("input_refs", self.input_refs),
+            ("output_refs", self.output_refs),
+            ("side_effects", self.side_effects),
+        ):
+            if not isinstance(value, tuple) or not all(
+                isinstance(item, str) and item for item in value
+            ):
+                raise ValidationError(f"{name} must be a tuple of non-empty strings")
+        for name, value in (
+            ("completed_at", self.completed_at),
+            ("parent_ref", self.parent_ref),
+            ("environment_hash", self.environment_hash),
+        ):
+            if value is not None:
+                _require_string(value, name)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ExecutionInvocation":
+        obj = _strict_kwargs(cls, _require_mapping(data, "ExecutionInvocation"))
+        for key in ("input_refs", "output_refs", "side_effects"):
+            obj[key] = tuple(obj.get(key, ()))
+        try:
+            obj["kind"] = ExecutionKind(obj["kind"])
+        except ValueError as exc:
+            raise ValidationError(f"kind has invalid value: {obj['kind']!r}") from exc
+        return cls(**obj)
+
+    @classmethod
+    def from_model(cls, invocation: "ModelInvocation") -> "ExecutionInvocation":
+        return cls(
+            schema_version=invocation.schema_version,
+            id=invocation.id,
+            created_at=invocation.created_at,
+            kind=ExecutionKind.MODEL,
+            work_order_ref=invocation.work_order_ref,
+            profile_ref=invocation.profile_ref,
+            capability=invocation.capability,
+            input_refs=invocation.input_refs,
+            output_refs=invocation.output_refs,
+            started_at=invocation.started_at,
+            completed_at=invocation.completed_at,
+            side_effects=invocation.side_effects,
+            runtime_ref=invocation.runtime_ref,
+            actor_ref=invocation.actor_ref,
+            parent_ref=invocation.parent_ref,
+            environment_hash=invocation.environment_hash,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        result = {f.name: getattr(self, f.name) for f in fields(self)}
+        result["kind"] = self.kind.value
+        for key in ("input_refs", "output_refs", "side_effects"):
+            result[key] = list(result[key])
         return result
 
 
@@ -873,6 +968,7 @@ CONTRACT_TYPES: dict[str, type[Any]] = {
         WorkOrder,
         ResultEnvelope,
         RuntimeProfile,
+        ExecutionInvocation,
         ModelInvocation,
         DomainEvent,
         CapabilityProposal,
@@ -902,6 +998,8 @@ __all__ = [
     "CapabilityProposal",
     "CONTRACT_TYPES",
     "DomainEvent",
+    "ExecutionInvocation",
+    "ExecutionKind",
     "GovernancePolicyVersion",
     "IndependencePredicate",
     "InvocationGranularity",

@@ -1,7 +1,9 @@
 # Dalton 项目进度
 
 更新日期：2026-08-14  
-代码基线：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
+- 已提交运行代码基线：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
+- 已提交进度文档基线：`df66d46`
+- 当前工作树：Connector P0-0 seam 修正与专项验证，尚未部署
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
 反向改写历史结论。这里的“完成”只表示代码、测试和当前部署已经验收，不表示已达到多租户或
@@ -17,6 +19,20 @@ Evidence、Claim、Thesis。
 当前下一阶段是 **Connector Fabric Shadow**。万华的 10 个工作日/20 个显式人工标签门槛只限制
 Agenda 从 1 家扩到 3 家，不阻塞通用 connector、research coordinator、verifier、Model IR 和
 sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单独验收。
+
+### Connector P0-0 当前进度（未部署）
+
+- `ExecutionInvocation` 通用超类型、Model 1:1 subtype link 和新调用原子双写已实现；
+- ArtifactVersion v0.2 改用 `producer_execution_ref`，跨 v0.1/v0.2 版本索引和 dashboard projection
+  已接通；
+- Scheduler 已支持 `retry_at/not_before`，新 attempt event 使用 `wire_version=0.2` 声明 hash epoch；
+- 203 项 Python 测试通过，含回填冲突回滚、跨代 artifact 分叉、投影和 Retry-After 幂等专项测试；
+- 生产 Core/Scheduler SQLite 的临时副本已完成 startup backfill 演练：2 条 ModelInvocation 全部建立
+  execution link，72 条 v0.1 artifact 全部进入跨代索引，两个副本 integrity 均为 `ok`；
+- connector authority DDL 仍是草案，尚未接入 `ConnectorStore`，不能报 P0-1 完成。
+
+此前 Connector 报告把未实际发生的 Fable 5 复核写成事实。报告已更正；随后完成的真实独立审阅结论
+是“有条件 Go”。
 
 ## 蓝图阶段
 
@@ -89,6 +105,8 @@ Postgres/Temporal 规模化门槛和迁移。
 - native event inbox，以及 expiry、catalyst、falsifier、source failure 触发；Agenda portfolio pools 和
   跨公司容量校准未完成；
 - planner DAG、stop/checkpoint/resume、production worker manager；
+- typed ContextPack、per-attempt RunState/Checkpoint、Ledger 的结构化 ClaimIndex，以及 authority DB
+  之外的滚动 OpsTelemetry；session transcript 和 compaction summary 不作为研究 memory；
 - operational verifier、revise/replanning/reflection 和 seeded-error 校准；
 - first-class falsifier/catalyst/driver/model/valuation authority、Model IR、Tier 1/2/3 evaluator 和
   Excel exporter；
@@ -112,8 +130,9 @@ Postgres/Temporal 规模化门槛和迁移。
 已知限制：Mac mini 本机的 Tailscale CLI 与 daemon 版本不一致，本机验收使用显式地址映射完成；
 尚未从第二台 tailnet 设备实测私有控制页。
 
-当前验证基线：Python 195/195，OpenClaw broker 15/15，Python 3.11/3.13 wheel build 与 GitHub CI
-通过；Core、Scheduler、Model Router SQLite integrity 均为 `ok`。
+已部署验证基线：Python 195/195，OpenClaw broker 15/15，Python 3.11/3.13 wheel build 与 GitHub CI
+通过；Core、Scheduler、Model Router SQLite integrity 均为 `ok`。当前工作树的专项测试、构建和 CI
+状态在提交前另行更新，不能与 live 基线混写。
 
 ## Connector Fabric Shadow
 
@@ -206,6 +225,8 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 ### P0：Connector Protocol 与计量边界
 
+0. P0-0：补齐 seam 敌对测试、在生产数据库副本演练 startup backfill、修正独立复核出处、修复
+   Artifact v0.2 投影，并给 Scheduler attempt event 声明 wire/hash epoch；
 1. 冻结 `ExecutionInvocation` 超类型、Model/Connector 子类型与 ArtifactVersion v0.2 ADR；采用新增表、
    回填 link 和新写入原子双写，不重写历史 model/artifact hash；
 2. 冻结 ConnectorCallSpec、ConnectorProfileVersion、connector RPC、SourceEnvelope、usage、physical
@@ -305,4 +326,5 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Core 规格：`SPEC.md`
 - Agenda Shadow：`docs/reports/phase-1-agenda-shadow-implementation-2026-08-14.md`
 - Agenda 运营与反馈：`docs/reports/phase-1-agenda-control-2026-08-14.md`
-- Connector Fabric 与 Fable 5 复核：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
+- Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
+- Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`

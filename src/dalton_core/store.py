@@ -21,6 +21,8 @@ from .contracts import (
     EvidenceRelation,
     EvidenceRelationType,
     EvidenceVersion,
+    ExecutionInvocation,
+    ExecutionKind,
     GovernancePolicyVersion,
     ModelInvocation,
     ThesisVersion,
@@ -122,6 +124,7 @@ class DaltonStore:
         self.connection.execute("PRAGMA busy_timeout = 5000")
         self.connection.create_function("dalton_authorized", 0, lambda: int(self._authorized))
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._backfill_model_execution_links()
         self._ensure_default_policy()
 
     @property
@@ -173,6 +176,108 @@ class DaltonStore:
     def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         return dict(row) if row is not None else None
 
+    def _ensure_execution_invocation(
+        self, cur: sqlite3.Cursor, execution: ExecutionInvocation | Mapping[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            validated = (
+                execution
+                if isinstance(execution, ExecutionInvocation)
+                else ExecutionInvocation.from_dict(execution)
+            )
+        except Exception as exc:
+            raise ValidationError(str(exc)) from exc
+        wire = validated.to_dict()
+        digest = content_hash(wire)
+        row = cur.execute(
+            "SELECT execution_json,content_hash,kind FROM execution_invocations WHERE execution_id=?",
+            (validated.id,),
+        ).fetchone()
+        if row is not None:
+            if row["content_hash"] != digest or row["execution_json"] != canonical_json(wire):
+                raise InvocationConflict(
+                    f"execution_id {validated.id!r} already has a different canonical payload"
+                )
+            return {
+                "execution_id": validated.id,
+                "kind": row["kind"],
+                "execution_json": row["execution_json"],
+                "content_hash": row["content_hash"],
+            }
+        cur.execute(
+            "INSERT INTO execution_invocations"
+            "(execution_id,kind,work_order_ref,profile_ref,capability,runtime_ref,actor_ref,"
+            "parent_ref,environment_hash,execution_json,content_hash,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                validated.id,
+                validated.kind.value,
+                validated.work_order_ref,
+                validated.profile_ref,
+                validated.capability,
+                validated.runtime_ref,
+                validated.actor_ref,
+                validated.parent_ref,
+                validated.environment_hash,
+                canonical_json(wire),
+                digest,
+                _now(),
+            ),
+        )
+        return {
+            "execution_id": validated.id,
+            "kind": validated.kind.value,
+            "execution_json": canonical_json(wire),
+            "content_hash": digest,
+        }
+
+    def _ensure_model_execution_link(
+        self, cur: sqlite3.Cursor, invocation: ModelInvocation
+    ) -> dict[str, Any]:
+        execution = ExecutionInvocation.from_model(invocation)
+        execution_row = self._ensure_execution_invocation(cur, execution)
+        link_wire = {
+            "execution_ref": execution.id,
+            "model_invocation_ref": invocation.id,
+        }
+        link_hash = content_hash(link_wire)
+        row = cur.execute(
+            "SELECT * FROM execution_invocation_model_links WHERE execution_ref=?",
+            (execution.id,),
+        ).fetchone()
+        if row is not None:
+            if row["model_invocation_ref"] != invocation.id or row["content_hash"] != link_hash:
+                raise InvocationConflict("execution/model subtype link conflicts with immutable data")
+            return execution_row
+        cur.execute(
+            "INSERT INTO execution_invocation_model_links"
+            "(execution_ref,model_invocation_ref,content_hash,created_at) VALUES(?,?,?,?)",
+            (execution.id, invocation.id, link_hash, _now()),
+        )
+        return execution_row
+
+    @staticmethod
+    def _model_invocation_from_saved(value: str | Mapping[str, Any]) -> ModelInvocation:
+        raw = json.loads(value) if isinstance(value, str) else dict(value)
+        raw.pop("invocation_id", None)
+        return ModelInvocation.from_dict(raw)
+
+    def _backfill_model_execution_links(self) -> None:
+        rows = self.connection.execute(
+            "SELECT invocation_json FROM model_invocations "
+            "WHERE invocation_id NOT IN (SELECT model_invocation_ref FROM execution_invocation_model_links) "
+            "ORDER BY invocation_id"
+        ).fetchall()
+        if not rows:
+            return
+        with self._transaction() as cur:
+            for row in rows:
+                try:
+                    invocation = self._model_invocation_from_saved(row["invocation_json"])
+                except Exception as exc:
+                    raise ValidationError("legacy model invocation cannot be backfilled") from exc
+                self._ensure_model_execution_link(cur, invocation)
+
     def _ensure_invocation(self, cur: sqlite3.Cursor, invocation: Any, *, required_id: str | None = None) -> dict[str, Any]:
         data = _mapping(invocation)
         if dataclasses.is_dataclass(invocation) and hasattr(invocation, "to_dict"):
@@ -188,6 +293,7 @@ class DaltonStore:
         row = cur.execute("SELECT * FROM model_invocations WHERE invocation_id=?", (invocation_id,)).fetchone()
         if row:
             saved = json.loads(row["invocation_json"])
+            self._ensure_model_execution_link(cur, self._model_invocation_from_saved(saved))
             # A repeated reference with no metadata is a read-only reference.
             # Once a payload is supplied, normalize aliases and compare the
             # complete canonical payload; an id can never identify two facts.
@@ -228,6 +334,7 @@ class DaltonStore:
             raise ValidationError(str(exc)) from exc
         data = validated.to_dict()
         data["invocation_id"] = validated.id
+        self._ensure_execution_invocation(cur, ExecutionInvocation.from_model(validated))
         created = _now()
         family = data.get("model_family")
         profile = data.get("profile_ref")
@@ -244,6 +351,7 @@ class DaltonStore:
             "INSERT INTO model_invocations(invocation_id,profile_ref,provider,model,capability,runtime_ref,actor_ref,environment_hash,granularity,work_order_ref,model_family,invocation_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (invocation_id, profile, provider, model, capability, runtime_ref, actor_ref, environment_hash, granularity, work_order_ref, family, canonical_json(data), created),
         )
+        self._ensure_model_execution_link(cur, validated)
         return {
             "invocation_id": invocation_id,
             "model_family": family,

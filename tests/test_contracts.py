@@ -13,6 +13,8 @@ from dalton_core.contracts import (
     EvidenceRelation,
     EvidenceRelationType,
     EvidenceVersion,
+    ExecutionInvocation,
+    ExecutionKind,
     GovernancePolicyVersion,
     IndependencePredicate,
     InvocationGranularity,
@@ -55,7 +57,8 @@ class ContractTests(unittest.TestCase):
         by_title = {
             cls.__name__: cls
             for cls in (
-                WorkOrder, ResultEnvelope, RuntimeProfile, ModelInvocation, DomainEvent,
+                WorkOrder, ResultEnvelope, RuntimeProfile, ExecutionInvocation,
+                ModelInvocation, DomainEvent,
                 CapabilityProposal, ThesisVersion, VerificationRecord,
                 GovernancePolicyVersion, EvidenceVersion, ClaimVersion,
                 EvidenceRelation, AdjudicationVersion,
@@ -111,6 +114,13 @@ class ContractTests(unittest.TestCase):
             "family-x", ("input-1",), ("output-1",), "2026-08-13T00:00:00Z",
             "2026-08-13T00:00:01Z", {"input_tokens": 1}, (), "runtime-1", "actor-1",
         )
+        execution = ExecutionInvocation.from_model(invocation)
+        self.assertEqual(execution.kind, ExecutionKind.MODEL)
+        self.assertEqual(execution.id, invocation.id)
+        with self.assertRaises(ValidationError):
+            ExecutionInvocation.from_dict({**execution.to_dict(), "unexpected": True})
+        with self.assertRaises(ValidationError):
+            ExecutionInvocation.from_dict({**execution.to_dict(), "kind": "unknown"})
         event = DomainEvent(
             "0.1", "event-1", "2026-08-13T00:00:00Z", "staged", "work_order", "wo-1", 1,
             "wo-1:v1", "sha256:wo", "2026-08-13T00:00:00Z", "actor-1", {"status": "ready"},
@@ -154,7 +164,7 @@ class ContractTests(unittest.TestCase):
             "0.1", "adj-1", "2026-08-13T00:00:00Z", "cl-1", "cl-v1", 1, AdjudicatedStatus.CORROBORATED,
             "independent review", ({"finding": "ok"},), "inv-adj", ("inv-subject",), "policy-1", None, "sha256:adj",
         )
-        for item in (profile, invocation, event, proposal, thesis, verification, policy, evidence, claim, relation, adjudication):
+        for item in (profile, execution, invocation, event, proposal, thesis, verification, policy, evidence, claim, relation, adjudication):
             with self.subTest(type=type(item).__name__):
                 self.assertEqual(type(item).from_dict(item.to_dict()), item)
 

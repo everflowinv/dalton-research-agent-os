@@ -356,6 +356,36 @@ class DashboardProjectorTests(unittest.TestCase):
         self.assertEqual(artifacts[0]["title"], "研究报告终稿")
         self.assertEqual(artifacts[0]["content_hash"], "b" * 64)
 
+    def test_latest_artifact_projection_reads_v2_generation(self) -> None:
+        store = DaltonStore(self.core_path)
+        obs = ObservabilityStore(store)
+        try:
+            envelope_hash = content_hash(result_envelope())
+            obs.register_artifact_version_v2(
+                "artifact:report",
+                version_id="artifact:report:v3",
+                title="研究报告 v0.2",
+                kind="deliverable",
+                media_type="application/pdf",
+                artifact_content_hash="c" * 64,
+                size_bytes=130,
+                storage_locator=f"artifact-store:{SECRET_LOCATOR}:v3",
+                producer_execution_ref="inv-1",
+                result_envelope_ref="result-1",
+                result_envelope_hash=envelope_hash,
+                access_class="restricted",
+                preview_status="redacted",
+                actor_ref="system:artifact",
+                prior_version_ref="artifact:report:v2",
+            )
+        finally:
+            store.close()
+
+        snapshot = self.projector().build_snapshot()
+        self.assertEqual(len(snapshot["artifact_index"]), 1)
+        self.assertEqual(snapshot["artifact_index"][0]["title"], "研究报告 v0.2")
+        self.assertEqual(snapshot["artifact_index"][0]["content_hash"], "c" * 64)
+
     def test_currency_unpriced_and_sensitive_fields_do_not_leak(self) -> None:
         snapshot = self.projector().project(self.projection_path)
         costs = {row["cost_entry_ref"]: row for row in snapshot["cost_slices"]}

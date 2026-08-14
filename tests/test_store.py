@@ -5,6 +5,7 @@ import sys
 import json
 import tempfile
 import unittest
+from pathlib import Path
 
 from dalton_core.errors import BadVerdict, GateRejected, IndependenceViolation, InvocationConflict, ValidationError, VerificationRequired
 from dalton_core.store import DaltonStore, canonical_json, content_hash
@@ -213,6 +214,121 @@ class StoreTests(unittest.TestCase):
 
         with self.assertRaises(ValidationError):
             self.s.register_invocation({"invocation_id": "new-only-id"})
+
+    def test_model_invocation_atomically_registers_generic_execution(self):
+        saved = self.s.conn.execute(
+            "SELECT execution_json,content_hash,kind FROM execution_invocations "
+            "WHERE execution_id='p'"
+        ).fetchone()
+        self.assertIsNotNone(saved)
+        wire = json.loads(saved["execution_json"])
+        self.assertEqual(wire["kind"], "model")
+        self.assertEqual(wire["work_order_ref"], "wo")
+        self.assertEqual(saved["content_hash"], content_hash(wire))
+        link = self.s.conn.execute(
+            "SELECT execution_ref,model_invocation_ref FROM execution_invocation_model_links "
+            "WHERE execution_ref='p'"
+        ).fetchone()
+        self.assertEqual(dict(link), {"execution_ref": "p", "model_invocation_ref": "p"})
+        for table in ("execution_invocations", "execution_invocation_model_links"):
+            with self.subTest(table=table), self.assertRaises(sqlite3.DatabaseError):
+                self.s.conn.execute(f"DELETE FROM {table}")
+
+    def test_legacy_model_invocation_is_backfilled_additively(self):
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        self.addCleanup(lambda: os.unlink(path) if os.path.exists(path) else None)
+        old = sqlite3.connect(path)
+        old.execute(
+            "CREATE TABLE model_invocations ("
+            "invocation_id TEXT PRIMARY KEY, profile_ref TEXT, provider TEXT, model TEXT, "
+            "capability TEXT, runtime_ref TEXT, actor_ref TEXT, environment_hash TEXT, "
+            "granularity TEXT, work_order_ref TEXT, model_family TEXT, invocation_json TEXT, "
+            "created_at TEXT)"
+        )
+        wire = invocation("legacy")
+        old.execute(
+            "INSERT INTO model_invocations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "legacy", wire["profile_ref"], wire["provider"], wire["model"],
+                wire["capability"], wire["runtime_ref"], wire["actor_ref"],
+                wire.get("environment_hash"), wire["granularity"], wire["work_order_ref"],
+                wire["model_family"], canonical_json(wire), wire["created_at"],
+            ),
+        )
+        old.commit()
+        old.close()
+        migrated = DaltonStore(path)
+        self.addCleanup(migrated.close)
+        execution = migrated.conn.execute(
+            "SELECT kind,execution_json FROM execution_invocations WHERE execution_id='legacy'"
+        ).fetchone()
+        self.assertEqual(execution["kind"], "model")
+        self.assertEqual(json.loads(execution["execution_json"])["id"], "legacy")
+        self.assertEqual(
+            migrated.conn.execute(
+                "SELECT model_invocation_ref FROM execution_invocation_model_links "
+                "WHERE execution_ref='legacy'"
+            ).fetchone()[0],
+            "legacy",
+        )
+
+    def test_conflicting_legacy_execution_backfill_fails_atomically(self):
+        fd, path = tempfile.mkstemp()
+        os.close(fd)
+        self.addCleanup(lambda: os.unlink(path) if os.path.exists(path) else None)
+        legacy = sqlite3.connect(path)
+        legacy.row_factory = sqlite3.Row
+        legacy.create_function("dalton_authorized", 0, lambda: 1)
+        schema = (Path(__file__).resolve().parents[1] / "src/dalton_core/schema.sql").read_text(
+            encoding="utf-8"
+        )
+        legacy.executescript(schema)
+        model_wire = invocation("legacy-conflict")
+        legacy.execute(
+            "INSERT INTO model_invocations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "legacy-conflict", model_wire["profile_ref"], model_wire["provider"],
+                model_wire["model"], model_wire["capability"], model_wire["runtime_ref"],
+                model_wire["actor_ref"], model_wire.get("environment_hash"),
+                model_wire["granularity"], model_wire["work_order_ref"],
+                model_wire["model_family"], canonical_json(model_wire), model_wire["created_at"],
+            ),
+        )
+        conflicting = {
+            "schema_version": "0.1", "id": "legacy-conflict",
+            "created_at": model_wire["created_at"], "kind": "connector",
+            "work_order_ref": model_wire["work_order_ref"], "profile_ref": "connector:p",
+            "capability": "connector", "input_refs": [], "output_refs": [],
+            "started_at": model_wire["started_at"], "completed_at": None,
+            "side_effects": [], "runtime_ref": "runtime:connector",
+            "actor_ref": "agent:connector", "parent_ref": None,
+            "environment_hash": None,
+        }
+        legacy.execute(
+            "INSERT INTO execution_invocations VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                conflicting["id"], conflicting["kind"], conflicting["work_order_ref"],
+                conflicting["profile_ref"], conflicting["capability"],
+                conflicting["runtime_ref"], conflicting["actor_ref"], None, None,
+                canonical_json(conflicting), content_hash(conflicting), model_wire["created_at"],
+            ),
+        )
+        legacy.commit()
+        legacy.close()
+
+        with self.assertRaises(InvocationConflict):
+            DaltonStore(path)
+        check = sqlite3.connect(path)
+        try:
+            self.assertEqual(
+                check.execute(
+                    "SELECT COUNT(*) FROM execution_invocation_model_links"
+                ).fetchone()[0],
+                0,
+            )
+        finally:
+            check.close()
 
     def test_policy_verdict_interval_and_strict_invocation(self):
         with self.assertRaises(ValidationError):

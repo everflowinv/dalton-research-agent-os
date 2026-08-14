@@ -163,6 +163,7 @@ class Scheduler:
             "dalton_scheduler_authorized", 0, lambda: int(self._authorized)
         )
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._ensure_schema_migrations()
         self._ensure_policy()
 
     @property
@@ -184,6 +185,22 @@ class Scheduler:
         # cannot smuggle naive local time into authority rows.
         _timestamp(value)
         return value.astimezone(timezone.utc)
+
+    def _ensure_schema_migrations(self) -> None:
+        columns = {
+            row["name"]
+            for row in self.connection.execute(
+                "PRAGMA table_info(scheduler_attempt_events)"
+            ).fetchall()
+        }
+        if "not_before" not in columns:
+            self.connection.execute(
+                "ALTER TABLE scheduler_attempt_events ADD COLUMN not_before TEXT"
+            )
+        if "wire_version" not in columns:
+            self.connection.execute(
+                "ALTER TABLE scheduler_attempt_events ADD COLUMN wire_version TEXT"
+            )
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
@@ -346,6 +363,7 @@ class Scheduler:
         result_envelope_id: str | None = None,
         result_envelope_hash: str | None = None,
         reason: str | None = None,
+        not_before: str | None = None,
     ) -> dict[str, Any]:
         if state not in _ATTEMPT_STATES:
             raise SchedulerValidationError(f"invalid attempt state: {state!r}")
@@ -353,6 +371,11 @@ class Scheduler:
         event_id = _id("attempt-event")
         wire = {
             "schema_version": SCHEMA_VERSION,
+            # Historical rows have NULL in the SQL wire_version column and
+            # were hashed without not_before.  New rows explicitly declare
+            # this epoch so an integrity audit never has to guess which
+            # canonical shape produced content_hash.
+            "wire_version": "0.2",
             "id": event_id,
             "created_at": now,
             "work_order_ref": work_order_id,
@@ -362,14 +385,16 @@ class Scheduler:
             "result_envelope_ref": result_envelope_id,
             "result_envelope_hash": result_envelope_hash,
             "reason": reason,
+            "not_before": not_before,
             "prior_event_ref": prior["event_id"] if prior else None,
         }
         wire["content_hash"] = content_hash(wire)
         cur.execute(
             "INSERT INTO scheduler_attempt_events "
             "(event_id, work_order_id, attempt_number, state, lease_revision_id, "
-            "result_envelope_id, result_envelope_hash, reason, prior_event_id, content_hash, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "result_envelope_id, result_envelope_hash, reason, not_before, wire_version, "
+            "prior_event_id, content_hash, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event_id,
                 work_order_id,
@@ -379,6 +404,8 @@ class Scheduler:
                 result_envelope_id,
                 result_envelope_hash,
                 reason,
+                not_before,
+                wire["wire_version"],
                 wire["prior_event_ref"],
                 wire["content_hash"],
                 now,
@@ -394,6 +421,7 @@ class Scheduler:
         completed_attempt: int,
         now: str,
         exhaustion_reason: str,
+        retry_at: str | None = None,
     ) -> dict[str, Any]:
         work = cur.execute(
             "SELECT max_attempts FROM scheduler_work_orders WHERE work_order_id=?",
@@ -417,6 +445,7 @@ class Scheduler:
             state="ready",
             now=now,
             reason=f"retry_after_attempt_{completed_attempt}",
+            not_before=retry_at,
         )
 
     def _latest_lease_for_event(
@@ -503,13 +532,14 @@ class Scheduler:
                 "      FROM scheduler_attempt_events GROUP BY work_order_id) current "
                 "ON current.max_seq=e.event_seq "
                 "WHERE e.state='ready' "
+                "AND (e.not_before IS NULL OR e.not_before<=?) "
                 "AND NOT EXISTS (SELECT 1 FROM scheduler_formal_results r "
                 "                WHERE r.work_order_id=e.work_order_id) "
             )
-            params: tuple[Any, ...] = ()
+            params: tuple[Any, ...] = (now,)
             if work_order_id is not None:
                 query += "AND e.work_order_id=? "
-                params = (work_order_id,)
+                params = (now, work_order_id)
             query += "ORDER BY e.event_seq LIMIT 1"
             event = cur.execute(query, params).fetchone()
             if event is None:
@@ -739,6 +769,7 @@ class Scheduler:
         *,
         idempotency_key: str,
         result_envelope_hash: str | None = None,
+        retry_at: str | datetime | None = None,
     ) -> dict[str, Any]:
         """Commit one attempt outcome with fresh/duplicate/conflict semantics.
 
@@ -758,6 +789,12 @@ class Scheduler:
             raise SchedulerValidationError(
                 "ResultEnvelope.status must be succeeded, retryable, or failed"
             )
+        retry_at_wire: str | None = None
+        if retry_at is not None:
+            if outcome != "retryable":
+                raise SchedulerValidationError("retry_at is only valid for retryable results")
+            retry_dt = _parse_time(retry_at) if isinstance(retry_at, str) else retry_at
+            retry_at_wire = _timestamp(retry_dt)
         calculated_hash = content_hash(wire)
         if result_envelope_hash is not None and result_envelope_hash != calculated_hash:
             raise SchedulerValidationError("ResultEnvelope hash does not match canonical payload")
@@ -769,6 +806,7 @@ class Scheduler:
             "result_envelope_id": wire["id"],
             "result_envelope_hash": calculated_hash,
             "outcome": outcome,
+            "retry_at": retry_at_wire,
         }
         request_hash = content_hash(request)
         now_dt = self._now()
@@ -855,6 +893,7 @@ class Scheduler:
                         completed_attempt=attempt_number,
                         now=now,
                         exhaustion_reason="retry_exhausted_after_retryable_result",
+                        retry_at=retry_at_wire,
                     )
                     final_state = next_event["state"]
                 if outcome in {"succeeded", "failed"}:
@@ -938,6 +977,7 @@ class Scheduler:
             "policy_version_id": work["policy_version_id"],
             "max_attempts": work["max_attempts"],
             "attempt_number": event["attempt_number"],
+            "not_before": event["not_before"],
             "state": state,
             "latest_event_id": event["event_id"],
             "formal_result_id": formal["result_record_id"] if formal else None,

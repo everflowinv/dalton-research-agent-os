@@ -282,12 +282,7 @@ class DashboardProjector:
                 )
                 if wire["usage_entry_ref"] in latest_usage_ids
             ]
-            artifact_wires = self._latest_records(
-                core,
-                "observability_artifact_versions",
-                "artifact_ref",
-                "version_number",
-            )
+            artifact_wires = self._latest_artifact_records(core)
             invocation_wires = [
                 _json(row["invocation_json"], "model invocation")
                 for row in core.execute(
@@ -379,6 +374,46 @@ class DashboardProjector:
             "agenda_cycle_summaries": agenda_cycles,
             "agenda_questions": agenda_questions,
         }
+
+    @staticmethod
+    def _latest_artifact_records(core: sqlite3.Connection) -> list[dict[str, Any]]:
+        """Read the newest immutable artifact across both schema generations."""
+
+        tables = _tables(core)
+        if not {
+            "observability_artifact_version_index",
+            "observability_artifact_versions_v2",
+        }.issubset(tables):
+            return DashboardProjector._latest_records(
+                core,
+                "observability_artifact_versions",
+                "artifact_ref",
+                "version_number",
+            )
+        rows = core.execute(
+            "SELECT i.version_id,i.schema_version FROM observability_artifact_version_index i "
+            "JOIN (SELECT artifact_ref,MAX(version_number) AS version_number "
+            "      FROM observability_artifact_version_index GROUP BY artifact_ref) latest "
+            "ON latest.artifact_ref=i.artifact_ref AND latest.version_number=i.version_number "
+            "ORDER BY i.artifact_ref"
+        ).fetchall()
+        records: list[dict[str, Any]] = []
+        for row in rows:
+            table = (
+                "observability_artifact_versions"
+                if row["schema_version"] == "0.1"
+                else "observability_artifact_versions_v2"
+            )
+            record = core.execute(
+                f"SELECT record_json FROM {table} WHERE version_id=?",
+                (row["version_id"],),
+            ).fetchone()
+            if record is None:
+                raise ProjectionSourceError(
+                    "artifact generation index points to a missing authority row"
+                )
+            records.append(_json(record["record_json"], "artifact version"))
+        return records
 
     @staticmethod
     def _agenda(
@@ -1008,7 +1043,9 @@ class DashboardProjector:
                 "content_hash": wire["artifact_content_hash"],
                 "access_class": wire["access_class"],
                 "preview_status": wire["preview_status"],
-                "producer_invocation_ref": wire["producer_invocation_ref"],
+                "producer_execution_ref": wire.get(
+                    "producer_execution_ref", wire.get("producer_invocation_ref")
+                ),
                 "created_at": wire["created_at"],
             }
             for wire in artifacts
