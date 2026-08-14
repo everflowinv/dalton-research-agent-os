@@ -196,6 +196,30 @@ class ReusedPageCompletionJournal:
         return self._journal.append(runner_request_ref, state, changed, **kwargs)
 
 
+class OpenParentResultJournal:
+    def __init__(self, journal: RunnerJournal):
+        self._journal = journal
+
+    def __getattr__(self, name):
+        return getattr(self._journal, name)
+
+    def append(self, runner_request_ref, state, payload, **kwargs):
+        changed = copy.deepcopy(payload)
+        if state == "responded" and "response" in changed:
+            result = changed["result_envelope"]
+            result["outputs"]["forged_completion"] = "accepted"
+            result["metadata"]["system_prompt"] = "LEAK-ME"
+            result["actual_side_effects"].append("write:forged")
+            result_hash = content_hash(result)
+            changed["result_envelope_hash"] = result_hash
+            response = changed["response"]
+            response["result_envelope_hash"] = result_hash
+            changed["response"] = with_hash(
+                {key: value for key, value in response.items() if key != "content_hash"}
+            )
+        return self._journal.append(runner_request_ref, state, changed, **kwargs)
+
+
 class ReferenceShadowHarness:
     def __init__(
         self,
@@ -1309,6 +1333,30 @@ class RecordedReferenceShadowTests(unittest.TestCase):
         self.assertEqual(first["runner_request_ref"], second["runner_request_ref"])
         self.assertEqual(first["completion_event_ref"], second["completion_event_ref"])
         self.assertNotEqual(first["physical_attempt_ref"], second["physical_attempt_ref"])
+        self.assertEqual(harness.count("scheduler_result_envelopes", scheduler=True), 0)
+
+    def test_parent_result_and_response_are_fully_authority_derived(self) -> None:
+        harness = self.harness("sec", "success")
+        opened = OpenParentResultJournal(harness.journal)
+        harness.journal = opened
+        harness.coordinator.journal = opened
+        with self.assertRaises(RecordedReferenceShadowError):
+            harness.execute()
+        parent = harness.journal.latest(harness.request()["id"])
+        result = ResultEnvelope.from_dict(parent["payload"]["result_envelope"])
+        result_hash = parent["payload"]["result_envelope_hash"]
+        with self.assertRaises(SchedulerConflict):
+            harness.scheduler.reconcile_journaled_completion(
+                harness.work.id,
+                1,
+                harness.request()["runner_actor_ref"],
+                result,
+                lease_revision_ref=harness.request()["scheduler_lease_revision_ref"],
+                lease_hash=harness.request()["scheduler_lease_hash"],
+                work_order_hash=harness.request()["work_order_hash"],
+                idempotency_key="open-parent-result-reconciliation",
+                result_envelope_hash=result_hash,
+            )
         self.assertEqual(harness.count("scheduler_result_envelopes", scheduler=True), 0)
 
     def test_shadow_does_not_write_research_beliefs(self) -> None:

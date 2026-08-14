@@ -21,6 +21,10 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .contracts import ResultEnvelope, WorkOrder
+from .recorded_completion import (
+    build_recorded_parent_response,
+    build_recorded_parent_result,
+)
 from .store import canonical_json, content_hash
 
 
@@ -1490,9 +1494,21 @@ class Scheduler:
                 "parent Result/response does not bind the page authority chain"
             )
         if result_wire["status"] == "succeeded":
+            expected_source_id = (
+                "source-envelope:"
+                + content_hash(
+                    {
+                        "kind": "source-envelope",
+                        "idempotency_key": (
+                            f"runner-shadow:{invocation['id']}:aggregate:source"
+                        ),
+                    }
+                )
+            )
             if (
                 any(item["attempt_outcome"] != "succeeded" for item in validated_receipts)
                 or not isinstance(source, Mapping)
+                or source.get("id") != expected_source_id
                 or source.get("content_hash") != response.get("source_envelope_hash")
                 or source.get("physical_attempt_refs") != attempt_refs
                 or source.get("result_physical_attempt_ref")
@@ -1517,6 +1533,34 @@ class Scheduler:
         ):
             raise SchedulerConflict(
                 "non-success parent completion fabricated success authority"
+            )
+        expected_result = build_recorded_parent_result(
+            request_ref=runner_request_ref,
+            work_order_ref=work_order_id,
+            execution_ref=execution["id"],
+            execution_output_refs=execution.get("output_refs", []),
+            invocation_ref=invocation["id"],
+            receipts=validated_receipts,
+            completion_recorded_at=completion_event["recorded_at"],
+            source=source,
+        )
+        expected_result_hash = content_hash(expected_result)
+        expected_response = build_recorded_parent_response(
+            request=request,
+            invocation=invocation,
+            receipts=validated_receipts,
+            result=expected_result,
+            result_hash=expected_result_hash,
+            source=source,
+            retry_at=expected_retry_at,
+        )
+        if (
+            result_wire != expected_result
+            or result_hash != expected_result_hash
+            or response != expected_response
+        ):
+            raise SchedulerConflict(
+                "parent ResultEnvelope/RunnerResponse is not authority-derived"
             )
         completion_ref = _nonempty(
             last_receipt.get("completion_event_ref"), "completion_event_ref"

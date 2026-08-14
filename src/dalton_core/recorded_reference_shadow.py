@@ -26,6 +26,10 @@ from .connector_transport_executor import (
 )
 from .contracts import ExecutionInvocation, ResultEnvelope, WorkOrder
 from .raw_spool import RawObject, RawSpool, RawSpoolCapacityError, RawSpoolLimitExceeded
+from .recorded_completion import (
+    build_recorded_parent_response,
+    build_recorded_parent_result,
+)
 from .runner_journal import RunnerJournal, RunnerJournalNotFound
 from .scheduler import LeaseExpired
 from .recorded_source_adapter import (
@@ -607,6 +611,8 @@ class RecordedReferenceShadowCoordinator:
         if result.status == "succeeded":
             if (
                 source is None
+                or source["id"]
+                != _derived_id("source-envelope", f"{expected_key}:source")
                 or source["content_hash"] != response["source_envelope_hash"]
                 or source["physical_attempt_refs"]
                 != [item["physical_attempt_ref"] for item in receipts]
@@ -628,6 +634,37 @@ class RecordedReferenceShadowCoordinator:
         ):
             raise RecordedReferenceShadowError(
                 "non-success parent completion fabricated source authority"
+            )
+        completion_event = self.journal.event(last["completion_event_ref"])
+        expected_result = build_recorded_parent_result(
+            request_ref=parent_request["id"],
+            work_order_ref=context.work_order.id,
+            execution_ref=context.execution.id,
+            execution_output_refs=context.execution.output_refs,
+            invocation_ref=context.invocation["id"],
+            receipts=receipts,
+            completion_recorded_at=completion_event["recorded_at"],
+            source=source,
+        )
+        expected_result_hash = content_hash(expected_result)
+        expected_response = validate_connector_runner_response(
+            build_recorded_parent_response(
+                request=parent_request,
+                invocation=context.invocation,
+                receipts=receipts,
+                result=expected_result,
+                result_hash=expected_result_hash,
+                source=source,
+                retry_at=journaled["retry_at"],
+            )
+        )
+        if (
+            result.to_dict() != expected_result
+            or result_hash != expected_result_hash
+            or response != expected_response
+        ):
+            raise RecordedReferenceShadowError(
+                "parent ResultEnvelope/RunnerResponse is not authority-derived"
             )
         return context, result, response, receipts, journaled["retry_at"]
 
@@ -695,7 +732,6 @@ class RecordedReferenceShadowCoordinator:
         receipts: list[dict[str, Any]] = []
         prior_cursor: str | None = None
         terminal = False
-        all_fresh = True
         for ordinal in range(1, int(self.plan["max_pages"]) + 1):
             page_request = self._page_request(parent_request, ordinal)
             receipt = self._execute_page(
@@ -707,15 +743,10 @@ class RecordedReferenceShadowCoordinator:
                 scheduler_lease_token=scheduler_lease_token,
                 is_parent=ordinal == 1,
             )
-            page_write_status = receipt.pop("page_write_status")
-            all_fresh = all_fresh and page_write_status == "fresh"
+            receipt.pop("page_write_status")
             receipts.append(receipt)
             if receipt["attempt_outcome"] != "succeeded":
-                return self._finish_failure(
-                    parent_admission,
-                    receipts,
-                    idempotency_status="fresh" if all_fresh else "duplicate",
-                )
+                return self._finish_failure(parent_admission, receipts)
             observation = receipt["observation"]
             assert observation is not None
             prior_cursor = observation["cursor"]
@@ -727,7 +758,6 @@ class RecordedReferenceShadowCoordinator:
             parent_admission,
             receipts,
             terminal=terminal,
-            idempotency_status="fresh" if all_fresh else "duplicate",
         )
 
     def _validate_plan_binding(self, admission: ValidatedRunnerAdmission) -> None:
@@ -1555,7 +1585,6 @@ class RecordedReferenceShadowCoordinator:
         receipts: list[Mapping[str, Any]],
         *,
         terminal: bool,
-        idempotency_status: str,
     ) -> dict[str, Any]:
         last = receipts[-1]
         all_records = [
@@ -1569,31 +1598,7 @@ class RecordedReferenceShadowCoordinator:
         )
         key = f"runner-shadow:{admission.invocation['id']}:aggregate"
         source_id = _derived_id("source-envelope", f"{key}:source")
-        result_id = _derived_id("result-envelope", f"{key}:result")
         artifact_ref = admission.execution.output_refs[0]
-        result = ResultEnvelope(
-            schema_version="0.1", id=result_id, created_at=last["observation"]["structured_output"].get("retrieved_at", _wire_time(self.clock())),
-            work_order_ref=admission.work_order.id, invocation_ref=admission.execution.id,
-            status="succeeded",
-            outputs={
-                "connector_invocation_ref": admission.invocation["id"],
-                "physical_attempt_refs": [item["physical_attempt_ref"] for item in receipts],
-                "result_physical_attempt_ref": last["physical_attempt_ref"],
-                "quota_settlement_refs": [item["quota_settlement_ref"] for item in receipts],
-                "source_envelope_ref": source_id,
-            },
-            actual_side_effects=("read:recorded-fixture",),
-            usage_refs=tuple(item["usage_entry_ref"] for item in receipts),
-            artifact_refs=(artifact_ref,), error=None,
-            metadata={
-                "runner_request_ref": admission.request["id"],
-                "physical_attempt_count": len(receipts),
-                "terminal_cursor_observed": terminal,
-                "completeness": completeness,
-            },
-        )
-        result_wire = result.to_dict()
-        result_hash = content_hash(result_wire)
         artifacts: list[dict[str, Any]] = []
         for ordinal, receipt in enumerate(receipts, start=1):
             raw = receipt["raw_object"]
@@ -1651,10 +1656,29 @@ class RecordedReferenceShadowCoordinator:
         source = self.authority.record_source_envelope(
             source_spec, idempotency_key=f"{key}:source"
         )
-        response = self._response(
-            admission, last, result, result_hash,
-            artifact=final_artifact, source=source, outcome="succeeded",
-            retry_at=None, idempotency_status=idempotency_status,
+        completion_event = self.journal.event(last["completion_event_ref"])
+        result_wire = build_recorded_parent_result(
+            request_ref=admission.request["id"],
+            work_order_ref=admission.work_order.id,
+            execution_ref=admission.execution.id,
+            execution_output_refs=admission.execution.output_refs,
+            invocation_ref=admission.invocation["id"],
+            receipts=receipts,
+            completion_recorded_at=completion_event["recorded_at"],
+            source=source,
+        )
+        result = ResultEnvelope.from_dict(result_wire)
+        result_hash = content_hash(result_wire)
+        response = validate_connector_runner_response(
+            build_recorded_parent_response(
+                request=admission.request,
+                invocation=admission.invocation,
+                receipts=receipts,
+                result=result_wire,
+                result_hash=result_hash,
+                source=source,
+                retry_at=None,
+            )
         )
         journal_event = self.journal.append(
             admission.request["id"], "responded",
@@ -1682,51 +1706,41 @@ class RecordedReferenceShadowCoordinator:
         self,
         admission: ValidatedRunnerAdmission | _ShadowCommitContext,
         receipts: list[Mapping[str, Any]],
-        *,
-        idempotency_status: str,
     ) -> dict[str, Any]:
         last = receipts[-1]
         key = f"runner-shadow:{admission.invocation['id']}:aggregate"
         retry_at = last["retry_at"] or _wire_time(
             self.clock() + timedelta(seconds=self.retry_backoff_seconds)
         )
-        retained_artifacts = any(
-            item.get("raw_artifact_version_ref") is not None for item in receipts
+        completion_event = self.journal.event(last["completion_event_ref"])
+        result_wire = build_recorded_parent_result(
+            request_ref=admission.request["id"],
+            work_order_ref=admission.work_order.id,
+            execution_ref=admission.execution.id,
+            execution_output_refs=admission.execution.output_refs,
+            invocation_ref=admission.invocation["id"],
+            receipts=receipts,
+            completion_recorded_at=completion_event["recorded_at"],
+            source=None,
         )
-        result = ResultEnvelope(
-            schema_version="0.1", id=_derived_id("result-envelope", f"{key}:result"),
-            created_at=_wire_time(self.clock()), work_order_ref=admission.work_order.id,
-            invocation_ref=admission.execution.id, status="retryable",
-            outputs={
-                "connector_invocation_ref": admission.invocation["id"],
-                "physical_attempt_refs": [item["physical_attempt_ref"] for item in receipts],
-                "result_physical_attempt_ref": last["physical_attempt_ref"],
-                "quota_settlement_refs": [item["quota_settlement_ref"] for item in receipts],
-                "source_envelope_ref": None,
-            },
-            actual_side_effects=("read:recorded-fixture",),
-            usage_refs=tuple(item["usage_entry_ref"] for item in receipts),
-            artifact_refs=(admission.execution.output_refs[0],) if retained_artifacts else (),
-            error=last["error"] or {
-                "code": last["attempt_outcome"], "message": "recorded source page failed",
-                "retryable": True,
-            },
-            metadata={
-                "runner_request_ref": admission.request["id"],
-                "physical_attempt_count": len(receipts), "completeness": "unknown",
-            },
-        )
-        result_hash = content_hash(result.to_dict())
-        response = self._response(
-            admission, last, result, result_hash, artifact=None, source=None,
-            outcome="retryable", retry_at=retry_at,
-            idempotency_status=idempotency_status,
+        result = ResultEnvelope.from_dict(result_wire)
+        result_hash = content_hash(result_wire)
+        response = validate_connector_runner_response(
+            build_recorded_parent_response(
+                request=admission.request,
+                invocation=admission.invocation,
+                receipts=receipts,
+                result=result_wire,
+                result_hash=result_hash,
+                source=None,
+                retry_at=retry_at,
+            )
         )
         journal_event = self.journal.append(
             admission.request["id"], "responded",
             {
                 "reservation_ref": receipts[0]["reservation_ref"],
-                "response": response, "result_envelope": result.to_dict(),
+                "response": response, "result_envelope": result_wire,
                 "result_envelope_hash": result_hash, "retry_at": retry_at,
                 "page_receipts": [dict(item) for item in receipts],
                 "commit_context": self._commit_context_wire(admission),
@@ -1799,49 +1813,6 @@ class RecordedReferenceShadowCoordinator:
     def _fault(self, barrier: str) -> None:
         if self.fault_hook is not None:
             self.fault_hook(barrier)
-
-    @staticmethod
-    def _response(
-        admission: ValidatedRunnerAdmission | _ShadowCommitContext,
-        last: Mapping[str, Any],
-        result: ResultEnvelope,
-        result_hash: str,
-        *,
-        artifact: Mapping[str, Any] | None,
-        source: Mapping[str, Any] | None,
-        outcome: str,
-        retry_at: str | None,
-        idempotency_status: str,
-    ) -> dict[str, Any]:
-        base = {
-            "schema_version": "0.2",
-            "id": _derived_id(
-                "connector-runner-response",
-                f"runner-shadow:{admission.invocation['id']}:response",
-            ),
-            "created_at": result.created_at,
-            "runner_request_ref": admission.request["id"],
-            "runner_request_hash": admission.request["content_hash"],
-            "idempotency_status": idempotency_status,
-            "connector_invocation_ref": admission.invocation["id"],
-            "connector_invocation_hash": admission.invocation["content_hash"],
-            "physical_attempt_ref": last["physical_attempt_ref"],
-            "physical_attempt_hash": last["physical_attempt_hash"],
-            "usage_entry_ref": last["usage_entry_ref"],
-            "usage_entry_hash": last["usage_entry_hash"],
-            "cost_entry_ref": last["cost_entry_ref"],
-            "cost_entry_hash": last["cost_entry_hash"],
-            "quota_settlement_ref": last["quota_settlement_ref"],
-            "quota_settlement_hash": last["quota_settlement_hash"],
-            "raw_artifact_version_ref": None if artifact is None else artifact["id"],
-            "raw_artifact_version_hash": None if artifact is None else artifact["content_hash"],
-            "source_envelope_ref": None if source is None else source["id"],
-            "source_envelope_hash": None if source is None else source["content_hash"],
-            "result_envelope_ref": result.id, "result_envelope_hash": result_hash,
-            "outcome": outcome, "retry_at": retry_at,
-        }
-        base["content_hash"] = content_hash(base)
-        return validate_connector_runner_response(base)
 
     @staticmethod
     def _duplicate_response(response: Mapping[str, Any]) -> dict[str, Any]:
