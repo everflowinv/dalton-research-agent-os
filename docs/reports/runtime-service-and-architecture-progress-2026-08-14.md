@@ -1,6 +1,6 @@
 # Dalton 常驻服务与架构进度审计
 
-> 日期：2026-08-14  
+> 日期：2026-08-14
 > 审计基准：`vision-and-architecture-v0.1.md`、`architecture-debate-and-v0.2-direction.md`、`SPEC.md`、当前源码、当前数据库和本机运行态
 
 ## 判断
