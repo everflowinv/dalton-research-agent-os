@@ -89,6 +89,44 @@ test("UDS accepts one closed JSONL frame and is owner-only", async () => {
   }
 });
 
+test("UDS keeps an authenticated socket open while the model call is in flight", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "dalton-broker-slow-test-"));
+  const slowConfig = {
+    ...config,
+    idleTimeoutMs: 100,
+    profiles: [{ ...config.profiles[0], timeoutMs: 500 }],
+  };
+  const slowRuntime = runtime();
+  slowRuntime.llm.complete = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 175));
+    return {
+      text: "slow but valid",
+      provider: "openai",
+      model: "gpt-5.6",
+      agentId: "dalton-model-broker",
+      usage: { inputTokens: 2, outputTokens: 3 },
+    };
+  };
+  const server = new BrokerServer(new ModelBroker(slowRuntime, slowConfig));
+  try {
+    const socketPath = await server.start(stateDir);
+    const { secret } = await loadOrCreateSecret(stateDir, slowConfig.socketName);
+    const core = { ...request, invocationId: "invocation:slow", timeoutMs: 300 };
+    const signed = signRequest(core, {
+      secret,
+      clientId: slowConfig.clientId,
+      timestampMs: Date.now(),
+      nonce: "b".repeat(32),
+    });
+    const response = await exchange(socketPath, `${JSON.stringify(signed)}\n`);
+    assert.equal(response.ok, true);
+    assert.equal(response.text, "slow but valid");
+  } finally {
+    await server.stop();
+    await rm(stateDir, { recursive: true, force: true });
+  }
+});
+
 test("UDS rejects missing, wrong, replayed, expired, and duplicate-key authentication", async () => {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "dalton-auth-test-"));
   const server = new BrokerServer(new ModelBroker(runtime(), config));

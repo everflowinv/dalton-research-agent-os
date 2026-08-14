@@ -16,12 +16,15 @@ import stat
 import tempfile
 import threading
 import time
+import concurrent.futures
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 from .dashboard_projector import project_dashboard
+from .agenda_coordinator import AgendaCoordinator, AgendaCoordinatorConfig
+from .backup import DatabaseBackupManager
 from .plugins.static_dashboard import StaticDashboardPlugin
 from .scheduler import Scheduler
 
@@ -64,16 +67,21 @@ class ServiceConfig:
     projection_min_interval_seconds: float
     plugin_retry_seconds: float
     plugins: tuple[StaticDashboardPlugin, ...]
+    agenda: AgendaCoordinatorConfig | None
+    agenda_interval_seconds: float | None
+    backup_root: Path | None
+    backup_interval_seconds: float | None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ServiceConfig":
-        expected = {
+        required = {
             "schema_version", "core_db", "scheduler_db", "projection_db",
             "model_router_db", "capability_catalog_db", "heartbeat_path",
             "writer_socket", "tick_seconds", "projection_min_interval_seconds",
             "plugin_retry_seconds", "plugins",
         }
-        if set(raw) != expected or raw.get("schema_version") != SCHEMA_VERSION:
+        optional = {"agenda", "backup"}
+        if not required.issubset(raw) or set(raw) - required - optional or raw.get("schema_version") != SCHEMA_VERSION:
             raise ServiceConfigError("service config has an invalid shape or schema version")
         plugin_rows = raw["plugins"]
         if not isinstance(plugin_rows, list):
@@ -87,6 +95,35 @@ class ServiceConfig:
             plugins.append(StaticDashboardPlugin.from_mapping(plugin_raw))
         if len({plugin.name for plugin in plugins}) != len(plugins):
             raise ServiceConfigError("plugin names must be unique")
+        agenda_config = None
+        agenda_interval = None
+        agenda_raw = raw.get("agenda")
+        if agenda_raw is not None:
+            if not isinstance(agenda_raw, Mapping) or set(agenda_raw) != {
+                "enabled", "interval_seconds", "config",
+            }:
+                raise ServiceConfigError("agenda service config is invalid")
+            if not isinstance(agenda_raw["enabled"], bool):
+                raise ServiceConfigError("agenda.enabled must be boolean")
+            if agenda_raw["enabled"]:
+                if not isinstance(agenda_raw["config"], Mapping):
+                    raise ServiceConfigError("agenda.config must be an object")
+                try:
+                    agenda_config = AgendaCoordinatorConfig.from_mapping(agenda_raw["config"])
+                except Exception as exc:
+                    raise ServiceConfigError("agenda coordinator config is invalid") from exc
+                agenda_interval = _positive_number(agenda_raw["interval_seconds"], "agenda.interval_seconds")
+        backup_root = None
+        backup_interval = None
+        backup_raw = raw.get("backup")
+        if backup_raw is not None:
+            if not isinstance(backup_raw, Mapping) or set(backup_raw) != {
+                "enabled", "root", "interval_seconds",
+            } or not isinstance(backup_raw["enabled"], bool):
+                raise ServiceConfigError("backup service config is invalid")
+            if backup_raw["enabled"]:
+                backup_root = _absolute_path(backup_raw["root"], "backup.root")
+                backup_interval = _positive_number(backup_raw["interval_seconds"], "backup.interval_seconds")
         return cls(
             core_db=_absolute_path(raw["core_db"], "core_db"),
             scheduler_db=_absolute_path(raw["scheduler_db"], "scheduler_db"),
@@ -103,6 +140,10 @@ class ServiceConfig:
             ),
             plugin_retry_seconds=_positive_number(raw["plugin_retry_seconds"], "plugin_retry_seconds"),
             plugins=tuple(plugins),
+            agenda=agenda_config,
+            agenda_interval_seconds=agenda_interval,
+            backup_root=backup_root,
+            backup_interval_seconds=backup_interval,
         )
 
     @classmethod
@@ -177,6 +218,28 @@ class DaltonService:
             }
             for plugin in config.plugins
         }
+        self._agenda = None if config.agenda is None else AgendaCoordinator(config.agenda)
+        self._agenda_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._agenda_future: concurrent.futures.Future[dict[str, Any]] | None = None
+        self._agenda_last_launch_monotonic = 0.0
+        self._agenda_state: dict[str, Any] = {
+            "state": "disabled" if self._agenda is None else "pending",
+            "last_started_at": None, "last_completed_at": None,
+            "last_result": None, "last_error": None,
+        }
+        self._backup = None if config.backup_root is None else DatabaseBackupManager(
+            config.backup_root,
+            {
+                "core": config.core_db,
+                "scheduler": config.scheduler_db,
+                **({"model-router": config.model_router_db} if config.model_router_db else {}),
+            },
+        )
+        self._last_backup_monotonic = 0.0
+        self._backup_state: dict[str, Any] = {
+            "state": "disabled" if self._backup is None else "pending",
+            "last_success_at": None, "last_snapshot_id": None, "last_error": None,
+        }
 
     def _sources(self) -> tuple[Any, ...]:
         return (
@@ -191,15 +254,65 @@ class DaltonService:
             return
         self.config.scheduler_db.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._scheduler = Scheduler(self.config.scheduler_db)
+        if self._agenda is not None:
+            self._agenda_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="dalton-agenda"
+            )
         self._write_heartbeat("starting")
 
     def stop(self) -> None:
         self._stop.set()
 
     def close(self) -> None:
+        executor, self._agenda_executor = self._agenda_executor, None
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
         scheduler, self._scheduler = self._scheduler, None
         if scheduler is not None:
             scheduler.close()
+
+    def _poll_agenda(self) -> None:
+        if self._agenda is None:
+            return
+        future = self._agenda_future
+        if future is not None and future.done():
+            self._agenda_future = None
+            self._agenda_state["last_completed_at"] = _utc_now()
+            try:
+                result = future.result()
+            except Exception as exc:
+                self._agenda_state.update(
+                    state="error", last_error=f"{type(exc).__name__}: {exc}", last_result=None
+                )
+            else:
+                self._agenda_state.update(
+                    state=str(result.get("status", "ready")), last_error=None, last_result=result
+                )
+        interval = self.config.agenda_interval_seconds
+        executor = self._agenda_executor
+        if self._agenda_future is None and interval is not None and executor is not None:
+            elapsed = time.monotonic() - self._agenda_last_launch_monotonic
+            if self._agenda_last_launch_monotonic == 0.0 or elapsed >= interval:
+                self._agenda_last_launch_monotonic = time.monotonic()
+                self._agenda_state.update(state="running", last_started_at=_utc_now(), last_error=None)
+                self._agenda_future = executor.submit(self._agenda.run_once)
+
+    def _run_backup(self) -> None:
+        if self._backup is None or self.config.backup_interval_seconds is None:
+            return
+        elapsed = time.monotonic() - self._last_backup_monotonic
+        if self._last_backup_monotonic != 0.0 and elapsed < self.config.backup_interval_seconds:
+            return
+        try:
+            manifest = self._backup.snapshot()
+        except Exception as exc:
+            self._backup_state.update(state="error", last_error=f"{type(exc).__name__}: {exc}")
+            return
+        self._last_backup_monotonic = time.monotonic()
+        self._backup_state.update(
+            state="ready", last_success_at=_utc_now(),
+            last_snapshot_id=manifest["snapshot_id"], last_error=None,
+        )
 
     def _project(self, source_signature: tuple[Any, ...] | None = None) -> None:
         signature_before = source_signature or self._sources()
@@ -256,6 +369,8 @@ class DaltonService:
         expired = self._scheduler.sweep_expired()
         self._expired_lease_count += len(expired)
         self._last_sweep_at = _utc_now()
+        self._poll_agenda()
+        self._run_backup()
         current_signature = self._sources()
         elapsed = time.monotonic() - self._last_projection_monotonic
         should_project = (
@@ -296,6 +411,8 @@ class DaltonService:
             "projection_watermark": self._projection_watermark,
             "writer_socket_present": self.config.writer_socket.exists(),
             "plugins": plugin_states,
+            "agenda": dict(self._agenda_state),
+            "backup": dict(self._backup_state),
             "last_error": self._last_error,
         }
 

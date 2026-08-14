@@ -16,6 +16,10 @@ dalton-bootstrap = "dalton_core.bootstrap:main"
 dalton-health = "dalton_core.health:main"
 dalton-writer = "dalton_core.writer_server:main"
 daltond = "dalton_core.service:main"
+dalton-gov = "dalton_core.governance_cli:main"
+dalton-agenda = "dalton_core.agenda_coordinator:main"
+dalton-perception-legacy = "dalton_core.perception:main"
+dalton-backup = "dalton_core.backup:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -30,6 +34,7 @@ dalton_core = [
   "model_router_schema.sql",
   "observability_schema.sql",
   "dashboard_schema.sql",
+  "agenda_schema.sql",
   "dashboard.html",
 ]
 

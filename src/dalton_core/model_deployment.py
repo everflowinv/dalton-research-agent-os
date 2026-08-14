@@ -17,6 +17,7 @@ from .model_router import ModelRouter
 
 ADAPTER_REF = "adapter:openclaw-model-broker:0.1"
 POLICY_REF = "model-routing-policy-version:dalton-openclaw:1"
+BROKER_POLICY_REF = "model-routing-policy-version:dalton-openclaw:2"
 
 
 _ENDPOINTS: tuple[dict[str, Any], ...] = (
@@ -213,10 +214,62 @@ def install_openclaw_catalog(
     }
 
 
+def openclaw_broker_profiles(
+    *, checked_at: datetime, availability_ttl: timedelta = timedelta(days=7)
+) -> list[dict[str, Any]]:
+    """Return broker-protocol-compatible profiles without rewriting v1 history."""
+
+    profiles = openclaw_profiles(
+        checked_at=checked_at, availability_ttl=availability_ttl
+    )
+    for profile, endpoint in zip(profiles, _ENDPOINTS, strict=True):
+        profile["profile_version_ref"] = (
+            f"model-profile-version:broker-{endpoint['name']}:1"
+        )
+        profile["id"] = f"profile:{endpoint['name']}"
+    return profiles
+
+
+def openclaw_broker_policy(*, created_at: datetime) -> dict[str, Any]:
+    """Version 2 routes only to profile ids accepted by the UDS broker."""
+
+    policy = openclaw_policy(created_at=created_at)
+    policy["policy_version_ref"] = BROKER_POLICY_REF
+    policy["version"] = 2
+    policy["prior_version_ref"] = POLICY_REF
+    policy["filters"]["allowed_profile_ids"] = [
+        f"profile:{endpoint['name']}" for endpoint in _ENDPOINTS
+    ]
+    return policy
+
+
+def upgrade_openclaw_broker_catalog(
+    router_path: str | Path,
+    *,
+    checked_at: datetime,
+    availability_ttl: timedelta = timedelta(days=7),
+) -> dict[str, Any]:
+    """Append the broker-compatible profile family and policy v2."""
+
+    with ModelRouter(Path(router_path)) as router:
+        policy = router.register_policy(openclaw_broker_policy(created_at=checked_at))
+        profiles = [
+            router.register_profile(profile)
+            for profile in openclaw_broker_profiles(
+                checked_at=checked_at, availability_ttl=availability_ttl
+            )
+        ]
+    return {"policy": policy, "profiles": profiles, "router_path": str(router_path)}
+
+
 __all__ = [
     "ADAPTER_REF",
     "POLICY_REF",
+    "BROKER_POLICY_REF",
     "install_openclaw_catalog",
     "openclaw_policy",
     "openclaw_profiles",
+    "openclaw_broker_profiles",
+    "openclaw_broker_policy",
+    "upgrade_openclaw_broker_catalog",
 ]

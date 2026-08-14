@@ -1,0 +1,29 @@
+{
+  "activate": true,
+  "effective_from": "2026-08-14T00:00:00+00:00",
+  "effective_until": null,
+  "idempotency_key": "agenda-policy:phase1-shadow-v1",
+  "policy": {
+    "cutover_acceptance_threshold": null,
+    "cutover_enabled": false,
+    "enabled": true,
+    "feature_weights": {
+      "catalyst_urgency": 3,
+      "decision_impact": 4,
+      "evidence_staleness": 2,
+      "mandate_relevance": 4
+    },
+    "max_daily_cost_usd": 0.5,
+    "max_daily_cycles": 1,
+    "max_input_tokens": 8000,
+    "max_model_calls_per_cycle": 1,
+    "max_monthly_cost_usd": 10.0,
+    "max_output_tokens": 2000,
+    "schema_version": "0.1",
+    "selected_count": 3,
+    "trial_company_refs": [
+      "wanhua"
+    ]
+  },
+  "version_id": "agenda-policy-version:phase1-shadow-v1"
+}

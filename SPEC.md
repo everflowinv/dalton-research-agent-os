@@ -329,6 +329,28 @@ heartbeat 的 `starting / running / degraded / stopping` 是服务健康状态�
 健康检查必须同时确认 controller 状态、心跳新鲜度、writer socket、authority/projection 文件和
 插件结果；旧 projection 仍存在时不能把 `degraded` controller 报成健康。
 
+### Phase 1 Agenda Shadow
+
+Phase 1 冻结 `Mandate`、`PriorityOverride`、`ResearchQuestion`、`AgendaCycle` 和
+`AgendaDecision`。AgendaDecision 与 cycle event 只追加；agenda 运营记录不走 Thesis commit
+gate，也不能直接改 Evidence、Claim、Thesis 或 Model。
+
+controller 每日最多启动一个试点公司 cycle。legacy adapter 只读旧 Coverage SQLite 的一致快照，
+输出小型 `PerceptionSnapshot`；Agenda 只认该契约，不引用旧库字段。LLM 只能提出 3—6 个问题、
+回答标准、可追溯 source refs、展示理由，以及四个 0—3 整数 feature。feature schema 闭合，越界、
+缺字段、未知 source 或非严格 JSON 都 fail closed。权重由版本化 agenda policy 持有；最终 score、
+配额、选择和 question id 字典序 tie-break 都由 Core 确定性执行。
+
+每次模型调用必须真实经过 Scheduler lease、ModelRouter decision 和受限 broker，并登记 invocation、
+UsageEntry 与 CostEntry。route、adapter 或 output contract 失败时，coordinator 必须先把已租用
+WorkOrder 终结为 failed，再把 AgendaCycle 终结为 failed，不能留下可被其他 worker 重领的僵尸任务。
+全局 agenda pause 在任何 broker 调用前生效。
+
+AgendaDecision 会原子创建 owner-only durable outbox message。Core 只保存 pending/claimed/delivered/
+failed 状态和 delivery receipt；OpenClaw delivery adapter 尚未接入，不得把外部投递成功伪装成已完成。
+人类治理操作使用一次性 token CLI：签发、执行一个 RPC、立即移除，token 配置不得保留 live human
+principal。
+
 ### 冻结词表
 
 `Verdict` 只有五个值：`pass`、`conditional_pass`、`revise`、`blocked`、`reject`。
@@ -354,11 +376,11 @@ predicate 是闭合 shape：`{left_path, operator, right_path|value}`，只支�
 
 ## 占位契约（本 slice 不冻结）
 
-以下对象只在架构文档中定义方向，暂不伪装成已实现契约：Question、Model IR
+以下对象只在架构文档中定义方向，暂不伪装成已实现契约：Model IR
 datapoint/computation/scenario、CommitRecord、完整 bridge command-event、Excel exporter、
 Tier 1/2/3 computation contract、
 实际 capability sandbox backend/monitoring、checkpoint、
-OpenClaw outbox，以及尚未选定的生产级存储/队列/runtime（Postgres、Temporal、
+OpenClaw outbox delivery adapter，以及尚未选定的生产级存储/队列/runtime（Postgres、Temporal、
 Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把 SQLite
 写成 Dalton 的长期架构不变式。
 
@@ -387,6 +409,9 @@ Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把
 | workflow/link、usage correction、rate/cost 与 artifact authority | E1/E2 | `tests/test_observability.py` |
 | model endpoint/profile/policy、route/retry/switch 决策 | E1/E2 | `tests/test_model_router.py` |
 | OpenClaw broker adapter 的 UDS/hash/route/usage/budget | E1/E2 | `tests/test_openclaw_model_adapter.py` |
+| Agenda schema、append-only cycle/decision、确定性排序与 durable outbox | E1/E2 | `tests/test_agenda.py` |
+| PerceptionSnapshot、backup/restore 与 ephemeral governance | E1/E2 | `tests/test_perception_backup.py`、`tests/test_governance_cli.py` |
+| Scheduler → Router → broker adapter → usage/cost → AgendaDecision thin slice | E1 | `tests/test_agenda_coordinator.py` |
 | authority → read-only dashboard projection 与敏感字段隔离 | E1 | `tests/test_dashboard_projector.py` |
 | dashboard 固定 GET API、只读连接与页面资源 | E2 | `tests/test_dashboard.py` |
 | 实际 hostile-code sandbox backend 与自动 monitoring | E1 | 本 slice 排除 |

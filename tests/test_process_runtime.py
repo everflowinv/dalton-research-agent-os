@@ -247,7 +247,11 @@ class ProcessRuntimeTests(unittest.TestCase):
                 os.environ["SECRET_TOKEN"] = old
         env = json.loads(result.outputs["env"])
         self.assertEqual(env, {"CODEX_HOME": None, "HOME": None, "OPENCLAW_HOME": None, "SECRET_TOKEN": None})
-        self.assertTrue(result.outputs["cwd"].startswith(tempfile.gettempdir()))
+        self.assertTrue(
+            Path(result.outputs["cwd"]).resolve().is_relative_to(
+                Path(tempfile.gettempdir()).resolve()
+            )
+        )
 
     def test_source_has_no_live_or_authority_path_reference(self):
         source_dir = Path(__file__).parents[1] / "src" / "dalton_core"

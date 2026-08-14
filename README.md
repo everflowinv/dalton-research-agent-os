@@ -61,4 +61,12 @@ controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回
 
 ## 开发状态
 
-当前代码已经实现主要契约、本机常驻维护和公开监督看板，但还不会自主形成研究议程或派发研究 worker。生产部署仍缺少独立 OS/container identity、正式 capability sandbox、Model IR、原生事件连接器、Agenda Engine、worker coordinator、outbox 和完整运维控制面。任何旧工作流切换都要逐项验证，不能因文件已导入就视为完成迁移。当前进度审计见 [docs/reports/runtime-service-and-architecture-progress-2026-08-14.md](docs/reports/runtime-service-and-architecture-progress-2026-08-14.md)。
+Phase 1 已进入单公司 Agenda Shadow：controller 每日从规范化 `PerceptionSnapshot` 生成一次
+AgendaCycle，真实经过 Scheduler、Model Router 和 OpenClaw broker，再由确定性权重与稳定
+tie-break 选择 ResearchQuestion。结果只进入 append-only AgendaDecision 和本地 durable outbox；
+当前不会执行研究，也不会写 Evidence、Claim 或 Thesis。
+
+生产部署仍缺少独立 OS/container identity、正式 capability sandbox、Model IR、原生事件连接器、
+研究 worker/verifier coordinator、OpenClaw outbox delivery adapter 和完整运维控制面。任何旧工作流
+切换都要逐项验证，不能因文件已导入就视为完成迁移。当前进度审计见
+[docs/reports/phase-1-agenda-shadow-implementation-2026-08-14.md](docs/reports/phase-1-agenda-shadow-implementation-2026-08-14.md)。

@@ -132,6 +132,75 @@ class WriterClient:
     def capability_pointer_history(self, capability_ref: str) -> Any:
         return self.call("capability_pointer_history", {"capability_ref": capability_ref})
 
+    def create_agenda_policy(self, **params: Any) -> Any:
+        return self.call("create_agenda_policy", params)
+
+    def active_agenda_policy(self, **params: Any) -> Any:
+        return self.call("active_agenda_policy", params)
+
+    def agenda_budget_status(self, **params: Any) -> Any:
+        return self.call("agenda_budget_status", params)
+
+    def create_mandate(self, **params: Any) -> Any:
+        return self.call("create_mandate", params)
+
+    def active_mandates(self, **params: Any) -> Any:
+        return self.call("active_mandates", params)
+
+    def create_priority_override(self, **params: Any) -> Any:
+        return self.call("create_priority_override", params)
+
+    def active_priority_overrides(self, **params: Any) -> Any:
+        return self.call("active_priority_overrides", params)
+
+    def set_agenda_pause(self, **params: Any) -> Any:
+        return self.call("set_agenda_pause", params)
+
+    def agenda_control_state(self) -> Any:
+        return self.call("agenda_control_state", {})
+
+    def start_agenda_cycle(self, **params: Any) -> Any:
+        return self.call("start_agenda_cycle", params)
+
+    def add_agenda_candidates(self, **params: Any) -> Any:
+        return self.call("add_agenda_candidates", params)
+
+    def decide_agenda_cycle(self, **params: Any) -> Any:
+        return self.call("decide_agenda_cycle", params)
+
+    def fail_agenda_cycle(self, **params: Any) -> Any:
+        return self.call("fail_agenda_cycle", params)
+
+    def agenda_cycle(self, cycle_id: str) -> Any:
+        return self.call("agenda_cycle", {"cycle_id": cycle_id})
+
+    def agenda_cycle_by_key(self, cycle_key: str) -> Any:
+        return self.call("agenda_cycle_by_key", {"cycle_key": cycle_key})
+
+    def pending_agenda_outbox(self, limit: int = 100) -> Any:
+        return self.call("pending_agenda_outbox", {"limit": limit})
+
+    def record_agenda_delivery(self, **params: Any) -> Any:
+        return self.call("record_agenda_delivery", params)
+
+    def record_agenda_feedback(self, **params: Any) -> Any:
+        return self.call("record_agenda_feedback", params)
+
+    def create_workflow_version(self, **params: Any) -> Any:
+        return self.call("create_workflow_version", params)
+
+    def link_work_order(self, **params: Any) -> Any:
+        return self.call("link_work_order", params)
+
+    def record_usage(self, invocation_ref: str, **params: Any) -> Any:
+        return self.call("record_usage", {"invocation_ref": invocation_ref, **params})
+
+    def create_price_rate_version(self, price_rate_ref: str, **params: Any) -> Any:
+        return self.call("create_price_rate_version", {"price_rate_ref": price_rate_ref, **params})
+
+    def record_cost(self, usage_entry_ref: str, **params: Any) -> Any:
+        return self.call("record_cost", {"usage_entry_ref": usage_entry_ref, **params})
+
     def __repr__(self) -> str:
         return f"WriterClient(socket_path=<local>, timeout={self.timeout!r})"
 

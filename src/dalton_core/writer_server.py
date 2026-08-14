@@ -25,6 +25,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from .agenda import (
+    AgendaConflict,
+    AgendaError,
+    AgendaNotFound,
+    AgendaStore,
+    AgendaValidationError,
+)
 from .capability_registry import (
     CapabilityConflict,
     CapabilityNotFound,
@@ -46,6 +53,13 @@ from .errors import (
     VerificationRequired,
 )
 from .store import DaltonStore
+from .observability import (
+    ObservabilityConflict,
+    ObservabilityError,
+    ObservabilityNotFound,
+    ObservabilityStore,
+    ObservabilityValidationError,
+)
 from .writer_protocol import (
     MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
@@ -114,6 +128,8 @@ CAPABILITY_BUILDER_OPERATIONS = frozenset({"submit_capability_proposal"})
 CAPABILITY_EVALUATOR_OPERATIONS = frozenset({"record_capability_evaluation"})
 HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "create_policy", "decide_capability_promotion", "rollback_capability",
+    "create_agenda_policy", "create_mandate", "create_priority_override",
+    "set_agenda_pause", "record_agenda_feedback",
 })
 CORE_OPERATIONS = frozenset({
     "register_invocation", "stage_change", "verify_change", "commit",
@@ -122,6 +138,13 @@ CORE_OPERATIONS = frozenset({
     "submit_capability_proposal", "record_capability_evaluation",
     "active_capability", "get_capability_version", "get_capability_evaluation",
     "get_capability_decision", "capability_pointer_history",
+    "agenda_control_state", "active_agenda_policy", "active_mandates",
+    "agenda_budget_status",
+    "active_priority_overrides", "start_agenda_cycle", "add_agenda_candidates",
+    "decide_agenda_cycle", "fail_agenda_cycle", "agenda_cycle", "agenda_cycle_by_key",
+    "pending_agenda_outbox", "record_agenda_delivery",
+    "create_workflow_version", "link_work_order", "record_usage",
+    "create_price_rate_version", "record_cost",
 })
 
 
@@ -150,6 +173,29 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "get_capability_evaluation": frozenset({"evaluation_id"}),
     "get_capability_decision": frozenset({"decision_id"}),
     "capability_pointer_history": frozenset({"capability_ref"}),
+    "create_agenda_policy": frozenset({"policy", "effective_from", "effective_until", "activate", "version_id", "idempotency_key", "actor_ref"}),
+    "active_agenda_policy": frozenset({"at"}),
+    "agenda_budget_status": frozenset({"daily_since", "monthly_since"}),
+    "create_mandate": frozenset({"mandate_ref", "objective", "scope_refs", "constraints", "success_criteria", "effective_from", "effective_until", "activate", "version_id", "idempotency_key", "actor_ref"}),
+    "active_mandates": frozenset({"at"}),
+    "create_priority_override": frozenset({"override_ref", "scope_refs", "weight_deltas", "rationale", "effective_from", "effective_until", "revoked", "version_id", "idempotency_key", "actor_ref"}),
+    "active_priority_overrides": frozenset({"scope_ref", "at"}),
+    "set_agenda_pause": frozenset({"paused", "reason", "version_id", "idempotency_key", "actor_ref"}),
+    "agenda_control_state": frozenset(),
+    "start_agenda_cycle": frozenset({"cycle_key", "perception_snapshot_ref", "perception_snapshot_hash", "mandate_version_ref", "policy_version_ref", "company_ref", "cycle_id", "idempotency_key", "actor_ref"}),
+    "add_agenda_candidates": frozenset({"cycle_id", "candidates", "idempotency_key", "actor_ref"}),
+    "decide_agenda_cycle": frozenset({"cycle_id", "decision_id", "idempotency_key", "actor_ref"}),
+    "fail_agenda_cycle": frozenset({"cycle_id", "reason", "metadata", "actor_ref"}),
+    "agenda_cycle": frozenset({"cycle_id"}),
+    "agenda_cycle_by_key": frozenset({"cycle_key"}),
+    "pending_agenda_outbox": frozenset({"limit"}),
+    "record_agenda_delivery": frozenset({"message_id", "state", "delivery_receipt_id", "error_code", "actor_ref"}),
+    "record_agenda_feedback": frozenset({"decision_id", "verdict", "notes", "feedback_id", "idempotency_key", "actor_ref"}),
+    "create_workflow_version": frozenset({"workflow_ref", "title", "objective", "scope_refs", "root_work_order_refs", "governance_policy_ref", "prior_version_ref", "version_id", "idempotency_key", "actor_ref"}),
+    "link_work_order": frozenset({"workflow_ref", "parent_work_order_ref", "child_work_order_ref", "relation", "sequence", "actor_ref", "link_id", "idempotency_key"}),
+    "record_usage": frozenset({"invocation_ref", "entry_id", "occurred_at", "metering_source", "measurement_status", "raw_usage", "workflow_ref", "provider_usage_ref", "correction_of_ref", "actor_ref", "idempotency_key", "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "total_tokens", "requests", "duration_ms", "input_bytes", "output_bytes"}),
+    "create_price_rate_version": frozenset({"price_rate_ref", "provider", "model", "charge_type", "unit_quantity", "unit_price_micros", "currency", "effective_from", "effective_until", "source_ref", "prior_version_ref", "version_id", "idempotency_key", "actor_ref"}),
+    "record_cost": frozenset({"usage_entry_ref", "price_rate_refs", "amount_micros", "currency", "cost_status", "calculation_ref", "correction_of_ref", "cost_entry_id", "idempotency_key", "actor_ref"}),
 }
 
 
@@ -166,6 +212,21 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "record_capability_evaluation": "actor_ref",
     "decide_capability_promotion": "actor_ref",
     "rollback_capability": "actor_ref",
+    "create_agenda_policy": "actor_ref",
+    "create_mandate": "actor_ref",
+    "create_priority_override": "actor_ref",
+    "set_agenda_pause": "actor_ref",
+    "start_agenda_cycle": "actor_ref",
+    "add_agenda_candidates": "actor_ref",
+    "decide_agenda_cycle": "actor_ref",
+    "fail_agenda_cycle": "actor_ref",
+    "record_agenda_delivery": "actor_ref",
+    "record_agenda_feedback": "actor_ref",
+    "create_workflow_version": "actor_ref",
+    "link_work_order": "actor_ref",
+    "record_usage": "actor_ref",
+    "create_price_rate_version": "actor_ref",
+    "record_cost": "actor_ref",
 }
 
 
@@ -229,15 +290,15 @@ def load_principals(path: str | Path) -> dict[str, Principal]:
     return result
 
 
-def write_token_config(path: str | Path, principals: list[Principal]) -> None:
-    """Create a token config with owner-only permissions (test/bootstrap use)."""
+def replace_token_config(path: str | Path, principals: list[Principal], *, require_absent: bool = False) -> None:
+    """Atomically replace an owner-only principal file without exposing tokens."""
     config_path = Path(path)
-    if config_path.exists():
+    if require_absent and config_path.exists():
         raise WriterServerError("token config already exists")
     for principal in principals:
         _validate_actor_ref(principal.resolved_actor_ref)
     config_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    config_path.write_text(json.dumps({"schema_version": PROTOCOL_VERSION, "principals": [
+    value = json.dumps({"schema_version": PROTOCOL_VERSION, "principals": [
         {
             "principal_id": p.principal_id,
             "token": p.token,
@@ -247,14 +308,29 @@ def write_token_config(path: str | Path, principals: list[Principal]) -> None:
             "unrestricted": p.is_unrestricted,
             "actor_ref": p.actor_ref,
         } for p in principals
-    ]}, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
-    os.chmod(config_path, 0o600)
+    ]}, sort_keys=True, separators=(",", ":")) + "\n"
+    temporary = config_path.with_name(f".{config_path.name}.{os.getpid()}.tmp")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, config_path)
+        os.chmod(config_path, 0o600)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def write_token_config(path: str | Path, principals: list[Principal]) -> None:
+    """Create a token config with owner-only permissions (test/bootstrap use)."""
+    replace_token_config(path, principals, require_absent=True)
 
 
 class WriterServer:
     """Serve a capability-scoped, local-only Dalton write API."""
 
-    def __init__(self, db_path: str | Path, socket_path: str | Path, principals: Mapping[str, Principal]):
+    def __init__(self, db_path: str | Path, socket_path: str | Path, principals: Mapping[str, Principal], *, token_config_path: str | Path | None = None):
         if not principals:
             raise WriterServerError("at least one principal is required")
         self.db_path = str(db_path)  # retained only by the owner process
@@ -267,6 +343,9 @@ class WriterServer:
             raise WriterServerError("principal tokens must be unique")
         self._store: DaltonStore | None = None
         self._registry: CapabilityRegistry | None = None
+        self._agenda: AgendaStore | None = None
+        self._observability: ObservabilityStore | None = None
+        self._token_config_path = None if token_config_path is None else Path(token_config_path)
         self._listener: socket.socket | None = None
         self._stop = threading.Event()
         self._connection_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
@@ -284,6 +363,18 @@ class WriterServer:
         if self._registry is None:
             raise WriterServerError("writer server is not started")
         return self._registry
+
+    @property
+    def agenda(self) -> AgendaStore:
+        if self._agenda is None:
+            self._agenda = AgendaStore(self.store)
+        return self._agenda
+
+    @property
+    def observability(self) -> ObservabilityStore:
+        if self._observability is None:
+            self._observability = ObservabilityStore(self.store)
+        return self._observability
 
     def start(self) -> None:
         if self._listener is not None:
@@ -323,6 +414,8 @@ class WriterServer:
     def _open_store(self) -> None:
         self._store = DaltonStore(self.db_path)
         self._registry = CapabilityRegistry(self._store)
+        self._observability = ObservabilityStore(self._store)
+        self._agenda = AgendaStore(self._store)
 
     def serve_forever(self) -> None:
         if self._listener is None:
@@ -392,6 +485,8 @@ class WriterServer:
             self._store.close()
             self._store = None
         self._registry = None
+        self._agenda = None
+        self._observability = None
 
     def _serve_connection(self, conn: socket.socket) -> None:
         reader = conn.makefile("rb")
@@ -424,6 +519,10 @@ class WriterServer:
             reader.close()
 
     def _principal(self, token: str) -> Principal:
+        if self._token_config_path is not None:
+            refreshed = load_principals(self._token_config_path)
+            self.principals = refreshed
+            self._by_token = {principal.token: principal for principal in refreshed.values()}
         for known, principal in self._by_token.items():
             if hmac.compare_digest(known, token):
                 return principal
@@ -453,8 +552,10 @@ class WriterServer:
             if supplied_actor is not None and supplied_actor != actor:
                 raise PermissionError("request actor does not match principal")
             result[actor_field] = actor
-        if operation == "create_policy" and _HUMAN_ACTOR_RE.fullmatch(principal.resolved_actor_ref) is None:
-            raise PermissionError("governance policy changes require an authenticated human principal")
+        if operation in HUMAN_GOVERNANCE_OPERATIONS and _HUMAN_ACTOR_RE.fullmatch(
+            principal.resolved_actor_ref
+        ) is None:
+            raise PermissionError("governance changes require an authenticated human principal")
         if operation in {"stage_change", "verify_change"}:
             self._authorize_invocation_subject(principal, operation, result)
         elif operation == "register_claim":
@@ -711,17 +812,94 @@ class WriterServer:
     def _op_capability_pointer_history(self, p: Mapping[str, Any]) -> Any:
         return self.registry.pointer_history(**dict(p))
 
+    def _op_create_agenda_policy(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.create_policy(**dict(p))
+
+    def _op_active_agenda_policy(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.active_policy(**dict(p))
+
+    def _op_agenda_budget_status(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.budget_status(**dict(p))
+
+    def _op_create_mandate(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.create_mandate(**dict(p))
+
+    def _op_active_mandates(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.active_mandates(**dict(p))
+
+    def _op_create_priority_override(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.create_priority_override(**dict(p))
+
+    def _op_active_priority_overrides(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.active_priority_overrides(**dict(p))
+
+    def _op_set_agenda_pause(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.set_pause(**dict(p))
+
+    def _op_agenda_control_state(self, p: Mapping[str, Any]) -> Any:
+        if p:
+            raise ProtocolError("agenda_control_state takes no parameters")
+        return self.agenda.control_state()
+
+    def _op_start_agenda_cycle(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.start_cycle(**dict(p))
+
+    def _op_add_agenda_candidates(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.add_candidates(**dict(p))
+
+    def _op_decide_agenda_cycle(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.decide_cycle(**dict(p))
+
+    def _op_fail_agenda_cycle(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.fail_cycle(**dict(p))
+
+    def _op_agenda_cycle(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.cycle(**dict(p))
+
+    def _op_agenda_cycle_by_key(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.cycle_by_key(**dict(p))
+
+    def _op_pending_agenda_outbox(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.pending_outbox(**dict(p))
+
+    def _op_record_agenda_delivery(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.record_delivery(**dict(p))
+
+    def _op_record_agenda_feedback(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.record_feedback(**dict(p))
+
+    def _op_create_workflow_version(self, p: Mapping[str, Any]) -> Any:
+        return self.observability.create_workflow_version(**dict(p))
+
+    def _op_link_work_order(self, p: Mapping[str, Any]) -> Any:
+        return self.observability.link_work_order(**dict(p))
+
+    def _op_record_usage(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        invocation_ref = values.pop("invocation_ref")
+        return self.observability.record_usage(invocation_ref, **values)
+
+    def _op_create_price_rate_version(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        price_rate_ref = values.pop("price_rate_ref")
+        return self.observability.create_price_rate_version(price_rate_ref, **values)
+
+    def _op_record_cost(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        usage_entry_ref = values.pop("usage_entry_ref")
+        return self.observability.record_cost(usage_entry_ref, **values)
+
     @staticmethod
     def _error_code(exc: Exception) -> str:
         if isinstance(exc, PermissionError):
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError)):
             return "rejected"
-        if isinstance(exc, (NotFound,)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict)):
             return "conflict"
         if isinstance(exc, (CapabilityConflict,)):
             return "conflict"
@@ -731,7 +909,7 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, CapabilityRegistryError):
             return "store_error"
-        if isinstance(exc, DaltonStoreError):
+        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError)):
             return "store_error"
         return "internal_error"
 
@@ -741,11 +919,11 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError)):
             return "request rejected by contract or gate"
-        if isinstance(exc, NotFound):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound)):
             return "requested object was not found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict)):
             return "request conflicts with existing immutable data"
         if isinstance(exc, CapabilityConflict):
             return "request conflicts with existing immutable capability data"
@@ -764,7 +942,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         principals = load_principals(args.token_config)
-        server = WriterServer(args.db, args.socket, principals)
+        server = WriterServer(
+            args.db, args.socket, principals, token_config_path=args.token_config
+        )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:
             server.stop()

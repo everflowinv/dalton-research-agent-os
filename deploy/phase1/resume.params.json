@@ -1,0 +1,6 @@
+{
+  "idempotency_key": "agenda-control:resume-phase1-shadow-v1",
+  "paused": false,
+  "reason": "Owner authorized Phase 1 Agenda Shadow; cutover remains disabled.",
+  "version_id": "agenda-control-version:phase1-shadow-v1"
+}

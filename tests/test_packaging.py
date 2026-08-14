@@ -24,6 +24,7 @@ class PackagingTests(unittest.TestCase):
             "model_router_schema.sql",
             "observability_schema.sql",
             "dashboard_schema.sql",
+            "agenda_schema.sql",
             "dashboard.html",
         ):
             self.assertIn(runtime_asset, package_data["dalton_core"])

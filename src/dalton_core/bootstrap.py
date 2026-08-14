@@ -10,11 +10,18 @@ from pathlib import Path
 from typing import Iterable
 
 from .model_router import ModelRouter
+from .agenda import AgendaStore
 from .observability import ObservabilityStore
 from .scheduler import Scheduler
 from .service import SCHEMA_VERSION, ServiceConfig
 from .store import DaltonStore
-from .writer_server import CORE_OPERATIONS, Principal, write_token_config
+from .writer_server import (
+    CORE_OPERATIONS,
+    Principal,
+    load_principals,
+    replace_token_config,
+    write_token_config,
+)
 
 
 def _write_config(path: Path, value: dict) -> None:
@@ -35,7 +42,7 @@ def _write_config(path: Path, value: dict) -> None:
 def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
     root = Path(state_dir).expanduser().resolve()
     config = Path(config_path).expanduser().resolve()
-    for directory in (root, root / "run", root / "public"):
+    for directory in (root, root / "run", root / "public", root / "perception", root / "backups"):
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(directory, 0o700)
     paths = {
@@ -50,6 +57,7 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
     }
     with DaltonStore(paths["core_db"]) as store:
         ObservabilityStore(store)
+        AgendaStore(store)
     with Scheduler(paths["scheduler_db"]):
         pass
     if not paths["model_router_db"].exists():
@@ -68,6 +76,22 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
                 )
             ],
         )
+    else:
+        principals = load_principals(paths["token_config"])
+        core = principals.get("core")
+        if core is None:
+            raise RuntimeError("existing token config is missing the core principal")
+        if core.operations != CORE_OPERATIONS:
+            principals["core"] = Principal(
+                principal_id=core.principal_id,
+                token=core.token,
+                operations=CORE_OPERATIONS,
+                allowed_invocation_refs=core.allowed_invocation_refs,
+                work_order_refs=core.work_order_refs,
+                unrestricted=True,
+                actor_ref=core.actor_ref,
+            )
+            replace_token_config(paths["token_config"], list(principals.values()))
     raw = {
         "schema_version": SCHEMA_VERSION,
         "core_db": str(paths["core_db"]),
@@ -101,6 +125,11 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
                 },
             }
         ],
+        "backup": {
+            "enabled": True,
+            "root": str(root / "backups"),
+            "interval_seconds": 86400,
+        },
     }
     if config.exists():
         ServiceConfig.from_file(config)

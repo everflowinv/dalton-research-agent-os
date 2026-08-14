@@ -78,6 +78,11 @@ export class BrokerServer {
         this.#reply(socket, protocolFailure("INVALID_FRAME", "exactly one non-empty JSONL frame is required", this.broker.runtime.version));
         return;
       }
+      // The socket timeout protects an idle client while it is still sending
+      // the one allowed frame.  Once the frame is complete, the model broker's
+      // own request timeout is authoritative; keeping the idle timer armed can
+      // destroy a healthy socket while a slower model call is in flight.
+      socket.setTimeout(0);
       try {
         const request = strictJsonParse(buffer.subarray(0, newline).toString("utf8"));
         const authenticated = this.authenticator.verify(request);

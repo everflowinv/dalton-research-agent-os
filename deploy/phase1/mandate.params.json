@@ -1,0 +1,27 @@
+{
+  "activate": true,
+  "constraints": {
+    "formal_belief_writes": false,
+    "model_ir_writes": false,
+    "mode": "agenda_shadow",
+    "research_execution": false,
+    "source_refs_required": true
+  },
+  "effective_from": "2026-08-14T00:00:00+00:00",
+  "effective_until": null,
+  "idempotency_key": "mandate:phase1-wanhua-shadow-v1",
+  "mandate_ref": "mandate:phase1-wanhua-shadow",
+  "objective": "围绕万华化学，基于可追溯的催化剂、证据新鲜度和 filing，提出最影响投资判断且尚未充分回答的研究问题；本阶段只做议程影子评估。",
+  "scope_refs": [
+    "wanhua"
+  ],
+  "success_criteria": {
+    "cutover_requires_earnings_or_filing_event": true,
+    "cutover_shadow_weeks": 4,
+    "human_feedback_required": true,
+    "pilot_expansion_labeled_questions": 20,
+    "pilot_expansion_shadow_business_days": 10,
+    "pilot_expansion_target_companies": 3
+  },
+  "version_id": "mandate-version:phase1-wanhua-shadow-v1"
+}
