@@ -55,6 +55,7 @@ def dashboard_snapshot(projection_db: str | Path) -> dict[str, Any]:
             "/v1/dashboard/summary": service.summary(),
             "/v1/workflows": workflows,
             "/v1/models": service.models(limit=200),
+            "/v1/agenda": service.agenda(limit=30),
             "/v1/capabilities": service.capabilities(limit=200),
             "/v1/artifacts": service.artifacts(limit=200),
             "/v1/projection/status": service.status(),

@@ -128,6 +128,54 @@ CREATE TABLE IF NOT EXISTS model_status (
     total_tokens INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS agenda_supervision (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    paused INTEGER NOT NULL CHECK (paused IN (0, 1)),
+    pause_reason TEXT NOT NULL,
+    policy_version_ref TEXT,
+    cutover_enabled INTEGER NOT NULL CHECK (cutover_enabled IN (0, 1)),
+    total_cycles INTEGER NOT NULL CHECK (total_cycles >= 0),
+    decided_cycles INTEGER NOT NULL CHECK (decided_cycles >= 0),
+    failed_cycles INTEGER NOT NULL CHECK (failed_cycles >= 0),
+    pending_deliveries INTEGER NOT NULL CHECK (pending_deliveries >= 0),
+    delivered_cards INTEGER NOT NULL CHECK (delivered_cards >= 0),
+    labeled_decisions INTEGER NOT NULL CHECK (labeled_decisions >= 0),
+    agreement_rate REAL,
+    last_cycle_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS agenda_cycle_summaries (
+    cycle_ref TEXT PRIMARY KEY,
+    cycle_key TEXT NOT NULL,
+    company_ref TEXT NOT NULL,
+    state TEXT NOT NULL,
+    decision_ref TEXT,
+    selected_count INTEGER NOT NULL CHECK (selected_count >= 0),
+    deferred_count INTEGER NOT NULL CHECK (deferred_count >= 0),
+    rejected_count INTEGER NOT NULL CHECK (rejected_count >= 0),
+    delivery_state TEXT NOT NULL,
+    delivery_attempts INTEGER NOT NULL CHECK (delivery_attempts >= 0),
+    feedback_state TEXT NOT NULL,
+    agree_count INTEGER NOT NULL CHECK (agree_count >= 0),
+    disagree_count INTEGER NOT NULL CHECK (disagree_count >= 0),
+    partial_count INTEGER NOT NULL CHECK (partial_count >= 0),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS agenda_questions (
+    candidate_ref TEXT PRIMARY KEY,
+    cycle_ref TEXT NOT NULL REFERENCES agenda_cycle_summaries(cycle_ref),
+    decision_ref TEXT,
+    selection_state TEXT NOT NULL,
+    selection_rank INTEGER,
+    question TEXT NOT NULL,
+    answer_criteria TEXT NOT NULL,
+    rationale TEXT NOT NULL,
+    total_score INTEGER,
+    features_json TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS work_items_workflow_idx
 ON work_items(workflow_ref, sequence, work_order_ref);
 CREATE INDEX IF NOT EXISTS invocation_workflow_idx
@@ -138,3 +186,7 @@ CREATE INDEX IF NOT EXISTS cost_workflow_idx
 ON cost_slices(workflow_ref, currency, created_at);
 CREATE INDEX IF NOT EXISTS artifact_workflow_idx
 ON artifact_index(workflow_ref, created_at);
+CREATE INDEX IF NOT EXISTS agenda_cycles_recent_idx
+ON agenda_cycle_summaries(created_at, cycle_ref);
+CREATE INDEX IF NOT EXISTS agenda_questions_cycle_idx
+ON agenda_questions(cycle_ref, selection_state, selection_rank, candidate_ref);

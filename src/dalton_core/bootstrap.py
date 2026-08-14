@@ -17,6 +17,7 @@ from .service import SCHEMA_VERSION, ServiceConfig
 from .store import DaltonStore
 from .writer_server import (
     CORE_OPERATIONS,
+    FEEDBACK_BRIDGE_OPERATIONS,
     Principal,
     load_principals,
     replace_token_config,
@@ -73,7 +74,14 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
                     operations=CORE_OPERATIONS,
                     unrestricted=True,
                     actor_ref="core",
-                )
+                ),
+                Principal(
+                    principal_id="feedback-bridge",
+                    token=secrets.token_urlsafe(48),
+                    operations=FEEDBACK_BRIDGE_OPERATIONS,
+                    unrestricted=False,
+                    actor_ref="bridge:openclaw-discord",
+                ),
             ],
         )
     else:
@@ -91,7 +99,27 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
                 unrestricted=True,
                 actor_ref=core.actor_ref,
             )
-            replace_token_config(paths["token_config"], list(principals.values()))
+        feedback_bridge = principals.get("feedback-bridge")
+        if feedback_bridge is None:
+            principals["feedback-bridge"] = Principal(
+                principal_id="feedback-bridge",
+                token=secrets.token_urlsafe(48),
+                operations=FEEDBACK_BRIDGE_OPERATIONS,
+                unrestricted=False,
+                actor_ref="bridge:openclaw-discord",
+            )
+        elif (
+            feedback_bridge.operations != FEEDBACK_BRIDGE_OPERATIONS
+            or feedback_bridge.resolved_actor_ref != "bridge:openclaw-discord"
+        ):
+            principals["feedback-bridge"] = Principal(
+                principal_id="feedback-bridge",
+                token=feedback_bridge.token,
+                operations=FEEDBACK_BRIDGE_OPERATIONS,
+                unrestricted=False,
+                actor_ref="bridge:openclaw-discord",
+            )
+        replace_token_config(paths["token_config"], list(principals.values()))
     raw = {
         "schema_version": SCHEMA_VERSION,
         "core_db": str(paths["core_db"]),

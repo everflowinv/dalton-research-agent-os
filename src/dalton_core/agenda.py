@@ -12,7 +12,7 @@ import json
 import math
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -166,7 +166,41 @@ class AgendaStore:
         self.store = store
         self.connection: sqlite3.Connection = store.connection
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._migrate_phase1_delivery_schema()
         self._ensure_paused_bootstrap()
+
+    def _migrate_phase1_delivery_schema(self) -> None:
+        """Add append-only delivery/feedback metadata to pre-bridge databases."""
+        extensions = {
+            "agenda_outbox_events": {
+                "delivery_attempt_id": "TEXT",
+                "claim_expires_at": "TEXT",
+                "endpoint_ref": "TEXT",
+                "retry_after": "TEXT",
+            },
+            "agenda_feedback": {
+                "prior_feedback_id": "TEXT REFERENCES agenda_feedback(feedback_id)",
+                "subject_ref": "TEXT",
+                "source": "TEXT",
+                "source_event_ref": "TEXT",
+            },
+        }
+        for table, columns in extensions.items():
+            present = {
+                row["name"] for row in self.connection.execute(f"PRAGMA table_info({table})")
+            }
+            for name, declaration in columns.items():
+                if name not in present:
+                    self.connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {name} {declaration}"
+                    )
+        self.connection.executescript(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_agenda_delivery_receipt_unique "
+            "ON agenda_outbox_events(delivery_receipt_id) "
+            "WHERE state='delivered' AND delivery_receipt_id IS NOT NULL;"
+            "CREATE INDEX IF NOT EXISTS idx_agenda_feedback_subject "
+            "ON agenda_feedback(decision_id,subject_ref,created_at);"
+        )
 
     def _ensure_paused_bootstrap(self) -> None:
         if self.connection.execute(
@@ -615,40 +649,273 @@ class AgendaStore:
             self._save_idem(cur, idempotency_key, "decide_agenda_cycle", request_hash, result)
             return result
 
-    def _outbox_event(self, cur: sqlite3.Cursor, message_id: str, state: str, *, actor_ref: str, delivery_receipt_id: str | None = None, error_code: str | None = None) -> dict[str, Any]:
+    def _outbox_event(
+        self,
+        cur: sqlite3.Cursor,
+        message_id: str,
+        state: str,
+        *,
+        actor_ref: str,
+        delivery_attempt_id: str | None = None,
+        claim_expires_at: str | None = None,
+        endpoint_ref: str | None = None,
+        retry_after: str | None = None,
+        delivery_receipt_id: str | None = None,
+        error_code: str | None = None,
+    ) -> dict[str, Any]:
         created_at = _now()
-        wire = self._record({"schema_version": SCHEMA_VERSION, "id": f"agenda-outbox-event:{uuid.uuid4().hex}", "message_ref": message_id, "state": state, "delivery_receipt_id": delivery_receipt_id, "error_code": error_code, "actor_ref": _text(actor_ref, "actor_ref"), "created_at": created_at})
-        cur.execute("INSERT INTO agenda_outbox_events(event_id,message_id,state,delivery_receipt_id,error_code,actor_ref,created_at,content_hash) VALUES(?,?,?,?,?,?,?,?)", (wire["id"], message_id, state, delivery_receipt_id, error_code, wire["actor_ref"], created_at, wire["content_hash"]))
+        wire = self._record({
+            "schema_version": SCHEMA_VERSION,
+            "id": f"agenda-outbox-event:{uuid.uuid4().hex}",
+            "message_ref": message_id,
+            "state": state,
+            "delivery_attempt_id": delivery_attempt_id,
+            "claim_expires_at": claim_expires_at,
+            "endpoint_ref": endpoint_ref,
+            "retry_after": retry_after,
+            "delivery_receipt_id": delivery_receipt_id,
+            "error_code": error_code,
+            "actor_ref": _text(actor_ref, "actor_ref"),
+            "created_at": created_at,
+        })
+        cur.execute(
+            "INSERT INTO agenda_outbox_events("
+            "event_id,message_id,state,delivery_attempt_id,claim_expires_at,endpoint_ref,"
+            "retry_after,delivery_receipt_id,error_code,actor_ref,created_at,content_hash"
+            ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                wire["id"], message_id, state, delivery_attempt_id, claim_expires_at,
+                endpoint_ref, retry_after, delivery_receipt_id, error_code,
+                wire["actor_ref"], created_at, wire["content_hash"],
+            ),
+        )
         return wire
+
+    @staticmethod
+    def _outbox_wire(row: sqlite3.Row) -> dict[str, Any]:
+        return {**dict(row), "payload": json.loads(row["payload_json"])}
+
+    def claim_outbox(
+        self,
+        *,
+        endpoint_ref: str,
+        actor_ref: str,
+        idempotency_key: str,
+        now: str | None = None,
+        claim_ttl_seconds: int = 120,
+        max_attempts: int = 5,
+        limit: int = 1,
+    ) -> dict[str, Any]:
+        endpoint_ref = _text(endpoint_ref, "endpoint_ref")
+        actor_ref = _text(actor_ref, "actor_ref")
+        now = _timestamp(now or _now(), "now")
+        for value, name, upper in (
+            (claim_ttl_seconds, "claim_ttl_seconds", 3600),
+            (max_attempts, "max_attempts", 100),
+            (limit, "limit", 100),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= upper:
+                raise AgendaValidationError(f"{name} must be 1..{upper}")
+        request = {
+            "endpoint_ref": endpoint_ref,
+            "actor_ref": actor_ref,
+            "now": now,
+            "claim_ttl_seconds": claim_ttl_seconds,
+            "max_attempts": max_attempts,
+            "limit": limit,
+        }
+        request_hash = content_hash(request)
+        with self.store._transaction() as cur:
+            duplicate = self._idem(cur, idempotency_key, "claim_agenda_outbox", request_hash)
+            if duplicate is not None:
+                return duplicate
+            rows = cur.execute(
+                "WITH latest AS ("
+                " SELECT e.* FROM agenda_outbox_events e"
+                " JOIN (SELECT message_id,MAX(event_seq) AS event_seq FROM agenda_outbox_events GROUP BY message_id) x"
+                " ON x.event_seq=e.event_seq"
+                "), attempts AS ("
+                " SELECT message_id,COUNT(*) AS attempt_count FROM agenda_outbox_events"
+                " WHERE state='claimed' GROUP BY message_id"
+                ")"
+                " SELECT m.*,l.state,l.delivery_attempt_id,l.claim_expires_at,l.retry_after,"
+                " COALESCE(a.attempt_count,0) AS attempt_count"
+                " FROM agenda_outbox_messages m JOIN latest l ON l.message_id=m.message_id"
+                " LEFT JOIN attempts a ON a.message_id=m.message_id"
+                " WHERE COALESCE(a.attempt_count,0)<? AND ("
+                " l.state='pending' OR"
+                " (l.state='failed' AND (l.retry_after IS NULL OR l.retry_after<=?)) OR"
+                " (l.state='claimed' AND l.claim_expires_at IS NOT NULL AND l.claim_expires_at<=?)"
+                ") ORDER BY m.created_at,m.message_id LIMIT ?",
+                (max_attempts, now, now, limit),
+            ).fetchall()
+            claims: list[dict[str, Any]] = []
+            expires_at = (
+                datetime.fromisoformat(str(now)).astimezone(timezone.utc)
+                + timedelta(seconds=claim_ttl_seconds)
+            ).isoformat(timespec="microseconds")
+            for row in rows:
+                attempt_number = int(row["attempt_count"]) + 1
+                attempt_id = (
+                    "agenda-delivery-attempt:"
+                    + content_hash({
+                        "message_id": row["message_id"],
+                        "attempt_number": attempt_number,
+                        "endpoint_ref": endpoint_ref,
+                    })[:32]
+                )
+                event = self._outbox_event(
+                    cur,
+                    row["message_id"],
+                    "claimed",
+                    actor_ref=actor_ref,
+                    delivery_attempt_id=attempt_id,
+                    claim_expires_at=expires_at,
+                    endpoint_ref=endpoint_ref,
+                )
+                claims.append({
+                    **self._outbox_wire(row),
+                    "attempt_number": attempt_number,
+                    "delivery_attempt_id": attempt_id,
+                    "claim_expires_at": expires_at,
+                    "endpoint_ref": endpoint_ref,
+                    "claim_event": event,
+                })
+            result = {"status": "fresh", "claims": claims}
+            self._save_idem(cur, idempotency_key, "claim_agenda_outbox", request_hash, result)
+            return result
 
     def pending_outbox(self, *, limit: int = 100) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
             raise AgendaValidationError("limit must be 1..1000")
         rows = self.connection.execute(
-            "SELECT m.*,e.state,e.delivery_receipt_id,e.error_code FROM agenda_outbox_messages m JOIN agenda_outbox_events e ON e.event_seq=(SELECT MAX(x.event_seq) FROM agenda_outbox_events x WHERE x.message_id=m.message_id) WHERE e.state IN ('pending','failed') ORDER BY m.created_at LIMIT ?",
+            "SELECT m.*,e.state,e.delivery_attempt_id,e.claim_expires_at,e.endpoint_ref,"
+            "e.retry_after,e.delivery_receipt_id,e.error_code "
+            "FROM agenda_outbox_messages m JOIN agenda_outbox_events e "
+            "ON e.event_seq=(SELECT MAX(x.event_seq) FROM agenda_outbox_events x WHERE x.message_id=m.message_id) "
+            "WHERE e.state IN ('pending','claimed','failed') ORDER BY m.created_at LIMIT ?",
             (limit,),
         ).fetchall()
-        return [{**dict(row), "payload": json.loads(row["payload_json"])} for row in rows]
+        return [self._outbox_wire(row) for row in rows]
 
-    def record_delivery(self, message_id: str, *, state: str, actor_ref: str, delivery_receipt_id: str | None = None, error_code: str | None = None) -> dict[str, Any]:
+    def record_delivery(
+        self,
+        message_id: str,
+        *,
+        state: str,
+        delivery_attempt_id: str,
+        actor_ref: str,
+        idempotency_key: str,
+        delivery_receipt_id: str | None = None,
+        error_code: str | None = None,
+        retry_after: str | None = None,
+    ) -> dict[str, Any]:
         message_id = _text(message_id, "message_id")
-        if state not in {"claimed", "delivered", "failed"}:
-            raise AgendaValidationError("delivery state is invalid")
+        delivery_attempt_id = _text(delivery_attempt_id, "delivery_attempt_id")
+        if state not in {"delivered", "failed"}:
+            raise AgendaValidationError("delivery completion state is invalid")
         if state == "delivered" and not delivery_receipt_id:
             raise AgendaValidationError("delivered outbox message requires a receipt id")
+        if state == "failed" and not error_code:
+            raise AgendaValidationError("failed outbox message requires an error code")
+        if state == "failed":
+            retry_after = _timestamp(retry_after, "retry_after")
+        elif retry_after is not None:
+            raise AgendaValidationError("delivered outbox message cannot set retry_after")
+        request = {
+            "message_id": message_id,
+            "state": state,
+            "delivery_attempt_id": delivery_attempt_id,
+            "delivery_receipt_id": delivery_receipt_id,
+            "error_code": error_code,
+            "retry_after": retry_after,
+            "actor_ref": _text(actor_ref, "actor_ref"),
+        }
+        request_hash = content_hash(request)
         with self.store._transaction() as cur:
+            duplicate = self._idem(cur, idempotency_key, "record_agenda_delivery", request_hash)
+            if duplicate is not None:
+                return duplicate
             if cur.execute("SELECT 1 FROM agenda_outbox_messages WHERE message_id=?", (message_id,)).fetchone() is None:
                 raise AgendaNotFound(message_id)
-            return self._outbox_event(cur, message_id, state, actor_ref=actor_ref, delivery_receipt_id=delivery_receipt_id, error_code=error_code)
+            latest = cur.execute(
+                "SELECT * FROM agenda_outbox_events WHERE message_id=? ORDER BY event_seq DESC LIMIT 1",
+                (message_id,),
+            ).fetchone()
+            if latest is None or latest["state"] != "claimed":
+                raise AgendaConflict("outbox message is not claimed")
+            if latest["delivery_attempt_id"] != delivery_attempt_id:
+                raise AgendaConflict("delivery attempt is stale")
+            event = self._outbox_event(
+                cur,
+                message_id,
+                state,
+                actor_ref=request["actor_ref"],
+                delivery_attempt_id=delivery_attempt_id,
+                endpoint_ref=latest["endpoint_ref"],
+                retry_after=retry_after,
+                delivery_receipt_id=delivery_receipt_id,
+                error_code=error_code,
+            )
+            if state == "delivered":
+                cycle = cur.execute(
+                    "SELECT d.cycle_id FROM agenda_outbox_messages m "
+                    "JOIN agenda_decisions d ON json_extract(m.payload_json,'$.decision_ref')=d.decision_id "
+                    "WHERE m.message_id=?",
+                    (message_id,),
+                ).fetchone()
+                if cycle is not None and self._latest_cycle_state(cur, cycle["cycle_id"]) == "decided":
+                    self._cycle_event(
+                        cur,
+                        cycle["cycle_id"],
+                        "delivered",
+                        "agenda_card_delivered",
+                        {"message_ref": message_id},
+                        request["actor_ref"],
+                    )
+            self._event(
+                cur,
+                f"agenda_delivery_{state}",
+                message_id,
+                {"delivery_attempt_ref": delivery_attempt_id, "receipt_ref": delivery_receipt_id},
+                request["actor_ref"],
+            )
+            result = {"status": "fresh", **event}
+            self._save_idem(cur, idempotency_key, "record_agenda_delivery", request_hash, result)
+            return result
 
-    def record_feedback(self, decision_id: str, *, verdict: str, notes: str, actor_ref: str, feedback_id: str | None = None, idempotency_key: str | None = None) -> dict[str, Any]:
+    def record_feedback(
+        self,
+        decision_id: str,
+        *,
+        verdict: str,
+        notes: str,
+        actor_ref: str,
+        feedback_id: str | None = None,
+        idempotency_key: str | None = None,
+        subject_ref: str | None = None,
+        prior_feedback_ref: str | None = None,
+        source: str = "local_cli",
+        source_event_ref: str | None = None,
+    ) -> dict[str, Any]:
         decision_id = _text(decision_id, "decision_id")
         if verdict not in {"agree", "disagree", "partial"}:
             raise AgendaValidationError("feedback verdict is invalid")
         notes = notes if isinstance(notes, str) else ""
         actor_ref = _text(actor_ref, "actor_ref")
+        subject_ref = _text(subject_ref or actor_ref, "subject_ref")
+        source = _text(source, "source")
+        if source not in {"local_cli", "openclaw_discord_reaction"}:
+            raise AgendaValidationError("feedback source is invalid")
+        source_event_ref = None if source_event_ref is None else _text(source_event_ref, "source_event_ref")
+        prior_feedback_ref = None if prior_feedback_ref is None else _text(prior_feedback_ref, "prior_feedback_ref")
         feedback_id = self._id("agenda-feedback", feedback_id)
-        request = {"decision_id": decision_id, "verdict": verdict, "notes": notes, "actor_ref": actor_ref, "feedback_id": feedback_id}
+        request = {
+            "decision_id": decision_id, "verdict": verdict, "notes": notes,
+            "actor_ref": actor_ref, "subject_ref": subject_ref,
+            "prior_feedback_ref": prior_feedback_ref, "source": source,
+            "source_event_ref": source_event_ref, "feedback_id": feedback_id,
+        }
         request_hash = content_hash(request)
         with self.store._transaction() as cur:
             duplicate = self._idem(cur, idempotency_key, "record_agenda_feedback", request_hash)
@@ -656,13 +923,79 @@ class AgendaStore:
                 return duplicate
             if cur.execute("SELECT 1 FROM agenda_decisions WHERE decision_id=?", (decision_id,)).fetchone() is None:
                 raise AgendaNotFound(decision_id)
+            latest = cur.execute(
+                "SELECT * FROM agenda_feedback WHERE decision_id=? AND COALESCE(subject_ref,actor_ref)=? "
+                "ORDER BY created_at DESC,feedback_id DESC LIMIT 1",
+                (decision_id, subject_ref),
+            ).fetchone()
+            latest_ref = None if latest is None else latest["feedback_id"]
+            if latest_ref != prior_feedback_ref:
+                raise AgendaConflict("feedback prior version is stale")
+            if latest is not None and latest["verdict"] == verdict:
+                return {"status": "duplicate", **dict(latest)}
             created_at = _now()
-            wire = self._record({"schema_version": SCHEMA_VERSION, "id": feedback_id, "decision_ref": decision_id, "verdict": verdict, "notes": notes, "actor_ref": actor_ref, "created_at": created_at})
-            cur.execute("INSERT INTO agenda_feedback(feedback_id,decision_id,verdict,notes,actor_ref,created_at,content_hash) VALUES(?,?,?,?,?,?,?)", (feedback_id, decision_id, verdict, notes, actor_ref, created_at, wire["content_hash"]))
-            self._event(cur, "agenda_feedback_recorded", decision_id, {"feedback_ref": feedback_id, "verdict": verdict}, actor_ref)
+            wire = self._record({
+                "schema_version": SCHEMA_VERSION, "id": feedback_id,
+                "decision_ref": decision_id, "prior_feedback_ref": prior_feedback_ref,
+                "subject_ref": subject_ref, "verdict": verdict, "notes": notes,
+                "source": source, "source_event_ref": source_event_ref,
+                "actor_ref": actor_ref, "created_at": created_at,
+            })
+            cur.execute(
+                "INSERT INTO agenda_feedback(feedback_id,decision_id,prior_feedback_id,subject_ref,"
+                "verdict,notes,source,source_event_ref,actor_ref,created_at,content_hash) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    feedback_id, decision_id, prior_feedback_ref, subject_ref, verdict, notes,
+                    source, source_event_ref, actor_ref, created_at, wire["content_hash"],
+                ),
+            )
+            self._event(cur, "agenda_feedback_recorded", decision_id, {"feedback_ref": feedback_id, "subject_ref": subject_ref, "verdict": verdict}, actor_ref)
             result = {"status": "fresh", **wire}
             self._save_idem(cur, idempotency_key, "record_agenda_feedback", request_hash, result)
             return result
+
+    def feedback_targets(self, *, endpoint_ref: str, limit: int = 100) -> list[dict[str, Any]]:
+        endpoint_ref = _text(endpoint_ref, "endpoint_ref")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise AgendaValidationError("limit must be 1..1000")
+        rows = self.connection.execute(
+            "WITH latest_delivery AS ("
+            " SELECT e.* FROM agenda_outbox_events e JOIN ("
+            "  SELECT message_id,MAX(event_seq) AS event_seq FROM agenda_outbox_events GROUP BY message_id"
+            " ) x ON x.event_seq=e.event_seq"
+            "), latest_feedback AS ("
+            " SELECT f.* FROM agenda_feedback f JOIN ("
+            "  SELECT decision_id,COALESCE(subject_ref,actor_ref) AS subject_ref,MAX(created_at) AS created_at"
+            "  FROM agenda_feedback GROUP BY decision_id,COALESCE(subject_ref,actor_ref)"
+            " ) x ON x.decision_id=f.decision_id AND x.subject_ref=COALESCE(f.subject_ref,f.actor_ref) AND x.created_at=f.created_at"
+            ")"
+            " SELECT m.message_id,m.payload_json,m.payload_hash,d.delivery_receipt_id,d.endpoint_ref,"
+            " f.feedback_id,f.subject_ref,f.verdict"
+            " FROM agenda_outbox_messages m JOIN latest_delivery d ON d.message_id=m.message_id"
+            " LEFT JOIN latest_feedback f ON f.decision_id=json_extract(m.payload_json,'$.decision_ref')"
+            " WHERE d.state='delivered' AND d.endpoint_ref=?"
+            " ORDER BY m.created_at DESC,f.subject_ref LIMIT ?",
+            (endpoint_ref, limit),
+        ).fetchall()
+        grouped: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            item = grouped.setdefault(
+                row["message_id"],
+                {
+                    "message_id": row["message_id"],
+                    "payload": json.loads(row["payload_json"]),
+                    "payload_hash": row["payload_hash"],
+                    "delivery_receipt_id": row["delivery_receipt_id"],
+                    "endpoint_ref": row["endpoint_ref"],
+                    "latest_feedback": {},
+                },
+            )
+            if row["subject_ref"]:
+                item["latest_feedback"][row["subject_ref"]] = {
+                    "feedback_id": row["feedback_id"], "verdict": row["verdict"],
+                }
+        return list(grouped.values())
 
     def cycle(self, cycle_id: str) -> dict[str, Any]:
         cycle_id = _text(cycle_id, "cycle_id")

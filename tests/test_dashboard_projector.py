@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dalton_core.dashboard import DashboardQueryService
+from dalton_core.agenda import AgendaStore
 from dalton_core.dashboard_projector import (
     DashboardProjector,
     DashboardProjectorError,
@@ -383,6 +384,76 @@ class DashboardProjectorTests(unittest.TestCase):
         self.assertNotIn("storage_locator", serialized)
         self.assertNotIn("outputs", serialized)
         self.assertNotIn("credential", serialized.lower())
+
+    def test_agenda_supervision_projects_delivery_and_feedback_without_subject_ids(self) -> None:
+        store = DaltonStore(self.core_path)
+        agenda = AgendaStore(store)
+        try:
+            policy = agenda.create_policy(
+                {
+                    "schema_version": "0.1", "enabled": True, "selected_count": 1,
+                    "max_model_calls_per_cycle": 1, "max_daily_cycles": 1,
+                    "max_daily_cost_usd": 0.5, "max_monthly_cost_usd": 10.0,
+                    "max_input_tokens": 8000, "max_output_tokens": 2000,
+                    "feature_weights": {"mandate_relevance": 4, "catalyst_urgency": 3, "evidence_staleness": 2, "decision_impact": 4},
+                    "trial_company_refs": ["wanhua"], "cutover_enabled": False,
+                    "cutover_acceptance_threshold": None,
+                },
+                effective_from=START.isoformat(), effective_until=None,
+                actor_ref="human:owner", version_id="agenda-policy:test",
+                idempotency_key="agenda-policy:test",
+            )
+            mandate = agenda.create_mandate(
+                "mandate:test", objective="Find the best question", scope_refs=["wanhua"],
+                constraints={"mode": "shadow"}, success_criteria={"feedback": True},
+                effective_from=START.isoformat(), effective_until=None,
+                actor_ref="human:owner", version_id="mandate:test:v1",
+                idempotency_key="mandate:test",
+            )
+            cycle = agenda.start_cycle(
+                "agenda:test:wanhua", perception_snapshot_ref="perception:test",
+                perception_snapshot_hash="a" * 64, mandate_version_ref=mandate["id"],
+                policy_version_ref=policy["id"], company_ref="wanhua", actor_ref="core",
+                cycle_id="agenda-cycle:test", idempotency_key="agenda-cycle:test",
+            )
+            agenda.add_candidates(
+                cycle["cycle_id"], actor_ref="core", idempotency_key="agenda-candidate:test",
+                candidates=[{
+                    "candidate_id": "agenda-candidate:test", "company_ref": "wanhua",
+                    "question": "价格变化是否影响盈利？", "answer_criteria": "核对价格和成本",
+                    "features": {"mandate_relevance": 3, "catalyst_urgency": 2, "evidence_staleness": 1, "decision_impact": 3},
+                    "rationale": "重要", "source_refs": ["evidence:test"],
+                }],
+            )
+            decision = agenda.decide_cycle(
+                cycle["cycle_id"], actor_ref="core", decision_id="agenda-decision:test",
+                idempotency_key="agenda-decision:test",
+            )
+            claim = agenda.claim_outbox(
+                endpoint_ref="openclaw:discord:test", actor_ref="core",
+                idempotency_key="agenda-claim:test", now=START.isoformat(),
+            )["claims"][0]
+            agenda.record_delivery(
+                claim["message_id"], state="delivered",
+                delivery_attempt_id=claim["delivery_attempt_id"],
+                delivery_receipt_id="discord:123", actor_ref="core",
+                idempotency_key="agenda-delivery:test",
+            )
+            agenda.record_feedback(
+                decision["id"], verdict="agree", notes="Discord reaction ✅",
+                subject_ref="human:discord-932169512197955636",
+                source="openclaw_discord_reaction",
+                source_event_ref="discord-reaction:test", actor_ref="bridge:openclaw-discord",
+                feedback_id="agenda-feedback:test", idempotency_key="agenda-feedback:test",
+            )
+        finally:
+            store.close()
+        snapshot = self.projector().project(self.projection_path)
+        self.assertEqual(snapshot["agenda_supervision"][0]["delivered_cards"], 1)
+        self.assertEqual(snapshot["agenda_supervision"][0]["agreement_rate"], 1.0)
+        self.assertEqual(snapshot["agenda_cycle_summaries"][0]["feedback_state"], "agree")
+        serialized = json.dumps(snapshot, ensure_ascii=False)
+        self.assertNotIn("932169512197955636", serialized)
 
     def test_projector_opens_sources_read_only_and_watermark_changes_with_authority(self) -> None:
         before_core = hashlib.sha256(self.core_path.read_bytes()).hexdigest()

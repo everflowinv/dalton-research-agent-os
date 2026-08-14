@@ -25,6 +25,7 @@ from typing import Any, Iterable, Mapping
 from .dashboard_projector import project_dashboard
 from .agenda_coordinator import AgendaCoordinator, AgendaCoordinatorConfig
 from .backup import DatabaseBackupManager
+from .openclaw_agenda_bridge import OpenClawAgendaBridge, OpenClawAgendaBridgeConfig
 from .plugins.static_dashboard import StaticDashboardPlugin
 from .scheduler import Scheduler
 
@@ -69,6 +70,8 @@ class ServiceConfig:
     plugins: tuple[StaticDashboardPlugin, ...]
     agenda: AgendaCoordinatorConfig | None
     agenda_interval_seconds: float | None
+    outbox: OpenClawAgendaBridgeConfig | None
+    outbox_interval_seconds: float | None
     backup_root: Path | None
     backup_interval_seconds: float | None
 
@@ -80,7 +83,7 @@ class ServiceConfig:
             "writer_socket", "tick_seconds", "projection_min_interval_seconds",
             "plugin_retry_seconds", "plugins",
         }
-        optional = {"agenda", "backup"}
+        optional = {"agenda", "outbox", "backup"}
         if not required.issubset(raw) or set(raw) - required - optional or raw.get("schema_version") != SCHEMA_VERSION:
             raise ServiceConfigError("service config has an invalid shape or schema version")
         plugin_rows = raw["plugins"]
@@ -124,6 +127,24 @@ class ServiceConfig:
             if backup_raw["enabled"]:
                 backup_root = _absolute_path(backup_raw["root"], "backup.root")
                 backup_interval = _positive_number(backup_raw["interval_seconds"], "backup.interval_seconds")
+        outbox_config = None
+        outbox_interval = None
+        outbox_raw = raw.get("outbox")
+        if outbox_raw is not None:
+            if not isinstance(outbox_raw, Mapping) or set(outbox_raw) != {
+                "enabled", "interval_seconds", "config",
+            } or not isinstance(outbox_raw["enabled"], bool):
+                raise ServiceConfigError("outbox service config is invalid")
+            if outbox_raw["enabled"]:
+                if not isinstance(outbox_raw["config"], Mapping):
+                    raise ServiceConfigError("outbox.config must be an object")
+                try:
+                    outbox_config = OpenClawAgendaBridgeConfig.from_mapping(outbox_raw["config"])
+                except Exception as exc:
+                    raise ServiceConfigError("OpenClaw agenda bridge config is invalid") from exc
+                outbox_interval = _positive_number(
+                    outbox_raw["interval_seconds"], "outbox.interval_seconds"
+                )
         return cls(
             core_db=_absolute_path(raw["core_db"], "core_db"),
             scheduler_db=_absolute_path(raw["scheduler_db"], "scheduler_db"),
@@ -142,6 +163,8 @@ class ServiceConfig:
             plugins=tuple(plugins),
             agenda=agenda_config,
             agenda_interval_seconds=agenda_interval,
+            outbox=outbox_config,
+            outbox_interval_seconds=outbox_interval,
             backup_root=backup_root,
             backup_interval_seconds=backup_interval,
         )
@@ -227,6 +250,15 @@ class DaltonService:
             "last_started_at": None, "last_completed_at": None,
             "last_result": None, "last_error": None,
         }
+        self._outbox = None if config.outbox is None else OpenClawAgendaBridge(config.outbox)
+        self._outbox_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._outbox_future: concurrent.futures.Future[dict[str, Any]] | None = None
+        self._outbox_last_launch_monotonic = 0.0
+        self._outbox_state: dict[str, Any] = {
+            "state": "disabled" if self._outbox is None else "pending",
+            "last_started_at": None, "last_completed_at": None,
+            "last_result": None, "last_error": None,
+        }
         self._backup = None if config.backup_root is None else DatabaseBackupManager(
             config.backup_root,
             {
@@ -258,12 +290,19 @@ class DaltonService:
             self._agenda_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="dalton-agenda"
             )
+        if self._outbox is not None:
+            self._outbox_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="dalton-outbox"
+            )
         self._write_heartbeat("starting")
 
     def stop(self) -> None:
         self._stop.set()
 
     def close(self) -> None:
+        outbox_executor, self._outbox_executor = self._outbox_executor, None
+        if outbox_executor is not None:
+            outbox_executor.shutdown(wait=False, cancel_futures=True)
         executor, self._agenda_executor = self._agenda_executor, None
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -296,6 +335,32 @@ class DaltonService:
                 self._agenda_last_launch_monotonic = time.monotonic()
                 self._agenda_state.update(state="running", last_started_at=_utc_now(), last_error=None)
                 self._agenda_future = executor.submit(self._agenda.run_once)
+
+    def _poll_outbox(self) -> None:
+        if self._outbox is None:
+            return
+        future = self._outbox_future
+        if future is not None and future.done():
+            self._outbox_future = None
+            self._outbox_state["last_completed_at"] = _utc_now()
+            try:
+                result = future.result()
+            except Exception as exc:
+                self._outbox_state.update(
+                    state="error", last_error=f"{type(exc).__name__}: {exc}", last_result=None
+                )
+            else:
+                self._outbox_state.update(
+                    state=str(result.get("status", "ready")), last_error=None, last_result=result
+                )
+        interval = self.config.outbox_interval_seconds
+        executor = self._outbox_executor
+        if self._outbox_future is None and interval is not None and executor is not None:
+            elapsed = time.monotonic() - self._outbox_last_launch_monotonic
+            if self._outbox_last_launch_monotonic == 0.0 or elapsed >= interval:
+                self._outbox_last_launch_monotonic = time.monotonic()
+                self._outbox_state.update(state="running", last_started_at=_utc_now(), last_error=None)
+                self._outbox_future = executor.submit(self._outbox.run_once)
 
     def _run_backup(self) -> None:
         if self._backup is None or self.config.backup_interval_seconds is None:
@@ -370,6 +435,7 @@ class DaltonService:
         self._expired_lease_count += len(expired)
         self._last_sweep_at = _utc_now()
         self._poll_agenda()
+        self._poll_outbox()
         self._run_backup()
         current_signature = self._sources()
         elapsed = time.monotonic() - self._last_projection_monotonic
@@ -388,9 +454,12 @@ class DaltonService:
             self._retry_plugins()
         self._last_tick_at = _utc_now()
         self._last_error = None
-        state = "degraded" if any(
+        degraded = any(
             plugin["state"] == "error" for plugin in self._plugin_states.values()
-        ) else "running"
+        ) or self._agenda_state["state"] == "error" or self._outbox_state["state"] in {
+            "error", "degraded",
+        }
+        state = "degraded" if degraded else "running"
         return self._write_heartbeat(state)
 
     def _heartbeat(self, state: str) -> dict[str, Any]:
@@ -412,6 +481,7 @@ class DaltonService:
             "writer_socket_present": self.config.writer_socket.exists(),
             "plugins": plugin_states,
             "agenda": dict(self._agenda_state),
+            "outbox": dict(self._outbox_state),
             "backup": dict(self._backup_state),
             "last_error": self._last_error,
         }

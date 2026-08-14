@@ -51,6 +51,14 @@ _SCHEDULER_TABLES = frozenset(
         "scheduler_result_envelopes",
     }
 )
+_AGENDA_TABLES = frozenset(
+    {
+        "agenda_control_versions", "agenda_control_pointer", "agenda_policy_versions",
+        "agenda_policy_pointer", "agenda_cycles", "agenda_cycle_events",
+        "agenda_candidates", "agenda_decisions", "agenda_feedback",
+        "agenda_outbox_messages", "agenda_outbox_events",
+    }
+)
 
 
 def _utc_now() -> datetime:
@@ -348,6 +356,7 @@ class DashboardProjector:
                 catalog, invocation_wires, as_of_dt, warnings
             )
             model_rows = self._models(router, invocation_rows, warnings)
+            agenda_overview, agenda_cycles, agenda_questions = self._agenda(core, warnings)
             watermark = self._watermark(core, scheduler, catalog, router)
 
         return {
@@ -366,7 +375,161 @@ class DashboardProjector:
             "artifact_index": artifact_rows,
             "capability_status": capability_rows,
             "model_status": model_rows,
+            "agenda_supervision": agenda_overview,
+            "agenda_cycle_summaries": agenda_cycles,
+            "agenda_questions": agenda_questions,
         }
+
+    @staticmethod
+    def _agenda(
+        core: sqlite3.Connection, warnings: _Warnings
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+        if not _AGENDA_TABLES.issubset(_tables(core)):
+            warnings.add("Agenda authority 不可用；监督视图为空")
+            return [], [], []
+        control = core.execute(
+            "SELECT v.version_id,v.paused,v.reason FROM agenda_control_pointer p "
+            "JOIN agenda_control_versions v ON v.version_id=p.version_id WHERE p.pointer_id=1"
+        ).fetchone()
+        policy = core.execute(
+            "SELECT v.version_id,v.policy_json FROM agenda_policy_pointer p "
+            "JOIN agenda_policy_versions v ON v.version_id=p.version_id WHERE p.pointer_id=1"
+        ).fetchone()
+        policy_json: dict[str, Any] = {}
+        if policy is not None:
+            policy_json = _json(policy["policy_json"], "agenda policy")
+
+        latest_cycle_events = {
+            row["cycle_id"]: row
+            for row in core.execute(
+                "SELECT e.* FROM agenda_cycle_events e JOIN ("
+                " SELECT cycle_id,MAX(event_seq) AS event_seq FROM agenda_cycle_events GROUP BY cycle_id"
+                ") x ON x.event_seq=e.event_seq"
+            )
+        }
+        decisions = {
+            row["cycle_id"]: row for row in core.execute("SELECT * FROM agenda_decisions")
+        }
+        outbox_by_decision: dict[str, sqlite3.Row] = {}
+        attempt_counts: dict[str, int] = defaultdict(int)
+        for row in core.execute(
+            "SELECT m.message_id,m.payload_json,e.* FROM agenda_outbox_messages m "
+            "JOIN agenda_outbox_events e ON e.event_seq=("
+            " SELECT MAX(x.event_seq) FROM agenda_outbox_events x WHERE x.message_id=m.message_id"
+            ")"
+        ):
+            payload = _json(row["payload_json"], "agenda outbox payload")
+            decision_ref = payload.get("decision_ref")
+            if isinstance(decision_ref, str):
+                outbox_by_decision[decision_ref] = row
+        for row in core.execute(
+            "SELECT message_id,COUNT(*) AS attempts FROM agenda_outbox_events "
+            "WHERE state='claimed' GROUP BY message_id"
+        ):
+            attempt_counts[row["message_id"]] = int(row["attempts"])
+
+        latest_feedback: dict[str, dict[str, sqlite3.Row]] = defaultdict(dict)
+        for row in core.execute(
+            "SELECT * FROM agenda_feedback ORDER BY created_at,feedback_id"
+        ):
+            subject = row["subject_ref"] or row["actor_ref"]
+            latest_feedback[row["decision_id"]][subject] = row
+
+        candidates_by_cycle: dict[str, list[sqlite3.Row]] = defaultdict(list)
+        for row in core.execute("SELECT * FROM agenda_candidates ORDER BY candidate_id"):
+            candidates_by_cycle[row["cycle_id"]].append(row)
+
+        cycle_rows: list[dict[str, Any]] = []
+        question_rows: list[dict[str, Any]] = []
+        all_label_counts = {"agree": 0, "disagree": 0, "partial": 0}
+        delivered_cards = 0
+        pending_deliveries = 0
+        labeled_decisions = 0
+        failed_cycles = 0
+        decided_cycles = 0
+
+        cycles = list(core.execute("SELECT * FROM agenda_cycles ORDER BY created_at,cycle_id"))
+        for cycle in cycles:
+            event = latest_cycle_events.get(cycle["cycle_id"])
+            state = "unknown" if event is None else event["state"]
+            if state == "failed":
+                failed_cycles += 1
+            if state in {"decided", "delivered"}:
+                decided_cycles += 1
+            decision = decisions.get(cycle["cycle_id"])
+            decision_ref = None if decision is None else decision["decision_id"]
+            selected: list[str] = []
+            deferred: list[str] = []
+            rejected: list[str] = []
+            breakdown: dict[str, Any] = {}
+            if decision is not None:
+                selected = json.loads(decision["selected_candidate_refs_json"])
+                deferred = json.loads(decision["deferred_candidate_refs_json"])
+                rejected = json.loads(decision["rejected_candidate_refs_json"])
+                breakdown = json.loads(decision["score_breakdown_json"])
+            delivery = None if decision_ref is None else outbox_by_decision.get(decision_ref)
+            delivery_state = "not_created" if delivery is None else delivery["state"]
+            if delivery_state == "delivered":
+                delivered_cards += 1
+            elif delivery is not None:
+                pending_deliveries += 1
+            labels = [] if decision_ref is None else list(latest_feedback.get(decision_ref, {}).values())
+            counts = {"agree": 0, "disagree": 0, "partial": 0}
+            for label in labels:
+                verdict = label["verdict"]
+                if verdict in counts:
+                    counts[verdict] += 1
+                    all_label_counts[verdict] += 1
+            if labels:
+                labeled_decisions += 1
+            nonzero = [name for name, count in counts.items() if count]
+            feedback_state = "unlabeled" if not nonzero else nonzero[0] if len(nonzero) == 1 else "mixed"
+            updated_at = cycle["created_at"] if event is None else event["created_at"]
+            cycle_rows.append({
+                "cycle_ref": cycle["cycle_id"], "cycle_key": cycle["cycle_key"],
+                "company_ref": cycle["company_ref"], "state": state,
+                "decision_ref": decision_ref, "selected_count": len(selected),
+                "deferred_count": len(deferred), "rejected_count": len(rejected),
+                "delivery_state": delivery_state,
+                "delivery_attempts": 0 if delivery is None else attempt_counts[delivery["message_id"]],
+                "feedback_state": feedback_state, "agree_count": counts["agree"],
+                "disagree_count": counts["disagree"], "partial_count": counts["partial"],
+                "created_at": cycle["created_at"], "updated_at": updated_at,
+            })
+            ranks = {candidate_ref: index + 1 for index, candidate_ref in enumerate(selected)}
+            for candidate in candidates_by_cycle.get(cycle["cycle_id"], []):
+                candidate_ref = candidate["candidate_id"]
+                selection_state = (
+                    "selected" if candidate_ref in selected else
+                    "deferred" if candidate_ref in deferred else
+                    "rejected" if candidate_ref in rejected or not candidate["valid"] else
+                    "unranked"
+                )
+                score = breakdown.get(candidate_ref, {}).get("total")
+                question_rows.append({
+                    "candidate_ref": candidate_ref, "cycle_ref": cycle["cycle_id"],
+                    "decision_ref": decision_ref, "selection_state": selection_state,
+                    "selection_rank": ranks.get(candidate_ref),
+                    "question": candidate["proposed_question"],
+                    "answer_criteria": candidate["answer_criteria"],
+                    "rationale": candidate["rationale"], "total_score": score,
+                    "features_json": candidate["features_json"],
+                })
+
+        total_labels = sum(all_label_counts.values())
+        overview = [{
+            "singleton": 1,
+            "paused": bool(control["paused"]) if control is not None else True,
+            "pause_reason": control["reason"] if control is not None else "control unavailable",
+            "policy_version_ref": None if policy is None else policy["version_id"],
+            "cutover_enabled": bool(policy_json.get("cutover_enabled", False)),
+            "total_cycles": len(cycles), "decided_cycles": decided_cycles,
+            "failed_cycles": failed_cycles, "pending_deliveries": pending_deliveries,
+            "delivered_cards": delivered_cards, "labeled_decisions": labeled_decisions,
+            "agreement_rate": None if total_labels == 0 else all_label_counts["agree"] / total_labels,
+            "last_cycle_at": None if not cycles else cycles[-1]["created_at"],
+        }]
+        return overview, cycle_rows, question_rows
 
     @staticmethod
     def _optional_source(
@@ -1071,7 +1234,10 @@ class DashboardProjector:
         router: sqlite3.Connection | None,
     ) -> str:
         sources: dict[str, Any] = {"core": {}, "scheduler": {}}
-        for table in sorted(_CORE_TABLES):
+        core_tables = _tables(core)
+        for table in sorted(_CORE_TABLES | (_AGENDA_TABLES & core_tables)):
+            if table.endswith("_pointer"):
+                continue
             row = core.execute(
                 f"SELECT COUNT(*) AS count,MAX(created_at) AS latest FROM {table}"
             ).fetchone()

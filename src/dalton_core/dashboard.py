@@ -78,6 +78,23 @@ _TABLE_FIELDS: dict[str, tuple[str, ...]] = {
         "auth_state", "capabilities_json", "context_window", "cost_class",
         "last_used_at", "total_tokens",
     ),
+    "agenda_supervision": (
+        "singleton", "paused", "pause_reason", "policy_version_ref",
+        "cutover_enabled", "total_cycles", "decided_cycles", "failed_cycles",
+        "pending_deliveries", "delivered_cards", "labeled_decisions",
+        "agreement_rate", "last_cycle_at",
+    ),
+    "agenda_cycle_summaries": (
+        "cycle_ref", "cycle_key", "company_ref", "state", "decision_ref",
+        "selected_count", "deferred_count", "rejected_count", "delivery_state",
+        "delivery_attempts", "feedback_state", "agree_count", "disagree_count",
+        "partial_count", "created_at", "updated_at",
+    ),
+    "agenda_questions": (
+        "candidate_ref", "cycle_ref", "decision_ref", "selection_state",
+        "selection_rank", "question", "answer_criteria", "rationale",
+        "total_score", "features_json",
+    ),
 }
 
 
@@ -360,6 +377,33 @@ class DashboardQueryService:
             rows.append(item)
         return self._envelope(rows)
 
+    def agenda(self, *, limit: int = 30) -> dict[str, Any]:
+        overview_row = self.connection.execute(
+            "SELECT * FROM agenda_supervision WHERE singleton=1"
+        ).fetchone()
+        overview = None if overview_row is None else dict(overview_row)
+        if overview is not None:
+            overview["paused"] = bool(overview["paused"])
+            overview["cutover_enabled"] = bool(overview["cutover_enabled"])
+        cycles = [dict(row) for row in self.connection.execute(
+            "SELECT * FROM agenda_cycle_summaries ORDER BY created_at DESC,cycle_ref LIMIT ?",
+            (self._limit(limit),),
+        )]
+        questions: list[dict[str, Any]] = []
+        if cycles:
+            refs = [row["cycle_ref"] for row in cycles]
+            placeholders = ",".join("?" for _ in refs)
+            for row in self.connection.execute(
+                f"SELECT * FROM agenda_questions WHERE cycle_ref IN ({placeholders}) "
+                "ORDER BY cycle_ref,CASE selection_state WHEN 'selected' THEN 0 WHEN 'deferred' THEN 1 ELSE 2 END,"
+                "selection_rank,candidate_ref",
+                refs,
+            ):
+                item = dict(row)
+                item["features"] = json.loads(item.pop("features_json"))
+                questions.append(item)
+        return self._envelope({"overview": overview, "cycles": cycles, "questions": questions})
+
 
 @dataclass(slots=True)
 class DashboardApplication:
@@ -396,6 +440,8 @@ class DashboardApplication:
                 value = self.service.capabilities(limit=query.get("limit", [100])[0])
             elif path == "/v1/models":
                 value = self.service.models(limit=query.get("limit", [100])[0])
+            elif path == "/v1/agenda":
+                value = self.service.agenda(limit=query.get("limit", [30])[0])
             else:
                 return HTTPStatus.NOT_FOUND, "application/json", b'{"error":"not_found"}'
         except KeyError:

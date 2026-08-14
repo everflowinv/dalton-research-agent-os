@@ -184,6 +184,57 @@ def snapshot() -> dict:
                 "total_tokens": 1000,
             }
         ],
+        "agenda_supervision": [
+            {
+                "singleton": 1,
+                "paused": False,
+                "pause_reason": "Phase 1 shadow",
+                "policy_version_ref": "agenda-policy:1",
+                "cutover_enabled": False,
+                "total_cycles": 1,
+                "decided_cycles": 1,
+                "failed_cycles": 0,
+                "pending_deliveries": 0,
+                "delivered_cards": 1,
+                "labeled_decisions": 1,
+                "agreement_rate": 1.0,
+                "last_cycle_at": NOW,
+            }
+        ],
+        "agenda_cycle_summaries": [
+            {
+                "cycle_ref": "agenda-cycle:1",
+                "cycle_key": "agenda:2026-08-14:wanhua",
+                "company_ref": "wanhua",
+                "state": "delivered",
+                "decision_ref": "agenda-decision:1",
+                "selected_count": 1,
+                "deferred_count": 1,
+                "rejected_count": 0,
+                "delivery_state": "delivered",
+                "delivery_attempts": 1,
+                "feedback_state": "agree",
+                "agree_count": 1,
+                "disagree_count": 0,
+                "partial_count": 0,
+                "created_at": NOW,
+                "updated_at": NOW,
+            }
+        ],
+        "agenda_questions": [
+            {
+                "candidate_ref": "agenda-candidate:1",
+                "cycle_ref": "agenda-cycle:1",
+                "decision_ref": "agenda-decision:1",
+                "selection_state": "selected",
+                "selection_rank": 1,
+                "question": "MDI 价差变化是否改变盈利预期？",
+                "answer_criteria": "核对价格、成本和销量",
+                "rationale": "展示理由",
+                "total_score": 31,
+                "features_json": json.dumps({"mandate_relevance": 3}),
+            }
+        ],
     }
 
 
@@ -218,6 +269,9 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(usage["rows"][0]["group_key"], "gpt-example")
             with self.assertRaises(ProjectionValidationError):
                 service.usage_summary("model; DROP TABLE work_items")
+            agenda = service.agenda()["data"]
+            self.assertEqual(agenda["overview"]["labeled_decisions"], 1)
+            self.assertEqual(agenda["questions"][0]["selection_state"], "selected")
         finally:
             service.close()
 

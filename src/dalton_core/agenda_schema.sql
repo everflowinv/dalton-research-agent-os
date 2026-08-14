@@ -163,8 +163,12 @@ CREATE TABLE IF NOT EXISTS agenda_decisions (
 CREATE TABLE IF NOT EXISTS agenda_feedback (
     feedback_id TEXT PRIMARY KEY,
     decision_id TEXT NOT NULL REFERENCES agenda_decisions(decision_id),
+    prior_feedback_id TEXT REFERENCES agenda_feedback(feedback_id),
+    subject_ref TEXT,
     verdict TEXT NOT NULL CHECK(verdict IN ('agree','disagree','partial')),
     notes TEXT NOT NULL,
+    source TEXT,
+    source_event_ref TEXT,
     actor_ref TEXT NOT NULL,
     created_at TEXT NOT NULL,
     content_hash TEXT NOT NULL
@@ -184,6 +188,10 @@ CREATE TABLE IF NOT EXISTS agenda_outbox_events (
     event_id TEXT NOT NULL UNIQUE,
     message_id TEXT NOT NULL REFERENCES agenda_outbox_messages(message_id),
     state TEXT NOT NULL CHECK(state IN ('pending','claimed','delivered','failed')),
+    delivery_attempt_id TEXT,
+    claim_expires_at TEXT,
+    endpoint_ref TEXT,
+    retry_after TEXT,
     delivery_receipt_id TEXT,
     error_code TEXT,
     actor_ref TEXT NOT NULL,
@@ -214,6 +222,9 @@ CREATE INDEX IF NOT EXISTS idx_agenda_cycle_events_cycle
 ON agenda_cycle_events(cycle_id, event_seq);
 CREATE INDEX IF NOT EXISTS idx_agenda_outbox_events_message
 ON agenda_outbox_events(message_id, event_seq);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agenda_delivery_receipt_unique
+ON agenda_outbox_events(delivery_receipt_id)
+WHERE state='delivered' AND delivery_receipt_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_questions_company_state
 ON research_question_versions(company_ref, state);
 

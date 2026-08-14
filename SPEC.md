@@ -346,10 +346,17 @@ UsageEntry 与 CostEntry。route、adapter 或 output contract 失败时，coord
 WorkOrder 终结为 failed，再把 AgendaCycle 终结为 failed，不能留下可被其他 worker 重领的僵尸任务。
 全局 agenda pause 在任何 broker 调用前生效。
 
-AgendaDecision 会原子创建 owner-only durable outbox message。Core 只保存 pending/claimed/delivered/
-failed 状态和 delivery receipt；OpenClaw delivery adapter 尚未接入，不得把外部投递成功伪装成已完成。
-人类治理操作使用一次性 token CLI：签发、执行一个 RPC、立即移除，token 配置不得保留 live human
-principal。
+AgendaDecision 会原子创建 owner-only durable outbox message。OpenClaw/Discord bridge 必须先原子
+claim，并把 attempt、lease expiry 和 endpoint 写进 append-only event；只有外部 API 返回 message id，
+或用确定性 marker 在目标频道找回已发消息后，才能写 delivered receipt。claimed lease 到期可回收，
+failed event 带 retry time，旧 attempt 不能覆盖新 claim。发送成功与 receipt commit 之间崩溃时，下一轮
+必须先搜索 marker，再决定是否补投，因此不能把“CLI 已退出”直接当作未发送。
+
+Discord reaction ingestion 使用独立的 feedback-only principal，不复用 Core 或 human governance token。
+bridge 只接受配置白名单中的 Discord user id，并把 ✅/❌ 写成 `agree/disagree`；同一用户同时点两种
+reaction 时不入账。projection 只展示标签计数和认可率，不公开 Discord user id。policy、mandate、
+pause 等人类治理操作仍使用一次性 token CLI：签发、执行一个 RPC、立即移除，token 配置不得保留
+live human principal。
 
 ### 冻结词表
 
@@ -412,6 +419,7 @@ Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把
 | Agenda schema、append-only cycle/decision、确定性排序与 durable outbox | E1/E2 | `tests/test_agenda.py` |
 | PerceptionSnapshot、backup/restore 与 ephemeral governance | E1/E2 | `tests/test_perception_backup.py`、`tests/test_governance_cli.py` |
 | Scheduler → Router → broker adapter → usage/cost → AgendaDecision thin slice | E1 | `tests/test_agenda_coordinator.py` |
+| outbox claim/lease、Discord reconciliation、receipt 与 reaction feedback | E1/E2 | `tests/test_openclaw_agenda_bridge.py` |
 | authority → read-only dashboard projection 与敏感字段隔离 | E1 | `tests/test_dashboard_projector.py` |
 | dashboard 固定 GET API、只读连接与页面资源 | E2 | `tests/test_dashboard.py` |
 | 实际 hostile-code sandbox backend 与自动 monitoring | E1 | 本 slice 排除 |

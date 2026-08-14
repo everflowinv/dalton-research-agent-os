@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dalton_core.agenda import AgendaStore, AgendaValidationError
+from dalton_core.agenda import AgendaConflict, AgendaStore, AgendaValidationError
 from dalton_core.observability import ObservabilityStore
 from dalton_core.store import DaltonStore
 
@@ -68,6 +68,36 @@ class AgendaTests(unittest.TestCase):
             version_id="agenda-control-version:2", idempotency_key="resume:1",
         )
         return p, m
+
+    def test_existing_feedback_table_migrates_before_new_index_is_created(self):
+        database = Path(self.tmp.name) / "legacy-agenda.sqlite"
+        connection = sqlite3.connect(database)
+        connection.execute(
+            "CREATE TABLE agenda_feedback ("
+            "feedback_id TEXT PRIMARY KEY,decision_id TEXT NOT NULL,"
+            "verdict TEXT NOT NULL,notes TEXT NOT NULL,actor_ref TEXT NOT NULL,"
+            "created_at TEXT NOT NULL,content_hash TEXT NOT NULL)"
+        )
+        connection.close()
+        legacy_store = DaltonStore(database)
+        try:
+            migrated = AgendaStore(legacy_store)
+            columns = {
+                row["name"]
+                for row in migrated.connection.execute("PRAGMA table_info(agenda_feedback)")
+            }
+            self.assertTrue(
+                {"prior_feedback_id", "subject_ref", "source", "source_event_ref"}
+                <= columns
+            )
+            self.assertIsNotNone(
+                migrated.connection.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='index' AND name='idx_agenda_feedback_subject'"
+                ).fetchone()
+            )
+        finally:
+            legacy_store.close()
 
     def test_fail_closed_bootstrap_and_bounded_features(self):
         self.assertTrue(self.agenda.control_state()["paused"])
@@ -133,14 +163,86 @@ class AgendaTests(unittest.TestCase):
         self.assertEqual(decision["selected_candidate_refs"], ["candidate:a", "candidate:b"])
         pending = self.agenda.pending_outbox()
         self.assertEqual(len(pending), 1)
+        claimed = self.agenda.claim_outbox(
+            endpoint_ref="openclaw:discord:test",
+            actor_ref="core",
+            idempotency_key="claim:1",
+            now=NOW,
+            claim_ttl_seconds=60,
+        )["claims"][0]
         with self.assertRaises(AgendaValidationError):
-            self.agenda.record_delivery(pending[0]["message_id"], state="delivered", actor_ref="bridge")
+            self.agenda.record_delivery(
+                pending[0]["message_id"], state="delivered",
+                delivery_attempt_id=claimed["delivery_attempt_id"], actor_ref="core",
+                idempotency_key="delivery:bad",
+            )
         delivered = self.agenda.record_delivery(
-            pending[0]["message_id"], state="delivered", actor_ref="bridge",
-            delivery_receipt_id="receipt:1",
+            pending[0]["message_id"], state="delivered", actor_ref="core",
+            delivery_attempt_id=claimed["delivery_attempt_id"],
+            delivery_receipt_id="receipt:1", idempotency_key="delivery:1",
         )
         self.assertEqual(delivered["delivery_receipt_id"], "receipt:1")
         self.assertEqual(self.agenda.pending_outbox(), [])
+        self.assertEqual(self.agenda.cycle(started["cycle_id"])["state"], "delivered")
+
+    def test_expired_claim_is_recovered_and_stale_completion_is_rejected(self):
+        self.govern()
+        started = self.agenda.start_cycle(
+            "agenda:2026-08-14:wanhua:recovery",
+            perception_snapshot_ref="perception:2", perception_snapshot_hash="b" * 64,
+            mandate_version_ref="mandate-version:1", policy_version_ref="agenda-policy-version:1",
+            company_ref="wanhua", actor_ref="core", cycle_id="agenda-cycle:recovery",
+            idempotency_key="cycle:recovery",
+        )
+        self.agenda.add_candidates(
+            started["cycle_id"],
+            candidates=[{
+                "candidate_id": "candidate:recovery", "company_ref": "wanhua",
+                "question": "Recovery question?", "answer_criteria": "Recovery answer",
+                "features": {"mandate_relevance": 3, "catalyst_urgency": 2, "evidence_staleness": 1, "decision_impact": 3},
+                "rationale": "recovery", "source_refs": ["evidence:recovery"],
+            }],
+            actor_ref="core", idempotency_key="candidates:recovery",
+        )
+        self.agenda.decide_cycle(
+            started["cycle_id"], actor_ref="core", decision_id="decision:recovery",
+            idempotency_key="decision:recovery",
+        )
+        first = self.agenda.claim_outbox(
+            endpoint_ref="openclaw:discord:test", actor_ref="core",
+            idempotency_key="claim:recovery:1", now=NOW, claim_ttl_seconds=1,
+        )["claims"][0]
+        second = self.agenda.claim_outbox(
+            endpoint_ref="openclaw:discord:test", actor_ref="core",
+            idempotency_key="claim:recovery:2", now="2026-08-14T10:00:02+00:00",
+            claim_ttl_seconds=60,
+        )["claims"][0]
+        self.assertNotEqual(first["delivery_attempt_id"], second["delivery_attempt_id"])
+        with self.assertRaises(AgendaConflict):
+            self.agenda.record_delivery(
+                first["message_id"], state="delivered",
+                delivery_attempt_id=first["delivery_attempt_id"], delivery_receipt_id="receipt:stale",
+                actor_ref="core", idempotency_key="delivery:stale",
+            )
+
+    def test_feedback_is_append_only_per_subject(self):
+        self.test_cycle_selection_is_deterministic_and_outbox_requires_receipt()
+        first = self.agenda.record_feedback(
+            "decision:1", verdict="agree", notes="yes", actor_ref="human:owner",
+            subject_ref="human:owner", feedback_id="feedback:1", idempotency_key="feedback:1",
+        )
+        duplicate = self.agenda.record_feedback(
+            "decision:1", verdict="agree", notes="same verdict", actor_ref="human:owner",
+            subject_ref="human:owner", prior_feedback_ref=first["id"],
+            feedback_id="feedback:ignored", idempotency_key="feedback:ignored",
+        )
+        self.assertEqual(duplicate["status"], "duplicate")
+        changed = self.agenda.record_feedback(
+            "decision:1", verdict="disagree", notes="changed", actor_ref="human:owner",
+            subject_ref="human:owner", prior_feedback_ref=first["id"],
+            feedback_id="feedback:2", idempotency_key="feedback:2",
+        )
+        self.assertEqual(changed["prior_feedback_ref"], first["id"])
 
     def test_direct_writes_and_idempotency_conflicts_fail_closed(self):
         with self.assertRaises(sqlite3.DatabaseError):

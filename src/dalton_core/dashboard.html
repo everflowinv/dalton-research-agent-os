@@ -48,6 +48,17 @@
     .card-value { margin-top: 8px; font-family: Georgia, serif; font-size: 32px; line-height: 1.1; font-variant-numeric: tabular-nums; }
     .card-note { margin-top: 8px; color: var(--muted); font-size: 12px; }
     .layout { display: grid; grid-template-columns: minmax(0,1.55fr) minmax(320px,.85fr); gap: 16px; }
+    .agenda-panel { margin-bottom: 16px; }
+    .agenda-overview { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; padding: 0 20px 16px; }
+    .agenda-stat { padding: 12px 14px; border: 1px solid var(--line); border-radius: 13px; background: rgba(247,247,242,.72); }
+    .agenda-stat strong { display: block; font: 24px/1.1 Georgia, serif; font-variant-numeric: tabular-nums; }
+    .agenda-stat span { color: var(--muted); font-size: 11px; }
+    .agenda-cycle { padding: 15px 20px; border-top: 1px solid var(--line); }
+    .agenda-cycle-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+    .agenda-cycle-meta { color: var(--muted); font-size: 11px; margin-top: 3px; }
+    .agenda-question { margin-top: 10px; padding-left: 14px; border-left: 2px solid var(--green-soft); }
+    .agenda-question strong { color: var(--green); font-size: 11px; margin-right: 7px; }
+    .agenda-question small { display: block; color: var(--muted); margin-top: 2px; }
     .stack { display: grid; gap: 16px; align-content: start; }
     .panel { border-radius: 20px; overflow: hidden; }
     .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 14px; padding: 18px 20px 12px; }
@@ -85,6 +96,7 @@
     .error { padding: 36px; color: var(--red); text-align: center; }
     @media (max-width: 980px) {
       .metrics { grid-template-columns: repeat(2,minmax(0,1fr)); }
+      .agenda-overview { grid-template-columns: repeat(2,minmax(0,1fr)); }
       .layout { grid-template-columns: 1fr; }
     }
     @media (max-width: 620px) {
@@ -92,6 +104,7 @@
       header { display: block; }
       .freshness { text-align: left; margin-top: 12px; }
       .metrics { grid-template-columns: 1fr; }
+      .agenda-overview { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -112,6 +125,11 @@
       <article class="card"><div class="card-label">模型 Token</div><div class="card-value" id="metric-tokens">—</div><div class="card-note">只汇总标准化 UsageEntry</div></article>
       <article class="card"><div class="card-label">模型成本</div><div class="card-value" id="metric-cost">—</div><div class="card-note" id="metric-cost-note">不同币种不会混算</div></article>
     </section>
+    <article class="panel agenda-panel">
+      <div class="panel-head"><div><h2>Agenda Shadow</h2><div class="panel-sub">只监督问题选择、投递和人工标签，不执行研究</div></div><span class="pill" id="agenda-state">—</span></div>
+      <div class="agenda-overview" id="agenda-overview"></div>
+      <div id="agenda-cycles"></div>
+    </article>
     <section class="layout">
       <div class="stack">
         <article class="panel">
@@ -204,10 +222,35 @@
         row.append(text("div",a.title,"title"),text("small",`${a.kind} · ${a.media_type} · ${compact(a.size_bytes)}B`)); box.append(row);
       });
     }
+    function renderAgenda(data){
+      const overview=data.overview; const stats=$("agenda-overview"); stats.replaceChildren();
+      const state=$("agenda-state");
+      if(!overview){ state.textContent="未接入"; return empty(stats,"Agenda authority 尚未进入投影"); }
+      state.textContent=overview.paused?"已暂停":"运行中"; state.className=`pill ${overview.paused?"retry":"running"}`;
+      const metric=(value,label)=>{ const n=document.createElement("div"); n.className="agenda-stat"; n.append(text("strong",value),text("span",label)); stats.append(n); };
+      metric(`${overview.decided_cycles}/${overview.total_cycles}`,"已决定 / 总 cycle");
+      metric(overview.delivered_cards,"已送达 Agenda 卡");
+      metric(overview.labeled_decisions,"有人工标签的决策");
+      metric(overview.agreement_rate==null?"—":`${Math.round(overview.agreement_rate*100)}%`,"当前认可率");
+      const box=$("agenda-cycles"); box.replaceChildren(); const questions=new Map();
+      data.questions.forEach(q=>{ if(!questions.has(q.cycle_ref))questions.set(q.cycle_ref,[]); questions.get(q.cycle_ref).push(q); });
+      if(!data.cycles.length)return empty(box,"还没有 Agenda cycle");
+      data.cycles.slice(0,10).forEach(c=>{
+        const row=document.createElement("div"); row.className="agenda-cycle";
+        const head=document.createElement("div"); head.className="agenda-cycle-head";
+        const copy=document.createElement("div"); copy.append(text("div",c.company_ref,"title"),text("div",`${c.delivery_state} · ${c.feedback_state} · 投递 ${c.delivery_attempts} 次`,"agenda-cycle-meta"));
+        head.append(copy,text("span",c.state,`pill ${c.state==="delivered"?"done":c.state==="failed"?"failed":"ready"}`)); row.append(head);
+        (questions.get(c.cycle_ref)||[]).filter(q=>q.selection_state==="selected").forEach(q=>{
+          const item=document.createElement("div"); item.className="agenda-question";
+          const line=document.createElement("div"); line.append(text("strong",`#${q.selection_rank}`),document.createTextNode(q.question));
+          item.append(line,text("small",`验收：${q.answer_criteria} · 分数 ${q.total_score??"—"}`)); row.append(item);
+        }); box.append(row);
+      });
+    }
     async function boot(){
       try {
-        const [summary,workflows,models,capabilities,artifacts,status]=await Promise.all([
-          get("/v1/dashboard/summary"),get("/v1/workflows"),get("/v1/models"),get("/v1/capabilities"),get("/v1/artifacts"),get("/v1/projection/status")
+        const [summary,workflows,models,capabilities,artifacts,agenda,status]=await Promise.all([
+          get("/v1/dashboard/summary"),get("/v1/workflows"),get("/v1/models"),get("/v1/capabilities"),get("/v1/artifacts"),get("/v1/agenda"),get("/v1/projection/status")
         ]);
         $("fresh-state").textContent=status.partial_data?"数据不完整":"投影已就绪"; $("as-of").textContent=`截至 ${status.as_of}`;
         if(status.warnings.length){ const n=$("notice"); n.style.display="block"; n.textContent=status.warnings.join("；"); }
@@ -217,6 +260,7 @@
         const priced=s.costs.filter(x=>x.amount_micros!=null); if(priced.length===1){ const c=priced[0]; $("metric-cost").textContent=`${c.currency} ${(c.amount_micros/1e6).toFixed(2)}`; $("metric-cost-note").textContent=c.unpriced_entries?`${c.unpriced_entries} 条尚未定价`:"按历史价格版本计算"; } else { $("metric-cost").textContent=priced.length?`${priced.length} 种币种`:"未定价"; }
         renderWorkflows(workflows.data); const trees=await Promise.all(workflows.data.slice(0,8).map(w=>get(`/v1/workflows/${encodeURIComponent(w.workflow_ref)}/tree`).then(x=>x.data))); renderTasks(trees);
         renderModels(models.data); renderCapabilities(capabilities.data); renderArtifacts(artifacts.data);
+        renderAgenda(agenda.data);
       } catch(err) { document.querySelector("main").replaceChildren(text("div",`看板读取失败：${err.message}`,"error")); }
     }
     boot();

@@ -131,6 +131,9 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "create_agenda_policy", "create_mandate", "create_priority_override",
     "set_agenda_pause", "record_agenda_feedback",
 })
+FEEDBACK_BRIDGE_OPERATIONS = frozenset({
+    "list_agenda_feedback_targets", "record_agenda_feedback",
+})
 CORE_OPERATIONS = frozenset({
     "register_invocation", "stage_change", "verify_change", "commit",
     "current_pointer", "get_version", "list_events", "active_policy",
@@ -142,7 +145,7 @@ CORE_OPERATIONS = frozenset({
     "agenda_budget_status",
     "active_priority_overrides", "start_agenda_cycle", "add_agenda_candidates",
     "decide_agenda_cycle", "fail_agenda_cycle", "agenda_cycle", "agenda_cycle_by_key",
-    "pending_agenda_outbox", "record_agenda_delivery",
+    "pending_agenda_outbox", "claim_agenda_outbox", "record_agenda_delivery",
     "create_workflow_version", "link_work_order", "record_usage",
     "create_price_rate_version", "record_cost",
 })
@@ -189,8 +192,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "agenda_cycle": frozenset({"cycle_id"}),
     "agenda_cycle_by_key": frozenset({"cycle_key"}),
     "pending_agenda_outbox": frozenset({"limit"}),
-    "record_agenda_delivery": frozenset({"message_id", "state", "delivery_receipt_id", "error_code", "actor_ref"}),
-    "record_agenda_feedback": frozenset({"decision_id", "verdict", "notes", "feedback_id", "idempotency_key", "actor_ref"}),
+    "claim_agenda_outbox": frozenset({"endpoint_ref", "now", "claim_ttl_seconds", "max_attempts", "limit", "idempotency_key", "actor_ref"}),
+    "record_agenda_delivery": frozenset({"message_id", "state", "delivery_attempt_id", "delivery_receipt_id", "error_code", "retry_after", "idempotency_key", "actor_ref"}),
+    "list_agenda_feedback_targets": frozenset({"endpoint_ref", "limit"}),
+    "record_agenda_feedback": frozenset({"decision_id", "verdict", "notes", "feedback_id", "idempotency_key", "subject_ref", "prior_feedback_ref", "source", "source_event_ref", "actor_ref"}),
     "create_workflow_version": frozenset({"workflow_ref", "title", "objective", "scope_refs", "root_work_order_refs", "governance_policy_ref", "prior_version_ref", "version_id", "idempotency_key", "actor_ref"}),
     "link_work_order": frozenset({"workflow_ref", "parent_work_order_ref", "child_work_order_ref", "relation", "sequence", "actor_ref", "link_id", "idempotency_key"}),
     "record_usage": frozenset({"invocation_ref", "entry_id", "occurred_at", "metering_source", "measurement_status", "raw_usage", "workflow_ref", "provider_usage_ref", "correction_of_ref", "actor_ref", "idempotency_key", "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "total_tokens", "requests", "duration_ms", "input_bytes", "output_bytes"}),
@@ -220,6 +225,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "add_agenda_candidates": "actor_ref",
     "decide_agenda_cycle": "actor_ref",
     "fail_agenda_cycle": "actor_ref",
+    "claim_agenda_outbox": "actor_ref",
     "record_agenda_delivery": "actor_ref",
     "record_agenda_feedback": "actor_ref",
     "create_workflow_version": "actor_ref",
@@ -280,6 +286,11 @@ def load_principals(path: str | Path) -> dict[str, Principal]:
         if principal_id == "worker" and not set(operations) <= WORKER_OPERATIONS:
             raise WriterServerError("token config is invalid")
         if principal_id == "verifier" and not set(operations) <= VERIFIER_OPERATIONS:
+            raise WriterServerError("token config is invalid")
+        if principal_id == "feedback-bridge" and (
+            set(operations) != FEEDBACK_BRIDGE_OPERATIONS
+            or actor_ref != "bridge:openclaw-discord"
+        ):
             raise WriterServerError("token config is invalid")
         if principal_id in result:
             raise WriterServerError("token config is invalid")
@@ -555,7 +566,17 @@ class WriterServer:
         if operation in HUMAN_GOVERNANCE_OPERATIONS and _HUMAN_ACTOR_RE.fullmatch(
             principal.resolved_actor_ref
         ) is None:
-            raise PermissionError("governance changes require an authenticated human principal")
+            if operation != "record_agenda_feedback" or principal.operations != FEEDBACK_BRIDGE_OPERATIONS:
+                raise PermissionError("governance changes require an authenticated human principal")
+        if operation == "record_agenda_feedback" and principal.operations == FEEDBACK_BRIDGE_OPERATIONS:
+            subject_ref = result.get("subject_ref")
+            if not isinstance(subject_ref, str) or not subject_ref.startswith("human:discord-"):
+                raise PermissionError("feedback bridge requires a Discord human subject")
+            if result.get("source") != "openclaw_discord_reaction":
+                raise PermissionError("feedback bridge source is invalid")
+            source_event_ref = result.get("source_event_ref")
+            if not isinstance(source_event_ref, str) or not source_event_ref.startswith("discord-reaction:"):
+                raise PermissionError("feedback bridge source event is invalid")
         if operation in {"stage_change", "verify_change"}:
             self._authorize_invocation_subject(principal, operation, result)
         elif operation == "register_claim":
@@ -862,8 +883,14 @@ class WriterServer:
     def _op_pending_agenda_outbox(self, p: Mapping[str, Any]) -> Any:
         return self.agenda.pending_outbox(**dict(p))
 
+    def _op_claim_agenda_outbox(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.claim_outbox(**dict(p))
+
     def _op_record_agenda_delivery(self, p: Mapping[str, Any]) -> Any:
         return self.agenda.record_delivery(**dict(p))
+
+    def _op_list_agenda_feedback_targets(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.feedback_targets(**dict(p))
 
     def _op_record_agenda_feedback(self, p: Mapping[str, Any]) -> Any:
         return self.agenda.record_feedback(**dict(p))

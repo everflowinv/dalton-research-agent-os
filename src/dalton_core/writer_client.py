@@ -180,8 +180,14 @@ class WriterClient:
     def pending_agenda_outbox(self, limit: int = 100) -> Any:
         return self.call("pending_agenda_outbox", {"limit": limit})
 
+    def claim_agenda_outbox(self, **params: Any) -> Any:
+        return self.call("claim_agenda_outbox", params)
+
     def record_agenda_delivery(self, **params: Any) -> Any:
         return self.call("record_agenda_delivery", params)
+
+    def list_agenda_feedback_targets(self, **params: Any) -> Any:
+        return self.call("list_agenda_feedback_targets", params)
 
     def record_agenda_feedback(self, **params: Any) -> Any:
         return self.call("record_agenda_feedback", params)
