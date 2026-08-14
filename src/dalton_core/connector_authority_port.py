@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from typing import Any
 
@@ -73,6 +74,92 @@ class ConnectorAuthorityPort:
 
     def complete(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         return self._scheduler.complete(*args, **kwargs)
+
+    def reconcile_journaled_completion(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._scheduler.reconcile_journaled_completion(*args, **kwargs)
+
+    def get_reservation(self, reservation_ref: str) -> dict[str, Any]:
+        return self._connectors.get_reservation(reservation_ref)
+
+    def get_invocation(self, invocation_ref: str) -> dict[str, Any]:
+        return self._connectors.get_invocation(invocation_ref)
+
+    def get_profile(self, profile_ref: str) -> dict[str, Any]:
+        return self._connectors.get_profile(profile_ref)
+
+    def get_call_spec(self, call_spec_ref: str) -> dict[str, Any]:
+        return self._connectors.get_call_spec(call_spec_ref)
+
+    def _connector_record(
+        self, table: str, id_column: str, record_ref: str
+    ) -> dict[str, Any] | None:
+        row = self._connectors.connection.execute(
+            f"SELECT record_json FROM {table} WHERE {id_column}=?", (record_ref,)
+        ).fetchone()
+        return None if row is None else json.loads(row["record_json"])
+
+    def get_physical_attempt(self, attempt_ref: str) -> dict[str, Any] | None:
+        return self._connector_record(
+            "connector_physical_attempts", "physical_attempt_id", attempt_ref
+        )
+
+    def get_usage_entry(self, usage_ref: str) -> dict[str, Any] | None:
+        return self._connector_record(
+            "connector_usage_entries", "usage_entry_id", usage_ref
+        )
+
+    def get_cost_entry(self, cost_ref: str) -> dict[str, Any] | None:
+        return self._connector_record(
+            "connector_cost_entries", "cost_entry_id", cost_ref
+        )
+
+    def get_quota_settlement(self, settlement_ref: str) -> dict[str, Any] | None:
+        return self._connector_record(
+            "connector_quota_settlements", "settlement_id", settlement_ref
+        )
+
+    def get_source_envelope(self, source_ref: str) -> dict[str, Any] | None:
+        return self._connector_record(
+            "connector_source_envelopes", "source_envelope_id", source_ref
+        )
+
+    def get_artifact_version(self, version_ref: str) -> dict[str, Any]:
+        return self._observability.get_artifact_version_v2(version_ref)
+
+    def get_execution(self, execution_ref: str) -> dict[str, Any] | None:
+        row = self._connectors.connection.execute(
+            "SELECT execution_json,content_hash FROM execution_invocations "
+            "WHERE execution_id=?",
+            (execution_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "execution": json.loads(row["execution_json"]),
+            "content_hash": row["content_hash"],
+        }
+
+    def get_scheduler_result(self, result_ref: str) -> dict[str, Any] | None:
+        row = self._scheduler.connection.execute(
+            "SELECT work_order_id,attempt_number,result_envelope_hash,"
+            "result_envelope_json,outcome,content_hash,created_at "
+            "FROM scheduler_result_envelopes WHERE result_envelope_id=?",
+            (result_ref,),
+        ).fetchone()
+        return None if row is None else dict(row)
+
+    def get_scheduler_work_order(self, work_order_ref: str) -> dict[str, Any] | None:
+        row = self._scheduler.connection.execute(
+            "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
+            "WHERE work_order_id=?",
+            (work_order_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "work_order": json.loads(row["work_order_json"]),
+            "content_hash": row["work_order_hash"],
+        }
 
 
 __all__ = ["ConnectorAuthorityPort"]

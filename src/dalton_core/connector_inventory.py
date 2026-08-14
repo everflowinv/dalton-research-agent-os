@@ -638,6 +638,45 @@ def _array_of_strings() -> dict[str, Any]:
     return {"type": "array", "uniqueItems": True, "items": _string()}
 
 
+def _output_schema(slug: str, operation: str) -> dict[str, Any]:
+    if (slug, operation) in {
+        ("cninfo", "list_announcements"),
+        ("sec", "list_filings"),
+    }:
+        normalized_record = _object_schema(
+            {
+                "record_ref": _string(),
+                "revision_of_ref": {"type": ["string", "null"]},
+                "record_hash": {
+                    "type": "string", "pattern": "^[0-9a-f]{64}$",
+                },
+            },
+            ("record_ref", "revision_of_ref", "record_hash"),
+        )
+        return _object_schema(
+            {
+                "records": {"type": "array", "items": normalized_record},
+                "source_record_refs": _array_of_strings(),
+                "request_cursor": {"type": ["string", "null"]},
+                "next_cursor": {"type": ["string", "null"]},
+                "page_ordinal": _integer(1),
+                "provider_status": _integer(100),
+            },
+            (
+                "records", "source_record_refs", "request_cursor",
+                "next_cursor", "page_ordinal", "provider_status",
+            ),
+        )
+    return _object_schema(
+        {
+            "source_record_refs": _array_of_strings(),
+            "next_cursor": {"type": ["string", "null"]},
+            "provider_status": _integer(100),
+        },
+        ("source_record_refs", "next_cursor", "provider_status"),
+    )
+
+
 def _operation(
     name: str,
     *,
@@ -880,14 +919,7 @@ def _validate_frozen_profile_contract(profile: Mapping[str, Any]) -> None:
         )
         output_document = _schema_document(
             slug, name, "output",
-            _object_schema(
-                {
-                    "source_record_refs": _array_of_strings(),
-                    "next_cursor": {"type": ["string", "null"]},
-                    "provider_status": _integer(100),
-                },
-                ("source_record_refs", "next_cursor", "provider_status"),
-            ),
+            _output_schema(slug, name),
         )
         expected_documents.extend((input_document, output_document))
         mode = operation_definition["pagination"]
@@ -1022,14 +1054,7 @@ def build_connector_inventory() -> dict[str, Any]:
             )
             output_document = _schema_document(
                 slug, name, "output",
-                _object_schema(
-                    {
-                        "source_record_refs": _array_of_strings(),
-                        "next_cursor": {"type": ["string", "null"]},
-                        "provider_status": _integer(100),
-                    },
-                    ("source_record_refs", "next_cursor", "provider_status"),
-                ),
+                _output_schema(slug, name),
             )
             documents.extend((input_document, output_document))
             mode = operation_definition["pagination"]

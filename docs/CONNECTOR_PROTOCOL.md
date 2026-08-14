@@ -77,7 +77,9 @@ durable journal/raw spool、raw artifact 注册、Usage/Cost/Settlement 和 Resu
 reservation 写权限、Core token、真实 credential value 或数据库路径。
 
 当前实现已完成 control-plane contract、静态 resolver、双 use-time gate、durable journal、bounded
-content-addressed raw spool、窄 AuthorityPort 和 recorded transport executor。它只执行仓库内 fixture，
+content-addressed raw spool、窄 AuthorityPort 和 recorded transport executor。AuthorityPort 只暴露七类
+authority 写入、闭合 immutable receipt 读取和受约束的 Scheduler journal reconciliation，不把 Store 或
+SQLite connection 交给 coordinator。它只执行仓库内 fixture，
 没有 socket、credential grant、writer RPC 或真实 source。这个切片只允许 `auth_mode=none`；
 Runner 专用 authority API 派生 policy version、连续 reservation 序号、Profile 最大 bytes/records、保守成本和 TTL；
 released reservation 仍占序号，所以 physical attempt 可以留洞。Runner
@@ -204,8 +206,11 @@ Inventory 只表示 contract 已冻结并可离线验证。所有 profile 都必
 `get_hot_stocks` 的 operation-scoped fallback；fallback 必须带独立 target/source/adapter/provenance label，
 不得用于 `get_hot_posts`、`search_stock` 或 `get_stock_quote`，也不得冒充雪球帖子正文。
 
-CNINFO 与 SEC 的 recorded reference shadow 继续使用 offline adapter，不打开 socket。一个 bounded logical
-query 可以产生多次 physical attempt，但每一页都要独立 reservation、计量、结算和 raw artifact version。
+CNINFO 与 SEC 的 recorded reference shadow 继续使用 offline adapter，不打开 socket。Runtime adapter 的
+fixture 必须与 packaged deterministic fixture 逐对象相同；fixture 冻结 parent operation、完整 base
+parameters 和可复算 query hash。执行计划还显式绑定 selected scenario ref/hash/behavior，不能用 adapter
+constructor 的隐藏状态改写结果。一个 bounded logical query 可以产生多次 physical attempt，但每一页都要
+独立 reservation、计量、结算和 raw artifact version。
 第一页使用 AdapterRequest 0.2 的空 prior authority；后续页必须同时绑定：
 
 - parent `ConnectorCallSpec.query_hash`；
@@ -215,11 +220,19 @@ query 可以产生多次 physical attempt，但每一页都要独立 reservation
 
 任何 prior hash、cursor、ordinal、fixture/profile/template graph 或日期窗口不一致都在调用 adapter 前拒绝。
 到达分页终点才可声明 `enumerated`；达到 `max_pages` 但仍有 cursor 必须写 `partial`。每页标准化记录的
-`revision_of_ref` 只能指向本次 shadow 更早出现的记录。
+`revision_of_ref` 只能指向本次 shadow 更早出现的记录。Adapter 的 normalized page output 必须通过 inventory
+冻结的 closed output schema；缺字段、多字段或类型漂移都不能进入 authority。
 
-Parent runner journal 在 Scheduler completion 前持久化闭合 response、ResultEnvelope 及其 hash；恢复时先核对
-Scheduler 的 immutable result receipt，缺失才用同一 idempotency key 补写。这样 response-journal/Scheduler
-两个跨库 crash window 都能收敛，不能因为重放多写 SourceEnvelope、artifact、usage 或 settlement。
+每个成功页先注册自己的 ArtifactVersion，再把闭合 page receipt 写入 journal。`reserved` 可证明未执行时释放，
+`transport_started` 按 indeterminate 结算，`observed` 使用 transport 前冻结的 commit context 完成，不在恢复时
+重新授权已经发生的 transport；page2 capacity failure 会保留 page1 已注册 artifact，并让 parent 得到闭合
+retryable completion。
+
+Parent runner journal 在 Scheduler completion 前持久化闭合 response、ResultEnvelope、page receipts、commit
+context 及其 hash；任何恢复都先完成 closed validation 和 immutable authority 交叉核对。缺少 Scheduler result
+时，受限 reconciliation 只接受 lease 期内已落 journal 的 exact attempt/result authority；即使恢复发生在 lease
+过期后也可收敛，但 later attempt 已被重新 claim 时必须 fail closed。重放不能多写 SourceEnvelope、artifact、
+usage 或 settlement，也不能让 response outcome 与 Scheduler outcome 分叉。
 
 这两个 shadow 不进入 Research Ledger。只有后续 ContextPack/ClaimIndex builder 和独立 verifier 才能把
 SourceEnvelope 转成 candidate Evidence/Claim；P1-0 不写 Evidence、Claim 或 Thesis。

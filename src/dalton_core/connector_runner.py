@@ -287,7 +287,8 @@ def validate_connector_adapter_request(value: Mapping[str, Any]) -> dict[str, An
                 "mode", "cursor_field", "page_ordinal", "request_cursor",
                 "parent_query_hash", "prior_adapter_request_hash",
                 "prior_observation_hash", "prior_physical_attempt_ref",
-                "prior_physical_attempt_hash",
+                "prior_physical_attempt_hash", "recorded_scenario_ref",
+                "recorded_scenario_hash", "recorded_behavior",
             },
             "pagination_authority",
         )
@@ -308,6 +309,18 @@ def validate_connector_adapter_request(value: Mapping[str, Any]) -> dict[str, An
         pagination["parent_query_hash"] = _hash(
             pagination["parent_query_hash"], "pagination_authority.parent_query_hash"
         )
+        pagination["recorded_scenario_ref"] = _text(
+            pagination["recorded_scenario_ref"],
+            "pagination_authority.recorded_scenario_ref",
+        )
+        pagination["recorded_scenario_hash"] = _hash(
+            pagination["recorded_scenario_hash"],
+            "pagination_authority.recorded_scenario_hash",
+        )
+        if pagination["recorded_behavior"] not in {
+            "return", "rate_limited", "timeout", "normalize_error",
+        }:
+            raise RunnerValidationError("recorded scenario behavior is invalid")
         prior_names = (
             "prior_adapter_request_hash", "prior_observation_hash",
             "prior_physical_attempt_ref", "prior_physical_attempt_hash",
@@ -482,6 +495,13 @@ def validate_connector_runner_response(value: Mapping[str, Any]) -> dict[str, An
     ):
         raise RunnerValidationError(
             "succeeded response requires raw artifact and SourceEnvelope"
+        )
+    if wire["outcome"] != "succeeded" and (
+        wire["raw_artifact_version_ref"] is not None
+        or wire["source_envelope_ref"] is not None
+    ):
+        raise RunnerValidationError(
+            "non-success response cannot claim raw artifact or SourceEnvelope"
         )
     return _with_hash(wire, "ConnectorRunnerResponse")
 

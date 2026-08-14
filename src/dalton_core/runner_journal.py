@@ -22,12 +22,12 @@ _SCHEMA_PATH = Path(__file__).with_name("runner_journal_schema.sql")
 _TRANSITIONS = {
     None: frozenset({"admitted"}),
     "admitted": frozenset({"reserved"}),
-    "reserved": frozenset({"transport_started", "released_recovered"}),
+    "reserved": frozenset({"transport_started", "observed", "released_recovered"}),
     "transport_started": frozenset({"observed", "indeterminate_recovered"}),
     "observed": frozenset({"responded"}),
     "responded": frozenset(),
     "released_recovered": frozenset(),
-    "indeterminate_recovered": frozenset(),
+    "indeterminate_recovered": frozenset({"responded"}),
 }
 
 
@@ -229,6 +229,22 @@ class RunnerJournal:
         )
         assert row is not None
         return row
+
+    def event(self, event_ref: str) -> dict[str, Any]:
+        if not isinstance(event_ref, str) or not event_ref:
+            raise RunnerJournalError("event_ref must be non-empty")
+        row = self._connection.execute(
+            "SELECT * FROM runner_attempt_journal_events WHERE event_id=?",
+            (event_ref,),
+        ).fetchone()
+        if row is None:
+            raise RunnerJournalNotFound(event_ref)
+        ordinal = self._connection.execute(
+            "SELECT COUNT(*) AS n FROM runner_attempt_journal_events "
+            "WHERE runner_request_ref=? AND event_seq<=?",
+            (row["runner_request_ref"], row["event_seq"]),
+        ).fetchone()
+        return self._event(row, int(ordinal["n"]))
 
     def history(self, runner_request_ref: str) -> list[dict[str, Any]]:
         rows = self._connection.execute(

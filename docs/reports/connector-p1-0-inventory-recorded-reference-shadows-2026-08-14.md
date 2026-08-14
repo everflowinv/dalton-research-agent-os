@@ -1,7 +1,8 @@
 # Connector P1-0：十类 Inventory 与 CNINFO/SEC recorded reference shadows
 
-日期：2026-08-14  
-状态：P1-0a 已获独立 Go；P1-0b committed candidate 待最终复核  
+日期：2026-08-14
+
+状态：P1-0a 已获独立 Go；P1-0b hardening candidate 待 committed-tree 增量复核
 范围：离线 contract、synthetic/recorded fixture、authority replay；未部署、未访问真实数据源
 
 ## 阶段裁决
@@ -53,15 +54,19 @@ P1-0a 提交：`976548e`。独立裁决：**Go**。
 ## P1-0b：CNINFO/SEC recorded reference shadows
 
 P1-0b 只实现两个 public official-source 的离线参考链：CNINFO `list_announcements` 与 SEC `list_filings`。
-Fixture 是 synthetic recorded payload，不发网络请求。
+Fixture 是 synthetic recorded payload，不发网络请求。Runtime fixture 必须与 packaged deterministic fixture
+逐对象一致，并冻结 parent operation、base parameters 和 parent query hash；plan 与 AdapterRequest 显式绑定
+selected scenario ref/hash/behavior，adapter 不能靠隐藏 constructor state 切换场景。
 
 每一页都是独立 physical attempt：
 
 `Reservation → AdapterRequest 0.2 → Journal transport barrier → Observation → PhysicalAttempt → Usage → Cost → Settlement → ArtifactVersion`
 
 多页共用一个 logical invocation。AdapterRequest 0.2 在后续页绑定 parent query、上一页 request/observation/
-attempt hash、连续 cursor、当前页 parameters 和 page-specific query hash。每页 raw object 形成同一 artifact ref
-下的连续 version chain；SourceEnvelope 列出全部 physical attempts 和 record refs，最后一页为 result attempt。
+attempt hash、连续 cursor、当前页 parameters 和 page-specific query hash。每页 normalized output 都必须通过
+inventory 冻结的 closed output schema。每页 raw object 形成同一 artifact ref 下的连续 version chain，并在
+page commit 内独立注册 ArtifactVersion；SourceEnvelope 列出全部 physical attempts 和 record refs，最后一页
+为 result attempt。
 
 完整性规则：
 
@@ -73,18 +78,26 @@ attempt hash、连续 cursor、当前页 parameters 和 page-specific query hash
 - 任何成功页没有 finalized raw object 时拒绝完成；
 - 本阶段不写 Evidence、Claim、Thesis。
 
-跨库收敛顺序改为先把 response、ResultEnvelope 和 hash 写入 parent RunnerJournal，再幂等完成 Scheduler。
-恢复时核对 Scheduler immutable result receipt；两个 crash window 均能重放到一条事实链且不新增 Core rows。
+page recovery 覆盖 `reserved`、`transport_started`、`observed`、page artifact 与 page responded barrier：未执行的
+reservation 可释放，transport_started 保守记为 indeterminate，observed 使用冻结的 commit context 完成；第二页
+spool capacity failure 保留第一页已注册 artifact，并关闭 parent retryable completion。
 
-## Candidate 验证
+跨库收敛顺序改为先把 closed response、ResultEnvelope、page receipts、commit context 和 hash 写入 parent
+RunnerJournal，再幂等完成 Scheduler。恢复先完成闭合校验并与 immutable authority 交叉核对；受限 Scheduler
+reconciliation 允许 lease 期内已持久化的完成事实在 lease 过期后收敛，但 later attempt 已重新 claim 时 fail
+closed。Coordinator 只持有窄 AuthorityPort，不直接持有 ConnectorStore、Scheduler 或 SQLite connection。
 
-- recorded reference shadow 专项：9/9；
-- Runner/transport/contracts 相关：39/39；
-- Python 全量：305/305；
+## Hardening candidate 验证
+
+- recorded reference shadow 专项：17/17；
+- Runner/transport/inventory/contracts/Scheduler 组合：74/74；
+- Python 全量：313/313；
+- broker：15/15；
 - `compileall`、`git diff --check`：通过。
 
-P1-0b 的 committed candidate 仍需 Fable 5 最终 hostile review、deterministic wheel/clean install 和 GitHub CI。
-这些检查完成前，本报告不把 P1-0b 写成 Go。
+上一份 committed candidate `9599ea8` 经 Fable 5 hostile review 裁决为 No-Go。本次 hardening 已为其八类
+blocker 加入回归；形成新提交后仍需 Fable 5 对 committed tree 增量复核，并完成 deterministic wheel/clean
+install 和 GitHub CI。这些检查完成前，本报告不把 P1-0b 写成 Go。
 
 ## 仍然 No-Go
 

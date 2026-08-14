@@ -64,7 +64,10 @@ def _with_hash(value: Mapping[str, Any]) -> dict[str, Any]:
 def validate_recorded_source_fixture(spec: Mapping[str, Any]) -> dict[str, Any]:
     wire = _closed(
         spec,
-        {"schema_version", "id", "created_at", "source_ref", "operation", "scenarios", "content_hash"},
+        {
+            "schema_version", "id", "created_at", "source_ref", "operation",
+            "parent_parameters", "parent_query_hash", "scenarios", "content_hash",
+        },
         "RecordedSourceFixture",
     )
     if wire["schema_version"] != "0.1":
@@ -83,6 +86,24 @@ def validate_recorded_source_fixture(spec: Mapping[str, Any]) -> dict[str, Any]:
         or wire["created_at"] != RECORDED_FIXTURE_CREATED_AT
     ):
         raise RecordedSourceError("recorded fixture identity is not frozen")
+    expected_parameters = (
+        {
+            "stock_code": "600309", "date_from": "2026-01-01",
+            "date_to": "2026-06-30", "page": 1, "page_size": 50,
+        }
+        if slug == "cninfo"
+        else {
+            "issuer": "0000000001", "form": "10-Q",
+            "date_from": "2026-01-01", "date_to": "2026-06-30", "limit": 50,
+        }
+    )
+    if wire["parent_parameters"] != expected_parameters:
+        raise RecordedSourceError("fixture parent parameters are not frozen")
+    expected_query_hash = content_hash(
+        {"operation": wire["operation"], "parameters": expected_parameters}
+    )
+    if wire["parent_query_hash"] != expected_query_hash:
+        raise RecordedSourceError("fixture parent_query_hash is not exact")
     if not isinstance(wire["scenarios"], list):
         raise RecordedSourceError("scenarios must be an array")
     scenario_fields = {
@@ -113,7 +134,7 @@ def validate_recorded_source_fixture(spec: Mapping[str, Any]) -> dict[str, Any]:
         if scenario["behavior"] != expected_behavior:
             raise RecordedSourceError("scenario does not bind its recorded behavior")
         advance = scenario["advance_seconds"]
-        if isinstance(advance, bool) or not isinstance(advance, (int, float)) or advance < 0:
+        if isinstance(advance, bool) or not isinstance(advance, int) or advance < 0:
             raise RecordedSourceError("advance_seconds must be non-negative")
         retry = scenario["retry_after_ms"]
         if retry is not None and (
@@ -190,6 +211,41 @@ def validate_recorded_source_fixture(spec: Mapping[str, Any]) -> dict[str, Any]:
                 count > 0 for count in normalized_counts
             ):
                 raise RecordedSourceError("non-empty fixture page lacks source records")
+            for page in pages:
+                payload = page["raw_payload"]
+                assert isinstance(payload, Mapping)
+                raw_records = (
+                    payload["announcements"] if slug == "cninfo" else payload["filings"]
+                )
+                for record in raw_records:
+                    if slug == "cninfo":
+                        published = _text(record["published_at"], "published_at")[:10]
+                        if (
+                            record["stock_code"] != expected_parameters["stock_code"]
+                            or not expected_parameters["date_from"]
+                            <= published
+                            <= expected_parameters["date_to"]
+                        ):
+                            raise RecordedSourceError(
+                                "CNINFO fixture record differs from its parent query"
+                            )
+                    else:
+                        accession = _text(record["accession"], "accession")
+                        filing_date = _text(record["filing_date"], "filing_date")
+                        if (
+                            accession[:10] != expected_parameters["issuer"]
+                            or record["form"]
+                            not in {
+                                expected_parameters["form"],
+                                expected_parameters["form"] + "/A",
+                            }
+                            or not expected_parameters["date_from"]
+                            <= filing_date
+                            <= expected_parameters["date_to"]
+                        ):
+                            raise RecordedSourceError(
+                                "SEC fixture record differs from its parent query"
+                            )
         elif scenario_name in {"schema_drift", "malformed"}:
             try:
                 normalizer(pages[0]["raw_payload"])
@@ -300,7 +356,15 @@ class RecordedSourceFixtureAdapter:
         if len(matches) != 1:
             raise RecordedSourceError("recorded scenario is not present")
         self._case = matches[0]
+        slug = "cninfo" if self.fixture["source_ref"] == "source:cninfo" else "sec"
+        self.scenario_ref = f"recorded-source-scenario:{slug}:{self.scenario}:0.1"
+        self.scenario_hash = content_hash(self._case)
+        self.behavior = self._case["behavior"]
         self._advance_clock = advance_clock
+
+    @property
+    def selected_case(self) -> dict[str, Any]:
+        return json.loads(canonical_json(self._case))
 
     def __call__(self, request: Mapping[str, Any], raw_sink: Any) -> dict[str, Any]:
         pagination = _closed(
@@ -309,13 +373,29 @@ class RecordedSourceFixtureAdapter:
                 "mode", "cursor_field", "page_ordinal", "request_cursor",
                 "parent_query_hash", "prior_adapter_request_hash",
                 "prior_observation_hash", "prior_physical_attempt_ref",
-                "prior_physical_attempt_hash",
+                "prior_physical_attempt_hash", "recorded_scenario_ref",
+                "recorded_scenario_hash", "recorded_behavior",
             },
             "pagination_authority",
         )
         ordinal = _page(request.get("physical_attempt_number"), "physical_attempt_number")
         if pagination["page_ordinal"] != ordinal:
             raise RecordedSourceError("pagination authority does not bind attempt ordinal")
+        if pagination["parent_query_hash"] != self.fixture["parent_query_hash"]:
+            raise RecordedSourceError("fixture does not bind the parent logical query")
+        if (
+            pagination["recorded_scenario_ref"] != self.scenario_ref
+            or pagination["recorded_scenario_hash"] != self.scenario_hash
+            or pagination["recorded_behavior"] != self.behavior
+        ):
+            raise RecordedSourceError("adapter request does not bind the selected scenario")
+        expected_parameters = dict(self.fixture["parent_parameters"])
+        if pagination["page_ordinal"] > 1:
+            expected_parameters[pagination["cursor_field"]] = pagination["request_cursor"]
+            if pagination["cursor_field"] == "page":
+                expected_parameters["page"] = pagination["page_ordinal"]
+        if request.get("parameters") != expected_parameters:
+            raise RecordedSourceError("adapter parameters differ from the frozen fixture query")
         if self._case["behavior"] == "rate_limited":
             return self._observation(
                 request,
@@ -403,8 +483,11 @@ class RecordedSourceFixtureAdapter:
             "retry_after_ms": retry_after_ms,
             "structured_output": {
                 "records": records,
+                "source_record_refs": refs,
                 "request_cursor": request_cursor,
+                "next_cursor": cursor,
                 "page_ordinal": page_ordinal,
+                "provider_status": provider_status,
             },
             "source_record_refs": refs,
             "cursor": cursor,
@@ -467,6 +550,19 @@ def build_recorded_source_fixtures() -> dict[str, dict[str, Any]]:
             "schema_version": "0.1", "id": "recorded-source-fixture:cninfo:0.1",
             "created_at": created_at, "source_ref": "source:cninfo",
             "operation": "list_announcements",
+            "parent_parameters": {
+                "stock_code": "600309", "date_from": "2026-01-01",
+                "date_to": "2026-06-30", "page": 1, "page_size": 50,
+            },
+            "parent_query_hash": content_hash(
+                {
+                    "operation": "list_announcements",
+                    "parameters": {
+                        "stock_code": "600309", "date_from": "2026-01-01",
+                        "date_to": "2026-06-30", "page": 1, "page_size": 50,
+                    },
+                }
+            ),
             "scenarios": [
                 _scenario("success", "return", [_recorded_page(1, "cninfo:success", cninfo_page_1)]),
                 _scenario("empty", "return", [_recorded_page(1, "cninfo:empty", {"page": 1, "announcements": []})]),
@@ -507,6 +603,19 @@ def build_recorded_source_fixtures() -> dict[str, dict[str, Any]]:
             "schema_version": "0.1", "id": "recorded-source-fixture:sec:0.1",
             "created_at": created_at, "source_ref": "source:sec-edgar",
             "operation": "list_filings",
+            "parent_parameters": {
+                "issuer": "0000000001", "form": "10-Q",
+                "date_from": "2026-01-01", "date_to": "2026-06-30", "limit": 50,
+            },
+            "parent_query_hash": content_hash(
+                {
+                    "operation": "list_filings",
+                    "parameters": {
+                        "issuer": "0000000001", "form": "10-Q",
+                        "date_from": "2026-01-01", "date_to": "2026-06-30", "limit": 50,
+                    },
+                }
+            ),
             "scenarios": [
                 _scenario("success", "return", [_recorded_page(1, "sec:success", sec_page_1)]),
                 _scenario("empty", "return", [_recorded_page(1, "sec:empty", {"ordinal": 1, "filings": []})]),

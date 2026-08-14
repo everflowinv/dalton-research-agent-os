@@ -423,6 +423,12 @@ class ConnectorTransportExecutorTests(unittest.TestCase):
                 "complete", "record_cost", "record_physical_attempt",
                 "record_source_envelope", "record_usage",
                 "register_artifact_version_v2", "settle_quota",
+                "reconcile_journaled_completion", "get_reservation",
+                "get_invocation", "get_profile", "get_call_spec",
+                "get_physical_attempt", "get_usage_entry", "get_cost_entry",
+                "get_quota_settlement", "get_source_envelope",
+                "get_artifact_version", "get_execution",
+                "get_scheduler_result", "get_scheduler_work_order",
             },
         )
 

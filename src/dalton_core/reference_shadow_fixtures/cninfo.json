@@ -1,8 +1,16 @@
 {
-  "content_hash": "516b75ade5f0c6c79115633c20bf1144716cbed223fcfb7fe70a3b97c53d0c3a",
+  "content_hash": "1865a446d8125a429d0e0e06e3c585860a4e2e5e20aa3f9f68e5c4c8109111e0",
   "created_at": "2026-08-14T21:00:00.000000+00:00",
   "id": "recorded-source-fixture:cninfo:0.1",
   "operation": "list_announcements",
+  "parent_parameters": {
+    "date_from": "2026-01-01",
+    "date_to": "2026-06-30",
+    "page": 1,
+    "page_size": 50,
+    "stock_code": "600309"
+  },
+  "parent_query_hash": "4239d0536032ce7c24bef265250fdc7ef677b719de97a921290305484e665a72",
   "scenarios": [
     {
       "advance_seconds": 0,

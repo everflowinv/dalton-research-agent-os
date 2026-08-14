@@ -1,8 +1,16 @@
 {
-  "content_hash": "2067b0ff3bdd694ff35c4526425632796438850215aa85f5e2b4da18489dd852",
+  "content_hash": "7bc33ccd5d6491eb822783087853e16399eccd5364ca5b5f2dca460716c8a59f",
   "created_at": "2026-08-14T21:00:00.000000+00:00",
   "id": "recorded-source-fixture:sec:0.1",
   "operation": "list_filings",
+  "parent_parameters": {
+    "date_from": "2026-01-01",
+    "date_to": "2026-06-30",
+    "form": "10-Q",
+    "issuer": "0000000001",
+    "limit": 50
+  },
+  "parent_query_hash": "0894b2f7814f85a3c3f32955047dbe4a765750159fbbaccf59b85b58ad3d8c2e",
   "scenarios": [
     {
       "advance_seconds": 0,

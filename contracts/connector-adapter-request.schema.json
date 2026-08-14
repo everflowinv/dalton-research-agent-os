@@ -71,13 +71,16 @@
     "pagination_authority": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["mode", "cursor_field", "page_ordinal", "request_cursor", "parent_query_hash", "prior_adapter_request_hash", "prior_observation_hash", "prior_physical_attempt_ref", "prior_physical_attempt_hash"],
+      "required": ["mode", "cursor_field", "page_ordinal", "request_cursor", "parent_query_hash", "recorded_scenario_ref", "recorded_scenario_hash", "recorded_behavior", "prior_adapter_request_hash", "prior_observation_hash", "prior_physical_attempt_ref", "prior_physical_attempt_hash"],
       "properties": {
         "mode": {"enum": ["page", "cursor"]},
         "cursor_field": {"enum": ["page", "cursor"]},
         "page_ordinal": {"type": "integer", "minimum": 1},
         "request_cursor": {"type": ["string", "null"]},
         "parent_query_hash": {"$ref": "#/$defs/hash"},
+        "recorded_scenario_ref": {"type": "string", "minLength": 1},
+        "recorded_scenario_hash": {"$ref": "#/$defs/hash"},
+        "recorded_behavior": {"enum": ["return", "rate_limited", "timeout", "normalize_error"]},
         "prior_adapter_request_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
         "prior_observation_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
         "prior_physical_attempt_ref": {"type": ["string", "null"]},

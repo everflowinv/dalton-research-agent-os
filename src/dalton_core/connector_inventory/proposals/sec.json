@@ -10,7 +10,7 @@
   "builder_ref": "builder:dalton-connector-inventory:0.1",
   "capability_proposal_ref": "capability-proposal:connector:sec:0.1",
   "connector_ref": "connector:sec-edgar",
-  "content_hash": "0c94575553a97eea2ef4c2feca4512c131356ecc06b0621f87dd6a9ba41c70fb",
+  "content_hash": "fa25e588d986719680d13c202b3f4acad16ea4a8724292c925a889395f3c1470",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "fixture_manifest_hash": "628f896f881e8584ed1e9949611aa0adaf833595fe7517308f55963b28e17ffc",
   "fixture_manifest_ref": "connector-fixture-manifest:sec:0.1",
@@ -23,7 +23,7 @@
       "input_schema_hash": "8fbd0650bfcb845f8bddded017551834d39174e9c74f785d1538e657c359cde4",
       "input_schema_ref": "schema:connector-inventory:sec:list_filings:input:0.1",
       "operation": "list_filings",
-      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_hash": "d832b00d9df34a53a22d54470112af1d9a0646ed1057d747a75ace4aa2f2d979",
       "output_schema_ref": "schema:connector-inventory:sec:list_filings:output:0.1",
       "pagination": "cursor",
       "side_effects": [
@@ -79,7 +79,7 @@
       ]
     }
   ],
-  "profile_template_hash": "2b8cc502b55fa53efd4eff97c1a2f3819e12185f8c38e982b00a23393baa2d07",
+  "profile_template_hash": "4c9ff55cdc639533309f07cbb4757d0961ccbce7e810ecce85dfc917f3d74583",
   "profile_template_ref": "connector-profile-template:sec:0.1",
   "promotion_policy_ref": "policy:connector-promotion:0.1",
   "requested_canary": null,

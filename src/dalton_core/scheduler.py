@@ -1044,6 +1044,244 @@ class Scheduler:
         assert response is not None
         return response
 
+    def reconcile_journaled_completion(
+        self,
+        work_order_id: str,
+        attempt_number: int,
+        owner_ref: str,
+        result_envelope: ResultEnvelope | Mapping[str, Any],
+        *,
+        lease_revision_ref: str,
+        lease_hash: str,
+        work_order_hash: str,
+        journal_event_ref: str,
+        journal_event_hash: str,
+        journal_event_at: str,
+        idempotency_key: str,
+        result_envelope_hash: str,
+        retry_at: str | datetime | None = None,
+    ) -> dict[str, Any]:
+        """Accept a trusted durable completion proven to predate lease expiry.
+
+        This is a narrow recovery path for a journal owned by another SQLite
+        authority.  It never authorizes new work: a later attempt that has
+        already been claimed or completed makes reconciliation fail closed.
+        """
+
+        work_order_id = _nonempty(work_order_id, "work_order_id")
+        attempt_number = _positive_int(attempt_number, "attempt_number")
+        owner_ref = _nonempty(owner_ref, "owner_ref")
+        lease_revision_ref = _nonempty(lease_revision_ref, "lease_revision_ref")
+        lease_hash = _sha256(lease_hash, "lease_hash")
+        work_order_hash = _sha256(work_order_hash, "work_order_hash")
+        journal_event_ref = _nonempty(journal_event_ref, "journal_event_ref")
+        journal_event_hash = _sha256(journal_event_hash, "journal_event_hash")
+        journal_at = _parse_time(journal_event_at)
+        idempotency_key = _nonempty(idempotency_key, "idempotency_key")
+        wire = self._result_wire(result_envelope)
+        calculated_hash = content_hash(wire)
+        if (
+            wire["work_order_ref"] != work_order_id
+            or result_envelope_hash != calculated_hash
+        ):
+            raise SchedulerValidationError(
+                "journaled ResultEnvelope authority does not match"
+            )
+        outcome = wire["status"]
+        if outcome not in _RESULT_STATES:
+            raise SchedulerValidationError("journaled result outcome is invalid")
+        retry_at_wire = None
+        if retry_at is not None:
+            if outcome != "retryable":
+                raise SchedulerValidationError(
+                    "retry_at is only valid for retryable results"
+                )
+            retry_at_wire = _timestamp(
+                _parse_time(retry_at) if isinstance(retry_at, str) else retry_at
+            )
+        request = {
+            "operation": "reconcile_journaled_completion",
+            "work_order_id": work_order_id,
+            "attempt_number": attempt_number,
+            "owner_ref": owner_ref,
+            "lease_revision_ref": lease_revision_ref,
+            "lease_hash": lease_hash,
+            "work_order_hash": work_order_hash,
+            "journal_event_ref": journal_event_ref,
+            "journal_event_hash": journal_event_hash,
+            "journal_event_at": _timestamp(journal_at),
+            "result_envelope_id": wire["id"],
+            "result_envelope_hash": calculated_hash,
+            "outcome": outcome,
+            "retry_at": retry_at_wire,
+        }
+        request_hash = content_hash(request)
+        now = _timestamp(self._now())
+        with self._transaction() as cur:
+            idem = cur.execute(
+                "SELECT request_hash,result_json FROM scheduler_completion_idempotency "
+                "WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if idem is not None:
+                if idem["request_hash"] != request_hash:
+                    return {
+                        "status": "conflict", "idempotency_key": idempotency_key,
+                        "request_hash": request_hash,
+                        "existing_request_hash": idem["request_hash"],
+                    }
+                saved = json.loads(idem["result_json"])
+                saved["status"] = "duplicate"
+                return saved
+            work = cur.execute(
+                "SELECT work_order_hash,max_attempts FROM scheduler_work_orders "
+                "WHERE work_order_id=?",
+                (work_order_id,),
+            ).fetchone()
+            lease = cur.execute(
+                "SELECT * FROM scheduler_leases WHERE lease_revision_id=?",
+                (lease_revision_ref,),
+            ).fetchone()
+            if (
+                work is None or work["work_order_hash"] != work_order_hash
+                or lease is None or lease["content_hash"] != lease_hash
+                or lease["work_order_id"] != work_order_id
+                or int(lease["attempt_number"]) != attempt_number
+                or lease["owner_ref"] != owner_ref
+            ):
+                raise SchedulerConflict(
+                    "journal reconciliation lease/work authority is invalid"
+                )
+            if not (
+                _parse_time(lease["issued_at"])
+                <= journal_at
+                < _parse_time(lease["expires_at"])
+            ):
+                raise LeaseExpired(
+                    "journaled completion was not durable within the lease"
+                )
+            current = self._latest_event(cur, work_order_id)
+            if current is None:
+                raise SchedulerConflict("journal reconciliation has no attempt history")
+            current_attempt = int(current["attempt_number"])
+            same_live_attempt = (
+                current_attempt == attempt_number
+                and current["state"] == "leased"
+                and current["lease_revision_id"] == lease_revision_ref
+            )
+            expired_unclaimed = (
+                current_attempt in {attempt_number, attempt_number + 1}
+                and current["state"] in {"ready", "failed"}
+                and cur.execute(
+                    "SELECT 1 FROM scheduler_attempt_events WHERE work_order_id=? "
+                    "AND attempt_number=? AND state='expired'",
+                    (work_order_id, attempt_number),
+                ).fetchone()
+                is not None
+            )
+            reclaimed = cur.execute(
+                "SELECT 1 FROM scheduler_attempt_events WHERE work_order_id=? "
+                "AND attempt_number>? AND state='leased' LIMIT 1",
+                (work_order_id, attempt_number),
+            ).fetchone()
+            if reclaimed is not None or (
+                not same_live_attempt and not expired_unclaimed
+            ):
+                raise SchedulerConflict(
+                    "a reclaimed or completed attempt blocks journal reconciliation"
+                )
+            if cur.execute(
+                "SELECT 1 FROM scheduler_formal_results WHERE work_order_id=?",
+                (work_order_id,),
+            ).fetchone() is not None:
+                raise SchedulerConflict(
+                    "formal result already blocks journal reconciliation"
+                )
+            receipt = {
+                "result_envelope_id": wire["id"], "work_order_id": work_order_id,
+                "attempt_number": attempt_number,
+                "result_envelope_hash": calculated_hash, "outcome": outcome,
+                "created_at": now,
+            }
+            receipt_hash = content_hash(receipt)
+            try:
+                cur.execute(
+                    "INSERT INTO scheduler_result_envelopes "
+                    "(result_envelope_id,work_order_id,attempt_number,"
+                    "result_envelope_hash,result_envelope_json,outcome,content_hash,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        wire["id"], work_order_id, attempt_number, calculated_hash,
+                        canonical_json(wire), outcome, receipt_hash, now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise SchedulerConflict(
+                    "journaled ResultEnvelope id already exists"
+                ) from exc
+            attempt_event = self._append_event(
+                cur, work_order_id=work_order_id, attempt_number=attempt_number,
+                state=outcome, now=now, lease_revision_id=lease_revision_ref,
+                result_envelope_id=wire["id"],
+                result_envelope_hash=calculated_hash,
+                reason="trusted_journal_reconciliation",
+            )
+            next_event = None
+            final_state = outcome
+            if outcome == "retryable":
+                if same_live_attempt:
+                    next_event = self._new_ready_or_exhausted(
+                        cur, work_order_id=work_order_id,
+                        completed_attempt=attempt_number, now=now,
+                        exhaustion_reason=(
+                            "retry_exhausted_after_journaled_retryable_result"
+                        ),
+                        retry_at=retry_at_wire,
+                    )
+                else:
+                    next_event = self._append_event(
+                        cur, work_order_id=work_order_id,
+                        attempt_number=current_attempt, state=current["state"],
+                        now=now, reason="journal_reconciliation_restored_retry_state",
+                        not_before=current["not_before"],
+                    )
+                final_state = next_event["state"]
+            if outcome in {"succeeded", "failed"}:
+                formal = {
+                    "id": _id("formal-result"), "work_order_id": work_order_id,
+                    "attempt_number": attempt_number,
+                    "result_envelope_id": wire["id"],
+                    "result_envelope_hash": calculated_hash,
+                    "terminal_state": outcome, "created_at": now,
+                }
+                cur.execute(
+                    "INSERT INTO scheduler_formal_results "
+                    "(result_record_id,work_order_id,attempt_number,result_envelope_id,"
+                    "result_envelope_hash,result_envelope_json,terminal_state,content_hash,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        formal["id"], work_order_id, attempt_number, wire["id"],
+                        calculated_hash, canonical_json(wire), outcome,
+                        content_hash(formal), now,
+                    ),
+                )
+            response = {
+                "status": "fresh", "idempotency_key": idempotency_key,
+                "request_hash": request_hash, "work_order_id": work_order_id,
+                "attempt_number": attempt_number, "attempt_state": outcome,
+                "work_state": final_state, "result_envelope_id": wire["id"],
+                "result_envelope_hash": calculated_hash,
+                "attempt_event": attempt_event, "next_event": next_event,
+                "journal_event_ref": journal_event_ref,
+                "journal_event_hash": journal_event_hash,
+            }
+            cur.execute(
+                "INSERT INTO scheduler_completion_idempotency "
+                "(idempotency_key,request_hash,result_json,created_at) VALUES(?,?,?,?)",
+                (idempotency_key, request_hash, canonical_json(response), now),
+            )
+            return response
+
     def status(self, work_order_id: str) -> dict[str, Any]:
         work_order_id = _nonempty(work_order_id, "work_order_id")
         work = self.connection.execute(

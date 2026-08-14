@@ -4,6 +4,7 @@ import copy
 import json
 import tempfile
 import unittest
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from dalton_core.capability_catalog import CapabilityCatalog
@@ -31,7 +32,7 @@ from dalton_core.recorded_source_adapter import (
     validate_recorded_source_fixture,
 )
 from dalton_core.runner_journal import RunnerJournal
-from dalton_core.scheduler import Scheduler
+from dalton_core.scheduler import LeaseExpired, Scheduler, SchedulerConflict
 from dalton_core.store import DaltonStore, content_hash
 from tests.test_capability_catalog import FakeAuthorities, descriptor_spec
 from tests.test_connector import (
@@ -101,6 +102,43 @@ class CapturingRecordedSourceFixtureAdapter(RecordedSourceFixtureAdapter):
         return super().__call__(request, raw_sink)
 
 
+class HostileOutputAdapter(CapturingRecordedSourceFixtureAdapter):
+    output_mutation: str
+
+    def __call__(self, request, raw_sink):
+        result = super().__call__(request, raw_sink)
+        structured = result["structured_output"]
+        if self.output_mutation == "extra":
+            structured["unexpected"] = True
+        elif self.output_mutation == "missing":
+            structured.pop("provider_status")
+        elif self.output_mutation == "type":
+            structured["page_ordinal"] = True
+        else:  # pragma: no cover - test helper guard
+            raise AssertionError(self.output_mutation)
+        return with_hash(
+            {key: value for key, value in result.items() if key != "content_hash"}
+        )
+
+
+class MutatingResponseJournal:
+    def __init__(self, journal: RunnerJournal):
+        self._journal = journal
+
+    def __getattr__(self, name):
+        return getattr(self._journal, name)
+
+    def append(self, runner_request_ref, state, payload, **kwargs):
+        changed = copy.deepcopy(payload)
+        if state == "responded" and "response" in changed:
+            response = changed["response"]
+            response["outcome"] = "failed"
+            changed["response"] = with_hash(
+                {key: value for key, value in response.items() if key != "content_hash"}
+            )
+        return self._journal.append(runner_request_ref, state, changed, **kwargs)
+
+
 class ReferenceShadowHarness:
     def __init__(
         self,
@@ -109,6 +147,9 @@ class ReferenceShadowHarness:
         *,
         max_pages: int = 2,
         fault_at: str | None = None,
+        parameter_overrides: Mapping[str, object] | None = None,
+        profile_mutator: Callable[[dict], None] | None = None,
+        spool_max_total_bytes: int = 2_000_000,
     ):
         self.source = source
         self.scenario = scenario
@@ -142,6 +183,17 @@ class ReferenceShadowHarness:
         adapter_ref = f"adapter:recorded-reference-shadow:{source}:0.1"
         adapter_hash = content_hash(
             {"adapter_ref": adapter_ref, "fixture_hash": self.fixture["content_hash"]}
+        )
+        package_manifest_ref = (
+            f"artifact:runner-package:recorded-reference-shadow:{source}:0.1"
+        )
+        package_manifest_hash = content_hash(
+            {
+                "schema_version": "0.1", "adapter_ref": adapter_ref,
+                "adapter_hash": adapter_hash,
+                "recorded_fixture_ref": self.fixture["id"],
+                "recorded_fixture_hash": self.fixture["content_hash"],
+            }
         )
         schema_hash = content_hash(
             {
@@ -203,8 +255,8 @@ class ReferenceShadowHarness:
             "runner_actor_ref": "runner:connector",
             "resolver_ref": "resolver:connector-static:0.1",
             "resolver_version": "0.1",
-            "package_manifest_ref": f"artifact:runner-packages:{source}-recorded:v1",
-            "package_manifest_hash": "9" * 64,
+            "package_manifest_ref": package_manifest_ref,
+            "package_manifest_hash": package_manifest_hash,
             "bindings": [binding],
         }
         self.manifest = validate_runner_environment_manifest(with_hash(manifest))
@@ -258,6 +310,8 @@ class ReferenceShadowHarness:
                 "resolve_public_only": True,
             },
         }
+        if profile_mutator is not None:
+            profile_mutator(profile)
         self.profile = self.connectors.register_profile(
             profile, idempotency_key=f"shadow:{source}:profile"
         )
@@ -304,6 +358,8 @@ class ReferenceShadowHarness:
                 "limit": 50,
             }
         )
+        if parameter_overrides is not None:
+            parameters.update(parameter_overrides)
         self.call = self.connectors.register_call_spec(
             {
                 "schema_version": "0.1", "id": self.call_id,
@@ -394,7 +450,9 @@ class ReferenceShadowHarness:
             visibility_scopes=["research"], clock=self.clock,
         )
         self.journal = RunnerJournal(self.core, clock=self.clock)
-        self.spool = RawSpool(self.temp.name, max_total_bytes=2_000_000)
+        self.spool = RawSpool(
+            self.temp.name, max_total_bytes=spool_max_total_bytes
+        )
         authority = ConnectorAuthorityPort(
             connectors=self.connectors,
             observability=ObservabilityStore(self.core),
@@ -406,8 +464,20 @@ class ReferenceShadowHarness:
             "created_at": self.clock().isoformat(timespec="microseconds"),
             "inventory_template_ref": self.template["id"],
             "inventory_template_hash": self.template["content_hash"],
+            "inventory_fixture_manifest_ref": self.template["fixture_manifest_ref"],
+            "inventory_fixture_manifest_hash": self.template["fixture_manifest_hash"],
             "recorded_fixture_ref": self.fixture["id"],
             "recorded_fixture_hash": self.fixture["content_hash"],
+            "transport_target_ref": self.template["transport"]["target_ref"],
+            "transport_target_hash": self.template["transport"]["target_hash"],
+            "transport_host_policy": self.template["transport"]["host_policy"],
+            "adapter_ref": adapter_ref, "adapter_hash": adapter_hash,
+            "package_manifest_ref": package_manifest_ref,
+            "package_manifest_hash": package_manifest_hash,
+            "recorded_scenario": scenario,
+            "recorded_scenario_ref": self.adapter.scenario_ref,
+            "recorded_scenario_hash": self.adapter.scenario_hash,
+            "recorded_behavior": self.adapter.behavior,
             "connector_profile_ref": self.profile["id"],
             "connector_profile_hash": self.profile["content_hash"],
             "source_ref": self.template["source_identity"]["source_ref"],
@@ -422,7 +492,7 @@ class ReferenceShadowHarness:
         self.coordinator = RecordedReferenceShadowCoordinator(
             plan=self.plan, gate=self.gate, journal=self.journal,
             spool=self.spool, authority=authority,
-            connector_reader=self.connectors, clock=self.clock,
+            clock=self.clock,
             fault_hook=(
                 None
                 if fault_at is None
@@ -435,7 +505,9 @@ class ReferenceShadowHarness:
         )
 
     def request(self) -> dict:
-        return with_hash(
+        if hasattr(self, "_request_wire"):
+            return copy.deepcopy(self._request_wire)
+        self._request_wire = with_hash(
             {
                 "schema_version": "0.1",
                 "id": f"connector-runner-request:{self.source}:shadow:1",
@@ -461,6 +533,7 @@ class ReferenceShadowHarness:
                 "idempotency_key": f"runner-request:{self.source}:shadow:1",
             }
         )
+        return copy.deepcopy(self._request_wire)
 
     def execute(self) -> dict:
         return self.coordinator.execute(
@@ -486,9 +559,15 @@ class RecordedReferenceShadowTests(unittest.TestCase):
         *,
         max_pages: int = 2,
         fault_at: str | None = None,
+        parameter_overrides: Mapping[str, object] | None = None,
+        profile_mutator: Callable[[dict], None] | None = None,
+        spool_max_total_bytes: int = 2_000_000,
     ) -> ReferenceShadowHarness:
         harness = ReferenceShadowHarness(
-            source, scenario, max_pages=max_pages, fault_at=fault_at
+            source, scenario, max_pages=max_pages, fault_at=fault_at,
+            parameter_overrides=parameter_overrides,
+            profile_mutator=profile_mutator,
+            spool_max_total_bytes=spool_max_total_bytes,
         )
         self.addCleanup(harness.close)
         return harness
@@ -512,6 +591,10 @@ class RecordedReferenceShadowTests(unittest.TestCase):
                 ),
                 built[source],
             )
+        cross_source = copy.deepcopy(built["cninfo"])
+        cross_source["parent_parameters"] = built["sec"]["parent_parameters"]
+        with self.assertRaises(AssertionError):
+            validate_json_schema(cross_source, schema, schema)
 
     def test_cninfo_and_sec_pagination_record_every_page_and_replay_zero_rows(self) -> None:
         for source in ("cninfo", "sec"):
@@ -619,6 +702,11 @@ class RecordedReferenceShadowTests(unittest.TestCase):
                 self.assertEqual(harness.count("connector_source_envelopes"), 0)
                 self.assertEqual(harness.count("observability_artifact_versions_v2"), 0)
                 self.assertEqual(harness.spool.total_bytes(), 0)
+                if scenario in {"schema_drift", "malformed"}:
+                    result = harness.journal.latest(harness.request()["id"])[
+                        "payload"
+                    ]["result_envelope"]
+                    self.assertEqual(result["error"]["code"], scenario)
 
     def test_plan_fixture_and_window_drift_fail_closed_before_transport(self) -> None:
         harness = self.harness("sec", "success")
@@ -641,7 +729,7 @@ class RecordedReferenceShadowTests(unittest.TestCase):
                     coordinator = RecordedReferenceShadowCoordinator(
                         plan=plan, gate=harness.gate, journal=harness.journal,
                         spool=harness.spool, authority=harness.coordinator.authority,
-                        connector_reader=harness.connectors, clock=harness.clock,
+                        clock=harness.clock,
                     )
                     coordinator.execute(
                         harness.request(),
@@ -667,6 +755,42 @@ class RecordedReferenceShadowTests(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(Exception):
                 validate_recorded_source_fixture(changed)
 
+    def test_runtime_fixture_must_equal_packaged_deterministic_fixture(self) -> None:
+        harness = self.harness("cninfo", "pagination")
+        mutated = copy.deepcopy(harness.fixture)
+        pagination = next(
+            item for item in mutated["scenarios"]
+            if item["scenario"] == "pagination"
+        )
+        pagination["pages"][0]["raw_payload"]["announcements"][0]["title"] = (
+            "Hostile but self-consistent replacement title"
+        )
+        mutated = with_hash(
+            {key: value for key, value in mutated.items() if key != "content_hash"}
+        )
+        mutated = validate_recorded_source_fixture(mutated)
+        harness.adapter.fixture = mutated
+        harness.adapter._case = next(
+            item for item in mutated["scenarios"]
+            if item["scenario"] == "pagination"
+        )
+        plan = copy.deepcopy(harness.plan)
+        plan["recorded_fixture_hash"] = mutated["content_hash"]
+        plan = with_hash(
+            {key: value for key, value in plan.items() if key != "content_hash"}
+        )
+        coordinator = RecordedReferenceShadowCoordinator(
+            plan=plan, gate=harness.gate, journal=harness.journal,
+            spool=harness.spool, authority=harness.coordinator.authority,
+            clock=harness.clock,
+        )
+        with self.assertRaises(RecordedReferenceShadowError):
+            coordinator.execute(
+                harness.request(),
+                scheduler_lease_token=harness.claim["lease_token"],
+            )
+        self.assertEqual(harness.count("connector_physical_attempts"), 0)
+
     def test_paginated_adapter_request_02_schema_and_hostile_mutations(self) -> None:
         harness = self.harness("cninfo", "success")
         admission = harness.gate.validate(
@@ -690,12 +814,14 @@ class RecordedReferenceShadowTests(unittest.TestCase):
         )
         validate_json_schema(request, schema, schema)
         self.assertEqual(request["protocol_version"], "0.2")
-        for mutation in ("query_hash", "prior_hash", "ordinal"):
+        for mutation in ("query_hash", "prior_hash", "ordinal", "scenario"):
             changed = copy.deepcopy(request)
             if mutation == "query_hash":
                 changed["query_hash"] = "0" * 64
             elif mutation == "prior_hash":
                 changed["pagination_authority"]["prior_observation_hash"] = "1" * 64
+            elif mutation == "scenario":
+                changed["pagination_authority"]["recorded_scenario_ref"] = ""
             else:
                 changed["pagination_authority"]["page_ordinal"] = 2
             changed = with_hash(
@@ -703,6 +829,219 @@ class RecordedReferenceShadowTests(unittest.TestCase):
             )
             with self.subTest(mutation=mutation), self.assertRaises(Exception):
                 validate_connector_adapter_request(changed)
+
+    def test_fixture_query_and_selected_scenario_are_explicit_authority(self) -> None:
+        mismatched = self.harness(
+            "cninfo", "success",
+            parameter_overrides={
+                "stock_code": "000001", "date_from": "2020-01-01",
+                "date_to": "2020-01-31",
+            },
+        )
+        with self.assertRaises(RecordedReferenceShadowError):
+            mismatched.execute()
+        self.assertEqual(mismatched.count("connector_physical_attempts"), 0)
+
+        hidden = self.harness("cninfo", "success")
+        hidden.adapter._case = next(
+            item for item in hidden.fixture["scenarios"]
+            if item["scenario"] == "rate_limited"
+        )
+        with self.assertRaises(RecordedReferenceShadowError):
+            hidden.execute()
+        self.assertEqual(hidden.count("connector_physical_attempts"), 0)
+
+    def test_normalized_output_is_validated_against_frozen_closed_schema(self) -> None:
+        for mutation in ("extra", "missing", "type"):
+            with self.subTest(mutation=mutation):
+                harness = self.harness("sec", "success")
+                harness.adapter.__class__ = HostileOutputAdapter
+                harness.adapter.output_mutation = mutation
+                response = harness.execute()
+                self.assertEqual(response["outcome"], "retryable")
+                self.assertIsNone(response["raw_artifact_version_ref"])
+                self.assertIsNone(response["source_envelope_ref"])
+                self.assertEqual(harness.count("observability_artifact_versions_v2"), 0)
+                self.assertEqual(harness.count("connector_source_envelopes"), 0)
+
+    def test_runtime_profile_and_inventory_graph_drift_fail_before_transport(self) -> None:
+        def hostile_hosts(profile: dict) -> None:
+            profile["allowed_hosts"] = ["evil.example"]
+
+        def hostile_network(profile: dict) -> None:
+            profile["network_policy"]["allow_redirects"] = True
+            profile["network_policy"]["max_redirects"] = 1
+
+        for mutation in (hostile_hosts, hostile_network):
+            with self.subTest(mutation=mutation.__name__):
+                harness = self.harness(
+                    "cninfo", "success", profile_mutator=mutation
+                )
+                with self.assertRaises(RecordedReferenceShadowError):
+                    harness.execute()
+                self.assertEqual(harness.count("connector_physical_attempts"), 0)
+
+        harness = self.harness("sec", "success")
+        plan = copy.deepcopy(harness.plan)
+        plan["inventory_fixture_manifest_hash"] = "1" * 64
+        plan = with_hash(
+            {key: value for key, value in plan.items() if key != "content_hash"}
+        )
+        coordinator = RecordedReferenceShadowCoordinator(
+            plan=plan, gate=harness.gate, journal=harness.journal,
+            spool=harness.spool, authority=harness.coordinator.authority,
+            clock=harness.clock,
+        )
+        with self.assertRaises(RecordedReferenceShadowError):
+            coordinator.execute(
+                harness.request(),
+                scheduler_lease_token=harness.claim["lease_token"],
+            )
+        self.assertEqual(harness.count("connector_physical_attempts"), 0)
+
+    def test_page_crash_barriers_recover_or_close_without_orphan_raw(self) -> None:
+        expectations = {
+            "after_page_reserved": "succeeded",
+            "after_page_transport_started": "retryable",
+            "after_page_observed": "succeeded",
+            "after_page_artifact_recorded": "succeeded",
+        }
+        for barrier, outcome in expectations.items():
+            with self.subTest(barrier=barrier):
+                harness = self.harness("cninfo", "success", fault_at=barrier)
+                with self.assertRaisesRegex(RuntimeError, barrier):
+                    harness.execute()
+                harness.coordinator.fault_hook = None
+                response = harness.execute()
+                self.assertEqual(response["outcome"], outcome)
+                self.assertEqual(
+                    harness.count("scheduler_result_envelopes", scheduler=True), 1
+                )
+                if outcome == "succeeded":
+                    self.assertEqual(
+                        harness.count("observability_artifact_versions_v2"), 1
+                    )
+                else:
+                    self.assertEqual(
+                        harness.count("observability_artifact_versions_v2"), 0
+                    )
+                    settlement = harness.core.connection.execute(
+                        "SELECT state FROM connector_quota_settlements"
+                    ).fetchone()
+                    self.assertEqual(settlement["state"], "indeterminate")
+
+        child = self.harness(
+            "cninfo", "pagination", fault_at="after_page_responded"
+        )
+        with self.assertRaisesRegex(RuntimeError, "after_page_responded"):
+            child.execute()
+        child.coordinator.fault_hook = None
+        self.assertEqual(child.execute()["outcome"], "succeeded")
+        self.assertEqual(child.count("connector_physical_attempts"), 2)
+        self.assertEqual(child.count("observability_artifact_versions_v2"), 2)
+
+        expired = self.harness(
+            "sec", "success", fault_at="after_page_reserved"
+        )
+        with self.assertRaisesRegex(RuntimeError, "after_page_reserved"):
+            expired.execute()
+        expired.coordinator.fault_hook = None
+        expired.clock.advance(31)
+        with self.assertRaises(LeaseExpired):
+            expired.execute()
+        settlement = expired.core.connection.execute(
+            "SELECT state FROM connector_quota_settlements"
+        ).fetchone()
+        self.assertEqual(settlement["state"], "released")
+        self.assertEqual(
+            expired.journal.latest(expired.request()["id"])["state"],
+            "released_recovered",
+        )
+
+        for barrier, expected in (
+            ("after_page_transport_started", "retryable"),
+            ("after_page_observed", "succeeded"),
+        ):
+            with self.subTest(expired_recovery=barrier):
+                durable = self.harness("sec", "success", fault_at=barrier)
+                with self.assertRaisesRegex(RuntimeError, barrier):
+                    durable.execute()
+                durable.coordinator.fault_hook = None
+                durable.clock.advance(31)
+                response = durable.execute()
+                self.assertEqual(response["outcome"], expected)
+                self.assertEqual(
+                    durable.count("scheduler_result_envelopes", scheduler=True), 1
+                )
+
+    def test_second_page_capacity_failure_keeps_first_page_registered_and_converges(self) -> None:
+        harness = self.harness(
+            "cninfo", "pagination", spool_max_total_bytes=1_000_100
+        )
+        response = harness.execute()
+        self.assertEqual(response["outcome"], "retryable")
+        self.assertIsNone(response["raw_artifact_version_ref"])
+        self.assertIsNone(response["source_envelope_ref"])
+        self.assertEqual(harness.count("connector_physical_attempts"), 2)
+        self.assertEqual(harness.count("observability_artifact_versions_v2"), 1)
+        self.assertEqual(harness.count("connector_source_envelopes"), 0)
+        before = {
+            table: harness.count(table)
+            for table in (
+                "connector_physical_attempts", "connector_usage_entries",
+                "connector_cost_entries", "connector_quota_settlements",
+                "observability_artifact_versions_v2", "runner_attempt_journal_events",
+            )
+        }
+        duplicate = harness.execute()
+        self.assertEqual(duplicate["idempotency_status"], "duplicate")
+        self.assertEqual(
+            before, {table: harness.count(table) for table in before}
+        )
+
+    def test_journaled_completion_reconciles_after_expiry_and_reclaim_race_fails_closed(self) -> None:
+        for swept in (False, True):
+            with self.subTest(swept=swept):
+                harness = self.harness(
+                    "sec", "success", fault_at="after_response_journaled"
+                )
+                with self.assertRaisesRegex(RuntimeError, "after_response_journaled"):
+                    harness.execute()
+                harness.coordinator.fault_hook = None
+                harness.clock.advance(31)
+                if swept:
+                    harness.scheduler.sweep_expired()
+                response = harness.execute()
+                self.assertEqual(response["outcome"], "succeeded")
+                self.assertEqual(
+                    harness.count("scheduler_result_envelopes", scheduler=True), 1
+                )
+
+        raced = self.harness(
+            "sec", "success", fault_at="after_response_journaled"
+        )
+        with self.assertRaisesRegex(RuntimeError, "after_response_journaled"):
+            raced.execute()
+        raced.coordinator.fault_hook = None
+        raced.clock.advance(31)
+        raced.scheduler.sweep_expired()
+        self.assertIsNotNone(
+            raced.scheduler.claim("runner:connector", work_order_id=raced.work.id)
+        )
+        with self.assertRaises(SchedulerConflict):
+            raced.execute()
+        self.assertEqual(raced.count("scheduler_result_envelopes", scheduler=True), 0)
+
+    def test_hostile_parent_response_is_rejected_before_scheduler_reconciliation(self) -> None:
+        harness = self.harness(
+            "cninfo", "success", fault_at="after_response_journaled"
+        )
+        hostile_journal = MutatingResponseJournal(harness.journal)
+        harness.journal = hostile_journal
+        harness.coordinator.journal = hostile_journal
+        with self.assertRaises(Exception):
+            harness.execute()
+        self.assertEqual(harness.count("scheduler_result_envelopes", scheduler=True), 0)
 
     def test_shadow_does_not_write_research_beliefs(self) -> None:
         harness = self.harness("sec", "success")

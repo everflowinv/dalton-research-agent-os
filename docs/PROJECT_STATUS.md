@@ -215,11 +215,18 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   reservation、physical attempt、Usage、Cost、Settlement 和 raw ArtifactVersion；多页共用一个 logical
   invocation，并用 AdapterRequest 0.2 把 parent query、上一页 request/observation/attempt hashes 与 cursor
   绑定到下一页参数；bounded window、页数上限、revision chain 和 completeness 全部显式；
+- Runtime fixture 必须与 packaged deterministic fixture 逐对象相同，并冻结 parent parameters/query hash；
+  plan 与 AdapterRequest 显式绑定 selected scenario。normalized output 必须通过 inventory 的 closed schema，
+  runtime profile 的 hosts/network/operation/schema/fixture/package graph 任一漂移都在 adapter 前拒绝；
 - 成功/empty/partial 才生成 SourceEnvelope；schema drift、429、timeout、malformed 不生成 raw artifact 或
-  SourceEnvelope。response journal 先持久化 result/response completion authority，再幂等完成 Scheduler，两个
-  跨库 crash window 重放后零新增 Core facts；
-- 当前 P1-0b candidate 专项 9/9、相关 Runner/transport/contracts 39/39、Python 全量 305/305 通过，等待
-  Fable 5 对 committed candidate 做最终独立复核；
+  SourceEnvelope。每个成功页在 page commit 内独立注册 ArtifactVersion；page recovery 覆盖 reserved、
+  transport_started、observed、artifact/responded barrier 和第二页 capacity failure；
+- response journal 先持久化 closed result/response/page receipts/commit context，再通过窄 AuthorityPort 做
+  Scheduler reconciliation。lease 过期后仍可收敛 lease 期内已持久化的完成事实；later attempt 已重新 claim
+  时 fail closed，不能覆盖新 authority；
+- 上一份 committed candidate `9599ea8` 经 Fable 5 裁决 No-Go。本次 hardening candidate 已关闭其八类 blocker；
+  专项 17/17、组合 74/74、Python 全量 313/313、broker 15/15、compileall 和 diff-check 通过，等待新提交的
+  committed-tree 增量复核；
 - 本轮没有部署、没有访问真实数据源、没有使用 credential，也没有写 Evidence/Claim/Thesis。真实 public
   network 仍被 killable total-deadline transport gate 阻塞；AlphaEngine/Guidepoint/雪球等 host/MCP 路径仍被
   runner wire 0.2、credential revoke/max_calls use-time authority 阻塞。
