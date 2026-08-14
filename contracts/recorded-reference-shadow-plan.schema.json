@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RecordedReferenceShadowPlan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "inventory_template_ref", "inventory_template_hash", "recorded_fixture_ref", "recorded_fixture_hash", "connector_profile_ref", "connector_profile_hash", "source_ref", "operation", "pagination_mode", "cursor_field", "max_pages", "bounded_window_fields", "completeness_target", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "inventory_template_ref": {"type": "string", "pattern": "^connector-profile-template:(cninfo|sec):0\\.1$"},
+    "inventory_template_hash": {"$ref": "#/$defs/hash"},
+    "recorded_fixture_ref": {"type": "string", "pattern": "^recorded-source-fixture:(cninfo|sec):0\\.1$"},
+    "recorded_fixture_hash": {"$ref": "#/$defs/hash"},
+    "connector_profile_ref": {"type": "string", "minLength": 1},
+    "connector_profile_hash": {"$ref": "#/$defs/hash"},
+    "source_ref": {"enum": ["source:cninfo", "source:sec-edgar"]},
+    "operation": {"enum": ["list_announcements", "list_filings"]},
+    "pagination_mode": {"enum": ["page", "cursor"]},
+    "cursor_field": {"enum": ["page", "cursor"]},
+    "max_pages": {"type": "integer", "minimum": 1, "maximum": 20},
+    "bounded_window_fields": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"enum": ["date_from", "date_to"]}},
+    "completeness_target": {"const": "enumerated"},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {"hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

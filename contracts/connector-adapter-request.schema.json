@@ -14,7 +14,7 @@
     "max_records", "raw_sink_ref", "content_hash"
   ],
   "properties": {
-    "protocol_version": {"const": "0.1"},
+    "protocol_version": {"enum": ["0.1", "0.2"]},
     "runner_request_ref": {"type": "string", "minLength": 1},
     "runner_request_hash": {"$ref": "#/$defs/hash"},
     "connector_invocation_ref": {"type": "string", "minLength": 1},
@@ -48,6 +48,7 @@
     "max_response_bytes": {"type": "integer", "minimum": 1},
     "max_records": {"type": "integer", "minimum": 1},
     "raw_sink_ref": {"type": "string", "pattern": "^raw-sink:[0-9a-f]{64}$"},
+    "pagination_authority": {"$ref": "#/$defs/pagination_authority"},
     "content_hash": {"$ref": "#/$defs/hash"}
   },
   "$defs": {
@@ -65,6 +66,22 @@
           ]
         },
         "source_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "pagination_authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "cursor_field", "page_ordinal", "request_cursor", "parent_query_hash", "prior_adapter_request_hash", "prior_observation_hash", "prior_physical_attempt_ref", "prior_physical_attempt_hash"],
+      "properties": {
+        "mode": {"enum": ["page", "cursor"]},
+        "cursor_field": {"enum": ["page", "cursor"]},
+        "page_ordinal": {"type": "integer", "minimum": 1},
+        "request_cursor": {"type": ["string", "null"]},
+        "parent_query_hash": {"$ref": "#/$defs/hash"},
+        "prior_adapter_request_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "prior_observation_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "prior_physical_attempt_ref": {"type": ["string", "null"]},
+        "prior_physical_attempt_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
       }
     },
     "network_policy": {
@@ -90,5 +107,15 @@
         }
       ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"protocol_version": {"const": "0.2"}},
+        "required": ["protocol_version"]
+      },
+      "then": {"required": ["pagination_authority"]},
+      "else": {"not": {"required": ["pagination_authority"]}}
+    }
+  ]
 }

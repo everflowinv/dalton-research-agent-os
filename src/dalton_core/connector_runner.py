@@ -234,12 +234,21 @@ _ADAPTER_REQUEST_FIELDS = {
     "allowed_hosts", "network_policy", "credential_grant_ref", "deadline_at",
     "max_response_bytes", "max_records", "raw_sink_ref", "content_hash",
 }
+_PAGINATED_ADAPTER_REQUEST_FIELDS = _ADAPTER_REQUEST_FIELDS | {"pagination_authority"}
 
 
 def validate_connector_adapter_request(value: Mapping[str, Any]) -> dict[str, Any]:
-    wire = _closed(value, _ADAPTER_REQUEST_FIELDS, "ConnectorAdapterRequest")
-    if wire["protocol_version"] != PROTOCOL_VERSION:
+    version = value.get("protocol_version") if isinstance(value, Mapping) else None
+    fields = (
+        _ADAPTER_REQUEST_FIELDS
+        if version == PROTOCOL_VERSION
+        else _PAGINATED_ADAPTER_REQUEST_FIELDS
+        if version == "0.2"
+        else None
+    )
+    if fields is None:
         raise RunnerValidationError("unsupported ConnectorAdapterRequest protocol_version")
+    wire = _closed(value, fields, "ConnectorAdapterRequest")
     for name in (
         "runner_request_ref", "connector_invocation_ref", "profile_ref", "call_spec_ref",
         "reservation_ref", "adapter_ref", "resolver_ref", "operation", "input_schema_ref",
@@ -271,6 +280,63 @@ def validate_connector_adapter_request(value: Mapping[str, Any]) -> dict[str, An
             "credential grants are not supported by connector protocol 0.1"
         )
     wire["parameters"] = json.loads(canonical_json(_mapping(wire["parameters"], "parameters")))
+    if version == "0.2":
+        pagination = _closed(
+            wire["pagination_authority"],
+            {
+                "mode", "cursor_field", "page_ordinal", "request_cursor",
+                "parent_query_hash", "prior_adapter_request_hash",
+                "prior_observation_hash", "prior_physical_attempt_ref",
+                "prior_physical_attempt_hash",
+            },
+            "pagination_authority",
+        )
+        if pagination["mode"] not in {"page", "cursor"}:
+            raise RunnerValidationError("pagination authority mode is invalid")
+        expected_cursor_field = "page" if pagination["mode"] == "page" else "cursor"
+        if pagination["cursor_field"] != expected_cursor_field:
+            raise RunnerValidationError("pagination cursor field is inconsistent")
+        pagination["page_ordinal"] = _integer(
+            pagination["page_ordinal"], "pagination_authority.page_ordinal", minimum=1
+        )
+        if pagination["page_ordinal"] != wire["physical_attempt_number"]:
+            raise RunnerValidationError("pagination ordinal must bind physical attempt")
+        pagination["request_cursor"] = (
+            None if pagination["request_cursor"] is None
+            else _text(pagination["request_cursor"], "pagination_authority.request_cursor")
+        )
+        pagination["parent_query_hash"] = _hash(
+            pagination["parent_query_hash"], "pagination_authority.parent_query_hash"
+        )
+        prior_names = (
+            "prior_adapter_request_hash", "prior_observation_hash",
+            "prior_physical_attempt_ref", "prior_physical_attempt_hash",
+        )
+        for name in prior_names:
+            prior = pagination[name]
+            if prior is None:
+                continue
+            pagination[name] = (
+                _text(prior, f"pagination_authority.{name}")
+                if name == "prior_physical_attempt_ref"
+                else _hash(prior, f"pagination_authority.{name}")
+            )
+        prior_values = [pagination[name] for name in prior_names]
+        if pagination["page_ordinal"] == 1:
+            if pagination["request_cursor"] is not None or any(
+                prior is not None for prior in prior_values
+            ):
+                raise RunnerValidationError("first page cannot claim prior pagination authority")
+        elif pagination["request_cursor"] is None or any(
+            prior is None for prior in prior_values
+        ):
+            raise RunnerValidationError("continued page requires complete prior authority")
+        expected_query_hash = content_hash(
+            {"operation": wire["operation"], "parameters": wire["parameters"]}
+        )
+        if wire["query_hash"] != expected_query_hash:
+            raise RunnerValidationError("paginated request query_hash is not page-specific")
+        wire["pagination_authority"] = pagination
     identity = _closed(
         wire["source_identity"],
         {"source_ref", "source_type", "source_version"},
@@ -766,7 +832,7 @@ class ConnectorRunnerAdmissionGate:
             "input_schema_hash": revalidated.profile["input_schema_hashes"][revalidated.call_spec["operation"]],
             "output_schema_ref": revalidated.profile["output_schema_refs"][revalidated.call_spec["operation"]],
             "output_schema_hash": revalidated.profile["output_schema_hashes"][revalidated.call_spec["operation"]],
-            "allowed_hosts": list(revalidated.profile["allowed_hosts"]),
+            "allowed_hosts": sorted(revalidated.profile["allowed_hosts"]),
             "network_policy": dict(revalidated.profile["network_policy"]),
             "credential_grant_ref": None,
             "deadline_at": deadline_at,

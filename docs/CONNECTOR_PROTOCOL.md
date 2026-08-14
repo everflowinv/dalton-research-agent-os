@@ -183,6 +183,47 @@ CapabilityDescriptor 的 `source` 表示 capability 实现来自 skill/MCP/tool/
 ConnectorProfile 的 `source_identity` 表示 adapter 实际访问的目标数据源。两者不是同一个 ref。Runner
 分别核对 live Descriptor contract 与 target source binding，不能用一个含糊的 `source` 字段替代两者。
 
+## P1-0 十类 Inventory 与 recorded reference shadow
+
+P1-0 inventory 固定十个独立 connector profile：CNINFO、SEC、AlphaEngine、X/xreach、X/x_search、
+Reddit/last30days keyless、Guidepoint、Gemini web search、public web fetch、雪球。Profile 拆分按实际
+transport、auth、completeness 和 operation 语义，不按“都是搜索”或“都是社交数据”合并。
+
+Inventory 只表示 contract 已冻结并可离线验证。所有 profile 都必须满足：
+
+- `readiness.level=inventory_connected`、`lease_eligible=false`、`live_execution_allowed=false`；
+- proposal 为 `proposal_only` 且 `requested_canary=null`；
+- 每个 operation 都有 success、empty、partial、schema drift、429、timeout、malformed fixture；有分页的
+  operation 另有 pagination，host-auth profile 另有 permission denied/revoked；
+- packaged profile/fixture/proposal/index graph 与 deterministic build 完全一致，不能仅靠攻击者可重算的
+  content hash 证明可信；
+- prompt、instruction body、local path、server/OAuth config、credential material 和真实 tool output 不进入
+  inventory package。
+
+雪球 profile 的主 route 是 host-owned `agent-reach XueqiuChannel`。`cn-hk-findata xq_hot_rank` 只作为
+`get_hot_stocks` 的 operation-scoped fallback；fallback 必须带独立 target/source/adapter/provenance label，
+不得用于 `get_hot_posts`、`search_stock` 或 `get_stock_quote`，也不得冒充雪球帖子正文。
+
+CNINFO 与 SEC 的 recorded reference shadow 继续使用 offline adapter，不打开 socket。一个 bounded logical
+query 可以产生多次 physical attempt，但每一页都要独立 reservation、计量、结算和 raw artifact version。
+第一页使用 AdapterRequest 0.2 的空 prior authority；后续页必须同时绑定：
+
+- parent `ConnectorCallSpec.query_hash`；
+- 上一页 AdapterRequest hash 和 AdapterTransportObservation hash；
+- 上一页 succeeded PhysicalAttempt ref/hash；
+- 连续 page/cursor 和当前 page-specific parameters/query hash。
+
+任何 prior hash、cursor、ordinal、fixture/profile/template graph 或日期窗口不一致都在调用 adapter 前拒绝。
+到达分页终点才可声明 `enumerated`；达到 `max_pages` 但仍有 cursor 必须写 `partial`。每页标准化记录的
+`revision_of_ref` 只能指向本次 shadow 更早出现的记录。
+
+Parent runner journal 在 Scheduler completion 前持久化闭合 response、ResultEnvelope 及其 hash；恢复时先核对
+Scheduler 的 immutable result receipt，缺失才用同一 idempotency key 补写。这样 response-journal/Scheduler
+两个跨库 crash window 都能收敛，不能因为重放多写 SourceEnvelope、artifact、usage 或 settlement。
+
+这两个 shadow 不进入 Research Ledger。只有后续 ContextPack/ClaimIndex builder 和独立 verifier 才能把
+SourceEnvelope 转成 candidate Evidence/Claim；P1-0 不写 Evidence、Claim 或 Thesis。
+
 ## 自生成模板
 
 Dalton 发现同一种 source/operation 重复出现或现有 connector 缺能力时：

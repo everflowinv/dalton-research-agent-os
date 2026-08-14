@@ -46,6 +46,9 @@ class _AdapterDeadlineExceeded(Exception):
     pass
 
 
+AdapterDeadlineExceeded = _AdapterDeadlineExceeded
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -65,6 +68,43 @@ def _parse_time(value: str) -> datetime:
 
 def _derived_id(prefix: str, idempotency_key: str) -> str:
     return f"{prefix}:{content_hash({'kind': prefix, 'idempotency_key': idempotency_key})}"
+
+
+def invoke_adapter_with_deadline(
+    adapter: Callable[..., Any],
+    request: Mapping[str, Any],
+    raw_sink: Any,
+    *,
+    clock: Callable[[], datetime],
+) -> Any:
+    """Invoke an offline adapter inside the runner-owned wall-clock boundary."""
+
+    remaining = (
+        _parse_time(request["deadline_at"])
+        - _parse_time(_wire_time(clock()))
+    ).total_seconds()
+    if remaining <= 0:
+        raise _AdapterDeadlineExceeded
+    if threading.current_thread() is not threading.main_thread():
+        raise ConnectorTransportError(
+            "recorded transport watchdog requires the runner main thread"
+        )
+    prior_handler = signal.getsignal(signal.SIGALRM)
+    prior_timer = signal.getitimer(signal.ITIMER_REAL)
+
+    def deadline_handler(signum: int, frame: Any) -> None:
+        del signum, frame
+        raise _AdapterDeadlineExceeded
+
+    signal.signal(signal.SIGALRM, deadline_handler)
+    signal.setitimer(signal.ITIMER_REAL, remaining)
+    try:
+        return adapter(request, raw_sink)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, prior_handler)
+        if prior_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, *prior_timer)
 
 
 @dataclass(frozen=True, slots=True)
@@ -690,33 +730,9 @@ class ConnectorTransportExecutor:
         self, adapter: Callable[..., Any], request: Mapping[str, Any], raw_sink: Any
     ) -> Any:
         """Bound synchronous recorded adapters with a runner-owned watchdog."""
-
-        remaining = (
-            _parse_time(request["deadline_at"])
-            - _parse_time(_wire_time(self._clock()))
-        ).total_seconds()
-        if remaining <= 0:
-            raise _AdapterDeadlineExceeded
-        if threading.current_thread() is not threading.main_thread():
-            raise ConnectorTransportError(
-                "recorded transport watchdog requires the runner main thread"
-            )
-        prior_handler = signal.getsignal(signal.SIGALRM)
-        prior_timer = signal.getitimer(signal.ITIMER_REAL)
-
-        def deadline_handler(signum: int, frame: Any) -> None:
-            del signum, frame
-            raise _AdapterDeadlineExceeded
-
-        signal.signal(signal.SIGALRM, deadline_handler)
-        signal.setitimer(signal.ITIMER_REAL, remaining)
-        try:
-            return adapter(request, raw_sink)
-        finally:
-            signal.setitimer(signal.ITIMER_REAL, 0)
-            signal.signal(signal.SIGALRM, prior_handler)
-            if prior_timer[0] > 0:
-                signal.setitimer(signal.ITIMER_REAL, *prior_timer)
+        return invoke_adapter_with_deadline(
+            adapter, request, raw_sink, clock=self._clock
+        )
 
     @staticmethod
     def _duplicate_response(response: Mapping[str, Any]) -> dict[str, Any]:
@@ -775,6 +791,7 @@ class ConnectorTransportExecutor:
 
 
 __all__ = [
-    "ConnectorTransportError", "ConnectorTransportExecutor",
-    "RunnerRecoveryRequired", "SimulatedRunnerCrash",
+    "AdapterDeadlineExceeded", "ConnectorTransportError",
+    "ConnectorTransportExecutor", "RunnerRecoveryRequired",
+    "SimulatedRunnerCrash", "invoke_adapter_with_deadline",
 ]

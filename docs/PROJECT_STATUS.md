@@ -2,7 +2,7 @@
 
 更新日期：2026-08-14  
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前提交内容：Connector P0-4a trusted metadata sync + Connector Shadow projection，未部署
+- 当前提交内容：Connector P1-0 十类 inventory + CNINFO/SEC recorded reference shadows，未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -198,6 +198,31 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   0.2 的 5 张新 read-model 表，HTML 含两个新 API endpoint，SQLite integrity 为 `ok`；
 - 这两笔提交仍未把 exporter 接到 OpenClaw live inventory，也没有真实网络、数据源访问、部署或研究
   WorkOrder。P0-4a Commit B 的最终测试、wheel、Fable 5 复核与提交信息见本轮独立报告。
+
+### Connector P1-0 当前进度（complete inventory + recorded reference shadows，未部署）
+
+- P1-0a 冻结十个独立 profile：CNINFO、SEC、AlphaEngine、X/xreach、X/x_search、Reddit/last30days
+  keyless、Guidepoint、Gemini web search、public web fetch 和雪球；X 的枚举/语义搜索与 web 的搜索/抓取
+  不合并；雪球只允许 `get_hot_stocks` 走带 `source_ref/adapter_ref/provenance_label` 的
+  `cn-hk-findata xq_hot_rank` fallback；
+- 每个 profile 都有闭合 operation/input/output/pagination/completeness/auth/transport contract、逐 operation
+  synthetic fixture matrix 和 proposal-only manifest。十类当前均为 `inventory_connected`，不产生 lease、
+  不请求 canary，也不代表 live connector 已接通；
+- Inventory loader 最终把已验证 package graph 与 deterministic build 逐对象精确比较；authority ref、时间戳、
+  fixture scenario/error/raw/auth 语义和 graph hash 任一漂移都 fail closed。P1-0a 提交 `976548e` 已获
+  Fable 5 **Go**：专项 12/12、Python 296/296、archive wheel 安装和 31 个 packaged JSON 逐字节检查通过；
+- P1-0b 新增 CNINFO `list_announcements` 与 SEC `list_filings` 的离线 recorded reference shadow。每页独立
+  reservation、physical attempt、Usage、Cost、Settlement 和 raw ArtifactVersion；多页共用一个 logical
+  invocation，并用 AdapterRequest 0.2 把 parent query、上一页 request/observation/attempt hashes 与 cursor
+  绑定到下一页参数；bounded window、页数上限、revision chain 和 completeness 全部显式；
+- 成功/empty/partial 才生成 SourceEnvelope；schema drift、429、timeout、malformed 不生成 raw artifact 或
+  SourceEnvelope。response journal 先持久化 result/response completion authority，再幂等完成 Scheduler，两个
+  跨库 crash window 重放后零新增 Core facts；
+- 当前 P1-0b candidate 专项 9/9、相关 Runner/transport/contracts 39/39、Python 全量 305/305 通过，等待
+  Fable 5 对 committed candidate 做最终独立复核；
+- 本轮没有部署、没有访问真实数据源、没有使用 credential，也没有写 Evidence/Claim/Thesis。真实 public
+  network 仍被 killable total-deadline transport gate 阻塞；AlphaEngine/Guidepoint/雪球等 host/MCP 路径仍被
+  runner wire 0.2、credential revoke/max_calls use-time authority 阻塞。
 
 ## 蓝图阶段
 

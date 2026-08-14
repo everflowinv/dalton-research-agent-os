@@ -43,6 +43,7 @@ dalton_core = [
   "connector_inventory/profiles/*.json",
   "connector_inventory/fixtures/*.json",
   "connector_inventory/proposals/*.json",
+  "reference_shadow_fixtures/*.json",
   "dashboard.html",
   "agenda_control.html",
 ]

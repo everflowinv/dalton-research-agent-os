@@ -1,0 +1,215 @@
+{
+  "content_hash": "516b75ade5f0c6c79115633c20bf1144716cbed223fcfb7fe70a3b97c53d0c3a",
+  "created_at": "2026-08-14T21:00:00.000000+00:00",
+  "id": "recorded-source-fixture:cninfo:0.1",
+  "operation": "list_announcements",
+  "scenarios": [
+    {
+      "advance_seconds": 0,
+      "behavior": "return",
+      "error_code": null,
+      "pages": [
+        {
+          "next_cursor": null,
+          "ordinal": 1,
+          "provider_request_id": "fixture:cninfo:success:request:1",
+          "provider_status": 200,
+          "raw_payload": {
+            "announcements": [
+              {
+                "announcement_id": "cn-0001",
+                "published_at": "2026-04-01T00:00:00+00:00",
+                "revision_of": null,
+                "stock_code": "600309",
+                "title": "Synthetic annual report"
+              }
+            ],
+            "page": 1
+          },
+          "request_cursor": null
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "success"
+    },
+    {
+      "advance_seconds": 0,
+      "behavior": "return",
+      "error_code": null,
+      "pages": [
+        {
+          "next_cursor": null,
+          "ordinal": 1,
+          "provider_request_id": "fixture:cninfo:empty:request:1",
+          "provider_status": 200,
+          "raw_payload": {
+            "announcements": [],
+            "page": 1
+          },
+          "request_cursor": null
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "empty"
+    },
+    {
+      "advance_seconds": 0,
+      "behavior": "return",
+      "error_code": null,
+      "pages": [
+        {
+          "next_cursor": "2",
+          "ordinal": 1,
+          "provider_request_id": "fixture:cninfo:pagination:request:1",
+          "provider_status": 200,
+          "raw_payload": {
+            "announcements": [
+              {
+                "announcement_id": "cn-0001",
+                "published_at": "2026-04-01T00:00:00+00:00",
+                "revision_of": null,
+                "stock_code": "600309",
+                "title": "Synthetic annual report"
+              }
+            ],
+            "page": 1
+          },
+          "request_cursor": null
+        },
+        {
+          "next_cursor": null,
+          "ordinal": 2,
+          "provider_request_id": "fixture:cninfo:pagination:request:2",
+          "provider_status": 200,
+          "raw_payload": {
+            "announcements": [
+              {
+                "announcement_id": "cn-0002",
+                "published_at": "2026-04-02T00:00:00+00:00",
+                "revision_of": "cn-0001",
+                "stock_code": "600309",
+                "title": "Synthetic corrected annual report"
+              }
+            ],
+            "page": 2
+          },
+          "request_cursor": "2"
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "pagination"
+    },
+    {
+      "advance_seconds": 0,
+      "behavior": "return",
+      "error_code": null,
+      "pages": [
+        {
+          "next_cursor": "2",
+          "ordinal": 1,
+          "provider_request_id": "fixture:cninfo:partial:request:1",
+          "provider_status": 200,
+          "raw_payload": {
+            "announcements": [
+              {
+                "announcement_id": "cn-0001",
+                "published_at": "2026-04-01T00:00:00+00:00",
+                "revision_of": null,
+                "stock_code": "600309",
+                "title": "Synthetic annual report"
+              }
+            ],
+            "page": 1
+          },
+          "request_cursor": null
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "partial"
+    },
+    {
+      "advance_seconds": 0,
+      "behavior": "normalize_error",
+      "error_code": "schema_drift",
+      "pages": [
+        {
+          "next_cursor": null,
+          "ordinal": 1,
+          "provider_request_id": "fixture:cninfo:schema-drift:request:1",
+          "provider_status": 200,
+          "raw_payload": {
+            "announcements": [
+              {
+                "announcement_id": "cn-0001",
+                "published_at": "2026-04-01T00:00:00+00:00",
+                "revision_of": null,
+                "stock_code": "600309",
+                "title": "Synthetic annual report"
+              }
+            ],
+            "page": 1,
+            "unexpected": true
+          },
+          "request_cursor": null
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "schema_drift"
+    },
+    {
+      "advance_seconds": 0,
+      "behavior": "rate_limited",
+      "error_code": "rate_limited",
+      "pages": [],
+      "retry_after_ms": 1000,
+      "scenario": "rate_limited"
+    },
+    {
+      "advance_seconds": 10,
+      "behavior": "timeout",
+      "error_code": "timeout",
+      "pages": [
+        {
+          "next_cursor": null,
+          "ordinal": 1,
+          "provider_request_id": "fixture:cninfo:timeout:request:1",
+          "provider_status": 200,
+          "raw_payload": {
+            "announcements": [
+              {
+                "announcement_id": "cn-0001",
+                "published_at": "2026-04-01T00:00:00+00:00",
+                "revision_of": null,
+                "stock_code": "600309",
+                "title": "Synthetic annual report"
+              }
+            ],
+            "page": 1
+          },
+          "request_cursor": null
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "timeout"
+    },
+    {
+      "advance_seconds": 0,
+      "behavior": "normalize_error",
+      "error_code": "malformed",
+      "pages": [
+        {
+          "next_cursor": null,
+          "ordinal": 1,
+          "provider_request_id": "fixture:cninfo:malformed:request:1",
+          "provider_status": 200,
+          "raw_payload": "{not-json",
+          "request_cursor": null
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "malformed"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_ref": "source:cninfo"
+}

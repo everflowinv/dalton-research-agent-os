@@ -1,0 +1,215 @@
+{
+  "content_hash": "2067b0ff3bdd694ff35c4526425632796438850215aa85f5e2b4da18489dd852",
+  "created_at": "2026-08-14T21:00:00.000000+00:00",
+  "id": "recorded-source-fixture:sec:0.1",
+  "operation": "list_filings",
+  "scenarios": [
+    {
+      "advance_seconds": 0,
+      "behavior": "return",
+      "error_code": null,
+      "pages": [
+        {
+          "next_cursor": null,
+          "ordinal": 1,
+          "provider_request_id": "fixture:sec:success:request:1",
+          "provider_status": 200,
+          "raw_payload": {
+            "filings": [
+              {
+                "accession": "0000000001-26-000001",
+                "filing_date": "2026-05-01",
+                "form": "10-Q",
+                "primary_document": "q1.htm",
+                "revision_of": null
+              }
+            ],
+            "ordinal": 1
+          },
+          "request_cursor": null
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "success"
+    },
+    {
+      "advance_seconds": 0,
+      "behavior": "return",
+      "error_code": null,
+      "pages": [
+        {
+          "next_cursor": null,
+          "ordinal": 1,
+          "provider_request_id": "fixture:sec:empty:request:1",
+          "provider_status": 200,
+          "raw_payload": {
+            "filings": [],
+            "ordinal": 1
+          },
+          "request_cursor": null
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "empty"
+    },
+    {
+      "advance_seconds": 0,
+      "behavior": "return",
+      "error_code": null,
+      "pages": [
+        {
+          "next_cursor": "cursor-2",
+          "ordinal": 1,
+          "provider_request_id": "fixture:sec:pagination:request:1",
+          "provider_status": 200,
+          "raw_payload": {
+            "filings": [
+              {
+                "accession": "0000000001-26-000001",
+                "filing_date": "2026-05-01",
+                "form": "10-Q",
+                "primary_document": "q1.htm",
+                "revision_of": null
+              }
+            ],
+            "ordinal": 1
+          },
+          "request_cursor": null
+        },
+        {
+          "next_cursor": null,
+          "ordinal": 2,
+          "provider_request_id": "fixture:sec:pagination:request:2",
+          "provider_status": 200,
+          "raw_payload": {
+            "filings": [
+              {
+                "accession": "0000000001-26-000002",
+                "filing_date": "2026-05-02",
+                "form": "10-Q/A",
+                "primary_document": "q1a.htm",
+                "revision_of": "0000000001-26-000001"
+              }
+            ],
+            "ordinal": 2
+          },
+          "request_cursor": "cursor-2"
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "pagination"
+    },
+    {
+      "advance_seconds": 0,
+      "behavior": "return",
+      "error_code": null,
+      "pages": [
+        {
+          "next_cursor": "cursor-2",
+          "ordinal": 1,
+          "provider_request_id": "fixture:sec:partial:request:1",
+          "provider_status": 200,
+          "raw_payload": {
+            "filings": [
+              {
+                "accession": "0000000001-26-000001",
+                "filing_date": "2026-05-01",
+                "form": "10-Q",
+                "primary_document": "q1.htm",
+                "revision_of": null
+              }
+            ],
+            "ordinal": 1
+          },
+          "request_cursor": null
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "partial"
+    },
+    {
+      "advance_seconds": 0,
+      "behavior": "normalize_error",
+      "error_code": "schema_drift",
+      "pages": [
+        {
+          "next_cursor": null,
+          "ordinal": 1,
+          "provider_request_id": "fixture:sec:schema-drift:request:1",
+          "provider_status": 200,
+          "raw_payload": {
+            "filings": [
+              {
+                "accession": "0000000001-26-000001",
+                "filing_date": "2026-05-01",
+                "form": "10-Q",
+                "primary_document": "q1.htm",
+                "revision_of": null
+              }
+            ],
+            "ordinal": 1,
+            "unexpected": true
+          },
+          "request_cursor": null
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "schema_drift"
+    },
+    {
+      "advance_seconds": 0,
+      "behavior": "rate_limited",
+      "error_code": "rate_limited",
+      "pages": [],
+      "retry_after_ms": 1000,
+      "scenario": "rate_limited"
+    },
+    {
+      "advance_seconds": 10,
+      "behavior": "timeout",
+      "error_code": "timeout",
+      "pages": [
+        {
+          "next_cursor": null,
+          "ordinal": 1,
+          "provider_request_id": "fixture:sec:timeout:request:1",
+          "provider_status": 200,
+          "raw_payload": {
+            "filings": [
+              {
+                "accession": "0000000001-26-000001",
+                "filing_date": "2026-05-01",
+                "form": "10-Q",
+                "primary_document": "q1.htm",
+                "revision_of": null
+              }
+            ],
+            "ordinal": 1
+          },
+          "request_cursor": null
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "timeout"
+    },
+    {
+      "advance_seconds": 0,
+      "behavior": "normalize_error",
+      "error_code": "malformed",
+      "pages": [
+        {
+          "next_cursor": null,
+          "ordinal": 1,
+          "provider_request_id": "fixture:sec:malformed:request:1",
+          "provider_status": 200,
+          "raw_payload": "{not-json",
+          "request_cursor": null
+        }
+      ],
+      "retry_after_ms": null,
+      "scenario": "malformed"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_ref": "source:sec-edgar"
+}

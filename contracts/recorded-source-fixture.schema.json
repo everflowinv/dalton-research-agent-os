@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RecordedSourceFixture",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "source_ref", "operation", "scenarios", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^recorded-source-fixture:(cninfo|sec):0\\.1$"},
+    "created_at": {"const": "2026-08-14T21:00:00.000000+00:00"},
+    "source_ref": {"enum": ["source:cninfo", "source:sec-edgar"]},
+    "operation": {"enum": ["list_announcements", "list_filings"]},
+    "scenarios": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/scenario"}
+    },
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario", "behavior", "advance_seconds", "retry_after_ms", "error_code", "pages"],
+      "properties": {
+        "scenario": {"enum": ["success", "empty", "pagination", "partial", "schema_drift", "rate_limited", "timeout", "malformed"]},
+        "behavior": {"enum": ["return", "rate_limited", "timeout", "normalize_error"]},
+        "advance_seconds": {"type": "integer", "minimum": 0},
+        "retry_after_ms": {"type": ["integer", "null"], "minimum": 1},
+        "error_code": {"type": ["string", "null"]},
+        "pages": {"type": "array", "items": {"$ref": "#/$defs/page"}}
+      }
+    },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "provider_request_id", "provider_status", "request_cursor", "next_cursor", "raw_payload"],
+      "properties": {
+        "ordinal": {"type": "integer", "minimum": 1},
+        "provider_request_id": {"type": "string", "minLength": 1},
+        "provider_status": {"const": 200},
+        "request_cursor": {"type": ["string", "null"]},
+        "next_cursor": {"type": ["string", "null"]},
+        "raw_payload": {"type": ["object", "string"]}
+      }
+    }
+  }
+}
