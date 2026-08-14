@@ -1,0 +1,21 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "title":"ConnectorRatePolicyActivationEvent",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schema_version","id","created_at","policy_ref","quota_scope_ref","policy_version_ref","policy_version_hash","effective_at","prior_event_ref","actor_ref","content_hash"],
+  "properties":{
+    "schema_version":{"const":"0.1"},
+    "id":{"type":"string","minLength":1},
+    "created_at":{"type":"string","format":"date-time"},
+    "policy_ref":{"type":"string","minLength":1},
+    "quota_scope_ref":{"type":"string","minLength":1},
+    "policy_version_ref":{"type":"string","minLength":1},
+    "policy_version_hash":{"$ref":"#/$defs/hash"},
+    "effective_at":{"type":"string","format":"date-time"},
+    "prior_event_ref":{"type":["string","null"]},
+    "actor_ref":{"type":"string","minLength":1},
+    "content_hash":{"$ref":"#/$defs/hash"}
+  },
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}}
+}

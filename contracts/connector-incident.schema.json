@@ -1,0 +1,6 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","title":"ConnectorIncident","type":"object","additionalProperties":false,
+  "required":["schema_version","id","created_at","connector_profile_ref","incident_type","severity","details","actor_ref","connector_invocation_ref","reservation_ref","content_hash"],
+  "properties":{"schema_version":{"const":"0.1"},"id":{"type":"string","minLength":1},"created_at":{"type":"string","format":"date-time"},"connector_profile_ref":{"type":"string","minLength":1},"incident_type":{"enum":["quota_drift","schema_drift","credential_auth","source_outage","policy_violation"]},"severity":{"enum":["warning","blocking"]},"details":{"type":"object"},"actor_ref":{"type":"string","minLength":1},"connector_invocation_ref":{"type":["string","null"]},"reservation_ref":{"type":["string","null"]},"content_hash":{"$ref":"#/$defs/hash"}},
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}}
+}

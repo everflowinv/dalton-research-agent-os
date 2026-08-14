@@ -25,6 +25,7 @@ class PackagingTests(unittest.TestCase):
             "observability_schema.sql",
             "dashboard_schema.sql",
             "agenda_schema.sql",
+            "connector_schema.sql",
             "dashboard.html",
             "agenda_control.html",
         ):

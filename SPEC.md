@@ -11,7 +11,7 @@ database 和 cron 定义，但归档不代表新系统采用旧约束、旧研�
 
 ### 通用规则
 
-- 三十九份 JSON Schema 都是 Draft 2020-12 文档，根对象有
+- 五十七份 JSON Schema 都是 Draft 2020-12 文档，根对象有
   `additionalProperties: false`。
 - 每个对象都有 `schema_version`、稳定 `id` 和 `created_at`；引用字段使用稳定
   ref 字符串，时间字段保持 RFC 3339 形式的字符串（具体时区策略留给实现层）。
@@ -30,12 +30,15 @@ database 和 cron 定义，但归档不代表新系统采用旧约束、旧研�
 artifact refs、实际副作用、usage refs 和可选 error。runtime 自报完成不等于
 verification 或 commit 通过。
 
-### RuntimeProfile / ModelInvocation
+### RuntimeProfile / ExecutionInvocation / ModelInvocation
 
 `RuntimeProfile` 版本化声明 capability、隔离、工具、网络/文件系统、副作用、
 资源限制、支持的 envelope 版本、runtime version 和 environment hash。
-`ModelInvocation` 记录实际 provider/model/model family、profile、capability、usage、
-输入/输出 refs、副作用、runtime 和 actor provenance。
+`ExecutionInvocation` 是 runtime-neutral execution 超类型；`ModelInvocation` 与
+`ConnectorInvocation` 以 1:1 subtype link 引用它。`ModelInvocation` 记录实际
+provider/model/model family、profile、capability、usage、输入/输出 refs、副作用、runtime 和 actor
+provenance。新 ModelInvocation 在同一事务原子登记 execution supertype；历史模型调用只做等值 backfill，
+不改原有 hash。
 
 本地 deterministic executor 会检查输入/输出 schema version、WorkOrder budget、
 RuntimeProfile limits，以及“声明副作用 ⊆ profile 许可、实际副作用 ⊆ 声明”。它只
@@ -249,10 +252,40 @@ raw usage 和线性 correction chain。未知值必须为 `null`，不能写成 
 绑定 immutable UsageEntry 与 exact rate versions，以 `half_up` 规则在服务端复算。校正只
 追加新版本，不同币种必须分开汇总。
 
-`ArtifactVersion` 只保存 title/kind/media type/hash/size/storage locator、producer
-invocation、WorkOrder、ResultEnvelope、access class 和 preview status。authority 验证
-producer output ref 与 ResultEnvelope hash，但不读取 artifact 内容；dashboard 默认不投影
-storage locator。
+`ArtifactVersion` 只保存 title/kind/media type/hash/size/storage locator、producer execution、
+WorkOrder、ResultEnvelope、access class 和 preview status。v0.2 通过 `producer_execution_ref` 支持
+connector 等非模型执行；跨 v0.1/v0.2 index 防止同一 artifact identity 分叉。authority 验证 producer
+output ref 与 ResultEnvelope hash，但不读取 artifact 内容；dashboard 默认不投影 storage locator。
+
+### Connector Fabric authority
+
+Connector 面向数据源和 operation，不面向单家公司。`ConnectorProfileVersion` 冻结 source identity、
+adapter/source/schema hashes、runner environment hash、operation、host、credential slot、分页、完整性和三项 policy ref；
+`ConnectorCallSpec` 冻结单次查询，`ConnectorInvocation` 与 `ExecutionInvocation(kind=connector)` 做 exact
+subtype equality。
+
+每次 physical attempt 必须先取得 `ConnectorQuotaReservation`。rate policy 通过 append-only activation
+event 选择 exact active version；admission 以稳定 `quota_scope_ref + UTC window` 跨版本聚合，并用
+`BEGIN IMMEDIATE` 串行化。RatePolicy 冻结 exact price refs、required meters 和 price-book hash；
+admission 按 Profile 最大 bytes/records 与固定 call 数计算保守成本下限。同一 profile/meter/currency 的
+rate 生效区间不得重叠。released reservation 不得登记 attempt；consumed/indeterminate settlement
+必须精确引用该 reservation 的 physical attempt、latest Usage 和 latest Cost revision。consumed 只接受
+final Usage 与按 frozen price book 计算的 actual CostEntry；physical actual 等于 Usage metrics，
+cost/currency 等于 CostEntry 和 quota
+policy。Usage/Cost correction 领先 settlement 时，在 correction 写入事务立即追加 blocking incident，
+不依赖当前 quota window。
+超 reservation 或窗口上限的 actual 会在同一事务追加 blocking `quota_drift` incident。
+
+`SourceEnvelope` 只能引用同一 connector execution 生产的 ArtifactVersion v0.2；source、operation、output
+schema hash、access/retention/terms policy、provider request、明确的 result attempt、raw artifact content
+hash 都必须与 Profile/CallSpec/Attempt/Artifact authority 相等；source/schema/content hash 分别绑定冻结的
+source identity、operation schema bundle 和规范化 source metadata/record refs，不声称绑定 record body。
+Connector output 先停在 raw artifact 和
+SourceEnvelope；未经 source/numeric verifier 不得进入 Evidence、Claim 或 Thesis。
+
+Dalton 可以生成 `ConnectorProposalManifest`、adapter package、schema 和 recorded fixtures，并在无网络、
+无凭据、无 Core DB 的 sandbox replay。静态 resolver、networked canary 和 production promotion 都需要
+独立人工 gate；运行时不得从 proposal path 动态 import/exec。
 
 ### OpenClaw model broker adapter
 
@@ -386,6 +419,17 @@ predicate 是闭合 shape：`{left_path, operator, right_path|value}`，只支�
 默认 0.1 policy 只允许 `pass`，并要求 producer 与 verifier 的 `model_family`
 不同；同一 invocation 无论 policy 如何配置都不能自证。
 
+### Context、Memory 与 Log 边界
+
+Dalton 不把聊天 transcript、compaction summary 或 runtime scratch 当作研究事实。durable research
+memory 是 Research Ledger 的 immutable Evidence/Claim/Thesis 版本链；execution/event audit 由
+ExecutionInvocation、DomainEvent、Scheduler attempt event、ArtifactVersion 和 Usage/Cost 承担。
+
+后续 `ContextPack` 是 derived、content-hashed model input projection，必须冻结 builder、selector、
+tokenizer 和 truncation algorithm 的 ref/hash；`RunState/Checkpoint` 是 per-attempt derived scratch，
+只能由 attempt event 引用；`ClaimIndex` 是可重建的 Ledger 只读投影；`OpsTelemetry` 放 authority DB
+之外。四者的保留期都由版本化 retention policy 决定，不能把临时天数写成架构常量。
+
 ## 占位契约（本 slice 不冻结）
 
 以下对象只在架构文档中定义方向，暂不伪装成已实现契约：Model IR
@@ -424,6 +468,7 @@ Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把
 | PerceptionSnapshot、backup/restore 与 ephemeral governance | E1/E2 | `tests/test_perception_backup.py`、`tests/test_governance_cli.py` |
 | Scheduler → Router → broker adapter → usage/cost → AgendaDecision thin slice | E1 | `tests/test_agenda_coordinator.py` |
 | outbox claim/lease、Discord reconciliation、receipt 与 reaction feedback | E1/E2 | `tests/test_openclaw_agenda_bridge.py` |
+| connector profile/invocation、quota/settlement、provenance、incident 和 self-generated manifest | E1/E2 | `tests/test_connector.py` |
 | authority → read-only dashboard projection 与敏感字段隔离 | E1 | `tests/test_dashboard_projector.py` |
 | dashboard 固定 GET API、只读连接与页面资源 | E2 | `tests/test_dashboard.py` |
 | 实际 hostile-code sandbox backend 与自动 monitoring | E1 | 本 slice 排除 |

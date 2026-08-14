@@ -1,9 +1,9 @@
 # Dalton 项目进度
 
 更新日期：2026-08-14  
-- 已提交运行代码基线：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 已提交进度文档基线：`df66d46`
-- 当前工作树：Connector P0-0 seam 修正与专项验证，尚未部署
+- live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
+- 当前已提交 HEAD：`79bca15`（Connector P0-0 seam，未部署）
+- 当前 dirty work：Connector P0-1 authority 与 protocol template，未提交、未部署
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
 反向改写历史结论。这里的“完成”只表示代码、测试和当前部署已经验收，不表示已达到多租户或
@@ -29,10 +29,51 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 - 203 项 Python 测试通过，含回填冲突回滚、跨代 artifact 分叉、投影和 Retry-After 幂等专项测试；
 - 生产 Core/Scheduler SQLite 的临时副本已完成 startup backfill 演练：2 条 ModelInvocation 全部建立
   execution link，72 条 v0.1 artifact 全部进入跨代索引，两个副本 integrity 均为 `ok`；
-- connector authority DDL 仍是草案，尚未接入 `ConnectorStore`，不能报 P0-1 完成。
+- `79bca15` 本身不含 connector authority；当前 dirty P0-1 在它之上继续实现，不能把两者混成一个
+  已部署基线。
 
 此前 Connector 报告把未实际发生的 Fable 5 复核写成事实。报告已更正；随后完成的真实独立审阅结论
 是“有条件 Go”。
+
+### Connector P0-1 当前进度（partial，未提交、未部署）
+
+- 新增 `ConnectorStore`，已把 connector authority DDL 接入 trusted `DaltonStore` transaction；
+- profile、call spec、logical invocation、physical attempt、Usage/Price/Cost、quota
+  reservation/settlement、SourceEnvelope、incident 和 source-health 已有闭合 wire contract；
+- quota admission 使用 SQLite `BEGIN IMMEDIATE` 串行化，当前只支持固定 UTC window；quota 按稳定
+  scope 跨 policy version 聚合，只有 exact active policy 能 admission；每个 physical attempt 必须先
+  预占 1 次调用，并同时检查并发、calls、bytes、records 和 cost_micros；
+- reservation 的创建、到期和 window 边界约束 attempt 开始时间；所有当前 attempt outcome 都是终态，
+  `completed_at` 不得晚于 authority 的记录时间，429 还要求 `retry_at > completed_at`；
+- `Usage → Cost → Settlement` 已做逐级精确绑定；consumed 只接受 final Usage 和按 frozen price book
+  计算的 actual CostEntry，
+  quota policy 冻结币种；Usage/Cost correction 领先 settlement 时 admission fail closed 并开启 blocking
+  `quota_drift` incident；correction 即使来自旧 quota window，也在写入同一事务立即开 incident；actual
+  overage 也在 settlement 同一事务开启 incident；
+- RatePolicy 冻结 exact price refs、required meters 和 price-book hash；注册时必须枚举整个 policy interval
+  的完整 canonical price book，免费来源也要显式登记 zero-rate；同一 profile/meter/currency 的 rate 生效
+  区间不得重叠；admission 按当前时点重新核对 price book，再按 profile 最大 bytes/records 与固定 call 数
+  计算保守成本下限，调用方不能低报 `reserved.cost_micros`；Cost 还会按 physical attempt 的开始时间复核，
+  漂移时不写 Cost，并持久化 blocking incident；
+- SourceEnvelope 必须匹配 profile/call spec、同一 execution 生产的 ArtifactVersion v0.2、raw hash、
+  source/schema/policy/provider request、明确的 result attempt 和 outcome；source/schema/content hash 都
+  绑定 source identity、schema bundle 和规范化 metadata/record refs；content hash 不声称绑定 record body；
+  profile 还冻结 runner environment hash；
+- CallSpec 拒绝 credential-shaped 参数；
+- blocking incident 会阻止新 reservation；429 physical attempt 单独记录 `retry_at`；
+- `docs/CONNECTOR_PROTOCOL.md` 与 `ConnectorProposalManifest` 已定义 Dalton 自建 connector 的离线生成、
+  replay、双人工 gate 和静态 resolver 边界；
+- Fable 5 已做六轮只读敌对复核：前五轮持续发现并复现 authority 漏洞，第六轮冻结复核结论为
+  **技术 Go**。当前可提交为 **P0-1 authority foundation**；connector 专项 23/23、Python 全量
+  226/226、broker 15/15 通过。这个 Go 不包括部署、真实 connector 或 E1；
+- 固定 `SOURCE_DATE_EPOCH=1700000000` 的两次 wheel 构建得到相同 SHA-256：
+  `825f07246ed13afff39ac0c5201242ca4e756542332d6590cd40bbb6a6d7a8c5`；隔离安装后可创建 16 张 connector 表；
+  live Core DB 的只读 backup 副本完成 P0-0 backfill 与 ConnectorStore 建表，2/2 model execution links、
+  72 条 artifact index、16 张 connector 表，integrity 为 `ok`；
+- 本机系统 Python 的 `python3 -m build` 仍因已安装的 `build` 包没有 `build.__main__` 而失败；独立 venv 的
+  `pip wheel --no-build-isolation` 已通过，这不是 Connector 代码验收通过的替代条件，也不隐藏该环境问题；
+- 可信 Runner、CapabilityLease use-time gate、exact adapter resolver、writer RPC、dashboard projection
+  和第一条真实 A 股公告 connector 尚未实现，因此不能报 P0、P0-1 完成或 E1 通过。
 
 ## 蓝图阶段
 
@@ -40,15 +81,16 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 
 已完成：
 
-- 39 份闭合 JSON Schema、7 份 authority SQL schema；
+- 57 份闭合 JSON Schema、9 份 authority SQL schema；
 - immutable DomainEvent、WorkOrder、ResultEnvelope、ModelInvocation；
 - Evidence → Claim → Thesis 版本链、verification 和 commit gate；
 - Workflow、Artifact metadata、模型 Usage/Cost、只读 projection 和静态看板；
 - legacy workspace/database/cron 的 shadow import；
 - owner-only writer、每日 SQLite backup、已完成的 restore 演练与数据库完整性检查。
 
-未完成：通用 connector invocation/usage/incident authority、完整 source-health ledger、生产对象存储
-生命周期和跨机灾难恢复。
+部分完成：connector authority foundation 已有 16 张 append-only 表、trusted store 和 wire contract，
+并通过六轮独立复核，但还没有 writer RPC/Runner。完整 source-health ledger、生产对象存储生命周期和
+跨机灾难恢复仍未完成。
 
 ### Phase 1：Agenda Engine Shadow——单公司运行中
 
@@ -87,8 +129,10 @@ rollback 只存在于 Capability Registry。
 已完成：CapabilityProposal、Evaluation、Decision、Registry、Catalog、lease、attestation contract、
 human promotion 和 rollback；builder 不能自评或自批。
 
-未完成：重复任务/gap detector、connector protocol template、代码生成器、真实 sandbox service、历史
-回放 runner、可信 canary、上线监控和自动 rollback trigger。当前 attestation 验证器不执行代码，
+已完成：Connector Protocol 0.1 文档、闭合 `ConnectorProposalManifest` schema 和 executable validator。
+
+未完成：重复任务/gap detector、代码生成器、真实 sandbox service、历史回放 runner、可信 canary、
+上线监控和自动 rollback trigger。当前 attestation 验证器不执行代码，
 且明确禁止网络、凭据和 Core DB。
 
 ### Phase 5：多 runtime 与规模化——替换边界完成
@@ -282,6 +326,7 @@ connector、Ledger 写入或旧 cron cutover 前都要独立开闸。
 - closed schema、未知字段拒绝、ExecutionInvocation subtype/equality；
 - RunnerResponse 与 ResultEnvelope 的 work/invocation/artifact/usage/status canonical equality；
 - SourceEnvelope 四类时间、completeness、access/retention/terms 和 provider request identity；
+- SourceEnvelope 的 result attempt、structured content hash 和 raw artifact producer/hash equality；
 - logical request 与 physical attempts、quota window/reset/timezone/rounding；
 - cursor/page/partial/schema drift、error taxonomy、Retry-After；
 - DNS/IP/redirect SSRF、source/adapter/MCP schema hash 变化使旧 lease 失效；
@@ -327,4 +372,6 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Agenda Shadow：`docs/reports/phase-1-agenda-shadow-implementation-2026-08-14.md`
 - Agenda 运营与反馈：`docs/reports/phase-1-agenda-control-2026-08-14.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
+- Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`
+- Connector Protocol 与自生成模板：`docs/CONNECTOR_PROTOCOL.md`

@@ -19,6 +19,10 @@ _LAZY_EXPORTS = {
     "CapabilityCatalog": (".capability_catalog", "CapabilityCatalog"),
     "ModelRouter": (".model_router", "ModelRouter"),
     "ObservabilityStore": (".observability", "ObservabilityStore"),
+    "ConnectorStore": (".connector", "ConnectorStore"),
+    "validate_connector_proposal_manifest": (
+        ".connector", "validate_connector_proposal_manifest"
+    ),
     "DashboardProjector": (".dashboard_projector", "DashboardProjector"),
     "project_dashboard": (".dashboard_projector", "project_dashboard"),
     "DashboardQueryService": (".dashboard", "DashboardQueryService"),
@@ -43,6 +47,8 @@ def __getattr__(name: str):
 __all__ = [
     "CapabilityAttestation",
     "CapabilityCatalog",
+    "ConnectorStore",
+    "validate_connector_proposal_manifest",
     "DashboardProjector",
     "DashboardQueryService",
     "ModelRouter",

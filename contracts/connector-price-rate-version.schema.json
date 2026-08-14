@@ -1,0 +1,6 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","title":"ConnectorPriceRateVersion","type":"object","additionalProperties":false,
+  "required":["schema_version","id","created_at","price_rate_ref","version","prior_version_ref","connector_profile_ref","meter","unit_quantity","unit_price_micros","rounding_mode","currency","effective_from","effective_until","source_ref","actor_ref","content_hash"],
+  "properties":{"schema_version":{"const":"0.1"},"id":{"type":"string","minLength":1},"created_at":{"type":"string","format":"date-time"},"price_rate_ref":{"type":"string","minLength":1},"version":{"type":"integer","minimum":1},"prior_version_ref":{"type":["string","null"]},"connector_profile_ref":{"type":"string","minLength":1},"meter":{"enum":["calls","bytes","records"]},"unit_quantity":{"type":"integer","minimum":1},"unit_price_micros":{"type":"integer","minimum":0},"rounding_mode":{"const":"ceiling"},"currency":{"type":"string","pattern":"^[A-Z]{3}$"},"effective_from":{"type":"string","format":"date-time"},"effective_until":{"type":["string","null"]},"source_ref":{"type":"string","minLength":1},"actor_ref":{"type":"string","minLength":1},"content_hash":{"$ref":"#/$defs/hash"}},
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}}
+}

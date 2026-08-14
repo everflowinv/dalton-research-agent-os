@@ -1,0 +1,6 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","title":"ConnectorPhysicalAttempt","type":"object","additionalProperties":false,
+  "required":["schema_version","id","created_at","connector_invocation_ref","reservation_ref","physical_attempt_number","outcome","started_at","completed_at","provider_request_id","retry_at","content_hash"],
+  "properties":{"schema_version":{"const":"0.1"},"id":{"type":"string","minLength":1},"created_at":{"type":"string","format":"date-time"},"connector_invocation_ref":{"type":"string","minLength":1},"reservation_ref":{"type":"string","minLength":1},"physical_attempt_number":{"type":"integer","minimum":1},"outcome":{"enum":["succeeded","rate_limited","timeout","failed","indeterminate"]},"started_at":{"type":"string","format":"date-time"},"completed_at":{"type":["string","null"]},"provider_request_id":{"type":["string","null"]},"retry_at":{"type":["string","null"]},"content_hash":{"$ref":"#/$defs/hash"}},
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}}
+}

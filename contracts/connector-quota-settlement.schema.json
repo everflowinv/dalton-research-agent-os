@@ -1,0 +1,6 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","title":"ConnectorQuotaSettlement","type":"object","additionalProperties":false,
+  "required":["schema_version","id","created_at","reservation_ref","revision","correction_of_ref","state","usage_entry_ref","cost_entry_ref","actual","content_hash"],
+  "properties":{"schema_version":{"const":"0.1"},"id":{"type":"string","minLength":1},"created_at":{"type":"string","format":"date-time"},"reservation_ref":{"type":"string","minLength":1},"revision":{"type":"integer","minimum":1},"correction_of_ref":{"type":["string","null"]},"state":{"enum":["consumed","released","indeterminate"]},"usage_entry_ref":{"type":["string","null"]},"cost_entry_ref":{"type":["string","null"]},"actual":{"$ref":"#/$defs/metrics"},"content_hash":{"$ref":"#/$defs/hash"}},
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},"metrics":{"type":"object","additionalProperties":false,"required":["calls","bytes","records","cost_micros"],"properties":{"calls":{"type":"integer","minimum":0},"bytes":{"type":"integer","minimum":0},"records":{"type":"integer","minimum":0},"cost_micros":{"type":"integer","minimum":0}}}}
+}

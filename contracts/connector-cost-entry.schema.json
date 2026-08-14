@@ -1,0 +1,6 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","title":"ConnectorCostEntry","type":"object","additionalProperties":false,
+  "required":["schema_version","id","created_at","usage_entry_ref","revision","correction_of_ref","price_rate_refs","amount_micros","currency","cost_status","calculation_ref","actor_ref","content_hash"],
+  "properties":{"schema_version":{"const":"0.1"},"id":{"type":"string","minLength":1},"created_at":{"type":"string","format":"date-time"},"usage_entry_ref":{"type":"string","minLength":1},"revision":{"type":"integer","minimum":1},"correction_of_ref":{"type":["string","null"]},"price_rate_refs":{"type":"array","uniqueItems":true,"items":{"type":"string","minLength":1}},"amount_micros":{"type":["integer","null"],"minimum":0},"currency":{"type":"string","pattern":"^[A-Z]{3}$"},"cost_status":{"enum":["actual","estimated","unpriced","waived"]},"calculation_ref":{"type":"string","minLength":1},"actor_ref":{"type":"string","minLength":1},"content_hash":{"$ref":"#/$defs/hash"}},
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}}
+}

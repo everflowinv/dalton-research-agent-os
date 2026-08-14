@@ -16,13 +16,13 @@ Scheduler、ExecutionInvocation、DomainEvent 和 ArtifactVersion 已经承担�
 | 机制 | 是否需要 | authority | 数据模型 | 保留策略 |
 | --- | --- | --- | --- | --- |
 | session compaction | 不作为 Dalton 跨任务机制 | 无 | runtime 单次 attempt 内部实现细节 | attempt 结束即可丢；摘要不能成为事实 |
-| ContextPack | 需要 | derived、可重建 | mandate/claim/snapshot/artifact refs + selection policy + content hash | formal result 后按缓存 TTL 清理 |
-| working memory | 需要 | derived、非权威 | `work_order_ref + attempt_number + step_ref` 的 scratch refs | 默认 7 天；故障或争议任务 30 天 |
-| checkpoint/resume | 需要 | checkpoint 本身非权威；attempt event 引用为审计事实 | checkpoint artifact hash、DAG cursor、completed step refs、pending step refs | formal result 后 30 天；事故冻结时随 incident 保留 |
+| ContextPack | 需要 | derived、可重建 | mandate/claim/snapshot/artifact refs + builder/selector/tokenizer/truncation refs 与 hashes + content hash | 由版本化 retention policy 决定 |
+| working memory | 需要 | derived、非权威 | `work_order_ref + attempt_number + step_ref` 的 scratch refs | 由版本化 retention policy 决定；事故可 legal hold |
+| checkpoint/resume | 需要 | checkpoint 本身非权威；attempt event 引用为审计事实 | checkpoint artifact hash、DAG cursor、completed step refs、pending step refs | 由版本化 retention policy 决定；事故可 legal hold |
 | durable research memory | 已有 | Research Ledger | immutable EvidenceVersion、ClaimVersion、ThesisVersion、relations、adjudication | 按研究记录长期保留，不自动压缩覆盖 |
 | ClaimIndex | 需要 | derived projection | Ledger refs、subject/metric/period/basis/status、检索字段 | 可整体重建；索引版本切换后旧版短期保留 |
 | execution/event log | 已有 | Core/Scheduler append-only authority | ExecutionInvocation、DomainEvent、attempt event、outbox event、Usage/Cost | 按审计和账务策略长期保留 |
-| ops log/metrics | 需要 | 非权威 | latency、error class、queue depth、process health、redacted JSONL/metrics | JSONL 14 天，聚合指标 90 天；事故片段单独冻结 |
+| ops log/metrics | 需要 | 非权威 | latency、error class、queue depth、process health、redacted JSONL/metrics | 由版本化 retention policy 决定；事故片段单独冻结 |
 
 ## 已有机制覆盖范围
 
@@ -30,8 +30,8 @@ Scheduler、ExecutionInvocation、DomainEvent 和 ArtifactVersion 已经承担�
   进入 Thesis 前还要过 verification/adjudication gate。
 - immutable versions 防止“新摘要覆盖旧事实”；domain events 记录状态变化，不要求用完整 event sourcing
   重建所有领域对象。
-- ArtifactVersion 保存模型 completion、原始响应和派生产物的 provenance。completion 只能先成为 artifact，
-  不能直接成为 Evidence。
+- ArtifactVersion 已能登记并引用模型 completion、原始响应和派生产物的 metadata/provenance；完整内容的
+  对象存储、retention 和 lifecycle 尚未验收。completion 即使登记为 artifact，也不能直接成为 Evidence。
 - Scheduler 的 lease、attempt、idempotency 和 formal result 提供 WorkOrder 粒度的 at-least-once resume。
   `retry_at/not_before` 让 429 回调度器，不在 worker 内等待。
 
@@ -40,9 +40,11 @@ Scheduler、ExecutionInvocation、DomainEvent 和 ArtifactVersion 已经承担�
 ### ContextPack
 
 `ContextPack = f(mandate_version, selected_claim_versions, perception_snapshot,
-artifact_refs, selection_policy_version)`。
+artifact_refs, builder_version, selection_policy_version, tokenizer_version,
+truncation_algorithm_version)`。
 
-构建必须确定性排序、记录每个输入 ref/hash、裁剪理由、token/byte 预算和 pack hash。模型调用只引用
+构建必须确定性排序，冻结 builder、selector、tokenizer、truncation algorithm 的 ref/hash，并记录每个
+输入 ref/hash、裁剪理由、token/byte 预算和 pack hash。模型调用只引用
 pack artifact，不引用一段无法复现的历史聊天。若 runtime 内部压缩 pack，它必须把压缩前后 hash 和
 算法版本写入 attempt artifact，但压缩结果仍是 derived data。
 

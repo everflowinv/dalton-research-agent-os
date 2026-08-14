@@ -1,0 +1,6 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","title":"ConnectorCallSpec","type":"object","additionalProperties":false,
+  "required":["schema_version","id","created_at","work_order_ref","work_order_hash","connector_profile_ref","operation","parameters","query_hash","content_hash"],
+  "properties":{"schema_version":{"const":"0.1"},"id":{"type":"string","minLength":1},"created_at":{"type":"string","format":"date-time"},"work_order_ref":{"type":"string","minLength":1},"work_order_hash":{"$ref":"#/$defs/hash"},"connector_profile_ref":{"type":"string","minLength":1},"operation":{"type":"string","minLength":1},"parameters":{"type":"object"},"query_hash":{"$ref":"#/$defs/hash"},"content_hash":{"$ref":"#/$defs/hash"}},
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}}
+}

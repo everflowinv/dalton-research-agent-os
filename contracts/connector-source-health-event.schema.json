@@ -1,0 +1,6 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","title":"ConnectorSourceHealthEvent","type":"object","additionalProperties":false,
+  "required":["schema_version","id","created_at","connector_profile_ref","connector_invocation_ref","state","prior_event_ref","actor_ref","content_hash"],
+  "properties":{"schema_version":{"const":"0.1"},"id":{"type":"string","minLength":1},"created_at":{"type":"string","format":"date-time"},"connector_profile_ref":{"type":"string","minLength":1},"connector_invocation_ref":{"type":["string","null"]},"state":{"enum":["healthy","degraded","open_circuit","recovered"]},"prior_event_ref":{"type":["string","null"]},"actor_ref":{"type":"string","minLength":1},"content_hash":{"$ref":"#/$defs/hash"}},
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}}
+}

@@ -1,0 +1,6 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","title":"ConnectorUsageEntry","type":"object","additionalProperties":false,
+  "required":["schema_version","id","created_at","physical_attempt_ref","connector_invocation_ref","revision","correction_of_ref","measurement_status","metering_source","provider_usage_ref","metrics","content_hash"],
+  "properties":{"schema_version":{"const":"0.1"},"id":{"type":"string","minLength":1},"created_at":{"type":"string","format":"date-time"},"physical_attempt_ref":{"type":"string","minLength":1},"connector_invocation_ref":{"type":"string","minLength":1},"revision":{"type":"integer","minimum":1},"correction_of_ref":{"type":["string","null"]},"measurement_status":{"enum":["final","partial","estimated","unavailable"]},"metering_source":{"enum":["provider_reported","runner_measured","estimated"]},"provider_usage_ref":{"type":["string","null"]},"metrics":{"$ref":"#/$defs/metrics"},"content_hash":{"$ref":"#/$defs/hash"}},
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},"metrics":{"type":"object","additionalProperties":false,"required":["calls","bytes","records","cost_micros"],"properties":{"calls":{"type":"integer","minimum":0},"bytes":{"type":"integer","minimum":0},"records":{"type":"integer","minimum":0},"cost_micros":{"type":"integer","minimum":0}}}}
+}

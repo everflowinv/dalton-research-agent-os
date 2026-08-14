@@ -24,7 +24,7 @@ Dalton 是面向投研团队的独立研究控制内核。它把任务调度、�
 - OpenClaw 可以提供模型、消息、审批和投递连接器；Core 不读取 OpenClaw 配置或凭据。
 - 旧 OpenClaw agent 的约束、研究结果和 cron 只作为 legacy input 归档。归档不代表采用、兼容或继续运行。
 
-旧工作流的初步取舍见 [docs/legacy-workflow-disposition.md](docs/legacy-workflow-disposition.md)。完整契约见 [SPEC.md](SPEC.md)，当前完成度与未完成项见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，Connector Fabric next phase 见 [docs/reports/connector-fabric-next-phase-2026-08-14.md](docs/reports/connector-fabric-next-phase-2026-08-14.md)。
+旧工作流的初步取舍见 [docs/legacy-workflow-disposition.md](docs/legacy-workflow-disposition.md)。完整契约见 [SPEC.md](SPEC.md)，当前完成度与未完成项见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，Connector 边界见 [docs/CONNECTOR_PROTOCOL.md](docs/CONNECTOR_PROTOCOL.md)，Context/Memory/Log 裁决见 [docs/reports/context-memory-log-subsystem-2026-08-14.md](docs/reports/context-memory-log-subsystem-2026-08-14.md)。
 
 ## 本地验证
 

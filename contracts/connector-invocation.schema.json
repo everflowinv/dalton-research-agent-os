@@ -1,0 +1,6 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema","title":"ConnectorInvocation","type":"object","additionalProperties":false,
+  "required":["schema_version","id","created_at","work_order_ref","work_order_hash","connector_profile_ref","connector_profile_hash","call_spec_ref","call_spec_hash","capability_lease_ref","capability_lease_hash","descriptor_revision_ref","catalog_epoch","logical_invocation_key","execution_ref","execution_hash","content_hash"],
+  "properties":{"schema_version":{"const":"0.1"},"id":{"type":"string","pattern":"^connector-invocation:"},"created_at":{"type":"string","format":"date-time"},"work_order_ref":{"type":"string","minLength":1},"work_order_hash":{"$ref":"#/$defs/hash"},"connector_profile_ref":{"type":"string","minLength":1},"connector_profile_hash":{"$ref":"#/$defs/hash"},"call_spec_ref":{"type":"string","minLength":1},"call_spec_hash":{"$ref":"#/$defs/hash"},"capability_lease_ref":{"type":"string","minLength":1},"capability_lease_hash":{"$ref":"#/$defs/hash"},"descriptor_revision_ref":{"type":"string","minLength":1},"catalog_epoch":{"type":"integer","minimum":1},"logical_invocation_key":{"type":"string","minLength":1},"execution_ref":{"type":"string","minLength":1},"execution_hash":{"$ref":"#/$defs/hash"},"content_hash":{"$ref":"#/$defs/hash"}},
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}}
+}
