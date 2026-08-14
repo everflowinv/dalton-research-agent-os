@@ -2,6 +2,11 @@
 
 日期：2026-08-14
 
+> 本文是 Agenda Shadow 首次跑通时的历史快照。outbox 投递、补投、人工反馈和 HTML 控制面已由
+> 后续阶段完成；当前状态见 [../PROJECT_STATUS.md](../PROJECT_STATUS.md)，运营与控制面验收分别见
+> [phase-1-agenda-shadow-operations-2026-08-14.md](phase-1-agenda-shadow-operations-2026-08-14.md) 和
+> [phase-1-agenda-control-2026-08-14.md](phase-1-agenda-control-2026-08-14.md)。
+
 ## 结论
 
 Phase 1 已进入单公司 shadow 运行。Dalton 能根据人类 Mandate 和只读感知快照提出研究问题，真实经过

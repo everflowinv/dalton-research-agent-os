@@ -3,6 +3,9 @@
 > 日期：2026-08-14
 > 审计基准：`vision-and-architecture-v0.1.md`、`architecture-debate-and-v0.2-direction.md`、`SPEC.md`、当前源码、当前数据库和本机运行态
 
+> 本文是常驻服务首次上线时的历史快照，其中“Phase 1 尚未开始”等判断已经过时。当前状态统一见
+> [../PROJECT_STATUS.md](../PROJECT_STATUS.md)。
+
 ## 判断
 
 Dalton 现在有了正确的常驻外壳：`daltond` 和 owner-only writer 由 macOS LaunchAgent 持续运行；空闲时不保留 LLM session。controller 会回收过期 lease、检测权威库变化、重建只读投影、驱动静态看板插件并写健康心跳。

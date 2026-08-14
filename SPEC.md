@@ -11,7 +11,7 @@ database 和 cron 定义，但归档不代表新系统采用旧约束、旧研�
 
 ### 通用规则
 
-- 三十四份 JSON Schema 都是 Draft 2020-12 文档，根对象有
+- 三十九份 JSON Schema 都是 Draft 2020-12 文档，根对象有
   `additionalProperties: false`。
 - 每个对象都有 `schema_version`、稳定 `id` 和 `created_at`；引用字段使用稳定
   ref 字符串，时间字段保持 RFC 3339 形式的字符串（具体时区策略留给实现层）。
@@ -391,8 +391,7 @@ predicate 是闭合 shape：`{left_path, operator, right_path|value}`，只支�
 以下对象只在架构文档中定义方向，暂不伪装成已实现契约：Model IR
 datapoint/computation/scenario、CommitRecord、完整 bridge command-event、Excel exporter、
 Tier 1/2/3 computation contract、
-实际 capability sandbox backend/monitoring、checkpoint、
-OpenClaw outbox delivery adapter，以及尚未选定的生产级存储/队列/runtime（Postgres、Temporal、
+实际 capability sandbox backend/monitoring、checkpoint，以及尚未选定的生产级存储/队列/runtime（Postgres、Temporal、
 Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把 SQLite
 写成 Dalton 的长期架构不变式。
 
