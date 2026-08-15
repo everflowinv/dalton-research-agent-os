@@ -232,11 +232,19 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   或分页串页即使重算 hash 也不能形成 formal result；
 - Fable 5 对 `9599ea8` 至 `bf7c169` 的多轮复核发现并推动关闭了 fixture/runtime graph、page recovery、输出
   schema、query/scenario、lease proof、caller 时间、inner fact chain、分页串页和开放 parent completion 等
-  问题。最终候选 `2cb671e` 已通过专项 21/21、组合 81/81、Python 317/317、broker 15/15；两次 archive wheel
-  SHA-256 均为 `ca0e6a9eb84f1d1d287bd839de1b0854da43588d9191d4db0fd2cfdb073c9bd6`，干净安装与
-  SQLite integrity 通过；
-- Claude Fable 5 的最终 committed-tree 增量会话因本机 OAuth 过期未能启动，所以当前仍标记“待独立裁决”，
-  未推送、未部署；
+  问题。最终 committed-tree 审阅对 `2cb671e` 给出 connector 代码 **Go**：专项 21/21、组合超集 92/92、
+  broker 15/15、敌对 completion probes、compileall、diff-check、clean install 和 SQLite integrity 全部通过；
+- 独立审阅在 UTC 跨日后把全量基线重跑为 316/317，唯一失败是既有 Agenda `decide_cycle` 重新按真实时间
+  查 active policy，而没有读取 cycle 冻结的 policy version。后续修复改为 exact frozen policy binding，并加
+  active policy 中途换版回归；当前 Python 全量恢复为 317/317；
+- `2cb671e` 的两次 archive wheel 独立复现 SHA-256 均为
+  `8775adbeaa6c901801e84dfe3652cdaa312912d65301cb13173c068edae23f58`。旧记录
+  `ca0e6a9e...` 无法从任何现存提交复现，不能继续作为验收事实。工具链为 Python 3.13.14、setuptools
+  84.0.0、pip 26.1.2、`SOURCE_DATE_EPOCH=1700000000`；Agenda 修复后的工作树 wheel 两次逐位一致，
+  SHA-256 为 `0df85b85981fd14ebc095bf9ecd5ff86377d11a4ac8822ffc1166dea01bbbd04`；
+- 下一最小扩展切片不是语义 Router 或 `CompiledConnectorPlan`，而是在十件 frozen inventory loader 之外新增
+  声明式 proposal package validator/loader。目标是第 11 条 proposal-only connector 不改中央 Python 即可完成
+  offline graph/schema/fixture 验证；human promotion、Catalog publish 和每次 physical call admission 不放宽；
 - 本轮没有部署、没有访问真实数据源、没有使用 credential，也没有写 Evidence/Claim/Thesis。真实 public
   network 仍被 killable total-deadline transport gate 阻塞；AlphaEngine/Guidepoint/雪球等 host/MCP 路径仍被
   runner wire 0.2、credential revoke/max_calls use-time authority 阻塞。

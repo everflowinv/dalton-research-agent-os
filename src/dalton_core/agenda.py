@@ -359,6 +359,19 @@ class AgendaStore:
             raise AgendaNotFound("active agenda policy")
         return json.loads(row["policy_json"])
 
+    def _policy_version(self, version_id: str) -> dict[str, Any]:
+        version_id = _text(version_id, "policy_version_ref")
+        row = self.connection.execute(
+            "SELECT policy_json FROM agenda_policy_versions WHERE version_id=?",
+            (version_id,),
+        ).fetchone()
+        if row is None:
+            raise AgendaNotFound(version_id)
+        policy = json.loads(row["policy_json"])
+        if policy.get("id") != version_id:
+            raise AgendaConflict("agenda policy row does not match its frozen version ref")
+        return policy
+
     def budget_status(self, *, daily_since: str, monthly_since: str) -> dict[str, Any]:
         daily_since = _timestamp(daily_since, "daily_since")  # type: ignore[assignment]
         monthly_since = _timestamp(monthly_since, "monthly_since")  # type: ignore[assignment]
@@ -598,11 +611,11 @@ class AgendaStore:
         cycle_id = _text(cycle_id, "cycle_id")
         actor_ref = _text(actor_ref, "actor_ref")
         decision_id = self._id("agenda-decision", decision_id)
-        policy_wire = self.active_policy()
-        policy = policy_wire["policy"]
         cycle = self.connection.execute("SELECT * FROM agenda_cycles WHERE cycle_id=?", (cycle_id,)).fetchone()
         if cycle is None:
             raise AgendaNotFound(cycle_id)
+        policy_wire = self._policy_version(cycle["policy_version_ref"])
+        policy = policy_wire["policy"]
         overrides = self.active_priority_overrides(scope_ref=cycle["company_ref"])
         weights = dict(policy["feature_weights"])
         for override in overrides:

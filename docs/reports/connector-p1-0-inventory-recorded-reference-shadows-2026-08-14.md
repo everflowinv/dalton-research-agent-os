@@ -99,12 +99,13 @@ Core store 上的 exact ConnectorStore 与 ObservabilityStore；Coordinator 只�
 ## 最终候选验证
 
 - recorded reference shadow 专项：21/21；
-- Runner/transport/inventory/contracts/Scheduler 组合：81/81；
-- Python 全量：317/317；
+- Runner/transport/inventory/contracts/Scheduler 独立组合超集：92/92；
+- Python 全量：独立复核在 UTC 跨日后为 316/317，唯一失败是既有 Agenda frozen-policy binding；修复后
+  为 317/317；
 - broker：15/15；
 - `compileall`、`git diff --check`：通过。
 - 两次 committed archive、Python 3.13 `--no-isolation` wheel 逐字节一致，SHA-256：
-  `ca0e6a9eb84f1d1d287bd839de1b0854da43588d9191d4db0fd2cfdb073c9bd6`；
+  `8775adbeaa6c901801e84dfe3652cdaa312912d65301cb13173c068edae23f58`；
 - 干净 venv 安装后 inventory `load == build`，十个 profile 与 CNINFO/SEC fixture 完整，completion builder 可导入，
   SQLite integrity 为 `ok`。
 
@@ -112,8 +113,19 @@ Fable 5 对 committed candidates `9599ea8`、`c5fcd41`、`d9b5a0e`、`6eea5c0` �
 发现 page recovery、fixture/runtime graph、lease completion proof、caller 时间、inner authority chain、分页
 串页和开放父级 Result/Response 等问题。最终候选 `2cb671e` 已关闭这些已知缝隙并通过上述本地验收。
 
-新的 Claude Fable 5 终审会话因本机 Claude OAuth 过期未能启动，因此本报告不把 `2cb671e` 写成独立 Go，也
-不推送或部署。恢复 Claude 会话后只需对 committed tree 补做增量裁决；若获 Go，再推送并等待 GitHub CI。
+新的 Claude Fable 5 终审会话在恢复 OAuth 后完成 committed-tree 独立复核，对 `2cb671e` connector 代码给出
+**Go**。五类敌对条件均由专项测试覆盖并通过：开放 parent Result/Response、分页串页、backdated caller
+`event_at`、缺失 Connector/Artifact/Source authority，以及伪造或跨库 completion reader。
+
+旧 wheel 记录 `ca0e6a9e...` 无法从 `2cb671e`、当前 docs-only HEAD 或相邻 `bf7c169` 复现，不能继续作为
+验收事实。独立复核使用 Python 3.13.14、setuptools 84.0.0、pip 26.1.2 和
+`SOURCE_DATE_EPOCH=1700000000`，`pip wheel --no-build-isolation` 与 `python -m build -n` 产物相同；wheel
+载荷与 committed tree 逐字节一致。该记录更正不改变 P1-0b 代码裁决。
+
+全量测试的唯一失败来自 P1-0b diff 之外的 Agenda 生产缺陷：cycle 已冻结 `policy_version_ref`，但
+`decide_cycle` 仍读取实时 active policy。后续修复改为从 immutable cycle ref 读取 exact policy，避免跨 UTC
+午夜或 policy 中途换版后静默改写 decision authority。修复后的全量为 317/317；Agenda 修复工作树 wheel
+两次逐位一致，SHA-256 `0df85b85981fd14ebc095bf9ecd5ff86377d11a4ac8822ffc1166dea01bbbd04`。
 
 ## 仍然 No-Go
 

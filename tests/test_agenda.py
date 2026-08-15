@@ -156,11 +156,23 @@ class AgendaTests(unittest.TestCase):
             started["cycle_id"], candidates=candidates, actor_ref="core",
             idempotency_key="candidates:1",
         )
+        replacement = policy()
+        replacement["selected_count"] = 1
+        self.agenda.create_policy(
+            replacement, effective_from=NOW, effective_until=LATER,
+            actor_ref="human:owner", version_id="agenda-policy-version:2",
+            idempotency_key="policy:2",
+        )
         decision = self.agenda.decide_cycle(
             started["cycle_id"], actor_ref="core", decision_id="decision:1",
             idempotency_key="decision:1",
         )
         self.assertEqual(decision["selected_candidate_refs"], ["candidate:a", "candidate:b"])
+        self.assertEqual(decision["policy_version_ref"], p["id"])
+        self.assertEqual(
+            self.agenda.cycle(started["cycle_id"])["cycle"]["policy_version_ref"],
+            decision["policy_version_ref"],
+        )
         pending = self.agenda.pending_outbox()
         self.assertEqual(len(pending), 1)
         claimed = self.agenda.claim_outbox(
