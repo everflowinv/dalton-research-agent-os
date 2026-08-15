@@ -2,7 +2,7 @@
 
 更新日期：2026-08-15
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver、隔离 SEC public canary、HumanReviewAuthority + Ledger promotion 0.2 + HTML review 入口、DocumentIndex FTS5 只读投影、ContextPack authority-bound materializer、Agenda exact context/materializer 统一路径、ResearchQuestionBacklog append-only authority，以及 Planner SEC public read-only 薄闭环（开发候选），未部署
+- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver、隔离 SEC public canary、HumanReviewAuthority + Ledger promotion 0.2 + HTML review 入口、DocumentIndex FTS5 只读投影、ContextPack authority-bound materializer、Agenda exact context/materializer 统一路径、ResearchQuestionBacklog append-only authority、Planner SEC public read-only 薄闭环，以及 ResearchPlan 下游逐项 admission coordinator（开发候选），未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -10,8 +10,8 @@
 hostile-code 生产安全等级。
 
 当前架构方向与执行顺序见
-[vision-and-next-step-review-v0.5-2026-08-15.md](reports/vision-and-next-step-review-v0.5-2026-08-15.md)。
-v0.4 及更早报告保留为各切片启动时的历史基线，不再作为当前执行顺序。
+[vision-and-execution-priority-v0.6-2026-08-15.md](reports/vision-and-execution-priority-v0.6-2026-08-15.md)。
+v0.5 及更早报告保留为各切片启动时的历史基线，不再作为当前执行顺序。
 
 ## 当前判断
 
@@ -35,14 +35,16 @@ materializer quoted JSONL；可变 snapshot 文件不再参与 replay 或 prompt
 ResearchQuestionVersion → immutable ResearchPlanVersion → WorkflowRunVersion/WorkOrderLink 任务树；首版只允许
 无凭据 SEC public `list_filings`，每份 plan 都要 exact human approval。启动只把根 connector WorkOrder 放入
 Scheduler，下游 resolver/verifier/candidate staging 保持 planned，必须由 coordinator 在上游 exact result 后逐项
-admission；没有能力租约、凭据、自动 Ledger commit 或旧 cron cutover。Kimi 外部讨论与 Fable 5 独立复审后，
-当前顺序改为先完成下游逐项 admission，跑通第一条真实 SEC public WorkOrder 树，再走人工 review、正式 Ledger
-promotion 和研究质量校准。Interrupt / park / resume 与 Reflection 顺延；在此之前不把 planned 子节点描述成
-已经执行，也不再增加没有真实消费者的内核子系统。
+admission；开发候选 coordinator 已完成 exact Scheduler/connector receipt/runner journal/内部阶段输出证明核对，
+每次只 admission 直接子节点，重放收敛且篡改 fail closed。它还没有接上真实四步 executor；没有能力租约、
+凭据、自动 Ledger commit 或旧 cron cutover。当前顺序是先跑通第一条真实 SEC public WorkOrder 树，再走人工
+review、正式 Ledger promotion 和研究质量校准。Interrupt / park / resume 与 Reflection 顺延；在此之前不把
+planned 子节点描述成已经执行，也不增加没有真实消费者的内核子系统。
 正式 Ledger commit 继续逐条人工 gate。万华的 10 个工作日/20 个显式人工标签门槛
-只限制 Agenda 从 1 家扩到 3 家。v0.5 另设研究价值门槛：第一条真实闭环和至少 1 条人工接受的正式 Claim
-出现前，只继续该闭环必需的 coordinator、verifier、Human Review 接线和故障重放；新 connector、Model IR、
-sandbox 与其他内核扩建暂停。任何研究执行开闸或旧 cron cutover 仍须单独验收。
+只限制 Agenda 从 1 家扩到 3 家。第一条真实闭环和至少 1 条人工接受的正式 Claim 出现前，完整流程仍是第一
+优先级，但不是冻结全部 connector 和 model 工作：只要一项增量直接解除首家公司覆盖的阻塞，或能按明确验收
+标准改善首轮产物质量，就可以并行推进。与首条 plan 无关的新 connector 品类、Model IR、sandbox 和其他内核
+扩建继续后置。任何研究执行开闸或旧 cron cutover 仍须单独验收。
 
 ### P2 DocumentIndex FTS5 当前进度（开发候选，未部署）
 
@@ -174,6 +176,27 @@ sandbox 与其他内核扩建暂停。任何研究执行开闸或旧 cron cutove
   停在 `planned`；replan/park/resume/retire 的产品语义继续保留为缺口，但在真实研究闭环和质量校准之后再设计。
   完整结果见
   [research-plan-thin-closure-2026-08-15.md](reports/research-plan-thin-closure-2026-08-15.md)。
+
+### ResearchPlan coordinator 当前进度（开发候选，未部署）
+
+- 新增唯一的下游逐项 admission 边界。caller 只提交 plan ref 和 upstream WorkOrder ref；coordinator 每次
+  重读 exact plan/start/workflow/link、Scheduler WorkOrder/policy/attempt/lease/formal result/ResultEnvelope，
+  不接受 caller-supplied success boolean 或 opaque payload；
+- connector 根节点必须有 exact compiled request、completion receipt 与 Scheduler result 绑定。v0.2 receipt
+  还要重读 Core runner journal 中的 actual request、完整事件 hash 链和终态 `responded` response；
+- 三个内部节点必须返回封闭、可哈希的 `ResearchPlanStageOutput`，绑定 exact plan/step/output contract、直接
+  上游 WorkOrder/result 和阶段规定的 typed ref/hash records。每次只 enqueue 直接子节点，不能越级或批量放行；
+- child identity 和 idempotency key 由 immutable plan 派生。重复调用、enqueue 后崩溃重放都会收敛到同一节点；
+  错误 plan/workflow/upstream/result、缺失 receipt、attempt/formal result/ResultEnvelope/receipt/child tamper，
+  以及 failed/expired/plan-attempt-exhausted 都 fail closed；
+- coordinator 专项 12/12、相邻 Planner/Scheduler/research coordinator/packaging 回归 55/55、Python 全量
+  519/519、broker 15/15、`compileall`、106 份 JSON contract 与 `git diff --check` 均通过。固定
+  `SOURCE_DATE_EPOCH=1700000000` 的两份 wheel 逐位一致，SHA-256 均为
+  `cbbd4feb139e764f7217fd6644001a8e2df2d6c9c5f3aae8da2da3f961052364`，大小均为 677,254 bytes；
+  Python 3.13 干净 venv 安装、公开导入和 packaged stage-output contract 检查通过；
+- 本切片没有接真实四步 executor，也没有从 resolver/verifier/candidate staging 的 authority store 重读 typed
+  records 正文；它证明 admission 控制语义，不证明四步计划已真实执行或投研产物有价值。完整结果见
+  [research-plan-coordinator-admission-2026-08-15.md](reports/research-plan-coordinator-admission-2026-08-15.md)。
 
 ### Connector P0-0 当前进度（未部署）
 
@@ -751,25 +774,29 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 offline/authority source-numeric verifier、只读 authority resolver、candidate staging、一条隔离 SEC public
 WorkOrder、独立 HumanReviewAuthority、HTML 入口和正式 Evidence/Claim 0.2 promotion 已完成开发候选。
 ClaimIndex status 派生、DocumentIndex FTS5、claim/artifact ContextPack materializer、Agenda context authority、
-ResearchQuestionBacklog 和 Planner SEC public 薄闭环均已完成开发候选。下一步先完成下游 WorkOrder 的逐项
-coordinator admission，在隔离 authority 中跑通一份人批 plan 的真实 SEC public 四步任务树，再把 candidate 走
-人工 review、正式 Evidence/Claim 0.2 promotion 与 Backlog answer binding。Interrupt / park / resume、Reflection、
-生产部署、Model IR 更新和旧 cron cutover 均后置并保持独立人工 gate。当前没有 live staging/review/plan authority。
+ResearchQuestionBacklog、Planner SEC public 薄闭环和下游逐项 coordinator admission 均已完成开发候选。下一步
+接上真实四步 executor，在隔离 authority 中跑通一份人批 plan 的真实 SEC public 四步任务树，再把 candidate
+送入人工 review、正式 Evidence/Claim 0.2 promotion 与 Backlog answer binding。Interrupt / park / resume、Reflection、
+生产部署和旧 cron cutover 均后置并保持独立人工 gate。直接解除首条 plan 阻塞或按明确标准改善首轮产物质量的
+connector/model 增量可以并行推进；与首条 plan 无关的扩建后置。当前没有 live staging/review/plan authority。
 
 operational verifier 与 fixture-only research coordinator 只继续第一条真实闭环需要的部分。formula census/
-Model IR ADR 和 offline capability sandbox 暂停，等真实闭环与首轮质量数据完成后再决定是否恢复。
+Model IR ADR 和 offline capability sandbox 只有在首条 plan 明确需要且有验收标准时才恢复，否则等真实闭环与
+首轮质量数据完成后再决定。
 
 ## 继续建设与开闸的不同门槛
 
-可以立即继续：完成第一条 SEC public read-only 研究闭环所需的 coordinator admission、故障重放、Human Review
-接线、verifier 校准和离线 replay；第一条闭环完成后可做不改 Core 的 Temporal recorded-fixture spike。
+可以立即继续：完成第一条 SEC public read-only 研究闭环所需的 executor 接线、故障重放、Human Review 接线、
+verifier 校准和离线 replay；能直接解除该 plan 阻塞或按明确标准改善产物质量的 connector/model 增量也可并行
+推进。第一条闭环完成后可做不改 Core 的 Temporal recorded-fixture spike。
 
-第一条真实闭环和至少 1 条人工接受的正式 Claim 出现前暂停：新 connector 品类、Interrupt / Reflection、Model IR、
-sandbox、embedding、多 runtime，以及没有真实消费者的 contract、projection 或 dashboard 扩建。
+第一条真实闭环和至少 1 条人工接受的正式 Claim 出现前暂停：与首条 plan 无关的新 connector 品类、
+Interrupt / Reflection、无明确质量验收的 Model IR、sandbox、embedding、多 runtime，以及没有真实消费者的
+contract、projection 或 dashboard 扩建。
 
 仍需观察或人工批准：扩大 Agenda 公司数、生产 connector 权限、Evidence/Claim/Thesis commit、外发、
 付费调用、凭据扩权、旧 cron cutover。第一条闭环开发和 Agenda Shadow 数据积累可以并行，其他架构扩建按
-v0.5 的价值门槛暂停。
+v0.6 的价值门槛后置。
 
 ## Connector Fabric 完成门槛
 
@@ -839,6 +866,8 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - DocumentIndex FTS5：`docs/reports/document-index-fts5-2026-08-15.md`
 - ResearchQuestionBacklog：`docs/reports/research-question-backlog-2026-08-15.md`
 - Planner SEC public 薄闭环：`docs/reports/research-plan-thin-closure-2026-08-15.md`
+- ResearchPlan coordinator：`docs/reports/research-plan-coordinator-admission-2026-08-15.md`
+- 当前愿景与执行优先级：`docs/reports/vision-and-execution-priority-v0.6-2026-08-15.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`

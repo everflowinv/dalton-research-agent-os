@@ -96,6 +96,13 @@ _LAZY_EXPORTS = {
     "ResearchQuestionBacklog": (".research_question_backlog", "ResearchQuestionBacklog"),
     "ResearchPlanAuthority": (".research_plan", "ResearchPlanAuthority"),
     "ResearchPlanControlPlane": (".research_plan", "ResearchPlanControlPlane"),
+    "ResearchPlanCoordinator": (".research_plan_coordinator", "ResearchPlanCoordinator"),
+    "ResearchPlanCoordinatorConflict": (
+        ".research_plan_coordinator", "ResearchPlanCoordinatorConflict"
+    ),
+    "ResearchPlanCoordinatorError": (
+        ".research_plan_coordinator", "ResearchPlanCoordinatorError"
+    ),
     "ResearchPlanConflict": (".research_plan", "ResearchPlanConflict"),
     "ResearchPlanError": (".research_plan", "ResearchPlanError"),
     "ResearchPlanNotFound": (".research_plan", "ResearchPlanNotFound"),
@@ -170,6 +177,9 @@ __all__ = [
     "ResearchQuestionBacklog",
     "ResearchPlanAuthority",
     "ResearchPlanControlPlane",
+    "ResearchPlanCoordinator",
+    "ResearchPlanCoordinatorConflict",
+    "ResearchPlanCoordinatorError",
     "ResearchPlanConflict",
     "ResearchPlanError",
     "ResearchPlanNotFound",
