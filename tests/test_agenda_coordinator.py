@@ -105,7 +105,14 @@ class AgendaCoordinatorTests(unittest.TestCase):
             socket = root / "run" / "writer.sock"; tokens = root / "tokens.json"
             legacy = root / "legacy.sqlite"; self.legacy(legacy)
             write_token_config(tokens, [Principal("core", "core-token", CORE_OPERATIONS, unrestricted=True)])
-            install_openclaw_catalog(router, checked_at=datetime(2026, 8, 14, 9, tzinfo=timezone.utc), availability_ttl=timedelta(days=1))
+            # Keep the fixture independent of the wall-clock date on which
+            # the suite is executed. The coordinator still passes its own
+            # frozen cycle time below.
+            install_openclaw_catalog(
+                router,
+                checked_at=datetime(2026, 8, 14, 9, tzinfo=timezone.utc),
+                availability_ttl=timedelta(days=365),
+            )
             env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
             process = subprocess.Popen(
                 [sys.executable, "-m", "dalton_core.writer_server", "--db", str(core), "--socket", str(socket), "--token-config", str(tokens)],

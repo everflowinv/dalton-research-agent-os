@@ -2,7 +2,7 @@
 
 更新日期：2026-08-15
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 fixture-only research coordinator，以及 offline source/numeric verifier + candidate staging，未部署
+- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver 和隔离 SEC public canary，未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -13,13 +13,15 @@ hostile-code 生产安全等级。
 
 Dalton 已经完成独立 Core、Research Ledger 核心版本链与 gate、单写者、Scheduler、模型路由、模型用量/成本、
 Capability Registry/Catalog、常驻控制服务、Agenda Shadow、durable outbox、人工反馈和备份恢复。
-它现在能自主生成并选择研究问题，也能在仓库 fixture 上按一次性 connector plan 执行 CNINFO、SEC、
-AlphaEngine 三源离线流程并从 checkpoint 恢复；它还不会访问 live source、运行 live authority verifier 或提交新的
-Evidence、Claim、Thesis。当前开发候选已经能对 packaged fixture 重跑 source/numeric verifier，并把通过的
-CandidateEvidence/CandidateClaim 写入独立 staging；这条链尚未部署，也没有接真实 connector authority 或人工审阅入口。
+live 部署现在能自主生成并选择研究问题，也能在仓库 fixture 上按一次性 connector plan 执行 CNINFO、SEC、
+AlphaEngine 三源离线流程并从 checkpoint 恢复；live 仍不会访问真实 source、运行 authority verifier 或提交新的
+Evidence、Claim、Thesis。当前开发候选已能重放 fixture，也能从完整 Connector authority 解析真实 SEC public
+响应，并把 source/numeric verifier 通过的 CandidateEvidence/CandidateClaim 写入独立 staging。这条链只在
+隔离临时 authority 中验收，尚未部署，也没有人工审阅入口。
 
-当前下一阶段是 **第一条只读研究闭环**：先把真实 SourceEnvelope/Artifact authority 解析到 verifier，
-再让一条公告或 filing WorkOrder 产出候选记录并进入人工 review。万华的 10 个工作日/20 个显式人工标签门槛
+当前下一阶段是 **第一条只读研究闭环的人工审阅边界**：authority resolver 与一条 SEC filing WorkOrder
+已产出 human-review-ready candidate；下一步要增加独立 review authority/入口，并继续保持正式 Ledger commit
+人工 gate。万华的 10 个工作日/20 个显式人工标签门槛
 只限制 Agenda 从 1 家扩到 3 家，不阻塞通用 connector、research coordinator、verifier、Model IR 和
 sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单独验收。
 
@@ -338,13 +340,36 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   WorkOrder 前必须增加 authority resolver 并复核完整 checkpoint chain；本阶段不部署、不接 Agenda、不读取凭据、
   不写正式 Research Ledger。
 
+### P2 authority resolver + SEC public canary 当前进度（隔离验收，未部署）
+
+- 新增 closed `AuthorityResolution`、`AuthoritySourceVerificationMaterial` 0.2 和
+  `ConnectorCompletionReceipt` 0.2。旧 0.1 receipt 保持兼容，但真实成功链必须同时绑定 coordinator 的
+  plan request 与 Connector Runner 实际执行 request；
+- `ConnectorAuthorityResolver` 只读连接 Core、Connector、Observability、Scheduler、RunnerJournal 和
+  coordinator scratch。它重算 raw Artifact、SourceEnvelope、Profile/CallSpec/Execution/WorkOrder、
+  ResultEnvelope/formal Scheduler event、physical attempt、Reservation、最新 Usage/Cost/Settlement、
+  AdapterRequest/observation/response 和完整 checkpoint chain；任何换绑、缺失、部分结果或篡改都 fail closed；
+- SEC adapter 只允许 `https://data.sec.gov/submissions/CIK{cik}.json`，不接受 credential handle，沿用
+  public transport 的 DNS/IP pinning、redirect 和 response-size gate。normalizer 严格拒绝重复 accession、
+  非法日期、不明 amendment revision、超窗口和静默 limit 截断；
+- isolated canary 使用临时 SQLite/raw spool 和 synthetic canary approval，不打开 live DB。真实 Microsoft
+  `CIK0000789019` 2025 10-Q 请求返回 3 条 filing，最终进入独立 candidate staging；状态为
+  `human-review-ready-candidate`，`semantic_verification_status=unverified`；
+- authority/SEC/Agenda 专项 8/8、相关 connector/coordinator/verifier 回归 41/41、Python 全量 370/370、
+  broker 15/15、`compileall`、schema 解析和 `git diff --check` 通过；固定
+  `SOURCE_DATE_EPOCH=1700000000` 的两次 Python 3.13 wheel SHA-256 均为
+  `d85ad4ecb466a18f3447549a3765f6561eba025a6b8bbed33baee3469dec22ae`，557,781 bytes；干净安装、
+  `pip check`、新增模块、14 份 packaged SQL 和 88 份 packaged contract schema 检查通过；
+- 本轮不部署、不接 Agenda、不读凭据、不写 Evidence/Claim/Thesis，也不切换旧 cron。人工 review authority/
+  入口、正式 commit 和生产 connector promotion 仍是独立 gate。
+
 ## 蓝图阶段
 
 ### Phase 0：记录和可观察性——主体完成
 
 已完成：
 
-- 85 份闭合 JSON Schema、14 份 SQL schema；
+- 88 份闭合 JSON Schema、14 份 SQL schema；
 - immutable DomainEvent、WorkOrder、ResultEnvelope、ModelInvocation；
 - Evidence → Claim → Thesis 版本链、verification 和 commit gate；
 - Workflow、Artifact metadata、模型 Usage/Cost、只读 projection 和静态看板；
@@ -378,10 +403,11 @@ Agenda Perception；否则会在 10 日评估窗口中途改变输入分布，�
 已完成：Scheduler lease/retry/idempotency、ProcessRuntimeAdapter、六模型 exact route、OpenClaw 模型
 broker、预算和 pause gate。
 
-部分完成：connector runner、recorded transport、fixture-only coordinator、offline source/numeric verifier 与
-candidate-only staging 已完成；尚未接 live source/authority resolver/human review。
+部分完成：connector runner、recorded transport、fixture-only coordinator、offline/authority source-numeric
+verifier、只读 authority resolver 与 candidate-only staging 已完成；真实 SEC public source 只在隔离 canary
+运行，尚未接 Agenda、生产 authority 或 human review。
 未完成：原生事件 connector、从 AgendaDecision 到 research DAG 的 production planner、
-`ready → connector/worker → verifier → revise/commit` 完整 coordinator，以及第一条真实只读研究 WorkOrder。
+`ready → connector/worker → verifier → revise/commit` 完整 coordinator，以及生产化只读研究 WorkOrder。
 
 ### Phase 3：Verifier 与 Thesis Commit——权威机制完成，运行层未开始
 
@@ -389,8 +415,9 @@ candidate-only staging 已完成；尚未接 live source/authority resolver/huma
 版本、原子 commit、幂等和事务失败回滚约束。这里没有 thesis 业务版本回滚；当前可激活历史版本的
 rollback 只存在于 Capability Registry。
 
-部分完成：source/numeric verifier 已有 synthetic fixture replay 与换绑/数值错误探针。
-未完成：live authority source/numeric verifier、completeness/investment-link verifier、seeded-error 校准、局部返工、人工审阅
+部分完成：source/numeric verifier 已有 synthetic fixture replay、真实 Connector authority replay 与
+换绑/数值错误探针。
+未完成：生产 authority verifier、completeness/investment-link verifier、seeded-error 校准、局部返工、人工审阅
 入口和任何 live thesis commit。
 
 ### Phase 4：能力自主改进——治理半边完成
@@ -421,7 +448,7 @@ Postgres/Temporal 规模化门槛和迁移。
   Scheduler/Agenda/live connector；
 - P2 已有 typed ContextPack、per-attempt RunState/Checkpoint 和结构化 ClaimIndex；尚缺版本化 retention policy
   与 authority DB 之外的滚动 OpsTelemetry；session transcript 和 compaction summary 不作为研究 memory；
-- operational verifier 已有 fixture-only source/numeric thin slice；尚缺 live authority resolver、
+- operational verifier 已有 fixture 与隔离 SEC authority source/numeric thin slice；尚缺生产 authority reader、
   completeness/investment-link verifier、revise/replanning/reflection 和 seeded-error 校准；
 - first-class falsifier/catalyst/driver/model/valuation authority、Model IR、Tier 1/2/3 evaluator 和
   Excel exporter；
@@ -570,9 +597,9 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 ### P2：第一条只读研究闭环
 
-offline source/numeric verifier 与 candidate staging contract 已完成候选。下一步先加只读 authority resolver，
-再将一个公告/filing connector 接到 AgendaDecision 后的只读 WorkOrder，输出候选记录并进入人工 review。
-正式 commit、Model IR 更新和旧 cron cutover 仍保持人工 gate；当前代码没有 live staging/review authority。
+offline/authority source-numeric verifier、只读 authority resolver、candidate staging 和一条隔离 SEC public
+WorkOrder 已完成。下一步增加独立人工 review authority/入口；AgendaDecision 接线、正式 commit、Model IR 更新和
+旧 cron cutover 仍保持人工 gate。当前代码没有 live staging/review authority。
 
 与 P0/P1 并行推进但不接生产权限：operational verifier contract、fixture-only research coordinator、
 formula census/Model IR ADR、offline capability sandbox。它们不必等待万华 shadow，但在 production
@@ -648,6 +675,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Core 规格：`SPEC.md`
 - Agenda Shadow：`docs/reports/phase-1-agenda-shadow-implementation-2026-08-14.md`
 - Agenda 运营与反馈：`docs/reports/phase-1-agenda-control-2026-08-14.md`
+- P2 authority resolver 与 SEC canary：`docs/reports/p2-authority-resolver-sec-canary-2026-08-15.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`

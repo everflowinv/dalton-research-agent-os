@@ -21,6 +21,24 @@ CREATE TABLE IF NOT EXISTS claim_indexes (
     created_at TEXT NOT NULL
 );
 
+-- Connector request and completion authority is persisted separately from the
+-- rebuildable checkpoint projection.  A resolver must be able to re-read the
+-- exact request/receipt pair after a coordinator restart; caller-provided
+-- maps are not execution authority.
+CREATE TABLE IF NOT EXISTS research_runner_requests (
+    runner_request_id TEXT PRIMARY KEY,
+    request_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS research_completion_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    receipt_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS research_checkpoints (
     checkpoint_id TEXT PRIMARY KEY,
     run_ref TEXT NOT NULL,
@@ -57,6 +75,14 @@ CREATE TRIGGER IF NOT EXISTS claim_indexes_no_update
 BEFORE UPDATE ON claim_indexes BEGIN SELECT RAISE(ABORT, 'claim_indexes is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS claim_indexes_no_delete
 BEFORE DELETE ON claim_indexes BEGIN SELECT RAISE(ABORT, 'claim_indexes is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_runner_requests_no_update
+BEFORE UPDATE ON research_runner_requests BEGIN SELECT RAISE(ABORT, 'research_runner_requests is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_runner_requests_no_delete
+BEFORE DELETE ON research_runner_requests BEGIN SELECT RAISE(ABORT, 'research_runner_requests is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_completion_receipts_no_update
+BEFORE UPDATE ON research_completion_receipts BEGIN SELECT RAISE(ABORT, 'research_completion_receipts is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_completion_receipts_no_delete
+BEFORE DELETE ON research_completion_receipts BEGIN SELECT RAISE(ABORT, 'research_completion_receipts is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS research_checkpoints_no_update
 BEFORE UPDATE ON research_checkpoints BEGIN SELECT RAISE(ABORT, 'research_checkpoints is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS research_checkpoints_no_delete

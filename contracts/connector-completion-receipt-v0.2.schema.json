@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dalton/connector-completion-receipt/0.2",
+  "title": "ConnectorCompletionReceipt 0.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "runner_request_ref", "runner_request_hash",
+    "actual_runner_request_ref", "actual_runner_request_hash", "status", "result_ref",
+    "result_hash", "source_envelopes", "artifacts", "next_cursor", "error_code",
+    "retry_after_ms", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.2"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "runner_request_ref": {"type": "string", "minLength": 1},
+    "runner_request_hash": {"$ref": "#/$defs/hash"},
+    "actual_runner_request_ref": {"type": "string", "minLength": 1},
+    "actual_runner_request_hash": {"$ref": "#/$defs/hash"},
+    "status": {"enum": ["succeeded", "retryable", "failed"]},
+    "result_ref": {"type": "string", "minLength": 1},
+    "result_hash": {"$ref": "#/$defs/hash"},
+    "source_envelopes": {"type": "array", "items": {"$ref": "#/$defs/refHash"}},
+    "artifacts": {"type": "array", "items": {"$ref": "#/$defs/refHash"}},
+    "next_cursor": {"type": ["string", "null"], "minLength": 1},
+    "error_code": {"type": ["string", "null"], "minLength": 1},
+    "retry_after_ms": {"type": ["integer", "null"], "minimum": 1},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "refHash": {
+      "type": "object", "additionalProperties": false, "required": ["ref", "hash"],
+      "properties": {"ref": {"type": "string", "minLength": 1}, "hash": {"$ref": "#/$defs/hash"}}
+    }
+  }
+}

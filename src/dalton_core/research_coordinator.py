@@ -160,16 +160,28 @@ _RECEIPT_FIELDS = {
     "source_envelopes", "artifacts", "next_cursor", "error_code",
     "retry_after_ms", "content_hash",
 }
+_RECEIPT_V2_FIELDS = _RECEIPT_FIELDS | {
+    "actual_runner_request_ref", "actual_runner_request_hash",
+}
 
 
 def validate_connector_completion_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
-    wire = _closed(value, _RECEIPT_FIELDS, "ConnectorCompletionReceipt")
-    if wire["schema_version"] != "0.1":
+    version = value.get("schema_version") if isinstance(value, Mapping) else None
+    fields = _RECEIPT_FIELDS if version == "0.1" else _RECEIPT_V2_FIELDS if version == "0.2" else None
+    if fields is None:
         raise ResearchCoordinatorError("unsupported ConnectorCompletionReceipt schema_version")
+    wire = _closed(value, fields, "ConnectorCompletionReceipt")
     for field in ("id", "runner_request_ref", "result_ref"):
         wire[field] = _text(wire[field], field)
     for field in ("runner_request_hash", "result_hash"):
         wire[field] = _hash(wire[field], field)
+    if version == "0.2":
+        wire["actual_runner_request_ref"] = _text(
+            wire["actual_runner_request_ref"], "actual_runner_request_ref"
+        )
+        wire["actual_runner_request_hash"] = _hash(
+            wire["actual_runner_request_hash"], "actual_runner_request_hash"
+        )
     wire["created_at"] = _timestamp(wire["created_at"], "created_at")
     if wire["status"] not in {"succeeded", "retryable", "failed"}:
         raise ResearchCoordinatorError("ConnectorCompletionReceipt.status is invalid")
@@ -582,6 +594,24 @@ class ResearchCoordinatorStore:
             table="claim_indexes", id_column="claim_index_id", identifier=wire["id"],
             json_column="claim_index_json", wire=wire, extra_columns=("created_at",),
             extra_values=(wire["created_at"],),
+        )
+
+    def store_runner_request(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        """Persist the exact request that was admitted for execution."""
+        wire = validate_connector_runner_request(value)
+        return self._insert(
+            table="research_runner_requests", id_column="runner_request_id",
+            identifier=wire["id"], json_column="request_json", wire=wire,
+            extra_columns=("created_at",), extra_values=(wire["created_at"],),
+        )
+
+    def store_completion_receipt(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        """Persist the exact connector completion receipt before checkpointing."""
+        wire = validate_connector_completion_receipt(value)
+        return self._insert(
+            table="research_completion_receipts", id_column="receipt_id",
+            identifier=wire["id"], json_column="receipt_json", wire=wire,
+            extra_columns=("created_at",), extra_values=(wire["created_at"],),
         )
 
     def append_checkpoint(self, value: Mapping[str, Any]) -> dict[str, Any]:
@@ -1036,6 +1066,9 @@ class FixtureResearchCoordinator:
         self.store.store_plan(plan_wire)
         self.store.store_claim_index(index)
         self.store.store_context_pack(context)
+        for request_attempts in requests.values():
+            for request in request_attempts:
+                self.store.store_runner_request(request)
         state = self._reconcile_state(
             plan=plan_wire,
             context_pack=context,
@@ -1088,6 +1121,11 @@ class FixtureResearchCoordinator:
                     step, request, idempotency_key=idempotency_key
                 )
             )
+            # This write is deliberately before the checkpoint and the
+            # after_execute fault barrier.  Recovery therefore resolves the
+            # exact completion receipt from coordinator authority rather than
+            # trusting the caller's request/receipt map.
+            self.store.store_completion_receipt(receipt)
             self._fault(
                 "after_execute",
                 {

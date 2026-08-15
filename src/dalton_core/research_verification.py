@@ -56,6 +56,14 @@ _SOURCE_VERIFIER_HASH = content_hash({
     "ref": _SOURCE_VERIFIER_REF,
     "rules": ["p2-bindings", "packaged-fixture-replay", "raw-hash", "source-hash", "completeness", "time-order"],
 })
+_AUTHORITY_SOURCE_VERIFIER_REF = "verifier:connector-authority-source:0.2"
+_AUTHORITY_SOURCE_VERIFIER_HASH = content_hash({
+    "ref": _AUTHORITY_SOURCE_VERIFIER_REF,
+    "rules": [
+        "authority-resolution", "raw-provider-replay", "structured-observation",
+        "source-hash", "schema", "completeness", "time-order",
+    ],
+})
 _NUMERIC_VERIFIER_REF = "verifier:offline-numeric:0.1"
 _NUMERIC_VERIFIER_HASH = content_hash({
     "ref": _NUMERIC_VERIFIER_REF,
@@ -184,8 +192,19 @@ _MATERIAL_FIELDS = {
     "completeness", "status", "content_hash",
 }
 
+_AUTHORITY_MATERIAL_FIELDS = {
+    "schema_version", "id", "created_at", "source_envelope_ref", "source_envelope_hash",
+    "artifact_ref", "artifact_hash", "source_ref", "source_type", "operation",
+    "provenance_mode", "authority_resolution_ref", "authority_resolution_hash",
+    "source_record_refs", "next_cursor", "normalized_payload", "normalized_payload_hash",
+    "source_schema_hash", "source_content_hash", "source_lineage", "published_at",
+    "updated_at", "as_of", "retrieved_at", "completeness", "status", "content_hash",
+}
+
 
 def validate_source_verification_material(value: Mapping[str, Any]) -> dict[str, Any]:
+    if isinstance(value, Mapping) and value.get("schema_version") == "0.2":
+        return _validate_authority_source_verification_material(value)
     wire = _closed(value, _MATERIAL_FIELDS, "SourceVerificationMaterial")
     if wire["schema_version"] != SCHEMA_VERSION:
         raise ResearchVerificationError("unsupported SourceVerificationMaterial schema_version")
@@ -218,6 +237,65 @@ def validate_source_verification_material(value: Mapping[str, Any]) -> dict[str,
     if wire["raw_payload_hash"] != _sha256_bytes(_canonical_raw_bytes(wire["raw_payload"], "raw_payload"), "raw_payload"):
         raise ResearchVerificationConflict("raw_payload_hash does not bind canonical raw bytes")
     return _with_hash(wire, "SourceVerificationMaterial")
+
+
+def _validate_authority_source_verification_material(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the separate authority provenance contract.
+
+    Authority material intentionally has no fixture/scenario fields.  This
+    prevents a live provider body from being relabeled as a recorded fixture
+    and makes the authority-resolution hash an explicit provenance edge.
+    """
+    wire = _closed(value, _AUTHORITY_MATERIAL_FIELDS, "AuthoritySourceVerificationMaterial")
+    if wire["schema_version"] != "0.2":
+        raise ResearchVerificationError("unsupported AuthoritySourceVerificationMaterial schema_version")
+    for name in (
+        "id", "source_envelope_ref", "artifact_ref", "source_ref", "source_type",
+        "operation", "provenance_mode", "authority_resolution_ref",
+    ):
+        wire[name] = _text(wire[name], name)
+    if wire["provenance_mode"] != "connector_authority":
+        raise ResearchVerificationError("authority material provenance_mode is closed")
+    if wire["source_type"] not in {
+        "official_filing", "authenticated_library", "social_enumeration",
+        "social_search", "public_web", "market_data",
+    }:
+        raise ResearchVerificationError("authority material source_type is invalid")
+    for name in (
+        "source_envelope_hash", "artifact_hash", "authority_resolution_hash",
+        "source_schema_hash", "source_content_hash", "normalized_payload_hash",
+    ):
+        wire[name] = _hash(wire[name], name)
+    wire["created_at"] = _timestamp(wire["created_at"], "created_at")
+    wire["source_record_refs"] = _strings(wire["source_record_refs"], "source_record_refs")
+    wire["source_lineage"] = _strings(wire["source_lineage"], "source_lineage", nonempty=True)
+    wire["next_cursor"] = None if wire["next_cursor"] is None else _text(wire["next_cursor"], "next_cursor")
+    for name in ("published_at", "updated_at", "as_of"):
+        wire[name] = _timestamp(wire[name], name, nullable=True)
+    wire["retrieved_at"] = _timestamp(wire["retrieved_at"], "retrieved_at")
+    if wire["completeness"] not in {"enumerated", "ranked", "partial", "unknown"}:
+        raise ResearchVerificationError("authority material completeness is invalid")
+    if wire["status"] not in {"complete", "partial", "empty", "error"}:
+        raise ResearchVerificationError("authority material status is invalid")
+    if wire["status"] == "complete" and wire["completeness"] == "unknown":
+        raise ResearchVerificationError("complete authority material cannot have unknown completeness")
+    if wire["status"] == "complete" and not wire["source_record_refs"]:
+        raise ResearchVerificationError("complete authority material must contain source records")
+    if wire["status"] == "empty" and wire["source_record_refs"]:
+        raise ResearchVerificationError("empty authority material cannot contain source records")
+    wire["normalized_payload"] = _json(
+        wire["normalized_payload"], "authority normalized_payload"
+    )
+    if wire["normalized_payload_hash"] != _sha256_bytes(
+        _canonical_raw_bytes(
+            wire["normalized_payload"], "authority normalized_payload"
+        ),
+        "authority normalized_payload",
+    ):
+        raise ResearchVerificationConflict(
+            "authority normalized_payload_hash does not bind canonical structured output"
+        )
+    return _with_hash(wire, "AuthoritySourceVerificationMaterial")
 
 
 _NUMERIC_INPUT_FIELDS = {
@@ -384,12 +462,12 @@ def validate_verification_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
     wire["created_at"] = _timestamp(wire["created_at"], "created_at")
     if wire["kind"] not in {"source", "numeric"}:
         raise ResearchVerificationError("VerificationBundle.kind is invalid")
-    expected_verifier = (
-        (_SOURCE_VERIFIER_REF, _SOURCE_VERIFIER_HASH)
+    expected_verifiers = (
+        {(_SOURCE_VERIFIER_REF, _SOURCE_VERIFIER_HASH), (_AUTHORITY_SOURCE_VERIFIER_REF, _AUTHORITY_SOURCE_VERIFIER_HASH)}
         if wire["kind"] == "source"
-        else (_NUMERIC_VERIFIER_REF, _NUMERIC_VERIFIER_HASH)
+        else {(_NUMERIC_VERIFIER_REF, _NUMERIC_VERIFIER_HASH)}
     )
-    if (wire["verifier_ref"], wire["verifier_hash"]) != expected_verifier:
+    if (wire["verifier_ref"], wire["verifier_hash"]) not in expected_verifiers:
         raise ResearchVerificationConflict("VerificationBundle verifier version drifted")
     if wire["verdict"] not in {"pass", "reject"}:
         raise ResearchVerificationError("VerificationBundle.verdict is invalid")
@@ -685,6 +763,141 @@ def verify_source_material(
     return validate_verification_bundle(base)
 
 
+def build_authority_source_material(resolved: Any) -> dict[str, Any]:
+    """Build verifier material from a resolved authority join.
+
+    ``normalized_payload`` is the adapter's structured observation used by
+    numeric verification.  The provider bytes remain separately bound by the
+    ArtifactVersion/raw hash and are replayed by the authority resolver.
+    """
+    summary = resolved.summary
+    observation = resolved.records.get("observation")
+    if not isinstance(observation, Mapping) or not isinstance(observation.get("structured_output"), Mapping):
+        raise ResearchVerificationError("authority resolution lacks structured adapter observation")
+    normalized_payload = _json(
+        observation["structured_output"], "authority structured output"
+    )
+    profile = resolved.records.get("profile")
+    if not isinstance(profile, Mapping):
+        raise ResearchVerificationError("authority resolution lacks trusted profile")
+    source_identity = profile.get("source_identity")
+    if not isinstance(source_identity, Mapping):
+        raise ResearchVerificationError("authority profile lacks source identity")
+    source_type = source_identity.get("source_type")
+    if source_type not in {
+        "official_filing", "authenticated_library", "social_enumeration",
+        "social_search", "public_web", "market_data",
+    }:
+        raise ResearchVerificationError("authority profile source type is not closed")
+    base = {
+        "schema_version": "0.2",
+        "id": "source-material:authority:" + summary["source_envelope_hash"],
+        "created_at": summary["created_at"],
+        "source_envelope_ref": summary["source_envelope_ref"],
+        "source_envelope_hash": summary["source_envelope_hash"],
+        "artifact_ref": summary["artifact_ref"],
+        "artifact_hash": summary["artifact_hash"],
+        "source_ref": summary["source_ref"],
+        "source_type": source_type,
+        "operation": summary["operation"],
+        "provenance_mode": "connector_authority",
+        "authority_resolution_ref": summary["id"],
+        "authority_resolution_hash": summary["content_hash"],
+        "source_record_refs": list(summary["source_record_refs"]),
+        "next_cursor": observation.get("cursor"),
+        "normalized_payload": normalized_payload,
+        "normalized_payload_hash": _sha256_bytes(
+            _canonical_raw_bytes(normalized_payload, "authority structured output"),
+            "authority structured output",
+        ),
+        "source_schema_hash": summary["source_schema_hash"],
+        "source_content_hash": summary["source_content_hash"],
+        "source_lineage": [summary["source_ref"], summary["source_envelope_ref"], summary["artifact_ref"], summary["id"]],
+        "published_at": summary["published_at"],
+        "updated_at": summary["updated_at"],
+        "as_of": summary["as_of"],
+        "retrieved_at": summary["retrieved_at"],
+        "completeness": summary["completeness"],
+        "status": summary["status"],
+    }
+    base["content_hash"] = content_hash(base)
+    return validate_source_verification_material(base)
+
+
+def verify_authority_source_material(
+    material: Mapping[str, Any], *, resolver: Any, checkpoint: Mapping[str, Any],
+    plan: Mapping[str, Any], context_pack: Mapping[str, Any], step: Mapping[str, Any],
+    runner_request: Mapping[str, Any], receipt: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Re-resolve exact connector authority and verify one source material."""
+    material_wire = validate_source_verification_material(material)
+    checkpoint_wire = validate_research_checkpoint(checkpoint)
+    plan_wire = validate_compiled_connector_plan(plan)
+    context_wire = validate_context_pack(context_pack)
+    step_wire = validate_compiled_connector_step(step)
+    receipt_wire = validate_connector_completion_receipt(receipt)
+    request_wire = validate_runner_request_plan_binding(runner_request, plan_wire, step_wire)
+    findings = _binding_findings(
+        checkpoint=checkpoint_wire, plan=plan_wire, context_pack=context_wire,
+        step=step_wire, runner_request=request_wire, receipt=receipt_wire,
+        material=material_wire,
+    )
+    try:
+        resolved = resolver.resolve(
+            material_wire["source_envelope_ref"], checkpoint_ref=checkpoint_wire["id"]
+        )
+        summary = resolved.summary
+        observation = resolved.records["observation"]
+        checks = [
+            ("authority_resolution_ref", material_wire["authority_resolution_ref"], summary["id"]),
+            ("authority_resolution_hash", material_wire["authority_resolution_hash"], summary["content_hash"]),
+            ("authority_source_ref", material_wire["source_envelope_ref"], summary["source_envelope_ref"]),
+            ("authority_source_hash", material_wire["source_envelope_hash"], summary["source_envelope_hash"]),
+            ("authority_artifact_ref", material_wire["artifact_ref"], summary["artifact_ref"]),
+            ("authority_artifact_hash", material_wire["artifact_hash"], summary["artifact_hash"]),
+            ("authority_source_records", material_wire["source_record_refs"], summary["source_record_refs"]),
+            ("authority_schema_hash", material_wire["source_schema_hash"], summary["source_schema_hash"]),
+            ("authority_source_content_hash", material_wire["source_content_hash"], summary["source_content_hash"]),
+            ("authority_source_type", material_wire["source_type"], resolved.records["profile"]["source_identity"]["source_type"]),
+            (
+                "authority_normalized_payload",
+                material_wire["normalized_payload"],
+                observation["structured_output"],
+            ),
+            ("authority_retrieved_at", material_wire["retrieved_at"], summary["retrieved_at"]),
+            ("authority_completeness", material_wire["completeness"], summary["completeness"]),
+            ("authority_status", material_wire["status"], summary["status"]),
+        ]
+        for code, observed, expected in checks:
+            ok = observed == expected
+            findings.append(_finding_wire(
+                code, "info" if ok else "error", "pass" if ok else "fail",
+                "authority." + code, expected, observed,
+                "authority resolver replay matches" if ok else "authority resolver replay drifted",
+            ))
+    except Exception as exc:
+        findings.append(_finding_wire(
+            "authority_resolution", "error", "fail", "authority_resolution",
+            "exact passing authority", "unavailable", str(exc),
+        ))
+    verdict = "pass" if not any(item["severity"] == "error" and item["status"] == "fail" for item in findings) else "reject"
+    base = {
+        "schema_version": SCHEMA_VERSION,
+        "id": "verification-bundle:authority-source:" + content_hash({
+            "subject": material_wire["id"], "checkpoint": checkpoint_wire["content_hash"],
+            "findings": [item["content_hash"] for item in findings],
+        }),
+        "created_at": material_wire["retrieved_at"], "kind": "source",
+        "subject_ref": material_wire["id"], "subject_hash": material_wire["content_hash"],
+        "verdict": verdict, "checkpoint_ref": checkpoint_wire["id"],
+        "checkpoint_hash": checkpoint_wire["content_hash"], "findings": findings,
+        "verifier_ref": _AUTHORITY_SOURCE_VERIFIER_REF,
+        "verifier_hash": _AUTHORITY_SOURCE_VERIFIER_HASH,
+    }
+    base["content_hash"] = content_hash(base)
+    return validate_verification_bundle(base)
+
+
 def _scale_factor(value: str) -> Decimal:
     return {"one": Decimal("1"), "thousand": Decimal("1000"), "million": Decimal("1000000"), "billion": Decimal("1000000000")}.get(value, Decimal(value))
 
@@ -714,7 +927,10 @@ def _json_pointer(document: Any, pointer: str) -> Any:
 
 
 def _extract_decimal(material: Mapping[str, Any], item: Mapping[str, Any]) -> str:
-    selected = _json_pointer(material["raw_payload"], item["json_pointer"])
+    payload_field = (
+        "normalized_payload" if material.get("schema_version") == "0.2" else "raw_payload"
+    )
+    selected = _json_pointer(material[payload_field], item["json_pointer"])
     if item["extractor"] == "count":
         if not isinstance(selected, (list, Mapping)):
             raise ResearchVerificationError("count extractor requires an array or object")
@@ -865,6 +1081,7 @@ def build_candidate_evidence(
     candidate_evidence_ref: str,
     actor_ref: str,
     created_at: str,
+    verification_mode: str = "recorded_fixture",
 ) -> dict[str, Any]:
     """Build a candidate-only evidence record; never a Ledger EvidenceVersion."""
     material_wire = validate_source_verification_material(material)
@@ -876,6 +1093,19 @@ def build_candidate_evidence(
         or verification["subject_hash"] != material_wire["content_hash"]
     ):
         raise VerificationRejected("source material has no exact passing verification")
+    verification_mode = _text(verification_mode, "verification_mode")
+    if verification_mode == "recorded_fixture":
+        expected_source_type = "recorded_fixture"
+        if material_wire["schema_version"] != "0.1":
+            raise VerificationRejected("recorded_fixture evidence requires fixture material")
+    elif verification_mode == "connector_authority":
+        if material_wire["schema_version"] != "0.2" or material_wire.get("provenance_mode") != "connector_authority":
+            raise VerificationRejected("connector_authority evidence requires authority material")
+        # This value came from the validated connector profile when the
+        # material was built; it is not accepted as a caller label.
+        expected_source_type = material_wire["source_type"]
+    else:
+        raise VerificationRejected("verification_mode is not a closed value")
     base = {
         "schema_version": SCHEMA_VERSION,
         "id": "candidate-evidence-version:" + content_hash(
@@ -884,7 +1114,7 @@ def build_candidate_evidence(
         "created_at": created_at,
         "candidate_evidence_ref": candidate_evidence_ref,
         "version": 1,
-        "source_type": "recorded_fixture",
+        "source_type": expected_source_type,
         "source_ref": material_wire["source_ref"],
         "source_envelope_ref": material_wire["source_envelope_ref"],
         "source_envelope_hash": material_wire["source_envelope_hash"],
@@ -1062,6 +1292,8 @@ class CandidateStagingStore:
         evidence: Mapping[str, Any],
         claim: Mapping[str, Any],
         idempotency_key: str,
+        verification_mode: str = "recorded_fixture",
+        authority_resolver: Any | None = None,
     ) -> dict[str, Any]:
         material_wire = validate_source_verification_material(material)
         spec_wire = validate_numeric_verification_spec(numeric_spec)
@@ -1071,11 +1303,25 @@ class CandidateStagingStore:
         claim_wire = validate_candidate_claim(claim)
         key = _text(idempotency_key, "idempotency_key")
 
-        recomputed_source = verify_source_material(
-            material_wire, checkpoint=checkpoint, plan=plan,
-            context_pack=context_pack, step=step,
-            runner_request=runner_request, receipt=receipt,
-        )
+        verification_mode = _text(verification_mode, "verification_mode")
+        if verification_mode == "connector_authority":
+            if authority_resolver is None:
+                raise VerificationRejected("connector_authority staging requires an authority resolver")
+            recomputed_source = verify_authority_source_material(
+                material_wire, resolver=authority_resolver, checkpoint=checkpoint,
+                plan=plan, context_pack=context_pack, step=step,
+                runner_request=runner_request, receipt=receipt,
+            )
+        elif verification_mode == "recorded_fixture":
+            if material_wire["schema_version"] != "0.1":
+                raise VerificationRejected("recorded_fixture staging requires fixture material")
+            recomputed_source = verify_source_material(
+                material_wire, checkpoint=checkpoint, plan=plan,
+                context_pack=context_pack, step=step,
+                runner_request=runner_request, receipt=receipt,
+            )
+        else:
+            raise VerificationRejected("verification_mode is not a closed value")
         if canonical_json(recomputed_source) != canonical_json(source_wire):
             raise ResearchVerificationConflict(
                 "source verification was not produced by the deterministic verifier"
@@ -1105,7 +1351,11 @@ class CandidateStagingStore:
             raise ResearchVerificationConflict("source and numeric verification bind different checkpoints")
         expected_artifacts = [{"ref": material_wire["artifact_ref"], "hash": material_wire["artifact_hash"]}]
         evidence_checks = (
-            evidence_wire["source_type"] == "recorded_fixture",
+            evidence_wire["source_type"] == (
+                "recorded_fixture"
+                if verification_mode == "recorded_fixture"
+                else material_wire["source_type"]
+            ),
             evidence_wire["source_ref"] == material_wire["source_ref"],
             evidence_wire["source_envelope_ref"] == material_wire["source_envelope_ref"],
             evidence_wire["source_envelope_hash"] == material_wire["source_envelope_hash"],
@@ -1221,8 +1471,10 @@ class CandidateStagingStore:
 __all__ = [
     "ResearchVerificationError", "ResearchVerificationConflict", "VerificationRejected",
     "InjectedStagingCrash", "CandidateStagingStore",
-    "build_source_verification_material", "validate_source_verification_material",
+    "build_source_verification_material", "build_authority_source_material",
+    "validate_source_verification_material",
     "validate_numeric_verification_spec", "validate_verification_bundle",
-    "validate_candidate_evidence", "validate_candidate_claim", "verify_source_material", "verify_numeric_spec",
+    "validate_candidate_evidence", "validate_candidate_claim", "verify_source_material",
+    "verify_authority_source_material", "verify_numeric_spec",
     "build_candidate_evidence", "build_candidate_claim",
 ]

@@ -283,7 +283,7 @@ source identity、operation schema bundle 和规范化 source metadata/record re
 Connector output 先停在 raw artifact 和
 SourceEnvelope；未经 source/numeric verifier 不得进入 Evidence、Claim 或 Thesis。
 
-### Offline source/numeric verification 与 candidate staging
+### Source/numeric verification、authority resolution 与 candidate staging
 
 P2 fixture-only verifier 只消费 packaged recorded fixture、成功的
 `ConnectorCompletionReceipt`、连续绑定的 `ResearchCheckpoint`、一次性 plan、ContextPack、step 和
@@ -299,9 +299,26 @@ material 抽取的 canonical Decimal string，并只执行 `identity / sum / dif
 numeric verifier 只验证数值及其 metadata；candidate 的 subject、metric、basis 和叙述在人工 review 前固定标为
 `semantic_verification_status=unverified`，不能把数值通过冒充成语义已经验证。
 
-0.1 仍只是 synthetic fixture contract。P2 coordinator 的 SourceEnvelope/Artifact 只是摘要 ref/hash，不是 live
-Connector authority record；真实只读研究前必须增加 authority resolver，并另行验收真实 raw artifact、SourceEnvelope、
-checkpoint chain 和 human review。candidate staging 没有 Research Ledger handle，也不授权正式 commit。
+`SourceVerificationMaterial` 0.1 仍只表示 synthetic fixture。真实 connector 使用独立 closed
+`AuthoritySourceVerificationMaterial` 0.2；它不保留 fixture/scenario 字段，只保存从可信 Profile 派生的
+`source_type`、authority resolution ref/hash、normalized payload/hash 和完整 source/artifact binding。
+原始 provider bytes 只由 ArtifactVersion/raw hash 绑定，resolver 必须从 raw spool 重读并用冻结的 source-specific
+normalizer 重放，不能把 normalized payload 冒充 raw provider body。
+
+`ConnectorAuthorityResolver` 是只读 join，不提供 migration 或 mutation API。它从 Core、ConnectorStore、
+Observability、Scheduler、RunnerJournal 和 coordinator scratch 重读并重算 Execution/Profile/CallSpec/WorkOrder、
+physical attempt、Reservation、最新 Usage/Cost/Settlement、ArtifactVersion、SourceEnvelope、ResultEnvelope、
+formal Scheduler result/event chain、AdapterRequest/observation/response、完整 checkpoint chain 和 incident/health。
+任一缺失、旧 correction、换绑、raw/normalized mismatch、部分结果或开放的 blocking state 都 fail closed。
+
+coordinator 的 plan-bound RunnerRequest 与 Connector Runner 实际执行请求有不同的 CallSpec hash 语义，不能互相
+冒充。`ConnectorCompletionReceipt` 0.2 因此同时绑定 coordinator request ref/hash 和 actual runner request
+ref/hash；0.1 继续兼容旧 fixture，但不能作为真实 authority resolution 的成功 receipt。
+
+当前 networked slice 只冻结公开、无凭据、只读的 SEC `submissions/CIK....json` `list_filings` canary，并只在
+隔离临时 authority 中运行一条单步 WorkOrder。它不部署、不接 Agenda、不授权凭据，也不写正式 Research Ledger。
+candidate staging 没有 Research Ledger handle；即使 source/numeric verification 通过，candidate 的语义仍是
+`unverified`，必须经过后续人工 review 才能讨论正式 commit。
 
 Dalton 可以生成 `ConnectorProposalManifest`、adapter package、schema 和 recorded fixtures，并在无网络、
 无凭据、无 Core DB 的 sandbox replay。静态 resolver、networked canary 和 production promotion 都需要
@@ -539,6 +556,7 @@ Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把
 | connector runner closed frame、双 use-time lease gate、静态 resolver 与 authority-derived adapter request | E2 | `tests/test_connector_runner.py` |
 | 一次性 connector plan、ref-only ContextPack/ClaimIndex、checkpoint/resume 与 bounded retry | E1/E2 | `tests/test_research_coordinator.py` |
 | recorded transport journal、bounded raw spool、W0–W4 recovery 与全链幂等重放 | E1/E2 | `tests/test_runner_journal.py`、`tests/test_raw_spool.py`、`tests/test_connector_transport_executor.py` |
+| SourceEnvelope/Artifact 只读 authority join、SEC public normalizer、真实请求双绑定与 candidate staging | E1/E2 | `tests/test_authority_resolver.py`、`tests/test_sec_public_adapter.py` |
 | authority → read-only dashboard projection 与敏感字段隔离 | E1 | `tests/test_dashboard_projector.py` |
 | dashboard 固定 GET API、只读连接与页面资源 | E2 | `tests/test_dashboard.py` |
 | 实际 hostile-code sandbox backend 与自动 monitoring | E1 | 本 slice 排除 |

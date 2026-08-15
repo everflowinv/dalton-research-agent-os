@@ -36,6 +36,10 @@ _LAZY_EXPORTS = {
     "ModelRouter": (".model_router", "ModelRouter"),
     "ObservabilityStore": (".observability", "ObservabilityStore"),
     "ConnectorStore": (".connector", "ConnectorStore"),
+    "ConnectorAuthorityResolver": (".authority_resolver", "ConnectorAuthorityResolver"),
+    "ResolvedAuthority": (".authority_resolver", "ResolvedAuthority"),
+    "AuthorityResolutionError": (".authority_resolver", "AuthorityResolutionError"),
+    "AuthorityResolutionConflict": (".authority_resolver", "AuthorityResolutionConflict"),
     "validate_connector_proposal_manifest": (
         ".connector", "validate_connector_proposal_manifest"
     ),
@@ -67,6 +71,8 @@ _LAZY_EXPORTS = {
     "build_reference_fixture_plan": (
         ".research_context", "build_reference_fixture_plan"
     ),
+    "SecPublicHttpAdapter": (".sec_public_adapter", "SecPublicHttpAdapter"),
+    "normalize_sec_submissions": (".sec_public_adapter", "normalize_sec_submissions"),
 }
 
 
@@ -88,6 +94,10 @@ __all__ = [
     "CredentialAuthorityStore",
     "FixtureResearchCoordinator",
     "ConnectorStore",
+    "ConnectorAuthorityResolver",
+    "ResolvedAuthority",
+    "AuthorityResolutionError",
+    "AuthorityResolutionConflict",
     "ConnectorRunnerAdmissionGate",
     "StaticAdapterResolver",
     "validate_connector_proposal_manifest",
@@ -105,6 +115,8 @@ __all__ = [
     "build_context_pack",
     "build_fixture_runner_request",
     "build_reference_fixture_plan",
+    "SecPublicHttpAdapter",
+    "normalize_sec_submissions",
     "install_openclaw_catalog",
     "migrate_legacy_workspace",
     "ProcessRuntimeAdapter",

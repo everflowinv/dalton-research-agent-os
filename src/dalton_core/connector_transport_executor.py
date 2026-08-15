@@ -114,6 +114,7 @@ class _CommitContext:
     call_spec: Mapping[str, Any]
     invocation: Mapping[str, Any]
     execution: ExecutionInvocation
+    binding_side_effects: tuple[str, ...]
 
 
 class ConnectorTransportExecutor:
@@ -648,7 +649,10 @@ class ConnectorTransportExecutor:
                 "quota_settlement_ref": settlement["id"],
                 "source_envelope_ref": source_id,
             },
-            actual_side_effects=("read:recorded-fixture",),
+            # Admission has revalidated the immutable binding at use time;
+            # report the adapter's authorized effects, not the WorkOrder's
+            # potentially broader declaration.
+            actual_side_effects=admission.binding_side_effects,
             usage_refs=(usage["id"],),
             artifact_refs=() if artifact_ref is None else (artifact_ref,),
             error=None if successful else dict(observed["error"] or {
@@ -781,6 +785,7 @@ class ConnectorTransportExecutor:
             call_spec=dict(admission.call_spec),
             invocation=dict(admission.invocation),
             execution=admission.execution,
+            binding_side_effects=tuple(admission.binding["side_effects"]),
         )
 
     @staticmethod
@@ -792,13 +797,14 @@ class ConnectorTransportExecutor:
             "call_spec": dict(admission.call_spec),
             "invocation": dict(admission.invocation),
             "execution": admission.execution.to_dict(),
+            "binding_side_effects": list(admission.binding["side_effects"]),
         }
 
     @staticmethod
     def _commit_context_from_wire(wire: Mapping[str, Any]) -> _CommitContext:
         expected = {
             "request", "work_order", "profile", "call_spec", "invocation",
-            "execution",
+            "execution", "binding_side_effects",
         }
         if not isinstance(wire, Mapping) or set(wire) != expected:
             raise ConnectorTransportError("journal commit context is not closed")
@@ -809,6 +815,7 @@ class ConnectorTransportExecutor:
             call_spec=dict(wire["call_spec"]),
             invocation=dict(wire["invocation"]),
             execution=ExecutionInvocation.from_dict(wire["execution"]),
+            binding_side_effects=tuple(wire["binding_side_effects"]),
         )
 
 
