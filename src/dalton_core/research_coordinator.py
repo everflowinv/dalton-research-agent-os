@@ -787,6 +787,7 @@ class FixtureResearchCoordinator:
         attempt_ref: str,
         attempt_hash: str,
         checkpoints: Sequence[Mapping[str, Any]],
+        runner_requests: Mapping[str, Sequence[Mapping[str, Any]]],
     ) -> dict[str, Any]:
         plan_wire = validate_compiled_connector_plan(plan)
         context = validate_context_pack(context_pack)
@@ -801,6 +802,26 @@ class FixtureResearchCoordinator:
                     "checkpoint names a step outside the compiled plan"
                 )
             attempt_counts[step["id"]] += 1
+            step_requests = runner_requests.get(step["id"])
+            if (
+                not isinstance(step_requests, Sequence)
+                or isinstance(step_requests, (str, bytes))
+                or len(step_requests) < attempt_counts[step["id"]]
+            ):
+                raise ResearchCoordinatorConflict(
+                    "checkpoint recovery has no matching runner request"
+                )
+            request = validate_runner_request_plan_binding(
+                step_requests[attempt_counts[step["id"]] - 1], plan_wire, step
+            )
+            expected_authority = {
+                "connector_profile_ref": request["connector_profile_ref"],
+                "connector_profile_hash": request["connector_profile_hash"],
+                "capability_lease_ref": request["capability_lease_ref"],
+                "capability_lease_hash": request["capability_lease_hash"],
+                "source_ref": step["source_ref"],
+                "source_hash": step["source_hash"],
+            }
             if (
                 checkpoint["run_ref"] != run_ref
                 or checkpoint["sequence"] != sequence
@@ -826,6 +847,10 @@ class FixtureResearchCoordinator:
                 or checkpoint["connector_attempt_number"]
                 != attempt_counts[step["id"]]
                 or checkpoint["connector_attempt_number"] > step["max_attempts"]
+                or checkpoint["runner_request_ref"] != request["id"]
+                or checkpoint["runner_request_hash"] != request["content_hash"]
+                or checkpoint["idempotency_key"] != request["idempotency_key"]
+                or checkpoint["authority_bindings"] != expected_authority
             ):
                 raise ResearchCoordinatorConflict(
                     "checkpoint recovery authority does not match the run"
@@ -901,6 +926,7 @@ class FixtureResearchCoordinator:
         run_ref: str,
         attempt_ref: str,
         attempt_hash: str,
+        runner_requests: Mapping[str, Sequence[Mapping[str, Any]]],
     ) -> dict[str, Any]:
         checkpoints = self.store.list_checkpoints(run_ref)
         derived = self._derive_state(
@@ -910,6 +936,7 @@ class FixtureResearchCoordinator:
             attempt_ref=attempt_ref,
             attempt_hash=attempt_hash,
             checkpoints=checkpoints,
+            runner_requests=runner_requests,
         )
         latest = self.store.latest_run_state(run_ref)
         comparable = (
@@ -1015,6 +1042,7 @@ class FixtureResearchCoordinator:
             run_ref=run_ref,
             attempt_ref=attempt_ref,
             attempt_hash=attempt_hash,
+            runner_requests=requests,
         )
         if state["status"] in {"completed", "failed"}:
             return {
@@ -1033,6 +1061,7 @@ class FixtureResearchCoordinator:
                 run_ref=run_ref,
                 attempt_ref=attempt_ref,
                 attempt_hash=attempt_hash,
+                runner_requests=requests,
             )
             if state["status"] in {"completed", "failed"}:
                 return {
@@ -1087,6 +1116,7 @@ class FixtureResearchCoordinator:
                 run_ref=run_ref,
                 attempt_ref=attempt_ref,
                 attempt_hash=attempt_hash,
+                runner_requests=requests,
             )
             self._fault("after_state", state)
             if receipt["status"] == "retryable":

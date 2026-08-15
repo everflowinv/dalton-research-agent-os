@@ -571,6 +571,7 @@ class McpManagedRunnerAdmissionGate(ConnectorRunnerAdmissionGate):
             raise RunnerConflict(
                 "MCP-managed connector runner requires RunnerRequest wire 0.2"
             )
+        self._reject_unverified_compiled_plan_binding(wire)
 
     def _plan_for_request(self, request: Mapping[str, Any]) -> Mapping[str, Any]:
         plan = self.transport_plans.get(str(request.get("transport_plan_ref")))

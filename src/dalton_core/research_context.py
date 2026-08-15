@@ -23,11 +23,15 @@ SCHEMA_VERSION = "0.1"
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _SEARCH_RE = re.compile(r"[a-z0-9_.:-]+|[\u4e00-\u9fff]+", re.IGNORECASE)
 _SENSITIVE_KEYS = {
-    "authorization", "cookie", "cookies", "password", "secret", "token",
-    "access_token", "api_key", "auth_token", "bearer_token", "client_secret",
-    "credential_value", "database_path", "db_path", "refresh_token",
-    "session_token", "storage_locator",
+    "authorization", "cookie", "cookies", "password", "passwd", "secret", "token",
+    "accesstoken", "apikey", "authtoken", "bearertoken", "clientsecret",
+    "credentialvalue", "databasepath", "dbpath", "privatekey", "refreshtoken",
+    "sessiontoken", "storagelocator", "connectionstring",
 }
+_SENSITIVE_KEY_SUFFIXES = (
+    "apikey", "authtoken", "bearertoken", "clientsecret", "privatekey",
+    "refreshtoken", "sessiontoken", "connectionstring",
+)
 
 
 class ResearchContextError(ValueError):
@@ -115,7 +119,11 @@ def _with_hash(value: Mapping[str, Any], name: str) -> dict[str, Any]:
 def _reject_sensitive(value: Any, name: str = "value") -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
-            if str(key).lower() in _SENSITIVE_KEYS:
+            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if (
+                normalized_key in _SENSITIVE_KEYS
+                or normalized_key.endswith(_SENSITIVE_KEY_SUFFIXES)
+            ):
                 raise ResearchContextError(f"{name} contains forbidden sensitive field")
             _reject_sensitive(item, f"{name}.{key}")
     elif isinstance(value, list):

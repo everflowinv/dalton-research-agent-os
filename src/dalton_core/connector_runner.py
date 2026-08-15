@@ -683,15 +683,21 @@ class ConnectorRunnerAdmissionGate:
         self.visibility_scopes = tuple(visibility_scopes)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
+    @staticmethod
+    def _reject_unverified_compiled_plan_binding(
+        wire: Mapping[str, Any]
+    ) -> None:
+        if any(field in wire for field in _COMPILED_PLAN_BINDING_FIELDS):
+            raise RunnerConflict(
+                "connector runner has no compiled-plan authority resolver"
+            )
+
     def _validate_runner_request_protocol(self, wire: Mapping[str, Any]) -> None:
         if wire["schema_version"] != SCHEMA_VERSION:
             raise RunnerConflict(
                 "public connector runner requires RunnerRequest wire 0.1"
             )
-        if any(field in wire for field in _COMPILED_PLAN_BINDING_FIELDS):
-            raise RunnerConflict(
-                "public connector runner has no compiled-plan authority resolver"
-            )
+        self._reject_unverified_compiled_plan_binding(wire)
 
     def validate(
         self, request: Mapping[str, Any], *, scheduler_lease_token: str

@@ -746,6 +746,26 @@ class McpManagedShadowTests(unittest.TestCase):
                 harness.gate.credential_handle_for_use(changed)
         self.assertEqual(harness.invocations, [])
 
+    def test_mcp_gate_rejects_unverified_compiled_plan_binding(self) -> None:
+        harness = self.harness("success")
+        changed = {
+            **{
+                key: value
+                for key, value in harness.request().items()
+                if key != "content_hash"
+            },
+            "compiled_connector_plan_ref": "compiled-connector-plan:forged",
+            "compiled_connector_plan_hash": "8" * 64,
+            "compiled_step_ref": "compiled-connector-step:forged",
+            "compiled_step_hash": "9" * 64,
+        }
+        changed["content_hash"] = content_hash(changed)
+        with self.assertRaises(RunnerConflict):
+            harness.gate.validate(
+                changed, scheduler_lease_token=harness.claim["lease_token"]
+            )
+        self.assertEqual(harness.invocations, [])
+
     def test_crash_barriers_do_not_replay_provider_calls(self) -> None:
         reserved = self.harness("success", fault_at="after_reserved")
         with self.assertRaises(SimulatedRunnerCrash):

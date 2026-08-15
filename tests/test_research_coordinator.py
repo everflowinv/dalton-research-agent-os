@@ -332,18 +332,25 @@ class ResearchCoordinatorTests(unittest.TestCase):
                 "max_attempts",
             )
         }
-        secret_spec["parameters"] = {"access_token": "must-not-enter"}
-        with self.assertRaises(ResearchContextError):
-            build_compiled_connector_plan(
-                task_ref=self.task_ref,
-                task_hash=self.task_hash,
-                planner_ref="planner:fixture",
-                planner_hash="1" * 64,
-                routing_policy_ref="routing-policy:fixture",
-                routing_policy_hash="2" * 64,
-                step_specs=[secret_spec],
-                created_at=WIRE_WHEN,
-            )
+        for sensitive_key in (
+            "access_token", "apiKey", "x-api-key", "private_key", "passwd",
+            "connection_string",
+        ):
+            hostile_spec = copy.deepcopy(secret_spec)
+            hostile_spec["parameters"] = {sensitive_key: "must-not-enter"}
+            with self.subTest(sensitive_key=sensitive_key), self.assertRaises(
+                ResearchContextError
+            ):
+                build_compiled_connector_plan(
+                    task_ref=self.task_ref,
+                    task_hash=self.task_hash,
+                    planner_ref="planner:fixture",
+                    planner_hash="1" * 64,
+                    routing_policy_ref="routing-policy:fixture",
+                    routing_policy_hash="2" * 64,
+                    step_specs=[hostile_spec],
+                    created_at=WIRE_WHEN,
+                )
 
     def test_claim_index_derives_search_projection_without_ledger_writes(self) -> None:
         claim = {
@@ -594,6 +601,22 @@ class ResearchCoordinatorTests(unittest.TestCase):
                 attempt_ref=self.attempt_ref,
                 attempt_hash=self.attempt_hash,
                 checkpoints=broken_chain,
+                runner_requests=self.runner_requests,
+            )
+
+        broken_authority = copy.deepcopy(checkpoints)
+        broken_authority[0]["authority_bindings"]["source_hash"] = "1" * 64
+        broken_authority[0].pop("content_hash")
+        broken_authority[0]["content_hash"] = content_hash(broken_authority[0])
+        with self.assertRaises(ResearchCoordinatorConflict):
+            coordinator._derive_state(
+                plan=self.plan,
+                context_pack=self.context_pack,
+                run_ref=self.run_ref,
+                attempt_ref=self.attempt_ref,
+                attempt_hash=self.attempt_hash,
+                checkpoints=broken_authority,
+                runner_requests=self.runner_requests,
             )
 
         state = copy.deepcopy(store.latest_run_state(self.run_ref))
@@ -615,6 +638,7 @@ class ResearchCoordinatorTests(unittest.TestCase):
             run_ref=self.run_ref,
             attempt_ref=self.attempt_ref,
             attempt_hash=self.attempt_hash,
+            runner_requests=self.runner_requests,
         )
         self.assertEqual(first["status"], "planned")
         with self.assertRaises(ResearchCoordinatorConflict):
@@ -624,6 +648,7 @@ class ResearchCoordinatorTests(unittest.TestCase):
                 run_ref=self.run_ref,
                 attempt_ref="research-attempt:fixture:rebound",
                 attempt_hash=content_hash({"attempt": "rebound"}),
+                runner_requests=self.runner_requests,
             )
 
         rebound_plan = copy.deepcopy(self.plan)
@@ -662,6 +687,7 @@ class ResearchCoordinatorTests(unittest.TestCase):
                 run_ref=self.run_ref,
                 attempt_ref=self.attempt_ref,
                 attempt_hash=self.attempt_hash,
+                runner_requests=self.runner_requests,
             )
 
     def test_fixture_port_idempotency_conflict_is_fail_closed(self) -> None:

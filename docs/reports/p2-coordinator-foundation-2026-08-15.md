@@ -2,7 +2,7 @@
 
 日期：2026-08-15
 
-状态：本地候选；Fable 5 已批准阶段选择并对首个 committed tree 给出 Go，收口修订的增量复核和远端 CI 待完成
+状态：本地候选；Fable 5 已批准阶段选择并对 committed tree 给出 Go，远端 CI 待完成
 
 ## 阶段裁决
 
@@ -72,6 +72,11 @@ Fable 5 对首个 committed tree 给出 scope-limited **Go**，同时指出 live
 - ContextPack validator 重算排序、去重、预算和选择结果，并扩大 credential-shaped 参数拒绝清单；
 - fixture port 与 RunnerRequest 使用同一个幂等键，并对同键不同请求 fail closed。
 
+Fable 的最终增量复核仍给出 **Go**，没有 P0；它另发现 MCP 0.2 gate 的 override 没有继承 public gate 的
+plan-binding 拒绝逻辑。最终候选已把拒绝函数提升为两个 gate 共用，并补 MCP 回归；同时把敏感参数键做分隔符
+归一化、恢复时重验 checkpoint 的 authority bindings、RunnerRequest ref/hash 和 idempotency key。真实 port 的
+write-ahead intent 仍留到非 fixture transport 上线前实现。
+
 故障注入覆盖：
 
 - execute 已返回、checkpoint 尚未写入：恢复使用相同 idempotency key，port 不重复 physical transport；
@@ -82,19 +87,19 @@ Fable 5 对首个 committed tree 给出 scope-limited **Go**，同时指出 live
 
 ## 当前验证
 
-- P2 专项：14/14；相关 runner/coordinator 组合 25/25；
-- Python 全量：356/356；
+- P2 专项：14/14；相关 runner/MCP/coordinator 组合 38/38；
+- Python 全量：357/357；
 - OpenClaw model broker：15/15；
 - `compileall`：通过；
 - `git diff --check`：通过；
 - 固定 `SOURCE_DATE_EPOCH=1700000000` 的两次 Python 3.13 no-build-isolation wheel 逐位一致，SHA-256 均为
-  `2b0f488b1851ccab544459a8925c1c88c15306748c3cee1509551d6589a27134`，每份 507,410 bytes；
+  `0077ca167f0b7626910edb10aac719b11e7a08bbea3062f61be0d33eeb5cade6`，每份 507,712 bytes；
 - 干净 venv 安装后 `pip check`、三步 plan build、packaged coordinator SQL 和 SQLite integrity 均通过；
 - P1-0d 远端 CI：Python 3.11、Python 3.13、broker 全部通过；
-- 当前 P2 候选尚待 Fable 5 committed-tree 增量复核与远端 CI。
+- 当前 P2 候选尚待远端 CI。
 
 全量测试仍会从既有 MCP/reference-shadow 测试夹具打印少量未关闭 SQLite connection 的 `ResourceWarning`；
-356 项结果全部通过，P2 专项单独运行没有 warning。
+357 项结果全部通过，P2 专项单独运行没有 warning。
 
 ## 当前边界
 
