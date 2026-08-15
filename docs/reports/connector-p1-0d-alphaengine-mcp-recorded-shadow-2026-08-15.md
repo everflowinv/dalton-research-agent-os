@@ -2,7 +2,7 @@
 
 日期：2026-08-15
 
-状态：本地候选；等待 Claude Fable 5 committed-tree 独立复核
+状态：Claude Fable 5 对 committed tree `e48d76b` 给出 scope-limited Go
 
 ## 目的
 
@@ -63,13 +63,18 @@ Adapter 是纯离线 replay stub，不导入 socket/HTTP/MCP client，也不接�
 - `git diff --check`：通过；
 - fixture regeneration：AlphaEngine packaged JSON 重建前后 SHA-256 一致，
   `51ddd1599ec243ccfcd04af372bdd89d0bc6dfc3de92e8763e65a4346caf09b3`。
+- 两次 committed-tree Python 3.13 no-build-isolation wheel 逐位一致，SHA-256 为
+  `1d18058a2f00ecee014da41c0c1dd4a360067df1b700c20febd5899272b1349f`，每份 484,052 bytes；
+- 干净 venv 安装后 `pip check` 通过，packaged AlphaEngine fixture 可加载，credential authority 创建四张表，
+  SQLite integrity 为 `ok`；
+- Claude Fable 5 逐文件敌对复核没有发现 P0/P1，对 committed P1-0d 给出 **Go**。
 
 全量测试仍会从既有测试夹具打印少量未关闭 SQLite connection 的 `ResourceWarning`，但 341 项结果全部通过；
-新增专项单独运行没有这些 warning。Committed archive wheel、clean install 与 Fable 5 裁决将在冻结候选后补入。
+新增专项单独运行没有这些 warning。
 
 ## Go/No-Go 边界
 
-当前只申请以下范围的 Go：
+本次 Go 只覆盖：
 
 - AlphaEngine `search_library` 离线 recorded shadow；
 - `mcp_managed` wire 0.2 contract；
@@ -85,13 +90,25 @@ Adapter 是纯离线 replay stub，不导入 socket/HTTP/MCP client，也不接�
 - Research WorkOrder、ContextPack、Evidence/Claim/Thesis commit；
 - 部署、旧 cron cutover。
 
-## 下一步裁决原则
+## Fable 裁决与下一阶段
 
-Fable 5 对 committed tree 给出 Go 后，再在以下两条中选最小消费者驱动切片：
+Fable 5 认为 P1-0c 的轻量路由边界成立：Planner/协调器每个逻辑任务只选一次 source、operation、parameters、
+completeness 与 fallback；physical page/retry 只做本地确定性 use-time gate。新 connector 的 contract 侧已经可以
+通过三文件 proposal package 扩展；`mcp_managed` runtime gate 仍带 AlphaEngine 首个 reference chain 的硬编码，
+等第二个真实 MCP consumer 出现时再按 template/operation/credential slot 参数化，不提前抽象。
 
-1. 复用 `mcp_managed` wire 接 Guidepoint 的离线 `search_library`/`get_document` recorded shadow；
-2. 进入 P2 research coordinator，先冻结 ContextPack/RunState/Checkpoint/ClaimIndex，再让 coordinator 消费
-   已验证的 CNINFO、SEC 与 AlphaEngine reference shadows。
+下一阶段选择 **P2 coordinator foundation**，而不是继续复制 Guidepoint shadow。交付范围是：
 
-不为“未来可能需要”提前建立独立 Connector Router。只有 P2 coordinator 出现真实跨 connector 调度消费者后，
-才把一次性 route decision 固化为 `CompiledConnectorPlan`。
+1. 闭合 ContextPack、RunState、Checkpoint、ClaimIndex contract 与 validator；
+2. fixture-only coordinator 消费现有 CNINFO、SEC、AlphaEngine recorded shadow，故障注入证明 checkpoint/resume 与
+   bounded retry；
+3. 由这个真实消费者首次引入 `CompiledConnectorPlan`，每个逻辑任务只生成一次并绑定到 RunnerRequest；
+4. coordinator 只持窄 AuthorityPort，不能伪造 completion 或 Research Ledger 事实。
+
+真实 MCP、Guidepoint/雪球、public network、Research WorkOrder live source、Evidence/Claim/Thesis commit、部署和旧
+cron cutover 继续 No-Go。
+
+Fable 另列出五项不阻塞离线 P1-0d、但 live MCP 前必须处理的债务：auth/permission failure 不能统一按 retryable；
+live output validator 要覆盖 enum/maximum/maxLength/format；credential idempotency hash 要去掉 authority clock；
+opaque handle denylist 要收紧；补 credential-table 并发探针。`authorize_use` 后、`transport_started` 前崩溃会保守消耗
+一个 max_calls slot，当前列为 P3 liveness trade-off。

@@ -257,7 +257,7 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   network 仍被 killable total-deadline transport gate 阻塞；AlphaEngine/Guidepoint/雪球等 host/MCP 路径仍被
   runner wire 0.2、credential revoke/max_calls use-time authority 阻塞。
 
-### Connector P1-0d 当前候选（AlphaEngine offline `mcp_managed` shadow，未部署）
+### Connector P1-0d 已完成（AlphaEngine offline `mcp_managed` shadow，未部署）
 
 - 新增独立 `mcp_managed` RunnerRequest/AdapterRequest/TransportObservation wire 0.2；该路径没有 URL、host、
   public network policy 或可序列化 credential value，不能复用 public HTTPS transport；
@@ -275,9 +275,14 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   多个 operation，跨 source 的 findata 体验由上层 research recipe 组合；
 - 新 connector 继续走声明式 proposal package。P1-0d 只增加 AlphaEngine 的运行时参考链，不把中央语义路由
   做成新服务，也不提前加入尚无消费者的 `CompiledConnectorPlan`；
-- 当前本地候选已通过 MCP/credential/Runner/transport/packaging 组合 41/41、Python 全量 341/341、broker
-  15/15、`compileall`、`git diff --check` 和 deterministic fixture regeneration。尚待 committed-tree wheel、
-  clean install 与 Claude Fable 5 独立复核，因此这里不提前写 Go；
+- MCP/credential/Runner/transport/packaging 组合 41/41、Python 全量 341/341、broker 15/15、`compileall`、
+  `git diff --check` 和 deterministic fixture regeneration 均通过。两次 committed-tree Python 3.13
+  no-build-isolation wheel 逐位一致，SHA-256 为
+  `1d18058a2f00ecee014da41c0c1dd4a360067df1b700c20febd5899272b1349f`；干净安装、packaged fixture、四张
+  credential authority 表与 SQLite integrity 均通过；
+- Claude Fable 5 对 `e48d76b` 的 committed tree 给出 scope-limited **Go**，没有 P0/P1。下一阶段选 P2
+  coordinator foundation：先做 ContextPack、RunState、Checkpoint、ClaimIndex，再由首个 fixture-only consumer
+  引入一次性 `CompiledConnectorPlan`；Guidepoint shadow 延后到真实 research recipe 需要时；
 - 本轮没有读取 AlphaEngine token、没有调用本地 MCP、没有访问真实数据、没有部署，也没有写
   Evidence/Claim/Thesis。`get_document` 仍停留在 inventory；Guidepoint、雪球和 live MCP 仍为 No-Go。
 
