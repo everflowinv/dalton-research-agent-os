@@ -21,6 +21,7 @@ dalton-agenda = "dalton_core.agenda_coordinator:main"
 dalton-perception-legacy = "dalton_core.perception:main"
 dalton-backup = "dalton_core.backup:main"
 dalton-control = "dalton_core.agenda_control:main"
+dalton-review = "dalton_core.research_review_control:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -42,6 +43,7 @@ dalton_core = [
   "credential_authority_schema.sql",
   "research_coordinator_schema.sql",
   "candidate_staging_schema.sql",
+  "research_review_schema.sql",
   "connector_inventory/*.json",
   "connector_inventory/profiles/*.json",
   "connector_inventory/fixtures/*.json",
@@ -49,6 +51,7 @@ dalton_core = [
   "reference_shadow_fixtures/*.json",
   "dashboard.html",
   "agenda_control.html",
+  "research_review_control.html",
 ]
 
 [tool.setuptools.data-files]

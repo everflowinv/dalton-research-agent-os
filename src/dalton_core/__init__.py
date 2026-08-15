@@ -73,6 +73,10 @@ _LAZY_EXPORTS = {
     ),
     "SecPublicHttpAdapter": (".sec_public_adapter", "SecPublicHttpAdapter"),
     "normalize_sec_submissions": (".sec_public_adapter", "normalize_sec_submissions"),
+    "HumanReviewAuthority": (".research_review", "HumanReviewAuthority"),
+    "ResearchReviewControlPlane": (
+        ".research_review_control", "ResearchReviewControlPlane"
+    ),
 }
 
 
@@ -117,6 +121,8 @@ __all__ = [
     "build_reference_fixture_plan",
     "SecPublicHttpAdapter",
     "normalize_sec_submissions",
+    "HumanReviewAuthority",
+    "ResearchReviewControlPlane",
     "install_openclaw_catalog",
     "migrate_legacy_workspace",
     "ProcessRuntimeAdapter",

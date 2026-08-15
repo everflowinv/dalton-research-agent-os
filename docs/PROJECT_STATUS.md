@@ -2,7 +2,7 @@
 
 更新日期：2026-08-15
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver 和隔离 SEC public canary，未部署
+- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver、隔离 SEC public canary，以及 HumanReviewAuthority + Ledger promotion 0.2 + HTML review 入口，未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -17,11 +17,12 @@ live 部署现在能自主生成并选择研究问题，也能在仓库 fixture 
 AlphaEngine 三源离线流程并从 checkpoint 恢复；live 仍不会访问真实 source、运行 authority verifier 或提交新的
 Evidence、Claim、Thesis。当前开发候选已能重放 fixture，也能从完整 Connector authority 解析真实 SEC public
 响应，并把 source/numeric verifier 通过的 CandidateEvidence/CandidateClaim 写入独立 staging。这条链只在
-隔离临时 authority 中验收，尚未部署，也没有人工审阅入口。
+隔离临时 authority 中验收。当前开发候选已经增加明确人工审阅入口和无损正式 promotion，但尚未部署。
 
-当前下一阶段是 **第一条只读研究闭环的人工审阅边界**：authority resolver 与一条 SEC filing WorkOrder
-已产出 human-review-ready candidate；下一步要增加独立 review authority/入口，并继续保持正式 Ledger commit
-人工 gate。万华的 10 个工作日/20 个显式人工标签门槛
+当前下一阶段是 **把第一条只读研究闭环接到可检索、可计划的消费者**：HumanReviewAuthority 已能对 exact
+candidate 做 accept/revise/reject，accept 通过 scoped writer 原子写 EvidenceVersion 0.2、ClaimVersion 0.2 和
+supports relation；下一步先修 ClaimIndex status 派生，再做 DocumentIndex FTS 和 ContextPack materializer。
+正式 Ledger commit 继续逐条人工 gate。万华的 10 个工作日/20 个显式人工标签门槛
 只限制 Agenda 从 1 家扩到 3 家，不阻塞通用 connector、research coordinator、verifier、Model IR 和
 sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单独验收。
 
@@ -370,7 +371,7 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 
 已完成：
 
-- 88 份闭合 JSON Schema、14 份 SQL schema；
+- 91 份闭合 JSON Schema、15 份 SQL schema；
 - immutable DomainEvent、WorkOrder、ResultEnvelope、ModelInvocation；
 - Evidence → Claim → Thesis 版本链、verification 和 commit gate；
 - Workflow、Artifact metadata、模型 Usage/Cost、只读 projection 和静态看板；
@@ -405,8 +406,8 @@ Agenda Perception；否则会在 10 日评估窗口中途改变输入分布，�
 broker、预算和 pause gate。
 
 部分完成：connector runner、recorded transport、fixture-only coordinator、offline/authority source-numeric
-verifier、只读 authority resolver 与 candidate-only staging 已完成；真实 SEC public source 只在隔离 canary
-运行，尚未接 Agenda、生产 authority 或 human review。
+verifier、只读 authority resolver、candidate-only staging、HumanReviewAuthority 和无损 Ledger promotion 0.2
+已完成；真实 SEC public source 与 review/commit 只在隔离测试运行，尚未接 Agenda 或生产 authority。
 未完成：原生事件 connector、从 AgendaDecision 到 research DAG 的 production planner、
 `ready → connector/worker → verifier → revise/commit` 完整 coordinator，以及生产化只读研究 WorkOrder。
 
@@ -416,10 +417,10 @@ verifier、只读 authority resolver 与 candidate-only staging 已完成；真�
 版本、原子 commit、幂等和事务失败回滚约束。这里没有 thesis 业务版本回滚；当前可激活历史版本的
 rollback 只存在于 Capability Registry。
 
-部分完成：source/numeric verifier 已有 synthetic fixture replay、真实 Connector authority replay 与
-换绑/数值错误探针。
-未完成：生产 authority verifier、completeness/investment-link verifier、seeded-error 校准、局部返工、人工审阅
-入口和任何 live thesis commit。
+部分完成：source/numeric verifier 已有 synthetic fixture replay、真实 Connector authority replay、
+换绑/数值错误探针，以及 explicit human review 后的 Evidence/Claim 0.2 原子 commit。
+未完成：生产 authority verifier、completeness/investment-link verifier、seeded-error 校准、局部返工和任何
+live thesis commit；review 入口仍未部署。
 
 ### Phase 4：能力自主改进——治理半边完成
 
@@ -598,9 +599,10 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 ### P2：第一条只读研究闭环
 
-offline/authority source-numeric verifier、只读 authority resolver、candidate staging 和一条隔离 SEC public
-WorkOrder 已完成。下一步增加独立人工 review authority/入口；AgendaDecision 接线、正式 commit、Model IR 更新和
-旧 cron cutover 仍保持人工 gate。当前代码没有 live staging/review authority。
+offline/authority source-numeric verifier、只读 authority resolver、candidate staging、一条隔离 SEC public
+WorkOrder、独立 HumanReviewAuthority、HTML 入口和正式 Evidence/Claim 0.2 promotion 已完成开发候选。
+下一步修 ClaimIndex status 派生，再做 DocumentIndex FTS 与 ContextPack materializer；AgendaDecision 接线、
+生产部署、Model IR 更新和旧 cron cutover 仍保持独立人工 gate。当前没有 live staging/review authority。
 
 与 P0/P1 并行推进但不接生产权限：operational verifier contract、fixture-only research coordinator、
 formula census/Model IR ADR、offline capability sandbox。它们不必等待万华 shadow，但在 production
@@ -652,8 +654,9 @@ connector、Ledger 写入或旧 cron cutover 前都要独立开闸。
 ### P2：第一条只读研究 gate
 
 - 一条真实只读 WorkOrder 完成 connector → source/numeric verifier → candidate staging → human review；
+- explicit accept 在一个事务内无损写 Evidence/Claim/Relation；reject/revise 不产生 formal commit；
 - retry/revise 有界，失败后不留下 ready/leased 僵尸任务；
-- 不做正式 Evidence/Claim/Thesis commit，不关闭旧 cron。
+- production 未部署前只在隔离 authority 验收；不做自动 Ledger commit，不关闭旧 cron。
 
 硬指标：100% physical attempts 入账；0 fake ModelInvocation；0 未 reservation 的本地 admission；0 超过
 本地 hard quota 的 admission；provider-reported overage 必须写 incident 并阻断后续调用；0 secret/Core

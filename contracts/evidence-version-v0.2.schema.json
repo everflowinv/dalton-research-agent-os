@@ -1,0 +1,12 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"dalton/evidence-version/0.2",
+  "title":"EvidenceVersionV0.2",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schema_version","id","created_at","evidence_ref","version","source_type","source_ref","source_envelope_ref","source_envelope_hash","retrieved_at","valid_until","artifact_refs","source_lineage","independence_group","source_verification_ref","source_verification_hash","candidate_origin_ref","candidate_origin_hash","review_decision_ref","review_decision_hash","actor_ref","prior_version_ref","content_hash"],
+  "properties":{
+    "schema_version":{"const":"0.2"},"id":{"type":"string","minLength":1},"created_at":{"type":"string","format":"date-time"},"evidence_ref":{"type":"string","minLength":1},"version":{"type":"integer","minimum":1},"source_type":{"type":"string","minLength":1},"source_ref":{"type":"string","minLength":1},"source_envelope_ref":{"type":"string","minLength":1},"source_envelope_hash":{"$ref":"#/$defs/hash"},"retrieved_at":{"type":"string","format":"date-time"},"valid_until":{"type":["string","null"]},"artifact_refs":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/refHash"}},"source_lineage":{"type":"array","minItems":1,"uniqueItems":true,"items":{"type":"string","minLength":1}},"independence_group":{"type":"string","minLength":1},"source_verification_ref":{"type":"string","minLength":1},"source_verification_hash":{"$ref":"#/$defs/hash"},"candidate_origin_ref":{"type":"string","minLength":1},"candidate_origin_hash":{"$ref":"#/$defs/hash"},"review_decision_ref":{"type":"string","minLength":1},"review_decision_hash":{"$ref":"#/$defs/hash"},"actor_ref":{"type":"string","pattern":"^human:tailscale-[0-9a-f]{32}$"},"prior_version_ref":{"type":["string","null"]},"content_hash":{"$ref":"#/$defs/hash"}
+  },
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},"refHash":{"type":"object","additionalProperties":false,"required":["ref","hash"],"properties":{"ref":{"type":"string","minLength":1},"hash":{"$ref":"#/$defs/hash"}}}}
+}

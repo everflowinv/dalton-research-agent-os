@@ -78,6 +78,9 @@ class WriterClient:
     def commit(self, **params: Any) -> Any:
         return self.call("commit", params)
 
+    def commit_reviewed_candidate(self, **params: Any) -> Any:
+        return self.call("commit_reviewed_candidate", params)
+
     def create_policy(self, **params: Any) -> Any:
         return self.call("create_policy", params)
 

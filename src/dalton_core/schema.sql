@@ -220,11 +220,41 @@ CREATE TABLE IF NOT EXISTS claim_challenges (
     created_at TEXT NOT NULL
 );
 
+-- Exact accepted review + formal Evidence/Claim/Relation result.  The writer
+-- inserts this row in the same transaction as all three Ledger records.  It
+-- is both the cross-boundary idempotency receipt and the durable copy of the
+-- explicit human authorization; no timeout/automation principal can create
+-- one through the scoped RPC boundary.
+CREATE TABLE IF NOT EXISTS reviewed_candidate_commits (
+    idempotency_key TEXT PRIMARY KEY,
+    request_hash TEXT NOT NULL,
+    review_decision_ref TEXT NOT NULL UNIQUE,
+    candidate_evidence_ref TEXT NOT NULL UNIQUE,
+    candidate_claim_ref TEXT NOT NULL UNIQUE,
+    decision_json TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 -- Keep a conventional view name available to callers that do not need to
 -- know the singleton implementation detail.
 CREATE VIEW IF NOT EXISTS active_policy_pointer AS
 SELECT pointer_id, policy_version_id, updated_at
 FROM governance_policy_pointer WHERE pointer_id = 1;
+
+CREATE TRIGGER IF NOT EXISTS reviewed_candidate_commits_authorized_insert
+BEFORE INSERT ON reviewed_candidate_commits
+WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'reviewed candidate commit requires DaltonStore');
+END;
+CREATE TRIGGER IF NOT EXISTS reviewed_candidate_commits_no_update
+BEFORE UPDATE ON reviewed_candidate_commits BEGIN
+    SELECT RAISE(ABORT, 'reviewed candidate commits are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS reviewed_candidate_commits_no_delete
+BEFORE DELETE ON reviewed_candidate_commits BEGIN
+    SELECT RAISE(ABORT, 'reviewed candidate commits are immutable');
+END;
 
 -- No update or delete can rewrite authoritative history, even from the store.
 CREATE TRIGGER IF NOT EXISTS execution_invocations_no_update

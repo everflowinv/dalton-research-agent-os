@@ -320,6 +320,27 @@ ref/hash；0.1 继续兼容旧 fixture，但不能作为真实 authority resolut
 candidate staging 没有 Research Ledger handle；即使 source/numeric verification 通过，candidate 的语义仍是
 `unverified`，必须经过后续人工 review 才能讨论正式 commit。
 
+### Human review 与 Ledger promotion 0.2
+
+`HumanReviewDecision` 是 candidate staging 旁的 append-only authority。每个 exact CandidateClaim version 只能有
+一个 `accept / revise / reject` 终态决定；`revise` 必须生成下一 candidate version，不能覆盖旧候选。reviewer ref
+只能由 Tailscale 登录派生为 `human:tailscale-*`，authorization 固定为 `explicit_human_review`。Agenda feedback、
+timeout accept、automation principal 和 Discord reaction 都不能授权正式 Ledger commit。
+
+accepted decision 与 durable commit intent 在 review authority 同一事务写入。正式 commit 由只持 scoped writer
+token 的 review control service 重试；Core DB path 不离开 writer。writer 从正式 SourceEnvelope 反查 connector
+producer ExecutionInvocation，并重验 SourceEnvelope/Artifact ref/hash，不能接受 caller 自报 producer execution。
+
+Candidate 与 Ledger 0.1 不是无损同构：candidate 数值是 canonical Decimal string，另有 currency/scale、结构化
+period、SourceEnvelope 和 source-verification hash。因此 reviewed promotion 使用 additive EvidenceVersion 0.2 和
+ClaimVersion 0.2；旧 0.1 历史记录保持不变。0.2 还固定 candidate origin 和 HumanReviewDecision ref/hash。
+EvidenceVersion、ClaimVersion、`supports` EvidenceRelation 和 promotion receipt 必须在一个 Core SQLite 事务提交；
+任一写入或返回缝隙失败时，不得留下部分 formal Ledger 记录。
+
+accepted ClaimVersion 的投影状态仍从 `proposed` 开始。人工语义核对只证明“这句话忠实表达已验证材料”，不等于
+独立 corroboration。connector/deterministic producer 以 `producer_execution_refs` 进入 ClaimVersion 0.2；没有
+专门的跨 execution adjudication policy 前，不能把它伪装成 ModelInvocation 来满足模型独立性规则。
+
 Dalton 可以生成 `ConnectorProposalManifest`、adapter package、schema 和 recorded fixtures，并在无网络、
 无凭据、无 Core DB 的 sandbox replay。静态 resolver、networked canary 和 production promotion 都需要
 独立人工 gate；运行时不得从 proposal path 动态 import/exec。

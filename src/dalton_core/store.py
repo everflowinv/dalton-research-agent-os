@@ -878,6 +878,295 @@ class DaltonStore:
     def _row_json(row: sqlite3.Row, key: str) -> dict[str, Any]:
         return json.loads(row[key])
 
+    def commit_reviewed_candidate(
+        self,
+        *,
+        decision: Mapping[str, Any],
+        evidence: Mapping[str, Any],
+        claim: Mapping[str, Any],
+        idempotency_key: str,
+        fault_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically promote one explicitly accepted candidate into Ledger 0.2.
+
+        The scoped writer boundary authenticates the review-control service;
+        this method still revalidates every closed record and derives the
+        producer execution from Core's SourceEnvelope authority.  It never
+        accepts a caller-supplied execution id, projected claim status, or
+        auto-accept authorization.
+        """
+        from .research_review import (
+            validate_claim_version_v0_2,
+            validate_evidence_version_v0_2,
+            validate_human_review_decision,
+        )
+        from .research_verification import (
+            validate_candidate_claim,
+            validate_candidate_evidence,
+        )
+
+        decision_wire = validate_human_review_decision(decision)
+        evidence_wire = validate_candidate_evidence(evidence)
+        claim_wire = validate_candidate_claim(claim)
+        if decision_wire["verdict"] != "accept":
+            raise GateRejected("only an explicit accepted review can enter the Ledger")
+        if not isinstance(idempotency_key, str) or not idempotency_key:
+            raise ValidationError("idempotency_key is required")
+        if decision_wire["reviewer_ref"] == claim_wire["actor_ref"]:
+            raise IndependenceViolation("candidate producer cannot review its own claim")
+        expected_evidence = [{"ref": evidence_wire["id"], "hash": evidence_wire["content_hash"]}]
+        if claim_wire["candidate_evidence_refs"] != expected_evidence:
+            raise GateRejected("candidate claim does not bind the reviewed evidence")
+        if (
+            decision_wire["candidate_claim_ref"] != claim_wire["id"]
+            or decision_wire["candidate_claim_hash"] != claim_wire["content_hash"]
+            or decision_wire["candidate_evidence_ref"] != evidence_wire["id"]
+            or decision_wire["candidate_evidence_hash"] != evidence_wire["content_hash"]
+        ):
+            raise GateRejected("review decision does not bind the exact candidate pair")
+        reviewed_semantics = {
+            field: claim_wire[field]
+            for field in (
+                "subject_ref", "metric_or_aspect", "period", "basis", "normalized_statement"
+            )
+        }
+        if canonical_json(decision_wire["reviewed_semantics"]) != canonical_json(reviewed_semantics):
+            raise GateRejected("review decision semantics drifted from the candidate")
+        if (
+            evidence_wire["source_verification_ref"] != claim_wire["source_verification_ref"]
+            or evidence_wire["source_verification_hash"] != claim_wire["source_verification_hash"]
+        ):
+            raise GateRejected("candidate source verification binding is inconsistent")
+        if evidence_wire["source_type"] == "recorded_fixture":
+            raise GateRejected("recorded fixture candidates cannot enter the formal Ledger")
+
+        request_hash = content_hash({
+            "decision_hash": decision_wire["content_hash"],
+            "evidence_hash": evidence_wire["content_hash"],
+            "claim_hash": claim_wire["content_hash"],
+        })
+        with self._transaction() as cur:
+            prior_key = cur.execute(
+                "SELECT request_hash,result_json FROM reviewed_candidate_commits "
+                "WHERE idempotency_key=?", (idempotency_key,),
+            ).fetchone()
+            if prior_key is not None:
+                if prior_key["request_hash"] != request_hash:
+                    return {
+                        "status": "conflict", "idempotency_key": idempotency_key,
+                        "existing_request_hash": prior_key["request_hash"],
+                        "request_hash": request_hash,
+                    }
+                original = json.loads(prior_key["result_json"])
+                return {**original, "status": "duplicate", "idempotency_key": idempotency_key}
+
+            prior_decision = cur.execute(
+                "SELECT request_hash,result_json FROM reviewed_candidate_commits "
+                "WHERE review_decision_ref=? OR candidate_evidence_ref=? OR candidate_claim_ref=?",
+                (decision_wire["id"], evidence_wire["id"], claim_wire["id"]),
+            ).fetchone()
+            if prior_decision is not None:
+                if prior_decision["request_hash"] == request_hash:
+                    original = json.loads(prior_decision["result_json"])
+                    return {**original, "status": "duplicate", "idempotency_key": idempotency_key}
+                raise IdempotencyConflict("review decision or candidate was already promoted")
+
+            source = cur.execute(
+                "SELECT connector_invocation_ref,record_json,content_hash FROM "
+                "connector_source_envelopes WHERE source_envelope_id=?",
+                (evidence_wire["source_envelope_ref"],),
+            ).fetchone()
+            if source is None or source["content_hash"] != evidence_wire["source_envelope_hash"]:
+                raise GateRejected("candidate SourceEnvelope is not exact Core authority")
+            source_doc = json.loads(source["record_json"])
+            if (
+                source_doc.get("source") != evidence_wire["source_ref"]
+                or source_doc.get("raw_artifact_version_ref")
+                != evidence_wire["artifact_refs"][0]["ref"]
+            ):
+                raise GateRejected("candidate source/artifact binding drifted from Core authority")
+            invocation = cur.execute(
+                "SELECT execution_ref FROM connector_invocations WHERE connector_invocation_id=?",
+                (source["connector_invocation_ref"],),
+            ).fetchone()
+            if invocation is None:
+                raise GateRejected("candidate producer execution is unavailable")
+            producer_execution_ref = invocation["execution_ref"]
+            artifact = cur.execute(
+                "SELECT i.version_id,v.content_hash FROM observability_artifact_version_index i "
+                "JOIN observability_artifact_versions_v2 v ON v.version_id=i.version_id "
+                "WHERE i.version_id=? AND i.producer_execution_ref=?",
+                (evidence_wire["artifact_refs"][0]["ref"], producer_execution_ref),
+            ).fetchone()
+            if (
+                artifact is None
+                or artifact["content_hash"] != evidence_wire["artifact_refs"][0]["hash"]
+            ):
+                raise GateRejected("candidate ArtifactVersion is not exact Core authority")
+
+            evidence_ref = evidence_wire["candidate_evidence_ref"].replace(
+                "candidate-evidence:", "evidence:", 1
+            )
+            claim_ref = claim_wire["candidate_claim_ref"].replace(
+                "candidate-claim:", "claim:", 1
+            )
+            previous_evidence = cur.execute(
+                "SELECT evidence_version_id,version_number FROM evidence_versions "
+                "WHERE evidence_ref=? ORDER BY version_number DESC LIMIT 1", (evidence_ref,),
+            ).fetchone()
+            previous_claim = cur.execute(
+                "SELECT claim_version_id,version_number FROM claim_versions "
+                "WHERE claim_ref=? ORDER BY version_number DESC LIMIT 1", (claim_ref,),
+            ).fetchone()
+            expected_evidence_version = 1 if previous_evidence is None else int(previous_evidence["version_number"]) + 1
+            expected_claim_version = 1 if previous_claim is None else int(previous_claim["version_number"]) + 1
+            if evidence_wire["version"] != expected_evidence_version:
+                raise GateRejected("formal evidence chain does not match candidate version")
+            if claim_wire["version"] != expected_claim_version:
+                raise GateRejected("formal claim chain does not match candidate version")
+            evidence_version_id = "evidence-version:" + content_hash({
+                "candidate": evidence_wire["id"], "review": decision_wire["id"]
+            })
+            claim_version_id = "claim-version:" + content_hash({
+                "candidate": claim_wire["id"], "review": decision_wire["id"]
+            })
+            evidence_v2 = {
+                "schema_version": "0.2", "id": evidence_version_id,
+                "created_at": decision_wire["created_at"], "evidence_ref": evidence_ref,
+                "version": evidence_wire["version"], "source_type": evidence_wire["source_type"],
+                "source_ref": evidence_wire["source_ref"],
+                "source_envelope_ref": evidence_wire["source_envelope_ref"],
+                "source_envelope_hash": evidence_wire["source_envelope_hash"],
+                "retrieved_at": evidence_wire["retrieved_at"],
+                "valid_until": evidence_wire["valid_until"],
+                "artifact_refs": list(evidence_wire["artifact_refs"]),
+                "source_lineage": list(evidence_wire["source_lineage"]),
+                "independence_group": evidence_wire["independence_group"],
+                "source_verification_ref": evidence_wire["source_verification_ref"],
+                "source_verification_hash": evidence_wire["source_verification_hash"],
+                "candidate_origin_ref": evidence_wire["id"],
+                "candidate_origin_hash": evidence_wire["content_hash"],
+                "review_decision_ref": decision_wire["id"],
+                "review_decision_hash": decision_wire["content_hash"],
+                "actor_ref": decision_wire["reviewer_ref"],
+                "prior_version_ref": None if previous_evidence is None else previous_evidence["evidence_version_id"],
+            }
+            evidence_v2["content_hash"] = self._ledger_hash(evidence_v2)
+            evidence_v2 = validate_evidence_version_v0_2(evidence_v2)
+            claim_v2 = {
+                "schema_version": "0.2", "id": claim_version_id,
+                "created_at": decision_wire["created_at"], "claim_ref": claim_ref,
+                "version": claim_wire["version"], "subject_ref": claim_wire["subject_ref"],
+                "metric_or_aspect": claim_wire["metric_or_aspect"],
+                "period": claim_wire["period"], "basis": claim_wire["basis"],
+                "normalized_statement": claim_wire["normalized_statement"],
+                "claim_kind": claim_wire["claim_kind"], "value": claim_wire["value"],
+                "unit": claim_wire["unit"], "currency": claim_wire["currency"],
+                "scale": claim_wire["scale"],
+                "producer_execution_refs": [producer_execution_ref],
+                "semantic_review_ref": decision_wire["id"],
+                "semantic_review_hash": decision_wire["content_hash"],
+                "candidate_origin_ref": claim_wire["id"],
+                "candidate_origin_hash": claim_wire["content_hash"],
+                "actor_ref": decision_wire["reviewer_ref"],
+                "prior_version_ref": None if previous_claim is None else previous_claim["claim_version_id"],
+            }
+            claim_v2["content_hash"] = self._ledger_hash(claim_v2)
+            claim_v2 = validate_claim_version_v0_2(claim_v2)
+
+            cur.execute(
+                "INSERT INTO evidence_versions(evidence_version_id,evidence_ref,version_number,"
+                "evidence_json,content_hash,prior_version_id,created_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    evidence_v2["id"], evidence_v2["evidence_ref"], evidence_v2["version"],
+                    canonical_json(evidence_v2), evidence_v2["content_hash"],
+                    evidence_v2["prior_version_ref"], evidence_v2["created_at"],
+                ),
+            )
+            evidence_event = self._insert_event(
+                cur, "evidence_versioned", "evidence", evidence_v2["evidence_ref"],
+                evidence_v2, content_hash=evidence_v2["content_hash"],
+                actor_id=decision_wire["reviewer_ref"],
+                idempotency_key=f"reviewed-evidence:{decision_wire['id']}",
+            )
+            if fault_at == "after_evidence":
+                raise RuntimeError("injected reviewed candidate failure after evidence")
+            cur.execute(
+                "INSERT INTO claim_versions(claim_version_id,claim_ref,version_number,claim_json,"
+                "content_hash,prior_version_id,created_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    claim_v2["id"], claim_v2["claim_ref"], claim_v2["version"],
+                    canonical_json(claim_v2), claim_v2["content_hash"],
+                    claim_v2["prior_version_ref"], claim_v2["created_at"],
+                ),
+            )
+            claim_event = self._insert_event(
+                cur, "claim_versioned", "claim", claim_v2["claim_ref"], claim_v2,
+                content_hash=claim_v2["content_hash"], actor_id=decision_wire["reviewer_ref"],
+                idempotency_key=f"reviewed-claim:{decision_wire['id']}",
+            )
+            self._emit_numeric_challenges_document(cur, claim_v2)
+            if fault_at == "after_claim":
+                raise RuntimeError("injected reviewed candidate failure after claim")
+
+            relation_wire = {
+                "schema_version": "0.1",
+                "id": "relation:reviewed:" + content_hash({
+                    "evidence": evidence_v2["id"], "claim": claim_v2["id"],
+                    "review": decision_wire["id"],
+                }),
+                "created_at": decision_wire["created_at"],
+                "evidence_ref": evidence_v2["evidence_ref"],
+                "evidence_version_ref": evidence_v2["id"],
+                "claim_ref": claim_v2["claim_ref"],
+                "claim_version_ref": claim_v2["id"],
+                "relation": "supports",
+                "source_lineage": list(evidence_v2["source_lineage"]),
+                "independence_group": evidence_v2["independence_group"],
+                "actor_ref": decision_wire["reviewer_ref"],
+            }
+            relation_wire["content_hash"] = self._ledger_hash(relation_wire)
+            relation = EvidenceRelation.from_dict(relation_wire)
+            relation_doc = relation.to_dict()
+            cur.execute(
+                "INSERT INTO evidence_relations(relation_id,evidence_ref,evidence_version_id,"
+                "claim_ref,claim_version_id,relation,relation_json,content_hash,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    relation.id, relation.evidence_ref, relation.evidence_version_ref,
+                    relation.claim_ref, relation.claim_version_ref, relation.relation.value,
+                    canonical_json(relation_doc), relation.content_hash, relation.created_at,
+                ),
+            )
+            relation_event = self._insert_event(
+                cur, "evidence_related", "claim", claim_v2["claim_ref"], relation_doc,
+                content_hash=relation.content_hash, actor_id=decision_wire["reviewer_ref"],
+                idempotency_key=f"reviewed-relation:{decision_wire['id']}",
+            )
+            if fault_at == "after_relation":
+                raise RuntimeError("injected reviewed candidate failure after relation")
+            result = {
+                "status": "fresh", "idempotency_key": idempotency_key,
+                "review_decision_ref": decision_wire["id"],
+                "evidence_version_ref": evidence_v2["id"],
+                "claim_version_ref": claim_v2["id"], "relation_ref": relation.id,
+                "claim_status": self._claim_status(cur, claim_v2["id"]),
+                "event_refs": [evidence_event, claim_event, relation_event],
+            }
+            cur.execute(
+                "INSERT INTO reviewed_candidate_commits(idempotency_key,request_hash,"
+                "review_decision_ref,candidate_evidence_ref,candidate_claim_ref,decision_json,"
+                "result_json,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    idempotency_key, request_hash, decision_wire["id"], evidence_wire["id"],
+                    claim_wire["id"], canonical_json(decision_wire), canonical_json(result),
+                    decision_wire["created_at"],
+                ),
+            )
+            if fault_at == "after_receipt":
+                raise RuntimeError("injected reviewed candidate failure after receipt")
+            return result
+
     def register_evidence(
         self,
         evidence: Mapping[str, Any] | Any = None,
@@ -1127,7 +1416,11 @@ class DaltonStore:
             claim_doc = json.loads(claim_row[0]); claim_ref = claim_ref or claim_doc["claim_ref"]
             if claim_doc["claim_ref"] != claim_ref:
                 raise ValidationError("claim_ref does not match claim_version_ref")
-            derived_subjects = list(claim_doc["producer_invocation_refs"])
+            derived_subjects = list(
+                claim_doc.get("producer_invocation_refs")
+                or claim_doc.get("producer_execution_refs")
+                or []
+            )
             if subjects is None:
                 subjects = list(derived_subjects)
             elif isinstance(subjects, str):
@@ -1145,6 +1438,14 @@ class DaltonStore:
             for subject_id in subjects:
                 row = cur.execute("SELECT * FROM model_invocations WHERE invocation_id=?", (str(subject_id),)).fetchone()
                 if not row:
+                    execution = cur.execute(
+                        "SELECT kind FROM execution_invocations WHERE execution_id=?",
+                        (str(subject_id),),
+                    ).fetchone()
+                    if execution is not None:
+                        raise VerificationRequired(
+                            "non-model producer execution requires a dedicated adjudication policy"
+                        )
                     raise NotFound(f"claim producer invocation not found: {subject_id}")
                 subject_rows.append(row)
             policy = cur.execute("SELECT v.policy_version_id,v.policy_json,v.effective_from,v.effective_until FROM governance_policy_pointer p JOIN governance_policy_versions v ON v.policy_version_id=p.policy_version_id WHERE p.pointer_id=1").fetchone()
@@ -1194,31 +1495,52 @@ class DaltonStore:
     add_adjudication = adjudicate_claim
     create_adjudication_version = adjudicate_claim
 
+    @staticmethod
+    def _claim_semantic_key(document: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
+        """Return a hashable key across ClaimVersion 0.1 and 0.2 periods."""
+        return (
+            str(document["subject_ref"]),
+            str(document["metric_or_aspect"]),
+            canonical_json(document["period"]),
+            str(document["basis"]),
+            str(document["unit"]),
+        )
+
     def _latest_claim_rows(self, cur: sqlite3.Cursor, *, key: tuple[str, str, str, str, str] | None = None) -> list[sqlite3.Row]:
         rows = cur.execute("SELECT c.* FROM claim_versions c JOIN (SELECT claim_ref,MAX(version_number) version_number FROM claim_versions GROUP BY claim_ref) latest ON latest.claim_ref=c.claim_ref AND latest.version_number=c.version_number").fetchall()
         if key is None:
             return rows
-        return [r for r in rows if tuple(json.loads(r["claim_json"])[x] for x in ("subject_ref", "metric_or_aspect", "period", "basis", "unit")) == key]
+        return [
+            row for row in rows
+            if self._claim_semantic_key(json.loads(row["claim_json"])) == key
+        ]
 
     def _emit_numeric_challenges(self, cur: sqlite3.Cursor, claim: ClaimVersion) -> None:
         if claim.claim_kind != ClaimKind.QUANTITATIVE:
             return
-        key = (claim.subject_ref, claim.metric_or_aspect, claim.period, claim.basis, claim.unit)
+        self._emit_numeric_challenges_document(cur, claim.to_dict())
+
+    def _emit_numeric_challenges_document(
+        self, cur: sqlite3.Cursor, claim: Mapping[str, Any]
+    ) -> None:
+        if claim.get("claim_kind") != ClaimKind.QUANTITATIVE.value:
+            return
+        key = self._claim_semantic_key(claim)
         for other in self._latest_claim_rows(cur, key=key):
-            if other["claim_version_id"] == claim.id:
+            if other["claim_version_id"] == claim["id"]:
                 continue
             other_doc = json.loads(other["claim_json"])
-            if other_doc.get("value") == claim.value:
+            if other_doc.get("value") == claim.get("value"):
                 continue
-            ids = sorted((claim.id, other["claim_version_id"]))
+            ids = sorted((str(claim["id"]), other["claim_version_id"]))
             conflict_key = "numeric:" + ":".join(ids)
             exists = cur.execute("SELECT 1 FROM claim_challenges WHERE conflict_key=?", (conflict_key,)).fetchone()
             if exists:
                 continue
-            challenge = {"challenge_id": uuid.uuid4().hex, "conflict_key": conflict_key, "claim_version_id": claim.id, "conflicting_claim_version_id": other["claim_version_id"], "reason": "exact numeric claims conflict", "semantic_key": list(key), "values": [claim.value, other_doc.get("value")]}
+            challenge = {"challenge_id": uuid.uuid4().hex, "conflict_key": conflict_key, "claim_version_id": claim["id"], "conflicting_claim_version_id": other["claim_version_id"], "reason": "exact numeric claims conflict", "semantic_key": list(key), "values": [claim.get("value"), other_doc.get("value")]}
             encoded = canonical_json(challenge)
-            cur.execute("INSERT INTO claim_challenges(challenge_id,conflict_key,claim_version_id,conflicting_claim_version_id,challenge_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?)", (challenge["challenge_id"], conflict_key, claim.id, other["claim_version_id"], encoded, content_hash(challenge), _now()))
-            self._insert_event(cur, "claim_challenged", "claim", claim.claim_ref, challenge, content_hash=content_hash(challenge), actor_id="system:dalton-core", idempotency_key=f"challenge:{conflict_key}")
+            cur.execute("INSERT INTO claim_challenges(challenge_id,conflict_key,claim_version_id,conflicting_claim_version_id,challenge_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?)", (challenge["challenge_id"], conflict_key, claim["id"], other["claim_version_id"], encoded, content_hash(challenge), _now()))
+            self._insert_event(cur, "claim_challenged", "claim", str(claim["claim_ref"]), challenge, content_hash=content_hash(challenge), actor_id="system:dalton-core", idempotency_key=f"challenge:{conflict_key}")
 
     def _claim_status(self, cur: sqlite3.Cursor, claim_version_id: str) -> str:
         row = cur.execute("SELECT claim_json,claim_ref FROM claim_versions WHERE claim_version_id=?", (claim_version_id,)).fetchone()
@@ -1226,7 +1548,7 @@ class DaltonStore:
             raise NotFound(f"claim version not found: {claim_version_id}")
         doc = json.loads(row["claim_json"])
         if doc["claim_kind"] == ClaimKind.QUANTITATIVE.value:
-            key = tuple(doc[x] for x in ("subject_ref", "metric_or_aspect", "period", "basis", "unit"))
+            key = self._claim_semantic_key(doc)
             for other in self._latest_claim_rows(cur, key=key):
                 other_doc = json.loads(other["claim_json"])
                 if other["claim_version_id"] != claim_version_id and other_doc.get("value") != doc.get("value"):

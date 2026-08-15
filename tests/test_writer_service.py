@@ -16,6 +16,7 @@ from dalton_core.writer_server import (
     CORE_OPERATIONS,
     FEEDBACK_BRIDGE_OPERATIONS,
     MAX_CONNECTIONS,
+    RESEARCH_REVIEW_CONTROL_OPERATIONS,
     VERIFIER_OPERATIONS,
     WORKER_OPERATIONS,
     Principal,
@@ -53,10 +54,16 @@ class WriterServiceTests(unittest.TestCase):
         self.worker_token = "worker-token-9f0c"
         self.verifier_token = "verifier-token-9f0c"
         self.core_token = "core-token-9f0c"
+        self.review_token = "review-token-9f0c"
         write_token_config(self.tokens, [
             Principal("worker", self.worker_token, WORKER_OPERATIONS, frozenset({"producer"}), frozenset({"wo"})),
             Principal("verifier", self.verifier_token, VERIFIER_OPERATIONS, frozenset({"verifier"}), frozenset({"wo"})),
             Principal("core", self.core_token, CORE_OPERATIONS, unrestricted=True),
+            Principal(
+                "research-review-control", self.review_token,
+                RESEARCH_REVIEW_CONTROL_OPERATIONS,
+                actor_ref="bridge:tailscale-review",
+            ),
         ])
         self.env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
         self.proc = None
@@ -109,6 +116,10 @@ class WriterServiceTests(unittest.TestCase):
     @property
     def core(self):
         return WriterClient(str(self.sock), self.core_token)
+
+    @property
+    def review(self):
+        return WriterClient(str(self.sock), self.review_token)
 
     def test_permission_matrix_and_unknown_fields(self):
         with self.assertRaises(RemoteAuthorizationError):
@@ -253,6 +264,31 @@ class WriterServiceTests(unittest.TestCase):
             ])
             with self.assertRaises(WriterServerError):
                 load_principals(invalid)
+
+    def test_research_review_principal_is_exact_and_rejects_automation(self):
+        with self.assertRaises(RemoteAuthorizationError):
+            self.worker.commit_reviewed_candidate(
+                decision={}, evidence={}, claim={}, idempotency_key="forbidden"
+            )
+        with self.assertRaises(RemoteAuthorizationError):
+            self.review.commit_reviewed_candidate(
+                decision={
+                    "reviewer_ref": "automation:timeout", "verdict": "accept",
+                    "authorization": "explicit_human_review", "source": "tailscale_review",
+                    "source_event_ref": "research-review:bad",
+                },
+                evidence={}, claim={}, idempotency_key="automation",
+            )
+        invalid = Path(self.tmp.name) / "private" / "research-review-invalid.json"
+        write_token_config(invalid, [
+            Principal(
+                "research-review-control", "bad-review-token",
+                RESEARCH_REVIEW_CONTROL_OPERATIONS,
+                actor_ref="bridge:tailscale-dashboard",
+            )
+        ])
+        with self.assertRaises(WriterServerError):
+            load_principals(invalid)
 
     def test_partial_frame_does_not_block_valid_client_and_connection_limit(self):
         partial = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

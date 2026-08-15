@@ -134,13 +134,18 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
 FEEDBACK_BRIDGE_OPERATIONS = frozenset({
     "list_agenda_feedback_targets", "record_agenda_feedback",
 })
+RESEARCH_REVIEW_CONTROL_OPERATIONS = frozenset({"commit_reviewed_candidate"})
 SCOPED_FEEDBACK_PRINCIPALS = {
     "feedback-bridge": ("bridge:openclaw-discord",),
     "dashboard-control": ("bridge:tailscale-dashboard",),
     "agenda-timeout": ("automation:agenda-timeout",),
 }
+SCOPED_REVIEW_PRINCIPALS = {
+    "research-review-control": "bridge:tailscale-review",
+}
 CORE_OPERATIONS = frozenset({
     "register_invocation", "stage_change", "verify_change", "commit",
+    "commit_reviewed_candidate",
     "current_pointer", "get_version", "list_events", "active_policy",
     "register_evidence", "register_claim", "relate_evidence", "adjudicate_claim",
     "submit_capability_proposal", "record_capability_evaluation",
@@ -163,6 +168,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "stage_change": frozenset({"change", "change_id", "thesis_id", "content", "payload", "producer_invocation", "producer_invocation_id", "actor_id"}),
     "verify_change": frozenset({"change_id", "verification", "verification_id", "verifier_invocation", "verifier_invocation_id", "verdict", "findings", "actor_id"}),
     "commit": frozenset({"change_id", "verification_id", "idempotency_key", "request", "actor_id", "request_hash"}),
+    "commit_reviewed_candidate": frozenset({"decision", "evidence", "claim", "idempotency_key"}),
     "create_policy": frozenset({"policy", "policy_version_id", "version_number", "activate", "policy_ref", "effective_from", "effective_until", "actor_ref", "prior_version_ref", "change_reason", "content_hash_value"}),
     "current_pointer": frozenset({"thesis_id"}),
     "get_version": frozenset({"version_id"}),
@@ -295,6 +301,12 @@ def load_principals(path: str | Path) -> dict[str, Principal]:
         scoped_actor = SCOPED_FEEDBACK_PRINCIPALS.get(principal_id)
         if scoped_actor is not None and (
             set(operations) != FEEDBACK_BRIDGE_OPERATIONS or actor_ref not in scoped_actor
+        ):
+            raise WriterServerError("token config is invalid")
+        review_actor = SCOPED_REVIEW_PRINCIPALS.get(principal_id)
+        if review_actor is not None and (
+            set(operations) != RESEARCH_REVIEW_CONTROL_OPERATIONS
+            or actor_ref != review_actor
         ):
             raise WriterServerError("token config is invalid")
         if principal_id in result:
@@ -604,6 +616,28 @@ class WriterServer:
                 )
             if not valid:
                 raise PermissionError("scoped feedback provenance is invalid")
+        if operation == "commit_reviewed_candidate" and not principal.is_unrestricted:
+            if (
+                principal.principal_id not in SCOPED_REVIEW_PRINCIPALS
+                or principal.operations != RESEARCH_REVIEW_CONTROL_OPERATIONS
+            ):
+                raise PermissionError("review promotion requires the scoped review control principal")
+            decision = result.get("decision")
+            if not isinstance(decision, Mapping):
+                raise PermissionError("review decision is required")
+            reviewer_ref = decision.get("reviewer_ref")
+            source_event_ref = decision.get("source_event_ref")
+            if (
+                not isinstance(reviewer_ref, str)
+                or _HUMAN_ACTOR_RE.fullmatch(reviewer_ref) is None
+                or not reviewer_ref.startswith("human:tailscale-")
+                or decision.get("authorization") != "explicit_human_review"
+                or decision.get("source") != "tailscale_review"
+                or not isinstance(source_event_ref, str)
+                or not source_event_ref.startswith("research-review:")
+                or decision.get("verdict") != "accept"
+            ):
+                raise PermissionError("review promotion provenance is invalid")
         if operation in {"stage_change", "verify_change"}:
             self._authorize_invocation_subject(principal, operation, result)
         elif operation == "register_claim":
@@ -803,6 +837,9 @@ class WriterServer:
 
     def _op_commit(self, p: Mapping[str, Any]) -> Any:
         return self.store.commit(**dict(p))
+
+    def _op_commit_reviewed_candidate(self, p: Mapping[str, Any]) -> Any:
+        return self.store.commit_reviewed_candidate(**dict(p))
 
     def _op_create_policy(self, p: Mapping[str, Any]) -> Any:
         return self.store.create_policy(**dict(p))
