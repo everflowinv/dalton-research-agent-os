@@ -2,7 +2,7 @@
 
 日期：2026-08-14
 
-状态：Claude Fable 5 首轮 committed-tree 复核为有条件 Go；阻塞项已修，待增量复核
+状态：Claude Fable 5 对 committed tree `8b13e26` 给出无条件 Go
 范围：离线 contract/package 验证；未部署、未访问真实数据源、未授予执行权限
 
 ## 架构裁决
@@ -49,7 +49,16 @@ required gate 也被固定。
   仍由 exact allowed targets 和 transport/use-time gate 决定；
 - connector inventory 专项：17/17；
 - Python 全量：322/322；broker：15/15；
-- `compileall`、`git diff --check`：通过。
+- `compileall`、`git diff --check`：通过；
+- 两次 committed archive wheel 逐位一致，SHA-256：
+  `23ce64bdfb5b74cad4344fac314da43d2b88f459f022aabdd7cc2e35df27a51b`；
+- Python 3.13 干净 venv 安装后含 31 个 inventory JSON，`load == build`，10 个 frozen profile 完整，
+  16 张 connector 表且 SQLite integrity 为 `ok`；
+- Fable 独立增加的 schema 绕过、身份抢注、跨 transport gate、纯 symlink 等 hostile probes 全部 fail closed；
+  合法 nested schema、不同 `source_method` 和自定义 `forbidden_target_refs` 控制组保持可用。
+
+Fable 对 `8b13e26` 的最终裁决为 **Go**。P1-0c 只完成离线 proposal package 的合格输入边界，不自动
+promotion/import，也不扩大下列 No-Go 范围。
 
 ## 保持 No-Go
 
