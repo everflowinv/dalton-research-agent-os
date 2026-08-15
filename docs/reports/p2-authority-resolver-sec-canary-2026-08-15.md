@@ -77,7 +77,8 @@ normalizer 只在请求窗口完全落入 `filings.recent` 覆盖范围、结果
   `d85ad4ecb466a18f3447549a3765f6561eba025a6b8bbed33baee3469dec22ae`，557,781 bytes；
 - wheel 在干净 Python 3.13 venv 安装成功，`pip check` 无冲突；新增模块、14 份 packaged SQL 和 88 份
   packaged contract schema 均可读取；
-- Python 3.11、Python 3.13 与 broker 远端 CI 在最终提交后补入本报告。
+- 实现提交 `002ebda`；GitHub CI `31878953063` 的 Python 3.11、Python 3.13 和 broker 三个 job 全部通过：
+  <https://github.com/everflowinv/dalton-research-agent-os/actions/runs/31878953063>。
 
 全量测试首次运行遇到既有 Agenda fixture 的 1 天 availability TTL 穿过当前墙钟边界；该测试改为 365 天固定
 TTL 后恢复确定性。产品 Agenda 路由和生产 TTL 没有改动。
