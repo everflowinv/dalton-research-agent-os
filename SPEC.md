@@ -518,6 +518,13 @@ derived scratch；`ClaimIndex` 是可重建的 Ledger 只读投影，不提供 L
 仍放 authority DB 之外。这些投影的保留期由未来版本化 retention policy 决定，不能把临时天数写成
 架构常量。
 
+Slice 2 起，`ClaimIndex` 只能由 `DaltonStore.claim_index_snapshot()` 产生的同一 SQLite 快照构建。
+快照同时绑定全部 ClaimVersion、EvidenceRelation、numeric challenge 和每个 exact ClaimVersion 的最新
+Adjudication；`status` 由 Core 的确定性投影顺序得出（旧版本 `superseded`、数值冲突 `contested`、exact
+版本裁决、最后 `proposed`），不接受 caller-provided status。`ledger_snapshot_ref/hash` 由 Core 派生并进入
+ClaimIndex content hash；ClaimVersion 0.2 的结构化 period 在仍保持 ClaimIndex 0.1 wire 的前提下以 canonical
+JSON 字符串投影。对应快照契约为 `contracts/claim-index-ledger-snapshot.schema.json`。
+
 ### P2 fixture research coordinator
 
 `CompiledConnectorPlan` 0.1 在 WorkOrder 规划边界只生成一次，冻结 source、profile、operation、parameters、

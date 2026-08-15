@@ -21,7 +21,8 @@ Evidence、Claim、Thesis。当前开发候选已能重放 fixture，也能从�
 
 当前下一阶段是 **把第一条只读研究闭环接到可检索、可计划的消费者**：HumanReviewAuthority 已能对 exact
 candidate 做 accept/revise/reject，accept 通过 scoped writer 原子写 EvidenceVersion 0.2、ClaimVersion 0.2 和
-supports relation；下一步先修 ClaimIndex status 派生，再做 DocumentIndex FTS 和 ContextPack materializer。
+supports relation；ClaimIndex status 派生现已改为读取 Core 的一致 Ledger snapshot，绑定 snapshot ref/hash，并拒绝
+caller-provided status；下一步再做 DocumentIndex FTS 和 ContextPack materializer。
 正式 Ledger commit 继续逐条人工 gate。万华的 10 个工作日/20 个显式人工标签门槛
 只限制 Agenda 从 1 家扩到 3 家，不阻塞通用 connector、research coordinator、verifier、Model IR 和
 sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单独验收。
@@ -371,7 +372,7 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 
 已完成：
 
-- 91 份闭合 JSON Schema、15 份 SQL schema；
+- 92 份 JSON Schema、15 份 SQL schema；
 - immutable DomainEvent、WorkOrder、ResultEnvelope、ModelInvocation；
 - Evidence → Claim → Thesis 版本链、verification 和 commit gate；
 - Workflow、Artifact metadata、模型 Usage/Cost、只读 projection 和静态看板；
@@ -601,7 +602,7 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 offline/authority source-numeric verifier、只读 authority resolver、candidate staging、一条隔离 SEC public
 WorkOrder、独立 HumanReviewAuthority、HTML 入口和正式 Evidence/Claim 0.2 promotion 已完成开发候选。
-下一步修 ClaimIndex status 派生，再做 DocumentIndex FTS 与 ContextPack materializer；AgendaDecision 接线、
+ClaimIndex status 派生已改为 exact Ledger snapshot；下一步做 DocumentIndex FTS，再做 ContextPack materializer；AgendaDecision 接线、
 生产部署、Model IR 更新和旧 cron cutover 仍保持独立人工 gate。当前没有 live staging/review authority。
 
 与 P0/P1 并行推进但不接生产权限：operational verifier contract、fixture-only research coordinator、

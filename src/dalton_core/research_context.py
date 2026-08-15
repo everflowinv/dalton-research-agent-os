@@ -13,10 +13,10 @@ from typing import Any, Mapping, Sequence
 
 from .connector_inventory import load_packaged_connector_inventory
 from .connector_runner import validate_connector_runner_request
-from .contracts import ClaimVersion, EvidenceRelation
+from .contracts import AdjudicationVersion, ClaimVersion, EvidenceRelation
 from .recorded_alphaengine_adapter import load_recorded_alphaengine_fixture
 from .recorded_source_adapter import load_recorded_source_fixture
-from .store import canonical_json, content_hash
+from .store import DaltonStore, canonical_json, content_hash
 
 
 SCHEMA_VERSION = "0.1"
@@ -378,6 +378,230 @@ _CLAIM_INDEX_FIELDS = {
     "entries", "content_hash",
 }
 
+_CLAIM_INDEX_SNAPSHOT_FIELDS = {
+    "schema_version", "id", "created_at", "claim_versions",
+    "latest_claim_version_refs", "evidence_relations", "claim_challenges",
+    "latest_adjudications", "content_hash",
+}
+_CLAIM_INDEX_SNAPSHOT_CLAIM_FIELDS = {
+    "claim_version_id", "claim_ref", "version", "content_hash", "created_at",
+    "claim",
+}
+_CLAIM_INDEX_SNAPSHOT_ADJUDICATION_FIELDS = {
+    "adjudication_version_id", "claim_ref", "claim_version_ref", "version",
+    "adjudication", "content_hash", "created_at",
+}
+_CLAIM_INDEX_SNAPSHOT_CHALLENGE_FIELDS = {
+    "challenge_id", "conflict_key", "claim_version_id",
+    "conflicting_claim_version_id", "reason", "semantic_key", "values",
+}
+
+
+def _validate_claim_index_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the status-free snapshot emitted by ``DaltonStore``.
+
+    A snapshot is the only admissible source for ClaimIndex status.  In
+    particular, a caller cannot smuggle a status field into a claim bundle or
+    replace a snapshot ref/hash while retaining the same claim bytes.
+    """
+    wire = _closed(value, _CLAIM_INDEX_SNAPSHOT_FIELDS, "ClaimIndexLedgerSnapshot")
+    if wire["schema_version"] != "0.1":
+        raise ResearchContextError("unsupported ClaimIndexLedgerSnapshot schema_version")
+    for field in ("id",):
+        wire[field] = _text(wire[field], field)
+    wire["created_at"] = _timestamp(wire["created_at"], "created_at")
+    if not isinstance(wire["claim_versions"], list):
+        raise ResearchContextError("ClaimIndexLedgerSnapshot.claim_versions must be an array")
+    claims: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(wire["claim_versions"]):
+        item = _closed(raw, _CLAIM_INDEX_SNAPSHOT_CLAIM_FIELDS, f"claim_versions[{index}]")
+        item["claim_version_id"] = _text(item["claim_version_id"], f"claim_versions[{index}].claim_version_id")
+        item["claim_ref"] = _text(item["claim_ref"], f"claim_versions[{index}].claim_ref")
+        item["content_hash"] = _hash(item["content_hash"], f"claim_versions[{index}].content_hash")
+        item["created_at"] = _timestamp(item["created_at"], f"claim_versions[{index}].created_at")
+        item["version"] = _integer(item["version"], f"claim_versions[{index}].version", minimum=1)
+        if item["claim_version_id"] in seen:
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot claim version ids must be unique")
+        seen.add(item["claim_version_id"])
+        claim_wire = item["claim"]
+        if not isinstance(claim_wire, Mapping):
+            raise ResearchContextError(f"claim_versions[{index}].claim must be an object")
+        schema_version = claim_wire.get("schema_version")
+        try:
+            if schema_version == "0.1":
+                claim = ClaimVersion.from_dict(claim_wire).to_dict()
+            elif schema_version == "0.2":
+                # Import lazily: research_review imports research_verification,
+                # which intentionally imports this module for its context types.
+                from .research_review import validate_claim_version_v0_2
+
+                claim = validate_claim_version_v0_2(claim_wire)
+            else:
+                raise ResearchContextError("unsupported ClaimVersion schema_version")
+        except ResearchContextError:
+            raise
+        except Exception as exc:
+            raise ResearchContextError("ClaimIndexLedgerSnapshot contains an invalid ClaimVersion") from exc
+        if claim["id"] != item["claim_version_id"] or claim["claim_ref"] != item["claim_ref"]:
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot claim identity mismatch")
+        if claim["content_hash"] != content_hash({
+            key: value for key, value in claim.items() if key != "content_hash"
+        }):
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot ClaimVersion content_hash mismatch")
+        if claim["version"] != item["version"] or claim["content_hash"] != item["content_hash"]:
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot claim binding mismatch")
+        if _timestamp(
+            claim["created_at"], f"claim_versions[{index}].claim.created_at"
+        ) != item["created_at"]:
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot claim timestamp mismatch")
+        claims.append({**item, "claim": claim})
+    latest = wire["latest_claim_version_refs"]
+    if not isinstance(latest, Mapping) or any(
+        not isinstance(key, str) or not isinstance(ref, str) for key, ref in latest.items()
+    ):
+        raise ResearchContextError("ClaimIndexLedgerSnapshot.latest_claim_version_refs must be a string map")
+    expected_latest: dict[str, dict[str, Any]] = {}
+    for item in claims:
+        current = expected_latest.get(item["claim_ref"])
+        if current is None or (item["version"], item["claim_version_id"]) > (
+            current["version"], current["claim_version_id"]
+        ):
+            expected_latest[item["claim_ref"]] = item
+    if dict(latest) != {
+        claim_ref: item["claim_version_id"] for claim_ref, item in expected_latest.items()
+    }:
+        raise ResearchContextConflict("ClaimIndexLedgerSnapshot latest claim projection mismatch")
+    wire["claim_versions"] = sorted(claims, key=lambda item: item["claim_version_id"])
+    wire["latest_claim_version_refs"] = dict(sorted(latest.items()))
+    claims_by_id = {item["claim_version_id"]: item for item in claims}
+    for field in ("evidence_relations", "claim_challenges", "latest_adjudications"):
+        if not isinstance(wire[field], list):
+            raise ResearchContextError(f"ClaimIndexLedgerSnapshot.{field} must be an array")
+    relations: list[dict[str, Any]] = []
+    for index, relation_raw in enumerate(wire["evidence_relations"]):
+        try:
+            relation = EvidenceRelation.from_dict(relation_raw).to_dict()
+        except Exception as exc:
+            raise ResearchContextError(
+                f"ClaimIndexLedgerSnapshot.evidence_relations[{index}] is invalid"
+            ) from exc
+        if relation["claim_version_ref"] not in seen:
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot relation points to unknown claim")
+        if relation["claim_ref"] != claims_by_id[relation["claim_version_ref"]]["claim_ref"]:
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot relation claim_ref mismatch")
+        relations.append(relation)
+    wire["evidence_relations"] = sorted(relations, key=lambda item: item["id"])
+    wire["evidence_relations"] = [
+        _with_hash(item, f"evidence_relations[{index}]")
+        for index, item in enumerate(wire["evidence_relations"])
+    ]
+    challenges: list[dict[str, Any]] = []
+    challenge_ids: set[str] = set()
+    conflict_keys: set[str] = set()
+    for index, raw in enumerate(wire["claim_challenges"]):
+        item = _closed(
+            raw, _CLAIM_INDEX_SNAPSHOT_CHALLENGE_FIELDS,
+            f"claim_challenges[{index}]",
+        )
+        for field in (
+            "challenge_id", "conflict_key", "claim_version_id",
+            "conflicting_claim_version_id", "reason",
+        ):
+            item[field] = _text(item[field], f"claim_challenges[{index}].{field}")
+        if item["challenge_id"] in challenge_ids or item["conflict_key"] in conflict_keys:
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot challenges must be unique")
+        challenge_ids.add(item["challenge_id"])
+        conflict_keys.add(item["conflict_key"])
+        left_ref = item["claim_version_id"]
+        right_ref = item["conflicting_claim_version_id"]
+        if left_ref not in claims_by_id or right_ref not in claims_by_id:
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot challenge points to unknown claim")
+        if left_ref == right_ref:
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot challenge must bind two claims")
+        expected_key = "numeric:" + ":".join(sorted((left_ref, right_ref)))
+        if item["conflict_key"] != expected_key or item["reason"] != "exact numeric claims conflict":
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot challenge identity mismatch")
+        left = claims_by_id[left_ref]["claim"]
+        right = claims_by_id[right_ref]["claim"]
+        expected_semantic_key = list(DaltonStore._claim_semantic_key(left))
+        if (
+            expected_semantic_key != list(DaltonStore._claim_semantic_key(right))
+            or item["semantic_key"] != expected_semantic_key
+        ):
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot challenge semantic key mismatch")
+        if not isinstance(item["values"], list) or len(item["values"]) != 2:
+            raise ResearchContextError("ClaimIndexLedgerSnapshot challenge values must contain two items")
+        if not (
+            DaltonStore._claim_values_equal(item["values"][0], left.get("value"))
+            and DaltonStore._claim_values_equal(item["values"][1], right.get("value"))
+        ):
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot challenge values mismatch")
+        challenges.append(item)
+    wire["claim_challenges"] = sorted(
+        challenges, key=lambda item: (item["conflict_key"], item["challenge_id"])
+    )
+    normalized_adjudications: list[dict[str, Any]] = []
+    adjudicated_claim_refs: set[str] = set()
+    for index, raw in enumerate(wire["latest_adjudications"]):
+        item = _closed(
+            raw, _CLAIM_INDEX_SNAPSHOT_ADJUDICATION_FIELDS,
+            f"latest_adjudications[{index}]",
+        )
+        item["adjudication_version_id"] = _text(item["adjudication_version_id"], f"latest_adjudications[{index}].adjudication_version_id")
+        item["claim_ref"] = _text(item["claim_ref"], f"latest_adjudications[{index}].claim_ref")
+        item["claim_version_ref"] = _text(item["claim_version_ref"], f"latest_adjudications[{index}].claim_version_ref")
+        item["version"] = _integer(item["version"], f"latest_adjudications[{index}].version", minimum=1)
+        item["content_hash"] = _hash(item["content_hash"], f"latest_adjudications[{index}].content_hash")
+        item["created_at"] = _timestamp(item["created_at"], f"latest_adjudications[{index}].created_at")
+        if item["claim_version_ref"] not in seen:
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot adjudication points to unknown claim")
+        if item["claim_ref"] != claims_by_id[item["claim_version_ref"]]["claim_ref"]:
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot adjudication claim_ref mismatch")
+        if item["claim_version_ref"] in adjudicated_claim_refs:
+            raise ResearchContextConflict(
+                "ClaimIndexLedgerSnapshot has multiple latest adjudications for one claim version"
+            )
+        adjudicated_claim_refs.add(item["claim_version_ref"])
+        try:
+            adjudication = AdjudicationVersion.from_dict(item["adjudication"]).to_dict()
+        except Exception as exc:
+            raise ResearchContextError(
+                "latest adjudication must be a valid AdjudicationVersion"
+            ) from exc
+        if adjudication["content_hash"] != content_hash({
+            key: value for key, value in adjudication.items() if key != "content_hash"
+        }):
+            raise ResearchContextConflict(
+                "ClaimIndexLedgerSnapshot AdjudicationVersion content_hash mismatch"
+            )
+        if (
+            adjudication["id"] != item["adjudication_version_id"]
+            or adjudication["claim_ref"] != item["claim_ref"]
+            or adjudication["claim_version_ref"] != item["claim_version_ref"]
+            or adjudication["version"] != item["version"]
+            or adjudication["content_hash"] != item["content_hash"]
+        ):
+            raise ResearchContextConflict("ClaimIndexLedgerSnapshot adjudication identity mismatch")
+        if _timestamp(
+            adjudication["created_at"],
+            f"latest_adjudications[{index}].adjudication.created_at",
+        ) != item["created_at"]:
+            raise ResearchContextConflict(
+                "ClaimIndexLedgerSnapshot adjudication timestamp mismatch"
+            )
+        item["adjudication"] = adjudication
+        normalized_adjudications.append(item)
+    wire["latest_adjudications"] = sorted(
+        normalized_adjudications, key=lambda item: item["claim_version_ref"]
+    )
+    expected_snapshot_ref = "ledger-snapshot:claim-index:" + content_hash({
+        key: value for key, value in wire.items() if key not in {"id", "content_hash"}
+    })
+    if wire["id"] != expected_snapshot_ref:
+        raise ResearchContextConflict("ClaimIndexLedgerSnapshot ref is not Core-derived")
+    return _with_hash(wire, "ClaimIndexLedgerSnapshot")
+
 
 def validate_claim_index(value: Mapping[str, Any]) -> dict[str, Any]:
     wire = _closed(value, _CLAIM_INDEX_FIELDS, "ClaimIndex")
@@ -403,84 +627,112 @@ def validate_claim_index(value: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def build_claim_index(
-    claim_bundles: Sequence[Mapping[str, Any]],
+    claim_bundles: Sequence[Mapping[str, Any]] | None = None,
     *,
-    ledger_snapshot_ref: str,
-    ledger_snapshot_hash: str,
+    ledger: DaltonStore | None = None,
+    claim_version_refs: Sequence[str] | None = None,
+    ledger_snapshot_ref: str | None = None,
+    ledger_snapshot_hash: str | None = None,
     created_at: str,
 ) -> dict[str, Any]:
+    """Build a ClaimIndex from an exact Core Ledger snapshot.
+
+    Caller bundles are intentionally no longer accepted.  The old API let a
+    caller provide both a claim and an arbitrary ``status`` string; that made
+    it possible to label a contested claim ``corroborated``.  A ``DaltonStore``
+    now owns snapshot creation and its projection is the only source of status,
+    including for an empty fixture Ledger.
+    """
+    created_at_wire = _timestamp(created_at, "created_at")
+    if claim_bundles is not None:
+        raise ResearchContextError(
+            "ClaimIndex requires a DaltonStore snapshot; caller claim bundles/status are not accepted"
+        )
+    if ledger_snapshot_ref is not None or ledger_snapshot_hash is not None:
+        raise ResearchContextError("ledger_snapshot_ref/hash are always Core-derived")
+    if not isinstance(ledger, DaltonStore):
+        raise ResearchContextError("ledger must be a DaltonStore")
+
+    snapshot = _validate_claim_index_snapshot(
+        ledger.claim_index_snapshot(created_at=created_at_wire)
+    )
+    index_ref = snapshot["id"]
+    index_hash = snapshot["content_hash"]
+    requested_refs = (
+        sorted(_refs(claim_version_refs, "claim_version_refs"))
+        if claim_version_refs is not None else
+        sorted(snapshot["latest_claim_version_refs"].values())
+    )
+    by_ref = {item["claim_version_id"]: item for item in snapshot["claim_versions"]}
+    unknown = set(requested_refs) - set(by_ref)
+    if unknown:
+        raise ResearchContextConflict(
+            f"claim_version_refs point to unknown Ledger claims: {sorted(unknown)}"
+        )
+    relation_by_claim: dict[str, list[dict[str, Any]]] = {}
+    for relation in snapshot["evidence_relations"]:
+        relation_by_claim.setdefault(relation["claim_version_ref"], []).append(relation)
     entries: list[dict[str, Any]] = []
-    for index, raw in enumerate(claim_bundles):
-        bundle = _closed(
-            raw, {"claim", "evidence_relations", "status"}, f"claim_bundles[{index}]"
+    for index, claim_ref in enumerate(requested_refs):
+        item = by_ref[claim_ref]
+        claim = item["claim"]
+        source_types = sorted({
+            source
+            for relation in relation_by_claim.get(claim_ref, [])
+            for source in relation["source_lineage"]
+        })
+        status_projection = DaltonStore.project_claim_status_details(
+            snapshot, claim_ref
         )
-        try:
-            claim = ClaimVersion.from_dict(bundle["claim"])
-        except Exception as exc:
-            raise ResearchContextError("ClaimIndex received an invalid ClaimVersion") from exc
-        claim_wire = claim.to_dict()
-        if claim.content_hash != content_hash(
-            {key: value for key, value in claim_wire.items() if key != "content_hash"}
-        ):
-            raise ResearchContextConflict("ClaimVersion content_hash mismatch")
-        if not isinstance(bundle["evidence_relations"], list):
-            raise ResearchContextError("evidence_relations must be an array")
-        source_types: set[str] = set()
-        for relation_raw in bundle["evidence_relations"]:
-            try:
-                relation = EvidenceRelation.from_dict(relation_raw)
-            except Exception as exc:
-                raise ResearchContextError("ClaimIndex received an invalid EvidenceRelation") from exc
-            relation_wire = relation.to_dict()
-            if relation.content_hash != content_hash(
-                {key: value for key, value in relation_wire.items() if key != "content_hash"}
-            ):
-                raise ResearchContextConflict("EvidenceRelation content_hash mismatch")
-            if relation.claim_version_ref != claim.id:
-                raise ResearchContextConflict("EvidenceRelation points to another claim")
-            source_types.update(relation.source_lineage)
-        status = _text(bundle["status"], "status")
-        terms = sorted(
-            set(
-                token.lower()
-                for token in _SEARCH_RE.findall(
-                    " ".join(
-                        filter(
-                            None,
-                            (
-                                claim.subject_ref, claim.metric_or_aspect, claim.period,
-                                claim.basis, claim.normalized_statement, claim.unit,
-                            ),
-                        )
-                    )
-                )
+        status = status_projection["status"]
+        # ClaimIndex 0.1 keeps a string period.  Structured periods from
+        # Ledger 0.2 are projected losslessly as canonical JSON text.
+        period = (
+            claim["period"]
+            if isinstance(claim["period"], str)
+            else canonical_json(claim["period"])
+        )
+        terms = sorted(set(
+            token.lower()
+            for token in _SEARCH_RE.findall(
+                " ".join(filter(None, (
+                    claim["subject_ref"], claim["metric_or_aspect"], period,
+                    claim["basis"], claim["normalized_statement"], claim.get("unit"),
+                )))
             )
-        )
+        ))
         base = {
-            "claim_version_ref": claim.id,
-            "claim_version_hash": claim.content_hash,
-            "claim_ref": claim.claim_ref,
-            "subject_ref": claim.subject_ref,
-            "metric_or_aspect": claim.metric_or_aspect,
-            "period": claim.period,
-            "basis": claim.basis,
+            "claim_version_ref": claim["id"],
+            "claim_version_hash": claim["content_hash"],
+            "claim_ref": claim["claim_ref"],
+            "subject_ref": claim["subject_ref"],
+            "metric_or_aspect": claim["metric_or_aspect"],
+            "period": period,
+            "basis": claim["basis"],
             "status": status,
-            "source_types": sorted(source_types),
-            "updated_at": claim.created_at,
+            "source_types": source_types,
+            "updated_at": max(
+                [status_projection["updated_at"]]
+                + [
+                    _timestamp(relation["created_at"], "EvidenceRelation.created_at")
+                    for relation in relation_by_claim.get(claim_ref, [])
+                ]
+            ),
             "search_terms": terms,
         }
         base["content_hash"] = content_hash(base)
         entries.append(_validate_claim_index_entry(base, f"entries[{index}]"))
-    index_ref = _text(ledger_snapshot_ref, "ledger_snapshot_ref")
-    builder_ref = "claim-index-builder:structured-sqlite:0.1"
+    builder_ref = "claim-index-builder:structured-sqlite:0.2"
     base = {
         "schema_version": SCHEMA_VERSION,
-        "id": "claim-index:" + content_hash(
-            {"ledger_snapshot_ref": index_ref, "entries": [x["content_hash"] for x in entries]}
-        ),
-        "created_at": _timestamp(created_at, "created_at"),
+        "id": "claim-index:" + content_hash({
+            "ledger_snapshot_ref": index_ref,
+            "ledger_snapshot_hash": index_hash,
+            "entries": [x["content_hash"] for x in entries],
+        }),
+        "created_at": created_at_wire,
         "ledger_snapshot_ref": index_ref,
-        "ledger_snapshot_hash": _hash(ledger_snapshot_hash, "ledger_snapshot_hash"),
+        "ledger_snapshot_hash": index_hash,
         "index_builder_ref": builder_ref,
         "index_builder_hash": content_hash({"index_builder_ref": builder_ref}),
         "entries": sorted(entries, key=lambda item: item["claim_version_ref"]),

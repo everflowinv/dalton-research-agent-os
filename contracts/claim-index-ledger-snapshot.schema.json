@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dalton/claim-index-ledger-snapshot/0.1",
+  "title": "ClaimIndexLedgerSnapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "claim_versions", "latest_claim_version_refs", "evidence_relations", "claim_challenges", "latest_adjudications", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "claim_versions": {"type": "array", "items": {"$ref": "#/$defs/claim"}},
+    "latest_claim_version_refs": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}},
+    "evidence_relations": {"type": "array", "items": {"$ref": "#/$defs/relation"}},
+    "claim_challenges": {"type": "array", "items": {"$ref": "#/$defs/challenge"}},
+    "latest_adjudications": {"type": "array", "items": {"$ref": "#/$defs/adjudication"}},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claim_version_id", "claim_ref", "version", "content_hash", "created_at", "claim"],
+      "properties": {
+        "claim_version_id": {"type": "string", "minLength": 1},
+        "claim_ref": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1},
+        "content_hash": {"$ref": "#/$defs/hash"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "claim": {
+          "type": "object",
+          "description": "A closed ClaimVersion 0.1 or 0.2 document, validated by the matching version contract and Core validator."
+        }
+      }
+    },
+    "relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "id", "created_at", "evidence_ref", "evidence_version_ref", "claim_ref", "claim_version_ref", "relation", "source_lineage", "independence_group", "actor_ref", "content_hash"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "id": {"type": "string", "minLength": 1},
+        "created_at": {"type": "string", "format": "date-time"},
+        "evidence_ref": {"type": "string", "minLength": 1},
+        "evidence_version_ref": {"type": "string", "minLength": 1},
+        "claim_ref": {"type": "string", "minLength": 1},
+        "claim_version_ref": {"type": "string", "minLength": 1},
+        "relation": {"enum": ["supports", "contradicts", "qualifies"]},
+        "source_lineage": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "independence_group": {"type": "string", "minLength": 1},
+        "actor_ref": {"type": "string", "minLength": 1},
+        "content_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "challenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["challenge_id", "conflict_key", "claim_version_id", "conflicting_claim_version_id", "reason", "semantic_key", "values"],
+      "properties": {
+        "challenge_id": {"type": "string", "minLength": 1},
+        "conflict_key": {"type": "string", "pattern": "^numeric:"},
+        "claim_version_id": {"type": "string", "minLength": 1},
+        "conflicting_claim_version_id": {"type": "string", "minLength": 1},
+        "reason": {"const": "exact numeric claims conflict"},
+        "semantic_key": {
+          "oneOf": [
+            {"type": "array", "minItems": 5, "maxItems": 5, "items": {"type": "string"}},
+            {"type": "array", "minItems": 7, "maxItems": 7, "items": {"type": "string"}}
+          ]
+        },
+        "values": {"type": "array", "minItems": 2, "maxItems": 2, "items": {}}
+      }
+    },
+    "adjudication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["adjudication_version_id", "claim_ref", "claim_version_ref", "version", "adjudication", "content_hash", "created_at"],
+      "properties": {
+        "adjudication_version_id": {"type": "string", "minLength": 1},
+        "claim_ref": {"type": "string", "minLength": 1},
+        "claim_version_ref": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1},
+        "adjudication": {"$ref": "#/$defs/adjudication_document"},
+        "content_hash": {"$ref": "#/$defs/hash"},
+        "created_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "adjudication_document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "id", "created_at", "claim_ref", "claim_version_ref", "version", "adjudicated_status", "rationale", "findings", "adjudicator_invocation_ref", "subject_invocation_refs", "independence_policy_ref", "prior_version_ref", "content_hash"],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "id": {"type": "string", "minLength": 1},
+        "created_at": {"type": "string", "format": "date-time"},
+        "claim_ref": {"type": "string", "minLength": 1},
+        "claim_version_ref": {"type": "string", "minLength": 1},
+        "version": {"type": "integer", "minimum": 1},
+        "adjudicated_status": {"enum": ["corroborated", "contested", "superseded", "retracted"]},
+        "rationale": {"type": "string", "minLength": 1},
+        "findings": {"type": "array", "items": {"type": "object"}},
+        "adjudicator_invocation_ref": {"type": "string", "minLength": 1},
+        "subject_invocation_refs": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "independence_policy_ref": {"type": "string", "minLength": 1},
+        "prior_version_ref": {"type": ["string", "null"]},
+        "content_hash": {"$ref": "#/$defs/hash"}
+      }
+    }
+  }
+}

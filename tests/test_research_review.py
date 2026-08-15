@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from dalton_core.errors import GateRejected
+from dalton_core.research_context import build_claim_index
 from dalton_core.research_review import (
     HumanReviewAuthority,
     ResearchReviewConflict,
@@ -62,6 +63,12 @@ class ResearchReviewTests(unittest.TestCase):
             runner_request=self.harness.coordinator_request,
             receipt=self._receipt(),
         )
+        period = {
+            "kind": "fiscal_year",
+            "label": "FY2025",
+            "start": "2025-01-01T00:00:00.000000+00:00",
+            "end": "2025-12-31T23:59:59.000000+00:00",
+        }
         spec = {
             "schema_version": "0.1",
             "id": "numeric-spec:sec:review-count:1",
@@ -69,14 +76,14 @@ class ResearchReviewTests(unittest.TestCase):
             "operator": "identity",
             "inputs": [{
                 "name": "filing_count", "value": "3", "unit": "records",
-                "currency": None, "scale": "one", "period": "FY2025",
+                "currency": None, "scale": "one", "period": period,
                 "source_material_ref": material["id"],
                 "source_material_hash": material["content_hash"],
                 "json_pointer": "/records", "extractor": "count",
             }],
             "output_value": "3", "output_unit": "records",
             "output_currency": None, "output_scale": "one",
-            "output_period": "FY2025",
+            "output_period": period,
             "rounding": {"mode": "down", "digits": 0},
         }
         spec["content_hash"] = content_hash(spec)
@@ -200,11 +207,17 @@ class ResearchReviewTests(unittest.TestCase):
         self.assertEqual(claim["value"], "3")
         self.assertIsNone(claim["currency"])
         self.assertEqual(claim["scale"], "one")
-        self.assertEqual(claim["period"], "FY2025")
+        self.assertEqual(claim["period"]["label"], "FY2025")
         self.assertEqual(claim_projection["status"], "proposed")
         self.assertEqual(len(claim_projection["evidence_relations"]), 1)
         self.assertEqual(
             claim_projection["evidence_relations"][0]["relation"], "supports"
+        )
+        index = build_claim_index(ledger=self.harness.core, created_at=WIRE_WHEN)
+        self.assertEqual(len(index["entries"]), 1)
+        self.assertEqual(index["entries"][0]["status"], "proposed")
+        self.assertEqual(
+            index["entries"][0]["period"], canonical_json(claim["period"])
         )
 
     def test_review_rejects_implicit_identity_and_semantic_rebinding(self) -> None:

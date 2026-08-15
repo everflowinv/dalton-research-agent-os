@@ -35,7 +35,7 @@ from dalton_core.research_coordinator import (
     validate_research_checkpoint,
     validate_research_run_state,
 )
-from dalton_core.store import content_hash
+from dalton_core.store import DaltonStore, content_hash
 from tests.test_connector import CONTRACTS, assert_wire_schema, validate_json_schema
 
 
@@ -77,6 +77,8 @@ class ForgedReceiptPort:
 
 class ResearchCoordinatorTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.ledger = DaltonStore(":memory:")
+        self.addCleanup(self.ledger.close)
         self.task_ref = "work-order:fixture-research:1"
         self.task_hash = content_hash({"work_order_ref": self.task_ref})
         self.plan = build_reference_fixture_plan(
@@ -85,9 +87,7 @@ class ResearchCoordinatorTests(unittest.TestCase):
             created_at=WIRE_WHEN,
         )
         self.claim_index = build_claim_index(
-            [],
-            ledger_snapshot_ref="ledger-snapshot:fixture:1",
-            ledger_snapshot_hash=content_hash({"ledger_snapshot": "fixture:1"}),
+            ledger=self.ledger,
             created_at=WIRE_WHEN,
         )
         self.context_pack = build_context_pack(
@@ -352,7 +352,7 @@ class ResearchCoordinatorTests(unittest.TestCase):
                     created_at=WIRE_WHEN,
                 )
 
-    def test_claim_index_derives_search_projection_without_ledger_writes(self) -> None:
+    def test_claim_index_rejects_caller_projection_bundle(self) -> None:
         claim = {
             "schema_version": "0.1",
             "id": "claim-version:revenue:1",
@@ -386,22 +386,21 @@ class ResearchCoordinatorTests(unittest.TestCase):
             "actor_ref": "actor:fixture",
         }
         relation["content_hash"] = content_hash(relation)
-        index = build_claim_index(
-            [
-                {
-                    "claim": claim,
-                    "evidence_relations": [relation],
-                    "status": "corroborated",
-                }
-            ],
-            ledger_snapshot_ref="ledger-snapshot:fixture:2",
-            ledger_snapshot_hash=content_hash({"snapshot": 2}),
-            created_at=WIRE_WHEN,
-        )
-        entry = validate_claim_index(index)["entries"][0]
-        self.assertEqual(entry["source_types"], ["source:sec-edgar"])
-        self.assertIn("revenue", entry["search_terms"])
-        self.assertEqual(entry["claim_version_hash"], claim["content_hash"])
+        with self.assertRaises(ResearchContextError):
+            build_claim_index(
+                [
+                    {
+                        "claim": claim,
+                        "evidence_relations": [relation],
+                        # This was the pre-Slice-2 injection point.  The
+                        # builder must reject it rather than trust it.
+                        "status": "corroborated",
+                    }
+                ],
+                ledger_snapshot_ref="ledger-snapshot:fixture:2",
+                ledger_snapshot_hash=content_hash({"snapshot": 2}),
+                created_at=WIRE_WHEN,
+            )
 
     def test_successful_three_source_run_is_resumable_and_idempotent(self) -> None:
         store = ResearchCoordinatorStore(":memory:")

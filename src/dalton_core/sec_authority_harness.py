@@ -526,7 +526,9 @@ class SecAuthorityHarness:
             routing_policy_hash=content_hash({"routing": "public-only:1"}), step_specs=[step_spec], created_at=WIRE_WHEN,
         )
         self.step = self.plan["steps"][0]
-        self.claim_index = build_claim_index([], ledger_snapshot_ref="ledger-snapshot:sec-demo:1", ledger_snapshot_hash=content_hash({"snapshot": "sec-demo:1"}), created_at=WIRE_WHEN)
+        self.claim_index = build_claim_index(
+            ledger=self.core, created_at=WIRE_WHEN
+        )
         self.context = build_context_pack([
             {"kind": "mandate", "ref": "mandate:sec-demo:1", "hash": content_hash({"mandate": "bounded SEC public read"}), "priority": 100, "content": "Count the bounded SEC filings."},
         ], task_ref=self.work.id, task_hash=self.work_hash, compiled_plan_ref=self.plan["id"], compiled_plan_hash=self.plan["content_hash"], claim_index_ref=self.claim_index["id"], claim_index_hash=self.claim_index["content_hash"], created_at=WIRE_WHEN, max_tokens=100, max_bytes=2000)

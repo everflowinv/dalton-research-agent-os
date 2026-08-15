@@ -11,6 +11,7 @@ import uuid
 from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Iterator
 from .contracts import (
@@ -1496,17 +1497,35 @@ class DaltonStore:
     create_adjudication_version = adjudicate_claim
 
     @staticmethod
-    def _claim_semantic_key(document: Mapping[str, Any]) -> tuple[str, str, str, str, str]:
-        """Return a hashable key across ClaimVersion 0.1 and 0.2 periods."""
-        return (
+    def _claim_semantic_key(
+        document: Mapping[str, Any],
+    ) -> tuple[str, ...]:
+        """Return an exact numeric-comparison key across Ledger versions."""
+        base = (
             str(document["subject_ref"]),
             str(document["metric_or_aspect"]),
             canonical_json(document["period"]),
             str(document["basis"]),
             str(document["unit"]),
         )
+        if document.get("schema_version") == "0.2":
+            return (*base, str(document.get("currency")), str(document.get("scale")))
+        return base
 
-    def _latest_claim_rows(self, cur: sqlite3.Cursor, *, key: tuple[str, str, str, str, str] | None = None) -> list[sqlite3.Row]:
+    @staticmethod
+    def _claim_values_equal(left: Any, right: Any) -> bool:
+        """Compare 0.1 JSON numbers and 0.2 canonical Decimal text exactly."""
+        try:
+            return Decimal(str(left)) == Decimal(str(right))
+        except (InvalidOperation, ValueError):
+            return left == right
+
+    def _latest_claim_rows(
+        self,
+        cur: sqlite3.Cursor,
+        *,
+        key: tuple[str, ...] | None = None,
+    ) -> list[sqlite3.Row]:
         rows = cur.execute("SELECT c.* FROM claim_versions c JOIN (SELECT claim_ref,MAX(version_number) version_number FROM claim_versions GROUP BY claim_ref) latest ON latest.claim_ref=c.claim_ref AND latest.version_number=c.version_number").fetchall()
         if key is None:
             return rows
@@ -1530,7 +1549,7 @@ class DaltonStore:
             if other["claim_version_id"] == claim["id"]:
                 continue
             other_doc = json.loads(other["claim_json"])
-            if other_doc.get("value") == claim.get("value"):
+            if self._claim_values_equal(other_doc.get("value"), claim.get("value")):
                 continue
             ids = sorted((str(claim["id"]), other["claim_version_id"]))
             conflict_key = "numeric:" + ":".join(ids)
@@ -1543,18 +1562,219 @@ class DaltonStore:
             self._insert_event(cur, "claim_challenged", "claim", str(claim["claim_ref"]), challenge, content_hash=content_hash(challenge), actor_id="system:dalton-core", idempotency_key=f"challenge:{conflict_key}")
 
     def _claim_status(self, cur: sqlite3.Cursor, claim_version_id: str) -> str:
-        row = cur.execute("SELECT claim_json,claim_ref FROM claim_versions WHERE claim_version_id=?", (claim_version_id,)).fetchone()
-        if not row:
+        row = cur.execute(
+            "SELECT claim_ref,version_number,claim_json FROM claim_versions "
+            "WHERE claim_version_id=?", (claim_version_id,),
+        ).fetchone()
+        if row is None:
             raise NotFound(f"claim version not found: {claim_version_id}")
-        doc = json.loads(row["claim_json"])
-        if doc["claim_kind"] == ClaimKind.QUANTITATIVE.value:
-            key = self._claim_semantic_key(doc)
+        latest = cur.execute(
+            "SELECT claim_version_id FROM claim_versions WHERE claim_ref=? "
+            "ORDER BY version_number DESC,claim_version_id DESC LIMIT 1",
+            (row["claim_ref"],),
+        ).fetchone()
+        if latest is None or latest["claim_version_id"] != claim_version_id:
+            return AdjudicatedStatus.SUPERSEDED.value
+        document = json.loads(row["claim_json"])
+        if document.get("claim_kind") == ClaimKind.QUANTITATIVE.value:
+            key = self._claim_semantic_key(document)
             for other in self._latest_claim_rows(cur, key=key):
-                other_doc = json.loads(other["claim_json"])
-                if other["claim_version_id"] != claim_version_id and other_doc.get("value") != doc.get("value"):
+                if other["claim_version_id"] == claim_version_id:
+                    continue
+                other_document = json.loads(other["claim_json"])
+                if not self._claim_values_equal(
+                    other_document.get("value"), document.get("value")
+                ):
                     return AdjudicatedStatus.CONTESTED.value
-        adjudication = cur.execute("SELECT adjudicated_status FROM adjudication_versions WHERE claim_ref=? ORDER BY version_number DESC,adjudication_version_id DESC LIMIT 1", (row["claim_ref"],)).fetchone()
-        return adjudication[0] if adjudication else "proposed"
+        adjudication = cur.execute(
+            "SELECT adjudicated_status FROM adjudication_versions "
+            "WHERE claim_version_id=? "
+            "ORDER BY version_number DESC,adjudication_version_id DESC LIMIT 1",
+            (claim_version_id,),
+        ).fetchone()
+        return adjudication[0] if adjudication is not None else "proposed"
+
+    @classmethod
+    def project_claim_status(
+        cls, snapshot: Mapping[str, Any], claim_version_id: str
+    ) -> str:
+        """Project one exact ClaimVersion status from an immutable snapshot.
+
+        The order is deliberately part of the Ledger authority contract:
+        superseded versions cannot inherit a later version's adjudication;
+        deterministic numeric conflicts win over adjudication; otherwise only
+        an adjudication attached to this exact ClaimVersion applies.
+        """
+        return cls.project_claim_status_details(snapshot, claim_version_id)["status"]
+
+    @classmethod
+    def project_claim_status_details(
+        cls, snapshot: Mapping[str, Any], claim_version_id: str
+    ) -> dict[str, str]:
+        """Return status and the newest immutable authority timestamp used."""
+        rows = list(snapshot.get("claim_versions", []))
+        target = next(
+            (row for row in rows if row.get("claim_version_id") == claim_version_id),
+            None,
+        )
+        if target is None:
+            raise NotFound(f"claim version not found: {claim_version_id}")
+        authority_times = [str(target["created_at"])]
+
+        def projected(status: str) -> dict[str, str]:
+            latest_time = max(
+                _parse_rfc3339(value, "claim status authority timestamp")
+                for value in authority_times
+            )
+            return {
+                "status": status,
+                "updated_at": latest_time.isoformat(timespec="microseconds"),
+            }
+
+        latest_refs = dict(snapshot.get("latest_claim_version_refs", {}))
+        if latest_refs.get(target["claim_ref"]) != claim_version_id:
+            replacement = next(
+                (
+                    row for row in rows
+                    if row.get("claim_version_id") == latest_refs.get(target["claim_ref"])
+                ),
+                None,
+            )
+            if replacement is not None:
+                authority_times.append(str(replacement["created_at"]))
+            return projected(AdjudicatedStatus.SUPERSEDED.value)
+        document = target["claim"]
+        if document.get("claim_kind") == ClaimKind.QUANTITATIVE.value:
+            key = cls._claim_semantic_key(document)
+            has_conflict = False
+            for other in rows:
+                if other["claim_version_id"] == claim_version_id:
+                    continue
+                if latest_refs.get(other["claim_ref"]) != other["claim_version_id"]:
+                    continue
+                other_document = other["claim"]
+                if (
+                    cls._claim_semantic_key(other_document) == key
+                    and not cls._claim_values_equal(
+                        other_document.get("value"), document.get("value")
+                    )
+                ):
+                    authority_times.append(str(other["created_at"]))
+                    has_conflict = True
+            if has_conflict:
+                return projected(AdjudicatedStatus.CONTESTED.value)
+        adjudications = [
+            item for item in snapshot.get("latest_adjudications", [])
+            if item.get("claim_version_ref") == claim_version_id
+        ]
+        if adjudications:
+            authority_times.append(str(adjudications[0]["created_at"]))
+            return projected(
+                str(adjudications[0]["adjudication"]["adjudicated_status"])
+            )
+        return projected("proposed")
+
+    def claim_index_snapshot(
+        self, *, created_at: str | None = None
+    ) -> dict[str, Any]:
+        """Read one consistent, status-free Ledger snapshot for ClaimIndex.
+
+        The returned snapshot contains every immutable ClaimVersion, its
+        relations/challenges, and the latest adjudication for each exact claim
+        version.  It is read under one SQLite snapshot and carries a Core-
+        derived ref/hash; callers cannot provide either authority value.
+        """
+        if self.connection.in_transaction:
+            raise RuntimeError("claim_index_snapshot cannot run inside a transaction")
+
+        def snapshot_timestamp(value: str) -> str:
+            return _parse_rfc3339(value, "claim index snapshot timestamp").isoformat(
+                timespec="microseconds"
+            )
+
+        self.connection.execute("BEGIN")
+        try:
+            claim_rows = self.connection.execute(
+                "SELECT claim_version_id,claim_ref,version_number,claim_json,content_hash,created_at "
+                "FROM claim_versions ORDER BY claim_version_id"
+            ).fetchall()
+            claims = [
+                {
+                    "claim_version_id": row["claim_version_id"],
+                    "claim_ref": row["claim_ref"],
+                    "version": row["version_number"],
+                    "content_hash": row["content_hash"],
+                    "created_at": snapshot_timestamp(row["created_at"]),
+                    "claim": json.loads(row["claim_json"]),
+                }
+                for row in claim_rows
+            ]
+            latest_claim_rows: dict[str, dict[str, Any]] = {}
+            for row in claims:
+                existing = latest_claim_rows.get(row["claim_ref"])
+                if existing is None:
+                    latest_claim_rows[row["claim_ref"]] = row
+                    continue
+                if (row["version"], row["claim_version_id"]) > (
+                    existing["version"], existing["claim_version_id"]
+                ):
+                    latest_claim_rows[row["claim_ref"]] = row
+            latest_claims = {
+                claim_ref: row["claim_version_id"]
+                for claim_ref, row in latest_claim_rows.items()
+            }
+
+            relations = [
+                json.loads(row[0])
+                for row in self.connection.execute(
+                    "SELECT relation_json FROM evidence_relations ORDER BY relation_id"
+                ).fetchall()
+            ]
+            challenges = [
+                json.loads(row[0])
+                for row in self.connection.execute(
+                    "SELECT challenge_json FROM claim_challenges ORDER BY conflict_key,challenge_id"
+                ).fetchall()
+            ]
+            adjudication_rows = self.connection.execute(
+                "SELECT adjudication_version_id,claim_ref,claim_version_id,version_number,"
+                "adjudication_json,content_hash,created_at FROM adjudication_versions "
+                "ORDER BY claim_version_id,version_number DESC,adjudication_version_id DESC"
+            ).fetchall()
+            latest_adjudications: dict[str, dict[str, Any]] = {}
+            for row in adjudication_rows:
+                latest_adjudications.setdefault(
+                    row["claim_version_id"],
+                    {
+                        "adjudication_version_id": row["adjudication_version_id"],
+                        "claim_ref": row["claim_ref"],
+                        "claim_version_ref": row["claim_version_id"],
+                        "version": row["version_number"],
+                        "adjudication": json.loads(row["adjudication_json"]),
+                        "content_hash": row["content_hash"],
+                        "created_at": snapshot_timestamp(row["created_at"]),
+                    },
+                )
+            base = {
+                "schema_version": "0.1",
+                "created_at": snapshot_timestamp(created_at or _now()),
+                "claim_versions": claims,
+                "latest_claim_version_refs": latest_claims,
+                "evidence_relations": relations,
+                "claim_challenges": challenges,
+                "latest_adjudications": list(latest_adjudications.values()),
+            }
+            identity_hash = content_hash(base)
+            snapshot = {
+                **base,
+                "id": f"ledger-snapshot:claim-index:{identity_hash}",
+            }
+            snapshot["content_hash"] = content_hash(snapshot)
+            self.connection.commit()
+            return snapshot
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def get_claim(self, claim_version_id: str) -> dict[str, Any] | None:
         row = self.connection.execute("SELECT * FROM claim_versions WHERE claim_version_id=?", (claim_version_id,)).fetchone()

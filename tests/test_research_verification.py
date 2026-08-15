@@ -33,7 +33,7 @@ from dalton_core.research_verification import (
     verify_numeric_spec,
     verify_source_material,
 )
-from dalton_core.store import content_hash
+from dalton_core.store import DaltonStore, content_hash
 from tests.test_connector import assert_wire_schema
 
 
@@ -64,15 +64,15 @@ class CrashBeforeCommit:
 
 class ResearchVerificationTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.ledger = DaltonStore(":memory:")
+        self.addCleanup(self.ledger.close)
         self.task_ref = "work-order:verification-fixture:1"
         self.task_hash = content_hash({"work_order_ref": self.task_ref})
         self.plan = build_reference_fixture_plan(
             task_ref=self.task_ref, task_hash=self.task_hash, created_at=WIRE_WHEN
         )
         self.claim_index = build_claim_index(
-            [],
-            ledger_snapshot_ref="ledger-snapshot:verification:1",
-            ledger_snapshot_hash=content_hash({"ledger_snapshot": "verification:1"}),
+            ledger=self.ledger,
             created_at=WIRE_WHEN,
         )
         self.context = build_context_pack(
