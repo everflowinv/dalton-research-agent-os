@@ -80,6 +80,12 @@ _LAZY_EXPORTS = {
     "DocumentIndex": (".document_index", "DocumentIndex"),
     "DocumentIndexInput": (".document_index", "DocumentIndexInput"),
     "make_document_index_input": (".document_index", "make_document_index_input"),
+    "ContextMaterializer": (".context_materializer", "ContextMaterializer"),
+    "ContextMaterialization": (".context_materializer", "ContextMaterialization"),
+    "ContextMaterializerConflict": (".context_materializer", "ContextMaterializerConflict"),
+    "ContextMaterializerError": (".context_materializer", "ContextMaterializerError"),
+    "ContextMaterializerUnsupported": (".context_materializer", "ContextMaterializerUnsupported"),
+    "validate_context_materialization": (".context_materializer", "validate_context_materialization"),
 }
 
 
@@ -129,6 +135,12 @@ __all__ = [
     "DocumentIndex",
     "DocumentIndexInput",
     "make_document_index_input",
+    "ContextMaterializer",
+    "ContextMaterialization",
+    "ContextMaterializerConflict",
+    "ContextMaterializerError",
+    "ContextMaterializerUnsupported",
+    "validate_context_materialization",
     "install_openclaw_catalog",
     "migrate_legacy_workspace",
     "ProcessRuntimeAdapter",

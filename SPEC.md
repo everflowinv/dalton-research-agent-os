@@ -553,6 +553,37 @@ SQL，rebuild/search 会检查主表、child facet 和 FTS5 `integrity-check` �
 submissions JSON 在本 slice 只表示 connector response/filing metadata，不能描述为 filing
 正文全文。embedding 和 recall-only sidecar 留到 FTS miss 率有测量后再决定。
 
+### ContextPack materializer 0.1（Slice 2）
+
+`ContextMaterializer` 是 ContextPack 的只读、短生命周期消费者，不是新的 authority，也不把正文写回
+`ContextPack` 0.1 或 authority DB。它要求同一 exact `DaltonStore`、`ObservabilityStore` 和 `RawSpool`；本版本
+只支持 `claim` 与 `artifact` 两种 input kind。Mandate、PerceptionSnapshot、SourceEnvelope 独立 reader 尚未
+冻结，因此传入这些 kind 必须 fail closed；不接受 caller resolver、caller body、caller metadata、文件路径或
+DocumentIndex FTS 正文。
+
+Claim 通过 exact `claim_versions` row 读取，复核 `id`、`claim_ref`、version、prior、created_at、SQL columns、
+record canonical hash，并分别使用 ClaimVersion 0.1/0.2 validator；模型正文同时保留 ContextPack 冻结的
+ClaimIndex entry，使 `contested/retracted` 等派生状态不会被抹掉，但 ClaimVersion 仍是事实权威。Artifact 通过 Observability API、跨代
+ArtifactVersion index 和 record row 复核版本、producer、raw content hash/size，再按 `media_type` 确定性选择
+内建 `utf8` 或 canonical `json` extractor，从 RawSpool 重读 bytes；storage locator 只存在于可信读取边界，
+manifest 和模型输入元数据都不输出该字段。默认 materializer access class 是 `public`，internal/restricted 只能
+由实例显式配置。
+
+authority-bound builder 只接受 `{kind, ref, hash, priority}`，从上述 authority 计算 ContextPack 0.1 的原文
+token/byte accounting。Materializer 对每项重新解析正文，并要求它与 pack 的 original accounting、ref/hash
+完全一致；旧 caller-content pack 即使 hash 看似合法，只要正文或 accounting 不一致就拒绝，不能静默截断或
+重新选题。选择顺序仍由 ContextPack frozen selector 决定，重复和 omission 只按 pack 记录执行。ContextPack
+预算是正文选择预算；materialization 另收一个 envelope-inclusive 总预算，后者必须计入 header/分隔符，未来
+接模型消费者时还必须受 WorkOrder input budget 约束。历史 pack 按自己冻结的 ClaimIndex 状态重放；新 attempt
+若需要当前状态，必须重建 ClaimIndex/ContextPack，不能在 replay 时暗中刷新。
+
+输出是 ephemeral `rendered_text` 与 `contracts/context-materialization.schema.json` 对应的闭合 manifest。render
+使用固定 quoted JSON-lines envelope；正文是 `quoted_data` 引用数据，prompt-like 文本不能改写 envelope/control
+字段，但这不声称解决一般 prompt injection。manifest 只记录 ContextPack ref/hash、authority/body hash、每项
+body/render token/byte 账、omission/failure 账、renderer/tokenizer ref/hash 和最终 render hash，不含正文、
+storage locator、DB path 或 credential。header/分隔符开销计入 max rendered token/byte budget，超限直接拒绝。
+materializer 不写 Evidence/Claim/Ledger，不调用模型，不接 Agenda 或 cron。
+
 ### P2 fixture research coordinator
 
 `CompiledConnectorPlan` 0.1 在 WorkOrder 规划边界只生成一次，冻结 source、profile、operation、parameters、
@@ -609,6 +640,7 @@ Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把
 | Scheduler → Router → broker adapter → usage/cost → AgendaDecision thin slice | E1 | `tests/test_agenda_coordinator.py` |
 | outbox claim/lease、Discord reconciliation、receipt 与 reaction feedback | E1/E2 | `tests/test_openclaw_agenda_bridge.py` |
 | ArtifactVersion/SourceEnvelope → DocumentIndex FTS5 只读投影、分面、hash/权限/重建边界 | E1/E2 | `tests/test_document_index.py` |
+| authority-bound ContextPack materializer、quoted render、authority/hash/accounting/budget 边界 | E1/E2 | `tests/test_context_materializer.py` |
 | connector profile/invocation、quota/settlement、provenance、incident 和 self-generated manifest | E1/E2 | `tests/test_connector.py` |
 | connector runner closed frame、双 use-time lease gate、静态 resolver 与 authority-derived adapter request | E2 | `tests/test_connector_runner.py` |
 | 一次性 connector plan、ref-only ContextPack/ClaimIndex、checkpoint/resume 与 bounded retry | E1/E2 | `tests/test_research_coordinator.py` |

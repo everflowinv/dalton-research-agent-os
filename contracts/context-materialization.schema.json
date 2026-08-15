@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dalton/context-materialization/0.1",
+  "title": "ContextMaterialization",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "context_pack_ref", "context_pack_hash",
+    "renderer_ref", "renderer_hash", "tokenizer_ref", "tokenizer_hash", "budget",
+    "inputs", "totals", "rendered_content_hash", "content_hash"
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "budget": {
+      "type": "object", "additionalProperties": false,
+      "required": ["max_tokens", "max_bytes"],
+      "properties": {
+        "max_tokens": {"type": "integer", "minimum": 1},
+        "max_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "input": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "kind", "ref", "hash", "selected", "selection_reason", "authority_ref",
+        "authority_hash", "body_hash", "body_tokens", "body_bytes",
+        "pack_original_tokens", "pack_original_bytes", "render_position",
+        "rendered_tokens", "rendered_bytes", "failure_code", "content_hash"
+      ],
+      "properties": {
+        "kind": {"enum": ["claim", "artifact"]},
+        "ref": {"type": "string", "minLength": 1},
+        "hash": {"$ref": "#/$defs/hash"},
+        "selected": {"type": "boolean"},
+        "selection_reason": {"enum": ["included", "budget_tokens", "budget_bytes", "duplicate"]},
+        "authority_ref": {"type": "string", "minLength": 1},
+        "authority_hash": {"$ref": "#/$defs/hash"},
+        "body_hash": {"$ref": "#/$defs/hash"},
+        "body_tokens": {"type": "integer", "minimum": 0},
+        "body_bytes": {"type": "integer", "minimum": 0},
+        "pack_original_tokens": {"type": "integer", "minimum": 0},
+        "pack_original_bytes": {"type": "integer", "minimum": 0},
+        "render_position": {"type": ["integer", "null"], "minimum": 1},
+        "rendered_tokens": {"type": "integer", "minimum": 0},
+        "rendered_bytes": {"type": "integer", "minimum": 0},
+        "failure_code": {"type": ["string", "null"]},
+        "content_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "totals": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "selected_count", "omitted_count", "failure_count", "body_tokens", "body_bytes",
+        "overhead_tokens", "overhead_bytes", "rendered_tokens", "rendered_bytes"
+      ],
+      "properties": {
+        "selected_count": {"type": "integer", "minimum": 0},
+        "omitted_count": {"type": "integer", "minimum": 0},
+        "failure_count": {"type": "integer", "minimum": 0},
+        "body_tokens": {"type": "integer", "minimum": 0},
+        "body_bytes": {"type": "integer", "minimum": 0},
+        "overhead_tokens": {"type": "integer", "minimum": 0},
+        "overhead_bytes": {"type": "integer", "minimum": 0},
+        "rendered_tokens": {"type": "integer", "minimum": 0},
+        "rendered_bytes": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "context_pack_ref": {"type": "string", "minLength": 1},
+    "context_pack_hash": {"$ref": "#/$defs/hash"},
+    "renderer_ref": {"type": "string", "minLength": 1},
+    "renderer_hash": {"$ref": "#/$defs/hash"},
+    "tokenizer_ref": {"type": "string", "minLength": 1},
+    "tokenizer_hash": {"$ref": "#/$defs/hash"},
+    "budget": {"$ref": "#/$defs/budget"},
+    "inputs": {"type": "array", "items": {"$ref": "#/$defs/input"}},
+    "totals": {"$ref": "#/$defs/totals"},
+    "rendered_content_hash": {"$ref": "#/$defs/hash"},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  }
+}

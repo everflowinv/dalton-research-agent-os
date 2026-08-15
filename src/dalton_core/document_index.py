@@ -211,7 +211,8 @@ def _company_refs_from_call(
     return []
 
 
-def _extract_builtin(raw: bytes, mode: str) -> str:
+def extract_builtin_document_text(raw: bytes, mode: str) -> str:
+    """Run the shared deterministic UTF-8/JSON document extractor."""
     if mode == "utf8":
         try:
             text = raw.decode("utf-8")
@@ -778,7 +779,9 @@ class DocumentIndex:
         if _raw_hash(raw_bytes) != artifact["artifact_content_hash"]:
             raise DocumentIndexConflict("raw artifact hash does not match ArtifactVersion")
 
-        extracted_text = _extract_builtin(raw_bytes, item["extraction_mode"])
+        extracted_text = extract_builtin_document_text(
+            raw_bytes, item["extraction_mode"]
+        )
         text_hash = _text_hash(extracted_text)
         extractor_ref = f"document-extractor:builtin-{item['extraction_mode']}:0.1"
         text_ref = f"document-text:{artifact['id']}:{artifact['content_hash']}:{extractor_ref}:{text_hash}"
@@ -1221,5 +1224,6 @@ __all__ = [
     "DocumentIndexInput",
     "DocumentIndexNotFound",
     "DocumentIndexValidationError",
+    "extract_builtin_document_text",
     "make_document_index_input",
 ]

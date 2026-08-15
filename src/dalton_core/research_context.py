@@ -34,6 +34,14 @@ _SENSITIVE_KEY_SUFFIXES = (
 )
 
 
+def count_dalton_search_tokens(value: str) -> int:
+    """Count tokens with the frozen ContextPack 0.1 accounting rule."""
+
+    if not isinstance(value, str):
+        raise ResearchContextError("tokenizer input must be text")
+    return len(_SEARCH_RE.findall(value))
+
+
 class ResearchContextError(ValueError):
     pass
 
@@ -896,7 +904,7 @@ def build_context_pack(
             spec["priority"], f"input_specs[{index}].priority"
         )
         content = _text(spec["content"], f"input_specs[{index}].content")
-        spec["tokens"] = len(_SEARCH_RE.findall(content))
+        spec["tokens"] = count_dalton_search_tokens(content)
         spec["bytes"] = len(content.encode("utf-8"))
         specs.append(spec)
     specs.sort(key=lambda item: (-item["priority"], item["kind"], item["ref"]))
@@ -1086,6 +1094,7 @@ def build_fixture_runner_request(
 __all__ = [
     "ResearchContextConflict", "ResearchContextError", "build_claim_index",
     "build_compiled_connector_plan", "build_context_pack",
+    "count_dalton_search_tokens",
     "build_fixture_runner_request", "build_reference_fixture_plan",
     "validate_claim_index", "validate_compiled_connector_plan",
     "validate_compiled_connector_step", "validate_context_pack",

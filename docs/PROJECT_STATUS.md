@@ -2,7 +2,7 @@
 
 更新日期：2026-08-15
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver、隔离 SEC public canary、HumanReviewAuthority + Ledger promotion 0.2 + HTML review 入口，以及 DocumentIndex FTS5 只读投影，未部署
+- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver、隔离 SEC public canary、HumanReviewAuthority + Ledger promotion 0.2 + HTML review 入口、DocumentIndex FTS5 只读投影，以及 ContextPack authority-bound materializer，未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -22,7 +22,8 @@ Evidence、Claim、Thesis。当前开发候选已能重放 fixture，也能从�
 当前下一阶段是 **把第一条只读研究闭环接到可检索、可计划的消费者**：HumanReviewAuthority 已能对 exact
 candidate 做 accept/revise/reject，accept 通过 scoped writer 原子写 EvidenceVersion 0.2、ClaimVersion 0.2 和
 supports relation；ClaimIndex status 派生现已改为读取 Core 的一致 Ledger snapshot，绑定 snapshot ref/hash，并拒绝
-caller-provided status；DocumentIndex FTS5 已完成开发候选，下一步做 ContextPack materializer。
+caller-provided status；DocumentIndex FTS5 已完成开发候选；ContextPack authority-bound materializer 已完成最小
+claim/artifact 只读切片，下一步再单独评估与 AgendaCoordinator 的接线。
 正式 Ledger commit 继续逐条人工 gate。万华的 10 个工作日/20 个显式人工标签门槛
 只限制 Agenda 从 1 家扩到 3 家，不阻塞通用 connector、research coordinator、verifier、Model IR 和
 sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单独验收。
@@ -43,13 +44,45 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   空 facet；rebuild 和查询都会检查 FTS、主表、facet 和 record hash 的一致性；
 - FTS 使用 `trigram`。三字符中文（如“半导体”）可有限命中，两字符（如“存储”）可能 miss；这不是通用
   中文分词。SEC submissions JSON 只按 connector response/filing metadata 处理，不能称为 filing 正文全文；
-  embedding 和 materializer 尚未实现；
+  embedding 尚未实现；ContextPack materializer 只支持 exact ClaimVersion 0.1/0.2 和 ArtifactVersion 0.1/0.2，
+  mandate/perception/source 尚无可靠的 exact reader，统一 fail closed；它从 Ledger/Observability/RawSpool
+  重读 authority，不能把 caller 正文、DocumentIndex FTS 正文、transcript 或 compaction summary 当事实；
+  输出是短生命周期 quoted JSON-lines render 加不含正文/path/locator/credential 的 hash manifest，header/分隔符
+  开销计入预算，不能超预算静默裁剪；本切片未接 AgendaCoordinator、未部署、未改 cron；
 - `tests/test_document_index.py` 覆盖 raw hash/size、authority hash rebinding、source/profile/call link、
   access/filter forge、FTS `delete-all` checksum、FTS/main-table sync、query boundary、Unicode、删除重建和
   文件权限。该 slice 未部署、未接 Agenda/cron，也未接 ContextPack materializer。
 - broker 回归 15/15；固定 `SOURCE_DATE_EPOCH=1700000000` 独立构建的两份 wheel 逐位一致，SHA-256
   均为 `ccd4ad817cf1837ed2e99d48b1cdd1b23e543dcadafede8a72921ff70a3cd5c8`，大小均为 601,297 bytes；
   干净 Python 3.13 venv 安装、导入、打包后的 FTS schema 和两份新 contract 检查均通过。
+
+### ContextPack materializer 当前进度（开发候选，未部署）
+
+- 新增 `ContextMaterializer` 与 `ContextMaterialization` closed contract。materializer 要求 exact
+  `DaltonStore`、`ObservabilityStore`、`RawSpool`，只支持 `claim` 和 `artifact`；mandate/perception/source
+  在本切片没有 authority reader，直接 fail closed；可见 `access_class` 默认只有 `public`，扩大范围必须在
+  materializer 实例显式配置；
+- ClaimVersion 0.1/0.2 从 Core `claim_versions` exact row/record 读取，复核 id、version、prior、created_at、
+  SQL column、canonical record hash 和对应 validator；render 同时携带 pack 冻结的 ClaimIndex entry，保留
+  `proposed/corroborated/contested/superseded/retracted` 状态，但不把该投影冒充 ClaimVersion authority；
+  ArtifactVersion 0.1/0.2 从 Observability API、跨代
+  index、record row 及 RawSpool 复核 hash/size，正文只用内建 `utf8`/`application/json` extractor，storage
+  locator 只用于 authority 校验，不进入 manifest；materializer 不读 DocumentIndex FTS body；
+- materializer 可从 exact authority refs 构建 ContextPack 0.1 的 authority-bound input accounting。旧的
+  caller-content pack 即使 ref/hash 合法，只要原文 token/byte 与 authority 正文不一致也拒绝；不重选、不截断。
+  render 使用固定 quoted JSON-lines 边界，prompt-like 正文只在 `quoted_data` 中出现；ContextPack 的正文选择
+  预算与 materialization 的 envelope-inclusive 总预算分开记录，header/分隔符必须计入后者；manifest 记录每项 authority/body/render 账、omission/failure 账、
+  renderer/tokenizer ref/hash 与最终 render hash，不持久化正文、路径、locator 或 credential；
+- `tests/test_context_materializer.py` 覆盖 23 个专项：claim/artifact、ClaimVersion 0.2 Decimal/structured period、
+  caller text/hash rebinding、SQL/raw
+  tamper、跨代 Artifact index、duplicate/omitted、正文/总预算、确定性、access class、unsupported kind/media、
+  JSON/CJK、prompt-like quoted data、冻结 builder/selector/tokenizer/truncation、历史 pack replay、
+  plan/ClaimIndex binding、敏感字段与 authority 行数不变。该 slice 未部署、未接 Agenda/cron。
+- 本地专项 23/23、materializer/coordinator/DocumentIndex/ClaimIndex 相关 57/57、Python 全量 423/423、
+  broker 15/15、`compileall`、95 份 JSON schema、16 份 SQL schema 和 `git diff --check` 均通过；固定
+  `SOURCE_DATE_EPOCH=1700000000` 的两份 wheel SHA-256 均为
+  `e61d35359d52a169c8abd4df7628836715038064ff5167e917c1c3cd007ebd21`，611,413 bytes；Python 3.13
+  干净安装、公开导入、新 contract 与共享 extractor/tokenizer 资源检查通过。
 
 ### Connector P0-0 当前进度（未部署）
 
@@ -626,7 +659,8 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 offline/authority source-numeric verifier、只读 authority resolver、candidate staging、一条隔离 SEC public
 WorkOrder、独立 HumanReviewAuthority、HTML 入口和正式 Evidence/Claim 0.2 promotion 已完成开发候选。
-ClaimIndex status 派生已改为 exact Ledger snapshot；DocumentIndex FTS5 已完成开发候选，下一步做 ContextPack materializer；AgendaDecision 接线、
+ClaimIndex status 派生、DocumentIndex FTS5 和 claim/artifact ContextPack materializer 均已完成开发候选；下一步先评估
+AgendaCoordinator 接线所缺的 Mandate/Perception exact reader，再决定迁移边界；AgendaDecision 接线、
 生产部署、Model IR 更新和旧 cron cutover 仍保持独立人工 gate。当前没有 live staging/review authority。
 
 与 P0/P1 并行推进但不接生产权限：operational verifier contract、fixture-only research coordinator、
