@@ -8,6 +8,7 @@ from pathlib import Path
 from dalton_core.agenda import AgendaConflict, AgendaStore, AgendaValidationError
 from dalton_core.observability import ObservabilityStore
 from dalton_core.store import DaltonStore
+from tests.agenda_fixtures import register_perception
 
 
 NOW = "2026-08-14T10:00:00.000000+00:00"
@@ -69,6 +70,9 @@ class AgendaTests(unittest.TestCase):
         )
         return p, m
 
+    def perception(self, snapshot_id: str, *, company: str = "wanhua") -> dict:
+        return register_perception(self.agenda, snapshot_id, company=company)
+
     def test_existing_feedback_table_migrates_before_new_index_is_created(self):
         database = Path(self.tmp.name) / "legacy-agenda.sqlite"
         connection = sqlite3.connect(database)
@@ -77,6 +81,15 @@ class AgendaTests(unittest.TestCase):
             "feedback_id TEXT PRIMARY KEY,decision_id TEXT NOT NULL,"
             "verdict TEXT NOT NULL,notes TEXT NOT NULL,actor_ref TEXT NOT NULL,"
             "created_at TEXT NOT NULL,content_hash TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE TABLE agenda_cycles ("
+            "cycle_id TEXT PRIMARY KEY,cycle_key TEXT NOT NULL UNIQUE,"
+            "perception_snapshot_ref TEXT NOT NULL,"
+            "perception_snapshot_hash TEXT NOT NULL,"
+            "mandate_version_ref TEXT NOT NULL,policy_version_ref TEXT NOT NULL,"
+            "company_ref TEXT NOT NULL,created_at TEXT NOT NULL,"
+            "content_hash TEXT NOT NULL)"
         )
         connection.close()
         legacy_store = DaltonStore(database)
@@ -89,6 +102,15 @@ class AgendaTests(unittest.TestCase):
             self.assertTrue(
                 {"prior_feedback_id", "subject_ref", "source", "source_event_ref"}
                 <= columns
+            )
+            cycle_columns = {
+                row["name"]
+                for row in migrated.connection.execute(
+                    "PRAGMA table_info(agenda_cycles)"
+                )
+            }
+            self.assertTrue(
+                {"mandate_version_hash", "policy_version_hash"} <= cycle_columns
             )
             self.assertIsNotNone(
                 migrated.connection.execute(
@@ -115,10 +137,11 @@ class AgendaTests(unittest.TestCase):
 
     def test_cycle_selection_is_deterministic_and_outbox_requires_receipt(self):
         p, m = self.govern()
+        snapshot = self.perception("perception:1")
         started = self.agenda.start_cycle(
             "agenda:2026-08-14:wanhua",
-            perception_snapshot_ref="perception:1",
-            perception_snapshot_hash="a" * 64,
+            perception_snapshot_ref=snapshot["snapshot_id"],
+            perception_snapshot_hash=snapshot["content_hash"],
             mandate_version_ref=m["id"], policy_version_ref=p["id"],
             company_ref="wanhua", actor_ref="core",
             cycle_id="agenda-cycle:1", idempotency_key="cycle:1",
@@ -199,9 +222,11 @@ class AgendaTests(unittest.TestCase):
 
     def test_expired_claim_is_recovered_and_stale_completion_is_rejected(self):
         self.govern()
+        snapshot = self.perception("perception:2")
         started = self.agenda.start_cycle(
             "agenda:2026-08-14:wanhua:recovery",
-            perception_snapshot_ref="perception:2", perception_snapshot_hash="b" * 64,
+            perception_snapshot_ref=snapshot["snapshot_id"],
+            perception_snapshot_hash=snapshot["content_hash"],
             mandate_version_ref="mandate-version:1", policy_version_ref="agenda-policy-version:1",
             company_ref="wanhua", actor_ref="core", cycle_id="agenda-cycle:recovery",
             idempotency_key="cycle:recovery",

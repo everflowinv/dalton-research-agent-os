@@ -162,6 +162,21 @@ class WriterClient:
     def agenda_control_state(self) -> Any:
         return self.call("agenda_control_state", {})
 
+    def register_perception_snapshot(self, **params: Any) -> Any:
+        return self.call("register_perception_snapshot", params)
+
+    def materialize_agenda_context(self, **params: Any) -> Any:
+        return self.call("materialize_agenda_context", params)
+
+    def get_agenda_mandate_version(self, **params: Any) -> Any:
+        return self.call("get_agenda_mandate_version", params)
+
+    def get_agenda_policy_version(self, **params: Any) -> Any:
+        return self.call("get_agenda_policy_version", params)
+
+    def get_perception_snapshot(self, **params: Any) -> Any:
+        return self.call("get_perception_snapshot", params)
+
     def start_agenda_cycle(self, **params: Any) -> Any:
         return self.call("start_agenda_cycle", params)
 

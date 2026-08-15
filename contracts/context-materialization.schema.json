@@ -28,7 +28,7 @@
         "rendered_tokens", "rendered_bytes", "failure_code", "content_hash"
       ],
       "properties": {
-        "kind": {"enum": ["claim", "artifact"]},
+        "kind": {"enum": ["claim", "artifact", "mandate", "perception"]},
         "ref": {"type": "string", "minLength": 1},
         "hash": {"$ref": "#/$defs/hash"},
         "selected": {"type": "boolean"},

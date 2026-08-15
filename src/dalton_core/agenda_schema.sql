@@ -106,13 +106,27 @@ CREATE TABLE IF NOT EXISTS research_question_pointer (
     version_id TEXT NOT NULL REFERENCES research_question_versions(version_id)
 );
 
+CREATE TABLE IF NOT EXISTS perception_snapshot_versions (
+    snapshot_id TEXT PRIMARY KEY,
+    company_ref TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    source_snapshot_hash TEXT NOT NULL,
+    generated_at TEXT NOT NULL,
+    actor_ref TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS agenda_cycles (
     cycle_id TEXT PRIMARY KEY,
     cycle_key TEXT NOT NULL UNIQUE,
     perception_snapshot_ref TEXT NOT NULL,
     perception_snapshot_hash TEXT NOT NULL,
     mandate_version_ref TEXT NOT NULL REFERENCES mandate_versions(version_id),
+    mandate_version_hash TEXT,
     policy_version_ref TEXT NOT NULL REFERENCES agenda_policy_versions(version_id),
+    policy_version_hash TEXT,
     company_ref TEXT NOT NULL,
     created_at TEXT NOT NULL,
     content_hash TEXT NOT NULL
@@ -293,6 +307,11 @@ BEFORE UPDATE ON research_question_pointer WHEN dalton_authorized() = 0 BEGIN
     SELECT RAISE(ABORT, 'research question pointer update requires DaltonStore');
 END;
 
+CREATE TRIGGER IF NOT EXISTS perception_snapshot_versions_authorized_insert
+BEFORE INSERT ON perception_snapshot_versions WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'perception snapshot insert requires DaltonStore');
+END;
+
 CREATE TRIGGER IF NOT EXISTS agenda_cycles_authorized_insert
 BEFORE INSERT ON agenda_cycles WHEN dalton_authorized() = 0 BEGIN
     SELECT RAISE(ABORT, 'agenda cycle insert requires DaltonStore');
@@ -340,6 +359,8 @@ CREATE TRIGGER IF NOT EXISTS priority_override_versions_no_update
 BEFORE UPDATE ON priority_override_versions BEGIN SELECT RAISE(ABORT, 'priority override versions are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS research_question_versions_no_update
 BEFORE UPDATE ON research_question_versions BEGIN SELECT RAISE(ABORT, 'research question versions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS perception_snapshot_versions_no_update
+BEFORE UPDATE ON perception_snapshot_versions BEGIN SELECT RAISE(ABORT, 'perception snapshots are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS agenda_cycles_no_update
 BEFORE UPDATE ON agenda_cycles BEGIN SELECT RAISE(ABORT, 'agenda cycles are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS agenda_cycle_events_no_update
@@ -367,6 +388,8 @@ CREATE TRIGGER IF NOT EXISTS priority_override_versions_no_delete
 BEFORE DELETE ON priority_override_versions BEGIN SELECT RAISE(ABORT, 'priority override versions are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS research_question_versions_no_delete
 BEFORE DELETE ON research_question_versions BEGIN SELECT RAISE(ABORT, 'research question versions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS perception_snapshot_versions_no_delete
+BEFORE DELETE ON perception_snapshot_versions BEGIN SELECT RAISE(ABORT, 'perception snapshots are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS agenda_cycles_no_delete
 BEFORE DELETE ON agenda_cycles BEGIN SELECT RAISE(ABORT, 'agenda cycles are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS agenda_cycle_events_no_delete

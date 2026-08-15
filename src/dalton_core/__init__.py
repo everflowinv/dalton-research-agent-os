@@ -65,6 +65,13 @@ _LAZY_EXPORTS = {
     ),
     "build_claim_index": (".research_context", "build_claim_index"),
     "build_context_pack": (".research_context", "build_context_pack"),
+    "build_agenda_context_binding": (
+        ".research_context", "build_agenda_context_binding"
+    ),
+    "validate_agenda_context_binding": (
+        ".research_context", "validate_agenda_context_binding"
+    ),
+    "build_agenda_context": (".agenda_context", "build_agenda_context"),
     "build_fixture_runner_request": (
         ".research_context", "build_fixture_runner_request"
     ),
@@ -126,6 +133,9 @@ __all__ = [
     "ResearchCoordinatorStore",
     "build_claim_index",
     "build_context_pack",
+    "build_agenda_context_binding",
+    "validate_agenda_context_binding",
+    "build_agenda_context",
     "build_fixture_runner_request",
     "build_reference_fixture_plan",
     "SecPublicHttpAdapter",

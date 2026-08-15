@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dalton/agenda-context-binding/0.1",
+  "title": "AgendaContextBinding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "task_ref", "task_hash",
+    "cycle_ref", "cycle_hash", "company_ref", "policy_version_ref",
+    "policy_version_hash", "mandate_version_ref", "mandate_version_hash",
+    "perception_snapshot_ref", "perception_snapshot_hash", "binder_ref",
+    "binder_hash", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "task_ref": {"type": "string", "minLength": 1},
+    "task_hash": {"$ref": "#/$defs/hash"},
+    "cycle_ref": {"type": "string", "minLength": 1},
+    "cycle_hash": {"$ref": "#/$defs/hash"},
+    "company_ref": {"type": "string", "minLength": 1},
+    "policy_version_ref": {"type": "string", "minLength": 1},
+    "policy_version_hash": {"$ref": "#/$defs/hash"},
+    "mandate_version_ref": {"type": "string", "minLength": 1},
+    "mandate_version_hash": {"$ref": "#/$defs/hash"},
+    "perception_snapshot_ref": {"type": "string", "minLength": 1},
+    "perception_snapshot_hash": {"$ref": "#/$defs/hash"},
+    "binder_ref": {"const": "agenda-context-binder:cycle-mandate-perception:0.1"},
+    "binder_hash": {"$ref": "#/$defs/hash"},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

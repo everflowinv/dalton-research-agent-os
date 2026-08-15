@@ -353,6 +353,100 @@ def build_reference_fixture_plan(
     )
 
 
+AGENDA_BINDER_REF = "agenda-context-binder:cycle-mandate-perception:0.1"
+AGENDA_BINDER_HASH = content_hash({"binder_ref": AGENDA_BINDER_REF})
+_AGENDA_BINDING_FIELDS = {
+    "schema_version", "id", "created_at", "task_ref", "task_hash", "cycle_ref",
+    "cycle_hash", "company_ref", "policy_version_ref", "policy_version_hash",
+    "mandate_version_ref", "mandate_version_hash", "perception_snapshot_ref",
+    "perception_snapshot_hash", "binder_ref", "binder_hash", "content_hash",
+}
+AGENDA_BINDING_FIELDS = frozenset(_AGENDA_BINDING_FIELDS)
+
+
+def validate_agenda_context_binding(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the Agenda plan binding accepted by the ContextMaterializer.
+
+    An Agenda cycle has no connector plan: it reads no external source and
+    compiles no step.  Rather than forge a ``CompiledConnectorPlan`` whose
+    connector semantics would be a lie, an Agenda ContextPack binds to this
+    closed record.  Every field is an exact Core ref/hash, so the binding is
+    reconstructible from the AgendaCycle, its policy version, its mandate
+    version, and its perception snapshot -- and from nothing else.
+    """
+
+    wire = _closed(value, _AGENDA_BINDING_FIELDS, "AgendaContextBinding")
+    if wire["schema_version"] != SCHEMA_VERSION:
+        raise ResearchContextError("unsupported AgendaContextBinding schema_version")
+    for field in (
+        "id", "task_ref", "cycle_ref", "company_ref", "policy_version_ref",
+        "mandate_version_ref", "perception_snapshot_ref", "binder_ref",
+    ):
+        wire[field] = _text(wire[field], field)
+    for field in (
+        "task_hash", "cycle_hash", "policy_version_hash", "mandate_version_hash",
+        "perception_snapshot_hash", "binder_hash",
+    ):
+        wire[field] = _hash(wire[field], field)
+    wire["created_at"] = _timestamp(wire["created_at"], "created_at")
+    if wire["binder_ref"] != AGENDA_BINDER_REF or wire["binder_hash"] != AGENDA_BINDER_HASH:
+        raise ResearchContextConflict("AgendaContextBinding binder drifted")
+    if wire["task_ref"] != wire["cycle_ref"] or wire["task_hash"] != wire["cycle_hash"]:
+        raise ResearchContextConflict("AgendaContextBinding task must be its cycle")
+    if wire["id"] != "agenda-context-binding:" + content_hash({
+        key: item for key, item in wire.items()
+        if key not in {"id", "content_hash", "created_at"}
+    }):
+        raise ResearchContextConflict("AgendaContextBinding id binding mismatch")
+    _reject_sensitive(wire, "AgendaContextBinding")
+    return _with_hash(wire, "AgendaContextBinding")
+
+
+def build_agenda_context_binding(
+    *,
+    cycle_ref: str,
+    cycle_hash: str,
+    company_ref: str,
+    policy_version_ref: str,
+    policy_version_hash: str,
+    mandate_version_ref: str,
+    mandate_version_hash: str,
+    perception_snapshot_ref: str,
+    perception_snapshot_hash: str,
+    created_at: str,
+) -> dict[str, Any]:
+    """Build an AgendaContextBinding from exact refs and hashes only."""
+
+    base = {
+        "schema_version": SCHEMA_VERSION,
+        "id": "pending",
+        "created_at": _timestamp(created_at, "created_at"),
+        "task_ref": _text(cycle_ref, "cycle_ref"),
+        "task_hash": _hash(cycle_hash, "cycle_hash"),
+        "cycle_ref": _text(cycle_ref, "cycle_ref"),
+        "cycle_hash": _hash(cycle_hash, "cycle_hash"),
+        "company_ref": _text(company_ref, "company_ref"),
+        "policy_version_ref": _text(policy_version_ref, "policy_version_ref"),
+        "policy_version_hash": _hash(policy_version_hash, "policy_version_hash"),
+        "mandate_version_ref": _text(mandate_version_ref, "mandate_version_ref"),
+        "mandate_version_hash": _hash(mandate_version_hash, "mandate_version_hash"),
+        "perception_snapshot_ref": _text(
+            perception_snapshot_ref, "perception_snapshot_ref"
+        ),
+        "perception_snapshot_hash": _hash(
+            perception_snapshot_hash, "perception_snapshot_hash"
+        ),
+        "binder_ref": AGENDA_BINDER_REF,
+        "binder_hash": AGENDA_BINDER_HASH,
+    }
+    base["id"] = "agenda-context-binding:" + content_hash({
+        key: item for key, item in base.items()
+        if key not in {"id", "content_hash", "created_at"}
+    })
+    base["content_hash"] = content_hash(base)
+    return validate_agenda_context_binding(base)
+
+
 _CLAIM_ENTRY_FIELDS = {
     "claim_version_ref", "claim_version_hash", "claim_ref", "subject_ref",
     "metric_or_aspect", "period", "basis", "status", "source_types",
@@ -1092,11 +1186,14 @@ def build_fixture_runner_request(
 
 
 __all__ = [
-    "ResearchContextConflict", "ResearchContextError", "build_claim_index",
+    "AGENDA_BINDER_HASH", "AGENDA_BINDER_REF", "AGENDA_BINDING_FIELDS",
+    "ResearchContextConflict", "ResearchContextError",
+    "build_agenda_context_binding", "build_claim_index",
     "build_compiled_connector_plan", "build_context_pack",
     "count_dalton_search_tokens",
     "build_fixture_runner_request", "build_reference_fixture_plan",
-    "validate_claim_index", "validate_compiled_connector_plan",
+    "validate_agenda_context_binding", "validate_claim_index",
+    "validate_compiled_connector_plan",
     "validate_compiled_connector_step", "validate_context_pack",
     "validate_runner_request_plan_binding",
 ]

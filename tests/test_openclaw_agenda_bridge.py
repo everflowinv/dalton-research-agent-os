@@ -13,6 +13,7 @@ from dalton_core.openclaw_agenda_bridge import (
     render_agenda_card,
 )
 from dalton_core.store import DaltonStore
+from tests.agenda_fixtures import register_perception
 
 
 NOW = "2026-08-14T10:00:00.000000+00:00"
@@ -98,9 +99,12 @@ class OpenClawAgendaBridgeTests(unittest.TestCase):
             effective_from=NOW, effective_until=LATER, actor_ref="human:owner",
             version_id="mandate-version:1", idempotency_key="mandate:1",
         )
+        snapshot = register_perception(self.agenda, "perception:1")
         cycle = self.agenda.start_cycle(
-            "agenda:2026-08-14:wanhua", perception_snapshot_ref="perception:1",
-            perception_snapshot_hash="a" * 64, mandate_version_ref=mandate["id"],
+            "agenda:2026-08-14:wanhua",
+            perception_snapshot_ref=snapshot["snapshot_id"],
+            perception_snapshot_hash=snapshot["content_hash"],
+            mandate_version_ref=mandate["id"],
             policy_version_ref=created_policy["id"], company_ref="wanhua", actor_ref="core",
             cycle_id="agenda-cycle:1", idempotency_key="cycle:1",
         )

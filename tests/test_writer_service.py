@@ -136,6 +136,59 @@ class WriterServiceTests(unittest.TestCase):
             self.worker.call("stage_change", {"unknown": True})
         self.assertEqual(ctx.exception.code, "protocol_error")
 
+    def test_agenda_context_operations_are_core_only_and_closed(self):
+        # Materializing an Agenda context reads mandates and perception
+        # snapshots.  Only the core principal may ask for it, and neither
+        # operation may accept an out-of-contract field.
+        for client in (self.worker, self.verifier, self.review):
+            with self.assertRaises(RemoteAuthorizationError):
+                client.materialize_agenda_context(cycle_id="agenda-cycle:1")
+            with self.assertRaises(RemoteAuthorizationError):
+                client.register_perception_snapshot(snapshot={}, actor_ref="core")
+            with self.assertRaises(RemoteAuthorizationError):
+                client.get_agenda_mandate_version(version_id="mandate-version:1")
+            with self.assertRaises(RemoteAuthorizationError):
+                client.get_agenda_policy_version(version_id="agenda-policy-version:1")
+            with self.assertRaises(RemoteAuthorizationError):
+                client.get_perception_snapshot(snapshot_id="perception:1")
+        with self.assertRaises(RemoteError) as ctx:
+            self.core.call("materialize_agenda_context", {"snapshot": {}})
+        self.assertEqual(ctx.exception.code, "protocol_error")
+        with self.assertRaises(RemoteError) as ctx:
+            self.core.call(
+                "materialize_agenda_context",
+                {
+                    "cycle_id": "agenda-cycle:absent",
+                    "max_tokens": 100,
+                    "max_bytes": 1000,
+                    "created_at": "2099-01-01T00:00:00Z",
+                },
+            )
+        self.assertEqual(ctx.exception.code, "protocol_error")
+        with self.assertRaises(RemoteError) as ctx:
+            self.core.call(
+                "get_perception_snapshot",
+                {"snapshot_id": "perception:1", "snapshot": {}},
+            )
+        self.assertEqual(ctx.exception.code, "protocol_error")
+        with self.assertRaises(RemoteError) as ctx:
+            self.core.call(
+                "register_perception_snapshot",
+                {"snapshot": {}, "actor_ref": "core", "database_path": "/tmp/x"},
+            )
+        self.assertEqual(ctx.exception.code, "protocol_error")
+        # A caller may name a cycle and a budget; it may not smuggle a body.
+        with self.assertRaises(RemoteError) as ctx:
+            self.core.materialize_agenda_context(
+                cycle_id="agenda-cycle:absent", max_tokens=100, max_bytes=1000
+            )
+        self.assertEqual(ctx.exception.code, "not_found")
+        with self.assertRaises(RemoteError) as ctx:
+            self.core.register_perception_snapshot(
+                snapshot={"schema_version": "0.1"}, actor_ref="core"
+            )
+        self.assertEqual(ctx.exception.code, "rejected")
+
     def test_stage_verify_commit_uses_separate_scopes(self):
         self.core.register_invocation(invocation("producer", "one"))
         self.core.register_invocation(invocation("verifier", "two"))

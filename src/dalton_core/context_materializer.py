@@ -18,12 +18,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from .agenda import read_exact_mandate_version, read_exact_perception_snapshot
 from .contracts import ClaimVersion
 from .document_index import extract_builtin_document_text
 from .observability import ObservabilityNotFound, ObservabilityStore
 from .raw_spool import RawSpool
 from .research_context import (
     count_dalton_search_tokens,
+    validate_agenda_context_binding,
     validate_claim_index,
     validate_compiled_connector_plan,
     validate_context_pack,
@@ -35,6 +37,12 @@ from .store import DaltonStore, canonical_json, content_hash
 SCHEMA_VERSION = "0.1"
 RENDERER_REF = "context-materializer:quoted-json-lines:0.1"
 RENDERER_HASH = content_hash({"renderer_ref": RENDERER_REF})
+AGENDA_RENDERER_REF = "context-materializer:agenda-quoted-json-lines:0.1"
+AGENDA_RENDERER_HASH = content_hash({"renderer_ref": AGENDA_RENDERER_REF})
+AGENDA_NO_CLAIM_INDEX_REF = "claim-index:none:agenda-context:0.1"
+AGENDA_NO_CLAIM_INDEX_HASH = content_hash(
+    {"claim_index_ref": AGENDA_NO_CLAIM_INDEX_REF}
+)
 TOKENIZER_REF = "tokenizer:dalton-search-token:0.1"
 TOKENIZER_HASH = content_hash({"tokenizer_ref": TOKENIZER_REF})
 CONTEXT_BUILDER_REF = "context-pack-builder:deterministic-ref-only:0.1"
@@ -222,9 +230,12 @@ _MANIFEST_FIELDS = {
 }
 
 
+_SUPPORTED_KINDS = frozenset({"claim", "artifact", "mandate", "perception"})
+
+
 def _validate_entry(value: Mapping[str, Any], name: str) -> dict[str, Any]:
     wire = _closed(value, _ENTRY_FIELDS, name)
-    if wire["kind"] not in {"claim", "artifact"}:
+    if wire["kind"] not in _SUPPORTED_KINDS:
         raise ContextMaterializerUnsupported(f"{name}.kind is unsupported")
     for field in ("ref", "selection_reason"):
         wire[field] = _text(wire[field], f"{name}.{field}")
@@ -284,7 +295,11 @@ def validate_context_materialization(value: Mapping[str, Any]) -> dict[str, Any]
     ):
         wire[field] = _hash(wire[field], field)
     wire["created_at"] = _timestamp(wire["created_at"], "created_at")
-    if wire["renderer_ref"] != RENDERER_REF or wire["renderer_hash"] != RENDERER_HASH:
+    renderer_bindings = {
+        (RENDERER_REF, RENDERER_HASH),
+        (AGENDA_RENDERER_REF, AGENDA_RENDERER_HASH),
+    }
+    if (wire["renderer_ref"], wire["renderer_hash"]) not in renderer_bindings:
         raise ContextMaterializerConflict("renderer binding drifted")
     if wire["tokenizer_ref"] != TOKENIZER_REF or wire["tokenizer_hash"] != TOKENIZER_HASH:
         raise ContextMaterializerConflict("tokenizer binding drifted")
@@ -295,6 +310,18 @@ def validate_context_materialization(value: Mapping[str, Any]) -> dict[str, Any]
     if type(wire["inputs"]) is not list:
         raise ContextMaterializerError("inputs must be an array")
     inputs = [_validate_entry(item, f"inputs[{index}]") for index, item in enumerate(wire["inputs"])]
+    has_agenda_input = any(
+        item["kind"] in {"mandate", "perception"} for item in inputs
+    )
+    expected_renderer = (
+        (AGENDA_RENDERER_REF, AGENDA_RENDERER_HASH)
+        if has_agenda_input
+        else (RENDERER_REF, RENDERER_HASH)
+    )
+    if (wire["renderer_ref"], wire["renderer_hash"]) != expected_renderer:
+        raise ContextMaterializerConflict(
+            "renderer binding does not match the materialized input kinds"
+        )
     positions = [item["render_position"] for item in inputs if item["render_position"] is not None]
     if positions != list(range(1, len(positions) + 1)):
         raise ContextMaterializerConflict("render positions are not contiguous")
@@ -337,15 +364,19 @@ class ContextMaterializer:
         self,
         core: DaltonStore,
         observability: ObservabilityStore,
-        raw_spool: RawSpool,
+        raw_spool: RawSpool | None,
         visible_access_classes: Sequence[str] = ("public",),
     ) -> None:
         if type(core) is not DaltonStore:
             raise TypeError("core must be the exact DaltonStore")
         if type(observability) is not ObservabilityStore or observability.store is not core:
             raise TypeError("observability must share the exact DaltonStore")
-        if type(raw_spool) is not RawSpool:
-            raise TypeError("raw_spool must be the exact RawSpool")
+        # A materializer without a spool is legal and strictly weaker: it can
+        # resolve Core-resident records but no raw artifact object.  Callers
+        # that never quote an artifact (Agenda) must not have to hand a raw
+        # object store to a boundary that would only widen their blast radius.
+        if raw_spool is not None and type(raw_spool) is not RawSpool:
+            raise TypeError("raw_spool must be the exact RawSpool or None")
         classes = tuple(visible_access_classes)
         if not classes or len(classes) != len(set(classes)) or any(item not in _ACCESS_CLASSES for item in classes):
             raise ContextMaterializerError("visible_access_classes is invalid")
@@ -403,7 +434,55 @@ class ContextMaterializer:
             count_dalton_search_tokens(body_text), len(body_text.encode("utf-8")),
         )
 
+    def _read_mandate(self, ref: str, expected_hash: str) -> _ResolvedInput:
+        """Resolve a MandateVersion from Core, never from a caller body."""
+
+        try:
+            wire = read_exact_mandate_version(self.core.connection, ref)
+        except Exception as exc:
+            raise ContextMaterializerConflict(
+                "MandateVersion authority record is unavailable or drifted"
+            ) from exc
+        if wire["id"] != ref:
+            raise ContextMaterializerConflict("MandateVersion identity binding failed")
+        if wire["content_hash"] != expected_hash:
+            raise ContextMaterializerConflict("MandateVersion ref/hash binding failed")
+        if _authority_hash(wire) != expected_hash:
+            raise ContextMaterializerConflict("MandateVersion content_hash binding failed")
+        _reject_sensitive_keys(wire, "MandateVersion")
+        body_text = canonical_json(wire)
+        return _ResolvedInput(
+            "mandate", ref, expected_hash, wire, body_text, _sha256_text(body_text),
+            count_dalton_search_tokens(body_text), len(body_text.encode("utf-8")),
+        )
+
+    def _read_perception(self, ref: str, expected_hash: str) -> _ResolvedInput:
+        """Resolve a PerceptionSnapshot from Core's append-only authority."""
+
+        try:
+            wire = read_exact_perception_snapshot(self.core.connection, ref)
+        except Exception as exc:
+            raise ContextMaterializerConflict(
+                "PerceptionSnapshot authority record is unavailable or drifted"
+            ) from exc
+        if wire["snapshot_id"] != ref:
+            raise ContextMaterializerConflict("PerceptionSnapshot identity binding failed")
+        if wire["content_hash"] != expected_hash:
+            raise ContextMaterializerConflict("PerceptionSnapshot ref/hash binding failed")
+        if _authority_hash(wire) != expected_hash:
+            raise ContextMaterializerConflict("PerceptionSnapshot content_hash binding failed")
+        _reject_sensitive_keys(wire, "PerceptionSnapshot")
+        body_text = canonical_json(wire)
+        return _ResolvedInput(
+            "perception", ref, expected_hash, wire, body_text, _sha256_text(body_text),
+            count_dalton_search_tokens(body_text), len(body_text.encode("utf-8")),
+        )
+
     def _read_artifact(self, ref: str, expected_hash: str) -> _ResolvedInput:
+        if self.raw_spool is None:
+            raise ContextMaterializerUnsupported(
+                "this materializer has no raw spool and cannot quote an artifact"
+            )
         try:
             api_wire = self.observability.get_artifact_version(ref)
         except ObservabilityNotFound as exc:
@@ -513,16 +592,83 @@ class ContextMaterializer:
             return self._read_claim(ref, expected_hash, entry)
         if kind == "artifact":
             return self._read_artifact(ref, expected_hash)
+        if kind == "mandate":
+            return self._read_mandate(ref, expected_hash)
+        if kind == "perception":
+            return self._read_perception(ref, expected_hash)
         raise ContextMaterializerUnsupported(f"ContextPack input kind is unsupported: {kind}")
+
+    @staticmethod
+    def _validate_agenda_inputs(
+        pack: Mapping[str, Any], binding: Mapping[str, Any]
+    ) -> None:
+        """Both Agenda facts are required and neither may be budget-dropped.
+
+        A prompt built from a mandate without perception, or perception
+        without its mandate, is a different task than the one the cycle
+        authorized.  Dropping either under budget pressure would silently
+        change what the model was asked, so it fails the whole render.
+        """
+
+        required = {
+            "mandate": (
+                binding["mandate_version_ref"], binding["mandate_version_hash"],
+            ),
+            "perception": (
+                binding["perception_snapshot_ref"],
+                binding["perception_snapshot_hash"],
+            ),
+        }
+        seen: set[str] = set()
+        for index, item in enumerate(pack["inputs"]):
+            expected = required.get(item["kind"])
+            if expected is None:
+                raise ContextMaterializerConflict(
+                    f"AgendaContextBinding does not admit inputs[{index}].kind"
+                )
+            if (item["ref"], item["hash"]) != expected:
+                raise ContextMaterializerConflict(
+                    f"inputs[{index}] is not the AgendaContextBinding {item['kind']}"
+                )
+            if item["kind"] in seen:
+                raise ContextMaterializerConflict(
+                    f"AgendaContextBinding admits one {item['kind']} input"
+                )
+            if not item["selected"]:
+                raise ContextMaterializerConflict(
+                    f"required Agenda {item['kind']} input was dropped by budget"
+                )
+            seen.add(item["kind"])
+        if seen != set(required):
+            raise ContextMaterializerConflict(
+                "Agenda context requires both a mandate and a perception input"
+            )
+
+    @staticmethod
+    def _plan_binding(value: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+        """Accept exactly one member of the closed plan-binding union.
+
+        The union is discriminated before validation so an Agenda binding can
+        never be silently retried as a connector plan (or the reverse), and an
+        unknown record shape fails closed instead of degrading.
+        """
+
+        if type(value) is not dict:
+            raise ContextMaterializerError("plan binding must be an object")
+        if "steps" in value:
+            return "compiled_plan", validate_compiled_connector_plan(value)
+        if "binder_ref" in value:
+            return "agenda_context_binding", validate_agenda_context_binding(value)
+        raise ContextMaterializerUnsupported("plan binding kind is unsupported")
 
     def _validate_bindings(
         self,
         pack: Mapping[str, Any],
         *,
         compiled_plan: Mapping[str, Any],
-        claim_index: Mapping[str, Any],
-    ) -> dict[str, dict[str, Any]]:
-        plan = validate_compiled_connector_plan(compiled_plan)
+        claim_index: Mapping[str, Any] | None,
+    ) -> tuple[dict[str, dict[str, Any]], str, dict[str, Any]]:
+        binding_kind, plan = self._plan_binding(compiled_plan)
         if (
             plan["id"] != pack["compiled_plan_ref"]
             or plan["content_hash"] != pack["compiled_plan_hash"]
@@ -530,6 +676,30 @@ class ContextMaterializer:
             or plan["task_hash"] != pack["task_hash"]
         ):
             raise ContextMaterializerConflict("ContextPack plan/task binding drifted")
+        if binding_kind == "agenda_context_binding":
+            self._validate_agenda_inputs(pack, plan)
+            if claim_index is not None:
+                raise ContextMaterializerConflict(
+                    "Agenda context does not admit a ClaimIndex body"
+                )
+            if (
+                pack["claim_index_ref"] != AGENDA_NO_CLAIM_INDEX_REF
+                or pack["claim_index_hash"] != AGENDA_NO_CLAIM_INDEX_HASH
+            ):
+                raise ContextMaterializerConflict(
+                    "Agenda ContextPack no-ClaimIndex binding drifted"
+                )
+            return {}, binding_kind, plan
+        else:
+            for item in pack["inputs"]:
+                if item["kind"] in {"mandate", "perception"}:
+                    raise ContextMaterializerUnsupported(
+                        "mandate/perception inputs require an AgendaContextBinding"
+                    )
+        if claim_index is None:
+            raise ContextMaterializerConflict(
+                "connector ContextPack requires an exact ClaimIndex"
+            )
         index = validate_claim_index(claim_index)
         if (
             index["id"] != pack["claim_index_ref"]
@@ -548,17 +718,42 @@ class ContextMaterializer:
                 entry = entries.get(item["ref"])
                 if entry is None or entry["claim_version_hash"] != item["hash"]:
                     raise ContextMaterializerConflict("ContextPack claim is absent from ClaimIndex")
-        return entries
+        return entries, binding_kind, plan
 
     @staticmethod
-    def _render(pack: Mapping[str, Any], resolved: Sequence[_ResolvedInput], selected_indices: Sequence[int]) -> tuple[str, list[dict[str, int]], dict[str, int]]:
+    def _render(
+        pack: Mapping[str, Any],
+        resolved: Sequence[_ResolvedInput],
+        selected_indices: Sequence[int],
+        *,
+        binding_kind: str,
+        binding: Mapping[str, Any],
+    ) -> tuple[str, list[dict[str, int]], dict[str, int], str, str]:
+        if binding_kind == "agenda_context_binding":
+            # Agenda replay must not move when unrelated claims change the
+            # empty compatibility ClaimIndex carried by ContextPack 0.1.  Its
+            # model-visible envelope therefore binds to the exact cycle
+            # context, while the durable manifest still records the concrete
+            # ContextPack used for this materialization.
+            renderer_ref = AGENDA_RENDERER_REF
+            renderer_hash = AGENDA_RENDERER_HASH
+            context_binding = {
+                "agenda_context_binding_ref": binding["id"],
+                "agenda_context_binding_hash": binding["content_hash"],
+            }
+        else:
+            renderer_ref = RENDERER_REF
+            renderer_hash = RENDERER_HASH
+            context_binding = {
+                "context_pack_ref": pack["id"],
+                "context_pack_hash": pack["content_hash"],
+            }
         header = {
             "_dalton_context": "materialization",
             "schema_version": SCHEMA_VERSION,
-            "context_pack_ref": pack["id"],
-            "context_pack_hash": pack["content_hash"],
-            "renderer_ref": RENDERER_REF,
-            "renderer_hash": RENDERER_HASH,
+            **context_binding,
+            "renderer_ref": renderer_ref,
+            "renderer_hash": renderer_hash,
             "tokenizer_ref": TOKENIZER_REF,
             "tokenizer_hash": TOKENIZER_HASH,
             "quoted_data_only": True,
@@ -590,8 +785,7 @@ class ContextMaterializer:
         footer = {
             "_dalton_context_end": {
                 "schema_version": SCHEMA_VERSION,
-                "context_pack_ref": pack["id"],
-                "context_pack_hash": pack["content_hash"],
+                **context_binding,
                 "selected_count": len(selected_indices),
                 "quoted_data_only": True,
             }
@@ -612,7 +806,13 @@ class ContextMaterializer:
         }
         if overhead["tokens"] < 0 or overhead["bytes"] < 0:
             raise ContextMaterializerConflict("renderer accounting underflow")
-        return rendered, block_stats, {"tokens": overhead["tokens"], "bytes": overhead["bytes"], **total}
+        return (
+            rendered,
+            block_stats,
+            {"tokens": overhead["tokens"], "bytes": overhead["bytes"], **total},
+            renderer_ref,
+            renderer_hash,
+        )
 
     def materialize(
         self,
@@ -621,7 +821,7 @@ class ContextMaterializer:
         max_rendered_tokens: int,
         max_rendered_bytes: int,
         compiled_plan: Mapping[str, Any],
-        claim_index: Mapping[str, Any],
+        claim_index: Mapping[str, Any] | None,
         created_at: str | None = None,
     ) -> ContextMaterialization:
         pack = validate_context_pack(context_pack)
@@ -640,7 +840,7 @@ class ContextMaterializer:
             )
         max_tokens = _integer(max_rendered_tokens, "max_rendered_tokens", minimum=1)
         max_bytes = _integer(max_rendered_bytes, "max_rendered_bytes", minimum=1)
-        claim_entries = self._validate_bindings(
+        claim_entries, binding_kind, binding = self._validate_bindings(
             pack, compiled_plan=compiled_plan, claim_index=claim_index
         )
         resolved: list[_ResolvedInput] = []
@@ -655,7 +855,13 @@ class ContextMaterializer:
                 )
             resolved.append(result)
         selected_indices = [index for index, item in enumerate(pack["inputs"]) if item["selected"]]
-        rendered, block_stats, render_totals = self._render(pack, resolved, selected_indices)
+        rendered, block_stats, render_totals, renderer_ref, renderer_hash = self._render(
+            pack,
+            resolved,
+            selected_indices,
+            binding_kind=binding_kind,
+            binding=binding,
+        )
         if render_totals["tokens"] > max_tokens or render_totals["bytes"] > max_bytes:
             raise ContextMaterializerConflict("rendered ContextPack exceeds envelope-inclusive budget")
         entries: list[dict[str, Any]] = []
@@ -690,7 +896,7 @@ class ContextMaterializer:
             "created_at": materialization_created_at,
             "context_pack_ref": pack["id"],
             "context_pack_hash": pack["content_hash"],
-            "renderer_ref": RENDERER_REF, "renderer_hash": RENDERER_HASH,
+            "renderer_ref": renderer_ref, "renderer_hash": renderer_hash,
             "tokenizer_ref": TOKENIZER_REF, "tokenizer_hash": TOKENIZER_HASH,
             "budget": {"max_tokens": max_tokens, "max_bytes": max_bytes},
             "inputs": entries,
@@ -768,8 +974,73 @@ class ContextMaterializer:
             created_at=created_at, max_tokens=max_tokens, max_bytes=max_bytes,
         )
 
+    def build_agenda_authority_context_pack(
+        self,
+        input_specs: Sequence[Mapping[str, Any]],
+        *,
+        agenda_binding: Mapping[str, Any],
+        created_at: str,
+        max_tokens: int,
+        max_bytes: int,
+    ) -> dict[str, Any]:
+        """Build one Agenda pack without inventing or scanning a ClaimIndex.
+
+        ContextPack 0.1 has mandatory ClaimIndex ref/hash fields.  Agenda
+        quotes no claim, so those fields carry a frozen, explicit no-index
+        sentinel.  The exact AgendaContextBinding remains the task/plan
+        authority, and materialization accepts the sentinel only for that
+        binding kind.
+        """
+
+        binding = validate_agenda_context_binding(agenda_binding)
+        specs: list[dict[str, Any]] = []
+        for index, raw in enumerate(input_specs):
+            spec = _closed(
+                raw,
+                {"kind", "ref", "hash", "priority"},
+                f"agenda_authority_input[{index}]",
+            )
+            kind = _text(spec["kind"], f"agenda_authority_input[{index}].kind")
+            if kind not in {"mandate", "perception"}:
+                raise ContextMaterializerUnsupported(
+                    "Agenda ContextPack only accepts mandate/perception inputs"
+                )
+            ref = _text(spec["ref"], f"agenda_authority_input[{index}].ref")
+            digest = _hash(
+                spec["hash"], f"agenda_authority_input[{index}].hash"
+            )
+            priority = _integer(
+                spec["priority"], f"agenda_authority_input[{index}].priority"
+            )
+            result = self._resolve(kind, ref, digest, claim_entries={})
+            specs.append(
+                {
+                    "kind": kind,
+                    "ref": ref,
+                    "hash": digest,
+                    "priority": priority,
+                    "content": result.body_text,
+                }
+            )
+        from .research_context import build_context_pack
+
+        return build_context_pack(
+            specs,
+            task_ref=binding["task_ref"],
+            task_hash=binding["task_hash"],
+            compiled_plan_ref=binding["id"],
+            compiled_plan_hash=binding["content_hash"],
+            claim_index_ref=AGENDA_NO_CLAIM_INDEX_REF,
+            claim_index_hash=AGENDA_NO_CLAIM_INDEX_HASH,
+            created_at=created_at,
+            max_tokens=max_tokens,
+            max_bytes=max_bytes,
+        )
+
 
 __all__ = [
+    "AGENDA_NO_CLAIM_INDEX_HASH", "AGENDA_NO_CLAIM_INDEX_REF",
+    "AGENDA_RENDERER_HASH", "AGENDA_RENDERER_REF",
     "ContextMaterialization", "ContextMaterializer", "ContextMaterializerConflict",
     "ContextMaterializerError", "ContextMaterializerUnsupported",
     "CONTEXT_BUILDER_HASH", "CONTEXT_BUILDER_REF", "RENDERER_HASH",

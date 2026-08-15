@@ -32,6 +32,13 @@ from .agenda import (
     AgendaStore,
     AgendaValidationError,
 )
+from .agenda_context import build_agenda_context
+from .perception import PerceptionError
+from .context_materializer import (
+    ContextMaterializerConflict,
+    ContextMaterializerError,
+    ContextMaterializerUnsupported,
+)
 from .capability_registry import (
     CapabilityConflict,
     CapabilityNotFound,
@@ -152,7 +159,9 @@ CORE_OPERATIONS = frozenset({
     "active_capability", "get_capability_version", "get_capability_evaluation",
     "get_capability_decision", "capability_pointer_history",
     "agenda_control_state", "active_agenda_policy", "active_mandates",
-    "agenda_budget_status",
+    "agenda_budget_status", "register_perception_snapshot",
+    "materialize_agenda_context", "get_agenda_mandate_version",
+    "get_agenda_policy_version", "get_perception_snapshot",
     "active_priority_overrides", "start_agenda_cycle", "add_agenda_candidates",
     "decide_agenda_cycle", "fail_agenda_cycle", "agenda_cycle", "agenda_cycle_by_key",
     "pending_agenda_outbox", "claim_agenda_outbox", "record_agenda_delivery",
@@ -196,6 +205,11 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "active_priority_overrides": frozenset({"scope_ref", "at"}),
     "set_agenda_pause": frozenset({"paused", "reason", "version_id", "idempotency_key", "actor_ref"}),
     "agenda_control_state": frozenset(),
+    "register_perception_snapshot": frozenset({"snapshot", "idempotency_key", "actor_ref"}),
+    "materialize_agenda_context": frozenset({"cycle_id", "max_tokens", "max_bytes"}),
+    "get_agenda_mandate_version": frozenset({"version_id"}),
+    "get_agenda_policy_version": frozenset({"version_id"}),
+    "get_perception_snapshot": frozenset({"snapshot_id"}),
     "start_agenda_cycle": frozenset({"cycle_key", "perception_snapshot_ref", "perception_snapshot_hash", "mandate_version_ref", "policy_version_ref", "company_ref", "cycle_id", "idempotency_key", "actor_ref"}),
     "add_agenda_candidates": frozenset({"cycle_id", "candidates", "idempotency_key", "actor_ref"}),
     "decide_agenda_cycle": frozenset({"cycle_id", "decision_id", "idempotency_key", "actor_ref"}),
@@ -232,6 +246,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "create_mandate": "actor_ref",
     "create_priority_override": "actor_ref",
     "set_agenda_pause": "actor_ref",
+    "register_perception_snapshot": "actor_ref",
     "start_agenda_cycle": "actor_ref",
     "add_agenda_candidates": "actor_ref",
     "decide_agenda_cycle": "actor_ref",
@@ -926,6 +941,28 @@ class WriterServer:
             raise ProtocolError("agenda_control_state takes no parameters")
         return self.agenda.control_state()
 
+    def _op_register_perception_snapshot(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        snapshot = values.pop("snapshot")
+        return self.agenda.register_perception_snapshot(snapshot, **values)
+
+    def _op_materialize_agenda_context(self, p: Mapping[str, Any]) -> Any:
+        # Materialization runs inside the writer service on purpose: the
+        # caller has no database path, no raw spool, and no way to substitute
+        # a body for the mandate or the perception snapshot it names.
+        return build_agenda_context(
+            self.store, self.observability, **dict(p)
+        )
+
+    def _op_get_agenda_mandate_version(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.mandate_version(**dict(p))
+
+    def _op_get_agenda_policy_version(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.policy_version(**dict(p))
+
+    def _op_get_perception_snapshot(self, p: Mapping[str, Any]) -> Any:
+        return self.agenda.perception_snapshot(**dict(p))
+
     def _op_start_agenda_cycle(self, p: Mapping[str, Any]) -> Any:
         return self.agenda.start_cycle(**dict(p))
 
@@ -990,8 +1027,10 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict)):
             return "conflict"
+        if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
+            return "rejected"
         if isinstance(exc, (CapabilityConflict,)):
             return "conflict"
         if isinstance(exc, (CapabilityNotFound,)):
@@ -1014,8 +1053,10 @@ class WriterServer:
             return "request rejected by contract or gate"
         if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound)):
             return "requested object was not found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict)):
             return "request conflicts with existing immutable data"
+        if isinstance(exc, (ContextMaterializerError, PerceptionError)):
+            return "request rejected by contract or gate"
         if isinstance(exc, CapabilityConflict):
             return "request conflicts with existing immutable capability data"
         if isinstance(exc, CapabilityNotFound):

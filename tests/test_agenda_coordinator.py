@@ -21,9 +21,11 @@ from dalton_core.writer_server import CORE_OPERATIONS, Principal, write_token_co
 
 class FakeAdapter:
     calls = 0
+    last_question = None
 
     def execute(self, work, route, profile):
         type(self).calls += 1
+        type(self).last_question = work.question
         completed = "2026-08-14T10:00:01+00:00"
         invocation = ModelInvocation(
             schema_version="0.1", id="invocation:agenda-test", created_at=completed,
@@ -69,13 +71,13 @@ class AgendaCoordinatorTests(unittest.TestCase):
         """)
         conn.commit(); conn.close()
 
-    def govern(self, tokens, socket):
+    def govern(self, tokens, socket, *, max_input_tokens=8000):
         base = {"token_config": tokens, "socket_path": socket, "actor_ref": "human:owner"}
         policy = {
             "schema_version": "0.1", "enabled": True, "selected_count": 2,
             "max_model_calls_per_cycle": 1, "max_daily_cycles": 1,
             "max_daily_cost_usd": 0.5, "max_monthly_cost_usd": 10.0,
-            "max_input_tokens": 8000, "max_output_tokens": 1000,
+            "max_input_tokens": max_input_tokens, "max_output_tokens": 1000,
             "feature_weights": {"mandate_relevance": 4, "catalyst_urgency": 3, "evidence_staleness": 2, "decision_impact": 4},
             "trial_company_refs": ["wanhua"], "cutover_enabled": False,
             "cutover_acceptance_threshold": None,
@@ -148,6 +150,82 @@ class AgendaCoordinatorTests(unittest.TestCase):
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM observability_cost_entries").fetchone()[0], 1)
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM agenda_decisions").fetchone()[0], 1)
                 self.assertEqual(conn.execute("SELECT COUNT(*) FROM agenda_outbox_messages").fetchone()[0], 1)
+                # The perception snapshot the cycle bound to is Core-resident.
+                self.assertEqual(
+                    conn.execute("SELECT COUNT(*) FROM perception_snapshot_versions").fetchone()[0], 1
+                )
+                cycle_snapshot = conn.execute(
+                    "SELECT perception_snapshot_ref,perception_snapshot_hash FROM agenda_cycles"
+                ).fetchone()
+                registered = conn.execute(
+                    "SELECT snapshot_id,content_hash FROM perception_snapshot_versions"
+                ).fetchone()
+                self.assertEqual(tuple(cycle_snapshot), tuple(registered))
+                conn.close()
+                # The prompt is the fixed wrapper plus the materializer render.
+                # The retired manual splice must not be back.
+                question = FakeAdapter.last_question
+                self.assertIsNotNone(question)
+                self.assertNotIn("MANDATE=", question)
+                self.assertNotIn("PERCEPTION=", question)
+                self.assertIn('"_dalton_context":"materialization"', question)
+                self.assertIn('"kind":"mandate"', question)
+                self.assertIn('"kind":"perception"', question)
+                self.assertIn("OUTPUT_CONTRACT=", question)
+            finally:
+                process.terminate(); process.wait(timeout=3)
+
+    def test_input_token_budget_fails_closed_without_truncating(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            core = root / "core.sqlite"; scheduler = root / "scheduler.sqlite"; router = root / "router.sqlite"
+            socket = root / "run" / "writer.sock"; tokens = root / "tokens.json"
+            legacy = root / "legacy.sqlite"; self.legacy(legacy)
+            write_token_config(tokens, [Principal("core", "core-token", CORE_OPERATIONS, unrestricted=True)])
+            install_openclaw_catalog(
+                router,
+                checked_at=datetime(2026, 8, 14, 9, tzinfo=timezone.utc),
+                availability_ttl=timedelta(days=365),
+            )
+            env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+            process = subprocess.Popen(
+                [sys.executable, "-m", "dalton_core.writer_server", "--db", str(core), "--socket", str(socket), "--token-config", str(tokens)],
+                cwd=str(Path(__file__).parents[1]), env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                deadline = time.time() + 5
+                while time.time() < deadline and not socket.exists():
+                    time.sleep(0.02)
+                config = AgendaCoordinatorConfig(
+                    scheduler_db=scheduler, model_router_db=router, writer_socket=socket,
+                    core_token_config=tokens, broker_socket=root / "broker.sock",
+                    broker_auth_key=root / "broker.key", perception_source_db=legacy,
+                    perception_snapshot_path=root / "perception.json", company_ref="wanhua",
+                    routing_policy_ref="model-routing-policy-version:dalton-openclaw:1",
+                    credential_slot_refs=("credential-slot:openclaw:deepseek",),
+                    broker_client_id="client:dalton-core", expected_agent_id="chem",
+                    timeout_seconds=30,
+                )
+                # 40 tokens cannot hold the mandate and the perception snapshot.
+                # The cycle must fail rather than drop one or truncate either.
+                self.govern(tokens, socket, max_input_tokens=40)
+                coordinator = AgendaCoordinator(config)
+                FakeAdapter.calls = 0
+                with patch.object(AgendaCoordinator, "_adapter", return_value=FakeAdapter()):
+                    with self.assertRaises(Exception):
+                        coordinator.run_once(now=datetime(2026, 8, 14, 10, tzinfo=timezone.utc))
+                self.assertEqual(FakeAdapter.calls, 0)
+                conn = sqlite3.connect(core)
+                state, reason = conn.execute(
+                    "SELECT state,reason FROM agenda_cycle_events ORDER BY event_seq DESC LIMIT 1"
+                ).fetchone()
+                self.assertEqual(state, "failed")
+                self.assertIn(
+                    reason,
+                    {"agenda_context_materialization_failed", "prompt_input_budget_exceeded"},
+                )
+                self.assertEqual(conn.execute("SELECT COUNT(*) FROM agenda_candidates").fetchone()[0], 0)
                 conn.close()
             finally:
                 process.terminate(); process.wait(timeout=3)

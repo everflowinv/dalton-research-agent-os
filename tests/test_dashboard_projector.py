@@ -29,6 +29,7 @@ from dalton_core.openclaw_metadata import OpenClawMetadataImporter
 from dalton_core.observability import ObservabilityStore
 from dalton_core.scheduler import Scheduler
 from dalton_core.store import DaltonStore, content_hash
+from tests.agenda_fixtures import register_perception
 from tests.test_capability_catalog import FakeAuthorities, descriptor_spec
 from tests.test_model_router import profile
 from tests.test_connector import (
@@ -714,9 +715,12 @@ class DashboardProjectorTests(unittest.TestCase):
                 actor_ref="human:owner", version_id="mandate:test:v1",
                 idempotency_key="mandate:test",
             )
+            snapshot = register_perception(agenda, "perception:test")
             cycle = agenda.start_cycle(
-                "agenda:test:wanhua", perception_snapshot_ref="perception:test",
-                perception_snapshot_hash="a" * 64, mandate_version_ref=mandate["id"],
+                "agenda:test:wanhua",
+                perception_snapshot_ref=snapshot["snapshot_id"],
+                perception_snapshot_hash=snapshot["content_hash"],
+                mandate_version_ref=mandate["id"],
                 policy_version_ref=policy["id"], company_ref="wanhua", actor_ref="core",
                 cycle_id="agenda-cycle:test", idempotency_key="agenda-cycle:test",
             )

@@ -465,6 +465,12 @@ UsageEntry 与 CostEntry。route、adapter 或 output contract 失败时，coord
 WorkOrder 终结为 failed，再把 AgendaCycle 终结为 failed，不能留下可被其他 worker 重领的僵尸任务。
 全局 agenda pause 在任何 broker 调用前生效。
 
+PerceptionSnapshot 文件只作 adapter 的临时交接，不是 replay authority。coordinator 必须先把 snapshot 的
+canonical record/hash 登记进 Core append-only authority，再启动 cycle；cycle row 同时冻结 exact
+PerceptionSnapshot、MandateVersion 和 AgendaPolicyVersion ref/hash。Mandate/Policy/Perception/Cycle reader
+必须从 canonical row、查询列和 content hash 重算，不能接受 caller body。旧 cycle 若没有冻结这些 hash，
+统一 fail closed，不能从可变 snapshot 文件静默 backfill。
+
 AgendaDecision 会原子创建 owner-only durable outbox message。OpenClaw/Discord bridge 必须先原子
 claim，并把 attempt、lease expiry 和 endpoint 写进 append-only event；只有外部 API 返回 message id，
 或用确定性 marker 在目标频道找回已发消息后，才能写 delivered receipt。claimed lease 到期可回收，
@@ -556,10 +562,9 @@ submissions JSON 在本 slice 只表示 connector response/filing metadata，不
 ### ContextPack materializer 0.1（Slice 2）
 
 `ContextMaterializer` 是 ContextPack 的只读、短生命周期消费者，不是新的 authority，也不把正文写回
-`ContextPack` 0.1 或 authority DB。它要求同一 exact `DaltonStore`、`ObservabilityStore` 和 `RawSpool`；本版本
-只支持 `claim` 与 `artifact` 两种 input kind。Mandate、PerceptionSnapshot、SourceEnvelope 独立 reader 尚未
-冻结，因此传入这些 kind 必须 fail closed；不接受 caller resolver、caller body、caller metadata、文件路径或
-DocumentIndex FTS 正文。
+`ContextPack` 0.1 或 authority DB。它要求同一 exact `DaltonStore` 与 `ObservabilityStore`；artifact 读取另要求
+exact `RawSpool`。本版本支持 `claim`、`artifact`、`mandate` 与 `perception`，SourceEnvelope 正文类型仍 fail
+closed；不接受 caller resolver、caller body、caller metadata、文件路径或 DocumentIndex FTS 正文。
 
 Claim 通过 exact `claim_versions` row 读取，复核 `id`、`claim_ref`、version、prior、created_at、SQL columns、
 record canonical hash，并分别使用 ClaimVersion 0.1/0.2 validator；模型正文同时保留 ContextPack 冻结的
@@ -582,7 +587,30 @@ token/byte accounting。Materializer 对每项重新解析正文，并要求它�
 字段，但这不声称解决一般 prompt injection。manifest 只记录 ContextPack ref/hash、authority/body hash、每项
 body/render token/byte 账、omission/failure 账、renderer/tokenizer ref/hash 和最终 render hash，不含正文、
 storage locator、DB path 或 credential。header/分隔符开销计入 max rendered token/byte budget，超限直接拒绝。
-materializer 不写 Evidence/Claim/Ledger，不调用模型，不接 Agenda 或 cron。
+materializer 不写 Evidence/Claim/Ledger，也不直接调用模型或 cron。
+
+### Agenda context authority 与 materializer binding 0.1
+
+Agenda 没有 connector step，不能伪造 CompiledConnectorPlan。`AgendaContextBinding` 是独立 closed contract，
+由 exact AgendaCycle 及其冻结的 Policy/Mandate/Perception ref/hash 确定性重建；ContextMaterializer 只接受
+CompiledConnectorPlan 或 AgendaContextBinding 两种已知 binding，未知 shape fail closed。旧 connector-bound
+ContextPack 0.1 的 replay 语义保持不变。
+
+ContextPack 0.1 的 ClaimIndex 字段对 Agenda 使用固定 `claim-index:none:agenda-context:0.1` sentinel；该 sentinel
+只允许 AgendaContextBinding 消费，不携带 ClaimIndex body，也不触发 Ledger snapshot/scan。Agenda pack 只能有
+mandate/perception 两项，且两项都是 required；任一被预算丢弃、ref/hash 漂移或 binding 被替换，materialization
+整体失败。
+
+Agenda renderer 的模型可见 header/footer 绑定 AgendaContextBinding ref/hash；manifest 仍记录 concrete
+ContextPack ref/hash。AgendaCoordinator 的最终 prompt 只能由固定 instruction/output contract 与 materializer
+quoted JSONL 组成，禁止手工 `MANDATE=`/`PERCEPTION=` 拼接。company 与 allowed source refs 只从 exact
+PerceptionSnapshot authority 派生。完整 prompt 使用冻结 tokenizer 核算 policy `max_input_tokens`，wrapper、
+materializer envelope 和正文全部计入；超限拒绝，不截断或重选。WorkOrder 绑定 exact AgendaContextBinding 和
+rendered prompt hash，因此进程重启、snapshot 文件删除/篡改和无关 Ledger 增长都必须逐字重放同一 prompt。
+
+writer 只给 core principal 开放 PerceptionSnapshot 注册、exact read 和 cycle-scoped materialization。调用方只能
+提交 cycle ref 与预算，不能提交正文、resolver、DB/path、DocumentIndex body 或 materialization timestamp。
+本切片不创建 ResearchQuestionBacklog/ResearchPlanVersion，不改变 auto-accept/timeout 权限，也不授权自动执行。
 
 ### P2 fixture research coordinator
 
@@ -641,6 +669,7 @@ Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把
 | outbox claim/lease、Discord reconciliation、receipt 与 reaction feedback | E1/E2 | `tests/test_openclaw_agenda_bridge.py` |
 | ArtifactVersion/SourceEnvelope → DocumentIndex FTS5 只读投影、分面、hash/权限/重建边界 | E1/E2 | `tests/test_document_index.py` |
 | authority-bound ContextPack materializer、quoted render、authority/hash/accounting/budget 边界 | E1/E2 | `tests/test_context_materializer.py` |
+| Agenda exact context、typed binding、prompt replay、writer scope 与 no-manual-prompt 边界 | E1/E2 | `tests/test_agenda_context.py`、`tests/test_agenda_coordinator.py`、`tests/test_writer_service.py` |
 | connector profile/invocation、quota/settlement、provenance、incident 和 self-generated manifest | E1/E2 | `tests/test_connector.py` |
 | connector runner closed frame、双 use-time lease gate、静态 resolver 与 authority-derived adapter request | E2 | `tests/test_connector_runner.py` |
 | 一次性 connector plan、ref-only ContextPack/ClaimIndex、checkpoint/resume 与 bounded retry | E1/E2 | `tests/test_research_coordinator.py` |
