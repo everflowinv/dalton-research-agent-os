@@ -453,17 +453,36 @@ Dalton 不把聊天 transcript、compaction summary 或 runtime scratch 当作�
 memory 是 Research Ledger 的 immutable Evidence/Claim/Thesis 版本链；execution/event audit 由
 ExecutionInvocation、DomainEvent、Scheduler attempt event、ArtifactVersion 和 Usage/Cost 承担。
 
-后续 `ContextPack` 是 derived、content-hashed model input projection，必须冻结 builder、selector、
-tokenizer 和 truncation algorithm 的 ref/hash；`RunState/Checkpoint` 是 per-attempt derived scratch，
-只能由 attempt event 引用；`ClaimIndex` 是可重建的 Ledger 只读投影；`OpsTelemetry` 放 authority DB
-之外。四者的保留期都由版本化 retention policy 决定，不能把临时天数写成架构常量。
+P2 已冻结 `ContextPack`、`ResearchRunState`、`ResearchCheckpoint` 和 `ClaimIndex` 0.1。
+`ContextPack` 是 derived、content-hashed、ref-only 的 model input projection，冻结 builder、selector、
+tokenizer 和 whole-input truncation algorithm 的 ref/hash；`ResearchRunState/Checkpoint` 是 per-attempt
+derived scratch；`ClaimIndex` 是可重建的 Ledger 只读投影，不提供 Ledger mutation API；`OpsTelemetry`
+仍放 authority DB 之外。这些投影的保留期由未来版本化 retention policy 决定，不能把临时天数写成
+架构常量。
+
+### P2 fixture research coordinator
+
+`CompiledConnectorPlan` 0.1 在 WorkOrder 规划边界只生成一次，冻结 source、profile、operation、parameters、
+query/schema/completeness、dependency、fallback 和 max attempts。`ConnectorRunnerRequest` 保持既有 0.1/0.2
+wire；P2 只增加一个可选但必须四项齐全的 plan/step ref/hash binding。Runner 的分页和重试不再调用语义
+Router，只复核冻结 binding 和既有 lease/quota/auth/schema/provenance authority。
+
+首个 `FixtureResearchCoordinator` 只持一个 `ConnectorExecutionPort.execute`，不持 ConnectorStore、Scheduler、
+Credential Authority、Research Ledger 或 Core DB handle。参考 port 只读取仓库内 CNINFO、SEC、AlphaEngine
+recorded fixtures。completion receipt 必须绑定 exact RunnerRequest；失败或 retryable receipt/checkpoint 不能
+携带 SourceEnvelope、artifact 或 cursor。coordinator 只能追加私有、可重建的 plan/context/index/checkpoint/
+run-state projection，不能创建 Evidence、Claim、Thesis 或 formal connector completion authority。
+
+checkpoint chain 精确绑定 run attempt、plan、context、step 和连续 connector attempt。崩溃发生在 execute 后
+但 checkpoint 前时，恢复复用相同 idempotency key；checkpoint 已落盘后不会再调用该 step。retryable 结果
+立即把控制权交回调用方，不 sleep；达到 `max_attempts` 后 run 终结为 failed。
 
 ## 占位契约（本 slice 不冻结）
 
 以下对象只在架构文档中定义方向，暂不伪装成已实现契约：Model IR
 datapoint/computation/scenario、CommitRecord、完整 bridge command-event、Excel exporter、
 Tier 1/2/3 computation contract、
-实际 capability sandbox backend/monitoring、checkpoint，以及尚未选定的生产级存储/队列/runtime（Postgres、Temporal、
+实际 capability sandbox backend/monitoring，以及尚未选定的生产级存储/队列/runtime（Postgres、Temporal、
 Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把 SQLite
 写成 Dalton 的长期架构不变式。
 
@@ -498,6 +517,7 @@ Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把
 | outbox claim/lease、Discord reconciliation、receipt 与 reaction feedback | E1/E2 | `tests/test_openclaw_agenda_bridge.py` |
 | connector profile/invocation、quota/settlement、provenance、incident 和 self-generated manifest | E1/E2 | `tests/test_connector.py` |
 | connector runner closed frame、双 use-time lease gate、静态 resolver 与 authority-derived adapter request | E2 | `tests/test_connector_runner.py` |
+| 一次性 connector plan、ref-only ContextPack/ClaimIndex、checkpoint/resume 与 bounded retry | E1/E2 | `tests/test_research_coordinator.py` |
 | recorded transport journal、bounded raw spool、W0–W4 recovery 与全链幂等重放 | E1/E2 | `tests/test_runner_journal.py`、`tests/test_raw_spool.py`、`tests/test_connector_transport_executor.py` |
 | authority → read-only dashboard projection 与敏感字段隔离 | E1 | `tests/test_dashboard_projector.py` |
 | dashboard 固定 GET API、只读连接与页面资源 | E2 | `tests/test_dashboard.py` |

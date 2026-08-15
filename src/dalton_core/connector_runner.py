@@ -123,17 +123,28 @@ _RUNNER_REQUEST_FIELDS = {
 _MCP_RUNNER_REQUEST_FIELDS = _RUNNER_REQUEST_FIELDS | {
     "transport_plan_ref", "transport_plan_hash",
 }
+_COMPILED_PLAN_BINDING_FIELDS = {
+    "compiled_connector_plan_ref", "compiled_connector_plan_hash",
+    "compiled_step_ref", "compiled_step_hash",
+}
 
 
 def validate_connector_runner_request(value: Mapping[str, Any]) -> dict[str, Any]:
     version = value.get("schema_version") if isinstance(value, Mapping) else None
-    fields = (
+    base_fields = (
         _RUNNER_REQUEST_FIELDS if version == SCHEMA_VERSION
         else _MCP_RUNNER_REQUEST_FIELDS if version == "0.2"
         else None
     )
-    if fields is None:
+    if base_fields is None:
         raise RunnerValidationError("unsupported ConnectorRunnerRequest schema_version")
+    supplied_fields = set(value) if isinstance(value, Mapping) else set()
+    plan_fields = supplied_fields & _COMPILED_PLAN_BINDING_FIELDS
+    if plan_fields and plan_fields != _COMPILED_PLAN_BINDING_FIELDS:
+        raise RunnerValidationError(
+            "ConnectorRunnerRequest compiled plan binding must be complete"
+        )
+    fields = base_fields | (_COMPILED_PLAN_BINDING_FIELDS if plan_fields else set())
     wire = _closed(value, fields, "ConnectorRunnerRequest")
     for name in (
         "id", "connector_invocation_ref", "execution_ref", "work_order_ref",
@@ -154,6 +165,19 @@ def validate_connector_runner_request(value: Mapping[str, Any]) -> dict[str, Any
         )
         wire["transport_plan_hash"] = _hash(
             wire["transport_plan_hash"], "transport_plan_hash"
+        )
+    if plan_fields:
+        wire["compiled_connector_plan_ref"] = _text(
+            wire["compiled_connector_plan_ref"], "compiled_connector_plan_ref"
+        )
+        wire["compiled_connector_plan_hash"] = _hash(
+            wire["compiled_connector_plan_hash"], "compiled_connector_plan_hash"
+        )
+        wire["compiled_step_ref"] = _text(
+            wire["compiled_step_ref"], "compiled_step_ref"
+        )
+        wire["compiled_step_hash"] = _hash(
+            wire["compiled_step_hash"], "compiled_step_hash"
         )
     wire["created_at"] = _timestamp(wire["created_at"], "created_at")
     wire["scheduler_attempt_number"] = _integer(

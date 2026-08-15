@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dalton/research-run-state/0.1",
+  "title": "ResearchRunState",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "run_ref", "version", "attempt_ref", "attempt_hash", "compiled_plan_ref", "compiled_plan_hash", "context_pack_ref", "context_pack_hash", "status", "completed_step_refs", "pending_step_refs", "blocked_step_refs", "last_checkpoint_ref", "last_checkpoint_hash", "prior_version_ref", "prior_version_hash", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "run_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "attempt_ref": {"type": "string", "minLength": 1},
+    "attempt_hash": {"$ref": "#/$defs/hash"},
+    "compiled_plan_ref": {"type": "string", "minLength": 1},
+    "compiled_plan_hash": {"$ref": "#/$defs/hash"},
+    "context_pack_ref": {"type": "string", "minLength": 1},
+    "context_pack_hash": {"$ref": "#/$defs/hash"},
+    "status": {"enum": ["planned", "running", "retryable", "completed", "failed"]},
+    "completed_step_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "pending_step_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "blocked_step_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "last_checkpoint_ref": {"type": ["string", "null"], "minLength": 1},
+    "last_checkpoint_hash": {"anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+    "prior_version_ref": {"type": ["string", "null"], "minLength": 1},
+    "prior_version_hash": {"anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {"hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

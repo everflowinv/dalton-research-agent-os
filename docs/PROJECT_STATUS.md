@@ -2,7 +2,7 @@
 
 更新日期：2026-08-15
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC recorded reference shadows、可扩展 offline proposal package loader，以及 AlphaEngine 离线 `mcp_managed` recorded shadow，未部署
+- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows，以及 P2 fixture-only research coordinator foundation，未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -13,7 +13,8 @@ hostile-code 生产安全等级。
 
 Dalton 已经完成独立 Core、Research Ledger 核心版本链与 gate、单写者、Scheduler、模型路由、模型用量/成本、
 Capability Registry/Catalog、常驻控制服务、Agenda Shadow、durable outbox、人工反馈和备份恢复。
-它现在能自主生成并选择研究问题，但还不会执行研究、运行独立 verifier 或提交新的
+它现在能自主生成并选择研究问题，也能在仓库 fixture 上按一次性 connector plan 执行 CNINFO、SEC、
+AlphaEngine 三源离线流程并从 checkpoint 恢复；它还不会访问 live source、运行独立 verifier 或提交新的
 Evidence、Claim、Thesis。
 
 当前下一阶段是 **Connector Fabric Shadow**。万华的 10 个工作日/20 个显式人工标签门槛只限制
@@ -286,13 +287,37 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 - 本轮没有读取 AlphaEngine token、没有调用本地 MCP、没有访问真实数据、没有部署，也没有写
   Evidence/Claim/Thesis。`get_document` 仍停留在 inventory；Guidepoint、雪球和 live MCP 仍为 No-Go。
 
+### P2 coordinator foundation 当前进度（fixture-only，未部署）
+
+- 新增闭合 `CompiledConnectorPlan`、`ContextPack`、`ClaimIndex`、`ConnectorCompletionReceipt`、
+  `ResearchCheckpoint` 和 `ResearchRunState` 0.1 contract/schema；所有对象都拒绝未知字段并校验 canonical hash；
+- Planner 在 WorkOrder 边界只生成一次三步计划。每个 RunnerRequest 精确绑定 plan/step ref/hash；Runner 的
+  physical call 不重复语义路由，只继续执行既有本地 authority gate；
+- ContextPack 只保存 ref/hash 和冻结后的 token/byte 选择账，不保存正文；ClaimIndex 只从已有 ClaimVersion、
+  EvidenceRelation 和 ledger snapshot ref/hash 构建可重建搜索投影，不提供 Ledger 写 API；
+- `FixtureResearchCoordinator` 只持 `ConnectorExecutionPort.execute`。参考 port 只读取 packaged CNINFO、SEC、
+  AlphaEngine fixtures，不导入 network/MCP client，不接受 credential；coordinator 自身不持 Connector、Scheduler、
+  Credential、Core 或 Research Ledger DB handle；
+- owner-only scratch SQLite 只保存 immutable plan/context/index/checkpoint/run-state projection。checkpoint chain
+  精确绑定 attempt、plan、context、step、连续 connector attempt 和 completion receipt；数据库可删除重建，
+  不属于 Research Ledger 或 connector completion authority；
+- fault injection 覆盖 execute 后、checkpoint 后和 state 后恢复。execute 后未写 checkpoint 时复用同一个
+  idempotency key；checkpoint 已写后不重复调用。429/retryable 立即返回，不 busy wait；每 step 最多两次，
+  耗尽后 run 终结为 failed；
+- 新增专项 11/11，Python 全量 352/352、broker 15/15、`compileall` 与 `git diff --check` 通过；固定
+  `SOURCE_DATE_EPOCH=1700000000` 两次 wheel 逐位一致，SHA-256 均为
+  `02d2b92a7728ce5b80480c36d0c4b388fcc704de3bf1c975a4089ddfb82dde1b`，每份 507,052 bytes；干净 venv
+  安装、`pip check`、三步 plan build、packaged SQL 和 SQLite integrity 均通过；当前尚待 Fable 增量复核和远端 CI；
+- 本轮没有部署、没有访问 live source/MCP、没有读取 credential、没有写 Evidence/Claim/Thesis，也没有切换
+  旧 cron。下一步是在本候选复核通过后实现 source/numeric verifier 与 candidate staging contract，仍先离线。
+
 ## 蓝图阶段
 
 ### Phase 0：记录和可观察性——主体完成
 
 已完成：
 
-- 64 份闭合 JSON Schema、11 份 authority SQL schema；
+- 80 份闭合 JSON Schema、13 份 SQL schema；
 - immutable DomainEvent、WorkOrder、ResultEnvelope、ModelInvocation；
 - Evidence → Claim → Thesis 版本链、verification 和 commit gate；
 - Workflow、Artifact metadata、模型 Usage/Cost、只读 projection 和静态看板；
@@ -326,9 +351,9 @@ Agenda Perception；否则会在 10 日评估窗口中途改变输入分布，�
 已完成：Scheduler lease/retry/idempotency、ProcessRuntimeAdapter、六模型 exact route、OpenClaw 模型
 broker、预算和 pause gate。
 
-部分完成：connector runner 控制面已完成，但没有执行 adapter 或接入 transport。未完成：原生事件 connector、
-从 AgendaDecision 到 research DAG 的 planner、
-`ready → connector/worker → verifier → revise/commit` coordinator，以及第一条只读研究 WorkOrder。
+部分完成：connector runner、recorded transport 与 fixture-only coordinator 已完成；尚未接 live source。
+未完成：原生事件 connector、从 AgendaDecision 到 research DAG 的 production planner、
+`ready → connector/worker → verifier → revise/commit` 完整 coordinator，以及第一条真实只读研究 WorkOrder。
 
 ### Phase 3：Verifier 与 Thesis Commit——权威机制完成，运行层未开始
 
@@ -363,9 +388,10 @@ Postgres/Temporal 规模化门槛和迁移。
   agenda pause 仍走 CLI，通用 cancel/approve/emergency-stop command/event bridge 未完成；
 - native event inbox，以及 expiry、catalyst、falsifier、source failure 触发；Agenda portfolio pools 和
   跨公司容量校准未完成；
-- planner DAG、stop/checkpoint/resume、production worker manager；
-- typed ContextPack、per-attempt RunState/Checkpoint、Ledger 的结构化 ClaimIndex，以及 authority DB
-  之外的滚动 OpsTelemetry；session transcript 和 compaction summary 不作为研究 memory；
+- production planner DAG、stop/cancel 和 worker manager；fixture coordinator 已有 checkpoint/resume，尚未接
+  Scheduler/Agenda/live connector；
+- P2 已有 typed ContextPack、per-attempt RunState/Checkpoint 和结构化 ClaimIndex；尚缺版本化 retention policy
+  与 authority DB 之外的滚动 OpsTelemetry；session transcript 和 compaction summary 不作为研究 memory；
 - operational verifier、revise/replanning/reflection 和 seeded-error 校准；
 - first-class falsifier/catalyst/driver/model/valuation authority、Model IR、Tier 1/2/3 evaluator 和
   Excel exporter；

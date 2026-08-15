@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dalton/context-pack/0.1",
+  "title": "ContextPack",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "task_ref", "task_hash", "compiled_plan_ref", "compiled_plan_hash", "claim_index_ref", "claim_index_hash", "builder_ref", "builder_hash", "selection_policy_ref", "selection_policy_hash", "tokenizer_ref", "tokenizer_hash", "truncation_ref", "truncation_hash", "budget", "inputs", "totals", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "task_ref": {"type": "string", "minLength": 1},
+    "task_hash": {"$ref": "#/$defs/hash"},
+    "compiled_plan_ref": {"type": "string", "minLength": 1},
+    "compiled_plan_hash": {"$ref": "#/$defs/hash"},
+    "claim_index_ref": {"type": "string", "minLength": 1},
+    "claim_index_hash": {"$ref": "#/$defs/hash"},
+    "builder_ref": {"type": "string", "minLength": 1},
+    "builder_hash": {"$ref": "#/$defs/hash"},
+    "selection_policy_ref": {"type": "string", "minLength": 1},
+    "selection_policy_hash": {"$ref": "#/$defs/hash"},
+    "tokenizer_ref": {"type": "string", "minLength": 1},
+    "tokenizer_hash": {"$ref": "#/$defs/hash"},
+    "truncation_ref": {"type": "string", "minLength": 1},
+    "truncation_hash": {"$ref": "#/$defs/hash"},
+    "budget": {"$ref": "#/$defs/budget"},
+    "inputs": {"type": "array", "items": {"$ref": "#/$defs/input"}},
+    "totals": {"$ref": "#/$defs/totals"},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "budget": {"type": "object", "additionalProperties": false, "required": ["max_tokens", "max_bytes"], "properties": {"max_tokens": {"type": "integer", "minimum": 1}, "max_bytes": {"type": "integer", "minimum": 1}}},
+    "totals": {"type": "object", "additionalProperties": false, "required": ["selected_tokens", "selected_bytes", "omitted_count"], "properties": {"selected_tokens": {"type": "integer", "minimum": 0}, "selected_bytes": {"type": "integer", "minimum": 0}, "omitted_count": {"type": "integer", "minimum": 0}}},
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "ref", "hash", "priority", "selected", "selection_reason", "original_tokens", "original_bytes", "included_tokens", "included_bytes", "content_hash"],
+      "properties": {
+        "kind": {"enum": ["mandate", "claim", "perception", "artifact", "source"]},
+        "ref": {"type": "string", "minLength": 1},
+        "hash": {"$ref": "#/$defs/hash"},
+        "priority": {"type": "integer", "minimum": 0},
+        "selected": {"type": "boolean"},
+        "selection_reason": {"enum": ["included", "budget_tokens", "budget_bytes", "duplicate"]},
+        "original_tokens": {"type": "integer", "minimum": 0},
+        "original_bytes": {"type": "integer", "minimum": 0},
+        "included_tokens": {"type": "integer", "minimum": 0},
+        "included_bytes": {"type": "integer", "minimum": 0},
+        "content_hash": {"$ref": "#/$defs/hash"}
+      }
+    }
+  }
+}

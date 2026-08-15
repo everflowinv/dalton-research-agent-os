@@ -50,6 +50,23 @@ _LAZY_EXPORTS = {
     "OpenClawModelAdapter": (".openclaw_model_adapter", "OpenClawModelAdapter"),
     "install_openclaw_catalog": (".model_deployment", "install_openclaw_catalog"),
     "migrate_legacy_workspace": (".legacy_migration", "migrate_legacy_workspace"),
+    "FixtureResearchCoordinator": (
+        ".research_coordinator", "FixtureResearchCoordinator"
+    ),
+    "RecordedShadowFixturePort": (
+        ".research_coordinator", "RecordedShadowFixturePort"
+    ),
+    "ResearchCoordinatorStore": (
+        ".research_coordinator", "ResearchCoordinatorStore"
+    ),
+    "build_claim_index": (".research_context", "build_claim_index"),
+    "build_context_pack": (".research_context", "build_context_pack"),
+    "build_fixture_runner_request": (
+        ".research_context", "build_fixture_runner_request"
+    ),
+    "build_reference_fixture_plan": (
+        ".research_context", "build_reference_fixture_plan"
+    ),
 }
 
 
@@ -69,6 +86,7 @@ __all__ = [
     "CapabilityCatalog",
     "CredentialGrantEnvelope",
     "CredentialAuthorityStore",
+    "FixtureResearchCoordinator",
     "ConnectorStore",
     "ConnectorRunnerAdmissionGate",
     "StaticAdapterResolver",
@@ -81,6 +99,12 @@ __all__ = [
     "OpenClawModelAdapter",
     "OpenClawMetadataImporter",
     "OpenClawMetadataExporter",
+    "RecordedShadowFixturePort",
+    "ResearchCoordinatorStore",
+    "build_claim_index",
+    "build_context_pack",
+    "build_fixture_runner_request",
+    "build_reference_fixture_plan",
     "install_openclaw_catalog",
     "migrate_legacy_workspace",
     "ProcessRuntimeAdapter",

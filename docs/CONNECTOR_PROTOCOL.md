@@ -248,7 +248,20 @@ Connector 是 source、transport、auth、completeness 和 provenance 的权限�
 Planner 每个 WorkOrder 只做一次语义选择，冻结需要的 source、operation、参数、completeness 和允许的 fallback。
 Runner 不在每个 physical call 重跑模型或语义 Router；它只执行本地、确定性的 use-time lease、quota、host/auth、
 schema、retry 和 provenance 校验。分页和并发调用复用已冻结计划，但每个 physical attempt 仍须独立 admission、
-计量和结算。`CompiledConnectorPlan` 在 P2 coordinator 开始消费该对象时再引入。
+计量和结算。P2 已由首个 fixture-only coordinator 引入 `CompiledConnectorPlan`；它是每个逻辑任务一次性
+冻结的派生计划，不是新的常驻 Router 服务。
+
+### P2 一次性计划与执行边界
+
+`CompiledConnectorPlan` 冻结 source/profile/operation/parameters/query/schema/completeness、dependency、fallback
+和 max attempts。每个 RunnerRequest 用 plan/step ref/hash 绑定具体调用；旧 RunnerRequest 不带这组字段时仍按
+既有 wire 验证，带任一字段时必须四项齐全。新增 connector 继续通过自描述 proposal package 进入候选池，
+Planner 使用通用 metadata 选择，不为每个 connector 增加中央分支。
+
+P2 参考 coordinator 只消费 CNINFO、SEC、AlphaEngine recorded fixture。它通过窄 execution port 取得与 exact
+RunnerRequest 绑定的 completion receipt，自身不能访问 transport、credential、Connector/Core/Ledger DB。
+它保存的 ContextPack、ClaimIndex、Checkpoint 和 RunState 都是 owner-only、可重建投影；失败结果不能携带
+SourceEnvelope 或 artifact。当前不执行 fallback branch，不访问 live source，也不写 Evidence/Claim/Thesis。
 
 ### 可扩展 proposal package
 

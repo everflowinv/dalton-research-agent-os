@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dalton/claim-index/0.1",
+  "title": "ClaimIndex",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "ledger_snapshot_ref", "ledger_snapshot_hash", "index_builder_ref", "index_builder_hash", "entries", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "ledger_snapshot_ref": {"type": "string", "minLength": 1},
+    "ledger_snapshot_hash": {"$ref": "#/$defs/hash"},
+    "index_builder_ref": {"type": "string", "minLength": 1},
+    "index_builder_hash": {"$ref": "#/$defs/hash"},
+    "entries": {"type": "array", "items": {"$ref": "#/$defs/entry"}},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claim_version_ref", "claim_version_hash", "claim_ref", "subject_ref", "metric_or_aspect", "period", "basis", "status", "source_types", "updated_at", "search_terms", "content_hash"],
+      "properties": {
+        "claim_version_ref": {"type": "string", "minLength": 1},
+        "claim_version_hash": {"$ref": "#/$defs/hash"},
+        "claim_ref": {"type": "string", "minLength": 1},
+        "subject_ref": {"type": "string", "minLength": 1},
+        "metric_or_aspect": {"type": "string", "minLength": 1},
+        "period": {"type": "string", "minLength": 1},
+        "basis": {"type": "string", "minLength": 1},
+        "status": {"enum": ["proposed", "corroborated", "contested", "superseded", "retracted"]},
+        "source_types": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "updated_at": {"type": "string", "format": "date-time"},
+        "search_terms": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "content_hash": {"$ref": "#/$defs/hash"}
+      }
+    }
+  }
+}

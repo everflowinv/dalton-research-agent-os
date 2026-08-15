@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dalton/research-checkpoint/0.1",
+  "title": "ResearchCheckpoint",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "run_ref", "attempt_ref", "attempt_hash", "sequence", "compiled_plan_ref", "compiled_plan_hash", "context_pack_ref", "context_pack_hash", "step_ref", "step_hash", "connector_attempt_number", "runner_request_ref", "runner_request_hash", "completion_receipt_ref", "completion_receipt_hash", "authority_bindings", "outcome", "source_envelopes", "artifacts", "next_cursor", "retry_after_ms", "idempotency_key", "prior_checkpoint_ref", "prior_checkpoint_hash", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "run_ref": {"type": "string", "minLength": 1},
+    "attempt_ref": {"type": "string", "minLength": 1},
+    "attempt_hash": {"$ref": "#/$defs/hash"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "compiled_plan_ref": {"type": "string", "minLength": 1},
+    "compiled_plan_hash": {"$ref": "#/$defs/hash"},
+    "context_pack_ref": {"type": "string", "minLength": 1},
+    "context_pack_hash": {"$ref": "#/$defs/hash"},
+    "step_ref": {"type": "string", "minLength": 1},
+    "step_hash": {"$ref": "#/$defs/hash"},
+    "connector_attempt_number": {"type": "integer", "minimum": 1},
+    "runner_request_ref": {"type": "string", "minLength": 1},
+    "runner_request_hash": {"$ref": "#/$defs/hash"},
+    "completion_receipt_ref": {"type": "string", "minLength": 1},
+    "completion_receipt_hash": {"$ref": "#/$defs/hash"},
+    "authority_bindings": {"$ref": "#/$defs/authority"},
+    "outcome": {"enum": ["succeeded", "retryable", "failed"]},
+    "source_envelopes": {"type": "array", "items": {"$ref": "#/$defs/refHash"}},
+    "artifacts": {"type": "array", "items": {"$ref": "#/$defs/refHash"}},
+    "next_cursor": {"type": ["string", "null"], "minLength": 1},
+    "retry_after_ms": {"type": ["integer", "null"], "minimum": 1},
+    "idempotency_key": {"type": "string", "minLength": 1},
+    "prior_checkpoint_ref": {"type": ["string", "null"], "minLength": 1},
+    "prior_checkpoint_hash": {"anyOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "refHash": {"type": "object", "additionalProperties": false, "required": ["ref", "hash"], "properties": {"ref": {"type": "string", "minLength": 1}, "hash": {"$ref": "#/$defs/hash"}}},
+    "authority": {"type": "object", "additionalProperties": false, "required": ["connector_profile_ref", "connector_profile_hash", "capability_lease_ref", "capability_lease_hash", "source_ref", "source_hash"], "properties": {"connector_profile_ref": {"type": "string", "minLength": 1}, "connector_profile_hash": {"$ref": "#/$defs/hash"}, "capability_lease_ref": {"type": "string", "minLength": 1}, "capability_lease_hash": {"$ref": "#/$defs/hash"}, "source_ref": {"type": "string", "minLength": 1}, "source_hash": {"$ref": "#/$defs/hash"}}}
+  }
+}

@@ -75,9 +75,12 @@ HTTPS transport 和 closed credential authority metadata boundary。P0-4a 第一
 registration、单调 snapshot chain、脱敏 ingest event 和 crash-safe exporter retry state；第二笔已把 metadata
 source head/reject 与 connector operation、physical attempt、最新 usage/cost/settlement、quota、health/circuit 和
 blocking incident 投到只读 Connector Shadow。当前仍只执行仓库内 recorded fixtures，没有网络、凭据或真实数据源；
-OpenClaw live inventory attach 与真实 A股/SEC/AlphaEngine connector 尚未接入。生产部署仍缺少独立
+OpenClaw live inventory attach 与真实 A股/SEC/AlphaEngine connector 尚未接入。P2 已加入一次性
+`CompiledConnectorPlan`、ref-only ContextPack/ClaimIndex、私有 RunState/Checkpoint，以及只消费三类 recorded
+fixture 的 research coordinator；它证明了 bounded retry 和崩溃恢复，但不运行 live research、不写
+Evidence/Claim/Thesis。生产部署仍缺少独立
 OS/container identity、正式 capability sandbox、Model IR、原生事件连接器、
-研究 worker/verifier coordinator、更多原生投递渠道和完整运维控制面。任何旧工作流
+source/numeric verifier、candidate staging、更多原生投递渠道和完整运维控制面。任何旧工作流
 切换都要逐项验证，不能因文件已导入就视为完成迁移。当前项目状态见
 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，最近一次 Agenda 控制面实施记录见
 [docs/reports/phase-1-agenda-control-2026-08-14.md](docs/reports/phase-1-agenda-control-2026-08-14.md)。
