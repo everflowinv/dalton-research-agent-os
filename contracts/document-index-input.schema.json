@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/document-index-input.schema.json",
+  "title": "DocumentIndexInput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "artifact_version_ref",
+    "artifact_version_hash", "extraction_mode", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "artifact_version_ref": {"type": "string", "minLength": 1},
+    "artifact_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "extraction_mode": {"enum": ["utf8", "json"]},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

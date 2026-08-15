@@ -11,7 +11,7 @@ database 和 cron 定义，但归档不代表新系统采用旧约束、旧研�
 
 ### 通用规则
 
-- 八十五份 JSON Schema 都是 Draft 2020-12 文档，根对象有
+- 九十四份 JSON Schema 都是 Draft 2020-12 文档，根对象有
   `additionalProperties: false`。
 - 每个对象都有 `schema_version`、稳定 `id` 和 `created_at`；引用字段使用稳定
   ref 字符串，时间字段保持 RFC 3339 形式的字符串（具体时区策略留给实现层）。
@@ -525,6 +525,34 @@ Adjudication；`status` 由 Core 的确定性投影顺序得出（旧版本 `sup
 ClaimIndex content hash；ClaimVersion 0.2 的结构化 period 在仍保持 ClaimIndex 0.1 wire 的前提下以 canonical
 JSON 字符串投影。对应快照契约为 `contracts/claim-index-ledger-snapshot.schema.json`。
 
+### DocumentIndex FTS5 投影 0.1（Slice 2）
+
+`DocumentIndex` 是 ArtifactVersion 的可重建、可删除、只读检索投影，不是新的 authority，
+也不提供 Artifact、Evidence、Claim 或 Ledger mutation API。`DocumentIndexInput` 只允许指定
+exact `artifact_version_ref/hash` 和内置 `utf8`/`json` extractor；builder 通过 exact
+`ObservabilityStore` 读取 ArtifactVersion，再从 exact `RawSpool` 重读 bytes，复核 SHA-256 和
+size 后确定性生成文本。caller 不能提交正文、公司、source 或其他 metadata。投影的每个
+snapshot/document 都保存 authority ref/hash、extractor/input ref/hash 和 extracted-text hash。
+
+当 ArtifactVersion 绑定 SourceEnvelope 时，builder 还必须沿 exact
+SourceEnvelope → ConnectorInvocation（execution ref/hash 从 SQL link 读取）→ ConnectorProfile /
+ConnectorCallSpec → connector `ExecutionInvocation` 链复核 hash、source、operation 和 producer。
+`source_type` 只取 frozen Profile 的 `source_identity.source_type`；SEC 的公司 facet 只在
+`source:sec-edgar` + `official_filing` + `list_filings` 下把 CallSpec 的 `issuer` 解析成
+`company:sec-cik:<10位CIK>`，未知 source 不猜公司。`content_type` 过滤 ArtifactVersion 的
+`kind`，`media_type` 只过滤 MIME。
+
+SQLite FTS5 使用 disposable external-content table，title、source metadata 和内置提取文本都
+可删除重建；查询只返回 immutable refs/hashes 和 metadata，不返回正文。默认只允许 `public`
+access class，调用方必须在 projection 建立时显式扩大可见范围；索引文件 owner-only（0600），
+但它仍受 SQLite 同 UID 信任边界约束，不是多租户安全边界。FTS 查询和 facets 都使用参数化
+SQL，rebuild/search 会检查主表、child facet 和 FTS5 `integrity-check` 一致性。
+
+本 slice 的 tokenizer 是 `trigram`：三字符中文查询（例如 `半导体`）可用于有限的子串召回，
+两字符查询（例如 `存储`）可能 miss；这不是通用中文分词，也不承诺任意中文子串检索。SEC
+submissions JSON 在本 slice 只表示 connector response/filing metadata，不能描述为 filing
+正文全文。embedding 和 recall-only sidecar 留到 FTS miss 率有测量后再决定。
+
 ### P2 fixture research coordinator
 
 `CompiledConnectorPlan` 0.1 在 WorkOrder 规划边界只生成一次，冻结 source、profile、operation、parameters、
@@ -580,6 +608,7 @@ Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把
 | PerceptionSnapshot、backup/restore 与 ephemeral governance | E1/E2 | `tests/test_perception_backup.py`、`tests/test_governance_cli.py` |
 | Scheduler → Router → broker adapter → usage/cost → AgendaDecision thin slice | E1 | `tests/test_agenda_coordinator.py` |
 | outbox claim/lease、Discord reconciliation、receipt 与 reaction feedback | E1/E2 | `tests/test_openclaw_agenda_bridge.py` |
+| ArtifactVersion/SourceEnvelope → DocumentIndex FTS5 只读投影、分面、hash/权限/重建边界 | E1/E2 | `tests/test_document_index.py` |
 | connector profile/invocation、quota/settlement、provenance、incident 和 self-generated manifest | E1/E2 | `tests/test_connector.py` |
 | connector runner closed frame、双 use-time lease gate、静态 resolver 与 authority-derived adapter request | E2 | `tests/test_connector_runner.py` |
 | 一次性 connector plan、ref-only ContextPack/ClaimIndex、checkpoint/resume 与 bounded retry | E1/E2 | `tests/test_research_coordinator.py` |
@@ -605,6 +634,11 @@ writer 进程把“外部 runtime 不拿 DB path、正式写入只走 service”
 但 owner-only socket/token/DB 仍不能抵御同一 OS 用户下读取进程参数、token 文件或
 直接打开 DB 的恶意进程。面对该 threat model，生产部署必须使用不同 OS identity、
 container/VM 或有独立授权身份的存储服务。
+
+`DocumentIndex` 的 owner-only SQLite 文件同样只是一道普通权限边界。即使默认 query
+不返回 `internal/restricted`，配置为可见的 projection 仍可能物理保存这些正文的 disposable
+FTS 内容；任何 runtime 都不得取得 index DB path，不能把该文件当作多租户隔离或跨身份授权
+机制。
 
 本 slice 已实现 proposal/eval/promotion/rollback 的治理账本，但没有执行未知代码的
 sandbox，也没有给外部副作用 capability 发放实际凭据。在 sandbox 和 permission

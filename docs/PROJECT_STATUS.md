@@ -2,7 +2,7 @@
 
 更新日期：2026-08-15
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver、隔离 SEC public canary，以及 HumanReviewAuthority + Ledger promotion 0.2 + HTML review 入口，未部署
+- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver、隔离 SEC public canary、HumanReviewAuthority + Ledger promotion 0.2 + HTML review 入口，以及 DocumentIndex FTS5 只读投影，未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -22,10 +22,34 @@ Evidence、Claim、Thesis。当前开发候选已能重放 fixture，也能从�
 当前下一阶段是 **把第一条只读研究闭环接到可检索、可计划的消费者**：HumanReviewAuthority 已能对 exact
 candidate 做 accept/revise/reject，accept 通过 scoped writer 原子写 EvidenceVersion 0.2、ClaimVersion 0.2 和
 supports relation；ClaimIndex status 派生现已改为读取 Core 的一致 Ledger snapshot，绑定 snapshot ref/hash，并拒绝
-caller-provided status；下一步再做 DocumentIndex FTS 和 ContextPack materializer。
+caller-provided status；DocumentIndex FTS5 已完成开发候选，下一步做 ContextPack materializer。
 正式 Ledger commit 继续逐条人工 gate。万华的 10 个工作日/20 个显式人工标签门槛
 只限制 Agenda 从 1 家扩到 3 家，不阻塞通用 connector、research coordinator、verifier、Model IR 和
 sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单独验收。
+
+### P2 DocumentIndex FTS5 当前进度（开发候选，未部署）
+
+- 新增 `DocumentIndexInput`、`DocumentIndexSnapshot` closed contract，以及 owner-only SQLite FTS5
+  projection。投影只读 exact `ObservabilityStore`、`ConnectorStore` 和 `RawSpool`；rebuild/clear 只改
+  自己的 disposable 数据，不提供 Artifact、Ledger 或 connector authority mutation API；非内存文件强制
+  `0600`；
+- 内置 `utf8`/canonical `json` extractor 直接从已复核 ArtifactVersion hash+size 的 raw bytes 派生正文，
+  caller 不能提交正文或自报 metadata。`content_type` 对应 ArtifactVersion `kind`，`media_type` 单独过滤；
+  默认只返回 `public`，但 projection 不是同 UID 下的多租户安全边界；配置为可见的 internal/restricted
+  内容仍可能物理存在于 disposable FTS 文件；
+- source join 沿 SourceEnvelope → SQL execution link → Profile/CallSpec → connector ExecutionInvocation
+  复核 exact ref/hash。`source_type` 从 Profile source identity 派生；只有 SEC
+  `source:sec-edgar/list_filings` 的 `issuer` 能生成 `company:sec-cik:<10位CIK>` facet，unknown source 保持
+  空 facet；rebuild 和查询都会检查 FTS、主表、facet 和 record hash 的一致性；
+- FTS 使用 `trigram`。三字符中文（如“半导体”）可有限命中，两字符（如“存储”）可能 miss；这不是通用
+  中文分词。SEC submissions JSON 只按 connector response/filing metadata 处理，不能称为 filing 正文全文；
+  embedding 和 materializer 尚未实现；
+- `tests/test_document_index.py` 覆盖 raw hash/size、authority hash rebinding、source/profile/call link、
+  access/filter forge、FTS `delete-all` checksum、FTS/main-table sync、query boundary、Unicode、删除重建和
+  文件权限。该 slice 未部署、未接 Agenda/cron，也未接 ContextPack materializer。
+- broker 回归 15/15；固定 `SOURCE_DATE_EPOCH=1700000000` 独立构建的两份 wheel 逐位一致，SHA-256
+  均为 `ccd4ad817cf1837ed2e99d48b1cdd1b23e543dcadafede8a72921ff70a3cd5c8`，大小均为 601,297 bytes；
+  干净 Python 3.13 venv 安装、导入、打包后的 FTS schema 和两份新 contract 检查均通过。
 
 ### Connector P0-0 当前进度（未部署）
 
@@ -372,7 +396,7 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 
 已完成：
 
-- 92 份 JSON Schema、15 份 SQL schema；
+- 94 份 JSON Schema、16 份 SQL schema；
 - immutable DomainEvent、WorkOrder、ResultEnvelope、ModelInvocation；
 - Evidence → Claim → Thesis 版本链、verification 和 commit gate；
 - Workflow、Artifact metadata、模型 Usage/Cost、只读 projection 和静态看板；
@@ -602,7 +626,7 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 offline/authority source-numeric verifier、只读 authority resolver、candidate staging、一条隔离 SEC public
 WorkOrder、独立 HumanReviewAuthority、HTML 入口和正式 Evidence/Claim 0.2 promotion 已完成开发候选。
-ClaimIndex status 派生已改为 exact Ledger snapshot；下一步做 DocumentIndex FTS，再做 ContextPack materializer；AgendaDecision 接线、
+ClaimIndex status 派生已改为 exact Ledger snapshot；DocumentIndex FTS5 已完成开发候选，下一步做 ContextPack materializer；AgendaDecision 接线、
 生产部署、Model IR 更新和旧 cron cutover 仍保持独立人工 gate。当前没有 live staging/review authority。
 
 与 P0/P1 并行推进但不接生产权限：operational verifier contract、fixture-only research coordinator、
@@ -681,6 +705,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Agenda Shadow：`docs/reports/phase-1-agenda-shadow-implementation-2026-08-14.md`
 - Agenda 运营与反馈：`docs/reports/phase-1-agenda-control-2026-08-14.md`
 - P2 authority resolver 与 SEC canary：`docs/reports/p2-authority-resolver-sec-canary-2026-08-15.md`
+- DocumentIndex FTS5：`docs/reports/document-index-fts5-2026-08-15.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`

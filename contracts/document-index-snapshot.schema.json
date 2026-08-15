@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/document-index-snapshot.schema.json",
+  "title": "DocumentIndexSnapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "authority_snapshot_ref",
+    "authority_snapshot_hash", "builder_ref", "documents", "content_hash"
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableHash": {"oneOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+    "nullableRef": {"oneOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
+    "nullableTimestamp": {"oneOf": [{"type": "string", "format": "date-time"}, {"type": "null"}]},
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "artifact_version_ref", "artifact_version_hash",
+        "artifact_ref", "artifact_version", "artifact_content_hash", "title",
+        "kind", "media_type", "access_class", "source_envelope_ref",
+        "source_envelope_hash", "source_type", "source_operation",
+        "source_record_refs", "company_refs", "company_parser_ref", "published_at", "updated_at",
+        "as_of", "retrieved_at", "document_date", "source_metadata",
+        "extracted_text_ref", "extracted_text_hash", "extracted_text_size_bytes",
+        "input_ref", "input_hash"
+      ],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "artifact_version_ref": {"type": "string", "minLength": 1},
+        "artifact_version_hash": {"$ref": "#/$defs/hash"},
+        "artifact_ref": {"type": "string", "minLength": 1},
+        "artifact_version": {"type": "integer", "minimum": 1},
+        "artifact_content_hash": {"$ref": "#/$defs/hash"},
+        "title": {"type": "string", "minLength": 1},
+        "kind": {"type": "string", "minLength": 1},
+        "media_type": {"type": "string", "minLength": 1},
+        "access_class": {"enum": ["public", "internal", "restricted"]},
+        "source_envelope_ref": {"$ref": "#/$defs/nullableRef"},
+        "source_envelope_hash": {"$ref": "#/$defs/nullableHash"},
+        "source_type": {"$ref": "#/$defs/nullableRef"},
+        "source_operation": {"$ref": "#/$defs/nullableRef"},
+        "source_record_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "company_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "company_parser_ref": {"$ref": "#/$defs/nullableRef"},
+        "published_at": {"$ref": "#/$defs/nullableTimestamp"},
+        "updated_at": {"$ref": "#/$defs/nullableTimestamp"},
+        "as_of": {"$ref": "#/$defs/nullableTimestamp"},
+        "retrieved_at": {"$ref": "#/$defs/nullableTimestamp"},
+        "document_date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+        "source_metadata": {"type": "string"},
+        "extracted_text_ref": {"type": "string", "minLength": 1},
+        "extracted_text_hash": {"$ref": "#/$defs/hash"},
+        "extracted_text_size_bytes": {"type": "integer", "minimum": 0},
+        "input_ref": {"type": "string", "minLength": 1},
+        "input_hash": {"$ref": "#/$defs/hash"}
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "authority_snapshot_ref": {"type": "string", "minLength": 1},
+    "authority_snapshot_hash": {"$ref": "#/$defs/hash"},
+    "builder_ref": {"type": "string", "minLength": 1},
+    "documents": {"type": "array", "items": {"$ref": "#/$defs/document"}},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  }
+}
