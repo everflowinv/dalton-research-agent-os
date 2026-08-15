@@ -367,6 +367,20 @@ class ConnectorRunnerControlPlaneTests(unittest.TestCase):
         with self.assertRaises(RunnerValidationError):
             validate_runner_environment_manifest(bad_credentials)
 
+    def test_public_gate_rejects_mcp_runner_request_wire(self) -> None:
+        request = self.runner_request()
+        changed = {
+            **{key: value for key, value in request.items() if key != "content_hash"},
+            "schema_version": "0.2",
+            "transport_plan_ref": "recorded-mcp-plan:unexpected:0.2",
+            "transport_plan_hash": "8" * 64,
+        }
+        changed["content_hash"] = content_hash(changed)
+        with self.assertRaises(RunnerConflict):
+            self.gate.validate(
+                changed, scheduler_lease_token=self.claim["lease_token"]
+            )
+
     def test_use_time_gates_and_adapter_request_are_authority_derived(self) -> None:
         admission = self.gate.validate(
             self.runner_request(), scheduler_lease_token=self.claim["lease_token"]

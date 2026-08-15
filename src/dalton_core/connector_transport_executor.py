@@ -14,7 +14,6 @@ from .connector_runner import (
     ConnectorRunnerAdmissionGate,
     RunnerConflict,
     ValidatedRunnerAdmission,
-    validate_adapter_transport_observation,
     validate_connector_runner_request,
     validate_connector_runner_response,
 )
@@ -248,8 +247,12 @@ class ConnectorTransportExecutor:
         raw_object: RawObject | None = None
         runner_error: dict[str, Any] | None = None
         try:
+            credential_handle = self._gate.credential_handle_for_use(adapter_request)
             returned = self._invoke_adapter(
-                admission.adapter, adapter_request, raw_sink
+                admission.adapter,
+                adapter_request,
+                raw_sink,
+                credential_handle=credential_handle,
             )
             completed_at = _wire_time(self._clock())
             if _parse_time(completed_at) >= _parse_time(adapter_request["deadline_at"]):
@@ -261,13 +264,9 @@ class ConnectorTransportExecutor:
                     "retryable": True,
                 }
             else:
-                observation = validate_adapter_transport_observation(returned)
-                if observation["request_hash"] != adapter_request["content_hash"]:
-                    raise RunnerConflict(
-                        "adapter observation does not bind the exact AdapterRequest"
-                    )
-                if len(observation["source_record_refs"]) > adapter_request["max_records"]:
-                    raise ConnectorTransportError("adapter exceeded max_records")
+                observation = self._gate.validate_observation(
+                    returned, adapter_request
+                )
                 attempt_outcome = observation["outcome"]
                 if attempt_outcome == "succeeded":
                     raw_object = raw_sink.finalize()
@@ -580,7 +579,18 @@ class ConnectorTransportExecutor:
                 "artifact-version", f"{key_prefix}:artifact"
             )
             source_id = _derived_id("source-envelope", f"{key_prefix}:source")
-            status = "complete" if records else "empty"
+            status = (
+                observation.get("source_status")
+                if observation is not None
+                else None
+            ) or ("complete" if records else "empty")
+            completeness = (
+                observation.get("completeness")
+                if observation is not None
+                else None
+            ) or admission.profile["completeness"][
+                admission.call_spec["operation"]
+            ]
             source_spec = {
                 "schema_version": "0.1",
                 "id": source_id,
@@ -604,9 +614,7 @@ class ConnectorTransportExecutor:
                     admission.call_spec["operation"]
                 ],
                 "source_content_hash": "",
-                "completeness": admission.profile["completeness"][
-                    admission.call_spec["operation"]
-                ],
+                "completeness": completeness,
                 "status": status,
                 "access_policy_ref": admission.profile["access_policy_ref"],
                 "retention_policy_ref": admission.profile["retention_policy_ref"],
@@ -727,9 +735,23 @@ class ConnectorTransportExecutor:
         return validate_connector_runner_response(response_base)
 
     def _invoke_adapter(
-        self, adapter: Callable[..., Any], request: Mapping[str, Any], raw_sink: Any
+        self,
+        adapter: Callable[..., Any],
+        request: Mapping[str, Any],
+        raw_sink: Any,
+        *,
+        credential_handle: Any | None = None,
     ) -> Any:
         """Bound synchronous recorded adapters with a runner-owned watchdog."""
+        if credential_handle is not None:
+            return invoke_adapter_with_deadline(
+                lambda request_wire, sink: adapter(
+                    request_wire, sink, credential_handle
+                ),
+                request,
+                raw_sink,
+                clock=self._clock,
+            )
         return invoke_adapter_with_deadline(
             adapter, request, raw_sink, clock=self._clock
         )

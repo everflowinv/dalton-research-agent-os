@@ -26,11 +26,15 @@ class PackagingTests(unittest.TestCase):
             "dashboard_schema.sql",
             "agenda_schema.sql",
             "connector_schema.sql",
+            "credential_authority_schema.sql",
             "dashboard.html",
             "agenda_control.html",
         ):
             self.assertIn(runtime_asset, package_data["dalton_core"])
         self.assertIn("contracts/*.schema.json", data_files["share/dalton-core/contracts"])
+        self.assertIn(
+            "reference_shadow_fixtures/*.json", package_data["dalton_core"]
+        )
         schemas = list((ROOT / "contracts").glob("*.schema.json"))
         self.assertGreaterEqual(len(schemas), 34)
 

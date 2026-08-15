@@ -1,8 +1,8 @@
 # Dalton 项目进度
 
-更新日期：2026-08-14  
+更新日期：2026-08-15
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前提交内容：Connector P1-0 十类 inventory、CNINFO/SEC recorded reference shadows、可扩展 offline proposal package loader，未部署
+- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC recorded reference shadows、可扩展 offline proposal package loader，以及 AlphaEngine 离线 `mcp_managed` recorded shadow，未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -256,6 +256,30 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 - 本轮没有部署、没有访问真实数据源、没有使用 credential，也没有写 Evidence/Claim/Thesis。真实 public
   network 仍被 killable total-deadline transport gate 阻塞；AlphaEngine/Guidepoint/雪球等 host/MCP 路径仍被
   runner wire 0.2、credential revoke/max_calls use-time authority 阻塞。
+
+### Connector P1-0d 当前候选（AlphaEngine offline `mcp_managed` shadow，未部署）
+
+- 新增独立 `mcp_managed` RunnerRequest/AdapterRequest/TransportObservation wire 0.2；该路径没有 URL、host、
+  public network policy 或可序列化 credential value，不能复用 public HTTPS transport；
+- Credential authority 只保存 grant、revoke 和逐次 use receipt 的闭合 metadata。每次使用精确绑定 profile、
+  capability lease、adapter、principal、credential slot、operation、reservation 和 physical attempt；在返回
+  host-owned opaque handle 前再次检查 revoke、expiry 与 `max_calls`；
+- AlphaEngine 当前只实现 `search_library` 的离线 recorded shadow。fixture 精确绑定 frozen inventory、parent query、
+  selected scenario、input/output schema 和 transport target；success、empty、partial、pagination、schema drift、
+  rate limit、timeout、malformed、permission denied、revoked 均不访问真实 MCP；
+- 成功调用继续走既有 reservation → attempt → Usage → Cost → Settlement → ArtifactVersion → SourceEnvelope →
+  Scheduler completion；失败不得伪造 raw artifact 或 SourceEnvelope。Runner-owned deadline 会中止超时 fixture 的
+  sink；credential 在 reservation 后形成 use receipt，并在 adapter 前做最后一次 use-time 验证；
+- connector 的语义路由没有进入每个 physical call。Planner/协调器一次选定 source、operation、parameters、
+  completeness 与 fallback；Runner 的分页和重试只执行本地确定性 authority gate。一个稳定 source 可以暴露
+  多个 operation，跨 source 的 findata 体验由上层 research recipe 组合；
+- 新 connector 继续走声明式 proposal package。P1-0d 只增加 AlphaEngine 的运行时参考链，不把中央语义路由
+  做成新服务，也不提前加入尚无消费者的 `CompiledConnectorPlan`；
+- 当前本地候选已通过 MCP/credential/Runner/transport/packaging 组合 41/41、Python 全量 341/341、broker
+  15/15、`compileall`、`git diff --check` 和 deterministic fixture regeneration。尚待 committed-tree wheel、
+  clean install 与 Claude Fable 5 独立复核，因此这里不提前写 Go；
+- 本轮没有读取 AlphaEngine token、没有调用本地 MCP、没有访问真实数据、没有部署，也没有写
+  Evidence/Claim/Thesis。`get_document` 仍停留在 inventory；Guidepoint、雪球和 live MCP 仍为 No-Go。
 
 ## 蓝图阶段
 

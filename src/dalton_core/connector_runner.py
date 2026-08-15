@@ -120,12 +120,21 @@ _RUNNER_REQUEST_FIELDS = {
     "principal_ref", "runner_runtime_ref", "runner_actor_ref",
     "runner_environment_hash", "idempotency_key", "content_hash",
 }
+_MCP_RUNNER_REQUEST_FIELDS = _RUNNER_REQUEST_FIELDS | {
+    "transport_plan_ref", "transport_plan_hash",
+}
 
 
 def validate_connector_runner_request(value: Mapping[str, Any]) -> dict[str, Any]:
-    wire = _closed(value, _RUNNER_REQUEST_FIELDS, "ConnectorRunnerRequest")
-    if wire["schema_version"] != SCHEMA_VERSION:
+    version = value.get("schema_version") if isinstance(value, Mapping) else None
+    fields = (
+        _RUNNER_REQUEST_FIELDS if version == SCHEMA_VERSION
+        else _MCP_RUNNER_REQUEST_FIELDS if version == "0.2"
+        else None
+    )
+    if fields is None:
         raise RunnerValidationError("unsupported ConnectorRunnerRequest schema_version")
+    wire = _closed(value, fields, "ConnectorRunnerRequest")
     for name in (
         "id", "connector_invocation_ref", "execution_ref", "work_order_ref",
         "scheduler_lease_revision_ref", "connector_profile_ref", "call_spec_ref",
@@ -139,6 +148,13 @@ def validate_connector_runner_request(value: Mapping[str, Any]) -> dict[str, Any
         "capability_lease_hash", "runner_environment_hash",
     ):
         wire[name] = _hash(wire[name], name)
+    if version == "0.2":
+        wire["transport_plan_ref"] = _text(
+            wire["transport_plan_ref"], "transport_plan_ref"
+        )
+        wire["transport_plan_hash"] = _hash(
+            wire["transport_plan_hash"], "transport_plan_hash"
+        )
     wire["created_at"] = _timestamp(wire["created_at"], "created_at")
     wire["scheduler_attempt_number"] = _integer(
         wire["scheduler_attempt_number"], "scheduler_attempt_number", minimum=1
@@ -643,10 +659,17 @@ class ConnectorRunnerAdmissionGate:
         self.visibility_scopes = tuple(visibility_scopes)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
+    def _validate_runner_request_protocol(self, wire: Mapping[str, Any]) -> None:
+        if wire["schema_version"] != SCHEMA_VERSION:
+            raise RunnerConflict(
+                "public connector runner requires RunnerRequest wire 0.1"
+            )
+
     def validate(
         self, request: Mapping[str, Any], *, scheduler_lease_token: str
     ) -> ValidatedRunnerAdmission:
         wire = validate_connector_runner_request(request)
+        self._validate_runner_request_protocol(wire)
         scheduler_state = self.scheduler.validate_lease_for_use(
             wire["work_order_ref"],
             wire["scheduler_attempt_number"],
@@ -883,6 +906,31 @@ class ConnectorRunnerAdmissionGate:
             revalidated.deadline_at,
             idempotency_key=idempotency_key,
         )
+
+    def credential_handle_for_use(
+        self, adapter_request: Mapping[str, Any]
+    ) -> Any | None:
+        """Return no credential for the credential-free public runner wire."""
+
+        validate_connector_adapter_request(adapter_request)
+        return None
+
+    def validate_observation(
+        self,
+        value: Mapping[str, Any],
+        adapter_request: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Validate the public/recorded observation against its exact request."""
+
+        request = validate_connector_adapter_request(adapter_request)
+        observation = validate_adapter_transport_observation(value)
+        if observation["request_hash"] != request["content_hash"]:
+            raise RunnerConflict(
+                "adapter observation does not bind the exact AdapterRequest"
+            )
+        if len(observation["source_record_refs"]) > request["max_records"]:
+            raise RunnerValidationError("adapter exceeded max_records")
+        return observation
 
 
 __all__ = [

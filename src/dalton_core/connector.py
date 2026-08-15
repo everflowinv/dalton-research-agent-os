@@ -593,16 +593,25 @@ class ConnectorStore:
         if wire["source_hash"] != content_hash(source_identity):
             raise ConnectorValidationError("source_hash does not bind source_identity")
         operations = _refs(wire["allowed_operations"], "allowed_operations", nonempty=True)
-        hosts = [
-            _public_host(host, "allowed_hosts[]")
-            for host in _refs(wire["allowed_hosts"], "allowed_hosts", nonempty=True)
-        ]
-        wire["allowed_operations"] = operations
-        wire["allowed_hosts"] = hosts
         auth_mode = _text(wire["auth_mode"], "auth_mode")
         if auth_mode not in {"none", "credential_slot", "mcp_managed"}:
             raise ConnectorValidationError("auth_mode is invalid")
         wire["auth_mode"] = auth_mode
+        raw_hosts = _refs(
+            wire["allowed_hosts"],
+            "allowed_hosts",
+            nonempty=auth_mode != "mcp_managed",
+        )
+        if auth_mode == "mcp_managed":
+            if raw_hosts:
+                raise ConnectorValidationError(
+                    "mcp_managed profiles cannot declare HTTP host authority"
+                )
+            hosts: list[str] = []
+        else:
+            hosts = [_public_host(host, "allowed_hosts[]") for host in raw_hosts]
+        wire["allowed_operations"] = operations
+        wire["allowed_hosts"] = hosts
         slots = _refs(wire["credential_slot_refs"], "credential_slot_refs")
         if auth_mode == "none" and slots:
             raise ConnectorValidationError("auth_mode none cannot declare credential slots")
@@ -639,23 +648,29 @@ class ConnectorStore:
             pagination["cursor_field"] = _text(pagination["cursor_field"], "cursor_field")
         pagination["max_pages"] = _integer(pagination["max_pages"], "max_pages", minimum=1)
         wire["pagination"] = pagination
-        network = _closed(
-            wire["network_policy"],
-            {"allowed_schemes", "allow_redirects", "max_redirects", "resolve_public_only"},
-            "network_policy",
-        )
-        schemes = _refs(network["allowed_schemes"], "allowed_schemes", nonempty=True)
-        if any(scheme not in {"https"} for scheme in schemes):
-            raise ConnectorValidationError("only https is allowed in Connector P0")
-        if type(network["allow_redirects"]) is not bool or type(network["resolve_public_only"]) is not bool:
-            raise ConnectorValidationError("network policy flags must be boolean")
-        network["max_redirects"] = _integer(network["max_redirects"], "max_redirects")
-        if not network["allow_redirects"] and network["max_redirects"] != 0:
-            raise ConnectorValidationError("disabled redirects require max_redirects=0")
-        if not network["resolve_public_only"]:
-            raise ConnectorValidationError("Connector P0 requires public-only DNS resolution")
-        network["allowed_schemes"] = schemes
-        wire["network_policy"] = network
+        if auth_mode == "mcp_managed":
+            if wire["network_policy"] is not None:
+                raise ConnectorValidationError(
+                    "mcp_managed profiles cannot carry public network policy"
+                )
+        else:
+            network = _closed(
+                wire["network_policy"],
+                {"allowed_schemes", "allow_redirects", "max_redirects", "resolve_public_only"},
+                "network_policy",
+            )
+            schemes = _refs(network["allowed_schemes"], "allowed_schemes", nonempty=True)
+            if any(scheme not in {"https"} for scheme in schemes):
+                raise ConnectorValidationError("only https is allowed in Connector P0")
+            if type(network["allow_redirects"]) is not bool or type(network["resolve_public_only"]) is not bool:
+                raise ConnectorValidationError("network policy flags must be boolean")
+            network["max_redirects"] = _integer(network["max_redirects"], "max_redirects")
+            if not network["allow_redirects"] and network["max_redirects"] != 0:
+                raise ConnectorValidationError("disabled redirects require max_redirects=0")
+            if not network["resolve_public_only"]:
+                raise ConnectorValidationError("Connector P0 requires public-only DNS resolution")
+            network["allowed_schemes"] = schemes
+            wire["network_policy"] = network
         wire = self._record(wire)
         request_hash = content_hash(wire)
         with self.store._transaction() as cur:

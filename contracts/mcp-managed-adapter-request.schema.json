@@ -1,0 +1,24 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "title":"McpManagedAdapterRequest",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["protocol_version","runner_request_ref","runner_request_hash","connector_invocation_ref","connector_invocation_hash","profile_ref","profile_hash","call_spec_ref","call_spec_hash","capability_lease_ref","capability_lease_hash","principal_ref","reservation_ref","reservation_hash","physical_attempt_number","source_identity","source_hash","adapter_ref","adapter_hash","resolver_ref","resolver_manifest_hash","transport_target_ref","transport_target_hash","transport_plan_ref","transport_plan_hash","recorded_fixture_ref","recorded_fixture_hash","recorded_scenario_ref","recorded_scenario_hash","recorded_behavior","credential_grant_ref","credential_grant_hash","credential_use_ref","credential_use_hash","operation","parameters","query_hash","input_schema_ref","input_schema_hash","output_schema_ref","output_schema_hash","deadline_at","max_response_bytes","max_records","raw_sink_ref","content_hash"],
+  "properties":{
+    "protocol_version":{"const":"0.2"},
+    "runner_request_ref":{"$ref":"#/$defs/ref"},"runner_request_hash":{"$ref":"#/$defs/hash"},
+    "connector_invocation_ref":{"$ref":"#/$defs/ref"},"connector_invocation_hash":{"$ref":"#/$defs/hash"},
+    "profile_ref":{"$ref":"#/$defs/ref"},"profile_hash":{"$ref":"#/$defs/hash"},"call_spec_ref":{"$ref":"#/$defs/ref"},"call_spec_hash":{"$ref":"#/$defs/hash"},
+    "capability_lease_ref":{"$ref":"#/$defs/ref"},"capability_lease_hash":{"$ref":"#/$defs/hash"},"principal_ref":{"$ref":"#/$defs/ref"},
+    "reservation_ref":{"$ref":"#/$defs/ref"},"reservation_hash":{"$ref":"#/$defs/hash"},"physical_attempt_number":{"type":"integer","minimum":1},
+    "source_identity":{"type":"object","additionalProperties":false,"required":["source_ref","source_type","source_version"],"properties":{"source_ref":{"$ref":"#/$defs/ref"},"source_type":{"const":"authenticated_library"},"source_version":{"type":"string","minLength":1}}},"source_hash":{"$ref":"#/$defs/hash"},
+    "adapter_ref":{"$ref":"#/$defs/ref"},"adapter_hash":{"$ref":"#/$defs/hash"},"resolver_ref":{"$ref":"#/$defs/ref"},"resolver_manifest_hash":{"$ref":"#/$defs/hash"},
+    "transport_target_ref":{"$ref":"#/$defs/ref"},"transport_target_hash":{"$ref":"#/$defs/hash"},"transport_plan_ref":{"$ref":"#/$defs/ref"},"transport_plan_hash":{"$ref":"#/$defs/hash"},
+    "recorded_fixture_ref":{"$ref":"#/$defs/ref"},"recorded_fixture_hash":{"$ref":"#/$defs/hash"},"recorded_scenario_ref":{"$ref":"#/$defs/ref"},"recorded_scenario_hash":{"$ref":"#/$defs/hash"},"recorded_behavior":{"enum":["return","rate_limited","timeout","normalize_error","permission_denied","revoked"]},
+    "credential_grant_ref":{"$ref":"#/$defs/ref"},"credential_grant_hash":{"$ref":"#/$defs/hash"},"credential_use_ref":{"$ref":"#/$defs/ref"},"credential_use_hash":{"$ref":"#/$defs/hash"},
+    "operation":{"type":"string","minLength":1},"parameters":{"type":"object"},"query_hash":{"$ref":"#/$defs/hash"},
+    "input_schema_ref":{"$ref":"#/$defs/ref"},"input_schema_hash":{"$ref":"#/$defs/hash"},"output_schema_ref":{"$ref":"#/$defs/ref"},"output_schema_hash":{"$ref":"#/$defs/hash"},
+    "deadline_at":{"type":"string","format":"date-time"},"max_response_bytes":{"type":"integer","minimum":1},"max_records":{"type":"integer","minimum":1},"raw_sink_ref":{"type":"string","pattern":"^raw-sink:[0-9a-f]{64}$"},"content_hash":{"$ref":"#/$defs/hash"}
+  },
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},"ref":{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9+._-]*:[A-Za-z0-9][A-Za-z0-9:._-]*$","not":{"pattern":"^(file|path|https?):"}}}
+}

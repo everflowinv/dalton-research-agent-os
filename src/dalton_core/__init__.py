@@ -27,6 +27,12 @@ _LAZY_EXPORTS = {
     "CredentialGrantEnvelope": (
         ".credential_authority", "CredentialGrantEnvelope"
     ),
+    "CredentialAuthorityStore": (
+        ".credential_authority", "CredentialAuthorityStore"
+    ),
+    "McpManagedRunnerAdmissionGate": (
+        ".mcp_managed_runner", "McpManagedRunnerAdmissionGate"
+    ),
     "ModelRouter": (".model_router", "ModelRouter"),
     "ObservabilityStore": (".observability", "ObservabilityStore"),
     "ConnectorStore": (".connector", "ConnectorStore"),
@@ -62,6 +68,7 @@ __all__ = [
     "CapabilityAttestation",
     "CapabilityCatalog",
     "CredentialGrantEnvelope",
+    "CredentialAuthorityStore",
     "ConnectorStore",
     "ConnectorRunnerAdmissionGate",
     "StaticAdapterResolver",
@@ -69,6 +76,7 @@ __all__ = [
     "DashboardProjector",
     "DashboardQueryService",
     "ModelRouter",
+    "McpManagedRunnerAdmissionGate",
     "ObservabilityStore",
     "OpenClawModelAdapter",
     "OpenClawMetadataImporter",

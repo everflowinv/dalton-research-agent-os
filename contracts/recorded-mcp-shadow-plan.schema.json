@@ -1,0 +1,21 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "title":"RecordedMcpShadowPlan",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schema_version","id","created_at","connector_profile_template_ref","connector_profile_template_hash","inventory_fixture_ref","inventory_fixture_hash","recorded_fixture_ref","recorded_fixture_hash","source_ref","transport_target_ref","transport_target_hash","operation","input_schema_ref","input_schema_hash","output_schema_ref","output_schema_hash","parent_parameters","parent_query_hash","inventory_case_ref","inventory_case_hash","recorded_scenario_ref","recorded_scenario_hash","recorded_behavior","content_hash"],
+  "properties":{
+    "schema_version":{"const":"0.2"},"id":{"$ref":"#/$defs/ref"},"created_at":{"type":"string","format":"date-time"},
+    "connector_profile_template_ref":{"$ref":"#/$defs/ref"},"connector_profile_template_hash":{"$ref":"#/$defs/hash"},
+    "inventory_fixture_ref":{"$ref":"#/$defs/ref"},"inventory_fixture_hash":{"$ref":"#/$defs/hash"},
+    "recorded_fixture_ref":{"$ref":"#/$defs/ref"},"recorded_fixture_hash":{"$ref":"#/$defs/hash"},
+    "source_ref":{"$ref":"#/$defs/ref"},"transport_target_ref":{"$ref":"#/$defs/ref"},"transport_target_hash":{"$ref":"#/$defs/hash"},
+    "operation":{"type":"string","minLength":1},"input_schema_ref":{"$ref":"#/$defs/ref"},"input_schema_hash":{"$ref":"#/$defs/hash"},"output_schema_ref":{"$ref":"#/$defs/ref"},"output_schema_hash":{"$ref":"#/$defs/hash"},
+    "parent_parameters":{"type":"object"},"parent_query_hash":{"$ref":"#/$defs/hash"},
+    "inventory_case_ref":{"$ref":"#/$defs/ref"},"inventory_case_hash":{"$ref":"#/$defs/hash"},
+    "recorded_scenario_ref":{"$ref":"#/$defs/ref"},"recorded_scenario_hash":{"$ref":"#/$defs/hash"},
+    "recorded_behavior":{"enum":["return","rate_limited","timeout","normalize_error","permission_denied","revoked"]},
+    "content_hash":{"$ref":"#/$defs/hash"}
+  },
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},"ref":{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9+._-]*:[A-Za-z0-9][A-Za-z0-9:._-]*$","not":{"pattern":"^(file|path|https?):"}}}
+}

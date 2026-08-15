@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate deterministic CNINFO/SEC reference-shadow fixtures."""
+"""Regenerate deterministic public and MCP reference-shadow fixtures."""
 
 from __future__ import annotations
 
@@ -7,6 +7,9 @@ import json
 from pathlib import Path
 
 from dalton_core.recorded_source_adapter import build_recorded_source_fixtures
+from dalton_core.recorded_alphaengine_adapter import (
+    build_recorded_alphaengine_fixture,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,6 +22,12 @@ def main() -> int:
         (TARGET / f"{source}.json").write_text(
             json.dumps(fixture, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
+    (TARGET / "alphaengine.json").write_text(
+        json.dumps(
+            build_recorded_alphaengine_fixture(), indent=2, sort_keys=True
+        ) + "\n",
+        encoding="utf-8",
+    )
     return 0
 
 
