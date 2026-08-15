@@ -2,7 +2,7 @@
 
 日期：2026-08-15
 
-状态：本地候选；Fable 5 已批准阶段选择并对 committed tree 给出 Go，远端 CI 待完成
+状态：完成；Fable 5 已批准阶段选择并对 committed tree 给出 Go，远端 CI 全部通过
 
 ## 阶段裁决
 
@@ -95,8 +95,7 @@ write-ahead intent 仍留到非 fixture transport 上线前实现。
 - 固定 `SOURCE_DATE_EPOCH=1700000000` 的两次 Python 3.13 no-build-isolation wheel 逐位一致，SHA-256 均为
   `0077ca167f0b7626910edb10aac719b11e7a08bbea3062f61be0d33eeb5cade6`，每份 507,712 bytes；
 - 干净 venv 安装后 `pip check`、三步 plan build、packaged coordinator SQL 和 SQLite integrity 均通过；
-- P1-0d 远端 CI：Python 3.11、Python 3.13、broker 全部通过；
-- 当前 P2 候选尚待远端 CI。
+- P2 远端 CI `31869944201`：Python 3.11、Python 3.13、broker 全部通过。
 
 全量测试仍会从既有 MCP/reference-shadow 测试夹具打印少量未关闭 SQLite connection 的 `ResourceWarning`；
 357 项结果全部通过，P2 专项单独运行没有 warning。

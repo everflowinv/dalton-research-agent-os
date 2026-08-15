@@ -313,7 +313,8 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   `git diff --check` 通过；固定
   `SOURCE_DATE_EPOCH=1700000000` 两次 wheel 逐位一致，SHA-256 均为
   `0077ca167f0b7626910edb10aac719b11e7a08bbea3062f61be0d33eeb5cade6`，每份 507,712 bytes；干净 venv
-  安装、`pip check`、三步 plan build、packaged SQL 和 SQLite integrity 均通过；当前尚待远端 CI；
+  安装、`pip check`、三步 plan build、packaged SQL 和 SQLite integrity 均通过；GitHub CI `31869944201` 的
+  Python 3.11、Python 3.13 和 broker 三个 job 全部通过；
 - 本轮没有部署、没有访问 live source/MCP、没有读取 credential、没有写 Evidence/Claim/Thesis，也没有切换
   旧 cron。下一步是在本候选复核通过后实现 source/numeric verifier 与 candidate staging contract，仍先离线。
 
