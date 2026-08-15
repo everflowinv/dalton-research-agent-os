@@ -93,6 +93,15 @@ _LAZY_EXPORTS = {
     "ContextMaterializerError": (".context_materializer", "ContextMaterializerError"),
     "ContextMaterializerUnsupported": (".context_materializer", "ContextMaterializerUnsupported"),
     "validate_context_materialization": (".context_materializer", "validate_context_materialization"),
+    "ResearchQuestionBacklog": (".research_question_backlog", "ResearchQuestionBacklog"),
+    "ResearchQuestionConflict": (".research_question_backlog", "ResearchQuestionConflict"),
+    "ResearchQuestionError": (".research_question_backlog", "ResearchQuestionError"),
+    "ResearchQuestionNotFound": (".research_question_backlog", "ResearchQuestionNotFound"),
+    "ResearchQuestionValidationError": (
+        ".research_question_backlog", "ResearchQuestionValidationError"
+    ),
+    "question_ref_for": (".research_question_backlog", "question_ref_for"),
+    "question_identity": (".research_question_backlog", "question_identity"),
 }
 
 
@@ -151,6 +160,13 @@ __all__ = [
     "ContextMaterializerError",
     "ContextMaterializerUnsupported",
     "validate_context_materialization",
+    "ResearchQuestionBacklog",
+    "ResearchQuestionConflict",
+    "ResearchQuestionError",
+    "ResearchQuestionNotFound",
+    "ResearchQuestionValidationError",
+    "question_ref_for",
+    "question_identity",
     "install_openclaw_catalog",
     "migrate_legacy_workspace",
     "ProcessRuntimeAdapter",

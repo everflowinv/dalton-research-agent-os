@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MandateQuestionProgress",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "mandate_ref", "mandate_version_ref",
+    "mandate_version_hash", "totals", "questions", "answered_claim_refs",
+    "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "mandate_ref": {"type": "string", "minLength": 1},
+    "mandate_version_ref": {"type": "string", "minLength": 1},
+    "mandate_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "totals": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["open", "selected", "planned", "in_progress", "answered", "blocked", "retired"],
+      "properties": {
+        "open": {"type": "integer", "minimum": 0},
+        "selected": {"type": "integer", "minimum": 0},
+        "planned": {"type": "integer", "minimum": 0},
+        "in_progress": {"type": "integer", "minimum": 0},
+        "answered": {"type": "integer", "minimum": 0},
+        "blocked": {"type": "integer", "minimum": 0},
+        "retired": {"type": "integer", "minimum": 0}
+      }
+    },
+    "questions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["question_ref", "question_version_ref", "content_hash", "state", "created_at"],
+        "properties": {
+          "question_ref": {"type": "string", "pattern": "^research-question:[0-9a-f]{32}$"},
+          "question_version_ref": {"type": "string", "minLength": 1},
+          "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "state": {"enum": ["open", "selected", "planned", "in_progress", "answered", "blocked", "retired"]},
+          "created_at": {"type": "string", "format": "date-time"},
+          "answer_bindings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["claim_version_ref", "claim_version_hash", "claim_ref"],
+              "properties": {
+                "claim_version_ref": {"type": "string", "minLength": 1},
+                "claim_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "claim_ref": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        }
+      }
+    },
+    "answered_claim_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["claim_version_ref", "claim_version_hash", "claim_ref"],
+        "properties": {
+          "claim_version_ref": {"type": "string", "minLength": 1},
+          "claim_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "claim_ref": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

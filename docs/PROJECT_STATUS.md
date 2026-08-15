@@ -2,7 +2,7 @@
 
 更新日期：2026-08-15
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver、隔离 SEC public canary、HumanReviewAuthority + Ledger promotion 0.2 + HTML review 入口、DocumentIndex FTS5 只读投影、ContextPack authority-bound materializer，以及 Agenda exact context/materializer 统一路径，未部署
+- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver、隔离 SEC public canary、HumanReviewAuthority + Ledger promotion 0.2 + HTML review 入口、DocumentIndex FTS5 只读投影、ContextPack authority-bound materializer、Agenda exact context/materializer 统一路径，以及 ResearchQuestionBacklog append-only authority（开发候选），未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -29,8 +29,11 @@ supports relation；ClaimIndex status 派生现已改为读取 Core 的一致 Le
 caller-provided status；DocumentIndex FTS5 已完成开发候选；ContextPack authority-bound materializer 已完成
 claim/artifact 只读切片，并已接通 Agenda 的 mandate/perception exact reader。PerceptionSnapshot 现在进入 Core
 append-only authority，Agenda 使用独立 AgendaContextBinding，模型只读取固定 instruction/output contract 与
-materializer quoted JSONL；可变 snapshot 文件不再参与 replay 或 prompt。下一步进入 ResearchQuestionBacklog，
-本切片没有接 Planner、自动执行或任何新权限。
+materializer quoted JSONL；可变 snapshot 文件不再参与 replay 或 prompt。ResearchQuestionBacklog 开发候选已
+完成：稳定 question 身份、冻结状态机、AgendaDecision 链接、正式 ClaimVersion answer 绑定与 Mandate 进度
+投影，问题现在可以跨 cycle 存续。下一步进入 Planner 薄闭环：selected AgendaDecision → immutable
+ResearchPlanVersion → 复用 WorkflowRunVersion/WorkOrderLink，首版只允许 SEC public read-only plan，并逐
+plan 人批；本切片没有接 Planner、自动执行或任何新权限。
 正式 Ledger commit 继续逐条人工 gate。万华的 10 个工作日/20 个显式人工标签门槛
 只限制 Agenda 从 1 家扩到 3 家，不阻塞通用 connector、research coordinator、verifier、Model IR 和
 sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单独验收。
@@ -112,6 +115,32 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   干净安装、AgendaContextBinding contract、Agenda schema/migration 与公开导入检查通过；
 - 本切片未部署、未接 Backlog/Planner、未改变 auto-accept/timeout 权限、未改 cron。旧 live cycle 若没有已登记的
   PerceptionSnapshot 会 fail closed；部署前需单独裁决 backfill 或从新 cycle 开始，不能静默信任旧 snapshot 文件。
+
+### ResearchQuestionBacklog 当前进度（开发候选，未部署）
+
+- 新增 Core append-only ResearchQuestionBacklog authority：`question_ref` 由 canonical
+  `{mandate_ref, company_ref, question}` 绑定确定性派生，caller 不能提供 id/hash；内容版本行不可变带链；
+  冻结状态机 `open → selected → planned → in_progress → answered | blocked | retired`，每个迁移在同一
+  Core 事务内校验并追加不可变 event，非法/乱序/重复迁移 fail closed，无恢复迁移；
+- 同一问题跨 cycle 保持同一身份：相同绑定+相同内容幂等返回既有 head（duplicate），相同绑定+不同内容
+  fail closed（conflict）；`backlog_idempotency` 沿用 agenda 幂等约定，同 key 不同 request 返回 conflict；
+- `select_question` 在事务内重读 exact AgendaDecision/AgendaCycle/MandateVersion，要求 cycle mandate ==
+  问题 mandate、cycle company == 问题 scope、decision 的 selected candidate 与问题内容逐字一致，
+  并核对回答标准与 `source_refs`；读取 link 时再次复核 event、decision、cycle、candidate、policy 和
+  backlog head，跨 mandate/跨公司/来源换绑/伪造 decision fail closed；
+- `answer_question` 只接受正式 ClaimVersion：逐条从 Core `claim_versions` 重读、重算 hash、按 0.1/0.2
+  重新校验闭合形状，candidate/staging/缺失/篡改 claim 拒绝，读取 answer binding 时再次核对 exact
+  ClaimVersion，`candidate-claim:` 前缀显式拒绝；
+  AgendaDecision 永远不会成为 answer；
+- `mandate_progress` 是纯确定性、可重建的进度投影：绑定 active MandateVersion ref/hash，统计各 state
+  计数与 answered claim refs；不写任何表、不改 MandateVersion authority、不成为替代 authority；
+- 本切片不创建 plan/WorkOrder/DAG，`plan_question` 只推进状态机；无 auto-accept 路径；
+  专项 34/34，Python 全量 494/494，相关回归 82/82、broker 15/15、101 份 JSON contract 解析、
+  16 份 Core SQL schema、`compileall`、`git diff --check`、SQLite integrity/FK 与 deterministic wheel
+  检查全部通过。
+- 未部署、未接 Planner/WorkOrder/cron、未改变 auto-accept/timeout 权限；Agenda Shadow 旧
+  `research_question_versions` 写路径保持不变，与 backlog 并存。完整结果见
+  [research-question-backlog-2026-08-15.md](reports/research-question-backlog-2026-08-15.md)。
 
 ### Connector P0-0 当前进度（未部署）
 
@@ -769,6 +798,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Agenda 运营与反馈：`docs/reports/phase-1-agenda-control-2026-08-14.md`
 - P2 authority resolver 与 SEC canary：`docs/reports/p2-authority-resolver-sec-canary-2026-08-15.md`
 - DocumentIndex FTS5：`docs/reports/document-index-fts5-2026-08-15.md`
+- ResearchQuestionBacklog：`docs/reports/research-question-backlog-2026-08-15.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`
