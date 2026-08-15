@@ -11,10 +11,11 @@ import ipaddress
 import json
 import re
 from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .connector import validate_connector_proposal_manifest
+from .connector import ConnectorError, validate_connector_proposal_manifest
 from .store import canonical_json, content_hash
 
 
@@ -49,6 +50,8 @@ _UNSAFE_COMPACT_MARKERS = (
 _INVENTORY_REF_RE = re.compile(
     r"[a-z][a-z0-9-]*(?::[a-z0-9][a-z0-9._-]*)+", re.ASCII
 )
+_PROPOSAL_PACKAGE_FILES = frozenset({"profile.json", "fixture.json", "proposal.json"})
+_MAX_PROPOSAL_PACKAGE_FILE_BYTES = 1_000_000
 
 
 class ConnectorInventoryError(ValueError):
@@ -78,6 +81,17 @@ def _hash(value: Any, name: str) -> str:
     if not _HASH_RE.fullmatch(value):
         raise ConnectorInventoryError(f"{name} must be lowercase SHA-256 hex")
     return value
+
+
+def _canonical_timestamp(value: Any, name: str) -> str:
+    value = _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ConnectorInventoryError(f"{name} must be RFC3339") from exc
+    if parsed.tzinfo is None:
+        raise ConnectorInventoryError(f"{name} must include timezone")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
 def _inventory_ref(value: Any, name: str) -> str:
@@ -141,7 +155,9 @@ def _assert_no_sensitive_material(wire: Mapping[str, Any], name: str) -> None:
         )
 
 
-def validate_connector_fixture_manifest(spec: Mapping[str, Any]) -> dict[str, Any]:
+def _validate_connector_fixture_manifest(
+    spec: Mapping[str, Any], *, frozen: bool
+) -> dict[str, Any]:
     fields = {
         "schema_version", "id", "created_at", "connector_template_ref",
         "recording_boundary", "authenticated", "synthetic", "operations", "cases",
@@ -152,7 +168,8 @@ def validate_connector_fixture_manifest(spec: Mapping[str, Any]) -> dict[str, An
         raise ConnectorInventoryError("unsupported ConnectorFixtureManifest schema_version")
     for name in ("id", "connector_template_ref"):
         wire[name] = _inventory_ref(wire[name], name)
-    if wire["created_at"] != CREATED_AT:
+    wire["created_at"] = _canonical_timestamp(wire["created_at"], "created_at")
+    if frozen and wire["created_at"] != CREATED_AT:
         raise ConnectorInventoryError("fixture created_at differs from the frozen build")
     match = re.fullmatch(
         r"connector-profile-template:([a-z0-9][a-z0-9-]*):0\.1",
@@ -344,7 +361,13 @@ def validate_connector_fixture_manifest(spec: Mapping[str, Any]) -> dict[str, An
     return wire
 
 
-def validate_connector_profile_template(spec: Mapping[str, Any]) -> dict[str, Any]:
+def validate_connector_fixture_manifest(spec: Mapping[str, Any]) -> dict[str, Any]:
+    return _validate_connector_fixture_manifest(spec, frozen=True)
+
+
+def _validate_connector_profile_template(
+    spec: Mapping[str, Any], *, frozen: bool
+) -> dict[str, Any]:
     fields = {
         "schema_version", "id", "created_at", "connector_ref", "source_identity",
         "transport", "auth_boundary", "route_restrictions", "schema_documents",
@@ -356,7 +379,8 @@ def validate_connector_profile_template(spec: Mapping[str, Any]) -> dict[str, An
         raise ConnectorInventoryError("unsupported ConnectorProfileTemplate schema_version")
     for name in ("id", "connector_ref", "fixture_manifest_ref"):
         wire[name] = _inventory_ref(wire[name], name)
-    if wire["created_at"] != CREATED_AT:
+    wire["created_at"] = _canonical_timestamp(wire["created_at"], "created_at")
+    if frozen and wire["created_at"] != CREATED_AT:
         raise ConnectorInventoryError("profile created_at differs from the frozen build")
     wire["fixture_manifest_hash"] = _hash(
         wire["fixture_manifest_hash"], "fixture_manifest_hash"
@@ -553,7 +577,7 @@ def validate_connector_profile_template(spec: Mapping[str, Any]) -> dict[str, An
             raise ConnectorInventoryError("fallback route names an undeclared operation")
     if transport["kind"] == "mcp_managed" and auth != host_auth:
         raise ConnectorInventoryError("mcp_managed profiles require host-owned auth")
-    if transport["kind"] == "host_tool":
+    if frozen and transport["kind"] == "host_tool":
         keyless_reddit = transport["target_ref"] == "host-tool:last30days-reddit-keyless"
         if keyless_reddit != (auth == none_auth):
             raise ConnectorInventoryError(
@@ -572,10 +596,15 @@ def validate_connector_profile_template(spec: Mapping[str, Any]) -> dict[str, An
         raise ConnectorInventoryError("inventory readiness cannot grant execution")
     readiness["required_gate"] = _text(readiness["required_gate"], "required_gate")
     wire["readiness"] = readiness
-    _validate_frozen_profile_contract(wire)
+    if frozen:
+        _validate_frozen_profile_contract(wire)
     _validate_content_hash(wire, "ConnectorProfileTemplate")
     _assert_no_sensitive_material(wire, "ConnectorProfileTemplate")
     return wire
+
+
+def validate_connector_profile_template(spec: Mapping[str, Any]) -> dict[str, Any]:
+    return _validate_connector_profile_template(spec, frozen=True)
 
 
 def validate_connector_inventory_index(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -1217,6 +1246,155 @@ def _proposal_operations(profile: Mapping[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
+def _read_proposal_package_json(path: Path) -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise ConnectorInventoryError(f"proposal package member is not a regular file: {path.name}")
+    if path.stat().st_size > _MAX_PROPOSAL_PACKAGE_FILE_BYTES:
+        raise ConnectorInventoryError(f"proposal package member is too large: {path.name}")
+
+    def closed_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ConnectorInventoryError(
+                    f"proposal package member contains duplicate JSON key: {key}"
+                )
+            result[key] = value
+        return result
+
+    try:
+        parsed = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=closed_pairs
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ConnectorInventoryError(
+            f"proposal package member is not canonical JSON: {path.name}"
+        ) from exc
+    if not isinstance(parsed, Mapping):
+        raise ConnectorInventoryError(
+            f"proposal package member must contain one JSON object: {path.name}"
+        )
+    return dict(parsed)
+
+
+def _validate_proposal_package_graph(
+    profile: Mapping[str, Any],
+    fixture: Mapping[str, Any],
+    proposal: Mapping[str, Any],
+) -> None:
+    match = re.fullmatch(
+        r"connector-profile-template:([a-z0-9][a-z0-9-]*):0\.1",
+        profile["id"],
+    )
+    if match is None:
+        raise ConnectorInventoryError("proposal profile id is not canonical")
+    slug = match.group(1)
+    expected_fixture_operations = [
+        {
+            "operation": operation["operation"],
+            "pagination_mode": operation["pagination"]["mode"],
+        }
+        for operation in profile["operations"]
+    ]
+    completeness_by_operation = {
+        operation["operation"]: operation["completeness_ceiling"]
+        for operation in profile["operations"]
+    }
+    fixture_semantics_bound = all(
+        (
+            case["completeness"]
+            == completeness_by_operation[case["operation"]]
+            if case["scenario"] in {"success", "empty"}
+            else True
+        )
+        for case in fixture["cases"]
+    )
+    expected_recording_boundary = (
+        "public_provider"
+        if profile["transport"]["kind"] == "public_https"
+        else "host_gateway"
+    )
+    expected_authenticated = profile["auth_boundary"]["mode"] == "host_owned"
+    expected_adapter_source_hash = content_hash(
+        {
+            "target_ref": profile["transport"]["target_ref"],
+            "operations": [item["operation"] for item in profile["operations"]],
+        }
+    )
+    exact = (
+        profile["created_at"] == fixture["created_at"] == proposal["created_at"]
+        and fixture["connector_template_ref"] == profile["id"]
+        and fixture["recording_boundary"] == expected_recording_boundary
+        and fixture["authenticated"] is expected_authenticated
+        and fixture["operations"] == expected_fixture_operations
+        and fixture_semantics_bound
+        and profile["fixture_manifest_ref"] == fixture["id"]
+        and profile["fixture_manifest_hash"] == fixture["content_hash"]
+        and proposal["connector_ref"] == profile["connector_ref"]
+        and proposal["profile_template_ref"] == profile["id"]
+        and proposal["profile_template_hash"] == profile["content_hash"]
+        and proposal["fixture_manifest_ref"] == fixture["id"]
+        and proposal["fixture_manifest_hash"] == fixture["content_hash"]
+        and proposal["transport_kind"] == profile["transport"]["kind"]
+        and proposal["transport_target_ref"] == profile["transport"]["target_ref"]
+        and proposal["transport_target_hash"] == profile["transport"]["target_hash"]
+        and proposal["auth_boundary"] == profile["auth_boundary"]
+        and proposal["operations"] == _proposal_operations(profile)
+        and proposal["source_identity"]["source"]
+        == profile["source_identity"]["source_ref"]
+        and proposal["source_identity"]["source_version"]
+        == profile["source_identity"]["source_version"]
+        and proposal["source_identity"]["adapter"]
+        == profile["transport"]["target_ref"]
+        and proposal["adapter_source_hash"] == expected_adapter_source_hash
+        and proposal["id"] == f"connector-proposal-manifest:{slug}:0.2"
+        and proposal["capability_proposal_ref"]
+        == f"capability-proposal:connector:{slug}:0.1"
+        and proposal["adapter_package_ref"]
+        == f"inventory-artifact:adapter-contract:{slug}:0.1"
+        and proposal["offline_attestation_policy_ref"]
+        == "policy:connector-inventory-offline:0.1"
+        and proposal["promotion_policy_ref"] == "policy:connector-promotion:0.1"
+        and proposal["inventory_state"] == "proposal_only"
+        and proposal["requested_canary"] is None
+        and all(
+            operation["side_effects"] == ["read:recorded-fixture"]
+            for operation in profile["operations"]
+        )
+    )
+    if not exact:
+        raise ConnectorInventoryError("connector proposal package graph binding is not exact")
+
+
+def load_connector_proposal_package(root: str | Path) -> dict[str, Any]:
+    """Validate one offline proposal package without changing the frozen P1-0 inventory."""
+
+    directory = Path(root)
+    if directory.is_symlink() or not directory.is_dir():
+        raise ConnectorInventoryError("connector proposal package root must be a directory")
+    members = {member.name for member in directory.iterdir()}
+    if members != _PROPOSAL_PACKAGE_FILES:
+        raise ConnectorInventoryError(
+            "connector proposal package must contain exactly profile.json, fixture.json, and proposal.json"
+        )
+    fixture = _validate_connector_fixture_manifest(
+        _read_proposal_package_json(directory / "fixture.json"), frozen=False
+    )
+    profile = _validate_connector_profile_template(
+        _read_proposal_package_json(directory / "profile.json"), frozen=False
+    )
+    try:
+        proposal = validate_connector_proposal_manifest(
+            _read_proposal_package_json(directory / "proposal.json")
+        )
+    except ConnectorError as exc:
+        raise ConnectorInventoryError("connector proposal manifest is invalid") from exc
+    if proposal["schema_version"] != "0.2":
+        raise ConnectorInventoryError("connector proposal package requires manifest wire 0.2")
+    _validate_proposal_package_graph(profile, fixture, proposal)
+    return {"profile": profile, "fixture": fixture, "proposal": proposal}
+
+
 def _validate_inventory_graph_entry(
     entry: Mapping[str, Any],
     profile: Mapping[str, Any],
@@ -1361,6 +1539,7 @@ def load_packaged_connector_inventory(root: str | Path | None = None) -> dict[st
 
 __all__ = [
     "ConnectorInventoryError", "PROFILE_DEFINITIONS", "build_connector_inventory",
-    "load_packaged_connector_inventory", "validate_connector_fixture_manifest",
+    "load_connector_proposal_package", "load_packaged_connector_inventory",
+    "validate_connector_fixture_manifest",
     "validate_connector_inventory_index", "validate_connector_profile_template",
 ]

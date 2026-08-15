@@ -238,6 +238,32 @@ SourceEnvelope、artifact、usage 或 settlement，也不能让 response outcome
 这两个 shadow 不进入 Research Ledger。只有后续 ContextPack/ClaimIndex builder 和独立 verifier 才能把
 SourceEnvelope 转成 candidate Evidence/Claim；P1-0 不写 Evidence、Claim 或 Thesis。
 
+### Connector 粒度与路由
+
+Connector 是 source、transport、auth、completeness 和 provenance 的权限边界，不要求“一个 connector 只能有
+一个动作”。同一个稳定 source/authority 可以在一个 profile 中声明多个闭合 operation；findata、公司深研等跨
+多个 source/auth 边界的能力属于 research recipe，由 coordinator 编排多个 connector，不能把不同 authority
+塞进一个不透明 connector。
+
+Planner 每个 WorkOrder 只做一次语义选择，冻结需要的 source、operation、参数、completeness 和允许的 fallback。
+Runner 不在每个 physical call 重跑模型或语义 Router；它只执行本地、确定性的 use-time lease、quota、host/auth、
+schema、retry 和 provenance 校验。分页和并发调用复用已冻结计划，但每个 physical attempt 仍须独立 admission、
+计量和结算。`CompiledConnectorPlan` 在 P2 coordinator 开始消费该对象时再引入。
+
+### 可扩展 proposal package
+
+冻结的 P1-0a 十件 inventory 继续由 deterministic build 和 exact package comparison 保护。新增 connector 不再要求
+修改这份中央 Python allowlist；offline proposal loader 接受一个只含以下三份 JSON 的目录：
+
+- `profile.json`：source/transport/auth/operation/schema/readiness contract；
+- `fixture.json`：逐 operation synthetic scenario matrix；
+- `proposal.json`：wire 0.2 proposal-only manifest 与跨对象 hash/ref binding。
+
+loader 只产出经过验证的数据对象，不注册 Catalog、不生成 lease、不请求 canary，也不加载或执行 adapter code。
+任一 live/lease escalation、非 synthetic fixture、敏感配置或 credential、额外文件、schema/hash 漂移、跨对象
+source/transport/auth/operation/fixture 分叉都会 fail closed。Human promotion、Catalog publish、静态 resolver 安装
+与每次 physical call admission 仍使用原有 authority gate。
+
 ## 自生成模板
 
 Dalton 发现同一种 source/operation 重复出现或现有 connector 缺能力时：

@@ -2,7 +2,7 @@
 
 更新日期：2026-08-14  
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前提交内容：Connector P1-0 十类 inventory + CNINFO/SEC recorded reference shadows，未部署
+- 当前提交内容：Connector P1-0 十类 inventory、CNINFO/SEC recorded reference shadows、可扩展 offline proposal package loader，未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -236,15 +236,19 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   broker 15/15、敌对 completion probes、compileall、diff-check、clean install 和 SQLite integrity 全部通过；
 - 独立审阅在 UTC 跨日后把全量基线重跑为 316/317，唯一失败是既有 Agenda `decide_cycle` 重新按真实时间
   查 active policy，而没有读取 cycle 冻结的 policy version。后续修复改为 exact frozen policy binding，并加
-  active policy 中途换版回归；当前 Python 全量恢复为 317/317；
+  active policy 中途换版回归；当前 Python 全量为 319/319；
 - `2cb671e` 的两次 archive wheel 独立复现 SHA-256 均为
   `8775adbeaa6c901801e84dfe3652cdaa312912d65301cb13173c068edae23f58`。旧记录
   `ca0e6a9e...` 无法从任何现存提交复现，不能继续作为验收事实。工具链为 Python 3.13.14、setuptools
   84.0.0、pip 26.1.2、`SOURCE_DATE_EPOCH=1700000000`；Agenda 修复后的工作树 wheel 两次逐位一致，
   SHA-256 为 `0df85b85981fd14ebc095bf9ecd5ff86377d11a4ac8822ffc1166dea01bbbd04`；
-- 下一最小扩展切片不是语义 Router 或 `CompiledConnectorPlan`，而是在十件 frozen inventory loader 之外新增
-  声明式 proposal package validator/loader。目标是第 11 条 proposal-only connector 不改中央 Python 即可完成
-  offline graph/schema/fixture 验证；human promotion、Catalog publish 和每次 physical call admission 不放宽；
+- P1-0c 在十件 frozen inventory loader 之外新增声明式 proposal package loader。每个 package 只能包含
+  `profile.json`、`fixture.json`、`proposal.json`，第 11 条及后续 proposal-only connector 不改中央
+  `PROFILE_DEFINITIONS` 即可完成 offline graph/schema/fixture 验证。loader 拒绝额外文件、非 synthetic
+  fixture、执行权限升级、schema/hash 分叉、敏感配置和跨对象 graph 漂移；冻结十件 loader 保持不变；
+- connector 语义选择不在每个 physical call 重做。Planner 在 WorkOrder/协调器边界一次选定 source、operation、
+  completeness 和 fallback；Runner 每次调用只做确定性的 lease、quota、host/auth、schema 与 provenance gate。
+  `CompiledConnectorPlan` 等到 P2 coordinator 有真实消费者时再加入，不提前建立独立 Router；
 - 本轮没有部署、没有访问真实数据源、没有使用 credential，也没有写 Evidence/Claim/Thesis。真实 public
   network 仍被 killable total-deadline transport gate 阻塞；AlphaEngine/Guidepoint/雪球等 host/MCP 路径仍被
   runner wire 0.2、credential revoke/max_calls use-time authority 阻塞。

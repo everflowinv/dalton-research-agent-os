@@ -9,7 +9,9 @@ from pathlib import Path
 from dalton_core.connector import ConnectorValidationError, validate_connector_proposal_manifest
 from dalton_core.connector_inventory import (
     ConnectorInventoryError,
+    PROFILE_DEFINITIONS,
     build_connector_inventory,
+    load_connector_proposal_package,
     load_packaged_connector_inventory,
     validate_connector_fixture_manifest,
     validate_connector_inventory_index,
@@ -27,6 +29,201 @@ def rehash(wire: dict) -> dict:
     result.pop("content_hash", None)
     result["content_hash"] = content_hash(result)
     return result
+
+
+def synthetic_proposal_package() -> dict[str, dict]:
+    slug = "synthetic-prices"
+    created_at = "2026-08-15T04:00:00.000000+00:00"
+    connector_ref = f"connector:{slug}"
+    profile_ref = f"connector-profile-template:{slug}:0.1"
+    fixture_ref = f"connector-fixture-manifest:{slug}:0.1"
+    target_ref = f"transport:{slug}:0.1"
+    operation = "get_quote"
+    input_schema = {
+        "type": "object", "additionalProperties": False,
+        "required": ["symbol"],
+        "properties": {"symbol": {"type": "string", "minLength": 1}},
+    }
+    output_schema = {
+        "type": "object", "additionalProperties": False,
+        "required": ["source_record_refs", "next_cursor", "provider_status"],
+        "properties": {
+            "source_record_refs": {
+                "type": "array", "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1},
+            },
+            "next_cursor": {"type": ["string", "null"]},
+            "provider_status": {"type": "integer", "minimum": 100},
+        },
+    }
+    input_ref = f"schema:connector-proposal:{slug}:{operation}:input:0.1"
+    output_ref = f"schema:connector-proposal:{slug}:{operation}:output:0.1"
+    fixture_cases = []
+    for scenario in (
+        "success", "empty", "partial", "schema_drift",
+        "rate_limited", "timeout", "malformed",
+    ):
+        succeeded = scenario in {"success", "empty", "partial"}
+        outcome = (
+            "succeeded" if succeeded else
+            "rate_limited" if scenario == "rate_limited" else
+            "timeout" if scenario == "timeout" else "failed"
+        )
+        source_status = {
+            "success": "complete", "empty": "empty", "partial": "partial",
+        }.get(scenario)
+        completeness = {
+            "success": "enumerated", "empty": "enumerated", "partial": "partial",
+        }.get(scenario)
+        fixture_cases.append(
+            {
+                "case_ref": f"fixture:{slug}:{operation}:{scenario}:0.1",
+                "scenario": scenario,
+                "operation": operation,
+                "outcome": outcome,
+                "provider_status": (
+                    None if scenario == "timeout" else
+                    429 if scenario == "rate_limited" else 200
+                ),
+                "source_status": source_status,
+                "completeness": completeness,
+                "page": None,
+                "next_cursor": None,
+                "source_record_refs": (
+                    [f"record:{slug}:synthetic:1"]
+                    if scenario in {"success", "partial"} else []
+                ),
+                "raw_payload_hash": (
+                    content_hash(
+                        {
+                            "synthetic": True, "connector": slug,
+                            "operation": operation, "scenario": scenario,
+                        }
+                    )
+                    if succeeded else None
+                ),
+                "error_code": None if succeeded else scenario,
+            }
+        )
+    fixture = rehash(
+        {
+            "schema_version": "0.1", "id": fixture_ref,
+            "created_at": created_at, "connector_template_ref": profile_ref,
+            "recording_boundary": "public_provider", "authenticated": False,
+            "synthetic": True,
+            "operations": [{"operation": operation, "pagination_mode": "none"}],
+            "cases": fixture_cases,
+        }
+    )
+    target_hash = content_hash(
+        {
+            "kind": "public_https", "target_ref": target_ref,
+            "host_policy": "literal_allowlist",
+            "allowed_hosts": ["prices.example.com"],
+        }
+    )
+    operation_wire = {
+        "operation": operation, "source_method": operation,
+        "input_schema_ref": input_ref, "input_schema_hash": content_hash(input_schema),
+        "output_schema_ref": output_ref, "output_schema_hash": content_hash(output_schema),
+        "completeness_ceiling": "enumerated",
+        "pagination": {
+            "mode": "none", "cursor_field": None,
+            "bounded_window_required": False, "max_pages": 1,
+        },
+        "side_effects": ["read:recorded-fixture"],
+    }
+    profile = rehash(
+        {
+            "schema_version": "0.1", "id": profile_ref,
+            "created_at": created_at, "connector_ref": connector_ref,
+            "source_identity": {
+                "source_ref": f"source:{slug}", "source_type": "market_data",
+                "source_version": "proposal-0.1",
+            },
+            "transport": {
+                "kind": "public_https", "target_ref": target_ref,
+                "target_hash": target_hash, "host_policy": "literal_allowlist",
+                "allowed_hosts": ["prices.example.com"],
+            },
+            "auth_boundary": {
+                "mode": "none", "owner": "none",
+                "credential_material": "forbidden", "use_time_authority": "none",
+            },
+            "route_restrictions": {
+                "allowed_target_refs": [target_ref],
+                "forbidden_target_refs": ["route:private-network"],
+                "fallback_routes": [], "provenance_label_required": True,
+            },
+            "schema_documents": [
+                {
+                    "schema_ref": input_ref, "schema_hash": content_hash(input_schema),
+                    "document": input_schema,
+                },
+                {
+                    "schema_ref": output_ref, "schema_hash": content_hash(output_schema),
+                    "document": output_schema,
+                },
+            ],
+            "operations": [operation_wire],
+            "fixture_manifest_ref": fixture_ref,
+            "fixture_manifest_hash": fixture["content_hash"],
+            "readiness": {
+                "level": "inventory_connected", "lease_eligible": False,
+                "live_execution_allowed": False,
+                "required_gate": "public_https_runner_v0.2",
+            },
+        }
+    )
+    proposal = rehash(
+        {
+            "schema_version": "0.2",
+            "id": f"connector-proposal-manifest:{slug}:0.2",
+            "created_at": created_at,
+            "capability_proposal_ref": f"capability-proposal:connector:{slug}:0.1",
+            "connector_ref": connector_ref,
+            "source_identity": {
+                "source": f"source:{slug}", "adapter": target_ref,
+                "source_version": "proposal-0.1", "adapter_version": "proposal-0.1",
+            },
+            "adapter_package_ref": f"inventory-artifact:adapter-contract:{slug}:0.1",
+            "adapter_source_hash": content_hash(
+                {"target_ref": target_ref, "operations": [operation]}
+            ),
+            "profile_template_ref": profile_ref,
+            "profile_template_hash": profile["content_hash"],
+            "operations": [
+                {
+                    "operation": operation,
+                    "input_schema_ref": input_ref,
+                    "input_schema_hash": content_hash(input_schema),
+                    "output_schema_ref": output_ref,
+                    "output_schema_hash": content_hash(output_schema),
+                    "completeness": "enumerated", "pagination": "none",
+                    "side_effects": ["read:recorded-fixture"],
+                }
+            ],
+            "fixture_manifest_ref": fixture_ref,
+            "fixture_manifest_hash": fixture["content_hash"],
+            "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+            "requested_canary": None,
+            "promotion_policy_ref": "policy:connector-promotion:0.1",
+            "builder_ref": "builder:test-connector-proposal:0.1",
+            "transport_kind": "public_https",
+            "transport_target_ref": target_ref,
+            "transport_target_hash": target_hash,
+            "auth_boundary": profile["auth_boundary"],
+            "inventory_state": "proposal_only",
+        }
+    )
+    return {"profile": profile, "fixture": fixture, "proposal": proposal}
+
+
+def write_proposal_package(root: Path, package: dict[str, dict]) -> None:
+    for name in ("profile", "fixture", "proposal"):
+        (root / f"{name}.json").write_text(
+            canonical_json(package[name]), encoding="utf-8"
+        )
 
 
 class ConnectorInventoryTests(unittest.TestCase):
@@ -51,6 +248,86 @@ class ConnectorInventoryTests(unittest.TestCase):
             self.assertEqual(
                 validate_connector_proposal_manifest(proposal), proposal
             )
+
+    def test_extensible_proposal_package_accepts_a_new_offline_connector(self) -> None:
+        frozen_before = load_packaged_connector_inventory()
+        package = synthetic_proposal_package()
+        self.assertNotIn(
+            package["profile"]["connector_ref"],
+            {definition["connector_ref"] for definition in PROFILE_DEFINITIONS},
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_proposal_package(root, package)
+            loaded = load_connector_proposal_package(root)
+
+        self.assertEqual(loaded, package)
+        self.assertEqual(
+            loaded["profile"]["readiness"],
+            {
+                "level": "inventory_connected",
+                "lease_eligible": False,
+                "live_execution_allowed": False,
+                "required_gate": "public_https_runner_v0.2",
+            },
+        )
+        self.assertEqual(load_packaged_connector_inventory(), frozen_before)
+
+    def test_extensible_proposal_package_fails_closed_on_escalation_and_forks(self) -> None:
+        def assert_rejected(
+            package: dict[str, dict], *, extra_file: bool = False
+        ) -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_proposal_package(root, package)
+                if extra_file:
+                    (root / "README.json").write_text("{}", encoding="utf-8")
+                with self.assertRaises(ConnectorInventoryError):
+                    load_connector_proposal_package(root)
+
+        live = synthetic_proposal_package()
+        live["profile"]["readiness"]["lease_eligible"] = True
+        live["profile"] = rehash(live["profile"])
+        live["proposal"]["profile_template_hash"] = live["profile"]["content_hash"]
+        live["proposal"] = rehash(live["proposal"])
+        assert_rejected(live)
+
+        schema_fork = synthetic_proposal_package()
+        schema_fork["profile"]["operations"][0]["input_schema_hash"] = "0" * 64
+        schema_fork["profile"] = rehash(schema_fork["profile"])
+        schema_fork["proposal"]["profile_template_hash"] = schema_fork["profile"][
+            "content_hash"
+        ]
+        schema_fork["proposal"] = rehash(schema_fork["proposal"])
+        assert_rejected(schema_fork)
+
+        real_fixture = synthetic_proposal_package()
+        real_fixture["fixture"]["synthetic"] = False
+        real_fixture["fixture"] = rehash(real_fixture["fixture"])
+        real_fixture["profile"]["fixture_manifest_hash"] = real_fixture["fixture"][
+            "content_hash"
+        ]
+        real_fixture["profile"] = rehash(real_fixture["profile"])
+        real_fixture["proposal"]["fixture_manifest_hash"] = real_fixture["fixture"][
+            "content_hash"
+        ]
+        real_fixture["proposal"]["profile_template_hash"] = real_fixture["profile"][
+            "content_hash"
+        ]
+        real_fixture["proposal"] = rehash(real_fixture["proposal"])
+        assert_rejected(real_fixture)
+
+        unsafe = synthetic_proposal_package()
+        unsafe["proposal"]["builder_ref"] = "api_key:secret-material"
+        unsafe["proposal"] = rehash(unsafe["proposal"])
+        assert_rejected(unsafe)
+
+        graph_fork = synthetic_proposal_package()
+        graph_fork["proposal"]["source_identity"]["adapter"] = "transport:fork:0.1"
+        graph_fork["proposal"] = rehash(graph_fork["proposal"])
+        assert_rejected(graph_fork)
+
+        assert_rejected(synthetic_proposal_package(), extra_file=True)
 
     def test_inventory_has_exactly_ten_distinct_profiles_and_required_splits(self) -> None:
         profiles = self.built["templates"]

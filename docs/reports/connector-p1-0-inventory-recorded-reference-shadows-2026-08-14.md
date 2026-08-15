@@ -2,7 +2,7 @@
 
 日期：2026-08-14
 
-状态：P1-0a 已获独立 Go；P1-0b 最终候选本地验收通过，待 Claude Fable 5 补做最终增量裁决
+状态：P1-0a 与 P1-0b 均已获 Claude Fable 5 独立 Go
 范围：离线 contract、synthetic/recorded fixture、authority replay；未部署、未访问真实数据源
 
 ## 阶段裁决
