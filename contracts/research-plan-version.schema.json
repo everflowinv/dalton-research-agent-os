@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResearchPlanVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "planner_ref", "planner_hash",
+    "version", "prior_version_ref", "question_ref", "question_version_ref",
+    "question_version_hash", "agenda_binding", "context_binding_ref",
+    "context_binding_hash", "execution_scope", "actor_ref", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^research-plan:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "planner_ref": {"const": "planner:research-plan-thin:0.1"},
+    "planner_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "version": {"type": "integer", "minimum": 1},
+    "prior_version_ref": {
+      "anyOf": [{"type": "null"}, {"type": "string", "minLength": 1}]
+    },
+    "question_ref": {"type": "string", "pattern": "^research-question:[0-9a-f]{32}$"},
+    "question_version_ref": {"type": "string", "minLength": 1},
+    "question_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "agenda_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_ref", "decision_hash", "cycle_ref", "cycle_hash",
+        "candidate_ref", "mandate_version_ref", "mandate_version_hash",
+        "policy_version_ref", "policy_version_hash"
+      ],
+      "properties": {
+        "decision_ref": {"type": "string", "minLength": 1},
+        "decision_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "cycle_ref": {"type": "string", "minLength": 1},
+        "cycle_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "candidate_ref": {"type": "string", "minLength": 1},
+        "mandate_version_ref": {"type": "string", "minLength": 1},
+        "mandate_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "policy_version_ref": {"type": "string", "minLength": 1},
+        "policy_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "context_binding_ref": {"type": "string", "pattern": "^agenda-context-binding:[0-9a-f]{32}$"},
+    "context_binding_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "execution_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_ref", "connector_profile_ref", "connector_profile_hash",
+        "operation", "parameters", "permission_scope", "auth_mode",
+        "side_effect_class", "declared_side_effects", "verifier_ref",
+        "output_contract_ref", "output_contract_hash", "budget", "steps"
+      ],
+      "properties": {
+        "source_ref": {"const": "source:sec-edgar"},
+        "connector_profile_ref": {"const": "connector-profile-template:sec:0.1"},
+        "connector_profile_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "operation": {"const": "list_filings"},
+        "parameters": {"$ref": "#/$defs/sec_request"},
+        "permission_scope": {"const": "public_sec_list_filings"},
+        "auth_mode": {"const": "none"},
+        "side_effect_class": {"const": "read_only_public"},
+        "declared_side_effects": {"const": ["read:public-http"]},
+        "verifier_ref": {"const": "verifier:connector-authority-source:0.2"},
+        "output_contract_ref": {"const": "schema:connector-inventory:sec:list_filings:output:0.1"},
+        "output_contract_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "budget": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["max_attempts", "max_pages", "max_response_bytes", "max_seconds"],
+          "properties": {
+            "max_attempts": {"type": "integer", "minimum": 1},
+            "max_pages": {"type": "integer", "minimum": 1},
+            "max_response_bytes": {"type": "integer", "minimum": 1},
+            "max_seconds": {"type": "integer", "minimum": 1}
+          }
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {"$ref": "#/$defs/step"}
+        }
+      }
+    },
+    "actor_ref": {"type": "string", "minLength": 1},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "sec_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuer_cik", "form", "filing_date_from", "filing_date_to"],
+      "properties": {
+        "issuer_cik": {"type": "string", "pattern": "^[0-9]{10}$"},
+        "form": {"enum": ["10-K", "10-Q", "8-K"]},
+        "filing_date_from": {"type": "string", "format": "date"},
+        "filing_date_to": {"type": "string", "format": "date"}
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "id", "ordinal", "stage", "operation", "parameters",
+        "depends_on", "requested_capabilities", "runtime_profile_ref",
+        "declared_side_effects", "output_contract_ref", "max_attempts",
+        "work_order_ref", "content_hash"
+      ],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "id": {"type": "string", "pattern": "^research-plan-step:[a-z_]+:[0-9a-f]{32}$"},
+        "ordinal": {"type": "integer", "minimum": 1, "maximum": 4},
+        "stage": {"enum": ["connector", "authority_resolver", "verifier", "candidate_staging"]},
+        "operation": {"type": "string", "minLength": 1},
+        "parameters": {"type": "object", "additionalProperties": true},
+        "depends_on": {
+          "type": "array", "maxItems": 1,
+          "items": {"type": "string", "pattern": "^research-plan-step:[a-z_]+:[0-9a-f]{32}$"},
+          "uniqueItems": true
+        },
+        "requested_capabilities": {
+          "type": "array", "minItems": 1, "maxItems": 1,
+          "items": {"type": "string", "minLength": 1}, "uniqueItems": true
+        },
+        "runtime_profile_ref": {"type": "string", "minLength": 1},
+        "declared_side_effects": {
+          "type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true
+        },
+        "output_contract_ref": {"type": "string", "minLength": 1},
+        "max_attempts": {"type": "integer", "minimum": 1},
+        "work_order_ref": {"type": "string", "pattern": "^work:plan-[0-9a-f]{32}$"},
+        "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

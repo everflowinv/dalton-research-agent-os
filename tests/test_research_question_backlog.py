@@ -17,6 +17,11 @@ from pathlib import Path
 
 from dalton_core.agenda import AgendaStore
 from dalton_core.observability import ObservabilityStore
+from dalton_core.research_plan import (
+    ResearchPlanAuthority,
+    ResearchPlanConflict,
+    ResearchPlanControlPlane,
+)
 from dalton_core.research_question_backlog import (
     QUESTION_STATES,
     ResearchQuestionBacklog,
@@ -26,6 +31,7 @@ from dalton_core.research_question_backlog import (
     question_ref_for,
 )
 from dalton_core.research_review import validate_claim_version_v0_2
+from dalton_core.scheduler import Scheduler
 from dalton_core.store import DaltonStore, canonical_json, content_hash
 from tests.agenda_fixtures import register_perception
 
@@ -83,9 +89,14 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = DaltonStore(Path(self.tmp.name) / "core.sqlite")
-        ObservabilityStore(self.store)
+        self.observability = ObservabilityStore(self.store)
         self.agenda = AgendaStore(self.store)
         self.backlog = ResearchQuestionBacklog(self.store)
+        self.plans = ResearchPlanAuthority(self.store)
+        self.scheduler = Scheduler(connection=self.store.connection)
+        self.plan_control = ResearchPlanControlPlane(
+            self.plans, self.backlog, self.observability, self.scheduler
+        )
         self.addCleanup(self.store.close)
         self.addCleanup(self.tmp.cleanup)
 
@@ -152,6 +163,40 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
             source_refs=source_refs or ["evidence:a"], actor_ref=actor_ref,
             idempotency_key=idempotency_key,
         )
+
+    def plan_selected_question(self, question_ref, *, key="plan:helper"):
+        question = self.backlog.question(question_ref)
+        selection = question["selection_links"][-1]
+        return self.plans.create_plan(
+            question_ref=question_ref,
+            question_version_ref=question["head"]["id"],
+            decision_ref=selection["decision_ref"],
+            issuer_cik="320193",
+            form="10-Q",
+            filing_date_from="2026-01-01",
+            filing_date_to="2026-08-15",
+            actor_ref="core:planner",
+            idempotency_key=key,
+        )
+
+    def start_planned_question(self, plan, *, key="start:helper"):
+        self.plans.approve_plan(
+            plan_version_ref=plan["plan_version_ref"],
+            decision="accepted",
+            reason="test plan approval",
+            actor_ref="human:owner",
+            idempotency_key="approve:" + key,
+        )
+        return self.plan_control.start_plan(
+            plan_version_ref=plan["plan_version_ref"],
+            actor_ref="core:planner",
+            idempotency_key=key,
+        )
+
+    def plan_and_start_question(self, question_ref, *, suffix="helper"):
+        plan = self.plan_selected_question(question_ref, key="plan:" + suffix)
+        started = self.start_planned_question(plan, key="start:" + suffix)
+        return plan, started
 
     def formal_claim(self, claim_ref, *, value=1.5, kind="quantitative"):
         producer_id = "producer-" + claim_ref
@@ -248,17 +293,13 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.assertEqual(link["decision_hash"], decision["content_hash"])
         self.assertEqual(link["candidate_ref"], decision["selected_candidate_refs"][0])
 
-        planned = self.backlog.plan_question(
-            question_ref=question_ref, actor_ref="core",
-            idempotency_key="plan:lifecycle",
-        )
-        self.assertEqual(planned["state"], "planned")
+        planned = self.plan_selected_question(question_ref, key="plan:lifecycle")
+        self.assertEqual(planned["question_state"], "planned")
 
-        started_exec = self.backlog.start_question(
-            question_ref=question_ref, actor_ref="core",
-            idempotency_key="start:lifecycle",
+        started_exec = self.start_planned_question(
+            planned, key="start:lifecycle"
         )
-        self.assertEqual(started_exec["state"], "in_progress")
+        self.assertEqual(started_exec["question_state"], "in_progress")
 
         claim = self.formal_claim("claim:lifecycle")
         claim_two = self.formal_claim("claim:lifecycle:2")
@@ -330,8 +371,7 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
             question_ref=question_ref, decision_ref="decision:v2",
             actor_ref="core", idempotency_key="select:v2",
         )
-        self.backlog.plan_question(question_ref=question_ref, actor_ref="core", idempotency_key="plan:v2")
-        self.backlog.start_question(question_ref=question_ref, actor_ref="core", idempotency_key="start:v2")
+        self.plan_and_start_question(question_ref, suffix="v2")
         claim = self.formal_claim_v2("claim:v2")
         answered = self.backlog.answer_question(
             question_ref=question_ref, claim_version_refs=[claim["id"]],
@@ -442,8 +482,7 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
-        self.backlog.plan_question(question_ref=question_ref, actor_ref="core", idempotency_key="plan:1")
-        self.backlog.start_question(question_ref=question_ref, actor_ref="core", idempotency_key="start:1")
+        self.plan_and_start_question(question_ref, suffix="replay")
         claim = self.formal_claim("claim:replay")
         first = self.backlog.answer_question(
             question_ref=question_ref, claim_version_refs=[claim["claim_version_id"]],
@@ -472,9 +511,9 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.govern()
         self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
-        with self.assertRaises(ResearchQuestionConflict):
+        with self.assertRaises(TypeError):
             self.backlog.plan_question(question_ref=question_ref, actor_ref="core")
-        with self.assertRaises(ResearchQuestionConflict):
+        with self.assertRaises(TypeError):
             self.backlog.start_question(question_ref=question_ref, actor_ref="core")
         with self.assertRaises(ResearchQuestionConflict):
             self.backlog.block_question(question_ref=question_ref, reason="r", actor_ref="core")
@@ -501,11 +540,11 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         # Re-select by a second decision is an illegal out-of-order transition.
         with self.assertRaises(ResearchQuestionConflict):
             self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:2")
-        self.backlog.plan_question(question_ref=question_ref, actor_ref="core", idempotency_key="plan:1")
-        with self.assertRaises(ResearchQuestionConflict):
-            self.backlog.plan_question(question_ref=question_ref, actor_ref="core", idempotency_key="plan:2")
+        plan = self.plan_selected_question(question_ref, key="plan:1")
+        replay = self.plan_selected_question(question_ref, key="plan:2")
+        self.assertEqual(replay["status"], "duplicate")
         # in_progress -> answered, then answered is terminal.
-        self.backlog.start_question(question_ref=question_ref, actor_ref="core", idempotency_key="start:1")
+        self.start_planned_question(plan, key="start:1")
         claim = self.formal_claim("claim:order")
         self.backlog.answer_question(
             question_ref=question_ref, claim_version_refs=[claim["claim_version_id"]],
@@ -533,8 +572,7 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
-        self.backlog.plan_question(question_ref=question_ref, actor_ref="core", idempotency_key="plan:1")
-        self.backlog.start_question(question_ref=question_ref, actor_ref="core", idempotency_key="start:1")
+        self.plan_and_start_question(question_ref, suffix="terminal")
         blocked = self.backlog.block_question(question_ref=question_ref, reason="source unavailable", actor_ref="core", idempotency_key="block:1")
         self.assertEqual(blocked["state"], "blocked")
         with self.assertRaises(ResearchQuestionConflict):
@@ -635,8 +673,7 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
-        self.backlog.plan_question(question_ref=question_ref, actor_ref="core", idempotency_key="plan:1")
-        self.backlog.start_question(question_ref=question_ref, actor_ref="core", idempotency_key="start:1")
+        self.plan_and_start_question(question_ref, suffix="answer-helper")
         return question_ref
 
     def test_answered_without_claims_rejected(self):
@@ -754,8 +791,7 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         )
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", f"Q {suffix}?")
         self.backlog.select_question(question_ref=question_ref, decision_ref=f"decision:{suffix}", actor_ref="core", idempotency_key=f"select:{suffix}")
-        self.backlog.plan_question(question_ref=question_ref, actor_ref="core", idempotency_key=f"plan:{suffix}")
-        self.backlog.start_question(question_ref=question_ref, actor_ref="core", idempotency_key=f"start:{suffix}")
+        self.plan_and_start_question(question_ref, suffix=suffix)
         claim = self.formal_claim(f"claim:{suffix}")
         self.backlog.answer_question(
             question_ref=question_ref, claim_version_refs=[claim["claim_version_id"]],
@@ -854,9 +890,7 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
             (second["question_ref"],),
         )
         with self.assertRaises(ResearchQuestionConflict):
-            self.backlog.plan_question(
-                question_ref=second["question_ref"], actor_ref="core"
-            )
+            self.backlog.question(second["question_ref"])
 
     def test_unauthorized_direct_write_rejected(self):
         self.govern()
@@ -880,8 +914,7 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
-        self.backlog.plan_question(question_ref=question_ref, actor_ref="core", idempotency_key="plan:1")
-        self.backlog.start_question(question_ref=question_ref, actor_ref="core", idempotency_key="start:1")
+        self.plan_and_start_question(question_ref, suffix="progress")
         claim = self.formal_claim("claim:progress")
         self.backlog.answer_question(
             question_ref=question_ref, claim_version_refs=[claim["claim_version_id"]],
@@ -952,31 +985,41 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
     # No plan / auto-accept authority
     # ------------------------------------------------------------------ #
 
-    def test_lifecycle_never_touches_other_authorities(self):
+    def test_planned_lifecycle_does_not_commit_new_ledger_authority(self):
         self.govern()
         self.start_decided_cycle(
             "agenda:cycle:1", "agenda-cycle:1", "decision:1",
             questions=[{"question": "Q?", "answer_criteria": "A"}],
         )
         claim = self.formal_claim("claim:side")
-        before = self.table_counts()
+        claim_rows_before = self.store.connection.execute(
+            "SELECT COUNT(*) FROM claim_versions"
+        ).fetchone()[0]
         self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
-        self.backlog.plan_question(question_ref=question_ref, actor_ref="core", idempotency_key="plan:1")
-        self.backlog.start_question(question_ref=question_ref, actor_ref="core", idempotency_key="start:1")
+        self.plan_and_start_question(question_ref, suffix="side")
         self.backlog.answer_question(
             question_ref=question_ref, claim_version_refs=[claim["claim_version_id"]],
             actor_ref="core", idempotency_key="answer:1",
         )
-        # Every row written by the full backlog lifecycle must live in the
-        # backlog tables only.  No plan, WorkOrder, scheduler, Agenda or
-        # Ledger row appears; an AgendaDecision is never an answer.
-        after = self.table_counts()
-        changed = {name for name in after if after[name] != before.get(name, 0)}
-        self.assertTrue(
-            changed <= BACKLOG_TABLES,
-            f"authorities changed outside the backlog: {sorted(changed - BACKLOG_TABLES)}",
+        # Planner writes plan/workflow/scheduler authority, but never creates
+        # a ClaimVersion or promotes a candidate by itself.
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM claim_versions"
+            ).fetchone()[0],
+            claim_rows_before,
+        )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM research_plan_versions"
+            ).fetchone()[0], 1,
+        )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM scheduler_work_orders"
+            ).fetchone()[0], 1,
         )
 
     def test_backlog_exposes_no_plan_or_execution_api(self):
@@ -985,7 +1028,8 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         for name in forbidden:
             self.assertFalse(hasattr(self.backlog, name), name)
         self.assertFalse(hasattr(ResearchQuestionBacklog, "PLAN_SCHEMA_VERSION"))
-        # plan_question returns no plan ref and creates no plan rows.
+        # Backlog still cannot create a plan; the separate plan authority can
+        # bind one exact selected question and returns its immutable ref/hash.
         self.govern()
         self.start_decided_cycle(
             "agenda:cycle:1", "agenda-cycle:1", "decision:1",
@@ -994,10 +1038,9 @@ class ResearchQuestionBacklogTests(unittest.TestCase):
         self.record(question="Q?", answer_criteria="A", idempotency_key="record:1")
         question_ref = question_ref_for("mandate:coverage-quality", "wanhua", "Q?")
         self.backlog.select_question(question_ref=question_ref, decision_ref="decision:1", actor_ref="core", idempotency_key="select:1")
-        planned = self.backlog.plan_question(question_ref=question_ref, actor_ref="core", idempotency_key="plan:1")
-        self.assertNotIn("plan_ref", planned)
-        self.assertNotIn("plan_version_ref", planned)
-        self.assertEqual(planned["state"], "planned")
+        planned = self.plan_selected_question(question_ref, key="plan:boundary")
+        self.assertIn("plan_version_ref", planned)
+        self.assertEqual(planned["question_state"], "planned")
 
     # ------------------------------------------------------------------ #
     # Exact readers

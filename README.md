@@ -88,8 +88,13 @@ Evidence/Claim/Thesis。开发候选另加入了 fixture-only source/numeric ver
 CandidateEvidence/CandidateClaim；staging 不持 Research Ledger handle，也不会自动生成正式版本。当前开发候选
 还加入只读 Connector authority resolver，并用真实 SEC submissions API 跑通一条隔离 WorkOrder：
 connector → persisted authority → source/numeric verifier → candidate staging。结果只到
-`human-review-ready-candidate`，语义状态仍为 `unverified`。生产部署仍缺少独立 OS/container identity、正式
-capability sandbox、Model IR、原生事件连接器、人工 review/commit 入口、更多原生投递渠道和完整运维控制面。任何旧工作流
+`human-review-ready-candidate`，语义状态仍为 `unverified`。HumanReviewAuthority、HTML review 入口和
+Ledger 0.2 无损 promotion 已进入开发候选；Planner 也能把 exact selected AgendaDecision/ResearchQuestion
+编译成 immutable ResearchPlanVersion，生成人工逐 plan 批准的 SEC public read-only 四步任务树，并复用
+WorkflowRunVersion、WorkOrderLink 和 Scheduler。启动时只把根 connector WorkOrder 入队，下游 resolver、
+verifier 和 candidate staging 节点等待 coordinator 按依赖逐项 admission，不能并发越过上游结果。
+这些能力均未部署，未接旧 cron，也没有自动提交 Ledger。生产部署仍缺少独立 OS/container identity、正式
+capability sandbox、Model IR、原生事件连接器、更多原生投递渠道和完整运维控制面。任何旧工作流
 切换都要逐项验证，不能因文件已导入就视为完成迁移。当前项目状态见
 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，最近一次 Agenda 控制面实施记录见
 [docs/reports/phase-1-agenda-control-2026-08-14.md](docs/reports/phase-1-agenda-control-2026-08-14.md)。

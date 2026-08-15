@@ -2,7 +2,7 @@
 
 更新日期：2026-08-15
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver、隔离 SEC public canary、HumanReviewAuthority + Ledger promotion 0.2 + HTML review 入口、DocumentIndex FTS5 只读投影、ContextPack authority-bound materializer、Agenda exact context/materializer 统一路径，以及 ResearchQuestionBacklog append-only authority（开发候选），未部署
+- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver、隔离 SEC public canary、HumanReviewAuthority + Ledger promotion 0.2 + HTML review 入口、DocumentIndex FTS5 只读投影、ContextPack authority-bound materializer、Agenda exact context/materializer 统一路径、ResearchQuestionBacklog append-only authority，以及 Planner SEC public read-only 薄闭环（开发候选），未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -31,9 +31,12 @@ claim/artifact 只读切片，并已接通 Agenda 的 mandate/perception exact r
 append-only authority，Agenda 使用独立 AgendaContextBinding，模型只读取固定 instruction/output contract 与
 materializer quoted JSONL；可变 snapshot 文件不再参与 replay 或 prompt。ResearchQuestionBacklog 开发候选已
 完成：稳定 question 身份、冻结状态机、AgendaDecision 链接、正式 ClaimVersion answer 绑定与 Mandate 进度
-投影，问题现在可以跨 cycle 存续。下一步进入 Planner 薄闭环：selected AgendaDecision → immutable
-ResearchPlanVersion → 复用 WorkflowRunVersion/WorkOrderLink，首版只允许 SEC public read-only plan，并逐
-plan 人批；本切片没有接 Planner、自动执行或任何新权限。
+投影，问题现在可以跨 cycle 存续。Planner 薄闭环也已完成开发候选：exact selected AgendaDecision/
+ResearchQuestionVersion → immutable ResearchPlanVersion → WorkflowRunVersion/WorkOrderLink 任务树；首版只允许
+无凭据 SEC public `list_filings`，每份 plan 都要 exact human approval。启动只把根 connector WorkOrder 放入
+Scheduler，下游 resolver/verifier/candidate staging 保持 planned，必须由 coordinator 在上游 exact result 后逐项
+admission；没有能力租约、凭据、自动 Ledger commit 或旧 cron cutover。下一步按冻结顺序进入
+Interrupt / park / resume；在此之前不把 planned 子节点描述成已经执行。
 正式 Ledger commit 继续逐条人工 gate。万华的 10 个工作日/20 个显式人工标签门槛
 只限制 Agenda 从 1 家扩到 3 家，不阻塞通用 connector、research coordinator、verifier、Model IR 和
 sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单独验收。
@@ -134,13 +137,39 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   AgendaDecision 永远不会成为 answer；
 - `mandate_progress` 是纯确定性、可重建的进度投影：绑定 active MandateVersion ref/hash，统计各 state
   计数与 answered claim refs；不写任何表、不改 MandateVersion authority、不成为替代 authority；
-- 本切片不创建 plan/WorkOrder/DAG，`plan_question` 只推进状态机；无 auto-accept 路径；
+- Backlog authority 本身不创建 plan/WorkOrder/DAG；Planner 开发候选现已接管 `selected → planned` 与
+  `planned → in_progress`，两次迁移都要求 exact plan/start binding 并与对应 authority 同事务写入；
+  无 auto-accept 路径；
   专项 34/34，Python 全量 494/494，相关回归 82/82、broker 15/15、101 份 JSON contract 解析、
   16 份 Core SQL schema、`compileall`、`git diff --check`、SQLite integrity/FK 与 deterministic wheel
   检查全部通过。
-- 未部署、未接 Planner/WorkOrder/cron、未改变 auto-accept/timeout 权限；Agenda Shadow 旧
-  `research_question_versions` 写路径保持不变，与 backlog 并存。完整结果见
+- 仍未部署、未接 cron、未改变 auto-accept/timeout 权限；Planner 开发候选已接入 exact plan/start binding，
+  Agenda Shadow 旧 `research_question_versions` 写路径保持不变，与 backlog 并存。Backlog 初始切片见
   [research-question-backlog-2026-08-15.md](reports/research-question-backlog-2026-08-15.md)。
+
+### Planner SEC public 薄闭环当前进度（开发候选，未部署）
+
+- 新增 append-only ResearchPlan authority。plan 身份由 exact ResearchQuestionVersion、selected
+  AgendaDecision 与规范化 SEC request 确定性派生；在创建事务内重读完整 backlog/Agenda/context authority，
+  候选位置、问题、回答标准、来源、company 或 mandate 任一换绑都会 fail closed；
+- 首版执行范围固定为无凭据、公开只读的 SEC `list_filings`，只接受 10 位 CIK、`10-K`/`10-Q`/`8-K`
+  和不超过 366 天的窗口。plan 冻结 profile、operation、verifier、runtime、capability、输出 contract、预算
+  与 side effect，caller 不能扩充 host、credential、步骤或写权限；
+- 每份 plan 确定性生成 connector → authority resolver → source/numeric verifier → candidate staging 四个
+  WorkOrder 和三条 WorkOrderLink。启动时写 WorkflowRunVersion 与完整任务树，但只 admission 根 connector
+  WorkOrder；三个子节点保持 `planned`，要由 coordinator 在 exact 上游结果后逐项 admission；
+- plan 必须由 exact `human:<principal>` 写一次终态 accepted decision；model、automation、timeout、Agenda
+  approval 和 auto-accept 都不能启动 plan。未批准和 rejected plan 均 fail closed；
+- start 在 Scheduler、workflow/link 和 Core binding 接缝使用确定性身份；外部接缝或事务内故障后重放会收敛
+  到同一个 start、同一棵任务树和一个根 WorkOrder。exact readers 会重新核对 plan/question/approval/start/
+  workflow/link/Scheduler 双向绑定，后续 authority 篡改同样 fail closed；
+- Planner 专项 13/13、Planner + Backlog 47/47、Python 全量 507/507、broker 15/15 通过；固定
+  `SOURCE_DATE_EPOCH=1700000000` 两份 wheel 逐位一致，SHA-256
+  `466935efa4684e7384b9b050002e642e648f848968442fb0a6a71850acb3ca38`，666,164 bytes；Python 3.13
+  干净安装、公开导入与 packaged SQL 检查通过；
+- 未部署、未访问真实 SEC、未创建 CapabilityLease/CredentialGrant、未自动写 Ledger。rejected plan 后问题仍
+  停在 `planned`；replan/park/resume/retire 要在下一阶段显式设计。完整结果见
+  [research-plan-thin-closure-2026-08-15.md](reports/research-plan-thin-closure-2026-08-15.md)。
 
 ### Connector P0-0 当前进度（未部署）
 
@@ -717,9 +746,10 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 offline/authority source-numeric verifier、只读 authority resolver、candidate staging、一条隔离 SEC public
 WorkOrder、独立 HumanReviewAuthority、HTML 入口和正式 Evidence/Claim 0.2 promotion 已完成开发候选。
-ClaimIndex status 派生、DocumentIndex FTS5 和 claim/artifact ContextPack materializer 均已完成开发候选；下一步先评估
-AgendaCoordinator 接线所缺的 Mandate/Perception exact reader，再决定迁移边界；AgendaDecision 接线、
-生产部署、Model IR 更新和旧 cron cutover 仍保持独立人工 gate。当前没有 live staging/review authority。
+ClaimIndex status 派生、DocumentIndex FTS5、claim/artifact ContextPack materializer、Agenda context authority、
+ResearchQuestionBacklog 和 Planner SEC public 薄闭环均已完成开发候选。下一步按冻结顺序进入 Interrupt / park /
+resume；下游 WorkOrder 的逐项 coordinator admission、生产部署、Model IR 更新和旧 cron cutover 仍保持独立人工
+gate。当前没有 live staging/review/plan authority。
 
 与 P0/P1 并行推进但不接生产权限：operational verifier contract、fixture-only research coordinator、
 formula census/Model IR ADR、offline capability sandbox。它们不必等待万华 shadow，但在 production
@@ -799,6 +829,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - P2 authority resolver 与 SEC canary：`docs/reports/p2-authority-resolver-sec-canary-2026-08-15.md`
 - DocumentIndex FTS5：`docs/reports/document-index-fts5-2026-08-15.md`
 - ResearchQuestionBacklog：`docs/reports/research-question-backlog-2026-08-15.md`
+- Planner SEC public 薄闭环：`docs/reports/research-plan-thin-closure-2026-08-15.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`

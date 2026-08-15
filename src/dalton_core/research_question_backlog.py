@@ -768,7 +768,10 @@ def _read_exact_claim_version(cursor: Any, claim_version_ref: str) -> dict[str, 
 
 
 def _read_exact_event_history(
-    cursor: Any, question_ref: str
+    cursor: Any,
+    question_ref: str,
+    *,
+    revalidate_plan: bool = True,
 ) -> list[dict[str, Any]]:
     """Replay and validate the complete state-machine history."""
 
@@ -792,7 +795,101 @@ def _read_exact_event_history(
             )
         events.append(event)
         prior = event["state"]
+    if revalidate_plan:
+        planned = next((event for event in events if event["state"] == "planned"), None)
+        if planned is not None:
+            metadata = planned["metadata"]
+            if set(metadata) != {"plan_version_ref", "plan_version_hash"}:
+                raise ResearchQuestionConflict(
+                    "planned question event lacks its exact plan binding"
+                )
+            from .research_plan import (
+                _revalidate_plan_start_binding,
+                revalidate_plan_binds_question,
+            )
+
+            plan = revalidate_plan_binds_question(
+                cursor,
+                metadata["plan_version_ref"],
+                question_ref,
+            )
+            if plan["content_hash"] != metadata["plan_version_hash"]:
+                raise ResearchQuestionConflict(
+                    "planned question event plan hash drifted"
+                )
+            in_progress = next(
+                (event for event in events if event["state"] == "in_progress"),
+                None,
+            )
+            if in_progress is not None:
+                expected_keys = {
+                    "plan_version_ref", "plan_version_hash",
+                    "workflow_version_ref", "workflow_version_hash",
+                    "root_work_order_ref", "root_work_order_hash",
+                }
+                if set(in_progress["metadata"]) != expected_keys:
+                    raise ResearchQuestionConflict(
+                        "in_progress question event lacks its exact start binding"
+                    )
+                if any(
+                    in_progress["metadata"][key] != metadata[key]
+                    for key in ("plan_version_ref", "plan_version_hash")
+                ):
+                    raise ResearchQuestionConflict(
+                        "in_progress question event changed its planned plan"
+                    )
+                _revalidate_plan_start_binding(
+                    cursor,
+                    **in_progress["metadata"],
+                )
     return events
+
+
+def _append_event_row(
+    cursor: Any,
+    *,
+    question_ref: str,
+    state: str,
+    reason: str,
+    metadata: Mapping[str, Any],
+    actor_ref: str,
+) -> dict[str, Any]:
+    """Append one validated backlog event inside an existing Core transaction.
+
+    Planner is a peer Core authority and must bind plan creation/start to the
+    question transition atomically.  This narrow helper exposes only that
+    append operation; it does not expose the database path or create a second
+    writer boundary.
+    """
+
+    events = _read_exact_event_history(cursor, question_ref)
+    prior = events[-1]["state"] if events else None
+    if state not in _QUESTION_TRANSITIONS.get(prior, set()):
+        raise ResearchQuestionConflict(
+            f"backlog question transition {prior!r} -> {state!r} is invalid"
+        )
+    created_at = _now()
+    wire = {
+        "schema_version": SCHEMA_VERSION,
+        "id": f"research-question-event:{uuid.uuid4().hex}",
+        "question_ref": _text(question_ref, "question_ref"),
+        "state": state,
+        "reason": _text(reason, "reason"),
+        "metadata": dict(metadata),
+        "actor_ref": _text(actor_ref, "actor_ref"),
+        "created_at": created_at,
+    }
+    wire["content_hash"] = content_hash(wire)
+    cursor.execute(
+        "INSERT INTO backlog_question_events(event_id,question_ref,state,reason,"
+        "metadata_json,actor_ref,created_at,content_hash) VALUES(?,?,?,?,?,?,?,?)",
+        (
+            wire["id"], question_ref, state, wire["reason"],
+            canonical_json(wire["metadata"]), wire["actor_ref"], created_at,
+            wire["content_hash"],
+        ),
+    )
+    return wire
 
 
 class ResearchQuestionBacklog:
@@ -860,32 +957,14 @@ class ResearchQuestionBacklog:
         metadata: Mapping[str, Any],
         actor_ref: str,
     ) -> dict[str, Any]:
-        prior = self._latest_state(cur, question_ref)
-        if state not in _QUESTION_TRANSITIONS.get(prior, set()):
-            raise ResearchQuestionConflict(
-                f"backlog question transition {prior!r} -> {state!r} is invalid"
-            )
-        created_at = _now()
-        wire = self._record({
-            "schema_version": SCHEMA_VERSION,
-            "id": f"research-question-event:{uuid.uuid4().hex}",
-            "question_ref": _text(question_ref, "question_ref"),
-            "state": state,
-            "reason": _text(reason, "reason"),
-            "metadata": dict(metadata),
-            "actor_ref": _text(actor_ref, "actor_ref"),
-            "created_at": created_at,
-        })
-        cur.execute(
-            "INSERT INTO backlog_question_events(event_id,question_ref,state,reason,"
-            "metadata_json,actor_ref,created_at,content_hash) VALUES(?,?,?,?,?,?,?,?)",
-            (
-                wire["id"], question_ref, state, wire["reason"],
-                canonical_json(wire["metadata"]), wire["actor_ref"], created_at,
-                wire["content_hash"],
-            ),
+        return _append_event_row(
+            cur,
+            question_ref=question_ref,
+            state=state,
+            reason=reason,
+            metadata=metadata,
+            actor_ref=actor_ref,
         )
-        return wire
 
     def record_question(
         self,
@@ -1181,30 +1260,62 @@ class ResearchQuestionBacklog:
         self,
         *,
         question_ref: str,
+        plan_version_ref: str,
+        plan_version_hash: str,
         actor_ref: str,
-        reason: str = "plan_gate_authorized",
+        reason: str = "plan_bound",
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Advance a selected question to planned.
+        """Advance a selected question to planned with an exact plan binding.
 
-        This slice deliberately creates no ResearchPlanVersion, WorkOrder or
-        DAG.  The transition only records that the plan gate has been passed;
-        the Planner slice binds an immutable ResearchPlanVersion to the
-        planned state and keeps plan start behind its own human gate.
+        The planned transition is only legal with an exact immutable
+        ResearchPlanVersion that binds this question's head version; the plan
+        is re-read from the plan authority and its hash re-computed inside
+        the same transaction.  The record/select flows call the plan
+        authority instead (``create_plan`` appends the same event in one
+        transaction); this method keeps the identical gate for direct
+        callers and for replay, so an unbound planned transition is
+        impossible from any path.
         """
 
+        from .research_plan import revalidate_plan_binds_question
+
         question_ref = _text(question_ref, "question_ref")
+        plan_version_ref = _text(plan_version_ref, "plan_version_ref")
+        plan_version_hash = _hash_text(plan_version_hash, "plan_version_hash")
         actor_ref = _text(actor_ref, "actor_ref")
         reason = _text(reason, "reason")
-        request = {"question_ref": question_ref, "reason": reason, "actor_ref": actor_ref}
+        request = {
+            "question_ref": question_ref,
+            "plan_version_ref": plan_version_ref,
+            "plan_version_hash": plan_version_hash,
+            "reason": reason,
+            "actor_ref": actor_ref,
+        }
         request_hash = content_hash(request)
         with self.store._transaction() as cur:
             duplicate = self._idem(cur, idempotency_key, "plan_backlog_question", request_hash)
             if duplicate is not None:
                 return duplicate
-            read_exact_backlog_question(cur, question_ref)
-            event = self._event(
-                cur, question_ref, "planned", reason, {}, actor_ref
+            head = self._head(cur, question_ref)
+            if self._latest_state(cur, question_ref) != "selected":
+                raise ResearchQuestionConflict(
+                    "only a selected question can be planned"
+                )
+            plan = revalidate_plan_binds_question(
+                cur, plan_version_ref, question_ref, head_version_id=head["id"],
+            )
+            if plan["content_hash"] != plan_version_hash:
+                raise ResearchQuestionConflict(
+                    "planned event plan hash drifted from the exact plan"
+                )
+            event = _append_event_row(
+                cur, question_ref=question_ref, state="planned", reason=reason,
+                metadata={
+                    "plan_version_ref": plan_version_ref,
+                    "plan_version_hash": plan_version_hash,
+                },
+                actor_ref=actor_ref,
             )
             result = {
                 "status": "fresh", "question_ref": question_ref,
@@ -1219,22 +1330,94 @@ class ResearchQuestionBacklog:
         self,
         *,
         question_ref: str,
+        plan_version_ref: str,
+        plan_version_hash: str,
+        workflow_version_ref: str,
+        workflow_version_hash: str,
+        root_work_order_ref: str,
+        root_work_order_hash: str,
         actor_ref: str,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Advance a planned question to in_progress."""
+        """Advance a planned question to in_progress after an approved start.
+
+        The in_progress transition is only legal after an approved plan start
+        that created the exact WorkflowRunVersion + root WorkOrder; the plan
+        start binding and every ref/hash are re-read and re-computed from
+        authority in the same transaction.  The control plane appends the
+        same event inside its own single transaction; this method keeps the
+        identical gate for direct callers and replay.
+        """
+
+        from .research_plan import (
+            _revalidate_plan_start_binding,
+            revalidate_plan_binds_question,
+        )
 
         question_ref = _text(question_ref, "question_ref")
+        plan_version_ref = _text(plan_version_ref, "plan_version_ref")
+        plan_version_hash = _hash_text(plan_version_hash, "plan_version_hash")
+        workflow_version_ref = _text(workflow_version_ref, "workflow_version_ref")
+        workflow_version_hash = _hash_text(workflow_version_hash, "workflow_version_hash")
+        root_work_order_ref = _text(root_work_order_ref, "root_work_order_ref")
+        root_work_order_hash = _hash_text(root_work_order_hash, "root_work_order_hash")
         actor_ref = _text(actor_ref, "actor_ref")
-        request = {"question_ref": question_ref, "actor_ref": actor_ref}
+        request = {
+            "question_ref": question_ref,
+            "plan_version_ref": plan_version_ref,
+            "plan_version_hash": plan_version_hash,
+            "workflow_version_ref": workflow_version_ref,
+            "workflow_version_hash": workflow_version_hash,
+            "root_work_order_ref": root_work_order_ref,
+            "root_work_order_hash": root_work_order_hash,
+            "actor_ref": actor_ref,
+        }
         request_hash = content_hash(request)
         with self.store._transaction() as cur:
             duplicate = self._idem(cur, idempotency_key, "start_backlog_question", request_hash)
             if duplicate is not None:
                 return duplicate
-            read_exact_backlog_question(cur, question_ref)
-            event = self._event(
-                cur, question_ref, "in_progress", "execution_started", {}, actor_ref
+            if self._latest_state(cur, question_ref) != "planned":
+                raise ResearchQuestionConflict(
+                    "only a planned question can start"
+                )
+            head = self._head(cur, question_ref)
+            events = _read_exact_event_history(cur, question_ref)
+            planned = next(
+                (event for event in reversed(events) if event["state"] == "planned"),
+                None,
+            )
+            if planned is None or planned["metadata"] != {
+                "plan_version_ref": plan_version_ref,
+                "plan_version_hash": plan_version_hash,
+            }:
+                raise ResearchQuestionConflict(
+                    "start binding drifted from the exact planned plan binding"
+                )
+            revalidate_plan_binds_question(
+                cur, plan_version_ref, question_ref, head_version_id=head["id"],
+            )
+            _revalidate_plan_start_binding(
+                cur,
+                plan_version_ref=plan_version_ref,
+                plan_version_hash=plan_version_hash,
+                workflow_version_ref=workflow_version_ref,
+                workflow_version_hash=workflow_version_hash,
+                root_work_order_ref=root_work_order_ref,
+                root_work_order_hash=root_work_order_hash,
+            )
+            event = _append_event_row(
+                cur, question_ref=question_ref, state="in_progress",
+                reason="approved_plan_started",
+                metadata={
+                    "plan_version_ref": plan_version_ref,
+                    "plan_version_hash": plan_version_hash,
+                    "workflow_version_ref": workflow_version_ref,
+                    "workflow_version_hash": workflow_version_hash,
+                    "root_work_order_ref": root_work_order_ref,
+                    "root_work_order_hash": root_work_order_hash,
+                },
+                actor_ref=actor_ref,
             )
             result = {
                 "status": "fresh", "question_ref": question_ref,
