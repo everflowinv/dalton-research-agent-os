@@ -64,7 +64,12 @@ miss 率有测量后决定，embedding 只能做 recall-only sidecar，不能进
   文件大小均为 601,297 bytes；干净 Python 3.13 venv 安装、导入、打包后的 FTS schema 和两份
   新 contract 检查均通过。
 
+实现提交：`89d3f08`。GitHub CI `31887581490` 的 Python 3.11、Python 3.13 和 broker 三个 job
+全部通过：<https://github.com/everflowinv/dalton-research-agent-os/actions/runs/31887581490>。
+CI 只提示 `actions/checkout@v4`、`actions/setup-python@v5` 和 `actions/setup-node@v4` 的 Node 20
+弃用警告，没有测试或构建失败。
+
 全量测试仍有仓库既有若干测试打印 `ResourceWarning`，但没有失败；本 slice 新增测试通过
-`addCleanup` 关闭 DocumentIndex 连接。当前没有部署或 push。下一笔是 ContextPack
+`addCleanup` 关闭 DocumentIndex 连接。上述实现已推送 `main`，但没有部署。下一笔是 ContextPack
 materializer：从 DocumentIndex 的 immutable refs/hash 读取、复核并按冻结预算组装模型可见正文，
 不能让 FTS disposable body 直接成为 authority。
