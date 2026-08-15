@@ -2,7 +2,7 @@
 
 日期：2026-08-15
 
-状态：fixture-only 实现和本地验证完成；未部署，远端 CI 待推送后记录
+状态：fixture-only 实现和验证完成；未部署，远端 CI 全部通过
 
 ## 本轮目标
 
@@ -55,6 +55,7 @@ raw payload 重新抽取，再按固定 rounding 规则计算结果和 metadata�
   `8930ac9a6574053ccd8c678e2dc80f2c8607631fb4f4cdbecf3480aa579c628a`，每份 526,179 bytes；
 - 干净 Python 3.13 venv 安装后 `pip check`、packaged staging SQL、六张表、空库计数和 SQLite
   `PRAGMA integrity_check` 均通过。
+- 实现提交 `83e7a5e` 的 GitHub CI `31874505563`：Python 3.11、Python 3.13、broker 全部通过。
 
 全量测试仍会从既有 MCP/reference-shadow 测试夹具打印少量未关闭 SQLite connection 的 `ResourceWarning`；
 364 项全部通过，新专项单独运行没有 warning。干净安装验收脚本最初两次分别写错预期表名、调用了不存在的
