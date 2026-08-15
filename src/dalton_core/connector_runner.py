@@ -688,6 +688,10 @@ class ConnectorRunnerAdmissionGate:
             raise RunnerConflict(
                 "public connector runner requires RunnerRequest wire 0.1"
             )
+        if any(field in wire for field in _COMPILED_PLAN_BINDING_FIELDS):
+            raise RunnerConflict(
+                "public connector runner has no compiled-plan authority resolver"
+            )
 
     def validate(
         self, request: Mapping[str, Any], *, scheduler_lease_token: str

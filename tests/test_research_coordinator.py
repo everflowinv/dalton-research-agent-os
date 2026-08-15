@@ -10,10 +10,12 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+from dalton_core.connector_runner import RunnerValidationError
 from dalton_core.research_context import (
     ResearchContextConflict,
     ResearchContextError,
     build_claim_index,
+    build_compiled_connector_plan,
     build_context_pack,
     build_fixture_runner_request,
     build_reference_fixture_plan,
@@ -213,6 +215,23 @@ class ResearchCoordinatorTests(unittest.TestCase):
             validate_runner_request_plan_binding(
                 forged, self.plan, self.plan["steps"][0]
             )
+        partial = copy.deepcopy(
+            self.runner_requests[self.plan["steps"][0]["id"]][0]
+        )
+        del partial["compiled_step_hash"]
+        partial.pop("content_hash")
+        partial["content_hash"] = content_hash(partial)
+        with self.assertRaises(RunnerValidationError):
+            validate_runner_request_plan_binding(
+                partial, self.plan, self.plan["steps"][0]
+            )
+        runner_schema = json.loads(
+            (CONTRACTS / "connector-runner-request.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        with self.assertRaises(AssertionError):
+            validate_json_schema(partial, runner_schema, runner_schema)
 
     def test_context_pack_budget_and_duplicate_policy_are_deterministic(self) -> None:
         shared_hash = content_hash({"shared": "input"})
@@ -283,6 +302,47 @@ class ResearchCoordinatorTests(unittest.TestCase):
                 created_at=WIRE_WHEN,
                 max_tokens=100,
                 max_bytes=100,
+            )
+        dishonest = copy.deepcopy(pack)
+        first = dishonest["inputs"][0]
+        first["selected"] = False
+        first["selection_reason"] = "budget_tokens"
+        first["included_tokens"] = 0
+        first["included_bytes"] = 0
+        first.pop("content_hash")
+        first["content_hash"] = content_hash(first)
+        dishonest["totals"] = {
+            "selected_tokens": 0,
+            "selected_bytes": 0,
+            "omitted_count": len(dishonest["inputs"]),
+        }
+        dishonest.pop("content_hash")
+        dishonest["content_hash"] = content_hash(dishonest)
+        with self.assertRaises(ResearchContextConflict):
+            validate_context_pack(dishonest)
+
+        step = self.plan["steps"][0]
+        secret_spec = {
+            key: step[key]
+            for key in (
+                "source_ref", "source_hash", "connector_profile_ref",
+                "connector_profile_hash", "operation", "input_schema_ref",
+                "input_schema_hash", "output_schema_ref", "output_schema_hash",
+                "completeness_required", "depends_on", "fallback_step_refs",
+                "max_attempts",
+            )
+        }
+        secret_spec["parameters"] = {"access_token": "must-not-enter"}
+        with self.assertRaises(ResearchContextError):
+            build_compiled_connector_plan(
+                task_ref=self.task_ref,
+                task_hash=self.task_hash,
+                planner_ref="planner:fixture",
+                planner_hash="1" * 64,
+                routing_policy_ref="routing-policy:fixture",
+                routing_policy_hash="2" * 64,
+                step_specs=[secret_spec],
+                created_at=WIRE_WHEN,
             )
 
     def test_claim_index_derives_search_projection_without_ledger_writes(self) -> None:
@@ -379,6 +439,19 @@ class ResearchCoordinatorTests(unittest.TestCase):
         self.assertEqual(port.execute_calls, 3)
         self.assertEqual(port.transport_calls, 3)
 
+    def test_crash_after_state_does_not_repeat_connector_call(self) -> None:
+        store = ResearchCoordinatorStore(":memory:")
+        self.addCleanup(store.close)
+        port = RecordedShadowFixturePort(clock=FrozenClock())
+        crash = CrashOnce("after_state")
+        with self.assertRaises(InjectedCoordinatorCrash):
+            self.invoke(self.coordinator(store, port, fault_hook=crash))
+        self.assertEqual(len(store.list_checkpoints(self.run_ref)), 1)
+        result = self.invoke(self.coordinator(store, port))
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(port.execute_calls, 3)
+        self.assertEqual(port.transport_calls, 3)
+
     def test_retry_is_bounded_and_never_busy_waits(self) -> None:
         first_step = self.plan["steps"][0]
         request_ids = [
@@ -440,6 +513,19 @@ class ResearchCoordinatorTests(unittest.TestCase):
             self.invoke(self.coordinator(store, ForgedReceiptPort()))
         self.assertEqual(store.list_checkpoints(self.run_ref), [])
 
+        failed_store = ResearchCoordinatorStore(":memory:")
+        self.addCleanup(failed_store.close)
+        failed_port = RecordedShadowFixturePort(
+            scenario_by_request={request["id"]: "malformed"},
+            clock=FrozenClock(),
+        )
+        failed = self.invoke(self.coordinator(failed_store, failed_port))
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed_port.transport_calls, 1)
+        failed_checkpoint = failed_store.list_checkpoints(self.run_ref)[0]
+        self.assertEqual(failed_checkpoint["source_envelopes"], [])
+        self.assertEqual(failed_checkpoint["artifacts"], [])
+
     def test_scratch_store_is_private_immutable_and_separate_from_authorities(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "coordinator.sqlite"
@@ -492,12 +578,99 @@ class ResearchCoordinatorTests(unittest.TestCase):
         with self.assertRaises(ResearchCoordinatorConflict):
             store.append_checkpoint(checkpoint)
 
+        checkpoints = store.list_checkpoints(self.run_ref)
+        broken_chain = copy.deepcopy(checkpoints)
+        broken_chain[1]["prior_checkpoint_hash"] = "0" * 64
+        broken_chain[1].pop("content_hash")
+        broken_chain[1]["content_hash"] = content_hash(broken_chain[1])
+        coordinator = self.coordinator(
+            store, RecordedShadowFixturePort(clock=FrozenClock())
+        )
+        with self.assertRaises(ResearchCoordinatorConflict):
+            coordinator._derive_state(
+                plan=self.plan,
+                context_pack=self.context_pack,
+                run_ref=self.run_ref,
+                attempt_ref=self.attempt_ref,
+                attempt_hash=self.attempt_hash,
+                checkpoints=broken_chain,
+            )
+
         state = copy.deepcopy(store.latest_run_state(self.run_ref))
         state["completed_step_refs"] = state["completed_step_refs"][:-1]
         state.pop("content_hash")
         state["content_hash"] = content_hash(state)
         with self.assertRaises(ResearchCoordinatorConflict):
             validate_research_run_state(state, plan=self.plan)
+
+    def test_run_state_chain_cannot_rebind_plan_or_attempt_before_checkpoint(self) -> None:
+        store = ResearchCoordinatorStore(":memory:")
+        self.addCleanup(store.close)
+        coordinator = self.coordinator(
+            store, RecordedShadowFixturePort(clock=FrozenClock())
+        )
+        first = coordinator._reconcile_state(
+            plan=self.plan,
+            context_pack=self.context_pack,
+            run_ref=self.run_ref,
+            attempt_ref=self.attempt_ref,
+            attempt_hash=self.attempt_hash,
+        )
+        self.assertEqual(first["status"], "planned")
+        with self.assertRaises(ResearchCoordinatorConflict):
+            coordinator._reconcile_state(
+                plan=self.plan,
+                context_pack=self.context_pack,
+                run_ref=self.run_ref,
+                attempt_ref="research-attempt:fixture:rebound",
+                attempt_hash=content_hash({"attempt": "rebound"}),
+            )
+
+        rebound_plan = copy.deepcopy(self.plan)
+        rebound_plan["created_at"] = datetime(
+            2026, 8, 15, 6, 1, tzinfo=timezone.utc
+        ).isoformat(timespec="microseconds")
+        rebound_plan.pop("content_hash")
+        rebound_plan["content_hash"] = content_hash(rebound_plan)
+        rebound_context = build_context_pack(
+            [
+                {
+                    "kind": "mandate",
+                    "ref": "research-mandate:fixture:1",
+                    "hash": content_hash({"mandate": "official reference sources"}),
+                    "priority": 100,
+                    "content": (
+                        "Read official CNINFO and SEC filings and the recorded "
+                        "AlphaEngine shadow."
+                    ),
+                }
+            ],
+            task_ref=self.task_ref,
+            task_hash=self.task_hash,
+            compiled_plan_ref=rebound_plan["id"],
+            compiled_plan_hash=rebound_plan["content_hash"],
+            claim_index_ref=self.claim_index["id"],
+            claim_index_hash=self.claim_index["content_hash"],
+            created_at=WIRE_WHEN,
+            max_tokens=100,
+            max_bytes=2_000,
+        )
+        with self.assertRaises(ResearchCoordinatorConflict):
+            coordinator._reconcile_state(
+                plan=rebound_plan,
+                context_pack=rebound_context,
+                run_ref=self.run_ref,
+                attempt_ref=self.attempt_ref,
+                attempt_hash=self.attempt_hash,
+            )
+
+    def test_fixture_port_idempotency_conflict_is_fail_closed(self) -> None:
+        port = RecordedShadowFixturePort(clock=FrozenClock())
+        first_step = self.plan["steps"][0]
+        requests = self.runner_requests[first_step["id"]]
+        port.execute(first_step, requests[0], idempotency_key="shared-key")
+        with self.assertRaises(ResearchCoordinatorConflict):
+            port.execute(first_step, requests[1], idempotency_key="shared-key")
 
 
 if __name__ == "__main__":

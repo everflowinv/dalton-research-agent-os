@@ -656,6 +656,17 @@ class ResearchCoordinatorStore:
             wire["prior_version_ref"], wire["prior_version_hash"]
         ) != expected_prior:
             raise ResearchCoordinatorConflict("run-state version chain is not exact")
+        if latest is not None and (
+            wire["attempt_ref"] != latest["attempt_ref"]
+            or wire["attempt_hash"] != latest["attempt_hash"]
+            or wire["compiled_plan_ref"] != latest["compiled_plan_ref"]
+            or wire["compiled_plan_hash"] != latest["compiled_plan_hash"]
+            or wire["context_pack_ref"] != latest["context_pack_ref"]
+            or wire["context_pack_hash"] != latest["context_pack_hash"]
+        ):
+            raise ResearchCoordinatorConflict(
+                "run-state chain changed an authority binding"
+            )
         return self._insert(
             table="research_run_state_versions", id_column="run_state_id",
             identifier=wire["id"], json_column="state_json", wire=wire,
@@ -782,7 +793,8 @@ class FixtureResearchCoordinator:
         groups = self._checkpoint_groups(checkpoints)
         step_by_ref = {step["id"]: step for step in plan_wire["steps"]}
         attempt_counts: dict[str, int] = defaultdict(int)
-        for checkpoint in checkpoints:
+        prior_checkpoint: Mapping[str, Any] | None = None
+        for sequence, checkpoint in enumerate(checkpoints, start=1):
             step = step_by_ref.get(checkpoint["step_ref"])
             if step is None:
                 raise ResearchCoordinatorConflict(
@@ -791,6 +803,19 @@ class FixtureResearchCoordinator:
             attempt_counts[step["id"]] += 1
             if (
                 checkpoint["run_ref"] != run_ref
+                or checkpoint["sequence"] != sequence
+                or (
+                    checkpoint["prior_checkpoint_ref"],
+                    checkpoint["prior_checkpoint_hash"],
+                )
+                != (
+                    (None, None)
+                    if prior_checkpoint is None
+                    else (
+                        prior_checkpoint["id"],
+                        prior_checkpoint["content_hash"],
+                    )
+                )
                 or checkpoint["attempt_ref"] != attempt_ref
                 or checkpoint["attempt_hash"] != attempt_hash
                 or checkpoint["compiled_plan_ref"] != plan_wire["id"]
@@ -805,6 +830,7 @@ class FixtureResearchCoordinator:
                 raise ResearchCoordinatorConflict(
                     "checkpoint recovery authority does not match the run"
                 )
+            prior_checkpoint = checkpoint
         completed: set[str] = set()
         terminal_failed: set[str] = set()
         for step in plan_wire["steps"]:
@@ -1027,7 +1053,7 @@ class FixtureResearchCoordinator:
             if attempt_number > step["max_attempts"]:
                 raise ResearchCoordinatorConflict("retry bound exceeded before execution")
             request = requests[step["id"]][attempt_number - 1]
-            idempotency_key = f"research-coordinator:{run_ref}:{step['id']}:{attempt_number}"
+            idempotency_key = request["idempotency_key"]
             receipt = validate_connector_completion_receipt(
                 self.connector_port.execute(
                     step, request, idempotency_key=idempotency_key

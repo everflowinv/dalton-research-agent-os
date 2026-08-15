@@ -304,10 +304,14 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 - fault injection 覆盖 execute 后、checkpoint 后和 state 后恢复。execute 后未写 checkpoint 时复用同一个
   idempotency key；checkpoint 已写后不重复调用。429/retryable 立即返回，不 busy wait；每 step 最多两次，
   耗尽后 run 终结为 failed；
-- 新增专项 11/11，Python 全量 352/352、broker 15/15、`compileall` 与 `git diff --check` 通过；固定
+- Fable 5 对首个 committed tree 给出 scope-limited **Go**。随后关闭 public runner 把调用方 plan binding 当
+  authority、RunState 首 checkpoint 前可换绑、恢复不重验 prior checkpoint chain、ContextPack 不重算选择结果和
+  fixture port 幂等键分叉等债务；
+- 新增专项 14/14，相关 runner/coordinator 组合 25/25，Python 全量 356/356、broker 15/15、`compileall` 与
+  `git diff --check` 通过；固定
   `SOURCE_DATE_EPOCH=1700000000` 两次 wheel 逐位一致，SHA-256 均为
-  `02d2b92a7728ce5b80480c36d0c4b388fcc704de3bf1c975a4089ddfb82dde1b`，每份 507,052 bytes；干净 venv
-  安装、`pip check`、三步 plan build、packaged SQL 和 SQLite integrity 均通过；当前尚待 Fable 增量复核和远端 CI；
+  `2b0f488b1851ccab544459a8925c1c88c15306748c3cee1509551d6589a27134`，每份 507,410 bytes；干净 venv
+  安装、`pip check`、三步 plan build、packaged SQL 和 SQLite integrity 均通过；当前尚待收口修订的 Fable 增量复核和远端 CI；
 - 本轮没有部署、没有访问 live source/MCP、没有读取 credential、没有写 Evidence/Claim/Thesis，也没有切换
   旧 cron。下一步是在本候选复核通过后实现 source/numeric verifier 与 candidate staging contract，仍先离线。
 

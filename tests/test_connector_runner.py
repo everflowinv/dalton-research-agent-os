@@ -381,6 +381,22 @@ class ConnectorRunnerControlPlaneTests(unittest.TestCase):
                 changed, scheduler_lease_token=self.claim["lease_token"]
             )
 
+    def test_public_gate_rejects_unverified_compiled_plan_binding(self) -> None:
+        request = self.runner_request()
+        changed = {
+            **{key: value for key, value in request.items() if key != "content_hash"},
+            "compiled_connector_plan_ref": "compiled-connector-plan:fixture",
+            "compiled_connector_plan_hash": "8" * 64,
+            "compiled_step_ref": "compiled-connector-step:fixture",
+            "compiled_step_hash": "9" * 64,
+        }
+        changed["content_hash"] = content_hash(changed)
+        validate_connector_runner_request(changed)
+        with self.assertRaises(RunnerConflict):
+            self.gate.validate(
+                changed, scheduler_lease_token=self.claim["lease_token"]
+            )
+
     def test_use_time_gates_and_adapter_request_are_authority_derived(self) -> None:
         admission = self.gate.validate(
             self.runner_request(), scheduler_lease_token=self.claim["lease_token"]

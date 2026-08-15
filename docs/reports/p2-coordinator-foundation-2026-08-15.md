@@ -2,7 +2,7 @@
 
 日期：2026-08-15
 
-状态：本地候选；Fable 5 已批准阶段选择，committed-tree 增量复核和远端 CI 待完成
+状态：本地候选；Fable 5 已批准阶段选择并对首个 committed tree 给出 Go，收口修订的增量复核和远端 CI 待完成
 
 ## 阶段裁决
 
@@ -63,6 +63,15 @@ owner-only SQLite 保存 immutable plan、context、index、checkpoint 和 run-s
 绑定 run attempt、plan、context、step、连续 connector attempt、receipt 和 prior checkpoint。run state 每次从
 checkpoint 重建，scratch DB 不属于权威账本，可以删除重建。
 
+Fable 5 对首个 committed tree 给出 scope-limited **Go**，同时指出 live admission、恢复链和投影诚实性仍需
+收紧。本候选已补上以下边界：
+
+- public runner 在还没有 compiled-plan authority resolver 时拒绝所有 plan binding，不能把调用方自报字段当权威；
+- RunState 版本链固定 attempt、plan 和 ContextPack，第一份 checkpoint 写入前也不能换绑；
+- 恢复时重新遍历 checkpoint sequence 与 prior ref/hash chain，不只相信 SQLite 排序；
+- ContextPack validator 重算排序、去重、预算和选择结果，并扩大 credential-shaped 参数拒绝清单；
+- fixture port 与 RunnerRequest 使用同一个幂等键，并对同键不同请求 fail closed。
+
 故障注入覆盖：
 
 - execute 已返回、checkpoint 尚未写入：恢复使用相同 idempotency key，port 不重复 physical transport；
@@ -73,19 +82,19 @@ checkpoint 重建，scratch DB 不属于权威账本，可以删除重建。
 
 ## 当前验证
 
-- P2 专项：11/11；
-- Python 全量：352/352；
+- P2 专项：14/14；相关 runner/coordinator 组合 25/25；
+- Python 全量：356/356；
 - OpenClaw model broker：15/15；
 - `compileall`：通过；
 - `git diff --check`：通过；
 - 固定 `SOURCE_DATE_EPOCH=1700000000` 的两次 Python 3.13 no-build-isolation wheel 逐位一致，SHA-256 均为
-  `02d2b92a7728ce5b80480c36d0c4b388fcc704de3bf1c975a4089ddfb82dde1b`，每份 507,052 bytes；
+  `2b0f488b1851ccab544459a8925c1c88c15306748c3cee1509551d6589a27134`，每份 507,410 bytes；
 - 干净 venv 安装后 `pip check`、三步 plan build、packaged coordinator SQL 和 SQLite integrity 均通过；
 - P1-0d 远端 CI：Python 3.11、Python 3.13、broker 全部通过；
 - 当前 P2 候选尚待 Fable 5 committed-tree 增量复核与远端 CI。
 
 全量测试仍会从既有 MCP/reference-shadow 测试夹具打印少量未关闭 SQLite connection 的 `ResourceWarning`；
-352 项结果全部通过，P2 专项单独运行没有 warning。
+356 项结果全部通过，P2 专项单独运行没有 warning。
 
 ## 当前边界
 

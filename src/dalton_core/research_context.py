@@ -24,7 +24,9 @@ _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _SEARCH_RE = re.compile(r"[a-z0-9_.:-]+|[\u4e00-\u9fff]+", re.IGNORECASE)
 _SENSITIVE_KEYS = {
     "authorization", "cookie", "cookies", "password", "secret", "token",
-    "credential_value", "database_path", "db_path", "storage_locator",
+    "access_token", "api_key", "auth_token", "bearer_token", "client_secret",
+    "credential_value", "database_path", "db_path", "refresh_token",
+    "session_token", "storage_locator",
 }
 
 
@@ -553,6 +555,41 @@ def validate_context_pack(value: Mapping[str, Any]) -> dict[str, Any]:
         _validate_context_input(item, f"inputs[{index}]")
         for index, item in enumerate(wire["inputs"])
     ]
+    expected_order = sorted(
+        inputs, key=lambda item: (-item["priority"], item["kind"], item["ref"])
+    )
+    if inputs != expected_order:
+        raise ResearchContextConflict("ContextPack inputs are not canonically ordered")
+    selected_tokens = 0
+    selected_bytes = 0
+    seen: dict[str, str] = {}
+    for item in inputs:
+        if item["ref"] in seen and seen[item["ref"]] != item["hash"]:
+            raise ResearchContextConflict(
+                "ContextPack duplicate ref carries conflicting content hash"
+            )
+        if item["ref"] in seen:
+            expected_selected = False
+            expected_reason = "duplicate"
+        elif selected_tokens + item["original_tokens"] > budget["max_tokens"]:
+            expected_selected = False
+            expected_reason = "budget_tokens"
+        elif selected_bytes + item["original_bytes"] > budget["max_bytes"]:
+            expected_selected = False
+            expected_reason = "budget_bytes"
+        else:
+            expected_selected = True
+            expected_reason = "included"
+            selected_tokens += item["original_tokens"]
+            selected_bytes += item["original_bytes"]
+        if (
+            item["selected"] != expected_selected
+            or item["selection_reason"] != expected_reason
+        ):
+            raise ResearchContextConflict(
+                "ContextPack selection does not match the frozen policy"
+            )
+        seen[item["ref"]] = item["hash"]
     totals = _closed(
         wire["totals"], {"selected_tokens", "selected_bytes", "omitted_count"}, "totals"
     )
