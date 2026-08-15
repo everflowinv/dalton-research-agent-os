@@ -9,9 +9,9 @@
 反向改写历史结论。这里的“完成”只表示代码、测试和当前部署已经验收，不表示已达到多租户或
 hostile-code 生产安全等级。
 
-当前架构方向见
-[architecture-review-and-next-phase-v0.4-2026-08-15.md](reports/architecture-review-and-next-phase-v0.4-2026-08-15.md)。
-v0.3 保留为 Human Review 切片启动时的历史基线，不再作为当前执行顺序。
+当前架构方向与执行顺序见
+[vision-and-next-step-review-v0.5-2026-08-15.md](reports/vision-and-next-step-review-v0.5-2026-08-15.md)。
+v0.4 及更早报告保留为各切片启动时的历史基线，不再作为当前执行顺序。
 
 ## 当前判断
 
@@ -35,11 +35,14 @@ materializer quoted JSONL；可变 snapshot 文件不再参与 replay 或 prompt
 ResearchQuestionVersion → immutable ResearchPlanVersion → WorkflowRunVersion/WorkOrderLink 任务树；首版只允许
 无凭据 SEC public `list_filings`，每份 plan 都要 exact human approval。启动只把根 connector WorkOrder 放入
 Scheduler，下游 resolver/verifier/candidate staging 保持 planned，必须由 coordinator 在上游 exact result 后逐项
-admission；没有能力租约、凭据、自动 Ledger commit 或旧 cron cutover。下一步按冻结顺序进入
-Interrupt / park / resume；在此之前不把 planned 子节点描述成已经执行。
+admission；没有能力租约、凭据、自动 Ledger commit 或旧 cron cutover。Kimi 外部讨论与 Fable 5 独立复审后，
+当前顺序改为先完成下游逐项 admission，跑通第一条真实 SEC public WorkOrder 树，再走人工 review、正式 Ledger
+promotion 和研究质量校准。Interrupt / park / resume 与 Reflection 顺延；在此之前不把 planned 子节点描述成
+已经执行，也不再增加没有真实消费者的内核子系统。
 正式 Ledger commit 继续逐条人工 gate。万华的 10 个工作日/20 个显式人工标签门槛
-只限制 Agenda 从 1 家扩到 3 家，不阻塞通用 connector、research coordinator、verifier、Model IR 和
-sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单独验收。
+只限制 Agenda 从 1 家扩到 3 家。v0.5 另设研究价值门槛：第一条真实闭环和至少 1 条人工接受的正式 Claim
+出现前，只继续该闭环必需的 coordinator、verifier、Human Review 接线和故障重放；新 connector、Model IR、
+sandbox 与其他内核扩建暂停。任何研究执行开闸或旧 cron cutover 仍须单独验收。
 
 ### P2 DocumentIndex FTS5 当前进度（开发候选，未部署）
 
@@ -168,7 +171,8 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   `466935efa4684e7384b9b050002e642e648f848968442fb0a6a71850acb3ca38`，666,164 bytes；Python 3.13
   干净安装、公开导入与 packaged SQL 检查通过；
 - 未部署、未访问真实 SEC、未创建 CapabilityLease/CredentialGrant、未自动写 Ledger。rejected plan 后问题仍
-  停在 `planned`；replan/park/resume/retire 要在下一阶段显式设计。完整结果见
+  停在 `planned`；replan/park/resume/retire 的产品语义继续保留为缺口，但在真实研究闭环和质量校准之后再设计。
+  完整结果见
   [research-plan-thin-closure-2026-08-15.md](reports/research-plan-thin-closure-2026-08-15.md)。
 
 ### Connector P0-0 当前进度（未部署）
@@ -747,20 +751,25 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 offline/authority source-numeric verifier、只读 authority resolver、candidate staging、一条隔离 SEC public
 WorkOrder、独立 HumanReviewAuthority、HTML 入口和正式 Evidence/Claim 0.2 promotion 已完成开发候选。
 ClaimIndex status 派生、DocumentIndex FTS5、claim/artifact ContextPack materializer、Agenda context authority、
-ResearchQuestionBacklog 和 Planner SEC public 薄闭环均已完成开发候选。下一步按冻结顺序进入 Interrupt / park /
-resume；下游 WorkOrder 的逐项 coordinator admission、生产部署、Model IR 更新和旧 cron cutover 仍保持独立人工
-gate。当前没有 live staging/review/plan authority。
+ResearchQuestionBacklog 和 Planner SEC public 薄闭环均已完成开发候选。下一步先完成下游 WorkOrder 的逐项
+coordinator admission，在隔离 authority 中跑通一份人批 plan 的真实 SEC public 四步任务树，再把 candidate 走
+人工 review、正式 Evidence/Claim 0.2 promotion 与 Backlog answer binding。Interrupt / park / resume、Reflection、
+生产部署、Model IR 更新和旧 cron cutover 均后置并保持独立人工 gate。当前没有 live staging/review/plan authority。
 
-与 P0/P1 并行推进但不接生产权限：operational verifier contract、fixture-only research coordinator、
-formula census/Model IR ADR、offline capability sandbox。它们不必等待万华 shadow，但在 production
-connector、Ledger 写入或旧 cron cutover 前都要独立开闸。
+operational verifier 与 fixture-only research coordinator 只继续第一条真实闭环需要的部分。formula census/
+Model IR ADR 和 offline capability sandbox 暂停，等真实闭环与首轮质量数据完成后再决定是否恢复。
 
 ## 继续建设与开闸的不同门槛
 
-可以立即继续：contract、runner、connector、verifier、Model IR、sandbox、dashboard 和离线 replay。
+可以立即继续：完成第一条 SEC public read-only 研究闭环所需的 coordinator admission、故障重放、Human Review
+接线、verifier 校准和离线 replay；第一条闭环完成后可做不改 Core 的 Temporal recorded-fixture spike。
+
+第一条真实闭环和至少 1 条人工接受的正式 Claim 出现前暂停：新 connector 品类、Interrupt / Reflection、Model IR、
+sandbox、embedding、多 runtime，以及没有真实消费者的 contract、projection 或 dashboard 扩建。
 
 仍需观察或人工批准：扩大 Agenda 公司数、生产 connector 权限、Evidence/Claim/Thesis commit、外发、
-付费调用、凭据扩权、旧 cron cutover。架构建设和 shadow 数据积累并行，不互相等待。
+付费调用、凭据扩权、旧 cron cutover。第一条闭环开发和 Agenda Shadow 数据积累可以并行，其他架构扩建按
+v0.5 的价值门槛暂停。
 
 ## Connector Fabric 完成门槛
 
