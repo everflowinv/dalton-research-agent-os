@@ -80,6 +80,10 @@ cd integrations/openclaw-model-broker && npm run check
 `e61d35359d52a169c8abd4df7628836715038064ff5167e917c1c3cd007ebd21`，大小都是 611,413 bytes。
 Python 3.13.14 干净 venv 安装后，`dalton_core.ContextMaterializer`、新 contract、共享 document extractor 和
 ContextPack tokenizer 均可用。
+
+实现提交：`1782c31`。GitHub CI `31891656929` 的 Python 3.11、Python 3.13 和 broker 三个 job 全部通过：
+<https://github.com/everflowinv/dalton-research-agent-os/actions/runs/31891656929>。CI 只有 GitHub Actions
+Node 20 弃用提示，没有测试或构建失败。
 ```
 
 ## 未决边界
