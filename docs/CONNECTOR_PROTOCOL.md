@@ -261,8 +261,16 @@ schema、retry 和 provenance 校验。分页和并发调用复用已冻结计�
 
 loader 只产出经过验证的数据对象，不注册 Catalog、不生成 lease、不请求 canary，也不加载或执行 adapter code。
 任一 live/lease escalation、非 synthetic fixture、敏感配置或 credential、额外文件、schema/hash 漂移、跨对象
-source/transport/auth/operation/fixture 分叉都会 fail closed。Human promotion、Catalog publish、静态 resolver 安装
-与每次 physical call admission 仍使用原有 authority gate。
+source/transport/auth/operation/fixture 分叉都会 fail closed。operation 的 JSON Schema 会递归验证每层 type、keyword、
+closed object、required 和 array items；package 不能复用冻结十件 inventory 的 slug 或 connector ref，adapter version
+与 transport/auth 对应的 required gate 也必须精确匹配。package member 只能是三份常规、限长、无重复 key 的 JSON
+文件，不能使用 symlink。Human promotion、Catalog publish、静态 resolver 安装与每次 physical call admission 仍使用
+原有 authority gate。
+
+`source_method` 是 source adapter 自己声明的方法名，不要求和 Dalton operation 同名；它由 profile hash 固定，安装
+adapter 和 canary 时再验证真实实现。`forbidden_target_refs` 是供审阅者明确看到的补充限制，实际 execution authority
+来自闭合的 `allowed_target_refs`、transport target/hash 和 use-time host/auth gate，不能把任意 forbidden 列表当成
+执行授权。
 
 ## 自生成模板
 

@@ -52,6 +52,21 @@ _INVENTORY_REF_RE = re.compile(
 )
 _PROPOSAL_PACKAGE_FILES = frozenset({"profile.json", "fixture.json", "proposal.json"})
 _MAX_PROPOSAL_PACKAGE_FILE_BYTES = 1_000_000
+_SCHEMA_TYPES = frozenset(
+    {"array", "boolean", "integer", "null", "number", "object", "string"}
+)
+_PROPOSAL_REQUIRED_GATES = {
+    ("public_https", "none"): frozenset(
+        {"killable_total_deadline_public_transport", "recorded_public_reference_shadow"}
+    ),
+    ("host_tool", "none"): frozenset({"host_tool_runner_v0.2"}),
+    ("host_tool", "host_owned"): frozenset(
+        {"host_tool_runner_v0.2_and_credential_authority"}
+    ),
+    ("mcp_managed", "host_owned"): frozenset(
+        {"mcp_managed_runner_v0.2_and_credential_authority"}
+    ),
+}
 
 
 class ConnectorInventoryError(ValueError):
@@ -153,6 +168,149 @@ def _assert_no_sensitive_material(wire: Mapping[str, Any], name: str) -> None:
         raise ConnectorInventoryError(
             f"{name} contains path, prompt, config, or credential material"
         )
+
+
+def _schema_types(value: Any, name: str) -> tuple[str, ...]:
+    if isinstance(value, str):
+        types = (_text(value, name),)
+    elif isinstance(value, list):
+        types = tuple(_unique_texts(value, name, nonempty=True))
+        if len(types) != 2 or "null" not in types:
+            raise ConnectorInventoryError(
+                f"{name} unions are limited to one type plus null"
+            )
+    else:
+        raise ConnectorInventoryError(f"{name} must be a JSON Schema type or nullable pair")
+    if not set(types).issubset(_SCHEMA_TYPES):
+        raise ConnectorInventoryError(f"{name} contains an unsupported JSON Schema type")
+    return types
+
+
+def _schema_integer(value: Any, name: str, *, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ConnectorInventoryError(f"{name} must be an integer >= {minimum}")
+    return value
+
+
+def _schema_number(value: Any, name: str) -> int | float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConnectorInventoryError(f"{name} must be a number")
+    return value
+
+
+def _matches_schema_type(value: Any, schema_type: str) -> bool:
+    if schema_type == "null":
+        return value is None
+    if schema_type == "boolean":
+        return isinstance(value, bool)
+    if schema_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if schema_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if schema_type == "string":
+        return isinstance(value, str)
+    return False
+
+
+def _validate_schema_node(value: Any, name: str, *, depth: int = 0) -> dict[str, Any]:
+    if depth > 32:
+        raise ConnectorInventoryError(f"{name} exceeds the schema nesting limit")
+    if not isinstance(value, Mapping):
+        raise ConnectorInventoryError(f"{name} must be a JSON Schema object")
+    node = json.loads(canonical_json(value))
+    if "type" not in node:
+        raise ConnectorInventoryError(f"{name}.type is required")
+    types = _schema_types(node["type"], f"{name}.type")
+    non_null = tuple(item for item in types if item != "null")
+    base_type = non_null[0] if non_null else "null"
+    fields = {"type", "enum"}
+    if base_type == "object":
+        fields.update({"additionalProperties", "properties", "required"})
+    elif base_type == "array":
+        fields.update({"items", "maxItems", "minItems", "uniqueItems"})
+    elif base_type == "string":
+        fields.update({"maxLength", "minLength", "pattern"})
+    elif base_type in {"integer", "number"}:
+        fields.update({"maximum", "minimum"})
+    unknown = set(node) - fields
+    if unknown:
+        raise ConnectorInventoryError(
+            f"{name} contains unsupported JSON Schema keywords: {sorted(unknown)}"
+        )
+
+    if "enum" in node:
+        enum = node["enum"]
+        if not isinstance(enum, list) or not enum:
+            raise ConnectorInventoryError(f"{name}.enum must be a non-empty array")
+        encoded = [canonical_json(item) for item in enum]
+        if len(encoded) != len(set(encoded)):
+            raise ConnectorInventoryError(f"{name}.enum must contain unique values")
+        if base_type in {"array", "object"} or any(
+            not any(_matches_schema_type(item, schema_type) for schema_type in types)
+            for item in enum
+        ):
+            raise ConnectorInventoryError(f"{name}.enum values do not match its type")
+
+    if base_type == "object":
+        if node.get("additionalProperties") is not False:
+            raise ConnectorInventoryError(f"{name} object schemas must be closed")
+        if not isinstance(node.get("properties"), Mapping):
+            raise ConnectorInventoryError(f"{name}.properties must be an object")
+        required = _unique_texts(node.get("required", []), f"{name}.required")
+        if not set(required).issubset(node["properties"]):
+            raise ConnectorInventoryError(f"{name}.required is not covered by properties")
+        if "required" in node:
+            node["required"] = required
+        node["properties"] = {
+            _text(property_name, f"{name}.properties key"): _validate_schema_node(
+                child, f"{name}.properties.{property_name}", depth=depth + 1
+            )
+            for property_name, child in node["properties"].items()
+        }
+    elif base_type == "array":
+        if "items" not in node:
+            raise ConnectorInventoryError(f"{name}.items is required for array schemas")
+        node["items"] = _validate_schema_node(
+            node["items"], f"{name}.items", depth=depth + 1
+        )
+        if "uniqueItems" in node and not isinstance(node["uniqueItems"], bool):
+            raise ConnectorInventoryError(f"{name}.uniqueItems must be boolean")
+        for field in ("minItems", "maxItems"):
+            if field in node:
+                node[field] = _schema_integer(node[field], f"{name}.{field}")
+        if node.get("minItems", 0) > node.get("maxItems", node.get("minItems", 0)):
+            raise ConnectorInventoryError(f"{name} has an invalid item-count interval")
+    elif base_type == "string":
+        for field in ("minLength", "maxLength"):
+            if field in node:
+                node[field] = _schema_integer(node[field], f"{name}.{field}")
+        if node.get("minLength", 0) > node.get("maxLength", node.get("minLength", 0)):
+            raise ConnectorInventoryError(f"{name} has an invalid string-length interval")
+        if "pattern" in node:
+            pattern = _text(node["pattern"], f"{name}.pattern")
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ConnectorInventoryError(f"{name}.pattern is invalid") from exc
+            node["pattern"] = pattern
+    elif base_type in {"integer", "number"}:
+        for field in ("minimum", "maximum"):
+            if field in node:
+                node[field] = _schema_number(node[field], f"{name}.{field}")
+        if (
+            "minimum" in node
+            and "maximum" in node
+            and node["minimum"] > node["maximum"]
+        ):
+            raise ConnectorInventoryError(f"{name} has an invalid numeric interval")
+    return node
+
+
+def _validate_schema_document(value: Any, name: str) -> dict[str, Any]:
+    document = _validate_schema_node(value, name)
+    if document["type"] != "object":
+        raise ConnectorInventoryError("operation schemas must be closed objects")
+    return document
 
 
 def _validate_connector_fixture_manifest(
@@ -499,17 +657,9 @@ def _validate_connector_profile_template(
         if schema_ref in documents:
             raise ConnectorInventoryError("schema_ref must be unique")
         schema_hash = _hash(document["schema_hash"], "schema_hash")
-        schema = _closed(
-            document["document"], {"type", "additionalProperties", "required", "properties"},
-            f"schema_documents[{index}].document",
+        schema = _validate_schema_document(
+            document["document"], f"schema_documents[{index}].document"
         )
-        if schema["type"] != "object" or schema["additionalProperties"] is not False:
-            raise ConnectorInventoryError("operation schemas must be closed objects")
-        required = _unique_texts(schema["required"], "schema.required")
-        if not isinstance(schema["properties"], Mapping):
-            raise ConnectorInventoryError("schema.properties must be an object")
-        if not set(required).issubset(schema["properties"]):
-            raise ConnectorInventoryError("schema.required is not covered by properties")
         if schema_hash != content_hash(schema):
             raise ConnectorInventoryError("schema_hash does not bind schema document")
         document = {"schema_ref": schema_ref, "schema_hash": schema_hash, "document": schema}
@@ -1289,6 +1439,11 @@ def _validate_proposal_package_graph(
     if match is None:
         raise ConnectorInventoryError("proposal profile id is not canonical")
     slug = match.group(1)
+    frozen_slugs = {definition["slug"] for definition in PROFILE_DEFINITIONS}
+    if slug in frozen_slugs or profile["connector_ref"] in _REQUIRED_CONNECTOR_REFS:
+        raise ConnectorInventoryError(
+            "connector proposal package cannot reuse a frozen inventory identity"
+        )
     expected_fixture_operations = [
         {
             "operation": operation["operation"],
@@ -1315,6 +1470,10 @@ def _validate_proposal_package_graph(
         else "host_gateway"
     )
     expected_authenticated = profile["auth_boundary"]["mode"] == "host_owned"
+    required_gates = _PROPOSAL_REQUIRED_GATES.get(
+        (profile["transport"]["kind"], profile["auth_boundary"]["mode"]),
+        frozenset(),
+    )
     expected_adapter_source_hash = content_hash(
         {
             "target_ref": profile["transport"]["target_ref"],
@@ -1352,11 +1511,13 @@ def _validate_proposal_package_graph(
         == f"capability-proposal:connector:{slug}:0.1"
         and proposal["adapter_package_ref"]
         == f"inventory-artifact:adapter-contract:{slug}:0.1"
+        and proposal["source_identity"]["adapter_version"] == "proposal-0.1"
         and proposal["offline_attestation_policy_ref"]
         == "policy:connector-inventory-offline:0.1"
         and proposal["promotion_policy_ref"] == "policy:connector-promotion:0.1"
         and proposal["inventory_state"] == "proposal_only"
         and proposal["requested_canary"] is None
+        and profile["readiness"]["required_gate"] in required_gates
         and all(
             operation["side_effects"] == ["read:recorded-fixture"]
             for operation in profile["operations"]

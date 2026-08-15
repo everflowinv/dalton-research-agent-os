@@ -171,7 +171,7 @@ def synthetic_proposal_package() -> dict[str, dict]:
             "readiness": {
                 "level": "inventory_connected", "lease_eligible": False,
                 "live_execution_allowed": False,
-                "required_gate": "public_https_runner_v0.2",
+                "required_gate": "killable_total_deadline_public_transport",
             },
         }
     )
@@ -226,6 +226,91 @@ def write_proposal_package(root: Path, package: dict[str, dict]) -> None:
         )
 
 
+def rebind_proposal_package(package: dict[str, dict]) -> dict[str, dict]:
+    """Recompute every declared graph hash after a hostile package mutation."""
+
+    package = copy.deepcopy(package)
+    profile = package["profile"]
+    fixture = package["fixture"]
+    proposal = package["proposal"]
+    slug = profile["id"].removeprefix(
+        "connector-profile-template:"
+    ).removesuffix(":0.1")
+
+    for case in fixture["cases"]:
+        if case["outcome"] == "succeeded":
+            case["raw_payload_hash"] = content_hash(
+                {
+                    "synthetic": True,
+                    "connector": slug,
+                    "operation": case["operation"],
+                    "scenario": case["scenario"],
+                }
+            )
+    fixture = rehash(fixture)
+
+    documents = {}
+    for document in profile["schema_documents"]:
+        document["schema_hash"] = content_hash(document["document"])
+        documents[document["schema_ref"]] = document
+    for operation in profile["operations"]:
+        operation["input_schema_hash"] = documents[
+            operation["input_schema_ref"]
+        ]["schema_hash"]
+        operation["output_schema_hash"] = documents[
+            operation["output_schema_ref"]
+        ]["schema_hash"]
+    profile["transport"]["target_hash"] = content_hash(
+        {
+            "kind": profile["transport"]["kind"],
+            "target_ref": profile["transport"]["target_ref"],
+            "host_policy": profile["transport"]["host_policy"],
+            "allowed_hosts": profile["transport"]["allowed_hosts"],
+        }
+    )
+    profile["fixture_manifest_ref"] = fixture["id"]
+    profile["fixture_manifest_hash"] = fixture["content_hash"]
+    profile = rehash(profile)
+
+    proposal["connector_ref"] = profile["connector_ref"]
+    proposal["source_identity"]["source"] = profile["source_identity"]["source_ref"]
+    proposal["source_identity"]["source_version"] = profile["source_identity"][
+        "source_version"
+    ]
+    proposal["source_identity"]["adapter"] = profile["transport"]["target_ref"]
+    proposal["adapter_source_hash"] = content_hash(
+        {
+            "target_ref": profile["transport"]["target_ref"],
+            "operations": [
+                operation["operation"] for operation in profile["operations"]
+            ],
+        }
+    )
+    proposal["profile_template_ref"] = profile["id"]
+    proposal["profile_template_hash"] = profile["content_hash"]
+    proposal["fixture_manifest_ref"] = fixture["id"]
+    proposal["fixture_manifest_hash"] = fixture["content_hash"]
+    proposal["transport_kind"] = profile["transport"]["kind"]
+    proposal["transport_target_ref"] = profile["transport"]["target_ref"]
+    proposal["transport_target_hash"] = profile["transport"]["target_hash"]
+    proposal["auth_boundary"] = profile["auth_boundary"]
+    proposal["operations"] = [
+        {
+            "operation": operation["operation"],
+            "input_schema_ref": operation["input_schema_ref"],
+            "input_schema_hash": operation["input_schema_hash"],
+            "output_schema_ref": operation["output_schema_ref"],
+            "output_schema_hash": operation["output_schema_hash"],
+            "completeness": operation["completeness_ceiling"],
+            "pagination": operation["pagination"]["mode"],
+            "side_effects": operation["side_effects"],
+        }
+        for operation in profile["operations"]
+    ]
+    proposal = rehash(proposal)
+    return {"profile": profile, "fixture": fixture, "proposal": proposal}
+
+
 class ConnectorInventoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.built = build_connector_inventory()
@@ -268,7 +353,7 @@ class ConnectorInventoryTests(unittest.TestCase):
                 "level": "inventory_connected",
                 "lease_eligible": False,
                 "live_execution_allowed": False,
-                "required_gate": "public_https_runner_v0.2",
+                "required_gate": "killable_total_deadline_public_transport",
             },
         )
         self.assertEqual(load_packaged_connector_inventory(), frozen_before)
@@ -328,6 +413,97 @@ class ConnectorInventoryTests(unittest.TestCase):
         assert_rejected(graph_fork)
 
         assert_rejected(synthetic_proposal_package(), extra_file=True)
+
+    def test_extensible_proposal_package_recursively_validates_operation_schemas(self) -> None:
+        mutations = (
+            lambda document: document["properties"]["symbol"].update(
+                {"type": "banana"}
+            ),
+            lambda document: document["properties"].update(
+                {
+                    "nested": {
+                        "type": "object",
+                        "additionalProperties": True,
+                        "properties": {},
+                    }
+                }
+            ),
+            lambda document: document["properties"].update(
+                {"values": {"type": "array"}}
+            ),
+            lambda document: document["properties"]["symbol"].update(
+                {"description": "unreviewed keyword"}
+            ),
+        )
+        for index, mutate in enumerate(mutations):
+            with self.subTest(index=index), tempfile.TemporaryDirectory() as directory:
+                package = synthetic_proposal_package()
+                mutate(package["profile"]["schema_documents"][0]["document"])
+                package = rebind_proposal_package(package)
+                root = Path(directory)
+                write_proposal_package(root, package)
+                with self.assertRaises(ConnectorInventoryError):
+                    load_connector_proposal_package(root)
+
+    def test_extensible_proposal_package_reserves_frozen_identity_and_authority(self) -> None:
+        def assert_rejected(package: dict[str, dict]) -> None:
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_proposal_package(root, rebind_proposal_package(package))
+                with self.assertRaises(ConnectorInventoryError):
+                    load_connector_proposal_package(root)
+
+        frozen = json.loads(
+            canonical_json(synthetic_proposal_package()).replace(
+                "synthetic-prices", "cninfo"
+            )
+        )
+        frozen["profile"]["connector_ref"] = "connector:cninfo-announcements"
+        frozen["proposal"]["connector_ref"] = "connector:cninfo-announcements"
+        assert_rejected(frozen)
+
+        adapter_version = synthetic_proposal_package()
+        adapter_version["proposal"]["source_identity"]["adapter_version"] = "forked-9.9"
+        assert_rejected(adapter_version)
+
+        missing_gate = synthetic_proposal_package()
+        missing_gate["profile"]["readiness"]["required_gate"] = "none"
+        assert_rejected(missing_gate)
+
+    def test_extensible_proposal_package_member_boundary_is_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_proposal_package(root, synthetic_proposal_package())
+            (root / "fixture.json").unlink()
+            with self.assertRaises(ConnectorInventoryError):
+                load_connector_proposal_package(root)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_proposal_package(root, synthetic_proposal_package())
+            (root / "proposal.json").unlink()
+            (root / "proposal.json").symlink_to(root / "profile.json")
+            with self.assertRaises(ConnectorInventoryError):
+                load_connector_proposal_package(root)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_proposal_package(root, synthetic_proposal_package())
+            (root / "fixture.json").write_text(
+                "{" + "x" * 1_000_001 + "}", encoding="utf-8"
+            )
+            with self.assertRaises(ConnectorInventoryError):
+                load_connector_proposal_package(root)
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_proposal_package(root, synthetic_proposal_package())
+            (root / "proposal.json").write_text(
+                '{"schema_version":"0.2","schema_version":"0.2"}',
+                encoding="utf-8",
+            )
+            with self.assertRaises(ConnectorInventoryError):
+                load_connector_proposal_package(root)
 
     def test_inventory_has_exactly_ten_distinct_profiles_and_required_splits(self) -> None:
         profiles = self.built["templates"]

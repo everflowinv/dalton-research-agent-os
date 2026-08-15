@@ -2,7 +2,7 @@
 
 日期：2026-08-14
 
-状态：本地候选验收通过，待 Claude Fable 5 committed-tree 增量复核
+状态：Claude Fable 5 首轮 committed-tree 复核为有条件 Go；阻塞项已修，待增量复核
 范围：离线 contract/package 验证；未部署、未访问真实数据源、未授予执行权限
 
 ## 架构裁决
@@ -29,10 +29,13 @@ route authority。只有首条 live connector 实测每页 admission p50 超过 
 loader 复用闭合 profile/fixture/proposal validator，但不要求新 connector 出现在冻结的十类
 `PROFILE_DEFINITIONS`。它精确绑定 created time、source、transport target/host policy、auth boundary、
 operation schema/pagination/completeness、fixture ref/hash、proposal ref/hash 和 offline promotion policy。
+operation schema 的每一层都会验证合法 type、受支持 keyword、closed object、required subset 和 array items。
+冻结十件 inventory 的 slug/connector ref 不能被外部 package 冒用，adapter version 与 transport/auth 对应的
+required gate 也被固定。
 
 这条路径只接受 `inventory_connected + proposal_only + requested_canary=null`，operation 只允许
-`read:recorded-fixture`，fixture 必须为 synthetic。它不导入 adapter code，不注册 Catalog，不生成 lease，
-不改变 frozen ten-profile loader。
+`read:recorded-fixture`，fixture 必须为 synthetic。目录只能包含三份常规、限长、无重复 JSON key 的文件，
+拒绝 symlink。它不导入 adapter code，不注册 Catalog，不生成 lease，不改变 frozen ten-profile loader。
 
 ## 本地候选验收
 
@@ -40,9 +43,13 @@ operation schema/pagination/completeness、fixture ref/hash、proposal ref/hash 
 - frozen ten-profile inventory 在加载新 package 前后逐对象相同；
 - lease escalation、schema hash fork、非 synthetic fixture、credential-shaped builder ref、adapter graph fork、
   额外文件均 fail closed；
-- connector inventory 专项：14/14；
-- Python 全量：319/319；
-- `git diff --check`：通过。
+- Fable 首轮六个重算 hash 的敌对探针发现 nested schema type 和 frozen identity 可绕过；当前修订加入递归 schema
+  validator、冻结身份保留、adapter version/required gate 绑定，以及 missing/symlink/oversize/duplicate-key 文件边界；
+- `source_method` 可与 Dalton operation 不同，这是 adapter 声明自由；`forbidden_target_refs` 是审阅提示，执行权限
+  仍由 exact allowed targets 和 transport/use-time gate 决定；
+- connector inventory 专项：17/17；
+- Python 全量：322/322；broker：15/15；
+- `compileall`、`git diff --check`：通过。
 
 ## 保持 No-Go
 
