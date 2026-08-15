@@ -2,7 +2,7 @@
 
 日期：2026-08-15
 
-状态：隔离开发候选已完成本地验证；未部署，未接 Agenda 或现有 cron
+状态：隔离开发候选已完成本地与远端验证；未部署，未接 Agenda 或现有 cron
 
 ## 结果
 
@@ -39,6 +39,11 @@ relation 时间，不再永远停在 Claim 创建时间。
   `ed4ea1194580c8b99d522fc42bfaac0152303f9033093986851ed5e00f52bf7e`，586,078 bytes；
 - wheel 在干净 Python 3.13 venv 安装成功，`pip check` 无冲突；空 Ledger 构建、snapshot contract 和
   packaged SQL 读取均通过。
+
+实现提交：`cd4c127`。GitHub CI `31884586011` 的 Python 3.11、Python 3.13 和 broker 三个 job
+全部通过：<https://github.com/everflowinv/dalton-research-agent-os/actions/runs/31884586011>。
+CI 只提示 `actions/checkout@v4`、`actions/setup-python@v5` 和 `actions/setup-node@v4` 的 Node 20
+弃用警告，没有测试或构建失败。
 
 Python 全量测试仍会打印既有测试夹具未关闭 SQLite connection 的 `ResourceWarning`；385 项全部通过，
 本轮 41 项组合测试没有 warning。
