@@ -41,6 +41,7 @@ dalton_core = [
   "runner_journal_schema.sql",
   "credential_authority_schema.sql",
   "research_coordinator_schema.sql",
+  "candidate_staging_schema.sql",
   "connector_inventory/*.json",
   "connector_inventory/profiles/*.json",
   "connector_inventory/fixtures/*.json",

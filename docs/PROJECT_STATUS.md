@@ -2,7 +2,7 @@
 
 更新日期：2026-08-15
 - live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows，以及 P2 fixture-only research coordinator foundation，未部署
+- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 fixture-only research coordinator，以及 offline source/numeric verifier + candidate staging，未部署
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -14,11 +14,13 @@ hostile-code 生产安全等级。
 Dalton 已经完成独立 Core、Research Ledger 核心版本链与 gate、单写者、Scheduler、模型路由、模型用量/成本、
 Capability Registry/Catalog、常驻控制服务、Agenda Shadow、durable outbox、人工反馈和备份恢复。
 它现在能自主生成并选择研究问题，也能在仓库 fixture 上按一次性 connector plan 执行 CNINFO、SEC、
-AlphaEngine 三源离线流程并从 checkpoint 恢复；它还不会访问 live source、运行独立 verifier 或提交新的
-Evidence、Claim、Thesis。
+AlphaEngine 三源离线流程并从 checkpoint 恢复；它还不会访问 live source、运行 live authority verifier 或提交新的
+Evidence、Claim、Thesis。当前开发候选已经能对 packaged fixture 重跑 source/numeric verifier，并把通过的
+CandidateEvidence/CandidateClaim 写入独立 staging；这条链尚未部署，也没有接真实 connector authority 或人工审阅入口。
 
-当前下一阶段是 **Connector Fabric Shadow**。万华的 10 个工作日/20 个显式人工标签门槛只限制
-Agenda 从 1 家扩到 3 家，不阻塞通用 connector、research coordinator、verifier、Model IR 和
+当前下一阶段是 **第一条只读研究闭环**：先把真实 SourceEnvelope/Artifact authority 解析到 verifier，
+再让一条公告或 filing WorkOrder 产出候选记录并进入人工 review。万华的 10 个工作日/20 个显式人工标签门槛
+只限制 Agenda 从 1 家扩到 3 家，不阻塞通用 connector、research coordinator、verifier、Model IR 和
 sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单独验收。
 
 ### Connector P0-0 当前进度（未部署）
@@ -316,7 +318,25 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
   安装、`pip check`、三步 plan build、packaged SQL 和 SQLite integrity 均通过；GitHub CI `31869944201` 的
   Python 3.11、Python 3.13 和 broker 三个 job 全部通过；
 - 本轮没有部署、没有访问 live source/MCP、没有读取 credential、没有写 Evidence/Claim/Thesis，也没有切换
-  旧 cron。下一步是在本候选复核通过后实现 source/numeric verifier 与 candidate staging contract，仍先离线。
+  旧 cron。其后的 offline source/numeric verifier 与 candidate staging candidate 见下一节。
+
+### P2 offline verifier + candidate staging 当前进度（fixture-only，未部署）
+
+- 新增 closed `SourceVerificationMaterial`、`NumericVerificationSpec`、`VerificationBundle`、
+  `CandidateEvidence` 和 `CandidateClaim` 0.1 schema。verification bundle 固定 verifier ref/hash；候选对象使用
+  candidate-only identity，不能当作正式 Ledger version；claim 的叙述语义在人工 review 前固定为 `unverified`；
+- source verifier 重新核对 plan/context/step/request/receipt/checkpoint/authority binding，并从 packaged fixture
+  重算 raw payload、synthetic source summary、artifact、schema、record refs、lineage、completeness 和时间顺序；
+- numeric input 必须用 exact material ref/hash + JSON Pointer 从 verified raw payload 重新抽取。数值使用 canonical
+  Decimal string，只开放 `identity / sum / difference / ratio`，并核对 unit、currency、scale、period 和 rounding；
+- `CandidateStagingStore` 使用独立 owner-only SQLite 和 append-only trigger，不导入 `DaltonStore`，也不创建
+  Evidence/Claim/Thesis 表。staging 会重新执行两个 verifier 并要求结果 canonical equality，调用方自报 pass 无效；
+- stage request 在 `BEGIN IMMEDIATE` 事务内保存 material/spec/verification/candidate/idempotency。事务内崩溃全部
+  回滚；commit 后返回前崩溃用同一 idempotency key 返回 duplicate；同 key 不同 request fail closed；
+- 专项 7/7，coordinator/verifier/packaging 组合 22/22，Python 全量、broker、build 和安装结果见本次实施报告；
+- 当前 SourceEnvelope/Artifact 仍是 P2 synthetic summary ref/hash，不是 live connector authority record。真实只读
+  WorkOrder 前必须增加 authority resolver 并复核完整 checkpoint chain；本阶段不部署、不接 Agenda、不读取凭据、
+  不写正式 Research Ledger。
 
 ## 蓝图阶段
 
@@ -324,7 +344,7 @@ sandbox 等架构建设。任何研究执行开闸或旧 cron cutover 仍须单�
 
 已完成：
 
-- 80 份闭合 JSON Schema、13 份 SQL schema；
+- 85 份闭合 JSON Schema、14 份 SQL schema；
 - immutable DomainEvent、WorkOrder、ResultEnvelope、ModelInvocation；
 - Evidence → Claim → Thesis 版本链、verification 和 commit gate；
 - Workflow、Artifact metadata、模型 Usage/Cost、只读 projection 和静态看板；
@@ -358,7 +378,8 @@ Agenda Perception；否则会在 10 日评估窗口中途改变输入分布，�
 已完成：Scheduler lease/retry/idempotency、ProcessRuntimeAdapter、六模型 exact route、OpenClaw 模型
 broker、预算和 pause gate。
 
-部分完成：connector runner、recorded transport 与 fixture-only coordinator 已完成；尚未接 live source。
+部分完成：connector runner、recorded transport、fixture-only coordinator、offline source/numeric verifier 与
+candidate-only staging 已完成；尚未接 live source/authority resolver/human review。
 未完成：原生事件 connector、从 AgendaDecision 到 research DAG 的 production planner、
 `ready → connector/worker → verifier → revise/commit` 完整 coordinator，以及第一条真实只读研究 WorkOrder。
 
@@ -368,7 +389,8 @@ broker、预算和 pause gate。
 版本、原子 commit、幂等和事务失败回滚约束。这里没有 thesis 业务版本回滚；当前可激活历史版本的
 rollback 只存在于 Capability Registry。
 
-未完成：source/numeric/completeness/investment-link verifier、seeded-error 校准、局部返工、人工审阅
+部分完成：source/numeric verifier 已有 synthetic fixture replay 与换绑/数值错误探针。
+未完成：live authority source/numeric verifier、completeness/investment-link verifier、seeded-error 校准、局部返工、人工审阅
 入口和任何 live thesis commit。
 
 ### Phase 4：能力自主改进——治理半边完成
@@ -399,7 +421,8 @@ Postgres/Temporal 规模化门槛和迁移。
   Scheduler/Agenda/live connector；
 - P2 已有 typed ContextPack、per-attempt RunState/Checkpoint 和结构化 ClaimIndex；尚缺版本化 retention policy
   与 authority DB 之外的滚动 OpsTelemetry；session transcript 和 compaction summary 不作为研究 memory；
-- operational verifier、revise/replanning/reflection 和 seeded-error 校准；
+- operational verifier 已有 fixture-only source/numeric thin slice；尚缺 live authority resolver、
+  completeness/investment-link verifier、revise/replanning/reflection 和 seeded-error 校准；
 - first-class falsifier/catalyst/driver/model/valuation authority、Model IR、Tier 1/2/3 evaluator 和
   Excel exporter；
 - generic research review/delivery outbox；现有 outbox 只服务 Agenda Discord 通知；incident ledger、
@@ -547,9 +570,9 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 ### P2：第一条只读研究闭环
 
-将一个公告/filing connector 接到 AgendaDecision 后的只读 WorkOrder，运行 source/numeric verifier，
-先新增闭合的 candidate Evidence/Claim staging contract，再输出候选记录。正式 commit、Model IR 更新和
-旧 cron cutover 仍保持人工 gate；当前代码没有这项 staging authority。
+offline source/numeric verifier 与 candidate staging contract 已完成候选。下一步先加只读 authority resolver，
+再将一个公告/filing connector 接到 AgendaDecision 后的只读 WorkOrder，输出候选记录并进入人工 review。
+正式 commit、Model IR 更新和旧 cron cutover 仍保持人工 gate；当前代码没有 live staging/review authority。
 
 与 P0/P1 并行推进但不接生产权限：operational verifier contract、fixture-only research coordinator、
 formula census/Model IR ADR、offline capability sandbox。它们不必等待万华 shadow，但在 production

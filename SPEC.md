@@ -11,7 +11,7 @@ database 和 cron 定义，但归档不代表新系统采用旧约束、旧研�
 
 ### 通用规则
 
-- 六十二份 JSON Schema 都是 Draft 2020-12 文档，根对象有
+- 八十五份 JSON Schema 都是 Draft 2020-12 文档，根对象有
   `additionalProperties: false`。
 - 每个对象都有 `schema_version`、稳定 `id` 和 `created_at`；引用字段使用稳定
   ref 字符串，时间字段保持 RFC 3339 形式的字符串（具体时区策略留给实现层）。
@@ -282,6 +282,26 @@ hash 都必须与 Profile/CallSpec/Attempt/Artifact authority 相等；source/sc
 source identity、operation schema bundle 和规范化 source metadata/record refs，不声称绑定 record body。
 Connector output 先停在 raw artifact 和
 SourceEnvelope；未经 source/numeric verifier 不得进入 Evidence、Claim 或 Thesis。
+
+### Offline source/numeric verification 与 candidate staging
+
+P2 fixture-only verifier 只消费 packaged recorded fixture、成功的
+`ConnectorCompletionReceipt`、连续绑定的 `ResearchCheckpoint`、一次性 plan、ContextPack、step 和
+RunnerRequest。source verifier 重新执行 fixture 解析，重算 canonical raw payload、synthetic
+SourceEnvelope summary、artifact 和 schema hash；numeric verifier 只接受由 JSON Pointer 从同一份 verified
+material 抽取的 canonical Decimal string，并只执行 `identity / sum / difference / ratio` 四个确定性算子。
+单位、币种、scale、period 和 rounding 都属于验证对象，不由候选结论自行声明。
+
+`CandidateEvidence` 与 `CandidateClaim` 使用 candidate-only identity 和独立 SQLite staging schema，不能解析为
+正式 `EvidenceVersion` / `ClaimVersion`。staging 会在事务内重新执行两个 verifier，并要求传入 bundle 与重算
+结果 canonical equality；任何 failed finding、换绑、幂等冲突或 version-chain 漂移都 fail closed。commit 后返回前
+崩溃可按同一 idempotency key 恢复，事务内崩溃不留下半条候选记录。
+numeric verifier 只验证数值及其 metadata；candidate 的 subject、metric、basis 和叙述在人工 review 前固定标为
+`semantic_verification_status=unverified`，不能把数值通过冒充成语义已经验证。
+
+0.1 仍只是 synthetic fixture contract。P2 coordinator 的 SourceEnvelope/Artifact 只是摘要 ref/hash，不是 live
+Connector authority record；真实只读研究前必须增加 authority resolver，并另行验收真实 raw artifact、SourceEnvelope、
+checkpoint chain 和 human review。candidate staging 没有 Research Ledger handle，也不授权正式 commit。
 
 Dalton 可以生成 `ConnectorProposalManifest`、adapter package、schema 和 recorded fixtures，并在无网络、
 无凭据、无 Core DB 的 sandbox replay。静态 resolver、networked canary 和 production promotion 都需要

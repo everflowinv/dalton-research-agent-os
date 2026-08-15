@@ -28,6 +28,7 @@ class PackagingTests(unittest.TestCase):
             "connector_schema.sql",
             "credential_authority_schema.sql",
             "research_coordinator_schema.sql",
+            "candidate_staging_schema.sql",
             "dashboard.html",
             "agenda_control.html",
         ):
