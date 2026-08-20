@@ -9,6 +9,7 @@ import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from dalton_core.agenda_coordinator import AgendaCoordinator, AgendaCoordinatorConfig
@@ -16,6 +17,7 @@ from dalton_core.contracts import InvocationGranularity, ModelInvocation, Result
 from dalton_core.governance_cli import ephemeral_call
 from dalton_core.model_deployment import install_openclaw_catalog
 from dalton_core.scheduler import Scheduler
+from dalton_core.store import content_hash
 from dalton_core.writer_server import CORE_OPERATIONS, Principal, write_token_config
 
 
@@ -55,6 +57,96 @@ class FakeAdapter:
 
 
 class AgendaCoordinatorTests(unittest.TestCase):
+    def test_cost_fallback_and_refreshed_rate_chain(self):
+        class Client:
+            def __init__(self):
+                self.usage = None
+                self.rates = []
+                self.cost = None
+
+            def record_usage(self, _invocation_ref, **params):
+                self.usage = params
+                return {"id": params["entry_id"]}
+
+            def create_price_rate_version(self, price_rate_ref, **params):
+                self.rates.append({"price_rate_ref": price_rate_ref, **params})
+                return {"id": params["version_id"]}
+
+            def record_cost(self, _usage_entry_ref, **params):
+                self.cost = params
+                return {"id": params["cost_entry_id"]}
+
+        profile = {
+            "profile_version_ref": "model-profile-version:broker-deepseek-v4-flash:2",
+            "prior_version_ref": "model-profile-version:broker-deepseek-v4-flash:1",
+            "provider": "deepseek",
+            "model": "deepseek-v4-flash",
+            "created_at": "2026-08-14T10:34:12.184403+00:00",
+            "cost": {"input_per_million_usd": 0.22, "output_per_million_usd": 0.66},
+        }
+        base = {
+            "work_order_ref": "work:agenda-hotfix",
+            "created_at": "2026-08-20T08:00:00+00:00",
+            "completed_at": "2026-08-20T08:00:01+00:00",
+            "parent_ref": "route-decision:hotfix",
+        }
+
+        missing = SimpleNamespace(
+            **base,
+            id="invocation:missing-hotfix",
+            usage={
+                "input_tokens": None, "output_tokens": None, "total_tokens": None,
+                "cache_read_tokens": None, "cache_write_tokens": None,
+            },
+        )
+        fallback = Client()
+        AgendaCoordinator._record_usage_and_cost(
+            fallback,
+            missing,
+            profile,
+            "agenda-cycle:hotfix-missing",
+            {
+                "id": missing.parent_ref,
+                "selected_profile_version_ref": profile["profile_version_ref"],
+                "candidate_snapshot": [{
+                    "profile_version_ref": profile["profile_version_ref"],
+                    "eligible": True,
+                    "estimated_cost_usd": "0.001759",
+                }],
+            },
+        )
+        self.assertEqual(fallback.usage["metering_source"], "launcher_measured")
+        self.assertEqual(
+            [rate["charge_type"] for rate in fallback.rates],
+            ["input_tokens", "output_tokens", "request"],
+        )
+        self.assertEqual(fallback.cost["amount_micros"], 1759)
+        self.assertEqual(fallback.cost["cost_status"], "estimated")
+
+        measured = SimpleNamespace(
+            **base,
+            id="invocation:measured-hotfix",
+            usage={
+                "input_tokens": 100, "output_tokens": 50, "total_tokens": 150,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+            },
+        )
+        chained = Client()
+        AgendaCoordinator._record_usage_and_cost(
+            chained,
+            measured,
+            profile,
+            "agenda-cycle:hotfix-measured",
+            {"id": measured.parent_ref},
+        )
+        self.assertEqual(len(chained.rates), 2)
+        for rate in chained.rates:
+            expected = "price-rate-version:" + content_hash({
+                "profile": profile["prior_version_ref"],
+                "charge": rate["charge_type"],
+            })[:32]
+            self.assertEqual(rate["prior_version_ref"], expected)
+
     def legacy(self, path: Path):
         conn = sqlite3.connect(path)
         conn.executescript("""
@@ -82,7 +174,7 @@ class AgendaCoordinatorTests(unittest.TestCase):
         }
         ephemeral_call(**base, operation="create_agenda_policy", params={
             "policy": policy, "effective_from": "2026-08-14T00:00:00+00:00",
-            "effective_until": "2026-08-15T00:00:00+00:00", "activate": True,
+            "effective_until": "2027-08-15T00:00:00+00:00", "activate": True,
             "version_id": "agenda-policy-version:phase1", "idempotency_key": "policy:phase1",
         })
         ephemeral_call(**base, operation="create_mandate", params={
@@ -90,7 +182,7 @@ class AgendaCoordinatorTests(unittest.TestCase):
             "scope_refs": ["wanhua"], "constraints": {"mode": "shadow"},
             "success_criteria": {"human_feedback_required": True},
             "effective_from": "2026-08-14T00:00:00+00:00",
-            "effective_until": "2026-08-15T00:00:00+00:00", "activate": True,
+            "effective_until": "2027-08-15T00:00:00+00:00", "activate": True,
             "version_id": "mandate-version:phase1", "idempotency_key": "mandate:phase1",
         })
         ephemeral_call(**base, operation="set_agenda_pause", params={
@@ -105,7 +197,14 @@ class AgendaCoordinatorTests(unittest.TestCase):
             socket = root / "run" / "writer.sock"; tokens = root / "tokens.json"
             legacy = root / "legacy.sqlite"; self.legacy(legacy)
             write_token_config(tokens, [Principal("core", "core-token", CORE_OPERATIONS, unrestricted=True)])
-            install_openclaw_catalog(router, checked_at=datetime(2026, 8, 14, 9, tzinfo=timezone.utc), availability_ttl=timedelta(days=1))
+            # Keep the fixture independent of the wall-clock date on which
+            # the suite is executed. The coordinator still passes its own
+            # frozen cycle time below.
+            install_openclaw_catalog(
+                router,
+                checked_at=datetime(2026, 8, 14, 9, tzinfo=timezone.utc),
+                availability_ttl=timedelta(days=365),
+            )
             env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
             process = subprocess.Popen(
                 [sys.executable, "-m", "dalton_core.writer_server", "--db", str(core), "--socket", str(socket), "--token-config", str(tokens)],
