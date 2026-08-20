@@ -2,7 +2,7 @@
 
 更新日期：2026-08-20
 - live deployed baseline：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`；Agenda 兼容热修复：`03ea471`
-- 当前开发候选：`c95a155` 加本轮待提交 closure；首条真实 SEC public plan 已完成人工接受、正式 Ledger promotion 与 Backlog answer，仍未部署到 live
+- 当前开发候选：`bd868b2`；首条真实 SEC public plan 已完成人工接受、正式 Ledger promotion 与 Backlog answer，仍未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
