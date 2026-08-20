@@ -2,7 +2,7 @@
 
 更新日期：2026-08-20
 - live deployed baseline：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`；Agenda 兼容热修复：`03ea471`
-- 当前开发候选：`1cbca49` 加本轮待提交修复；ResearchPlan 四步 executor 已接通并完成真实 SEC public 隔离 canary，仍未部署到 live
+- 当前开发候选：`c95a155` 加本轮待提交 closure；首条真实 SEC public plan 已完成人工接受、正式 Ledger promotion 与 Backlog answer，仍未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -21,8 +21,10 @@ live 部署现在能自主生成并选择研究问题，也能在仓库 fixture 
 AlphaEngine 三源离线流程并从 checkpoint 恢复；live 仍不会访问真实 source、运行 authority verifier 或提交新的
 Evidence、Claim、Thesis。当前开发候选已能重放 fixture，也能从完整 Connector authority 解析真实 SEC public
 响应，并把 source/numeric verifier 通过的 CandidateEvidence/CandidateClaim 写入独立 staging。这条链已由
-ResearchPlanExecutor 接通，并在隔离临时 authority 中跑完一份真实 SEC public 四步 plan。当前开发候选已经
-增加明确人工审阅入口和无损正式 promotion，但尚未部署。
+ResearchPlanExecutor 接通，并在隔离临时 authority 中跑完一份真实 SEC public 四步 plan。Owner 已接受该 plan
+的 exact candidate；隔离 Core 已生成 1 条正式 EvidenceVersion 0.2、1 条 ClaimVersion 0.2、1 条 supports
+relation 和 1 条 Backlog answer binding。当前开发候选已经增加明确人工审阅入口、无损正式 promotion 和
+authority-bound ResearchPlan closure，但尚未部署。
 
 当前下一阶段是 **把第一条只读研究闭环接到可检索、可计划的消费者**：HumanReviewAuthority 已能对 exact
 candidate 做 accept/revise/reject，accept 通过 scoped writer 原子写 EvidenceVersion 0.2、ClaimVersion 0.2 和
@@ -38,15 +40,17 @@ ResearchQuestionVersion → immutable ResearchPlanVersion → WorkflowRunVersion
 Scheduler，下游 resolver/verifier/candidate staging 保持 planned，必须由 coordinator 在上游 exact result 后逐项
 admission；开发候选 coordinator 已完成 exact Scheduler/connector receipt/runner journal/内部阶段输出证明核对，
 每次只 admission 直接子节点，重放收敛且篡改 fail closed。ResearchPlanExecutor 现已把四个真实节点接到各自
-authority，并跑完第一条真实 SEC public WorkOrder 树；没有能力租约、凭据、自动 Ledger commit 或旧 cron
-cutover。当前顺序是让人工对 exact candidate 作 accept/revise/reject；只有 explicit accept 才能正式写入
-Evidence/Claim/Relation，再绑定 Backlog answer 并校准首轮研究质量。Interrupt / park / resume 与 Reflection
-顺延，不增加没有真实消费者的内核子系统。
+authority，并跑完第一条真实 SEC public WorkOrder 树。首条 exact candidate 已获 explicit accept，正式
+Evidence/Claim/Relation 与 Backlog answer 也已写入隔离 authority；新 closure coordinator 会重验
+plan→final candidate→review→formal promotion 全链，并在崩溃后收敛到同一 answer binding。当前顺序进入首轮
+质量校准：记录接受/修改/拒绝原因、来源与数字错误、成本和审阅时间，再按真实缺口决定 connector、verifier 或
+model 增量。Interrupt / park / resume 与 Reflection 继续顺延，不增加没有真实消费者的内核子系统。当前没有
+能力租约、凭据、自动 Ledger commit 或旧 cron cutover。
 正式 Ledger commit 继续逐条人工 gate。万华的 10 个工作日/20 个显式人工标签门槛
-只限制 Agenda 从 1 家扩到 3 家。第一条真实闭环和至少 1 条人工接受的正式 Claim 出现前，完整流程仍是第一
-优先级，但不是冻结全部 connector 和 model 工作：只要一项增量直接解除首家公司覆盖的阻塞，或能按明确验收
-标准改善首轮产物质量，就可以并行推进。与首条 plan 无关的新 connector 品类、Model IR、sandbox 和其他内核
-扩建继续后置。任何研究执行开闸或旧 cron cutover 仍须单独验收。
+只限制 Agenda 从 1 家扩到 3 家。第一条真实闭环和至少 1 条人工接受的正式 Claim 门槛已在隔离 canary 达到，
+但它只证明机制闭环，不证明研究质量或生产就绪。后续增量必须回指真实审阅数据或明确解除覆盖阻塞；与质量缺口
+无关的新 connector 品类、Model IR、sandbox 和其他内核扩建继续后置。任何研究执行开闸、生产部署或旧 cron
+cutover 仍须单独验收。
 
 ### P2 DocumentIndex FTS5 当前进度（开发候选，未部署）
 
@@ -803,13 +807,15 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 ### P2：第一条只读研究闭环
 
 offline/authority source-numeric verifier、只读 authority resolver、candidate staging、一条隔离 SEC public
-WorkOrder、独立 HumanReviewAuthority、HTML 入口和正式 Evidence/Claim 0.2 promotion 已完成开发候选。
+WorkOrder、独立 HumanReviewAuthority、HTML 入口、正式 Evidence/Claim 0.2 promotion 与 ResearchPlan closure
+已完成开发候选。
 ClaimIndex status 派生、DocumentIndex FTS5、claim/artifact ContextPack materializer、Agenda context authority、
 ResearchQuestionBacklog、Planner SEC public 薄闭环、下游逐项 coordinator admission 和真实四步 executor 均已完成
-开发候选；隔离 authority 中的一份人批 SEC public 四步任务树已经跑通。下一步对 exact candidate 做人工
-accept/revise/reject；accept 后才执行正式 Evidence/Claim 0.2 promotion 与 Backlog answer binding。Interrupt / park / resume、Reflection、
-生产部署和旧 cron cutover 均后置并保持独立人工 gate。直接解除首条 plan 阻塞或按明确标准改善首轮产物质量的
-connector/model 增量可以并行推进；与首条 plan 无关的扩建后置。当前没有 live staging/review/plan authority。
+开发候选；隔离 authority 中的一份人批 SEC public 四步任务树已经跑通。Owner 已接受 exact candidate，正式
+Evidence/Claim 0.2 promotion 与 Backlog answer binding 已完成；closure coordinator 对全链重验并支持崩溃重放。
+下一步是用首轮接受原因、错误、成本和审阅时间校准研究质量。Interrupt / park / resume、Reflection、生产部署和
+旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
+增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。
 
 operational verifier 与 fixture-only research coordinator 只继续第一条真实闭环需要的部分。formula census/
 Model IR ADR 和 offline capability sandbox 只有在首条 plan 明确需要且有验收标准时才恢复，否则等真实闭环与
@@ -817,13 +823,12 @@ Model IR ADR 和 offline capability sandbox 只有在首条 plan 明确需要且
 
 ## 继续建设与开闸的不同门槛
 
-可以立即继续：完成第一条 SEC public read-only 研究闭环的 Human Review、正式 promotion、Backlog answer binding、
-故障重放和 verifier 校准；能直接解除该 plan 阻塞或按明确标准改善产物质量的 connector/model 增量也可并行
-推进。第一条闭环完成后可做不改 Core 的 Temporal recorded-fixture spike。
+可以立即继续：校准第一条 SEC public read-only 研究闭环的审阅质量、成本与耗时，修复真实 review 暴露的
+verifier/connector/model 缺口；能按明确标准改善下一轮产物质量的增量也可推进。第一条闭环完成后可做不改
+Core 的 Temporal recorded-fixture spike。
 
-第一条真实闭环和至少 1 条人工接受的正式 Claim 出现前暂停：与首条 plan 无关的新 connector 品类、
-Interrupt / Reflection、无明确质量验收的 Model IR、sandbox、embedding、多 runtime，以及没有真实消费者的
-contract、projection 或 dashboard 扩建。
+继续暂停：与真实质量缺口无关的新 connector 品类、Interrupt / Reflection、无明确质量验收的 Model IR、
+sandbox、embedding、多 runtime，以及没有真实消费者的 contract、projection 或 dashboard 扩建。
 
 仍需观察或人工批准：扩大 Agenda 公司数、生产 connector 权限、Evidence/Claim/Thesis commit、外发、
 付费调用、凭据扩权、旧 cron cutover。第一条闭环开发和 Agenda Shadow 数据积累可以并行，其他架构扩建按

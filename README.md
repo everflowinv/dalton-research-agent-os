@@ -45,6 +45,11 @@ python3 scripts/run_sec_research_plan_canary.py \
   --date-from 2026-01-01 --date-to 2026-08-17 \
   --approved-by human:operator
 
+# 在 exact candidate 已经人工接受并完成 Ledger promotion 后，关闭同一条计划
+python3 scripts/close_sec_research_plan_canary.py \
+  --output-dir temp/sec-plan-canary-example \
+  --decision-ref human-review:EXACT_DECISION_REF
+
 cd integrations/openclaw-model-broker
 npm run check
 ```
@@ -100,7 +105,10 @@ Ledger 0.2 无损 promotion 已进入开发候选；Planner 也能把 exact sele
 WorkflowRunVersion、WorkOrderLink 和 Scheduler。启动时只把根 connector WorkOrder 入队，下游 resolver、
 verifier 和 candidate staging 节点等待 coordinator 按依赖逐项 admission，不能并发越过上游结果。
 `ResearchPlanExecutor` 已接通这四个真实节点；2026-08-20 的隔离 canary 访问 `data.sec.gov`，把一份人工批准的
-plan 跑到 `human-review-ready-candidate`，没有读取凭据或 live DB，也没有写正式 Ledger。
+plan 跑到 `human-review-ready-candidate`。Owner 随后接受 exact candidate；隔离 Core 已写入正式
+EvidenceVersion 0.2、ClaimVersion 0.2、supports relation 和 Backlog answer。新增的
+`ResearchPlanClosureCoordinator` 会重验 plan final-stage proof、review commit chain 和正式 promotion receipt，
+并在崩溃后重放到同一 answer binding。这条 canary 没有读取凭据或 live DB。
 这些能力均未部署，未接旧 cron，也没有自动提交 Ledger。生产部署仍缺少独立 OS/container identity、正式
 capability sandbox、Model IR、原生事件连接器、更多原生投递渠道和完整运维控制面。任何旧工作流
 切换都要逐项验证，不能因文件已导入就视为完成迁移。当前项目状态见

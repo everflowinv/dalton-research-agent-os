@@ -147,6 +147,11 @@ _DECISION_FIELDS = {
     "source_event_ref", "content_hash",
 }
 
+_COMMIT_EVENT_FIELDS = {
+    "schema_version", "id", "created_at", "decision_ref", "state",
+    "prior_event_ref", "ledger_result", "error_code", "content_hash",
+}
+
 
 def _semantics(value: Any, name: str) -> dict[str, Any]:
     wire = _closed(value, set(_SEMANTIC_FIELDS), name)
@@ -195,6 +200,50 @@ def validate_human_review_decision(value: Mapping[str, Any]) -> dict[str, Any]:
     elif revisions is not None:
         raise ResearchReviewError("accept/reject cannot carry proposed_revisions")
     return _with_hash(wire, "HumanReviewDecision")
+
+
+def validate_human_review_commit_event(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate one append-only review-to-Ledger delivery event."""
+
+    wire = _closed(value, _COMMIT_EVENT_FIELDS, "HumanReviewCommitEvent")
+    if wire["schema_version"] != SCHEMA_VERSION:
+        raise ResearchReviewError(
+            "unsupported HumanReviewCommitEvent schema_version"
+        )
+    for field in ("id", "decision_ref"):
+        wire[field] = _text(wire[field], field)
+    wire["created_at"] = _timestamp(wire["created_at"], "created_at")
+    if wire["state"] not in {"queued", "committed", "failed"}:
+        raise ResearchReviewError("HumanReviewCommitEvent.state is invalid")
+    if wire["prior_event_ref"] is not None:
+        wire["prior_event_ref"] = _text(
+            wire["prior_event_ref"], "prior_event_ref"
+        )
+    if wire["ledger_result"] is not None:
+        if not isinstance(wire["ledger_result"], Mapping):
+            raise ResearchReviewError("ledger_result must be an object or null")
+        wire["ledger_result"] = _json(wire["ledger_result"], "ledger_result")
+    if wire["error_code"] is not None:
+        wire["error_code"] = _text(wire["error_code"], "error_code")
+    if wire["state"] == "queued" and (
+        wire["prior_event_ref"] is not None
+        or wire["ledger_result"] is not None
+        or wire["error_code"] is not None
+    ):
+        raise ResearchReviewError("queued commit event has terminal fields")
+    if wire["state"] == "committed" and (
+        wire["prior_event_ref"] is None
+        or wire["ledger_result"] is None
+        or wire["error_code"] is not None
+    ):
+        raise ResearchReviewError("committed event has invalid result fields")
+    if wire["state"] == "failed" and (
+        wire["prior_event_ref"] is None
+        or wire["ledger_result"] is not None
+        or wire["error_code"] is None
+    ):
+        raise ResearchReviewError("failed event has invalid error fields")
+    return _with_hash(wire, "HumanReviewCommitEvent")
 
 
 _EVIDENCE_V2_FIELDS = {
@@ -317,13 +366,38 @@ class HumanReviewAuthority:
             "SELECT * FROM candidate_claim_versions WHERE version_id=?", (claim_version_ref,)
         ).fetchone()
         claim = validate_candidate_claim(self._load_record(claim_row, "candidate claim"))
+        if (
+            claim_row is None
+            or claim_row["record_json"] != canonical_json(claim)
+            or claim_row["version_id"] != claim["id"]
+            or claim_row["candidate_claim_ref"] != claim["candidate_claim_ref"]
+            or claim_row["version_number"] != claim["version"]
+            or claim_row["prior_version_id"] != claim["prior_version_ref"]
+            or claim_row["content_hash"] != claim["content_hash"]
+            or claim_row["created_at"] != claim["created_at"]
+        ):
+            raise ResearchReviewConflict("candidate claim columns drifted")
         evidence_ref = claim_row["evidence_version_id"] if claim_row is not None else None
         evidence_row = self.connection.execute(
             "SELECT * FROM candidate_evidence_versions WHERE version_id=?", (evidence_ref,)
         ).fetchone()
         evidence = validate_candidate_evidence(self._load_record(evidence_row, "candidate evidence"))
+        if (
+            evidence_row is None
+            or evidence_row["record_json"] != canonical_json(evidence)
+            or evidence_row["version_id"] != evidence["id"]
+            or evidence_row["candidate_evidence_ref"] != evidence["candidate_evidence_ref"]
+            or evidence_row["version_number"] != evidence["version"]
+            or evidence_row["prior_version_id"] != evidence["prior_version_ref"]
+            or evidence_row["content_hash"] != evidence["content_hash"]
+            or evidence_row["created_at"] != evidence["created_at"]
+        ):
+            raise ResearchReviewConflict("candidate evidence columns drifted")
         expected = [{"ref": evidence["id"], "hash": evidence["content_hash"]}]
-        if claim["candidate_evidence_refs"] != expected:
+        if (
+            claim_row["evidence_version_id"] != evidence["id"]
+            or claim["candidate_evidence_refs"] != expected
+        ):
             raise ResearchReviewConflict("candidate claim/evidence binding drifted")
         return claim, evidence
 
@@ -517,14 +591,108 @@ class HumanReviewAuthority:
 
     def decision_bundle(self, decision_ref: str) -> dict[str, Any]:
         row = self.connection.execute(
-            "SELECT decision_json,candidate_claim_version_ref FROM human_review_decisions WHERE decision_id=?",
+            "SELECT * FROM human_review_decisions WHERE decision_id=?",
             (_text(decision_ref, "decision_ref"),),
         ).fetchone()
         if row is None:
             raise ResearchReviewRejected("review decision is unavailable")
         decision = validate_human_review_decision(json.loads(row["decision_json"]))
+        if (
+            row["decision_json"] != canonical_json(decision)
+            or row["decision_id"] != decision["id"]
+            or row["candidate_claim_version_ref"] != decision["candidate_claim_ref"]
+            or row["candidate_evidence_version_ref"] != decision["candidate_evidence_ref"]
+            or row["verdict"] != decision["verdict"]
+            or row["reviewer_ref"] != decision["reviewer_ref"]
+            or row["content_hash"] != decision["content_hash"]
+            or row["created_at"] != decision["created_at"]
+        ):
+            raise ResearchReviewConflict("human review decision columns drifted")
         claim, evidence = self._candidate_pair(row["candidate_claim_version_ref"])
         return {"decision": decision, "evidence": evidence, "claim": claim}
+
+    def commit_event(self, decision_ref: str) -> dict[str, Any] | None:
+        """Return the exact current commit event after validating its full chain."""
+
+        decision_ref = _text(decision_ref, "decision_ref")
+        decision_row = self.connection.execute(
+            "SELECT decision_json FROM human_review_decisions WHERE decision_id=?",
+            (decision_ref,),
+        ).fetchone()
+        if decision_row is None:
+            raise ResearchReviewRejected("review decision is unavailable")
+        decision = validate_human_review_decision(
+            json.loads(decision_row["decision_json"])
+        )
+        rows = self.connection.execute(
+            "SELECT * FROM human_review_commit_events WHERE decision_ref=? "
+            "ORDER BY created_at,event_id",
+            (decision_ref,),
+        ).fetchall()
+        if not rows:
+            return None
+        events: dict[str, dict[str, Any]] = {}
+        children: dict[str, str] = {}
+        for row in rows:
+            try:
+                event = validate_human_review_commit_event(
+                    json.loads(row["event_json"])
+                )
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise ResearchReviewConflict(
+                    "human review commit event record is corrupt"
+                ) from exc
+            expected_ledger = (
+                None
+                if event["ledger_result"] is None
+                else canonical_json(event["ledger_result"])
+            )
+            if (
+                event["id"] != row["event_id"]
+                or event["decision_ref"] != row["decision_ref"]
+                or event["state"] != row["state"]
+                or event["prior_event_ref"] != row["prior_event_ref"]
+                or expected_ledger != row["ledger_result_json"]
+                or event["error_code"] != row["error_code"]
+                or event["content_hash"] != row["content_hash"]
+                or event["created_at"] != row["created_at"]
+                or canonical_json(event) != row["event_json"]
+            ):
+                raise ResearchReviewConflict(
+                    "human review commit event columns drifted"
+                )
+            if event["decision_ref"] != decision["id"]:
+                raise ResearchReviewConflict(
+                    "human review commit event binds another decision"
+                )
+            prior = event["prior_event_ref"]
+            if prior is not None:
+                if prior in children:
+                    raise ResearchReviewConflict(
+                        "human review commit event chain forked"
+                    )
+                children[prior] = event["id"]
+            events[event["id"]] = event
+        roots = [event for event in events.values() if event["prior_event_ref"] is None]
+        heads = [event for event in events.values() if event["id"] not in children]
+        if len(roots) != 1 or len(heads) != 1 or roots[0]["state"] != "queued":
+            raise ResearchReviewConflict(
+                "human review commit event chain is not linear"
+            )
+        current = roots[0]
+        visited = {current["id"]}
+        while current["id"] in children:
+            current = events.get(children[current["id"]])
+            if current is None or current["id"] in visited or current["state"] == "queued":
+                raise ResearchReviewConflict(
+                    "human review commit event chain is invalid"
+                )
+            visited.add(current["id"])
+        if len(visited) != len(events) or current["id"] != heads[0]["id"]:
+            raise ResearchReviewConflict(
+                "human review commit event chain is disconnected"
+            )
+        return current
 
     def pending_commits(self, *, limit: int = 100) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
@@ -573,5 +741,6 @@ class HumanReviewAuthority:
 __all__ = [
     "HumanReviewAuthority", "ResearchReviewError", "ResearchReviewConflict",
     "ResearchReviewRejected", "validate_human_review_decision",
+    "validate_human_review_commit_event",
     "validate_evidence_version_v0_2", "validate_claim_version_v0_2",
 ]
