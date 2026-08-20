@@ -1,0 +1,24 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"dalton/research-plan-policy-authorization/0.1",
+  "title":"ResearchPlanPolicyAuthorization",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schema_version","id","created_at","plan_version_ref","plan_version_hash","decision","reason","actor_ref","authorization","policy_version_ref","policy_version_hash","rule_ref","content_hash"],
+  "properties":{
+    "schema_version":{"const":"0.1"},
+    "id":{"type":"string","pattern":"^research-plan-policy-authorization:[0-9a-f]{32}$"},
+    "created_at":{"type":"string","format":"date-time"},
+    "plan_version_ref":{"type":"string","pattern":"^research-plan:[0-9a-f]{32}$"},
+    "plan_version_hash":{"$ref":"#/$defs/hash"},
+    "decision":{"const":"accepted"},
+    "reason":{"type":"string","minLength":1},
+    "actor_ref":{"const":"system:research-plan-auto-start"},
+    "authorization":{"const":"versioned_governance_policy"},
+    "policy_version_ref":{"type":"string","minLength":1},
+    "policy_version_hash":{"$ref":"#/$defs/hash"},
+    "rule_ref":{"const":"research-plan-auto-start:sec-public-list-filings:v1"},
+    "content_hash":{"$ref":"#/$defs/hash"}
+  },
+  "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}}
+}

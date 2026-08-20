@@ -11,6 +11,7 @@ from pathlib import Path
 from dalton_core.agenda import AgendaStore
 from dalton_core.observability import ObservabilityStore
 from dalton_core.research_plan import (
+    PLAN_AUTO_START_RULE_REF,
     ResearchPlanAuthority,
     ResearchPlanConflict,
     ResearchPlanControlPlane,
@@ -366,6 +367,96 @@ class ResearchPlanTests(unittest.TestCase):
         self._validate_contract("research-plan-approval.schema.json", approval["approval"])
         self._validate_contract("research-plan-start.schema.json", started["start_binding"])
         self._validate_contract("research-plan-event.schema.json", started["started_event"])
+
+    def test_active_policy_can_authorize_and_start_low_risk_plan(self) -> None:
+        created = self._create_plan(suffix="policy-start")
+        active = self.store.active_policy()
+        policy_wire = dict(active["policy"])
+        policy_wire["research_plan_auto_start"] = {
+            "enabled": True,
+            "rules": [PLAN_AUTO_START_RULE_REF],
+        }
+        self.store.create_policy(
+            policy_wire,
+            policy_version_id="policy:plan-auto-start:test:v2",
+            version_number=2,
+            prior_version_ref=active["policy_version_id"],
+            actor_ref="human:test-owner",
+            change_reason="authorize isolated public SEC plans",
+            activate=True,
+        )
+        authorized = self.plans.authorize_plan_by_policy(
+            plan_version_ref=created["plan_version_ref"],
+            idempotency_key="authorize-plan:policy-start",
+        )
+        started = self._start(created, suffix="policy-start")
+        self.assertEqual(authorized["plan_state"], "approved")
+        self.assertEqual(
+            authorized["authorization"]["authorization"],
+            "versioned_governance_policy",
+        )
+        self._validate_contract(
+            "research-plan-policy-authorization.schema.json",
+            authorized["authorization"],
+        )
+        self.assertEqual(started["plan_state"], "started")
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM research_plan_approvals"
+            ).fetchone()[0],
+            0,
+        )
+        view = self.plans.plan(created["plan_version_ref"])
+        self.assertIsNone(view["approval"])
+        self.assertEqual(
+            view["policy_authorization"]["id"],
+            authorized["authorization"]["id"],
+        )
+
+    def test_policy_start_fails_closed_when_rule_is_missing_or_superseded(self) -> None:
+        created = self._create_plan(suffix="policy-start-closed")
+        with self.assertRaises(ResearchPlanConflict):
+            self.plans.authorize_plan_by_policy(
+                plan_version_ref=created["plan_version_ref"],
+                idempotency_key="authorize-plan:missing-policy",
+            )
+        active = self.store.active_policy()
+        policy_wire = dict(active["policy"])
+        policy_wire["research_plan_auto_start"] = {
+            "enabled": True,
+            "rules": [PLAN_AUTO_START_RULE_REF],
+        }
+        enabled = self.store.create_policy(
+            policy_wire,
+            policy_version_id="policy:plan-auto-start:enabled:v2",
+            version_number=2,
+            prior_version_ref=active["policy_version_id"],
+            actor_ref="human:test-owner",
+            change_reason="enable isolated public SEC plans",
+            activate=True,
+        )
+        self.plans.authorize_plan_by_policy(
+            plan_version_ref=created["plan_version_ref"],
+            idempotency_key="authorize-plan:enabled-policy",
+        )
+        policy_wire["research_plan_auto_start"]["enabled"] = False
+        self.store.create_policy(
+            policy_wire,
+            policy_version_id="policy:plan-auto-start:disabled:v3",
+            version_number=3,
+            prior_version_ref=enabled["policy_version_id"],
+            actor_ref="human:test-owner",
+            change_reason="supersede autonomous start authorization",
+            activate=True,
+        )
+        with self.assertRaises(ResearchPlanConflict):
+            self._start(created, suffix="policy-start-closed")
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM scheduler_work_orders"
+            ).fetchone()[0],
+            0,
+        )
 
     def test_completed_start_replays_before_any_side_effect(self) -> None:
         created = self._create_plan(suffix="replay")

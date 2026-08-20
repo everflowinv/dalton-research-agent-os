@@ -220,11 +220,13 @@ CREATE TABLE IF NOT EXISTS claim_challenges (
     created_at TEXT NOT NULL
 );
 
--- Exact accepted review + formal Evidence/Claim/Relation result.  The writer
+-- Exact accepted human-or-policy authorization + formal
+-- Evidence/Claim/Relation result.  The writer
 -- inserts this row in the same transaction as all three Ledger records.  It
 -- is both the cross-boundary idempotency receipt and the durable copy of the
--- explicit human authorization; no timeout/automation principal can create
--- one through the scoped RPC boundary.
+-- authorization.  The policy path is derived inside DaltonStore from the
+-- active version and exact Core connector authority; callers cannot submit
+-- an automation identity as a human review.
 CREATE TABLE IF NOT EXISTS reviewed_candidate_commits (
     idempotency_key TEXT PRIMARY KEY,
     request_hash TEXT NOT NULL,

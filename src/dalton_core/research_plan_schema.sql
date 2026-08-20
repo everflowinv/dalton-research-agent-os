@@ -19,15 +19,16 @@ PRAGMA foreign_keys = ON;
 -- event row.
 --
 -- ``research_plan_approvals`` is the exact human approval authority.  Each
--- exact plan version has exactly one terminal decision (``accepted`` or
--- ``rejected``); a second decision fails closed.  Only ``human:`` principals
--- may approve.  Auto-accept timeouts, automation/model principals, Agenda
--- approval and Discord reactions are never plan-start authority.
+-- exact plan version may instead bind one separate versioned-policy
+-- authorization for the closed low-risk SEC scope.  Automation/model
+-- principals, Agenda approval and Discord reactions cannot write the human
+-- table or impersonate a person.
 --
 -- ``research_plan_starts`` binds a started plan to the exact
 -- WorkflowRunVersion row and root WorkOrder created by the plan control
 -- plane: workflow version ref/hash, root work order ref/hash and the exact
--- accepted approval ref/hash are all frozen and re-validated on every read.
+-- accepted human-or-policy authorization ref/hash are all frozen and
+-- re-validated on every read.
 --
 -- ``research_plan_idempotency`` mirrors the agenda/backlog idempotency
 -- convention: a replayed request returns the original result; the same key
@@ -69,6 +70,21 @@ CREATE TABLE IF NOT EXISTS research_plan_approvals (
     actor_ref TEXT NOT NULL CHECK(actor_ref LIKE 'human:%'),
     created_at TEXT NOT NULL,
     content_hash TEXT NOT NULL
+);
+
+-- Low-risk plans may instead receive one deterministic authorization from
+-- the active versioned governance policy.  This authority is deliberately
+-- separate from human approval so automation cannot impersonate a person.
+CREATE TABLE IF NOT EXISTS research_plan_policy_authorizations (
+    authorization_id TEXT PRIMARY KEY,
+    plan_version_ref TEXT NOT NULL UNIQUE REFERENCES research_plan_versions(version_id),
+    plan_version_hash TEXT NOT NULL,
+    policy_version_ref TEXT NOT NULL REFERENCES governance_policy_versions(policy_version_id),
+    policy_version_hash TEXT NOT NULL,
+    rule_ref TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS research_plan_starts (
@@ -113,6 +129,10 @@ CREATE TRIGGER IF NOT EXISTS research_plan_approvals_authorized_insert
 BEFORE INSERT ON research_plan_approvals WHEN dalton_authorized() = 0 BEGIN
     SELECT RAISE(ABORT, 'research plan approval insert requires DaltonStore');
 END;
+CREATE TRIGGER IF NOT EXISTS research_plan_policy_authorizations_authorized_insert
+BEFORE INSERT ON research_plan_policy_authorizations WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'research plan policy authorization insert requires DaltonStore');
+END;
 CREATE TRIGGER IF NOT EXISTS research_plan_starts_authorized_insert
 BEFORE INSERT ON research_plan_starts WHEN dalton_authorized() = 0 BEGIN
     SELECT RAISE(ABORT, 'research plan start insert requires DaltonStore');
@@ -128,6 +148,8 @@ CREATE TRIGGER IF NOT EXISTS research_plan_events_no_update
 BEFORE UPDATE ON research_plan_events BEGIN SELECT RAISE(ABORT, 'research plan events are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS research_plan_approvals_no_update
 BEFORE UPDATE ON research_plan_approvals BEGIN SELECT RAISE(ABORT, 'research plan approvals are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_plan_policy_authorizations_no_update
+BEFORE UPDATE ON research_plan_policy_authorizations BEGIN SELECT RAISE(ABORT, 'research plan policy authorizations are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS research_plan_starts_no_update
 BEFORE UPDATE ON research_plan_starts BEGIN SELECT RAISE(ABORT, 'research plan starts are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS research_plan_idempotency_no_update
@@ -139,6 +161,8 @@ CREATE TRIGGER IF NOT EXISTS research_plan_events_no_delete
 BEFORE DELETE ON research_plan_events BEGIN SELECT RAISE(ABORT, 'research plan events are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS research_plan_approvals_no_delete
 BEFORE DELETE ON research_plan_approvals BEGIN SELECT RAISE(ABORT, 'research plan approvals are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS research_plan_policy_authorizations_no_delete
+BEFORE DELETE ON research_plan_policy_authorizations BEGIN SELECT RAISE(ABORT, 'research plan policy authorizations are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS research_plan_starts_no_delete
 BEFORE DELETE ON research_plan_starts BEGIN SELECT RAISE(ABORT, 'research plan starts are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS research_plan_idempotency_no_delete

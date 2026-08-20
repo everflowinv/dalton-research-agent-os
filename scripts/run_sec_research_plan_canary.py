@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Run one isolated, human-approved SEC ResearchPlan through all four nodes.
+"""Run one isolated, policy-authorized SEC ResearchPlan through closure.
 
 The canary keeps every authority database and the raw spool under an explicit
 output directory.  It never opens Dalton's live databases, accepts no
-credentials, performs only one bounded read from ``data.sec.gov``, and stops
-at the human-review candidate gate without writing a formal Ledger claim.
+credentials, performs only one bounded read from ``data.sec.gov``, and uses
+one owner-installed versioned policy to start the plan and commit the exact
+deterministic result without per-plan or per-claim human review.
 """
 
 from __future__ import annotations
@@ -36,9 +37,12 @@ from dalton_core.observability import ObservabilityStore
 from dalton_core.raw_spool import RawSpool
 from dalton_core.research_coordinator import ResearchCoordinatorStore
 from dalton_core.research_plan import (
+    PLAN_AUTO_START_RULE_REF,
     ResearchPlanAuthority,
     ResearchPlanControlPlane,
 )
+from dalton_core.research_auto_commit import RULE_REF as AUTO_COMMIT_RULE_REF
+from dalton_core.research_plan_closure import ResearchPlanClosureCoordinator
 from dalton_core.research_plan_coordinator import ResearchPlanCoordinator
 from dalton_core.research_plan_executor import (
     ResearchPlanExecutor,
@@ -221,21 +225,21 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--issuer-cik", default="789019")
     parser.add_argument("--company-ref", default="company:sec-cik:0000789019")
-    parser.add_argument("--form", choices=("10-K", "10-Q", "8-K"), default="10-Q")
+    parser.add_argument("--form", choices=("10-Q",), default="10-Q")
     parser.add_argument("--date-from", required=True)
     parser.add_argument("--date-to", required=True)
     parser.add_argument(
-        "--approved-by",
+        "--policy-owner",
         required=True,
-        help="explicit isolated-canary plan approver; must use human: namespace",
+        help="owner installing the isolated versioned policy; must use human: namespace",
     )
     parser.add_argument(
         "--user-agent",
         default="Dalton Research Agent isolated SEC ResearchPlan canary",
     )
     args = parser.parse_args()
-    if not args.approved_by.startswith("human:"):
-        raise SystemExit("--approved-by must use the human: namespace")
+    if not args.policy_owner.startswith("human:"):
+        raise SystemExit("--policy-owner must use the human: namespace")
 
     output_dir = args.output_dir.expanduser().resolve()
     if output_dir.exists():
@@ -265,7 +269,7 @@ def main() -> int:
             _policy(now, args.company_ref),
             effective_from=effective_from,
             effective_until=effective_until,
-            actor_ref=args.approved_by,
+            actor_ref=args.policy_owner,
             version_id="agenda-policy-version:sec-plan-canary:1",
             idempotency_key="agenda-policy:sec-plan-canary:1",
         )
@@ -274,17 +278,17 @@ def main() -> int:
             objective="Validate one real, bounded SEC ResearchPlan task tree",
             scope_refs=[args.company_ref],
             constraints={"mode": "isolated_public_read_only_canary"},
-            success_criteria={"human_review_required": True},
+            success_criteria={"policy_authorized_low_risk_loop": True},
             effective_from=effective_from,
             effective_until=effective_until,
-            actor_ref=args.approved_by,
+            actor_ref=args.policy_owner,
             version_id="mandate-version:sec-plan-canary:1",
             idempotency_key="mandate:sec-plan-canary:1",
         )
         agenda.set_pause(
             False,
             reason="owner authorized isolated SEC ResearchPlan canary",
-            actor_ref=args.approved_by,
+            actor_ref=args.policy_owner,
             version_id="agenda-control-version:sec-plan-canary:1",
             idempotency_key="agenda-resume:sec-plan-canary:1",
         )
@@ -309,12 +313,29 @@ def main() -> int:
             actor_ref="core:planner",
             idempotency_key="create-plan:sec-plan-canary:1",
         )
-        approval = plans.approve_plan(
+        active = core.active_policy()
+        governance_policy = dict(active["policy"])
+        governance_policy["research_plan_auto_start"] = {
+            "enabled": True,
+            "rules": [PLAN_AUTO_START_RULE_REF],
+        }
+        governance_policy["research_candidate_auto_commit"] = {
+            "enabled": True,
+            "rules": [AUTO_COMMIT_RULE_REF],
+            "max_records": 20,
+        }
+        installed_policy = core.create_policy(
+            governance_policy,
+            policy_version_id="policy:isolated-autonomous-sec:v2",
+            version_number=2,
+            prior_version_ref=active["policy_version_id"],
+            actor_ref=args.policy_owner,
+            change_reason="authorize isolated autonomous public SEC research",
+            activate=True,
+        )
+        plan_authorization = plans.authorize_plan_by_policy(
             plan_version_ref=created["plan_version_ref"],
-            decision="accepted",
-            reason="Owner authorized the isolated public-read-only SEC canary.",
-            actor_ref=args.approved_by,
-            idempotency_key="approve-plan:sec-plan-canary:1",
+            idempotency_key="authorize-plan:sec-plan-canary:1",
         )
         control.start_plan(
             plan_version_ref=created["plan_version_ref"],
@@ -435,15 +456,31 @@ def main() -> int:
         candidate = candidates[0]
         claim = candidate["claim"]
         evidence = candidate["evidence"]
+        promotion = core.commit_policy_candidate(
+            evidence=evidence,
+            claim=claim,
+            idempotency_key="policy-ledger:sec-plan-canary:1",
+        )
+        closure = ResearchPlanClosureCoordinator(
+            plan=plans,
+            backlog=backlog,
+            coordinator=coordinator,
+            review=review,
+        ).close_policy_authorized(
+            plan_version_ref=plan_wire["id"],
+            authorization=promotion["authorization"],
+        )
         tree = coordinator.tree_status(plan_wire["id"])
         result = {
-            "status": "human-review-ready-candidate",
+            "status": "autonomous-closed",
             "generated_at": _wire_time(datetime.now(timezone.utc)),
             "output_dir": str(output_dir),
             "plan": {
                 "ref": plan_wire["id"],
                 "hash": plan_wire["content_hash"],
-                "approved_by": approval["approval"]["actor_ref"],
+                "authorization_ref": plan_authorization["authorization"]["id"],
+                "policy_version_ref": installed_policy["policy_version_id"],
+                "policy_owner": args.policy_owner,
                 "issuer_cik": plan_wire["execution_scope"]["parameters"]["issuer_cik"],
                 "form": plan_wire["execution_scope"]["parameters"]["form"],
                 "date_from": plan_wire["execution_scope"]["parameters"]["filing_date_from"],
@@ -479,6 +516,31 @@ def main() -> int:
             "formal_ledger_counts": {
                 table: core.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
                 for table in ("evidence_versions", "claim_versions", "thesis_versions")
+            },
+            "promotion": {
+                "authorization_ref": promotion["authorization"]["id"],
+                "evidence_version_ref": promotion["evidence_version_ref"],
+                "claim_version_ref": promotion["claim_version_ref"],
+                "relation_ref": promotion["relation_ref"],
+            },
+            "closure": closure,
+            "human_gate_counts": {
+                "plan_approvals": core.connection.execute(
+                    "SELECT COUNT(*) FROM research_plan_approvals"
+                ).fetchone()[0],
+                "claim_reviews": review.connection.execute(
+                    "SELECT COUNT(*) FROM human_review_decisions"
+                ).fetchone()[0],
+            },
+            "integrity": {
+                "core": core.connection.execute("PRAGMA integrity_check").fetchone()[0],
+                "staging": review.connection.execute("PRAGMA integrity_check").fetchone()[0],
+                "coordinator": connector_records.connection.execute(
+                    "PRAGMA integrity_check"
+                ).fetchone()[0],
+                "capability": catalog.connection.execute(
+                    "PRAGMA integrity_check"
+                ).fetchone()[0],
             },
             "network": {
                 "host": "data.sec.gov",

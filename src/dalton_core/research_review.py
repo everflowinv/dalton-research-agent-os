@@ -40,6 +40,8 @@ _HUMAN_REVIEWER_RE = re.compile(r"^human:tailscale-[0-9a-f]{32}$")
 _SEMANTIC_FIELDS = (
     "subject_ref", "metric_or_aspect", "period", "basis", "normalized_statement"
 )
+_CONSUMABLE_REVISION_FIELDS = ("normalized_statement",)
+_REVISION_ACTOR_REF = "system:research-review-revision"
 
 
 class ResearchReviewError(ValueError):
@@ -197,6 +199,9 @@ def validate_human_review_decision(value: Mapping[str, Any]) -> dict[str, Any]:
         if unknown:
             raise ResearchReviewError("proposed_revisions contains unknown semantic fields")
         wire["proposed_revisions"] = _json(revisions, "proposed_revisions")
+        revised_semantics = dict(wire["reviewed_semantics"])
+        revised_semantics.update(wire["proposed_revisions"])
+        _semantics(revised_semantics, "revised_semantics")
     elif revisions is not None:
         raise ResearchReviewError("accept/reject cannot carry proposed_revisions")
     return _with_hash(wire, "HumanReviewDecision")
@@ -329,6 +334,43 @@ def _candidate_semantics(claim: Mapping[str, Any]) -> dict[str, Any]:
     return {field: _json(claim[field], field) for field in _SEMANTIC_FIELDS}
 
 
+def _revised_candidate_claim(
+    claim: Mapping[str, Any],
+    decision: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Deterministically apply one exact human revision to a candidate claim."""
+
+    claim_wire = validate_candidate_claim(claim)
+    decision_wire = validate_human_review_decision(decision)
+    if decision_wire["verdict"] != "revise":
+        raise ResearchReviewRejected("only a revise decision can produce a candidate revision")
+    if set(decision_wire["proposed_revisions"]) - set(_CONSUMABLE_REVISION_FIELDS):
+        raise ResearchReviewRejected(
+            "in-place revision currently supports normalized_statement only; "
+            "source, numeric or period changes require a new verified plan run"
+        )
+    if (
+        decision_wire["candidate_claim_ref"] != claim_wire["id"]
+        or decision_wire["candidate_claim_hash"] != claim_wire["content_hash"]
+        or canonical_json(decision_wire["reviewed_semantics"])
+        != canonical_json(_candidate_semantics(claim_wire))
+    ):
+        raise ResearchReviewConflict("revision decision drifted from its exact candidate")
+    revised = dict(claim_wire)
+    revised.pop("content_hash")
+    revised.update(decision_wire["proposed_revisions"])
+    revised["version"] = claim_wire["version"] + 1
+    revised["id"] = "candidate-claim-version:" + content_hash({
+        "candidate_claim_ref": claim_wire["candidate_claim_ref"],
+        "version": revised["version"],
+    })
+    revised["created_at"] = decision_wire["created_at"]
+    revised["actor_ref"] = _REVISION_ACTOR_REF
+    revised["prior_version_ref"] = claim_wire["id"]
+    revised["content_hash"] = content_hash(revised)
+    return validate_candidate_claim(revised)
+
+
 class HumanReviewAuthority:
     """Append-only human decisions over an owner-only candidate staging DB."""
 
@@ -420,6 +462,14 @@ class HumanReviewAuthority:
             })
         return result
 
+    def candidate_bundle(self, candidate_claim_ref: str) -> dict[str, Any]:
+        """Return one exact staged candidate pair without creating a review."""
+
+        claim, evidence = self._candidate_pair(
+            _text(candidate_claim_ref, "candidate_claim_ref")
+        )
+        return {"evidence": evidence, "claim": claim}
+
     def decide(
         self,
         *,
@@ -444,6 +494,11 @@ class HumanReviewAuthority:
         if verdict == "revise":
             if not isinstance(proposed_revisions, Mapping) or not proposed_revisions:
                 raise ResearchReviewError("revise requires proposed_revisions")
+            if set(proposed_revisions) - set(_CONSUMABLE_REVISION_FIELDS):
+                raise ResearchReviewRejected(
+                    "in-place revision currently supports normalized_statement only; "
+                    "source, numeric or period changes require a new verified plan run"
+                )
             if all(
                 field not in proposed_revisions
                 or canonical_json(proposed_revisions[field]) == canonical_json(claim[field])
@@ -610,6 +665,159 @@ class HumanReviewAuthority:
             raise ResearchReviewConflict("human review decision columns drifted")
         claim, evidence = self._candidate_pair(row["candidate_claim_version_ref"])
         return {"decision": decision, "evidence": evidence, "claim": claim}
+
+    def consume_revision(self, decision_ref: str) -> dict[str, Any]:
+        """Consume one exact revise decision into the next candidate claim version.
+
+        This is deliberately not a general replanner.  The current slice can
+        rewrite only the human-reviewed statement while retaining the exact
+        source, numeric result, period and evidence provenance of the plan's
+        verified candidate.
+        """
+
+        bundle = self.decision_bundle(decision_ref)
+        decision = bundle["decision"]
+        prior_claim = bundle["claim"]
+        evidence = bundle["evidence"]
+        if decision["verdict"] != "revise":
+            raise ResearchReviewRejected(
+                "only a revise decision can be consumed as candidate rework"
+            )
+        if self.commit_event(decision["id"]) is not None:
+            raise ResearchReviewConflict(
+                "a revise decision cannot carry a Ledger commit event"
+            )
+        revised = _revised_candidate_claim(prior_claim, decision)
+
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            children = self.connection.execute(
+                "SELECT version_id,evidence_version_id FROM candidate_claim_versions "
+                "WHERE prior_version_id=? ORDER BY version_id",
+                (prior_claim["id"],),
+            ).fetchall()
+            if children:
+                if len(children) != 1:
+                    raise ResearchReviewConflict("candidate revision chain forked")
+                existing, existing_evidence = self._candidate_pair(
+                    children[0]["version_id"]
+                )
+                if (
+                    canonical_json(existing) != canonical_json(revised)
+                    or children[0]["evidence_version_id"] != evidence["id"]
+                    or canonical_json(existing_evidence) != canonical_json(evidence)
+                ):
+                    raise ResearchReviewConflict(
+                        "existing candidate revision drifted from the human request"
+                    )
+                self.connection.execute("COMMIT")
+                return {
+                    "write_status": "duplicate",
+                    "review_decision_ref": decision["id"],
+                    "prior_candidate_claim_ref": prior_claim["id"],
+                    "candidate_claim_ref": existing["id"],
+                    "candidate_claim_hash": existing["content_hash"],
+                    "candidate_evidence_ref": evidence["id"],
+                    "candidate_evidence_hash": evidence["content_hash"],
+                }
+            latest = self.connection.execute(
+                "SELECT version_id,version_number FROM candidate_claim_versions "
+                "WHERE candidate_claim_ref=? ORDER BY version_number DESC LIMIT 1",
+                (prior_claim["candidate_claim_ref"],),
+            ).fetchone()
+            if (
+                latest is None
+                or latest["version_id"] != prior_claim["id"]
+                or latest["version_number"] != prior_claim["version"]
+            ):
+                raise ResearchReviewConflict(
+                    "revision decision does not bind the current candidate head"
+                )
+            self.connection.execute(
+                "INSERT INTO candidate_claim_versions("
+                "version_id,candidate_claim_ref,version_number,prior_version_id,"
+                "evidence_version_id,record_json,content_hash,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    revised["id"], revised["candidate_claim_ref"],
+                    revised["version"], revised["prior_version_ref"], evidence["id"],
+                    canonical_json(revised), revised["content_hash"], revised["created_at"],
+                ),
+            )
+            self.connection.execute("COMMIT")
+        except Exception:
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
+        return {
+            "write_status": "fresh",
+            "review_decision_ref": decision["id"],
+            "prior_candidate_claim_ref": prior_claim["id"],
+            "candidate_claim_ref": revised["id"],
+            "candidate_claim_hash": revised["content_hash"],
+            "candidate_evidence_ref": evidence["id"],
+            "candidate_evidence_hash": evidence["content_hash"],
+        }
+
+    def revision_lineage(self, candidate_claim_ref: str) -> dict[str, Any]:
+        """Re-read and validate the complete lineage ending at one candidate head."""
+
+        claim, evidence = self._candidate_pair(
+            _text(candidate_claim_ref, "candidate_claim_ref")
+        )
+        if self.connection.execute(
+            "SELECT 1 FROM candidate_claim_versions WHERE prior_version_id=? LIMIT 1",
+            (claim["id"],),
+        ).fetchone() is not None:
+            raise ResearchReviewConflict("requested candidate is not the revision head")
+        claims = [claim]
+        evidences = [evidence]
+        decisions: list[dict[str, Any]] = []
+        visited = {claim["id"]}
+        while claim["prior_version_ref"] is not None:
+            parent, parent_evidence = self._candidate_pair(
+                claim["prior_version_ref"]
+            )
+            if parent["id"] in visited:
+                raise ResearchReviewConflict("candidate revision lineage contains a cycle")
+            visited.add(parent["id"])
+            row = self.connection.execute(
+                "SELECT decision_id FROM human_review_decisions "
+                "WHERE candidate_claim_version_ref=?",
+                (parent["id"],),
+            ).fetchone()
+            if row is None:
+                raise ResearchReviewConflict(
+                    "candidate revision has no exact human revise decision"
+                )
+            decision = self.decision_bundle(row["decision_id"])["decision"]
+            expected = _revised_candidate_claim(parent, decision)
+            siblings = self.connection.execute(
+                "SELECT version_id FROM candidate_claim_versions "
+                "WHERE prior_version_id=? ORDER BY version_id",
+                (parent["id"],),
+            ).fetchall()
+            if (
+                len(siblings) != 1
+                or siblings[0]["version_id"] != claim["id"]
+                or canonical_json(expected) != canonical_json(claim)
+                or canonical_json(parent_evidence) != canonical_json(evidence)
+            ):
+                raise ResearchReviewConflict(
+                    "candidate revision lineage drifted or forked"
+                )
+            decisions.append(decision)
+            claims.append(parent)
+            evidences.append(parent_evidence)
+            claim, evidence = parent, parent_evidence
+        claims.reverse()
+        evidences.reverse()
+        decisions.reverse()
+        return {
+            "claims": claims,
+            "evidences": evidences,
+            "revision_decisions": decisions,
+        }
 
     def commit_event(self, decision_ref: str) -> dict[str, Any] | None:
         """Return the exact current commit event after validating its full chain."""

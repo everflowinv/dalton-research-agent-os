@@ -896,21 +896,81 @@ class DaltonStore:
         accepts a caller-supplied execution id, projected claim status, or
         auto-accept authorization.
         """
+        from .research_review import validate_human_review_decision
+
+        decision_wire = validate_human_review_decision(decision)
+        if decision_wire["verdict"] != "accept":
+            raise GateRejected("only an explicit accepted review can enter the Ledger")
+        return self._commit_authorized_candidate(
+            decision_wire=decision_wire,
+            evidence=evidence,
+            claim=claim,
+            idempotency_key=idempotency_key,
+            fault_at=fault_at,
+            active_policy_binding=None,
+        )
+
+    def commit_policy_candidate(
+        self,
+        *,
+        evidence: Mapping[str, Any],
+        claim: Mapping[str, Any],
+        idempotency_key: str,
+        fault_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Promote one low-risk candidate authorized by the active policy.
+
+        The evaluator re-derives the complete SEC filing-count statement from
+        Core's immutable connector authority.  A caller cannot select another
+        source, metric, statement, record count, policy version, or actor.
+        """
+        from .research_auto_commit import authorize_policy_candidate
+
+        policy = self.active_policy()
+        decision_wire = authorize_policy_candidate(
+            connection=self.connection,
+            policy_version=policy,
+            evidence=evidence,
+            claim=claim,
+        )
+        result = self._commit_authorized_candidate(
+            decision_wire=decision_wire,
+            evidence=evidence,
+            claim=claim,
+            idempotency_key=idempotency_key,
+            fault_at=fault_at,
+            active_policy_binding=(
+                decision_wire["policy_version_ref"],
+                decision_wire["policy_version_hash"],
+            ),
+        )
+        return {**result, "authorization": decision_wire}
+
+    def _commit_authorized_candidate(
+        self,
+        *,
+        decision_wire: Mapping[str, Any],
+        evidence: Mapping[str, Any],
+        claim: Mapping[str, Any],
+        idempotency_key: str,
+        fault_at: str | None,
+        active_policy_binding: tuple[str, str] | None,
+    ) -> dict[str, Any]:
+        """Shared atomic Ledger writer for human and policy authorization."""
         from .research_review import (
             validate_claim_version_v0_2,
             validate_evidence_version_v0_2,
-            validate_human_review_decision,
         )
         from .research_verification import (
             validate_candidate_claim,
             validate_candidate_evidence,
         )
 
-        decision_wire = validate_human_review_decision(decision)
+        decision_wire = dict(decision_wire)
         evidence_wire = validate_candidate_evidence(evidence)
         claim_wire = validate_candidate_claim(claim)
         if decision_wire["verdict"] != "accept":
-            raise GateRejected("only an explicit accepted review can enter the Ledger")
+            raise GateRejected("only an accepted authorization can enter the Ledger")
         if not isinstance(idempotency_key, str) or not idempotency_key:
             raise ValidationError("idempotency_key is required")
         if decision_wire["reviewer_ref"] == claim_wire["actor_ref"]:
@@ -972,6 +1032,18 @@ class DaltonStore:
                     return {**original, "status": "duplicate", "idempotency_key": idempotency_key}
                 raise IdempotencyConflict("review decision or candidate was already promoted")
 
+            if active_policy_binding is not None:
+                policy_row = cur.execute(
+                    "SELECT v.policy_version_id,v.content_hash,v.effective_from,v.effective_until "
+                    "FROM governance_policy_pointer p JOIN governance_policy_versions v "
+                    "ON v.policy_version_id=p.policy_version_id WHERE p.pointer_id=1"
+                ).fetchone()
+                if policy_row is None:
+                    raise GateRejected("no active governance policy")
+                if (policy_row["policy_version_id"], policy_row["content_hash"]) != active_policy_binding:
+                    raise GateRejected("research authorization policy is no longer active")
+                self._assert_policy_effective(policy_row)
+
             source = cur.execute(
                 "SELECT connector_invocation_ref,record_json,content_hash FROM "
                 "connector_source_envelopes WHERE source_envelope_id=?",
@@ -1019,12 +1091,12 @@ class DaltonStore:
                 "SELECT claim_version_id,version_number FROM claim_versions "
                 "WHERE claim_ref=? ORDER BY version_number DESC LIMIT 1", (claim_ref,),
             ).fetchone()
+            # Candidate revisions are staging-local semantic work.  Their
+            # version numbers do not reserve or skip versions in the formal
+            # Ledger; the first accepted candidate is formal version 1 even
+            # when a rejected/revised staging predecessor exists.
             expected_evidence_version = 1 if previous_evidence is None else int(previous_evidence["version_number"]) + 1
             expected_claim_version = 1 if previous_claim is None else int(previous_claim["version_number"]) + 1
-            if evidence_wire["version"] != expected_evidence_version:
-                raise GateRejected("formal evidence chain does not match candidate version")
-            if claim_wire["version"] != expected_claim_version:
-                raise GateRejected("formal claim chain does not match candidate version")
             evidence_version_id = "evidence-version:" + content_hash({
                 "candidate": evidence_wire["id"], "review": decision_wire["id"]
             })
@@ -1034,7 +1106,7 @@ class DaltonStore:
             evidence_v2 = {
                 "schema_version": "0.2", "id": evidence_version_id,
                 "created_at": decision_wire["created_at"], "evidence_ref": evidence_ref,
-                "version": evidence_wire["version"], "source_type": evidence_wire["source_type"],
+                "version": expected_evidence_version, "source_type": evidence_wire["source_type"],
                 "source_ref": evidence_wire["source_ref"],
                 "source_envelope_ref": evidence_wire["source_envelope_ref"],
                 "source_envelope_hash": evidence_wire["source_envelope_hash"],
@@ -1057,7 +1129,7 @@ class DaltonStore:
             claim_v2 = {
                 "schema_version": "0.2", "id": claim_version_id,
                 "created_at": decision_wire["created_at"], "claim_ref": claim_ref,
-                "version": claim_wire["version"], "subject_ref": claim_wire["subject_ref"],
+                "version": expected_claim_version, "subject_ref": claim_wire["subject_ref"],
                 "metric_or_aspect": claim_wire["metric_or_aspect"],
                 "period": claim_wire["period"], "basis": claim_wire["basis"],
                 "normalized_statement": claim_wire["normalized_statement"],

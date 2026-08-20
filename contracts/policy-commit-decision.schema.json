@@ -1,0 +1,35 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"dalton/policy-commit-decision/0.1",
+  "title":"PolicyCommitDecision",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schema_version","id","created_at","candidate_claim_ref","candidate_claim_hash","candidate_evidence_ref","candidate_evidence_hash","verdict","reviewed_semantics","proposed_revisions","relation","rationale","findings","reviewer_ref","authorization","source","source_event_ref","policy_version_ref","policy_version_hash","rule_ref","content_hash"],
+  "properties":{
+    "schema_version":{"const":"0.1"},
+    "id":{"type":"string","pattern":"^policy-commit:[0-9a-f]{64}$"},
+    "created_at":{"type":"string","format":"date-time"},
+    "candidate_claim_ref":{"type":"string","minLength":1},
+    "candidate_claim_hash":{"$ref":"#/$defs/hash"},
+    "candidate_evidence_ref":{"type":"string","minLength":1},
+    "candidate_evidence_hash":{"$ref":"#/$defs/hash"},
+    "verdict":{"const":"accept"},
+    "reviewed_semantics":{"$ref":"#/$defs/semantics"},
+    "proposed_revisions":{"type":"null"},
+    "relation":{"const":"supports"},
+    "rationale":{"type":"string","minLength":1},
+    "findings":{"const":["matched exact deterministic SEC filing-count rule"]},
+    "reviewer_ref":{"const":"system:research-auto-commit"},
+    "authorization":{"const":"versioned_governance_policy"},
+    "source":{"const":"governance_policy"},
+    "source_event_ref":{"type":"string","pattern":"^governance-policy:"},
+    "policy_version_ref":{"type":"string","minLength":1},
+    "policy_version_hash":{"$ref":"#/$defs/hash"},
+    "rule_ref":{"const":"research-auto-commit:sec-public-filing-count:v1"},
+    "content_hash":{"$ref":"#/$defs/hash"}
+  },
+  "$defs":{
+    "hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "semantics":{"type":"object","additionalProperties":false,"required":["subject_ref","metric_or_aspect","period","basis","normalized_statement"],"properties":{"subject_ref":{"type":"string","minLength":1},"metric_or_aspect":{"type":"string","minLength":1},"period":{"oneOf":[{"type":"string","minLength":1},{"type":"object"}]},"basis":{"type":"string","minLength":1},"normalized_statement":{"type":"string","minLength":1}}}
+  }
+}

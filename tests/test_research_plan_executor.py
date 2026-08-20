@@ -23,7 +23,8 @@ from dalton_core.observability import ObservabilityStore
 from dalton_core.public_http_transport import PublicHttpTransport
 from dalton_core.raw_spool import RawSpool
 from dalton_core.research_coordinator import ResearchCoordinatorStore
-from dalton_core.research_plan import _plan_work_orders
+from dalton_core.research_auto_commit import RULE_REF as AUTO_COMMIT_RULE_REF
+from dalton_core.research_plan import PLAN_AUTO_START_RULE_REF, _plan_work_orders
 from dalton_core.research_plan_coordinator import (
     ResearchPlanCoordinator,
     ResearchPlanCoordinatorConflict,
@@ -77,14 +78,46 @@ class InjectedExecutorCrash(RuntimeError):
 class PlanExecutorHarness:
     """One approved + started SEC plan with the full real connector stack."""
 
-    def __init__(self, *, suffix: str = "exec", fault_at: str | None = None):
+    def __init__(
+        self,
+        *,
+        suffix: str = "exec",
+        fault_at: str | None = None,
+        auto_start: bool = False,
+    ):
         self.planner = planner_test_support.ResearchPlanTests(
             methodName="test_create_plan_is_exact_closed_four_step_tree"
         )
         self.planner.setUp()
         self._cleanups = [self.planner.doCleanups]
         created = self.planner._create_plan(suffix=suffix)
-        self.planner._approve(created, suffix=suffix)
+        if auto_start:
+            active = self.planner.store.active_policy()
+            policy = dict(active["policy"])
+            policy["research_plan_auto_start"] = {
+                "enabled": True,
+                "rules": [PLAN_AUTO_START_RULE_REF],
+            }
+            policy["research_candidate_auto_commit"] = {
+                "enabled": True,
+                "rules": [AUTO_COMMIT_RULE_REF],
+                "max_records": 20,
+            }
+            self.planner.store.create_policy(
+                policy,
+                policy_version_id=f"policy:autonomous-research:{suffix}:v2",
+                version_number=2,
+                prior_version_ref=active["policy_version_id"],
+                actor_ref="human:test-owner",
+                change_reason="authorize isolated autonomous SEC research",
+                activate=True,
+            )
+            self.planner.plans.authorize_plan_by_policy(
+                plan_version_ref=created["plan_version_ref"],
+                idempotency_key=f"authorize-plan:{suffix}",
+            )
+        else:
+            self.planner._approve(created, suffix=suffix)
         self.planner._start(created, suffix=suffix)
         self.plan_wire = self.planner.plans.plan_version(
             created["plan_version_ref"]

@@ -1,4 +1,4 @@
-"""Close an accepted ResearchPlan into one exact Backlog answer.
+"""Close an authorized ResearchPlan into one exact Backlog answer.
 
 The executor stops at candidate staging and the review control plane stops
 after formal Ledger promotion.  This coordinator joins those existing
@@ -6,8 +6,8 @@ authorities without creating another queue or mutable status table:
 
 * the complete four-node plan tree is re-read from Scheduler authority;
 * the final stage proof must name the exact reviewed candidate pair;
-* the review decision must be an explicit accept with a committed delivery
-  event whose receipt matches Core's reviewed-candidate commit;
+* a human path requires an explicit accept and committed delivery event;
+  a low-risk path requires an exact active-policy authorization receipt;
 * the promoted Evidence/Claim/supports relation are revalidated from Core;
 * only that formal ClaimVersion may answer the plan's exact Backlog question.
 
@@ -37,6 +37,7 @@ from .research_review import (
     validate_evidence_version_v0_2,
     validate_human_review_decision,
 )
+from .research_auto_commit import validate_policy_commit_decision
 from .store import canonical_json, content_hash
 
 
@@ -153,9 +154,15 @@ class ResearchPlanClosureCoordinator:
         self,
         *,
         bundle: Mapping[str, Any],
-        review_result: Mapping[str, Any],
+        review_result: Mapping[str, Any] | None,
+        policy_authorized: bool = False,
     ) -> dict[str, Any]:
-        decision = validate_human_review_decision(bundle["decision"])
+        validator = (
+            validate_policy_commit_decision
+            if policy_authorized
+            else validate_human_review_decision
+        )
+        decision = validator(bundle["decision"])
         evidence = bundle["evidence"]
         claim = bundle["claim"]
         cursor = self.plan.connection.cursor()
@@ -167,14 +174,18 @@ class ResearchPlanClosureCoordinator:
             raise ResearchPlanClosurePending(
                 "accepted review has no formal Ledger promotion receipt"
             )
-        stored_decision = validate_human_review_decision(
+        stored_decision = validator(
             _json_record(row["decision_json"], "reviewed commit decision")
         )
         stored_result = _promotion_result(
             _json_record(row["result_json"], "reviewed commit result"),
             "reviewed commit result",
         )
-        delivered = _promotion_result(review_result, "review delivery result")
+        delivered = (
+            None
+            if review_result is None
+            else _promotion_result(review_result, "review delivery result")
+        )
         expected_request_hash = content_hash({
             "decision_hash": decision["content_hash"],
             "evidence_hash": evidence["content_hash"],
@@ -195,7 +206,9 @@ class ResearchPlanClosureCoordinator:
             "idempotency_key", "review_decision_ref", "evidence_version_ref",
             "claim_version_ref", "relation_ref", "claim_status", "event_refs",
         )
-        if any(delivered[field] != stored_result[field] for field in identity_fields):
+        if delivered is not None and any(
+            delivered[field] != stored_result[field] for field in identity_fields
+        ):
             raise ResearchPlanClosureConflict(
                 "review delivery event and Core promotion receipt disagree"
             )
@@ -342,18 +355,39 @@ class ResearchPlanClosureCoordinator:
             raise ResearchPlanClosureConflict(
                 "only an explicitly accepted review can close a plan"
             )
-        expected = {
-            "candidate_evidence": bundle["evidence"],
-            "candidate_claim": bundle["claim"],
-        }
-        for kind, candidate in expected.items():
-            if candidates[kind] != {
-                "kind": kind,
-                "ref": candidate["id"],
-                "hash": candidate["content_hash"],
-            }:
+        if candidates["candidate_evidence"] != {
+            "kind": "candidate_evidence",
+            "ref": bundle["evidence"]["id"],
+            "hash": bundle["evidence"]["content_hash"],
+        }:
+            raise ResearchPlanClosureConflict(
+                "review decision does not retain the plan's exact candidate evidence"
+            )
+        final_claim = candidates["candidate_claim"]
+        accepted_claim = bundle["claim"]
+        if final_claim != {
+            "kind": "candidate_claim",
+            "ref": accepted_claim["id"],
+            "hash": accepted_claim["content_hash"],
+        }:
+            lineage = self.review.revision_lineage(accepted_claim["id"])
+            if (
+                len(lineage["claims"]) != 2
+                or len(lineage["revision_decisions"]) != 1
+                or final_claim != {
+                    "kind": "candidate_claim",
+                    "ref": lineage["claims"][0]["id"],
+                    "hash": lineage["claims"][0]["content_hash"],
+                }
+                or canonical_json(lineage["claims"][1])
+                != canonical_json(accepted_claim)
+                or any(
+                    canonical_json(item) != canonical_json(bundle["evidence"])
+                    for item in lineage["evidences"]
+                )
+            ):
                 raise ResearchPlanClosureConflict(
-                    "review decision does not bind the plan's final candidate pair"
+                    "accepted candidate is not the plan's exact single-step human revision"
                 )
         event = self.review.commit_event(decision["id"])
         if event is None or event["state"] != "committed":
@@ -411,6 +445,103 @@ class ResearchPlanClosureCoordinator:
             "question_ref": plan_wire["question_ref"],
             "review_decision_ref": decision["id"],
             "candidate_claim_ref": bundle["claim"]["id"],
+            "evidence_version_ref": formal["evidence"]["id"],
+            "claim_version_ref": formal["claim"]["id"],
+            "relation_ref": formal["relation"]["id"],
+            "answer_event_ref": answer["event"]["id"],
+            "answer_binding_ref": answer["answer_bindings"][0]["id"],
+        }
+
+    def close_policy_authorized(
+        self,
+        *,
+        plan_version_ref: str,
+        authorization: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Close one exact low-risk plan without a per-item human decision."""
+
+        decision = validate_policy_commit_decision(authorization)
+        view = self.plan.plan(plan_version_ref)
+        if view["state"] != "started" or view["start_binding"] is None:
+            raise ResearchPlanClosurePending("research plan is not started")
+        plan_wire = view["plan_version"]
+        candidates = self._final_candidates(plan_wire)
+        candidate = self.review.candidate_bundle(decision["candidate_claim_ref"])
+        evidence = candidate["evidence"]
+        claim = candidate["claim"]
+        if candidates["candidate_evidence"] != {
+            "kind": "candidate_evidence",
+            "ref": evidence["id"],
+            "hash": evidence["content_hash"],
+        } or candidates["candidate_claim"] != {
+            "kind": "candidate_claim",
+            "ref": claim["id"],
+            "hash": claim["content_hash"],
+        }:
+            raise ResearchPlanClosureConflict(
+                "policy authorization does not bind the plan's exact final candidate"
+            )
+        if (
+            decision["candidate_evidence_ref"] != evidence["id"]
+            or decision["candidate_evidence_hash"] != evidence["content_hash"]
+            or decision["candidate_claim_hash"] != claim["content_hash"]
+        ):
+            raise ResearchPlanClosureConflict(
+                "policy authorization candidate binding drifted"
+            )
+        formal = self._formal_promotion(
+            bundle={"decision": decision, "evidence": evidence, "claim": claim},
+            review_result=None,
+            policy_authorized=True,
+        )
+        question = self.backlog.question(plan_wire["question_ref"])
+        if question["state"] == "answered":
+            bindings = question["answer_bindings"]
+            if (
+                len(bindings) != 1
+                or bindings[0]["claim_version_ref"] != formal["claim"]["id"]
+                or bindings[0]["claim_version_hash"]
+                != formal["claim"]["content_hash"]
+            ):
+                raise ResearchPlanClosureConflict(
+                    "answered question is bound to a different formal claim"
+                )
+            return {
+                "status": "duplicate",
+                "plan_version_ref": plan_wire["id"],
+                "question_ref": plan_wire["question_ref"],
+                "authorization_ref": decision["id"],
+                "candidate_claim_ref": claim["id"],
+                "evidence_version_ref": formal["evidence"]["id"],
+                "claim_version_ref": formal["claim"]["id"],
+                "relation_ref": formal["relation"]["id"],
+                "answer_event_ref": bindings[0]["event_ref"],
+                "answer_binding_ref": bindings[0]["id"],
+            }
+        if question["state"] != "in_progress":
+            raise ResearchPlanClosurePending(
+                "research plan question is not ready to be answered"
+            )
+        self._inject("before_backlog_answer")
+        answer = self.backlog.answer_question(
+            question_ref=plan_wire["question_ref"],
+            claim_version_refs=[formal["claim"]["id"]],
+            actor_ref="core:research-plan-policy-closure",
+            idempotency_key=(
+                f"research-plan-policy-closure:{plan_wire['id']}:{decision['id']}"
+            ),
+        )
+        self._inject("after_backlog_answer")
+        if answer["state"] != "answered":
+            raise ResearchPlanClosureConflict(
+                "Backlog answer transition did not converge"
+            )
+        return {
+            "status": answer["status"],
+            "plan_version_ref": plan_wire["id"],
+            "question_ref": plan_wire["question_ref"],
+            "authorization_ref": decision["id"],
+            "candidate_claim_ref": claim["id"],
             "evidence_version_ref": formal["evidence"]["id"],
             "claim_version_ref": formal["claim"]["id"],
             "relation_ref": formal["relation"]["id"],

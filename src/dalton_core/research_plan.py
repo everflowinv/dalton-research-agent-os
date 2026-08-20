@@ -2,7 +2,8 @@
 
 An exact selected AgendaDecision binds an exact research-question version;
 this slice records one immutable ``ResearchPlanVersion`` from that exact
-binding and keeps plan start behind an explicit exact human approval gate.
+binding and keeps plan start behind either an explicit human approval or the
+active versioned policy's narrow low-risk authorization.
 
 Frozen plan state:
 
@@ -14,9 +15,10 @@ backlog question ``selected -> planned`` with the exact plan binding;
 WorkflowRunVersion + root WorkOrder created by the plan control plane and
 advances the backlog question ``planned -> in_progress``.  Approval is a
 separate append-only authority: exactly one terminal ``accepted``/``rejected``
-decision per exact plan version, and only ``human:`` principals may decide.
-Auto-accept timeouts, automation/model principals, Agenda approval and
-Discord reactions are never plan-start authority.
+decision per exact plan version.  Automation/model principals, Agenda
+approval and Discord reactions cannot impersonate that human authority; the
+only autonomous path is a separate immutable policy authorization for the
+closed public SEC read-only scope.
 
 Version 1 is closed to a single SEC public, credential-free, read-only
 ``list_filings`` research plan:
@@ -38,8 +40,9 @@ plan contains a closed four-step tree (SEC connector -> authority resolver ->
 verifier -> candidate staging).  Start records the complete tree but enqueues
 only the root connector WorkOrder; downstream nodes remain planned until a
 coordinator observes the exact upstream result and admits them.  Candidate
-staging still feeds the existing explicit HumanReviewAuthority gate and never
-writes Evidence/Claim/Thesis directly.
+staging still never writes Evidence/Claim/Thesis directly; the separate
+Ledger commit boundary decides whether exact deterministic results qualify
+for policy authorization or require human escalation.
 """
 
 from __future__ import annotations
@@ -98,6 +101,8 @@ SEC_MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 SEC_MAX_SECONDS = 60
 PERMISSION_SCOPE = "public_sec_list_filings"
 SIDE_EFFECT_CLASS = "read_only_public"
+PLAN_AUTO_START_RULE_REF = "research-plan-auto-start:sec-public-list-filings:v1"
+PLAN_AUTO_START_ACTOR_REF = "system:research-plan-auto-start"
 
 _CAMEL_CHARS = set("0123456789abcdef")
 
@@ -131,6 +136,12 @@ _PLAN_FIELDS = frozenset({
 _APPROVAL_FIELDS = frozenset({
     "schema_version", "id", "created_at", "plan_version_ref",
     "plan_version_hash", "decision", "reason", "actor_ref", "content_hash",
+})
+_POLICY_AUTHORIZATION_FIELDS = frozenset({
+    "schema_version", "id", "created_at", "plan_version_ref",
+    "plan_version_hash", "decision", "reason", "actor_ref",
+    "authorization", "policy_version_ref", "policy_version_hash",
+    "rule_ref", "content_hash",
 })
 _START_FIELDS = frozenset({
     "schema_version", "id", "created_at", "plan_version_ref",
@@ -987,16 +998,90 @@ def read_exact_research_plan_approval(cursor: Any, approval_id: str) -> dict[str
     return wire
 
 
+def read_exact_research_plan_policy_authorization(
+    cursor: Any, authorization_id: str
+) -> dict[str, Any]:
+    """Read one exact low-risk plan authorization from versioned policy."""
+
+    authorization_id = _text(authorization_id, "authorization_id")
+    row = _authority_row(
+        cursor,
+        "SELECT * FROM research_plan_policy_authorizations WHERE authorization_id=?",
+        (authorization_id,),
+        "ResearchPlanPolicyAuthorization",
+    )
+    if row is None:
+        raise ResearchPlanNotFound(
+            f"research plan policy authorization {authorization_id}"
+        )
+    wire = _reverify_record(
+        row["record_json"],
+        {
+            "id": row["authorization_id"],
+            "plan_version_ref": row["plan_version_ref"],
+            "plan_version_hash": row["plan_version_hash"],
+            "policy_version_ref": row["policy_version_ref"],
+            "policy_version_hash": row["policy_version_hash"],
+            "rule_ref": row["rule_ref"],
+            "created_at": row["created_at"],
+        },
+        name="ResearchPlanPolicyAuthorization",
+    )
+    if set(wire) != _POLICY_AUTHORIZATION_FIELDS:
+        raise ResearchPlanConflict(
+            "ResearchPlanPolicyAuthorization has an invalid closed shape"
+        )
+    if (
+        wire["schema_version"] != SCHEMA_VERSION
+        or wire["decision"] != "accepted"
+        or wire["actor_ref"] != PLAN_AUTO_START_ACTOR_REF
+        or wire["authorization"] != "versioned_governance_policy"
+        or wire["rule_ref"] != PLAN_AUTO_START_RULE_REF
+    ):
+        raise ResearchPlanConflict(
+            "ResearchPlanPolicyAuthorization authority is invalid"
+        )
+    plan = read_exact_research_plan_version(cursor, wire["plan_version_ref"])
+    if plan["content_hash"] != wire["plan_version_hash"]:
+        raise ResearchPlanConflict(
+            "ResearchPlanPolicyAuthorization drifted from its exact plan"
+        )
+    policy = cursor.execute(
+        "SELECT content_hash FROM governance_policy_versions WHERE policy_version_id=?",
+        (wire["policy_version_ref"],),
+    ).fetchone()
+    if policy is None or policy["content_hash"] != wire["policy_version_hash"]:
+        raise ResearchPlanConflict(
+            "ResearchPlanPolicyAuthorization policy binding drifted"
+        )
+    return wire
+
+
+def read_exact_research_plan_start_authorization(
+    cursor: Any, authorization_id: str
+) -> dict[str, Any]:
+    """Resolve the immutable human or policy authority named by a start."""
+
+    human = cursor.execute(
+        "SELECT 1 FROM research_plan_approvals WHERE approval_id=?",
+        (authorization_id,),
+    ).fetchone()
+    if human is not None:
+        return read_exact_research_plan_approval(cursor, authorization_id)
+    return read_exact_research_plan_policy_authorization(cursor, authorization_id)
+
+
 def read_exact_research_plan_start(
     cursor: Any,
     start_id: str,
     *,
     require_question_binding: bool = True,
 ) -> dict[str, Any]:
-    """Read one approved plan start binding from its canonical row.
+    """Read one authorized plan start binding from its canonical row.
 
     The start row freezes the exact WorkflowRunVersion row (ref/hash) and the
-    exact root WorkOrder (ref/hash) plus the exact accepted approval.  The
+    exact root WorkOrder (ref/hash) plus the exact accepted human-or-policy
+    authorization.  The
     observability workflow row lives in the same Core DB and is re-verified
     here from its canonical record; the root WorkOrder row lives in the
     Scheduler authority and is re-verified by the plan control plane.
@@ -1053,7 +1138,9 @@ def read_exact_research_plan_start(
         raise ResearchPlanConflict(
             "ResearchPlanStart drifted from its exact plan version"
         )
-    approval = read_exact_research_plan_approval(cursor, wire["approval_ref"])
+    approval = read_exact_research_plan_start_authorization(
+        cursor, wire["approval_ref"]
+    )
     if approval["content_hash"] != wire["approval_hash"]:
         raise ResearchPlanConflict(
             "ResearchPlanStart drifted from its exact approval decision"
@@ -1550,9 +1637,14 @@ class ResearchPlanAuthority:
                 "WHERE plan_version_ref=?",
                 (plan_version_ref,),
             ).fetchone()
-            if existing is not None:
+            policy_existing = cur.execute(
+                "SELECT authorization_id FROM research_plan_policy_authorizations "
+                "WHERE plan_version_ref=?",
+                (plan_version_ref,),
+            ).fetchone()
+            if existing is not None or policy_existing is not None:
                 raise ResearchPlanConflict(
-                    "research plan already has a terminal approval decision"
+                    "research plan already has a terminal start authorization"
                 )
             created_at = _now()
             approval_id = "research-plan-approval:" + uuid.uuid4().hex
@@ -1586,6 +1678,123 @@ class ResearchPlanAuthority:
             )
             return result
 
+    def authorize_plan_by_policy(
+        self,
+        *,
+        plan_version_ref: str,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Authorize one closed public SEC plan under the active policy."""
+
+        plan_version_ref = _text(plan_version_ref, "plan_version_ref")
+        request_hash = content_hash({"plan_version_ref": plan_version_ref})
+        with self.store._transaction() as cur:
+            duplicate = self._idem(
+                cur, idempotency_key, "authorize_plan_by_policy", request_hash
+            )
+            if duplicate is not None:
+                return duplicate
+            plan = read_exact_research_plan_version(cur, plan_version_ref)
+            if plan["execution_scope"]["parameters"]["form"] != "10-Q":
+                raise ResearchPlanConflict(
+                    "active autonomous plan rule currently accepts 10-Q only"
+                )
+            policy_row = cur.execute(
+                "SELECT v.* FROM governance_policy_pointer p "
+                "JOIN governance_policy_versions v "
+                "ON v.policy_version_id=p.policy_version_id WHERE p.pointer_id=1"
+            ).fetchone()
+            if policy_row is None:
+                raise ResearchPlanConflict("no active governance policy")
+            self.store._assert_policy_effective(policy_row)
+            try:
+                policy = json.loads(policy_row["policy_json"])
+            except (TypeError, ValueError) as exc:
+                raise ResearchPlanConflict("active governance policy is corrupt") from exc
+            rule = policy.get("research_plan_auto_start")
+            if (
+                not isinstance(rule, Mapping)
+                or set(rule) != {"enabled", "rules"}
+                or rule["enabled"] is not True
+                or rule["rules"] != [PLAN_AUTO_START_RULE_REF]
+            ):
+                raise ResearchPlanConflict(
+                    "active governance policy does not authorize this research plan"
+                )
+            human = cur.execute(
+                "SELECT approval_id FROM research_plan_approvals WHERE plan_version_ref=?",
+                (plan_version_ref,),
+            ).fetchone()
+            if human is not None:
+                raise ResearchPlanConflict(
+                    "research plan already has a terminal human decision"
+                )
+            existing = cur.execute(
+                "SELECT authorization_id FROM research_plan_policy_authorizations "
+                "WHERE plan_version_ref=?",
+                (plan_version_ref,),
+            ).fetchone()
+            if existing is not None:
+                authorization = read_exact_research_plan_policy_authorization(
+                    cur, existing["authorization_id"]
+                )
+                result = {
+                    "status": "duplicate",
+                    "plan_version_ref": plan_version_ref,
+                    "plan_state": "approved",
+                    "authorization": authorization,
+                }
+                self._save_idem(
+                    cur, idempotency_key, "authorize_plan_by_policy", request_hash, result
+                )
+                return result
+            policy_ref = policy_row["policy_version_id"]
+            policy_hash = policy_row["content_hash"]
+            authorization_id = "research-plan-policy-authorization:" + content_hash({
+                "plan_version_ref": plan_version_ref,
+                "plan_version_hash": plan["content_hash"],
+                "policy_version_ref": policy_ref,
+                "policy_version_hash": policy_hash,
+                "rule_ref": PLAN_AUTO_START_RULE_REF,
+            })[:32]
+            authorization = self._record({
+                "schema_version": SCHEMA_VERSION,
+                "id": authorization_id,
+                "plan_version_ref": plan_version_ref,
+                "plan_version_hash": plan["content_hash"],
+                "decision": "accepted",
+                "reason": "matched active low-risk public SEC plan policy",
+                "actor_ref": PLAN_AUTO_START_ACTOR_REF,
+                "authorization": "versioned_governance_policy",
+                "policy_version_ref": policy_ref,
+                "policy_version_hash": policy_hash,
+                "rule_ref": PLAN_AUTO_START_RULE_REF,
+                "created_at": max(plan["created_at"], policy_row["created_at"]),
+            })
+            cur.execute(
+                "INSERT INTO research_plan_policy_authorizations("
+                "authorization_id,plan_version_ref,plan_version_hash,policy_version_ref,"
+                "policy_version_hash,rule_ref,record_json,content_hash,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    authorization["id"], authorization["plan_version_ref"],
+                    authorization["plan_version_hash"], authorization["policy_version_ref"],
+                    authorization["policy_version_hash"], authorization["rule_ref"],
+                    canonical_json(authorization), authorization["content_hash"],
+                    authorization["created_at"],
+                ),
+            )
+            result = {
+                "status": "fresh",
+                "plan_version_ref": plan_version_ref,
+                "plan_state": "approved",
+                "authorization": authorization,
+            }
+            self._save_idem(
+                cur, idempotency_key, "authorize_plan_by_policy", request_hash, result
+            )
+            return result
+
     def _latest_backlog_state(self, cur: sqlite3.Cursor, question_ref: str) -> str | None:
         from .research_question_backlog import _read_exact_event_history
 
@@ -1604,6 +1813,12 @@ class ResearchPlanAuthority:
         ).fetchone()
         if approval is not None:
             return "approved" if approval["decision"] == "accepted" else "rejected"
+        policy_authorization = cur.execute(
+            "SELECT 1 FROM research_plan_policy_authorizations WHERE plan_version_ref=?",
+            (plan_version_ref,),
+        ).fetchone()
+        if policy_authorization is not None:
+            return "approved"
         return "pending"
 
     def plan(self, plan_version_ref: str) -> dict[str, Any]:
@@ -1621,6 +1836,16 @@ class ResearchPlanAuthority:
         if approval_row is not None:
             approval = read_exact_research_plan_approval(
                 cursor, approval_row["approval_id"]
+            )
+        policy_row = cursor.execute(
+            "SELECT authorization_id FROM research_plan_policy_authorizations "
+            "WHERE plan_version_ref=?",
+            (plan_version_ref,),
+        ).fetchone()
+        policy_authorization = None
+        if policy_row is not None:
+            policy_authorization = read_exact_research_plan_policy_authorization(
+                cursor, policy_row["authorization_id"]
             )
         start_row = cursor.execute(
             "SELECT start_id FROM research_plan_starts WHERE plan_version_ref=?",
@@ -1641,6 +1866,7 @@ class ResearchPlanAuthority:
             "events": events,
             "state": self._plan_state(cursor, plan_version_ref),
             "approval": approval,
+            "policy_authorization": policy_authorization,
             "start_binding": start_binding,
         }
 
@@ -1920,7 +2146,7 @@ class ResearchPlanControlPlane:
         actor_ref: str,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Start one approved plan: workflow version + root WorkOrder + gate.
+        """Start one authorized plan: workflow version + root WorkOrder + gate.
 
         Validation is re-run on every seam, so a concurrent authority change,
         a replayed request or a tampered row fails closed instead of
@@ -1940,7 +2166,7 @@ class ResearchPlanControlPlane:
         if duplicate is not None:
             return duplicate
         plan_wire = read_exact_research_plan_version(cursor, plan_version_ref)
-        approval = self._exact_accepted_approval(cursor, plan_wire)
+        approval = self._exact_start_authorization(cursor, plan_wire)
         existing_start = cursor.execute(
             "SELECT start_id FROM research_plan_starts WHERE plan_version_ref=?",
             (plan_version_ref,),
@@ -1972,7 +2198,7 @@ class ResearchPlanControlPlane:
             workflow_ref,
             title=f"Research plan {plan_version_ref}",
             objective=(
-                f"Execute the approved SEC public read-only plan for question "
+                f"Execute the authorized SEC public read-only plan for question "
                 f"{plan_wire['question_ref']}"
             ),
             scope_refs=[plan_wire["question_ref"], plan_wire["question_version_ref"]],
@@ -2016,7 +2242,7 @@ class ResearchPlanControlPlane:
             plan_recheck = read_exact_research_plan_version(cur, plan_version_ref)
             if plan_recheck["content_hash"] != plan_wire["content_hash"]:
                 raise ResearchPlanConflict("plan drifted between start seams")
-            approval_recheck = self._exact_accepted_approval(cur, plan_recheck)
+            approval_recheck = self._exact_start_authorization(cur, plan_recheck)
             self._assert_startable(cur, plan_recheck)
             if approval_recheck["content_hash"] != approval["content_hash"]:
                 raise ResearchPlanConflict("approval drifted between start seams")
@@ -2206,29 +2432,54 @@ class ResearchPlanControlPlane:
             "in_progress_event": in_progress_event,
         }
 
-    def _exact_accepted_approval(
+    def _exact_start_authorization(
         self, cursor: Any, plan_wire: Mapping[str, Any]
     ) -> dict[str, Any]:
-        """Require the exact accepted approval for the exact plan."""
+        """Require one exact human or active-policy start authorization."""
 
         row = cursor.execute(
             "SELECT approval_id FROM research_plan_approvals WHERE plan_version_ref=?",
             (plan_wire["id"],),
         ).fetchone()
-        if row is None:
+        if row is not None:
+            approval = read_exact_research_plan_approval(cursor, row["approval_id"])
+            if approval["decision"] != "accepted":
+                raise ResearchPlanConflict(
+                    "plan approval decision is not accepted; start is not authorized"
+                )
+            if approval["plan_version_hash"] != plan_wire["content_hash"]:
+                raise ResearchPlanConflict(
+                    "plan approval drifted from the exact plan version"
+                )
+            return approval
+        policy_row = cursor.execute(
+            "SELECT authorization_id FROM research_plan_policy_authorizations "
+            "WHERE plan_version_ref=?",
+            (plan_wire["id"],),
+        ).fetchone()
+        if policy_row is None:
             raise ResearchPlanConflict(
-                "plan has no human approval decision; start is not authorized"
+                "plan has no human or policy start authorization"
             )
-        approval = read_exact_research_plan_approval(cursor, row["approval_id"])
-        if approval["decision"] != "accepted":
+        authorization = read_exact_research_plan_policy_authorization(
+            cursor, policy_row["authorization_id"]
+        )
+        active = cursor.execute(
+            "SELECT v.policy_version_id,v.content_hash,v.effective_from,v.effective_until "
+            "FROM governance_policy_pointer p JOIN governance_policy_versions v "
+            "ON v.policy_version_id=p.policy_version_id WHERE p.pointer_id=1"
+        ).fetchone()
+        if active is None:
+            raise ResearchPlanConflict("no active governance policy")
+        self.plan.store._assert_policy_effective(active)
+        if (
+            active["policy_version_id"] != authorization["policy_version_ref"]
+            or active["content_hash"] != authorization["policy_version_hash"]
+        ):
             raise ResearchPlanConflict(
-                "plan approval decision is not accepted; start is not authorized"
+                "plan policy authorization is no longer active"
             )
-        if approval["plan_version_hash"] != plan_wire["content_hash"]:
-            raise ResearchPlanConflict(
-                "plan approval drifted from the exact plan version"
-            )
-        return approval
+        return authorization
 
     def _assert_startable(
         self, cursor: Any, plan_wire: Mapping[str, Any]

@@ -2,7 +2,7 @@
 
 更新日期：2026-08-20
 - live deployed baseline：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`；Agenda 兼容热修复：`03ea471`
-- 当前开发候选：`bd868b2`；首条真实 SEC public plan 已完成人工接受、正式 Ledger promotion 与 Backlog answer，仍未部署到 live
+- 当前开发候选 baseline：`bd868b2`；工作区新增 policy-authorized 自动研究切片，尚未 commit，也未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -26,8 +26,16 @@ ResearchPlanExecutor 接通，并在隔离临时 authority 中跑完一份真实
 relation 和 1 条 Backlog answer binding。当前开发候选已经增加明确人工审阅入口、无损正式 promotion 和
 authority-bound ResearchPlan closure，但尚未部署。
 
-当前下一阶段是 **把第一条只读研究闭环接到可检索、可计划的消费者**：HumanReviewAuthority 已能对 exact
-candidate 做 accept/revise/reject，accept 通过 scoped writer 原子写 EvidenceVersion 0.2、ClaimVersion 0.2 和
+2026-08-20 新隔离 canary 已从 `data.sec.gov` 真实跑通 policy-authorized 主链：versioned policy 自动授权 1 份
+SEC public 10-Q plan，四个节点全部成功，系统自动提交 1 条 Evidence、1 条 Claim、1 条 supports relation，并生成
+1 条 Backlog answer binding。`research_plan_approvals=0`、`human_review_decisions=0`；Core、candidate staging、
+coordinator、capability 四个 SQLite integrity check 均为 `ok`。这证明低风险主链不需要逐 plan、逐 Claim 找 owner
+审批，但仍只是 `filing_count` 机制样本，不代表已经达到自主研究分析师的最终质量。
+
+当前下一阶段是 **在自动主链上做多样本质量校准，并把产物从 filing metadata 推进到可用于研究判断的 Claim**：
+versioned governance policy 只允许 closed SEC public `10-Q list_filings` plan 自动启动；结果只有在 Core 从 exact
+CallSpec、SourceEnvelope 和 Artifact 重新推导 CIK、表单、日期窗、记录数与完整 statement，并命中固定
+`filing_count` rule 时才能自动写 EvidenceVersion 0.2、ClaimVersion 0.2 和
 supports relation；ClaimIndex status 派生现已改为读取 Core 的一致 Ledger snapshot，绑定 snapshot ref/hash，并拒绝
 caller-provided status；DocumentIndex FTS5 已完成开发候选；ContextPack authority-bound materializer 已完成
 claim/artifact 只读切片，并已接通 Agenda 的 mandate/perception exact reader。PerceptionSnapshot 现在进入 Core
@@ -36,17 +44,20 @@ materializer quoted JSONL；可变 snapshot 文件不再参与 replay 或 prompt
 完成：稳定 question 身份、冻结状态机、AgendaDecision 链接、正式 ClaimVersion answer 绑定与 Mandate 进度
 投影，问题现在可以跨 cycle 存续。Planner 薄闭环也已完成开发候选：exact selected AgendaDecision/
 ResearchQuestionVersion → immutable ResearchPlanVersion → WorkflowRunVersion/WorkOrderLink 任务树；首版只允许
-无凭据 SEC public `list_filings`，每份 plan 都要 exact human approval。启动只把根 connector WorkOrder 放入
+无凭据 SEC public `list_filings`；人可以批准 plan，active versioned policy 也可以只对 closed low-risk scope 签发
+独立 authorization，automation 不能伪装成人。启动只把根 connector WorkOrder 放入
 Scheduler，下游 resolver/verifier/candidate staging 保持 planned，必须由 coordinator 在上游 exact result 后逐项
 admission；开发候选 coordinator 已完成 exact Scheduler/connector receipt/runner journal/内部阶段输出证明核对，
 每次只 admission 直接子节点，重放收敛且篡改 fail closed。ResearchPlanExecutor 现已把四个真实节点接到各自
 authority，并跑完第一条真实 SEC public WorkOrder 树。首条 exact candidate 已获 explicit accept，正式
 Evidence/Claim/Relation 与 Backlog answer 也已写入隔离 authority；新 closure coordinator 会重验
-plan→final candidate→review→formal promotion 全链，并在崩溃后收敛到同一 answer binding。当前顺序进入首轮
-质量校准：记录接受/修改/拒绝原因、来源与数字错误、成本和审阅时间，再按真实缺口决定 connector、verifier 或
-model 增量。Interrupt / park / resume 与 Reflection 继续顺延，不增加没有真实消费者的内核子系统。当前没有
-能力租约、凭据、自动 Ledger commit 或旧 cron cutover。
-正式 Ledger commit 继续逐条人工 gate。万华的 10 个工作日/20 个显式人工标签门槛
+plan→final candidate→authorization→formal promotion 全链，并在崩溃后收敛到同一 answer binding。当前自动规则
+不接受 model-written interpretation、candidate revision、凭据来源、非完整枚举、其他 source/metric/form 或越界
+预算；这些情况进入 human review / revise / reject 异常通道。HumanReviewAuthority 的 revise consumer 只允许人工
+改写 `normalized_statement`，source、numeric、period、evidence 和 provenance 不变，其他变化回到新的 verified
+plan run。Interrupt / park / resume 与 Reflection 继续顺延，不增加没有真实消费者的内核子系统。当前没有 live
+policy activation、凭据或旧 cron cutover。
+万华的 10 个工作日/20 个显式人工标签门槛
 只限制 Agenda 从 1 家扩到 3 家。第一条真实闭环和至少 1 条人工接受的正式 Claim 门槛已在隔离 canary 达到，
 但它只证明机制闭环，不证明研究质量或生产就绪。后续增量必须回指真实审阅数据或明确解除覆盖阻塞；与质量缺口
 无关的新 connector 品类、Model IR、sandbox 和其他内核扩建继续后置。任何研究执行开闸、生产部署或旧 cron
@@ -813,7 +824,10 @@ ClaimIndex status 派生、DocumentIndex FTS5、claim/artifact ContextPack mater
 ResearchQuestionBacklog、Planner SEC public 薄闭环、下游逐项 coordinator admission 和真实四步 executor 均已完成
 开发候选；隔离 authority 中的一份人批 SEC public 四步任务树已经跑通。Owner 已接受 exact candidate，正式
 Evidence/Claim 0.2 promotion 与 Backlog answer binding 已完成；closure coordinator 对全链重验并支持崩溃重放。
-下一步是用首轮接受原因、错误、成本和审阅时间校准研究质量。Interrupt / park / resume、Reflection、生产部署和
+真实 policy-authorized 隔离 canary 已完成：closed SEC public plan 自动授权、执行、验证、promotion 并回答原
+question，越界 statement 也已在专项测试中 fail closed。下一步用多样本自动通过/升级/人工修改数据校准研究
+质量，并优先产出能进入研究判断的 Claim，不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
+resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。
 
@@ -823,15 +837,17 @@ Model IR ADR 和 offline capability sandbox 只有在首条 plan 明确需要且
 
 ## 继续建设与开闸的不同门槛
 
-可以立即继续：校准第一条 SEC public read-only 研究闭环的审阅质量、成本与耗时，修复真实 review 暴露的
-verifier/connector/model 缺口；能按明确标准改善下一轮产物质量的增量也可推进。第一条闭环完成后可做不改
+可以立即继续：用真实 SEC public policy-authorized 主链校准自动通过率、升级原因、成本与耗时，修复真实运行
+暴露的 verifier/connector/model 缺口，并把下一份产物推进到能回答研究判断的问题；能按明确标准改善下一轮
+产物质量的增量也可推进。该闭环完成后可做不改
 Core 的 Temporal recorded-fixture spike。
 
 继续暂停：与真实质量缺口无关的新 connector 品类、Interrupt / Reflection、无明确质量验收的 Model IR、
 sandbox、embedding、多 runtime，以及没有真实消费者的 contract、projection 或 dashboard 扩建。
 
-仍需观察或人工批准：扩大 Agenda 公司数、生产 connector 权限、Evidence/Claim/Thesis commit、外发、
-付费调用、凭据扩权、旧 cron cutover。第一条闭环开发和 Agenda Shadow 数据积累可以并行，其他架构扩建按
+仍需观察或人工批准：扩大 Agenda 公司数、生产 connector 权限、重大或非规则化 Evidence/Claim/Thesis
+commit、外发、付费调用、凭据扩权、旧 cron cutover。低风险确定性 Claim 可在 owner 激活的 versioned policy
+内自动提交。第一条闭环开发和 Agenda Shadow 数据积累可以并行，其他架构扩建按
 v0.6 的价值门槛后置。
 
 ## Connector Fabric 完成门槛
@@ -872,10 +888,13 @@ v0.6 的价值门槛后置。
 
 ### P2：第一条只读研究 gate
 
-- 一条真实只读 WorkOrder 完成 connector → source/numeric verifier → candidate staging → human review；
-- explicit accept 在一个事务内无损写 Evidence/Claim/Relation；reject/revise 不产生 formal commit；
+- 一条真实只读 WorkOrder 完成 connector → source/numeric verifier → candidate staging → policy gate；
+- closed low-risk plan 和确定性 candidate 可由同一 active versioned policy 授权；人审保留为越界、重大变化和
+  verifier 无法自行解决时的升级通道；
+- policy accept 或 explicit human accept 都在一个事务内无损写 Evidence/Claim/Relation；reject/revise 不产生
+  formal commit；
 - retry/revise 有界，失败后不留下 ready/leased 僵尸任务；
-- production 未部署前只在隔离 authority 验收；不做自动 Ledger commit，不关闭旧 cron。
+- production 未部署前只在隔离 authority 验收自动 Ledger commit，不关闭旧 cron。
 
 硬指标：100% physical attempts 入账；0 fake ModelInvocation；0 未 reservation 的本地 admission；0 超过
 本地 hard quota 的 admission；provider-reported overage 必须写 incident 并阻断后续调用；0 secret/Core

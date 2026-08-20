@@ -229,18 +229,59 @@ class ResearchReviewTests(unittest.TestCase):
             self._decide(reviewed_semantics=rebound)
         self.assertEqual(self.review.counts()["human_review_decisions"], 0)
 
-    def test_revise_and_reject_are_terminal_without_ledger_intent(self) -> None:
+    def test_revise_stages_one_candidate_v2_and_replays(self) -> None:
         revised = self._decide(
             "revise",
             proposed_revisions={"normalized_statement": "Use a narrower statement."},
         )
         self.assertEqual(revised["commit_state"], "not_applicable")
         self.assertEqual(self.review.pending_commits(), [])
+        first = self.review.consume_revision(revised["decision_ref"])
+        replay = self.review.consume_revision(revised["decision_ref"])
+        self.assertEqual(first["write_status"], "fresh")
+        self.assertEqual(replay["write_status"], "duplicate")
+        self.assertEqual(first["candidate_claim_ref"], replay["candidate_claim_ref"])
+        candidates = self.review.list_candidates(limit=10)
+        self.assertEqual(len(candidates), 2)
+        v1, v2 = sorted(
+            (item["claim"] for item in candidates),
+            key=lambda item: item["version"],
+        )
+        self.assertEqual(v2["version"], 2)
+        self.assertEqual(v2["prior_version_ref"], v1["id"])
+        self.assertEqual(v2["normalized_statement"], "Use a narrower statement.")
+        self.assertEqual(v2["actor_ref"], "system:research-review-revision")
+        for field in (
+            "candidate_claim_ref", "subject_ref", "metric_or_aspect", "period",
+            "basis", "claim_kind", "value", "unit", "currency", "scale",
+            "candidate_evidence_refs", "source_verification_ref",
+            "source_verification_hash", "numeric_spec_ref", "numeric_spec_hash",
+            "numeric_verification_ref", "numeric_verification_hash",
+        ):
+            self.assertEqual(v2[field], v1[field], field)
+        lineage = self.review.revision_lineage(v2["id"])
+        self.assertEqual([item["id"] for item in lineage["claims"]], [v1["id"], v2["id"]])
+        self.assertEqual(
+            [item["id"] for item in lineage["revision_decisions"]],
+            [revised["decision_ref"]],
+        )
+        self.assertIsNone(self.review.commit_event(revised["decision_ref"]))
         with self.assertRaises(ResearchReviewConflict):
             self._decide(
                 "reject", idempotency_key="review:sec:2",
                 source_event_ref="research-review:test-event-2",
             )
+
+    def test_in_place_revision_rejects_source_numeric_or_period_rebinding(self) -> None:
+        changed_period = dict(self.candidate["claim"]["period"])
+        changed_period["label"] = "FY2024"
+        with self.assertRaises(ResearchReviewRejected):
+            self._decide(
+                "revise",
+                proposed_revisions={"period": changed_period},
+            )
+        self.assertEqual(self.review.counts()["human_review_decisions"], 0)
+        self.assertEqual(len(self.review.list_candidates(limit=10)), 1)
 
     def test_formal_commit_failure_seams_leave_no_partial_ledger(self) -> None:
         self._decide()
