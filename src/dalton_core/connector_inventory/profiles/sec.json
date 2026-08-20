@@ -6,9 +6,9 @@
     "use_time_authority": "none"
   },
   "connector_ref": "connector:sec-edgar",
-  "content_hash": "4c9ff55cdc639533309f07cbb4757d0961ccbce7e810ecce85dfc917f3d74583",
+  "content_hash": "e38ad24d2b55199ec30b4d4dbafa4fb007efe88c1420ab2d3824f2ff63dc4130",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
-  "fixture_manifest_hash": "628f896f881e8584ed1e9949611aa0adaf833595fe7517308f55963b28e17ffc",
+  "fixture_manifest_hash": "8f88e64939d4f2140189337e323ea11479a86fbf459ca3f0afe501f3aa099957",
   "fixture_manifest_ref": "connector-fixture-manifest:sec:0.1",
   "id": "connector-profile-template:sec:0.1",
   "operations": [
@@ -86,16 +86,16 @@
     },
     {
       "completeness_ceiling": "enumerated",
-      "input_schema_hash": "3c63067a3576279eb316fa7dedaa0e84b7e8987d556cb854f86a5bd5c3826b80",
+      "input_schema_hash": "b9692095c25dd8ff61d10ce54d7dc91fa93213cbc401163b98b518329d070446",
       "input_schema_ref": "schema:connector-inventory:sec:get_company_facts:input:0.1",
       "operation": "get_company_facts",
-      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_hash": "6a0b5de209f1c3188dcf28348f90030711b49e47962967bd50b065b0eef552bd",
       "output_schema_ref": "schema:connector-inventory:sec:get_company_facts:output:0.1",
       "pagination": {
         "bounded_window_required": true,
-        "cursor_field": "cursor",
-        "max_pages": 20,
-        "mode": "cursor"
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
       },
       "side_effects": [
         "read:recorded-fixture"
@@ -405,52 +405,260 @@
             "minLength": 1,
             "type": "string"
           },
-          "cursor": {
-            "type": [
-              "string",
-              "null"
-            ]
+          "concept": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "filed_to": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "form": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "taxonomy": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "unit": {
+            "minLength": 1,
+            "type": "string"
           }
         },
         "required": [
-          "cik"
+          "cik",
+          "taxonomy",
+          "concept",
+          "unit",
+          "form",
+          "filed_to"
         ],
         "type": "object"
       },
-      "schema_hash": "3c63067a3576279eb316fa7dedaa0e84b7e8987d556cb854f86a5bd5c3826b80",
+      "schema_hash": "b9692095c25dd8ff61d10ce54d7dc91fa93213cbc401163b98b518329d070446",
       "schema_ref": "schema:connector-inventory:sec:get_company_facts:input:0.1"
     },
     {
       "document": {
         "additionalProperties": false,
         "properties": {
+          "cik": {
+            "pattern": "^[0-9]{10}$",
+            "type": "string"
+          },
+          "concept": {
+            "pattern": "^[A-Za-z][A-Za-z0-9]{0,127}$",
+            "type": "string"
+          },
+          "content_hash": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "current": {
+            "additionalProperties": false,
+            "properties": {
+              "accession": {
+                "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+                "type": "string"
+              },
+              "end": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "filed": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "form": {
+                "enum": [
+                  "10-Q"
+                ],
+                "type": "string"
+              },
+              "fp": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "frame": {
+                "pattern": "^CY[0-9]{4}Q[1-4]$",
+                "type": "string"
+              },
+              "fy": {
+                "maximum": 2200,
+                "minimum": 1900,
+                "type": "integer"
+              },
+              "record_hash": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "start": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "value": {
+                "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "accession",
+              "start",
+              "end",
+              "filed",
+              "fy",
+              "fp",
+              "form",
+              "frame",
+              "value",
+              "record_hash"
+            ],
+            "type": "object"
+          },
+          "entity_name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "filed_to": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "form": {
+            "enum": [
+              "10-Q"
+            ],
+            "type": "string"
+          },
+          "growth_percent": {
+            "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+            "type": "string"
+          },
+          "label": {
+            "minLength": 1,
+            "type": "string"
+          },
           "next_cursor": {
             "type": [
               "string",
               "null"
             ]
           },
+          "prior": {
+            "additionalProperties": false,
+            "properties": {
+              "accession": {
+                "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+                "type": "string"
+              },
+              "end": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "filed": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "form": {
+                "enum": [
+                  "10-Q"
+                ],
+                "type": "string"
+              },
+              "fp": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "frame": {
+                "pattern": "^CY[0-9]{4}Q[1-4]$",
+                "type": "string"
+              },
+              "fy": {
+                "maximum": 2200,
+                "minimum": 1900,
+                "type": "integer"
+              },
+              "record_hash": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "start": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "value": {
+                "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "accession",
+              "start",
+              "end",
+              "filed",
+              "fy",
+              "fp",
+              "form",
+              "frame",
+              "value",
+              "record_hash"
+            ],
+            "type": "object"
+          },
           "provider_status": {
             "minimum": 100,
             "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
           },
           "source_record_refs": {
             "items": {
               "minLength": 1,
               "type": "string"
             },
+            "maxItems": 2,
+            "minItems": 2,
             "type": "array",
             "uniqueItems": true
+          },
+          "taxonomy": {
+            "enum": [
+              "us-gaap"
+            ],
+            "type": "string"
+          },
+          "unit": {
+            "enum": [
+              "USD"
+            ],
+            "type": "string"
           }
         },
         "required": [
+          "schema_version",
+          "entity_name",
+          "cik",
+          "taxonomy",
+          "concept",
+          "label",
+          "unit",
+          "form",
+          "filed_to",
+          "current",
+          "prior",
+          "growth_percent",
           "source_record_refs",
           "next_cursor",
-          "provider_status"
+          "provider_status",
+          "content_hash"
         ],
         "type": "object"
       },
-      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_hash": "6a0b5de209f1c3188dcf28348f90030711b49e47962967bd50b065b0eef552bd",
       "schema_ref": "schema:connector-inventory:sec:get_company_facts:output:0.1"
     }
   ],

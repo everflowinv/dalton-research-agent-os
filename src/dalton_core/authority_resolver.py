@@ -42,7 +42,11 @@ from .research_coordinator import (
     validate_connector_completion_receipt,
     validate_research_checkpoint,
 )
-from .sec_public_adapter import SecPublicAdapterError, normalize_sec_submissions
+from .sec_public_adapter import (
+    SecPublicAdapterError,
+    normalize_sec_company_concept,
+    normalize_sec_submissions,
+)
 from .store import canonical_json, content_hash
 
 
@@ -219,12 +223,22 @@ def _inventory_output_schema(profile: Mapping[str, Any], operation: str) -> Mapp
     raise AuthorityResolutionConflict("profile output schema is not the exact registered schema document")
 
 
-def _normal_record_refs(source_ref: str, raw_payload: Any) -> list[str]:
+def _normal_record_refs(
+    source_ref: str, operation: str, raw_payload: Any
+) -> list[str]:
     if not isinstance(raw_payload, Mapping):
         raise AuthorityResolutionConflict("structured source payload must be an object")
-    records = raw_payload.get("records")
     refs = raw_payload.get("source_record_refs")
-    if not isinstance(records, list) or not isinstance(refs, list):
+    if not isinstance(refs, list):
+        raise AuthorityResolutionConflict("structured source payload lacks source record refs")
+    if source_ref == "source:sec-edgar" and operation == "get_company_facts":
+        if len(refs) != 2 or len(refs) != len(set(refs)):
+            raise AuthorityResolutionConflict(
+                "SEC company facts require two exact source record refs"
+            )
+        return [_text(item, "source_record_refs[]") for item in refs]
+    records = raw_payload.get("records")
+    if not isinstance(records, list):
         raise AuthorityResolutionConflict("structured source payload lacks normalized records")
     record_refs: list[str] = []
     for index, item in enumerate(records):
@@ -934,6 +948,14 @@ class ConnectorAuthorityResolver:
                     raw_payload, call["parameters"],
                     provider_status=int(observation["provider_status_code"] or 0),
                 )
+            elif (
+                source["source"] == "source:sec-edgar"
+                and source["operation"] == "get_company_facts"
+            ):
+                normalized = normalize_sec_company_concept(
+                    raw_payload, call["parameters"],
+                    provider_status=int(observation["provider_status_code"] or 0),
+                )
             else:
                 raise SecPublicAdapterError("no source-specific authority normalizer for this source")
         except Exception as exc:
@@ -945,7 +967,9 @@ class ConnectorAuthorityResolver:
         )
         if normalized != observation["structured_output"]:
             raise AuthorityResolutionConflict("raw provider body replay does not match adapter observation")
-        if _normal_record_refs(source["source"], observation["structured_output"]) != source["source_record_refs"]:
+        if _normal_record_refs(
+            source["source"], source["operation"], observation["structured_output"]
+        ) != source["source_record_refs"]:
             raise AuthorityResolutionConflict("SourceEnvelope record refs do not match structured observation")
         if source["source_schema_hash"] != profile["output_schema_hashes"][source["operation"]]:
             raise AuthorityResolutionConflict("SourceEnvelope schema hash does not match profile")

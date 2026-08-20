@@ -79,6 +79,13 @@ _LAZY_EXPORTS = {
         ".research_context", "build_reference_fixture_plan"
     ),
     "SecPublicHttpAdapter": (".sec_public_adapter", "SecPublicHttpAdapter"),
+    "SecCompanyConceptHttpAdapter": (
+        ".sec_public_adapter", "SecCompanyConceptHttpAdapter"
+    ),
+    "SecPublicRouterAdapter": (".sec_public_adapter", "SecPublicRouterAdapter"),
+    "normalize_sec_company_concept": (
+        ".sec_public_adapter", "normalize_sec_company_concept"
+    ),
     "normalize_sec_submissions": (".sec_public_adapter", "normalize_sec_submissions"),
     "HumanReviewAuthority": (".research_review", "HumanReviewAuthority"),
     "ResearchReviewControlPlane": (
@@ -183,6 +190,9 @@ __all__ = [
     "build_fixture_runner_request",
     "build_reference_fixture_plan",
     "SecPublicHttpAdapter",
+    "SecCompanyConceptHttpAdapter",
+    "SecPublicRouterAdapter",
+    "normalize_sec_company_concept",
     "normalize_sec_submissions",
     "HumanReviewAuthority",
     "ResearchReviewControlPlane",

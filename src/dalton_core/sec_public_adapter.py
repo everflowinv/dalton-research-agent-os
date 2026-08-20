@@ -487,6 +487,8 @@ class SecPublicHttpAdapter:
     def __call__(self, request: Mapping[str, Any], raw_sink: Any, credential_handle: Any | None = None) -> dict[str, Any]:
         if credential_handle is not None:
             raise SecPublicAdapterError("public SEC adapter does not accept credential handles")
+        if request.get("operation", "list_filings") != "list_filings":
+            raise SecPublicAdapterError("SEC submissions adapter operation is not list_filings")
         parameters = request["parameters"]
         issuer = _issuer(parameters["issuer"])
         url = f"https://data.sec.gov/submissions/CIK{issuer}.json"
@@ -584,6 +586,10 @@ class SecCompanyConceptHttpAdapter:
         if credential_handle is not None:
             raise SecPublicAdapterError(
                 "public SEC company concept adapter does not accept credential handles"
+            )
+        if request.get("operation", "get_company_facts") != "get_company_facts":
+            raise SecPublicAdapterError(
+                "SEC company concept adapter operation is not get_company_facts"
             )
         parameters = request["parameters"]
         cik = _issuer(parameters.get("cik"))
@@ -690,8 +696,40 @@ class SecCompanyConceptHttpAdapter:
         )
 
 
+class SecPublicRouterAdapter:
+    """Dispatch the two approved public SEC operations without URL authority."""
+
+    def __init__(
+        self,
+        *,
+        transport: PublicHttpTransport | None = None,
+        user_agent: str = DEFAULT_USER_AGENT,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        shared_transport = transport or PublicHttpTransport()
+        self.submissions = SecPublicHttpAdapter(
+            transport=shared_transport, user_agent=user_agent, clock=clock
+        )
+        self.company_concept = SecCompanyConceptHttpAdapter(
+            transport=shared_transport, user_agent=user_agent, clock=clock
+        )
+
+    def __call__(
+        self,
+        request: Mapping[str, Any],
+        raw_sink: Any,
+        credential_handle: Any | None = None,
+    ) -> dict[str, Any]:
+        operation = request.get("operation")
+        if operation == "list_filings":
+            return self.submissions(request, raw_sink, credential_handle)
+        if operation == "get_company_facts":
+            return self.company_concept(request, raw_sink, credential_handle)
+        raise SecPublicAdapterError("SEC public router operation is not approved")
+
+
 __all__ = [
     "DEFAULT_USER_AGENT", "SecCompanyConceptHttpAdapter", "SecPublicAdapterError",
-    "SecPublicHttpAdapter", "normalize_sec_company_concept",
+    "SecPublicHttpAdapter", "SecPublicRouterAdapter", "normalize_sec_company_concept",
     "normalize_sec_submissions",
 ]

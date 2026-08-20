@@ -8,6 +8,7 @@ from dalton_core.sec_public_adapter import (
     SecCompanyConceptHttpAdapter,
     SecPublicAdapterError,
     SecPublicHttpAdapter,
+    SecPublicRouterAdapter,
     normalize_sec_company_concept,
     normalize_sec_submissions,
 )
@@ -229,3 +230,20 @@ class AdapterTests(unittest.TestCase):
         )
         with self.assertRaises(SecPublicAdapterError):
             adapter(request, object(), credential_handle="forbidden")
+
+    def test_router_dispatches_only_the_two_registered_operations(self):
+        body = json.dumps(concept_payload(), separators=(",", ":")).encode()
+        transport = Transport(Response(200, body))
+        router = SecPublicRouterAdapter(transport=transport, clock=lambda: WHEN)
+        request = {
+            "operation": "get_company_facts",
+            "parameters": CONCEPT_PARAMETERS,
+            "deadline_at": (WHEN + timedelta(seconds=10)).isoformat(),
+            "allowed_hosts": ["data.sec.gov"],
+            "network_policy": {"allow_redirects": False, "max_redirects": 0},
+            "max_response_bytes": 5_000_000,
+            "content_hash": "c" * 64,
+        }
+        self.assertEqual(router(request, object())["outcome"], "succeeded")
+        with self.assertRaisesRegex(SecPublicAdapterError, "not approved"):
+            router({**request, "operation": "read_arbitrary_url"}, object())

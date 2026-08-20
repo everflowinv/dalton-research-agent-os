@@ -846,6 +846,61 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "next_cursor", "page_ordinal", "provider_status",
             ),
         )
+    if (slug, operation) == ("sec", "get_company_facts"):
+        decimal = {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$"}
+        sha256 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        fact = _object_schema(
+            {
+                "accession": {
+                    "type": "string",
+                    "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+                },
+                "start": _string(),
+                "end": _string(),
+                "filed": _string(),
+                "fy": {"type": "integer", "minimum": 1900, "maximum": 2200},
+                "fp": _string(),
+                "form": {"type": "string", "enum": ["10-Q"]},
+                "frame": {"type": "string", "pattern": "^CY[0-9]{4}Q[1-4]$"},
+                "value": decimal,
+                "record_hash": sha256,
+            },
+            (
+                "accession", "start", "end", "filed", "fy", "fp", "form",
+                "frame", "value", "record_hash",
+            ),
+        )
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                "entity_name": _string(),
+                "cik": {"type": "string", "pattern": "^[0-9]{10}$"},
+                "taxonomy": {"type": "string", "enum": ["us-gaap"]},
+                "concept": {
+                    "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]{0,127}$",
+                },
+                "label": _string(),
+                "unit": {"type": "string", "enum": ["USD"]},
+                "form": {"type": "string", "enum": ["10-Q"]},
+                "filed_to": _string(),
+                "current": fact,
+                "prior": fact,
+                "growth_percent": decimal,
+                "source_record_refs": {
+                    "type": "array", "minItems": 2, "maxItems": 2,
+                    "uniqueItems": True, "items": _string(),
+                },
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+                "content_hash": sha256,
+            },
+            (
+                "schema_version", "entity_name", "cik", "taxonomy", "concept",
+                "label", "unit", "form", "filed_to", "current", "prior",
+                "growth_percent", "source_record_refs", "next_cursor",
+                "provider_status", "content_hash",
+            ),
+        )
     return _object_schema(
         {
             "source_record_refs": _array_of_strings(),
@@ -898,7 +953,13 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
             _operation("list_official_attachments", completeness="enumerated", input_fields=("accession",)),
             _operation("get_official_attachment", completeness="enumerated", input_fields=("accession", "attachment_ref")),
             _operation("read_item", completeness="enumerated", input_fields=("accession", "item")),
-            _operation("get_company_facts", completeness="enumerated", pagination="cursor", input_fields=("cik", "cursor")),
+            _operation(
+                "get_company_facts",
+                completeness="enumerated",
+                input_fields=(
+                    "cik", "taxonomy", "concept", "unit", "form", "filed_to",
+                ),
+            ),
         ),
         "gate": "recorded_public_reference_shadow",
     },
