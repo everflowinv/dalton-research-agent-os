@@ -9,6 +9,7 @@ import math
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal, ROUND_HALF_UP
 from fractions import Fraction
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -373,7 +374,45 @@ class AgendaCoordinator:
         )
 
     @staticmethod
-    def _record_usage_and_cost(client: WriterClient, invocation: Any, profile: Mapping[str, Any], cycle_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    def _route_estimate_micros(
+        route: Mapping[str, Any], profile: Mapping[str, Any]
+    ) -> int:
+        if route.get("selected_profile_version_ref") != profile.get(
+            "profile_version_ref"
+        ):
+            raise CoordinatorError("route estimate does not match selected profile")
+        snapshot = route.get("candidate_snapshot")
+        if not isinstance(snapshot, list):
+            raise CoordinatorError("route estimate is missing or ambiguous")
+        selected = [
+            item
+            for item in snapshot
+            if isinstance(item, Mapping)
+            and item.get("profile_version_ref") == profile.get("profile_version_ref")
+            and item.get("eligible") is True
+        ]
+        if len(selected) != 1:
+            raise CoordinatorError("route estimate is missing or ambiguous")
+        try:
+            estimate = Decimal(str(selected[0]["estimated_cost_usd"]))
+        except (KeyError, ValueError, ArithmeticError) as exc:
+            raise CoordinatorError("route estimate is invalid") from exc
+        if not estimate.is_finite() or estimate < 0:
+            raise CoordinatorError("route estimate is invalid")
+        return int(
+            (estimate * Decimal(1_000_000)).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            )
+        )
+
+    @staticmethod
+    def _record_usage_and_cost(
+        client: WriterClient,
+        invocation: Any,
+        profile: Mapping[str, Any],
+        cycle_id: str,
+        route: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         usage = dict(invocation.usage)
         workflow_ref = f"workflow:agenda:{content_hash({'work_order_ref': invocation.work_order_ref, 'cycle_ref': cycle_id})[:32]}"
         input_tokens = usage.get("input_tokens")
@@ -381,13 +420,28 @@ class AgendaCoordinator:
         total_tokens = usage.get("total_tokens")
         if all(isinstance(value, int) for value in (input_tokens, output_tokens, total_tokens)) and total_tokens != input_tokens + output_tokens:
             total_tokens = None
+        token_split_available = isinstance(input_tokens, int) and isinstance(output_tokens, int)
+        route_estimate_micros = (
+            None
+            if token_split_available
+            else AgendaCoordinator._route_estimate_micros(route, profile)
+        )
+        route_ref = str(route.get("id", ""))
+        if route_ref != invocation.parent_ref:
+            raise CoordinatorError("route decision does not match model invocation")
         usage_entry_id = f"usage-entry:{hashlib.sha256(invocation.id.encode()).hexdigest()[:32]}"
         raw = dict(usage)
-        measurement = "partial" if any(value is not None for value in (input_tokens, output_tokens, total_tokens)) else "unavailable"
+        # A completed ModelInvocation proves that one provider request was
+        # attempted even when the host omits token telemetry.  Preserve that
+        # launcher-measured request instead of recording a wholly unavailable
+        # usage entry: the route decision already carries the exact,
+        # authority-bound request cost estimate used for admission.
+        measurement = "partial"
+        metering_source = "provider_reported" if token_split_available else "launcher_measured"
         usage_entry = client.record_usage(
             invocation.id,
             occurred_at=invocation.completed_at or invocation.created_at,
-            metering_source="provider_reported",
+            metering_source=metering_source,
             measurement_status=measurement,
             raw_usage=raw,
             workflow_ref=workflow_ref,
@@ -401,44 +455,80 @@ class AgendaCoordinator:
             cache_read_tokens=usage.get("cache_read_tokens"),
             cache_write_tokens=usage.get("cache_write_tokens"),
             total_tokens=total_tokens,
-            requests=1 if measurement != "unavailable" else None,
+            requests=1,
             duration_ms=None,
             input_bytes=None,
             output_bytes=None,
         )
         rate_refs: list[str] = []
         amount = Fraction(0, 1)
-        for metric, charge in ((input_tokens, "input_tokens"), (output_tokens, "output_tokens")):
-            if metric is None:
-                continue
+        for metric, charge in (
+            (input_tokens, "input_tokens"),
+            (output_tokens, "output_tokens"),
+        ):
             price = profile["cost"]["input_per_million_usd" if charge == "input_tokens" else "output_per_million_usd"]
             unit_price_micros = int(round(float(price) * 1_000_000))
             rate_ref = f"price-rate:{profile['provider']}:{profile['model']}:{charge}"
             rate_version = f"price-rate-version:{content_hash({'profile': profile['profile_version_ref'], 'charge': charge})[:32]}"
+            prior_profile_ref = profile.get("prior_version_ref")
+            prior_rate_version = (
+                None
+                if prior_profile_ref is None
+                else f"price-rate-version:{content_hash({'profile': prior_profile_ref, 'charge': charge})[:32]}"
+            )
             rate = client.create_price_rate_version(
                 rate_ref,
                 provider=profile["provider"], model=profile["model"], charge_type=charge,
                 unit_quantity=1_000_000, unit_price_micros=unit_price_micros,
                 currency="USD", effective_from=profile["created_at"], effective_until=None,
                 source_ref=profile["profile_version_ref"], actor_ref=COORDINATOR_ACTOR,
-                prior_version_ref=None, version_id=rate_version,
+                prior_version_ref=prior_rate_version, version_id=rate_version,
+                idempotency_key=f"price-rate:{rate_version}",
+            )
+            # Persist the token price schedule even when this invocation has
+            # no token split. The successful invocation will refresh the
+            # model profile, so its next rate version must have a real prior
+            # head rather than a derived reference to a row that never
+            # existed. Only rates used by this cost enter price_rate_refs.
+            if token_split_available:
+                rate_refs.append(rate["id"])
+                amount += Fraction(metric * unit_price_micros, 1_000_000)
+        if token_split_available:
+            amount_micros = (2 * amount.numerator + amount.denominator) // (2 * amount.denominator)
+        else:
+            assert route_estimate_micros is not None
+            amount_micros = route_estimate_micros
+            rate_ref = f"price-rate:agenda-route-estimate:{route_ref}"
+            rate_version = f"price-rate-version:{content_hash({'route': route_ref, 'profile': profile['profile_version_ref'], 'amount_micros': amount_micros})[:32]}"
+            rate = client.create_price_rate_version(
+                rate_ref,
+                provider=profile["provider"],
+                model=profile["model"],
+                charge_type="request",
+                unit_quantity=1,
+                unit_price_micros=amount_micros,
+                currency="USD",
+                effective_from=invocation.created_at,
+                effective_until=None,
+                source_ref=route_ref,
+                actor_ref=COORDINATOR_ACTOR,
+                prior_version_ref=None,
+                version_id=rate_version,
                 idempotency_key=f"price-rate:{rate_version}",
             )
             rate_refs.append(rate["id"])
-            amount += Fraction(metric * unit_price_micros, 1_000_000)
-        if rate_refs:
-            amount_micros = (2 * amount.numerator + amount.denominator) // (2 * amount.denominator)
-            cost_status = "estimated"
-        else:
-            amount_micros = None
-            cost_status = "unpriced"
+        cost_status = "estimated"
         cost = client.record_cost(
             usage_entry_id,
             price_rate_refs=rate_refs,
             amount_micros=amount_micros,
             currency="USD",
             cost_status=cost_status,
-            calculation_ref="calculator:agenda-profile-rates:0.1",
+            calculation_ref=(
+                "calculator:agenda-profile-rates:0.1"
+                if token_split_available
+                else "calculator:agenda-route-estimate:0.1"
+            ),
             actor_ref=COORDINATOR_ACTOR,
             correction_of_ref=None,
             cost_entry_id=f"cost-entry:{hashlib.sha256(usage_entry_id.encode()).hexdigest()[:32]}",
@@ -657,7 +747,9 @@ class AgendaCoordinator:
                         )
                         raise
                     client.register_invocation(invocation.to_dict())
-                    self._record_usage_and_cost(client, invocation, profile, cycle_id)
+                    self._record_usage_and_cost(
+                        client, invocation, profile, cycle_id, routed
+                    )
                     if result.status == "succeeded":
                         try:
                             candidates = parse_candidates(

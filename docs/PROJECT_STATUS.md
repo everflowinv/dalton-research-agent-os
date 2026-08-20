@@ -1,8 +1,8 @@
 # Dalton 项目进度
 
-更新日期：2026-08-15
-- live deployed commit：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`
-- 当前候选内容：Connector P1-0 十类 inventory、CNINFO/SEC/AlphaEngine recorded shadows、P2 coordinator、source/numeric verifier、candidate staging、只读 authority resolver、隔离 SEC public canary、HumanReviewAuthority + Ledger promotion 0.2 + HTML review 入口、DocumentIndex FTS5 只读投影、ContextPack authority-bound materializer、Agenda exact context/materializer 统一路径、ResearchQuestionBacklog append-only authority、Planner SEC public read-only 薄闭环，以及 ResearchPlan 下游逐项 admission coordinator（开发候选），未部署
+更新日期：2026-08-20
+- live deployed baseline：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`；Agenda 兼容热修复：`03ea471`
+- 当前开发候选：`1cbca49` 加本轮待提交修复；ResearchPlan 四步 executor 已接通并完成真实 SEC public 隔离 canary，仍未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -20,8 +20,9 @@ Capability Registry/Catalog、常驻控制服务、Agenda Shadow、durable outbo
 live 部署现在能自主生成并选择研究问题，也能在仓库 fixture 上按一次性 connector plan 执行 CNINFO、SEC、
 AlphaEngine 三源离线流程并从 checkpoint 恢复；live 仍不会访问真实 source、运行 authority verifier 或提交新的
 Evidence、Claim、Thesis。当前开发候选已能重放 fixture，也能从完整 Connector authority 解析真实 SEC public
-响应，并把 source/numeric verifier 通过的 CandidateEvidence/CandidateClaim 写入独立 staging。这条链只在
-隔离临时 authority 中验收。当前开发候选已经增加明确人工审阅入口和无损正式 promotion，但尚未部署。
+响应，并把 source/numeric verifier 通过的 CandidateEvidence/CandidateClaim 写入独立 staging。这条链已由
+ResearchPlanExecutor 接通，并在隔离临时 authority 中跑完一份真实 SEC public 四步 plan。当前开发候选已经
+增加明确人工审阅入口和无损正式 promotion，但尚未部署。
 
 当前下一阶段是 **把第一条只读研究闭环接到可检索、可计划的消费者**：HumanReviewAuthority 已能对 exact
 candidate 做 accept/revise/reject，accept 通过 scoped writer 原子写 EvidenceVersion 0.2、ClaimVersion 0.2 和
@@ -36,10 +37,11 @@ ResearchQuestionVersion → immutable ResearchPlanVersion → WorkflowRunVersion
 无凭据 SEC public `list_filings`，每份 plan 都要 exact human approval。启动只把根 connector WorkOrder 放入
 Scheduler，下游 resolver/verifier/candidate staging 保持 planned，必须由 coordinator 在上游 exact result 后逐项
 admission；开发候选 coordinator 已完成 exact Scheduler/connector receipt/runner journal/内部阶段输出证明核对，
-每次只 admission 直接子节点，重放收敛且篡改 fail closed。它还没有接上真实四步 executor；没有能力租约、
-凭据、自动 Ledger commit 或旧 cron cutover。当前顺序是先跑通第一条真实 SEC public WorkOrder 树，再走人工
-review、正式 Ledger promotion 和研究质量校准。Interrupt / park / resume 与 Reflection 顺延；在此之前不把
-planned 子节点描述成已经执行，也不增加没有真实消费者的内核子系统。
+每次只 admission 直接子节点，重放收敛且篡改 fail closed。ResearchPlanExecutor 现已把四个真实节点接到各自
+authority，并跑完第一条真实 SEC public WorkOrder 树；没有能力租约、凭据、自动 Ledger commit 或旧 cron
+cutover。当前顺序是让人工对 exact candidate 作 accept/revise/reject；只有 explicit accept 才能正式写入
+Evidence/Claim/Relation，再绑定 Backlog answer 并校准首轮研究质量。Interrupt / park / resume 与 Reflection
+顺延，不增加没有真实消费者的内核子系统。
 正式 Ledger commit 继续逐条人工 gate。万华的 10 个工作日/20 个显式人工标签门槛
 只限制 Agenda 从 1 家扩到 3 家。第一条真实闭环和至少 1 条人工接受的正式 Claim 出现前，完整流程仍是第一
 优先级，但不是冻结全部 connector 和 model 工作：只要一项增量直接解除首家公司覆盖的阻塞，或能按明确验收
@@ -197,6 +199,35 @@ planned 子节点描述成已经执行，也不增加没有真实消费者的内
 - 本切片没有接真实四步 executor，也没有从 resolver/verifier/candidate staging 的 authority store 重读 typed
   records 正文；它证明 admission 控制语义，不证明四步计划已真实执行或投研产物有价值。完整结果见
   [research-plan-coordinator-admission-2026-08-15.md](reports/research-plan-coordinator-admission-2026-08-15.md)。
+
+以上是 coordinator 切片交付时的历史结论。后续 executor 与真实 canary 进展如下。
+
+### ResearchPlan executor + SEC public canary 当前进度（开发候选，未部署）
+
+- `ResearchPlanExecutor` 已把 connector、authority resolver、source/numeric verifier、candidate staging 四个
+  WorkOrder 接到各自 authority；coordinator 仍按 exact 上游结果逐边 admission，executor 不接受 caller
+  伪造的 stage payload，也不会越级执行；
+- 2026-08-20 在 owner-only 临时目录跑完一份人工批准的隔离 plan。真实请求只访问
+  `data.sec.gov`，无凭据、不打开 live DB；四个节点均 `queued → succeeded`，最终停在
+  `human-review-ready-candidate`；
+- canary 枚举 Microsoft CIK `0000789019` 在 `2026-01-01..2026-08-17` 的 `10-Q`，得到 2 条官方 filing。
+  candidate 的 `semantic_verification_status` 仍为 `unverified`，正式 Ledger 中 Evidence、Claim、Thesis 均为 0；
+- 第一次错误窗口暴露出 transport 把 `error.retryable=false` 仍写成 Scheduler `retryable`。开发候选已改为保留
+  adapter 的 retryability：不可重试 normalization failure 直接终止，429/timeout/adapter crash 仍按原策略
+  重试；新增专项回归并通过；
+- canary 的 4 个 SQLite authority 均通过 `PRAGMA integrity_check`。完整记录见
+  [research-plan-executor-sec-canary-2026-08-20.md](reports/research-plan-executor-sec-canary-2026-08-20.md)。
+
+### Agenda live 恢复（2026-08-20）
+
+- 保留原 append-only 记录，用 correction 消除 1 条当前未定价成本，并为 2 条已计量但缺 cost 的 UsageEntry
+  补齐价格链；当前 `missing_cost_count=0`、`current_unpriced_count=0`，Core/Scheduler integrity 均为 `ok`；
+- `03ea471` 最小热修复已装入 live runtime：provider 不返回 token split 时使用 admission 时冻结的 route estimate
+  记一笔 request cost；模型 profile 刷新后，新的 input/output price rate 版本会链接上一版，不再触发 immutable
+  fork conflict；旧基线完整回归 196/196 通过；
+- controller、writer、control、projection、backup、outbox 和 dashboard 当前健康。8 月 20 日已开始的旧 Agenda
+  cycle 保持 append-only terminal `failed`，不会改写成成功；daily cycle 上限仍为 1，未擅自扩大，下一次正常
+  live cycle 要等下一个日历周期。
 
 ### Connector P0-0 当前进度（未部署）
 
@@ -774,9 +805,9 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 offline/authority source-numeric verifier、只读 authority resolver、candidate staging、一条隔离 SEC public
 WorkOrder、独立 HumanReviewAuthority、HTML 入口和正式 Evidence/Claim 0.2 promotion 已完成开发候选。
 ClaimIndex status 派生、DocumentIndex FTS5、claim/artifact ContextPack materializer、Agenda context authority、
-ResearchQuestionBacklog、Planner SEC public 薄闭环和下游逐项 coordinator admission 均已完成开发候选。下一步
-接上真实四步 executor，在隔离 authority 中跑通一份人批 plan 的真实 SEC public 四步任务树，再把 candidate
-送入人工 review、正式 Evidence/Claim 0.2 promotion 与 Backlog answer binding。Interrupt / park / resume、Reflection、
+ResearchQuestionBacklog、Planner SEC public 薄闭环、下游逐项 coordinator admission 和真实四步 executor 均已完成
+开发候选；隔离 authority 中的一份人批 SEC public 四步任务树已经跑通。下一步对 exact candidate 做人工
+accept/revise/reject；accept 后才执行正式 Evidence/Claim 0.2 promotion 与 Backlog answer binding。Interrupt / park / resume、Reflection、
 生产部署和旧 cron cutover 均后置并保持独立人工 gate。直接解除首条 plan 阻塞或按明确标准改善首轮产物质量的
 connector/model 增量可以并行推进；与首条 plan 无关的扩建后置。当前没有 live staging/review/plan authority。
 
@@ -786,8 +817,8 @@ Model IR ADR 和 offline capability sandbox 只有在首条 plan 明确需要且
 
 ## 继续建设与开闸的不同门槛
 
-可以立即继续：完成第一条 SEC public read-only 研究闭环所需的 executor 接线、故障重放、Human Review 接线、
-verifier 校准和离线 replay；能直接解除该 plan 阻塞或按明确标准改善产物质量的 connector/model 增量也可并行
+可以立即继续：完成第一条 SEC public read-only 研究闭环的 Human Review、正式 promotion、Backlog answer binding、
+故障重放和 verifier 校准；能直接解除该 plan 阻塞或按明确标准改善产物质量的 connector/model 增量也可并行
 推进。第一条闭环完成后可做不改 Core 的 Temporal recorded-fixture spike。
 
 第一条真实闭环和至少 1 条人工接受的正式 Claim 出现前暂停：与首条 plan 无关的新 connector 品类、

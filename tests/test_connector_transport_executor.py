@@ -16,6 +16,7 @@ from dalton_core.observability import ObservabilityStore
 from dalton_core.raw_spool import RawSpool
 from dalton_core.recorded_connector_adapter import RecordedFixtureAdapter
 from dalton_core.runner_journal import RunnerJournal
+from dalton_core.store import content_hash
 from tests import test_connector_runner as runner_helpers
 
 
@@ -29,6 +30,7 @@ class TransportHarness:
         *,
         fault_at: str | None = None,
         spool_max_total_bytes: int = 2_000_000,
+        adapter: object | None = None,
     ):
         self.base = runner_helpers.ConnectorRunnerControlPlaneTests(
             "test_closed_contracts_and_static_resolver"
@@ -40,10 +42,11 @@ class TransportHarness:
         self.spool = RawSpool(
             self.temp.name, max_total_bytes=spool_max_total_bytes
         )
-        adapter = RecordedFixtureAdapter(
-            FIXTURES / f"{fixture}.json",
-            advance_clock=self.base.clock.advance,
-        )
+        if adapter is None:
+            adapter = RecordedFixtureAdapter(
+                FIXTURES / f"{fixture}.json",
+                advance_clock=self.base.clock.advance,
+            )
         binding_ref = self.base.manifest["bindings"][0]["binding_ref"]
         resolver = StaticAdapterResolver(
             self.base.manifest,
@@ -260,6 +263,49 @@ class ConnectorTransportExecutorTests(unittest.TestCase):
         self.assertEqual(attempt["outcome"], "failed")
         self.assertEqual(settlement["state"], "indeterminate")
         self.assertEqual(harness.spool.gc_orphans(), 0)
+
+    def test_nonretryable_adapter_failure_is_terminal(self) -> None:
+        def adapter(request, _raw_sink):
+            observation = {
+                "protocol_version": "0.1",
+                "request_hash": request["content_hash"],
+                "outcome": "failed",
+                "provider_request_id": "provider-request:nonretryable",
+                "provider_status_code": 200,
+                "retry_after_ms": None,
+                "structured_output": None,
+                "source_record_refs": [],
+                "cursor": None,
+                "provider_usage": {
+                    "calls": 1,
+                    "bytes": 0,
+                    "records": 0,
+                },
+                "error": {
+                    "code": "normalization_error",
+                    "message": "requested window exceeds source coverage",
+                    "retryable": False,
+                },
+            }
+            observation["content_hash"] = content_hash(observation)
+            return observation
+
+        harness = TransportHarness("success", adapter=adapter)
+        self.addCleanup(harness.close)
+        response = harness.execute()
+        self.assertEqual(response["outcome"], "failed")
+        self.assertIsNone(response["retry_at"])
+        self.assertIsNone(response["source_envelope_ref"])
+        formal = harness.base.scheduler.formal_result(harness.base.work.id)
+        self.assertEqual(formal["terminal_state"], "failed")
+        self.assertEqual(
+            formal["result_envelope"]["error"],
+            {
+                "code": "normalization_error",
+                "message": "requested window exceeds source coverage",
+                "retryable": False,
+            },
+        )
 
     def test_w0_through_w4_crash_windows_recover_idempotently(self) -> None:
         cases = (

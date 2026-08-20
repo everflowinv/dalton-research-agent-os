@@ -39,6 +39,12 @@ python3 -m build
 # 可选：真实公共 SEC 只读 canary；不读取凭据，不接 live 数据库
 python3 scripts/run_public_sec_authority_demo.py
 
+# 可选：人工批准的完整 ResearchPlan 四步 canary；output-dir 必须尚不存在
+python3 scripts/run_sec_research_plan_canary.py \
+  --output-dir temp/sec-plan-canary-example \
+  --date-from 2026-01-01 --date-to 2026-08-17 \
+  --approved-by human:operator
+
 cd integrations/openclaw-model-broker
 npm run check
 ```
@@ -93,6 +99,8 @@ Ledger 0.2 无损 promotion 已进入开发候选；Planner 也能把 exact sele
 编译成 immutable ResearchPlanVersion，生成人工逐 plan 批准的 SEC public read-only 四步任务树，并复用
 WorkflowRunVersion、WorkOrderLink 和 Scheduler。启动时只把根 connector WorkOrder 入队，下游 resolver、
 verifier 和 candidate staging 节点等待 coordinator 按依赖逐项 admission，不能并发越过上游结果。
+`ResearchPlanExecutor` 已接通这四个真实节点；2026-08-20 的隔离 canary 访问 `data.sec.gov`，把一份人工批准的
+plan 跑到 `human-review-ready-candidate`，没有读取凭据或 live DB，也没有写正式 Ledger。
 这些能力均未部署，未接旧 cron，也没有自动提交 Ledger。生产部署仍缺少独立 OS/container identity、正式
 capability sandbox、Model IR、原生事件连接器、更多原生投递渠道和完整运维控制面。任何旧工作流
 切换都要逐项验证，不能因文件已导入就视为完成迁移。当前项目状态见

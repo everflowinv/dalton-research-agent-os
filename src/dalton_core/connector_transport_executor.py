@@ -628,7 +628,19 @@ class ConnectorTransportExecutor:
             source_id = None
             source_hash = None
 
-        scheduler_outcome = "succeeded" if successful else "retryable"
+        failure_error = None
+        if not successful:
+            failure_error = dict(observed["error"] or {
+                "code": observed["attempt_outcome"],
+                "message": "connector physical attempt did not succeed",
+                "retryable": True,
+            })
+        if successful:
+            scheduler_outcome = "succeeded"
+        elif failure_error["retryable"] is True:
+            scheduler_outcome = "retryable"
+        else:
+            scheduler_outcome = "failed"
         scheduler_retry_at = None
         if scheduler_outcome == "retryable":
             scheduler_retry_at = observed["retry_at"] or _wire_time(
@@ -655,11 +667,7 @@ class ConnectorTransportExecutor:
             actual_side_effects=admission.binding_side_effects,
             usage_refs=(usage["id"],),
             artifact_refs=() if artifact_ref is None else (artifact_ref,),
-            error=None if successful else dict(observed["error"] or {
-                "code": observed["attempt_outcome"],
-                "message": "connector physical attempt did not succeed",
-                "retryable": True,
-            }),
+            error=failure_error,
             metadata={
                 "runner_request_ref": admission.request["id"],
                 "physical_attempt_outcome": observed["attempt_outcome"],

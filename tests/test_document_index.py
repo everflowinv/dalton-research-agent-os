@@ -3,6 +3,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -544,7 +545,16 @@ class DocumentIndexTests(unittest.TestCase):
         idx.rebuild(inputs, created_at=WHEN)
         self.assertEqual(idx.search('" OR *'), [])
         self.assertLessEqual(len(idx.search("半导体", limit=1)), 1)
-        self.assertEqual(idx.search("半导体", date_from="2026-08-16"), [])
+        artifact_date = date.fromisoformat(
+            self.artifacts["artifact-version:plain"]["created_at"][:10]
+        )
+        self.assertEqual(
+            idx.search(
+                "半导体",
+                date_from=(artifact_date + timedelta(days=1)).isoformat(),
+            ),
+            [],
+        )
         with self.assertRaises(DocumentIndexValidationError):
             idx.search("半导体", date_from="2026-01-02", date_to="2026-01-01")
         for limit in (0, 1001):

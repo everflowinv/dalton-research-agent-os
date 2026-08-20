@@ -582,7 +582,10 @@ class McpManagedShadowTests(unittest.TestCase):
                 harness = AlphaEngineHarness(scenario)
                 try:
                     response = harness.execute()
-                    self.assertEqual(response["outcome"], "retryable")
+                    self.assertEqual(
+                        response["outcome"],
+                        "failed" if scenario == "permission_denied" else "retryable",
+                    )
                     self.assertIsNone(response["source_envelope_ref"])
                     self.assertIsNone(response["raw_artifact_version_ref"])
                     self.assertEqual(harness.count("connector_source_envelopes"), 0)

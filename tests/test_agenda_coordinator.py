@@ -11,11 +11,16 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from dalton_core.agenda_coordinator import AgendaCoordinator, AgendaCoordinatorConfig
+from dalton_core.agenda_coordinator import (
+    AgendaCoordinator,
+    AgendaCoordinatorConfig,
+    CoordinatorError,
+)
 from dalton_core.contracts import InvocationGranularity, ModelInvocation, ResultEnvelope, WorkOrder
 from dalton_core.governance_cli import ephemeral_call
 from dalton_core.model_deployment import install_openclaw_catalog
 from dalton_core.scheduler import Scheduler
+from dalton_core.store import content_hash
 from dalton_core.writer_server import CORE_OPERATIONS, Principal, write_token_config
 
 
@@ -57,6 +62,208 @@ class FakeAdapter:
 
 
 class AgendaCoordinatorTests(unittest.TestCase):
+    def test_missing_provider_tokens_use_authority_bound_route_estimate(self):
+        class RecordingClient:
+            def __init__(self):
+                self.usage = None
+                self.rates = []
+                self.cost = None
+
+            def record_usage(self, invocation_ref, **params):
+                self.usage = {"invocation_ref": invocation_ref, **params}
+                return {"id": params["entry_id"]}
+
+            def create_price_rate_version(self, price_rate_ref, **params):
+                self.rates.append({"price_rate_ref": price_rate_ref, **params})
+                return {"id": params["version_id"]}
+
+            def record_cost(self, usage_entry_ref, **params):
+                self.cost = {"usage_entry_ref": usage_entry_ref, **params}
+                return {"id": params["cost_entry_id"]}
+
+        completed = "2026-08-16T02:49:06.118094+00:00"
+        invocation = ModelInvocation(
+            schema_version="0.1",
+            id="invocation:missing-provider-usage",
+            created_at=completed,
+            work_order_ref="work:agenda-missing-provider-usage",
+            profile_ref="model-profile-version:broker-deepseek-v4-flash:2",
+            granularity=InvocationGranularity.TASK,
+            capability="extract",
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            model_family="deepseek-v4",
+            input_refs=("perception:test", "mandate:test"),
+            output_refs=(),
+            started_at="2026-08-16T02:48:59.465533+00:00",
+            completed_at=completed,
+            usage={
+                "input_tokens": None,
+                "output_tokens": None,
+                "total_tokens": None,
+                "cache_read_tokens": None,
+                "cache_write_tokens": None,
+                "metering_source": "provider_reported",
+                "measurement_status": "unavailable",
+                "authority_status": "uncommitted",
+                "raw_provider_telemetry": {"cost": {"available": False}},
+            },
+            side_effects=(),
+            runtime_ref="adapter:openclaw-model-broker:0.1",
+            actor_ref="broker:test",
+            parent_ref="route-decision:test",
+            environment_hash="env:test",
+        )
+        profile = {
+            "profile_version_ref": invocation.profile_ref,
+            "provider": invocation.provider,
+            "model": invocation.model,
+            "created_at": "2026-08-14T10:34:12.184403+00:00",
+            "cost": {
+                "input_per_million_usd": 0.22,
+                "output_per_million_usd": 0.66,
+            },
+        }
+        route = {
+            "id": invocation.parent_ref,
+            "selected_profile_version_ref": invocation.profile_ref,
+            "candidate_snapshot": [
+                {
+                    "profile_version_ref": invocation.profile_ref,
+                    "eligible": True,
+                    "estimated_cost_usd": "0.001759",
+                }
+            ],
+        }
+        client = RecordingClient()
+
+        AgendaCoordinator._record_usage_and_cost(
+            client, invocation, profile, "agenda-cycle:test", route
+        )
+
+        self.assertEqual(client.usage["metering_source"], "launcher_measured")
+        self.assertEqual(client.usage["measurement_status"], "partial")
+        self.assertEqual(client.usage["requests"], 1)
+        self.assertEqual(
+            [rate["charge_type"] for rate in client.rates],
+            ["input_tokens", "output_tokens", "request"],
+        )
+        request_rate = client.rates[-1]
+        self.assertEqual(request_rate["unit_quantity"], 1)
+        self.assertEqual(request_rate["unit_price_micros"], 1759)
+        self.assertEqual(request_rate["source_ref"], route["id"])
+        self.assertEqual(client.cost["amount_micros"], 1759)
+        self.assertEqual(client.cost["cost_status"], "estimated")
+        self.assertEqual(
+            client.cost["calculation_ref"],
+            "calculator:agenda-route-estimate:0.1",
+        )
+        self.assertEqual(client.cost["price_rate_refs"], [request_rate["version_id"]])
+
+    def test_refreshed_profile_chains_price_rate_versions(self):
+        class RecordingClient:
+            def __init__(self):
+                self.rates = []
+
+            def record_usage(self, _invocation_ref, **params):
+                return {"id": params["entry_id"]}
+
+            def create_price_rate_version(self, price_rate_ref, **params):
+                self.rates.append({"price_rate_ref": price_rate_ref, **params})
+                return {"id": params["version_id"]}
+
+            def record_cost(self, _usage_entry_ref, **params):
+                return {"id": params["cost_entry_id"]}
+
+        invocation = ModelInvocation(
+            schema_version="0.1",
+            id="invocation:refreshed-profile",
+            created_at="2026-08-20T08:00:00+00:00",
+            work_order_ref="work:agenda-refreshed-profile",
+            profile_ref="model-profile-version:broker-deepseek-v4-flash:2",
+            granularity=InvocationGranularity.TASK,
+            capability="extract",
+            provider="deepseek",
+            model="deepseek-v4-flash",
+            model_family="deepseek-v4",
+            input_refs=(),
+            output_refs=(),
+            started_at="2026-08-20T07:59:59+00:00",
+            completed_at="2026-08-20T08:00:00+00:00",
+            usage={
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "total_tokens": 150,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "metering_source": "provider_reported",
+                "measurement_status": "partial",
+                "authority_status": "uncommitted",
+                "raw_provider_telemetry": {},
+            },
+            side_effects=(),
+            runtime_ref="adapter:openclaw-model-broker:0.1",
+            actor_ref="broker:test",
+            parent_ref="route-decision:refreshed-profile",
+            environment_hash="env:test",
+        )
+        profile = {
+            "profile_version_ref": invocation.profile_ref,
+            "prior_version_ref": "model-profile-version:broker-deepseek-v4-flash:1",
+            "provider": invocation.provider,
+            "model": invocation.model,
+            "created_at": "2026-08-14T10:34:12.184403+00:00",
+            "cost": {
+                "input_per_million_usd": 0.22,
+                "output_per_million_usd": 0.66,
+            },
+        }
+        client = RecordingClient()
+
+        AgendaCoordinator._record_usage_and_cost(
+            client,
+            invocation,
+            profile,
+            "agenda-cycle:refreshed-profile",
+            {"id": invocation.parent_ref},
+        )
+
+        self.assertEqual(len(client.rates), 2)
+        for rate in client.rates:
+            expected = "price-rate-version:" + content_hash(
+                {
+                    "profile": profile["prior_version_ref"],
+                    "charge": rate["charge_type"],
+                }
+            )[:32]
+            self.assertEqual(rate["prior_version_ref"], expected)
+
+    def test_cost_rejects_route_rebinding(self):
+        invocation = type(
+            "Invocation",
+            (),
+            {
+                "id": "invocation:route-rebinding",
+                "parent_ref": "route-decision:expected",
+                "work_order_ref": "work:route-rebinding",
+                "usage": {
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "total_tokens": 2,
+                },
+            },
+        )()
+        with self.assertRaisesRegex(
+            CoordinatorError, "route decision does not match model invocation"
+        ):
+            AgendaCoordinator._record_usage_and_cost(
+                object(),
+                invocation,
+                {},
+                "agenda-cycle:route-rebinding",
+                {"id": "route-decision:other"},
+            )
+
     def legacy(self, path: Path):
         conn = sqlite3.connect(path)
         conn.executescript("""
