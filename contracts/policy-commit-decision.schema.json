@@ -18,14 +18,14 @@
     "proposed_revisions":{"type":"null"},
     "relation":{"const":"supports"},
     "rationale":{"type":"string","minLength":1},
-    "findings":{"const":["matched exact deterministic SEC filing-count rule"]},
+    "findings":{"enum":[["matched exact deterministic SEC filing-count rule"],["matched exact deterministic SEC company-facts growth rule"]]},
     "reviewer_ref":{"const":"system:research-auto-commit"},
     "authorization":{"const":"versioned_governance_policy"},
     "source":{"const":"governance_policy"},
     "source_event_ref":{"type":"string","pattern":"^governance-policy:"},
     "policy_version_ref":{"type":"string","minLength":1},
     "policy_version_hash":{"$ref":"#/$defs/hash"},
-    "rule_ref":{"const":"research-auto-commit:sec-public-filing-count:v1"},
+    "rule_ref":{"enum":["research-auto-commit:sec-public-filing-count:v1","research-auto-commit:sec-public-company-facts-growth:v1"]},
     "content_hash":{"$ref":"#/$defs/hash"}
   },
   "$defs":{

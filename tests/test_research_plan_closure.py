@@ -14,7 +14,11 @@ from dalton_core.research_plan_closure import (
     ResearchPlanClosureCoordinator,
     ResearchPlanClosurePending,
 )
-from dalton_core.research_auto_commit import ResearchAutoCommitRejected, RULE_REF
+from dalton_core.research_auto_commit import (
+    COMPANY_FACTS_RULE_REF,
+    ResearchAutoCommitRejected,
+    RULE_REF,
+)
 from dalton_core.research_review import (
     HumanReviewAuthority,
     ResearchReviewConflict,
@@ -207,7 +211,6 @@ class ResearchPlanClosureTests(unittest.TestCase):
             ).fetchone()[0],
             1,
         )
-
     def test_low_risk_policy_candidate_closes_without_human_review(self) -> None:
         self._activate_auto_commit_policy()
         candidate = self.review.list_candidates(limit=10)[0]
@@ -452,6 +455,7 @@ class ResearchPlanClosureTests(unittest.TestCase):
             0,
         )
 
+
     def test_review_commit_chain_tamper_fails_before_answer(self) -> None:
         decision = self._accept()
         self.review.connection.execute(
@@ -491,6 +495,65 @@ class ResearchPlanClosureTests(unittest.TestCase):
         self.assertEqual(
             connection.execute(
                 "SELECT COUNT(*) FROM backlog_answer_bindings"
+            ).fetchone()[0],
+            0,
+        )
+
+
+
+class CompanyFactsPolicyClosureTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.harness = PlanExecutorHarness(
+            suffix="company-facts-closure",
+            company_facts=True,
+            auto_start=True,
+        )
+        self.addCleanup(self.harness.close)
+        self.harness.run_to_complete()
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        path = Path(self.temp.name) / "company-facts-review.sqlite"
+        target = sqlite3.connect(path)
+        try:
+            self.harness.staging.connection.backup(target)
+        finally:
+            target.close()
+        self.review = HumanReviewAuthority(path)
+        self.addCleanup(self.review.close)
+
+    def test_company_facts_policy_commits_and_answers_without_human_decision(self) -> None:
+        candidate = self.review.list_candidates(limit=10)[0]
+        bundle = self.review.candidate_authority_bundle(candidate["claim"]["id"])
+        promoted = self.harness.core.commit_policy_candidate(
+            **bundle,
+            idempotency_key="policy-ledger:company-facts-closure",
+        )
+        self.assertEqual(
+            promoted["authorization"]["rule_ref"], COMPANY_FACTS_RULE_REF
+        )
+        closure = ResearchPlanClosureCoordinator(
+            plan=self.harness.planner.plans,
+            backlog=self.harness.planner.backlog,
+            coordinator=self.harness.coordinator,
+            review=self.review,
+        ).close_policy_authorized(
+            plan_version_ref=self.harness.plan_wire["id"],
+            authorization=promoted["authorization"],
+        )
+        self.assertEqual(closure["status"], "fresh")
+        formal = self.harness.core.get_claim(closure["claim_version_ref"])["claim"]
+        self.assertEqual(formal["metric_or_aspect"], "quarterly_revenue_yoy_growth")
+        self.assertEqual(formal["value"], "12.5")
+        self.assertEqual(formal["unit"], "percent")
+        self.assertEqual(
+            self.harness.core.connection.execute(
+                "SELECT COUNT(*) FROM research_plan_approvals"
+            ).fetchone()[0],
+            0,
+        )
+        self.assertEqual(
+            self.review.connection.execute(
+                "SELECT COUNT(*) FROM human_review_decisions"
             ).fetchone()[0],
             0,
         )

@@ -57,14 +57,14 @@
         "source_ref": {"const": "source:sec-edgar"},
         "connector_profile_ref": {"const": "connector-profile-template:sec:0.1"},
         "connector_profile_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "operation": {"const": "list_filings"},
-        "parameters": {"$ref": "#/$defs/sec_request"},
-        "permission_scope": {"const": "public_sec_list_filings"},
+        "operation": {"enum": ["list_filings", "get_company_facts"]},
+        "parameters": {"oneOf": [{"$ref": "#/$defs/sec_request"}, {"$ref": "#/$defs/company_facts_request"}]},
+        "permission_scope": {"enum": ["public_sec_list_filings", "public_sec_company_facts"]},
         "auth_mode": {"const": "none"},
         "side_effect_class": {"const": "read_only_public"},
         "declared_side_effects": {"const": ["read:public-http"]},
         "verifier_ref": {"const": "verifier:connector-authority-source:0.2"},
-        "output_contract_ref": {"const": "schema:connector-inventory:sec:list_filings:output:0.1"},
+        "output_contract_ref": {"enum": ["schema:connector-inventory:sec:list_filings:output:0.1", "schema:connector-inventory:sec:get_company_facts:output:0.1"]},
         "output_contract_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "budget": {
           "type": "object",
@@ -98,6 +98,19 @@
         "form": {"enum": ["10-K", "10-Q", "8-K"]},
         "filing_date_from": {"type": "string", "format": "date"},
         "filing_date_to": {"type": "string", "format": "date"}
+      }
+    },
+    "company_facts_request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cik", "taxonomy", "concept", "unit", "form", "filed_to"],
+      "properties": {
+        "cik": {"type": "string", "pattern": "^[0-9]{10}$"},
+        "taxonomy": {"const": "us-gaap"},
+        "concept": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]{0,127}$"},
+        "unit": {"const": "USD"},
+        "form": {"const": "10-Q"},
+        "filed_to": {"type": "string", "format": "date"}
       }
     },
     "step": {

@@ -50,7 +50,7 @@ _ROUNDING = {
     "ceiling": ROUND_CEILING,
     "floor": ROUND_FLOOR,
 }
-_OPERATORS = {"identity", "sum", "difference", "ratio"}
+_OPERATORS = {"identity", "sum", "difference", "ratio", "growth_percentage"}
 _SOURCE_VERIFIER_REF = "verifier:offline-source:0.1"
 _SOURCE_VERIFIER_HASH = content_hash({
     "ref": _SOURCE_VERIFIER_REF,
@@ -416,7 +416,7 @@ def validate_numeric_verification_spec(value: Mapping[str, Any]) -> dict[str, An
     arity = len(wire["inputs"])
     if wire["operator"] == "identity" and arity != 1:
         raise ResearchVerificationError("identity requires exactly one input")
-    if wire["operator"] in {"difference", "ratio"} and arity != 2:
+    if wire["operator"] in {"difference", "ratio", "growth_percentage"} and arity != 2:
         raise ResearchVerificationError(
             f"{wire['operator']} requires exactly two inputs"
         )
@@ -1016,6 +1016,21 @@ def verify_numeric_spec(
             if denominator == 0:
                 raise ResearchVerificationError("ratio denominator cannot be zero")
             raw = Decimal(inputs[0]["value"]) / denominator
+        elif operator == "growth_percentage":
+            if len(inputs) != 2 or not _same_metadata(
+                inputs, ("unit", "currency", "scale")
+            ):
+                raise ResearchVerificationError(
+                    "growth_percentage requires two inputs with equal unit/currency/scale"
+                )
+            denominator = Decimal(inputs[1]["value"])
+            if denominator <= 0:
+                raise ResearchVerificationError(
+                    "growth_percentage denominator must be positive"
+                )
+            raw = (
+                Decimal(inputs[0]["value"]) / denominator - Decimal("1")
+            ) * Decimal("100")
         else:  # validator makes this unreachable; retain explicit fail-closed branch.
             raise ResearchVerificationError("unsupported computation operator")
         quantum = Decimal(1).scaleb(-spec_wire["rounding"]["digits"])
@@ -1029,6 +1044,13 @@ def verify_numeric_spec(
         if operator == "ratio":
             expected_metadata = {
                 "unit": "ratio",
+                "currency": None,
+                "scale": "one",
+                "period": inputs[0]["period"],
+            }
+        elif operator == "growth_percentage":
+            expected_metadata = {
+                "unit": "percent",
                 "currency": None,
                 "scale": "one",
                 "period": inputs[0]["period"],

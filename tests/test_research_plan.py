@@ -12,6 +12,7 @@ from dalton_core.agenda import AgendaStore
 from dalton_core.observability import ObservabilityStore
 from dalton_core.research_plan import (
     PLAN_AUTO_START_RULE_REF,
+    PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
     ResearchPlanAuthority,
     ResearchPlanConflict,
     ResearchPlanControlPlane,
@@ -226,6 +227,62 @@ class ResearchPlanTests(unittest.TestCase):
             self.assertEqual(step["ordinal"], index + 1)
             self.assertEqual(step["depends_on"], [] if index == 0 else [wire["execution_scope"]["steps"][index - 1]["id"]])
         self._validate_contract("research-plan-version.schema.json", wire)
+
+    def test_company_facts_plan_is_closed_and_policy_authorizable(self) -> None:
+        decision, records = self._selected_questions([
+            (
+                "How did reported quarterly revenue change year over year?",
+                "Return the exact same-filing SEC quarterly revenue comparison",
+            )
+        ])
+        record = records[0]
+        created = self.plans.create_company_facts_plan(
+            question_ref=record["question_ref"],
+            question_version_ref=record["question_version_ref"],
+            decision_ref=decision["id"],
+            cik="789019",
+            concept="RevenueFromContractWithCustomerExcludingAssessedTax",
+            filed_to="2026-08-20",
+            actor_ref="core:planner",
+            idempotency_key="create-plan:company-facts",
+        )
+        wire = self.plans.plan_version(created["plan_version_ref"])
+        self.assertEqual(wire["execution_scope"]["operation"], "get_company_facts")
+        self.assertEqual(
+            wire["execution_scope"]["permission_scope"],
+            "public_sec_company_facts",
+        )
+        self.assertEqual(wire["execution_scope"]["budget"]["max_pages"], 1)
+        self.assertEqual(
+            wire["execution_scope"]["steps"][0]["parameters"]["cik"],
+            "0000789019",
+        )
+        active = self.store.active_policy()
+        policy_wire = dict(active["policy"])
+        policy_wire["research_plan_auto_start"] = {
+            "enabled": True,
+            "rules": [PLAN_COMPANY_FACTS_AUTO_START_RULE_REF],
+        }
+        self.store.create_policy(
+            policy_wire,
+            policy_version_id="policy:company-facts-auto-start:test:v2",
+            version_number=2,
+            prior_version_ref=active["policy_version_id"],
+            actor_ref="human:test-owner",
+            change_reason="authorize exact SEC company facts plan",
+            activate=True,
+        )
+        authorized = self.plans.authorize_plan_by_policy(
+            plan_version_ref=created["plan_version_ref"],
+            idempotency_key="authorize-plan:company-facts",
+        )
+        self.assertEqual(
+            authorized["authorization"]["rule_ref"],
+            PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
+        )
+        self.assertEqual(
+            self._start(created, suffix="company-facts")["plan_state"], "started"
+        )
 
     def test_plan_binds_the_exact_selected_candidate_not_list_position(self) -> None:
         decision, records = self._selected_questions([

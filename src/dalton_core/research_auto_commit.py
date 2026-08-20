@@ -18,12 +18,16 @@ from typing import Any
 from .research_verification import (
     validate_candidate_claim,
     validate_candidate_evidence,
+    validate_numeric_verification_spec,
+    validate_source_verification_material,
+    validate_verification_bundle,
 )
 from .store import canonical_json, content_hash
 
 
 SCHEMA_VERSION = "0.1"
 RULE_REF = "research-auto-commit:sec-public-filing-count:v1"
+COMPANY_FACTS_RULE_REF = "research-auto-commit:sec-public-company-facts-growth:v1"
 ACTOR_REF = "system:research-auto-commit"
 _CIK_RE = re.compile(r"^[0-9]{10}$")
 _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -73,12 +77,12 @@ def _policy_rule(policy_version: Mapping[str, Any]) -> dict[str, Any]:
         )
     if rule["enabled"] is not True:
         raise ResearchAutoCommitRejected("research candidate auto-commit is disabled")
-    if rule["rules"] != [RULE_REF]:
+    if rule["rules"] not in ([RULE_REF], [COMPANY_FACTS_RULE_REF]):
         raise ResearchAutoCommitRejected("active governance policy rule set is not supported")
     max_records = rule["max_records"]
     if isinstance(max_records, bool) or not isinstance(max_records, int) or not 1 <= max_records <= 100:
         raise ResearchAutoCommitRejected("research auto-commit max_records is invalid")
-    return dict(rule)
+    return {**dict(rule), "selected_rule": rule["rules"][0]}
 
 
 def validate_policy_commit_decision(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -97,7 +101,7 @@ def validate_policy_commit_decision(value: Mapping[str, Any]) -> dict[str, Any]:
         wire["reviewer_ref"] != ACTOR_REF
         or wire["authorization"] != "versioned_governance_policy"
         or wire["source"] != "governance_policy"
-        or wire["rule_ref"] != RULE_REF
+        or wire["rule_ref"] not in {RULE_REF, COMPANY_FACTS_RULE_REF}
     ):
         raise ResearchAutoCommitError("PolicyCommitDecision authority is invalid")
     for field in (
@@ -115,7 +119,13 @@ def validate_policy_commit_decision(value: Mapping[str, Any]) -> dict[str, Any]:
         "subject_ref", "metric_or_aspect", "period", "basis", "normalized_statement",
     }:
         raise ResearchAutoCommitError("PolicyCommitDecision.reviewed_semantics is invalid")
-    if wire["findings"] != ["matched exact deterministic SEC filing-count rule"]:
+    expected_finding = {
+        RULE_REF: "matched exact deterministic SEC filing-count rule",
+        COMPANY_FACTS_RULE_REF: (
+            "matched exact deterministic SEC company-facts growth rule"
+        ),
+    }[wire["rule_ref"]]
+    if wire["findings"] != [expected_finding]:
         raise ResearchAutoCommitError("PolicyCommitDecision.findings is invalid")
     declared = wire.pop("content_hash")
     if declared != content_hash(wire):
@@ -130,10 +140,15 @@ def authorize_policy_candidate(
     policy_version: Mapping[str, Any],
     evidence: Mapping[str, Any],
     claim: Mapping[str, Any],
+    material: Mapping[str, Any] | None = None,
+    numeric_spec: Mapping[str, Any] | None = None,
+    source_verification: Mapping[str, Any] | None = None,
+    numeric_verification: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate one exact candidate against Core authority and active policy."""
 
     rule = _policy_rule(policy_version)
+    selected_rule = rule["selected_rule"]
     evidence_wire = validate_candidate_evidence(evidence)
     claim_wire = validate_candidate_claim(claim)
     if (
@@ -199,28 +214,12 @@ def authorize_policy_candidate(
     parameters = call.get("parameters")
     if not isinstance(parameters, Mapping):
         raise ResearchAutoCommitRejected("SEC call parameters are unavailable")
-    issuer = parameters.get("issuer")
-    form = parameters.get("form")
-    date_from = parameters.get("date_from")
-    date_to = parameters.get("date_to")
-    limit = parameters.get("limit")
-    if (
-        call.get("operation") != "list_filings"
-        or not isinstance(issuer, str) or _CIK_RE.fullmatch(issuer) is None
-        or form not in {"10-Q", "6-K"}
-        or not isinstance(date_from, str) or _DATE_RE.fullmatch(date_from) is None
-        or not isinstance(date_to, str) or _DATE_RE.fullmatch(date_to) is None
-        or date_from > date_to
-        or isinstance(limit, bool) or not isinstance(limit, int)
-        or not 1 <= limit <= rule["max_records"]
-    ):
-        raise ResearchAutoCommitRejected("candidate is outside the bounded SEC call rule")
     records = source.get("source_record_refs")
     if not isinstance(records, list) or len(records) > rule["max_records"]:
         raise ResearchAutoCommitRejected("SEC source record count exceeds policy")
     if (
         source.get("source") != "source:sec-edgar"
-        or source.get("operation") != "list_filings"
+        or source.get("operation") != call.get("operation")
         or source.get("status") != "complete"
         or source.get("completeness") != "enumerated"
         or source.get("cursor") is not None
@@ -233,37 +232,151 @@ def authorize_policy_candidate(
     ):
         raise ResearchAutoCommitRejected("candidate source is not low-risk public SEC authority")
 
-    period = f"{date_from}..{date_to}"
-    count = len(records)
     plan_parameters = plan.get("execution_scope", {}).get("parameters")
-    if plan_parameters != {
-        "filing_date_from": date_from,
-        "filing_date_to": date_to,
-        "form": form,
-        "issuer_cik": issuer,
-    }:
-        raise ResearchAutoCommitRejected("SEC call drifted from its exact ResearchPlan")
-    expected_statement = (
-        f"The SEC public {form} filing list for CIK {issuer} in window "
-        f"{period} contains {count} filings."
-    )
-    expected_claim = {
-        "subject_ref": question["company_ref"],
-        "metric_or_aspect": "filing_count",
-        "period": period,
-        "basis": "official-filing",
-        "normalized_statement": expected_statement,
-        "claim_kind": "quantitative",
-        "value": str(count),
-        "unit": "records",
-        "currency": None,
-        "scale": "one",
-        "semantic_verification_status": "unverified",
-        "actor_ref": "runner:research-plan-executor",
-    }
+    if selected_rule == RULE_REF:
+        issuer = parameters.get("issuer")
+        form = parameters.get("form")
+        date_from = parameters.get("date_from")
+        date_to = parameters.get("date_to")
+        limit = parameters.get("limit")
+        if (
+            call.get("operation") != "list_filings"
+            or not isinstance(issuer, str) or _CIK_RE.fullmatch(issuer) is None
+            or form not in {"10-Q", "6-K"}
+            or not isinstance(date_from, str) or _DATE_RE.fullmatch(date_from) is None
+            or not isinstance(date_to, str) or _DATE_RE.fullmatch(date_to) is None
+            or date_from > date_to
+            or isinstance(limit, bool) or not isinstance(limit, int)
+            or not 1 <= limit <= rule["max_records"]
+        ):
+            raise ResearchAutoCommitRejected(
+                "candidate is outside the bounded SEC filing-count rule"
+            )
+        period = f"{date_from}..{date_to}"
+        count = len(records)
+        if plan_parameters != {
+            "filing_date_from": date_from,
+            "filing_date_to": date_to,
+            "form": form,
+            "issuer_cik": issuer,
+        }:
+            raise ResearchAutoCommitRejected(
+                "SEC call drifted from its exact ResearchPlan"
+            )
+        expected_statement = (
+            f"The SEC public {form} filing list for CIK {issuer} in window "
+            f"{period} contains {count} filings."
+        )
+        expected_claim = {
+            "subject_ref": question["company_ref"],
+            "metric_or_aspect": "filing_count",
+            "period": period,
+            "basis": "official-filing",
+            "normalized_statement": expected_statement,
+            "claim_kind": "quantitative",
+            "value": str(count),
+            "unit": "records",
+            "currency": None,
+            "scale": "one",
+            "semantic_verification_status": "unverified",
+            "actor_ref": "runner:research-plan-executor",
+        }
+        finding = "matched exact deterministic SEC filing-count rule"
+    else:
+        if any(
+            item is None
+            for item in (
+                material, numeric_spec, source_verification, numeric_verification
+            )
+        ):
+            raise ResearchAutoCommitRejected(
+                "company facts policy requires the exact staged verification bundle"
+            )
+        material_wire = validate_source_verification_material(material or {})
+        spec_wire = validate_numeric_verification_spec(numeric_spec or {})
+        source_wire = validate_verification_bundle(source_verification or {})
+        numeric_wire = validate_verification_bundle(numeric_verification or {})
+        if (
+            material_wire.get("schema_version") != "0.2"
+            or material_wire.get("source_envelope_ref") != source["id"]
+            or material_wire.get("source_envelope_hash") != source["content_hash"]
+            or source_wire.get("verdict") != "pass"
+            or numeric_wire.get("verdict") != "pass"
+            or source_wire.get("subject_ref") != material_wire["id"]
+            or source_wire.get("subject_hash") != material_wire["content_hash"]
+            or claim_wire["source_verification_ref"] != source_wire["id"]
+            or claim_wire["source_verification_hash"]
+            != source_wire["content_hash"]
+            or numeric_wire.get("subject_ref") != spec_wire["id"]
+            or numeric_wire.get("subject_hash") != spec_wire["content_hash"]
+            or claim_wire["numeric_spec_ref"] != spec_wire["id"]
+            or claim_wire["numeric_spec_hash"] != spec_wire["content_hash"]
+            or claim_wire["numeric_verification_ref"] != numeric_wire["id"]
+            or claim_wire["numeric_verification_hash"]
+            != numeric_wire["content_hash"]
+        ):
+            raise ResearchAutoCommitRejected(
+                "company facts staged authority binding drifted"
+            )
+        payload = material_wire.get("normalized_payload")
+        if not isinstance(payload, Mapping):
+            raise ResearchAutoCommitRejected(
+                "company facts normalized payload is unavailable"
+            )
+        expected_parameters = {
+            "cik": payload.get("cik"),
+            "taxonomy": payload.get("taxonomy"),
+            "concept": payload.get("concept"),
+            "unit": payload.get("unit"),
+            "form": payload.get("form"),
+            "filed_to": payload.get("filed_to"),
+        }
+        if (
+            call.get("operation") != "get_company_facts"
+            or parameters != expected_parameters
+            or plan_parameters != expected_parameters
+            or payload.get("source_record_refs") != records
+            or len(records) != 2
+            or payload.get("next_cursor") is not None
+            or spec_wire.get("operator") != "growth_percentage"
+            or spec_wire.get("output_unit") != "percent"
+            or spec_wire.get("output_currency") is not None
+            or spec_wire.get("output_scale") != "one"
+            or spec_wire.get("output_value") != claim_wire["value"]
+        ):
+            raise ResearchAutoCommitRejected(
+                "candidate is outside the bounded SEC company-facts rule"
+            )
+        current = payload.get("current")
+        prior = payload.get("prior")
+        if not isinstance(current, Mapping) or not isinstance(prior, Mapping):
+            raise ResearchAutoCommitRejected("company facts comparison is unavailable")
+        period = f"{current.get('start')}..{current.get('end')}"
+        direction = "up" if not claim_wire["value"].startswith("-") else "down"
+        expected_statement = (
+            f"{payload.get('entity_name')} reported {payload.get('label')} of "
+            f"{payload.get('unit')} {current.get('value')} for {period}, "
+            f"{direction} {claim_wire['value'].lstrip('-')}% year over year from "
+            f"{payload.get('unit')} {prior.get('value')} in the comparable quarter."
+        )
+        expected_claim = {
+            "subject_ref": question["company_ref"],
+            "metric_or_aspect": "quarterly_revenue_yoy_growth",
+            "period": period,
+            "basis": "official-filing-xbrl",
+            "normalized_statement": expected_statement,
+            "claim_kind": "quantitative",
+            "value": spec_wire["output_value"],
+            "unit": "percent",
+            "currency": None,
+            "scale": "one",
+            "semantic_verification_status": "unverified",
+            "actor_ref": "runner:research-plan-executor",
+        }
+        finding = "matched exact deterministic SEC company-facts growth rule"
     if any(claim_wire[field] != expected for field, expected in expected_claim.items()):
         raise ResearchAutoCommitRejected(
-            "candidate semantics do not match the deterministic SEC filing-count rule"
+            "candidate semantics do not match the deterministic SEC policy rule"
         )
 
     semantics = {
@@ -284,7 +397,7 @@ def authorize_policy_candidate(
             "candidate_claim_hash": claim_wire["content_hash"],
             "policy_version_ref": policy_ref,
             "policy_version_hash": policy_hash,
-            "rule_ref": RULE_REF,
+            "rule_ref": selected_rule,
         }),
         "created_at": created_at,
         "candidate_claim_ref": claim_wire["id"],
@@ -296,14 +409,14 @@ def authorize_policy_candidate(
         "proposed_revisions": None,
         "relation": "supports",
         "rationale": "Candidate matched the active bounded research auto-commit policy.",
-        "findings": ["matched exact deterministic SEC filing-count rule"],
+        "findings": [finding],
         "reviewer_ref": ACTOR_REF,
         "authorization": "versioned_governance_policy",
         "source": "governance_policy",
         "source_event_ref": f"governance-policy:{policy_ref}:{policy_hash}",
         "policy_version_ref": policy_ref,
         "policy_version_hash": policy_hash,
-        "rule_ref": RULE_REF,
+        "rule_ref": selected_rule,
     }
     base["content_hash"] = content_hash(base)
     return validate_policy_commit_decision(base)
@@ -311,6 +424,7 @@ def authorize_policy_candidate(
 
 __all__ = [
     "ACTOR_REF",
+    "COMPANY_FACTS_RULE_REF",
     "RULE_REF",
     "ResearchAutoCommitError",
     "ResearchAutoCommitRejected",

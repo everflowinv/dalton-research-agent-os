@@ -14,6 +14,7 @@ import argparse
 import copy
 import json
 import os
+import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -38,10 +39,14 @@ from dalton_core.raw_spool import RawSpool
 from dalton_core.research_coordinator import ResearchCoordinatorStore
 from dalton_core.research_plan import (
     PLAN_AUTO_START_RULE_REF,
+    PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
     ResearchPlanAuthority,
     ResearchPlanControlPlane,
 )
-from dalton_core.research_auto_commit import RULE_REF as AUTO_COMMIT_RULE_REF
+from dalton_core.research_auto_commit import (
+    COMPANY_FACTS_RULE_REF as COMPANY_FACTS_AUTO_COMMIT_RULE_REF,
+    RULE_REF as AUTO_COMMIT_RULE_REF,
+)
 from dalton_core.research_plan_closure import ResearchPlanClosureCoordinator
 from dalton_core.research_plan_coordinator import ResearchPlanCoordinator
 from dalton_core.research_plan_executor import (
@@ -59,12 +64,20 @@ from dalton_core.sec_authority_harness import (
     MutableClock,
     _PublicAuthorities,
 )
-from dalton_core.sec_public_adapter import SecPublicHttpAdapter
+from dalton_core.sec_public_adapter import SecPublicRouterAdapter
 from dalton_core.store import DaltonStore, content_hash
 
 
 def _wire_time(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _sqlite_integrity(path: Path) -> str:
+    connection = sqlite3.connect(path)
+    try:
+        return str(connection.execute("PRAGMA integrity_check").fetchone()[0])
+    finally:
+        connection.close()
 
 
 def _policy(now: datetime, company_ref: str) -> dict:
@@ -226,8 +239,18 @@ def main() -> int:
     parser.add_argument("--issuer-cik", default="789019")
     parser.add_argument("--company-ref", default="company:sec-cik:0000789019")
     parser.add_argument("--form", choices=("10-Q",), default="10-Q")
-    parser.add_argument("--date-from", required=True)
-    parser.add_argument("--date-to", required=True)
+    parser.add_argument(
+        "--operation",
+        choices=("list_filings", "get_company_facts"),
+        default="list_filings",
+    )
+    parser.add_argument("--date-from")
+    parser.add_argument("--date-to")
+    parser.add_argument(
+        "--concept",
+        default="RevenueFromContractWithCustomerExcludingAssessedTax",
+    )
+    parser.add_argument("--filed-to")
     parser.add_argument(
         "--policy-owner",
         required=True,
@@ -240,6 +263,10 @@ def main() -> int:
     args = parser.parse_args()
     if not args.policy_owner.startswith("human:"):
         raise SystemExit("--policy-owner must use the human: namespace")
+    if args.operation == "list_filings" and (not args.date_from or not args.date_to):
+        raise SystemExit("list_filings requires --date-from and --date-to")
+    if args.operation == "get_company_facts" and not args.filed_to:
+        raise SystemExit("get_company_facts requires --filed-to")
 
     output_dir = args.output_dir.expanduser().resolve()
     if output_dir.exists():
@@ -292,8 +319,17 @@ def main() -> int:
             version_id="agenda-control-version:sec-plan-canary:1",
             idempotency_key="agenda-resume:sec-plan-canary:1",
         )
-        question = f"Which official {args.form} filings fall inside the bounded date window?"
-        answer_criteria = "Return the official SEC filing list and verify the filing count."
+        company_facts = args.operation == "get_company_facts"
+        question = (
+            "How did reported quarterly revenue change year over year?"
+            if company_facts
+            else f"Which official {args.form} filings fall inside the bounded date window?"
+        )
+        answer_criteria = (
+            "Return the exact same-filing SEC quarterly revenue comparison."
+            if company_facts
+            else "Return the official SEC filing list and verify the filing count."
+        )
         decision, question_record = _register_selected_question(
             agenda,
             backlog,
@@ -302,26 +338,44 @@ def main() -> int:
             question=question,
             answer_criteria=answer_criteria,
         )
-        created = plans.create_plan(
-            question_ref=question_record["question_ref"],
-            question_version_ref=question_record["question_version_ref"],
-            decision_ref=decision["id"],
-            issuer_cik=args.issuer_cik,
-            form=args.form,
-            filing_date_from=args.date_from,
-            filing_date_to=args.date_to,
-            actor_ref="core:planner",
-            idempotency_key="create-plan:sec-plan-canary:1",
-        )
+        if company_facts:
+            created = plans.create_company_facts_plan(
+                question_ref=question_record["question_ref"],
+                question_version_ref=question_record["question_version_ref"],
+                decision_ref=decision["id"],
+                cik=args.issuer_cik,
+                concept=args.concept,
+                filed_to=args.filed_to,
+                actor_ref="core:planner",
+                idempotency_key="create-plan:sec-plan-canary:1",
+            )
+        else:
+            created = plans.create_plan(
+                question_ref=question_record["question_ref"],
+                question_version_ref=question_record["question_version_ref"],
+                decision_ref=decision["id"],
+                issuer_cik=args.issuer_cik,
+                form=args.form,
+                filing_date_from=args.date_from,
+                filing_date_to=args.date_to,
+                actor_ref="core:planner",
+                idempotency_key="create-plan:sec-plan-canary:1",
+            )
         active = core.active_policy()
         governance_policy = dict(active["policy"])
         governance_policy["research_plan_auto_start"] = {
             "enabled": True,
-            "rules": [PLAN_AUTO_START_RULE_REF],
+            "rules": [
+                PLAN_COMPANY_FACTS_AUTO_START_RULE_REF
+                if company_facts else PLAN_AUTO_START_RULE_REF
+            ],
         }
         governance_policy["research_candidate_auto_commit"] = {
             "enabled": True,
-            "rules": [AUTO_COMMIT_RULE_REF],
+            "rules": [
+                COMPANY_FACTS_AUTO_COMMIT_RULE_REF
+                if company_facts else AUTO_COMMIT_RULE_REF
+            ],
             "max_records": 20,
         }
         installed_policy = core.create_policy(
@@ -353,12 +407,13 @@ def main() -> int:
             policy_resolver=authorities.policy,
         )
         sec_template = load_packaged_connector_inventory()["templates"]["sec"]
-        template_identity = sec_connector_identity(sec_template)
+        template_identity = sec_connector_identity(sec_template, args.operation)
         descriptor = catalog.publish(
             sec_descriptor_spec(
                 sec_template,
                 PUBLIC_PERMISSIONS,
                 created_at,
+                operation_name=args.operation,
             )
         )
         manifest = _runner_manifest(
@@ -366,14 +421,17 @@ def main() -> int:
             identity=template_identity,
             created_at=created_at,
         )
-        adapter = SecPublicHttpAdapter(user_agent=args.user_agent, clock=clock)
+        adapter = SecPublicRouterAdapter(user_agent=args.user_agent, clock=clock)
         binding = manifest["bindings"][0]
         static_resolver = StaticAdapterResolver(
             manifest,
             {binding["binding_ref"]: adapter},
             {
-                binding["binding_ref"]: lambda params: set(params)
-                == {"issuer", "form", "date_from", "date_to", "limit"}
+                binding["binding_ref"]: lambda params: set(params) == (
+                    {"cik", "taxonomy", "concept", "unit", "form", "filed_to"}
+                    if company_facts
+                    else {"issuer", "form", "date_from", "date_to", "limit"}
+                )
             },
         )
         gate = ConnectorRunnerAdmissionGate(
@@ -456,9 +514,9 @@ def main() -> int:
         candidate = candidates[0]
         claim = candidate["claim"]
         evidence = candidate["evidence"]
+        authority_bundle = review.candidate_authority_bundle(claim["id"])
         promotion = core.commit_policy_candidate(
-            evidence=evidence,
-            claim=claim,
+            **authority_bundle,
             idempotency_key="policy-ledger:sec-plan-canary:1",
         )
         closure = ResearchPlanClosureCoordinator(
@@ -481,10 +539,8 @@ def main() -> int:
                 "authorization_ref": plan_authorization["authorization"]["id"],
                 "policy_version_ref": installed_policy["policy_version_id"],
                 "policy_owner": args.policy_owner,
-                "issuer_cik": plan_wire["execution_scope"]["parameters"]["issuer_cik"],
-                "form": plan_wire["execution_scope"]["parameters"]["form"],
-                "date_from": plan_wire["execution_scope"]["parameters"]["filing_date_from"],
-                "date_to": plan_wire["execution_scope"]["parameters"]["filing_date_to"],
+                "operation": plan_wire["execution_scope"]["operation"],
+                "parameters": plan_wire["execution_scope"]["parameters"],
             },
             "outcomes": outcomes,
             "tree": [
@@ -538,9 +594,7 @@ def main() -> int:
                 "coordinator": connector_records.connection.execute(
                     "PRAGMA integrity_check"
                 ).fetchone()[0],
-                "capability": catalog.connection.execute(
-                    "PRAGMA integrity_check"
-                ).fetchone()[0],
+                "capability": _sqlite_integrity(output_dir / "capability.sqlite"),
             },
             "network": {
                 "host": "data.sec.gov",

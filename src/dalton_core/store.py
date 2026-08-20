@@ -915,6 +915,10 @@ class DaltonStore:
         *,
         evidence: Mapping[str, Any],
         claim: Mapping[str, Any],
+        material: Mapping[str, Any] | None = None,
+        numeric_spec: Mapping[str, Any] | None = None,
+        source_verification: Mapping[str, Any] | None = None,
+        numeric_verification: Mapping[str, Any] | None = None,
         idempotency_key: str,
         fault_at: str | None = None,
     ) -> dict[str, Any]:
@@ -932,6 +936,10 @@ class DaltonStore:
             policy_version=policy,
             evidence=evidence,
             claim=claim,
+            material=material,
+            numeric_spec=numeric_spec,
+            source_verification=source_verification,
+            numeric_verification=numeric_verification,
         )
         result = self._commit_authorized_candidate(
             decision_wire=decision_wire,

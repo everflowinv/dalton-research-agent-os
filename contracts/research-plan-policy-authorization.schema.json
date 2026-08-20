@@ -17,7 +17,7 @@
     "authorization":{"const":"versioned_governance_policy"},
     "policy_version_ref":{"type":"string","minLength":1},
     "policy_version_hash":{"$ref":"#/$defs/hash"},
-    "rule_ref":{"const":"research-plan-auto-start:sec-public-list-filings:v1"},
+    "rule_ref":{"enum":["research-plan-auto-start:sec-public-list-filings:v1","research-plan-auto-start:sec-public-company-facts:v1"]},
     "content_hash":{"$ref":"#/$defs/hash"}
   },
   "$defs":{"hash":{"type":"string","pattern":"^[0-9a-f]{64}$"}}

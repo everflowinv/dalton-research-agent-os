@@ -27,6 +27,9 @@ from typing import Any
 from .research_verification import (
     validate_candidate_claim,
     validate_candidate_evidence,
+    validate_numeric_verification_spec,
+    validate_source_verification_material,
+    validate_verification_bundle,
 )
 from .store import canonical_json, content_hash
 
@@ -469,6 +472,77 @@ class HumanReviewAuthority:
             _text(candidate_claim_ref, "candidate_claim_ref")
         )
         return {"evidence": evidence, "claim": claim}
+
+    def candidate_authority_bundle(
+        self, candidate_claim_ref: str
+    ) -> dict[str, Any]:
+        """Return the exact staged source/numeric authorities for policy evaluation."""
+
+        pair = self.candidate_bundle(candidate_claim_ref)
+        claim = pair["claim"]
+
+        def load(table: str, column: str, identifier: str, name: str) -> dict[str, Any]:
+            row = self.connection.execute(
+                f"SELECT record_json,content_hash FROM {table} WHERE {column}=?",
+                (identifier,),
+            ).fetchone()
+            wire = self._load_record(row, name)
+            if (
+                row is None
+                or row["record_json"] != canonical_json(wire)
+                or row["content_hash"] != wire.get("content_hash")
+                or wire.get("content_hash")
+                != content_hash({
+                    key: value for key, value in wire.items()
+                    if key != "content_hash"
+                })
+            ):
+                raise ResearchReviewConflict(f"{name} authority drifted")
+            return wire
+
+        numeric_spec = validate_numeric_verification_spec(load(
+            "candidate_numeric_specs", "numeric_spec_id",
+            claim["numeric_spec_ref"], "candidate numeric spec",
+        ))
+        source_verification = validate_verification_bundle(load(
+            "candidate_verifications", "verification_id",
+            claim["source_verification_ref"], "candidate source verification",
+        ))
+        numeric_verification = validate_verification_bundle(load(
+            "candidate_verifications", "verification_id",
+            claim["numeric_verification_ref"], "candidate numeric verification",
+        ))
+        material_refs = {
+            (item["source_material_ref"], item["source_material_hash"])
+            for item in numeric_spec["inputs"]
+        }
+        if len(material_refs) != 1:
+            raise ResearchReviewConflict(
+                "candidate numeric spec does not bind one exact source material"
+            )
+        material_ref, material_hash = next(iter(material_refs))
+        material = validate_source_verification_material(load(
+            "candidate_source_materials", "material_id", material_ref,
+            "candidate source material",
+        ))
+        if (
+            material["content_hash"] != material_hash
+            or claim["numeric_spec_hash"] != numeric_spec["content_hash"]
+            or claim["source_verification_hash"]
+            != source_verification["content_hash"]
+            or claim["numeric_verification_hash"]
+            != numeric_verification["content_hash"]
+        ):
+            raise ResearchReviewConflict(
+                "candidate authority bundle hash binding drifted"
+            )
+        return {
+            **pair,
+            "material": material,
+            "numeric_spec": numeric_spec,
+            "source_verification": source_verification,
+            "numeric_verification": numeric_verification,
+        }
 
     def decide(
         self,

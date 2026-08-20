@@ -59,6 +59,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from .agenda import read_exact_agenda_cycle, read_exact_mandate_version
@@ -90,6 +91,7 @@ from .research_plan import (
     PLANNER_HASH,
     PLANNER_REF,
     SEC_CAPABILITY,
+    SEC_COMPANY_FACTS_OPERATION,
     SEC_OPERATION,
     SEC_RUNTIME_PROFILE_REF,
     _plan_work_orders,
@@ -187,6 +189,7 @@ def sec_descriptor_spec(
     created_at: str,
     *,
     capability_policy_ref: str = _DESCRIPTOR_POLICY_REF,
+    operation_name: str = SEC_OPERATION,
 ) -> dict[str, Any]:
     """The closed SEC capability descriptor proposal for one template.
 
@@ -195,19 +198,19 @@ def sec_descriptor_spec(
     publish it once and the executor re-reads the same descriptor on replay.
     """
 
-    identity = sec_connector_identity(template)
+    identity = sec_connector_identity(template, operation_name)
     return {
         "schema_version": "0.1",
         "id": identity["capability_id"],
         "version": 1,
         "created_at": created_at,
         "kind": "connector",
-        "name": "sec-public-filings",
-        "label": "SEC public filings adapter",
-        "summary": "Read the public SEC submissions endpoint",
-        "aliases": ["SEC filings"],
+        "name": "sec-public-research",
+        "label": "SEC public research adapter",
+        "summary": "Read an approved public SEC data endpoint",
+        "aliases": ["SEC filings", "SEC company facts"],
         "tags": ["connector", "public", "SEC"],
-        "intent_examples": ["list public SEC filings"],
+        "intent_examples": ["list public SEC filings", "read one SEC company concept"],
         "source": {
             "type": identity["capability_id"].split(":")[1],
             "namespace": identity["capability_id"].split(":")[2],
@@ -233,7 +236,9 @@ def sec_descriptor_spec(
     }
 
 
-def sec_connector_identity(template: Mapping[str, Any]) -> dict[str, Any]:
+def sec_connector_identity(
+    template: Mapping[str, Any], operation_name: str = SEC_OPERATION
+) -> dict[str, Any]:
     """Deterministic SEC runtime identity derived from the packaged template.
 
     Every value is a pure function of the frozen packaged SEC template and
@@ -241,23 +246,38 @@ def sec_connector_identity(template: Mapping[str, Any]) -> dict[str, Any]:
     the executor cannot drift apart without breaking a hash comparison.
     """
 
-    operation = next(
-        (item for item in template["operations"] if item["operation"] == SEC_OPERATION),
-        None,
-    )
+    approved_operations = (SEC_OPERATION, SEC_COMPANY_FACTS_OPERATION)
+    operations = {
+        item["operation"]: item
+        for item in template["operations"]
+        if item["operation"] in approved_operations
+    }
+    operation = operations.get(operation_name)
     if operation is None:
         raise ResearchPlanExecutorConflict(
-            "packaged SEC template lacks the frozen list_filings operation"
+            f"packaged SEC template lacks the frozen {operation_name} operation"
+        )
+    if set(operations) != set(approved_operations):
+        raise ResearchPlanExecutorConflict(
+            "packaged SEC template lacks an approved public operation"
         )
     source_identity = dict(template["source_identity"])
     source_hash = content_hash(source_identity)
     adapter_ref = template["transport"]["target_ref"]
     schema_hash = content_hash({
-        "allowed_operations": [SEC_OPERATION],
-        "input_schema_refs": {SEC_OPERATION: operation["input_schema_ref"]},
-        "input_schema_hashes": {SEC_OPERATION: operation["input_schema_hash"]},
-        "output_schema_refs": {SEC_OPERATION: operation["output_schema_ref"]},
-        "output_schema_hashes": {SEC_OPERATION: operation["output_schema_hash"]},
+        "allowed_operations": list(approved_operations),
+        "input_schema_refs": {
+            name: operations[name]["input_schema_ref"] for name in approved_operations
+        },
+        "input_schema_hashes": {
+            name: operations[name]["input_schema_hash"] for name in approved_operations
+        },
+        "output_schema_refs": {
+            name: operations[name]["output_schema_ref"] for name in approved_operations
+        },
+        "output_schema_hashes": {
+            name: operations[name]["output_schema_hash"] for name in approved_operations
+        },
     })
     return {
         "capability_id": SEC_CAPABILITY,
@@ -268,7 +288,24 @@ def sec_connector_identity(template: Mapping[str, Any]) -> dict[str, Any]:
         "adapter_hash": content_hash({
             "adapter_ref": adapter_ref, "source": source_identity["source_ref"],
         }),
-        "operation": SEC_OPERATION,
+        "allowed_operations": list(approved_operations),
+        "input_schema_refs": {
+            name: operations[name]["input_schema_ref"] for name in approved_operations
+        },
+        "input_schema_hashes": {
+            name: operations[name]["input_schema_hash"] for name in approved_operations
+        },
+        "output_schema_refs": {
+            name: operations[name]["output_schema_ref"] for name in approved_operations
+        },
+        "output_schema_hashes": {
+            name: operations[name]["output_schema_hash"] for name in approved_operations
+        },
+        "completeness": {
+            name: operations[name]["completeness_ceiling"]
+            for name in approved_operations
+        },
+        "operation": operation_name,
         "input_schema_ref": operation["input_schema_ref"],
         "input_schema_hash": operation["input_schema_hash"],
         "output_schema_ref": operation["output_schema_ref"],
@@ -291,7 +328,21 @@ def sec_adapter_parameters(plan_wire: Mapping[str, Any]) -> dict[str, Any]:
     the authority resolver is reproducible from plan authority alone.
     """
 
-    request = plan_wire["execution_scope"]["parameters"]
+    scope = plan_wire["execution_scope"]
+    request = scope["parameters"]
+    if scope["operation"] == SEC_COMPANY_FACTS_OPERATION:
+        return {
+            "cik": request["cik"],
+            "taxonomy": request["taxonomy"],
+            "concept": request["concept"],
+            "unit": request["unit"],
+            "form": request["form"],
+            "filed_to": request["filed_to"],
+        }
+    if scope["operation"] != SEC_OPERATION:
+        raise ResearchPlanExecutorConflict(
+            "plan operation is outside the approved SEC adapter routes"
+        )
     budget = plan_wire["execution_scope"]["budget"]
     limit = budget["max_pages"]
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -642,7 +693,9 @@ class ResearchPlanExecutor:
             raise ResearchPlanExecutorConflict(
                 "plan connector profile drifted from the packaged SEC template"
             )
-        identity = sec_connector_identity(template)
+        identity = sec_connector_identity(
+            template, plan_wire["execution_scope"]["operation"]
+        )
         now = _wire_time(self.clock())
 
         # Capability descriptor: publish only when the exact capability is
@@ -655,6 +708,7 @@ class ResearchPlanExecutor:
             descriptor = self.catalog.publish(sec_descriptor_spec(
                 template, self.permissions, now,
                 capability_policy_ref=self.capability_policy_ref,
+                operation_name=plan_wire["execution_scope"]["operation"],
             ))
         # Profile/pricing authority is shared across SEC plans.  Anchor those
         # immutable version-1 records to the descriptor's own timestamp and
@@ -684,18 +738,16 @@ class ResearchPlanExecutor:
             "runner_runtime_ref": SEC_RUNTIME_PROFILE_REF,
             "runner_actor_ref": self.actor_ref,
             "runner_environment_hash": self.runner_environment_hash,
-            "allowed_operations": [identity["operation"]],
+            "allowed_operations": identity["allowed_operations"],
             "allowed_hosts": identity["allowed_hosts"],
             "auth_mode": "none",
             "credential_slot_refs": [],
-            "input_schema_refs": {identity["operation"]: identity["input_schema_ref"]},
-            "input_schema_hashes": {identity["operation"]: identity["input_schema_hash"]},
-            "output_schema_refs": {identity["operation"]: identity["output_schema_ref"]},
-            "output_schema_hashes": {
-                identity["operation"]: identity["output_schema_hash"]
-            },
+            "input_schema_refs": identity["input_schema_refs"],
+            "input_schema_hashes": identity["input_schema_hashes"],
+            "output_schema_refs": identity["output_schema_refs"],
+            "output_schema_hashes": identity["output_schema_hashes"],
             "pagination": identity["pagination"],
-            "completeness": {identity["operation"]: identity["completeness_required"]},
+            "completeness": identity["completeness"],
             "max_response_bytes": plan_wire["execution_scope"]["budget"][
                 "max_response_bytes"
             ],
@@ -934,7 +986,8 @@ class ResearchPlanExecutor:
             planner_hash=PLANNER_HASH,
             routing_policy_ref="routing:research-plan:" + plan_wire["id"],
             routing_policy_hash=content_hash({
-                **plan_identity, "routing": "sec-public-list-filings",
+                **plan_identity,
+                "routing": "sec-public-" + identity["operation"],
             }),
             step_specs=[compiled_step_spec],
             created_at=created_at,
@@ -1508,8 +1561,64 @@ class ResearchPlanExecutor:
         step: Mapping[str, Any],
         material: Mapping[str, Any],
     ) -> dict[str, Any]:
+        scope = plan_wire["execution_scope"]
+        request = scope["parameters"]
+        if scope["operation"] == SEC_COMPANY_FACTS_OPERATION:
+            payload = material["normalized_payload"]
+            current = payload["current"]
+            prior = payload["prior"]
+            period = f"{current['start']}..{current['end']}"
+            growth = format(Decimal(payload["growth_percent"]), "f")
+            if "." in growth:
+                growth = growth.rstrip("0").rstrip(".")
+            spec = {
+                "schema_version": "0.1",
+                "id": _derived_ref("numeric-spec:research-plan", {
+                    "plan_version_ref": plan_wire["id"],
+                    "step_ref": step["id"],
+                }),
+                "created_at": material["retrieved_at"],
+                "operator": "growth_percentage",
+                "inputs": [
+                    {
+                        "name": "current_quarter",
+                        "value": current["value"],
+                        "unit": "number",
+                        "currency": None,
+                        "scale": "one",
+                        "period": period,
+                        "source_material_ref": material["id"],
+                        "source_material_hash": material["content_hash"],
+                        "json_pointer": "/current/value",
+                        "extractor": "number",
+                    },
+                    {
+                        "name": "prior_year_quarter",
+                        "value": prior["value"],
+                        "unit": "number",
+                        "currency": None,
+                        "scale": "one",
+                        "period": f"{prior['start']}..{prior['end']}",
+                        "source_material_ref": material["id"],
+                        "source_material_hash": material["content_hash"],
+                        "json_pointer": "/prior/value",
+                        "extractor": "number",
+                    },
+                ],
+                "output_value": growth,
+                "output_unit": "percent",
+                "output_currency": None,
+                "output_scale": "one",
+                "output_period": period,
+                "rounding": {"mode": "half_up", "digits": 2},
+            }
+            spec["content_hash"] = content_hash(spec)
+            return validate_numeric_verification_spec(spec)
+        if scope["operation"] != SEC_OPERATION:
+            raise ResearchPlanExecutorConflict(
+                "numeric verifier operation is outside the approved SEC reads"
+            )
         count = len(material["source_record_refs"])
-        request = plan_wire["execution_scope"]["parameters"]
         period = f"{request['filing_date_from']}..{request['filing_date_to']}"
         spec = {
             "schema_version": "0.1",
@@ -2073,13 +2182,41 @@ class ResearchPlanExecutor:
         )
         subject_ref = cycle["company_ref"]
         request = plan_wire["execution_scope"]["parameters"]
-        period = f"{request['filing_date_from']}..{request['filing_date_to']}"
-        count = len(recomputed["material"]["source_record_refs"])
+        operation_name = plan_wire["execution_scope"]["operation"]
+        if operation_name == SEC_COMPANY_FACTS_OPERATION:
+            payload = recomputed["material"]["normalized_payload"]
+            period = f"{payload['current']['start']}..{payload['current']['end']}"
+            aspect = "quarterly_revenue_yoy_growth"
+            basis = "official-filing-xbrl"
+            direction = (
+                "up" if not recomputed["numeric_spec"]["output_value"].startswith("-")
+                else "down"
+            )
+            statement = (
+                f"{payload['entity_name']} reported {payload['label']} of "
+                f"{payload['unit']} {payload['current']['value']} for {period}, "
+                f"{direction} {recomputed['numeric_spec']['output_value'].lstrip('-')}% "
+                f"year over year from {payload['unit']} {payload['prior']['value']} "
+                "in the comparable quarter."
+            )
+        elif operation_name == SEC_OPERATION:
+            period = f"{request['filing_date_from']}..{request['filing_date_to']}"
+            count = len(recomputed["material"]["source_record_refs"])
+            aspect = "filing_count"
+            basis = "official-filing"
+            statement = (
+                f"The SEC public {request['form']} filing list for CIK "
+                f"{request['issuer_cik']} in window {period} contains {count} filings."
+            )
+        else:
+            raise ResearchPlanExecutorConflict(
+                "candidate operation is outside the approved SEC reads"
+            )
         candidate_identity = {
             "plan_version_ref": plan_wire["id"],
             "step_ref": step["id"],
             "subject_ref": subject_ref,
-            "aspect": "filing_count",
+            "aspect": aspect,
         }
         evidence = build_candidate_evidence(
             recomputed["material"],
@@ -2100,12 +2237,9 @@ class ResearchPlanExecutor:
                 "candidate-claim:research-plan", candidate_identity
             ),
             subject_ref=subject_ref,
-            metric_or_aspect="filing_count",
-            basis="official-filing",
-            normalized_statement=(
-                f"The SEC public {request['form']} filing list for CIK "
-                f"{request['issuer_cik']} in window {period} contains {count} filings."
-            ),
+            metric_or_aspect=aspect,
+            basis=basis,
+            normalized_statement=statement,
             actor_ref=self.actor_ref,
             created_at=recomputed["material"]["retrieved_at"],
         )

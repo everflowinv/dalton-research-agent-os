@@ -23,8 +23,15 @@ from dalton_core.observability import ObservabilityStore
 from dalton_core.public_http_transport import PublicHttpTransport
 from dalton_core.raw_spool import RawSpool
 from dalton_core.research_coordinator import ResearchCoordinatorStore
-from dalton_core.research_auto_commit import RULE_REF as AUTO_COMMIT_RULE_REF
-from dalton_core.research_plan import PLAN_AUTO_START_RULE_REF, _plan_work_orders
+from dalton_core.research_auto_commit import (
+    COMPANY_FACTS_RULE_REF as COMPANY_FACTS_AUTO_COMMIT_RULE_REF,
+    RULE_REF as AUTO_COMMIT_RULE_REF,
+)
+from dalton_core.research_plan import (
+    PLAN_AUTO_START_RULE_REF,
+    PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
+    _plan_work_orders,
+)
 from dalton_core.research_plan_coordinator import (
     ResearchPlanCoordinator,
     ResearchPlanCoordinatorConflict,
@@ -44,7 +51,7 @@ from dalton_core.sec_authority_harness import (
     _PublicAuthorities,
     _Response,
 )
-from dalton_core.sec_public_adapter import SecPublicHttpAdapter
+from dalton_core.sec_public_adapter import SecPublicRouterAdapter
 from dalton_core.store import content_hash
 from tests import test_research_plan as planner_test_support
 
@@ -71,6 +78,32 @@ def _sec_body() -> bytes:
     ).encode()
 
 
+def _sec_company_facts_body() -> bytes:
+    payload = {
+        "cik": 320193,
+        "taxonomy": "us-gaap",
+        "tag": "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "label": "Revenue from Contract with Customer, Excluding Assessed Tax",
+        "description": "Synthetic quarterly revenue series.",
+        "entityName": "APPLE INC.",
+        "units": {"USD": [
+            {
+                "start": "2025-01-01", "end": "2025-03-31",
+                "val": 100000000000, "accn": "0000320193-26-000101",
+                "fy": 2026, "fp": "Q2", "form": "10-Q",
+                "filed": "2026-05-01", "frame": "CY2025Q1",
+            },
+            {
+                "start": "2026-01-01", "end": "2026-03-31",
+                "val": 112500000000, "accn": "0000320193-26-000101",
+                "fy": 2026, "fp": "Q2", "form": "10-Q",
+                "filed": "2026-05-01", "frame": "CY2026Q1",
+            },
+        ]},
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+
 class InjectedExecutorCrash(RuntimeError):
     pass
 
@@ -84,23 +117,47 @@ class PlanExecutorHarness:
         suffix: str = "exec",
         fault_at: str | None = None,
         auto_start: bool = False,
+        company_facts: bool = False,
     ):
         self.planner = planner_test_support.ResearchPlanTests(
             methodName="test_create_plan_is_exact_closed_four_step_tree"
         )
         self.planner.setUp()
         self._cleanups = [self.planner.doCleanups]
-        created = self.planner._create_plan(suffix=suffix)
+        if company_facts:
+            decision, records = self.planner._selected_questions([(
+                f"How did quarterly revenue change year over year for {suffix}?",
+                "Return the exact same-filing SEC quarterly revenue comparison",
+            )])
+            record = records[0]
+            created = self.planner.plans.create_company_facts_plan(
+                question_ref=record["question_ref"],
+                question_version_ref=record["question_version_ref"],
+                decision_ref=decision["id"],
+                cik="320193",
+                concept="RevenueFromContractWithCustomerExcludingAssessedTax",
+                filed_to="2026-08-20",
+                actor_ref="core:planner",
+                idempotency_key=f"create-plan:{suffix}",
+            )
+        else:
+            created = self.planner._create_plan(suffix=suffix)
         if auto_start:
             active = self.planner.store.active_policy()
             policy = dict(active["policy"])
             policy["research_plan_auto_start"] = {
                 "enabled": True,
-                "rules": [PLAN_AUTO_START_RULE_REF],
+                "rules": [
+                    PLAN_COMPANY_FACTS_AUTO_START_RULE_REF
+                    if company_facts else PLAN_AUTO_START_RULE_REF
+                ],
             }
             policy["research_candidate_auto_commit"] = {
                 "enabled": True,
-                "rules": [AUTO_COMMIT_RULE_REF],
+                "rules": [
+                    COMPANY_FACTS_AUTO_COMMIT_RULE_REF
+                    if company_facts else AUTO_COMMIT_RULE_REF
+                ],
                 "max_records": 20,
             }
             self.planner.store.create_policy(
@@ -141,7 +198,9 @@ class PlanExecutorHarness:
         self.spool = RawSpool(self.temp.name, max_total_bytes=6_000_000)
 
         self.template = load_packaged_connector_inventory()["templates"]["sec"]
-        self.identity = sec_connector_identity(self.template)
+        self.identity = sec_connector_identity(
+            self.template, self.plan_wire["execution_scope"]["operation"]
+        )
         self.actor_ref = "runner:research-plan-executor"
         self.permissions = copy.deepcopy(PUBLIC_PERMISSIONS)
         # The operator publishes the exact capability descriptor once, then
@@ -149,6 +208,7 @@ class PlanExecutorHarness:
         self.descriptor = self.catalog.publish(sec_descriptor_spec(
             self.template, self.permissions,
             self.clock.value.isoformat(timespec="microseconds"),
+            operation_name=self.identity["operation"],
         ))
         binding = {
             "binding_ref": "runner-binding:sec-public:v1",
@@ -186,11 +246,11 @@ class PlanExecutorHarness:
             "content_hash": content_hash(manifest_payload),
         })
         self.runner_environment_hash = self.manifest["content_hash"]
-        adapter = SecPublicHttpAdapter(
+        adapter = SecPublicRouterAdapter(
             transport=PublicHttpTransport(
                 resolver=lambda _host, _port: ("93.184.216.34",),
                 exchange=lambda _target, _method, _headers, _body, _timeout: _Response(
-                    _sec_body()
+                    _sec_company_facts_body() if company_facts else _sec_body()
                 ),
             ),
             clock=self.clock,
@@ -200,8 +260,11 @@ class PlanExecutorHarness:
             {binding["binding_ref"]: adapter},
             {
                 binding["binding_ref"]: (
-                    lambda params: set(params)
-                    == {"issuer", "form", "date_from", "date_to", "limit"}
+                    lambda params: set(params) == (
+                        {"cik", "taxonomy", "concept", "unit", "form", "filed_to"}
+                        if company_facts
+                        else {"issuer", "form", "date_from", "date_to", "limit"}
+                    )
                 )
             },
         )
@@ -376,6 +439,34 @@ class ResearchPlanExecutorTests(unittest.TestCase):
         replay = harness.executor.run_once(plan_version_ref=harness.plan_wire["id"])
         self.assertEqual(replay["status"], "complete")
         self.assertEqual(harness.staging_counts()["candidate_claim_versions"], 1)
+
+    def test_company_facts_tree_stages_verified_revenue_growth_candidate(self) -> None:
+        harness = self.harness(suffix="company-facts", company_facts=True)
+        outcomes = harness.run_to_complete()
+        self.assertEqual(
+            [item["status"] for item in outcomes],
+            ["admitted", "admitted", "admitted", "complete"],
+        )
+        claim = json.loads(
+            harness.staging.connection.execute(
+                "SELECT record_json FROM candidate_claim_versions"
+            ).fetchone()[0]
+        )
+        self.assertEqual(claim["metric_or_aspect"], "quarterly_revenue_yoy_growth")
+        self.assertEqual(claim["value"], "12.5")
+        self.assertEqual(claim["unit"], "percent")
+        self.assertIn("USD 112500000000", claim["normalized_statement"])
+        self.assertIn("12.5% year over year", claim["normalized_statement"])
+        material = json.loads(
+            harness.staging.connection.execute(
+                "SELECT record_json FROM candidate_source_materials"
+            ).fetchone()[0]
+        )
+        self.assertEqual(
+            material["normalized_payload"]["current"]["accession"],
+            material["normalized_payload"]["prior"]["accession"],
+        )
+        self.assertEqual(material["normalized_payload"]["growth_percent"], "12.50")
 
     def test_connector_receipt_binds_transport_source_artifact_and_envelope(self) -> None:
         harness = self.harness(suffix="bindings")

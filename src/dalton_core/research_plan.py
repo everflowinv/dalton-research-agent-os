@@ -85,6 +85,10 @@ SEC_SOURCE_REF = "source:sec-edgar"
 SEC_PROFILE_REF = "connector-profile-template:sec:0.1"
 SEC_OPERATION = "list_filings"
 SEC_OUTPUT_CONTRACT_REF = "schema:connector-inventory:sec:list_filings:output:0.1"
+SEC_COMPANY_FACTS_OPERATION = "get_company_facts"
+SEC_COMPANY_FACTS_OUTPUT_CONTRACT_REF = (
+    "schema:connector-inventory:sec:get_company_facts:output:0.1"
+)
 SEC_VERIFIER_REF = "verifier:connector-authority-source:0.2"
 SEC_CAPABILITY = "capability:dalton:connector:sec-edgar"
 SEC_RUNTIME_PROFILE_REF = "runner-runtime:sec-public:v1"
@@ -100,8 +104,12 @@ SEC_MAX_ATTEMPTS = 2
 SEC_MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 SEC_MAX_SECONDS = 60
 PERMISSION_SCOPE = "public_sec_list_filings"
+COMPANY_FACTS_PERMISSION_SCOPE = "public_sec_company_facts"
 SIDE_EFFECT_CLASS = "read_only_public"
 PLAN_AUTO_START_RULE_REF = "research-plan-auto-start:sec-public-list-filings:v1"
+PLAN_COMPANY_FACTS_AUTO_START_RULE_REF = (
+    "research-plan-auto-start:sec-public-company-facts:v1"
+)
 PLAN_AUTO_START_ACTOR_REF = "system:research-plan-auto-start"
 
 _CAMEL_CHARS = set("0123456789abcdef")
@@ -166,6 +174,7 @@ _BUDGET_FIELDS = frozenset({
 _HUMAN_ACTOR_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
 _CIK_RE = re.compile(r"[0-9]{1,10}\Z")
 _DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+_XBRL_CONCEPT_RE = re.compile(r"[A-Za-z][A-Za-z0-9]{0,127}\Z")
 
 
 class ResearchPlanError(Exception):
@@ -295,6 +304,82 @@ def _validate_sec_request(value: Any) -> dict[str, str]:
     }
 
 
+def _validate_company_facts_request(value: Any) -> dict[str, str]:
+    """Freeze one exact public SEC Company Concept quarterly comparison."""
+
+    if not isinstance(value, Mapping):
+        raise ResearchPlanValidationError("company_facts_request must be an object")
+    fields = {"cik", "taxonomy", "concept", "unit", "form", "filed_to"}
+    if set(value) != fields:
+        raise ResearchPlanValidationError(
+            "company_facts_request has an invalid closed shape"
+        )
+    cik = _text(value.get("cik"), "company_facts_request.cik")
+    if _CIK_RE.fullmatch(cik) is None:
+        raise ResearchPlanValidationError(
+            "company_facts_request.cik must be a CIK with at most ten digits"
+        )
+    taxonomy = _text(value.get("taxonomy"), "company_facts_request.taxonomy")
+    concept = _text(value.get("concept"), "company_facts_request.concept")
+    unit = _text(value.get("unit"), "company_facts_request.unit")
+    form = _text(value.get("form"), "company_facts_request.form")
+    filed_to = _text(value.get("filed_to"), "company_facts_request.filed_to")
+    if taxonomy != "us-gaap" or unit != "USD" or form != "10-Q":
+        raise ResearchPlanValidationError(
+            "company facts scope is closed to us-gaap/USD/10-Q"
+        )
+    if _XBRL_CONCEPT_RE.fullmatch(concept) is None:
+        raise ResearchPlanValidationError(
+            "company_facts_request.concept is not a safe XBRL concept"
+        )
+    if _DATE_RE.fullmatch(filed_to) is None:
+        raise ResearchPlanValidationError(
+            "company_facts_request.filed_to must be YYYY-MM-DD"
+        )
+    try:
+        filed_date = date.fromisoformat(filed_to)
+    except ValueError as exc:
+        raise ResearchPlanValidationError(
+            "company_facts_request.filed_to is not a calendar date"
+        ) from exc
+    if filed_date.year < 1995 or filed_date.year > 2100:
+        raise ResearchPlanValidationError(
+            "company_facts_request.filed_to is outside the SEC filing epoch"
+        )
+    return {
+        "cik": cik.zfill(10),
+        "taxonomy": taxonomy,
+        "concept": concept,
+        "unit": unit,
+        "form": form,
+        "filed_to": filed_to,
+    }
+
+
+def _validate_operation_request(operation: str, value: Any) -> dict[str, str]:
+    if operation == SEC_OPERATION:
+        return _validate_sec_request(value)
+    if operation == SEC_COMPANY_FACTS_OPERATION:
+        return _validate_company_facts_request(value)
+    raise ResearchPlanValidationError("SEC research operation is not approved")
+
+
+def _operation_permission_scope(operation: str) -> str:
+    if operation == SEC_OPERATION:
+        return PERMISSION_SCOPE
+    if operation == SEC_COMPANY_FACTS_OPERATION:
+        return COMPANY_FACTS_PERMISSION_SCOPE
+    raise ResearchPlanValidationError("SEC research operation is not approved")
+
+
+def _operation_policy_rule(operation: str) -> str:
+    if operation == SEC_OPERATION:
+        return PLAN_AUTO_START_RULE_REF
+    if operation == SEC_COMPANY_FACTS_OPERATION:
+        return PLAN_COMPANY_FACTS_AUTO_START_RULE_REF
+    raise ResearchPlanValidationError("SEC research operation is not approved")
+
+
 def _sec_template() -> dict[str, Any]:
     """The packaged SEC connector template; version 1 plans are closed to it."""
 
@@ -307,16 +392,23 @@ def _sec_template() -> dict[str, Any]:
         ) from exc
 
 
-def _sec_operation(template: Mapping[str, Any]) -> dict[str, Any]:
+def _sec_operation(
+    template: Mapping[str, Any], operation_name: str = SEC_OPERATION
+) -> dict[str, Any]:
     for operation in template.get("operations", []):
-        if isinstance(operation, Mapping) and operation.get("operation") == SEC_OPERATION:
+        if (
+            isinstance(operation, Mapping)
+            and operation.get("operation") == operation_name
+        ):
             return dict(operation)
     raise ResearchPlanConflict(
-        f"packaged SEC template lacks the frozen {SEC_OPERATION} operation"
+        f"packaged SEC template lacks the frozen {operation_name} operation"
     )
 
 
-def _execution_budget(template: Mapping[str, Any]) -> dict[str, int]:
+def _execution_budget(
+    template: Mapping[str, Any], operation_name: str = SEC_OPERATION
+) -> dict[str, int]:
     """Frozen budget/retry bounds for the single-step SEC plan.
 
     ``max_pages`` is taken from the packed template pagination so plan
@@ -325,7 +417,7 @@ def _execution_budget(template: Mapping[str, Any]) -> dict[str, int]:
     fails closed.
     """
 
-    pagination = _sec_operation(template).get("pagination")
+    pagination = _sec_operation(template, operation_name).get("pagination")
     max_pages = 20
     if isinstance(pagination, Mapping) and isinstance(pagination.get("max_pages"), int):
         max_pages = pagination["max_pages"]
@@ -337,15 +429,7 @@ def _execution_budget(template: Mapping[str, Any]) -> dict[str, int]:
     }
 
 
-_STEP_SPECS: tuple[dict[str, Any], ...] = (
-    {
-        "stage": "connector",
-        "operation": SEC_OPERATION,
-        "requested_capabilities": [SEC_CAPABILITY],
-        "runtime_profile_ref": SEC_RUNTIME_PROFILE_REF,
-        "declared_side_effects": ["read:public-http"],
-        "output_contract_ref": SEC_OUTPUT_CONTRACT_REF,
-    },
+_DOWNSTREAM_STEP_SPECS: tuple[dict[str, Any], ...] = (
     {
         "stage": "authority_resolver",
         "operation": "resolve_connector_authority",
@@ -373,25 +457,42 @@ _STEP_SPECS: tuple[dict[str, Any], ...] = (
 )
 
 
+def _step_specs(operation: str) -> tuple[dict[str, Any], ...]:
+    operation_wire = _sec_operation(_sec_template(), operation)
+    return (
+        {
+            "stage": "connector",
+            "operation": operation,
+            "requested_capabilities": [SEC_CAPABILITY],
+            "runtime_profile_ref": SEC_RUNTIME_PROFILE_REF,
+            "declared_side_effects": ["read:public-http"],
+            "output_contract_ref": operation_wire["output_schema_ref"],
+        },
+        *_DOWNSTREAM_STEP_SPECS,
+    )
+
+
 def build_research_plan_step(
     *,
     plan_version_ref: str,
     sec_request: Mapping[str, str],
+    operation: str = SEC_OPERATION,
     ordinal: int = 1,
     prior_step_ref: str | None = None,
     max_attempts: int,
 ) -> dict[str, Any]:
     """Build one deterministic node of the closed SEC research tree."""
 
-    if isinstance(ordinal, bool) or not isinstance(ordinal, int) or not 1 <= ordinal <= len(_STEP_SPECS):
+    specs = _step_specs(operation)
+    if isinstance(ordinal, bool) or not isinstance(ordinal, int) or not 1 <= ordinal <= len(specs):
         raise ResearchPlanValidationError("ordinal is outside the frozen plan tree")
-    spec = _STEP_SPECS[ordinal - 1]
+    spec = specs[ordinal - 1]
     if ordinal == 1 and prior_step_ref is not None:
         raise ResearchPlanValidationError("the root plan step cannot depend on another step")
     if ordinal > 1:
         prior_step_ref = _text(prior_step_ref, "prior_step_ref")
     parameters = (
-        _validate_sec_request(sec_request)
+        _validate_operation_request(operation, sec_request)
         if ordinal == 1
         else {"upstream_step_ref": prior_step_ref}
     )
@@ -427,15 +528,17 @@ def build_research_plan_step(
 
 def build_research_plan_steps(
     *, plan_version_ref: str, sec_request: Mapping[str, str], max_attempts: int,
+    operation: str = SEC_OPERATION,
 ) -> list[dict[str, Any]]:
     """Build the complete closed connector-to-staging task tree."""
 
     steps: list[dict[str, Any]] = []
     prior: str | None = None
-    for ordinal in range(1, len(_STEP_SPECS) + 1):
+    for ordinal in range(1, len(_step_specs(operation)) + 1):
         step = build_research_plan_step(
             plan_version_ref=plan_version_ref,
             sec_request=sec_request,
+            operation=operation,
             ordinal=ordinal,
             prior_step_ref=prior,
             max_attempts=max_attempts,
@@ -469,6 +572,7 @@ def plan_identity(
     question_version_ref: str,
     decision_ref: str,
     sec_request: Mapping[str, str],
+    operation: str = SEC_OPERATION,
 ) -> dict[str, Any]:
     """Canonical identity binding for one research plan version.
 
@@ -478,14 +582,22 @@ def plan_identity(
     caller-supplied id.
     """
 
-    return {
+    base = {
         "identity_schema": _IDENTITY_SCHEMA,
         "planner_ref": PLANNER_REF,
         "question_ref": _text(question_ref, "question_ref"),
         "question_version_ref": _text(question_version_ref, "question_version_ref"),
         "decision_ref": _text(decision_ref, "decision_ref"),
-        "sec_request": _validate_sec_request(sec_request),
     }
+    if operation == SEC_OPERATION:
+        # Preserve the deployed v0.1 identity bytes for existing plans.
+        base["sec_request"] = _validate_sec_request(sec_request)
+    elif operation == SEC_COMPANY_FACTS_OPERATION:
+        base["operation"] = operation
+        base["company_facts_request"] = _validate_company_facts_request(sec_request)
+    else:
+        raise ResearchPlanValidationError("SEC research operation is not approved")
+    return base
 
 
 def plan_version_ref_for(
@@ -494,6 +606,7 @@ def plan_version_ref_for(
     question_version_ref: str,
     decision_ref: str,
     sec_request: Mapping[str, str],
+    operation: str = SEC_OPERATION,
 ) -> str:
     """Deterministic plan version ref derived from the identity binding."""
 
@@ -502,6 +615,7 @@ def plan_version_ref_for(
         question_version_ref=question_version_ref,
         decision_ref=decision_ref,
         sec_request=sec_request,
+        operation=operation,
     ))[:32]
 
 
@@ -676,16 +790,17 @@ def _revalidate_execution_scope(
             "plan execution scope has an invalid closed shape"
         )
     template = _sec_template()
-    operation = _sec_operation(template)
+    operation_name = scope.get("operation")
+    if operation_name not in {SEC_OPERATION, SEC_COMPANY_FACTS_OPERATION}:
+        raise ResearchPlanConflict("plan operation is outside the approved SEC reads")
+    operation = _sec_operation(template, operation_name)
     if scope["source_ref"] != template["source_identity"]["source_ref"]:
         raise ResearchPlanConflict("plan source drifted from the SEC template")
     if scope["connector_profile_ref"] != template["id"]:
         raise ResearchPlanConflict("plan connector profile drifted")
     if scope["connector_profile_hash"] != template["content_hash"]:
         raise ResearchPlanConflict("plan connector profile hash drifted")
-    if scope["operation"] != SEC_OPERATION:
-        raise ResearchPlanConflict("plan operation drifted from the frozen SEC read")
-    if scope["permission_scope"] != PERMISSION_SCOPE:
+    if scope["permission_scope"] != _operation_permission_scope(operation_name):
         raise ResearchPlanConflict("plan permission scope drifted from the frozen read scope")
     if scope["auth_mode"] != "none":
         raise ResearchPlanConflict("plan requests credentials (auth_mode must be none)")
@@ -699,11 +814,11 @@ def _revalidate_execution_scope(
         raise ResearchPlanConflict("plan output contract drifted")
     if scope["output_contract_hash"] != operation["output_schema_hash"]:
         raise ResearchPlanConflict("plan output contract hash drifted")
-    parameters = _validate_sec_request(scope["parameters"])
+    parameters = _validate_operation_request(operation_name, scope["parameters"])
     budget = scope["budget"]
     if not isinstance(budget, Mapping) or set(budget) != _BUDGET_FIELDS:
         raise ResearchPlanConflict("plan budget has an invalid closed shape")
-    expected_budget = _execution_budget(template)
+    expected_budget = _execution_budget(template, operation_name)
     if canonical_json(budget) != canonical_json(expected_budget):
         raise ResearchPlanConflict("plan budget drifted from the frozen bounds")
     steps = scope["steps"]
@@ -711,6 +826,7 @@ def _revalidate_execution_scope(
         plan_version_ref=plan_version_ref,
         sec_request=parameters,
         max_attempts=SEC_MAX_ATTEMPTS,
+        operation=operation_name,
     )
     if not isinstance(steps, list) or len(steps) != len(expected_steps):
         raise ResearchPlanConflict("plan must define the complete frozen four-step tree")
@@ -846,12 +962,14 @@ def read_exact_research_plan_version(cursor: Any, version_ref: str) -> dict[str,
             "ResearchPlanVersion drifted from its exact question version"
         )
     scope = wire["execution_scope"]
-    parameters = _validate_sec_request(scope["parameters"])
+    operation_name = scope.get("operation")
+    parameters = _validate_operation_request(operation_name, scope["parameters"])
     identity = plan_identity(
         question_ref=wire["question_ref"],
         question_version_ref=wire["question_version_ref"],
         decision_ref=wire["agenda_binding"]["decision_ref"],
         sec_request=parameters,
+        operation=operation_name,
     )
     expected_ref = "research-plan:" + content_hash(identity)[:32]
     if wire["id"] != expected_ref or expected_ref != row["version_id"]:
@@ -1031,17 +1149,18 @@ def read_exact_research_plan_policy_authorization(
         raise ResearchPlanConflict(
             "ResearchPlanPolicyAuthorization has an invalid closed shape"
         )
+    plan = read_exact_research_plan_version(cursor, wire["plan_version_ref"])
+    expected_rule = _operation_policy_rule(plan["execution_scope"]["operation"])
     if (
         wire["schema_version"] != SCHEMA_VERSION
         or wire["decision"] != "accepted"
         or wire["actor_ref"] != PLAN_AUTO_START_ACTOR_REF
         or wire["authorization"] != "versioned_governance_policy"
-        or wire["rule_ref"] != PLAN_AUTO_START_RULE_REF
+        or wire["rule_ref"] != expected_rule
     ):
         raise ResearchPlanConflict(
             "ResearchPlanPolicyAuthorization authority is invalid"
         )
-    plan = read_exact_research_plan_version(cursor, wire["plan_version_ref"])
     if plan["content_hash"] != wire["plan_version_hash"]:
         raise ResearchPlanConflict(
             "ResearchPlanPolicyAuthorization drifted from its exact plan"
@@ -1383,6 +1502,7 @@ class ResearchPlanAuthority:
         filing_date_to: str,
         actor_ref: str,
         idempotency_key: str | None = None,
+        company_facts_request: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Record one immutable plan from an exact selected question/decision.
 
@@ -1399,18 +1519,36 @@ class ResearchPlanAuthority:
         question_ref = _text(question_ref, "question_ref")
         question_version_ref = _text(question_version_ref, "question_version_ref")
         decision_ref = _text(decision_ref, "decision_ref")
-        sec_request = _validate_sec_request({
-            "issuer_cik": issuer_cik,
-            "form": form,
-            "filing_date_from": filing_date_from,
-            "filing_date_to": filing_date_to,
-        })
+        if company_facts_request is None:
+            operation_name = SEC_OPERATION
+            sec_request = _validate_sec_request({
+                "issuer_cik": issuer_cik,
+                "form": form,
+                "filing_date_from": filing_date_from,
+                "filing_date_to": filing_date_to,
+            })
+            request_scope = {"sec_request": sec_request}
+        else:
+            operation_name = SEC_COMPANY_FACTS_OPERATION
+            sec_request = _validate_company_facts_request(company_facts_request)
+            if sec_request["cik"] != _text(issuer_cik, "issuer_cik").zfill(10):
+                raise ResearchPlanValidationError(
+                    "issuer_cik must match company_facts_request.cik"
+                )
+            if sec_request["form"] != _text(form, "form"):
+                raise ResearchPlanValidationError(
+                    "form must match company_facts_request.form"
+                )
+            request_scope = {
+                "operation": operation_name,
+                "company_facts_request": sec_request,
+            }
         actor_ref = _text(actor_ref, "actor_ref")
         request = {
             "question_ref": question_ref,
             "question_version_ref": question_version_ref,
             "decision_ref": decision_ref,
-            "sec_request": sec_request,
+            **request_scope,
             "actor_ref": actor_ref,
         }
         request_hash = content_hash(request)
@@ -1463,6 +1601,7 @@ class ResearchPlanAuthority:
                 question_version_ref=question_version_ref,
                 decision_ref=decision["id"],
                 sec_request=sec_request,
+                operation=operation_name,
             )
             existing = cur.execute(
                 "SELECT * FROM research_plan_versions WHERE version_id=?",
@@ -1505,25 +1644,26 @@ class ResearchPlanAuthority:
                 )
             context = _recompute_context_binding(cur, cycle)
             template = _sec_template()
-            operation = _sec_operation(template)
+            operation = _sec_operation(template, operation_name)
             scope = {
                 "source_ref": template["source_identity"]["source_ref"],
                 "connector_profile_ref": template["id"],
                 "connector_profile_hash": template["content_hash"],
-                "operation": SEC_OPERATION,
+                "operation": operation_name,
                 "parameters": sec_request,
-                "permission_scope": PERMISSION_SCOPE,
+                "permission_scope": _operation_permission_scope(operation_name),
                 "auth_mode": template["auth_boundary"]["mode"],
                 "side_effect_class": SIDE_EFFECT_CLASS,
                 "declared_side_effects": ["read:public-http"],
                 "verifier_ref": SEC_VERIFIER_REF,
                 "output_contract_ref": operation["output_schema_ref"],
                 "output_contract_hash": operation["output_schema_hash"],
-                "budget": _execution_budget(template),
+                "budget": _execution_budget(template, operation_name),
                 "steps": build_research_plan_steps(
                     plan_version_ref=plan_ref,
                     sec_request=sec_request,
                     max_attempts=SEC_MAX_ATTEMPTS,
+                    operation=operation_name,
                 ),
             }
             plan_wire = self._record({
@@ -1587,6 +1727,46 @@ class ResearchPlanAuthority:
                 cur, idempotency_key, "create_research_plan", request_hash, result
             )
             return result
+
+    def create_company_facts_plan(
+        self,
+        *,
+        question_ref: str,
+        question_version_ref: str,
+        decision_ref: str,
+        cik: str,
+        concept: str,
+        filed_to: str,
+        actor_ref: str,
+        taxonomy: str = "us-gaap",
+        unit: str = "USD",
+        form: str = "10-Q",
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Record the closed Company Concept variant of the SEC plan."""
+
+        return self.create_plan(
+            question_ref=question_ref,
+            question_version_ref=question_version_ref,
+            decision_ref=decision_ref,
+            issuer_cik=cik,
+            form=form,
+            # The list-filings date arguments are not part of this operation;
+            # bind them to filed_to so the wrapper cannot smuggle a second
+            # temporal scope into the generic creation path.
+            filing_date_from=filed_to,
+            filing_date_to=filed_to,
+            actor_ref=actor_ref,
+            idempotency_key=idempotency_key,
+            company_facts_request={
+                "cik": cik,
+                "taxonomy": taxonomy,
+                "concept": concept,
+                "unit": unit,
+                "form": form,
+                "filed_to": filed_to,
+            },
+        )
 
     def approve_plan(
         self,
@@ -1712,11 +1892,14 @@ class ResearchPlanAuthority:
             except (TypeError, ValueError) as exc:
                 raise ResearchPlanConflict("active governance policy is corrupt") from exc
             rule = policy.get("research_plan_auto_start")
+            expected_rule = _operation_policy_rule(
+                plan["execution_scope"]["operation"]
+            )
             if (
                 not isinstance(rule, Mapping)
                 or set(rule) != {"enabled", "rules"}
                 or rule["enabled"] is not True
-                or rule["rules"] != [PLAN_AUTO_START_RULE_REF]
+                or rule["rules"] != [expected_rule]
             ):
                 raise ResearchPlanConflict(
                     "active governance policy does not authorize this research plan"
@@ -1755,7 +1938,7 @@ class ResearchPlanAuthority:
                 "plan_version_hash": plan["content_hash"],
                 "policy_version_ref": policy_ref,
                 "policy_version_hash": policy_hash,
-                "rule_ref": PLAN_AUTO_START_RULE_REF,
+                "rule_ref": expected_rule,
             })[:32]
             authorization = self._record({
                 "schema_version": SCHEMA_VERSION,
@@ -1768,7 +1951,7 @@ class ResearchPlanAuthority:
                 "authorization": "versioned_governance_policy",
                 "policy_version_ref": policy_ref,
                 "policy_version_hash": policy_hash,
-                "rule_ref": PLAN_AUTO_START_RULE_REF,
+                "rule_ref": expected_rule,
                 "created_at": max(plan["created_at"], policy_row["created_at"]),
             })
             cur.execute(
@@ -1901,11 +2084,23 @@ def _plan_work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
     for step in steps:
         if step["stage"] == "connector":
             request = step["parameters"]
-            question = (
-                "SEC public read-only list_filings for CIK "
-                f"{request['issuer_cik']}, form {request['form']}, window "
-                f"{request['filing_date_from']}..{request['filing_date_to']}"
-            )
+            if step["operation"] == SEC_OPERATION:
+                question = (
+                    "SEC public read-only list_filings for CIK "
+                    f"{request['issuer_cik']}, form {request['form']}, window "
+                    f"{request['filing_date_from']}..{request['filing_date_to']}"
+                )
+            elif step["operation"] == SEC_COMPANY_FACTS_OPERATION:
+                question = (
+                    "SEC public read-only get_company_facts for CIK "
+                    f"{request['cik']}, concept {request['taxonomy']}:"
+                    f"{request['concept']}, unit {request['unit']}, form "
+                    f"{request['form']}, filed through {request['filed_to']}"
+                )
+            else:
+                raise ResearchPlanConflict(
+                    "connector WorkOrder operation is outside the approved SEC reads"
+                )
         else:
             question = (
                 f"Research plan {plan_wire['id']} stage {step['ordinal']}: "
@@ -2555,7 +2750,11 @@ __all__ = [
     "PLANNER_REF",
     "SEC_ALLOWED_FORMS",
     "SEC_OPERATION",
+    "SEC_COMPANY_FACTS_OPERATION",
     "PERMISSION_SCOPE",
+    "COMPANY_FACTS_PERMISSION_SCOPE",
+    "PLAN_AUTO_START_RULE_REF",
+    "PLAN_COMPANY_FACTS_AUTO_START_RULE_REF",
     "SIDE_EFFECT_CLASS",
     "plan_identity",
     "plan_version_ref_for",
