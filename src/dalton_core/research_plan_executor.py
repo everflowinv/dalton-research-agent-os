@@ -334,7 +334,7 @@ def sec_adapter_parameters(plan_wire: Mapping[str, Any]) -> dict[str, Any]:
         return {
             "cik": request["cik"],
             "taxonomy": request["taxonomy"],
-            "concept": request["concept"],
+            "concept_candidates": list(request["concept_candidates"]),
             "unit": request["unit"],
             "form": request["form"],
             "filed_from": request["filed_from"],

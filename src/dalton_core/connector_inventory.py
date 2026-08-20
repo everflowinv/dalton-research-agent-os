@@ -876,6 +876,22 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "entity_name": _string(),
                 "cik": {"type": "string", "pattern": "^[0-9]{10}$"},
                 "taxonomy": {"type": "string", "enum": ["us-gaap"]},
+                "concept_candidates": {
+                    "type": "array", "minItems": 1, "maxItems": 8,
+                    "uniqueItems": True,
+                    "items": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z][A-Za-z0-9]{0,127}$",
+                    },
+                },
+                "eligible_concepts": {
+                    "type": "array", "minItems": 1, "maxItems": 8,
+                    "uniqueItems": True,
+                    "items": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z][A-Za-z0-9]{0,127}$",
+                    },
+                },
                 "concept": {
                     "type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]{0,127}$",
                 },
@@ -884,6 +900,14 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "form": {"type": "string", "enum": ["10-Q"]},
                 "filed_from": _string(),
                 "filed_to": _string(),
+                "latest_accession": {
+                    "type": "string",
+                    "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+                },
+                "selection_basis": {
+                    "type": "string",
+                    "enum": ["ordered_allowlist_latest_10-Q"],
+                },
                 "current": fact,
                 "prior": fact,
                 "growth_percent": decimal,
@@ -897,7 +921,8 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
             },
             (
                 "schema_version", "entity_name", "cik", "taxonomy", "concept",
-                "label", "unit", "form", "filed_from", "filed_to", "current", "prior",
+                "concept_candidates", "eligible_concepts", "label", "unit", "form", "filed_from",
+                "filed_to", "latest_accession", "selection_basis", "current", "prior",
                 "growth_percent", "source_record_refs", "next_cursor",
                 "provider_status", "content_hash",
             ),
@@ -958,8 +983,8 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 "get_company_facts",
                 completeness="enumerated",
                 input_fields=(
-                    "cik", "taxonomy", "concept", "unit", "form", "filed_from",
-                    "filed_to",
+                    "cik", "taxonomy", "concept_candidates", "unit", "form",
+                    "filed_from", "filed_to",
                 ),
             ),
         ),
@@ -1086,7 +1111,7 @@ def _field_schema(name: str) -> dict[str, Any]:
         }
     if name == "cursor":
         return {"type": ["string", "null"]}
-    if name in {"allowed_handles", "subreddits"}:
+    if name in {"allowed_handles", "subreddits", "concept_candidates"}:
         return _array_of_strings()
     return _string()
 

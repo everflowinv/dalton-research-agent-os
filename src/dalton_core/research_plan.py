@@ -110,6 +110,11 @@ PLAN_AUTO_START_RULE_REF = "research-plan-auto-start:sec-public-list-filings:v1"
 PLAN_COMPANY_FACTS_AUTO_START_RULE_REF = (
     "research-plan-auto-start:sec-public-company-facts:v1"
 )
+DEFAULT_REVENUE_CONCEPT_CANDIDATES = (
+    "Revenues",
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "SalesRevenueNet",
+)
 PLAN_AUTO_START_ACTOR_REF = "system:research-plan-auto-start"
 
 _CAMEL_CHARS = set("0123456789abcdef")
@@ -304,13 +309,14 @@ def _validate_sec_request(value: Any) -> dict[str, str]:
     }
 
 
-def _validate_company_facts_request(value: Any) -> dict[str, str]:
-    """Freeze one exact public SEC Company Concept quarterly comparison."""
+def _validate_company_facts_request(value: Any) -> dict[str, Any]:
+    """Freeze one bounded public SEC Company Facts revenue comparison."""
 
     if not isinstance(value, Mapping):
         raise ResearchPlanValidationError("company_facts_request must be an object")
     fields = {
-        "cik", "taxonomy", "concept", "unit", "form", "filed_from", "filed_to",
+        "cik", "taxonomy", "concept_candidates", "unit", "form",
+        "filed_from", "filed_to",
     }
     if set(value) != fields:
         raise ResearchPlanValidationError(
@@ -322,7 +328,19 @@ def _validate_company_facts_request(value: Any) -> dict[str, str]:
             "company_facts_request.cik must be a CIK with at most ten digits"
         )
     taxonomy = _text(value.get("taxonomy"), "company_facts_request.taxonomy")
-    concept = _text(value.get("concept"), "company_facts_request.concept")
+    raw_candidates = value.get("concept_candidates")
+    if not isinstance(raw_candidates, (list, tuple)) or not 1 <= len(raw_candidates) <= 8:
+        raise ResearchPlanValidationError(
+            "company_facts_request.concept_candidates must contain 1..8 concepts"
+        )
+    concept_candidates = [
+        _text(item, "company_facts_request.concept_candidates[]")
+        for item in raw_candidates
+    ]
+    if len(set(concept_candidates)) != len(concept_candidates):
+        raise ResearchPlanValidationError(
+            "company_facts_request.concept_candidates must be unique"
+        )
     unit = _text(value.get("unit"), "company_facts_request.unit")
     form = _text(value.get("form"), "company_facts_request.form")
     filed_from = _text(
@@ -333,9 +351,12 @@ def _validate_company_facts_request(value: Any) -> dict[str, str]:
         raise ResearchPlanValidationError(
             "company facts scope is closed to us-gaap/USD/10-Q"
         )
-    if _XBRL_CONCEPT_RE.fullmatch(concept) is None:
+    if any(
+        _XBRL_CONCEPT_RE.fullmatch(candidate) is None
+        for candidate in concept_candidates
+    ):
         raise ResearchPlanValidationError(
-            "company_facts_request.concept is not a safe XBRL concept"
+            "company_facts_request contains an unsafe XBRL concept"
         )
     if _DATE_RE.fullmatch(filed_from) is None:
         raise ResearchPlanValidationError(
@@ -373,7 +394,7 @@ def _validate_company_facts_request(value: Any) -> dict[str, str]:
     return {
         "cik": cik.zfill(10),
         "taxonomy": taxonomy,
-        "concept": concept,
+        "concept_candidates": concept_candidates,
         "unit": unit,
         "form": form,
         "filed_from": filed_from,
@@ -381,7 +402,7 @@ def _validate_company_facts_request(value: Any) -> dict[str, str]:
     }
 
 
-def _validate_operation_request(operation: str, value: Any) -> dict[str, str]:
+def _validate_operation_request(operation: str, value: Any) -> dict[str, Any]:
     if operation == SEC_OPERATION:
         return _validate_sec_request(value)
     if operation == SEC_COMPANY_FACTS_OPERATION:
@@ -595,8 +616,8 @@ def plan_identity(
     *,
     question_ref: str,
     question_version_ref: str,
-    decision_ref: str,
-    sec_request: Mapping[str, str],
+        decision_ref: str,
+        sec_request: Mapping[str, Any],
     operation: str = SEC_OPERATION,
 ) -> dict[str, Any]:
     """Canonical identity binding for one research plan version.
@@ -1760,10 +1781,10 @@ class ResearchPlanAuthority:
         question_version_ref: str,
         decision_ref: str,
         cik: str,
-        concept: str,
         filed_from: str,
         filed_to: str,
         actor_ref: str,
+        concept_candidates: Sequence[str] = DEFAULT_REVENUE_CONCEPT_CANDIDATES,
         taxonomy: str = "us-gaap",
         unit: str = "USD",
         form: str = "10-Q",
@@ -1787,7 +1808,7 @@ class ResearchPlanAuthority:
             company_facts_request={
                 "cik": cik,
                 "taxonomy": taxonomy,
-                "concept": concept,
+                "concept_candidates": list(concept_candidates),
                 "unit": unit,
                 "form": form,
                 "filed_from": filed_from,
@@ -2120,8 +2141,8 @@ def _plan_work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
             elif step["operation"] == SEC_COMPANY_FACTS_OPERATION:
                 question = (
                     "SEC public read-only get_company_facts for CIK "
-                    f"{request['cik']}, concept {request['taxonomy']}:"
-                    f"{request['concept']}, unit {request['unit']}, form "
+                    f"{request['cik']}, concepts {request['taxonomy']}:"
+                    f"{','.join(request['concept_candidates'])}, unit {request['unit']}, form "
                     f"{request['form']}, filed in "
                     f"{request['filed_from']}..{request['filed_to']}"
                 )
@@ -2783,6 +2804,7 @@ __all__ = [
     "COMPANY_FACTS_PERMISSION_SCOPE",
     "PLAN_AUTO_START_RULE_REF",
     "PLAN_COMPANY_FACTS_AUTO_START_RULE_REF",
+    "DEFAULT_REVENUE_CONCEPT_CANDIDATES",
     "SIDE_EFFECT_CLASS",
     "plan_identity",
     "plan_version_ref_for",

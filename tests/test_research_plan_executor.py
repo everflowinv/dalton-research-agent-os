@@ -79,13 +79,9 @@ def _sec_body() -> bytes:
 
 
 def _sec_company_facts_body() -> bytes:
-    payload = {
-        "cik": 320193,
-        "taxonomy": "us-gaap",
-        "tag": "RevenueFromContractWithCustomerExcludingAssessedTax",
+    concept = {
         "label": "Revenue from Contract with Customer, Excluding Assessed Tax",
         "description": "Synthetic quarterly revenue series.",
-        "entityName": "APPLE INC.",
         "units": {"USD": [
             {
                 "start": "2025-01-01", "end": "2025-03-31",
@@ -100,6 +96,13 @@ def _sec_company_facts_body() -> bytes:
                 "filed": "2026-05-01", "frame": "CY2026Q1",
             },
         ]},
+    }
+    payload = {
+        "cik": 320193,
+        "entityName": "APPLE INC.",
+        "facts": {"us-gaap": {
+            "RevenueFromContractWithCustomerExcludingAssessedTax": concept,
+        }},
     }
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
 
@@ -135,7 +138,6 @@ class PlanExecutorHarness:
                 question_version_ref=record["question_version_ref"],
                 decision_ref=decision["id"],
                 cik="320193",
-                concept="RevenueFromContractWithCustomerExcludingAssessedTax",
                 filed_from="2025-08-20",
                 filed_to="2026-08-20",
                 actor_ref="core:planner",
@@ -263,7 +265,7 @@ class PlanExecutorHarness:
                 binding["binding_ref"]: (
                     lambda params: set(params) == (
                         {
-                            "cik", "taxonomy", "concept", "unit", "form",
+                            "cik", "taxonomy", "concept_candidates", "unit", "form",
                             "filed_from", "filed_to",
                         }
                         if company_facts

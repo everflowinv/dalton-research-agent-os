@@ -17,6 +17,7 @@ from dalton_core.sec_public_adapter import (  # noqa: E402
     DEFAULT_USER_AGENT,
     SecCompanyConceptHttpAdapter,
 )
+from dalton_core.research_plan import DEFAULT_REVENUE_CONCEPT_CANDIDATES  # noqa: E402
 from dalton_core.store import canonical_json, content_hash  # noqa: E402
 
 
@@ -40,8 +41,9 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--cik", default="0000789019")
     parser.add_argument(
-        "--concept",
-        default="RevenueFromContractWithCustomerExcludingAssessedTax",
+        "--concept-candidate", "--concept", dest="concept_candidates",
+        action="append",
+        help="ordered revenue concept allowlist; repeat to add candidates",
     )
     parser.add_argument("--filed-from", required=True)
     parser.add_argument("--filed-to", required=True)
@@ -54,7 +56,9 @@ def main() -> int:
     parameters = {
         "cik": args.cik,
         "taxonomy": "us-gaap",
-        "concept": args.concept,
+        "concept_candidates": list(
+            args.concept_candidates or DEFAULT_REVENUE_CONCEPT_CANDIDATES
+        ),
         "unit": "USD",
         "form": "10-Q",
         "filed_from": args.filed_from,
@@ -99,12 +103,16 @@ def main() -> int:
         "entity_name": normalized["entity_name"],
         "cik": normalized["cik"],
         "taxonomy": normalized["taxonomy"],
+        "concept_candidates": normalized["concept_candidates"],
+        "eligible_concepts": normalized["eligible_concepts"],
         "concept": normalized["concept"],
         "label": normalized["label"],
         "unit": normalized["unit"],
         "form": normalized["form"],
         "filed_from": normalized["filed_from"],
         "filed_to": normalized["filed_to"],
+        "latest_accession": normalized["latest_accession"],
+        "selection_basis": normalized["selection_basis"],
         "current": normalized["current"],
         "prior": normalized["prior"],
         "growth_percent": normalized["growth_percent"],

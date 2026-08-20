@@ -103,11 +103,11 @@
     "company_facts_request": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cik", "taxonomy", "concept", "unit", "form", "filed_from", "filed_to"],
+      "required": ["cik", "taxonomy", "concept_candidates", "unit", "form", "filed_from", "filed_to"],
       "properties": {
         "cik": {"type": "string", "pattern": "^[0-9]{10}$"},
         "taxonomy": {"const": "us-gaap"},
-        "concept": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]{0,127}$"},
+        "concept_candidates": {"type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9]{0,127}$"}},
         "unit": {"const": "USD"},
         "form": {"const": "10-Q"},
         "filed_from": {"type": "string", "format": "date"},

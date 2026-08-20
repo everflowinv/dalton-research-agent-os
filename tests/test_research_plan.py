@@ -244,7 +244,6 @@ class ResearchPlanTests(unittest.TestCase):
                 question_version_ref=record["question_version_ref"],
                 decision_ref=decision["id"],
                 cik="789019",
-                concept="RevenueFromContractWithCustomerExcludingAssessedTax",
                 filed_from="2025-01-01",
                 filed_to="2026-08-20",
                 actor_ref="core:planner",
@@ -255,7 +254,6 @@ class ResearchPlanTests(unittest.TestCase):
             question_version_ref=record["question_version_ref"],
             decision_ref=decision["id"],
             cik="789019",
-            concept="RevenueFromContractWithCustomerExcludingAssessedTax",
             filed_from="2025-08-20",
             filed_to="2026-08-20",
             actor_ref="core:planner",
@@ -275,6 +273,14 @@ class ResearchPlanTests(unittest.TestCase):
         self.assertEqual(
             wire["execution_scope"]["steps"][0]["parameters"]["filed_from"],
             "2025-08-20",
+        )
+        self.assertEqual(
+            wire["execution_scope"]["steps"][0]["parameters"]["concept_candidates"],
+            [
+                "Revenues",
+                "RevenueFromContractWithCustomerExcludingAssessedTax",
+                "SalesRevenueNet",
+            ],
         )
         active = self.store.active_policy()
         policy_wire = dict(active["policy"])

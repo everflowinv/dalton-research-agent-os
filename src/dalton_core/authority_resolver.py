@@ -44,7 +44,7 @@ from .research_coordinator import (
 )
 from .sec_public_adapter import (
     SecPublicAdapterError,
-    normalize_sec_company_concept,
+    normalize_sec_company_facts,
     normalize_sec_submissions,
 )
 from .store import canonical_json, content_hash
@@ -952,7 +952,7 @@ class ConnectorAuthorityResolver:
                 source["source"] == "source:sec-edgar"
                 and source["operation"] == "get_company_facts"
             ):
-                normalized = normalize_sec_company_concept(
+                normalized = normalize_sec_company_facts(
                     raw_payload, call["parameters"],
                     provider_status=int(observation["provider_status_code"] or 0),
                 )

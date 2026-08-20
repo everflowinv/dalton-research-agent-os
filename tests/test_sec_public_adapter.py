@@ -10,6 +10,7 @@ from dalton_core.sec_public_adapter import (
     SecPublicHttpAdapter,
     SecPublicRouterAdapter,
     normalize_sec_company_concept,
+    normalize_sec_company_facts,
     normalize_sec_submissions,
 )
 
@@ -39,6 +40,20 @@ CONCEPT_PARAMETERS = {
     "cik": "0000789019",
     "taxonomy": "us-gaap",
     "concept": "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "unit": "USD",
+    "form": "10-Q",
+    "filed_from": "2025-08-20",
+    "filed_to": "2026-08-20",
+}
+
+COMPANY_FACTS_PARAMETERS = {
+    "cik": "0000789019",
+    "taxonomy": "us-gaap",
+    "concept_candidates": [
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "SalesRevenueNet",
+    ],
     "unit": "USD",
     "form": "10-Q",
     "filed_from": "2025-08-20",
@@ -88,6 +103,29 @@ def concept_payload():
                 },
             ]
         },
+    }
+
+
+def company_facts_payload():
+    exact = concept_payload()
+    current = {
+        "label": exact["label"],
+        "description": exact["description"],
+        "units": exact["units"],
+    }
+    equivalent = json.loads(json.dumps(current))
+    equivalent["label"] = "Revenues"
+    stale = json.loads(json.dumps(current))
+    stale["label"] = "Revenue, Net (Deprecated)"
+    stale["units"]["USD"] = stale["units"]["USD"][:2]
+    return {
+        "cik": exact["cik"],
+        "entityName": exact["entityName"],
+        "facts": {"us-gaap": {
+            "RevenueFromContractWithCustomerExcludingAssessedTax": current,
+            "Revenues": equivalent,
+            "SalesRevenueNet": stale,
+        }},
     }
 
 
@@ -246,14 +284,60 @@ class AdapterTests(unittest.TestCase):
                 provider_status=200,
             )
 
+    def test_company_facts_resolves_allowlist_on_latest_accession(self):
+        result = normalize_sec_company_facts(
+            company_facts_payload(), COMPANY_FACTS_PARAMETERS, provider_status=200
+        )
+        self.assertEqual(
+            result["concept"],
+            "Revenues",
+        )
+        self.assertEqual(result["latest_accession"], "0000789019-26-000054")
+        self.assertEqual(result["growth_percent"], "13.27")
+        self.assertEqual(
+            result["selection_basis"],
+            "ordered_allowlist_latest_10-Q",
+        )
+        self.assertEqual(
+            result["eligible_concepts"],
+            ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax"],
+        )
+
+        stale_first = {
+            **COMPANY_FACTS_PARAMETERS,
+            "concept_candidates": ["SalesRevenueNet", "Revenues"],
+        }
+        selected = normalize_sec_company_facts(
+            company_facts_payload(), stale_first, provider_status=200
+        )
+        self.assertEqual(selected["concept"], "Revenues")
+
+        disagreeing = company_facts_payload()
+        disagreeing["facts"]["us-gaap"]["Revenues"]["units"]["USD"][3]["val"] += 1
+        preferred = normalize_sec_company_facts(
+            disagreeing,
+            {
+                **COMPANY_FACTS_PARAMETERS,
+                "concept_candidates": [
+                    "RevenueFromContractWithCustomerExcludingAssessedTax",
+                    "Revenues",
+                ],
+            },
+            provider_status=200,
+        )
+        self.assertEqual(
+            preferred["concept"],
+            "RevenueFromContractWithCustomerExcludingAssessedTax",
+        )
+
     def test_company_concept_adapter_is_credential_free_and_route_bound(self):
-        body = json.dumps(concept_payload(), separators=(",", ":")).encode()
+        body = json.dumps(company_facts_payload(), separators=(",", ":")).encode()
         transport = Transport(Response(200, body))
         adapter = SecCompanyConceptHttpAdapter(
             transport=transport, clock=lambda: WHEN, user_agent="operator/sec-canary"
         )
         request = {
-            "parameters": CONCEPT_PARAMETERS,
+            "parameters": COMPANY_FACTS_PARAMETERS,
             "deadline_at": (WHEN + timedelta(seconds=10)).isoformat(),
             "allowed_hosts": ["data.sec.gov"],
             "network_policy": {"allow_redirects": False, "max_redirects": 0},
@@ -264,20 +348,18 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(observation["outcome"], "succeeded")
         self.assertEqual(
             transport.url,
-            "https://data.sec.gov/api/xbrl/companyconcept/"
-            "CIK0000789019/us-gaap/"
-            "RevenueFromContractWithCustomerExcludingAssessedTax.json",
+            "https://data.sec.gov/api/xbrl/companyfacts/CIK0000789019.json",
         )
         with self.assertRaises(SecPublicAdapterError):
             adapter(request, object(), credential_handle="forbidden")
 
     def test_router_dispatches_only_the_two_registered_operations(self):
-        body = json.dumps(concept_payload(), separators=(",", ":")).encode()
+        body = json.dumps(company_facts_payload(), separators=(",", ":")).encode()
         transport = Transport(Response(200, body))
         router = SecPublicRouterAdapter(transport=transport, clock=lambda: WHEN)
         request = {
             "operation": "get_company_facts",
-            "parameters": CONCEPT_PARAMETERS,
+            "parameters": COMPANY_FACTS_PARAMETERS,
             "deadline_at": (WHEN + timedelta(seconds=10)).isoformat(),
             "allowed_hosts": ["data.sec.gov"],
             "network_policy": {"allow_redirects": False, "max_redirects": 0},

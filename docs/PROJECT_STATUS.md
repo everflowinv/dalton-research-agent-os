@@ -46,20 +46,27 @@ thesis/model，不能把单一收入增速自动解释成投资结论。
 作为“最新”事实自动提交。`get_company_facts` 现在必须冻结最长 400 天的 `filed_from..filed_to`，adapter、raw
 authority replay 和 policy commit 都绑定同一窗口；旧 concept 在窗口内没有 10-Q 时会在 connector 阶段失败，
 不会生成 Evidence 或 Claim。窗口化实跑中，Apple 的同季度收入同比为 16.36%，NVIDIA 的 `Revenues` 为 85.23%，
-Walmart 当前 revenue concept 为 7.14%；三个 plan 都是零人工审批并完成正式 closure，Walmart 旧 concept 则按预期
-产生 0 条 Evidence、0 条 Claim。专项测试同时覆盖 `10-Q/A` 排除、缺失同比、模糊 context 和超宽窗口。
+Walmart ASC 606 revenue concept 为 7.14%；三个 plan 都是零人工审批并完成正式 closure，Walmart 旧 concept 则按
+预期产生 0 条 Evidence、0 条 Claim。专项测试同时覆盖 `10-Q/A` 排除、缺失同比、模糊 context 和超宽窗口。
 
-当前下一阶段是 **自动选择当前 revenue concept，再把财务事实映射到既有 driver/thesis**：
-系统不能依赖人先告诉它 NVIDIA 应从旧 concept 切到 `Revenues`。下一切片应把 concept 选择绑定到最新 10-Q
-accession 和 closed concept allowlist；选择不唯一时自动失败，不转成人工逐条审批。通过这一层的正式 Claim 再进入
-driver/thesis verifier；deterministic fact 未经独立判断不能直接改 thesis。
+随后开发候选已去掉 company-specific concept 输入。plan 只冻结统一的有序 allowlist：`Revenues →
+RevenueFromContractWithCustomerExcludingAssessedTax → SalesRevenueNet`；adapter 从 SEC Company Facts 原始响应找出
+窗口内最新 10-Q accession，只在该 accession 上按顺序选第一个能形成 same-filing 同比的 concept，并把全部可用
+concept 一并写入 authority。当前代码实跑 Apple 时自动 fallback 到 ASC 606 concept，NVIDIA 自动选 `Revenues`
+并得到 85.23%，Walmart 自动选更完整的 `Revenues` 并得到 7.33%；此前 7.14% 的口径不含部分会员费等收入。
+三家公司均完成零人工审批的正式 closure。
+
+当前下一阶段是 **把正式财务 Claim 映射到既有 driver/thesis verifier**：
+先为“收入增速是否支持、削弱或不改变某一条既有 driver”建立独立判断与验证，不让 deterministic fact 直接改
+thesis，也不增加逐条 owner 审批。没有既有 thesis/driver 时只保存 Claim 并生成后续研究问题。
 现有 versioned governance policy 可分别只允许 closed SEC public `10-Q list_filings` 或 exact
 `10-Q get_company_facts` plan 自动启动；
 其中 `list_filings` 结果只有在 Core 从 exact
 CallSpec、SourceEnvelope 和 Artifact 重新推导 CIK、表单、日期窗、记录数与完整 statement，并命中固定
 `filing_count` rule 时才能自动写 EvidenceVersion 0.2、ClaimVersion 0.2 和
-supports relation；`get_company_facts` 结果则必须从 exact raw body 重放同一 accession 的 current/prior quarterly
-fact，并由 numeric verifier 独立复算 `growth_percentage` 后才能自动提交。ClaimIndex status 派生现已改为读取
+supports relation；`get_company_facts` 结果则必须从 exact Company Facts raw body 重放最新 10-Q accession、冻结
+allowlist 选择、current/prior quarterly fact，并由 numeric verifier 独立复算 `growth_percentage` 后才能自动提交。
+ClaimIndex status 派生现已改为读取
 Core 的一致 Ledger snapshot，绑定 snapshot ref/hash，并拒绝
 caller-provided status；DocumentIndex FTS5 已完成开发候选；ContextPack authority-bound materializer 已完成
 claim/artifact 只读切片，并已接通 Agenda 的 mandate/perception exact reader。PerceptionSnapshot 现在进入 Core
@@ -850,8 +857,8 @@ ResearchQuestionBacklog、Planner SEC public 薄闭环、下游逐项 coordinato
 Evidence/Claim 0.2 promotion 与 Backlog answer binding 已完成；closure coordinator 对全链重验并支持崩溃重放。
 真实 policy-authorized 隔离 canary 已完成：closed SEC public plan 自动授权、执行、验证、promotion 并回答原
 question，越界 statement 也已在专项测试中 fail closed。下一步用多样本自动通过/升级/人工修改数据校准研究
-质量；当前已据此增加 company-facts filing window，下一步补 latest-accession-bound concept 选择，并优先产出能
-进入研究判断的 Claim，不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
+质量；当前已据此增加 company-facts filing window 和 latest-accession-bound concept 选择，下一步把正式 Claim
+接入 driver/thesis verifier，不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。

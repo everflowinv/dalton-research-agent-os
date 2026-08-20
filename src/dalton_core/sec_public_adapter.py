@@ -1,4 +1,4 @@
-"""Credential-free SEC submissions adapter used by the isolated canary.
+"""Credential-free SEC submissions and Company Facts adapters.
 
 The SEC JSON response is a provider document, not Dalton's normalized
 ``list_filings`` schema.  This module keeps the source-specific normalizer in
@@ -452,6 +452,178 @@ def normalize_sec_company_concept(
     return normalized
 
 
+def _revenue_concept_candidates(value: Any) -> list[str]:
+    if not isinstance(value, list) or not 1 <= len(value) <= 8:
+        raise SecPublicAdapterError(
+            "concept_candidates must contain 1..8 XBRL concepts"
+        )
+    candidates = [_xbrl_name(item, "concept_candidates[]") for item in value]
+    if len(set(candidates)) != len(candidates):
+        raise SecPublicAdapterError("concept_candidates must be unique")
+    return candidates
+
+
+def _latest_company_facts_accession(
+    facts: Mapping[str, Any],
+    *,
+    unit: str,
+    form: str,
+    filed_from: str,
+    filed_to: str,
+) -> str:
+    latest_filed: str | None = None
+    latest_accessions: set[str] = set()
+    for concept in facts.values():
+        if not isinstance(concept, Mapping):
+            continue
+        units = concept.get("units")
+        if not isinstance(units, Mapping):
+            continue
+        rows = units.get(unit)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, Mapping) or row.get("form") != form:
+                continue
+            try:
+                filed = _date(row.get("filed"), "companyfacts.row.filed")
+                accession = _text(row.get("accn"), "companyfacts.row.accn")
+            except SecPublicAdapterError:
+                continue
+            if (
+                filed < filed_from
+                or filed > filed_to
+                or _ACCESSION_RE.fullmatch(accession) is None
+            ):
+                continue
+            if latest_filed is None or filed > latest_filed:
+                latest_filed = filed
+                latest_accessions = {accession}
+            elif filed == latest_filed:
+                latest_accessions.add(accession)
+    if latest_filed is None:
+        raise SecPublicAdapterError(
+            "SEC company facts has no 10-Q accession in the filing window"
+        )
+    if len(latest_accessions) != 1:
+        raise SecPublicAdapterError(
+            "SEC company facts latest 10-Q accession is ambiguous"
+        )
+    return next(iter(latest_accessions))
+
+
+def normalize_sec_company_facts(
+    payload: Any,
+    parameters: Mapping[str, Any],
+    *,
+    provider_status: int,
+) -> dict[str, Any]:
+    """Resolve one revenue concept on the latest 10-Q accession.
+
+    The plan freezes an ordered, closed allowlist.  A concept is eligible only
+    when its exact current/prior pair belongs to the latest 10-Q accession in
+    the bounded filing window.  The first eligible concept wins, so the
+    immutable plan allowlist is also the explicit semantic priority.
+    """
+
+    if not isinstance(payload, Mapping):
+        raise SecPublicAdapterError("SEC company facts body must be an object")
+    if not isinstance(parameters, Mapping):
+        raise SecPublicAdapterError("adapter parameters must be an object")
+    expected_fields = {
+        "cik", "taxonomy", "concept_candidates", "unit", "form",
+        "filed_from", "filed_to",
+    }
+    if set(parameters) != expected_fields:
+        raise SecPublicAdapterError("company facts parameters have an invalid closed shape")
+    cik = _issuer(parameters.get("cik"))
+    taxonomy = _taxonomy(parameters.get("taxonomy"))
+    candidates = _revenue_concept_candidates(parameters.get("concept_candidates"))
+    unit = _text(parameters.get("unit"), "unit")
+    form = _text(parameters.get("form"), "form")
+    filed_from = _date(parameters.get("filed_from"), "filed_from")
+    filed_to = _date(parameters.get("filed_to"), "filed_to")
+    filing_window_days = (
+        date.fromisoformat(filed_to) - date.fromisoformat(filed_from)
+    ).days
+    if filing_window_days < 0 or filing_window_days > 400:
+        raise SecPublicAdapterError(
+            "company facts filing window must span 0..400 days"
+        )
+    if taxonomy != "us-gaap" or unit != "USD" or form != "10-Q":
+        raise SecPublicAdapterError(
+            "company facts resolver is closed to us-gaap/USD/10-Q"
+        )
+    if _issuer(str(payload.get("cik"))) != cik:
+        raise SecPublicAdapterError("SEC company facts CIK does not match the request")
+    entity_name = _text(payload.get("entityName"), "payload.entityName")
+    all_facts = payload.get("facts")
+    if not isinstance(all_facts, Mapping):
+        raise SecPublicAdapterError("SEC company facts body lacks facts")
+    taxonomy_facts = all_facts.get(taxonomy)
+    if not isinstance(taxonomy_facts, Mapping):
+        raise SecPublicAdapterError("SEC company facts lacks the requested taxonomy")
+    latest_accession = _latest_company_facts_accession(
+        taxonomy_facts,
+        unit=unit,
+        form=form,
+        filed_from=filed_from,
+        filed_to=filed_to,
+    )
+    eligible: list[dict[str, Any]] = []
+    skippable = (
+        "has no eligible quarterly facts",
+        "lacks a same-filing prior-year quarterly comparison",
+    )
+    for candidate in candidates:
+        concept = taxonomy_facts.get(candidate)
+        if concept is None:
+            continue
+        if not isinstance(concept, Mapping):
+            raise SecPublicAdapterError("SEC company facts concept must be an object")
+        concept_payload = {
+            "cik": payload.get("cik"),
+            "taxonomy": taxonomy,
+            "tag": candidate,
+            "label": concept.get("label"),
+            "entityName": entity_name,
+            "units": concept.get("units"),
+        }
+        exact_parameters = {
+            "cik": cik,
+            "taxonomy": taxonomy,
+            "concept": candidate,
+            "unit": unit,
+            "form": form,
+            "filed_from": filed_from,
+            "filed_to": filed_to,
+        }
+        try:
+            normalized = normalize_sec_company_concept(
+                concept_payload,
+                exact_parameters,
+                provider_status=provider_status,
+            )
+        except SecPublicAdapterError as exc:
+            if any(message in str(exc) for message in skippable):
+                continue
+            raise
+        if normalized["current"]["accession"] == latest_accession:
+            eligible.append(normalized)
+    if not eligible:
+        raise SecPublicAdapterError(
+            "no allowlisted revenue concept resolves on the latest 10-Q accession"
+        )
+    selected = dict(eligible[0])
+    selected.pop("content_hash")
+    selected["concept_candidates"] = candidates
+    selected["eligible_concepts"] = [item["concept"] for item in eligible]
+    selected["latest_accession"] = latest_accession
+    selected["selection_basis"] = "ordered_allowlist_latest_10-Q"
+    selected["content_hash"] = content_hash(selected)
+    return selected
+
+
 def _observation(
     request: Mapping[str, Any],
     *,
@@ -579,8 +751,8 @@ class SecPublicHttpAdapter:
         )
 
 
-class SecCompanyConceptHttpAdapter:
-    """Bound GET adapter for one public SEC Company Concept series."""
+class SecCompanyFactsHttpAdapter:
+    """Bound GET adapter for latest-accession SEC Company Facts resolution."""
 
     def __init__(
         self,
@@ -601,7 +773,7 @@ class SecCompanyConceptHttpAdapter:
     ) -> dict[str, Any]:
         if credential_handle is not None:
             raise SecPublicAdapterError(
-                "public SEC company concept adapter does not accept credential handles"
+                "public SEC company facts adapter does not accept credential handles"
             )
         if request.get("operation", "get_company_facts") != "get_company_facts":
             raise SecPublicAdapterError(
@@ -609,12 +781,7 @@ class SecCompanyConceptHttpAdapter:
             )
         parameters = request["parameters"]
         cik = _issuer(parameters.get("cik"))
-        taxonomy = _taxonomy(parameters.get("taxonomy"))
-        concept = _xbrl_name(parameters.get("concept"), "concept")
-        url = (
-            "https://data.sec.gov/api/xbrl/companyconcept/"
-            f"CIK{cik}/{taxonomy}/{concept}.json"
-        )
+        url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
         try:
             deadline = datetime.fromisoformat(
                 str(request["deadline_at"]).replace("Z", "+00:00")
@@ -678,7 +845,7 @@ class SecCompanyConceptHttpAdapter:
                 bytes_written=response.bytes_written,
             )
         try:
-            structured = normalize_sec_company_concept(
+            structured = normalize_sec_company_facts(
                 _strict_json(response.body),
                 parameters,
                 provider_status=response.status,
@@ -712,6 +879,10 @@ class SecCompanyConceptHttpAdapter:
         )
 
 
+# Compatibility alias for the pre-resolver development name.
+SecCompanyConceptHttpAdapter = SecCompanyFactsHttpAdapter
+
+
 class SecPublicRouterAdapter:
     """Dispatch the two approved public SEC operations without URL authority."""
 
@@ -726,7 +897,7 @@ class SecPublicRouterAdapter:
         self.submissions = SecPublicHttpAdapter(
             transport=shared_transport, user_agent=user_agent, clock=clock
         )
-        self.company_concept = SecCompanyConceptHttpAdapter(
+        self.company_concept = SecCompanyFactsHttpAdapter(
             transport=shared_transport, user_agent=user_agent, clock=clock
         )
 
@@ -745,7 +916,8 @@ class SecPublicRouterAdapter:
 
 
 __all__ = [
-    "DEFAULT_USER_AGENT", "SecCompanyConceptHttpAdapter", "SecPublicAdapterError",
+    "DEFAULT_USER_AGENT", "SecCompanyConceptHttpAdapter", "SecCompanyFactsHttpAdapter",
+    "SecPublicAdapterError",
     "SecPublicHttpAdapter", "SecPublicRouterAdapter", "normalize_sec_company_concept",
-    "normalize_sec_submissions",
+    "normalize_sec_company_facts", "normalize_sec_submissions",
 ]

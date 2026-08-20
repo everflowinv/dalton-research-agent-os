@@ -38,6 +38,7 @@ from dalton_core.observability import ObservabilityStore
 from dalton_core.raw_spool import RawSpool
 from dalton_core.research_coordinator import ResearchCoordinatorStore
 from dalton_core.research_plan import (
+    DEFAULT_REVENUE_CONCEPT_CANDIDATES,
     PLAN_AUTO_START_RULE_REF,
     PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
     ResearchPlanAuthority,
@@ -247,8 +248,9 @@ def main() -> int:
     parser.add_argument("--date-from")
     parser.add_argument("--date-to")
     parser.add_argument(
-        "--concept",
-        default="RevenueFromContractWithCustomerExcludingAssessedTax",
+        "--concept-candidate", "--concept", dest="concept_candidates",
+        action="append",
+        help="ordered revenue concept allowlist; repeat to add candidates",
     )
     parser.add_argument("--filed-from")
     parser.add_argument("--filed-to")
@@ -347,10 +349,12 @@ def main() -> int:
                 question_version_ref=question_record["question_version_ref"],
                 decision_ref=decision["id"],
                 cik=args.issuer_cik,
-                concept=args.concept,
                 filed_from=args.filed_from,
                 filed_to=args.filed_to,
                 actor_ref="core:planner",
+                concept_candidates=(
+                    args.concept_candidates or DEFAULT_REVENUE_CONCEPT_CANDIDATES
+                ),
                 idempotency_key="create-plan:sec-plan-canary:1",
             )
         else:
@@ -433,7 +437,7 @@ def main() -> int:
             {
                 binding["binding_ref"]: lambda params: set(params) == (
                     {
-                        "cik", "taxonomy", "concept", "unit", "form",
+                        "cik", "taxonomy", "concept_candidates", "unit", "form",
                         "filed_from", "filed_to",
                     }
                     if company_facts

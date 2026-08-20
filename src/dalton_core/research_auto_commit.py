@@ -326,18 +326,28 @@ def authorize_policy_candidate(
         expected_parameters = {
             "cik": payload.get("cik"),
             "taxonomy": payload.get("taxonomy"),
-            "concept": payload.get("concept"),
+            "concept_candidates": payload.get("concept_candidates"),
             "unit": payload.get("unit"),
             "form": payload.get("form"),
             "filed_from": payload.get("filed_from"),
             "filed_to": payload.get("filed_to"),
         }
+        current = payload.get("current")
+        prior = payload.get("prior")
+        if not isinstance(current, Mapping) or not isinstance(prior, Mapping):
+            raise ResearchAutoCommitRejected("company facts comparison is unavailable")
         if (
             call.get("operation") != "get_company_facts"
             or parameters != expected_parameters
             or plan_parameters != expected_parameters
             or payload.get("source_record_refs") != records
             or len(records) != 2
+            or payload.get("latest_accession") != current.get("accession")
+            or payload.get("selection_basis")
+            != "ordered_allowlist_latest_10-Q"
+            or not isinstance(payload.get("eligible_concepts"), list)
+            or not payload.get("eligible_concepts")
+            or payload.get("eligible_concepts")[0] != payload.get("concept")
             or payload.get("next_cursor") is not None
             or spec_wire.get("operator") != "growth_percentage"
             or spec_wire.get("output_unit") != "percent"
@@ -348,10 +358,6 @@ def authorize_policy_candidate(
             raise ResearchAutoCommitRejected(
                 "candidate is outside the bounded SEC company-facts rule"
             )
-        current = payload.get("current")
-        prior = payload.get("prior")
-        if not isinstance(current, Mapping) or not isinstance(prior, Mapping):
-            raise ResearchAutoCommitRejected("company facts comparison is unavailable")
         period = f"{current.get('start')}..{current.get('end')}"
         direction = "up" if not claim_wire["value"].startswith("-") else "down"
         expected_statement = (

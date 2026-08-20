@@ -10,7 +10,7 @@
   "builder_ref": "builder:dalton-connector-inventory:0.1",
   "capability_proposal_ref": "capability-proposal:connector:sec:0.1",
   "connector_ref": "connector:sec-edgar",
-  "content_hash": "edb696df6d3f32120f81b19e8a616d4e6b23f52eefd8df85d68d8dbb1c620846",
+  "content_hash": "0d63bb697e5cd5ed0c6716b9057d7192fd0809f216bdfe0a8fec0c286085ceea",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "fixture_manifest_hash": "8f88e64939d4f2140189337e323ea11479a86fbf459ca3f0afe501f3aa099957",
   "fixture_manifest_ref": "connector-fixture-manifest:sec:0.1",
@@ -68,10 +68,10 @@
     },
     {
       "completeness": "enumerated",
-      "input_schema_hash": "8d99ce085668487b67e1e7cbf8cc82db352cc714b015ead51ae996247526ac3e",
+      "input_schema_hash": "9391711e60bd62794d66623d67d3788b4f22f0e90d4d3e38aa610eb7d00ac232",
       "input_schema_ref": "schema:connector-inventory:sec:get_company_facts:input:0.1",
       "operation": "get_company_facts",
-      "output_schema_hash": "36ef882ea2705d2525588c38e9fad5934ce5673abb2f6583d0b7627ffec5a2c5",
+      "output_schema_hash": "13a570d37c193318d25cb8b1aa7d165580504e7514deb3254d1fbc0249405b8f",
       "output_schema_ref": "schema:connector-inventory:sec:get_company_facts:output:0.1",
       "pagination": "none",
       "side_effects": [
@@ -79,7 +79,7 @@
       ]
     }
   ],
-  "profile_template_hash": "371a279681f868233404658570e7be555926acc92865658333188c4c12660947",
+  "profile_template_hash": "c5050e466467123e0c79632989a0ca0f4d27ef937402bb2948bc0d6d912c344f",
   "profile_template_ref": "connector-profile-template:sec:0.1",
   "promotion_policy_ref": "policy:connector-promotion:0.1",
   "requested_canary": null,
