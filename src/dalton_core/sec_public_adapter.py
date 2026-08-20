@@ -13,6 +13,7 @@ import json
 import re
 from collections.abc import Mapping
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Callable
 
 from .connector_runner import validate_adapter_transport_observation
@@ -22,6 +23,9 @@ from .store import canonical_json, content_hash
 
 DEFAULT_USER_AGENT = "Dalton Research Agent public-read-only canary"
 _ACCESSION_RE = re.compile(r"^\d{10}-\d{2}-\d{6}$")
+_XBRL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]{0,127}$")
+_TAXONOMY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,63}$")
+_FRAME_RE = re.compile(r"^CY(?P<year>\d{4})Q(?P<quarter>[1-4])$")
 
 
 class SecPublicAdapterError(ValueError):
@@ -216,6 +220,222 @@ def normalize_sec_submissions(
     }
 
 
+def _xbrl_name(value: Any, name: str) -> str:
+    text = _text(value, name)
+    if _XBRL_NAME_RE.fullmatch(text) is None:
+        raise SecPublicAdapterError(f"{name} is not a safe XBRL name")
+    return text
+
+
+def _taxonomy(value: Any) -> str:
+    text = _text(value, "taxonomy")
+    if _TAXONOMY_RE.fullmatch(text) is None:
+        raise SecPublicAdapterError("taxonomy is not a safe XBRL taxonomy name")
+    return text
+
+
+def _decimal_integer(value: Any, name: str) -> Decimal:
+    if isinstance(value, bool):
+        raise SecPublicAdapterError(f"{name} must be an integer")
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, str) and re.fullmatch(r"-?(0|[1-9][0-9]*)", value):
+        return Decimal(value)
+    raise SecPublicAdapterError(f"{name} must be an exact integer")
+
+
+def _quarterly_fact(
+    value: Any,
+    *,
+    index: int,
+    expected_form: str,
+    filed_to: str,
+) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        raise SecPublicAdapterError(f"SEC company concept unit row[{index}] must be an object")
+    form = _text(value.get("form"), f"units.row[{index}].form")
+    if form != expected_form:
+        return None
+    frame = value.get("frame")
+    if not isinstance(frame, str) or _FRAME_RE.fullmatch(frame) is None:
+        return None
+    accession = _text(value.get("accn"), f"units.row[{index}].accn")
+    if _ACCESSION_RE.fullmatch(accession) is None:
+        raise SecPublicAdapterError("SEC company concept accession format is invalid")
+    start = _date(value.get("start"), f"units.row[{index}].start")
+    end = _date(value.get("end"), f"units.row[{index}].end")
+    filed = _date(value.get("filed"), f"units.row[{index}].filed")
+    if start > end:
+        raise SecPublicAdapterError("SEC company concept fact period is inverted")
+    if filed > filed_to:
+        return None
+    duration = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
+    if duration < 70 or duration > 105:
+        return None
+    amount = _decimal_integer(value.get("val"), f"units.row[{index}].val")
+    fy = value.get("fy")
+    if isinstance(fy, bool) or not isinstance(fy, int) or fy < 1900 or fy > 2200:
+        raise SecPublicAdapterError("SEC company concept fy is invalid")
+    fp = _text(value.get("fp"), f"units.row[{index}].fp")
+    record = {
+        "accession": accession,
+        "start": start,
+        "end": end,
+        "filed": filed,
+        "fy": fy,
+        "fp": fp,
+        "form": form,
+        "frame": frame,
+        "value": format(amount, "f"),
+    }
+    record["record_hash"] = content_hash(record)
+    return record
+
+
+def _prior_frame(frame: str) -> str:
+    match = _FRAME_RE.fullmatch(frame)
+    if match is None:
+        raise SecPublicAdapterError("SEC company concept frame is invalid")
+    return f"CY{int(match.group('year')) - 1}Q{match.group('quarter')}"
+
+
+def normalize_sec_company_concept(
+    payload: Any,
+    parameters: Mapping[str, Any],
+    *,
+    provider_status: int,
+) -> dict[str, Any]:
+    """Select one exact current/prior quarterly pair and recompute YoY growth.
+
+    The pair must come from the same 10-Q accession.  That binds both values
+    to one comparative filing and avoids silently mixing later restatements,
+    different duration contexts, annual facts, or two taxonomy concepts.
+    """
+
+    if not isinstance(payload, Mapping):
+        raise SecPublicAdapterError("SEC company concept body must be an object")
+    if not isinstance(parameters, Mapping):
+        raise SecPublicAdapterError("adapter parameters must be an object")
+    expected_fields = {"cik", "taxonomy", "concept", "unit", "form", "filed_to"}
+    if set(parameters) != expected_fields:
+        raise SecPublicAdapterError("company concept parameters have an invalid closed shape")
+    cik = _issuer(parameters.get("cik"))
+    taxonomy = _taxonomy(parameters.get("taxonomy"))
+    concept = _xbrl_name(parameters.get("concept"), "concept")
+    unit = _text(parameters.get("unit"), "unit")
+    form = _text(parameters.get("form"), "form")
+    filed_to = _date(parameters.get("filed_to"), "filed_to")
+    if taxonomy != "us-gaap" or unit != "USD" or form != "10-Q":
+        raise SecPublicAdapterError(
+            "company concept canary is closed to us-gaap/USD/10-Q"
+        )
+    reported_cik = _issuer(str(payload.get("cik")))
+    if reported_cik != cik:
+        raise SecPublicAdapterError("SEC company concept CIK does not match the request")
+    if _text(payload.get("taxonomy"), "payload.taxonomy") != taxonomy:
+        raise SecPublicAdapterError("SEC company concept taxonomy does not match the request")
+    if _text(payload.get("tag"), "payload.tag") != concept:
+        raise SecPublicAdapterError("SEC company concept tag does not match the request")
+    entity_name = _text(payload.get("entityName"), "payload.entityName")
+    label = _text(payload.get("label"), "payload.label")
+    units = payload.get("units")
+    if not isinstance(units, Mapping) or set(units) != {unit}:
+        raise SecPublicAdapterError("SEC company concept units do not match the exact requested unit")
+    rows = units[unit]
+    if not isinstance(rows, list):
+        raise SecPublicAdapterError("SEC company concept unit payload must be an array")
+    facts = [
+        fact
+        for index, row in enumerate(rows)
+        if (fact := _quarterly_fact(
+            row, index=index, expected_form=form, filed_to=filed_to
+        )) is not None
+    ]
+    if not facts:
+        raise SecPublicAdapterError("SEC company concept has no eligible quarterly facts")
+
+    # Later filings repeat historical values.  A current candidate must have
+    # its exact prior-year comparative in the same accession.  Evaluate the
+    # most recent period first and fail closed on ambiguous contexts.
+    current: dict[str, Any] | None = None
+    prior: dict[str, Any] | None = None
+    for candidate in sorted(
+        facts,
+        key=lambda item: (item["end"], item["filed"], item["accession"]),
+        reverse=True,
+    ):
+        prior_candidates = [
+            item
+            for item in facts
+            if item["accession"] == candidate["accession"]
+            and item["frame"] == _prior_frame(candidate["frame"])
+            and item["fp"] == candidate["fp"]
+            and 350
+            <= (
+                date.fromisoformat(candidate["end"])
+                - date.fromisoformat(item["end"])
+            ).days
+            <= 380
+            and abs(
+                (date.fromisoformat(candidate["end"]) - date.fromisoformat(candidate["start"])).days
+                - (date.fromisoformat(item["end"]) - date.fromisoformat(item["start"])).days
+            )
+            <= 7
+        ]
+        unique_prior = {
+            (item["start"], item["end"], item["value"], item["record_hash"]): item
+            for item in prior_candidates
+        }
+        if len(unique_prior) > 1:
+            raise SecPublicAdapterError(
+                "SEC company concept comparative period is ambiguous"
+            )
+        if len(unique_prior) == 1:
+            current = candidate
+            prior = next(iter(unique_prior.values()))
+            break
+    if current is None or prior is None:
+        raise SecPublicAdapterError(
+            "SEC company concept lacks a same-filing prior-year quarterly comparison"
+        )
+
+    try:
+        current_value = Decimal(current["value"])
+        prior_value = Decimal(prior["value"])
+        if prior_value <= 0:
+            raise SecPublicAdapterError("prior-year company concept value must be positive")
+        growth = ((current_value / prior_value) - Decimal(1)) * Decimal(100)
+        growth = growth.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except (InvalidOperation, ZeroDivisionError) as exc:
+        raise SecPublicAdapterError("company concept growth cannot be computed exactly") from exc
+    growth_text = format(growth, "f")
+    if growth_text == "-0.00":
+        growth_text = "0.00"
+    record_refs = [
+        f"sec:company-concept:{item['accession']}:{taxonomy}:{concept}:{item['frame']}"
+        for item in (current, prior)
+    ]
+    normalized = {
+        "schema_version": "0.1",
+        "entity_name": entity_name,
+        "cik": cik,
+        "taxonomy": taxonomy,
+        "concept": concept,
+        "label": label,
+        "unit": unit,
+        "form": form,
+        "filed_to": filed_to,
+        "current": current,
+        "prior": prior,
+        "growth_percent": growth_text,
+        "source_record_refs": record_refs,
+        "next_cursor": None,
+        "provider_status": provider_status,
+    }
+    normalized["content_hash"] = content_hash(normalized)
+    return normalized
+
+
 def _observation(
     request: Mapping[str, Any],
     *,
@@ -341,7 +561,137 @@ class SecPublicHttpAdapter:
         )
 
 
+class SecCompanyConceptHttpAdapter:
+    """Bound GET adapter for one public SEC Company Concept series."""
+
+    def __init__(
+        self,
+        *,
+        transport: PublicHttpTransport | None = None,
+        user_agent: str = DEFAULT_USER_AGENT,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.transport = transport or PublicHttpTransport()
+        self.user_agent = _text(user_agent, "user_agent")
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def __call__(
+        self,
+        request: Mapping[str, Any],
+        raw_sink: Any,
+        credential_handle: Any | None = None,
+    ) -> dict[str, Any]:
+        if credential_handle is not None:
+            raise SecPublicAdapterError(
+                "public SEC company concept adapter does not accept credential handles"
+            )
+        parameters = request["parameters"]
+        cik = _issuer(parameters.get("cik"))
+        taxonomy = _taxonomy(parameters.get("taxonomy"))
+        concept = _xbrl_name(parameters.get("concept"), "concept")
+        url = (
+            "https://data.sec.gov/api/xbrl/companyconcept/"
+            f"CIK{cik}/{taxonomy}/{concept}.json"
+        )
+        try:
+            deadline = datetime.fromisoformat(
+                str(request["deadline_at"]).replace("Z", "+00:00")
+            )
+            if deadline.tzinfo is None:
+                raise ValueError
+            now = self.clock()
+            if not isinstance(now, datetime) or now.tzinfo is None:
+                raise ValueError
+            remaining = (
+                deadline.astimezone(timezone.utc) - now.astimezone(timezone.utc)
+            ).total_seconds()
+        except (TypeError, ValueError) as exc:
+            raise SecPublicAdapterError("adapter deadline is invalid") from exc
+        if remaining <= 0:
+            raise SecPublicAdapterError("adapter deadline has expired")
+        response = self.transport.request(
+            PublicHttpRequest(
+                "GET",
+                url,
+                {"User-Agent": self.user_agent, "Accept": "application/json"},
+            ),
+            raw_sink,
+            allowed_hosts=request["allowed_hosts"],
+            allow_redirects=request["network_policy"]["allow_redirects"],
+            max_redirects=request["network_policy"]["max_redirects"],
+            max_response_bytes=request["max_response_bytes"],
+            timeout_seconds=max(0.001, remaining),
+        )
+        provider_request_id = "sec-http:" + hashlib.sha256(response.body).hexdigest()
+        if response.status == 429:
+            retry_after = _retry_after_ms(response.headers)
+            if retry_after is not None:
+                return _observation(
+                    request,
+                    outcome="rate_limited",
+                    provider_request_id=provider_request_id,
+                    provider_status=response.status,
+                    structured_output=None,
+                    source_record_refs=[],
+                    cursor=None,
+                    error=None,
+                    retry_after_ms=retry_after,
+                    bytes_written=response.bytes_written,
+                )
+        if response.status != 200:
+            return _observation(
+                request,
+                outcome="failed",
+                provider_request_id=provider_request_id,
+                provider_status=response.status,
+                structured_output=None,
+                source_record_refs=[],
+                cursor=None,
+                error={
+                    "code": "http_status",
+                    "message": f"SEC returned HTTP {response.status}",
+                    "retryable": response.status in {408, 429, 500, 502, 503, 504},
+                },
+                retry_after_ms=None,
+                bytes_written=response.bytes_written,
+            )
+        try:
+            structured = normalize_sec_company_concept(
+                _strict_json(response.body),
+                parameters,
+                provider_status=response.status,
+            )
+        except SecPublicAdapterError as exc:
+            return _observation(
+                request,
+                outcome="failed",
+                provider_request_id=provider_request_id,
+                provider_status=response.status,
+                structured_output=None,
+                source_record_refs=[],
+                cursor=None,
+                error={
+                    "code": "normalization_error",
+                    "message": str(exc),
+                    "retryable": False,
+                },
+                bytes_written=response.bytes_written,
+            )
+        return _observation(
+            request,
+            outcome="succeeded",
+            provider_request_id=provider_request_id,
+            provider_status=response.status,
+            structured_output=structured,
+            source_record_refs=list(structured["source_record_refs"]),
+            cursor=None,
+            error=None,
+            bytes_written=response.bytes_written,
+        )
+
+
 __all__ = [
-    "DEFAULT_USER_AGENT", "SecPublicAdapterError", "SecPublicHttpAdapter",
+    "DEFAULT_USER_AGENT", "SecCompanyConceptHttpAdapter", "SecPublicAdapterError",
+    "SecPublicHttpAdapter", "normalize_sec_company_concept",
     "normalize_sec_submissions",
 ]

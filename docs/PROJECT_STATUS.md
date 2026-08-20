@@ -2,7 +2,7 @@
 
 更新日期：2026-08-20
 - live deployed baseline：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`；Agenda 兼容热修复：`03ea471`
-- 当前开发候选 baseline：`bd868b2`；工作区新增 policy-authorized 自动研究切片，尚未 commit，也未部署到 live
+- 当前开发候选 baseline：`b030093`；工作区新增 SEC Company Concept 财务事实切片，尚未 commit，也未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -32,8 +32,18 @@ SEC public 10-Q plan，四个节点全部成功，系统自动提交 1 条 Evide
 coordinator、capability 四个 SQLite integrity check 均为 `ok`。这证明低风险主链不需要逐 plan、逐 Claim 找 owner
 审批，但仍只是 `filing_count` 机制样本，不代表已经达到自主研究分析师的最终质量。
 
-当前下一阶段是 **在自动主链上做多样本质量校准，并把产物从 filing metadata 推进到可用于研究判断的 Claim**：
-versioned governance policy 只允许 closed SEC public `10-Q list_filings` plan 自动启动；结果只有在 Core 从 exact
+同日第二条无凭据 canary 已读取 SEC Company Concept 官方接口，从 Microsoft 同一份 10-Q accession
+`0001193125-26-191507` 中自动选出 2026-01-01..2026-03-31 与同比期间的收入事实：USD 82,886,000,000 对
+USD 70,066,000,000，确定性复算同比增长 18.30%。选择规则拒绝跨 filing 拼接、年度/累计期间、单位漂移、模糊
+comparative context、非整数 USD 事实和 taxonomy/concept 猜测。这一步已经把产物从 filing metadata 推进到可用于
+研究的财务事实，但目前只是隔离 source/semantic canary，尚未绑定 ResearchPlan authority、正式 Evidence/Claim、
+Backlog answer 或 thesis/model 变化，不能冒充完整研究闭环。
+
+当前下一阶段是 **把已验证的 Company Concept 财务事实接入自动主链，并做多样本质量校准**：
+先把 exact concept、unit、form、filed-to 和同比期间选择绑定到 ResearchPlan、source/numeric verifier 与 policy commit，
+再让正式 Claim 回答 exact Backlog question；在此之前不增加新的人工 gate，也不把 deterministic fact 擅自上升为
+thesis 结论。现有 versioned governance policy 只允许 closed SEC public `10-Q list_filings` plan 自动启动；
+结果只有在 Core 从 exact
 CallSpec、SourceEnvelope 和 Artifact 重新推导 CIK、表单、日期窗、记录数与完整 statement，并命中固定
 `filing_count` rule 时才能自动写 EvidenceVersion 0.2、ClaimVersion 0.2 和
 supports relation；ClaimIndex status 派生现已改为读取 Core 的一致 Ledger snapshot，绑定 snapshot ref/hash，并拒绝

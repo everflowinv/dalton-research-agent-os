@@ -4,7 +4,13 @@ import json
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from dalton_core.sec_public_adapter import SecPublicAdapterError, SecPublicHttpAdapter, normalize_sec_submissions
+from dalton_core.sec_public_adapter import (
+    SecCompanyConceptHttpAdapter,
+    SecPublicAdapterError,
+    SecPublicHttpAdapter,
+    normalize_sec_company_concept,
+    normalize_sec_submissions,
+)
 
 
 WHEN = datetime(2026, 8, 15, 8, 0, tzinfo=timezone.utc)
@@ -28,6 +34,61 @@ def payload():
 PARAMETERS = {"issuer": "0000789019", "form": "10-Q", "date_from": "2025-01-01", "date_to": "2025-12-31", "limit": 10}
 
 
+CONCEPT_PARAMETERS = {
+    "cik": "0000789019",
+    "taxonomy": "us-gaap",
+    "concept": "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "unit": "USD",
+    "form": "10-Q",
+    "filed_to": "2026-08-20",
+}
+
+
+def concept_payload():
+    return {
+        "cik": 789019,
+        "taxonomy": "us-gaap",
+        "tag": "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "label": "Revenue from Contract with Customer, Excluding Assessed Tax",
+        "description": "Synthetic test description.",
+        "entityName": "MICROSOFT CORPORATION",
+        "units": {
+            "USD": [
+                {
+                    "start": "2024-01-01", "end": "2024-03-31",
+                    "val": 51000000000, "accn": "0000789019-25-000063",
+                    "fy": 2025, "fp": "Q3", "form": "10-Q",
+                    "filed": "2025-04-30", "frame": "CY2024Q1",
+                },
+                {
+                    "start": "2025-01-01", "end": "2025-03-31",
+                    "val": 61858000000, "accn": "0000789019-25-000063",
+                    "fy": 2025, "fp": "Q3", "form": "10-Q",
+                    "filed": "2025-04-30", "frame": "CY2025Q1",
+                },
+                {
+                    "start": "2025-01-01", "end": "2025-03-31",
+                    "val": 61858000000, "accn": "0000789019-26-000054",
+                    "fy": 2026, "fp": "Q3", "form": "10-Q",
+                    "filed": "2026-04-29", "frame": "CY2025Q1",
+                },
+                {
+                    "start": "2026-01-01", "end": "2026-03-31",
+                    "val": 70066000000, "accn": "0000789019-26-000054",
+                    "fy": 2026, "fp": "Q3", "form": "10-Q",
+                    "filed": "2026-04-29", "frame": "CY2026Q1",
+                },
+                {
+                    "start": "2025-07-01", "end": "2026-06-30",
+                    "val": 281000000000, "accn": "0000789019-26-000099",
+                    "fy": 2026, "fp": "FY", "form": "10-K",
+                    "filed": "2026-07-29", "frame": "CY2025",
+                },
+            ]
+        },
+    }
+
+
 class Response:
     def __init__(self, status, body=b"{}", headers=None):
         self.status = status
@@ -42,10 +103,12 @@ class Transport:
         self.response = response
         self.timeout = None
         self.headers = None
+        self.url = None
 
     def request(self, request, raw_sink, **kwargs):
         self.headers = dict(request.headers)
         self.timeout = kwargs["timeout_seconds"]
+        self.url = request.url
         return self.response
 
 
@@ -102,3 +165,67 @@ class AdapterTests(unittest.TestCase):
         failed = SecPublicHttpAdapter(transport=unbounded, clock=lambda: WHEN)(self.request(), object())
         self.assertEqual(failed["outcome"], "failed")
         self.assertEqual(failed["error"]["code"], "rate_limited_missing_retry_after")
+
+    def test_company_concept_selects_same_filing_quarters_and_recomputes_growth(self):
+        result = normalize_sec_company_concept(
+            concept_payload(), CONCEPT_PARAMETERS, provider_status=200
+        )
+        self.assertEqual(result["current"]["frame"], "CY2026Q1")
+        self.assertEqual(result["prior"]["frame"], "CY2025Q1")
+        self.assertEqual(
+            result["current"]["accession"], result["prior"]["accession"]
+        )
+        self.assertEqual(result["growth_percent"], "13.27")
+        self.assertEqual(len(result["source_record_refs"]), 2)
+
+    def test_company_concept_fails_closed_on_ambiguous_or_mixed_context(self):
+        ambiguous = concept_payload()
+        ambiguous["units"]["USD"].append(
+            {
+                **ambiguous["units"]["USD"][2],
+                "val": 60000000000,
+            }
+        )
+        with self.assertRaisesRegex(
+            SecPublicAdapterError, "comparative period is ambiguous"
+        ):
+            normalize_sec_company_concept(
+                ambiguous, CONCEPT_PARAMETERS, provider_status=200
+            )
+        mixed_units = concept_payload()
+        mixed_units["units"]["shares"] = []
+        with self.assertRaisesRegex(SecPublicAdapterError, "units do not match"):
+            normalize_sec_company_concept(
+                mixed_units, CONCEPT_PARAMETERS, provider_status=200
+            )
+        with self.assertRaisesRegex(SecPublicAdapterError, "closed shape"):
+            normalize_sec_company_concept(
+                concept_payload(),
+                {**CONCEPT_PARAMETERS, "guess_tag": True},
+                provider_status=200,
+            )
+
+    def test_company_concept_adapter_is_credential_free_and_route_bound(self):
+        body = json.dumps(concept_payload(), separators=(",", ":")).encode()
+        transport = Transport(Response(200, body))
+        adapter = SecCompanyConceptHttpAdapter(
+            transport=transport, clock=lambda: WHEN, user_agent="operator/sec-canary"
+        )
+        request = {
+            "parameters": CONCEPT_PARAMETERS,
+            "deadline_at": (WHEN + timedelta(seconds=10)).isoformat(),
+            "allowed_hosts": ["data.sec.gov"],
+            "network_policy": {"allow_redirects": False, "max_redirects": 0},
+            "max_response_bytes": 5_000_000,
+            "content_hash": "b" * 64,
+        }
+        observation = adapter(request, object())
+        self.assertEqual(observation["outcome"], "succeeded")
+        self.assertEqual(
+            transport.url,
+            "https://data.sec.gov/api/xbrl/companyconcept/"
+            "CIK0000789019/us-gaap/"
+            "RevenueFromContractWithCustomerExcludingAssessedTax.json",
+        )
+        with self.assertRaises(SecPublicAdapterError):
+            adapter(request, object(), credential_handle="forbidden")
