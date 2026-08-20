@@ -309,7 +309,9 @@ def _validate_company_facts_request(value: Any) -> dict[str, str]:
 
     if not isinstance(value, Mapping):
         raise ResearchPlanValidationError("company_facts_request must be an object")
-    fields = {"cik", "taxonomy", "concept", "unit", "form", "filed_to"}
+    fields = {
+        "cik", "taxonomy", "concept", "unit", "form", "filed_from", "filed_to",
+    }
     if set(value) != fields:
         raise ResearchPlanValidationError(
             "company_facts_request has an invalid closed shape"
@@ -323,6 +325,9 @@ def _validate_company_facts_request(value: Any) -> dict[str, str]:
     concept = _text(value.get("concept"), "company_facts_request.concept")
     unit = _text(value.get("unit"), "company_facts_request.unit")
     form = _text(value.get("form"), "company_facts_request.form")
+    filed_from = _text(
+        value.get("filed_from"), "company_facts_request.filed_from"
+    )
     filed_to = _text(value.get("filed_to"), "company_facts_request.filed_to")
     if taxonomy != "us-gaap" or unit != "USD" or form != "10-Q":
         raise ResearchPlanValidationError(
@@ -332,10 +337,20 @@ def _validate_company_facts_request(value: Any) -> dict[str, str]:
         raise ResearchPlanValidationError(
             "company_facts_request.concept is not a safe XBRL concept"
         )
+    if _DATE_RE.fullmatch(filed_from) is None:
+        raise ResearchPlanValidationError(
+            "company_facts_request.filed_from must be YYYY-MM-DD"
+        )
     if _DATE_RE.fullmatch(filed_to) is None:
         raise ResearchPlanValidationError(
             "company_facts_request.filed_to must be YYYY-MM-DD"
         )
+    try:
+        filed_from_date = date.fromisoformat(filed_from)
+    except ValueError as exc:
+        raise ResearchPlanValidationError(
+            "company_facts_request.filed_from is not a calendar date"
+        ) from exc
     try:
         filed_date = date.fromisoformat(filed_to)
     except ValueError as exc:
@@ -346,12 +361,22 @@ def _validate_company_facts_request(value: Any) -> dict[str, str]:
         raise ResearchPlanValidationError(
             "company_facts_request.filed_to is outside the SEC filing epoch"
         )
+    if filed_from_date.year < 1995 or filed_from_date.year > 2100:
+        raise ResearchPlanValidationError(
+            "company_facts_request.filed_from is outside the SEC filing epoch"
+        )
+    filing_window_days = (filed_date - filed_from_date).days
+    if filing_window_days < 0 or filing_window_days > 400:
+        raise ResearchPlanValidationError(
+            "company_facts_request filing window must span 0..400 days"
+        )
     return {
         "cik": cik.zfill(10),
         "taxonomy": taxonomy,
         "concept": concept,
         "unit": unit,
         "form": form,
+        "filed_from": filed_from,
         "filed_to": filed_to,
     }
 
@@ -1736,6 +1761,7 @@ class ResearchPlanAuthority:
         decision_ref: str,
         cik: str,
         concept: str,
+        filed_from: str,
         filed_to: str,
         actor_ref: str,
         taxonomy: str = "us-gaap",
@@ -1764,6 +1790,7 @@ class ResearchPlanAuthority:
                 "concept": concept,
                 "unit": unit,
                 "form": form,
+                "filed_from": filed_from,
                 "filed_to": filed_to,
             },
         )
@@ -2095,7 +2122,8 @@ def _plan_work_orders(plan_wire: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "SEC public read-only get_company_facts for CIK "
                     f"{request['cik']}, concept {request['taxonomy']}:"
                     f"{request['concept']}, unit {request['unit']}, form "
-                    f"{request['form']}, filed through {request['filed_to']}"
+                    f"{request['form']}, filed in "
+                    f"{request['filed_from']}..{request['filed_to']}"
                 )
             else:
                 raise ResearchPlanConflict(

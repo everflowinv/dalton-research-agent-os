@@ -882,6 +882,7 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "label": _string(),
                 "unit": {"type": "string", "enum": ["USD"]},
                 "form": {"type": "string", "enum": ["10-Q"]},
+                "filed_from": _string(),
                 "filed_to": _string(),
                 "current": fact,
                 "prior": fact,
@@ -896,7 +897,7 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
             },
             (
                 "schema_version", "entity_name", "cik", "taxonomy", "concept",
-                "label", "unit", "form", "filed_to", "current", "prior",
+                "label", "unit", "form", "filed_from", "filed_to", "current", "prior",
                 "growth_percent", "source_record_refs", "next_cursor",
                 "provider_status", "content_hash",
             ),
@@ -957,7 +958,8 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 "get_company_facts",
                 completeness="enumerated",
                 input_fields=(
-                    "cik", "taxonomy", "concept", "unit", "form", "filed_to",
+                    "cik", "taxonomy", "concept", "unit", "form", "filed_from",
+                    "filed_to",
                 ),
             ),
         ),

@@ -1,5 +1,5 @@
 {
-  "content_hash": "5e0c63edd62589189a0d85c0e626b6590aa7beb280019ca00f7df1537962152d",
+  "content_hash": "7c57f2698316a8465c43a3efd5adef5129d5c5e6c77cedd772884eb3a262c931",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "id": "connector-inventory:p1-0:0.1",
   "profiles": [
@@ -16,9 +16,9 @@
       "connector_ref": "connector:sec-edgar",
       "fixture_manifest_hash": "8f88e64939d4f2140189337e323ea11479a86fbf459ca3f0afe501f3aa099957",
       "fixture_manifest_ref": "connector-fixture-manifest:sec:0.1",
-      "profile_template_hash": "e38ad24d2b55199ec30b4d4dbafa4fb007efe88c1420ab2d3824f2ff63dc4130",
+      "profile_template_hash": "371a279681f868233404658570e7be555926acc92865658333188c4c12660947",
       "profile_template_ref": "connector-profile-template:sec:0.1",
-      "proposal_manifest_hash": "58a5efa39313343ca5eb06820e8c0cd5fbce26c89715c3e3aa21c44bd820becd",
+      "proposal_manifest_hash": "edb696df6d3f32120f81b19e8a616d4e6b23f52eefd8df85d68d8dbb1c620846",
       "proposal_manifest_ref": "connector-proposal-manifest:sec:0.2"
     },
     {

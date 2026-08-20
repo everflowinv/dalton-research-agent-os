@@ -136,6 +136,7 @@ class PlanExecutorHarness:
                 decision_ref=decision["id"],
                 cik="320193",
                 concept="RevenueFromContractWithCustomerExcludingAssessedTax",
+                filed_from="2025-08-20",
                 filed_to="2026-08-20",
                 actor_ref="core:planner",
                 idempotency_key=f"create-plan:{suffix}",
@@ -261,7 +262,10 @@ class PlanExecutorHarness:
             {
                 binding["binding_ref"]: (
                     lambda params: set(params) == (
-                        {"cik", "taxonomy", "concept", "unit", "form", "filed_to"}
+                        {
+                            "cik", "taxonomy", "concept", "unit", "form",
+                            "filed_from", "filed_to",
+                        }
                         if company_facts
                         else {"issuer", "form", "date_from", "date_to", "limit"}
                     )

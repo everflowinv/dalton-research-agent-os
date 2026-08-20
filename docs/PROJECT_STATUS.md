@@ -42,9 +42,17 @@ filing 拼接、年度/累计期间、单位漂移、模糊 comparative context�
 这证明系统不需要 owner 逐条审阅，也已把正式产物从 filing metadata 推进到研究可用的财务事实；它仍未更新
 thesis/model，不能把单一收入增速自动解释成投资结论。
 
-当前下一阶段是 **做多公司、多 concept 的质量校准，并把财务事实映射到既有 driver/thesis**：
-先验证不同 fiscal calendar、concept taxonomy、amendment 和缺失同比场景都能 fail closed，再让通过的正式 Claim
-进入 driver/thesis verifier；不增加新的人工 gate，也不让 deterministic fact 未经独立判断直接改 thesis。
+同日多样本校准暴露并修复了一个真实错误：Walmart 已弃用的 `SalesRevenueNet` 只有 2018 年数据，旧实现仍把它
+作为“最新”事实自动提交。`get_company_facts` 现在必须冻结最长 400 天的 `filed_from..filed_to`，adapter、raw
+authority replay 和 policy commit 都绑定同一窗口；旧 concept 在窗口内没有 10-Q 时会在 connector 阶段失败，
+不会生成 Evidence 或 Claim。窗口化实跑中，Apple 的同季度收入同比为 16.36%，NVIDIA 的 `Revenues` 为 85.23%，
+Walmart 当前 revenue concept 为 7.14%；三个 plan 都是零人工审批并完成正式 closure，Walmart 旧 concept 则按预期
+产生 0 条 Evidence、0 条 Claim。专项测试同时覆盖 `10-Q/A` 排除、缺失同比、模糊 context 和超宽窗口。
+
+当前下一阶段是 **自动选择当前 revenue concept，再把财务事实映射到既有 driver/thesis**：
+系统不能依赖人先告诉它 NVIDIA 应从旧 concept 切到 `Revenues`。下一切片应把 concept 选择绑定到最新 10-Q
+accession 和 closed concept allowlist；选择不唯一时自动失败，不转成人工逐条审批。通过这一层的正式 Claim 再进入
+driver/thesis verifier；deterministic fact 未经独立判断不能直接改 thesis。
 现有 versioned governance policy 可分别只允许 closed SEC public `10-Q list_filings` 或 exact
 `10-Q get_company_facts` plan 自动启动；
 其中 `list_filings` 结果只有在 Core 从 exact
@@ -842,7 +850,8 @@ ResearchQuestionBacklog、Planner SEC public 薄闭环、下游逐项 coordinato
 Evidence/Claim 0.2 promotion 与 Backlog answer binding 已完成；closure coordinator 对全链重验并支持崩溃重放。
 真实 policy-authorized 隔离 canary 已完成：closed SEC public plan 自动授权、执行、验证、promotion 并回答原
 question，越界 statement 也已在专项测试中 fail closed。下一步用多样本自动通过/升级/人工修改数据校准研究
-质量，并优先产出能进入研究判断的 Claim，不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
+质量；当前已据此增加 company-facts filing window，下一步补 latest-accession-bound concept 选择，并优先产出能
+进入研究判断的 Claim，不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。

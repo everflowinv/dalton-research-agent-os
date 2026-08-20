@@ -249,6 +249,7 @@ def _quarterly_fact(
     *,
     index: int,
     expected_form: str,
+    filed_from: str,
     filed_to: str,
 ) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
@@ -267,7 +268,7 @@ def _quarterly_fact(
     filed = _date(value.get("filed"), f"units.row[{index}].filed")
     if start > end:
         raise SecPublicAdapterError("SEC company concept fact period is inverted")
-    if filed > filed_to:
+    if filed < filed_from or filed > filed_to:
         return None
     duration = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
     if duration < 70 or duration > 105:
@@ -316,7 +317,9 @@ def normalize_sec_company_concept(
         raise SecPublicAdapterError("SEC company concept body must be an object")
     if not isinstance(parameters, Mapping):
         raise SecPublicAdapterError("adapter parameters must be an object")
-    expected_fields = {"cik", "taxonomy", "concept", "unit", "form", "filed_to"}
+    expected_fields = {
+        "cik", "taxonomy", "concept", "unit", "form", "filed_from", "filed_to",
+    }
     if set(parameters) != expected_fields:
         raise SecPublicAdapterError("company concept parameters have an invalid closed shape")
     cik = _issuer(parameters.get("cik"))
@@ -324,7 +327,15 @@ def normalize_sec_company_concept(
     concept = _xbrl_name(parameters.get("concept"), "concept")
     unit = _text(parameters.get("unit"), "unit")
     form = _text(parameters.get("form"), "form")
+    filed_from = _date(parameters.get("filed_from"), "filed_from")
     filed_to = _date(parameters.get("filed_to"), "filed_to")
+    filing_window_days = (
+        date.fromisoformat(filed_to) - date.fromisoformat(filed_from)
+    ).days
+    if filing_window_days < 0 or filing_window_days > 400:
+        raise SecPublicAdapterError(
+            "company concept filing window must span 0..400 days"
+        )
     if taxonomy != "us-gaap" or unit != "USD" or form != "10-Q":
         raise SecPublicAdapterError(
             "company concept canary is closed to us-gaap/USD/10-Q"
@@ -348,7 +359,11 @@ def normalize_sec_company_concept(
         fact
         for index, row in enumerate(rows)
         if (fact := _quarterly_fact(
-            row, index=index, expected_form=form, filed_to=filed_to
+            row,
+            index=index,
+            expected_form=form,
+            filed_from=filed_from,
+            filed_to=filed_to,
         )) is not None
     ]
     if not facts:
@@ -424,6 +439,7 @@ def normalize_sec_company_concept(
         "label": label,
         "unit": unit,
         "form": form,
+        "filed_from": filed_from,
         "filed_to": filed_to,
         "current": current,
         "prior": prior,

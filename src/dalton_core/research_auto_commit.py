@@ -329,6 +329,7 @@ def authorize_policy_candidate(
             "concept": payload.get("concept"),
             "unit": payload.get("unit"),
             "form": payload.get("form"),
+            "filed_from": payload.get("filed_from"),
             "filed_to": payload.get("filed_to"),
         }
         if (

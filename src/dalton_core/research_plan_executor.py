@@ -337,6 +337,7 @@ def sec_adapter_parameters(plan_wire: Mapping[str, Any]) -> dict[str, Any]:
             "concept": request["concept"],
             "unit": request["unit"],
             "form": request["form"],
+            "filed_from": request["filed_from"],
             "filed_to": request["filed_to"],
         }
     if scope["operation"] != SEC_OPERATION:

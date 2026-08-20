@@ -250,6 +250,7 @@ def main() -> int:
         "--concept",
         default="RevenueFromContractWithCustomerExcludingAssessedTax",
     )
+    parser.add_argument("--filed-from")
     parser.add_argument("--filed-to")
     parser.add_argument(
         "--policy-owner",
@@ -265,8 +266,10 @@ def main() -> int:
         raise SystemExit("--policy-owner must use the human: namespace")
     if args.operation == "list_filings" and (not args.date_from or not args.date_to):
         raise SystemExit("list_filings requires --date-from and --date-to")
-    if args.operation == "get_company_facts" and not args.filed_to:
-        raise SystemExit("get_company_facts requires --filed-to")
+    if args.operation == "get_company_facts" and (
+        not args.filed_from or not args.filed_to
+    ):
+        raise SystemExit("get_company_facts requires --filed-from and --filed-to")
 
     output_dir = args.output_dir.expanduser().resolve()
     if output_dir.exists():
@@ -345,6 +348,7 @@ def main() -> int:
                 decision_ref=decision["id"],
                 cik=args.issuer_cik,
                 concept=args.concept,
+                filed_from=args.filed_from,
                 filed_to=args.filed_to,
                 actor_ref="core:planner",
                 idempotency_key="create-plan:sec-plan-canary:1",
@@ -428,7 +432,10 @@ def main() -> int:
             {binding["binding_ref"]: adapter},
             {
                 binding["binding_ref"]: lambda params: set(params) == (
-                    {"cik", "taxonomy", "concept", "unit", "form", "filed_to"}
+                    {
+                        "cik", "taxonomy", "concept", "unit", "form",
+                        "filed_from", "filed_to",
+                    }
                     if company_facts
                     else {"issuer", "form", "date_from", "date_to", "limit"}
                 )

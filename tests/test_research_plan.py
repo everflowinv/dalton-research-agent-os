@@ -236,12 +236,27 @@ class ResearchPlanTests(unittest.TestCase):
             )
         ])
         record = records[0]
+        with self.assertRaisesRegex(
+            ResearchPlanValidationError, "filing window must span 0..400 days"
+        ):
+            self.plans.create_company_facts_plan(
+                question_ref=record["question_ref"],
+                question_version_ref=record["question_version_ref"],
+                decision_ref=decision["id"],
+                cik="789019",
+                concept="RevenueFromContractWithCustomerExcludingAssessedTax",
+                filed_from="2025-01-01",
+                filed_to="2026-08-20",
+                actor_ref="core:planner",
+                idempotency_key="create-plan:company-facts:wide-window",
+            )
         created = self.plans.create_company_facts_plan(
             question_ref=record["question_ref"],
             question_version_ref=record["question_version_ref"],
             decision_ref=decision["id"],
             cik="789019",
             concept="RevenueFromContractWithCustomerExcludingAssessedTax",
+            filed_from="2025-08-20",
             filed_to="2026-08-20",
             actor_ref="core:planner",
             idempotency_key="create-plan:company-facts",
@@ -256,6 +271,10 @@ class ResearchPlanTests(unittest.TestCase):
         self.assertEqual(
             wire["execution_scope"]["steps"][0]["parameters"]["cik"],
             "0000789019",
+        )
+        self.assertEqual(
+            wire["execution_scope"]["steps"][0]["parameters"]["filed_from"],
+            "2025-08-20",
         )
         active = self.store.active_policy()
         policy_wire = dict(active["policy"])

@@ -43,6 +43,7 @@ def main() -> int:
         "--concept",
         default="RevenueFromContractWithCustomerExcludingAssessedTax",
     )
+    parser.add_argument("--filed-from", required=True)
     parser.add_argument("--filed-to", required=True)
     parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
     args = parser.parse_args()
@@ -56,6 +57,7 @@ def main() -> int:
         "concept": args.concept,
         "unit": "USD",
         "form": "10-Q",
+        "filed_from": args.filed_from,
         "filed_to": args.filed_to,
     }
     request = {
@@ -101,6 +103,7 @@ def main() -> int:
         "label": normalized["label"],
         "unit": normalized["unit"],
         "form": normalized["form"],
+        "filed_from": normalized["filed_from"],
         "filed_to": normalized["filed_to"],
         "current": normalized["current"],
         "prior": normalized["prior"],

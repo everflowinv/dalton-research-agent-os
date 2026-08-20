@@ -41,6 +41,7 @@ CONCEPT_PARAMETERS = {
     "concept": "RevenueFromContractWithCustomerExcludingAssessedTax",
     "unit": "USD",
     "form": "10-Q",
+    "filed_from": "2025-08-20",
     "filed_to": "2026-08-20",
 }
 
@@ -177,7 +178,21 @@ class AdapterTests(unittest.TestCase):
             result["current"]["accession"], result["prior"]["accession"]
         )
         self.assertEqual(result["growth_percent"], "13.27")
+        self.assertEqual(result["filed_from"], "2025-08-20")
         self.assertEqual(len(result["source_record_refs"]), 2)
+
+        amended = concept_payload()
+        amended["units"]["USD"].append({
+            **amended["units"]["USD"][3],
+            "val": 999999999999,
+            "accn": "0000789019-26-000055",
+            "form": "10-Q/A",
+            "filed": "2026-05-15",
+        })
+        amended_result = normalize_sec_company_concept(
+            amended, CONCEPT_PARAMETERS, provider_status=200
+        )
+        self.assertEqual(amended_result["current"]["value"], "70066000000")
 
     def test_company_concept_fails_closed_on_ambiguous_or_mixed_context(self):
         ambiguous = concept_payload()
@@ -203,6 +218,31 @@ class AdapterTests(unittest.TestCase):
             normalize_sec_company_concept(
                 concept_payload(),
                 {**CONCEPT_PARAMETERS, "guess_tag": True},
+                provider_status=200,
+            )
+        with self.assertRaisesRegex(SecPublicAdapterError, "no eligible quarterly"):
+            normalize_sec_company_concept(
+                concept_payload(),
+                {**CONCEPT_PARAMETERS, "filed_from": "2026-05-01"},
+                provider_status=200,
+            )
+        missing_comparative = concept_payload()
+        missing_comparative["units"]["USD"] = [
+            row
+            for row in missing_comparative["units"]["USD"]
+            if not (
+                row["accn"] == "0000789019-26-000054"
+                and row["frame"] == "CY2025Q1"
+            )
+        ]
+        with self.assertRaisesRegex(SecPublicAdapterError, "same-filing prior-year"):
+            normalize_sec_company_concept(
+                missing_comparative, CONCEPT_PARAMETERS, provider_status=200
+            )
+        with self.assertRaisesRegex(SecPublicAdapterError, "0..400 days"):
+            normalize_sec_company_concept(
+                concept_payload(),
+                {**CONCEPT_PARAMETERS, "filed_from": "2025-01-01"},
                 provider_status=200,
             )
 
