@@ -96,14 +96,14 @@ controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回
 
 live 仍停在 Agenda Shadow 和 recorded connector 路径。当前未部署的开发候选已经在隔离 authority 中完成
 policy-authorized SEC public ResearchPlan：读取 Company Facts、解析同一 10-Q 的季度收入、独立复算同比、提交
-正式 Evidence/Claim 并关闭 Backlog question。Microsoft、Apple、NVIDIA、Walmart 的本地 canary 说明主链已从
-filing metadata 走到财务事实，但多公司结果还缺可提交的 replay bundle，不能视为生产证明。
+正式 Evidence/Claim 并关闭 Backlog question。固定五家公司 batch 已在同一代码 commit 上完成 Microsoft、Apple、
+NVIDIA、Walmart、Amazon 的 5/5 正式 closure、进程重启后无网络 replay，以及 Walmart stale concept fail-closed
+控制样本；脱敏摘要和简报已提交。该结果仍是隔离开发验收，不代表已部署到 live。
 
 开发候选还包含 Claim → thesis impact assessment、不同 model family verifier、ModelRouter/OpenClaw broker 接线，
 以及模型返回后崩溃时的 durable replay。它们目前只通过 recorded broker 测试，没有使用真实 ThesisVersion 和真实
 模型完成端到端产物，也没有部署到 live。
 
-当前顺序是：先让最新 HEAD 的独立 CI 和 hermetic replay 全绿，再在同一 commit 上复现 5 家公司的 revenue-growth
-plan 并生成第一份 verified brief，最后在取得单独付费授权和 hard spend cap 后运行一条真实 thesis-impact canary。
-在此之前冻结新的 thesis-impact capability、新 connector、生产部署和旧 cron cutover。详细状态见
+Gate 0 和 Gate 1 已完成；下一步只能在取得单独付费授权和 hard spend cap 后运行一条真实 thesis-impact canary。
+在此之前继续冻结新的 thesis-impact capability、新 connector、生产部署和旧 cron cutover。详细状态见
 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)。

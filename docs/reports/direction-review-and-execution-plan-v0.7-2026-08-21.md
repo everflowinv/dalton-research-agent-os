@@ -129,6 +129,12 @@ canary 失败会通知 owner。dashboard 和路由优化继续后置。
   已结束，Python 3.11、Python 3.13、openclaw-broker 三个 job 全部成功；
 - Gate 0 本机候选：Python 全量 581/581、broker 16/16、显式 hermetic replay 1/1、review collector
   故障注入 8/8、build、compileall 和 `git diff --check` 全部通过；实际 review manifest 已生成非空证据包；
-- Gate 0 只有在 exact commit 的 Python 3.11、Python 3.13、openclaw-broker 三个远端 job 和独立 canary step
-  全部成功后才完成。本段不在 push 前预写远端成功；exact run URL 由 GitHub checks 和本轮交付记录；
-- 未调用真实或付费模型，未访问新的真实 source，未部署 live，未修改 cron。
+- Gate 0 exact commit `3d2114a05b97b2a6a5005242106ebb961df161f9` 的
+  [Actions run 32470808101](https://github.com/everflowinv/dalton-research-agent-os/actions/runs/32470808101)
+  已结束：Python 3.11、Python 3.13、openclaw-broker、两个独立 canary step、review collector 和 artifact upload
+  全部成功。Gate 0 已完成；
+- Gate 1 已在 clean commit `0b0f872c0f935098f8e41af339a93d8164684992` 完成 5/5 SEC issuer 正式 closure、
+  进程重启后无网络 replay 和 1 个 stale concept fail-closed 样本。结果 bundle hash 为
+  `7f69dc9a483d3e04cc6c8c6eeb01563ad0e5e94e28d189df34350f812a95844b`；简报见
+  [gate1-sec-five-issuer-revenue-growth-2026-08-21.md](gate1-sec-five-issuer-revenue-growth-2026-08-21.md)；
+- 未调用真实或付费模型，未部署 live，未修改 cron。Gate 2 仍须 owner 对具体付费调用和 hard spend cap 单独授权。

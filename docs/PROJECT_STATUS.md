@@ -2,7 +2,8 @@
 
 更新日期：2026-08-21
 - live deployed baseline：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`；Agenda 兼容热修复：`03ea471`
-- 本轮开发起点：`9cf86d2`；Gate 0 开发基线：`b81d1cb`；SEC 财务事实与 thesis-impact 开发候选均尚未部署到 live
+- 本轮开发起点：`9cf86d2`；Gate 0 验收 commit：`3d2114a`；Gate 1 batch 代码 commit：`0b0f872`；
+  SEC 财务事实与 thesis-impact 开发候选均尚未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -102,7 +103,26 @@ recorded SEC Company Facts → formal Claim closure → recorded thesis assessme
 manifest 收集非空文档、实现和命令证据，只接受 argv 数组，任一文件缺失/为空、命令失败/超时、路径逃逸或陈旧
 输出都会停止且不发布半份 artifact。GitHub Actions 在 Python 3.11、3.13 两个 runner 都跑 canary，3.13 runner
 另上传证据包。该候选本机 Python 全量 581/581、broker 16/16、canary 1/1、collector 8/8、build 与 compileall
-通过；Gate 0 仍以 exact commit 的三个远端 job 全绿为最终门槛。
+通过。Exact commit `3d2114a05b97b2a6a5005242106ebb961df161f9` 的
+[Actions run 32470808101](https://github.com/everflowinv/dalton-research-agent-os/actions/runs/32470808101)
+中 Python 3.11、Python 3.13、openclaw-broker 三个 job 全部成功；两个 hermetic canary step、3.13 review collector
+和 artifact upload 也全部成功。Gate 0 已完成。
+
+Gate 1 已在 clean commit `0b0f872c0f935098f8e41af339a93d8164684992` 运行固定五家公司 batch。
+Microsoft、Apple、NVIDIA、Walmart、Amazon 五条同入口 SEC Company Facts plan 全部完成 source/numeric verifier、
+正式 Evidence/Claim、Backlog closure 和进程重启后的无网络 replay；重放统一返回 `duplicate`，没有新增网络请求，
+每家公司保持 1 条 Evidence、1 条 Claim、0 条 Thesis、0 个人工 gate，全部 SQLite integrity check 为 `ok`。
+五家公司季度收入同比依次为 18.30%、16.36%、85.23%、7.33%、19.62%；实际模型调用和成本均为 0，thesis
+impact 明确记录为 `not yet run`。Walmart stale `SalesRevenueNet` 控制样本按预期失败，candidate 和正式
+Evidence/Claim/Thesis 全部为 0。独立 edgartools 路径复核了 5 个 accession、10 个财务报表数值和 5 个同比计算，
+没有差异；同时证明通用 Revenue 关键词路由会对 NVDA/WMT 误选 CostOfRevenue，不能替代 exact duration 和冻结
+concept allowlist。结果 bundle hash 为 `7f69dc9a483d3e04cc6c8c6eeb01563ad0e5e94e28d189df34350f812a95844b`，
+简报见
+[gate1-sec-five-issuer-revenue-growth-2026-08-21.md](reports/gate1-sec-five-issuer-revenue-growth-2026-08-21.md)。
+Gate 1 没有 schema 变化，也没有部署 live。下一门是取得 owner 对具体付费调用和 hard spend cap 的单独授权后，
+运行一条真实 ThesisVersion 的 thesis-impact canary；授权前不启动 Gate 2。本机相邻回归 81/81、Python 全量
+587/587、broker 16/16、显式 hermetic replay 1/1、build、compileall、结果摘要 JSON 和 `git diff --check`
+全部通过。
 
 现有 versioned governance policy 可分别只允许 closed SEC public `10-Q list_filings` 或 exact
 `10-Q get_company_facts` plan 自动启动；
