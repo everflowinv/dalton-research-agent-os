@@ -1,7 +1,7 @@
 # Thesis-impact verifier 校准基础
 
 日期：2026-08-21
-状态：冻结 12 个样本和评分标准；新 verifier 合同已收紧；尚未运行新的付费模型校准
+状态：冻结 12 个样本和评分标准；新 verifier 合同已收紧；真实候选运行见后续报告
 
 ## 结论
 
@@ -9,7 +9,7 @@ Gate 2 的质量问题已转成一组可复算的校准资产。第一版 corpus
 其中 5 个高严重度错误、2 个中严重度错误。模型可见输入与人工 gold label 分开，评分器只在模型输出落盘后读取
 gold，不把 `seeded_error`、严重度、预期 verdict 或人工理由放进 prompt。
 
-目前只有 Gate 2 的 DeepSeek V4 Flash 结果属于真实观测。它在应当 `pass` 的样本上给出 `reject`，因此基线是
+基础冻结时只有 Gate 2 的 DeepSeek V4 Flash 结果属于真实观测。它在应当 `pass` 的样本上给出 `reject`，因此基线是
 1/12 coverage、1 个误报、该已测 pass 样本误报率 100%。这只是单个已测样本的事实，不代表 12 个样本上的模型
 准确率，也不能用来比较模型。
 
@@ -61,5 +61,5 @@ Gate 2 那类“文字先说匹配，随后仍报 mismatch”因此不会再形�
 脱敏、可复算基线：
 `docs/review-evidence/thesis-impact-verifier-calibration-baseline-v0.1.json`。
 
-下一步才是把 12 个 model-visible prompts 分别交给候选 verifier，保存逐样本 invocation、usage、cost 和输出，
-再由当前评分器生成完整报告。没有完整 12/12 coverage 前不报告模型检出率；没有达到 30 个样本前不讨论放权。
+后续已完成 DeepSeek 12/12 和 Claude Fable 的有界候选运行。结果见
+[`thesis-impact-verifier-live-calibration-2026-08-21.md`](thesis-impact-verifier-live-calibration-2026-08-21.md)。

@@ -142,10 +142,18 @@ eligible，也未回写 Gate 1 简报。真实运行还暴露并修复了两个�
 [gate2-real-thesis-impact-canary-2026-08-21.md](reports/gate2-real-thesis-impact-canary-2026-08-21.md)。
 
 Verifier 校准基础随后冻结 12 个样本：5 pass、7 reject，其中 5 个 high、2 个 medium。gold label 与模型输入分离；
-Gate 2 的 DeepSeek 输出是当前唯一真实观测，在应 pass 的样本上形成 1 个 false positive。新 WorkOrder 必须返回
+基础冻结时，Gate 2 的 DeepSeek 输出是唯一真实观测，在应 pass 的样本上形成 1 个 false positive。新 WorkOrder 必须返回
 严格 `0.2` finding contract，authority 会按 WorkOrder 重验版本，worker 会拒绝与已验证 binding/driver 自相
 矛盾的 finding。历史 `0.1` 只保留 replay 兼容。12 个样本小于 30 个放权门槛，因此不能解锁自动化。报告见
 [thesis-impact-verifier-calibration-foundation-2026-08-21.md](reports/thesis-impact-verifier-calibration-foundation-2026-08-21.md)。
+
+真实候选校准现已完成。DeepSeek V4 Flash 跑完 12/12：accuracy 75%，7 个错误样本检出 5 个，detection rate
+71.4%；5 个正确样本误杀 1 个，false-positive rate 20%；high-severity miss 为 1。另有 3 条输出会被 production
+consistency guard 拒绝。Claude Fable 5 第一条实际使用 6,795 input / 958 output tokens，超过 WorkOrder 的
+3,000 / 400 上限，费用 USD 0.11585 也超过单条 USD 0.04 admission cap；runner 持久化失败后停止剩余 11 条。
+本轮两模型新增实际费用 USD 0.118666；加上 Gate 2 既有 accounted + uncertain reserve 后总上界 USD 0.538652。
+没有候选获准上线。报告见
+[thesis-impact-verifier-live-calibration-2026-08-21.md](reports/thesis-impact-verifier-live-calibration-2026-08-21.md)。
 
 现有 versioned governance policy 可分别只允许 closed SEC public `10-Q list_filings` 或 exact
 `10-Q get_company_facts` plan 自动启动；
@@ -950,9 +958,10 @@ company-facts filing window 和 latest-accession-bound concept 选择，但结�
 Claim → driver/thesis impact authority，以及 ResearchPlan closure → bounded assessment/verifier WorkOrder 接线。
 两个 WorkOrder 现已接入 ModelRouter/OpenClaw model worker，并以无外部调用 recorded broker 验证 contract retry、
 usage/cost 入账、model-family independence、lease-expiry crash recovery 和 replay。Gate 0/1 breadth proof 与
-Gate 2 真实模型 canary 均已完成；当前阻塞是 verifier false positive，而不是控制面缺口。冻结标准的独立
-verifier 校准基础现已完成 12 个 no-leakage cases、closed finding/severity、评分器和 `0.2` 输出合同；下一步是
-跑完 12/12 候选模型观测，不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
+Gate 2 真实模型 canary 和 verifier 候选校准均已完成；当前阻塞是可用的独立 verifier model/broker 边界，而不是
+控制面缺口。DeepSeek 的 12/12 质量分数未过门，Claude Fable 首条即超过 admission budget 和严格输出合同。
+下一步先收紧 provider-side 结构化输出与可执行 token/cost 限制，再接新的非 OpenAI family 候选；不继续围绕
+filing-count 元数据扩建 authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。
@@ -1061,6 +1070,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Thesis impact 付费边界崩溃恢复：`docs/reports/thesis-impact-model-crash-recovery-2026-08-21.md`
 - Gate 2 真实 thesis-impact canary：`docs/reports/gate2-real-thesis-impact-canary-2026-08-21.md`
 - Thesis-impact verifier 校准基础：`docs/reports/thesis-impact-verifier-calibration-foundation-2026-08-21.md`
+- Thesis-impact verifier 真实校准：`docs/reports/thesis-impact-verifier-live-calibration-2026-08-21.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`

@@ -106,8 +106,8 @@ NVIDIA、Walmart、Amazon 的 5/5 正式 closure、进程重启后无网络 repl
 `reject`。控制链、记账、family independence、离线 replay 和数据库完整性通过；verifier findings 有明显矛盾，
 所以 assessment 未进入 eligible，也未写入简报。
 
-Gate 0、Gate 1 和 Gate 2 控制面验收已完成；模型质量门仍未通过。第一版 verifier 校准基础已冻结 12 个
-no-leakage 样本、严重度和评分器，新 WorkOrder 使用严格 `0.2` finding 合同；Gate 2 的已观测结果在正确样本上
-形成 1 个误报。下一步只做完整 12/12 候选模型校准，不部署 live、不自动修改 ThesisVersion，也不切旧 cron。
-详细状态见
+Gate 0、Gate 1 和 Gate 2 控制面验收已完成；模型质量门仍未通过。第一版 verifier 校准已冻结并完成真实候选运行：
+DeepSeek V4 Flash 在 12 个 no-leakage 样本上准确率 75%、错误检出率 71.4%、正确样本误报率 20%，并漏掉 1 个
+高严重度错误；Claude Fable 5 第一条就超过 input/output/cost admission budget，后续 11 条未调用。当前没有
+verifier 候选获准上线，也没有部署 live、自动修改 ThesisVersion 或切旧 cron。详细状态见
 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)。

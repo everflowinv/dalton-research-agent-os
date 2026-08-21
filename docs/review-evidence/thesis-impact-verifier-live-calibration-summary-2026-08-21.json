@@ -1,0 +1,158 @@
+{
+  "schema_version": "0.1",
+  "generated_at": "2026-08-21T22:23:14Z",
+  "scope": "isolated live thesis-impact verifier calibration",
+  "corpus": {
+    "ref": "thesis-impact-verifier-calibration:0.1",
+    "hash": "c5f6928860f043fb4f3a01962dc68d7e53fd8c93b3291fafbc85e96aabb41797",
+    "total_cases": 12,
+    "expected_passes": 5,
+    "expected_rejects": 7,
+    "high_severity_errors": 5,
+    "medium_severity_errors": 2
+  },
+  "deepseek_v4_flash": {
+    "run_ref": "thesis-impact-calibration-run:0f1d37f0a5c0bef9dcc07fddbca69a53",
+    "execution_repo_commit": "4491ef0d2b0ffb8dd1df292afc019d43ddfc87a9",
+    "profile_id": "profile:deepseek-v4-flash",
+    "profile_version_ref": "model-profile-version:broker-deepseek-v4-flash:1",
+    "model_family": "deepseek-v4",
+    "status": "complete_quality_rejected",
+    "model_calls": 12,
+    "usage": {
+      "input_tokens": 6623,
+      "output_tokens": 2059,
+      "total_tokens": 8682
+    },
+    "actual_cost_usd": "0.002816",
+    "admission_budget": {
+      "run_cap_usd": "0.25",
+      "per_case_cap_usd": "0.01",
+      "maximum_admitted_case_caps_usd": "0.12"
+    },
+    "frozen_score": {
+      "coverage": {
+        "numerator": 12,
+        "denominator": 12
+      },
+      "accuracy": 0.75,
+      "expected_rejects": 7,
+      "detected_rejects": 5,
+      "detection_rate": 0.7142857142857143,
+      "expected_passes": 5,
+      "false_positives": 1,
+      "false_positive_rate": 0.2,
+      "high_severity_misses": 1,
+      "automation_eligible": false,
+      "automation_ineligibility_reasons": [
+        "frozen corpus has fewer than 30 seeded cases",
+        "detection rate is below 90%",
+        "high-severity misses are non-zero"
+      ]
+    },
+    "incorrect_cases": [
+      {
+        "case_ref": "calibration:thesis-impact:003",
+        "expected_verdict": "pass",
+        "actual_verdict": "reject",
+        "error": "false_positive"
+      },
+      {
+        "case_ref": "calibration:thesis-impact:006",
+        "expected_verdict": "reject",
+        "actual_verdict": "pass",
+        "error": "missed_binding_mismatch"
+      },
+      {
+        "case_ref": "calibration:thesis-impact:011",
+        "expected_verdict": "reject",
+        "actual_verdict": "pass",
+        "error": "missed_follow_up_quality"
+      }
+    ],
+    "production_consistency_rejections": [
+      {
+        "case_ref": "calibration:thesis-impact:003",
+        "reason": "impact_mismatch repeats the assessed impact"
+      },
+      {
+        "case_ref": "calibration:thesis-impact:007",
+        "reason": "impact_mismatch repeats the assessed impact"
+      },
+      {
+        "case_ref": "calibration:thesis-impact:012",
+        "reason": "binding_mismatch was already disproved by authority"
+      }
+    ],
+    "offline_resume": {
+      "completed_cases": 12,
+      "broker_journal_hash_unchanged": true,
+      "broker_journal_size_unchanged": true,
+      "additional_provider_calls": 0
+    },
+    "artifact_hashes": {
+      "manifest_sha256": "1dad72690264ea302b847fa20757a1d93ec7ca39660c714173a131952175917b",
+      "responses_jsonl_sha256": "cd73f111a0c9375662d22066d0d6fad1f1bc13e503a7a30989dfdc41c9965414",
+      "outputs_sha256": "c2ee3ae4fb0cac8f71db2c2781586a3f81d49a0d82a1d8260aeffc7d7ed1a43c",
+      "score_sha256": "8ac91223e34a4f8b708156101dcc41af1b1cb93b0e778694b8f6be81265eb5eb"
+    }
+  },
+  "claude_fable_5": {
+    "run_ref": "thesis-impact-calibration-run:94cc6bc07b546bcea06bb1e5a06df58c",
+    "execution_repo_commit": "d50b3a7bc2ae0cc8ee3f54f4afb341e11f8262fe",
+    "profile_id": "profile:claude-fable-5",
+    "profile_version_ref": "model-profile-version:broker-claude-fable-5:1",
+    "model_family": "anthropic-claude-5",
+    "status": "operationally_rejected_after_first_call",
+    "attempted_cases": 1,
+    "evaluable_cases": 0,
+    "skipped_cases": 11,
+    "admission_budget": {
+      "run_cap_usd": "0.48",
+      "per_case_cap_usd": "0.04",
+      "max_input_tokens": 3000,
+      "max_output_tokens": 400
+    },
+    "provider_telemetry": {
+      "input_tokens": 6795,
+      "output_tokens": 958,
+      "total_tokens": 7753,
+      "actual_cost_usd": "0.11585"
+    },
+    "adapter_error": {
+      "code": "PROVIDER_BUDGET_EXCEEDED",
+      "message": "provider max_input_tokens telemetry exceeds WorkOrder budget"
+    },
+    "strict_output_contract_violated": true,
+    "strict_output_contract_note": "The broker journal contains one JSON object followed by explanatory prose, rather than exactly one JSON object.",
+    "broker_binding": {
+      "invocation_ref": "invocation:b8ae9bb56feba809cf859d8cf2c71676",
+      "request_hash": "98821e5e6d2315ae066b82420bd421d97daccb8a5b79a61b2d4caaca48dce154",
+      "fresh_response_content_hash": "7bcf1ca8098601175f0e6d5972b7caae2360d4bf22b221a06176023c636c2021"
+    },
+    "failure_recovery": {
+      "mode": "replay_duplicate",
+      "additional_provider_calls": 0,
+      "broker_journal_hash_unchanged": true,
+      "broker_journal_size_unchanged": true
+    },
+    "artifact_hashes": {
+      "manifest_sha256": "d8e2436a04d86784ced7f41c4f5cc1380b3fe044ff057f15422fd2f55dfdb44c",
+      "responses_jsonl_sha256": "93fdf3a673be2b498eeeda2203597c75d8d97765777e96943ed070aeac6383d1",
+      "outputs_sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+      "score_sha256": "c8d19d5b859666abaef9e8d0bdee8163e4824d9f428326d325b0ebc392589575"
+    }
+  },
+  "spend": {
+    "new_calibration_actual_cost_usd": "0.118666",
+    "prior_accounted_and_uncertain_upper_bound_usd": "0.419986",
+    "aggregate_accounted_and_uncertain_upper_bound_usd": "0.538652",
+    "owner_authorized_upper_bound_usd": "1.00"
+  },
+  "decision": {
+    "selected_verifier": null,
+    "automation_eligible": false,
+    "live_deployment_authorized": false,
+    "reason": "DeepSeek failed the frozen quality gate; Claude Fable exceeded admission budgets and strict output format on its first case."
+  }
+}
