@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
+import secrets
 import shutil
 import sqlite3
+import socket
 import subprocess
 import sys
 import time
@@ -349,6 +352,101 @@ def _key_provider(path: Path) -> Callable[[], bytes]:
     return read_key
 
 
+def _broker_replay_only_preflight(
+    *, socket_path: Path, auth_key_path: Path
+) -> dict[str, Any]:
+    """Prove the live broker accepts replayOnly without calling a provider."""
+
+    identity = hashlib.sha256(
+        b"gate2-live-broker-replay-only-protocol-preflight"
+    ).hexdigest()[:32]
+    core_request = {
+        "schemaVersion": SCHEMA_VERSION,
+        "invocationId": f"invocation:gate2-preflight-{identity}",
+        "workOrderId": f"work:gate2-preflight-{identity}",
+        "profileId": ASSESSMENT_PROFILE_ID,
+        "model": "openai/gpt-5.6-sol",
+        "prompt": "Gate 2 replay-only protocol preflight; do not call a provider.",
+        "maxTokens": 1,
+        "timeoutMs": 1,
+        "replayOnly": True,
+    }
+    auth = {
+        "scheme": "hmac-sha256-v1",
+        "clientId": BROKER_CLIENT_ID,
+        "timestampMs": int(_now().timestamp() * 1000),
+        "nonce": secrets.token_hex(16),
+    }
+    unsigned = {**core_request, "auth": auth}
+    secret = _key_provider(auth_key_path)()
+    auth["mac"] = hmac.new(
+        secret,
+        canonical_json(unsigned).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    frame = (canonical_json({**core_request, "auth": auth}) + "\n").encode("utf-8")
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    response = bytearray()
+    try:
+        client.settimeout(5.0)
+        client.connect(os.fspath(socket_path))
+        client.sendall(frame)
+        while True:
+            chunk = client.recv(16_384)
+            if not chunk:
+                break
+            response.extend(chunk)
+            if len(response) > 262_144:
+                raise Gate2CanaryError("broker preflight response exceeded frame limit")
+    except OSError as exc:
+        raise Gate2CanaryError("broker replay-only preflight could not connect") from exc
+    finally:
+        client.close()
+    if not response or response[-1:] != b"\n" or response.count(b"\n") != 1:
+        raise Gate2CanaryError("broker replay-only preflight returned an invalid frame")
+    try:
+        wire = json.loads(bytes(response[:-1]).decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise Gate2CanaryError("broker replay-only preflight returned invalid JSON") from exc
+    expected_keys = {
+        "schemaVersion", "brokerVersion", "runtimeVersion", "invocationId",
+        "workOrderId", "profileId", "requestHash", "idempotencyStatus", "ok",
+        "provider", "model", "canonicalModel", "agentId", "text", "usage",
+        "cost", "error", "contentHash",
+    }
+    if (
+        not isinstance(wire, dict)
+        or set(wire) != expected_keys
+        or wire.get("ok") is not False
+        or wire.get("idempotencyStatus") != "fresh"
+        or wire.get("error") != {
+            "code": "IDEMPOTENCY_MISS",
+            "message": (
+                "no durable completion exists; replay-only request did not call the host"
+            ),
+        }
+        or wire.get("text") is not None
+    ):
+        error = wire.get("error") if isinstance(wire, dict) else None
+        raise Gate2CanaryError(
+            "live broker does not expose the required replay-only protocol; "
+            f"error={error!r}"
+        )
+    unhashed = dict(wire)
+    asserted_hash = unhashed.pop("contentHash")
+    if asserted_hash != hashlib.sha256(
+        canonical_json(unhashed).encode("utf-8")
+    ).hexdigest():
+        raise Gate2CanaryError("broker replay-only preflight hash did not verify")
+    return {
+        "status": "pass",
+        "broker_version": wire["brokerVersion"],
+        "runtime_version": wire["runtimeVersion"],
+        "provider_called": False,
+        "error_code": wire["error"]["code"],
+    }
+
+
 def _worker(
     *,
     authorities: Authorities,
@@ -542,6 +640,10 @@ def _parent(args: argparse.Namespace) -> int:
     if output.exists():
         raise Gate2CanaryError(f"output directory already exists: {output}")
     _required_paths(source)
+    broker_preflight = _broker_replay_only_preflight(
+        socket_path=args.socket_path,
+        auth_key_path=args.auth_key_path,
+    )
     shutil.copytree(source, output)
     os.chmod(output, 0o700)
     for path in output.iterdir():
@@ -733,6 +835,7 @@ def _parent(args: argparse.Namespace) -> int:
                     "thesis_admission": admission,
                 },
                 "budget": budget,
+                "broker_preflight": broker_preflight,
                 "actual_or_estimated_total_cost_usd": format(total_cost, "f"),
                 "model_accounting_counts": _counts(rows_before_replay),
                 "model_calls": [
