@@ -347,7 +347,7 @@ class ResearchPlanThesisImpactCoordinator:
         *,
         plan_version_ref: str,
         thesis_ref: str,
-        producer_invocation: ModelInvocation | Mapping[str, Any],
+        producer_invocation: ModelInvocation | Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Record a succeeded assessment result and enqueue verification."""
 
@@ -364,7 +364,11 @@ class ResearchPlanThesisImpactCoordinator:
         recorded = self.impact.record_assessment(
             claim_version_ref=context["routed"]["claim_version_ref"],
             thesis_version_ref=context["routed"]["thesis_version_ref"],
-            producer_invocation=producer_invocation,
+            producer_invocation=(
+                producer_invocation
+                if producer_invocation is not None
+                else {"id": formal["result_envelope"]["invocation_ref"]}
+            ),
             producer_result_envelope_ref=formal["result_envelope_id"],
         )
         assessment = recorded["assessment"]
@@ -385,7 +389,7 @@ class ResearchPlanThesisImpactCoordinator:
         plan_version_ref: str,
         thesis_ref: str,
         assessment_ref: str,
-        verifier_invocation: ModelInvocation | Mapping[str, Any],
+        verifier_invocation: ModelInvocation | Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Record independent verification; create a follow-up if insufficient."""
 
@@ -402,7 +406,11 @@ class ResearchPlanThesisImpactCoordinator:
             )
         verified = self.impact.verify_assessment(
             assessment_ref=assessment_ref,
-            verifier_invocation=verifier_invocation,
+            verifier_invocation=(
+                verifier_invocation
+                if verifier_invocation is not None
+                else {"id": formal["result_envelope"]["invocation_ref"]}
+            ),
             verifier_result_envelope_ref=formal["result_envelope_id"],
         )
         if verified["verification"]["verdict"] == "reject":

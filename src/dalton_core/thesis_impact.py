@@ -661,6 +661,13 @@ class ThesisImpactAuthority:
         assessment_ref = _text(assessment_ref, "assessment_ref")
         return self._read_assessment(self.connection.cursor(), assessment_ref)
 
+    def invocation(self, invocation_ref: str) -> dict[str, Any]:
+        """Return one exact ModelInvocation already committed to Core authority."""
+
+        invocation_ref = _text(invocation_ref, "invocation_ref")
+        invocation, _ = self._read_invocation(self.connection.cursor(), invocation_ref)
+        return invocation
+
     def verify_assessment(
         self,
         *,

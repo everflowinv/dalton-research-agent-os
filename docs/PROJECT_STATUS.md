@@ -68,8 +68,20 @@ assessment WorkOrder 与独立 verifier WorkOrder；verifier 同时读取 assess
 隔离 recorded-result 端到端 canary 已覆盖 `supports`、没有 thesis 自动建题、`insufficient` 自动建题和 crash/replay
 去重；两条模型 WorkOrder 都无 side effect，整个流程不增加逐条人工审批，也不改 thesis。真实付费模型尚未调用。
 
-当前下一阶段是把这两个 WorkOrder 接入现有 ModelRouter/OpenClaw model worker，在隔离 authority 跑第一条真实模型
-canary，并核对实际 token、成本、model-family independence 和输出质量。真实 canary 仍不得直接修改 thesis；
+同日后续开发已把这两个 WorkOrder 接入现有 `ModelRouter → OpenClawModelAdapter → Core/Scheduler` 执行边界。
+worker 只能执行 coordinator 生成且已在 Scheduler authority 中冻结的 exact WorkOrder；assessment 失败后按 bounded
+attempt 重新路由，verifier 的 producer family 从已持久化 assessment invocation 自动读取，caller 不能选择或绕过
+family independence。每次 broker 调用都会先写 ModelInvocation、usage 和 cost authority，模型输出通过 closed contract
+及 exact ref/hash 检查后才允许成为 Scheduler formal success。错误 JSON 会进入有界 retry，最后一次失败会形成正式
+failed result，不留下 exhausted-but-unreadable 状态。
+
+隔离 recorded broker canary 已验证 `错误 assessment JSON → retry → valid assessment → independent verifier pass → replay`：
+三次调用分别形成三条 invocation、usage 和 cost，错误输出没有生成 assessment，verifier 自动切换到另一个 model
+family，重放没有第四次 broker 请求，人工 review decision 仍为 0，Thesis current pointer 不变。该 canary 没有调用
+真实模型，不能用于判断模型输出质量。
+
+当前下一阶段是取得单独付费调用授权后，在隔离 authority 跑第一条真实模型 canary，并核对实际 token、成本和输出
+质量。真实 canary 仍不得直接修改 thesis；
 `insufficient` 只生成后续问题，`supports / weakens / no_change` 只形成可供未来 thesis updater 消费的已验证判断。
 现有 versioned governance policy 可分别只允许 closed SEC public `10-Q list_filings` 或 exact
 `10-Q get_company_facts` plan 自动启动；
@@ -871,8 +883,9 @@ Evidence/Claim 0.2 promotion 与 Backlog answer binding 已完成；closure coor
 question，越界 statement 也已在专项测试中 fail closed。下一步用多样本自动通过/升级/人工修改数据校准研究
 质量；当前已据此增加 company-facts filing window、latest-accession-bound concept 选择、第一版
 Claim → driver/thesis impact authority，以及 ResearchPlan closure → bounded assessment/verifier WorkOrder 接线。
-下一步把这两个 WorkOrder 接入现有模型执行边界并跑隔离真实模型 canary，不继续围绕 filing-count 元数据扩建
-authority。Interrupt / park /
+两个 WorkOrder 现已接入 ModelRouter/OpenClaw model worker，并以无外部调用 recorded broker 验证 contract retry、
+usage/cost 入账、model-family independence 和 replay。下一步只在取得单独付费调用授权后跑隔离真实模型 canary，
+评估输出质量；不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。
@@ -971,6 +984,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - 当前愿景与执行优先级：`docs/reports/vision-and-execution-priority-v0.6-2026-08-15.md`
 - Claim → thesis 影响判断：`docs/reports/thesis-impact-verifier-2026-08-20.md`
 - ResearchPlan → thesis impact 控制面：`docs/reports/research-plan-thesis-impact-control-2026-08-21.md`
+- Thesis impact 模型执行器：`docs/reports/thesis-impact-model-worker-2026-08-21.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`

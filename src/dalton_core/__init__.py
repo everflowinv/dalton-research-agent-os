@@ -152,6 +152,21 @@ _LAZY_EXPORTS = {
     "ResearchPlanThesisImpactPending": (
         ".thesis_impact_control", "ResearchPlanThesisImpactPending"
     ),
+    "ResearchPlanThesisImpactRuntime": (
+        ".thesis_impact_model_worker", "ResearchPlanThesisImpactRuntime"
+    ),
+    "ThesisImpactModelWorker": (
+        ".thesis_impact_model_worker", "ThesisImpactModelWorker"
+    ),
+    "ThesisImpactModelWorkerConflict": (
+        ".thesis_impact_model_worker", "ThesisImpactModelWorkerConflict"
+    ),
+    "ThesisImpactModelWorkerError": (
+        ".thesis_impact_model_worker", "ThesisImpactModelWorkerError"
+    ),
+    "ThesisImpactModelWorkerRejected": (
+        ".thesis_impact_model_worker", "ThesisImpactModelWorkerRejected"
+    ),
     "ResearchPlanConflict": (".research_plan", "ResearchPlanConflict"),
     "ResearchPlanError": (".research_plan", "ResearchPlanError"),
     "ResearchPlanNotFound": (".research_plan", "ResearchPlanNotFound"),
@@ -248,6 +263,11 @@ __all__ = [
     "ResearchPlanThesisImpactConflict",
     "ResearchPlanThesisImpactError",
     "ResearchPlanThesisImpactPending",
+    "ResearchPlanThesisImpactRuntime",
+    "ThesisImpactModelWorker",
+    "ThesisImpactModelWorkerConflict",
+    "ThesisImpactModelWorkerError",
+    "ThesisImpactModelWorkerRejected",
     "ResearchPlanConflict",
     "ResearchPlanError",
     "ResearchPlanNotFound",
