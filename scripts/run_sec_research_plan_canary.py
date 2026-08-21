@@ -81,6 +81,26 @@ def _sqlite_integrity(path: Path) -> str:
         connection.close()
 
 
+def _write_result(output_dir: Path, result: dict) -> None:
+    result_path = output_dir / "result.json"
+    result_path.write_text(
+        json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(result_path, 0o600)
+
+
+def _model_accounting_counts(core: DaltonStore) -> dict[str, int]:
+    return {
+        table: core.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in (
+            "model_invocations",
+            "observability_usage_entries",
+            "observability_cost_entries",
+        )
+    }
+
+
 def _policy(now: datetime, company_ref: str) -> dict:
     return {
         "schema_version": "0.1",
@@ -263,6 +283,14 @@ def main() -> int:
         "--user-agent",
         default="Dalton Research Agent isolated SEC ResearchPlan canary",
     )
+    parser.add_argument(
+        "--expect-blocked",
+        action="store_true",
+        help=(
+            "treat an execution-stage fail-closed result as the expected canary "
+            "outcome; completed plans remain an error and are not promoted"
+        ),
+    )
     args = parser.parse_args()
     if not args.policy_owner.startswith("human:"):
         raise SystemExit("--policy-owner must use the human: namespace")
@@ -272,6 +300,8 @@ def main() -> int:
         not args.filed_from or not args.filed_to
     ):
         raise SystemExit("get_company_facts requires --filed-from and --filed-to")
+    if args.expect_blocked and args.operation != "get_company_facts":
+        raise SystemExit("--expect-blocked is only supported for get_company_facts")
 
     output_dir = args.output_dir.expanduser().resolve()
     if output_dir.exists():
@@ -478,6 +508,7 @@ def main() -> int:
         )
         staging_path = output_dir / "candidate-staging.sqlite"
         staging = CandidateStagingStore(staging_path)
+        review = HumanReviewAuthority(staging_path)
         resolver = ConnectorAuthorityResolver(
             core=core,
             connectors=connectors,
@@ -516,29 +547,138 @@ def main() -> int:
             if outcome["status"] not in {"admitted", "succeeded"}:
                 break
         if outcomes[-1]["status"] != "complete":
-            raise RuntimeError(f"ResearchPlan canary did not complete: {outcomes[-1]}")
+            result = {
+                "status": "expected-fail-closed" if args.expect_blocked else "blocked",
+                "generated_at": _wire_time(datetime.now(timezone.utc)),
+                "output_dir": str(output_dir),
+                "plan": {
+                    "ref": plan_wire["id"],
+                    "hash": plan_wire["content_hash"],
+                    "authorization_ref": plan_authorization["authorization"]["id"],
+                    "policy_version_ref": installed_policy["policy_version_id"],
+                    "policy_owner": args.policy_owner,
+                    "operation": plan_wire["execution_scope"]["operation"],
+                    "parameters": plan_wire["execution_scope"]["parameters"],
+                },
+                "outcomes": outcomes,
+                "failure": outcomes[-1],
+                "candidate_counts": staging.counts(),
+                "formal_ledger_counts": {
+                    table: core.connection.execute(
+                        f"SELECT COUNT(*) FROM {table}"
+                    ).fetchone()[0]
+                    for table in (
+                        "evidence_versions", "claim_versions", "thesis_versions"
+                    )
+                },
+                "human_gate_counts": {
+                    "plan_approvals": core.connection.execute(
+                        "SELECT COUNT(*) FROM research_plan_approvals"
+                    ).fetchone()[0],
+                    "claim_reviews": staging.connection.execute(
+                        "SELECT COUNT(*) FROM human_review_decisions"
+                    ).fetchone()[0],
+                },
+                "model_accounting_counts": _model_accounting_counts(core),
+                "integrity": {
+                    "core": core.connection.execute(
+                        "PRAGMA integrity_check"
+                    ).fetchone()[0],
+                    "staging": staging.connection.execute(
+                        "PRAGMA integrity_check"
+                    ).fetchone()[0],
+                    "coordinator": connector_records.connection.execute(
+                        "PRAGMA integrity_check"
+                    ).fetchone()[0],
+                    "capability": _sqlite_integrity(
+                        output_dir / "capability.sqlite"
+                    ),
+                },
+                "network": {
+                    "host": "data.sec.gov",
+                    "auth_mode": "none",
+                    "side_effects": ["read:public-http"],
+                    "user_agent": args.user_agent,
+                },
+            }
+            _write_result(output_dir, result)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 0 if args.expect_blocked else 3
 
-        review = HumanReviewAuthority(staging_path)
+        if args.expect_blocked:
+            result = {
+                "status": "unexpected-complete",
+                "generated_at": _wire_time(datetime.now(timezone.utc)),
+                "output_dir": str(output_dir),
+                "plan": {
+                    "ref": plan_wire["id"],
+                    "hash": plan_wire["content_hash"],
+                    "operation": plan_wire["execution_scope"]["operation"],
+                    "parameters": plan_wire["execution_scope"]["parameters"],
+                },
+                "outcomes": outcomes,
+                "candidate_counts": staging.counts(),
+                "formal_ledger_counts": {
+                    table: core.connection.execute(
+                        f"SELECT COUNT(*) FROM {table}"
+                    ).fetchone()[0]
+                    for table in (
+                        "evidence_versions", "claim_versions", "thesis_versions"
+                    )
+                },
+                "model_accounting_counts": _model_accounting_counts(core),
+            }
+            _write_result(output_dir, result)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+            return 4
+
         candidates = review.list_candidates(limit=10)
         if len(candidates) != 1:
             raise RuntimeError("ResearchPlan canary must produce exactly one candidate")
         candidate = candidates[0]
         claim = candidate["claim"]
         evidence = candidate["evidence"]
+        material_rows = review.connection.execute(
+            "SELECT record_json FROM candidate_source_materials"
+        ).fetchall()
+        verification_rows = review.connection.execute(
+            "SELECT record_json FROM candidate_verifications ORDER BY verification_id"
+        ).fetchall()
+        if len(material_rows) != 1 or len(verification_rows) != 2:
+            raise RuntimeError(
+                "ResearchPlan canary must persist one source material and two verifications"
+            )
+        source_material = json.loads(material_rows[0][0])
+        normalized = source_material["normalized_payload"]
+        verifications = [json.loads(row[0]) for row in verification_rows]
         authority_bundle = review.candidate_authority_bundle(claim["id"])
         promotion = core.commit_policy_candidate(
             **authority_bundle,
             idempotency_key="policy-ledger:sec-plan-canary:1",
         )
-        closure = ResearchPlanClosureCoordinator(
+        closure_coordinator = ResearchPlanClosureCoordinator(
             plan=plans,
             backlog=backlog,
             coordinator=coordinator,
             review=review,
-        ).close_policy_authorized(
+        )
+        closure = closure_coordinator.close_policy_authorized(
             plan_version_ref=plan_wire["id"],
             authorization=promotion["authorization"],
         )
+        closure_replay = closure_coordinator.close_policy_authorized(
+            plan_version_ref=plan_wire["id"],
+            authorization=promotion["authorization"],
+        )
+        if (
+            closure_replay["status"] != "duplicate"
+            or closure_replay["answer_binding_ref"] != closure["answer_binding_ref"]
+        ):
+            raise RuntimeError("ResearchPlan closure replay did not converge")
+        formal_claim_record = core.get_claim(promotion["claim_version_ref"])
+        if formal_claim_record is None:
+            raise RuntimeError("formal ClaimVersion is missing after policy promotion")
+        formal_claim = formal_claim_record["claim"]
         tree = coordinator.tree_status(plan_wire["id"])
         result = {
             "status": "autonomous-closed",
@@ -579,6 +719,34 @@ def main() -> int:
                 "source_ref": evidence["source_ref"],
                 "source_envelope_ref": evidence["source_envelope_ref"],
                 "artifact_refs": evidence["artifact_refs"],
+                **(
+                    {
+                        "source_facts": {
+                            key: normalized[key]
+                            for key in (
+                                "entity_name", "cik", "taxonomy", "concept",
+                                "concept_candidates", "eligible_concepts", "label",
+                                "unit", "filed_from", "filed_to",
+                                "latest_accession", "selection_basis", "current",
+                                "prior", "growth_percent", "source_record_refs",
+                                "content_hash",
+                            )
+                        }
+                    }
+                    if company_facts
+                    else {}
+                ),
+                "verifications": [
+                    {
+                        "ref": verification["id"],
+                        "hash": verification["content_hash"],
+                        "kind": verification["kind"],
+                        "verdict": verification["verdict"],
+                        "verifier_ref": verification["verifier_ref"],
+                        "verifier_hash": verification["verifier_hash"],
+                    }
+                    for verification in verifications
+                ],
             },
             "formal_ledger_counts": {
                 table: core.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
@@ -586,11 +754,14 @@ def main() -> int:
             },
             "promotion": {
                 "authorization_ref": promotion["authorization"]["id"],
+                "authorization": promotion["authorization"],
                 "evidence_version_ref": promotion["evidence_version_ref"],
                 "claim_version_ref": promotion["claim_version_ref"],
+                "claim_version_hash": formal_claim["content_hash"],
                 "relation_ref": promotion["relation_ref"],
             },
             "closure": closure,
+            "closure_replay": closure_replay,
             "human_gate_counts": {
                 "plan_approvals": core.connection.execute(
                     "SELECT COUNT(*) FROM research_plan_approvals"
@@ -599,6 +770,7 @@ def main() -> int:
                     "SELECT COUNT(*) FROM human_review_decisions"
                 ).fetchone()[0],
             },
+            "model_accounting_counts": _model_accounting_counts(core),
             "integrity": {
                 "core": core.connection.execute("PRAGMA integrity_check").fetchone()[0],
                 "staging": review.connection.execute("PRAGMA integrity_check").fetchone()[0],
@@ -614,12 +786,7 @@ def main() -> int:
                 "user_agent": args.user_agent,
             },
         }
-        result_path = output_dir / "result.json"
-        result_path.write_text(
-            json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        os.chmod(result_path, 0o600)
+        _write_result(output_dir, result)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
     finally:

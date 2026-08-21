@@ -58,6 +58,16 @@ python3 scripts/close_sec_research_plan_canary.py \
   --output-dir temp/sec-plan-canary-example \
   --decision-ref human-review:EXACT_DECISION_REF
 
+# 五家公司同口径 revenue-growth batch；要求仓库 clean，output-dir 不存在
+python3 scripts/run_sec_revenue_growth_batch.py \
+  --output-dir temp/sec-revenue-growth-batch \
+  --filed-from 2025-08-21 --filed-to 2026-08-21 \
+  --policy-owner human:operator
+
+# 对 batch 内单家公司做无网络 closure replay
+python3 scripts/replay_sec_research_plan_canary.py \
+  --output-dir temp/sec-revenue-growth-batch/samples/MSFT
+
 cd integrations/openclaw-model-broker
 npm run check
 ```
