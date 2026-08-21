@@ -56,9 +56,16 @@ concept 一并写入 authority。当前代码实跑 Apple 时自动 fallback 到
 并得到 85.23%，Walmart 自动选更完整的 `Revenues` 并得到 7.33%；此前 7.14% 的口径不含部分会员费等收入。
 三家公司均完成零人工审批的正式 closure。
 
-当前下一阶段是 **把正式财务 Claim 映射到既有 driver/thesis verifier**：
-先为“收入增速是否支持、削弱或不改变某一条既有 driver”建立独立判断与验证，不让 deterministic fact 直接改
-thesis，也不增加逐条 owner 审批。没有既有 thesis/driver 时只保存 Claim 并生成后续研究问题。
+开发候选现已完成 **正式财务 Claim → 既有 driver/thesis 影响判断** 的第一版 authority：producer 只能读取
+exact formal ClaimVersion、当前 ThesisVersion 和两者 hash，输出 `supports / weakens / no_change / insufficient`；
+另一个不同 model family 必须从 Scheduler 的 immutable ResultEnvelope 独立复核。通过后只形成 append-only
+pre-commit 判断，不会直接改 thesis，也不增加逐条 owner 审批。没有既有 thesis/driver 时，系统保留 Claim 并
+在 ResearchQuestionBacklog 自动生成一条可重放的 follow-up question。隔离 recorded-model canary 已证明判断、
+独立复核、幂等、fail-closed 和零 thesis mutation；尚未接到 ResearchPlan closure，也未调用真实付费模型。
+
+当前下一阶段是把 ResearchPlan closure 的 exact formal Claim 接到该路由，为 assessment/verifier 生成受预算约束的
+两个 WorkOrder 和 closed prompt，然后在隔离 authority 跑第一条真实模型 canary。真实 canary 仍不得直接修改
+thesis；`insufficient` 只生成后续问题，`supports / weakens / no_change` 只进入待未来 thesis updater 消费的队列。
 现有 versioned governance policy 可分别只允许 closed SEC public `10-Q list_filings` 或 exact
 `10-Q get_company_facts` plan 自动启动；
 其中 `list_filings` 结果只有在 Core 从 exact
@@ -857,8 +864,9 @@ ResearchQuestionBacklog、Planner SEC public 薄闭环、下游逐项 coordinato
 Evidence/Claim 0.2 promotion 与 Backlog answer binding 已完成；closure coordinator 对全链重验并支持崩溃重放。
 真实 policy-authorized 隔离 canary 已完成：closed SEC public plan 自动授权、执行、验证、promotion 并回答原
 question，越界 statement 也已在专项测试中 fail closed。下一步用多样本自动通过/升级/人工修改数据校准研究
-质量；当前已据此增加 company-facts filing window 和 latest-accession-bound concept 选择，下一步把正式 Claim
-接入 driver/thesis verifier，不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
+质量；当前已据此增加 company-facts filing window、latest-accession-bound concept 选择和第一版
+Claim → driver/thesis impact authority。下一步把 ResearchPlan closure 接到该 authority 并跑真实模型 canary，
+不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。
@@ -955,6 +963,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Planner SEC public 薄闭环：`docs/reports/research-plan-thin-closure-2026-08-15.md`
 - ResearchPlan coordinator：`docs/reports/research-plan-coordinator-admission-2026-08-15.md`
 - 当前愿景与执行优先级：`docs/reports/vision-and-execution-priority-v0.6-2026-08-15.md`
+- Claim → thesis 影响判断：`docs/reports/thesis-impact-verifier-2026-08-20.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`

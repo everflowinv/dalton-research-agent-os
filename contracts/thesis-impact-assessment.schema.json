@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/thesis-impact-assessment.schema.json",
+  "title": "ThesisImpactAssessment",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "claim_version_ref",
+    "claim_version_hash", "thesis_version_ref", "thesis_version_hash",
+    "driver_statement", "impact", "rationale", "follow_up_question",
+    "producer_invocation_ref", "producer_invocation_hash",
+    "producer_result_envelope_ref", "producer_result_envelope_hash",
+    "input_context_hash", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^thesis-impact:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "minLength": 1},
+    "claim_version_ref": {"type": "string", "minLength": 1},
+    "claim_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "thesis_version_ref": {"type": "string", "minLength": 1},
+    "thesis_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "driver_statement": {"type": "string", "minLength": 1},
+    "impact": {"enum": ["supports", "weakens", "no_change", "insufficient"]},
+    "rationale": {"type": "string", "minLength": 1},
+    "follow_up_question": {"type": ["string", "null"]},
+    "producer_invocation_ref": {"type": "string", "minLength": 1},
+    "producer_invocation_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "producer_result_envelope_ref": {"type": "string", "minLength": 1},
+    "producer_result_envelope_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "input_context_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

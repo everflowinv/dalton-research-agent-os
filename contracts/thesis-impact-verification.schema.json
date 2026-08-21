@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/thesis-impact-verification.schema.json",
+  "title": "ThesisImpactVerification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "assessment_ref",
+    "assessment_hash", "verdict", "findings", "verifier_invocation_ref",
+    "verifier_invocation_hash", "verifier_result_envelope_ref",
+    "verifier_result_envelope_hash", "policy_version_ref",
+    "policy_version_hash", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^thesis-impact-verification:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "minLength": 1},
+    "assessment_ref": {"type": "string", "minLength": 1},
+    "assessment_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verdict": {"enum": ["pass", "reject"]},
+    "findings": {"type": "array", "items": {"type": "object"}},
+    "verifier_invocation_ref": {"type": "string", "minLength": 1},
+    "verifier_invocation_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verifier_result_envelope_ref": {"type": "string", "minLength": 1},
+    "verifier_result_envelope_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "policy_version_ref": {"type": "string", "minLength": 1},
+    "policy_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
