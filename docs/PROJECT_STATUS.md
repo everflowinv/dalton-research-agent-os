@@ -1,6 +1,6 @@
 # Dalton 项目进度
 
-更新日期：2026-08-20
+更新日期：2026-08-21
 - live deployed baseline：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`；Agenda 兼容热修复：`03ea471`
 - 本轮开发起点：`9cf86d2`；当前分支已把 SEC Company Concept 财务事实接入自动主链，尚未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
@@ -60,12 +60,17 @@ concept 一并写入 authority。当前代码实跑 Apple 时自动 fallback 到
 exact formal ClaimVersion、当前 ThesisVersion 和两者 hash，输出 `supports / weakens / no_change / insufficient`；
 另一个不同 model family 必须从 Scheduler 的 immutable ResultEnvelope 独立复核。通过后只形成 append-only
 pre-commit 判断，不会直接改 thesis，也不增加逐条 owner 审批。没有既有 thesis/driver 时，系统保留 Claim 并
-在 ResearchQuestionBacklog 自动生成一条可重放的 follow-up question。隔离 recorded-model canary 已证明判断、
-独立复核、幂等、fail-closed 和零 thesis mutation；尚未接到 ResearchPlan closure，也未调用真实付费模型。
+在 ResearchQuestionBacklog 自动生成一条可重放的 follow-up question。
 
-当前下一阶段是把 ResearchPlan closure 的 exact formal Claim 接到该路由，为 assessment/verifier 生成受预算约束的
-两个 WorkOrder 和 closed prompt，然后在隔离 authority 跑第一条真实模型 canary。真实 canary 仍不得直接修改
-thesis；`insufficient` 只生成后续问题，`supports / weakens / no_change` 只进入待未来 thesis updater 消费的队列。
+2026-08-21 开发候选已把 ResearchPlan closure 的 exact formal Claim 接到上述路由。新 coordinator 重读
+ResearchPlan、Backlog start/answer、正式 Claim 和当前 Thesis 的 exact ref/hash，再依次生成受预算约束的
+assessment WorkOrder 与独立 verifier WorkOrder；verifier 同时读取 assessment、Claim 和 Thesis，不能只复核摘要。
+隔离 recorded-result 端到端 canary 已覆盖 `supports`、没有 thesis 自动建题、`insufficient` 自动建题和 crash/replay
+去重；两条模型 WorkOrder 都无 side effect，整个流程不增加逐条人工审批，也不改 thesis。真实付费模型尚未调用。
+
+当前下一阶段是把这两个 WorkOrder 接入现有 ModelRouter/OpenClaw model worker，在隔离 authority 跑第一条真实模型
+canary，并核对实际 token、成本、model-family independence 和输出质量。真实 canary 仍不得直接修改 thesis；
+`insufficient` 只生成后续问题，`supports / weakens / no_change` 只形成可供未来 thesis updater 消费的已验证判断。
 现有 versioned governance policy 可分别只允许 closed SEC public `10-Q list_filings` 或 exact
 `10-Q get_company_facts` plan 自动启动；
 其中 `list_filings` 结果只有在 Core 从 exact
@@ -864,9 +869,10 @@ ResearchQuestionBacklog、Planner SEC public 薄闭环、下游逐项 coordinato
 Evidence/Claim 0.2 promotion 与 Backlog answer binding 已完成；closure coordinator 对全链重验并支持崩溃重放。
 真实 policy-authorized 隔离 canary 已完成：closed SEC public plan 自动授权、执行、验证、promotion 并回答原
 question，越界 statement 也已在专项测试中 fail closed。下一步用多样本自动通过/升级/人工修改数据校准研究
-质量；当前已据此增加 company-facts filing window、latest-accession-bound concept 选择和第一版
-Claim → driver/thesis impact authority。下一步把 ResearchPlan closure 接到该 authority 并跑真实模型 canary，
-不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
+质量；当前已据此增加 company-facts filing window、latest-accession-bound concept 选择、第一版
+Claim → driver/thesis impact authority，以及 ResearchPlan closure → bounded assessment/verifier WorkOrder 接线。
+下一步把这两个 WorkOrder 接入现有模型执行边界并跑隔离真实模型 canary，不继续围绕 filing-count 元数据扩建
+authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。
@@ -964,6 +970,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - ResearchPlan coordinator：`docs/reports/research-plan-coordinator-admission-2026-08-15.md`
 - 当前愿景与执行优先级：`docs/reports/vision-and-execution-priority-v0.6-2026-08-15.md`
 - Claim → thesis 影响判断：`docs/reports/thesis-impact-verifier-2026-08-20.md`
+- ResearchPlan → thesis impact 控制面：`docs/reports/research-plan-thesis-impact-control-2026-08-21.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`

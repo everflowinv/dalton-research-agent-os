@@ -655,6 +655,12 @@ class ThesisImpactAuthority:
             raise ThesisImpactConflict("assessment authority chain drifted")
         return wire
 
+    def assessment(self, assessment_ref: str) -> dict[str, Any]:
+        """Return one exact assessment after revalidating its full authority chain."""
+
+        assessment_ref = _text(assessment_ref, "assessment_ref")
+        return self._read_assessment(self.connection.cursor(), assessment_ref)
+
     def verify_assessment(
         self,
         *,
@@ -665,12 +671,17 @@ class ThesisImpactAuthority:
         """Persist one independent verification; still no thesis mutation."""
 
         assessment_ref = _text(assessment_ref, "assessment_ref")
-        result, raw_output, result_hash = self._scheduler_model_output(
-            verifier_result_envelope_ref, [assessment_ref]
-        )
-        output = validate_thesis_impact_verifier_output(raw_output)
         with self.store._transaction() as cur:
             assessment = self._read_assessment(cur, assessment_ref)
+            verifier_input_refs = [
+                assessment_ref,
+                assessment["claim_version_ref"],
+                assessment["thesis_version_ref"],
+            ]
+            result, raw_output, result_hash = self._scheduler_model_output(
+                verifier_result_envelope_ref, verifier_input_refs
+            )
+            output = validate_thesis_impact_verifier_output(raw_output)
             if (
                 output["assessment_ref"] != assessment_ref
                 or output["assessment_hash"] != assessment["content_hash"]
@@ -682,7 +693,7 @@ class ThesisImpactAuthority:
             if (
                 result["invocation_ref"] != verifier["id"]
                 or result["work_order_ref"] != verifier["work_order_ref"]
-                or verifier["input_refs"] != [assessment_ref]
+                or verifier["input_refs"] != verifier_input_refs
             ):
                 raise ThesisImpactConflict("verifier invocation binding drifted")
             self._read_invocation(cur, assessment["producer_invocation_ref"])
@@ -809,12 +820,21 @@ class ThesisImpactAuthority:
             cur, verification["verifier_invocation_ref"]
         )
         result, raw_output, result_hash = self._scheduler_model_output(
-            verification["verifier_result_envelope_ref"], [assessment_ref]
+            verification["verifier_result_envelope_ref"],
+            [
+                assessment_ref,
+                assessment["claim_version_ref"],
+                assessment["thesis_version_ref"],
+            ],
         )
         output = validate_thesis_impact_verifier_output(raw_output)
         if (
             verifier_hash != verification["verifier_invocation_hash"]
-            or verifier["input_refs"] != [assessment_ref]
+            or verifier["input_refs"] != [
+                assessment_ref,
+                assessment["claim_version_ref"],
+                assessment["thesis_version_ref"],
+            ]
             or result["invocation_ref"] != verifier["id"]
             or result["work_order_ref"] != verifier["work_order_ref"]
             or result_hash != verification["verifier_result_envelope_hash"]

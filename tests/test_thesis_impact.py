@@ -205,7 +205,10 @@ class ThesisImpactTests(unittest.TestCase):
             "findings": [],
         }
         verifier, result_ref = self.complete_model(
-            "impact-verifier", [assessment["id"]], verifier_output, "impact-b"
+            "impact-verifier",
+            [assessment["id"], self.claim_ref, self.thesis_ref],
+            verifier_output,
+            "impact-b",
         )
         verified = self.authority.verify_assessment(
             assessment_ref=assessment["id"],
@@ -286,7 +289,7 @@ class ThesisImpactTests(unittest.TestCase):
         assessment = recorded["assessment"]
         verifier, result_ref = self.complete_model(
             "impact-verifier",
-            [assessment["id"]],
+            [assessment["id"], self.claim_ref, self.thesis_ref],
             {
                 "schema_version": "0.1",
                 "assessment_ref": assessment["id"],
@@ -307,6 +310,34 @@ class ThesisImpactTests(unittest.TestCase):
             0,
         )
 
+    def test_verifier_must_reread_exact_claim_and_thesis(self):
+        recorded, _ = self.record_assessment()
+        assessment = recorded["assessment"]
+        verifier, result_ref = self.complete_model(
+            "impact-verifier-incomplete",
+            [assessment["id"]],
+            {
+                "schema_version": "0.1",
+                "assessment_ref": assessment["id"],
+                "assessment_hash": assessment["content_hash"],
+                "verdict": "pass",
+                "findings": [],
+            },
+            "impact-b",
+        )
+        with self.assertRaises(ThesisImpactConflict):
+            self.authority.verify_assessment(
+                assessment_ref=assessment["id"],
+                verifier_invocation=verifier,
+                verifier_result_envelope_ref=result_ref,
+            )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM thesis_impact_verifications"
+            ).fetchone()[0],
+            0,
+        )
+
     def test_reject_is_durable_but_not_eligible(self):
         recorded, _ = self.record_assessment(
             output=self.assessment_output(
@@ -318,7 +349,7 @@ class ThesisImpactTests(unittest.TestCase):
         assessment = recorded["assessment"]
         verifier, result_ref = self.complete_model(
             "impact-verifier",
-            [assessment["id"]],
+            [assessment["id"], self.claim_ref, self.thesis_ref],
             {
                 "schema_version": "0.1",
                 "assessment_ref": assessment["id"],

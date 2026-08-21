@@ -140,6 +140,18 @@ _LAZY_EXPORTS = {
     "validate_thesis_impact_verifier_output": (
         ".thesis_impact", "validate_thesis_impact_verifier_output"
     ),
+    "ResearchPlanThesisImpactCoordinator": (
+        ".thesis_impact_control", "ResearchPlanThesisImpactCoordinator"
+    ),
+    "ResearchPlanThesisImpactConflict": (
+        ".thesis_impact_control", "ResearchPlanThesisImpactConflict"
+    ),
+    "ResearchPlanThesisImpactError": (
+        ".thesis_impact_control", "ResearchPlanThesisImpactError"
+    ),
+    "ResearchPlanThesisImpactPending": (
+        ".thesis_impact_control", "ResearchPlanThesisImpactPending"
+    ),
     "ResearchPlanConflict": (".research_plan", "ResearchPlanConflict"),
     "ResearchPlanError": (".research_plan", "ResearchPlanError"),
     "ResearchPlanNotFound": (".research_plan", "ResearchPlanNotFound"),
@@ -232,6 +244,10 @@ __all__ = [
     "ThesisImpactIneligible",
     "validate_thesis_impact_model_output",
     "validate_thesis_impact_verifier_output",
+    "ResearchPlanThesisImpactCoordinator",
+    "ResearchPlanThesisImpactConflict",
+    "ResearchPlanThesisImpactError",
+    "ResearchPlanThesisImpactPending",
     "ResearchPlanConflict",
     "ResearchPlanError",
     "ResearchPlanNotFound",
