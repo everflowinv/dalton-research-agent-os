@@ -67,7 +67,7 @@ ROUTING_POLICY_REF = "model-routing-policy-version:gate2-real-canary:1"
 BROKER_CLIENT_ID = "client:dalton-core"
 BROKER_AGENT_ID = "chem"
 ASSESSMENT_PROFILE_ID = "profile:gpt-5-6-sol"
-VERIFIER_PROFILE_ID = "profile:claude-opus-5"
+VERIFIER_PROFILE_ID = "profile:deepseek-v4-flash"
 GATE2_ACTOR = "system:gate2-real-thesis-impact-canary"
 BROKER_INVOCATION_ACTOR = "runtime:openclaw-model-broker"
 SCHEDULER_POLICY_REF = "scheduler-policy:gate2-real-canary:1"
@@ -482,7 +482,7 @@ def _worker(
         routing_policy_ref=ROUTING_POLICY_REF,
         credential_slot_refs=(
             "credential-slot:openclaw:openai",
-            "credential-slot:openclaw:claude-cli",
+            "credential-slot:openclaw:deepseek",
         ),
         lease_seconds=lease_seconds,
         clock=_now,
@@ -604,28 +604,34 @@ def _wait_for_lease_expiry(root: Path, work_order_ref: str) -> dict[str, Any]:
 
 
 def _assert_budget_contract(
-    spend_cap: Decimal, prior_incurred_cost: Decimal
+    spend_cap: Decimal,
+    prior_accounted_cost: Decimal,
+    prior_uncertain_cost_reserve: Decimal,
 ) -> dict[str, str]:
     if spend_cap <= 0:
         raise Gate2CanaryError("spend cap must be positive")
-    if prior_incurred_cost < 0:
-        raise Gate2CanaryError("prior incurred cost cannot be negative")
+    if prior_accounted_cost < 0 or prior_uncertain_cost_reserve < 0:
+        raise Gate2CanaryError("prior costs and reserves cannot be negative")
     reserved = Decimal(str(ASSESSMENT_BUDGET["max_cost_usd"])) + Decimal(
         str(VERIFIER_BUDGET["max_cost_usd"])
     )
-    if prior_incurred_cost + reserved > spend_cap:
+    prior_total = prior_accounted_cost + prior_uncertain_cost_reserve
+    if prior_total + reserved > spend_cap:
         raise Gate2CanaryError(
-            "prior incurred cost plus WorkOrder hard maximum "
-            f"{prior_incurred_cost + reserved} exceeds authorized cap {spend_cap}"
+            "prior accounted/reserved cost plus WorkOrder hard maximum "
+            f"{prior_total + reserved} exceeds authorized cap {spend_cap}"
         )
     return {
         "authorized_total_spend_cap_usd": format(spend_cap, "f"),
-        "prior_incurred_cost_usd": format(prior_incurred_cost, "f"),
+        "prior_accounted_cost_usd": format(prior_accounted_cost, "f"),
+        "prior_uncertain_cost_reserve_usd": format(
+            prior_uncertain_cost_reserve, "f"
+        ),
         "assessment_hard_cap_usd": str(ASSESSMENT_BUDGET["max_cost_usd"]),
         "verifier_hard_cap_usd": str(VERIFIER_BUDGET["max_cost_usd"]),
         "maximum_executable_spend_usd": format(reserved, "f"),
         "maximum_aggregate_spend_usd": format(
-            prior_incurred_cost + reserved, "f"
+            prior_total + reserved, "f"
         ),
     }
 
@@ -670,7 +676,9 @@ def _parent(args: argparse.Namespace) -> int:
             os.chmod(path, 0o600)
     plan_ref = _plan_ref(output)
     budget = _assert_budget_contract(
-        args.spend_cap_usd, args.prior_incurred_cost_usd
+        args.spend_cap_usd,
+        args.prior_accounted_cost_usd,
+        args.prior_uncertain_cost_reserve_usd,
     )
     router_install = _install_router(output / "model-router.sqlite")
 
@@ -759,9 +767,13 @@ def _parent(args: argparse.Namespace) -> int:
             verifier_work = assessed["verifier_work_order"]
             if verifier_work["budget"] != VERIFIER_BUDGET:
                 raise Gate2CanaryError("verifier WorkOrder budget drifted")
-            if args.prior_incurred_cost_usd + _total_cost_usd(
-                after_recovery
-            ) + Decimal(str(VERIFIER_BUDGET["max_cost_usd"])) > args.spend_cap_usd:
+            prior_cost_bound = (
+                args.prior_accounted_cost_usd
+                + args.prior_uncertain_cost_reserve_usd
+            )
+            if prior_cost_bound + _total_cost_usd(after_recovery) + Decimal(
+                str(VERIFIER_BUDGET["max_cost_usd"])
+            ) > args.spend_cap_usd:
                 raise Gate2CanaryError("verifier admission would exceed hard spend cap")
             print("assessment recovered; starting independent verifier", flush=True)
             verified_run = worker.run_once(verifier_work)
@@ -785,10 +797,11 @@ def _parent(args: argparse.Namespace) -> int:
                 raise Gate2CanaryError(
                     f"actual/estimated cost {total_cost} exceeded cap {args.spend_cap_usd}"
                 )
-            aggregate_cost = args.prior_incurred_cost_usd + total_cost
-            if aggregate_cost > args.spend_cap_usd:
+            aggregate_cost_bound = prior_cost_bound + total_cost
+            if aggregate_cost_bound > args.spend_cap_usd:
                 raise Gate2CanaryError(
-                    f"aggregate cost {aggregate_cost} exceeded cap {args.spend_cap_usd}"
+                    "aggregate accounted/reserved cost "
+                    f"{aggregate_cost_bound} exceeded cap {args.spend_cap_usd}"
                 )
             decisions = router.list_decisions()
             families = [item["selected_endpoint"]["family"] for item in decisions]
@@ -820,7 +833,7 @@ def _parent(args: argparse.Namespace) -> int:
                 routing_policy_ref=ROUTING_POLICY_REF,
                 credential_slot_refs=(
                     "credential-slot:openclaw:openai",
-                    "credential-slot:openclaw:claude-cli",
+                    "credential-slot:openclaw:deepseek",
                 ),
                 clock=_now,
             )
@@ -863,8 +876,8 @@ def _parent(args: argparse.Namespace) -> int:
                 "budget": budget,
                 "broker_preflight": broker_preflight,
                 "actual_or_estimated_total_cost_usd": format(total_cost, "f"),
-                "aggregate_cost_including_prior_failures_usd": format(
-                    aggregate_cost, "f"
+                "aggregate_spend_upper_bound_usd": format(
+                    aggregate_cost_bound, "f"
                 ),
                 "model_accounting_counts": _counts(rows_before_replay),
                 "model_calls": [
@@ -929,7 +942,12 @@ def main() -> int:
     parser.add_argument("--policy-owner", default="human:lumos-obliviate")
     parser.add_argument("--spend-cap-usd", type=Decimal, default=Decimal("1.00"))
     parser.add_argument(
-        "--prior-incurred-cost-usd", type=Decimal, default=Decimal("0")
+        "--prior-accounted-cost-usd", type=Decimal, default=Decimal("0")
+    )
+    parser.add_argument(
+        "--prior-uncertain-cost-reserve-usd",
+        type=Decimal,
+        default=Decimal("0"),
     )
     parser.add_argument(
         "--socket-path",
