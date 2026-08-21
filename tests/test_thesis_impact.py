@@ -130,11 +130,14 @@ class ThesisImpactTests(unittest.TestCase):
         self.claim_ref = claim["claim_version_id"]
         self.claim_hash = claim["content_hash"]
 
-    def complete_model(self, identifier, input_refs, output, family):
+    def complete_model(self, identifier, input_refs, output, family, metadata=None):
         work_ref = f"work:{identifier}"
         invocation_ref = f"invocation:{identifier}"
         inv = invocation(invocation_ref, work_ref, input_refs, family)
-        self.scheduler.enqueue(work_order(work_ref, input_refs))
+        work = work_order(work_ref, input_refs)
+        if metadata is not None:
+            work["metadata"] = dict(metadata)
+        self.scheduler.enqueue(work)
         lease = self.scheduler.claim(f"worker:{identifier}", work_order_id=work_ref)
         text = canonical_json(output)
         result = {
@@ -338,6 +341,31 @@ class ThesisImpactTests(unittest.TestCase):
             0,
         )
 
+        legacy_verifier, legacy_result_ref = self.complete_model(
+            "impact-verifier-legacy-bypass",
+            [assessment["id"], self.claim_ref, self.thesis_ref],
+            {
+                "schema_version": "0.1",
+                "assessment_ref": assessment["id"],
+                "assessment_hash": assessment["content_hash"],
+                "verdict": "pass",
+                "findings": [],
+            },
+            "impact-b",
+            metadata={
+                "phase": "verification",
+                "verifier_output_schema_version": "0.2",
+            },
+        )
+        with self.assertRaisesRegex(
+            ThesisImpactValidationError, "WorkOrder contract"
+        ):
+            self.authority.verify_assessment(
+                assessment_ref=assessment["id"],
+                verifier_invocation=legacy_verifier,
+                verifier_result_envelope_ref=legacy_result_ref,
+            )
+
     def test_reject_is_durable_but_not_eligible(self):
         recorded, _ = self.record_assessment(
             output=self.assessment_output(
@@ -367,6 +395,45 @@ class ThesisImpactTests(unittest.TestCase):
         self.assertEqual(verified["verification"]["verdict"], "reject")
         with self.assertRaises(ThesisImpactIneligible):
             self.authority.eligible_assessment(assessment["id"])
+
+    def test_authority_rejects_v02_finding_contradicted_by_exact_binding(self):
+        recorded, _ = self.record_assessment()
+        assessment = recorded["assessment"]
+        verifier, result_ref = self.complete_model(
+            "impact-verifier-contradiction",
+            [assessment["id"], self.claim_ref, self.thesis_ref],
+            {
+                "schema_version": "0.2",
+                "assessment_ref": assessment["id"],
+                "assessment_hash": assessment["content_hash"],
+                "verdict": "reject",
+                "findings": [{
+                    "code": "binding_mismatch",
+                    "severity": "high",
+                    "detail": "The exact binding was incorrectly reported as mismatched.",
+                    "expected_impact": None,
+                }],
+            },
+            "impact-b",
+            metadata={
+                "phase": "verification",
+                "verifier_output_schema_version": "0.2",
+            },
+        )
+        with self.assertRaisesRegex(
+            ThesisImpactValidationError, "already disproved by authority"
+        ):
+            self.authority.verify_assessment(
+                assessment_ref=assessment["id"],
+                verifier_invocation=verifier,
+                verifier_result_envelope_ref=result_ref,
+            )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM thesis_impact_verifications"
+            ).fetchone()[0],
+            0,
+        )
 
     def test_direct_writes_are_rejected(self):
         with self.assertRaises(sqlite3.DatabaseError):

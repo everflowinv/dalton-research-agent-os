@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/thesis-impact-verifier-output-v0.2.schema.json",
+  "title": "ThesisImpactVerifierOutputV0.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "assessment_ref",
+    "assessment_hash",
+    "verdict",
+    "findings"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.2"},
+    "assessment_ref": {"type": "string", "minLength": 1},
+    "assessment_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verdict": {"enum": ["pass", "reject"]},
+    "findings": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {"$ref": "#/$defs/finding"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"verdict": {"const": "pass"}}},
+      "then": {"properties": {"findings": {"maxItems": 0}}}
+    },
+    {
+      "if": {"properties": {"verdict": {"const": "reject"}}},
+      "then": {"properties": {"findings": {"minItems": 1}}}
+    }
+  ],
+  "$defs": {
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "severity", "detail", "expected_impact"],
+      "properties": {
+        "code": {
+          "enum": [
+            "binding_mismatch",
+            "driver_mismatch",
+            "unsupported_inference",
+            "impact_mismatch",
+            "rationale_contradiction",
+            "follow_up_quality"
+          ]
+        },
+        "severity": {"enum": ["high", "medium"]},
+        "detail": {"type": "string", "minLength": 1, "maxLength": 1200},
+        "expected_impact": {
+          "type": ["string", "null"],
+          "enum": ["supports", "weakens", "no_change", "insufficient", null]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "code": {
+                "enum": [
+                  "binding_mismatch",
+                  "driver_mismatch",
+                  "unsupported_inference",
+                  "impact_mismatch"
+                ]
+              }
+            }
+          },
+          "then": {"properties": {"severity": {"const": "high"}}},
+          "else": {"properties": {"severity": {"const": "medium"}}}
+        },
+        {
+          "if": {"properties": {"code": {"const": "impact_mismatch"}}},
+          "then": {
+            "properties": {
+              "expected_impact": {
+                "enum": ["supports", "weakens", "no_change", "insufficient"]
+              }
+            }
+          },
+          "else": {"properties": {"expected_impact": {"const": null}}}
+        }
+      ]
+    }
+  }
+}

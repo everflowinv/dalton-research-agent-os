@@ -34,8 +34,10 @@ from .research_context import count_dalton_search_tokens
 from .scheduler import Scheduler
 from .store import canonical_json, content_hash
 from .thesis_impact import (
+    VERIFIER_OUTPUT_SCHEMA_VERSION,
     ThesisImpactAuthority,
     validate_thesis_impact_model_output,
+    validate_thesis_impact_verifier_consistency,
     validate_thesis_impact_verifier_output,
 )
 from .thesis_impact_control import ResearchPlanThesisImpactCoordinator
@@ -228,7 +230,12 @@ class ThesisImpactModelWorker:
                     "assessment output drifted from the exact Claim or Thesis"
                 )
         else:
-            output = validate_thesis_impact_verifier_output(raw)
+            required_schema_version = work.metadata.get(
+                "verifier_output_schema_version", "0.1"
+            )
+            output = validate_thesis_impact_verifier_output(
+                raw, required_schema_version=required_schema_version
+            )
             if (
                 output["assessment_ref"] != work.input_refs[0]
                 or output["assessment_hash"]
@@ -237,6 +244,30 @@ class ThesisImpactModelWorker:
                 raise ThesisImpactModelWorkerConflict(
                     "verifier output drifted from the exact assessment"
                 )
+            if required_schema_version == VERIFIER_OUTPUT_SCHEMA_VERSION:
+                assessment = self.impact.assessment(work.input_refs[0])
+                thesis_view = self.store.get_version(work.input_refs[2])
+                if thesis_view is None:
+                    raise ThesisImpactModelWorkerConflict(
+                        "verifier ThesisVersion disappeared"
+                    )
+                self._validate_verifier_authority_consistency(
+                    output, assessment, thesis_view["content"]["mechanism"]
+                )
+
+    @staticmethod
+    def _validate_verifier_authority_consistency(
+        output: Mapping[str, Any],
+        assessment: Mapping[str, Any],
+        thesis_mechanism: str,
+    ) -> None:
+        """Reject findings contradicted by already-validated authority facts."""
+        try:
+            validate_thesis_impact_verifier_consistency(
+                output, assessment, thesis_mechanism
+            )
+        except Exception as exc:
+            raise ThesisImpactModelWorkerConflict(str(exc)) from exc
 
     @staticmethod
     def _route_estimate_micros(

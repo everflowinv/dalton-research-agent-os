@@ -27,8 +27,17 @@ from .store import canonical_json, content_hash
 
 
 SCHEMA_VERSION = "0.1"
+VERIFIER_OUTPUT_SCHEMA_VERSION = "0.2"
 IMPACTS = frozenset({"supports", "weakens", "no_change", "insufficient"})
 VERDICTS = frozenset({"pass", "reject"})
+VERIFIER_FINDING_SEVERITIES = {
+    "binding_mismatch": "high",
+    "driver_mismatch": "high",
+    "unsupported_inference": "high",
+    "impact_mismatch": "high",
+    "rationale_contradiction": "medium",
+    "follow_up_quality": "medium",
+}
 _SCHEMA_PATH = Path(__file__).with_name("thesis_impact_schema.sql")
 _THESIS_CONTENT_FIELDS = (
     "statement",
@@ -156,14 +165,29 @@ def validate_thesis_impact_model_output(value: Mapping[str, Any]) -> dict[str, A
     return wire
 
 
-def validate_thesis_impact_verifier_output(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate the independent verifier's exact target and verdict."""
+def validate_thesis_impact_verifier_output(
+    value: Mapping[str, Any], *, required_schema_version: str | None = None
+) -> dict[str, Any]:
+    """Validate the independent verifier's exact target and verdict.
+
+    ``0.1`` remains readable for immutable historical replay.  New WorkOrders
+    require ``0.2``, whose findings use a closed code/severity contract and a
+    closed expected-impact field.  Keeping the compatibility branch here does
+    not authorize new workers to emit legacy output.
+    """
 
     wire = _closed(value, {
         "schema_version", "assessment_ref", "assessment_hash", "verdict", "findings",
     }, "ThesisImpactVerifierOutput")
-    if wire["schema_version"] != SCHEMA_VERSION:
+    if wire["schema_version"] not in {SCHEMA_VERSION, VERIFIER_OUTPUT_SCHEMA_VERSION}:
         raise ThesisImpactValidationError("unsupported verification schema_version")
+    if (
+        required_schema_version is not None
+        and wire["schema_version"] != required_schema_version
+    ):
+        raise ThesisImpactValidationError(
+            "verification schema_version does not match the WorkOrder contract"
+        )
     wire["assessment_ref"] = _text(wire["assessment_ref"], "assessment_ref")
     wire["assessment_hash"] = _hash(wire["assessment_hash"], "assessment_hash")
     if wire["verdict"] not in VERDICTS:
@@ -172,8 +196,96 @@ def validate_thesis_impact_verifier_output(value: Mapping[str, Any]) -> dict[str
         isinstance(item, Mapping) for item in wire["findings"]
     ):
         raise ThesisImpactValidationError("findings must be an array of objects")
-    wire["findings"] = [dict(item) for item in wire["findings"]]
+    if len(wire["findings"]) > 8:
+        raise ThesisImpactValidationError("findings cannot contain more than 8 items")
+    if wire["schema_version"] == SCHEMA_VERSION:
+        wire["findings"] = [dict(item) for item in wire["findings"]]
+        return wire
+
+    findings: list[dict[str, Any]] = []
+    seen_codes: set[str] = set()
+    for index, item in enumerate(wire["findings"]):
+        finding = _closed(
+            item,
+            {"code", "severity", "detail", "expected_impact"},
+            f"findings[{index}]",
+        )
+        code = _text(finding["code"], f"findings[{index}].code")
+        expected_severity = VERIFIER_FINDING_SEVERITIES.get(code)
+        if expected_severity is None:
+            raise ThesisImpactValidationError(f"invalid verifier finding code: {code!r}")
+        if code in seen_codes:
+            raise ThesisImpactValidationError(f"duplicate verifier finding code: {code!r}")
+        seen_codes.add(code)
+        if finding["severity"] != expected_severity:
+            raise ThesisImpactValidationError(
+                f"finding {code!r} must use frozen severity {expected_severity!r}"
+            )
+        detail = _text(finding["detail"], f"findings[{index}].detail")
+        if len(detail) > 1200:
+            raise ThesisImpactValidationError(
+                f"findings[{index}].detail cannot exceed 1200 characters"
+            )
+        expected_impact = finding["expected_impact"]
+        if code == "impact_mismatch":
+            if expected_impact not in IMPACTS:
+                raise ThesisImpactValidationError(
+                    "impact_mismatch expected_impact must use the closed impact taxonomy"
+                )
+        elif expected_impact is not None:
+            raise ThesisImpactValidationError(
+                f"finding {code!r} must set expected_impact to null"
+            )
+        findings.append({
+            "code": code,
+            "severity": expected_severity,
+            "detail": detail,
+            "expected_impact": expected_impact,
+        })
+    if wire["verdict"] == "pass" and findings:
+        raise ThesisImpactValidationError("pass verdict must have no findings")
+    if wire["verdict"] == "reject" and not findings:
+        raise ThesisImpactValidationError("reject verdict must have at least one finding")
+    wire["findings"] = findings
     return wire
+
+
+def validate_thesis_impact_verifier_consistency(
+    output: Mapping[str, Any],
+    assessment: Mapping[str, Any],
+    thesis_mechanism: str,
+) -> None:
+    """Reject new findings contradicted by already-validated authority facts."""
+
+    if output.get("schema_version") != VERIFIER_OUTPUT_SCHEMA_VERSION:
+        return
+    codes = {item["code"] for item in output["findings"]}
+    if "binding_mismatch" in codes:
+        raise ThesisImpactValidationError(
+            "verifier reported a binding mismatch already disproved by authority"
+        )
+    if (
+        "driver_mismatch" in codes
+        and assessment["driver_statement"] == thesis_mechanism
+    ):
+        raise ThesisImpactValidationError(
+            "verifier reported a driver mismatch already disproved by authority"
+        )
+    for finding in output["findings"]:
+        if (
+            finding["code"] == "impact_mismatch"
+            and finding["expected_impact"] == assessment["impact"]
+        ):
+            raise ThesisImpactValidationError(
+                "verifier impact_mismatch repeats the assessed impact"
+            )
+        if (
+            finding["code"] == "follow_up_quality"
+            and assessment["impact"] != "insufficient"
+        ):
+            raise ThesisImpactValidationError(
+                "follow_up_quality applies only to an insufficient assessment"
+            )
 
 
 class ThesisImpactAuthority:
@@ -422,6 +534,37 @@ class ThesisImpactAuthority:
         if not isinstance(model_output, Mapping):
             raise ThesisImpactValidationError("model output JSON must be an object")
         return result, dict(model_output), result_hash
+
+    def _verifier_output_contract_version(self, work_order_ref: str) -> str:
+        row = self.scheduler.connection.execute(
+            "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
+            "WHERE work_order_id=?",
+            (_text(work_order_ref, "work_order_ref"),),
+        ).fetchone()
+        if row is None:
+            raise ThesisImpactConflict("verifier WorkOrder is missing")
+        work = _canonical_object(row["work_order_json"], "verifier WorkOrder")
+        try:
+            work = WorkOrder.from_dict(work).to_dict()
+        except Exception as exc:
+            raise ThesisImpactConflict("verifier WorkOrder is invalid") from exc
+        if (
+            work["id"] != work_order_ref
+            or content_hash(work) != row["work_order_hash"]
+            or work["metadata"].get("phase") not in {None, "verification"}
+        ):
+            raise ThesisImpactConflict("verifier WorkOrder authority drifted")
+        version = work["metadata"].get(
+            "verifier_output_schema_version", SCHEMA_VERSION
+        )
+        if version not in {SCHEMA_VERSION, VERIFIER_OUTPUT_SCHEMA_VERSION}:
+            raise ThesisImpactConflict("verifier WorkOrder output contract is unsupported")
+        if (
+            work["metadata"].get("phase") is None
+            and version != SCHEMA_VERSION
+        ):
+            raise ThesisImpactConflict("unphased verifier WorkOrder must remain legacy")
+        return version
 
     def record_assessment(
         self,
@@ -701,7 +844,18 @@ class ThesisImpactAuthority:
             result, raw_output, result_hash = self._scheduler_model_output(
                 verifier_result_envelope_ref, verifier_input_refs
             )
-            output = validate_thesis_impact_verifier_output(raw_output)
+            output = validate_thesis_impact_verifier_output(
+                raw_output,
+                required_schema_version=self._verifier_output_contract_version(
+                    result["work_order_ref"]
+                ),
+            )
+            thesis = self._read_current_thesis(
+                cur, assessment["thesis_version_ref"]
+            )
+            validate_thesis_impact_verifier_consistency(
+                output, assessment, thesis["mechanism"]
+            )
             if (
                 output["assessment_ref"] != assessment_ref
                 or output["assessment_hash"] != assessment["content_hash"]
@@ -847,7 +1001,16 @@ class ThesisImpactAuthority:
                 assessment["thesis_version_ref"],
             ],
         )
-        output = validate_thesis_impact_verifier_output(raw_output)
+        output = validate_thesis_impact_verifier_output(
+            raw_output,
+            required_schema_version=self._verifier_output_contract_version(
+                result["work_order_ref"]
+            ),
+        )
+        thesis = self._read_current_thesis(cur, assessment["thesis_version_ref"])
+        validate_thesis_impact_verifier_consistency(
+            output, assessment, thesis["mechanism"]
+        )
         if (
             verifier_hash != verification["verifier_invocation_hash"]
             or verifier["input_refs"] != [
@@ -900,6 +1063,9 @@ class ThesisImpactAuthority:
 
 __all__ = [
     "IMPACTS",
+    "VERDICTS",
+    "VERIFIER_FINDING_SEVERITIES",
+    "VERIFIER_OUTPUT_SCHEMA_VERSION",
     "ThesisImpactAuthority",
     "ThesisImpactConflict",
     "ThesisImpactError",
@@ -907,5 +1073,6 @@ __all__ = [
     "ThesisImpactNotFound",
     "ThesisImpactValidationError",
     "validate_thesis_impact_model_output",
+    "validate_thesis_impact_verifier_consistency",
     "validate_thesis_impact_verifier_output",
 ]

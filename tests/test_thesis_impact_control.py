@@ -28,6 +28,7 @@ from dalton_core.thesis_impact_control import (
 from dalton_core.thesis_impact_model_worker import (
     ResearchPlanThesisImpactRuntime,
     ThesisImpactModelWorker,
+    ThesisImpactModelWorkerConflict,
 )
 from tests.test_openclaw_model_adapter import FakeBroker
 from tests.test_research_plan_executor import PlanExecutorHarness
@@ -254,7 +255,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             work=verifier_work,
             model_family="impact-b",
             output={
-                "schema_version": "0.1",
+                "schema_version": "0.2",
                 "assessment_ref": assessment["id"],
                 "assessment_hash": assessment["content_hash"],
                 "verdict": "pass",
@@ -381,7 +382,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             work=assessed["verifier_work_order"],
             model_family="impact-b",
             output={
-                "schema_version": "0.1",
+                "schema_version": "0.2",
                 "assessment_ref": assessment["id"],
                 "assessment_hash": assessment["content_hash"],
                 "verdict": "pass",
@@ -541,7 +542,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
                 marker = "\nASSESSMENT_CANONICAL_JSON:\n"
                 assessment = json.loads(request["prompt"].split(marker, 1)[1])
                 text = canonical_json({
-                    "schema_version": "0.1",
+                    "schema_version": "0.2",
                     "assessment_ref": assessment["id"],
                     "assessment_hash": assessment["content_hash"],
                     "verdict": "pass",
@@ -1026,6 +1027,65 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
 
 
 class ThesisImpactModelWorkerUnitTests(unittest.TestCase):
+    @staticmethod
+    def finding(code, expected_impact=None):
+        severities = {
+            "binding_mismatch": "high",
+            "driver_mismatch": "high",
+            "impact_mismatch": "high",
+            "follow_up_quality": "medium",
+        }
+        return {
+            "code": code,
+            "severity": severities[code],
+            "detail": "Recorded calibration condition.",
+            "expected_impact": expected_impact,
+        }
+
+    def test_authority_consistency_rejects_self_contradictory_findings(self) -> None:
+        assessment = {
+            "driver_statement": "Revenue growth sustains operating leverage.",
+            "impact": "insufficient",
+        }
+        for finding, message in (
+            (self.finding("binding_mismatch"), "binding mismatch"),
+            (self.finding("driver_mismatch"), "driver mismatch"),
+            (
+                self.finding("impact_mismatch", expected_impact="insufficient"),
+                "repeats the assessed impact",
+            ),
+        ):
+            with self.subTest(code=finding["code"]):
+                with self.assertRaisesRegex(ThesisImpactModelWorkerConflict, message):
+                    ThesisImpactModelWorker._validate_verifier_authority_consistency(
+                        {"schema_version": "0.2", "findings": [finding]},
+                        assessment,
+                        "Revenue growth sustains operating leverage.",
+                    )
+
+        with self.assertRaisesRegex(
+            ThesisImpactModelWorkerConflict, "applies only to an insufficient"
+        ):
+            ThesisImpactModelWorker._validate_verifier_authority_consistency(
+                {
+                    "schema_version": "0.2",
+                    "findings": [self.finding("follow_up_quality")],
+                },
+                {**assessment, "impact": "supports"},
+                "Revenue growth sustains operating leverage.",
+            )
+
+        ThesisImpactModelWorker._validate_verifier_authority_consistency(
+            {
+                "schema_version": "0.2",
+                "findings": [
+                    self.finding("impact_mismatch", expected_impact="supports")
+                ],
+            },
+            assessment,
+            "Revenue growth sustains operating leverage.",
+        )
+
     def test_retry_status_becomes_formal_failure_at_attempt_limit(self) -> None:
         self.assertEqual(
             ThesisImpactModelWorker._bounded_failure_status({

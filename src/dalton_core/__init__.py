@@ -140,6 +140,21 @@ _LAZY_EXPORTS = {
     "validate_thesis_impact_verifier_output": (
         ".thesis_impact", "validate_thesis_impact_verifier_output"
     ),
+    "validate_thesis_impact_verifier_consistency": (
+        ".thesis_impact", "validate_thesis_impact_verifier_consistency"
+    ),
+    "load_frozen_calibration_corpus": (
+        ".thesis_impact_calibration", "load_frozen_calibration_corpus"
+    ),
+    "build_thesis_impact_calibration_prompt": (
+        ".thesis_impact_calibration", "build_calibration_prompt"
+    ),
+    "model_visible_calibration_case": (
+        ".thesis_impact_calibration", "model_visible_case"
+    ),
+    "score_thesis_impact_verifier_outputs": (
+        ".thesis_impact_calibration", "score_verifier_outputs"
+    ),
     "ResearchPlanThesisImpactCoordinator": (
         ".thesis_impact_control", "ResearchPlanThesisImpactCoordinator"
     ),
@@ -259,6 +274,11 @@ __all__ = [
     "ThesisImpactIneligible",
     "validate_thesis_impact_model_output",
     "validate_thesis_impact_verifier_output",
+    "validate_thesis_impact_verifier_consistency",
+    "load_frozen_calibration_corpus",
+    "build_thesis_impact_calibration_prompt",
+    "model_visible_calibration_case",
+    "score_thesis_impact_verifier_outputs",
     "ResearchPlanThesisImpactCoordinator",
     "ResearchPlanThesisImpactConflict",
     "ResearchPlanThesisImpactError",

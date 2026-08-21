@@ -141,6 +141,12 @@ eligible，也未回写 Gate 1 简报。真实运行还暴露并修复了两个�
 但 invocation/usage/cost 会进入 Core。报告见
 [gate2-real-thesis-impact-canary-2026-08-21.md](reports/gate2-real-thesis-impact-canary-2026-08-21.md)。
 
+Verifier 校准基础随后冻结 12 个样本：5 pass、7 reject，其中 5 个 high、2 个 medium。gold label 与模型输入分离；
+Gate 2 的 DeepSeek 输出是当前唯一真实观测，在应 pass 的样本上形成 1 个 false positive。新 WorkOrder 必须返回
+严格 `0.2` finding contract，authority 会按 WorkOrder 重验版本，worker 会拒绝与已验证 binding/driver 自相
+矛盾的 finding。历史 `0.1` 只保留 replay 兼容。12 个样本小于 30 个放权门槛，因此不能解锁自动化。报告见
+[thesis-impact-verifier-calibration-foundation-2026-08-21.md](reports/thesis-impact-verifier-calibration-foundation-2026-08-21.md)。
+
 现有 versioned governance policy 可分别只允许 closed SEC public `10-Q list_filings` 或 exact
 `10-Q get_company_facts` plan 自动启动；
 其中 `list_filings` 结果只有在 Core 从 exact
@@ -944,8 +950,9 @@ company-facts filing window 和 latest-accession-bound concept 选择，但结�
 Claim → driver/thesis impact authority，以及 ResearchPlan closure → bounded assessment/verifier WorkOrder 接线。
 两个 WorkOrder 现已接入 ModelRouter/OpenClaw model worker，并以无外部调用 recorded broker 验证 contract retry、
 usage/cost 入账、model-family independence、lease-expiry crash recovery 和 replay。Gate 0/1 breadth proof 与
-Gate 2 真实模型 canary 均已完成；当前阻塞是 verifier false positive，而不是控制面缺口。下一步先做冻结标准的
-独立 verifier 校准集，不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
+Gate 2 真实模型 canary 均已完成；当前阻塞是 verifier false positive，而不是控制面缺口。冻结标准的独立
+verifier 校准基础现已完成 12 个 no-leakage cases、closed finding/severity、评分器和 `0.2` 输出合同；下一步是
+跑完 12/12 候选模型观测，不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。
@@ -1030,7 +1037,8 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - 同一 agent 同时写代码、测试、验证报告和状态文档会形成 self-attestation；最新 HEAD 必须由独立 CI 验证，
   review evidence 为空或采集命令失败时必须 fail closed；
 - thesis-impact stack 已有真实 ThesisVersion + 真实模型产物，但首条独立 verifier 正式 `reject`，且 findings 本身
-  存在自相矛盾；模型质量未达到 live 门槛；
+  存在自相矛盾；现已冻结 12 个 no-leakage 校准样本并启用严格 `0.2` 输出合同，但只有 Gate 2 的 1 个样本有
+  真实模型观测，模型质量仍未达到 live 门槛；
 - schema 持续演化但缺少统一迁移纪律；后续任何 schema 改动必须同批提交迁移说明和旧数据 replay/upgrade 测试。
 
 ## 相关入口
@@ -1052,6 +1060,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Thesis impact 模型执行器：`docs/reports/thesis-impact-model-worker-2026-08-21.md`
 - Thesis impact 付费边界崩溃恢复：`docs/reports/thesis-impact-model-crash-recovery-2026-08-21.md`
 - Gate 2 真实 thesis-impact canary：`docs/reports/gate2-real-thesis-impact-canary-2026-08-21.md`
+- Thesis-impact verifier 校准基础：`docs/reports/thesis-impact-verifier-calibration-foundation-2026-08-21.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`

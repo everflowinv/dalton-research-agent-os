@@ -1,0 +1,46 @@
+{
+  "accuracy": 0.0,
+  "automation_eligible": false,
+  "automation_ineligibility_reasons": [
+    "calibration coverage is incomplete",
+    "frozen corpus has fewer than 30 seeded cases",
+    "detection rate is below 90%"
+  ],
+  "cases": [
+    {
+      "actual_finding_codes": [
+        "ref_hash_mismatch",
+        "driver_statement_mismatch",
+        "unsupported_inference",
+        "impact_evaluation",
+        "hash_consistency"
+      ],
+      "actual_verdict": "reject",
+      "case_ref": "calibration:thesis-impact:001",
+      "correct": false,
+      "error": null,
+      "expected_impact": null,
+      "expected_verdict": "pass",
+      "required_finding_codes": [],
+      "seeded_error": "none",
+      "severity": "none"
+    }
+  ],
+  "corpus_hash": "c5f6928860f043fb4f3a01962dc68d7e53fd8c93b3291fafbc85e96aabb41797",
+  "corpus_ref": "thesis-impact-verifier-calibration:0.1",
+  "coverage": {
+    "denominator": 12,
+    "numerator": 1
+  },
+  "detected_rejects": 0,
+  "detection_rate": null,
+  "evaluated_cases": 1,
+  "expected_passes": 1,
+  "expected_rejects": 0,
+  "false_positive_rate": 1.0,
+  "false_positives": 1,
+  "high_severity_misses": 0,
+  "required_verifier_output_schema_version": null,
+  "schema_version": "0.1",
+  "total_cases": 12
+}

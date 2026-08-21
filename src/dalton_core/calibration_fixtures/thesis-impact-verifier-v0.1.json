@@ -1,0 +1,521 @@
+{
+  "schema_version": "0.1",
+  "id": "thesis-impact-verifier-calibration:0.1",
+  "frozen_at": "2026-08-21T19:45:00+00:00",
+  "rubric": {
+    "impact_taxonomy": [
+      "insufficient",
+      "no_change",
+      "supports",
+      "weakens"
+    ],
+    "finding_severities": {
+      "binding_mismatch": "high",
+      "driver_mismatch": "high",
+      "unsupported_inference": "high",
+      "impact_mismatch": "high",
+      "rationale_contradiction": "medium",
+      "follow_up_quality": "medium"
+    },
+    "pass_standard": [
+      "Pass when the assessment uses the closed impact taxonomy, stays within the exact claim and thesis mechanism, and explains its conclusion without a material unsupported inference.",
+      "An insufficient assessment passes when it names the missing decision-useful evidence and asks a follow-up capable of closing that gap.",
+      "A passing verifier output has no findings."
+    ],
+    "reject_standard": [
+      "Reject exact binding or driver drift, a material unsupported inference, a wrong closed-taxonomy impact, an internally contradictory rationale, or an insufficient follow-up that cannot close the stated gap.",
+      "Do not invent binding or driver mismatches when the quoted values match, and do not propose impact synonyms outside supports, weakens, no_change, or insufficient.",
+      "A rejecting verifier output has at least one closed finding whose severity is fixed by its code."
+    ],
+    "release_thresholds": {
+      "minimum_seeded_cases": 30,
+      "minimum_detection_rate": 0.9,
+      "high_severity_misses": 0
+    }
+  },
+  "cases": [
+    {
+      "id": "calibration:thesis-impact:001",
+      "title": "Gate 2 revenue growth is correctly insufficient for operating leverage",
+      "seeded_error": "none",
+      "severity": "none",
+      "input": {
+        "claim": {
+          "id": "claim-version:cb32bdeb2094e2dad62d3e4ee38ce18689dbbe75c7bf6a500905e1f457515e93",
+          "content_hash": "8ca6597d36cda66fa611fb11bef7cc8f69556392ca2ab149702aaa4b296fd74e",
+          "normalized_statement": "Microsoft quarterly revenue increased 18.3% year over year."
+        },
+        "thesis": {
+          "id": "25dd119325e94781a4bbcee9eca8175f",
+          "content_hash": "4b58e39959362b55630e19e28ba4c252eede0f04f04cba1f46f6579dc8d3b6fc",
+          "mechanism": "Quarterly revenue growth sustains operating leverage."
+        },
+        "assessment": {
+          "id": "thesis-impact:e1ba1aada261ff8cc6139e95076b62d4",
+          "content_hash": "c8b7a2075d90f7736b056d6f472ea7fdafe641da2bed8fcc02c0075daf69b0ea",
+          "claim_version_ref": "claim-version:cb32bdeb2094e2dad62d3e4ee38ce18689dbbe75c7bf6a500905e1f457515e93",
+          "claim_version_hash": "8ca6597d36cda66fa611fb11bef7cc8f69556392ca2ab149702aaa4b296fd74e",
+          "thesis_version_ref": "25dd119325e94781a4bbcee9eca8175f",
+          "thesis_version_hash": "4b58e39959362b55630e19e28ba4c252eede0f04f04cba1f46f6579dc8d3b6fc",
+          "driver_statement": "Quarterly revenue growth sustains operating leverage.",
+          "impact": "insufficient",
+          "rationale": "Revenue growth confirms the revenue-side precondition but operating income, margin, and cost growth are missing, so operating leverage cannot yet be determined.",
+          "follow_up_question": "Did operating income or operating margin rise year over year, and did operating expenses grow more slowly than revenue?"
+        }
+      },
+      "gold": {
+        "verdict": "pass",
+        "required_finding_codes": [],
+        "expected_impact": null,
+        "rationale": "The assessment does not claim operating leverage occurred; it identifies the exact evidence gap and asks a follow-up that can close it."
+      },
+      "observed_outputs": [
+        {
+          "id": "observed:gate2-deepseek-v4-flash",
+          "model_family": "deepseek-v4",
+          "source_ref": "docs/review-evidence/gate2-real-thesis-impact-summary.json",
+          "output": {
+            "schema_version": "0.1",
+            "assessment_ref": "thesis-impact:e1ba1aada261ff8cc6139e95076b62d4",
+            "assessment_hash": "c8b7a2075d90f7736b056d6f472ea7fdafe641da2bed8fcc02c0075daf69b0ea",
+            "verdict": "reject",
+            "findings": [
+              {
+                "code": "ref_hash_mismatch",
+                "status": "reject",
+                "detail": "The refs and hashes match the quoted objects, but the thesis id lacks a prefix and was incorrectly treated as a mismatch."
+              },
+              {
+                "code": "driver_statement_mismatch",
+                "status": "reject",
+                "detail": "The driver matches the thesis mechanism exactly, but the matching value was incorrectly reported as a mismatch."
+              },
+              {
+                "code": "unsupported_inference",
+                "status": "reject",
+                "detail": "The verifier treated identification of the revenue-side precondition as a claim that operating leverage occurred."
+              },
+              {
+                "code": "impact_evaluation",
+                "status": "reject",
+                "detail": "The verifier proposed none or contradictory, which are outside the closed impact taxonomy."
+              },
+              {
+                "code": "hash_consistency",
+                "status": "reject",
+                "detail": "The verifier said the assessment hash could not be checked even though the canonical assessment and content hash were supplied."
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "calibration:thesis-impact:002",
+      "title": "Exact customer growth supports the demand mechanism",
+      "seeded_error": "none",
+      "severity": "none",
+      "input": {
+        "claim": {
+          "id": "claim:002",
+          "content_hash": "0202020202020202020202020202020202020202020202020202020202020202",
+          "normalized_statement": "Paying enterprise customers increased 31% year over year."
+        },
+        "thesis": {
+          "id": "thesis:002",
+          "content_hash": "1212121212121212121212121212121212121212121212121212121212121212",
+          "mechanism": "Enterprise customer adoption drives durable subscription demand."
+        },
+        "assessment": {
+          "id": "assessment:002",
+          "content_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+          "claim_version_ref": "claim:002",
+          "claim_version_hash": "0202020202020202020202020202020202020202020202020202020202020202",
+          "thesis_version_ref": "thesis:002",
+          "thesis_version_hash": "1212121212121212121212121212121212121212121212121212121212121212",
+          "driver_statement": "Enterprise customer adoption drives durable subscription demand.",
+          "impact": "supports",
+          "rationale": "The exact customer-growth claim is directly consistent with the adoption mechanism.",
+          "follow_up_question": null
+        }
+      },
+      "gold": {
+        "verdict": "pass",
+        "required_finding_codes": [],
+        "expected_impact": null,
+        "rationale": "The claim directly measures the bound mechanism and the assessment stays directional."
+      },
+      "observed_outputs": []
+    },
+    {
+      "id": "calibration:thesis-impact:003",
+      "title": "Customer contraction weakens the adoption mechanism",
+      "seeded_error": "none",
+      "severity": "none",
+      "input": {
+        "claim": {
+          "id": "claim:003",
+          "content_hash": "0303030303030303030303030303030303030303030303030303030303030303",
+          "normalized_statement": "Paying enterprise customers declined 9% year over year."
+        },
+        "thesis": {
+          "id": "thesis:003",
+          "content_hash": "1313131313131313131313131313131313131313131313131313131313131313",
+          "mechanism": "Enterprise customer adoption drives durable subscription demand."
+        },
+        "assessment": {
+          "id": "assessment:003",
+          "content_hash": "2323232323232323232323232323232323232323232323232323232323232323",
+          "claim_version_ref": "claim:003",
+          "claim_version_hash": "0303030303030303030303030303030303030303030303030303030303030303",
+          "thesis_version_ref": "thesis:003",
+          "thesis_version_hash": "1313131313131313131313131313131313131313131313131313131313131313",
+          "driver_statement": "Enterprise customer adoption drives durable subscription demand.",
+          "impact": "weakens",
+          "rationale": "The reported contraction is directionally inconsistent with the adoption mechanism.",
+          "follow_up_question": null
+        }
+      },
+      "gold": {
+        "verdict": "pass",
+        "required_finding_codes": [],
+        "expected_impact": null,
+        "rationale": "The assessment uses a direct, bounded directional inference."
+      },
+      "observed_outputs": []
+    },
+    {
+      "id": "calibration:thesis-impact:004",
+      "title": "Unrelated tax-rate movement leaves the demand mechanism unchanged",
+      "seeded_error": "none",
+      "severity": "none",
+      "input": {
+        "claim": {
+          "id": "claim:004",
+          "content_hash": "0404040404040404040404040404040404040404040404040404040404040404",
+          "normalized_statement": "The quarterly effective tax rate increased by 120 basis points."
+        },
+        "thesis": {
+          "id": "thesis:004",
+          "content_hash": "1414141414141414141414141414141414141414141414141414141414141414",
+          "mechanism": "Enterprise customer adoption drives durable subscription demand."
+        },
+        "assessment": {
+          "id": "assessment:004",
+          "content_hash": "2424242424242424242424242424242424242424242424242424242424242424",
+          "claim_version_ref": "claim:004",
+          "claim_version_hash": "0404040404040404040404040404040404040404040404040404040404040404",
+          "thesis_version_ref": "thesis:004",
+          "thesis_version_hash": "1414141414141414141414141414141414141414141414141414141414141414",
+          "driver_statement": "Enterprise customer adoption drives durable subscription demand.",
+          "impact": "no_change",
+          "rationale": "The tax-rate claim does not bear on enterprise customer adoption or subscription demand.",
+          "follow_up_question": null
+        }
+      },
+      "gold": {
+        "verdict": "pass",
+        "required_finding_codes": [],
+        "expected_impact": null,
+        "rationale": "The assessment correctly distinguishes unrelated evidence from missing evidence about the mechanism."
+      },
+      "observed_outputs": []
+    },
+    {
+      "id": "calibration:thesis-impact:005",
+      "title": "A precise follow-up makes an evidence-gap assessment valid",
+      "seeded_error": "none",
+      "severity": "none",
+      "input": {
+        "claim": {
+          "id": "claim:005",
+          "content_hash": "0505050505050505050505050505050505050505050505050505050505050505",
+          "normalized_statement": "Gross billings increased 22% year over year."
+        },
+        "thesis": {
+          "id": "thesis:005",
+          "content_hash": "1515151515151515151515151515151515151515151515151515151515151515",
+          "mechanism": "Higher billings convert into durable free cash flow."
+        },
+        "assessment": {
+          "id": "assessment:005",
+          "content_hash": "2525252525252525252525252525252525252525252525252525252525252525",
+          "claim_version_ref": "claim:005",
+          "claim_version_hash": "0505050505050505050505050505050505050505050505050505050505050505",
+          "thesis_version_ref": "thesis:005",
+          "thesis_version_hash": "1515151515151515151515151515151515151515151515151515151515151515",
+          "driver_statement": "Higher billings convert into durable free cash flow.",
+          "impact": "insufficient",
+          "rationale": "Billings growth is established, but cash collections, working capital, and capital expenditure are absent.",
+          "follow_up_question": "Did operating cash flow grow and free-cash-flow margin expand in the same period after working-capital and capital-expenditure effects?"
+        }
+      },
+      "gold": {
+        "verdict": "pass",
+        "required_finding_codes": [],
+        "expected_impact": null,
+        "rationale": "The assessment identifies the conversion gap and asks for the exact cash-flow evidence needed."
+      },
+      "observed_outputs": []
+    },
+    {
+      "id": "calibration:thesis-impact:006",
+      "title": "Claim hash is bound to the wrong formal claim",
+      "seeded_error": "binding_mismatch",
+      "severity": "high",
+      "input": {
+        "claim": {
+          "id": "claim:006",
+          "content_hash": "0606060606060606060606060606060606060606060606060606060606060606",
+          "normalized_statement": "Revenue increased 14% year over year."
+        },
+        "thesis": {
+          "id": "thesis:006",
+          "content_hash": "1616161616161616161616161616161616161616161616161616161616161616",
+          "mechanism": "Revenue growth sustains operating leverage."
+        },
+        "assessment": {
+          "id": "assessment:006",
+          "content_hash": "2626262626262626262626262626262626262626262626262626262626262626",
+          "claim_version_ref": "claim:006",
+          "claim_version_hash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+          "thesis_version_ref": "thesis:006",
+          "thesis_version_hash": "1616161616161616161616161616161616161616161616161616161616161616",
+          "driver_statement": "Revenue growth sustains operating leverage.",
+          "impact": "supports",
+          "rationale": "Revenue growth is consistent with the mechanism.",
+          "follow_up_question": null
+        }
+      },
+      "gold": {
+        "verdict": "reject",
+        "required_finding_codes": ["binding_mismatch"],
+        "expected_impact": null,
+        "rationale": "The assessment claim hash differs from the exact quoted ClaimVersion hash."
+      },
+      "observed_outputs": []
+    },
+    {
+      "id": "calibration:thesis-impact:007",
+      "title": "Driver statement is not the exact thesis mechanism",
+      "seeded_error": "driver_mismatch",
+      "severity": "high",
+      "input": {
+        "claim": {
+          "id": "claim:007",
+          "content_hash": "0707070707070707070707070707070707070707070707070707070707070707",
+          "normalized_statement": "Revenue increased 14% year over year."
+        },
+        "thesis": {
+          "id": "thesis:007",
+          "content_hash": "1717171717171717171717171717171717171717171717171717171717171717",
+          "mechanism": "Revenue growth sustains operating leverage."
+        },
+        "assessment": {
+          "id": "assessment:007",
+          "content_hash": "2727272727272727272727272727272727272727272727272727272727272727",
+          "claim_version_ref": "claim:007",
+          "claim_version_hash": "0707070707070707070707070707070707070707070707070707070707070707",
+          "thesis_version_ref": "thesis:007",
+          "thesis_version_hash": "1717171717171717171717171717171717171717171717171717171717171717",
+          "driver_statement": "Revenue growth guarantees higher earnings per share.",
+          "impact": "supports",
+          "rationale": "Revenue growth is consistent with the substituted driver.",
+          "follow_up_question": null
+        }
+      },
+      "gold": {
+        "verdict": "reject",
+        "required_finding_codes": ["driver_mismatch"],
+        "expected_impact": null,
+        "rationale": "The assessment replaced the exact operating-leverage mechanism with an EPS guarantee."
+      },
+      "observed_outputs": []
+    },
+    {
+      "id": "calibration:thesis-impact:008",
+      "title": "Revenue growth alone is overclaimed as margin expansion",
+      "seeded_error": "unsupported_inference",
+      "severity": "high",
+      "input": {
+        "claim": {
+          "id": "claim:008",
+          "content_hash": "0808080808080808080808080808080808080808080808080808080808080808",
+          "normalized_statement": "Revenue increased 5% year over year."
+        },
+        "thesis": {
+          "id": "thesis:008",
+          "content_hash": "1818181818181818181818181818181818181818181818181818181818181818",
+          "mechanism": "Operating-margin expansion demonstrates scalable unit economics."
+        },
+        "assessment": {
+          "id": "assessment:008",
+          "content_hash": "2828282828282828282828282828282828282828282828282828282828282828",
+          "claim_version_ref": "claim:008",
+          "claim_version_hash": "0808080808080808080808080808080808080808080808080808080808080808",
+          "thesis_version_ref": "thesis:008",
+          "thesis_version_hash": "1818181818181818181818181818181818181818181818181818181818181818",
+          "driver_statement": "Operating-margin expansion demonstrates scalable unit economics.",
+          "impact": "supports",
+          "rationale": "Revenue growth proves operating margin expanded and unit economics scaled.",
+          "follow_up_question": null
+        }
+      },
+      "gold": {
+        "verdict": "reject",
+        "required_finding_codes": ["unsupported_inference"],
+        "expected_impact": null,
+        "rationale": "The exact claim contains no operating-margin or cost evidence."
+      },
+      "observed_outputs": []
+    },
+    {
+      "id": "calibration:thesis-impact:009",
+      "title": "A demand contraction is assigned the wrong directional impact",
+      "seeded_error": "impact_mismatch",
+      "severity": "high",
+      "input": {
+        "claim": {
+          "id": "claim:009",
+          "content_hash": "0909090909090909090909090909090909090909090909090909090909090909",
+          "normalized_statement": "Active customers declined 12% year over year."
+        },
+        "thesis": {
+          "id": "thesis:009",
+          "content_hash": "1919191919191919191919191919191919191919191919191919191919191919",
+          "mechanism": "Customer adoption expands recurring demand."
+        },
+        "assessment": {
+          "id": "assessment:009",
+          "content_hash": "2929292929292929292929292929292929292929292929292929292929292929",
+          "claim_version_ref": "claim:009",
+          "claim_version_hash": "0909090909090909090909090909090909090909090909090909090909090909",
+          "thesis_version_ref": "thesis:009",
+          "thesis_version_hash": "1919191919191919191919191919191919191919191919191919191919191919",
+          "driver_statement": "Customer adoption expands recurring demand.",
+          "impact": "supports",
+          "rationale": "The customer decline supports the adoption mechanism.",
+          "follow_up_question": null
+        }
+      },
+      "gold": {
+        "verdict": "reject",
+        "required_finding_codes": ["impact_mismatch"],
+        "expected_impact": "weakens",
+        "rationale": "The claim direction weakens rather than supports the mechanism."
+      },
+      "observed_outputs": []
+    },
+    {
+      "id": "calibration:thesis-impact:010",
+      "title": "Rationale contradicts a supports label",
+      "seeded_error": "rationale_contradiction",
+      "severity": "medium",
+      "input": {
+        "claim": {
+          "id": "claim:010",
+          "content_hash": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+          "normalized_statement": "Net retention increased from 104% to 112%."
+        },
+        "thesis": {
+          "id": "thesis:010",
+          "content_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "mechanism": "Expansion within existing accounts sustains recurring growth."
+        },
+        "assessment": {
+          "id": "assessment:010",
+          "content_hash": "2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a",
+          "claim_version_ref": "claim:010",
+          "claim_version_hash": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a",
+          "thesis_version_ref": "thesis:010",
+          "thesis_version_hash": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+          "driver_statement": "Expansion within existing accounts sustains recurring growth.",
+          "impact": "supports",
+          "rationale": "Net retention is unrelated to expansion within existing accounts and provides no evidence for the mechanism.",
+          "follow_up_question": null
+        }
+      },
+      "gold": {
+        "verdict": "reject",
+        "required_finding_codes": ["rationale_contradiction"],
+        "expected_impact": null,
+        "rationale": "The rationale denies relevance while the impact says supports."
+      },
+      "observed_outputs": []
+    },
+    {
+      "id": "calibration:thesis-impact:011",
+      "title": "Vague follow-up cannot close the stated cash-flow gap",
+      "seeded_error": "follow_up_quality",
+      "severity": "medium",
+      "input": {
+        "claim": {
+          "id": "claim:011",
+          "content_hash": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+          "normalized_statement": "Bookings increased 18% year over year."
+        },
+        "thesis": {
+          "id": "thesis:011",
+          "content_hash": "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
+          "mechanism": "Bookings convert into free cash flow without working-capital strain."
+        },
+        "assessment": {
+          "id": "assessment:011",
+          "content_hash": "2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b",
+          "claim_version_ref": "claim:011",
+          "claim_version_hash": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+          "thesis_version_ref": "thesis:011",
+          "thesis_version_hash": "1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b",
+          "driver_statement": "Bookings convert into free cash flow without working-capital strain.",
+          "impact": "insufficient",
+          "rationale": "Bookings are known, but conversion, working capital, and cash flow are missing.",
+          "follow_up_question": "What happened next?"
+        }
+      },
+      "gold": {
+        "verdict": "reject",
+        "required_finding_codes": ["follow_up_quality"],
+        "expected_impact": null,
+        "rationale": "The follow-up does not identify cash conversion, working capital, or free cash flow."
+      },
+      "observed_outputs": []
+    },
+    {
+      "id": "calibration:thesis-impact:012",
+      "title": "Constant-currency growth is mislabeled as weakening demand",
+      "seeded_error": "impact_mismatch",
+      "severity": "high",
+      "input": {
+        "claim": {
+          "id": "claim:012",
+          "content_hash": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+          "normalized_statement": "Reported revenue declined 2%, while constant-currency revenue increased 7%."
+        },
+        "thesis": {
+          "id": "thesis:012",
+          "content_hash": "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "mechanism": "Underlying customer demand produces organic revenue growth."
+        },
+        "assessment": {
+          "id": "assessment:012",
+          "content_hash": "2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c",
+          "claim_version_ref": "claim:012",
+          "claim_version_hash": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+          "thesis_version_ref": "thesis:012",
+          "thesis_version_hash": "1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c",
+          "driver_statement": "Underlying customer demand produces organic revenue growth.",
+          "impact": "weakens",
+          "rationale": "The reported-currency decline shows underlying customer demand contracted.",
+          "follow_up_question": null
+        }
+      },
+      "gold": {
+        "verdict": "reject",
+        "required_finding_codes": ["impact_mismatch"],
+        "expected_impact": "supports",
+        "rationale": "The exact claim reports positive constant-currency growth, so reported FX translation does not weaken underlying demand."
+      },
+      "observed_outputs": []
+    }
+  ]
+}

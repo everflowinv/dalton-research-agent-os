@@ -49,6 +49,15 @@ class ContractTests(unittest.TestCase):
                     # envelope and is not one of the domain contracts.
                     continue
                 self.assertIn("schema_version", schema["required"])
+                if schema["title"] == "ThesisImpactVerifierOutputV0.2":
+                    # Model-owned output is bound by its WorkOrder and target
+                    # assessment; authority adds id/created_at only after validation.
+                    self.assertNotIn("id", schema["required"])
+                    self.assertNotIn("created_at", schema["required"])
+                    self.assertTrue(
+                        set(schema["required"]).issubset(schema["properties"])
+                    )
+                    continue
                 self.assertIn("id", schema["required"])
                 self.assertIn("created_at", schema["required"])
                 self.assertTrue(set(schema["required"]).issubset(schema["properties"]))
