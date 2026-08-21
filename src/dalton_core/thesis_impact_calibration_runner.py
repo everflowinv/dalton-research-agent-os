@@ -1,9 +1,15 @@
-"""Durable, budget-bounded live runner for verifier calibration.
+"""Durable, admission-bounded live runner for verifier calibration.
 
 The runner sends only model-visible corpus inputs to one exact broker profile.
 Each completion is appended and fsynced before the next case.  A crash after a
 provider completion but before the append is recovered through the broker's
 ``replayOnly`` path, so resume never needs an unbounded retry loop.
+
+The frozen budgets are admission and ex-post telemetry gates.  The broker can
+bound requested output tokens but cannot stop a provider from reporting extra
+host-side input/context or output after the call.  Any such overrun is therefore
+recorded durably and stops the run before the next case; it is not mislabeled as
+unspent budget.
 """
 
 from __future__ import annotations
@@ -143,7 +149,7 @@ def build_calibration_run_manifest(
     max_output_tokens: int,
     timeout_seconds: int,
 ) -> dict[str, Any]:
-    """Freeze exact model, corpus, code, and maximum executable spend."""
+    """Freeze exact model, corpus, code, and maximum admitted spend."""
 
     frozen = validate_calibration_corpus(corpus)
     if len(repo_commit) != 40 or any(char not in "0123456789abcdef" for char in repo_commit):
@@ -300,12 +306,17 @@ def _strict_json_output(result: ResultEnvelope) -> tuple[dict[str, Any], str | N
     return parsed, None
 
 
-def _record_cost(invocation: ModelInvocation, case_cap: Decimal) -> tuple[str | None, str]:
+def _record_cost(
+    invocation: ModelInvocation,
+    case_cap: Decimal,
+    *,
+    allow_over_cap: bool = False,
+) -> tuple[str | None, str]:
     telemetry = invocation.usage.get("raw_provider_telemetry", {})
     cost = telemetry.get("cost", {}) if isinstance(telemetry, Mapping) else {}
     if isinstance(cost, Mapping) and cost.get("available") is True:
         actual = _money(cost.get("usd"), "provider cost")
-        if actual > case_cap:
+        if actual > case_cap and not allow_over_cap:
             raise ThesisImpactCalibrationRunError("provider cost exceeds per-case cap")
         # Broker telemetry crosses a JSON number boundary.  Remove binary-float
         # noise while keeping substantially more precision than USD micros.
@@ -379,7 +390,8 @@ def calibration_output_map(
         record = validate_calibration_record(raw)
         if record["case_ref"] not in run["case_refs"]:
             raise ThesisImpactCalibrationRunError("record case is outside manifest")
-        outputs[record["case_ref"]] = record["parsed_output"]
+        if record["result"]["status"] == "succeeded":
+            outputs[record["case_ref"]] = record["parsed_output"]
     return outputs
 
 
@@ -594,11 +606,18 @@ def run_live_calibration(
                 invocation, result = adapter.execute(work, decision, profile)
                 recovery_mode = "fresh_execute"
             else:
-                raise ThesisImpactCalibrationRunError(
-                    f"broker replay preflight failed: {replay_result.error!r}"
-                )
-            parsed, parse_error = _strict_json_output(result)
-            accounted, reserve = _record_cost(invocation, case_cap)
+                invocation, result = replay_invocation, replay_result
+                recovery_mode = "replay_duplicate"
+            if result.status == "succeeded":
+                parsed, parse_error = _strict_json_output(result)
+            else:
+                parsed = {}
+                parse_error = f"broker result failed: {result.error!r}"
+            accounted, reserve = _record_cost(
+                invocation,
+                case_cap,
+                allow_over_cap=result.status != "succeeded",
+            )
             record = {
                 "schema_version": SCHEMA_VERSION,
                 "case_ref": case["id"],
@@ -626,20 +645,29 @@ def run_live_calibration(
                     "case": index,
                     "case_ref": case["id"],
                     "recovery_mode": recovery_mode,
+                    "result_status": result.status,
                     "accounted_cost_usd": accounted,
                     "cost_reserve_usd": reserve,
                 }),
                 flush=True,
             )
+            if result.status != "succeeded":
+                raise ThesisImpactCalibrationRunError(parse_error)
     finally:
         router.close()
     report = _write_checkpoint(output_dir, records, manifest, corpus)
+    succeeded_cases = sum(
+        record["result"]["status"] == "succeeded" for record in records
+    )
     return {
-        "status": "complete" if len(records) == len(corpus["cases"]) else "partial",
+        "status": (
+            "complete" if succeeded_cases == len(corpus["cases"]) else "partial"
+        ),
         "run_ref": manifest["id"],
         "repo_commit": manifest["repo_commit"],
         "profile_id": manifest["profile_id"],
-        "completed_cases": len(records),
+        "completed_cases": succeeded_cases,
+        "recorded_cases": len(records),
         "total_cases": len(corpus["cases"]),
         "spent_or_reserved_usd": format(spent_or_reserved, "f"),
         "run_cap_usd": manifest["run_cap_usd"],

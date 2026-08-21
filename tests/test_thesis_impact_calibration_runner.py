@@ -194,6 +194,30 @@ class ThesisImpactCalibrationRunnerTests(unittest.TestCase):
         self.assertEqual(accounted, "0.00020064")
         self.assertEqual(reserve, "0")
 
+    def test_failed_provider_record_is_durable_but_not_scored(self):
+        record = self._record()
+        record["result"]["status"] = "failed"
+        record["result"]["outputs"] = {}
+        record["result"]["error"] = {
+            "code": "PROVIDER_BUDGET_EXCEEDED",
+            "message": "provider output exceeded the WorkOrder budget",
+            "source": "openclaw-model-adapter",
+        }
+        record["parsed_output"] = {}
+        record["parse_error"] = "broker result failed"
+        parsed = validate_calibration_record(record)
+        self.assertEqual(calibration_output_map([parsed], self.manifest), {})
+        invocation = ModelInvocation.from_dict(record["invocation"])
+        invocation.usage["raw_provider_telemetry"]["cost"]["usd"] = 0.11585
+        with self.assertRaisesRegex(ThesisImpactCalibrationRunError, "exceeds"):
+            _record_cost(invocation, Decimal("0.04"))
+        self.assertEqual(
+            _record_cost(
+                invocation, Decimal("0.04"), allow_over_cap=True
+            ),
+            ("0.11585", "0"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
