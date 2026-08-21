@@ -20,6 +20,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import shutil
 import sqlite3
@@ -787,9 +788,9 @@ def _parent(args: argparse.Namespace) -> int:
                 thesis_ref=THESIS_REF,
                 assessment_ref=assessment["id"],
             )
-            if final["status"] != "eligible":
+            if final["status"] not in {"eligible", "rejected"}:
                 raise Gate2CanaryError(
-                    f"verified assessment is not eligible: {final['status']}"
+                    f"verification did not reach a terminal quality gate: {final['status']}"
                 )
             rows_before_replay = _gate2_rows(authorities.core)
             total_cost = _total_cost_usd(rows_before_replay)
@@ -842,7 +843,7 @@ def _parent(args: argparse.Namespace) -> int:
                 worker=deny_worker,
             ).run_once(plan_version_ref=plan_ref, thesis_ref=THESIS_REF)
             if (
-                replayed["status"] != "eligible"
+                replayed["status"] != final["status"]
                 or replayed["assessment_run"].get("replayed") is not True
                 or replayed["verifier_run"].get("replayed") is not True
             ):
@@ -854,10 +855,11 @@ def _parent(args: argparse.Namespace) -> int:
             formal_claim = authorities.core.get_claim(
                 started["claim_version_ref"]
             )["claim"]
-            verification = final["eligible"]["verification"]
+            verification = final["verification"]["verification"]
             result = {
                 "schema_version": SCHEMA_VERSION,
                 "status": "complete",
+                "quality_gate_status": final["status"],
                 "generated_at": _wire_time(),
                 "repo_commit": head,
                 "repo_dirty": dirty,
@@ -935,6 +937,241 @@ def _parent(args: argparse.Namespace) -> int:
     return 0
 
 
+def _finalize_existing(args: argparse.Namespace) -> int:
+    """Audit and finalize an already terminal isolated canary without model access."""
+
+    output = args.output_dir.expanduser().resolve()
+    source = args.source_dir.expanduser().resolve()
+    if not output.is_dir():
+        raise Gate2CanaryError(f"existing output directory is missing: {output}")
+    _required_paths(output)
+    if args.execution_repo_commit is None or not re.fullmatch(
+        r"[0-9a-f]{40}", args.execution_repo_commit
+    ):
+        raise Gate2CanaryError(
+            "--execution-repo-commit must be the exact 40-character canary commit"
+        )
+    head, dirty = _git_state()
+    if dirty and not args.allow_dirty:
+        raise Gate2CanaryError("refusing to audit from a dirty repository")
+    budget = _assert_budget_contract(
+        args.spend_cap_usd,
+        args.prior_accounted_cost_usd,
+        args.prior_uncertain_cost_reserve_usd,
+    )
+    broker_preflight = _broker_replay_only_preflight(
+        socket_path=args.socket_path,
+        auth_key_path=args.auth_key_path,
+    )
+    plan_ref = _plan_ref(output)
+
+    with Authorities(output) as authorities:
+        pointer_before = dict(authorities.core.current_pointer(THESIS_REF) or {})
+        if not pointer_before:
+            raise Gate2CanaryError("isolated thesis pointer is missing")
+        thesis_count = authorities.core.connection.execute(
+            "SELECT COUNT(*) FROM thesis_versions WHERE thesis_id=?",
+            (THESIS_REF,),
+        ).fetchone()[0]
+        if thesis_count != 1:
+            raise Gate2CanaryError("isolated thesis has unexpected version history")
+        started = authorities.control.start_from_closed_plan(
+            plan_version_ref=plan_ref,
+            thesis_ref=THESIS_REF,
+        )
+        assessed = authorities.control.advance_assessment(
+            plan_version_ref=plan_ref,
+            thesis_ref=THESIS_REF,
+        )
+        assessment = assessed["assessment"]["assessment"]
+        final = authorities.control.advance_verification(
+            plan_version_ref=plan_ref,
+            thesis_ref=THESIS_REF,
+            assessment_ref=assessment["id"],
+        )
+        if final["status"] not in {"eligible", "rejected"}:
+            raise Gate2CanaryError(
+                f"existing verification is not terminal: {final['status']}"
+            )
+        verification = final["verification"]["verification"]
+        rows_before_replay = _gate2_rows(authorities.core)
+        if _counts(rows_before_replay) != {
+            "invocations": 2,
+            "usage": 2,
+            "costs": 2,
+        }:
+            raise Gate2CanaryError(
+                "existing canary does not have exactly two accounted model calls"
+            )
+        total_cost = _total_cost_usd(rows_before_replay)
+        prior_cost_bound = (
+            args.prior_accounted_cost_usd
+            + args.prior_uncertain_cost_reserve_usd
+        )
+        aggregate_cost_bound = prior_cost_bound + total_cost
+        if aggregate_cost_bound > args.spend_cap_usd:
+            raise Gate2CanaryError("existing canary exceeds the aggregate spend cap")
+
+        router = ModelRouter(output / "model-router.sqlite")
+        try:
+            decisions = router.list_decisions()
+            families = [item["selected_endpoint"]["family"] for item in decisions]
+            if len(decisions) != 2 or len(set(families)) != 2:
+                raise Gate2CanaryError(
+                    f"producer/verifier family independence failed: {families}"
+                )
+            assessment_formal = authorities.scheduler.formal_result(
+                started["assessment_work_order"]["id"]
+            )
+            verifier_formal = authorities.scheduler.formal_result(
+                assessed["verifier_work_order"]["id"]
+            )
+            if assessment_formal is None or verifier_formal is None:
+                raise Gate2CanaryError("existing canary lacks terminal formal results")
+            assessment_metadata = assessment_formal["result_envelope"]["metadata"]
+            if (
+                assessment_metadata.get("broker_request_mode") != "replay_only"
+                or assessment_metadata.get("broker_idempotency_status") != "duplicate"
+            ):
+                raise Gate2CanaryError(
+                    "existing assessment did not finish through duplicate replay-only recovery"
+                )
+
+            deny_adapter = OpenClawModelAdapter(
+                output / "broker-must-not-be-called.sock",
+                route_resolver=router.get_decision,
+                expected_agent_id=BROKER_AGENT_ID,
+                auth_client_id=BROKER_CLIENT_ID,
+                auth_key_provider=lambda: (_ for _ in ()).throw(
+                    Gate2CanaryError("broker key requested during formal replay")
+                ),
+                timeout_seconds=1.0,
+                clock=_now,
+            )
+            deny_worker = ThesisImpactModelWorker(
+                scheduler=authorities.scheduler,
+                router=router,
+                adapter=deny_adapter,
+                impact=authorities.impact,
+                observability=authorities.observability,
+                routing_policy_ref=ROUTING_POLICY_REF,
+                credential_slot_refs=(
+                    "credential-slot:openclaw:openai",
+                    "credential-slot:openclaw:deepseek",
+                ),
+                clock=_now,
+            )
+            replayed = ResearchPlanThesisImpactRuntime(
+                control=authorities.control,
+                worker=deny_worker,
+            ).run_once(plan_version_ref=plan_ref, thesis_ref=THESIS_REF)
+            if (
+                replayed["status"] != final["status"]
+                or replayed["assessment_run"].get("replayed") is not True
+                or replayed["verifier_run"].get("replayed") is not True
+            ):
+                raise Gate2CanaryError(
+                    "existing formal end-to-end replay did not converge offline"
+                )
+            rows_after_replay = _gate2_rows(authorities.core)
+            if _counts(rows_after_replay) != _counts(rows_before_replay):
+                raise Gate2CanaryError("formal replay added model accounting rows")
+            pointer_after = dict(authorities.core.current_pointer(THESIS_REF) or {})
+            if pointer_after != pointer_before:
+                raise Gate2CanaryError("audit changed the thesis current pointer")
+            integrity = _integrity(authorities, router)
+            crash_lease_row = authorities.core.connection.execute(
+                "SELECT * FROM scheduler_leases WHERE work_order_id=? "
+                "AND attempt_number=1 ORDER BY lease_version DESC LIMIT 1",
+                (started["assessment_work_order"]["id"],),
+            ).fetchone()
+            if crash_lease_row is None:
+                raise Gate2CanaryError("assessment crash lease is missing")
+            formal_claim = authorities.core.get_claim(
+                started["claim_version_ref"]
+            )["claim"]
+            result = {
+                "schema_version": SCHEMA_VERSION,
+                "status": "complete",
+                "quality_gate_status": final["status"],
+                "generated_at": _wire_time(),
+                "execution_repo_commit": args.execution_repo_commit,
+                "audit_repo_commit": head,
+                "repo_dirty": dirty,
+                "source_gate1_sample": str(source),
+                "source_plan_ref": plan_ref,
+                "formal_claim_ref": formal_claim["id"],
+                "formal_claim_hash": formal_claim["content_hash"],
+                "thesis_ref": THESIS_REF,
+                "thesis_version_ref": pointer_before["version_id"],
+                "thesis_pointer_unchanged": True,
+                "owner_authorization": {
+                    "owner_ref": args.policy_owner,
+                    "scope": "isolated real thesis-impact canary",
+                },
+                "budget": budget,
+                "broker_preflight": broker_preflight,
+                "actual_or_estimated_total_cost_usd": format(total_cost, "f"),
+                "aggregate_spend_upper_bound_usd": format(
+                    aggregate_cost_bound, "f"
+                ),
+                "model_accounting_counts": _counts(rows_before_replay),
+                "model_calls": [
+                    {
+                        "invocation_ref": invocation["id"],
+                        "work_order_ref": invocation["work_order_ref"],
+                        "provider": invocation["provider"],
+                        "model": invocation["model"],
+                        "family": invocation["model_family"],
+                        "usage": invocation["usage"],
+                        "cost": rows_before_replay["costs"][index],
+                    }
+                    for index, invocation in enumerate(
+                        rows_before_replay["invocations"]
+                    )
+                ],
+                "assessment": assessment,
+                "verification": verification,
+                "crash_recovery": {
+                    "worker_exit_code": CRASH_EXIT_CODE,
+                    "lease_id": crash_lease_row["lease_id"],
+                    "attempt_number": crash_lease_row["attempt_number"],
+                    "expires_at": crash_lease_row["expires_at"],
+                    "provider_calls": 2,
+                    "broker_socket_requests": 3,
+                    "assessment_first_request": "execute/fresh",
+                    "assessment_recovery_request": "replay_only/duplicate",
+                    "recovery_duplicated_invocation": False,
+                    "recovery_duplicated_usage": False,
+                    "recovery_duplicated_cost": False,
+                },
+                "routes": [
+                    {
+                        "decision_ref": item["id"],
+                        "capability": item["capability"],
+                        "provider": item["selected_endpoint"]["provider"],
+                        "model": item["selected_endpoint"]["model"],
+                        "family": item["selected_endpoint"]["family"],
+                        "producer_family_constraint": item["constraints"][
+                            "producer_family"
+                        ],
+                    }
+                    for item in decisions
+                ],
+                "formal_replay": {
+                    "status": replayed["status"],
+                    "broker_access_blocked_by_test_adapter": True,
+                    "accounting_counts_unchanged": True,
+                },
+                "integrity": integrity,
+            }
+            _write_object(output / "gate2-result.json", result)
+            print(json.dumps(result, ensure_ascii=False, sort_keys=True), flush=True)
+        finally:
+            router.close()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-dir", type=Path)
@@ -960,6 +1197,8 @@ def main() -> int:
         default=Path("/Users/everflow/.openclaw/dalton-model-broker.sock.key"),
     )
     parser.add_argument("--allow-dirty", action="store_true")
+    parser.add_argument("--finalize-existing", action="store_true")
+    parser.add_argument("--execution-repo-commit")
     parser.add_argument("--crash-child", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if not args.policy_owner.startswith("human:"):
@@ -969,6 +1208,8 @@ def main() -> int:
     if args.source_dir is None:
         parser.error("--source-dir is required")
     try:
+        if args.finalize_existing:
+            return _finalize_existing(args)
         return _parent(args)
     except Gate2CanaryError as exc:
         print(f"Gate 2 canary failed: {exc}", file=sys.stderr)
