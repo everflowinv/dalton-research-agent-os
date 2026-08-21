@@ -1,0 +1,32 @@
+{
+  "schema_version": "0.1",
+  "name": "Gate 0 runtime evidence debt",
+  "documents": [
+    "docs/reports/direction-review-and-execution-plan-v0.7-2026-08-21.md",
+    "docs/PROJECT_STATUS.md"
+  ],
+  "implementation": [
+    ".github/workflows/ci.yml",
+    "scripts/run_hermetic_research_replay_canary.py",
+    "scripts/collect_review_evidence.py",
+    "tests/test_review_evidence_collector.py",
+    "tests/test_thesis_impact_control.py"
+  ],
+  "commands": [
+    {
+      "label": "Repository state",
+      "argv": ["git", "status", "--short", "--branch"],
+      "timeout_seconds": 30
+    },
+    {
+      "label": "Exact HEAD",
+      "argv": ["git", "log", "-1", "--format=%H %s"],
+      "timeout_seconds": 30
+    },
+    {
+      "label": "Hermetic research replay canary",
+      "argv": ["{python}", "scripts/run_hermetic_research_replay_canary.py"],
+      "timeout_seconds": 300
+    }
+  ]
+}

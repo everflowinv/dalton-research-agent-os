@@ -24,7 +24,7 @@ Dalton 是面向投研团队的独立研究控制内核。它把任务调度、�
 - OpenClaw 可以提供模型、消息、审批和投递连接器；Core 不读取 OpenClaw 配置或凭据。
 - 旧 OpenClaw agent 的约束、研究结果和 cron 只作为 legacy input 归档。归档不代表采用、兼容或继续运行。
 
-旧工作流的初步取舍见 [docs/legacy-workflow-disposition.md](docs/legacy-workflow-disposition.md)。完整契约见 [SPEC.md](SPEC.md)，当前完成度与未完成项见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，Connector 边界见 [docs/CONNECTOR_PROTOCOL.md](docs/CONNECTOR_PROTOCOL.md)，Context/Memory/Log 裁决见 [docs/reports/context-memory-log-subsystem-2026-08-14.md](docs/reports/context-memory-log-subsystem-2026-08-14.md)。
+旧工作流的初步取舍见 [docs/legacy-workflow-disposition.md](docs/legacy-workflow-disposition.md)。完整契约见 [SPEC.md](SPEC.md)，当前完成度与未完成项见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，当前执行顺序见 [docs/reports/direction-review-and-execution-plan-v0.7-2026-08-21.md](docs/reports/direction-review-and-execution-plan-v0.7-2026-08-21.md)，Connector 边界见 [docs/CONNECTOR_PROTOCOL.md](docs/CONNECTOR_PROTOCOL.md)。
 
 ## 本地验证
 
@@ -35,6 +35,14 @@ python3 -m pip install -e .
 python3 -m unittest discover -s tests -v
 python3 -m pip install build
 python3 -m build
+
+# 无网络、无付费模型的显式 closure → thesis-impact replay gate
+python3 scripts/run_hermetic_research_replay_canary.py
+
+# 生成完整 review evidence；输出路径必须尚不存在
+python3 scripts/collect_review_evidence.py \
+  --manifest docs/review-evidence/gate0-review.manifest.json \
+  --output /tmp/dalton-review-evidence.md
 
 # 可选：真实公共 SEC 只读 canary；不读取凭据，不接 live 数据库
 python3 scripts/run_public_sec_authority_demo.py
@@ -76,41 +84,16 @@ controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回
 
 ## 开发状态
 
-Phase 1 已进入单公司 Agenda Shadow：controller 每日从规范化 `PerceptionSnapshot` 生成一次
-AgendaCycle，真实经过 Scheduler、Model Router 和 OpenClaw broker，再由确定性权重与稳定
-tie-break 选择 ResearchQuestion。结果进入 append-only AgendaDecision，再由 OpenClaw/Discord
-bridge 投递通知。bridge 使用 claim lease、确定性 marker、发送后 reconciliation 和 receipt 回写；
-重启时会先查找已发 marker，避免重复外发。人工 agree/disagree 改由 Tailscale Serve 后的 owner-only
-HTML 控制面提交；浏览器反馈与 24 小时超时默认接受使用两个独立 feedback-only principal。超时默认
-接受单独统计，不计入人工标签或认可率。当前不会执行研究，也不会写 Evidence、Claim 或 Thesis。
+live 仍停在 Agenda Shadow 和 recorded connector 路径。当前未部署的开发候选已经在隔离 authority 中完成
+policy-authorized SEC public ResearchPlan：读取 Company Facts、解析同一 10-Q 的季度收入、独立复算同比、提交
+正式 Evidence/Claim 并关闭 Backlog question。Microsoft、Apple、NVIDIA、Walmart 的本地 canary 说明主链已从
+filing metadata 走到财务事实，但多公司结果还缺可提交的 replay bundle，不能视为生产证明。
 
-Connector P0-1 authority foundation、P0-2a Runner 控制面和 P0-2b recorded transport thin slice
-已完成；P0-3 已加入受治理的 OpenClaw skill/MCP metadata importer、credential-free SSRF-safe public
-HTTPS transport 和 closed credential authority metadata boundary。P0-4a 第一笔已加入 trusted source
-registration、单调 snapshot chain、脱敏 ingest event 和 crash-safe exporter retry state；第二笔已把 metadata
-source head/reject 与 connector operation、physical attempt、最新 usage/cost/settlement、quota、health/circuit 和
-blocking incident 投到只读 Connector Shadow。默认运行路径仍只执行仓库内 recorded fixtures；OpenClaw live
-inventory attach 与真实 A股/AlphaEngine connector 尚未接入。开发候选新增了无凭据 SEC public adapter 和隔离
-canary，但没有部署为常驻或生产 connector。P2 已加入一次性
-`CompiledConnectorPlan`、ref-only ContextPack/ClaimIndex、私有 RunState/Checkpoint，以及只消费三类 recorded
-fixture 的 research coordinator；它证明了 bounded retry 和崩溃恢复，但不运行 live research、不写
-Evidence/Claim/Thesis。开发候选另加入了 fixture-only source/numeric verifier 和 candidate-only staging：
-它会从 packaged raw payload 重新抽取数值、用 Decimal 复算，并在独立 owner-only SQLite 中保存待人工审阅的
-CandidateEvidence/CandidateClaim；staging 不持 Research Ledger handle，也不会自动生成正式版本。当前开发候选
-还加入只读 Connector authority resolver，并用真实 SEC submissions API 跑通一条隔离 WorkOrder：
-connector → persisted authority → source/numeric verifier → candidate staging。结果只到
-`human-review-ready-candidate`，语义状态仍为 `unverified`。HumanReviewAuthority、HTML review 入口和
-Ledger 0.2 无损 promotion 已进入开发候选；Planner 也能把 exact selected AgendaDecision/ResearchQuestion
-编译成 immutable ResearchPlanVersion，生成人工逐 plan 批准的 SEC public read-only 四步任务树，并复用
-WorkflowRunVersion、WorkOrderLink 和 Scheduler。启动时只把根 connector WorkOrder 入队，下游 resolver、
-verifier 和 candidate staging 节点等待 coordinator 按依赖逐项 admission，不能并发越过上游结果。
-`ResearchPlanExecutor` 已接通这四个真实节点；2026-08-20 的隔离 canary 访问 `data.sec.gov`，把一份人工批准的
-plan 跑到 `human-review-ready-candidate`。Owner 随后接受 exact candidate；隔离 Core 已写入正式
-EvidenceVersion 0.2、ClaimVersion 0.2、supports relation 和 Backlog answer。新增的
-`ResearchPlanClosureCoordinator` 会重验 plan final-stage proof、review commit chain 和正式 promotion receipt，
-并在崩溃后重放到同一 answer binding。这条 canary 没有读取凭据或 live DB。
-这些能力均未部署，未接旧 cron，也没有自动提交 Ledger。生产部署仍缺少独立 OS/container identity、正式
-capability sandbox、Model IR、原生事件连接器、更多原生投递渠道和完整运维控制面。任何旧工作流
-切换都要逐项验证，不能因文件已导入就视为完成迁移。当前项目状态见
-[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，最近一次 Agenda 控制面实施记录见
-[docs/reports/phase-1-agenda-control-2026-08-14.md](docs/reports/phase-1-agenda-control-2026-08-14.md)。
+开发候选还包含 Claim → thesis impact assessment、不同 model family verifier、ModelRouter/OpenClaw broker 接线，
+以及模型返回后崩溃时的 durable replay。它们目前只通过 recorded broker 测试，没有使用真实 ThesisVersion 和真实
+模型完成端到端产物，也没有部署到 live。
+
+当前顺序是：先让最新 HEAD 的独立 CI 和 hermetic replay 全绿，再在同一 commit 上复现 5 家公司的 revenue-growth
+plan 并生成第一份 verified brief，最后在取得单独付费授权和 hard spend cap 后运行一条真实 thesis-impact canary。
+在此之前冻结新的 thesis-impact capability、新 connector、生产部署和旧 cron cutover。详细状态见
+[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)。

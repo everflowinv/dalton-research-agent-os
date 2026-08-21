@@ -2,7 +2,7 @@
 
 更新日期：2026-08-21
 - live deployed baseline：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`；Agenda 兼容热修复：`03ea471`
-- 本轮开发起点：`9cf86d2`；当前分支已把 SEC Company Concept 财务事实接入自动主链，尚未部署到 live
+- 本轮开发起点：`9cf86d2`；Gate 0 开发基线：`b81d1cb`；SEC 财务事实与 thesis-impact 开发候选均尚未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
@@ -10,8 +10,8 @@
 hostile-code 生产安全等级。
 
 当前架构方向与执行顺序见
-[vision-and-execution-priority-v0.6-2026-08-15.md](reports/vision-and-execution-priority-v0.6-2026-08-15.md)。
-v0.5 及更早报告保留为各切片启动时的历史基线，不再作为当前执行顺序。
+[direction-review-and-execution-plan-v0.7-2026-08-21.md](reports/direction-review-and-execution-plan-v0.7-2026-08-21.md)。
+v0.6 及更早报告保留为各切片启动时的历史基线，不再作为当前执行顺序。
 
 ## 当前判断
 
@@ -88,9 +88,22 @@ retryable ResultEnvelope 的 attempt 仍会按正常 retry 新建 route。隔离
 socket 请求只产生 1 次 provider call、1 条 invocation、1 条 usage 和 1 条 cost，formal success 落在 Scheduler
 attempt 2，三套 SQLite integrity check 均为 `ok`。
 
-当前下一阶段是取得单独付费调用授权后，在隔离 authority 跑第一条真实模型 canary，并核对实际 token、成本和输出
-质量。真实 canary 仍不得直接修改 thesis；
+2026-08-21 方向复审维持 Conditional Go，但改变了下一阶段顺序。Fable 的 review evidence 注入脚本失败，且
+`3fd630e..b81d1cb` 的 10 个提交在独立复核完成前已累计增加 8,527 行。仓库虽已有 Python 3.11/3.13 全量测试、
+build 和 broker check 的 GitHub Actions，Apple/NVIDIA/Walmart 也跑过同指标自动 closure，但最新 HEAD 的 CI 在
+复审时尚未全部结束，三家公司结果也只有状态文档记录，没有可提交的 replay bundle。当前顺序改为：先完成最新
+HEAD 独立 CI、hermetic replay canary 和 fail-closed review evidence collector；再在同一 commit 上复现 5 家公司并
+产出 verified revenue-growth brief；之后才取得单独付费调用授权，跑一条真实 thesis-impact canary。此前不增加
+thesis updater、并发 worker、自动 thesis revision 或 fleet control。真实 canary 仍不得直接修改 thesis；
 `insufficient` 只生成后续问题，`supports / weakens / no_change` 只形成可供未来 thesis updater 消费的已验证判断。
+
+Gate 0 候选现已增加显式 hermetic replay CI step 和 fail-closed review evidence collector。前者单独覆盖
+recorded SEC Company Facts → formal Claim closure → recorded thesis assessment/verifier → replay；后者从 closed
+manifest 收集非空文档、实现和命令证据，只接受 argv 数组，任一文件缺失/为空、命令失败/超时、路径逃逸或陈旧
+输出都会停止且不发布半份 artifact。GitHub Actions 在 Python 3.11、3.13 两个 runner 都跑 canary，3.13 runner
+另上传证据包。该候选本机 Python 全量 581/581、broker 16/16、canary 1/1、collector 8/8、build 与 compileall
+通过；Gate 0 仍以 exact commit 的三个远端 job 全绿为最终门槛。
+
 现有 versioned governance policy 可分别只允许 closed SEC public `10-Q list_filings` 或 exact
 `10-Q get_company_facts` plan 自动启动；
 其中 `list_filings` 结果只有在 Core 从 exact
@@ -888,12 +901,14 @@ ResearchQuestionBacklog、Planner SEC public 薄闭环、下游逐项 coordinato
 开发候选；隔离 authority 中的一份人批 SEC public 四步任务树已经跑通。Owner 已接受 exact candidate，正式
 Evidence/Claim 0.2 promotion 与 Backlog answer binding 已完成；closure coordinator 对全链重验并支持崩溃重放。
 真实 policy-authorized 隔离 canary 已完成：closed SEC public plan 自动授权、执行、验证、promotion 并回答原
-question，越界 statement 也已在专项测试中 fail closed。下一步用多样本自动通过/升级/人工修改数据校准研究
-质量；当前已据此增加 company-facts filing window、latest-accession-bound concept 选择、第一版
+question，越界 statement 也已在专项测试中 fail closed。Apple、NVIDIA、Walmart 的多样本运行已经用于修复
+company-facts filing window 和 latest-accession-bound concept 选择，但结果未形成可独立 replay 的提交证据；
+当前已增加第一版
 Claim → driver/thesis impact authority，以及 ResearchPlan closure → bounded assessment/verifier WorkOrder 接线。
 两个 WorkOrder 现已接入 ModelRouter/OpenClaw model worker，并以无外部调用 recorded broker 验证 contract retry、
-usage/cost 入账、model-family independence、lease-expiry crash recovery 和 replay。下一步只在取得单独付费调用授权后跑隔离真实模型 canary，
-评估输出质量；不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
+usage/cost 入账、model-family independence、lease-expiry crash recovery 和 replay。下一步先完成最新 HEAD 独立 CI、
+CI 内 hermetic replay 和 5 公司同指标复现，再在取得单独付费调用授权后跑隔离真实模型 canary。期间冻结新的
+thesis-impact capability code，也不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。
@@ -904,10 +919,9 @@ Model IR ADR 和 offline capability sandbox 只有在首条 plan 明确需要且
 
 ## 继续建设与开闸的不同门槛
 
-可以立即继续：用真实 SEC public policy-authorized 主链校准自动通过率、升级原因、成本与耗时，修复真实运行
-暴露的 verifier/connector/model 缺口，并把下一份产物推进到能回答研究判断的问题；能按明确标准改善下一轮
-产物质量的增量也可推进。该闭环完成后可做不改
-Core 的 Temporal recorded-fixture spike。
+可以立即继续：完成最新 HEAD 的独立 CI；把无网络、无付费调用的完整 replay canary 接入 CI；修复会静默生成
+空 evidence block 的 review harness；用同一 revenue-growth plan 复现 5 家 SEC issuer，并生成第一份 verified
+brief。真实运行暴露的 verifier/connector 缺口可以修，但必须进入同一个 brief 验收，不能顺手扩建平台。
 
 继续暂停：与真实质量缺口无关的新 connector 品类、Interrupt / Reflection、无明确质量验收的 Model IR、
 sandbox、embedding、多 runtime，以及没有真实消费者的 contract、projection 或 dashboard 扩建。
@@ -915,7 +929,7 @@ sandbox、embedding、多 runtime，以及没有真实消费者的 contract、pr
 仍需观察或人工批准：扩大 Agenda 公司数、生产 connector 权限、重大或非规则化 Evidence/Claim/Thesis
 commit、外发、付费调用、凭据扩权、旧 cron cutover。低风险确定性 Claim 可在 owner 激活的 versioned policy
 内自动提交。第一条闭环开发和 Agenda Shadow 数据积累可以并行，其他架构扩建按
-v0.6 的价值门槛后置。
+v0.7 的价值门槛后置。
 
 ## Connector Fabric 完成门槛
 
@@ -976,6 +990,12 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - self-generated connector 若缺 recorded fixture、schema drift、429、分页和 partial-result 测试，会在
   正常路径通过、在真实源上失控；
 - shadow 通过不等于允许写 Ledger，也不等于可以关闭旧 cron。
+- 同一 agent 同时写代码、测试、验证报告和状态文档会形成 self-attestation；最新 HEAD 必须由独立 CI 验证，
+  review evidence 为空或采集命令失败时必须 fail closed；
+- 三家公司同指标 closure 目前只有叙述性记录，没有可提交的结果摘要和 replay bundle，不能冒充已完成的独立
+  breadth proof；
+- thesis-impact stack 目前只有 recorded broker canary，没有真实 ThesisVersion + 真实模型调用的端到端产物；
+- schema 持续演化但缺少统一迁移纪律；后续任何 schema 改动必须同批提交迁移说明和旧数据 replay/upgrade 测试。
 
 ## 相关入口
 
@@ -989,7 +1009,8 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - ResearchQuestionBacklog：`docs/reports/research-question-backlog-2026-08-15.md`
 - Planner SEC public 薄闭环：`docs/reports/research-plan-thin-closure-2026-08-15.md`
 - ResearchPlan coordinator：`docs/reports/research-plan-coordinator-admission-2026-08-15.md`
-- 当前愿景与执行优先级：`docs/reports/vision-and-execution-priority-v0.6-2026-08-15.md`
+- 当前方向复审与执行计划：`docs/reports/direction-review-and-execution-plan-v0.7-2026-08-21.md`
+- 上一版愿景与执行优先级：`docs/reports/vision-and-execution-priority-v0.6-2026-08-15.md`
 - Claim → thesis 影响判断：`docs/reports/thesis-impact-verifier-2026-08-20.md`
 - ResearchPlan → thesis impact 控制面：`docs/reports/research-plan-thesis-impact-control-2026-08-21.md`
 - Thesis impact 模型执行器：`docs/reports/thesis-impact-model-worker-2026-08-21.md`
