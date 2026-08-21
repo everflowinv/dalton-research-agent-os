@@ -8,7 +8,7 @@ ResearchPlan closure 产出的正式 Claim 现在会自动进入 thesis impact �
 exact plan、Backlog start/answer、Claim 和当前 Thesis，再生成两个 immutable Scheduler WorkOrder：
 
 - assessment：输入 exact ClaimVersion 与当前 ThesisVersion，预算上限为 3,500 tokens、0.25 美元、120 秒；
-- verifier：输入 exact assessment、ClaimVersion 与 ThesisVersion，预算上限为 3,900 tokens、0.25 美元、120 秒。
+- verifier：输入 exact assessment、ClaimVersion 与 ThesisVersion，预算上限为 14,000 tokens（10,000 输入、4,000 输出）、0.25 美元、120 秒。
 
 两个 prompt 都把 authority JSON 标为不可信数据，要求模型只返回 closed JSON contract。verifier 不能只看
 assessment 摘要；它必须重新读取 Claim 和 Thesis。两个 WorkOrder 都声明零 side effect。

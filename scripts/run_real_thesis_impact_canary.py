@@ -70,6 +70,8 @@ ASSESSMENT_PROFILE_ID = "profile:gpt-5-6-sol"
 VERIFIER_PROFILE_ID = "profile:claude-opus-5"
 GATE2_ACTOR = "system:gate2-real-thesis-impact-canary"
 BROKER_INVOCATION_ACTOR = "runtime:openclaw-model-broker"
+SCHEDULER_POLICY_REF = "scheduler-policy:gate2-real-canary:1"
+MODEL_LEASE_SECONDS = 130.0
 
 
 class Gate2CanaryError(RuntimeError):
@@ -159,6 +161,11 @@ class Authorities:
         self.scheduler = Scheduler(
             connection=self.core.connection,
             clock=scheduler_clock,
+            default_lease_seconds=30.0,
+            max_lease_seconds=150.0,
+            max_renew_seconds=30.0,
+            max_total_lease_seconds=300.0,
+            policy_version_id=SCHEDULER_POLICY_REF,
         )
         self.coordinator = ResearchPlanCoordinator(
             plan=self.plan,
@@ -453,6 +460,7 @@ def _worker(
     router_path: Path,
     socket_path: Path,
     auth_key_path: Path,
+    lease_seconds: float | None = MODEL_LEASE_SECONDS,
     fault_hook: Callable[[str], None] | None = None,
 ) -> tuple[ModelRouter, ThesisImpactModelWorker]:
     router = ModelRouter(router_path)
@@ -476,6 +484,7 @@ def _worker(
             "credential-slot:openclaw:openai",
             "credential-slot:openclaw:claude-cli",
         ),
+        lease_seconds=lease_seconds,
         clock=_now,
         fault_hook=fault_hook,
     )
@@ -511,6 +520,7 @@ def _crash_child(args: argparse.Namespace) -> int:
             router_path=root / "model-router.sqlite",
             socket_path=args.socket_path,
             auth_key_path=args.auth_key_path,
+            lease_seconds=None,
             fault_hook=crash,
         )
         try:
@@ -593,21 +603,30 @@ def _wait_for_lease_expiry(root: Path, work_order_ref: str) -> dict[str, Any]:
     }
 
 
-def _assert_budget_contract(spend_cap: Decimal) -> dict[str, str]:
+def _assert_budget_contract(
+    spend_cap: Decimal, prior_incurred_cost: Decimal
+) -> dict[str, str]:
     if spend_cap <= 0:
         raise Gate2CanaryError("spend cap must be positive")
+    if prior_incurred_cost < 0:
+        raise Gate2CanaryError("prior incurred cost cannot be negative")
     reserved = Decimal(str(ASSESSMENT_BUDGET["max_cost_usd"])) + Decimal(
         str(VERIFIER_BUDGET["max_cost_usd"])
     )
-    if reserved > spend_cap:
+    if prior_incurred_cost + reserved > spend_cap:
         raise Gate2CanaryError(
-            f"WorkOrder hard maximum {reserved} exceeds authorized cap {spend_cap}"
+            "prior incurred cost plus WorkOrder hard maximum "
+            f"{prior_incurred_cost + reserved} exceeds authorized cap {spend_cap}"
         )
     return {
         "authorized_total_spend_cap_usd": format(spend_cap, "f"),
+        "prior_incurred_cost_usd": format(prior_incurred_cost, "f"),
         "assessment_hard_cap_usd": str(ASSESSMENT_BUDGET["max_cost_usd"]),
         "verifier_hard_cap_usd": str(VERIFIER_BUDGET["max_cost_usd"]),
         "maximum_executable_spend_usd": format(reserved, "f"),
+        "maximum_aggregate_spend_usd": format(
+            prior_incurred_cost + reserved, "f"
+        ),
     }
 
 
@@ -650,7 +669,9 @@ def _parent(args: argparse.Namespace) -> int:
         if path.is_file():
             os.chmod(path, 0o600)
     plan_ref = _plan_ref(output)
-    budget = _assert_budget_contract(args.spend_cap_usd)
+    budget = _assert_budget_contract(
+        args.spend_cap_usd, args.prior_incurred_cost_usd
+    )
     router_install = _install_router(output / "model-router.sqlite")
 
     with Authorities(output) as authorities:
@@ -738,9 +759,9 @@ def _parent(args: argparse.Namespace) -> int:
             verifier_work = assessed["verifier_work_order"]
             if verifier_work["budget"] != VERIFIER_BUDGET:
                 raise Gate2CanaryError("verifier WorkOrder budget drifted")
-            if _total_cost_usd(after_recovery) + Decimal(
-                str(VERIFIER_BUDGET["max_cost_usd"])
-            ) > args.spend_cap_usd:
+            if args.prior_incurred_cost_usd + _total_cost_usd(
+                after_recovery
+            ) + Decimal(str(VERIFIER_BUDGET["max_cost_usd"])) > args.spend_cap_usd:
                 raise Gate2CanaryError("verifier admission would exceed hard spend cap")
             print("assessment recovered; starting independent verifier", flush=True)
             verified_run = worker.run_once(verifier_work)
@@ -763,6 +784,11 @@ def _parent(args: argparse.Namespace) -> int:
             if total_cost > args.spend_cap_usd:
                 raise Gate2CanaryError(
                     f"actual/estimated cost {total_cost} exceeded cap {args.spend_cap_usd}"
+                )
+            aggregate_cost = args.prior_incurred_cost_usd + total_cost
+            if aggregate_cost > args.spend_cap_usd:
+                raise Gate2CanaryError(
+                    f"aggregate cost {aggregate_cost} exceeded cap {args.spend_cap_usd}"
                 )
             decisions = router.list_decisions()
             families = [item["selected_endpoint"]["family"] for item in decisions]
@@ -837,6 +863,9 @@ def _parent(args: argparse.Namespace) -> int:
                 "budget": budget,
                 "broker_preflight": broker_preflight,
                 "actual_or_estimated_total_cost_usd": format(total_cost, "f"),
+                "aggregate_cost_including_prior_failures_usd": format(
+                    aggregate_cost, "f"
+                ),
                 "model_accounting_counts": _counts(rows_before_replay),
                 "model_calls": [
                     {
@@ -899,6 +928,9 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--policy-owner", default="human:lumos-obliviate")
     parser.add_argument("--spend-cap-usd", type=Decimal, default=Decimal("1.00"))
+    parser.add_argument(
+        "--prior-incurred-cost-usd", type=Decimal, default=Decimal("0")
+    )
     parser.add_argument(
         "--socket-path",
         type=Path,

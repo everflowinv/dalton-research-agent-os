@@ -33,9 +33,9 @@ ASSESSMENT_BUDGET = {
     "max_seconds": 120,
 }
 VERIFIER_BUDGET = {
-    "max_input_tokens": 3500,
-    "max_output_tokens": 400,
-    "max_total_tokens": 3900,
+    "max_input_tokens": 10000,
+    "max_output_tokens": 4000,
+    "max_total_tokens": 14000,
     "max_cost_usd": 0.25,
     "max_seconds": 120,
 }

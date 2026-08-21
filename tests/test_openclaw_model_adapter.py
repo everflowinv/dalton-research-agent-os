@@ -18,7 +18,6 @@ from typing import Any, Callable
 from dalton_core.contracts import WorkOrder
 from dalton_core.model_router import ModelRouter, canonical_hash as dalton_hash
 from dalton_core.openclaw_model_adapter import (
-    BrokerBudgetExceeded,
     BrokerFrameTooLarge,
     BrokerProtocolError,
     BrokerTimeout,
@@ -527,14 +526,21 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             "cacheWriteTokens": None,
             "totalTokens": 1_002,
         }
-        with self.assertRaises(BrokerBudgetExceeded):
-            self.run_with(lambda request: success_response(request, usage=excessive_usage))
-        with self.assertRaises(BrokerBudgetExceeded):
-            self.run_with(
-                lambda request: success_response(
-                    request, cost={"available": True, "usd": 0.51}
+        for response in (
+            lambda request: success_response(request, usage=excessive_usage),
+            lambda request: success_response(
+                request, cost={"available": True, "usd": 0.51}
+            ),
+        ):
+            with self.subTest(response=response):
+                (invocation, result), broker = self.run_with(response)
+                broker.close()
+                self.assertEqual(result.status, "failed")
+                self.assertEqual(result.error["code"], "PROVIDER_BUDGET_EXCEEDED")
+                self.assertEqual(result.outputs, {})
+                self.assertEqual(
+                    invocation.usage["metering_source"], "provider_reported"
                 )
-            )
 
     def test_actual_provider_model_and_agent_are_exact(self) -> None:
         for field, value in (

@@ -470,7 +470,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
                 "modalities": ["text"],
                 "context": {
                     "max_context_tokens": 100_000,
-                    "max_output_tokens": 2_000,
+                    "max_output_tokens": 4_000,
                 },
                 "availability": {
                     "state": "available",
@@ -484,8 +484,8 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
                 },
                 "limits": {
                     "max_input_tokens": 10_000,
-                    "max_output_tokens": 2_000,
-                    "max_total_tokens": 12_000,
+                    "max_output_tokens": 4_000,
+                    "max_total_tokens": 14_000,
                     "max_cost_usd": 1.0,
                 },
             }
@@ -759,7 +759,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             "modalities": ["text"],
             "context": {
                 "max_context_tokens": 100_000,
-                "max_output_tokens": 2_000,
+                "max_output_tokens": 4_000,
             },
             "availability": {
                 "state": "available",
@@ -773,8 +773,8 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             },
             "limits": {
                 "max_input_tokens": 10_000,
-                "max_output_tokens": 2_000,
-                "max_total_tokens": 12_000,
+                "max_output_tokens": 4_000,
+                "max_total_tokens": 14_000,
                 "max_cost_usd": 1.0,
             },
         })

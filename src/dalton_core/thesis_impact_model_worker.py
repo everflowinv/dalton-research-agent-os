@@ -87,6 +87,7 @@ class ThesisImpactModelWorker:
         routing_policy_ref: str,
         credential_slot_refs: Sequence[str],
         token_counter: Callable[[str], int] = count_dalton_search_tokens,
+        lease_seconds: float | None = None,
         clock: Callable[[], datetime] | None = None,
         fault_hook: Callable[[str], None] | None = None,
     ) -> None:
@@ -103,6 +104,13 @@ class ThesisImpactModelWorker:
             raise ValueError("credential_slot_refs must be unique")
         if not callable(token_counter):
             raise TypeError("token_counter must be callable")
+        if lease_seconds is not None and (
+            isinstance(lease_seconds, bool)
+            or not isinstance(lease_seconds, (int, float))
+            or not math.isfinite(float(lease_seconds))
+            or lease_seconds <= 0
+        ):
+            raise ValueError("lease_seconds must be a positive finite number")
         if fault_hook is not None and not callable(fault_hook):
             raise TypeError("fault_hook must be callable")
         self.scheduler = scheduler
@@ -114,6 +122,9 @@ class ThesisImpactModelWorker:
         self.routing_policy_ref = routing_policy_ref
         self.credential_slot_refs = slots
         self.token_counter = token_counter
+        self.lease_seconds = (
+            None if lease_seconds is None else float(lease_seconds)
+        )
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.fault_hook = fault_hook
 
@@ -539,7 +550,11 @@ class ThesisImpactModelWorker:
                 "invocation_ref": formal["result_envelope"]["invocation_ref"],
                 "replayed": True,
             }
-        lease = self.scheduler.claim(WORKER_REF, work_order_id=work.id)
+        lease = self.scheduler.claim(
+            WORKER_REF,
+            work_order_id=work.id,
+            lease_seconds=self.lease_seconds,
+        )
         if lease is None:
             return {
                 "status": "waiting",

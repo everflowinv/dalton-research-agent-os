@@ -1035,7 +1035,11 @@ class OpenClawModelAdapter:
             raise BrokerProtocolError(
                 "replay-only broker success must be a durable duplicate"
             )
-        self._assert_budget(usage, cost, work, profile, max_tokens)
+        budget_error: BrokerBudgetExceeded | None = None
+        try:
+            self._assert_budget(usage, cost, work, profile, max_tokens)
+        except BrokerBudgetExceeded as exc:
+            budget_error = exc
         completed_at = _timestamp(self._clock())
         result_id = "result:" + hashlib.sha256(invocation_id.encode("utf-8")).hexdigest()[:32]
         usage_ref = f"usage:{invocation_id}"
@@ -1099,7 +1103,15 @@ class OpenClawModelAdapter:
             "broker_idempotency_status": response["idempotencyStatus"],
             "broker_request_mode": "replay_only" if replay_only else "execute",
         }
-        if response["ok"]:
+        if budget_error is not None:
+            outputs = {}
+            status = "failed"
+            error = {
+                "code": "PROVIDER_BUDGET_EXCEEDED",
+                "message": str(budget_error),
+                "source": "openclaw-model-adapter",
+            }
+        elif response["ok"]:
             outputs: Mapping[str, Any] = {
                 "text": response["text"],
                 "content_hash": hashlib.sha256(response["text"].encode("utf-8")).hexdigest(),
