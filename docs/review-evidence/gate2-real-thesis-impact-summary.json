@@ -1,0 +1,110 @@
+{
+  "schema_version": "0.1",
+  "generated_at": "2026-08-21T19:28:29.008116+00:00",
+  "status": "complete",
+  "quality_gate_status": "rejected",
+  "execution_repo_commit": "b980bba7ca3113ef16824e9b4a1055ae5c769864",
+  "audit_repo_commit": "c88746b0a44e1e0d161edaa52eb0a0a17b01566f",
+  "repo_dirty": false,
+  "source": {
+    "ticker": "MSFT",
+    "gate1_formal_claim_ref": "claim-version:cb32bdeb2094e2dad62d3e4ee38ce18689dbbe75c7bf6a500905e1f457515e93",
+    "gate1_formal_claim_hash": "8ca6597d36cda66fa611fb11bef7cc8f69556392ca2ab149702aaa4b296fd74e",
+    "quarterly_revenue_yoy_growth_percent": "18.30"
+  },
+  "thesis": {
+    "thesis_ref": "thesis:msft:revenue-operating-leverage",
+    "thesis_version_ref": "25dd119325e94781a4bbcee9eca8175f",
+    "driver_statement": "Quarterly revenue growth sustains operating leverage.",
+    "pointer_unchanged": true
+  },
+  "budget": {
+    "authorized_total_spend_cap_usd": "1.00",
+    "prior_known_cost_usd": "0.156775",
+    "prior_timeout_cost_reserve_usd": "0.250000",
+    "successful_canary_cost_usd": "0.013211",
+    "all_known_cost_usd": "0.169986",
+    "aggregate_spend_upper_bound_usd": "0.419986"
+  },
+  "model_calls": [
+    {
+      "phase": "assessment",
+      "invocation_ref": "invocation:3e885a70062d41d5e943c410eeac5b86",
+      "provider": "openai",
+      "model": "gpt-5.6-sol",
+      "family": "openai-gpt-5.6",
+      "input_tokens": 881,
+      "output_tokens": 267,
+      "total_tokens": 1148,
+      "actual_cost_usd": "0.012415"
+    },
+    {
+      "phase": "verification",
+      "invocation_ref": "invocation:8e127a4766bcb7ac9518b74bc635bc3b",
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "family": "deepseek-v4",
+      "producer_family_constraint": "openai-gpt-5.6",
+      "input_tokens": 1476,
+      "output_tokens": 714,
+      "total_tokens": 2190,
+      "actual_cost_usd": "0.000796"
+    }
+  ],
+  "assessment": {
+    "impact": "insufficient",
+    "follow_up_question": "Did Microsoft's operating margin or operating income increase year over year in the same quarter, and did operating expenses grow more slowly than revenue?"
+  },
+  "verification": {
+    "verdict": "reject",
+    "finding_count": 5,
+    "human_audit": "The verifier output contains internally contradictory ref/hash findings and proposes impact labels outside the closed taxonomy. The rejection remains authoritative for this canary, so the assessment is not eligible and was not added to the Gate 1 brief."
+  },
+  "crash_recovery": {
+    "worker_exit_code": 86,
+    "assessment_first_request": "execute/fresh",
+    "assessment_recovery_request": "replay_only/duplicate",
+    "provider_calls": 2,
+    "broker_socket_requests": 3,
+    "duplicated_invocation": false,
+    "duplicated_usage": false,
+    "duplicated_cost": false
+  },
+  "formal_replay": {
+    "status": "rejected",
+    "broker_access_blocked": true,
+    "accounting_counts_unchanged": true
+  },
+  "integrity": {
+    "core": "ok",
+    "review": "ok",
+    "coordinator": "ok",
+    "router": "ok"
+  },
+  "prior_attempts": [
+    {
+      "attempt": 1,
+      "outcome": "replay protocol rejected by pre-restart broker",
+      "known_cost_usd": "0.012970",
+      "provider_calls": 1,
+      "duplicate_provider_calls": 0
+    },
+    {
+      "attempt": 2,
+      "outcome": "Claude verifier telemetry exceeded the immutable token budget; the old adapter omitted its paid rejected response from Core accounting",
+      "known_cost_usd": "0.131275",
+      "provider_calls": 2,
+      "duplicate_provider_calls": 0,
+      "remediation": "Over-budget responses now return a failed ResultEnvelope while retaining invocation, usage, and cost for Core accounting."
+    },
+    {
+      "attempt": 3,
+      "outcome": "Claude verifier timed out and the broker recorded TIMEOUT with no usage or cost telemetry",
+      "known_cost_usd": "0.012530",
+      "uncertain_cost_reserve_usd": "0.250000",
+      "provider_calls_with_known_completion": 1,
+      "remediation": "The final verifier used a bounded 2,000-token output contract and a faster independent model family."
+    }
+  ],
+  "raw_result_sha256": "a03a055725d4d6922e00c26e90251821eebe2e0fb48349b52353922ec1cc1e32"
+}

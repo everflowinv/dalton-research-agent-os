@@ -101,9 +101,11 @@ NVIDIA、Walmart、Amazon 的 5/5 正式 closure、进程重启后无网络 repl
 控制样本；脱敏摘要和简报已提交。该结果仍是隔离开发验收，不代表已部署到 live。
 
 开发候选还包含 Claim → thesis impact assessment、不同 model family verifier、ModelRouter/OpenClaw broker 接线，
-以及模型返回后崩溃时的 durable replay。它们目前只通过 recorded broker 测试，没有使用真实 ThesisVersion 和真实
-模型完成端到端产物，也没有部署到 live。
+以及模型返回后崩溃时的 durable replay。Gate 2 已在 USD 1.00 hard cap 下使用真实 ThesisVersion 和真实模型完成
+隔离 canary：GPT-5.6 Sol assessment 经 crash 后由 `replayOnly` 无重复恢复，DeepSeek V4 Flash 独立复核并给出
+`reject`。控制链、记账、family independence、离线 replay 和数据库完整性通过；verifier findings 有明显矛盾，
+所以 assessment 未进入 eligible，也未写入简报。
 
-Gate 0 和 Gate 1 已完成；下一步只能在取得单独付费授权和 hard spend cap 后运行一条真实 thesis-impact canary。
-在此之前继续冻结新的 thesis-impact capability、新 connector、生产部署和旧 cron cutover。详细状态见
+Gate 0、Gate 1 和 Gate 2 控制面验收已完成；模型质量门仍未通过。下一步只做冻结标准的 verifier 校准，不部署
+live、不自动修改 ThesisVersion，也不切旧 cron。详细状态见
 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)。

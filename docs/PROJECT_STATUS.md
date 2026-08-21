@@ -3,6 +3,7 @@
 更新日期：2026-08-21
 - live deployed baseline：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`；Agenda 兼容热修复：`03ea471`
 - 本轮开发起点：`9cf86d2`；Gate 0 验收 commit：`3d2114a`；Gate 1 batch 代码 commit：`0b0f872`；
+  Gate 2 真实执行 commit：`b980bba`；离线收尾 commit：`c88746b`；
   SEC 财务事实与 thesis-impact 开发候选均尚未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 
@@ -67,7 +68,8 @@ pre-commit 判断，不会直接改 thesis，也不增加逐条 owner 审批。�
 ResearchPlan、Backlog start/answer、正式 Claim 和当前 Thesis 的 exact ref/hash，再依次生成受预算约束的
 assessment WorkOrder 与独立 verifier WorkOrder；verifier 同时读取 assessment、Claim 和 Thesis，不能只复核摘要。
 隔离 recorded-result 端到端 canary 已覆盖 `supports`、没有 thesis 自动建题、`insufficient` 自动建题和 crash/replay
-去重；两条模型 WorkOrder 都无 side effect，整个流程不增加逐条人工审批，也不改 thesis。真实付费模型尚未调用。
+去重；两条模型 WorkOrder 都无 side effect，整个流程不增加逐条人工审批，也不改 thesis。截至这个 recorded 阶段，
+真实付费模型尚未调用；后续 Gate 2 结果见下文。
 
 同日后续开发已把这两个 WorkOrder 接入现有 `ModelRouter → OpenClawModelAdapter → Core/Scheduler` 执行边界。
 worker 只能执行 coordinator 生成且已在 Scheduler authority 中冻结的 exact WorkOrder；assessment 失败后按 bounded
@@ -119,10 +121,25 @@ Evidence/Claim/Thesis 全部为 0。独立 edgartools 路径复核了 5 个 acce
 concept allowlist。结果 bundle hash 为 `7f69dc9a483d3e04cc6c8c6eeb01563ad0e5e94e28d189df34350f812a95844b`，
 简报见
 [gate1-sec-five-issuer-revenue-growth-2026-08-21.md](reports/gate1-sec-five-issuer-revenue-growth-2026-08-21.md)。
-Gate 1 没有 schema 变化，也没有部署 live。下一门是取得 owner 对具体付费调用和 hard spend cap 的单独授权后，
-运行一条真实 ThesisVersion 的 thesis-impact canary；授权前不启动 Gate 2。本机相邻回归 81/81、Python 全量
+Gate 1 没有 schema 变化，也没有部署 live。Gate 1 完成时的下一门是取得 owner 对具体付费调用和 hard spend cap
+的单独授权后运行一条真实 ThesisVersion 的 thesis-impact canary。本机相邻回归 81/81、Python 全量
 587/587、broker 16/16、显式 hermetic replay 1/1、build、compileall、结果摘要 JSON 和 `git diff --check`
 全部通过。
+
+Gate 2 已在 owner 授权的 USD 1.00 hard cap 下完成真实隔离 canary。MSFT Gate 1 Claim 先由 GPT-5.6 Sol 生成
+`insufficient` assessment；worker 在 model accounting 后、Scheduler completion 前退出，lease 过期后通过同一
+invocation 的 `replayOnly/duplicate` 恢复，没有第二次 provider call，也没有重复 invocation/usage/cost。独立
+verifier 使用 DeepSeek V4 Flash，producer/verifier family 分别是 `openai-gpt-5.6` 与 `deepseek-v4`。本次两条
+调用为 3,338 tokens、USD 0.013211；全部已知成本为 USD 0.169986，另为一条无费用遥测的 Claude TIMEOUT 预留
+USD 0.25，累计上界 USD 0.419986。离线 replay 使用 deny adapter 禁止 broker 访问，稳定重现正式 `rejected`，
+两条模型记账数量不变，Thesis pointer 不变，Core/review/coordinator/router integrity 都是 `ok`。
+
+Gate 2 的控制面通过，模型质量门没有通过。DeepSeek 的五条 rejection findings 中有 ref/hash 自相矛盾，并建议
+使用 authority closed taxonomy 之外的 `none / contradictory`；系统仍保留正式 `reject`，assessment 未进入
+eligible，也未回写 Gate 1 简报。真实运行还暴露并修复了两个控制缺口：verifier token 预算过小，以及旧 adapter
+在 provider telemetry 超预算时先抛错、导致已付费拒绝响应只留在 broker journal。现在超预算内容仍会被拒绝，
+但 invocation/usage/cost 会进入 Core。报告见
+[gate2-real-thesis-impact-canary-2026-08-21.md](reports/gate2-real-thesis-impact-canary-2026-08-21.md)。
 
 现有 versioned governance policy 可分别只允许 closed SEC public `10-Q list_filings` 或 exact
 `10-Q get_company_facts` plan 自动启动；
@@ -926,9 +943,9 @@ company-facts filing window 和 latest-accession-bound concept 选择，但结�
 当前已增加第一版
 Claim → driver/thesis impact authority，以及 ResearchPlan closure → bounded assessment/verifier WorkOrder 接线。
 两个 WorkOrder 现已接入 ModelRouter/OpenClaw model worker，并以无外部调用 recorded broker 验证 contract retry、
-usage/cost 入账、model-family independence、lease-expiry crash recovery 和 replay。下一步先完成最新 HEAD 独立 CI、
-CI 内 hermetic replay 和 5 公司同指标复现，再在取得单独付费调用授权后跑隔离真实模型 canary。期间冻结新的
-thesis-impact capability code，也不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
+usage/cost 入账、model-family independence、lease-expiry crash recovery 和 replay。Gate 0/1 breadth proof 与
+Gate 2 真实模型 canary 均已完成；当前阻塞是 verifier false positive，而不是控制面缺口。下一步先做冻结标准的
+独立 verifier 校准集，不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。
@@ -1012,9 +1029,8 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - shadow 通过不等于允许写 Ledger，也不等于可以关闭旧 cron。
 - 同一 agent 同时写代码、测试、验证报告和状态文档会形成 self-attestation；最新 HEAD 必须由独立 CI 验证，
   review evidence 为空或采集命令失败时必须 fail closed；
-- 三家公司同指标 closure 目前只有叙述性记录，没有可提交的结果摘要和 replay bundle，不能冒充已完成的独立
-  breadth proof；
-- thesis-impact stack 目前只有 recorded broker canary，没有真实 ThesisVersion + 真实模型调用的端到端产物；
+- thesis-impact stack 已有真实 ThesisVersion + 真实模型产物，但首条独立 verifier 正式 `reject`，且 findings 本身
+  存在自相矛盾；模型质量未达到 live 门槛；
 - schema 持续演化但缺少统一迁移纪律；后续任何 schema 改动必须同批提交迁移说明和旧数据 replay/upgrade 测试。
 
 ## 相关入口
@@ -1035,6 +1051,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - ResearchPlan → thesis impact 控制面：`docs/reports/research-plan-thesis-impact-control-2026-08-21.md`
 - Thesis impact 模型执行器：`docs/reports/thesis-impact-model-worker-2026-08-21.md`
 - Thesis impact 付费边界崩溃恢复：`docs/reports/thesis-impact-model-crash-recovery-2026-08-21.md`
+- Gate 2 真实 thesis-impact canary：`docs/reports/gate2-real-thesis-impact-canary-2026-08-21.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`
