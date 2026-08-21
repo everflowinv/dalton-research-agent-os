@@ -770,8 +770,8 @@ class ModelRouter:
         ).fetchone()
         latest = json.loads(latest_row["decision_json"]) if latest_row else None
         if decision_kind == "initial":
-            if attempt_number != 1:
-                raise RouteTransitionError("initial route must use attempt number 1")
+            # Scheduler leases can expire before routing, so its first routed
+            # attempt need not be attempt 1.
             if previous_decision_ref is not None:
                 raise RouteTransitionError("initial route cannot reference a previous decision")
             if latest is not None:
@@ -785,8 +785,10 @@ class ModelRouter:
             raise RouteTransitionError("previous_decision_ref must be the latest route decision")
         if latest["work_order_ref"] != work_order_id or latest["capability"] != capability:
             raise RouteTransitionError("previous route belongs to different work/capability")
-        if decision_kind == "retry" and attempt_number != latest["attempt_number"] + 1:
-            raise RouteTransitionError("retry must advance the attempt number by exactly one")
+        # The same lease-expiry gap can occur between route decisions.  Route
+        # lineage must move forward, but it must not invent missing decisions.
+        if decision_kind == "retry" and attempt_number <= latest["attempt_number"]:
+            raise RouteTransitionError("retry must advance the attempt number")
         if decision_kind == "switch" and attempt_number != latest["attempt_number"]:
             raise RouteTransitionError("switch must remain in the same attempt")
         excluded: set[str] = set()

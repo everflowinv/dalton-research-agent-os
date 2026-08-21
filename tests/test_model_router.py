@@ -410,6 +410,34 @@ class ModelRouterTests(unittest.TestCase):
                 ),
             )
 
+    def test_scheduler_attempt_gaps_do_not_block_first_route_or_retry(self) -> None:
+        self.seed()
+        initial = self.router.route(
+            work_order(),
+            **route_args(attempt_number=2, idempotency_key="route-key:late-initial"),
+        )["decision"]
+        self.assertEqual(initial["decision_kind"], "initial")
+        self.assertEqual(initial["attempt_number"], 2)
+
+        retried = self.router.retry(
+            work_order(),
+            **route_args(
+                attempt_number=4,
+                previous_decision_ref=initial["id"],
+                idempotency_key="route-key:late-retry",
+            ),
+        )["decision"]
+        self.assertEqual(retried["attempt_number"], 4)
+        with self.assertRaises(RouteTransitionError):
+            self.router.retry(
+                work_order(),
+                **route_args(
+                    attempt_number=4,
+                    previous_decision_ref=retried["id"],
+                    idempotency_key="route-key:same-attempt-retry",
+                ),
+            )
+
     def test_route_idempotency_is_fresh_duplicate_conflict(self) -> None:
         self.seed()
         args = route_args()

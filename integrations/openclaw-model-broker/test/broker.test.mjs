@@ -105,6 +105,10 @@ test("closed request rejects all credential and transport authority fields", () 
     );
   }
   assert.throws(() => validateRequest({ ...request(), prompt: "" }, 4096), ProtocolError);
+  assert.throws(
+    () => validateRequest({ ...request(), replayOnly: "yes" }, 4096),
+    ProtocolError,
+  );
 });
 
 test("invocation idempotency is fresh, duplicate, or conflict", async () => {
@@ -125,6 +129,52 @@ test("invocation idempotency is fresh, duplicate, or conflict", async () => {
   verifyHash(fresh);
   verifyHash(duplicate);
   verifyHash(conflict);
+});
+
+test("replay-only reads durable completion and never calls host on miss", async () => {
+  let calls = 0;
+  const broker = new ModelBroker(fakeRuntime(async () => {
+    calls += 1;
+    return result();
+  }), config());
+
+  const miss = await broker.handle(request({
+    invocationId: "invocation:replay-miss",
+    workOrderId: "work:replay-miss",
+    replayOnly: true,
+  }));
+  assert.equal(miss.ok, false);
+  assert.equal(miss.error.code, "IDEMPOTENCY_MISS");
+  assert.equal(calls, 0);
+
+  const fresh = await broker.handle(request());
+  const replay = await broker.handle(request({ replayOnly: true }));
+  assert.equal(fresh.ok, true);
+  assert.equal(replay.ok, true);
+  assert.equal(replay.idempotencyStatus, "duplicate");
+  assert.equal(replay.text, fresh.text);
+  assert.equal(replay.requestHash, fresh.requestHash);
+  assert.equal(calls, 1);
+  verifyHash(miss);
+  verifyHash(replay);
+
+  let release;
+  let inFlightCalls = 0;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  const inFlightBroker = new ModelBroker(fakeRuntime(async () => {
+    inFlightCalls += 1;
+    await blocked;
+    return result();
+  }), config());
+  const originalPromise = inFlightBroker.handle(request());
+  await new Promise((resolve) => setImmediate(resolve));
+  const replayPromise = inFlightBroker.handle(request({ replayOnly: true }));
+  release();
+  const [original, inFlightReplay] = await Promise.all([originalPromise, replayPromise]);
+  assert.equal(original.idempotencyStatus, "fresh");
+  assert.equal(inFlightReplay.idempotencyStatus, "duplicate");
+  assert.equal(inFlightReplay.text, original.text);
+  assert.equal(inFlightCalls, 1);
 });
 
 test("profile, model, token, and timeout bounds fail closed", async () => {

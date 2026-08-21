@@ -80,6 +80,14 @@ failed result，不留下 exhausted-but-unreadable 状态。
 family，重放没有第四次 broker 请求，人工 review decision 仍为 0，Thesis current pointer 不变。该 canary 没有调用
 真实模型，不能用于判断模型输出质量。
 
+同日继续补齐了付费调用前的崩溃边界。如果模型已经返回并写入 invocation/usage/cost、但进程在
+`Scheduler.complete` 前崩溃，lease 过期后的新 attempt 会复用原 route 和 invocation，只能向 broker 发
+authenticated `replayOnly` 请求。broker durable journal 命中时返回原 completion；miss 时直接返回
+`IDEMPOTENCY_MISS`，禁止调用 host 模型。只有没有被 Scheduler 接受过的 route 才进入这条恢复路径；已经形成
+retryable ResultEnvelope 的 attempt 仍会按正常 retry 新建 route。隔离 E2E 注入了 accounting 后崩溃，最终 2 次
+socket 请求只产生 1 次 provider call、1 条 invocation、1 条 usage 和 1 条 cost，formal success 落在 Scheduler
+attempt 2，三套 SQLite integrity check 均为 `ok`。
+
 当前下一阶段是取得单独付费调用授权后，在隔离 authority 跑第一条真实模型 canary，并核对实际 token、成本和输出
 质量。真实 canary 仍不得直接修改 thesis；
 `insufficient` 只生成后续问题，`supports / weakens / no_change` 只形成可供未来 thesis updater 消费的已验证判断。
@@ -884,7 +892,7 @@ question，越界 statement 也已在专项测试中 fail closed。下一步用�
 质量；当前已据此增加 company-facts filing window、latest-accession-bound concept 选择、第一版
 Claim → driver/thesis impact authority，以及 ResearchPlan closure → bounded assessment/verifier WorkOrder 接线。
 两个 WorkOrder 现已接入 ModelRouter/OpenClaw model worker，并以无外部调用 recorded broker 验证 contract retry、
-usage/cost 入账、model-family independence 和 replay。下一步只在取得单独付费调用授权后跑隔离真实模型 canary，
+usage/cost 入账、model-family independence、lease-expiry crash recovery 和 replay。下一步只在取得单独付费调用授权后跑隔离真实模型 canary，
 评估输出质量；不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
@@ -985,6 +993,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Claim → thesis 影响判断：`docs/reports/thesis-impact-verifier-2026-08-20.md`
 - ResearchPlan → thesis impact 控制面：`docs/reports/research-plan-thesis-impact-control-2026-08-21.md`
 - Thesis impact 模型执行器：`docs/reports/thesis-impact-model-worker-2026-08-21.md`
+- Thesis impact 付费边界崩溃恢复：`docs/reports/thesis-impact-model-crash-recovery-2026-08-21.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`

@@ -20,7 +20,7 @@ steps.
   MAC validity, and nonce replay protection before request validation.
 - Apart from that authentication envelope, a request contains only protocol
   version, invocation/work-order IDs, profile, exact canonical model, prompt,
-  maximum tokens, and timeout.
+  maximum tokens, timeout, and the optional boolean `replayOnly` instruction.
 - The plugin chooses one configured dedicated agent and one exact model per
   configured profile. A client cannot choose an agent, endpoint, header,
   credential, or authentication profile.
@@ -38,6 +38,10 @@ atomically replaces the snapshot after completion. A restart returns the saved
 closed response for an identical completed request and returns conflict for a
 different request. A request left `pending` by a crash is reported as
 `IDEMPOTENCY_INDETERMINATE`; the broker never silently calls the host again.
+An authenticated `replayOnly: true` request can read the completed or pending
+record but cannot create a journal claim or call the host. A journal miss is
+returned as `IDEMPOTENCY_MISS`. `replayOnly` is excluded from the provider
+request hash, so recovery must match the original request exactly.
 
 The bounded journal is `<socketName>.journal.json`, mode `0600`, written through
 same-directory temporary file + fsync + atomic rename. Configured TTL applies

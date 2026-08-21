@@ -88,6 +88,7 @@ class ThesisImpactModelWorker:
         credential_slot_refs: Sequence[str],
         token_counter: Callable[[str], int] = count_dalton_search_tokens,
         clock: Callable[[], datetime] | None = None,
+        fault_hook: Callable[[str], None] | None = None,
     ) -> None:
         if impact.scheduler is not scheduler:
             raise TypeError("worker and impact must share one Scheduler authority")
@@ -102,6 +103,8 @@ class ThesisImpactModelWorker:
             raise ValueError("credential_slot_refs must be unique")
         if not callable(token_counter):
             raise TypeError("token_counter must be callable")
+        if fault_hook is not None and not callable(fault_hook):
+            raise TypeError("fault_hook must be callable")
         self.scheduler = scheduler
         self.router = router
         self.adapter = adapter
@@ -112,6 +115,7 @@ class ThesisImpactModelWorker:
         self.credential_slot_refs = slots
         self.token_counter = token_counter
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.fault_hook = fault_hook
 
     @staticmethod
     def _work(value: WorkOrder | Mapping[str, Any]) -> WorkOrder:
@@ -470,6 +474,49 @@ class ThesisImpactModelWorker:
             )
         return "failed" if attempt >= maximum else "retryable"
 
+    def _accepted_attempts(self, work_order_id: str) -> set[int]:
+        return {
+            event["attempt_number"]
+            for event in self.scheduler.attempt_history(work_order_id)
+            if event.get("result_envelope_id") is not None
+        }
+
+    @staticmethod
+    def _reuse_invocation(
+        saved: Mapping[str, Any], replayed: ModelInvocation
+    ) -> ModelInvocation:
+        """Bind a broker replay to the invocation committed before the crash."""
+
+        replayed_wire = replayed.to_dict()
+        stable_fields = {
+            "schema_version",
+            "id",
+            "work_order_ref",
+            "profile_ref",
+            "granularity",
+            "capability",
+            "provider",
+            "model",
+            "model_family",
+            "input_refs",
+            "output_refs",
+            "side_effects",
+            "runtime_ref",
+            "actor_ref",
+            "parent_ref",
+            "environment_hash",
+        }
+        if any(saved.get(field) != replayed_wire.get(field) for field in stable_fields):
+            raise ThesisImpactModelWorkerConflict(
+                "replayed broker result differs from the committed ModelInvocation"
+            )
+        try:
+            return ModelInvocation.from_dict(saved)
+        except Exception as exc:
+            raise ThesisImpactModelWorkerConflict(
+                "committed ModelInvocation is invalid during recovery"
+            ) from exc
+
     def run_once(
         self, work_order: WorkOrder | Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -509,29 +556,37 @@ class ThesisImpactModelWorker:
         attempt_number = lease["attempt"]["attempt_number"]
         producer_family = self._producer_family(work, phase)
         previous = self.router.list_decisions(work_order_id=work.id)
-        decision_kind = "initial" if attempt_number == 1 else "retry"
-        previous_ref = None if attempt_number == 1 else (
-            previous[-1]["id"] if previous else None
+        accepted_attempts = self._accepted_attempts(work.id)
+        recovery_route = (
+            previous[-1]
+            if previous and previous[-1]["attempt_number"] not in accepted_attempts
+            else None
         )
-        estimated_input = self.token_counter(work.question)
-        estimated_output = int(work.budget["max_output_tokens"])
-        routed = self.router.route(
-            work,
-            attempt_number=attempt_number,
-            capability=capability,
-            policy_version_ref=self.routing_policy_ref,
-            credential_slot_refs=self.credential_slot_refs,
-            required_modalities=("text",),
-            required_context_tokens=estimated_input + estimated_output,
-            estimated_input_tokens=estimated_input,
-            estimated_output_tokens=estimated_output,
-            decision_kind=decision_kind,
-            previous_decision_ref=previous_ref,
-            producer_family=producer_family,
-            idempotency_key=(
-                f"thesis-impact-route:{work.id}:{attempt_number}"
-            ),
-        )["decision"]
+        route_replayed = recovery_route is not None
+        if recovery_route is not None:
+            routed = recovery_route
+        else:
+            decision_kind = "initial" if not previous else "retry"
+            previous_ref = None if not previous else previous[-1]["id"]
+            estimated_input = self.token_counter(work.question)
+            estimated_output = int(work.budget["max_output_tokens"])
+            routed = self.router.route(
+                work,
+                attempt_number=attempt_number,
+                capability=capability,
+                policy_version_ref=self.routing_policy_ref,
+                credential_slot_refs=self.credential_slot_refs,
+                required_modalities=("text",),
+                required_context_tokens=estimated_input + estimated_output,
+                estimated_input_tokens=estimated_input,
+                estimated_output_tokens=estimated_output,
+                decision_kind=decision_kind,
+                previous_decision_ref=previous_ref,
+                producer_family=producer_family,
+                idempotency_key=(
+                    f"thesis-impact-route:{work.id}:{attempt_number}"
+                ),
+            )["decision"]
         if routed["outcome"] != "selected":
             result = self._control_result(
                 work,
@@ -556,7 +611,10 @@ class ThesisImpactModelWorker:
             }
         profile = self.router.get_profile(routed["selected_profile_version_ref"])
         try:
-            invocation, adapter_result = self.adapter.execute(work, routed, profile)
+            if route_replayed:
+                invocation, adapter_result = self.adapter.replay(work, routed, profile)
+            else:
+                invocation, adapter_result = self.adapter.execute(work, routed, profile)
         except OpenClawModelAdapterError as exc:
             retryable = isinstance(exc, BrokerConnectionError)
             failure_status = (
@@ -589,8 +647,47 @@ class ThesisImpactModelWorker:
                 "error_type": type(exc).__name__,
             }
 
-        self.store.register_invocation(invocation.to_dict())
+        if (
+            route_replayed
+            and adapter_result.status == "failed"
+            and adapter_result.error is not None
+            and adapter_result.error.get("code") == "IDEMPOTENCY_MISS"
+        ):
+            result = self._control_result(
+                work,
+                attempt_number,
+                code="MODEL_RECOVERY_MISS",
+                status="failed",
+                created_at=adapter_result.created_at,
+                route_ref=routed["id"],
+            )
+            completed = self.scheduler.complete(
+                work.id,
+                attempt_number,
+                WORKER_REF,
+                lease["lease_token"],
+                result,
+                idempotency_key=f"thesis-impact-complete:{work.id}:{attempt_number}",
+            )
+            return {
+                "status": "failed",
+                "phase": phase,
+                "work_order_ref": work.id,
+                "route": routed,
+                "result": result.to_dict(),
+                "completion": completed,
+                "route_replayed": True,
+                "replayed": False,
+            }
+
+        saved_invocation = self.impact.find_invocation(invocation.id)
+        if saved_invocation is None:
+            self.store.register_invocation(invocation.to_dict())
+        else:
+            invocation = self._reuse_invocation(saved_invocation, invocation)
         accounting = self._account(invocation, routed, profile)
+        if self.fault_hook is not None:
+            self.fault_hook("after_model_accounting")
         result = adapter_result
         if result.status == "succeeded":
             try:
@@ -636,6 +733,7 @@ class ThesisImpactModelWorker:
             "accounting": accounting,
             "completion": completed,
             "output_error": output_error,
+            "route_replayed": route_replayed,
             "replayed": False,
         }
 

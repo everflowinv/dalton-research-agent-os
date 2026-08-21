@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 export const PROTOCOL_VERSION = "0.1";
 export const BROKER_VERSION = "0.1.0-spike.1";
 
-const REQUEST_KEYS = new Set([
+const REQUIRED_REQUEST_KEYS = new Set([
   "schemaVersion",
   "invocationId",
   "workOrderId",
@@ -13,6 +13,8 @@ const REQUEST_KEYS = new Set([
   "maxTokens",
   "timeoutMs",
 ]);
+const OPTIONAL_REQUEST_KEYS = new Set(["replayOnly"]);
+const REQUEST_KEYS = new Set([...REQUIRED_REQUEST_KEYS, ...OPTIONAL_REQUEST_KEYS]);
 
 export class ProtocolError extends Error {
   constructor(code, message) {
@@ -140,7 +142,7 @@ export function validateRequest(input, maxFrameBytes) {
     throw new ProtocolError("INVALID_REQUEST", "request must be an object");
   }
   const unknown = Object.keys(input).filter((key) => !REQUEST_KEYS.has(key));
-  const missing = [...REQUEST_KEYS].filter((key) => !(key in input));
+  const missing = [...REQUIRED_REQUEST_KEYS].filter((key) => !(key in input));
   if (unknown.length > 0) {
     throw new ProtocolError("UNKNOWN_FIELD", `request contains unknown fields: ${unknown.sort().join(",")}`);
   }
@@ -149,6 +151,9 @@ export function validateRequest(input, maxFrameBytes) {
   }
   if (input.schemaVersion !== PROTOCOL_VERSION) {
     throw new ProtocolError("UNSUPPORTED_VERSION", "schemaVersion is not supported");
+  }
+  if ("replayOnly" in input && typeof input.replayOnly !== "boolean") {
+    throw new ProtocolError("INVALID_REQUEST", "replayOnly must be boolean");
   }
   const request = Object.freeze({
     schemaVersion: PROTOCOL_VERSION,
@@ -159,6 +164,7 @@ export function validateRequest(input, maxFrameBytes) {
     prompt: requiredString(input.prompt, "prompt"),
     maxTokens: positiveInteger(input.maxTokens, "maxTokens"),
     timeoutMs: positiveInteger(input.timeoutMs, "timeoutMs"),
+    ...(input.replayOnly === true ? { replayOnly: true } : {}),
   });
   if (Buffer.byteLength(canonicalJson(request), "utf8") > maxFrameBytes) {
     throw new ProtocolError("FRAME_TOO_LARGE", "request exceeds the configured frame limit");

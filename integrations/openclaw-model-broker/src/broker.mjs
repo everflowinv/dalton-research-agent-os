@@ -143,7 +143,11 @@ export class ModelBroker {
 
   async handle(input) {
     const request = validateRequest(input, this.config.maxFrameBytes);
-    const requestHash = contentHash(request);
+    // replayOnly is an authenticated transport instruction, not part of the
+    // provider request identity.  It can read a durable journal result but
+    // can never create a journal claim or call the host model on a miss.
+    const { replayOnly = false, ...executionRequest } = request;
+    const requestHash = contentHash(executionRequest);
     const live = this.inFlight.get(request.invocationId);
     if (live) {
       if (live.requestHash !== requestHash) return this.#failure(request, requestHash, "conflict", "IDEMPOTENCY_CONFLICT", "invocationId was already used for another request");
@@ -155,6 +159,9 @@ export class ModelBroker {
       if (persisted.requestHash !== requestHash) return this.#failure(request, requestHash, "conflict", "IDEMPOTENCY_CONFLICT", "invocationId was already used for another request");
       if (persisted.state === "completed") return this.#duplicate(persisted.response);
       return this.#failure(request, requestHash, "duplicate", "IDEMPOTENCY_INDETERMINATE", "prior host completion may have run; automatic replay is blocked");
+    }
+    if (replayOnly) {
+      return this.#failure(request, requestHash, "fresh", "IDEMPOTENCY_MISS", "no durable completion exists; replay-only request did not call the host");
     }
     if (this.active + this.reserved >= this.config.maxConcurrent) {
       return this.#failure(request, requestHash, "fresh", "BUSY", "broker concurrency limit reached");

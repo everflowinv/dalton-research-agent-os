@@ -668,6 +668,19 @@ class ThesisImpactAuthority:
         invocation, _ = self._read_invocation(self.connection.cursor(), invocation_ref)
         return invocation
 
+    def find_invocation(self, invocation_ref: str) -> dict[str, Any] | None:
+        """Return an exact committed invocation, or ``None`` when absent."""
+
+        invocation_ref = _text(invocation_ref, "invocation_ref")
+        row = self.connection.execute(
+            "SELECT 1 FROM model_invocations WHERE invocation_id=?",
+            (invocation_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        invocation, _ = self._read_invocation(self.connection.cursor(), invocation_ref)
+        return invocation
+
     def verify_assessment(
         self,
         *,

@@ -29,6 +29,10 @@
     "prompt": {"type": "string", "minLength": 1},
     "maxTokens": {"type": "integer", "minimum": 1},
     "timeoutMs": {"type": "integer", "minimum": 1},
+    "replayOnly": {
+      "type": "boolean",
+      "description": "When true, return only an existing durable idempotency result; a miss must not call the host model."
+    },
     "auth": {
       "type": "object",
       "additionalProperties": false,

@@ -190,6 +190,18 @@ test("owner-only journal survives restart and blocks replay or conflict before h
     assert.equal(duplicate.idempotencyStatus, "duplicate");
     assert.equal(duplicate.text, "persisted response");
     assert.equal(restartCalls, 0);
+    const replayMissCore = {
+      ...request,
+      invocationId: "invocation:replay-only-miss",
+      workOrderId: "work:replay-only-miss",
+      replayOnly: true,
+    };
+    const replayMiss = await exchange(
+      restartedPath,
+      `${JSON.stringify(authenticated(replayMissCore, secret, "b".repeat(32)))}\n`,
+    );
+    assert.equal(replayMiss.error.code, "IDEMPOTENCY_MISS");
+    assert.equal(restartCalls, 0);
     const conflictCore = { ...request, prompt: "changed prompt" };
     const conflict = await exchange(restartedPath, `${JSON.stringify(authenticated(conflictCore, secret, "a".repeat(32)))}\n`);
     assert.equal(conflict.idempotencyStatus, "conflict");

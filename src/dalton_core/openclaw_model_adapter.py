@@ -672,7 +672,11 @@ class OpenClawModelAdapter:
         return json.loads(authoritative_canonical)
 
     def _authenticate_request(
-        self, core_request: Mapping[str, Any], timestamp_ms: int
+        self,
+        core_request: Mapping[str, Any],
+        timestamp_ms: int,
+        *,
+        replay_only: bool = False,
     ) -> dict[str, Any]:
         provider_failed = False
         try:
@@ -694,6 +698,8 @@ class OpenClawModelAdapter:
         if not _NONCE_RE.fullmatch(nonce):  # defensive assertion around stdlib CSPRNG
             raise ModelAdmissionError("could not create broker authentication nonce")
         request = dict(core_request)
+        if replay_only:
+            request["replayOnly"] = True
         request["auth"] = {
             "scheme": "hmac-sha256-v1",
             "clientId": self._auth_client_id,
@@ -922,6 +928,42 @@ class OpenClawModelAdapter:
     ) -> tuple[ModelInvocation, ResultEnvelope]:
         """Run exactly the selected route and return uncommitted Core contracts."""
 
+        return self._execute(
+            work_order,
+            route_decision,
+            model_profile,
+            replay_only=False,
+        )
+
+    def replay(
+        self,
+        work_order: WorkOrder | Mapping[str, Any],
+        route_decision: Mapping[str, Any],
+        model_profile: Mapping[str, Any],
+    ) -> tuple[ModelInvocation, ResultEnvelope]:
+        """Read only the broker's durable result for the exact invocation.
+
+        A journal miss is a failed broker result and must never call the host
+        model.  This path exists only for recovery after a Scheduler lease
+        expired without accepting the already-routed attempt.
+        """
+
+        return self._execute(
+            work_order,
+            route_decision,
+            model_profile,
+            replay_only=True,
+        )
+
+    def _execute(
+        self,
+        work_order: WorkOrder | Mapping[str, Any],
+        route_decision: Mapping[str, Any],
+        model_profile: Mapping[str, Any],
+        *,
+        replay_only: bool,
+    ) -> tuple[ModelInvocation, ResultEnvelope]:
+
         work = _work_order(work_order)
         try:
             profile = _profile_wire(model_profile)
@@ -972,14 +1014,27 @@ class OpenClawModelAdapter:
         if set(core_request) != set(_CORE_REQUEST_KEYS):  # defensive assertion
             raise AssertionError("internal broker request shape drift")
         timestamp_ms = int(now_dt.astimezone(timezone.utc).timestamp() * 1000)
-        request = self._authenticate_request(core_request, timestamp_ms)
-        if set(request) != set(_REQUEST_KEYS):  # defensive assertion
+        request = self._authenticate_request(
+            core_request, timestamp_ms, replay_only=replay_only
+        )
+        expected_request_keys = set(_REQUEST_KEYS) | (
+            {"replayOnly"} if replay_only else set()
+        )
+        if set(request) != expected_request_keys:  # defensive assertion
             raise AssertionError("internal authenticated broker request shape drift")
         started_at = _timestamp(now_dt)
         response = self._exchange(request, timeout)
         usage, cost = self._validate_response(
             response, core_request, profile, self._expected_agent_id
         )
+        if (
+            replay_only
+            and response["ok"] is True
+            and response["idempotencyStatus"] != "duplicate"
+        ):
+            raise BrokerProtocolError(
+                "replay-only broker success must be a durable duplicate"
+            )
         self._assert_budget(usage, cost, work, profile, max_tokens)
         completed_at = _timestamp(self._clock())
         result_id = "result:" + hashlib.sha256(invocation_id.encode("utf-8")).hexdigest()[:32]
@@ -1042,6 +1097,7 @@ class OpenClawModelAdapter:
             "runtime_version": response["runtimeVersion"],
             "broker_response_hash": response["contentHash"],
             "broker_idempotency_status": response["idempotencyStatus"],
+            "broker_request_mode": "replay_only" if replay_only else "execute",
         }
         if response["ok"]:
             outputs: Mapping[str, Any] = {

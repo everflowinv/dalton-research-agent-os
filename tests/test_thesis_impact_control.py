@@ -7,7 +7,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -713,6 +713,316 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             "ok",
         )
         self.assertEqual(router.connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    def test_worker_recovers_accounted_model_result_without_second_provider_call(self) -> None:
+        committed = self._seed_thesis()
+        started = self._close_and_start()
+        work = started["impact"]["assessment_work_order"]
+        recovery_miss_work_id = (
+            "work:thesis-impact-recovery-miss-"
+            + hashlib.sha256(work["id"].encode("utf-8")).hexdigest()[:32]
+        )
+        claim = self.harness.core.get_claim(
+            started["impact"]["claim_version_ref"]
+        )["claim"]
+        thesis = self.harness.core.get_version(committed["version_id"])["content"]
+        output = {
+            "schema_version": "0.1",
+            "claim_version_ref": claim["id"],
+            "claim_version_hash": claim["content_hash"],
+            "thesis_version_ref": thesis["id"],
+            "thesis_version_hash": thesis["content_hash"],
+            "driver_statement": thesis["mechanism"],
+            "impact": "supports",
+            "rationale": "The exact reported growth is consistent with the bound driver.",
+            "follow_up_question": None,
+        }
+        router = ModelRouter(
+            Path(self.temp.name) / "impact-recovery-router.sqlite",
+            clock=self.harness.clock,
+        )
+        self.addCleanup(router.close)
+        profile_ref = "model-profile-version:impact-recovery:1"
+        router.register_profile({
+            "schema_version": "0.1",
+            "profile_version_ref": profile_ref,
+            "id": "profile:impact-recovery",
+            "version": 1,
+            "created_at": "2026-08-15T07:00:00+00:00",
+            "prior_version_ref": None,
+            "provider": "openai",
+            "model": "gpt-5-impact-recovery",
+            "family": "impact-family-recovery",
+            "adapter_ref": "adapter:openclaw-model-broker:0.1",
+            "credential_slot_ref": "credential-slot:openai:impact-recovery",
+            "capabilities": ["research"],
+            "modalities": ["text"],
+            "context": {
+                "max_context_tokens": 100_000,
+                "max_output_tokens": 2_000,
+            },
+            "availability": {
+                "state": "available",
+                "checked_at": "2026-08-15T07:30:00+00:00",
+                "valid_until": "2026-08-16T08:00:00+00:00",
+            },
+            "cost": {
+                "currency": "USD",
+                "input_per_million_usd": 0.5,
+                "output_per_million_usd": 1.0,
+            },
+            "limits": {
+                "max_input_tokens": 10_000,
+                "max_output_tokens": 2_000,
+                "max_total_tokens": 12_000,
+                "max_cost_usd": 1.0,
+            },
+        })
+        policy_ref = "model-routing-policy-version:impact-recovery:1"
+        router.register_policy({
+            "schema_version": "0.1",
+            "policy_version_ref": policy_ref,
+            "id": "model-routing-policy:impact-recovery",
+            "version": 1,
+            "created_at": "2026-08-15T07:00:00+00:00",
+            "prior_version_ref": None,
+            "filters": {
+                "allowed_profile_ids": ["profile:impact-recovery"],
+                "allowed_providers": ["openai"],
+                "allowed_families": [],
+                "allowed_adapter_refs": ["adapter:openclaw-model-broker:0.1"],
+                "required_modalities": ["text"],
+                "family_independence_capabilities": [],
+            },
+            "ordered_preferences": [
+                {"field": "estimated_cost_usd", "direction": "asc"},
+                {"field": "profile_version_ref", "direction": "asc"},
+            ],
+        })
+
+        provider_calls = 0
+
+        def response(request: dict[str, Any]) -> dict[str, Any]:
+            nonlocal provider_calls
+            replay_only = request.get("replayOnly") is True
+            if not replay_only:
+                provider_calls += 1
+            core = {
+                key: value
+                for key, value in request.items()
+                if key not in {"auth", "replayOnly"}
+            }
+            text = canonical_json(output)
+            recovery_miss = core["workOrderId"] == recovery_miss_work_id
+            wire = {
+                "schemaVersion": "0.1",
+                "brokerVersion": "0.1.0-recorded",
+                "runtimeVersion": "2026.8.21",
+                "invocationId": core["invocationId"],
+                "workOrderId": core["workOrderId"],
+                "profileId": core["profileId"],
+                "requestHash": broker_hash(core),
+                "idempotencyStatus": (
+                    "fresh" if recovery_miss else (
+                        "duplicate" if replay_only else "fresh"
+                    )
+                ),
+                "ok": not recovery_miss,
+                "provider": None if recovery_miss else "openai",
+                "model": None if recovery_miss else "gpt-5-impact-recovery",
+                "canonicalModel": None if recovery_miss else core["model"],
+                "agentId": None if recovery_miss else "dalton-model-broker",
+                "text": None if recovery_miss else text,
+                "usage": (
+                    {
+                        "inputTokens": None,
+                        "outputTokens": None,
+                        "cacheReadTokens": None,
+                        "cacheWriteTokens": None,
+                        "totalTokens": None,
+                    }
+                    if recovery_miss
+                    else {
+                        "inputTokens": 100,
+                        "outputTokens": 50,
+                        "cacheReadTokens": 0,
+                        "cacheWriteTokens": None,
+                        "totalTokens": 150,
+                    }
+                ),
+                "cost": (
+                    {"available": False, "usd": None}
+                    if recovery_miss
+                    else {"available": True, "usd": 0.001}
+                ),
+                "error": (
+                    {
+                        "code": "IDEMPOTENCY_MISS",
+                        "message": (
+                            "no durable completion exists; replay-only request "
+                            "did not call the host"
+                        ),
+                    }
+                    if recovery_miss
+                    else None
+                ),
+            }
+            wire["contentHash"] = broker_hash(wire)
+            return wire
+
+        broker = FakeBroker(Path(self.temp.name), response, connections=3)
+        self.addCleanup(broker.close)
+        adapter = OpenClawModelAdapter(
+            broker.path,
+            route_resolver=router.get_decision,
+            auth_client_id="client:thesis-impact-runtime",
+            auth_key_provider=lambda: b"a" * 64,
+            timeout_seconds=1.0,
+            clock=self.harness.clock,
+        )
+        faulted = False
+
+        def crash_after_accounting(seam: str) -> None:
+            nonlocal faulted
+            if seam == "after_model_accounting" and not faulted:
+                faulted = True
+                raise RuntimeError("injected crash after model accounting")
+
+        worker = ThesisImpactModelWorker(
+            scheduler=self.harness.scheduler(),
+            router=router,
+            adapter=adapter,
+            impact=self.impact,
+            observability=self.harness.observability,
+            routing_policy_ref=policy_ref,
+            credential_slot_refs=("credential-slot:openai:impact-recovery",),
+            token_counter=lambda _text: 800,
+            clock=self.harness.clock,
+            fault_hook=crash_after_accounting,
+        )
+        base_invocations = self.harness.core.connection.execute(
+            "SELECT COUNT(*) FROM model_invocations"
+        ).fetchone()[0]
+        base_usage = self.harness.core.connection.execute(
+            "SELECT COUNT(*) FROM observability_usage_entries"
+        ).fetchone()[0]
+        base_cost = self.harness.core.connection.execute(
+            "SELECT COUNT(*) FROM observability_cost_entries"
+        ).fetchone()[0]
+
+        with self.assertRaisesRegex(RuntimeError, "after model accounting"):
+            worker.run_once(work)
+        self.assertEqual(provider_calls, 1)
+        self.assertIsNone(self.harness.scheduler().formal_result(work["id"]))
+        self.assertEqual(len(router.list_decisions(work_order_id=work["id"])), 1)
+
+        self.harness.clock.value += timedelta(seconds=31)
+        recovered = worker.run_once(work)
+        self.assertEqual(recovered["status"], "succeeded")
+        self.assertTrue(recovered["route_replayed"])
+        self.assertEqual(
+            recovered["result"]["metadata"]["broker_request_mode"],
+            "replay_only",
+        )
+        self.assertEqual(provider_calls, 1)
+        self.assertEqual(len(broker.requests), 2)
+        self.assertNotIn("replayOnly", broker.requests[0])
+        self.assertIs(broker.requests[1]["replayOnly"], True)
+        self.assertEqual(len(router.list_decisions(work_order_id=work["id"])), 1)
+        formal = self.harness.scheduler().formal_result(work["id"])
+        self.assertEqual(formal["attempt_number"], 2)
+        self.assertEqual(
+            self.harness.core.connection.execute(
+                "SELECT COUNT(*) FROM model_invocations"
+            ).fetchone()[0],
+            base_invocations + 1,
+        )
+        self.assertEqual(
+            self.harness.core.connection.execute(
+                "SELECT COUNT(*) FROM observability_usage_entries"
+            ).fetchone()[0],
+            base_usage + 1,
+        )
+        self.assertEqual(
+            self.harness.core.connection.execute(
+                "SELECT COUNT(*) FROM observability_cost_entries"
+            ).fetchone()[0],
+            base_cost + 1,
+        )
+        assessed = self.control.advance_assessment(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+        )
+        self.assertEqual(assessed["assessment"]["status"], "fresh")
+
+        recovery_miss_work = {
+            **work,
+            "id": recovery_miss_work_id,
+            "idempotency_key": f"work-key:{recovery_miss_work_id}",
+        }
+        self.harness.scheduler().enqueue(recovery_miss_work)
+        self.harness.scheduler().claim(
+            "worker:crash-before-broker",
+            work_order_id=recovery_miss_work_id,
+        )
+        router.route(
+            recovery_miss_work,
+            attempt_number=1,
+            capability="research",
+            policy_version_ref=policy_ref,
+            credential_slot_refs=("credential-slot:openai:impact-recovery",),
+            required_modalities=("text",),
+            required_context_tokens=800 + work["budget"]["max_output_tokens"],
+            estimated_input_tokens=800,
+            estimated_output_tokens=work["budget"]["max_output_tokens"],
+            idempotency_key=f"route-key:{recovery_miss_work_id}:1",
+        )
+        self.harness.clock.value += timedelta(seconds=31)
+        recovery_miss = worker.run_once(recovery_miss_work)
+        self.assertEqual(recovery_miss["status"], "failed")
+        self.assertIn("result", recovery_miss, recovery_miss)
+        self.assertEqual(
+            recovery_miss["result"]["error"]["code"], "MODEL_RECOVERY_MISS"
+        )
+        self.assertEqual(provider_calls, 1)
+        self.assertEqual(len(broker.requests), 3)
+        self.assertIs(broker.requests[2]["replayOnly"], True)
+        self.assertEqual(
+            len(router.list_decisions(work_order_id=recovery_miss_work_id)), 1
+        )
+        miss_formal = self.harness.scheduler().formal_result(recovery_miss_work_id)
+        self.assertEqual(miss_formal["attempt_number"], 2)
+        self.assertEqual(
+            self.harness.core.connection.execute(
+                "SELECT COUNT(*) FROM model_invocations"
+            ).fetchone()[0],
+            base_invocations + 1,
+        )
+        self.assertEqual(
+            self.harness.core.connection.execute(
+                "SELECT COUNT(*) FROM observability_usage_entries"
+            ).fetchone()[0],
+            base_usage + 1,
+        )
+        self.assertEqual(
+            self.harness.core.connection.execute(
+                "SELECT COUNT(*) FROM observability_cost_entries"
+            ).fetchone()[0],
+            base_cost + 1,
+        )
+        self.assertEqual(
+            self.harness.core.connection.execute("PRAGMA integrity_check").fetchone()[0],
+            "ok",
+        )
+        self.assertEqual(
+            self.harness.scheduler().connection.execute(
+                "PRAGMA integrity_check"
+            ).fetchone()[0],
+            "ok",
+        )
+        self.assertEqual(
+            router.connection.execute("PRAGMA integrity_check").fetchone()[0], "ok"
+        )
 
 
 class ThesisImpactModelWorkerUnitTests(unittest.TestCase):

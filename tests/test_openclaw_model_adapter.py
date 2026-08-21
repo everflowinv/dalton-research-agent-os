@@ -134,7 +134,11 @@ def seal(response: dict[str, Any]) -> dict[str, Any]:
 
 
 def core_request(request: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in request.items() if key != "auth"}
+    return {
+        key: value
+        for key, value in request.items()
+        if key not in {"auth", "replayOnly"}
+    }
 
 
 def success_response(
@@ -649,6 +653,69 @@ class OpenClawModelAdapterTests(unittest.TestCase):
         self.assertNotEqual(
             broker.requests[0]["auth"]["mac"], broker.requests[1]["auth"]["mac"]
         )
+
+    def test_replay_only_is_authenticated_and_returns_only_a_duplicate(self) -> None:
+        def responder(request: dict[str, Any]) -> dict[str, Any]:
+            self.assertIs(request["replayOnly"], True)
+            unsigned = dict(request)
+            unsigned["auth"] = {
+                key: value for key, value in request["auth"].items() if key != "mac"
+            }
+            expected = hmac.new(
+                AUTH_SECRET,
+                canonical_json(unsigned).encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            self.assertEqual(request["auth"]["mac"], expected)
+            response = success_response(request)
+            response["idempotencyStatus"] = "duplicate"
+            return seal(
+                {key: value for key, value in response.items() if key != "contentHash"}
+            )
+
+        broker = FakeBroker(self.directory, responder)
+        try:
+            adapter = OpenClawModelAdapter(
+                broker.path,
+                route_resolver=self.router.get_decision,
+                auth_client_id=AUTH_CLIENT_ID,
+                auth_key_provider=lambda: AUTH_SECRET,
+                clock=lambda: FIXED_NOW,
+            )
+            invocation, result = adapter.replay(
+                self.work, self.route, self.profile
+            )
+        finally:
+            broker.close()
+
+        self.assertEqual(invocation.parent_ref, self.route["id"])
+        self.assertEqual(result.status, "succeeded")
+        self.assertEqual(result.metadata["broker_request_mode"], "replay_only")
+        self.assertEqual(result.metadata["broker_idempotency_status"], "duplicate")
+        self.assertEqual(
+            core_request(broker.requests[0]),
+            {
+                key: value
+                for key, value in broker.requests[0].items()
+                if key not in {"auth", "replayOnly"}
+            },
+        )
+
+        broker = FakeBroker(self.directory, success_response)
+        try:
+            adapter = OpenClawModelAdapter(
+                broker.path,
+                route_resolver=self.router.get_decision,
+                auth_client_id=AUTH_CLIENT_ID,
+                auth_key_provider=lambda: AUTH_SECRET,
+                clock=lambda: FIXED_NOW,
+            )
+            with self.assertRaisesRegex(
+                BrokerProtocolError, "durable duplicate"
+            ):
+                adapter.replay(self.work, self.route, self.profile)
+        finally:
+            broker.close()
 
     def test_auth_is_mandatory_wrong_key_fails_closed_and_secret_never_escapes(self) -> None:
         with self.assertRaises(TypeError):
