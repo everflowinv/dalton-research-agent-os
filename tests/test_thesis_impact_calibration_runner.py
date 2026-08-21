@@ -12,6 +12,7 @@ from dalton_core.model_deployment import openclaw_broker_profiles
 from dalton_core.thesis_impact_calibration import load_frozen_calibration_corpus
 from dalton_core.thesis_impact_calibration_runner import (
     ThesisImpactCalibrationRunError,
+    _record_cost,
     _strict_json_output,
     build_calibration_run_manifest,
     build_calibration_work_order,
@@ -180,6 +181,18 @@ class ThesisImpactCalibrationRunnerTests(unittest.TestCase):
         parsed, error = _strict_json_output(result)
         self.assertEqual(parsed, {})
         self.assertIn("duplicate JSON key", error)
+
+    def test_provider_float_cost_is_normalized_without_fake_precision(self):
+        record = self._record()
+        invocation = record["invocation"]
+        invocation["usage"]["raw_provider_telemetry"]["cost"]["usd"] = (
+            0.00020064000000000003
+        )
+        accounted, reserve = _record_cost(
+            ModelInvocation.from_dict(invocation), Decimal("0.01")
+        )
+        self.assertEqual(accounted, "0.00020064")
+        self.assertEqual(reserve, "0")
 
 
 if __name__ == "__main__":

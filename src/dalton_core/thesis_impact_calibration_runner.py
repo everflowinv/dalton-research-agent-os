@@ -14,7 +14,7 @@ import json
 import os
 import subprocess
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -307,6 +307,11 @@ def _record_cost(invocation: ModelInvocation, case_cap: Decimal) -> tuple[str | 
         actual = _money(cost.get("usd"), "provider cost")
         if actual > case_cap:
             raise ThesisImpactCalibrationRunError("provider cost exceeds per-case cap")
+        # Broker telemetry crosses a JSON number boundary.  Remove binary-float
+        # noise while keeping substantially more precision than USD micros.
+        actual = actual.quantize(
+            Decimal("0.000000000001"), rounding=ROUND_HALF_UP
+        ).normalize()
         return format(actual, "f"), "0"
     return None, format(case_cap, "f")
 
