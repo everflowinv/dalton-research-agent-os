@@ -7,9 +7,9 @@
   SEC 财务事实与 thesis-impact 开发候选均尚未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 - 当前开发候选新增 wrapper-owned verifier binding、semantic-only provider schema、phase-pinned verifier
-  policy 与 thinking-level 控制合同；Gemini 3.7 Flash low 仍是主候选。剩余开闸条件是 host 侧 Gemini profile
-  providerControls/rate card 配置、OpenClaw host patch 与 safe restart、以及 owner 单独授权的真实 broker
-  3×30 canary 与 shadow
+  policy、thinking-level 控制合同与 3×30 canary campaign runner；Gemini 3.7 Flash low 仍是主候选。剩余开闸
+  条件是 host 侧 Gemini profile providerControls/rate card 配置、OpenClaw host patch 与 safe restart、以及
+  owner 单独授权后经 `dalton-thesis-impact-verifier-canary` 执行的真实 broker 3×30 canary 与 shadow
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
 反向改写历史结论。这里的“完成”只表示代码、测试和当前部署已经验收，不表示已达到多租户或
@@ -181,9 +181,16 @@ verification 相位可改在该 policy 下路由，且未 pin 到单一 profile 
 request hash、invocation 幂等身份和 host proof 的 closed 合同（broker 升至 0.1.0-spike.5）。live routing、
 gateway 配置和 ThesisVersion mutation 都没有变化。剩余开闸条件全部在仓库外或需单独授权：host 侧 Gemini
 profile 的 providerControls/rate card/thinkingLevel 配置、OpenClaw host patch 透传与 safe restart、以及 owner
-授权后用真实 broker 路径完成至少 3×30 provider-controlled canary 与 shadow。本批次本机验证：Python 全量 621/621、broker 22/22、显式 hermetic
-research replay canary、compileall、wheel/sdist build 与 `git diff --check` 全部通过；没有付费调用。报告见
+授权后用真实 broker 路径完成至少 3×30 provider-controlled canary 与 shadow。phase-pin/thinking 批次的本机验证：Python 全量 621/621、broker
+22/22、显式 hermetic research replay canary、compileall、wheel/sdist build 与 `git diff --check` 全部通过；
+没有付费调用。报告见
 [verifier-phase-pin-and-thinking-controls-2026-08-22.md](reports/verifier-phase-pin-and-thinking-controls-2026-08-22.md)。
+同日后续新增 `dalton-thesis-impact-verifier-canary` campaign runner：把 3×30 开闸条件收敛为一条显式授权即可
+执行的命令，内置 per-case/per-round/campaign 三重硬顶、逐轮验收（0 FP、0 high miss、0 schema/control
+failure、thinking 与 provider-control 合同逐 record 绑定）与 `production_gate` 裁决；campaign 自身不发起
+未授权付费调用，测试无网络无付费；本机验证 Python 全量 628/628、hermetic replay canary、compileall、
+wheel/sdist build 与 `git diff --check` 全部通过。报告见
+[verifier-canary-campaign-runner-2026-08-22.md](reports/verifier-canary-campaign-runner-2026-08-22.md)。
 
 现有 versioned governance policy 可分别只允许 closed SEC public `10-Q list_filings` 或 exact
 `10-Q get_company_facts` plan 自动启动；
@@ -1112,6 +1119,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Google Generative AI provider controls：`docs/reports/google-generative-ai-provider-controls-2026-08-22.md`
 - Wrapper binding 与候选选择：`docs/reports/thesis-impact-verifier-wrapper-selection-2026-08-22.md`
 - Phase-pinned verifier policy 与 thinking 控制合同：`docs/reports/verifier-phase-pin-and-thinking-controls-2026-08-22.md`
+- 3×30 verifier canary campaign runner：`docs/reports/verifier-canary-campaign-runner-2026-08-22.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`

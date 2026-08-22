@@ -79,6 +79,15 @@ dalton-thesis-impact-calibrate-matrix \
   --output-dir temp/model-smoke --socket-path /ABSOLUTE/PATH/TO/broker.sock \
   --auth-key-path /ABSOLUTE/PATH/TO/broker.key
 
+# Owner 授权后的 3×30 provider-controlled verifier 生产 canary；三重硬顶，产出验收裁决
+dalton-thesis-impact-verifier-canary \
+  --output-dir temp/verifier-canary-3x30 \
+  --profile-id profile:gemini-3-7-flash \
+  --thinking-level low --rounds 3 \
+  --per-case-cap-usd 0.05 --per-round-cap-usd 1.60 --campaign-cap-usd 5.00 \
+  --socket-path /ABSOLUTE/PATH/TO/broker.sock \
+  --auth-key-path /ABSOLUTE/PATH/TO/broker.key
+
 cd integrations/openclaw-model-broker
 npm run check
 ```
