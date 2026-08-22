@@ -9,8 +9,12 @@ completes the Scheduler attempt.
 Verification routes derive the producer model family from the exact persisted
 assessment; callers cannot choose the independence constraint.  When a phase-
 pinned verifier policy is configured, verification must route under that exact
-immutable policy and a same-family producer stays fail-closed.  Invalid model
-JSON becomes a bounded retryable result instead of a succeeded formal result.
+immutable policy and a same-family producer stays fail-closed.  When a day
+budget authority is configured, every broker call first reserves against the
+immutable day cap (over-cap stops with a durable rejection and a formal
+DAY_BUDGET_EXCEEDED failure) and settles to actual accounted cost afterwards.
+Invalid model JSON becomes a bounded retryable result instead of a succeeded
+formal result.
 """
 
 from __future__ import annotations
@@ -44,6 +48,10 @@ from .thesis_impact import (
     validate_thesis_impact_model_output,
     validate_thesis_impact_verifier_consistency,
     validate_thesis_impact_verifier_output,
+)
+from .thesis_impact_budget import (
+    ThesisImpactBudgetStore,
+    ThesisImpactDayBudgetExceeded,
 )
 from .thesis_impact_control import ResearchPlanThesisImpactCoordinator
 
@@ -94,6 +102,8 @@ class ThesisImpactModelWorker:
         routing_policy_ref: str,
         credential_slot_refs: Sequence[str],
         verifier_routing_policy_ref: str | None = None,
+        budget: ThesisImpactBudgetStore | None = None,
+        budget_policy_version_id: str | None = None,
         token_counter: Callable[[str], int] = count_dalton_search_tokens,
         lease_seconds: float | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -111,6 +121,16 @@ class ThesisImpactModelWorker:
         ):
             raise ValueError(
                 "verifier_routing_policy_ref must be a non-empty string or None"
+            )
+        if (budget is None) != (budget_policy_version_id is None):
+            raise ValueError(
+                "budget and budget_policy_version_id must be supplied together"
+            )
+        if budget_policy_version_id is not None and (
+            not isinstance(budget_policy_version_id, str) or not budget_policy_version_id
+        ):
+            raise ValueError(
+                "budget_policy_version_id must be a non-empty string or None"
             )
         slots = tuple(credential_slot_refs)
         if not slots or any(not isinstance(item, str) or not item for item in slots):
@@ -136,6 +156,8 @@ class ThesisImpactModelWorker:
         self.observability = observability
         self.routing_policy_ref = routing_policy_ref
         self.verifier_routing_policy_ref = verifier_routing_policy_ref
+        self.budget = budget
+        self.budget_policy_version_id = budget_policy_version_id
         self.credential_slot_refs = slots
         self.token_counter = token_counter
         self.lease_seconds = (
@@ -220,6 +242,42 @@ class ThesisImpactModelWorker:
             )
         invocation = self.impact.invocation(assessment["producer_invocation_ref"])
         return invocation["model_family"]
+
+    def _budget_day(self) -> str:
+        return self.clock().astimezone(timezone.utc).date().isoformat()
+
+    def _budget_reserved_micros(self, work: WorkOrder) -> int:
+        return int(
+            (
+                Decimal(str(work.budget["max_cost_usd"])) * Decimal(1_000_000)
+            ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        )
+
+    def _record_failure_alert(
+        self,
+        *,
+        kind: str,
+        work: WorkOrder,
+        phase: str,
+        attempt_number: int,
+        route_ref: str | None,
+        detail: Mapping[str, Any],
+    ) -> None:
+        if self.budget is None:
+            return
+        self.budget.record_alert(
+            alert_id="thesis-impact-alert:"
+            + content_hash({
+                "work_order_ref": work.id,
+                "attempt_number": attempt_number,
+                "kind": kind,
+            })[:32],
+            kind=kind,
+            severity="high" if kind == "day_budget_exceeded" else "medium",
+            work_order_ref=work.id,
+            phase=phase,
+            detail={"attempt_number": attempt_number, "route_decision_ref": route_ref, **detail},
+        )
 
     def _validate_output(
         self, work: WorkOrder, phase: str, result: ResultEnvelope
@@ -698,6 +756,14 @@ class ThesisImpactModelWorker:
                 ),
             )["decision"]
         if routed["outcome"] != "selected":
+            self._record_failure_alert(
+                kind="work_order_failed",
+                work=work,
+                phase=phase,
+                attempt_number=attempt_number,
+                route_ref=routed["id"],
+                detail={"code": "MODEL_ROUTE_REJECTED"},
+            )
             result = self._control_result(
                 work,
                 attempt_number,
@@ -720,6 +786,56 @@ class ThesisImpactModelWorker:
                 "completion": completed,
             }
         profile = self.router.get_profile(routed["selected_profile_version_ref"])
+        admission = None
+        if self.budget is not None:
+            try:
+                admission = self.budget.admit(
+                    policy_version_id=self.budget_policy_version_id,
+                    day=self._budget_day(),
+                    work_order_ref=work.id,
+                    attempt_number=attempt_number,
+                    phase=phase,
+                    route_decision_ref=routed["id"],
+                    reserved_micros=self._budget_reserved_micros(work),
+                )
+            except ThesisImpactDayBudgetExceeded as exc:
+                rejection = exc.rejection
+                self._record_failure_alert(
+                    kind="day_budget_exceeded",
+                    work=work,
+                    phase=phase,
+                    attempt_number=attempt_number,
+                    route_ref=routed["id"],
+                    detail={
+                        "day": rejection["day"],
+                        "day_committed_micros": rejection["day_committed_micros"],
+                        "reserved_micros": rejection["reserved_micros"],
+                        "day_cap_micros": rejection["day_cap_micros"],
+                    },
+                )
+                result = self._control_result(
+                    work,
+                    attempt_number,
+                    code="DAY_BUDGET_EXCEEDED",
+                    status="failed",
+                    route_ref=routed["id"],
+                )
+                completed = self.scheduler.complete(
+                    work.id,
+                    attempt_number,
+                    WORKER_REF,
+                    lease["lease_token"],
+                    result,
+                    idempotency_key=f"thesis-impact-complete:{work.id}:{attempt_number}",
+                )
+                return {
+                    "status": "failed",
+                    "phase": phase,
+                    "work_order_ref": work.id,
+                    "route": routed,
+                    "completion": completed,
+                    "budget_rejection": rejection,
+                }
         try:
             if route_replayed:
                 invocation, adapter_result = self.adapter.replay(work, routed, profile)
@@ -730,6 +846,22 @@ class ThesisImpactModelWorker:
             failure_status = (
                 self._bounded_failure_status(lease) if retryable else "failed"
             )
+            if failure_status == "failed":
+                self._record_failure_alert(
+                    kind="work_order_failed",
+                    work=work,
+                    phase=phase,
+                    attempt_number=attempt_number,
+                    route_ref=routed["id"],
+                    detail={
+                        "code": (
+                            "MODEL_ADAPTER_UNAVAILABLE"
+                            if retryable
+                            else "MODEL_ADAPTER_REJECTED"
+                        ),
+                        "error_type": type(exc).__name__,
+                    },
+                )
             result = self._control_result(
                 work,
                 attempt_number,
@@ -763,6 +895,14 @@ class ThesisImpactModelWorker:
             and adapter_result.error is not None
             and adapter_result.error.get("code") == "IDEMPOTENCY_MISS"
         ):
+            self._record_failure_alert(
+                kind="work_order_failed",
+                work=work,
+                phase=phase,
+                attempt_number=attempt_number,
+                route_ref=routed["id"],
+                detail={"code": "MODEL_RECOVERY_MISS"},
+            )
             result = self._control_result(
                 work,
                 attempt_number,
@@ -796,6 +936,12 @@ class ThesisImpactModelWorker:
         else:
             invocation = self._reuse_invocation(saved_invocation, invocation)
         accounting = self._account(invocation, routed, profile)
+        if admission is not None:
+            self.budget.settle(
+                admission["admission_id"],
+                actual_micros=accounting["cost"]["amount_micros"],
+                usage_entry_ref=accounting["usage"]["id"],
+            )
         if self.fault_hook is not None:
             self.fault_hook("after_model_accounting")
         result = adapter_result
@@ -832,6 +978,18 @@ class ThesisImpactModelWorker:
             normalized_status = "retryable"
         else:
             normalized_status = "failed"
+            if output_error is not None:
+                self._record_failure_alert(
+                    kind="work_order_failed",
+                    work=work,
+                    phase=phase,
+                    attempt_number=attempt_number,
+                    route_ref=routed["id"],
+                    detail={
+                        "code": "MODEL_OUTPUT_CONTRACT_REJECTED",
+                        "error_type": output_error,
+                    },
+                )
         return {
             "status": normalized_status,
             "phase": phase,

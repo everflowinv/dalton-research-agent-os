@@ -7,9 +7,10 @@
   SEC 财务事实与 thesis-impact 开发候选均尚未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 - 当前开发候选新增 wrapper-owned verifier binding、semantic-only provider schema、phase-pinned verifier
-  policy、thinking-level 控制合同与 3×30 canary campaign runner；Gemini 3.7 Flash low 仍是主候选。剩余开闸
-  条件是 host 侧 Gemini profile providerControls/rate card 配置、OpenClaw host patch 与 safe restart、以及
-  owner 单独授权后经 `dalton-thesis-impact-verifier-canary` 执行的真实 broker 3×30 canary 与 shadow
+  policy、thinking-level 控制合同、3×30 canary campaign runner 与 per-day 预算/告警 authority；Gemini 3.7
+  Flash low 仍是主候选。剩余开闸条件是 host 侧 Gemini profile providerControls/rate card 配置、OpenClaw
+  host patch 与 safe restart、以及 owner 单独授权后经 `dalton-thesis-impact-verifier-canary` 执行的真实
+  broker 3×30 canary 与 shadow
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
 反向改写历史结论。这里的“完成”只表示代码、测试和当前部署已经验收，不表示已达到多租户或
@@ -191,6 +192,14 @@ failure、thinking 与 provider-control 合同逐 record 绑定）与 `productio
 未授权付费调用，测试无网络无付费；本机验证 Python 全量 628/628、hermetic replay canary、compileall、
 wheel/sdist build 与 `git diff --check` 全部通过。报告见
 [verifier-canary-campaign-runner-2026-08-22.md](reports/verifier-canary-campaign-runner-2026-08-22.md)。
+同日再后续补齐 v0.7 Gate 3 控制面：新增 `thesis_impact_budget` authority（独立 owner-only SQLite，第 17 份
+packaged SQL schema）提供版本化 per-day 硬顶、per-(work order, attempt, phase) admission/settlement（未结算
+按全额保守占额）、durable rejection（被拒身份不可复活）与 append-only 告警链（claim TTL、投递上限 5）；
+worker 可选接入——超顶在任何 broker 调用前落成正式 `DAY_BUDGET_EXCEEDED` 失败与 high 告警，终态失败记录
+`work_order_failed` 告警，未配置时行为不变。故障注入已证明超预算停止并留下 decision、重放不产生新事实；
+本机验证 Python 全量 636/636、broker 22/22、hermetic replay canary、compileall、wheel/sdist build 与
+`git diff --check` 全部通过，没有付费调用。报告见
+[thesis-impact-day-budget-and-alerts-2026-08-22.md](reports/thesis-impact-day-budget-and-alerts-2026-08-22.md)。
 
 现有 versioned governance policy 可分别只允许 closed SEC public `10-Q list_filings` 或 exact
 `10-Q get_company_facts` plan 自动启动；
@@ -1120,6 +1129,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Wrapper binding 与候选选择：`docs/reports/thesis-impact-verifier-wrapper-selection-2026-08-22.md`
 - Phase-pinned verifier policy 与 thinking 控制合同：`docs/reports/verifier-phase-pin-and-thinking-controls-2026-08-22.md`
 - 3×30 verifier canary campaign runner：`docs/reports/verifier-canary-campaign-runner-2026-08-22.md`
+- Thesis-impact per-day 预算硬顶与失败告警：`docs/reports/thesis-impact-day-budget-and-alerts-2026-08-22.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`

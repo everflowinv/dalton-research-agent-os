@@ -20,6 +20,7 @@ from dalton_core.research_plan_closure import ResearchPlanClosureCoordinator
 from dalton_core.research_review import HumanReviewAuthority
 from dalton_core.store import canonical_json
 from dalton_core.thesis_impact import ThesisImpactAuthority
+from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
 from dalton_core.thesis_impact_control import (
     ASSESSMENT_BUDGET,
     VERIFIER_BUDGET,
@@ -1089,6 +1090,138 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
         ):
             unpinned.run_once(failed["assessment"]["verifier_work_order"])
         self.assertEqual(len(broker.requests), 1)
+
+    def test_day_budget_gates_paid_calls_and_alerts(self) -> None:
+        committed = self._seed_thesis()
+        started = self._close_and_start()
+        claim = self.harness.core.get_claim(
+            started["impact"]["claim_version_ref"]
+        )["claim"]
+        thesis = self.harness.core.get_version(committed["version_id"])["content"]
+        assessment_output = {
+            "schema_version": "0.1",
+            "claim_version_ref": claim["id"],
+            "claim_version_hash": claim["content_hash"],
+            "thesis_version_ref": thesis["id"],
+            "thesis_version_hash": thesis["content_hash"],
+            "driver_statement": thesis["mechanism"],
+            "impact": "supports",
+            "rationale": (
+                "The exact reported growth is directionally consistent with the "
+                "bound operating-leverage driver."
+            ),
+            "follow_up_question": None,
+        }
+        fixed_now = datetime(2026, 8, 22, 1, 30, tzinfo=timezone.utc)
+        router = ModelRouter(
+            Path(self.temp.name) / "budget-router.sqlite",
+            clock=lambda: fixed_now,
+        )
+        self.addCleanup(router.close)
+        shared_ref, _ = self._impact_profiles_and_policies(
+            router, pinned_profile_id=None
+        )
+        budget = ThesisImpactBudgetStore(
+            Path(self.temp.name) / "budget.sqlite", clock=lambda: fixed_now
+        )
+        self.addCleanup(budget.close)
+        budget.register_policy(
+            policy_version_id="budget-policy:thesis-impact-day:1",
+            day_cap_micros=250_500,
+        )
+        broker = FakeBroker(
+            Path(self.temp.name),
+            self._recorded_response(
+                lambda: len(broker.requests), assessment_output
+            ),
+            connections=2,
+        )
+        self.addCleanup(broker.close)
+        adapter = OpenClawModelAdapter(
+            broker.path,
+            route_resolver=router.get_decision,
+            auth_client_id="client:thesis-impact-runtime",
+            auth_key_provider=lambda: b"a" * 64,
+            timeout_seconds=1.0,
+            clock=lambda: fixed_now,
+        )
+        worker = ThesisImpactModelWorker(
+            scheduler=self.harness.scheduler(),
+            router=router,
+            adapter=adapter,
+            impact=self.impact,
+            observability=self.harness.observability,
+            routing_policy_ref=shared_ref,
+            credential_slot_refs=(
+                "credential-slot:openai:impact-a",
+                "credential-slot:anthropic:impact-b",
+            ),
+            budget=budget,
+            budget_policy_version_id="budget-policy:thesis-impact-day:1",
+            token_counter=lambda _text: 800,
+            clock=lambda: fixed_now,
+        )
+        runtime = ResearchPlanThesisImpactRuntime(control=self.control, worker=worker)
+        failed = runtime.run_once(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+        )
+        self.assertEqual(failed["status"], "verification_failed")
+        rejection = failed["verifier_run"]["budget_rejection"]
+        self.assertEqual(rejection["day_cap_micros"], 250_500)
+        self.assertEqual(rejection["day_committed_micros"], 1_000)
+        self.assertEqual(rejection["reserved_micros"], 250_000)
+        self.assertEqual(rejection["phase"], "verification")
+        self.assertEqual(len(broker.requests), 1)
+        self.assertEqual(
+            budget.connection.execute(
+                "SELECT COUNT(*) FROM thesis_impact_day_admissions"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            budget.connection.execute(
+                "SELECT COUNT(*) FROM thesis_impact_day_settlements"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            budget.connection.execute(
+                "SELECT COUNT(*) FROM thesis_impact_day_rejections"
+            ).fetchone()[0],
+            1,
+        )
+        summary = budget.day_summary(
+            policy_version_id="budget-policy:thesis-impact-day:1",
+            day="2026-08-22",
+        )
+        self.assertEqual(summary["committed_micros"], 1_000)
+        self.assertEqual(summary["remaining_micros"], 249_500)
+        alerts = budget.pending_alerts()
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["kind"], "day_budget_exceeded")
+        self.assertEqual(alerts[0]["severity"], "high")
+        self.assertEqual(alerts[0]["phase"], "verification")
+        verifier_ref = failed["verifier_run"]["work_order_ref"]
+        formal = self.harness.scheduler().formal_result(verifier_ref)
+        self.assertEqual(formal["terminal_state"], "failed")
+        self.assertEqual(
+            formal["result_envelope"]["error"]["code"], "DAY_BUDGET_EXCEEDED"
+        )
+        self.assertEqual(
+            self.harness.core.connection.execute(
+                "SELECT COUNT(*) FROM thesis_impact_verifications"
+            ).fetchone()[0],
+            0,
+        )
+
+        replay = runtime.run_once(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+        )
+        self.assertEqual(replay["status"], "verification_failed")
+        self.assertEqual(len(broker.requests), 1)
+        self.assertEqual(len(budget.pending_alerts()), 1)
 
     def test_worker_recovers_accounted_model_result_without_second_provider_call(self) -> None:
         committed = self._seed_thesis()

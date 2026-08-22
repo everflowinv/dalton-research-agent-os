@@ -52,6 +52,7 @@ dalton_core = [
   "research_question_backlog_schema.sql",
   "research_plan_schema.sql",
   "thesis_impact_schema.sql",
+  "thesis_impact_budget_schema.sql",
   "connector_inventory/*.json",
   "connector_inventory/profiles/*.json",
   "connector_inventory/fixtures/*.json",
