@@ -14,9 +14,13 @@ export function createPluginDefinition() {
           const broker = new ModelBroker(api.runtime, api.pluginConfig ?? {});
           server = new BrokerServer(broker);
           await server.start(ctx.stateDir);
+          const capability = api.runtime?.llm?.capabilities?.providerControls;
           ctx.logger.info("Dalton model broker started", {
             socketName: broker.config.socketName,
             profileCount: broker.config.profiles.size,
+            providerControlCapability: capability
+              ? { version: capability.version, modes: capability.modes, transports: capability.transports ?? capability.transport ?? null }
+              : null,
           });
         },
         async stop(ctx) {
