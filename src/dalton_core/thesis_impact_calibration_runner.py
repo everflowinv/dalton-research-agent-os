@@ -30,6 +30,8 @@ from .model_router import ModelRouter
 from .openclaw_model_adapter import (
     OpenClawModelAdapter,
     OpenClawModelAdapterError,
+    PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
+    PROVIDER_CONTROL_MODE_REQUIRED,
     owner_only_secret_file_provider,
 )
 from .research_context import count_dalton_search_tokens
@@ -44,6 +46,7 @@ from .thesis_impact_calibration import (
 
 
 SCHEMA_VERSION = "0.1"
+RUN_MANIFEST_SCHEMA_VERSION = "0.2"
 DEFAULT_PROFILE_ID = "profile:deepseek-v4-flash"
 DEFAULT_RUN_CAP_USD = Decimal("0.25")
 DEFAULT_CASE_CAP_USD = Decimal("0.01")
@@ -51,11 +54,15 @@ DEFAULT_MAX_INPUT_TOKENS = 3_000
 DEFAULT_MAX_OUTPUT_TOKENS = 1_000
 DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_BROKER_AGENT_ID = "chem"
+EXECUTION_TIERS = {
+    PROVIDER_CONTROL_MODE_REQUIRED,
+    PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
+}
 _MANIFEST_FIELDS = {
     "schema_version", "id", "created_at", "repo_commit", "corpus_ref",
     "corpus_hash", "profile_id", "profile_version_ref", "model_family",
     "run_cap_usd", "per_case_cap_usd", "max_input_tokens",
-    "max_output_tokens", "timeout_seconds", "case_refs",
+    "max_output_tokens", "timeout_seconds", "case_refs", "execution_tier",
 }
 _RECORD_FIELDS = {
     "schema_version", "case_ref", "work_order", "route_decision_ref",
@@ -148,6 +155,8 @@ def build_calibration_run_manifest(
     max_input_tokens: int,
     max_output_tokens: int,
     timeout_seconds: int,
+    execution_tier: str = PROVIDER_CONTROL_MODE_REQUIRED,
+    case_refs: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Freeze exact model, corpus, code, and maximum admitted spend."""
 
@@ -156,7 +165,21 @@ def build_calibration_run_manifest(
         raise ThesisImpactCalibrationRunError("repo_commit must be a full lowercase SHA")
     run_cap = _money(run_cap_usd, "run_cap_usd", positive=True)
     case_cap = _money(per_case_cap_usd, "per_case_cap_usd", positive=True)
-    if len(frozen["cases"]) * case_cap > run_cap:
+    if execution_tier not in EXECUTION_TIERS:
+        raise ThesisImpactCalibrationRunError("execution_tier is unsupported")
+    available_case_refs = [case["id"] for case in frozen["cases"]]
+    selected_case_refs = available_case_refs if case_refs is None else list(case_refs)
+    if (
+        not selected_case_refs
+        or len(set(selected_case_refs)) != len(selected_case_refs)
+        or not all(isinstance(item, str) and item for item in selected_case_refs)
+        or not set(selected_case_refs).issubset(set(available_case_refs))
+    ):
+        raise ThesisImpactCalibrationRunError("case_refs are not a unique corpus subset")
+    selected_case_refs = [
+        case_ref for case_ref in available_case_refs if case_ref in selected_case_refs
+    ]
+    if len(selected_case_refs) * case_cap > run_cap:
         raise ThesisImpactCalibrationRunError(
             "case count times per-case hard cap exceeds the run hard cap"
         )
@@ -177,9 +200,13 @@ def build_calibration_run_manifest(
         "corpus_hash": content_hash(frozen),
         "profile_version_ref": profile["profile_version_ref"],
         "repo_commit": repo_commit,
+        "execution_tier": execution_tier,
+        "case_refs": selected_case_refs,
+        "run_cap_usd": format(run_cap, "f"),
+        "per_case_cap_usd": format(case_cap, "f"),
     }
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
         "id": "thesis-impact-calibration-run:" + content_hash(identity)[:32],
         "created_at": _wire_time(created_at),
         "repo_commit": repo_commit,
@@ -193,13 +220,14 @@ def build_calibration_run_manifest(
         "max_input_tokens": max_input_tokens,
         "max_output_tokens": max_output_tokens,
         "timeout_seconds": timeout_seconds,
-        "case_refs": [case["id"] for case in frozen["cases"]],
+        "case_refs": selected_case_refs,
+        "execution_tier": execution_tier,
     }
 
 
 def validate_calibration_run_manifest(value: Any) -> dict[str, Any]:
     wire = _closed(value, _MANIFEST_FIELDS, "calibration run manifest")
-    if wire["schema_version"] != SCHEMA_VERSION:
+    if wire["schema_version"] != RUN_MANIFEST_SCHEMA_VERSION:
         raise ThesisImpactCalibrationRunError("unsupported run manifest schema")
     for field in (
         "id", "created_at", "repo_commit", "corpus_ref", "corpus_hash",
@@ -207,6 +235,8 @@ def validate_calibration_run_manifest(value: Any) -> dict[str, Any]:
     ):
         if not isinstance(wire[field], str) or not wire[field]:
             raise ThesisImpactCalibrationRunError(f"manifest {field} must be text")
+    if wire["execution_tier"] not in EXECUTION_TIERS:
+        raise ThesisImpactCalibrationRunError("manifest execution_tier is unsupported")
     for field in ("run_cap_usd", "per_case_cap_usd"):
         _money(wire[field], f"manifest {field}", positive=True)
     for field in ("max_input_tokens", "max_output_tokens", "timeout_seconds"):
@@ -271,6 +301,7 @@ def build_calibration_work_order(
             "corpus_ref": run["corpus_ref"],
             "corpus_hash": run["corpus_hash"],
             "case_ref": case_ref,
+            "execution_tier": run["execution_tier"],
             "verifier_output_schema_version": VERIFIER_OUTPUT_SCHEMA_VERSION,
         },
     )
@@ -424,8 +455,6 @@ def _install_exact_router(
     if len(profiles) != 1:
         raise ThesisImpactCalibrationRunError("candidate broker profile is unavailable")
     profile = profiles[0]
-    if "verify" not in profile["capabilities"]:
-        raise ThesisImpactCalibrationRunError("candidate profile cannot verify")
     profile["capabilities"] = ["verify"]
     profile["limits"]["max_cost_usd"] = float(per_case_cap_usd)
     policy_ref = "model-routing-policy-version:thesis-impact-calibration-" + hashlib.sha256(
@@ -471,6 +500,8 @@ def run_live_calibration(
     max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    execution_tier: str = PROVIDER_CONTROL_MODE_REQUIRED,
+    case_refs: list[str] | tuple[str, ...] | None = None,
     resume: bool = False,
     allow_dirty: bool = False,
 ) -> dict[str, Any]:
@@ -500,6 +531,8 @@ def run_live_calibration(
         max_input_tokens=max_input_tokens,
         max_output_tokens=max_output_tokens,
         timeout_seconds=timeout_seconds,
+        execution_tier=execution_tier,
+        case_refs=case_refs,
     )
     manifest_path = output_dir / "manifest.json"
     router_path = output_dir / "router.sqlite"
@@ -561,10 +594,13 @@ def run_live_calibration(
         auth_client_id="client:dalton-core",
         auth_key_provider=owner_only_secret_file_provider(auth_key_path),
         timeout_seconds=float(manifest["timeout_seconds"]),
+        provider_control_mode=manifest["execution_tier"],
         clock=_now,
     )
     try:
         for index, case in enumerate(corpus["cases"], 1):
+            if case["id"] not in manifest["case_refs"]:
+                continue
             if case["id"] in completed:
                 continue
             if spent_or_reserved + case_cap > run_cap:
@@ -616,7 +652,11 @@ def run_live_calibration(
             accounted, reserve = _record_cost(
                 invocation,
                 case_cap,
-                allow_over_cap=result.status != "succeeded",
+                allow_over_cap=(
+                    result.status != "succeeded"
+                    or manifest["execution_tier"]
+                    == PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC
+                ),
             )
             record = {
                 "schema_version": SCHEMA_VERSION,
@@ -661,14 +701,15 @@ def run_live_calibration(
     )
     return {
         "status": (
-            "complete" if succeeded_cases == len(corpus["cases"]) else "partial"
+            "complete" if succeeded_cases == len(manifest["case_refs"]) else "partial"
         ),
         "run_ref": manifest["id"],
         "repo_commit": manifest["repo_commit"],
         "profile_id": manifest["profile_id"],
         "completed_cases": succeeded_cases,
         "recorded_cases": len(records),
-        "total_cases": len(corpus["cases"]),
+        "total_cases": len(manifest["case_refs"]),
+        "execution_tier": manifest["execution_tier"],
         "spent_or_reserved_usd": format(spent_or_reserved, "f"),
         "run_cap_usd": manifest["run_cap_usd"],
         "score": report,
@@ -688,6 +729,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
     parser.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS)
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument(
+        "--execution-tier",
+        choices=sorted(EXECUTION_TIERS),
+        default=PROVIDER_CONTROL_MODE_REQUIRED,
+    )
+    parser.add_argument("--case-ref", action="append", dest="case_refs")
     parser.add_argument("--socket-path", type=Path, required=True)
     parser.add_argument("--auth-key-path", type=Path, required=True)
     parser.add_argument("--expected-agent-id", default=DEFAULT_BROKER_AGENT_ID)
@@ -707,6 +754,8 @@ def main(argv: list[str] | None = None) -> int:
             max_input_tokens=args.max_input_tokens,
             max_output_tokens=args.max_output_tokens,
             timeout_seconds=args.timeout_seconds,
+            execution_tier=args.execution_tier,
+            case_refs=args.case_refs,
             resume=args.resume,
             allow_dirty=args.allow_dirty,
         )
@@ -723,6 +772,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "ThesisImpactCalibrationRunError",
+    "EXECUTION_TIERS",
     "build_calibration_run_manifest",
     "build_calibration_work_order",
     "calibration_output_map",

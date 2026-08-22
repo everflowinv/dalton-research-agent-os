@@ -24,6 +24,7 @@ dalton-control = "dalton_core.agenda_control:main"
 dalton-review = "dalton_core.research_review_control:main"
 dalton-thesis-impact-calibrate = "dalton_core.thesis_impact_calibration:main"
 dalton-thesis-impact-calibrate-live = "dalton_core.thesis_impact_calibration_runner:main"
+dalton-thesis-impact-calibrate-matrix = "dalton_core.thesis_impact_calibration_matrix:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

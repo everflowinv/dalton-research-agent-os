@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from importlib import resources
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from .contracts import (
     InvocationGranularity,
@@ -47,6 +47,12 @@ from .model_router import (
 PROTOCOL_VERSION = "0.1"
 BROKER_AGENT_ID = "dalton-model-broker"
 BROKER_ACTOR_REF = "runtime:openclaw-model-broker"
+PROVIDER_CONTROL_MODE_REQUIRED = "provider-controlled-v1"
+PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC = "calibration-posthoc-v1"
+ProviderControlMode = Literal[
+    "provider-controlled-v1",
+    "calibration-posthoc-v1",
+]
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _BROKER_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 _ERROR_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -566,6 +572,7 @@ def _required_provider_controls(
     work: WorkOrder,
     route: Mapping[str, Any],
     max_output_tokens: int,
+    provider_control_mode: ProviderControlMode,
 ) -> dict[str, Any] | None:
     """Bind independent verification to controls the current host must prove.
 
@@ -580,6 +587,16 @@ def _required_provider_controls(
         raise ModelAdmissionError(
             "independent verifier WorkOrder lacks the required output schema version"
         )
+    if provider_control_mode == PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC:
+        if (
+            work.metadata.get("phase") != "verification-calibration"
+            or work.metadata.get("execution_tier")
+            != PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC
+        ):
+            raise ModelAdmissionError(
+                "post-hoc provider controls are restricted to exact calibration WorkOrders"
+            )
+        return None
     try:
         schema = json.loads(
             resources.files("dalton_core")
@@ -647,6 +664,7 @@ class OpenClawModelAdapter:
         timeout_seconds: float = 5.0,
         max_frame_bytes: int = 262_144,
         expected_agent_id: str = BROKER_AGENT_ID,
+        provider_control_mode: ProviderControlMode = PROVIDER_CONTROL_MODE_REQUIRED,
         clock: Callable[[], datetime] | None = None,
         monotonic: Callable[[], float] | None = None,
     ) -> None:
@@ -678,6 +696,11 @@ class OpenClawModelAdapter:
             raise ValueError("auth_client_id must be a canonical client reference")
         if not callable(auth_key_provider):
             raise ValueError("auth_key_provider must be a trusted secret-bytes provider")
+        if provider_control_mode not in {
+            PROVIDER_CONTROL_MODE_REQUIRED,
+            PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
+        }:
+            raise ValueError("provider_control_mode is unsupported")
         self._socket_path = path
         self._timeout_seconds = float(timeout_seconds)
         self._max_frame_bytes = max_frame_bytes
@@ -685,6 +708,7 @@ class OpenClawModelAdapter:
         self._route_resolver = route_resolver
         self._auth_client_id = auth_client_id
         self._auth_key_provider = auth_key_provider
+        self._provider_control_mode = provider_control_mode
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._monotonic = monotonic or time.monotonic
 
@@ -1049,7 +1073,12 @@ class OpenClawModelAdapter:
                 ):
                     raise ModelAdmissionError(f"WorkOrder budget {key} is invalid")
                 timeout = min(timeout, float(value))
-        required_controls = _required_provider_controls(work, route, max_tokens)
+        required_controls = _required_provider_controls(
+            work,
+            route,
+            max_tokens,
+            self._provider_control_mode,
+        )
         invocation_identity = {
             "route_decision_ref": route["id"],
             "work_order_ref": work.id,
@@ -1059,6 +1088,8 @@ class OpenClawModelAdapter:
             invocation_identity["required_provider_controls_hash"] = _dalton_hash(
                 required_controls
             )
+        if route["constraints"]["producer_family"] is not None:
+            invocation_identity["provider_control_mode"] = self._provider_control_mode
         invocation_id = "invocation:" + _dalton_hash(invocation_identity)[:32]
         core_request = {
             "schemaVersion": PROTOCOL_VERSION,
@@ -1169,6 +1200,7 @@ class OpenClawModelAdapter:
             "broker_idempotency_status": response["idempotencyStatus"],
             "broker_request_mode": "replay_only" if replay_only else "execute",
             "required_provider_controls": required_controls is not None,
+            "provider_control_mode": self._provider_control_mode,
             "provider_control_schema_hash": (
                 required_controls["structuredOutput"]["schemaHash"]
                 if required_controls is not None
@@ -1226,5 +1258,7 @@ __all__ = [
     "BrokerFrameTooLarge",
     "BrokerBudgetExceeded",
     "BrokerIdempotencyConflict",
+    "PROVIDER_CONTROL_MODE_REQUIRED",
+    "PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC",
     "owner_only_secret_file_provider",
 ]

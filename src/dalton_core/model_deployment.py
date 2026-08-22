@@ -17,7 +17,18 @@ from .model_router import ModelRouter
 
 ADAPTER_REF = "adapter:openclaw-model-broker:0.1"
 POLICY_REF = "model-routing-policy-version:dalton-openclaw:1"
-BROKER_POLICY_REF = "model-routing-policy-version:dalton-openclaw:2"
+LEGACY_BROKER_POLICY_REF = "model-routing-policy-version:dalton-openclaw:2"
+BROKER_POLICY_REF = "model-routing-policy-version:dalton-openclaw:3"
+
+
+_LEGACY_ENDPOINT_NAMES = (
+    "deepseek-v4-flash",
+    "gpt-5-6-sol",
+    "gpt-5-6-terra",
+    "gpt-5-6-luna",
+    "claude-fable-5",
+    "claude-opus-5",
+)
 
 
 _ENDPOINTS: tuple[dict[str, Any], ...] = (
@@ -99,6 +110,227 @@ _ENDPOINTS: tuple[dict[str, Any], ...] = (
         "input_cost": 5.0,
         "output_cost": 25.0,
     },
+    {
+        "name": "claude-sonnet-5",
+        "provider": "claude-cli-gateway",
+        "model": "claude-sonnet-5",
+        "family": "anthropic-claude-5",
+        "credential_slot_ref": "credential-slot:openclaw:claude-cli",
+        "capabilities": ["research", "verify", "adjudicate", "code", "summarize"],
+        "max_context_tokens": 1_000_000,
+        "max_output_tokens": 64_000,
+        "max_input_tokens": 800_000,
+        "input_cost": 2.0,
+        "output_cost": 10.0,
+    },
+    {
+        "name": "gemini-3-7-flash",
+        "provider": "google",
+        "model": "gemini-3.7-flash",
+        "family": "google-gemini-3",
+        "credential_slot_ref": "credential-slot:openclaw:google",
+        "capabilities": ["research", "verify", "code", "summarize", "extract"],
+        "max_context_tokens": 1_048_576,
+        "max_output_tokens": 65_536,
+        "max_input_tokens": 983_040,
+        "input_cost": 0.75,
+        "output_cost": 3.75,
+    },
+    {
+        "name": "gemini-flash-latest",
+        "provider": "google",
+        "model": "gemini-flash-latest",
+        "family": "google-gemini-flash",
+        "credential_slot_ref": "credential-slot:openclaw:google",
+        "capabilities": ["research", "verify", "code", "summarize", "extract"],
+        "max_context_tokens": 1_048_576,
+        "max_output_tokens": 65_536,
+        "max_input_tokens": 983_040,
+        "input_cost": 1.5,
+        "output_cost": 9.0,
+    },
+    {
+        "name": "gemini-3-1-pro-preview",
+        "provider": "google",
+        "model": "gemini-3.1-pro-preview",
+        "family": "google-gemini-3",
+        "credential_slot_ref": "credential-slot:openclaw:google",
+        "capabilities": ["research", "research-hard", "verify", "adjudicate", "code"],
+        "max_context_tokens": 1_048_576,
+        "max_output_tokens": 65_536,
+        "max_input_tokens": 983_040,
+        "input_cost": 2.0,
+        "output_cost": 12.0,
+    },
+    {
+        "name": "gemini-3-5-flash-lite",
+        "provider": "google",
+        "model": "gemini-3.5-flash-lite",
+        "family": "google-gemini-3",
+        "credential_slot_ref": "credential-slot:openclaw:google",
+        "capabilities": ["research", "verify", "summarize", "extract", "format"],
+        "max_context_tokens": 1_048_576,
+        "max_output_tokens": 65_536,
+        "max_input_tokens": 983_040,
+        "input_cost": 0.3,
+        "output_cost": 2.5,
+    },
+    {
+        "name": "qwen3-8-max",
+        "provider": "qwen",
+        "model": "qwen3.8-max",
+        "family": "qwen-3.8",
+        "credential_slot_ref": "credential-slot:openclaw:qwen",
+        "capabilities": ["research", "research-hard", "verify", "adjudicate", "code"],
+        "max_context_tokens": 983_616,
+        "max_output_tokens": 131_072,
+        "max_input_tokens": 852_544,
+        "input_cost": 1.65,
+        "output_cost": 4.95,
+    },
+    {
+        "name": "qwen-deepseek-v4-flash-0731",
+        "provider": "qwen",
+        "model": "deepseek-v4-flash-0731",
+        "family": "deepseek-v4",
+        "credential_slot_ref": "credential-slot:openclaw:qwen",
+        "capabilities": ["research", "verify", "code", "summarize", "extract"],
+        "max_context_tokens": 1_000_000,
+        "max_output_tokens": 393_216,
+        "max_input_tokens": 606_784,
+        "input_cost": 0.14,
+        "output_cost": 0.28,
+    },
+    {
+        "name": "qwen-deepseek-v4-pro",
+        "provider": "qwen",
+        "model": "deepseek-v4-pro",
+        "family": "deepseek-v4",
+        "credential_slot_ref": "credential-slot:openclaw:qwen",
+        "capabilities": ["research", "research-hard", "verify", "adjudicate", "code"],
+        "max_context_tokens": 1_000_000,
+        "max_output_tokens": 393_216,
+        "max_input_tokens": 606_784,
+        "input_cost": 0.435,
+        "output_cost": 0.87,
+    },
+    {
+        "name": "glm-5-2",
+        "provider": "qwen",
+        "model": "glm-5.2",
+        "family": "zhipu-glm-5.2",
+        "credential_slot_ref": "credential-slot:openclaw:qwen",
+        "capabilities": ["research", "verify", "code", "summarize", "extract"],
+        "max_context_tokens": 1_000_000,
+        "max_output_tokens": 131_072,
+        "max_input_tokens": 868_928,
+        "input_cost": 1.1,
+        "output_cost": 3.851,
+    },
+    {
+        "name": "gpt-5-5",
+        "provider": "openai",
+        "model": "gpt-5.5",
+        "family": "openai-gpt-5.5",
+        "credential_slot_ref": "credential-slot:openclaw:openai",
+        "capabilities": ["research", "research-hard", "verify", "adjudicate", "code"],
+        "max_context_tokens": 1_000_000,
+        "max_output_tokens": 128_000,
+        "max_input_tokens": 872_000,
+        "input_cost": 5.0,
+        "output_cost": 30.0,
+    },
+    {
+        "name": "deepseek-v4-pro",
+        "provider": "deepseek",
+        "model": "deepseek-v4-pro",
+        "family": "deepseek-v4",
+        "credential_slot_ref": "credential-slot:openclaw:deepseek",
+        "capabilities": ["research", "research-hard", "verify", "adjudicate", "code"],
+        "max_context_tokens": 1_000_000,
+        "max_output_tokens": 384_000,
+        "max_input_tokens": 616_000,
+        "input_cost": 0.66,
+        "output_cost": 1.98,
+    },
+    {
+        "name": "grok-4-6",
+        "provider": "xai",
+        "model": "grok-4.6",
+        "family": "xai-grok-4",
+        "credential_slot_ref": "credential-slot:openclaw:xai",
+        "capabilities": ["research", "research-hard", "verify", "adjudicate", "code"],
+        "max_context_tokens": 500_000,
+        "max_output_tokens": 64_000,
+        "max_input_tokens": 436_000,
+        "input_cost": 2.0,
+        "output_cost": 6.0,
+    },
+    {
+        "name": "grok-build-0-1",
+        "provider": "xai",
+        "model": "grok-build-0.1",
+        "family": "xai-grok-build",
+        "credential_slot_ref": "credential-slot:openclaw:xai",
+        "capabilities": ["research", "verify", "code", "summarize", "extract"],
+        "max_context_tokens": 256_000,
+        "max_output_tokens": 64_000,
+        "max_input_tokens": 192_000,
+        "input_cost": 1.0,
+        "output_cost": 2.0,
+    },
+    {
+        "name": "grok-4-3",
+        "provider": "xai",
+        "model": "grok-4.3",
+        "family": "xai-grok-4",
+        "credential_slot_ref": "credential-slot:openclaw:xai",
+        "capabilities": ["research", "verify", "code", "summarize", "extract"],
+        "max_context_tokens": 1_000_000,
+        "max_output_tokens": 64_000,
+        "max_input_tokens": 936_000,
+        "input_cost": 1.25,
+        "output_cost": 2.5,
+    },
+    {
+        "name": "grok-4-20-beta-reasoning",
+        "provider": "xai",
+        "model": "grok-4.20-beta-latest-reasoning",
+        "family": "xai-grok-4",
+        "credential_slot_ref": "credential-slot:openclaw:xai",
+        "capabilities": ["research", "research-hard", "verify", "adjudicate", "code"],
+        "max_context_tokens": 1_000_000,
+        "max_output_tokens": 30_000,
+        "max_input_tokens": 970_000,
+        "input_cost": 1.25,
+        "output_cost": 2.5,
+    },
+    {
+        "name": "grok-4-20-beta-non-reasoning",
+        "provider": "xai",
+        "model": "grok-4.20-beta-latest-non-reasoning",
+        "family": "xai-grok-4",
+        "credential_slot_ref": "credential-slot:openclaw:xai",
+        "capabilities": ["research", "verify", "summarize", "extract", "format"],
+        "max_context_tokens": 1_000_000,
+        "max_output_tokens": 30_000,
+        "max_input_tokens": 970_000,
+        "input_cost": 1.25,
+        "output_cost": 2.5,
+    },
+    {
+        "name": "openrouter-ox-alpha",
+        "provider": "openrouter",
+        "model": "stealth/ox-alpha",
+        "family": "openrouter-ox-alpha",
+        "credential_slot_ref": "credential-slot:openclaw:openrouter",
+        "capabilities": ["research", "verify", "code", "summarize", "extract"],
+        "max_context_tokens": 1_048_576,
+        "max_output_tokens": 131_072,
+        "max_input_tokens": 917_504,
+        "input_cost": 0.0,
+        "output_cost": 0.0,
+    },
 )
 
 
@@ -111,7 +343,7 @@ def _utc(value: datetime) -> datetime:
 def openclaw_profiles(
     *, checked_at: datetime, availability_ttl: timedelta = timedelta(hours=24)
 ) -> list[dict[str, Any]]:
-    """Return immutable profile version 1 wires for the six probed routes."""
+    """Return immutable profile version 1 wires for configured OpenClaw routes."""
 
     checked = _utc(checked_at)
     if availability_ttl.total_seconds() <= 0:
@@ -174,7 +406,7 @@ def openclaw_policy(*, created_at: datetime) -> dict[str, Any]:
         "prior_version_ref": None,
         "filters": {
             "allowed_profile_ids": [
-                f"model-profile:{endpoint['name']}" for endpoint in _ENDPOINTS
+                f"model-profile:{name}" for name in _LEGACY_ENDPOINT_NAMES
             ],
             "allowed_providers": [],
             "allowed_families": [],
@@ -195,7 +427,7 @@ def install_openclaw_catalog(
     checked_at: datetime,
     availability_ttl: timedelta = timedelta(hours=24),
 ) -> dict[str, Any]:
-    """Install the six endpoint profiles and one deterministic policy."""
+    """Install the endpoint profiles and one deterministic policy."""
 
     path = Path(router_path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -231,14 +463,27 @@ def openclaw_broker_profiles(
 
 
 def openclaw_broker_policy(*, created_at: datetime) -> dict[str, Any]:
-    """Version 2 routes only to profile ids accepted by the UDS broker."""
+    """Version 3 routes to every configured profile accepted by the UDS broker."""
 
     policy = openclaw_policy(created_at=created_at)
     policy["policy_version_ref"] = BROKER_POLICY_REF
+    policy["version"] = 3
+    policy["prior_version_ref"] = LEGACY_BROKER_POLICY_REF
+    policy["filters"]["allowed_profile_ids"] = [
+        f"profile:{endpoint['name']}" for endpoint in _ENDPOINTS
+    ]
+    return policy
+
+
+def _legacy_openclaw_broker_policy(*, created_at: datetime) -> dict[str, Any]:
+    """Recreate immutable policy v2 so fresh catalogs can advance to v3."""
+
+    policy = openclaw_policy(created_at=created_at)
+    policy["policy_version_ref"] = LEGACY_BROKER_POLICY_REF
     policy["version"] = 2
     policy["prior_version_ref"] = POLICY_REF
     policy["filters"]["allowed_profile_ids"] = [
-        f"profile:{endpoint['name']}" for endpoint in _ENDPOINTS
+        f"profile:{name}" for name in _LEGACY_ENDPOINT_NAMES
     ]
     return policy
 
@@ -249,9 +494,12 @@ def upgrade_openclaw_broker_catalog(
     checked_at: datetime,
     availability_ttl: timedelta = timedelta(days=7),
 ) -> dict[str, Any]:
-    """Append the broker-compatible profile family and policy v2."""
+    """Append broker-compatible profiles plus immutable policy v2 and v3."""
 
     with ModelRouter(Path(router_path)) as router:
+        legacy_policy = router.register_policy(
+            _legacy_openclaw_broker_policy(created_at=checked_at)
+        )
         policy = router.register_policy(openclaw_broker_policy(created_at=checked_at))
         profiles = [
             router.register_profile(profile)
@@ -259,12 +507,18 @@ def upgrade_openclaw_broker_catalog(
                 checked_at=checked_at, availability_ttl=availability_ttl
             )
         ]
-    return {"policy": policy, "profiles": profiles, "router_path": str(router_path)}
+    return {
+        "legacy_policy": legacy_policy,
+        "policy": policy,
+        "profiles": profiles,
+        "router_path": str(router_path),
+    }
 
 
 __all__ = [
     "ADAPTER_REF",
     "POLICY_REF",
+    "LEGACY_BROKER_POLICY_REF",
     "BROKER_POLICY_REF",
     "install_openclaw_catalog",
     "openclaw_policy",

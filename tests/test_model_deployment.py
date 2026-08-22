@@ -21,9 +21,9 @@ WHEN = datetime(2026, 8, 14, 8, 0, tzinfo=timezone.utc)
 
 
 class ModelDeploymentTests(unittest.TestCase):
-    def test_six_exact_routes_and_independent_verification_policy(self) -> None:
+    def test_all_configured_routes_and_independent_verification_policy(self) -> None:
         profiles = openclaw_profiles(checked_at=WHEN)
-        self.assertEqual(len(profiles), 6)
+        self.assertEqual(len(profiles), 23)
         self.assertEqual(
             {(item["provider"], item["model"]) for item in profiles},
             {
@@ -33,6 +33,23 @@ class ModelDeploymentTests(unittest.TestCase):
                 ("openai", "gpt-5.6-luna"),
                 ("claude-cli-gateway", "claude-fable-5"),
                 ("claude-cli-gateway", "claude-opus-5"),
+                ("claude-cli-gateway", "claude-sonnet-5"),
+                ("google", "gemini-3.7-flash"),
+                ("google", "gemini-flash-latest"),
+                ("google", "gemini-3.1-pro-preview"),
+                ("google", "gemini-3.5-flash-lite"),
+                ("qwen", "qwen3.8-max"),
+                ("qwen", "deepseek-v4-flash-0731"),
+                ("qwen", "deepseek-v4-pro"),
+                ("qwen", "glm-5.2"),
+                ("openai", "gpt-5.5"),
+                ("deepseek", "deepseek-v4-pro"),
+                ("xai", "grok-4.6"),
+                ("xai", "grok-build-0.1"),
+                ("xai", "grok-4.3"),
+                ("xai", "grok-4.20-beta-latest-reasoning"),
+                ("xai", "grok-4.20-beta-latest-non-reasoning"),
+                ("openrouter", "stealth/ox-alpha"),
             },
         )
         self.assertTrue(all(item["adapter_ref"] == ADAPTER_REF for item in profiles))
@@ -45,7 +62,7 @@ class ModelDeploymentTests(unittest.TestCase):
             ["verify", "adjudicate"],
         )
 
-    def test_catalog_persists_six_profiles_and_one_policy(self) -> None:
+    def test_catalog_persists_all_profiles_and_one_policy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model-router.sqlite"
             installed = install_openclaw_catalog(path, checked_at=WHEN)
@@ -58,7 +75,7 @@ class ModelDeploymentTests(unittest.TestCase):
                 policy_count = router.connection.execute(
                     "SELECT COUNT(*) FROM model_routing_policy_versions"
                 ).fetchone()[0]
-                self.assertEqual(profile_count, 6)
+                self.assertEqual(profile_count, 23)
                 self.assertEqual(policy_count, 1)
 
     def test_v2_profiles_use_ids_accepted_by_broker_protocol(self) -> None:
@@ -70,7 +87,7 @@ class ModelDeploymentTests(unittest.TestCase):
             upgraded = upgrade_openclaw_broker_catalog(path, checked_at=WHEN)
             self.assertEqual(upgraded["policy"]["policy"]["policy_version_ref"], BROKER_POLICY_REF)
             with ModelRouter(path) as router:
-                self.assertEqual(len(router.get_policy(BROKER_POLICY_REF)["filters"]["allowed_profile_ids"]), 6)
+                self.assertEqual(len(router.get_policy(BROKER_POLICY_REF)["filters"]["allowed_profile_ids"]), 23)
 
     def test_v2_profile_version_can_advance_without_changing_entity_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -23,6 +23,7 @@ from dalton_core.openclaw_model_adapter import (
     BrokerTimeout,
     ModelAdmissionError,
     OpenClawModelAdapter,
+    PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
     RouteAuthorityError,
     canonical_hash,
     canonical_json,
@@ -320,6 +321,7 @@ class OpenClawModelAdapterTests(unittest.TestCase):
         expected_agent_id: str = "dalton-model-broker",
         route_resolver: Callable[[str], dict[str, Any] | None] | None = None,
         auth_key_provider: Callable[[], bytes] | None = None,
+        provider_control_mode: str = "provider-controlled-v1",
     ):
         broker = FakeBroker(self.directory, responder)
         try:
@@ -339,6 +341,7 @@ class OpenClawModelAdapterTests(unittest.TestCase):
                 timeout_seconds=timeout,
                 max_frame_bytes=frame_limit,
                 expected_agent_id=expected_agent_id,
+                provider_control_mode=provider_control_mode,
                 clock=lambda: FIXED_NOW,
             )
             result = adapter.execute(
@@ -495,6 +498,74 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             structured["schemaHash"],
         )
         self.assertEqual(invocation.granularity.value, "verification")
+
+    def test_posthoc_mode_is_explicit_and_calibration_only(self) -> None:
+        verifier = WorkOrder.from_dict({
+            **self.work.to_dict(),
+            "id": "work:model-calibration-posthoc",
+            "question": "Verify one frozen calibration case",
+            "requested_capabilities": ["verify"],
+            "idempotency_key": "work-key:model-calibration-posthoc",
+            "metadata": {
+                "phase": "verification-calibration",
+                "execution_tier": PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
+                "verifier_output_schema_version": "0.2",
+            },
+        })
+        routed = self.router.route(
+            verifier,
+            attempt_number=1,
+            capability="verify",
+            policy_version_ref="model-routing-policy-version:default:1",
+            credential_slot_refs=["credential-slot:openai:dalton"],
+            required_modalities=["text"],
+            required_context_tokens=1_000,
+            estimated_input_tokens=500,
+            estimated_output_tokens=250,
+            producer_family="anthropic-claude",
+            idempotency_key="route-key:model-calibration-posthoc",
+        )["decision"]
+        (invocation, result), broker = self.run_with(
+            success_response,
+            work=verifier,
+            route=routed,
+            provider_control_mode=PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
+        )
+        broker.close()
+        self.assertNotIn("requiredControls", broker.requests[0])
+        self.assertEqual(invocation.granularity.value, "verification")
+        self.assertFalse(result.metadata["required_provider_controls"])
+        self.assertEqual(
+            result.metadata["provider_control_mode"],
+            PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
+        )
+
+        production_shaped = WorkOrder.from_dict({
+            **verifier.to_dict(),
+            "id": "work:model-production-posthoc-forbidden",
+            "idempotency_key": "work-key:model-production-posthoc-forbidden",
+            "metadata": {"verifier_output_schema_version": "0.2"},
+        })
+        production_route = self.router.route(
+            production_shaped,
+            attempt_number=1,
+            capability="verify",
+            policy_version_ref="model-routing-policy-version:default:1",
+            credential_slot_refs=["credential-slot:openai:dalton"],
+            required_modalities=["text"],
+            required_context_tokens=1_000,
+            estimated_input_tokens=500,
+            estimated_output_tokens=250,
+            producer_family="anthropic-claude",
+            idempotency_key="route-key:model-production-posthoc-forbidden",
+        )["decision"]
+        with self.assertRaisesRegex(ModelAdmissionError, "restricted to exact calibration"):
+            self.run_with(
+                success_response,
+                work=production_shaped,
+                route=production_route,
+                provider_control_mode=PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
+            )
 
     def test_request_and_response_hashes_and_route_hash_are_enforced(self) -> None:
         def bad_request_hash(request: dict[str, Any]) -> dict[str, Any]:

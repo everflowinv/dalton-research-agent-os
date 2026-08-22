@@ -9,6 +9,10 @@ from pathlib import Path
 
 from dalton_core.contracts import InvocationGranularity, ModelInvocation, ResultEnvelope
 from dalton_core.model_deployment import openclaw_broker_profiles
+from dalton_core.openclaw_model_adapter import (
+    PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
+    PROVIDER_CONTROL_MODE_REQUIRED,
+)
 from dalton_core.thesis_impact_calibration import load_frozen_calibration_corpus
 from dalton_core.thesis_impact_calibration_runner import (
     ThesisImpactCalibrationRunError,
@@ -52,6 +56,7 @@ class ThesisImpactCalibrationRunnerTests(unittest.TestCase):
             case["id"] for case in self.corpus["cases"]
         ])
         self.assertEqual(parsed["per_case_cap_usd"], "0.01")
+        self.assertEqual(parsed["execution_tier"], PROVIDER_CONTROL_MODE_REQUIRED)
         with self.assertRaisesRegex(ThesisImpactCalibrationRunError, "exceeds"):
             build_calibration_run_manifest(
                 corpus=self.corpus,
@@ -65,6 +70,25 @@ class ThesisImpactCalibrationRunnerTests(unittest.TestCase):
                 timeout_seconds=120,
             )
 
+        smoke = build_calibration_run_manifest(
+            corpus=self.corpus,
+            profile=self.profile,
+            repo_commit="a" * 40,
+            created_at=NOW,
+            run_cap_usd=Decimal("0.20"),
+            per_case_cap_usd=Decimal("0.20"),
+            max_input_tokens=3000,
+            max_output_tokens=1000,
+            timeout_seconds=120,
+            execution_tier=PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
+            case_refs=[self.corpus["cases"][0]["id"]],
+        )
+        self.assertEqual(smoke["case_refs"], [self.corpus["cases"][0]["id"]])
+        self.assertEqual(
+            smoke["execution_tier"],
+            PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
+        )
+
     def test_work_order_is_deterministic_and_contains_no_gold(self):
         case = self.corpus["cases"][0]
         first = build_calibration_work_order(case, self.manifest).to_dict()
@@ -76,6 +100,10 @@ class ThesisImpactCalibrationRunnerTests(unittest.TestCase):
         self.assertNotIn(case["gold"]["rationale"], serialized)
         self.assertEqual(first["budget"]["max_cost_usd"], 0.01)
         self.assertEqual(first["metadata"]["verifier_output_schema_version"], "0.2")
+        self.assertEqual(
+            first["metadata"]["execution_tier"],
+            PROVIDER_CONTROL_MODE_REQUIRED,
+        )
 
     def _record(self):
         case = self.corpus["cases"][0]
