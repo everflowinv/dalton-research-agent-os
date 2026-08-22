@@ -48,7 +48,7 @@ from .thesis_impact_calibration import (
 SCHEMA_VERSION = "0.1"
 RUN_MANIFEST_SCHEMA_VERSION = "0.2"
 DEFAULT_PROFILE_ID = "profile:deepseek-v4-flash"
-DEFAULT_RUN_CAP_USD = Decimal("0.25")
+DEFAULT_RUN_CAP_USD = Decimal("0.30")
 DEFAULT_CASE_CAP_USD = Decimal("0.01")
 DEFAULT_MAX_INPUT_TOKENS = 3_000
 DEFAULT_MAX_OUTPUT_TOKENS = 1_000

@@ -124,11 +124,11 @@ class ThesisImpactCalibrationTests(unittest.TestCase):
     def setUp(self):
         self.corpus = load_frozen_calibration_corpus()
 
-    def test_frozen_corpus_has_twelve_cases_and_hidden_gold(self):
-        self.assertEqual(len(self.corpus["cases"]), 12)
+    def test_frozen_corpus_has_thirty_cases_and_hidden_gold(self):
+        self.assertEqual(len(self.corpus["cases"]), 30)
         self.assertEqual(
             content_hash(self.corpus),
-            "c5f6928860f043fb4f3a01962dc68d7e53fd8c93b3291fafbc85e96aabb41797",
+            "e736c0fc6f6c3dcf569dde76aa40fdaa6f7cfa2311e78e8efa2153771c625703",
         )
         self.assertEqual(
             {item["severity"] for item in self.corpus["cases"]},
@@ -143,6 +143,39 @@ class ThesisImpactCalibrationTests(unittest.TestCase):
         self.assertNotIn("seeded_error", prompt)
         self.assertNotIn("required_finding_codes", prompt)
         self.assertNotIn(self.corpus["cases"][0]["gold"]["rationale"], prompt)
+
+        self.assertEqual(
+            sum(case["gold"]["verdict"] == "pass" for case in self.corpus["cases"]),
+            12,
+        )
+        self.assertEqual(
+            sum(case["gold"]["verdict"] == "reject" for case in self.corpus["cases"]),
+            18,
+        )
+        seeded_codes = {
+            code
+            for case in self.corpus["cases"]
+            for code in case["gold"]["required_finding_codes"]
+        }
+        self.assertEqual(seeded_codes, set(VERIFIER_FINDING_SEVERITIES))
+        self.assertTrue(any(
+            len(case["gold"]["required_finding_codes"]) > 1
+            for case in self.corpus["cases"]
+        ))
+
+    def test_prior_twelve_case_fixture_remains_frozen(self):
+        prior = json.loads((
+            ROOT
+            / "src"
+            / "dalton_core"
+            / "calibration_fixtures"
+            / "thesis-impact-verifier-v0.1.json"
+        ).read_text(encoding="utf-8"))
+        self.assertEqual(len(prior["cases"]), 12)
+        self.assertEqual(
+            content_hash(prior),
+            "c5f6928860f043fb4f3a01962dc68d7e53fd8c93b3291fafbc85e96aabb41797",
+        )
 
     def test_json_contract_and_python_finding_codes_match(self):
         schema = json.loads((
@@ -178,7 +211,7 @@ class ThesisImpactCalibrationTests(unittest.TestCase):
             report["automation_ineligibility_reasons"],
         )
 
-    def test_scorer_recognizes_gold_outputs_but_small_corpus_never_unlocks(self):
+    def test_scorer_recognizes_gold_outputs_and_unlocks_at_threshold(self):
         outputs = {}
         for case in self.corpus["cases"]:
             gold = case["gold"]
@@ -200,15 +233,12 @@ class ThesisImpactCalibrationTests(unittest.TestCase):
                 "findings": findings,
             }
         report = score_verifier_outputs(outputs, corpus=self.corpus)
-        self.assertEqual(report["evaluated_cases"], 12)
+        self.assertEqual(report["evaluated_cases"], 30)
         self.assertEqual(report["accuracy"], 1.0)
         self.assertEqual(report["detection_rate"], 1.0)
         self.assertEqual(report["high_severity_misses"], 0)
-        self.assertFalse(report["automation_eligible"])
-        self.assertIn(
-            "frozen corpus has fewer than 30 seeded cases",
-            report["automation_ineligibility_reasons"],
-        )
+        self.assertTrue(report["automation_eligible"])
+        self.assertEqual(report["automation_ineligibility_reasons"], [])
 
     def test_corpus_and_output_case_sets_are_closed(self):
         tampered = copy.deepcopy(self.corpus)

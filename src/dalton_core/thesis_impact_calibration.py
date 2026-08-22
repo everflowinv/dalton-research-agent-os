@@ -26,7 +26,7 @@ from .thesis_impact import (
 
 CORPUS_SCHEMA_VERSION = "0.1"
 REPORT_SCHEMA_VERSION = "0.1"
-CORPUS_RESOURCE = "calibration_fixtures/thesis-impact-verifier-v0.1.json"
+CORPUS_RESOURCE = "calibration_fixtures/thesis-impact-verifier-v0.2.json"
 _CASE_FIELDS = {
     "id", "title", "seeded_error", "severity", "input", "gold",
     "observed_outputs",
