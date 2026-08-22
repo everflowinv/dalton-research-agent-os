@@ -304,19 +304,22 @@ export class ModelBroker {
       const expectedTransport = PROVIDER_CONTROL_MODES[configuredMode]?.transport;
       const advertisedTransport = capability?.transports?.[configuredMode]
         ?? (configuredMode === "openai-responses-input-count-v1" ? capability?.transport : undefined);
-      if (
-        !profile.providerControls
-        || capability?.version !== "0.1"
-        || advertisedTransport !== expectedTransport
-        || !Array.isArray(capability.modes)
-        || !capability.modes.includes(profile.providerControls.mode)
-      ) {
+      const gaps = [];
+      if (!profile.providerControls) gaps.push("profile lacks providerControls");
+      if (capability?.version !== "0.1") gaps.push(`runtime capability version ${capability?.version ?? "missing"}`);
+      if (advertisedTransport !== expectedTransport) {
+        gaps.push(`transport ${advertisedTransport ?? "missing"} != ${expectedTransport ?? "missing"}`);
+      }
+      if (!Array.isArray(capability?.modes) || !capability.modes.includes(configuredMode)) {
+        gaps.push(`mode ${configuredMode ?? "missing"} not advertised`);
+      }
+      if (gaps.length > 0) {
         return this.#failure(
           request,
           requestHash,
           "fresh",
           "REQUIRED_CONTROLS_UNAVAILABLE",
-          "host runtime or selected profile cannot enforce the required provider controls",
+          `host runtime or selected profile cannot enforce the required provider controls: ${gaps.join("; ")}`,
         );
       }
       if (
