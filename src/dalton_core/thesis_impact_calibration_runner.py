@@ -57,7 +57,8 @@ from .thesis_impact_calibration import (
 
 
 SCHEMA_VERSION = "0.1"
-RUN_MANIFEST_SCHEMA_VERSION = "0.3"
+LEGACY_RUN_MANIFEST_SCHEMA_VERSION = "0.3"
+RUN_MANIFEST_SCHEMA_VERSION = "0.4"
 DEFAULT_PROFILE_ID = "profile:deepseek-v4-flash"
 DEFAULT_RUN_CAP_USD = Decimal("0.30")
 DEFAULT_CASE_CAP_USD = Decimal("0.01")
@@ -212,6 +213,7 @@ def build_calibration_run_manifest(
     if not isinstance(profile, Mapping) or not required_profile.issubset(profile):
         raise ThesisImpactCalibrationRunError("candidate profile is incomplete")
     identity = {
+        "created_at": _wire_time(created_at),
         "corpus_hash": content_hash(frozen),
         "profile_version_ref": profile["profile_version_ref"],
         "repo_commit": repo_commit,
@@ -247,7 +249,10 @@ def build_calibration_run_manifest(
 
 def validate_calibration_run_manifest(value: Any) -> dict[str, Any]:
     wire = _closed(value, _MANIFEST_FIELDS, "calibration run manifest")
-    if wire["schema_version"] != RUN_MANIFEST_SCHEMA_VERSION:
+    if wire["schema_version"] not in {
+        LEGACY_RUN_MANIFEST_SCHEMA_VERSION,
+        RUN_MANIFEST_SCHEMA_VERSION,
+    }:
         raise ThesisImpactCalibrationRunError("unsupported run manifest schema")
     for field in (
         "id", "created_at", "repo_commit", "corpus_ref", "corpus_hash",
@@ -255,6 +260,20 @@ def validate_calibration_run_manifest(value: Any) -> dict[str, Any]:
     ):
         if not isinstance(wire[field], str) or not wire[field]:
             raise ThesisImpactCalibrationRunError(f"manifest {field} must be text")
+    try:
+        created_at = datetime.fromisoformat(wire["created_at"])
+    except ValueError as exc:
+        raise ThesisImpactCalibrationRunError("manifest created_at is invalid") from exc
+    if created_at.tzinfo is None:
+        raise ThesisImpactCalibrationRunError("manifest created_at must include a timezone")
+    if len(wire["repo_commit"]) != 40 or any(
+        char not in "0123456789abcdef" for char in wire["repo_commit"]
+    ):
+        raise ThesisImpactCalibrationRunError("manifest repo_commit is invalid")
+    if len(wire["corpus_hash"]) != 64 or any(
+        char not in "0123456789abcdef" for char in wire["corpus_hash"]
+    ):
+        raise ThesisImpactCalibrationRunError("manifest corpus_hash is invalid")
     if wire["execution_tier"] not in EXECUTION_TIERS:
         raise ThesisImpactCalibrationRunError("manifest execution_tier is unsupported")
     if wire["thinking_level"] is not None and (
@@ -278,6 +297,24 @@ def validate_calibration_run_manifest(value: Any) -> dict[str, Any]:
         wire["per_case_cap_usd"], "manifest per_case_cap_usd"
     ) > _money(wire["run_cap_usd"], "manifest run_cap_usd"):
         raise ThesisImpactCalibrationRunError("manifest maximum spend exceeds run cap")
+    identity = {
+        "corpus_hash": wire["corpus_hash"],
+        "profile_version_ref": wire["profile_version_ref"],
+        "repo_commit": wire["repo_commit"],
+        "execution_tier": wire["execution_tier"],
+        "thinking_level": wire["thinking_level"],
+        "case_refs": wire["case_refs"],
+        "run_cap_usd": wire["run_cap_usd"],
+        "per_case_cap_usd": wire["per_case_cap_usd"],
+        "max_input_tokens": wire["max_input_tokens"],
+        "max_output_tokens": wire["max_output_tokens"],
+        "timeout_seconds": wire["timeout_seconds"],
+    }
+    if wire["schema_version"] == RUN_MANIFEST_SCHEMA_VERSION:
+        identity = {"created_at": wire["created_at"], **identity}
+    expected_id = "thesis-impact-calibration-run:" + content_hash(identity)[:32]
+    if wire["id"] != expected_id:
+        raise ThesisImpactCalibrationRunError("manifest id does not bind its identity")
     return wire
 
 
@@ -544,7 +581,17 @@ def run_live_calibration(
     if dirty and not allow_dirty:
         raise ThesisImpactCalibrationRunError("repository must be clean for a paid run")
     corpus = load_frozen_calibration_corpus()
-    created_at = _now()
+    manifest_path = output_dir / "manifest.json"
+    persisted_manifest: dict[str, Any] | None = None
+    if output_dir.exists() and resume:
+        if not manifest_path.is_file():
+            raise ThesisImpactCalibrationRunError("resume directory is incomplete")
+        persisted_manifest = validate_calibration_run_manifest(
+            json.loads(manifest_path.read_text(encoding="utf-8"))
+        )
+        created_at = datetime.fromisoformat(persisted_manifest["created_at"])
+    else:
+        created_at = _now()
     try:
         catalog = (
             openclaw_broker_profiles_from_config(
@@ -578,7 +625,6 @@ def run_live_calibration(
         thinking_level=thinking_level,
         case_refs=case_refs,
     )
-    manifest_path = output_dir / "manifest.json"
     router_path = output_dir / "router.sqlite"
     records_path = output_dir / "responses.jsonl"
     if output_dir.exists():
@@ -586,9 +632,9 @@ def run_live_calibration(
             raise ThesisImpactCalibrationRunError("output directory already exists")
         if not manifest_path.is_file() or not router_path.is_file():
             raise ThesisImpactCalibrationRunError("resume directory is incomplete")
-        manifest = validate_calibration_run_manifest(
-            json.loads(manifest_path.read_text(encoding="utf-8"))
-        )
+        manifest = persisted_manifest
+        if manifest is None:
+            raise ThesisImpactCalibrationRunError("resume manifest was not loaded")
         comparable = dict(requested_manifest)
         comparable["created_at"] = manifest["created_at"]
         if canonical_json(manifest) != canonical_json(comparable):

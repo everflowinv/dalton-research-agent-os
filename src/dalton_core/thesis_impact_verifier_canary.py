@@ -34,13 +34,17 @@ from .thesis_impact_calibration_runner import (
     _git_state,
     _money,
     _secure_write,
+    build_calibration_work_order,
+    calibration_output_map,
     load_calibration_records,
     run_live_calibration,
     validate_calibration_run_manifest,
 )
+from .thesis_impact_calibration import score_verifier_outputs
 
 
-CAMPAIGN_SCHEMA_VERSION = "0.1"
+LEGACY_CAMPAIGN_SCHEMA_VERSION = "0.1"
+CAMPAIGN_SCHEMA_VERSION = "0.2"
 PRODUCTION_MINIMUM_ROUNDS = 3
 MAX_ROUNDS = 10
 DEFAULT_PROFILE_ID = "profile:gemini-3-7-flash"
@@ -139,6 +143,7 @@ def build_verifier_canary_manifest(
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ThesisImpactCalibrationRunError(f"{name} must be a positive integer")
     identity = {
+        "created_at": _wire_time(created_at),
         "repo_commit": repo_commit,
         "corpus_hash": content_hash(frozen),
         "profile_id": profile_id,
@@ -177,7 +182,10 @@ def build_verifier_canary_manifest(
 
 def validate_verifier_canary_manifest(value: Any) -> dict[str, Any]:
     wire = _closed(value, _CAMPAIGN_FIELDS, "verifier canary campaign manifest")
-    if wire["schema_version"] != CAMPAIGN_SCHEMA_VERSION:
+    if wire["schema_version"] not in {
+        LEGACY_CAMPAIGN_SCHEMA_VERSION,
+        CAMPAIGN_SCHEMA_VERSION,
+    }:
         raise ThesisImpactCalibrationRunError("unsupported campaign manifest schema")
     if wire["execution_tier"] != PROVIDER_CONTROL_MODE_REQUIRED:
         raise ThesisImpactCalibrationRunError("campaign must use provider-controlled-v1")
@@ -195,6 +203,20 @@ def validate_verifier_canary_manifest(value: Any) -> dict[str, Any]:
     ):
         if not isinstance(wire[field], str) or not wire[field]:
             raise ThesisImpactCalibrationRunError(f"campaign {field} must be text")
+    try:
+        created_at = datetime.fromisoformat(wire["created_at"])
+    except ValueError as exc:
+        raise ThesisImpactCalibrationRunError("campaign created_at is invalid") from exc
+    if created_at.tzinfo is None:
+        raise ThesisImpactCalibrationRunError("campaign created_at must include a timezone")
+    if len(wire["repo_commit"]) != 40 or any(
+        char not in "0123456789abcdef" for char in wire["repo_commit"]
+    ):
+        raise ThesisImpactCalibrationRunError("campaign repo_commit is invalid")
+    if len(wire["corpus_hash"]) != 64 or any(
+        char not in "0123456789abcdef" for char in wire["corpus_hash"]
+    ):
+        raise ThesisImpactCalibrationRunError("campaign corpus_hash is invalid")
     if (
         not isinstance(wire["case_refs"], list)
         or not wire["case_refs"]
@@ -220,6 +242,26 @@ def validate_verifier_canary_manifest(value: Any) -> dict[str, Any]:
             or wire[field] < 1
         ):
             raise ThesisImpactCalibrationRunError(f"campaign {field} is invalid")
+    identity = {
+        "repo_commit": wire["repo_commit"],
+        "corpus_hash": wire["corpus_hash"],
+        "profile_id": wire["profile_id"],
+        "execution_tier": wire["execution_tier"],
+        "thinking_level": wire["thinking_level"],
+        "rounds": wire["rounds"],
+        "case_refs": wire["case_refs"],
+        "per_case_cap_usd": wire["per_case_cap_usd"],
+        "per_round_cap_usd": wire["per_round_cap_usd"],
+        "campaign_cap_usd": wire["campaign_cap_usd"],
+        "max_input_tokens": wire["max_input_tokens"],
+        "max_output_tokens": wire["max_output_tokens"],
+        "timeout_seconds": wire["timeout_seconds"],
+    }
+    if wire["schema_version"] == CAMPAIGN_SCHEMA_VERSION:
+        identity = {"created_at": wire["created_at"], **identity}
+    expected_id = "thesis-impact-verifier-canary:" + content_hash(identity)[:32]
+    if wire["id"] != expected_id:
+        raise ThesisImpactCalibrationRunError("campaign id does not bind its identity")
     return wire
 
 
@@ -237,6 +279,7 @@ def evaluate_round_records(
     parse_failures = 0
     control_failures = 0
     thinking_failures = 0
+    replay_failures = 0
     for record in records:
         result = record.get("result", {})
         metadata = result.get("metadata", {}) if isinstance(result, Mapping) else {}
@@ -246,7 +289,7 @@ def evaluate_round_records(
             parse_failures += 1
         if metadata.get("required_provider_controls") is not True or not metadata.get(
             "provider_control_schema_hash"
-        ):
+        ) or metadata.get("provider_control_mode") != PROVIDER_CONTROL_MODE_REQUIRED:
             control_failures += 1
         work_order = record.get("work_order", {})
         work_metadata = (
@@ -254,6 +297,12 @@ def evaluate_round_records(
         )
         if work_metadata.get("verifier_thinking_level") != thinking_level:
             thinking_failures += 1
+        if (
+            record.get("recovery_mode") != "fresh_execute"
+            or metadata.get("broker_request_mode") != "execute"
+            or metadata.get("broker_idempotency_status") != "fresh"
+        ):
+            replay_failures += 1
     if failed_calls:
         reasons.append(f"{failed_calls} broker calls did not succeed")
     if parse_failures:
@@ -262,6 +311,8 @@ def evaluate_round_records(
         reasons.append(f"{control_failures} records lack the provider-control contract")
     if thinking_failures:
         reasons.append(f"{thinking_failures} records do not bind the thinking level")
+    if replay_failures:
+        reasons.append(f"{replay_failures} records are not fresh provider executions")
     false_positives: int | None = None
     high_severity_misses: int | None = None
     accuracy: Any = None
@@ -293,6 +344,7 @@ def evaluate_round_records(
         "parse_failures": parse_failures,
         "control_failures": control_failures,
         "thinking_binding_failures": thinking_failures,
+        "fresh_execution_failures": replay_failures,
         "false_positives": false_positives,
         "high_severity_misses": high_severity_misses,
         "accuracy": accuracy,
@@ -351,18 +403,62 @@ def _evaluate_round_dir(
         manifest["execution_tier"] != campaign["execution_tier"]
         or manifest["thinking_level"] != campaign["thinking_level"]
         or manifest["profile_id"] != campaign["profile_id"]
+        or manifest["repo_commit"] != campaign["repo_commit"]
         or manifest["corpus_hash"] != campaign["corpus_hash"]
         or manifest["case_refs"] != campaign["case_refs"]
     ):
         binding_reasons.append("round manifest does not bind the exact campaign contract")
-    score: Mapping[str, Any] | None = None
+    stored_score: Mapping[str, Any] | None = None
     score_path = round_dir / "score.json"
     if score_path.is_file():
         try:
-            score = json.loads(score_path.read_text(encoding="utf-8"))
+            stored_score = json.loads(score_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             binding_reasons.append(f"round score report is unreadable: {exc}")
     records = load_calibration_records(round_dir / "responses.jsonl")
+    corpus = load_frozen_calibration_corpus()
+    score: Mapping[str, Any] | None = None
+    if content_hash(corpus) != campaign["corpus_hash"]:
+        binding_reasons.append("frozen corpus no longer matches the campaign")
+    try:
+        expected_cases = {case["id"]: case for case in corpus["cases"]}
+        for record in records:
+            case = expected_cases.get(record["case_ref"])
+            if case is None or canonical_json(record["work_order"]) != canonical_json(
+                build_calibration_work_order(case, manifest).to_dict()
+            ):
+                raise ThesisImpactCalibrationRunError(
+                    "record does not bind the exact case WorkOrder"
+                )
+            invocation = record["invocation"]
+            result_metadata = record["result"].get("metadata", {})
+            if (
+                invocation.get("profile_ref") != manifest["profile_version_ref"]
+                or invocation.get("model_family") != manifest["model_family"]
+                or result_metadata.get("profile_version_ref")
+                != manifest["profile_version_ref"]
+                or result_metadata.get("route_decision_ref")
+                != record["route_decision_ref"]
+            ):
+                raise ThesisImpactCalibrationRunError(
+                    "record does not bind the exact routed profile"
+                )
+        outputs = calibration_output_map(records, manifest)
+        recomputed_score = score_verifier_outputs(outputs, corpus=corpus)
+        score = dict(recomputed_score)
+        score["total_cases"] = campaign["case_count"]
+        score["coverage"] = {
+            "numerator": len(outputs),
+            "denominator": campaign["case_count"],
+        }
+    except ThesisImpactCalibrationRunError as exc:
+        binding_reasons.append(f"round records are not campaign-bound: {exc}")
+    if stored_score is None:
+        binding_reasons.append("round has no durable score report")
+    elif score is not None and canonical_json(stored_score) != canonical_json(
+        recomputed_score
+    ):
+        binding_reasons.append("stored score differs from records recomputation")
     evaluation = evaluate_round_records(
         records,
         score,
@@ -374,6 +470,7 @@ def _evaluate_round_dir(
     return {
         "round_dir": str(round_dir),
         "run_ref": manifest["id"],
+        "profile_version_ref": manifest["profile_version_ref"],
         "status": "complete" if evaluation["complete"] else "partial",
         "accounted_cost_usd": format(accounted, "f"),
         "unpriced_reserve_usd": format(reserve, "f"),
@@ -402,6 +499,16 @@ def evaluate_campaign_gate(
             reasons.append(f"round {index} was not accepted: " + "; ".join(
                 item.get("rejection_reasons", ["unknown"])
             ))
+    run_refs = [item.get("run_ref") for item in rounds]
+    if any(not isinstance(ref, str) or not ref for ref in run_refs):
+        reasons.append("every round must bind one run identity")
+    elif len(set(run_refs)) != len(run_refs):
+        reasons.append("round run identities are not unique")
+    profile_refs = [item.get("profile_version_ref") for item in rounds]
+    if any(not isinstance(ref, str) or not ref for ref in profile_refs):
+        reasons.append("every round must bind one exact profile version")
+    elif len(set(profile_refs)) != 1:
+        reasons.append("round profile versions drifted within the campaign")
     campaign_cap = _money(campaign["campaign_cap_usd"], "campaign cap")
     if spent_or_reserved > campaign_cap:
         reasons.append("aggregate spend exceeded the campaign cap")
@@ -444,11 +551,22 @@ def run_verifier_canary(
     if dirty and not allow_dirty:
         raise ThesisImpactCalibrationRunError("repository must be clean for a paid run")
     corpus = load_frozen_calibration_corpus()
+    manifest_path = output_dir / "campaign.json"
+    persisted_campaign: dict[str, Any] | None = None
+    if output_dir.exists() and resume:
+        if not manifest_path.is_file():
+            raise ThesisImpactCalibrationRunError("resume directory is incomplete")
+        persisted_campaign = validate_verifier_canary_manifest(
+            json.loads(manifest_path.read_text(encoding="utf-8"))
+        )
+        created_at = datetime.fromisoformat(persisted_campaign["created_at"])
+    else:
+        created_at = _now()
     campaign = build_verifier_canary_manifest(
         corpus=corpus,
         profile_id=profile_id,
         repo_commit=head,
-        created_at=_now(),
+        created_at=created_at,
         thinking_level=thinking_level,
         rounds=rounds,
         per_case_cap_usd=per_case_cap_usd,
@@ -458,15 +576,12 @@ def run_verifier_canary(
         max_output_tokens=max_output_tokens,
         timeout_seconds=timeout_seconds,
     )
-    manifest_path = output_dir / "campaign.json"
     if output_dir.exists():
         if not resume:
             raise ThesisImpactCalibrationRunError("output directory already exists")
-        if not manifest_path.is_file():
-            raise ThesisImpactCalibrationRunError("resume directory is incomplete")
-        persisted = validate_verifier_canary_manifest(
-            json.loads(manifest_path.read_text(encoding="utf-8"))
-        )
+        persisted = persisted_campaign
+        if persisted is None:
+            raise ThesisImpactCalibrationRunError("resume campaign was not loaded")
         comparable = dict(campaign)
         comparable["created_at"] = persisted["created_at"]
         if canonical_json(persisted) != canonical_json(comparable):

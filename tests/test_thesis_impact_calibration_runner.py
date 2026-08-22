@@ -3,7 +3,7 @@ import hashlib
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -100,6 +100,18 @@ class ThesisImpactCalibrationRunnerTests(unittest.TestCase):
             timeout_seconds=120,
         )
         self.assertNotEqual(changed_budget["id"], self.manifest["id"])
+        later_instance = build_calibration_run_manifest(
+            corpus=self.corpus,
+            profile=self.profile,
+            repo_commit="a" * 40,
+            created_at=NOW + timedelta(microseconds=1),
+            run_cap_usd=Decimal("0.30"),
+            per_case_cap_usd=Decimal("0.01"),
+            max_input_tokens=3000,
+            max_output_tokens=1000,
+            timeout_seconds=120,
+        )
+        self.assertNotEqual(later_instance["id"], self.manifest["id"])
 
     def test_thinking_level_is_frozen_and_closed(self):
         self.assertIsNone(self.manifest["thinking_level"])

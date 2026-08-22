@@ -17,6 +17,7 @@ admitted after it was rejected.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from collections.abc import Callable, Mapping
@@ -103,6 +104,8 @@ class ThesisImpactBudgetStore:
         if self.path != ":memory:":
             target = Path(self.path)
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            target.touch(mode=0o600, exist_ok=True)
+            os.chmod(target, 0o600)
         self.connection = sqlite3.connect(self.path, isolation_level=None)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
@@ -162,17 +165,29 @@ class ThesisImpactBudgetStore:
                 (policy_version_id,),
             ).fetchone()
             if existing is not None:
-                if existing["record_json"] != canonical_json(wire):
+                persisted = json.loads(existing["record_json"])
+                comparable_fields = (
+                    "schema_version", "policy_version_id", "day_cap_micros",
+                    "currency", "prior_version_id",
+                )
+                if any(persisted[field] != wire[field] for field in comparable_fields):
                     raise ThesisImpactBudgetConflict(
                         "budget policy identity was reused with different semantics"
                     )
-                return {**wire, "status": "duplicate"}
+                return {**persisted, "status": "duplicate"}
             if prior_version_id is not None and cur.execute(
                 "SELECT 1 FROM thesis_impact_budget_policies WHERE policy_version_id=?",
                 (prior_version_id,),
             ).fetchone() is None:
                 raise ThesisImpactBudgetConflict(
                     "budget policy prior version is not registered"
+                )
+            if prior_version_id is not None and cur.execute(
+                "SELECT 1 FROM thesis_impact_budget_policies WHERE prior_version_id=?",
+                (prior_version_id,),
+            ).fetchone() is not None:
+                raise ThesisImpactBudgetConflict(
+                    "budget policy chain already advanced from the prior version"
                 )
             cur.execute(
                 "INSERT INTO thesis_impact_budget_policies("
@@ -202,20 +217,31 @@ class ThesisImpactBudgetStore:
 
     @staticmethod
     def _day_committed(cur: sqlite3.Cursor, policy_version_id: str, day: str) -> int:
+        chain_rows = cur.execute(
+            "WITH RECURSIVE policy_chain(policy_version_id) AS ("
+            " SELECT ? UNION ALL "
+            " SELECT p.prior_version_id FROM thesis_impact_budget_policies p "
+            " JOIN policy_chain c ON p.policy_version_id=c.policy_version_id "
+            " WHERE p.prior_version_id IS NOT NULL) "
+            "SELECT policy_version_id FROM policy_chain",
+            (policy_version_id,),
+        ).fetchall()
+        policy_ids = tuple(row["policy_version_id"] for row in chain_rows)
+        placeholders = ",".join("?" for _ in policy_ids)
         settled = cur.execute(
             "SELECT COALESCE(SUM(s.actual_micros),0) AS total "
             "FROM thesis_impact_day_settlements s "
             "JOIN thesis_impact_day_admissions a ON a.admission_id=s.admission_id "
-            "WHERE a.policy_version_id=? AND a.day=?",
-            (policy_version_id, day),
+            f"WHERE a.policy_version_id IN ({placeholders}) AND a.day=?",
+            (*policy_ids, day),
         ).fetchone()["total"]
         open_reserved = cur.execute(
             "SELECT COALESCE(SUM(a.reserved_micros),0) AS total "
             "FROM thesis_impact_day_admissions a "
-            "WHERE a.policy_version_id=? AND a.day=? AND NOT EXISTS ("
+            f"WHERE a.policy_version_id IN ({placeholders}) AND a.day=? AND NOT EXISTS ("
             " SELECT 1 FROM thesis_impact_day_settlements s "
             " WHERE s.admission_id=a.admission_id)",
-            (policy_version_id, day),
+            (*policy_ids, day),
         ).fetchone()["total"]
         return int(settled) + int(open_reserved)
 
@@ -293,22 +319,46 @@ class ThesisImpactBudgetStore:
                 (work_order_ref, attempt_number, phase),
             ).fetchone()
             if existing is not None:
-                if existing["record_json"] != canonical_json(wire):
+                persisted = json.loads(existing["record_json"])
+                comparable_fields = (
+                    "schema_version", "admission_id", "policy_version_id", "day",
+                    "work_order_ref", "attempt_number", "phase",
+                    "route_decision_ref", "reserved_micros",
+                )
+                if any(persisted[field] != wire[field] for field in comparable_fields):
                     raise ThesisImpactBudgetConflict(
                         "admission identity was reused with different semantics"
                     )
-                return {**wire, "status": "duplicate"}
+                return {**persisted, "status": "duplicate"}
             prior_row = cur.execute(
                 "SELECT record_json FROM thesis_impact_day_rejections "
                 "WHERE work_order_ref=? AND attempt_number=? AND phase=?",
                 (work_order_ref, attempt_number, phase),
             ).fetchone()
-            committed = self._day_committed(cur, policy_version_id, day)
-            if committed + reserved_micros > policy["day_cap_micros"]:
-                rejection = (
-                    json.loads(prior_row["record_json"])
-                    if prior_row is not None
-                    else {
+            if prior_row is not None:
+                persisted = json.loads(prior_row["record_json"])
+                comparable_fields = (
+                    "schema_version", "policy_version_id", "day", "work_order_ref",
+                    "attempt_number", "phase", "route_decision_ref", "reserved_micros",
+                )
+                if any(persisted[field] != wire[field] for field in comparable_fields):
+                    raise ThesisImpactBudgetConflict(
+                        "rejection identity was reused with different semantics"
+                    )
+                raise ThesisImpactBudgetConflict(
+                    "a rejected admission cannot later be admitted"
+                )
+            else:
+                if cur.execute(
+                    "SELECT 1 FROM thesis_impact_budget_policies WHERE prior_version_id=?",
+                    (policy_version_id,),
+                ).fetchone() is not None:
+                    raise ThesisImpactBudgetConflict(
+                        "budget policy was superseded and cannot admit new spend"
+                    )
+                committed = self._day_committed(cur, policy_version_id, day)
+                if committed + reserved_micros > policy["day_cap_micros"]:
+                    rejection = {
                         "schema_version": SCHEMA_VERSION,
                         "rejection_id": "thesis-impact-rejection:"
                         + content_hash(identity)[:32],
@@ -321,8 +371,6 @@ class ThesisImpactBudgetStore:
                         "day_cap_micros": policy["day_cap_micros"],
                         "created_at": _utc(self.clock()),
                     }
-                )
-                if prior_row is None:
                     rejection["content_hash"] = content_hash(rejection)
                     cur.execute(
                         "INSERT INTO thesis_impact_day_rejections("
@@ -346,11 +394,9 @@ class ThesisImpactBudgetStore:
                             rejection["created_at"],
                         ),
                     )
-            elif prior_row is not None:
-                raise ThesisImpactBudgetConflict(
-                    "a rejected admission cannot later be admitted"
-                )
-            else:
+                else:
+                    rejection = None
+            if rejection is None:
                 cur.execute(
                     "INSERT INTO thesis_impact_day_admissions("
                     "admission_id,policy_version_id,day,work_order_ref,attempt_number,"
@@ -398,22 +444,32 @@ class ThesisImpactBudgetStore:
         }
         wire["content_hash"] = content_hash(wire)
         with self._transaction() as cur:
-            if cur.execute(
-                "SELECT 1 FROM thesis_impact_day_admissions WHERE admission_id=?",
+            admission = cur.execute(
+                "SELECT reserved_micros FROM thesis_impact_day_admissions WHERE admission_id=?",
                 (admission_id,),
-            ).fetchone() is None:
+            ).fetchone()
+            if admission is None:
                 raise ThesisImpactBudgetConflict("settlement references no admission")
+            if actual_micros > int(admission["reserved_micros"]):
+                raise ThesisImpactBudgetConflict(
+                    "actual cost exceeds the admitted reservation"
+                )
             existing = cur.execute(
                 "SELECT record_json FROM thesis_impact_day_settlements "
                 "WHERE admission_id=?",
                 (admission_id,),
             ).fetchone()
             if existing is not None:
-                if existing["record_json"] != canonical_json(wire):
+                persisted = json.loads(existing["record_json"])
+                comparable_fields = (
+                    "schema_version", "settlement_id", "admission_id",
+                    "actual_micros", "usage_entry_ref",
+                )
+                if any(persisted[field] != wire[field] for field in comparable_fields):
                     raise ThesisImpactBudgetConflict(
                         "admission was already settled with different semantics"
                     )
-                return {**wire, "status": "duplicate"}
+                return {**persisted, "status": "duplicate"}
             cur.execute(
                 "INSERT INTO thesis_impact_day_settlements("
                 "settlement_id,admission_id,actual_micros,usage_entry_ref,"
@@ -452,18 +508,23 @@ class ThesisImpactBudgetStore:
         if phase is not None and phase not in {"assessment", "verification"}:
             raise ThesisImpactBudgetValidationError("alert phase is not admitted")
         detail_json = canonical_json(dict(detail or {}))
-        row = self.connection.execute(
-            "SELECT detail_json FROM thesis_impact_alerts WHERE alert_id=?",
-            (alert_id,),
-        ).fetchone()
-        if row is not None:
-            if row["detail_json"] != detail_json:
-                raise ThesisImpactBudgetConflict(
-                    "alert identity was reused with different semantics"
-                )
-            return {"alert_id": alert_id, "status": "duplicate"}
         created_at = _utc(self.clock())
         with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT kind,severity,work_order_ref,phase,detail_json "
+                "FROM thesis_impact_alerts WHERE alert_id=?",
+                (alert_id,),
+            ).fetchone()
+            if row is not None:
+                expected = (kind, severity, work_order_ref, phase, detail_json)
+                actual = tuple(row[field] for field in (
+                    "kind", "severity", "work_order_ref", "phase", "detail_json"
+                ))
+                if actual != expected:
+                    raise ThesisImpactBudgetConflict(
+                        "alert identity was reused with different semantics"
+                    )
+                return {"alert_id": alert_id, "status": "duplicate"}
             cur.execute(
                 "INSERT INTO thesis_impact_alerts("
                 "alert_id,kind,severity,work_order_ref,phase,detail_json,created_at"
@@ -515,26 +576,26 @@ class ThesisImpactBudgetStore:
             if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= upper:
                 raise ThesisImpactBudgetValidationError(f"{name} must be 1..{upper}")
         now = _utc(self.clock())
-        rows = self.connection.execute(
-            "SELECT a.alert_id, "
-            "(SELECT COUNT(*) FROM thesis_impact_alert_events c "
-            " WHERE c.alert_id=a.alert_id AND c.state='claimed') AS attempt_count "
-            "FROM thesis_impact_alerts a JOIN thesis_impact_alert_events e "
-            "ON e.event_seq=(SELECT MAX(x.event_seq) FROM thesis_impact_alert_events x "
-            "WHERE x.alert_id=a.alert_id) "
-            "WHERE (SELECT COUNT(*) FROM thesis_impact_alert_events c "
-            " WHERE c.alert_id=a.alert_id AND c.state='claimed')<? AND ("
-            "e.state='pending' OR e.state='failed' OR "
-            "(e.state='claimed' AND e.claim_expires_at IS NOT NULL "
-            " AND e.claim_expires_at<=?)) "
-            "ORDER BY a.created_at LIMIT ?",
-            (ALERT_MAX_DELIVERY_ATTEMPTS, now, limit),
-        ).fetchall()
         expires = (
             datetime.fromisoformat(now) + timedelta(seconds=claim_ttl_seconds)
         ).isoformat(timespec="microseconds")
         claims: list[dict[str, Any]] = []
         with self._transaction() as cur:
+            rows = cur.execute(
+                "SELECT a.alert_id, "
+                "(SELECT COUNT(*) FROM thesis_impact_alert_events c "
+                " WHERE c.alert_id=a.alert_id AND c.state='claimed') AS attempt_count "
+                "FROM thesis_impact_alerts a JOIN thesis_impact_alert_events e "
+                "ON e.event_seq=(SELECT MAX(x.event_seq) FROM thesis_impact_alert_events x "
+                "WHERE x.alert_id=a.alert_id) "
+                "WHERE (SELECT COUNT(*) FROM thesis_impact_alert_events c "
+                " WHERE c.alert_id=a.alert_id AND c.state='claimed')<? AND ("
+                "e.state='pending' OR e.state='failed' OR "
+                "(e.state='claimed' AND e.claim_expires_at IS NOT NULL "
+                " AND e.claim_expires_at<=?)) "
+                "ORDER BY a.created_at LIMIT ?",
+                (ALERT_MAX_DELIVERY_ATTEMPTS, now, limit),
+            ).fetchall()
             for row in rows:
                 alert_id = row["alert_id"]
                 attempt_number = int(row["attempt_count"]) + 1
@@ -584,6 +645,15 @@ class ThesisImpactBudgetStore:
                 "SELECT 1 FROM thesis_impact_alerts WHERE alert_id=?", (alert_id,)
             ).fetchone() is None:
                 raise ThesisImpactBudgetConflict("delivery references no alert")
+            latest = cur.execute(
+                "SELECT state FROM thesis_impact_alert_events WHERE alert_id=? "
+                "ORDER BY event_seq DESC LIMIT 1",
+                (alert_id,),
+            ).fetchone()
+            if latest is None or latest["state"] != "claimed":
+                raise ThesisImpactBudgetConflict(
+                    "delivery requires the alert's current claimed event"
+                )
             prior_events = int(cur.execute(
                 "SELECT COUNT(*) FROM thesis_impact_alert_events "
                 "WHERE alert_id=? AND state IN ('delivered','failed')",

@@ -1,0 +1,53 @@
+{
+  "schema_version": "0.1",
+  "source_campaign_ref": "thesis-impact-verifier-canary:0bb1a943a565d652a763a5fb2c940f63",
+  "source_repo_commit": "5e3c93a96d6ef97e68559cf15a1e2ac1ff3382d9",
+  "profile_id": "profile:gemini-3-7-flash",
+  "profile_version_ref": "model-profile-version:broker-gemini-3-7-flash:1",
+  "thinking_level": "low",
+  "execution_tier": "provider-controlled-v1",
+  "rounds": [
+    {
+      "round": 1,
+      "run_ref": "thesis-impact-calibration-run:54dc887c65fbfbb7176e6c834baebb90",
+      "accepted_after_record_recomputation": true,
+      "cases": 30,
+      "accuracy": 1.0,
+      "false_positives": 0,
+      "high_severity_misses": 0,
+      "fresh_execution_failures": 0,
+      "accounted_cost_usd": "0.04224525"
+    },
+    {
+      "round": 2,
+      "run_ref": "thesis-impact-calibration-run:54dc887c65fbfbb7176e6c834baebb90",
+      "accepted_after_record_recomputation": true,
+      "cases": 30,
+      "accuracy": 1.0,
+      "false_positives": 0,
+      "high_severity_misses": 0,
+      "fresh_execution_failures": 0,
+      "accounted_cost_usd": "0.04284525"
+    },
+    {
+      "round": 3,
+      "run_ref": "thesis-impact-calibration-run:54dc887c65fbfbb7176e6c834baebb90",
+      "accepted_after_record_recomputation": true,
+      "cases": 30,
+      "accuracy": 1.0,
+      "false_positives": 0,
+      "high_severity_misses": 0,
+      "fresh_execution_failures": 0,
+      "accounted_cost_usd": "0.042354"
+    }
+  ],
+  "aggregate_accounted_cost_usd": "0.12744450",
+  "corrected_production_gate": {
+    "eligible": false,
+    "reasons": [
+      "round run identities are not unique"
+    ],
+    "rounds_evaluated": 3,
+    "rounds_accepted": 3
+  }
+}

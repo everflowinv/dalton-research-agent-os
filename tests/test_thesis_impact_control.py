@@ -731,7 +731,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
         router: ModelRouter,
         *,
         pinned_profile_id: str | None,
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str, str, str | None]:
         def profile(
             name: str,
             *,
@@ -818,6 +818,26 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
                 {"field": "profile_version_ref", "direction": "asc"},
             ],
         })
+        assessment_ref = "model-routing-policy-version:thesis-impact-assessment:1"
+        router.register_policy({
+            "schema_version": "0.1",
+            "policy_version_ref": assessment_ref,
+            "id": "model-routing-policy:thesis-impact-assessment",
+            "version": 1,
+            "created_at": "2026-08-22T01:00:00+00:00",
+            "prior_version_ref": None,
+            "filters": {
+                "allowed_profile_ids": ["profile:impact-a"],
+                "allowed_providers": [],
+                "allowed_families": [],
+                "allowed_adapter_refs": ["adapter:openclaw-model-broker:0.1"],
+                "required_modalities": ["text"],
+                "family_independence_capabilities": ["verify"],
+            },
+            "ordered_preferences": [
+                {"field": "profile_version_ref", "direction": "asc"},
+            ],
+        })
         verifier_ref = None
         if pinned_profile_id is not None:
             verifier_ref = "model-routing-policy-version:thesis-impact-verifier:1"
@@ -841,7 +861,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
                     {"field": "profile_version_ref", "direction": "asc"},
                 ],
             })
-        return shared_ref, verifier_ref
+        return shared_ref, assessment_ref, verifier_ref
 
     @staticmethod
     def _recorded_response(
@@ -916,7 +936,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             clock=lambda: fixed_now,
         )
         self.addCleanup(router.close)
-        shared_ref, verifier_ref = self._impact_profiles_and_policies(
+        shared_ref, assessment_ref, verifier_ref = self._impact_profiles_and_policies(
             router, pinned_profile_id="profile:impact-b"
         )
         broker = FakeBroker(
@@ -942,6 +962,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             impact=self.impact,
             observability=self.harness.observability,
             routing_policy_ref=shared_ref,
+            assessment_routing_policy_ref=assessment_ref,
             verifier_routing_policy_ref=verifier_ref,
             credential_slot_refs=(
                 "credential-slot:openai:impact-a",
@@ -958,7 +979,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
         self.assertEqual(completed["status"], "eligible")
         decisions = router.list_decisions()
         self.assertEqual(len(decisions), 2)
-        self.assertEqual(decisions[0]["policy_version_ref"], shared_ref)
+        self.assertEqual(decisions[0]["policy_version_ref"], assessment_ref)
         self.assertEqual(
             decisions[0]["selected_endpoint"]["family"], "impact-family-a"
         )
@@ -1011,7 +1032,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             clock=lambda: fixed_now,
         )
         self.addCleanup(router.close)
-        shared_ref, verifier_ref = self._impact_profiles_and_policies(
+        shared_ref, assessment_ref, verifier_ref = self._impact_profiles_and_policies(
             router, pinned_profile_id="profile:impact-a"
         )
         broker = FakeBroker(
@@ -1037,6 +1058,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             impact=self.impact,
             observability=self.harness.observability,
             routing_policy_ref=shared_ref,
+            assessment_routing_policy_ref=assessment_ref,
             verifier_routing_policy_ref=verifier_ref,
             credential_slot_refs=(
                 "credential-slot:openai:impact-a",
@@ -1077,6 +1099,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             impact=self.impact,
             observability=self.harness.observability,
             routing_policy_ref=shared_ref,
+            assessment_routing_policy_ref=assessment_ref,
             verifier_routing_policy_ref=shared_ref,
             credential_slot_refs=(
                 "credential-slot:openai:impact-a",
@@ -1088,8 +1111,29 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
         with self.assertRaisesRegex(
             ThesisImpactModelWorkerRejected, "not pinned to exactly one profile"
         ):
-            unpinned.run_once(failed["assessment"]["verifier_work_order"])
+            unpinned._phase_policy_ref("verification")
         self.assertEqual(len(broker.requests), 1)
+
+        assessment_unpinned = ThesisImpactModelWorker(
+            scheduler=self.harness.scheduler(),
+            router=router,
+            adapter=adapter,
+            impact=self.impact,
+            observability=self.harness.observability,
+            routing_policy_ref=shared_ref,
+            assessment_routing_policy_ref=shared_ref,
+            credential_slot_refs=(
+                "credential-slot:openai:impact-a",
+                "credential-slot:anthropic:impact-b",
+            ),
+            token_counter=lambda _text: 800,
+            clock=lambda: fixed_now,
+        )
+        with self.assertRaisesRegex(
+            ThesisImpactModelWorkerRejected,
+            "assessment routing policy is not pinned to exactly one profile",
+        ):
+            assessment_unpinned._phase_policy_ref("assessment")
 
     def test_day_budget_gates_paid_calls_and_alerts(self) -> None:
         committed = self._seed_thesis()
@@ -1118,7 +1162,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             clock=lambda: fixed_now,
         )
         self.addCleanup(router.close)
-        shared_ref, _ = self._impact_profiles_and_policies(
+        shared_ref, assessment_ref, _ = self._impact_profiles_and_policies(
             router, pinned_profile_id=None
         )
         budget = ThesisImpactBudgetStore(
@@ -1152,6 +1196,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             impact=self.impact,
             observability=self.harness.observability,
             routing_policy_ref=shared_ref,
+            assessment_routing_policy_ref=assessment_ref,
             credential_slot_refs=(
                 "credential-slot:openai:impact-a",
                 "credential-slot:anthropic:impact-b",

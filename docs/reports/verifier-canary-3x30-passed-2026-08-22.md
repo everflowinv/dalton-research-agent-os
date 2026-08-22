@@ -1,5 +1,10 @@
 # 3×30 provider-controlled verifier canary 通过
 
+> **2026-08-22 独立复核更正：本报告的 `production_gate.eligible=true` 已撤销。**
+> 90 次调用和 3 轮 30/30 的质量数据均可从原始记录重算，但三轮 manifest 共用同一个 `run_ref`；旧 gate
+> 没有检查 run identity 唯一性，并且直接信任落盘 `score.json`。详情见
+> `verifier-canary-independent-audit-2026-08-22.md`。修正后的 runner 必须重新执行 3×30 后才能恢复生产资格。
+
 日期：2026-08-22
 状态：生产验收门通过（`production_gate.eligible=true`）；production verifier 解锁至"待 shadow 与单独 policy activation"，live route 仍未变化
 
@@ -28,7 +33,8 @@ Owner 授权（verifier = exact `google/gemini-3.7-flash`、thinking low、付�
    worst-case 口径设置 per-case cap（$0.30）后一次通过。
 
 另有两个由本轮促成的仓库改进：broker `REQUIRED_CONTROLS_UNAVAILABLE` 错误信息现在具名缺失项（capability
-version/transport/mode），非 ProtocolError 的 host 失败以裸 message 透传（截断 300 字符，不含 prompt/凭据）。
+version/transport/mode）。非 ProtocolError 的 host 裸 message 透传后来被独立复核撤销：host error 可以包含原始
+prompt，且当前 HEAD 的安全测试确实因此失败。
 
 ## 验证
 

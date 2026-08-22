@@ -7,10 +7,12 @@
   SEC 财务事实与 thesis-impact 开发候选均尚未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 - 当前开发候选新增 wrapper-owned verifier binding、semantic-only provider schema、phase-pinned verifier
-  policy、thinking-level 控制合同、3×30 canary campaign runner 与 per-day 预算/告警 authority；**2026-08-22
-  owner 授权后 3×30 provider-controlled canary 已在真实 broker 路径通过**（3 轮全 30/30、0 FP、0 high miss、90
-  条 record 全部绑定 controls/thinking、总花费 USD 0.127）。production verifier 剩余开闸步骤：shadow 运行、
-  production policy activation 与 gateway restart 单独批准、assessment producer pin
+  policy、thinking-level 控制合同、3×30 canary campaign runner、per-day 预算/告警 authority，以及只允许
+  `profile:gpt-5-6-sol` 的 assessment phase policy。2026-08-22 原始 3×30 数据确实是 90 次 fresh provider
+  execution，三轮均 30/30、0 FP、0 high miss，总花费 USD 0.127；但独立复核发现三轮共用同一个 `run_ref`，旧
+  gate 又直接信任落盘 score，因此撤销原 `production_gate.eligible=true`。runner 已改为 instance-bound
+  manifest、从 records 重算 score，并要求三轮 run/profile identity 闭合；production verifier 必须在新 runner
+  下重新完成 3×30，之后才可讨论 shadow、policy activation 和 gateway restart。
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
 反向改写历史结论。这里的“完成”只表示代码、测试和当前部署已经验收，不表示已达到多租户或
@@ -179,10 +181,10 @@ target binding，wrapper 后 90 条均绑定成功。Python 全量 616/616、bro
 `model-routing-policy-version:dalton-openclaw-verifier:1` 只允许 exact `profile:gemini-3-7-flash`，worker 的
 verification 相位可改在该 policy 下路由，且未 pin 到单一 profile 的 policy 会在 claim 前 fail closed；
 `thinking=low` 现在冻结进 verifier WorkOrder 与 calibration manifest，进入 broker `requiredControls`、
-request hash、invocation 幂等身份和 host proof 的 closed 合同（broker 升至 0.1.0-spike.5）。live routing、
-gateway 配置和 ThesisVersion mutation 都没有变化。剩余开闸条件全部在仓库外或需单独授权：host 侧 Gemini
-profile 的 providerControls/rate card/thinkingLevel 配置、OpenClaw host patch 透传与 safe restart、以及 owner
-授权后用真实 broker 路径完成至少 3×30 provider-controlled canary 与 shadow。phase-pin/thinking 批次的本机验证：Python 全量 621/621、broker
+request hash、invocation 幂等身份和 host proof 的 closed 合同（broker 升至 0.1.0-spike.5）。live routing 和
+ThesisVersion mutation 都没有变化。host 侧 provider controls、rate card、thinkingLevel、patch 与 restart 后来已
+打通；首次真实 3×30 的 90 次 fresh 调用与质量数据有效，但因三轮 run identity 重复而撤销 production gate。
+修正后的 runner 重新完成 3×30 与 shadow 仍需单独授权。phase-pin/thinking 批次的本机验证：Python 全量 621/621、broker
 22/22、显式 hermetic research replay canary、compileall、wheel/sdist build 与 `git diff --check` 全部通过；
 没有付费调用。报告见
 [verifier-phase-pin-and-thinking-controls-2026-08-22.md](reports/verifier-phase-pin-and-thinking-controls-2026-08-22.md)。
@@ -1011,9 +1013,9 @@ provider strict Schema、输入/输出/总 token、费用硬控制、raw ResultE
 仍有 high miss。仓库内的三项 production conformance 缺口已关闭两项：phase-pinned immutable verifier policy
 （`dalton-openclaw-verifier:1`，只允许 exact `profile:gemini-3-7-flash`，未 pin 的 policy fail closed）与
 thinking-level 控制合同（WorkOrder/manifest 冻结 `low`，进入 broker request hash、invocation 身份与 host
-proof；broker 0.1.0-spike.5）。剩余一项是 owner 授权的真实 broker 3×30 provider-controlled canary，其前置是
-host 侧 Gemini profile providerControls/rate card/thinkingLevel 配置与 OpenClaw host patch safe restart；完成前
-production verifier 仍为 0，live route 不变；不继续围绕 filing-count 元数据扩建
+proof；broker 0.1.0-spike.5）。host 配置和 patch 已经打通；首次 3×30 的 90 次 fresh 调用保留为质量证据，但
+旧 runner 复用了 run identity，production gate 已撤销。剩余一项是 owner 再次授权后用修正 runner 重跑 3×30；
+完成前 production verifier 仍为 0，live route 不变；不继续围绕 filing-count 元数据扩建
 authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
@@ -1130,6 +1132,8 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Phase-pinned verifier policy 与 thinking 控制合同：`docs/reports/verifier-phase-pin-and-thinking-controls-2026-08-22.md`
 - 3×30 verifier canary campaign runner：`docs/reports/verifier-canary-campaign-runner-2026-08-22.md`
 - 3×30 provider-controlled canary 通过：`docs/reports/verifier-canary-3x30-passed-2026-08-22.md`
+- 3×30 canary 独立复核与更正：`docs/reports/verifier-canary-independent-audit-2026-08-22.md`
+- GPT-5.6 Sol assessment producer phase pin：`docs/reports/assessment-producer-phase-pin-2026-08-22.md`
 - Thesis-impact per-day 预算硬顶与失败告警：`docs/reports/thesis-impact-day-budget-and-alerts-2026-08-22.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`

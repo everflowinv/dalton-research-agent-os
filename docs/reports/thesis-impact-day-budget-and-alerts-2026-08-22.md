@@ -1,5 +1,9 @@
 # Thesis-impact per-day 预算硬顶与失败告警（Gate 3 控制面）
 
+> 2026-08-22 独立复核补丁：原实现已修正真实时钟下重复调用误冲突、policy 版本切换重置当日累计、
+> settlement 超过 reservation、alert identity 比较不完整、claim 读取不在写事务内，以及文件权限未显式锁到
+> owner-only 的问题。专项测试现为 11/11；本报告下方 7/7 是首次提交时的历史结果。
+
 日期：2026-08-22
 状态：开发候选已实现并通过本机测试；未部署、未接 cron、未改变 live routing
 

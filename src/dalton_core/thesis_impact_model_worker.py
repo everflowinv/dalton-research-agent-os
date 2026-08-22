@@ -101,6 +101,7 @@ class ThesisImpactModelWorker:
         observability: ObservabilityStore,
         routing_policy_ref: str,
         credential_slot_refs: Sequence[str],
+        assessment_routing_policy_ref: str | None = None,
         verifier_routing_policy_ref: str | None = None,
         budget: ThesisImpactBudgetStore | None = None,
         budget_policy_version_id: str | None = None,
@@ -115,13 +116,16 @@ class ThesisImpactModelWorker:
             raise TypeError("worker accounting and impact must share one Core authority")
         if not isinstance(routing_policy_ref, str) or not routing_policy_ref:
             raise ValueError("routing_policy_ref must be a non-empty string")
-        if verifier_routing_policy_ref is not None and (
-            not isinstance(verifier_routing_policy_ref, str)
-            or not verifier_routing_policy_ref
+        for phase_name, phase_ref in (
+            ("assessment", assessment_routing_policy_ref),
+            ("verifier", verifier_routing_policy_ref),
         ):
-            raise ValueError(
-                "verifier_routing_policy_ref must be a non-empty string or None"
-            )
+            if phase_ref is not None and (
+                not isinstance(phase_ref, str) or not phase_ref
+            ):
+                raise ValueError(
+                    f"{phase_name}_routing_policy_ref must be a non-empty string or None"
+                )
         if (budget is None) != (budget_policy_version_id is None):
             raise ValueError(
                 "budget and budget_policy_version_id must be supplied together"
@@ -155,6 +159,7 @@ class ThesisImpactModelWorker:
         self.store = impact.store
         self.observability = observability
         self.routing_policy_ref = routing_policy_ref
+        self.assessment_routing_policy_ref = assessment_routing_policy_ref
         self.verifier_routing_policy_ref = verifier_routing_policy_ref
         self.budget = budget
         self.budget_policy_version_id = budget_policy_version_id
@@ -208,20 +213,25 @@ class ThesisImpactModelWorker:
         call.
         """
 
-        if phase != "verification" or self.verifier_routing_policy_ref is None:
+        pinned_ref = (
+            self.assessment_routing_policy_ref
+            if phase == "assessment"
+            else self.verifier_routing_policy_ref
+        )
+        if pinned_ref is None:
             return self.routing_policy_ref
         try:
-            policy = self.router.get_policy(self.verifier_routing_policy_ref)
+            policy = self.router.get_policy(pinned_ref)
         except RoutingPolicyNotFound as exc:
             raise ThesisImpactModelWorkerRejected(
-                "verifier routing policy is not registered in the router authority"
+                f"{phase} routing policy is not registered in the router authority"
             ) from exc
         allowed = policy.get("filters", {}).get("allowed_profile_ids")
         if not isinstance(allowed, list) or len(allowed) != 1:
             raise ThesisImpactModelWorkerRejected(
-                "verifier routing policy is not pinned to exactly one profile"
+                f"{phase} routing policy is not pinned to exactly one profile"
             )
-        return self.verifier_routing_policy_ref
+        return pinned_ref
 
     def _producer_family(self, work: WorkOrder, phase: str) -> str | None:
         if phase == "assessment":
@@ -687,7 +697,6 @@ class ThesisImpactModelWorker:
 
         work = self._work(work_order)
         phase, capability = self._phase(work)
-        phase_policy_ref = self._phase_policy_ref(phase)
         status = self.scheduler.status(work.id)
         if status["work_order_hash"] != content_hash(work.to_dict()):
             raise ThesisImpactModelWorkerConflict(
@@ -703,6 +712,7 @@ class ThesisImpactModelWorker:
                 "invocation_ref": formal["result_envelope"]["invocation_ref"],
                 "replayed": True,
             }
+        phase_policy_ref = self._phase_policy_ref(phase)
         lease = self.scheduler.claim(
             WORKER_REF,
             work_order_id=work.id,

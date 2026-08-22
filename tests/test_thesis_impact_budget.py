@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import sqlite3
+import stat
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dalton_core.thesis_impact_budget import (
@@ -73,10 +74,44 @@ class BudgetPolicyTests(unittest.TestCase):
             prior_version_id="budget-policy:day:1",
         )
         self.assertEqual(second["status"], "fresh")
+        with self.assertRaisesRegex(ThesisImpactBudgetConflict, "already advanced"):
+            authority.register_policy(
+                policy_version_id="budget-policy:day:2-sibling",
+                day_cap_micros=500_000,
+                prior_version_id="budget-policy:day:1",
+            )
         with self.assertRaises(ThesisImpactBudgetValidationError):
             authority.register_policy(
                 policy_version_id="budget-policy:day:3", day_cap_micros=0
             )
+
+    def test_duplicate_semantics_do_not_depend_on_retry_time(self) -> None:
+        current = [FIXED]
+        authority = ThesisImpactBudgetStore(clock=lambda: current[0])
+        self.addCleanup(authority.close)
+        first_policy = authority.register_policy(
+            policy_version_id="budget-policy:day:1", day_cap_micros=1_000_000
+        )
+        current[0] += timedelta(minutes=1)
+        duplicate_policy = authority.register_policy(
+            policy_version_id="budget-policy:day:1", day_cap_micros=1_000_000
+        )
+        self.assertEqual(duplicate_policy["status"], "duplicate")
+        self.assertEqual(duplicate_policy["created_at"], first_policy["created_at"])
+        first = admit(authority, work="work:a", reserved=100_000)
+        current[0] += timedelta(minutes=1)
+        duplicate = admit(authority, work="work:a", reserved=100_000)
+        self.assertEqual(duplicate["status"], "duplicate")
+        self.assertEqual(duplicate["created_at"], first["created_at"])
+        settled = authority.settle(first["admission_id"], actual_micros=50_000)
+        current[0] += timedelta(minutes=1)
+        duplicate_settlement = authority.settle(
+            first["admission_id"], actual_micros=50_000
+        )
+        self.assertEqual(duplicate_settlement["status"], "duplicate")
+        self.assertEqual(
+            duplicate_settlement["created_at"], settled["created_at"]
+        )
 
 
 class DayAdmissionTests(unittest.TestCase):
@@ -126,6 +161,50 @@ class DayAdmissionTests(unittest.TestCase):
             )["committed_micros"],
             1_000_000,
         )
+
+    def test_settlement_cannot_exceed_admitted_reservation(self) -> None:
+        opened = admit(self.authority, work="work:over-settle", reserved=10_000)
+        with self.assertRaisesRegex(ThesisImpactBudgetConflict, "reservation"):
+            self.authority.settle(opened["admission_id"], actual_micros=10_001)
+
+    def test_policy_advance_keeps_same_day_spend_and_closes_old_version(self) -> None:
+        first = admit(self.authority, work="work:v1", reserved=400_000)
+        self.authority.register_policy(
+            policy_version_id="budget-policy:day:2",
+            day_cap_micros=500_000,
+            prior_version_id="budget-policy:day:1",
+        )
+        summary = self.authority.day_summary(
+            policy_version_id="budget-policy:day:2", day="2026-08-22"
+        )
+        self.assertEqual(summary["committed_micros"], 400_000)
+        duplicate = admit(self.authority, work="work:v1", reserved=400_000)
+        self.assertEqual(duplicate["admission_id"], first["admission_id"])
+        with self.assertRaisesRegex(ThesisImpactBudgetConflict, "superseded"):
+            admit(self.authority, work="work:old-new", reserved=1)
+        admitted = admit(
+            self.authority,
+            work="work:v2",
+            reserved=100_000,
+            policy="budget-policy:day:2",
+        )
+        self.assertEqual(admitted["status"], "fresh")
+        with self.assertRaises(ThesisImpactDayBudgetExceeded):
+            admit(
+                self.authority,
+                work="work:v2-over",
+                reserved=1,
+                policy="budget-policy:day:2",
+            )
+
+    def test_file_backed_authority_is_owner_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "budget.sqlite"
+            authority = ThesisImpactBudgetStore(path, clock=lambda: FIXED)
+            try:
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+            finally:
+                authority.close()
 
     def test_over_cap_rejection_is_durable_and_final(self) -> None:
         admit(self.authority, work="work:a", reserved=400_000)
@@ -230,6 +309,15 @@ class AlertTests(unittest.TestCase):
                 severity="medium",
                 detail={},
             )
+        with self.assertRaises(ThesisImpactBudgetConflict):
+            self.authority.record_alert(
+                alert_id="thesis-impact-alert:abc",
+                kind="day_budget_exceeded",
+                severity="medium",
+                work_order_ref="work:a",
+                phase="verification",
+                detail={"day": "2026-08-22"},
+            )
         pending = self.authority.pending_alerts()
         self.assertEqual(len(pending), 1)
         self.assertEqual(pending[0]["kind"], "day_budget_exceeded")
@@ -275,6 +363,10 @@ class AlertTests(unittest.TestCase):
             )
         with self.assertRaises(ThesisImpactBudgetConflict):
             self.authority.record_alert_delivery("thesis-impact-alert:missing", state="delivered")
+        with self.assertRaisesRegex(ThesisImpactBudgetConflict, "claimed"):
+            self.authority.record_alert_delivery(
+                "thesis-impact-alert:def", state="failed", error_code="ENDPOINT_DOWN"
+            )
 
 
 if __name__ == "__main__":

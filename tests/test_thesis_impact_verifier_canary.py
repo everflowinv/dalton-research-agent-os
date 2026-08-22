@@ -5,13 +5,16 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from dalton_core.contracts import InvocationGranularity, ModelInvocation, ResultEnvelope
-from dalton_core.thesis_impact_calibration import load_frozen_calibration_corpus
+from dalton_core.thesis_impact_calibration import (
+    load_frozen_calibration_corpus,
+    score_verifier_outputs,
+)
 from dalton_core.thesis_impact_calibration_runner import (
     ThesisImpactCalibrationRunError,
     build_calibration_run_manifest,
@@ -83,6 +86,11 @@ def _record(
         metadata={
             "required_provider_controls": controlled,
             "provider_control_schema_hash": "b" * 64 if controlled else None,
+            "provider_control_mode": "provider-controlled-v1",
+            "broker_request_mode": "execute",
+            "broker_idempotency_status": "fresh",
+            "profile_version_ref": profile["profile_version_ref"],
+            "route_decision_ref": f"route-decision:canary-{case['id']}",
         },
     )
     parsed = (
@@ -142,6 +150,18 @@ class VerifierCanaryManifestTests(unittest.TestCase):
         self.assertEqual(manifest["rounds"], 3)
         parsed = validate_verifier_canary_manifest(manifest)
         self.assertEqual(parsed["id"], manifest["id"])
+        later = build_verifier_canary_manifest(
+            corpus=self.corpus,
+            profile_id="profile:gemini-3-7-flash",
+            repo_commit=COMMIT,
+            created_at=NOW + timedelta(microseconds=1),
+            thinking_level="low",
+            rounds=3,
+            per_case_cap_usd=Decimal("0.05"),
+            per_round_cap_usd=Decimal("1.60"),
+            campaign_cap_usd=Decimal("5.00"),
+        )
+        self.assertNotEqual(later["id"], manifest["id"])
         smoke = build_verifier_canary_manifest(
             corpus=self.corpus,
             profile_id="profile:gemini-3-7-flash",
@@ -233,11 +253,15 @@ class VerifierCanaryEvaluationTests(unittest.TestCase):
             "verifier_thinking_level": thinking,
         }
         return {
+            "recovery_mode": "fresh_execute",
             "result": {
                 "status": "succeeded",
                 "metadata": {
                     "required_provider_controls": True,
                     "provider_control_schema_hash": "b" * 64,
+                    "provider_control_mode": "provider-controlled-v1",
+                    "broker_request_mode": "execute",
+                    "broker_idempotency_status": "fresh",
                 },
             },
             "work_order": {"metadata": work_metadata},
@@ -262,6 +286,9 @@ class VerifierCanaryEvaluationTests(unittest.TestCase):
                 "metadata": {
                     "required_provider_controls": False,
                     "provider_control_schema_hash": None,
+                    "provider_control_mode": "provider-controlled-v1",
+                    "broker_request_mode": "execute",
+                    "broker_idempotency_status": "fresh",
                 },
             },
             "parse_error": "broker result failed",
@@ -299,13 +326,23 @@ class VerifierCanaryEvaluationTests(unittest.TestCase):
             created_at=NOW,
             thinking_level="low",
         )
-        accepted = {"accepted": True, "rejection_reasons": []}
+        accepted = [
+            {
+                "accepted": True,
+                "rejection_reasons": [],
+                "run_ref": f"run:{index}",
+                "profile_version_ref": "profile-version:gemini:1",
+            }
+            for index in range(1, 4)
+        ]
         rejected = {
             "accepted": False,
             "rejection_reasons": ["1 false positives"],
+            "run_ref": "run:3",
+            "profile_version_ref": "profile-version:gemini:1",
         }
         two_rounds = evaluate_campaign_gate(
-            [accepted, accepted],
+            accepted[:2],
             campaign={**campaign, "rounds": 2},
             spent_or_reserved=Decimal("0.20"),
         )
@@ -315,27 +352,39 @@ class VerifierCanaryEvaluationTests(unittest.TestCase):
             " ".join(two_rounds["reasons"]),
         )
         failed_round = evaluate_campaign_gate(
-            [accepted, accepted, rejected],
+            [accepted[0], accepted[1], rejected],
             campaign=campaign,
             spent_or_reserved=Decimal("0.20"),
         )
         self.assertFalse(failed_round["eligible"])
         self.assertIn("round 3 was not accepted", " ".join(failed_round["reasons"]))
         over_cap = evaluate_campaign_gate(
-            [accepted, accepted, accepted],
+            accepted,
             campaign=campaign,
             spent_or_reserved=Decimal("6.00"),
         )
         self.assertFalse(over_cap["eligible"])
         self.assertIn("exceeded the campaign cap", " ".join(over_cap["reasons"]))
         passed = evaluate_campaign_gate(
-            [accepted, accepted, accepted],
+            accepted,
             campaign=campaign,
             spent_or_reserved=Decimal("0.20"),
         )
         self.assertTrue(passed["eligible"])
         self.assertEqual(passed["reasons"], [])
         self.assertEqual(passed["rounds_accepted"], 3)
+        duplicate_runs = [
+            accepted[0],
+            {**accepted[1], "run_ref": "run:1"},
+            accepted[2],
+        ]
+        duplicate_gate = evaluate_campaign_gate(
+            duplicate_runs,
+            campaign=campaign,
+            spent_or_reserved=Decimal("0.20"),
+        )
+        self.assertFalse(duplicate_gate["eligible"])
+        self.assertIn("not unique", " ".join(duplicate_gate["reasons"]))
 
 
 class VerifierCanaryRoundDirTests(unittest.TestCase):
@@ -375,7 +424,13 @@ class VerifierCanaryRoundDirTests(unittest.TestCase):
             json.dumps(record) + "\n", encoding="utf-8"
         )
         (round_dir / "score.json").write_text(
-            json.dumps(_score(1)), encoding="utf-8"
+            json.dumps(
+                score_verifier_outputs(
+                    {record["case_ref"]: record["parsed_output"]},
+                    corpus=self.corpus,
+                )
+            ),
+            encoding="utf-8",
         )
 
     def test_round_dir_evaluation_binds_the_campaign_contract(self) -> None:
@@ -406,6 +461,15 @@ class VerifierCanaryRoundDirTests(unittest.TestCase):
         self.assertTrue(evaluation["accepted"])
         self.assertEqual(evaluation["status"], "complete")
         self.assertEqual(evaluation["accounted_cost_usd"], "0.001")
+        (matching / "score.json").write_text(
+            json.dumps(_score(1, false_positives=1)), encoding="utf-8"
+        )
+        tampered = _evaluate_round_dir(matching, campaign=campaign)
+        self.assertFalse(tampered["accepted"])
+        self.assertIn(
+            "differs from records recomputation",
+            " ".join(tampered["rejection_reasons"]),
+        )
 
         legacy = base / "round-legacy"
         self._write_round(legacy, thinking=None)
