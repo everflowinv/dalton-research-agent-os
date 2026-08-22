@@ -2,7 +2,7 @@
   "id": "dalton-openclaw-model-broker",
   "name": "Dalton OpenClaw Model Broker",
   "description": "Host-owned model completion bridge for an external Dalton runtime.",
-  "version": "0.1.0-spike.2",
+  "version": "0.1.0-spike.3",
   "activation": {
     "onStartup": true
   },
@@ -35,7 +35,34 @@
             "id": {"type": "string", "pattern": "^profile:[A-Za-z0-9._-]+$"},
             "model": {"type": "string", "pattern": "^[A-Za-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
             "maxTokens": {"type": "integer", "minimum": 1},
-            "timeoutMs": {"type": "integer", "minimum": 1}
+            "timeoutMs": {"type": "integer", "minimum": 1},
+            "providerControls": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["mode", "rateCard"],
+              "properties": {
+                "mode": {"const": "openai-responses-input-count-v1"},
+                "rateCard": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "model", "serviceTier", "inputUsdPerMillion",
+                    "cachedInputUsdPerMillion", "cacheWriteUsdPerMillion",
+                    "outputUsdPerMillion", "verifiedAt", "expiresAt"
+                  ],
+                  "properties": {
+                    "model": {"type": "string", "pattern": "^[A-Za-z0-9._-]+/[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+                    "serviceTier": {"const": "default"},
+                    "inputUsdPerMillion": {"type": "string", "pattern": "^(?:0\\.(?:0*[1-9][0-9]*)|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "cachedInputUsdPerMillion": {"type": "string", "pattern": "^(?:0\\.(?:0*[1-9][0-9]*)|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "cacheWriteUsdPerMillion": {"type": "string", "pattern": "^(?:0\\.(?:0*[1-9][0-9]*)|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "outputUsdPerMillion": {"type": "string", "pattern": "^(?:0\\.(?:0*[1-9][0-9]*)|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+                    "verifiedAt": {"type": "string", "format": "date-time"},
+                    "expiresAt": {"type": "string", "format": "date-time"}
+                  }
+                }
+              }
+            }
           }
         }
       },

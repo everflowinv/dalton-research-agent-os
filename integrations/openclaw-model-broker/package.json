@@ -1,6 +1,6 @@
 {
   "name": "@dalton/openclaw-model-broker",
-  "version": "0.1.0-spike.2",
+  "version": "0.1.0-spike.3",
   "private": true,
   "type": "module",
   "engines": {

@@ -1,5 +1,9 @@
 # Verifier provider controls boundary — 2026-08-21
 
+> 2026-08-22 更新：原生 OpenAI Responses 路径的宿主控制和 broker 证明已完成开发；当前 ChatGPT Responses、
+> DeepSeek completions 和 Claude CLI 路由仍保持 fail closed。见
+> [openai-responses-provider-controls-2026-08-22.md](openai-responses-provider-controls-2026-08-22.md)。
+
 ## 结论
 
 独立 thesis-impact verifier 现在必须声明并绑定五项 provider 控制：JSON Schema、输入 token 上限、输出 token 上限、总 token 上限和费用上限。OpenClaw 2026.7.1 的公开 `api.runtime.llm.complete` 不能执行完整合同，因此 broker 会在调用模型前返回 `REQUIRED_CONTROLS_UNAVAILABLE`。这条路径不会再把 prompt-only JSON 和事后 telemetry 检查当作硬控制。

@@ -20,6 +20,31 @@ function config(overrides = {}) {
   };
 }
 
+function providerControlProfile() {
+  return {
+    mode: "openai-responses-input-count-v1",
+    rateCard: {
+      model: "openai/gpt-5.6",
+      serviceTier: "default",
+      inputUsdPerMillion: "1.00",
+      cachedInputUsdPerMillion: "0.50",
+      cacheWriteUsdPerMillion: "1.50",
+      outputUsdPerMillion: "2.00",
+      verifiedAt: "2026-08-01T00:00:00Z",
+      expiresAt: "2099-09-01T00:00:00Z",
+    },
+  };
+}
+
+function controlledConfig(overrides = {}) {
+  const base = config();
+  return {
+    ...base,
+    profiles: [{ ...base.profiles[0], providerControls: providerControlProfile() }],
+    ...overrides,
+  };
+}
+
 function request(overrides = {}) {
   return {
     schemaVersion: "0.1",
@@ -55,8 +80,22 @@ function requiredControls(overrides = {}) {
   };
 }
 
-function fakeRuntime(complete) {
-  return { version: "2026.7.1", llm: { complete } };
+function fakeRuntime(complete, { controlled = false } = {}) {
+  return {
+    version: "2026.7.1",
+    llm: {
+      ...(controlled ? {
+        capabilities: {
+          providerControls: {
+            version: "0.1",
+            modes: ["openai-responses-input-count-v1"],
+            transport: "openai/openai-responses",
+          },
+        },
+      } : {}),
+      complete,
+    },
+  };
 }
 
 function result(overrides = {}) {
@@ -72,6 +111,23 @@ function result(overrides = {}) {
       totalTokens: 17,
       costUsd: 0.004,
     },
+    ...overrides,
+  };
+}
+
+function providerControlProof(controls = requiredControls(), overrides = {}) {
+  return {
+    version: "0.1",
+    mode: "openai-responses-input-count-v1",
+    model: "openai/gpt-5.6",
+    schemaHash: controls.structuredOutput.schemaHash,
+    rateCardHash: contentHash(providerControlProfile().rateCard),
+    inputTokens: 14,
+    maxInputTokens: controls.maxInputTokens,
+    maxOutputTokens: controls.maxOutputTokens,
+    maxTotalTokens: controls.maxTotalTokens,
+    worstCaseCostUsd: "0.000533",
+    serviceTier: "default",
     ...overrides,
   };
 }
@@ -104,7 +160,7 @@ test("calls only host-owned completion with a fixed agent and exact allowed mode
   });
   assert.deepEqual(response.cost, { available: true, usd: 0.004 });
   assert.equal(response.runtimeVersion, "2026.7.1");
-  assert.equal(response.brokerVersion, "0.1.0-spike.2");
+  assert.equal(response.brokerVersion, "0.1.0-spike.3");
   verifyHash(response);
 
   assert.equal(calls.length, 1);
@@ -130,6 +186,43 @@ test("closed request rejects all credential and transport authority fields", () 
     () => validateRequest({ ...request(), replayOnly: "yes" }, 4096),
     ProtocolError,
   );
+});
+
+test("provider control profiles reject stale or mismatched rate cards", () => {
+  const base = providerControlProfile();
+  const cases = [
+    ["model", { ...base.rateCard, model: "openai/other-model" }],
+    ["zero-price", { ...base.rateCard, inputUsdPerMillion: "0" }],
+    [
+      "future",
+      {
+        ...base.rateCard,
+        verifiedAt: "2098-08-01T00:00:00Z",
+        expiresAt: "2099-09-01T00:00:00Z",
+      },
+    ],
+    [
+      "expired",
+      {
+        ...base.rateCard,
+        verifiedAt: "2020-08-01T00:00:00Z",
+        expiresAt: "2021-09-01T00:00:00Z",
+      },
+    ],
+  ];
+  for (const [name, rateCard] of cases) {
+    const invalid = controlledConfig({
+      profiles: [{
+        ...config().profiles[0],
+        providerControls: { ...base, rateCard },
+      }],
+    });
+    assert.throws(
+      () => new ModelBroker(fakeRuntime(async () => result()), invalid),
+      (error) => error instanceof ProtocolError && error.code === "INVALID_CONFIG",
+      name,
+    );
+  }
 });
 
 test("invocation idempotency is fresh, duplicate, or conflict", async () => {
@@ -243,6 +336,90 @@ test("required provider controls fail before any host completion", async () => {
     () => validateRequest({ ...controlled, requiredControls: badSchema }, 4096),
     (error) => error instanceof ProtocolError && error.code === "INVALID_REQUEST",
   );
+});
+
+test("controlled completion requires host capability and binds the trusted profile rate card", async () => {
+  const calls = [];
+  const controls = requiredControls();
+  const broker = new ModelBroker(fakeRuntime(async (params) => {
+    calls.push(params);
+    return result({ providerControlProof: providerControlProof(controls) });
+  }, { controlled: true }), controlledConfig());
+  const response = await broker.handle(request({ requiredControls: controls }));
+
+  assert.equal(response.ok, true);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].providerControls, {
+    ...controls,
+    mode: "openai-responses-input-count-v1",
+    rateCard: providerControlProfile().rateCard,
+  });
+  assert.equal("providerControlProof" in response, false);
+  verifyHash(response);
+
+  const noCapability = new ModelBroker(
+    fakeRuntime(async () => result()),
+    controlledConfig(),
+  );
+  const unavailable = await noCapability.handle(request({
+    invocationId: "invocation:no-capability",
+    requiredControls: controls,
+  }));
+  assert.equal(unavailable.error.code, "REQUIRED_CONTROLS_UNAVAILABLE");
+
+  const wrongTransport = new ModelBroker(
+    fakeRuntime(async () => result(), { controlled: true }),
+    controlledConfig(),
+  );
+  wrongTransport.runtime.llm.capabilities.providerControls.transport = "openai/openai-chatgpt-responses";
+  const incompatible = await wrongTransport.handle(request({
+    invocationId: "invocation:wrong-transport",
+    requiredControls: controls,
+  }));
+  assert.equal(incompatible.error.code, "REQUIRED_CONTROLS_UNAVAILABLE");
+});
+
+test("controlled completion rejects missing, mismatched, or breached host proof", async () => {
+  const controls = requiredControls();
+  const cases = [
+    ["missing", result(), "INVALID_HOST_RESULT"],
+    [
+      "schema",
+      result({ providerControlProof: providerControlProof(controls, { schemaHash: "0".repeat(64) }) }),
+      "INVALID_HOST_RESULT",
+    ],
+    [
+      "usage-proof",
+      result({ providerControlProof: providerControlProof(controls, { inputTokens: 13 }) }),
+      "INVALID_HOST_RESULT",
+    ],
+    [
+      "usage",
+      result({
+        providerControlProof: providerControlProof(controls),
+        usage: {
+          inputTokens: 12,
+          cacheReadTokens: 2,
+          outputTokens: 257,
+          totalTokens: 271,
+          costUsd: 0.004,
+        },
+      }),
+      "PROVIDER_CONTROL_BREACH",
+    ],
+  ];
+  for (const [name, hostResult, code] of cases) {
+    const broker = new ModelBroker(
+      fakeRuntime(async () => hostResult, { controlled: true }),
+      controlledConfig(),
+    );
+    const response = await broker.handle(request({
+      invocationId: `invocation:bad-proof-${name}`,
+      requiredControls: controls,
+    }));
+    assert.equal(response.ok, false, name);
+    assert.equal(response.error.code, code, name);
+  }
 });
 
 test("timeout aborts the host request and output/attribution mismatches fail closed", async () => {

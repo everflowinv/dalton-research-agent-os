@@ -958,12 +958,16 @@ company-facts filing window 和 latest-accession-bound concept 选择，但结�
 Claim → driver/thesis impact authority，以及 ResearchPlan closure → bounded assessment/verifier WorkOrder 接线。
 两个 WorkOrder 现已接入 ModelRouter/OpenClaw model worker，并以无外部调用 recorded broker 验证 contract retry、
 usage/cost 入账、model-family independence、lease-expiry crash recovery 和 replay。Gate 0/1 breadth proof 与
-Gate 2 真实模型 canary 和 verifier 候选校准均已完成；当前阻塞是可用的独立 verifier model/broker 边界，而不是
+Gate 2 真实模型 canary 和 verifier 候选校准均已完成；当前阻塞是可用的独立 verifier model/credential，而不是
 控制面缺口。DeepSeek 的 12/12 质量分数未过门，Claude Fable 首条即超过 admission budget 和严格输出合同。
-独立 verifier 现已携带 hash-bound JSON Schema 和输入/输出/总 token、费用硬控制合同；OpenClaw 2026.7.1
-不能执行完整合同，broker 0.1.0-spike.2 会在 host completion 前返回 `REQUIRED_CONTROLS_UNAVAILABLE`，不再
-静默降级到 prompt-only JSON 或事后预算检查。下一步先补齐宿主 provider-side 控制并做 transport 级证明，
-再接新的非 OpenAI family 候选；不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
+独立 verifier 现已携带 hash-bound JSON Schema 和输入/输出/总 token、费用硬控制合同。OpenClaw 2026.7.1
+宿主补丁与 broker 0.1.0-spike.3 已为原生 `openai/openai-responses` 路径实现 input count、strict Schema、
+最坏费用预留和证明校验；fake transport 证明输入或费用超限时 model call 为 0。不兼容 transport 会在 provider
+调用前拒绝。当前 `openai/gpt-5.6-*` 实际使用 ChatGPT Responses，DeepSeek 和 Claude 也不兼容，所有现有
+profile 均未启用 provider controls，因此 live verifier 仍返回 `REQUIRED_CONTROLS_UNAVAILABLE`。下一步要么把
+producer 切到非 OpenAI family，并用原生 OpenAI verifier；要么为独立的非 OpenAI provider 建立同等级 preflight
+controls。满足 family independence、凭据和当前 rate card 三项后，才能运行一条付费 canary；不继续围绕
+filing-count 元数据扩建 authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。
@@ -1073,6 +1077,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Gate 2 真实 thesis-impact canary：`docs/reports/gate2-real-thesis-impact-canary-2026-08-21.md`
 - Thesis-impact verifier 校准基础：`docs/reports/thesis-impact-verifier-calibration-foundation-2026-08-21.md`
 - Thesis-impact verifier 真实校准：`docs/reports/thesis-impact-verifier-live-calibration-2026-08-21.md`
+- OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`

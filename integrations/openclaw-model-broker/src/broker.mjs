@@ -39,6 +39,74 @@ function exactObject(value, allowed, required, name) {
   return value;
 }
 
+function decimalString(value, name) {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value) || Number(value) <= 0) {
+    throw new ProtocolError("INVALID_CONFIG", `${name} must be a positive decimal string`);
+  }
+  return value;
+}
+
+function timestamp(value, name) {
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
+    throw new ProtocolError("INVALID_CONFIG", `${name} must be an ISO timestamp`);
+  }
+  return value;
+}
+
+function validateProviderControlProfile(value, model) {
+  if (value === undefined) return undefined;
+  const profile = exactObject(
+    value,
+    new Set(["mode", "rateCard"]),
+    new Set(["mode", "rateCard"]),
+    "profile.providerControls",
+  );
+  if (profile.mode !== "openai-responses-input-count-v1") {
+    throw new ProtocolError("INVALID_CONFIG", "profile.providerControls mode is unsupported");
+  }
+  if (!model.startsWith("openai/")) {
+    throw new ProtocolError("INVALID_CONFIG", "profile.providerControls require an openai model route");
+  }
+  const rateCard = exactObject(
+    profile.rateCard,
+    new Set([
+      "model", "serviceTier", "inputUsdPerMillion", "cachedInputUsdPerMillion",
+      "cacheWriteUsdPerMillion", "outputUsdPerMillion", "verifiedAt", "expiresAt",
+    ]),
+    new Set([
+      "model", "serviceTier", "inputUsdPerMillion", "cachedInputUsdPerMillion",
+      "cacheWriteUsdPerMillion", "outputUsdPerMillion", "verifiedAt", "expiresAt",
+    ]),
+    "profile.providerControls.rateCard",
+  );
+  if (rateCard.model !== model || rateCard.serviceTier !== "default") {
+    throw new ProtocolError("INVALID_CONFIG", "provider control rate card route is invalid");
+  }
+  const verifiedAt = timestamp(rateCard.verifiedAt, "rateCard.verifiedAt");
+  const expiresAt = timestamp(rateCard.expiresAt, "rateCard.expiresAt");
+  const now = Date.now();
+  if (
+    Date.parse(verifiedAt) > now
+    || Date.parse(expiresAt) <= now
+    || Date.parse(expiresAt) <= Date.parse(verifiedAt)
+  ) {
+    throw new ProtocolError("INVALID_CONFIG", "provider control rate card is not currently valid");
+  }
+  return Object.freeze({
+    mode: profile.mode,
+    rateCard: Object.freeze({
+      model: rateCard.model,
+      serviceTier: rateCard.serviceTier,
+      inputUsdPerMillion: decimalString(rateCard.inputUsdPerMillion, "rateCard.inputUsdPerMillion"),
+      cachedInputUsdPerMillion: decimalString(rateCard.cachedInputUsdPerMillion, "rateCard.cachedInputUsdPerMillion"),
+      cacheWriteUsdPerMillion: decimalString(rateCard.cacheWriteUsdPerMillion, "rateCard.cacheWriteUsdPerMillion"),
+      outputUsdPerMillion: decimalString(rateCard.outputUsdPerMillion, "rateCard.outputUsdPerMillion"),
+      verifiedAt,
+      expiresAt,
+    }),
+  });
+}
+
 function validateConfig(input) {
   const allowed = new Set([
     "dedicatedAgentId",
@@ -72,7 +140,7 @@ function validateConfig(input) {
   for (const raw of config.profiles) {
     const profile = exactObject(
       raw,
-      new Set(["id", "model", "maxTokens", "timeoutMs"]),
+      new Set(["id", "model", "maxTokens", "timeoutMs", "providerControls"]),
       new Set(["id", "model", "maxTokens", "timeoutMs"]),
       "profile",
     );
@@ -88,6 +156,7 @@ function validateConfig(input) {
       model: profile.model,
       maxTokens: integer(profile.maxTokens, "profile.maxTokens", undefined, 1, 1_000_000),
       timeoutMs: integer(profile.timeoutMs, "profile.timeoutMs", undefined, 1, 600_000),
+      providerControls: validateProviderControlProfile(profile.providerControls, profile.model),
     }));
   }
   return Object.freeze({
@@ -207,14 +276,29 @@ export class ModelBroker {
     if (request.maxTokens > profile.maxTokens || request.timeoutMs > profile.timeoutMs) {
       return this.#failure(request, requestHash, "fresh", "PROFILE_LIMIT_EXCEEDED", "request exceeds profile limits");
     }
+    let providerControls;
     if (request.requiredControls) {
-      return this.#failure(
-        request,
-        requestHash,
-        "fresh",
-        "REQUIRED_CONTROLS_UNAVAILABLE",
-        "host runtime cannot enforce required structured output, input/total token, and cost controls",
-      );
+      const capability = this.runtime.llm.capabilities?.providerControls;
+      if (
+        !profile.providerControls
+        || capability?.version !== "0.1"
+        || capability?.transport !== "openai/openai-responses"
+        || !Array.isArray(capability.modes)
+        || !capability.modes.includes(profile.providerControls.mode)
+      ) {
+        return this.#failure(
+          request,
+          requestHash,
+          "fresh",
+          "REQUIRED_CONTROLS_UNAVAILABLE",
+          "host runtime or selected profile cannot enforce the required provider controls",
+        );
+      }
+      providerControls = Object.freeze({
+        ...request.requiredControls,
+        mode: profile.providerControls.mode,
+        rateCard: profile.providerControls.rateCard,
+      });
     }
     this.active += 1;
     const controller = new AbortController();
@@ -227,6 +311,7 @@ export class ModelBroker {
         maxTokens: request.maxTokens,
         signal: controller.signal,
         agentId: this.config.dedicatedAgentId,
+        ...(providerControls ? { providerControls } : {}),
       }));
       completion.catch(() => {});
       const timeout = new Promise((_, reject) => {
@@ -262,6 +347,7 @@ export class ModelBroker {
     if (canonicalActualModel(result.provider, result.model) !== request.model || result.agentId !== this.config.dedicatedAgentId) {
       throw new ProtocolError("HOST_ATTRIBUTION_MISMATCH", "host attribution differs from the requested route");
     }
+    if (request.requiredControls) this.#validateProviderControlProof(request, result.providerControlProof);
     const usage = result.usage ?? {};
     const normalizedUsage = {
       inputTokens: nullableUsageNumber(usage.inputTokens, "usage.inputTokens"),
@@ -271,6 +357,34 @@ export class ModelBroker {
       totalTokens: nullableUsageNumber(usage.totalTokens, "usage.totalTokens"),
     };
     const costUsd = nullableUsageNumber(usage.costUsd, "usage.costUsd");
+    if (request.requiredControls) {
+      const controls = request.requiredControls;
+      if (
+        normalizedUsage.inputTokens === null
+        || normalizedUsage.outputTokens === null
+        || normalizedUsage.totalTokens === null
+        || costUsd === null
+      ) {
+        throw new ProtocolError("INVALID_HOST_RESULT", "controlled completion lacks provider usage or cost telemetry");
+      }
+      const providerInputTokens = normalizedUsage.inputTokens
+        + (normalizedUsage.cacheReadTokens ?? 0)
+        + (normalizedUsage.cacheWriteTokens ?? 0);
+      if (
+        providerInputTokens !== result.providerControlProof.inputTokens
+        || normalizedUsage.totalTokens !== providerInputTokens + normalizedUsage.outputTokens
+      ) {
+        throw new ProtocolError("INVALID_HOST_RESULT", "controlled completion usage differs from its provider admission proof");
+      }
+      if (
+        providerInputTokens > controls.maxInputTokens
+        || normalizedUsage.outputTokens > controls.maxOutputTokens
+        || normalizedUsage.totalTokens > controls.maxTotalTokens
+        || costUsd > controls.maxCostUsd
+      ) {
+        throw new ProtocolError("PROVIDER_CONTROL_BREACH", "controlled completion exceeded its admitted provider limits");
+      }
+    }
     return sealResponse({
       schemaVersion: PROTOCOL_VERSION,
       brokerVersion: BROKER_VERSION,
@@ -290,6 +404,41 @@ export class ModelBroker {
       cost: { available: costUsd !== null, usd: costUsd },
       error: null,
     });
+  }
+
+  #validateProviderControlProof(request, proof) {
+    const expectedKeys = new Set([
+      "version", "mode", "model", "schemaHash", "rateCardHash", "inputTokens",
+      "maxInputTokens", "maxOutputTokens", "maxTotalTokens", "worstCaseCostUsd", "serviceTier",
+    ]);
+    if (!proof || typeof proof !== "object" || Array.isArray(proof)) {
+      throw new ProtocolError("INVALID_HOST_RESULT", "controlled completion lacks provider control proof");
+    }
+    if (Object.keys(proof).length !== expectedKeys.size || Object.keys(proof).some((key) => !expectedKeys.has(key))) {
+      throw new ProtocolError("INVALID_HOST_RESULT", "provider control proof has an invalid shape");
+    }
+    const profile = this.config.profiles.get(request.profileId);
+    const controls = request.requiredControls;
+    if (
+      proof.version !== "0.1"
+      || proof.mode !== profile.providerControls.mode
+      || proof.model !== request.model
+      || proof.schemaHash !== controls.structuredOutput.schemaHash
+      || proof.rateCardHash !== contentHash(profile.providerControls.rateCard)
+      || proof.serviceTier !== "default"
+      || proof.maxInputTokens !== controls.maxInputTokens
+      || proof.maxOutputTokens !== controls.maxOutputTokens
+      || proof.maxTotalTokens !== controls.maxTotalTokens
+      || !Number.isSafeInteger(proof.inputTokens)
+      || proof.inputTokens < 0
+      || proof.inputTokens > controls.maxInputTokens
+      || proof.inputTokens + controls.maxOutputTokens > controls.maxTotalTokens
+      || typeof proof.worstCaseCostUsd !== "string"
+      || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/.test(proof.worstCaseCostUsd)
+      || Number(proof.worstCaseCostUsd) > controls.maxCostUsd
+    ) {
+      throw new ProtocolError("INVALID_HOST_RESULT", "provider control proof does not match the admitted request");
+    }
   }
 
   #failure(request, requestHash, idempotencyStatus, code, message) {
