@@ -1,0 +1,260 @@
+{
+  "schema_version": "0.1",
+  "generated_at": "2026-08-22T07:10:33Z",
+  "repo_commit": "7ad4b03e1ad777b642efe8eb6e39d71392940be5",
+  "repo_dirty": false,
+  "status": "calibration_complete_production_locked",
+  "execution_tier": "calibration-posthoc-v1",
+  "corpus": {
+    "ref": "thesis-impact-verifier-calibration:0.1",
+    "hash": "c5f6928860f043fb4f3a01962dc68d7e53fd8c93b3291fafbc85e96aabb41797",
+    "cases": 12,
+    "expected_passes": 5,
+    "expected_rejects": 7,
+    "minimum_cases_for_automation": 30
+  },
+  "catalog": {
+    "profiles": 23,
+    "smoke_eligible": 20,
+    "fully_scored": 20,
+    "not_scored": [
+      {
+        "profile_id": "profile:claude-sonnet-5",
+        "reason": "provider input-token telemetry exceeded the 10000-token calibration WorkOrder budget"
+      },
+      {
+        "profile_id": "profile:gemini-3-7-flash",
+        "reason": "two smoke attempts returned INVALID_HOST_RESULT with no valid text"
+      },
+      {
+        "profile_id": "profile:gemini-flash-latest",
+        "reason": "two smoke attempts returned INVALID_HOST_RESULT with no valid text"
+      }
+    ]
+  },
+  "paid_runs": {
+    "primary_matrix": {
+      "matrix_ref": "thesis-impact-calibration-matrix:5bf746d86fe395e1f7d9e924d67a56b1",
+      "summary_sha256": "d1fbf6dec5eac4127aef51d262a5301d1a0ee4a35f925cf8119d328e79a6a363",
+      "profiles": 20,
+      "complete_profiles": 16,
+      "failed_profiles": 4,
+      "succeeded_calls": 203,
+      "valid_outputs": 198,
+      "accounted_cost_usd": "1.109683119",
+      "unpriced_reserve_usd": "0.000000"
+    },
+    "higher_budget_retry": {
+      "matrix_ref": "thesis-impact-calibration-matrix:5b809d6de471bc001de0aa057b9a7dde",
+      "summary_sha256": "9687bbc95d2f1e2b597681a11838dd09634f8ceedf159d0f1b72b9823bc40cc5",
+      "profiles": 4,
+      "complete_profiles": 4,
+      "failed_profiles": 0,
+      "succeeded_calls": 48,
+      "valid_outputs": 46,
+      "accounted_cost_usd": "1.62512265",
+      "unpriced_reserve_usd": "0.000000"
+    },
+    "full_corpus_accounted_cost_usd": "2.734805769",
+    "campaign_accounted_cost_including_smoke_usd": "3.180277816",
+    "final_scored_calls": 240,
+    "final_schema_valid_outputs": 233
+  },
+  "results": [
+    {
+      "profile_id": "profile:gpt-5-6-terra",
+      "accuracy": 1.0,
+      "detection_rate": 1.0,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 0,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.028664"
+    },
+    {
+      "profile_id": "profile:claude-opus-5",
+      "accuracy": 1.0,
+      "detection_rate": 1.0,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 0,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.587025"
+    },
+    {
+      "profile_id": "profile:gemini-3-1-pro-preview",
+      "accuracy": 1.0,
+      "detection_rate": 1.0,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 0,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.083244"
+    },
+    {
+      "profile_id": "profile:qwen3-8-max",
+      "accuracy": 1.0,
+      "detection_rate": 1.0,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 0,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.02296635"
+    },
+    {
+      "profile_id": "profile:grok-4-6",
+      "accuracy": 0.9166666666666666,
+      "detection_rate": 1.0,
+      "false_positive_rate": 0.2,
+      "high_severity_misses": 0,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.225386"
+    },
+    {
+      "profile_id": "profile:grok-4-3",
+      "accuracy": 0.9166666666666666,
+      "detection_rate": 0.8571428571428571,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 0,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.03383045"
+    },
+    {
+      "profile_id": "profile:grok-4-20-beta-reasoning",
+      "accuracy": 0.9166666666666666,
+      "detection_rate": 0.8571428571428571,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 0,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.08002045"
+    },
+    {
+      "profile_id": "profile:deepseek-v4-flash",
+      "accuracy": 0.8333333333333334,
+      "detection_rate": 0.8571428571428571,
+      "false_positive_rate": 0.2,
+      "high_severity_misses": 0,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.001581200"
+    },
+    {
+      "profile_id": "profile:gpt-5-6-luna",
+      "accuracy": 0.8333333333333334,
+      "detection_rate": 0.7142857142857143,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 1,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.0032444"
+    },
+    {
+      "profile_id": "profile:claude-fable-5",
+      "accuracy": 0.8333333333333334,
+      "detection_rate": 0.8571428571428571,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 1,
+      "schema_valid_outputs": 10,
+      "accounted_cost_usd": "1.22300"
+    },
+    {
+      "profile_id": "profile:gemini-3-5-flash-lite",
+      "accuracy": 0.8333333333333334,
+      "detection_rate": 0.7142857142857143,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 1,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.0067913"
+    },
+    {
+      "profile_id": "profile:grok-build-0-1",
+      "accuracy": 0.8333333333333334,
+      "detection_rate": 0.8571428571428571,
+      "false_positive_rate": 0.2,
+      "high_severity_misses": 1,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.0967162"
+    },
+    {
+      "profile_id": "profile:grok-4-20-beta-non-reasoning",
+      "accuracy": 0.8333333333333334,
+      "detection_rate": 0.7142857142857143,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 1,
+      "schema_valid_outputs": 10,
+      "accounted_cost_usd": "0.01285585"
+    },
+    {
+      "profile_id": "profile:qwen-deepseek-v4-flash-0731",
+      "accuracy": 0.75,
+      "detection_rate": 0.7142857142857143,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 1,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.00145558"
+    },
+    {
+      "profile_id": "profile:glm-5-2",
+      "accuracy": 0.75,
+      "detection_rate": 0.7142857142857143,
+      "false_positive_rate": 0.2,
+      "high_severity_misses": 0,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.013852794"
+    },
+    {
+      "profile_id": "profile:gpt-5-5",
+      "accuracy": 0.75,
+      "detection_rate": 0.5714285714285714,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 1,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.082190"
+    },
+    {
+      "profile_id": "profile:gpt-5-6-sol",
+      "accuracy": 0.6666666666666666,
+      "detection_rate": 0.42857142857142855,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 2,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.079640"
+    },
+    {
+      "profile_id": "profile:qwen-deepseek-v4-pro",
+      "accuracy": 0.6666666666666666,
+      "detection_rate": 0.7142857142857143,
+      "false_positive_rate": 0.4,
+      "high_severity_misses": 0,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0.004552275"
+    },
+    {
+      "profile_id": "profile:openrouter-ox-alpha",
+      "accuracy": 0.6666666666666666,
+      "detection_rate": 0.42857142857142855,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 2,
+      "schema_valid_outputs": 12,
+      "accounted_cost_usd": "0"
+    },
+    {
+      "profile_id": "profile:deepseek-v4-pro",
+      "accuracy": 0.5833333333333334,
+      "detection_rate": 0.42857142857142855,
+      "false_positive_rate": 0.0,
+      "high_severity_misses": 3,
+      "schema_valid_outputs": 9,
+      "accounted_cost_usd": "0.00747142"
+    }
+  ],
+  "shortlist": {
+    "primary_candidate": "profile:qwen3-8-max",
+    "independent_candidate": "profile:gpt-5-6-terra",
+    "additional_perfect_candidates": [
+      "profile:gemini-3-1-pro-preview",
+      "profile:claude-opus-5"
+    ],
+    "selection_basis": "12/12 accuracy, 100% reject detection, 0% false positives, no high-severity misses; Qwen and Terra had the two lowest measured costs among perfect scorers"
+  },
+  "production_gate": {
+    "automation_eligible_profiles": 0,
+    "reason": "the frozen corpus has only 12 cases; the scorer requires at least 30 seeded cases",
+    "provider_control_mode": "provider-controlled-v1 remains required in production",
+    "calibration_mode_restriction": "calibration-posthoc-v1 is calibration-only and cannot satisfy production provider controls"
+  }
+}
