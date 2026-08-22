@@ -88,6 +88,18 @@ class ThesisImpactCalibrationRunnerTests(unittest.TestCase):
             smoke["execution_tier"],
             PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
         )
+        changed_budget = build_calibration_run_manifest(
+            corpus=self.corpus,
+            profile=self.profile,
+            repo_commit="a" * 40,
+            created_at=NOW,
+            run_cap_usd=Decimal("0.25"),
+            per_case_cap_usd=Decimal("0.01"),
+            max_input_tokens=3001,
+            max_output_tokens=1000,
+            timeout_seconds=120,
+        )
+        self.assertNotEqual(changed_budget["id"], self.manifest["id"])
 
     def test_work_order_is_deterministic_and_contains_no_gold(self):
         case = self.corpus["cases"][0]

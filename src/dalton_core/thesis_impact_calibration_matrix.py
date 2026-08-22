@@ -22,7 +22,6 @@ from .thesis_impact_calibration import (
 )
 from .thesis_impact_calibration_runner import (
     DEFAULT_BROKER_AGENT_ID,
-    DEFAULT_MAX_INPUT_TOKENS,
     DEFAULT_MAX_OUTPUT_TOKENS,
     DEFAULT_TIMEOUT_SECONDS,
     ThesisImpactCalibrationRunError,
@@ -38,6 +37,7 @@ from .thesis_impact_calibration_runner import (
 SCHEMA_VERSION = "0.1"
 DEFAULT_TOTAL_CAP_USD = Decimal("4.60")
 DEFAULT_PER_CASE_CAP_USD = Decimal("0.20")
+DEFAULT_MATRIX_MAX_INPUT_TOKENS = 10_000
 _MANIFEST_FIELDS = {
     "schema_version", "id", "created_at", "repo_commit", "corpus_ref",
     "corpus_hash", "execution_tier", "profile_ids", "case_refs",
@@ -115,6 +115,9 @@ def build_calibration_matrix_manifest(
         "case_refs": selected_case_refs,
         "total_cap_usd": format(total_cap, "f"),
         "per_case_cap_usd": format(case_cap, "f"),
+        "max_input_tokens": max_input_tokens,
+        "max_output_tokens": max_output_tokens,
+        "timeout_seconds": timeout_seconds,
     }
     return {
         "schema_version": SCHEMA_VERSION,
@@ -269,7 +272,7 @@ def run_live_calibration_matrix(
     expected_agent_id: str = DEFAULT_BROKER_AGENT_ID,
     total_cap_usd: Decimal = DEFAULT_TOTAL_CAP_USD,
     per_case_cap_usd: Decimal = DEFAULT_PER_CASE_CAP_USD,
-    max_input_tokens: int = DEFAULT_MAX_INPUT_TOKENS,
+    max_input_tokens: int = DEFAULT_MATRIX_MAX_INPUT_TOKENS,
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     resume: bool = False,
@@ -412,7 +415,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--case-ref", action="append", dest="case_refs")
     parser.add_argument("--total-cap-usd", type=Decimal, default=DEFAULT_TOTAL_CAP_USD)
     parser.add_argument("--per-case-cap-usd", type=Decimal, default=DEFAULT_PER_CASE_CAP_USD)
-    parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
+    parser.add_argument(
+        "--max-input-tokens",
+        type=int,
+        default=DEFAULT_MATRIX_MAX_INPUT_TOKENS,
+    )
     parser.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS)
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
     parser.add_argument("--socket-path", type=Path, required=True)

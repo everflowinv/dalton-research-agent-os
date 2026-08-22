@@ -204,6 +204,9 @@ def build_calibration_run_manifest(
         "case_refs": selected_case_refs,
         "run_cap_usd": format(run_cap, "f"),
         "per_case_cap_usd": format(case_cap, "f"),
+        "max_input_tokens": max_input_tokens,
+        "max_output_tokens": max_output_tokens,
+        "timeout_seconds": timeout_seconds,
     }
     return {
         "schema_version": RUN_MANIFEST_SCHEMA_VERSION,
