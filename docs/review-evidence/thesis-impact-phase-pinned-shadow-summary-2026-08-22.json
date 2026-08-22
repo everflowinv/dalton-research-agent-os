@@ -1,0 +1,83 @@
+{
+  "artifact_hashes": {
+    "shadow/core.sqlite": "a46d862ea9964bc5b35905109e44a24ae4359a269dc73c2d02de4233ab0f0e21",
+    "shadow/gate2-result.json": "6d4d00e4050c60c6b5ef6b45b05d1f12218f1bdb065bf866a1fe0503ddace3d1",
+    "source/result.json": "7c9492a8e5b42465e4d2e2788cfee275e3d3c96743df42be7ec959a99d3a4547"
+  },
+  "assessment": {
+    "broker_idempotency_status": "duplicate",
+    "broker_request_mode": "replay_only",
+    "cost_usd": "0.008560",
+    "family": "openai-gpt-5.6",
+    "input_tokens": 885,
+    "model": "gpt-5.6-sol",
+    "output_tokens": 251,
+    "policy_version_ref": "model-routing-policy-version:dalton-openclaw-assessment:1",
+    "profile_id": "profile:gpt-5-6-sol",
+    "provider": "openai",
+    "required_provider_controls": false,
+    "total_tokens": 1136
+  },
+  "broker_preflight": {
+    "error_code": "IDEMPOTENCY_MISS",
+    "provider_called": false,
+    "status": "pass"
+  },
+  "budget": {
+    "accounted_total_cost_usd": "0.010518",
+    "assessment_hard_cap_usd": "0.25",
+    "authorized_total_spend_cap_usd": "1.00",
+    "verifier_hard_cap_usd": "0.25"
+  },
+  "crash_recovery": {
+    "assessment_first_request": "execute/fresh",
+    "assessment_recovery_request": "replay_only/duplicate",
+    "provider_calls": 2,
+    "recovery_duplicated_cost": false,
+    "recovery_duplicated_invocation": false,
+    "recovery_duplicated_usage": false
+  },
+  "formal_claim_ref": "claim-version:dd49e0892958d540661ffe996c277e2667041a74c57e6bb7a84c7cfc8b3cd795",
+  "formal_replay": {
+    "accounting_counts_unchanged": true,
+    "broker_access_blocked": true,
+    "status": "eligible"
+  },
+  "integrity": {
+    "coordinator": "ok",
+    "core": "ok",
+    "review": "ok",
+    "router": "ok"
+  },
+  "kind": "thesis-impact-phase-pinned-isolated-shadow-summary",
+  "model_accounting_counts": {
+    "costs": 2,
+    "invocations": 2,
+    "usage": 2
+  },
+  "quality_gate_status": "eligible",
+  "repo_commit": "dc1d3e4482f580482216fec8065d3fb276cd9f21",
+  "schema_version": "0.1",
+  "source_plan_ref": "research-plan:92b99f01f90fbd150fdec2b08cfae7ef",
+  "status": "complete",
+  "thesis_pointer_unchanged": true,
+  "thesis_ref": "thesis:msft:revenue-operating-leverage",
+  "thesis_version_ref": "d9618a458cad4483893a5b67bb503b2b",
+  "verification": {
+    "broker_idempotency_status": "fresh",
+    "broker_request_mode": "execute",
+    "cost_usd": "0.001958",
+    "family": "google-gemini-3",
+    "findings": [],
+    "input_tokens": 2091,
+    "model": "gemini-3.7-flash",
+    "output_tokens": 104,
+    "policy_version_ref": "model-routing-policy-version:dalton-openclaw-verifier:1",
+    "profile_id": "profile:gemini-3-7-flash",
+    "provider": "google",
+    "required_provider_controls": true,
+    "thinking_level": "low",
+    "total_tokens": 2195,
+    "verdict": "pass"
+  }
+}

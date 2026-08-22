@@ -141,8 +141,10 @@ host proof；broker 升至 0.1.0-spike.5）。
 Gemini 3.7 的 host provider controls、rate card、thinkingLevel 和 host patch 已经打通。首次 3×30 的 90 次
 fresh execution 与质量数据有效，但因三轮复用 run identity 而撤销 gate；修正版 runner 随后用三个不同 run
 identity 重跑，90 条仍全部 fresh/provider-controlled，三轮均 30/30，合计成本 USD 0.12906825，独立重算得到
-`eligible=true`。当前只解锁 isolated shadow；live route、ThesisVersion mutation 和旧 cron 都保持不变，production
-policy activation 与 gateway restart 仍是独立步骤。assessment 同时新增独立 phase policy，只允许
+`eligible=true`。随后一条真实 MSFT Claim/Thesis isolated shadow 也已通过：assessment 固定 GPT-5.6 Sol、verifier
+固定 Gemini 3.7 Flash low，crash recovery、记账、离线 replay 和 thesis pointer 不变式全部成立，总成本
+USD 0.010518。live route、ThesisVersion mutation 和旧 cron 仍保持不变，production policy activation 与 gateway
+restart 是独立步骤。assessment 同时新增独立 phase policy，只允许
 `profile:gpt-5-6-sol`；本批没有把 assessment thinking level 说成 provider-control 证明。
 定时运行前的控制面也已就位：`dalton-thesis-impact-verifier-canary` 提供 3×30 canary 的
 三重硬顶与验收裁决，`thesis_impact_budget` authority 提供付费 lane 的 per-day 硬顶（admission/settlement、
@@ -153,4 +155,5 @@ durable rejection）与 append-only 失败告警。详细状态见
 [per-day 预算与告警报告](docs/reports/thesis-impact-day-budget-and-alerts-2026-08-22.md)，以及
 [3×30 独立复核更正](docs/reports/verifier-canary-independent-audit-2026-08-22.md)和
 [修正版 3×30 通过报告](docs/reports/verifier-canary-3x30-corrected-passed-2026-08-22.md)、
+[phase-pinned isolated shadow](docs/reports/thesis-impact-phase-pinned-shadow-2026-08-22.md)、
 [assessment producer phase pin](docs/reports/assessment-producer-phase-pin-2026-08-22.md)。
