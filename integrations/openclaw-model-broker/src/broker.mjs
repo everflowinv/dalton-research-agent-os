@@ -364,7 +364,12 @@ export class ModelBroker {
       return this.#success(request, requestHash, result);
     } catch (error) {
       const code = error instanceof ProtocolError ? error.code : "HOST_COMPLETION_FAILED";
-      const message = error instanceof ProtocolError ? error.message : "host completion failed";
+      // Protocol errors carry broker-safe messages; any other host failure is
+      // surfaced as its bare message string so operators can diagnose the
+      // transport without exposing prompt or credential content.
+      const message = error instanceof ProtocolError
+        ? error.message
+        : `host completion failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 300);
       return this.#failure(request, requestHash, "fresh", code, message);
     } finally {
       if (timer) clearTimeout(timer);
