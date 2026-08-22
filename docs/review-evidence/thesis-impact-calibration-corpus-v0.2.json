@@ -1,0 +1,46 @@
+{
+  "schema_version": "0.1",
+  "generated_at": "2026-08-22T07:22:59Z",
+  "repo_commit": "1f5c00d6844440cb55cce9f3b0078396a4ff8b5d",
+  "status": "frozen",
+  "corpus": {
+    "ref": "thesis-impact-verifier-calibration:0.2",
+    "hash": "e736c0fc6f6c3dcf569dde76aa40fdaa6f7cfa2311e78e8efa2153771c625703",
+    "cases": 30,
+    "expected_passes": 12,
+    "expected_rejects": 18,
+    "severity_counts": {
+      "none": 12,
+      "medium": 5,
+      "high": 13
+    },
+    "required_finding_counts": {
+      "binding_mismatch": 4,
+      "driver_mismatch": 2,
+      "unsupported_inference": 3,
+      "impact_mismatch": 5,
+      "rationale_contradiction": 2,
+      "follow_up_quality": 3
+    },
+    "mixed_error_cases": 1
+  },
+  "prior_release": {
+    "ref": "thesis-impact-verifier-calibration:0.1",
+    "hash": "c5f6928860f043fb4f3a01962dc68d7e53fd8c93b3291fafbc85e96aabb41797",
+    "cases": 12,
+    "status": "preserved_unchanged"
+  },
+  "release_thresholds": {
+    "minimum_seeded_cases": 30,
+    "minimum_detection_rate": 0.9,
+    "high_severity_misses": 0
+  },
+  "gold_self_check": {
+    "coverage": "30/30",
+    "accuracy": 1.0,
+    "detection_rate": 1.0,
+    "high_severity_misses": 0,
+    "automation_eligible": true
+  },
+  "authority_note": "Gold self-check only proves corpus and scorer consistency. A real model still needs measured quality and production provider-control proof."
+}
