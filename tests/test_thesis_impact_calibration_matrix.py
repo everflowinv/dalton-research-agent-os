@@ -67,11 +67,13 @@ class ThesisImpactCalibrationMatrixTests(unittest.TestCase):
 
     def test_record_log_is_closed_and_profile_unique(self):
         record = validate_calibration_matrix_record({
-            "schema_version": "0.1",
+            "schema_version": "0.2",
             "profile_id": self.manifest["profile_ids"][0],
             "status": "failed",
             "started_at": NOW.isoformat(),
             "completed_at": NOW.isoformat(),
+            "accounted_cost_usd": "0",
+            "unpriced_reserve_usd": "0.20",
             "spent_or_reserved_usd": "0.20",
             "succeeded_calls": 0,
             "valid_outputs": 0,
@@ -93,6 +95,11 @@ class ThesisImpactCalibrationMatrixTests(unittest.TestCase):
         drifted["extra"] = True
         with self.assertRaisesRegex(ThesisImpactCalibrationRunError, "shape"):
             validate_calibration_matrix_record(drifted)
+
+        unreconciled = copy.deepcopy(record)
+        unreconciled["accounted_cost_usd"] = "0.01"
+        with self.assertRaisesRegex(ThesisImpactCalibrationRunError, "reconcile"):
+            validate_calibration_matrix_record(unreconciled)
 
 
 if __name__ == "__main__":

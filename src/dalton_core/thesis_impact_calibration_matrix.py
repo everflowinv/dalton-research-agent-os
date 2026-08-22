@@ -34,7 +34,7 @@ from .thesis_impact_calibration_runner import (
 )
 
 
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
 DEFAULT_TOTAL_CAP_USD = Decimal("4.60")
 DEFAULT_PER_CASE_CAP_USD = Decimal("0.20")
 DEFAULT_MATRIX_MAX_INPUT_TOKENS = 10_000
@@ -46,8 +46,8 @@ _MANIFEST_FIELDS = {
 }
 _RECORD_FIELDS = {
     "schema_version", "profile_id", "status", "started_at", "completed_at",
-    "spent_or_reserved_usd", "succeeded_calls", "valid_outputs", "run_summary",
-    "error",
+    "accounted_cost_usd", "unpriced_reserve_usd", "spent_or_reserved_usd",
+    "succeeded_calls", "valid_outputs", "run_summary", "error",
 }
 
 
@@ -174,7 +174,11 @@ def validate_calibration_matrix_record(value: Any) -> dict[str, Any]:
     for field in ("profile_id", "started_at", "completed_at"):
         if not isinstance(wire[field], str) or not wire[field]:
             raise ThesisImpactCalibrationRunError(f"matrix record {field} must be text")
-    _money(wire["spent_or_reserved_usd"], "matrix record cost")
+    accounted = _money(wire["accounted_cost_usd"], "matrix record accounted cost")
+    reserve = _money(wire["unpriced_reserve_usd"], "matrix record reserve")
+    combined = _money(wire["spent_or_reserved_usd"], "matrix record combined cost")
+    if accounted + reserve != combined:
+        raise ThesisImpactCalibrationRunError("matrix record cost fields do not reconcile")
     for field in ("succeeded_calls", "valid_outputs"):
         if isinstance(wire[field], bool) or not isinstance(wire[field], int) or wire[field] < 0:
             raise ThesisImpactCalibrationRunError(f"matrix record {field} is invalid")
@@ -207,16 +211,19 @@ def load_calibration_matrix_records(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _profile_cost_and_counts(profile_dir: Path) -> tuple[Decimal, int, int]:
+def _profile_cost_and_counts(
+    profile_dir: Path,
+) -> tuple[Decimal, Decimal, int, int]:
     records = load_calibration_records(profile_dir / "responses.jsonl")
-    cost = sum(
-        _money(
-            record["accounted_cost_usd"]
-            if record["accounted_cost_usd"] is not None
-            else record["cost_reserve_usd"],
-            "profile checkpoint cost",
-        )
+    accounted = sum(
+        _money(record["accounted_cost_usd"], "profile accounted cost")
         for record in records
+        if record["accounted_cost_usd"] is not None
+    )
+    reserve = sum(
+        _money(record["cost_reserve_usd"], "profile unpriced reserve")
+        for record in records
+        if record["accounted_cost_usd"] is None
     )
     succeeded = sum(record["result"]["status"] == "succeeded" for record in records)
     valid = sum(
@@ -224,7 +231,7 @@ def _profile_cost_and_counts(profile_dir: Path) -> tuple[Decimal, int, int]:
         and record["parse_error"] is None
         for record in records
     )
-    return cost, succeeded, valid
+    return accounted, reserve, succeeded, valid
 
 
 def _write_matrix_summary(
@@ -232,7 +239,15 @@ def _write_matrix_summary(
     manifest: Mapping[str, Any],
     records: list[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    spent = sum(
+    accounted = sum(
+        _money(record["accounted_cost_usd"], "matrix summary accounted cost")
+        for record in records
+    )
+    reserve = sum(
+        _money(record["unpriced_reserve_usd"], "matrix summary reserve")
+        for record in records
+    )
+    spent_or_reserved = sum(
         _money(record["spent_or_reserved_usd"], "matrix summary cost")
         for record in records
     )
@@ -253,7 +268,9 @@ def _write_matrix_summary(
         "failed_profiles": sum(record["status"] == "failed" for record in records),
         "succeeded_calls": sum(record["succeeded_calls"] for record in records),
         "valid_outputs": sum(record["valid_outputs"] for record in records),
-        "spent_or_reserved_usd": format(spent, "f"),
+        "accounted_cost_usd": format(accounted, "f"),
+        "unpriced_reserve_usd": format(reserve, "f"),
+        "spent_or_reserved_usd": format(spent_or_reserved, "f"),
         "total_cap_usd": manifest["total_cap_usd"],
         "records": list(records),
     }
@@ -374,15 +391,21 @@ def run_live_calibration_matrix(
         except (ThesisImpactCalibrationRunError, OpenClawModelAdapterError) as exc:
             status = "failed"
             error = f"{type(exc).__name__}: {exc}"
-        cost, succeeded_calls, valid_outputs = _profile_cost_and_counts(profile_dir)
+        accounted, reserve, succeeded_calls, valid_outputs = _profile_cost_and_counts(
+            profile_dir
+        )
         if not profile_dir.exists():
-            cost = Decimal("0")
+            accounted = Decimal("0")
+            reserve = Decimal("0")
+        cost = accounted + reserve
         record = validate_calibration_matrix_record({
             "schema_version": SCHEMA_VERSION,
             "profile_id": profile_id,
             "status": status,
             "started_at": _wire_time(started),
             "completed_at": _wire_time(datetime.now(timezone.utc)),
+            "accounted_cost_usd": format(accounted, "f"),
+            "unpriced_reserve_usd": format(reserve, "f"),
             "spent_or_reserved_usd": format(cost, "f"),
             "succeeded_calls": succeeded_calls,
             "valid_outputs": valid_outputs,
@@ -398,6 +421,8 @@ def run_live_calibration_matrix(
             "profile": profile_index,
             "profile_id": profile_id,
             "status": status,
+            "accounted_cost_usd": record["accounted_cost_usd"],
+            "unpriced_reserve_usd": record["unpriced_reserve_usd"],
             "spent_or_reserved_usd": record["spent_or_reserved_usd"],
             "valid_outputs": valid_outputs,
             "matrix_spent_or_reserved_usd": summary["spent_or_reserved_usd"],
