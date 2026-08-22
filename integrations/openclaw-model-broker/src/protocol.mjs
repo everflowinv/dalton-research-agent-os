@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const PROTOCOL_VERSION = "0.1";
-export const BROKER_VERSION = "0.1.0-spike.3";
+export const BROKER_VERSION = "0.1.0-spike.4";
 
 const REQUIRED_REQUEST_KEYS = new Set([
   "schemaVersion",

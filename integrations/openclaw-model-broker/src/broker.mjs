@@ -19,6 +19,17 @@ const DEFAULTS = Object.freeze({
   journalMaxBytes: 8_388_608,
 });
 
+const PROVIDER_CONTROL_MODES = Object.freeze({
+  "openai-responses-input-count-v1": Object.freeze({
+    provider: "openai",
+    transport: "openai/openai-responses",
+  }),
+  "google-generative-ai-count-tokens-v1": Object.freeze({
+    provider: "google",
+    transport: "google/google-generative-ai",
+  }),
+});
+
 function integer(value, name, fallback, min, max) {
   const selected = value ?? fallback;
   if (!Number.isSafeInteger(selected) || selected < min || selected > max) {
@@ -61,11 +72,12 @@ function validateProviderControlProfile(value, model) {
     new Set(["mode", "rateCard"]),
     "profile.providerControls",
   );
-  if (profile.mode !== "openai-responses-input-count-v1") {
+  const mode = PROVIDER_CONTROL_MODES[profile.mode];
+  if (!mode) {
     throw new ProtocolError("INVALID_CONFIG", "profile.providerControls mode is unsupported");
   }
-  if (!model.startsWith("openai/")) {
-    throw new ProtocolError("INVALID_CONFIG", "profile.providerControls require an openai model route");
+  if (!model.startsWith(`${mode.provider}/`)) {
+    throw new ProtocolError("INVALID_CONFIG", "profile.providerControls mode does not match its model route");
   }
   const rateCard = exactObject(
     profile.rateCard,
@@ -279,10 +291,14 @@ export class ModelBroker {
     let providerControls;
     if (request.requiredControls) {
       const capability = this.runtime.llm.capabilities?.providerControls;
+      const configuredMode = profile.providerControls?.mode;
+      const expectedTransport = PROVIDER_CONTROL_MODES[configuredMode]?.transport;
+      const advertisedTransport = capability?.transports?.[configuredMode]
+        ?? (configuredMode === "openai-responses-input-count-v1" ? capability?.transport : undefined);
       if (
         !profile.providerControls
         || capability?.version !== "0.1"
-        || capability?.transport !== "openai/openai-responses"
+        || advertisedTransport !== expectedTransport
         || !Array.isArray(capability.modes)
         || !capability.modes.includes(profile.providerControls.mode)
       ) {

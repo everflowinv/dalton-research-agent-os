@@ -1,0 +1,77 @@
+{
+  "schema_version": "0.1",
+  "report_date": "2026-08-22",
+  "broker_version": "0.1.0-spike.4",
+  "openclaw_version": "2026.7.1",
+  "provider_control_mode": "google-generative-ai-count-tokens-v1",
+  "transport": "google/google-generative-ai",
+  "model": "google/gemini-3.1-pro-preview",
+  "portable_schema": {
+    "resource": "src/dalton_core/thesis-impact-verifier-provider-output-v0.2.schema.json",
+    "canonical_content_hash": "0016c1626203b4f80fd84ee2b545cbf0dd58f6bcdd62d196f757e3c4aba2bf0f",
+    "file_sha256": "c2fb7a9938f6288082b095b2ce92a556d9a6b770fc8fa3c15dfaec32d05f6e7d",
+    "canonical_semantic_validator_remains_required": true
+  },
+  "rate_card": {
+    "source": "https://ai.google.dev/gemini-api/docs/pricing#gemini-3.1-pro-preview",
+    "verified_at": "2026-08-22T00:00:00Z",
+    "expires_at": "2026-09-22T00:00:00Z",
+    "reserved_input_usd_per_million": "4.00",
+    "reserved_output_usd_per_million": "18.00",
+    "basis": "conservative standard paid tier above 200k; cached content forbidden"
+  },
+  "live_schema_probes": {
+    "count_tokens_matches_prompt_usage": {
+      "counted_total_tokens": 14,
+      "generated_prompt_token_count": 14
+    },
+    "canonical_schema_keyword_gap_observed": {
+      "required_schema_version": "0.2",
+      "observed_schema_version": "1.0",
+      "conclusion": "Google accepted but did not enforce const; portable documented-keyword schema required"
+    },
+    "provider_reported_cost_complete": false
+  },
+  "verification": {
+    "broker_node_tests": {
+      "passed": 21,
+      "failed": 0
+    },
+    "targeted_python_tests": {
+      "passed": 30,
+      "failed": 0
+    },
+    "fake_transport": {
+      "openai_admitted": {
+        "input_count_calls": 1,
+        "model_calls": 1
+      },
+      "google_admitted": {
+        "input_count_calls": 1,
+        "model_calls": 1
+      },
+      "google_unsupported_schema_provider_calls": 0,
+      "paid_calls": 0
+    },
+    "patch_check": {
+      "groups_passed": 9,
+      "google_targets_applied": 3
+    },
+    "pre_restart_live_controlled_case": {
+      "status": "failed_closed",
+      "error_code": "REQUIRED_CONTROLS_UNAVAILABLE"
+    },
+    "full_python_suite_run": false,
+    "github_actions_waited": false
+  },
+  "cost": {
+    "previously_accounted_matrix_campaign_usd": "5.023876966",
+    "additional_direct_schema_probes_fully_accounted": false
+  },
+  "deployment": {
+    "safe_restart_requested": true,
+    "safe_restart_completed": false,
+    "provider_controlled_thirty_case_run_completed": false,
+    "production_verifier_enabled": false
+  }
+}

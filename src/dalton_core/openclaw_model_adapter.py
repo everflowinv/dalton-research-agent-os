@@ -600,7 +600,7 @@ def _required_provider_controls(
     try:
         schema = json.loads(
             resources.files("dalton_core")
-            .joinpath("thesis-impact-verifier-output-v0.2.schema.json")
+            .joinpath("thesis-impact-verifier-provider-output-v0.2.schema.json")
             .read_text(encoding="utf-8")
         )
     except (OSError, TypeError, ValueError) as exc:
@@ -626,7 +626,7 @@ def _required_provider_controls(
         "maxTotalTokens": max_total_tokens,
         "maxCostUsd": max_cost_usd,
         "structuredOutput": {
-            "schemaName": "thesis_impact_verifier_output_v0_2",
+            "schemaName": "thesis_impact_verifier_provider_output_v0_2",
             "schemaHash": _dalton_hash(schema),
             "jsonSchema": dict(schema),
         },

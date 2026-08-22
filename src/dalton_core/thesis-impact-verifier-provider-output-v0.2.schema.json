@@ -1,0 +1,84 @@
+{
+  "$id": "https://dalton.local/schemas/thesis-impact-verifier-provider-output-v0.2.schema.json",
+  "title": "ThesisImpactVerifierProviderOutputV0.2",
+  "description": "Portable provider-enforced shape; Dalton applies the canonical semantic validator after parsing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "assessment_ref",
+    "assessment_hash",
+    "verdict",
+    "findings"
+  ],
+  "properties": {
+    "schema_version": {
+      "enum": [
+        "0.2"
+      ]
+    },
+    "assessment_ref": {
+      "type": "string"
+    },
+    "assessment_hash": {
+      "type": "string"
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "reject"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "severity",
+          "detail",
+          "expected_impact"
+        ],
+        "properties": {
+          "code": {
+            "enum": [
+              "binding_mismatch",
+              "driver_mismatch",
+              "unsupported_inference",
+              "impact_mismatch",
+              "rationale_contradiction",
+              "follow_up_quality"
+            ]
+          },
+          "severity": {
+            "enum": [
+              "high",
+              "medium"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          },
+          "expected_impact": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "supports",
+                  "weakens",
+                  "no_change",
+                  "insufficient"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

@@ -36,6 +36,22 @@ function providerControlProfile() {
   };
 }
 
+function googleProviderControlProfile() {
+  return {
+    mode: "google-generative-ai-count-tokens-v1",
+    rateCard: {
+      model: "google/gemini-3.1-pro-preview",
+      serviceTier: "default",
+      inputUsdPerMillion: "4.00",
+      cachedInputUsdPerMillion: "4.00",
+      cacheWriteUsdPerMillion: "4.00",
+      outputUsdPerMillion: "18.00",
+      verifiedAt: "2026-08-22T00:00:00Z",
+      expiresAt: "2099-09-01T00:00:00Z",
+    },
+  };
+}
+
 function controlledConfig(overrides = {}) {
   const base = config();
   return {
@@ -88,8 +104,15 @@ function fakeRuntime(complete, { controlled = false } = {}) {
         capabilities: {
           providerControls: {
             version: "0.1",
-            modes: ["openai-responses-input-count-v1"],
+            modes: [
+              "openai-responses-input-count-v1",
+              "google-generative-ai-count-tokens-v1",
+            ],
             transport: "openai/openai-responses",
+            transports: {
+              "openai-responses-input-count-v1": "openai/openai-responses",
+              "google-generative-ai-count-tokens-v1": "google/google-generative-ai",
+            },
           },
         },
       } : {}),
@@ -160,7 +183,7 @@ test("calls only host-owned completion with a fixed agent and exact allowed mode
   });
   assert.deepEqual(response.cost, { available: true, usd: 0.004 });
   assert.equal(response.runtimeVersion, "2026.7.1");
-  assert.equal(response.brokerVersion, "0.1.0-spike.3");
+  assert.equal(response.brokerVersion, "0.1.0-spike.4");
   verifyHash(response);
 
   assert.equal(calls.length, 1);
@@ -371,12 +394,50 @@ test("controlled completion requires host capability and binds the trusted profi
     fakeRuntime(async () => result(), { controlled: true }),
     controlledConfig(),
   );
-  wrongTransport.runtime.llm.capabilities.providerControls.transport = "openai/openai-chatgpt-responses";
+  wrongTransport.runtime.llm.capabilities.providerControls.transports[
+    "openai-responses-input-count-v1"
+  ] = "openai/openai-chatgpt-responses";
   const incompatible = await wrongTransport.handle(request({
     invocationId: "invocation:wrong-transport",
     requiredControls: controls,
   }));
   assert.equal(incompatible.error.code, "REQUIRED_CONTROLS_UNAVAILABLE");
+});
+
+test("controlled Google completion binds the exact Google transport and proof", async () => {
+  const controls = requiredControls();
+  const profile = googleProviderControlProfile();
+  const googleConfig = controlledConfig({
+    profiles: [{
+      id: "profile:gemini",
+      model: "google/gemini-3.1-pro-preview",
+      maxTokens: 1000,
+      timeoutMs: 500,
+      providerControls: profile,
+    }],
+  });
+  const googleRequest = request({
+    invocationId: "invocation:google-controlled",
+    profileId: "profile:gemini",
+    model: "google/gemini-3.1-pro-preview",
+    requiredControls: controls,
+  });
+  const proof = {
+    ...providerControlProof(controls),
+    mode: profile.mode,
+    model: profile.rateCard.model,
+    rateCardHash: contentHash(profile.rateCard),
+  };
+  const broker = new ModelBroker(fakeRuntime(async () => result({
+    provider: "google",
+    model: "gemini-3.1-pro-preview",
+    providerControlProof: proof,
+  }), { controlled: true }), googleConfig);
+
+  const response = await broker.handle(googleRequest);
+  assert.equal(response.ok, true);
+  assert.equal(response.canonicalModel, "google/gemini-3.1-pro-preview");
+  verifyHash(response);
 });
 
 test("controlled completion rejects missing, mismatched, or breached host proof", async () => {

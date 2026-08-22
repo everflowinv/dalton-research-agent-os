@@ -195,6 +195,48 @@ class ThesisImpactCalibrationTests(unittest.TestCase):
             {"supports", "weakens", "no_change", "insufficient"},
         )
 
+    def test_provider_schema_uses_portable_strict_output_keywords(self):
+        schema = json.loads((
+            ROOT
+            / "src"
+            / "dalton_core"
+            / "thesis-impact-verifier-provider-output-v0.2.schema.json"
+        ).read_text(encoding="utf-8"))
+        allowed = {
+            "$id", "title", "description", "type", "additionalProperties", "required",
+            "properties", "enum", "items", "maxItems", "anyOf",
+        }
+
+        def inspect(node):
+            if isinstance(node, dict):
+                self.assertTrue(set(node) <= allowed, sorted(set(node) - allowed))
+                for key, value in node.items():
+                    if key != "properties":
+                        inspect(value)
+                    else:
+                        for child in value.values():
+                            inspect(child)
+            elif isinstance(node, list):
+                for item in node:
+                    inspect(item)
+
+        inspect(schema)
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(
+            set(schema["required"]),
+            {
+                "schema_version", "assessment_ref", "assessment_hash",
+                "verdict", "findings",
+            },
+        )
+        self.assertEqual(schema["properties"]["schema_version"]["enum"], ["0.2"])
+        finding = schema["properties"]["findings"]["items"]
+        self.assertFalse(finding["additionalProperties"])
+        self.assertEqual(
+            set(finding["properties"]["code"]["enum"]),
+            set(VERIFIER_FINDING_SEVERITIES),
+        )
+
     def test_historical_gate2_output_is_one_measured_false_positive(self):
         report = score_verifier_outputs(
             observed_output_map(self.corpus),

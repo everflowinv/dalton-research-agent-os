@@ -490,7 +490,10 @@ class OpenClawModelAdapterTests(unittest.TestCase):
         self.assertEqual(controls["maxTotalTokens"], 1_500)
         self.assertEqual(controls["maxCostUsd"], 0.5)
         structured = controls["structuredOutput"]
-        self.assertEqual(structured["schemaName"], "thesis_impact_verifier_output_v0_2")
+        self.assertEqual(
+            structured["schemaName"],
+            "thesis_impact_verifier_provider_output_v0_2",
+        )
         self.assertEqual(structured["schemaHash"], canonical_hash(structured["jsonSchema"]))
         self.assertTrue(result.metadata["required_provider_controls"])
         self.assertEqual(

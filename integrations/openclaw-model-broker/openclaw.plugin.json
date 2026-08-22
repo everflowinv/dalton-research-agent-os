@@ -2,7 +2,7 @@
   "id": "dalton-openclaw-model-broker",
   "name": "Dalton OpenClaw Model Broker",
   "description": "Host-owned model completion bridge for an external Dalton runtime.",
-  "version": "0.1.0-spike.3",
+    "version": "0.1.0-spike.4",
   "activation": {
     "onStartup": true
   },
@@ -41,7 +41,12 @@
               "additionalProperties": false,
               "required": ["mode", "rateCard"],
               "properties": {
-                "mode": {"const": "openai-responses-input-count-v1"},
+                "mode": {
+                  "enum": [
+                    "openai-responses-input-count-v1",
+                    "google-generative-ai-count-tokens-v1"
+                  ]
+                },
                 "rateCard": {
                   "type": "object",
                   "additionalProperties": false,
