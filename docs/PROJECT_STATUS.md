@@ -7,10 +7,10 @@
   SEC 财务事实与 thesis-impact 开发候选均尚未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
 - 当前开发候选新增 wrapper-owned verifier binding、semantic-only provider schema、phase-pinned verifier
-  policy、thinking-level 控制合同、3×30 canary campaign runner 与 per-day 预算/告警 authority；Gemini 3.7
-  Flash low 仍是主候选。剩余开闸条件是 host 侧 Gemini profile providerControls/rate card 配置、OpenClaw
-  host patch 与 safe restart、以及 owner 单独授权后经 `dalton-thesis-impact-verifier-canary` 执行的真实
-  broker 3×30 canary 与 shadow
+  policy、thinking-level 控制合同、3×30 canary campaign runner 与 per-day 预算/告警 authority；**2026-08-22
+  owner 授权后 3×30 provider-controlled canary 已在真实 broker 路径通过**（3 轮全 30/30、0 FP、0 high miss、90
+  条 record 全部绑定 controls/thinking、总花费 USD 0.127）。production verifier 剩余开闸步骤：shadow 运行、
+  production policy activation 与 gateway restart 单独批准、assessment producer pin
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
 反向改写历史结论。这里的“完成”只表示代码、测试和当前部署已经验收，不表示已达到多租户或
@@ -1129,6 +1129,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Wrapper binding 与候选选择：`docs/reports/thesis-impact-verifier-wrapper-selection-2026-08-22.md`
 - Phase-pinned verifier policy 与 thinking 控制合同：`docs/reports/verifier-phase-pin-and-thinking-controls-2026-08-22.md`
 - 3×30 verifier canary campaign runner：`docs/reports/verifier-canary-campaign-runner-2026-08-22.md`
+- 3×30 provider-controlled canary 通过：`docs/reports/verifier-canary-3x30-passed-2026-08-22.md`
 - Thesis-impact per-day 预算硬顶与失败告警：`docs/reports/thesis-impact-day-budget-and-alerts-2026-08-22.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
