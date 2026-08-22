@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const PROTOCOL_VERSION = "0.1";
-export const BROKER_VERSION = "0.1.0-spike.4";
+export const BROKER_VERSION = "0.1.0-spike.5";
 
 const REQUIRED_REQUEST_KEYS = new Set([
   "schemaVersion",
@@ -22,7 +22,10 @@ const REQUIRED_CONTROL_KEYS = new Set([
   "maxCostUsd",
   "structuredOutput",
 ]);
+const OPTIONAL_CONTROL_KEYS = new Set(["thinkingLevel"]);
+const CONTROL_KEYS = new Set([...REQUIRED_CONTROL_KEYS, ...OPTIONAL_CONTROL_KEYS]);
 const STRUCTURED_OUTPUT_KEYS = new Set(["schemaName", "schemaHash", "jsonSchema"]);
+const THINKING_LEVELS = new Set(["low"]);
 
 export class ProtocolError extends Error {
   constructor(code, message) {
@@ -164,9 +167,22 @@ function exactRequestObject(value, keys, field) {
 }
 
 function validateRequiredControls(value, requestMaxTokens) {
-  const raw = exactRequestObject(value, REQUIRED_CONTROL_KEYS, "requiredControls");
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ProtocolError("INVALID_REQUEST", "requiredControls must be an object");
+  }
+  const actualKeys = Object.keys(value);
+  if (
+    actualKeys.length > CONTROL_KEYS.size
+    || actualKeys.some((key) => !CONTROL_KEYS.has(key))
+    || [...REQUIRED_CONTROL_KEYS].some((key) => !(key in value))
+  ) {
+    throw new ProtocolError("INVALID_REQUEST", "requiredControls has an invalid shape");
+  }
+  if ("thinkingLevel" in value && !THINKING_LEVELS.has(value.thinkingLevel)) {
+    throw new ProtocolError("INVALID_REQUEST", "requiredControls.thinkingLevel is unsupported");
+  }
   const structured = exactRequestObject(
-    raw.structuredOutput,
+    value.structuredOutput,
     STRUCTURED_OUTPUT_KEYS,
     "requiredControls.structuredOutput",
   );
@@ -182,10 +198,10 @@ function validateRequiredControls(value, requestMaxTokens) {
     throw new ProtocolError("INVALID_REQUEST", "requiredControls structured output schema hash mismatch");
   }
   const controls = {
-    maxInputTokens: positiveInteger(raw.maxInputTokens, "requiredControls.maxInputTokens"),
-    maxOutputTokens: positiveInteger(raw.maxOutputTokens, "requiredControls.maxOutputTokens"),
-    maxTotalTokens: positiveInteger(raw.maxTotalTokens, "requiredControls.maxTotalTokens"),
-    maxCostUsd: positiveNumber(raw.maxCostUsd, "requiredControls.maxCostUsd"),
+    maxInputTokens: positiveInteger(value.maxInputTokens, "requiredControls.maxInputTokens"),
+    maxOutputTokens: positiveInteger(value.maxOutputTokens, "requiredControls.maxOutputTokens"),
+    maxTotalTokens: positiveInteger(value.maxTotalTokens, "requiredControls.maxTotalTokens"),
+    maxCostUsd: positiveNumber(value.maxCostUsd, "requiredControls.maxCostUsd"),
     structuredOutput: {
       schemaName: requiredString(
         structured.schemaName,
@@ -195,6 +211,7 @@ function validateRequiredControls(value, requestMaxTokens) {
       schemaHash,
       jsonSchema: structured.jsonSchema,
     },
+    ...("thinkingLevel" in value ? { thinkingLevel: value.thinkingLevel } : {}),
   };
   if (controls.maxOutputTokens !== requestMaxTokens) {
     throw new ProtocolError("INVALID_REQUEST", "requiredControls output limit must equal maxTokens");

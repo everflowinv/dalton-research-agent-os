@@ -123,8 +123,16 @@ replay 保留。同一 30-case v0.2 corpus 的 low-thinking 重跑中，Gemini 3
 Qwen DeepSeek V4 Flash 为 27/30；Owner 已选择 exact `google/gemini-3.7-flash` low 作为主候选，Luna 保留为
 低成本候选。
 
-候选选择仍不等于 production 可用。Gemini 3.7 broker profile 尚未启用 provider controls，broker 也不能证明
-low thinking；现有 routing policy 没有 phase-pin verifier。production broker 3×30 canary、shadow 和单独 policy
-activation 完成前，live route、ThesisVersion mutation 和旧 cron 都保持不变。详细状态见
-[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) 和
-[wrapper binding 与候选选择报告](docs/reports/thesis-impact-verifier-wrapper-selection-2026-08-22.md)。
+仓库内的 production conformance 已补齐两项：phase-pinned immutable verifier policy
+（`model-routing-policy-version:dalton-openclaw-verifier:1` 只允许 exact `profile:gemini-3-7-flash`，未 pin 到
+单一 profile 的 verifier policy 在路由前 fail closed），以及 thinking-level 控制合同（verifier WorkOrder 与
+calibration manifest 冻结 `thinking=low`，进入 broker `requiredControls`、request hash、invocation 幂等身份与
+host proof；broker 升至 0.1.0-spike.5）。
+
+候选选择仍不等于 production 可用。Gemini 3.7 的 host 侧 broker profile 尚未配置 Google provider controls、
+rate card 与 thinkingLevel，OpenClaw host patch 与 safe restart 未完成；owner 授权的真实 broker 3×30
+provider-controlled canary、shadow 和单独 policy activation 完成前，live route、ThesisVersion mutation 和旧
+cron 都保持不变。详细状态见
+[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)、
+[wrapper binding 与候选选择报告](docs/reports/thesis-impact-verifier-wrapper-selection-2026-08-22.md) 和
+[phase-pin 与 thinking 控制合同报告](docs/reports/verifier-phase-pin-and-thinking-controls-2026-08-22.md)。

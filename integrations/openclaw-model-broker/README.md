@@ -63,9 +63,15 @@ model and cross-agent overrides (`allowModelOverride`, `allowedModels`, and
 ## Required provider controls
 
 Independent verifier calls carry a hash-bound JSON Schema plus input, output,
-total-token, and cost limits in `requiredControls`. Controlled execution is
+total-token, and cost limits in `requiredControls`. A request may additionally
+require a closed `thinkingLevel` (currently only `"low"`); the requirement is
+part of the request hash and idempotency identity, it is admitted only when the
+selected profile's `providerControls` declares the exact same level, and the
+host proof must echo it. Requests without `thinkingLevel` never receive one,
+even on a profile that declares it. Controlled execution is
 enabled only when both the host runtime and the selected broker profile declare
-the matching `openai-responses-input-count-v1` mode. The profile supplies an
+the matching `openai-responses-input-count-v1` or
+`google-generative-ai-count-tokens-v1` mode. The profile supplies an
 exact-model, default-tier, expiring rate card; the client cannot supply or
 override prices.
 

@@ -7,7 +7,9 @@ usage/cost authority, validates the phase output contract, and only then
 completes the Scheduler attempt.
 
 Verification routes derive the producer model family from the exact persisted
-assessment; callers cannot choose the independence constraint.  Invalid model
+assessment; callers cannot choose the independence constraint.  When a phase-
+pinned verifier policy is configured, verification must route under that exact
+immutable policy and a same-family producer stays fail-closed.  Invalid model
 JSON becomes a bounded retryable result instead of a succeeded formal result.
 """
 
@@ -23,7 +25,7 @@ from fractions import Fraction
 from typing import Any
 
 from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
-from .model_router import ModelRouter
+from .model_router import ModelRouter, RoutingPolicyNotFound
 from .observability import ObservabilityStore
 from .openclaw_model_adapter import (
     BrokerConnectionError,
@@ -91,6 +93,7 @@ class ThesisImpactModelWorker:
         observability: ObservabilityStore,
         routing_policy_ref: str,
         credential_slot_refs: Sequence[str],
+        verifier_routing_policy_ref: str | None = None,
         token_counter: Callable[[str], int] = count_dalton_search_tokens,
         lease_seconds: float | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -102,6 +105,13 @@ class ThesisImpactModelWorker:
             raise TypeError("worker accounting and impact must share one Core authority")
         if not isinstance(routing_policy_ref, str) or not routing_policy_ref:
             raise ValueError("routing_policy_ref must be a non-empty string")
+        if verifier_routing_policy_ref is not None and (
+            not isinstance(verifier_routing_policy_ref, str)
+            or not verifier_routing_policy_ref
+        ):
+            raise ValueError(
+                "verifier_routing_policy_ref must be a non-empty string or None"
+            )
         slots = tuple(credential_slot_refs)
         if not slots or any(not isinstance(item, str) or not item for item in slots):
             raise ValueError("credential_slot_refs must be a non-empty string sequence")
@@ -125,6 +135,7 @@ class ThesisImpactModelWorker:
         self.store = impact.store
         self.observability = observability
         self.routing_policy_ref = routing_policy_ref
+        self.verifier_routing_policy_ref = verifier_routing_policy_ref
         self.credential_slot_refs = slots
         self.token_counter = token_counter
         self.lease_seconds = (
@@ -165,6 +176,30 @@ class ThesisImpactModelWorker:
                 "WorkOrder phase, capability, inputs or side effects are not admitted"
             )
         return phase, capability
+
+    def _phase_policy_ref(self, phase: str) -> str:
+        """Return the immutable routing policy admitted for one phase.
+
+        A verifier policy is only admitted when it phase-pins exactly one
+        broker profile; a shared cost-sorted policy cannot prove which model
+        verified an assessment, so it fails closed before any lease or broker
+        call.
+        """
+
+        if phase != "verification" or self.verifier_routing_policy_ref is None:
+            return self.routing_policy_ref
+        try:
+            policy = self.router.get_policy(self.verifier_routing_policy_ref)
+        except RoutingPolicyNotFound as exc:
+            raise ThesisImpactModelWorkerRejected(
+                "verifier routing policy is not registered in the router authority"
+            ) from exc
+        allowed = policy.get("filters", {}).get("allowed_profile_ids")
+        if not isinstance(allowed, list) or len(allowed) != 1:
+            raise ThesisImpactModelWorkerRejected(
+                "verifier routing policy is not pinned to exactly one profile"
+            )
+        return self.verifier_routing_policy_ref
 
     def _producer_family(self, work: WorkOrder, phase: str) -> str | None:
         if phase == "assessment":
@@ -594,6 +629,7 @@ class ThesisImpactModelWorker:
 
         work = self._work(work_order)
         phase, capability = self._phase(work)
+        phase_policy_ref = self._phase_policy_ref(phase)
         status = self.scheduler.status(work.id)
         if status["work_order_hash"] != content_hash(work.to_dict()):
             raise ThesisImpactModelWorkerConflict(
@@ -648,7 +684,7 @@ class ThesisImpactModelWorker:
                 work,
                 attempt_number=attempt_number,
                 capability=capability,
-                policy_version_ref=self.routing_policy_ref,
+                policy_version_ref=phase_policy_ref,
                 credential_slot_refs=self.credential_slot_refs,
                 required_modalities=("text",),
                 required_context_tokens=estimated_input + estimated_output,

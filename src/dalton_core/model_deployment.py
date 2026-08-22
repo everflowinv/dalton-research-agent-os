@@ -19,6 +19,8 @@ ADAPTER_REF = "adapter:openclaw-model-broker:0.1"
 POLICY_REF = "model-routing-policy-version:dalton-openclaw:1"
 LEGACY_BROKER_POLICY_REF = "model-routing-policy-version:dalton-openclaw:2"
 BROKER_POLICY_REF = "model-routing-policy-version:dalton-openclaw:3"
+VERIFIER_PROFILE_ID = "profile:gemini-3-7-flash"
+VERIFIER_POLICY_REF = "model-routing-policy-version:dalton-openclaw-verifier:1"
 
 
 _LEGACY_ENDPOINT_NAMES = (
@@ -488,6 +490,39 @@ def _legacy_openclaw_broker_policy(*, created_at: datetime) -> dict[str, Any]:
     return policy
 
 
+def openclaw_verifier_policy(*, created_at: datetime) -> dict[str, Any]:
+    """Phase-pin independent verification to one exact broker profile.
+
+    The verifier selection must be provable, not an emergent result of a
+    cost-sorted shared policy.  This immutable policy chain allows exactly the
+    Owner-selected ``profile:gemini-3-7-flash``; any producer from the same
+    model family stays fail-closed through the router's family-independence
+    filter.
+    """
+
+    created = _utc(created_at).isoformat(timespec="microseconds")
+    return {
+        "schema_version": "0.1",
+        "policy_version_ref": VERIFIER_POLICY_REF,
+        "id": "model-routing-policy:dalton-openclaw-verifier",
+        "version": 1,
+        "created_at": created,
+        "prior_version_ref": None,
+        "filters": {
+            "allowed_profile_ids": [VERIFIER_PROFILE_ID],
+            "allowed_providers": [],
+            "allowed_families": [],
+            "allowed_adapter_refs": [ADAPTER_REF],
+            "required_modalities": ["text"],
+            "family_independence_capabilities": ["verify", "adjudicate"],
+        },
+        "ordered_preferences": [
+            {"field": "estimated_cost_usd", "direction": "asc"},
+            {"field": "profile_version_ref", "direction": "asc"},
+        ],
+    }
+
+
 def upgrade_openclaw_broker_catalog(
     router_path: str | Path,
     *,
@@ -501,6 +536,9 @@ def upgrade_openclaw_broker_catalog(
             _legacy_openclaw_broker_policy(created_at=checked_at)
         )
         policy = router.register_policy(openclaw_broker_policy(created_at=checked_at))
+        verifier_policy = router.register_policy(
+            openclaw_verifier_policy(created_at=checked_at)
+        )
         profiles = [
             router.register_profile(profile)
             for profile in openclaw_broker_profiles(
@@ -510,6 +548,7 @@ def upgrade_openclaw_broker_catalog(
     return {
         "legacy_policy": legacy_policy,
         "policy": policy,
+        "verifier_policy": verifier_policy,
         "profiles": profiles,
         "router_path": str(router_path),
     }
@@ -520,10 +559,13 @@ __all__ = [
     "POLICY_REF",
     "LEGACY_BROKER_POLICY_REF",
     "BROKER_POLICY_REF",
+    "VERIFIER_PROFILE_ID",
+    "VERIFIER_POLICY_REF",
     "install_openclaw_catalog",
     "openclaw_policy",
     "openclaw_profiles",
     "openclaw_broker_profiles",
     "openclaw_broker_policy",
+    "openclaw_verifier_policy",
     "upgrade_openclaw_broker_catalog",
 ]

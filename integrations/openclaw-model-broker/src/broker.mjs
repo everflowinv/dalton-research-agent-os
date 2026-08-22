@@ -30,6 +30,8 @@ const PROVIDER_CONTROL_MODES = Object.freeze({
   }),
 });
 
+const THINKING_LEVELS = new Set(["low"]);
+
 function integer(value, name, fallback, min, max) {
   const selected = value ?? fallback;
   if (!Number.isSafeInteger(selected) || selected < min || selected > max) {
@@ -68,7 +70,7 @@ function validateProviderControlProfile(value, model) {
   if (value === undefined) return undefined;
   const profile = exactObject(
     value,
-    new Set(["mode", "rateCard"]),
+    new Set(["mode", "rateCard", "thinkingLevel"]),
     new Set(["mode", "rateCard"]),
     "profile.providerControls",
   );
@@ -78,6 +80,12 @@ function validateProviderControlProfile(value, model) {
   }
   if (!model.startsWith(`${mode.provider}/`)) {
     throw new ProtocolError("INVALID_CONFIG", "profile.providerControls mode does not match its model route");
+  }
+  if (
+    profile.thinkingLevel !== undefined
+    && (typeof profile.thinkingLevel !== "string" || !THINKING_LEVELS.has(profile.thinkingLevel))
+  ) {
+    throw new ProtocolError("INVALID_CONFIG", "profile.providerControls.thinkingLevel is unsupported");
   }
   const rateCard = exactObject(
     profile.rateCard,
@@ -106,6 +114,7 @@ function validateProviderControlProfile(value, model) {
   }
   return Object.freeze({
     mode: profile.mode,
+    ...(profile.thinkingLevel !== undefined ? { thinkingLevel: profile.thinkingLevel } : {}),
     rateCard: Object.freeze({
       model: rateCard.model,
       serviceTier: rateCard.serviceTier,
@@ -310,6 +319,18 @@ export class ModelBroker {
           "host runtime or selected profile cannot enforce the required provider controls",
         );
       }
+      if (
+        request.requiredControls.thinkingLevel !== undefined
+        && profile.providerControls.thinkingLevel !== request.requiredControls.thinkingLevel
+      ) {
+        return this.#failure(
+          request,
+          requestHash,
+          "fresh",
+          "REQUIRED_CONTROLS_UNAVAILABLE",
+          "profile is not configured to enforce the required thinking level",
+        );
+      }
       providerControls = Object.freeze({
         ...request.requiredControls,
         mode: profile.providerControls.mode,
@@ -427,6 +448,9 @@ export class ModelBroker {
       "version", "mode", "model", "schemaHash", "rateCardHash", "inputTokens",
       "maxInputTokens", "maxOutputTokens", "maxTotalTokens", "worstCaseCostUsd", "serviceTier",
     ]);
+    if (request.requiredControls.thinkingLevel !== undefined) {
+      expectedKeys.add("thinkingLevel");
+    }
     if (!proof || typeof proof !== "object" || Array.isArray(proof)) {
       throw new ProtocolError("INVALID_HOST_RESULT", "controlled completion lacks provider control proof");
     }
@@ -445,6 +469,7 @@ export class ModelBroker {
       || proof.maxInputTokens !== controls.maxInputTokens
       || proof.maxOutputTokens !== controls.maxOutputTokens
       || proof.maxTotalTokens !== controls.maxTotalTokens
+      || (controls.thinkingLevel !== undefined && proof.thinkingLevel !== controls.thinkingLevel)
       || !Number.isSafeInteger(proof.inputTokens)
       || proof.inputTokens < 0
       || proof.inputTokens > controls.maxInputTokens

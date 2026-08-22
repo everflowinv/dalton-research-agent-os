@@ -32,6 +32,7 @@ from .thesis_impact import (
 
 SCHEMA_VERSION = "0.1"
 RUNTIME_PROFILE_REF = "runtime-profile:dalton:0.1"
+VERIFIER_THINKING_LEVEL = "low"
 ASSESSMENT_BUDGET = {
     "max_input_tokens": 3000,
     "max_output_tokens": 500,
@@ -249,6 +250,7 @@ class ResearchPlanThesisImpactCoordinator:
             "verifier_output_schema_version": VERIFIER_OUTPUT_SCHEMA_VERSION,
             "verifier_decision_schema_version": VERIFIER_DECISION_SCHEMA_VERSION,
             "verifier_binding_mode": VERIFIER_BINDING_MODE,
+            "verifier_thinking_level": VERIFIER_THINKING_LEVEL,
             "plan_version_ref": context["plan"]["id"],
             "assessment_ref": assessment["id"],
             "assessment_hash": assessment["content_hash"],
@@ -480,6 +482,7 @@ class ResearchPlanThesisImpactCoordinator:
 __all__ = [
     "ASSESSMENT_BUDGET",
     "VERIFIER_BUDGET",
+    "VERIFIER_THINKING_LEVEL",
     "ResearchPlanThesisImpactConflict",
     "ResearchPlanThesisImpactCoordinator",
     "ResearchPlanThesisImpactError",

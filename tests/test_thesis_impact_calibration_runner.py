@@ -101,6 +101,53 @@ class ThesisImpactCalibrationRunnerTests(unittest.TestCase):
         )
         self.assertNotEqual(changed_budget["id"], self.manifest["id"])
 
+    def test_thinking_level_is_frozen_and_closed(self):
+        self.assertIsNone(self.manifest["thinking_level"])
+        thinking = build_calibration_run_manifest(
+            corpus=self.corpus,
+            profile=self.profile,
+            repo_commit="a" * 40,
+            created_at=NOW,
+            run_cap_usd=Decimal("0.30"),
+            per_case_cap_usd=Decimal("0.01"),
+            max_input_tokens=3000,
+            max_output_tokens=1000,
+            timeout_seconds=120,
+            thinking_level="low",
+        )
+        self.assertEqual(thinking["thinking_level"], "low")
+        self.assertNotEqual(thinking["id"], self.manifest["id"])
+        parsed = validate_calibration_run_manifest(thinking)
+        self.assertEqual(parsed["thinking_level"], "low")
+        case = self.corpus["cases"][0]
+        frozen = build_calibration_work_order(case, thinking).metadata
+        self.assertEqual(frozen["verifier_thinking_level"], "low")
+        self.assertNotIn(
+            "verifier_thinking_level",
+            build_calibration_work_order(case, self.manifest).metadata,
+        )
+        with self.assertRaisesRegex(
+            ThesisImpactCalibrationRunError, "thinking_level"
+        ):
+            build_calibration_run_manifest(
+                corpus=self.corpus,
+                profile=self.profile,
+                repo_commit="a" * 40,
+                created_at=NOW,
+                run_cap_usd=Decimal("0.30"),
+                per_case_cap_usd=Decimal("0.01"),
+                max_input_tokens=3000,
+                max_output_tokens=1000,
+                timeout_seconds=120,
+                thinking_level="high",
+            )
+        broken = dict(thinking)
+        broken["thinking_level"] = "high"
+        with self.assertRaisesRegex(
+            ThesisImpactCalibrationRunError, "thinking_level"
+        ):
+            validate_calibration_run_manifest(broken)
+
     def test_work_order_is_deterministic_and_contains_no_gold(self):
         case = self.corpus["cases"][0]
         first = build_calibration_work_order(case, self.manifest).to_dict()

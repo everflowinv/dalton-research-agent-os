@@ -54,6 +54,7 @@ BROKER_AGENT_ID = "dalton-model-broker"
 BROKER_ACTOR_REF = "runtime:openclaw-model-broker"
 PROVIDER_CONTROL_MODE_REQUIRED = "provider-controlled-v1"
 PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC = "calibration-posthoc-v1"
+VERIFIER_THINKING_LEVELS = frozenset({"low"})
 ProviderControlMode = Literal[
     "provider-controlled-v1",
     "calibration-posthoc-v1",
@@ -646,7 +647,7 @@ def _required_provider_controls(
             "WorkOrder total token budget is smaller than required input plus output controls"
         )
     max_cost_usd = float(work.budget["max_cost_usd"])
-    return {
+    controls: dict[str, Any] = {
         "maxInputTokens": max_input_tokens,
         "maxOutputTokens": max_output_tokens,
         "maxTotalTokens": max_total_tokens,
@@ -657,6 +658,14 @@ def _required_provider_controls(
             "jsonSchema": dict(schema),
         },
     }
+    thinking_level = work.metadata.get("verifier_thinking_level")
+    if thinking_level is not None:
+        if thinking_level not in VERIFIER_THINKING_LEVELS:
+            raise ModelAdmissionError(
+                "verifier WorkOrder freezes an unsupported thinking level"
+            )
+        controls["thinkingLevel"] = thinking_level
+    return controls
 
 
 def _remaining_timeout(
@@ -1286,5 +1295,6 @@ __all__ = [
     "BrokerIdempotencyConflict",
     "PROVIDER_CONTROL_MODE_REQUIRED",
     "PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC",
+    "VERIFIER_THINKING_LEVELS",
     "owner_only_secret_file_provider",
 ]

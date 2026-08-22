@@ -37,6 +37,7 @@ from .openclaw_model_adapter import (
     OpenClawModelAdapterError,
     PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
     PROVIDER_CONTROL_MODE_REQUIRED,
+    VERIFIER_THINKING_LEVELS,
     owner_only_secret_file_provider,
 )
 from .research_context import count_dalton_search_tokens
@@ -56,7 +57,7 @@ from .thesis_impact_calibration import (
 
 
 SCHEMA_VERSION = "0.1"
-RUN_MANIFEST_SCHEMA_VERSION = "0.2"
+RUN_MANIFEST_SCHEMA_VERSION = "0.3"
 DEFAULT_PROFILE_ID = "profile:deepseek-v4-flash"
 DEFAULT_RUN_CAP_USD = Decimal("0.30")
 DEFAULT_CASE_CAP_USD = Decimal("0.01")
@@ -73,6 +74,7 @@ _MANIFEST_FIELDS = {
     "corpus_hash", "profile_id", "profile_version_ref", "model_family",
     "run_cap_usd", "per_case_cap_usd", "max_input_tokens",
     "max_output_tokens", "timeout_seconds", "case_refs", "execution_tier",
+    "thinking_level",
 }
 _RECORD_FIELDS = {
     "schema_version", "case_ref", "work_order", "route_decision_ref",
@@ -166,6 +168,7 @@ def build_calibration_run_manifest(
     max_output_tokens: int,
     timeout_seconds: int,
     execution_tier: str = PROVIDER_CONTROL_MODE_REQUIRED,
+    thinking_level: str | None = None,
     case_refs: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Freeze exact model, corpus, code, and maximum admitted spend."""
@@ -177,6 +180,8 @@ def build_calibration_run_manifest(
     case_cap = _money(per_case_cap_usd, "per_case_cap_usd", positive=True)
     if execution_tier not in EXECUTION_TIERS:
         raise ThesisImpactCalibrationRunError("execution_tier is unsupported")
+    if thinking_level is not None and thinking_level not in VERIFIER_THINKING_LEVELS:
+        raise ThesisImpactCalibrationRunError("thinking_level is unsupported")
     available_case_refs = [case["id"] for case in frozen["cases"]]
     selected_case_refs = available_case_refs if case_refs is None else list(case_refs)
     if (
@@ -211,6 +216,7 @@ def build_calibration_run_manifest(
         "profile_version_ref": profile["profile_version_ref"],
         "repo_commit": repo_commit,
         "execution_tier": execution_tier,
+        "thinking_level": thinking_level,
         "case_refs": selected_case_refs,
         "run_cap_usd": format(run_cap, "f"),
         "per_case_cap_usd": format(case_cap, "f"),
@@ -235,6 +241,7 @@ def build_calibration_run_manifest(
         "timeout_seconds": timeout_seconds,
         "case_refs": selected_case_refs,
         "execution_tier": execution_tier,
+        "thinking_level": thinking_level,
     }
 
 
@@ -250,6 +257,11 @@ def validate_calibration_run_manifest(value: Any) -> dict[str, Any]:
             raise ThesisImpactCalibrationRunError(f"manifest {field} must be text")
     if wire["execution_tier"] not in EXECUTION_TIERS:
         raise ThesisImpactCalibrationRunError("manifest execution_tier is unsupported")
+    if wire["thinking_level"] is not None and (
+        not isinstance(wire["thinking_level"], str)
+        or wire["thinking_level"] not in VERIFIER_THINKING_LEVELS
+    ):
+        raise ThesisImpactCalibrationRunError("manifest thinking_level is unsupported")
     for field in ("run_cap_usd", "per_case_cap_usd"):
         _money(wire[field], f"manifest {field}", positive=True)
     for field in ("max_input_tokens", "max_output_tokens", "timeout_seconds"):
@@ -318,6 +330,11 @@ def build_calibration_work_order(
             "verifier_output_schema_version": VERIFIER_OUTPUT_SCHEMA_VERSION,
             "verifier_decision_schema_version": VERIFIER_DECISION_SCHEMA_VERSION,
             "verifier_binding_mode": VERIFIER_BINDING_MODE,
+            **(
+                {"verifier_thinking_level": run["thinking_level"]}
+                if run["thinking_level"] is not None
+                else {}
+            ),
         },
     )
 
@@ -513,6 +530,7 @@ def run_live_calibration(
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     execution_tier: str = PROVIDER_CONTROL_MODE_REQUIRED,
+    thinking_level: str | None = None,
     case_refs: list[str] | tuple[str, ...] | None = None,
     openclaw_config_path: Path | None = None,
     resume: bool = False,
@@ -557,6 +575,7 @@ def run_live_calibration(
         max_output_tokens=max_output_tokens,
         timeout_seconds=timeout_seconds,
         execution_tier=execution_tier,
+        thinking_level=thinking_level,
         case_refs=case_refs,
     )
     manifest_path = output_dir / "manifest.json"
@@ -772,6 +791,11 @@ def main(argv: list[str] | None = None) -> int:
         choices=sorted(EXECUTION_TIERS),
         default=PROVIDER_CONTROL_MODE_REQUIRED,
     )
+    parser.add_argument(
+        "--thinking-level",
+        choices=sorted(VERIFIER_THINKING_LEVELS),
+        default=None,
+    )
     parser.add_argument("--case-ref", action="append", dest="case_refs")
     parser.add_argument("--openclaw-config", type=Path)
     parser.add_argument("--socket-path", type=Path, required=True)
@@ -794,6 +818,7 @@ def main(argv: list[str] | None = None) -> int:
             max_output_tokens=args.max_output_tokens,
             timeout_seconds=args.timeout_seconds,
             execution_tier=args.execution_tier,
+            thinking_level=args.thinking_level,
             case_refs=args.case_refs,
             openclaw_config_path=args.openclaw_config,
             resume=args.resume,

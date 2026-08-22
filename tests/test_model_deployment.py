@@ -8,8 +8,11 @@ from pathlib import Path
 from dalton_core.model_deployment import (
     ADAPTER_REF,
     BROKER_POLICY_REF,
+    VERIFIER_POLICY_REF,
+    VERIFIER_PROFILE_ID,
     install_openclaw_catalog,
     openclaw_broker_profiles,
+    openclaw_verifier_policy,
     upgrade_openclaw_broker_catalog,
     openclaw_policy,
     openclaw_profiles,
@@ -103,6 +106,35 @@ class ModelDeploymentTests(unittest.TestCase):
                 second["created_at"] = (WHEN + timedelta(minutes=1)).isoformat()
                 second.pop("content_hash", None)
                 self.assertEqual(router.register_profile(second)["status"], "fresh")
+
+    def test_verifier_policy_pins_exactly_one_broker_profile(self) -> None:
+        policy = openclaw_verifier_policy(created_at=WHEN)
+        self.assertEqual(policy["policy_version_ref"], VERIFIER_POLICY_REF)
+        self.assertEqual(
+            policy["filters"]["allowed_profile_ids"],
+            [VERIFIER_PROFILE_ID],
+        )
+        self.assertEqual(
+            policy["filters"]["family_independence_capabilities"],
+            ["verify", "adjudicate"],
+        )
+        self.assertIsNone(policy["prior_version_ref"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model-router.sqlite"
+            install_openclaw_catalog(path, checked_at=WHEN)
+            upgraded = upgrade_openclaw_broker_catalog(path, checked_at=WHEN)
+            self.assertEqual(
+                upgraded["verifier_policy"]["policy"]["policy_version_ref"],
+                VERIFIER_POLICY_REF,
+            )
+            with ModelRouter(path) as router:
+                pinned = router.get_policy(VERIFIER_POLICY_REF)
+                self.assertEqual(
+                    pinned["filters"]["allowed_profile_ids"],
+                    [VERIFIER_PROFILE_ID],
+                )
+                rerun = upgrade_openclaw_broker_catalog(path, checked_at=WHEN)
+                self.assertEqual(rerun["verifier_policy"]["status"], "duplicate")
 
 
 if __name__ == "__main__":

@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from dalton_core.model_router import ModelRouter
 from dalton_core.openclaw_model_adapter import (
@@ -29,6 +29,7 @@ from dalton_core.thesis_impact_model_worker import (
     ResearchPlanThesisImpactRuntime,
     ThesisImpactModelWorker,
     ThesisImpactModelWorkerConflict,
+    ThesisImpactModelWorkerRejected,
 )
 from tests.test_openclaw_model_adapter import FakeBroker
 from tests.test_research_plan_executor import PlanExecutorHarness
@@ -723,6 +724,371 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             "ok",
         )
         self.assertEqual(router.connection.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+
+    def _impact_profiles_and_policies(
+        self,
+        router: ModelRouter,
+        *,
+        pinned_profile_id: str | None,
+    ) -> tuple[str, str | None]:
+        def profile(
+            name: str,
+            *,
+            provider: str,
+            model: str,
+            family: str,
+            cost: float,
+            capabilities: list[str],
+        ) -> dict[str, Any]:
+            return {
+                "schema_version": "0.1",
+                "profile_version_ref": f"model-profile-version:{name}:1",
+                "id": f"profile:{name}",
+                "version": 1,
+                "created_at": "2026-08-22T01:00:00+00:00",
+                "prior_version_ref": None,
+                "provider": provider,
+                "model": model,
+                "family": family,
+                "adapter_ref": "adapter:openclaw-model-broker:0.1",
+                "credential_slot_ref": f"credential-slot:{provider}:{name}",
+                "capabilities": capabilities,
+                "modalities": ["text"],
+                "context": {
+                    "max_context_tokens": 100_000,
+                    "max_output_tokens": 4_000,
+                },
+                "availability": {
+                    "state": "available",
+                    "checked_at": "2026-08-22T01:00:00+00:00",
+                    "valid_until": "2026-08-23T01:00:00+00:00",
+                },
+                "cost": {
+                    "currency": "USD",
+                    "input_per_million_usd": cost,
+                    "output_per_million_usd": cost * 2,
+                },
+                "limits": {
+                    "max_input_tokens": 10_000,
+                    "max_output_tokens": 4_000,
+                    "max_total_tokens": 14_000,
+                    "max_cost_usd": 1.0,
+                },
+            }
+
+        profiles = [
+            profile(
+                "impact-a",
+                provider="openai",
+                model="gpt-5-impact-a",
+                family="impact-family-a",
+                cost=0.5,
+                capabilities=["research", "verify"],
+            ),
+            profile(
+                "impact-b",
+                provider="anthropic",
+                model="claude-impact-b",
+                family="impact-family-b",
+                cost=2.0,
+                capabilities=["verify"],
+            ),
+        ]
+        for item in profiles:
+            router.register_profile(item)
+        shared_ref = "model-routing-policy-version:thesis-impact-pinned-shared:1"
+        router.register_policy({
+            "schema_version": "0.1",
+            "policy_version_ref": shared_ref,
+            "id": "model-routing-policy:thesis-impact-pinned-shared",
+            "version": 1,
+            "created_at": "2026-08-22T01:00:00+00:00",
+            "prior_version_ref": None,
+            "filters": {
+                "allowed_profile_ids": ["profile:impact-a", "profile:impact-b"],
+                "allowed_providers": ["openai", "anthropic"],
+                "allowed_families": [],
+                "allowed_adapter_refs": ["adapter:openclaw-model-broker:0.1"],
+                "required_modalities": ["text"],
+                "family_independence_capabilities": ["verify"],
+            },
+            "ordered_preferences": [
+                {"field": "estimated_cost_usd", "direction": "asc"},
+                {"field": "profile_version_ref", "direction": "asc"},
+            ],
+        })
+        verifier_ref = None
+        if pinned_profile_id is not None:
+            verifier_ref = "model-routing-policy-version:thesis-impact-verifier:1"
+            router.register_policy({
+                "schema_version": "0.1",
+                "policy_version_ref": verifier_ref,
+                "id": "model-routing-policy:thesis-impact-verifier",
+                "version": 1,
+                "created_at": "2026-08-22T01:00:00+00:00",
+                "prior_version_ref": None,
+                "filters": {
+                    "allowed_profile_ids": [pinned_profile_id],
+                    "allowed_providers": [],
+                    "allowed_families": [],
+                    "allowed_adapter_refs": ["adapter:openclaw-model-broker:0.1"],
+                    "required_modalities": ["text"],
+                    "family_independence_capabilities": ["verify"],
+                },
+                "ordered_preferences": [
+                    {"field": "estimated_cost_usd", "direction": "asc"},
+                    {"field": "profile_version_ref", "direction": "asc"},
+                ],
+            })
+        return shared_ref, verifier_ref
+
+    @staticmethod
+    def _recorded_response(
+        request_count: Callable[[], int],
+        assessment_output: dict[str, Any],
+    ) -> Callable[[dict[str, Any]], dict[str, Any]]:
+        def response(request: dict[str, Any]) -> dict[str, Any]:
+            core = {key: value for key, value in request.items() if key != "auth"}
+            if request_count() == 1:
+                text = canonical_json(assessment_output)
+            else:
+                text = canonical_json({
+                    "schema_version": "0.1",
+                    "verdict": "pass",
+                    "findings": [],
+                })
+            provider, model = core["model"].split("/", 1)
+            wire = {
+                "schemaVersion": "0.1",
+                "brokerVersion": "0.1.0-recorded",
+                "runtimeVersion": "2026.8.22",
+                "invocationId": core["invocationId"],
+                "workOrderId": core["workOrderId"],
+                "profileId": core["profileId"],
+                "requestHash": broker_hash(core),
+                "idempotencyStatus": "fresh",
+                "ok": True,
+                "provider": provider,
+                "model": model,
+                "canonicalModel": core["model"],
+                "agentId": "dalton-model-broker",
+                "text": text,
+                "usage": {
+                    "inputTokens": 100,
+                    "outputTokens": 50,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": None,
+                    "totalTokens": 150,
+                },
+                "cost": {"available": True, "usd": 0.001},
+                "error": None,
+            }
+            wire["contentHash"] = broker_hash(wire)
+            return wire
+
+        return response
+
+    def test_phase_pinned_verifier_policy_binds_route_and_thinking_level(self) -> None:
+        committed = self._seed_thesis()
+        started = self._close_and_start()
+        claim = self.harness.core.get_claim(
+            started["impact"]["claim_version_ref"]
+        )["claim"]
+        thesis = self.harness.core.get_version(committed["version_id"])["content"]
+        assessment_output = {
+            "schema_version": "0.1",
+            "claim_version_ref": claim["id"],
+            "claim_version_hash": claim["content_hash"],
+            "thesis_version_ref": thesis["id"],
+            "thesis_version_hash": thesis["content_hash"],
+            "driver_statement": thesis["mechanism"],
+            "impact": "supports",
+            "rationale": (
+                "The exact reported growth is directionally consistent with the "
+                "bound operating-leverage driver."
+            ),
+            "follow_up_question": None,
+        }
+        fixed_now = datetime(2026, 8, 22, 1, 30, tzinfo=timezone.utc)
+        router = ModelRouter(
+            Path(self.temp.name) / "pinned-router.sqlite",
+            clock=lambda: fixed_now,
+        )
+        self.addCleanup(router.close)
+        shared_ref, verifier_ref = self._impact_profiles_and_policies(
+            router, pinned_profile_id="profile:impact-b"
+        )
+        broker = FakeBroker(
+            Path(self.temp.name),
+            self._recorded_response(
+                lambda: len(broker.requests), assessment_output
+            ),
+            connections=2,
+        )
+        self.addCleanup(broker.close)
+        adapter = OpenClawModelAdapter(
+            broker.path,
+            route_resolver=router.get_decision,
+            auth_client_id="client:thesis-impact-runtime",
+            auth_key_provider=lambda: b"a" * 64,
+            timeout_seconds=1.0,
+            clock=lambda: fixed_now,
+        )
+        worker = ThesisImpactModelWorker(
+            scheduler=self.harness.scheduler(),
+            router=router,
+            adapter=adapter,
+            impact=self.impact,
+            observability=self.harness.observability,
+            routing_policy_ref=shared_ref,
+            verifier_routing_policy_ref=verifier_ref,
+            credential_slot_refs=(
+                "credential-slot:openai:impact-a",
+                "credential-slot:anthropic:impact-b",
+            ),
+            token_counter=lambda _text: 800,
+            clock=lambda: fixed_now,
+        )
+        runtime = ResearchPlanThesisImpactRuntime(control=self.control, worker=worker)
+        completed = runtime.run_once(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+        )
+        self.assertEqual(completed["status"], "eligible")
+        decisions = router.list_decisions()
+        self.assertEqual(len(decisions), 2)
+        self.assertEqual(decisions[0]["policy_version_ref"], shared_ref)
+        self.assertEqual(
+            decisions[0]["selected_endpoint"]["family"], "impact-family-a"
+        )
+        self.assertEqual(decisions[1]["policy_version_ref"], verifier_ref)
+        self.assertEqual(
+            decisions[1]["selected_endpoint"]["family"], "impact-family-b"
+        )
+        self.assertEqual(
+            decisions[1]["constraints"]["producer_family"], "impact-family-a"
+        )
+        self.assertEqual(len(broker.requests), 2)
+        self.assertNotIn("requiredControls", broker.requests[0])
+        controls = broker.requests[1]["requiredControls"]
+        self.assertEqual(controls["thinkingLevel"], "low")
+        self.assertEqual(
+            controls["structuredOutput"]["schemaName"],
+            "thesis_impact_verifier_decision_provider_output_v0_1",
+        )
+        self.assertEqual(
+            completed["assessment"]["verifier_work_order"]["metadata"][
+                "verifier_thinking_level"
+            ],
+            "low",
+        )
+
+    def test_verifier_policy_fails_closed_on_same_family_and_unpinned_policy(self) -> None:
+        committed = self._seed_thesis()
+        started = self._close_and_start()
+        claim = self.harness.core.get_claim(
+            started["impact"]["claim_version_ref"]
+        )["claim"]
+        thesis = self.harness.core.get_version(committed["version_id"])["content"]
+        assessment_output = {
+            "schema_version": "0.1",
+            "claim_version_ref": claim["id"],
+            "claim_version_hash": claim["content_hash"],
+            "thesis_version_ref": thesis["id"],
+            "thesis_version_hash": thesis["content_hash"],
+            "driver_statement": thesis["mechanism"],
+            "impact": "supports",
+            "rationale": (
+                "The exact reported growth is directionally consistent with the "
+                "bound operating-leverage driver."
+            ),
+            "follow_up_question": None,
+        }
+        fixed_now = datetime(2026, 8, 22, 1, 30, tzinfo=timezone.utc)
+        router = ModelRouter(
+            Path(self.temp.name) / "fail-closed-router.sqlite",
+            clock=lambda: fixed_now,
+        )
+        self.addCleanup(router.close)
+        shared_ref, verifier_ref = self._impact_profiles_and_policies(
+            router, pinned_profile_id="profile:impact-a"
+        )
+        broker = FakeBroker(
+            Path(self.temp.name),
+            self._recorded_response(
+                lambda: len(broker.requests), assessment_output
+            ),
+            connections=1,
+        )
+        self.addCleanup(broker.close)
+        adapter = OpenClawModelAdapter(
+            broker.path,
+            route_resolver=router.get_decision,
+            auth_client_id="client:thesis-impact-runtime",
+            auth_key_provider=lambda: b"a" * 64,
+            timeout_seconds=1.0,
+            clock=lambda: fixed_now,
+        )
+        worker = ThesisImpactModelWorker(
+            scheduler=self.harness.scheduler(),
+            router=router,
+            adapter=adapter,
+            impact=self.impact,
+            observability=self.harness.observability,
+            routing_policy_ref=shared_ref,
+            verifier_routing_policy_ref=verifier_ref,
+            credential_slot_refs=(
+                "credential-slot:openai:impact-a",
+                "credential-slot:anthropic:impact-b",
+            ),
+            token_counter=lambda _text: 800,
+            clock=lambda: fixed_now,
+        )
+        runtime = ResearchPlanThesisImpactRuntime(control=self.control, worker=worker)
+        failed = runtime.run_once(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+        )
+        self.assertEqual(failed["status"], "verification_failed")
+        verifier_route = failed["verifier_run"]["route"]
+        self.assertEqual(verifier_route["outcome"], "rejected")
+        self.assertIn(
+            "model_family_not_independent", verifier_route["rejection_reasons"]
+        )
+        self.assertEqual(len(broker.requests), 1)
+        self.assertEqual(
+            self.harness.core.connection.execute(
+                "SELECT COUNT(*) FROM thesis_impact_assessments"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            self.harness.core.connection.execute(
+                "SELECT COUNT(*) FROM thesis_impact_verifications"
+            ).fetchone()[0],
+            0,
+        )
+
+        unpinned = ThesisImpactModelWorker(
+            scheduler=self.harness.scheduler(),
+            router=router,
+            adapter=adapter,
+            impact=self.impact,
+            observability=self.harness.observability,
+            routing_policy_ref=shared_ref,
+            verifier_routing_policy_ref=shared_ref,
+            credential_slot_refs=(
+                "credential-slot:openai:impact-a",
+                "credential-slot:anthropic:impact-b",
+            ),
+            token_counter=lambda _text: 800,
+            clock=lambda: fixed_now,
+        )
+        with self.assertRaisesRegex(
+            ThesisImpactModelWorkerRejected, "not pinned to exactly one profile"
+        ):
+            unpinned.run_once(failed["assessment"]["verifier_work_order"])
+        self.assertEqual(len(broker.requests), 1)
 
     def test_worker_recovers_accounted_model_result_without_second_provider_call(self) -> None:
         committed = self._seed_thesis()

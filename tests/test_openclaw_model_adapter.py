@@ -510,6 +510,72 @@ class OpenClawModelAdapterTests(unittest.TestCase):
         )
         self.assertEqual(invocation.granularity.value, "verification")
 
+    def test_verifier_thinking_level_binds_into_controls_and_identity(self) -> None:
+        verifier = WorkOrder.from_dict({
+            **self.work.to_dict(),
+            "id": "work:model-verification-thinking",
+            "question": "Verify the exact thesis impact assessment",
+            "requested_capabilities": ["verify"],
+            "idempotency_key": "work-key:model-verification-thinking",
+            "metadata": {
+                "verifier_output_schema_version": "0.2",
+                "verifier_decision_schema_version": "0.1",
+                "verifier_binding_mode": "wrapper-owned-v1",
+                "verifier_thinking_level": "low",
+            },
+        })
+        routed = self.router.route(
+            verifier,
+            attempt_number=1,
+            capability="verify",
+            policy_version_ref="model-routing-policy-version:default:1",
+            credential_slot_refs=["credential-slot:openai:dalton"],
+            required_modalities=["text"],
+            required_context_tokens=1_000,
+            estimated_input_tokens=500,
+            estimated_output_tokens=250,
+            producer_family="anthropic-claude",
+            idempotency_key="route-key:model-verification-thinking",
+        )["decision"]
+        (invocation, result), broker = self.run_with(
+            success_response,
+            work=verifier,
+            route=routed,
+        )
+        broker.close()
+        controls = broker.requests[0]["requiredControls"]
+        self.assertEqual(controls["thinkingLevel"], "low")
+        self.assertTrue(result.metadata["required_provider_controls"])
+        self.assertEqual(invocation.granularity.value, "verification")
+
+        uncalibrated = WorkOrder.from_dict({
+            **verifier.to_dict(),
+            "id": "work:model-verification-thinking-high",
+            "idempotency_key": "work-key:model-verification-thinking-high",
+            "metadata": {**verifier.metadata, "verifier_thinking_level": "high"},
+        })
+        rejected_route = self.router.route(
+            uncalibrated,
+            attempt_number=1,
+            capability="verify",
+            policy_version_ref="model-routing-policy-version:default:1",
+            credential_slot_refs=["credential-slot:openai:dalton"],
+            required_modalities=["text"],
+            required_context_tokens=1_000,
+            estimated_input_tokens=500,
+            estimated_output_tokens=250,
+            producer_family="anthropic-claude",
+            idempotency_key="route-key:model-verification-thinking-high",
+        )["decision"]
+        with self.assertRaisesRegex(
+            ModelAdmissionError, "unsupported thinking level"
+        ):
+            self.run_with(
+                success_response,
+                work=uncalibrated,
+                route=rejected_route,
+            )
+
     def test_posthoc_mode_is_explicit_and_calibration_only(self) -> None:
         verifier = WorkOrder.from_dict({
             **self.work.to_dict(),

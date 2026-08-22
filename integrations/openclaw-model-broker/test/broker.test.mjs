@@ -183,7 +183,7 @@ test("calls only host-owned completion with a fixed agent and exact allowed mode
   });
   assert.deepEqual(response.cost, { available: true, usd: 0.004 });
   assert.equal(response.runtimeVersion, "2026.7.1");
-  assert.equal(response.brokerVersion, "0.1.0-spike.4");
+  assert.equal(response.brokerVersion, "0.1.0-spike.5");
   verifyHash(response);
 
   assert.equal(calls.length, 1);
@@ -438,6 +438,92 @@ test("controlled Google completion binds the exact Google transport and proof", 
   assert.equal(response.ok, true);
   assert.equal(response.canonicalModel, "google/gemini-3.1-pro-preview");
   verifyHash(response);
+});
+
+test("required thinking level is enforced end to end", async () => {
+  const thinkingControls = requiredControls({ thinkingLevel: "low" });
+
+  assert.throws(
+    () => validateRequest(
+      request({ requiredControls: requiredControls({ thinkingLevel: "high" }) }),
+      4096,
+    ),
+    (error) => error instanceof ProtocolError && error.code === "INVALID_REQUEST",
+  );
+  assert.throws(
+    () => new ModelBroker(fakeRuntime(async () => result()), controlledConfig({
+      profiles: [{
+        ...config().profiles[0],
+        providerControls: { ...providerControlProfile(), thinkingLevel: "high" },
+      }],
+    })),
+    (error) => error instanceof ProtocolError && error.code === "INVALID_CONFIG",
+  );
+
+  let unconfiguredCalls = 0;
+  const unconfigured = new ModelBroker(fakeRuntime(async () => {
+    unconfiguredCalls += 1;
+    return result();
+  }, { controlled: true }), controlledConfig());
+  const unavailable = await unconfigured.handle(request({
+    invocationId: "invocation:thinking-unconfigured",
+    requiredControls: thinkingControls,
+  }));
+  assert.equal(unavailable.error.code, "REQUIRED_CONTROLS_UNAVAILABLE");
+  assert.equal(unconfiguredCalls, 0);
+
+  const thinkingProfile = { ...providerControlProfile(), thinkingLevel: "low" };
+  const thinkingConfig = controlledConfig({
+    profiles: [{ ...config().profiles[0], providerControls: thinkingProfile }],
+  });
+  const seen = [];
+  const broker = new ModelBroker(fakeRuntime(async (params) => {
+    seen.push(params);
+    return result({
+      providerControlProof: providerControlProof(thinkingControls, {
+        thinkingLevel: "low",
+      }),
+    });
+  }, { controlled: true }), thinkingConfig);
+  const response = await broker.handle(request({
+    invocationId: "invocation:thinking-ok",
+    requiredControls: thinkingControls,
+  }));
+  assert.equal(response.ok, true);
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].providerControls.thinkingLevel, "low");
+  verifyHash(response);
+
+  const conflict = await broker.handle(request({
+    invocationId: "invocation:thinking-ok",
+    requiredControls: requiredControls(),
+  }));
+  assert.equal(conflict.error.code, "IDEMPOTENCY_CONFLICT");
+
+  const legacyProof = new ModelBroker(fakeRuntime(async () => result({
+    providerControlProof: providerControlProof(thinkingControls),
+  }), { controlled: true }), thinkingConfig);
+  const rejected = await legacyProof.handle(request({
+    invocationId: "invocation:thinking-legacy-proof",
+    requiredControls: thinkingControls,
+  }));
+  assert.equal(rejected.error.code, "INVALID_HOST_RESULT");
+
+  const plainControls = requiredControls();
+  const plainProof = new ModelBroker(fakeRuntime(async () => result({
+    providerControlProof: providerControlProof(plainControls),
+  }), { controlled: true }), thinkingConfig);
+  const plainSeen = [];
+  plainProof.runtime.llm.complete = async (params) => {
+    plainSeen.push(params);
+    return result({ providerControlProof: providerControlProof(plainControls) });
+  };
+  const plain = await plainProof.handle(request({
+    invocationId: "invocation:thinking-plain",
+    requiredControls: plainControls,
+  }));
+  assert.equal(plain.ok, true);
+  assert.equal("thinkingLevel" in plainSeen[0].providerControls, false);
 });
 
 test("controlled completion rejects missing, mismatched, or breached host proof", async () => {
