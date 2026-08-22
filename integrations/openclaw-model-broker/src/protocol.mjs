@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 export const PROTOCOL_VERSION = "0.1";
-export const BROKER_VERSION = "0.1.0-spike.1";
+export const BROKER_VERSION = "0.1.0-spike.2";
 
 const REQUIRED_REQUEST_KEYS = new Set([
   "schemaVersion",
@@ -13,8 +13,16 @@ const REQUIRED_REQUEST_KEYS = new Set([
   "maxTokens",
   "timeoutMs",
 ]);
-const OPTIONAL_REQUEST_KEYS = new Set(["replayOnly"]);
+const OPTIONAL_REQUEST_KEYS = new Set(["replayOnly", "requiredControls"]);
 const REQUEST_KEYS = new Set([...REQUIRED_REQUEST_KEYS, ...OPTIONAL_REQUEST_KEYS]);
+const REQUIRED_CONTROL_KEYS = new Set([
+  "maxInputTokens",
+  "maxOutputTokens",
+  "maxTotalTokens",
+  "maxCostUsd",
+  "structuredOutput",
+]);
+const STRUCTURED_OUTPUT_KEYS = new Set(["schemaName", "schemaHash", "jsonSchema"]);
 
 export class ProtocolError extends Error {
   constructor(code, message) {
@@ -137,6 +145,66 @@ function positiveInteger(value, field) {
   return value;
 }
 
+function positiveNumber(value, field) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new ProtocolError("INVALID_REQUEST", `${field} must be a positive finite number`);
+  }
+  return value;
+}
+
+function exactRequestObject(value, keys, field) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ProtocolError("INVALID_REQUEST", `${field} must be an object`);
+  }
+  const actual = Object.keys(value);
+  if (actual.length !== keys.size || actual.some((key) => !keys.has(key))) {
+    throw new ProtocolError("INVALID_REQUEST", `${field} has an invalid shape`);
+  }
+  return value;
+}
+
+function validateRequiredControls(value, requestMaxTokens) {
+  const raw = exactRequestObject(value, REQUIRED_CONTROL_KEYS, "requiredControls");
+  const structured = exactRequestObject(
+    raw.structuredOutput,
+    STRUCTURED_OUTPUT_KEYS,
+    "requiredControls.structuredOutput",
+  );
+  if (!structured.jsonSchema || typeof structured.jsonSchema !== "object" || Array.isArray(structured.jsonSchema)) {
+    throw new ProtocolError("INVALID_REQUEST", "requiredControls structured output schema must be an object");
+  }
+  const schemaHash = requiredString(
+    structured.schemaHash,
+    "requiredControls.structuredOutput.schemaHash",
+    /^[0-9a-f]{64}$/,
+  );
+  if (contentHash(structured.jsonSchema) !== schemaHash) {
+    throw new ProtocolError("INVALID_REQUEST", "requiredControls structured output schema hash mismatch");
+  }
+  const controls = {
+    maxInputTokens: positiveInteger(raw.maxInputTokens, "requiredControls.maxInputTokens"),
+    maxOutputTokens: positiveInteger(raw.maxOutputTokens, "requiredControls.maxOutputTokens"),
+    maxTotalTokens: positiveInteger(raw.maxTotalTokens, "requiredControls.maxTotalTokens"),
+    maxCostUsd: positiveNumber(raw.maxCostUsd, "requiredControls.maxCostUsd"),
+    structuredOutput: {
+      schemaName: requiredString(
+        structured.schemaName,
+        "requiredControls.structuredOutput.schemaName",
+        /^[A-Za-z][A-Za-z0-9._-]{0,127}$/,
+      ),
+      schemaHash,
+      jsonSchema: structured.jsonSchema,
+    },
+  };
+  if (controls.maxOutputTokens !== requestMaxTokens) {
+    throw new ProtocolError("INVALID_REQUEST", "requiredControls output limit must equal maxTokens");
+  }
+  if (controls.maxTotalTokens < controls.maxInputTokens + controls.maxOutputTokens) {
+    throw new ProtocolError("INVALID_REQUEST", "requiredControls total limit is smaller than input plus output limits");
+  }
+  return Object.freeze(controls);
+}
+
 export function validateRequest(input, maxFrameBytes) {
   if (!input || typeof input !== "object" || Array.isArray(input)) {
     throw new ProtocolError("INVALID_REQUEST", "request must be an object");
@@ -155,6 +223,7 @@ export function validateRequest(input, maxFrameBytes) {
   if ("replayOnly" in input && typeof input.replayOnly !== "boolean") {
     throw new ProtocolError("INVALID_REQUEST", "replayOnly must be boolean");
   }
+  const maxTokens = positiveInteger(input.maxTokens, "maxTokens");
   const request = Object.freeze({
     schemaVersion: PROTOCOL_VERSION,
     invocationId: requiredString(input.invocationId, "invocationId", /^invocation:[A-Za-z0-9._-]+$/),
@@ -162,8 +231,11 @@ export function validateRequest(input, maxFrameBytes) {
     profileId: requiredString(input.profileId, "profileId", /^profile:[A-Za-z0-9._-]+$/),
     model: requiredString(input.model, "model", /^[A-Za-z0-9._-]+\/[A-Za-z0-9][A-Za-z0-9._:/-]*$/),
     prompt: requiredString(input.prompt, "prompt"),
-    maxTokens: positiveInteger(input.maxTokens, "maxTokens"),
+    maxTokens,
     timeoutMs: positiveInteger(input.timeoutMs, "timeoutMs"),
+    ...(input.requiredControls === undefined ? {} : {
+      requiredControls: validateRequiredControls(input.requiredControls, maxTokens),
+    }),
     ...(input.replayOnly === true ? { replayOnly: true } : {}),
   });
   if (Buffer.byteLength(canonicalJson(request), "utf8") > maxFrameBytes) {

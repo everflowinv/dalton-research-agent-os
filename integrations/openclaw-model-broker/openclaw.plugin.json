@@ -2,7 +2,7 @@
   "id": "dalton-openclaw-model-broker",
   "name": "Dalton OpenClaw Model Broker",
   "description": "Host-owned model completion bridge for an external Dalton runtime.",
-  "version": "0.1.0-spike.1",
+  "version": "0.1.0-spike.2",
   "activation": {
     "onStartup": true
   },

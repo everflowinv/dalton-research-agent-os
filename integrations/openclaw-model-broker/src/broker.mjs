@@ -207,6 +207,15 @@ export class ModelBroker {
     if (request.maxTokens > profile.maxTokens || request.timeoutMs > profile.timeoutMs) {
       return this.#failure(request, requestHash, "fresh", "PROFILE_LIMIT_EXCEEDED", "request exceeds profile limits");
     }
+    if (request.requiredControls) {
+      return this.#failure(
+        request,
+        requestHash,
+        "fresh",
+        "REQUIRED_CONTROLS_UNAVAILABLE",
+        "host runtime cannot enforce required structured output, input/total token, and cost controls",
+      );
+    }
     this.active += 1;
     const controller = new AbortController();
     let timer;

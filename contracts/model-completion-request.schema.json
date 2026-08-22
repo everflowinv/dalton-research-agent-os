@@ -8,6 +8,9 @@
     "schemaVersion", "invocationId", "workOrderId", "profileId",
     "model", "prompt", "maxTokens", "timeoutMs", "auth"
   ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
   "properties": {
     "schemaVersion": {"const": "0.1"},
     "invocationId": {
@@ -32,6 +35,33 @@
     "replayOnly": {
       "type": "boolean",
       "description": "When true, return only an existing durable idempotency result; a miss must not call the host model."
+    },
+    "requiredControls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxInputTokens", "maxOutputTokens", "maxTotalTokens",
+        "maxCostUsd", "structuredOutput"
+      ],
+      "properties": {
+        "maxInputTokens": {"type": "integer", "minimum": 1},
+        "maxOutputTokens": {"type": "integer", "minimum": 1},
+        "maxTotalTokens": {"type": "integer", "minimum": 1},
+        "maxCostUsd": {"type": "number", "exclusiveMinimum": 0},
+        "structuredOutput": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["schemaName", "schemaHash", "jsonSchema"],
+          "properties": {
+            "schemaName": {
+              "type": "string",
+              "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,127}$"
+            },
+            "schemaHash": {"$ref": "#/$defs/hash"},
+            "jsonSchema": {"type": "object"}
+          }
+        }
+      }
     },
     "auth": {
       "type": "object",

@@ -421,6 +421,8 @@ class OpenClawModelAdapterTests(unittest.TestCase):
         self.assertEqual(invocation.usage["raw_provider_telemetry"]["cost"]["usd"], 0.01)
         self.assertEqual(result.status, "succeeded")
         self.assertEqual(result.usage_refs, (f"usage:{invocation.id}",))
+        self.assertIs(result.metadata["required_provider_controls"], False)
+        self.assertIsNone(result.metadata["provider_control_schema_hash"])
         serialized = canonical_json({"invocation": invocation.to_dict(), "result": result.to_dict()})
         self.assertNotIn(self.work.question, serialized)
         self.assertNotIn(AUTH_SECRET.decode(), serialized)
@@ -443,6 +445,56 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             self.assertEqual(accepted["work_state"], "succeeded")
         finally:
             scheduler.close()
+
+    def test_independent_verifier_binds_required_provider_controls(self) -> None:
+        verifier = WorkOrder.from_dict({
+            **self.work.to_dict(),
+            "id": "work:model-verification-1",
+            "question": "Verify the exact thesis impact assessment",
+            "requested_capabilities": ["verify"],
+            "idempotency_key": "work-key:model-verification-1",
+            "metadata": {"verifier_output_schema_version": "0.2"},
+        })
+        routed = self.router.route(
+            verifier,
+            attempt_number=1,
+            capability="verify",
+            policy_version_ref="model-routing-policy-version:default:1",
+            credential_slot_refs=["credential-slot:openai:dalton"],
+            required_modalities=["text"],
+            required_context_tokens=1_000,
+            estimated_input_tokens=500,
+            estimated_output_tokens=250,
+            producer_family="anthropic-claude",
+            idempotency_key="route-key:model-verification-1",
+        )["decision"]
+        (invocation, result), broker = self.run_with(
+            success_response,
+            work=verifier,
+            route=routed,
+        )
+        broker.close()
+        controls = broker.requests[0]["requiredControls"]
+        self.assertEqual(
+            set(controls),
+            {
+                "maxInputTokens", "maxOutputTokens", "maxTotalTokens",
+                "maxCostUsd", "structuredOutput",
+            },
+        )
+        self.assertEqual(controls["maxInputTokens"], 1_000)
+        self.assertEqual(controls["maxOutputTokens"], 500)
+        self.assertEqual(controls["maxTotalTokens"], 1_500)
+        self.assertEqual(controls["maxCostUsd"], 0.5)
+        structured = controls["structuredOutput"]
+        self.assertEqual(structured["schemaName"], "thesis_impact_verifier_output_v0_2")
+        self.assertEqual(structured["schemaHash"], canonical_hash(structured["jsonSchema"]))
+        self.assertTrue(result.metadata["required_provider_controls"])
+        self.assertEqual(
+            result.metadata["provider_control_schema_hash"],
+            structured["schemaHash"],
+        )
+        self.assertEqual(invocation.granularity.value, "verification")
 
     def test_request_and_response_hashes_and_route_hash_are_enforced(self) -> None:
         def bad_request_hash(request: dict[str, Any]) -> dict[str, Any]:
@@ -875,6 +927,38 @@ process.on("SIGTERM",async()=>{await server.stop();process.exit(0)});
             self.assertEqual(duplicate_invocation.id, invocation.id)
             self.assertEqual(
                 duplicate_result.metadata["broker_idempotency_status"], "duplicate"
+            )
+            verifier = WorkOrder.from_dict({
+                **self.work.to_dict(),
+                "id": "work:node-controlled-verifier",
+                "question": "Verify one exact structured assessment",
+                "requested_capabilities": ["verify"],
+                "idempotency_key": "work-key:node-controlled-verifier",
+                "metadata": {"verifier_output_schema_version": "0.2"},
+            })
+            verifier_route = node_router.route(
+                verifier,
+                attempt_number=1,
+                capability="verify",
+                policy_version_ref="model-routing-policy-version:default:1",
+                credential_slot_refs=["credential-slot:openai:dalton"],
+                required_modalities=["text"],
+                required_context_tokens=1_000,
+                estimated_input_tokens=500,
+                estimated_output_tokens=250,
+                producer_family="anthropic-claude",
+                idempotency_key="route-key:node-controlled-verifier",
+            )["decision"]
+            _, controlled_result = adapter.execute(
+                verifier, verifier_route, stored_profile
+            )
+            self.assertEqual(controlled_result.status, "failed")
+            self.assertEqual(
+                controlled_result.error["code"],
+                "REQUIRED_CONTROLS_UNAVAILABLE",
+            )
+            self.assertTrue(
+                controlled_result.metadata["required_provider_controls"]
             )
         finally:
             if node_router is not None:

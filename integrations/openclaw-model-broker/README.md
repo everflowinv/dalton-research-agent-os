@@ -20,7 +20,8 @@ steps.
   MAC validity, and nonce replay protection before request validation.
 - Apart from that authentication envelope, a request contains only protocol
   version, invocation/work-order IDs, profile, exact canonical model, prompt,
-  maximum tokens, timeout, and the optional boolean `replayOnly` instruction.
+  maximum tokens, timeout, the optional boolean `replayOnly` instruction, and
+  an optional closed `requiredControls` contract.
 - The plugin chooses one configured dedicated agent and one exact model per
   configured profile. A client cannot choose an agent, endpoint, header,
   credential, or authentication profile.
@@ -58,6 +59,21 @@ plugin state directory and owner-only permissions, not a general audit log.
 The host additionally needs operator-controlled plugin runtime policy for
 model and cross-agent overrides (`allowModelOverride`, `allowedModels`, and
 `allowAgentIdOverride`). The repository does not edit that policy.
+
+## Required provider controls
+
+Independent verifier calls carry a hash-bound JSON Schema plus input, output,
+total-token, and cost limits in `requiredControls`. OpenClaw 2026.7.1's public
+`api.runtime.llm.complete` surface accepts only `maxTokens`, `temperature`, and
+an abort signal. It does not expose provider-side JSON Schema, input/total token
+limits, or a cost limit. The broker therefore returns
+`REQUIRED_CONTROLS_UNAVAILABLE` before calling the host. It never silently
+downgrades these calls to prompt-only JSON or post-hoc budget checking.
+
+General completion requests without `requiredControls` keep the existing
+bounded broker path. Enabling controlled verifier execution requires a future
+host API that can prove all named controls; adding unsupported extra fields to
+`llm.complete` is not treated as support.
 
 ## Test
 

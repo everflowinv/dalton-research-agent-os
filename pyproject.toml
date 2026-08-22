@@ -56,6 +56,7 @@ dalton_core = [
   "connector_inventory/proposals/*.json",
   "reference_shadow_fixtures/*.json",
   "calibration_fixtures/*.json",
+  "thesis-impact-verifier-output-v0.2.schema.json",
   "dashboard.html",
   "agenda_control.html",
   "research_review_control.html",

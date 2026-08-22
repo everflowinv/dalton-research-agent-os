@@ -34,6 +34,27 @@ function request(overrides = {}) {
   };
 }
 
+function requiredControls(overrides = {}) {
+  const jsonSchema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["verdict"],
+    properties: { verdict: { enum: ["pass", "reject"] } },
+  };
+  return {
+    maxInputTokens: 1000,
+    maxOutputTokens: 256,
+    maxTotalTokens: 1256,
+    maxCostUsd: 0.05,
+    structuredOutput: {
+      schemaName: "thesis_impact_verifier_output_v0_2",
+      schemaHash: contentHash(jsonSchema),
+      jsonSchema,
+    },
+    ...overrides,
+  };
+}
+
 function fakeRuntime(complete) {
   return { version: "2026.7.1", llm: { complete } };
 }
@@ -83,7 +104,7 @@ test("calls only host-owned completion with a fixed agent and exact allowed mode
   });
   assert.deepEqual(response.cost, { available: true, usd: 0.004 });
   assert.equal(response.runtimeVersion, "2026.7.1");
-  assert.equal(response.brokerVersion, "0.1.0-spike.1");
+  assert.equal(response.brokerVersion, "0.1.0-spike.2");
   verifyHash(response);
 
   assert.equal(calls.length, 1);
@@ -194,6 +215,34 @@ test("profile, model, token, and timeout bounds fail closed", async () => {
     assert.equal(response.ok, false);
   }
   assert.equal(calls, 0);
+});
+
+test("required provider controls fail before any host completion", async () => {
+  let calls = 0;
+  const broker = new ModelBroker(fakeRuntime(async () => {
+    calls += 1;
+    return result();
+  }), config());
+  const controlled = request({ requiredControls: requiredControls() });
+  const response = await broker.handle(controlled);
+  assert.equal(response.ok, false);
+  assert.equal(response.error.code, "REQUIRED_CONTROLS_UNAVAILABLE");
+  assert.equal(calls, 0);
+  verifyHash(response);
+
+  assert.throws(
+    () => validateRequest({
+      ...controlled,
+      requiredControls: requiredControls({ maxOutputTokens: 255 }),
+    }, 4096),
+    (error) => error instanceof ProtocolError && error.code === "INVALID_REQUEST",
+  );
+  const badSchema = requiredControls();
+  badSchema.structuredOutput.schemaHash = "0".repeat(64);
+  assert.throws(
+    () => validateRequest({ ...controlled, requiredControls: badSchema }, 4096),
+    (error) => error instanceof ProtocolError && error.code === "INVALID_REQUEST",
+  );
 });
 
 test("timeout aborts the host request and output/attribution mismatches fail closed", async () => {

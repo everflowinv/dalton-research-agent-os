@@ -148,6 +148,10 @@ class ThesisImpactCalibrationTests(unittest.TestCase):
         schema = json.loads((
             ROOT / "contracts" / "thesis-impact-verifier-output-v0.2.schema.json"
         ).read_text(encoding="utf-8"))
+        packaged_schema = json.loads((
+            ROOT / "src" / "dalton_core" / "thesis-impact-verifier-output-v0.2.schema.json"
+        ).read_text(encoding="utf-8"))
+        self.assertEqual(packaged_schema, schema)
         codes = schema["$defs"]["finding"]["properties"]["code"]["enum"]
         expected_impacts = schema["$defs"]["finding"]["allOf"][1]["then"][
             "properties"

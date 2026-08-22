@@ -960,8 +960,10 @@ Claim → driver/thesis impact authority，以及 ResearchPlan closure → bound
 usage/cost 入账、model-family independence、lease-expiry crash recovery 和 replay。Gate 0/1 breadth proof 与
 Gate 2 真实模型 canary 和 verifier 候选校准均已完成；当前阻塞是可用的独立 verifier model/broker 边界，而不是
 控制面缺口。DeepSeek 的 12/12 质量分数未过门，Claude Fable 首条即超过 admission budget 和严格输出合同。
-下一步先收紧 provider-side 结构化输出与可执行 token/cost 限制，再接新的非 OpenAI family 候选；不继续围绕
-filing-count 元数据扩建 authority。Interrupt / park /
+独立 verifier 现已携带 hash-bound JSON Schema 和输入/输出/总 token、费用硬控制合同；OpenClaw 2026.7.1
+不能执行完整合同，broker 0.1.0-spike.2 会在 host completion 前返回 `REQUIRED_CONTROLS_UNAVAILABLE`，不再
+静默降级到 prompt-only JSON 或事后预算检查。下一步先补齐宿主 provider-side 控制并做 transport 级证明，
+再接新的非 OpenAI family 候选；不继续围绕 filing-count 元数据扩建 authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。

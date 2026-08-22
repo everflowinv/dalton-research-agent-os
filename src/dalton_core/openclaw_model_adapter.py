@@ -26,6 +26,7 @@ import time
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from decimal import Decimal
+from importlib import resources
 from pathlib import Path
 from typing import Any, Callable
 
@@ -561,6 +562,60 @@ def _budget(work: WorkOrder, profile: Mapping[str, Any]) -> tuple[int, float]:
     return int(max_tokens), float(cost)
 
 
+def _required_provider_controls(
+    work: WorkOrder,
+    route: Mapping[str, Any],
+    max_output_tokens: int,
+) -> dict[str, Any] | None:
+    """Bind independent verification to controls the current host must prove.
+
+    General model work keeps the legacy completion path.  A route with a
+    producer family is an independent verifier and may not silently degrade to
+    prompt-only JSON or post-hoc budget checks.
+    """
+
+    if route["constraints"]["producer_family"] is None:
+        return None
+    if work.metadata.get("verifier_output_schema_version") != "0.2":
+        raise ModelAdmissionError(
+            "independent verifier WorkOrder lacks the required output schema version"
+        )
+    try:
+        schema = json.loads(
+            resources.files("dalton_core")
+            .joinpath("thesis-impact-verifier-output-v0.2.schema.json")
+            .read_text(encoding="utf-8")
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ModelAdmissionError(
+            "independent verifier output schema resource is unavailable"
+        ) from exc
+    if not isinstance(schema, Mapping):
+        raise ModelAdmissionError("independent verifier output schema is invalid")
+    max_input_tokens = _positive_int(
+        work.budget["max_input_tokens"], "WorkOrder budget max_input_tokens"
+    )
+    max_total_tokens = _positive_int(
+        work.budget["max_total_tokens"], "WorkOrder budget max_total_tokens"
+    )
+    if max_total_tokens < max_input_tokens + max_output_tokens:
+        raise ModelAdmissionError(
+            "WorkOrder total token budget is smaller than required input plus output controls"
+        )
+    max_cost_usd = float(work.budget["max_cost_usd"])
+    return {
+        "maxInputTokens": max_input_tokens,
+        "maxOutputTokens": max_output_tokens,
+        "maxTotalTokens": max_total_tokens,
+        "maxCostUsd": max_cost_usd,
+        "structuredOutput": {
+            "schemaName": "thesis_impact_verifier_output_v0_2",
+            "schemaHash": _dalton_hash(schema),
+            "jsonSchema": dict(schema),
+        },
+    }
+
+
 def _remaining_timeout(
     deadline: float, monotonic: Callable[[], float]
 ) -> float:
@@ -994,13 +1049,17 @@ class OpenClawModelAdapter:
                 ):
                     raise ModelAdmissionError(f"WorkOrder budget {key} is invalid")
                 timeout = min(timeout, float(value))
-        invocation_id = "invocation:" + _dalton_hash(
-            {
-                "route_decision_ref": route["id"],
-                "work_order_ref": work.id,
-                "profile_version_ref": profile["profile_version_ref"],
-            }
-        )[:32]
+        required_controls = _required_provider_controls(work, route, max_tokens)
+        invocation_identity = {
+            "route_decision_ref": route["id"],
+            "work_order_ref": work.id,
+            "profile_version_ref": profile["profile_version_ref"],
+        }
+        if required_controls is not None:
+            invocation_identity["required_provider_controls_hash"] = _dalton_hash(
+                required_controls
+            )
+        invocation_id = "invocation:" + _dalton_hash(invocation_identity)[:32]
         core_request = {
             "schemaVersion": PROTOCOL_VERSION,
             "invocationId": invocation_id,
@@ -1011,15 +1070,22 @@ class OpenClawModelAdapter:
             "maxTokens": max_tokens,
             "timeoutMs": max(1, int(timeout * 1000)),
         }
-        if set(core_request) != set(_CORE_REQUEST_KEYS):  # defensive assertion
+        if required_controls is not None:
+            core_request["requiredControls"] = required_controls
+        expected_core_keys = set(_CORE_REQUEST_KEYS) | (
+            {"requiredControls"} if required_controls is not None else set()
+        )
+        if set(core_request) != expected_core_keys:  # defensive assertion
             raise AssertionError("internal broker request shape drift")
         timestamp_ms = int(now_dt.astimezone(timezone.utc).timestamp() * 1000)
         request = self._authenticate_request(
             core_request, timestamp_ms, replay_only=replay_only
         )
-        expected_request_keys = set(_REQUEST_KEYS) | (
-            {"replayOnly"} if replay_only else set()
-        )
+        expected_request_keys = set(_REQUEST_KEYS)
+        if replay_only:
+            expected_request_keys.add("replayOnly")
+        if required_controls is not None:
+            expected_request_keys.add("requiredControls")
         if set(request) != expected_request_keys:  # defensive assertion
             raise AssertionError("internal authenticated broker request shape drift")
         started_at = _timestamp(now_dt)
@@ -1102,6 +1168,12 @@ class OpenClawModelAdapter:
             "broker_response_hash": response["contentHash"],
             "broker_idempotency_status": response["idempotencyStatus"],
             "broker_request_mode": "replay_only" if replay_only else "execute",
+            "required_provider_controls": required_controls is not None,
+            "provider_control_schema_hash": (
+                required_controls["structuredOutput"]["schemaHash"]
+                if required_controls is not None
+                else None
+            ),
         }
         if budget_error is not None:
             outputs = {}
