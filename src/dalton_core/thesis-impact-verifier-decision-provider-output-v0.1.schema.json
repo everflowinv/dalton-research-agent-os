@@ -1,0 +1,76 @@
+{
+  "$id": "https://dalton.local/schemas/thesis-impact-verifier-decision-provider-output-v0.1.schema.json",
+  "title": "ThesisImpactVerifierDecisionProviderOutputV0.1",
+  "description": "Provider-enforced semantic verifier decision. Dalton binds the exact assessment ref and hash from the immutable WorkOrder after parsing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "verdict",
+    "findings"
+  ],
+  "properties": {
+    "schema_version": {
+      "enum": [
+        "0.1"
+      ]
+    },
+    "verdict": {
+      "enum": [
+        "pass",
+        "reject"
+      ]
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "severity",
+          "detail",
+          "expected_impact"
+        ],
+        "properties": {
+          "code": {
+            "enum": [
+              "binding_mismatch",
+              "driver_mismatch",
+              "unsupported_inference",
+              "impact_mismatch",
+              "rationale_contradiction",
+              "follow_up_quality"
+            ]
+          },
+          "severity": {
+            "enum": [
+              "high",
+              "medium"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          },
+          "expected_impact": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "supports",
+                  "weakens",
+                  "no_change",
+                  "insufficient"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

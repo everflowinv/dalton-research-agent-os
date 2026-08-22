@@ -59,6 +59,7 @@ dalton_core = [
   "calibration_fixtures/*.json",
   "thesis-impact-verifier-output-v0.2.schema.json",
   "thesis-impact-verifier-provider-output-v0.2.schema.json",
+  "thesis-impact-verifier-decision-provider-output-v0.1.schema.json",
   "dashboard.html",
   "agenda_control.html",
   "research_review_control.html",

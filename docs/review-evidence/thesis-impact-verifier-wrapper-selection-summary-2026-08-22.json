@@ -1,0 +1,171 @@
+{
+  "schema_version": "0.1",
+  "generated_at": "2026-08-22T14:29:34Z",
+  "status": "wrapper_contract_verified_candidate_selected_production_locked",
+  "corpus": {
+    "ref": "thesis-impact-verifier-calibration:0.2",
+    "hash": "e736c0fc6f6c3dcf569dde76aa40fdaa6f7cfa2311e78e8efa2153771c625703",
+    "cases": 30,
+    "expected_passes": 12,
+    "expected_rejects": 18
+  },
+  "execution": {
+    "prompt_mode": "strict",
+    "temperature": 0,
+    "thinking": "low",
+    "max_output_tokens": 16000,
+    "binding_mode": "wrapper-owned-v1",
+    "decision_schema_version": "0.1",
+    "formal_output_schema_version": "0.2",
+    "provider_direct_calibration": true,
+    "production_broker_conformance": false
+  },
+  "decision_schema": {
+    "resource": "src/dalton_core/thesis-impact-verifier-decision-provider-output-v0.1.schema.json",
+    "file_sha256": "8cb44e1714a722cd9b1865631e8873ba1610b3aac287e5231973f6d69e0e8490",
+    "required_fields": [
+      "schema_version",
+      "verdict",
+      "findings"
+    ],
+    "model_owned_target_binding_forbidden": true
+  },
+  "results": [
+    {
+      "profile_id": "profile:gemini-3-7-flash",
+      "model": "google/gemini-3.7-flash",
+      "accuracy": 1.0,
+      "detection_rate": 1.0,
+      "false_positives": 0,
+      "high_severity_misses": 0,
+      "failed_calls": 0,
+      "tokens": {
+        "input_noncache": 25257,
+        "cache_read": 0,
+        "reasoning": 5633,
+        "visible_output": 1597,
+        "total": 32487
+      },
+      "latency_seconds": {
+        "mean": 2.4521,
+        "median": 2.196,
+        "p95": 3.91055,
+        "max": 4.506
+      },
+      "current_config_equivalent_cost_usd": "0.04605525",
+      "failed_cases": []
+    },
+    {
+      "profile_id": "profile:gpt-5-6-luna",
+      "model": "openai/gpt-5.6-luna",
+      "accuracy": 1.0,
+      "detection_rate": 1.0,
+      "false_positives": 0,
+      "high_severity_misses": 0,
+      "failed_calls": 0,
+      "tokens": {
+        "input_noncache": 21349,
+        "cache_read": 0,
+        "reasoning": 3841,
+        "visible_output": 1924,
+        "total": 27114
+      },
+      "latency_seconds": {
+        "mean": 7.829433333333332,
+        "median": 6.733,
+        "p95": 12.68695,
+        "max": 13.885
+      },
+      "current_config_equivalent_cost_usd": "0.0111878",
+      "failed_cases": []
+    },
+    {
+      "profile_id": "profile:qwen-deepseek-v4-flash-0731",
+      "model": "qwen/deepseek-v4-flash-0731",
+      "accuracy": 0.9,
+      "detection_rate": 0.8333333333333334,
+      "false_positives": 0,
+      "high_severity_misses": 2,
+      "failed_calls": 0,
+      "tokens": {
+        "input_noncache": 21865,
+        "cache_read": 0,
+        "reasoning": 29034,
+        "visible_output": 1821,
+        "total": 52720
+      },
+      "latency_seconds": {
+        "mean": 12.9968,
+        "median": 6.71,
+        "p95": 32.49895,
+        "max": 93.702
+      },
+      "current_config_equivalent_cost_usd": "0.0251746",
+      "failed_cases": [
+        {
+          "case_ref": "calibration:thesis-impact:006",
+          "severity": "high",
+          "required_finding_codes": [
+            "binding_mismatch"
+          ],
+          "actual_verdict": "pass",
+          "actual_finding_codes": []
+        },
+        {
+          "case_ref": "calibration:thesis-impact:008",
+          "severity": "high",
+          "required_finding_codes": [
+            "unsupported_inference"
+          ],
+          "actual_verdict": "reject",
+          "actual_finding_codes": [
+            "impact_mismatch"
+          ]
+        },
+        {
+          "case_ref": "calibration:thesis-impact:011",
+          "severity": "medium",
+          "required_finding_codes": [
+            "follow_up_quality"
+          ],
+          "actual_verdict": "pass",
+          "actual_finding_codes": []
+        }
+      ]
+    }
+  ],
+  "contract_validation": {
+    "raw_outputs_checked": 90,
+    "raw_outputs_with_model_supplied_target_binding": 0,
+    "wrapper_bound_outputs": 90,
+    "wrapper_binding_failures": 0
+  },
+  "selection": {
+    "primary_candidate": "profile:gemini-3-7-flash",
+    "required_thinking": "low",
+    "low_cost_candidate": "profile:gpt-5-6-luna",
+    "rejected_for_high_severity_miss": [
+      "profile:qwen-deepseek-v4-flash-0731",
+      "profile:openrouter-ox-alpha"
+    ]
+  },
+  "verification": {
+    "python_tests": {
+      "passed": 616,
+      "failed": 0
+    },
+    "broker_node_tests": {
+      "passed": 21,
+      "failed": 0
+    },
+    "package_build": "pass"
+  },
+  "production_gate": {
+    "production_eligible_profiles": 0,
+    "selected_profile_has_provider_controls": false,
+    "broker_proves_low_thinking": false,
+    "verifier_route_is_phase_pinned": false,
+    "live_routing_changed": false,
+    "thesis_mutation_enabled": false
+  }
+}

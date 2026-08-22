@@ -117,9 +117,14 @@ NVIDIA、Walmart、Amazon 的 5/5 正式 closure、进程重启后无网络 repl
 `reject`。控制链、记账、family independence、离线 replay 和数据库完整性通过；verifier findings 有明显矛盾，
 所以 assessment 未进入 eligible，也未写入简报。
 
-Gate 0、Gate 1 和 Gate 2 控制面验收已完成；模型质量门仍未通过。冻结的 12-case v0.1 已有 20 个 profile 完成
-全量评分，其中 GPT-5.6 Terra、Claude Opus 5、Gemini 3.1 Pro Preview 和 Qwen3.8 Max 为 12/12；随后冻结的
-30-case v0.2 中，Gemini 3.1 Pro Preview 为 30/30，另外三个 shortlist profile 各为 29/30。Claude Sonnet 5
-已经在放宽 Claude CLI Gateway 宿主输入预算后通过单案 smoke；Gemini 3.7 Flash 的 `MINIMAL` thinking level
-兼容补丁已通过模拟 provider 验收，仍需在 gateway 安全重启后补 live broker smoke。当前没有 verifier 候选获准
-上线，也没有部署 live、自动修改 ThesisVersion 或切旧 cron。详细状态见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)。
+Gate 0、Gate 1 和 Gate 2 控制面验收已完成。verifier 现改为 wrapper-owned binding：模型只返回 semantic
+`verdict/findings`，trusted worker 从 immutable WorkOrder 绑定 exact assessment ref/hash，raw ResultEnvelope 与历史
+replay 保留。同一 30-case v0.2 corpus 的 low-thinking 重跑中，Gemini 3.7 Flash 和 GPT-5.6 Luna 都是 30/30，
+Qwen DeepSeek V4 Flash 为 27/30；Owner 已选择 exact `google/gemini-3.7-flash` low 作为主候选，Luna 保留为
+低成本候选。
+
+候选选择仍不等于 production 可用。Gemini 3.7 broker profile 尚未启用 provider controls，broker 也不能证明
+low thinking；现有 routing policy 没有 phase-pin verifier。production broker 3×30 canary、shadow 和单独 policy
+activation 完成前，live route、ThesisVersion mutation 和旧 cron 都保持不变。详细状态见
+[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) 和
+[wrapper binding 与候选选择报告](docs/reports/thesis-impact-verifier-wrapper-selection-2026-08-22.md)。

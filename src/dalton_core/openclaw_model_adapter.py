@@ -42,6 +42,11 @@ from .model_router import (
     canonical_hash as _dalton_hash,
     canonical_json as _dalton_json,
 )
+from .thesis_impact import (
+    VERIFIER_BINDING_MODE,
+    VERIFIER_DECISION_SCHEMA_VERSION,
+    VERIFIER_OUTPUT_SCHEMA_VERSION,
+)
 
 
 PROTOCOL_VERSION = "0.1"
@@ -583,7 +588,10 @@ def _required_provider_controls(
 
     if route["constraints"]["producer_family"] is None:
         return None
-    if work.metadata.get("verifier_output_schema_version") != "0.2":
+    if (
+        work.metadata.get("verifier_output_schema_version")
+        != VERIFIER_OUTPUT_SCHEMA_VERSION
+    ):
         raise ModelAdmissionError(
             "independent verifier WorkOrder lacks the required output schema version"
         )
@@ -597,10 +605,28 @@ def _required_provider_controls(
                 "post-hoc provider controls are restricted to exact calibration WorkOrders"
             )
         return None
+    binding_mode = work.metadata.get("verifier_binding_mode")
+    if binding_mode == VERIFIER_BINDING_MODE:
+        if (
+            work.metadata.get("verifier_decision_schema_version")
+            != VERIFIER_DECISION_SCHEMA_VERSION
+        ):
+            raise ModelAdmissionError(
+                "wrapper-bound verifier lacks the required decision schema version"
+            )
+        schema_resource = (
+            "thesis-impact-verifier-decision-provider-output-v0.1.schema.json"
+        )
+        schema_name = "thesis_impact_verifier_decision_provider_output_v0_1"
+    elif binding_mode is None:
+        schema_resource = "thesis-impact-verifier-provider-output-v0.2.schema.json"
+        schema_name = "thesis_impact_verifier_provider_output_v0_2"
+    else:
+        raise ModelAdmissionError("independent verifier binding mode is unsupported")
     try:
         schema = json.loads(
             resources.files("dalton_core")
-            .joinpath("thesis-impact-verifier-provider-output-v0.2.schema.json")
+            .joinpath(schema_resource)
             .read_text(encoding="utf-8")
         )
     except (OSError, TypeError, ValueError) as exc:
@@ -626,7 +652,7 @@ def _required_provider_controls(
         "maxTotalTokens": max_total_tokens,
         "maxCostUsd": max_cost_usd,
         "structuredOutput": {
-            "schemaName": "thesis_impact_verifier_provider_output_v0_2",
+            "schemaName": schema_name,
             "schemaHash": _dalton_hash(schema),
             "jsonSchema": dict(schema),
         },

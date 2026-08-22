@@ -41,7 +41,12 @@ from .openclaw_model_adapter import (
 )
 from .research_context import count_dalton_search_tokens
 from .store import canonical_json, content_hash
-from .thesis_impact import VERIFIER_OUTPUT_SCHEMA_VERSION
+from .thesis_impact import (
+    VERIFIER_BINDING_MODE,
+    VERIFIER_DECISION_SCHEMA_VERSION,
+    VERIFIER_OUTPUT_SCHEMA_VERSION,
+    bind_thesis_impact_verifier_decision,
+)
 from .thesis_impact_calibration import (
     build_calibration_prompt,
     load_frozen_calibration_corpus,
@@ -311,6 +316,8 @@ def build_calibration_work_order(
             "case_ref": case_ref,
             "execution_tier": run["execution_tier"],
             "verifier_output_schema_version": VERIFIER_OUTPUT_SCHEMA_VERSION,
+            "verifier_decision_schema_version": VERIFIER_DECISION_SCHEMA_VERSION,
+            "verifier_binding_mode": VERIFIER_BINDING_MODE,
         },
     )
 
@@ -665,6 +672,18 @@ def run_live_calibration(
                 recovery_mode = "replay_duplicate"
             if result.status == "succeeded":
                 parsed, parse_error = _strict_json_output(result)
+                if parse_error is None:
+                    try:
+                        parsed = bind_thesis_impact_verifier_decision(
+                            parsed,
+                            assessment_ref=case["input"]["assessment"]["id"],
+                            assessment_hash=case["input"]["assessment"][
+                                "content_hash"
+                            ],
+                        )
+                    except Exception as exc:
+                        parsed = {}
+                        parse_error = f"{type(exc).__name__}: {exc}"
             else:
                 parsed = {}
                 parse_error = f"broker result failed: {result.error!r}"

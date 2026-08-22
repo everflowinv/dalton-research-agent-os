@@ -112,6 +112,8 @@ class ThesisImpactCalibrationRunnerTests(unittest.TestCase):
         self.assertNotIn(case["gold"]["rationale"], serialized)
         self.assertEqual(first["budget"]["max_cost_usd"], 0.01)
         self.assertEqual(first["metadata"]["verifier_output_schema_version"], "0.2")
+        self.assertEqual(first["metadata"]["verifier_decision_schema_version"], "0.1")
+        self.assertEqual(first["metadata"]["verifier_binding_mode"], "wrapper-owned-v1")
         self.assertEqual(
             first["metadata"]["execution_tier"],
             PROVIDER_CONTROL_MODE_REQUIRED,
@@ -120,6 +122,11 @@ class ThesisImpactCalibrationRunnerTests(unittest.TestCase):
     def _record(self):
         case = self.corpus["cases"][0]
         work = build_calibration_work_order(case, self.manifest)
+        decision = {
+            "schema_version": "0.1",
+            "verdict": "pass",
+            "findings": [],
+        }
         output = {
             "schema_version": "0.2",
             "assessment_ref": case["input"]["assessment"]["id"],
@@ -154,7 +161,7 @@ class ThesisImpactCalibrationRunnerTests(unittest.TestCase):
             work_order_ref=work.id,
             invocation_ref=invocation.id,
             status="succeeded",
-            outputs={"text": json.dumps(output), "content_hash": "a" * 64},
+            outputs={"text": json.dumps(decision), "content_hash": "a" * 64},
             actual_side_effects=(),
             usage_refs=("usage:test-calibration",),
             artifact_refs=(),

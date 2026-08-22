@@ -251,13 +251,23 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
         self.assertIn(canonical_json(claim), verifier_work["question"])
         self.assertIn(canonical_json(thesis), verifier_work["question"])
         self.assertIn(canonical_json(assessment), verifier_work["question"])
+        self.assertEqual(
+            verifier_work["metadata"]["verifier_binding_mode"],
+            "wrapper-owned-v1",
+        )
+        self.assertEqual(
+            verifier_work["metadata"]["verifier_decision_schema_version"],
+            "0.1",
+        )
+        self.assertIn(
+            "Do not return assessment_ref or assessment_hash",
+            verifier_work["question"],
+        )
         verifier = self._complete_model(
             work=verifier_work,
             model_family="impact-b",
             output={
-                "schema_version": "0.2",
-                "assessment_ref": assessment["id"],
-                "assessment_hash": assessment["content_hash"],
+                "schema_version": "0.1",
                 "verdict": "pass",
                 "findings": [],
             },
@@ -269,6 +279,11 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             verifier_invocation=verifier,
         )
         self.assertEqual(completed["status"], "eligible")
+        verification = completed["verification"]["verification"]
+        self.assertEqual(verification["assessment_ref"], assessment["id"])
+        self.assertEqual(
+            verification["assessment_hash"], assessment["content_hash"]
+        )
         self.assertEqual(completed["eligible"]["assessment"]["impact"], "supports")
         self.assertIsNone(completed["follow_up"])
         self.assertEqual(
@@ -382,9 +397,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             work=assessed["verifier_work_order"],
             model_family="impact-b",
             output={
-                "schema_version": "0.2",
-                "assessment_ref": assessment["id"],
-                "assessment_hash": assessment["content_hash"],
+                "schema_version": "0.1",
                 "verdict": "pass",
                 "findings": [],
             },
@@ -539,12 +552,8 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             elif index == 2:
                 text = canonical_json(assessment_output)
             else:
-                marker = "\nASSESSMENT_CANONICAL_JSON:\n"
-                assessment = json.loads(request["prompt"].split(marker, 1)[1])
                 text = canonical_json({
-                    "schema_version": "0.2",
-                    "assessment_ref": assessment["id"],
-                    "assessment_hash": assessment["content_hash"],
+                    "schema_version": "0.1",
                     "verdict": "pass",
                     "findings": [],
                 })

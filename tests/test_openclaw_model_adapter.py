@@ -456,7 +456,11 @@ class OpenClawModelAdapterTests(unittest.TestCase):
             "question": "Verify the exact thesis impact assessment",
             "requested_capabilities": ["verify"],
             "idempotency_key": "work-key:model-verification-1",
-            "metadata": {"verifier_output_schema_version": "0.2"},
+            "metadata": {
+                "verifier_output_schema_version": "0.2",
+                "verifier_decision_schema_version": "0.1",
+                "verifier_binding_mode": "wrapper-owned-v1",
+            },
         })
         routed = self.router.route(
             verifier,
@@ -492,7 +496,11 @@ class OpenClawModelAdapterTests(unittest.TestCase):
         structured = controls["structuredOutput"]
         self.assertEqual(
             structured["schemaName"],
-            "thesis_impact_verifier_provider_output_v0_2",
+            "thesis_impact_verifier_decision_provider_output_v0_1",
+        )
+        self.assertEqual(
+            set(structured["jsonSchema"]["required"]),
+            {"schema_version", "verdict", "findings"},
         )
         self.assertEqual(structured["schemaHash"], canonical_hash(structured["jsonSchema"]))
         self.assertTrue(result.metadata["required_provider_controls"])

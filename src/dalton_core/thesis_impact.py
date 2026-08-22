@@ -3,8 +3,10 @@
 This slice gives formal financial claims one real downstream consumer without
 letting a deterministic fact, a worker, or one model call mutate a thesis.
 The producer and verifier must each have a successful immutable Scheduler
-ResultEnvelope and a complete Core ModelInvocation.  Both model outputs bind
-the exact ClaimVersion/ThesisVersion (or assessment) refs and hashes.
+ResultEnvelope and a complete Core ModelInvocation.  Producer output binds the
+exact ClaimVersion/ThesisVersion.  The verifier returns only its semantic
+decision; the trusted worker binds that decision to the immutable assessment
+carried by the verifier WorkOrder.
 
 The resulting records are append-only pre-commit judgments.  A later thesis
 updater may consume only ``eligible_assessment`` output; this module itself
@@ -28,6 +30,8 @@ from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
 VERIFIER_OUTPUT_SCHEMA_VERSION = "0.2"
+VERIFIER_DECISION_SCHEMA_VERSION = "0.1"
+VERIFIER_BINDING_MODE = "wrapper-owned-v1"
 IMPACTS = frozenset({"supports", "weakens", "no_change", "insufficient"})
 VERDICTS = frozenset({"pass", "reject"})
 VERIFIER_FINDING_SEVERITIES = {
@@ -248,6 +252,55 @@ def validate_thesis_impact_verifier_output(
         raise ThesisImpactValidationError("reject verdict must have at least one finding")
     wire["findings"] = findings
     return wire
+
+
+def validate_thesis_impact_verifier_decision_output(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate the model-owned semantic decision without target bindings."""
+
+    wire = _closed(
+        value,
+        {"schema_version", "verdict", "findings"},
+        "ThesisImpactVerifierDecisionOutput",
+    )
+    if wire["schema_version"] != VERIFIER_DECISION_SCHEMA_VERSION:
+        raise ThesisImpactValidationError(
+            "unsupported verifier decision schema_version"
+        )
+    bound = validate_thesis_impact_verifier_output(
+        {
+            "schema_version": VERIFIER_OUTPUT_SCHEMA_VERSION,
+            "assessment_ref": "wrapper-bound:pending",
+            "assessment_hash": "0" * 64,
+            "verdict": wire["verdict"],
+            "findings": wire["findings"],
+        },
+        required_schema_version=VERIFIER_OUTPUT_SCHEMA_VERSION,
+    )
+    return {
+        "schema_version": VERIFIER_DECISION_SCHEMA_VERSION,
+        "verdict": bound["verdict"],
+        "findings": bound["findings"],
+    }
+
+
+def bind_thesis_impact_verifier_decision(
+    value: Mapping[str, Any], *, assessment_ref: str, assessment_hash: str
+) -> dict[str, Any]:
+    """Attach the WorkOrder-owned target to one validated model decision."""
+
+    decision = validate_thesis_impact_verifier_decision_output(value)
+    return validate_thesis_impact_verifier_output(
+        {
+            "schema_version": VERIFIER_OUTPUT_SCHEMA_VERSION,
+            "assessment_ref": assessment_ref,
+            "assessment_hash": assessment_hash,
+            "verdict": decision["verdict"],
+            "findings": decision["findings"],
+        },
+        required_schema_version=VERIFIER_OUTPUT_SCHEMA_VERSION,
+    )
 
 
 def validate_thesis_impact_verifier_consistency(
@@ -535,7 +588,7 @@ class ThesisImpactAuthority:
             raise ThesisImpactValidationError("model output JSON must be an object")
         return result, dict(model_output), result_hash
 
-    def _verifier_output_contract_version(self, work_order_ref: str) -> str:
+    def _verifier_output_contract(self, work_order_ref: str) -> dict[str, Any]:
         row = self.scheduler.connection.execute(
             "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
             "WHERE work_order_id=?",
@@ -548,10 +601,11 @@ class ThesisImpactAuthority:
             work = WorkOrder.from_dict(work).to_dict()
         except Exception as exc:
             raise ThesisImpactConflict("verifier WorkOrder is invalid") from exc
+        phase = work["metadata"].get("phase")
         if (
             work["id"] != work_order_ref
             or content_hash(work) != row["work_order_hash"]
-            or work["metadata"].get("phase") not in {None, "verification"}
+            or phase not in {None, "verification"}
         ):
             raise ThesisImpactConflict("verifier WorkOrder authority drifted")
         version = work["metadata"].get(
@@ -559,12 +613,58 @@ class ThesisImpactAuthority:
         )
         if version not in {SCHEMA_VERSION, VERIFIER_OUTPUT_SCHEMA_VERSION}:
             raise ThesisImpactConflict("verifier WorkOrder output contract is unsupported")
-        if (
-            work["metadata"].get("phase") is None
-            and version != SCHEMA_VERSION
-        ):
+        if phase is None and version != SCHEMA_VERSION:
             raise ThesisImpactConflict("unphased verifier WorkOrder must remain legacy")
-        return version
+        binding_mode = work["metadata"].get("verifier_binding_mode")
+        decision_version = work["metadata"].get(
+            "verifier_decision_schema_version"
+        )
+        if binding_mode is None:
+            if decision_version is not None:
+                raise ThesisImpactConflict(
+                    "legacy verifier WorkOrder cannot declare a decision schema"
+                )
+        elif (
+            binding_mode != VERIFIER_BINDING_MODE
+            or phase != "verification"
+            or version != VERIFIER_OUTPUT_SCHEMA_VERSION
+            or decision_version != VERIFIER_DECISION_SCHEMA_VERSION
+        ):
+            raise ThesisImpactConflict(
+                "verifier WorkOrder binding contract is unsupported"
+            )
+        return {
+            "output_schema_version": version,
+            "binding_mode": binding_mode,
+            "decision_schema_version": decision_version,
+        }
+
+    def _verifier_output_contract_version(self, work_order_ref: str) -> str:
+        """Compatibility accessor for historical callers and evidence readers."""
+
+        return self._verifier_output_contract(work_order_ref)[
+            "output_schema_version"
+        ]
+
+    def _bind_verifier_result_output(
+        self,
+        raw_output: Mapping[str, Any],
+        *,
+        work_order_ref: str,
+        assessment_ref: str,
+        assessment_hash: str,
+    ) -> dict[str, Any]:
+        contract = self._verifier_output_contract(work_order_ref)
+        if contract["binding_mode"] == VERIFIER_BINDING_MODE:
+            return bind_thesis_impact_verifier_decision(
+                raw_output,
+                assessment_ref=assessment_ref,
+                assessment_hash=assessment_hash,
+            )
+        return validate_thesis_impact_verifier_output(
+            raw_output,
+            required_schema_version=contract["output_schema_version"],
+        )
 
     def record_assessment(
         self,
@@ -844,11 +944,11 @@ class ThesisImpactAuthority:
             result, raw_output, result_hash = self._scheduler_model_output(
                 verifier_result_envelope_ref, verifier_input_refs
             )
-            output = validate_thesis_impact_verifier_output(
+            output = self._bind_verifier_result_output(
                 raw_output,
-                required_schema_version=self._verifier_output_contract_version(
-                    result["work_order_ref"]
-                ),
+                work_order_ref=result["work_order_ref"],
+                assessment_ref=assessment_ref,
+                assessment_hash=assessment["content_hash"],
             )
             thesis = self._read_current_thesis(
                 cur, assessment["thesis_version_ref"]
@@ -1001,11 +1101,11 @@ class ThesisImpactAuthority:
                 assessment["thesis_version_ref"],
             ],
         )
-        output = validate_thesis_impact_verifier_output(
+        output = self._bind_verifier_result_output(
             raw_output,
-            required_schema_version=self._verifier_output_contract_version(
-                result["work_order_ref"]
-            ),
+            work_order_ref=result["work_order_ref"],
+            assessment_ref=assessment_ref,
+            assessment_hash=assessment["content_hash"],
         )
         thesis = self._read_current_thesis(cur, assessment["thesis_version_ref"])
         validate_thesis_impact_verifier_consistency(
@@ -1064,6 +1164,8 @@ class ThesisImpactAuthority:
 __all__ = [
     "IMPACTS",
     "VERDICTS",
+    "VERIFIER_BINDING_MODE",
+    "VERIFIER_DECISION_SCHEMA_VERSION",
     "VERIFIER_FINDING_SEVERITIES",
     "VERIFIER_OUTPUT_SCHEMA_VERSION",
     "ThesisImpactAuthority",
@@ -1072,7 +1174,9 @@ __all__ = [
     "ThesisImpactIneligible",
     "ThesisImpactNotFound",
     "ThesisImpactValidationError",
+    "bind_thesis_impact_verifier_decision",
     "validate_thesis_impact_model_output",
     "validate_thesis_impact_verifier_consistency",
+    "validate_thesis_impact_verifier_decision_output",
     "validate_thesis_impact_verifier_output",
 ]

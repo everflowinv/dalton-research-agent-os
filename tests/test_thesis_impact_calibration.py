@@ -6,6 +6,8 @@ from pathlib import Path
 from dalton_core.thesis_impact import (
     VERIFIER_FINDING_SEVERITIES,
     ThesisImpactValidationError,
+    bind_thesis_impact_verifier_decision,
+    validate_thesis_impact_verifier_decision_output,
     validate_thesis_impact_verifier_output,
 )
 from dalton_core.thesis_impact_calibration import (
@@ -45,6 +47,29 @@ class ThesisImpactVerifierContractV02Tests(unittest.TestCase):
         }
         wire.update(overrides)
         return wire
+
+    def test_wrapper_owned_binding_rejects_model_supplied_target(self):
+        decision = {
+            "schema_version": "0.1",
+            "verdict": "reject",
+            "findings": [self.finding()],
+        }
+        self.assertEqual(
+            validate_thesis_impact_verifier_decision_output(decision), decision
+        )
+        bound = bind_thesis_impact_verifier_decision(
+            decision,
+            assessment_ref="assessment:trusted",
+            assessment_hash="b" * 64,
+        )
+        self.assertEqual(bound["assessment_ref"], "assessment:trusted")
+        self.assertEqual(bound["assessment_hash"], "b" * 64)
+        with self.assertRaisesRegex(
+            ThesisImpactValidationError, r"extra=\['assessment_ref'\]"
+        ):
+            validate_thesis_impact_verifier_decision_output(
+                {**decision, "assessment_ref": "assessment:model-controlled"}
+            )
 
     def test_strict_pass_and_reject_contracts(self):
         self.assertEqual(
@@ -235,6 +260,20 @@ class ThesisImpactCalibrationTests(unittest.TestCase):
         self.assertEqual(
             set(finding["properties"]["code"]["enum"]),
             set(VERIFIER_FINDING_SEVERITIES),
+        )
+        decision_schema = json.loads((
+            ROOT
+            / "src"
+            / "dalton_core"
+            / "thesis-impact-verifier-decision-provider-output-v0.1.schema.json"
+        ).read_text(encoding="utf-8"))
+        inspect(decision_schema)
+        self.assertEqual(
+            set(decision_schema["required"]),
+            {"schema_version", "verdict", "findings"},
+        )
+        self.assertEqual(
+            decision_schema["properties"]["schema_version"]["enum"], ["0.1"]
         )
 
     def test_historical_gate2_output_is_one_measured_false_positive(self):

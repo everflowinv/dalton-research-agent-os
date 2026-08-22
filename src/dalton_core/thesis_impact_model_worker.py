@@ -34,8 +34,11 @@ from .research_context import count_dalton_search_tokens
 from .scheduler import Scheduler
 from .store import canonical_json, content_hash
 from .thesis_impact import (
+    VERIFIER_BINDING_MODE,
+    VERIFIER_DECISION_SCHEMA_VERSION,
     VERIFIER_OUTPUT_SCHEMA_VERSION,
     ThesisImpactAuthority,
+    bind_thesis_impact_verifier_decision,
     validate_thesis_impact_model_output,
     validate_thesis_impact_verifier_consistency,
     validate_thesis_impact_verifier_output,
@@ -169,8 +172,13 @@ class ThesisImpactModelWorker:
         assessment = self.impact.assessment(work.input_refs[0])
         if (
             assessment["id"] != work.input_refs[0]
+            or assessment["content_hash"] != work.metadata.get("assessment_hash")
             or assessment["claim_version_ref"] != work.input_refs[1]
+            or assessment["claim_version_hash"]
+            != work.metadata.get("claim_version_hash")
             or assessment["thesis_version_ref"] != work.input_refs[2]
+            or assessment["thesis_version_hash"]
+            != work.metadata.get("thesis_version_hash")
         ):
             raise ThesisImpactModelWorkerConflict(
                 "verifier WorkOrder input refs drifted from its exact assessment"
@@ -233,16 +241,36 @@ class ThesisImpactModelWorker:
             required_schema_version = work.metadata.get(
                 "verifier_output_schema_version", "0.1"
             )
-            output = validate_thesis_impact_verifier_output(
-                raw, required_schema_version=required_schema_version
-            )
-            if (
-                output["assessment_ref"] != work.input_refs[0]
-                or output["assessment_hash"]
-                != work.metadata.get("assessment_hash")
-            ):
+            binding_mode = work.metadata.get("verifier_binding_mode")
+            if binding_mode == VERIFIER_BINDING_MODE:
+                if (
+                    required_schema_version != VERIFIER_OUTPUT_SCHEMA_VERSION
+                    or work.metadata.get("verifier_decision_schema_version")
+                    != VERIFIER_DECISION_SCHEMA_VERSION
+                ):
+                    raise ThesisImpactModelWorkerConflict(
+                        "verifier WorkOrder binding contract is unsupported"
+                    )
+                output = bind_thesis_impact_verifier_decision(
+                    raw,
+                    assessment_ref=work.input_refs[0],
+                    assessment_hash=work.metadata.get("assessment_hash"),
+                )
+            elif binding_mode is None:
+                output = validate_thesis_impact_verifier_output(
+                    raw, required_schema_version=required_schema_version
+                )
+                if (
+                    output["assessment_ref"] != work.input_refs[0]
+                    or output["assessment_hash"]
+                    != work.metadata.get("assessment_hash")
+                ):
+                    raise ThesisImpactModelWorkerConflict(
+                        "verifier output drifted from the exact assessment"
+                    )
+            else:
                 raise ThesisImpactModelWorkerConflict(
-                    "verifier output drifted from the exact assessment"
+                    "verifier WorkOrder binding mode is unsupported"
                 )
             if required_schema_version == VERIFIER_OUTPUT_SCHEMA_VERSION:
                 assessment = self.impact.assessment(work.input_refs[0])

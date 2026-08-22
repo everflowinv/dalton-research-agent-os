@@ -1,11 +1,13 @@
 # Dalton 项目进度
 
-更新日期：2026-08-21
+更新日期：2026-08-22
 - live deployed baseline：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`；Agenda 兼容热修复：`03ea471`
 - 本轮开发起点：`9cf86d2`；Gate 0 验收 commit：`3d2114a`；Gate 1 batch 代码 commit：`0b0f872`；
   Gate 2 真实执行 commit：`b980bba`；离线收尾 commit：`c88746b`；
   SEC 财务事实与 thesis-impact 开发候选均尚未部署到 live
 - live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
+- 当前开发候选新增 wrapper-owned verifier binding 和 semantic-only provider schema；Gemini 3.7 Flash low
+  已选为主候选，但 production broker controls、phase-pinned policy 和 live canary 尚未完成
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
 反向改写历史结论。这里的“完成”只表示代码、测试和当前部署已经验收，不表示已达到多租户或
@@ -154,6 +156,27 @@ consistency guard 拒绝。Claude Fable 5 第一条实际使用 6,795 input / 95
 本轮两模型新增实际费用 USD 0.118666；加上 Gate 2 既有 accounted + uncertain reserve 后总上界 USD 0.538652。
 没有候选获准上线。报告见
 [thesis-impact-verifier-live-calibration-2026-08-21.md](reports/thesis-impact-verifier-live-calibration-2026-08-21.md)。
+
+2026-08-22 校准语料已扩到固定 30-case v0.2。第一轮 shortlist 中 Gemini 3.1 Pro Preview 为 30/30，Claude
+Opus 5、Qwen 3.8 Max、GPT-5.6 Terra 均为 29/30；只有前两者没有 high-severity miss，但这轮仍是
+`calibration-posthoc-v1`，不能冒充 production provider-control proof。随后 provider direct 测试证明 Gemini 3.7
+Flash low 可稳定返回 strict JSON；旧模型回抄 `assessment_ref/hash` 的设计也被替换为 wrapper-owned binding。
+模型现在只返回 closed `schema_version/verdict/findings`，trusted worker 从 immutable WorkOrder 注入 exact
+assessment identity；raw ResultEnvelope 不改写，authority replay 可重建正式 `0.2` output，历史 WorkOrder 继续兼容。
+
+同一 30-case corpus、strict prompt、temperature 0、thinking low、16k cap 的正式 semantic-only 重跑中，Gemini
+3.7 Flash 和 GPT-5.6 Luna 都是 30/30、0 false positive、0 high miss；Qwen DeepSeek V4 Flash 为 27/30，
+有 2 个 high miss。Gemini 平均 2.452 秒、P95 3.911 秒，Luna 平均 7.829 秒、P95 12.687 秒；Owner 已选择
+exact `google/gemini-3.7-flash`、thinking low 作为主候选，Luna 保留为低成本候选。90 条 raw output 都不含
+target binding，wrapper 后 90 条均绑定成功。Python 全量 616/616、broker 21/21、wheel/sdist build 通过。
+报告见
+[thesis-impact-verifier-wrapper-selection-2026-08-22.md](reports/thesis-impact-verifier-wrapper-selection-2026-08-22.md)。
+
+这不代表 production verifier 已可用。当前 Gemini 3.7 broker profile 没有 `providerControls`，broker 也不能强制
+并证明 `thinking=low`；thesis-impact assessment/verifier 仍共用按估算成本排序的 policy，不能证明 verifier 固定
+选择 Gemini。live routing、gateway 配置和 ThesisVersion mutation 都没有变化。下一步是建立 phase-specific
+immutable verifier policy、补 low-thinking request/hash/proof 和 Google controls，再用真实 broker 路径完成至少
+3×30 canary 与 shadow。
 
 现有 versioned governance policy 可分别只允许 closed SEC public `10-Q list_filings` 或 exact
 `10-Q get_company_facts` plan 自动启动；
@@ -958,16 +981,14 @@ company-facts filing window 和 latest-accession-bound concept 选择，但结�
 Claim → driver/thesis impact authority，以及 ResearchPlan closure → bounded assessment/verifier WorkOrder 接线。
 两个 WorkOrder 现已接入 ModelRouter/OpenClaw model worker，并以无外部调用 recorded broker 验证 contract retry、
 usage/cost 入账、model-family independence、lease-expiry crash recovery 和 replay。Gate 0/1 breadth proof 与
-Gate 2 真实模型 canary 和 verifier 候选校准均已完成；当前阻塞是可用的独立 verifier model/credential，而不是
-控制面缺口。DeepSeek 的 12/12 质量分数未过门，Claude Fable 首条即超过 admission budget 和严格输出合同。
-独立 verifier 现已携带 hash-bound JSON Schema 和输入/输出/总 token、费用硬控制合同。OpenClaw 2026.7.1
-宿主补丁与 broker 0.1.0-spike.3 已为原生 `openai/openai-responses` 路径实现 input count、strict Schema、
-最坏费用预留和证明校验；fake transport 证明输入或费用超限时 model call 为 0。不兼容 transport 会在 provider
-调用前拒绝。当前 `openai/gpt-5.6-*` 实际使用 ChatGPT Responses，DeepSeek 和 Claude 也不兼容，所有现有
-profile 均未启用 provider controls，因此 live verifier 仍返回 `REQUIRED_CONTROLS_UNAVAILABLE`。下一步要么把
-producer 切到非 OpenAI family，并用原生 OpenAI verifier；要么为独立的非 OpenAI provider 建立同等级 preflight
-controls。满足 family independence、凭据和当前 rate card 三项后，才能运行一条付费 canary；不继续围绕
-filing-count 元数据扩建 authority。Interrupt / park /
+Gate 2 真实模型 canary、30-case corpus、候选校准和 wrapper-owned output contract 均已完成。旧的“模型回抄
+assessment ref/hash”已从 semantic decision 中移除；trusted worker 从 immutable WorkOrder 绑定 target，仍保留
+provider strict Schema、输入/输出/总 token、费用硬控制、raw ResultEnvelope 和历史 replay。Gemini 3.7 Flash low
+与 Luna low 在最新 30-case direct calibration 中均为 30/30，Owner 已选择 Gemini 作为主候选；Qwen 和 Ox-alpha
+仍有 high miss。当前阻塞已经从“没有质量候选”变成三项 production conformance：Gemini profile 缺少 Google
+provider controls、broker 不能证明 low thinking、现有共享 policy 不能 phase-pin verifier。三项补齐并通过真实
+broker 3×30 canary 前，production verifier 仍为 0，live route 不变；不继续围绕 filing-count 元数据扩建
+authority。Interrupt / park /
 resume、Reflection、生产部署和
 旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。
@@ -1051,9 +1072,9 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - shadow 通过不等于允许写 Ledger，也不等于可以关闭旧 cron。
 - 同一 agent 同时写代码、测试、验证报告和状态文档会形成 self-attestation；最新 HEAD 必须由独立 CI 验证，
   review evidence 为空或采集命令失败时必须 fail closed；
-- thesis-impact stack 已有真实 ThesisVersion + 真实模型产物，但首条独立 verifier 正式 `reject`，且 findings 本身
-  存在自相矛盾；现已冻结 12 个 no-leakage 校准样本并启用严格 `0.2` 输出合同，但只有 Gate 2 的 1 个样本有
-  真实模型观测，模型质量仍未达到 live 门槛；
+- thesis-impact stack 已有真实 ThesisVersion、30-case no-leakage corpus、wrapper-owned output contract 和多模型
+  真实观测；Gemini 3.7 Flash low 已在 direct calibration 30/30，但 production broker 尚不能证明 exact low thinking、
+  Google provider controls 和 phase-pinned route，因此仍未达到 live 门槛；
 - schema 持续演化但缺少统一迁移纪律；后续任何 schema 改动必须同批提交迁移说明和旧数据 replay/upgrade 测试。
 
 ## 相关入口
@@ -1077,6 +1098,9 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Gate 2 真实 thesis-impact canary：`docs/reports/gate2-real-thesis-impact-canary-2026-08-21.md`
 - Thesis-impact verifier 校准基础：`docs/reports/thesis-impact-verifier-calibration-foundation-2026-08-21.md`
 - Thesis-impact verifier 真实校准：`docs/reports/thesis-impact-verifier-live-calibration-2026-08-21.md`
+- Thesis-impact 30-case shortlist：`docs/reports/thesis-impact-calibration-v0.2-shortlist-2026-08-22.md`
+- Google Generative AI provider controls：`docs/reports/google-generative-ai-provider-controls-2026-08-22.md`
+- Wrapper binding 与候选选择：`docs/reports/thesis-impact-verifier-wrapper-selection-2026-08-22.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
