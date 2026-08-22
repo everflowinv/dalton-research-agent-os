@@ -688,14 +688,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
     parser.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS)
     parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
-    parser.add_argument(
-        "--socket-path", type=Path,
-        default=Path("/Users/everflow/.openclaw/dalton-model-broker.sock"),
-    )
-    parser.add_argument(
-        "--auth-key-path", type=Path,
-        default=Path("/Users/everflow/.openclaw/dalton-model-broker.sock.key"),
-    )
+    parser.add_argument("--socket-path", type=Path, required=True)
+    parser.add_argument("--auth-key-path", type=Path, required=True)
     parser.add_argument("--expected-agent-id", default=DEFAULT_BROKER_AGENT_ID)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--allow-dirty", action="store_true")
