@@ -1,0 +1,93 @@
+{
+  "artifact_hashes": {
+    "campaign.json": "08a9d59914575d91b7e77f98af0d65498859ada8abe500a62f9d55708422cedc",
+    "campaign-summary.json": "7e4a5b8b8faed96c538c8dafcb88244683045a3f650f4ab9b1076960e0bc3b0d",
+    "round-1/manifest.json": "c4275c6496ca0a7aa047028095089f0ce53fb4804089d8ad67ce8fa10576e5aa",
+    "round-1/responses.jsonl": "d89acebf4bb6cfd79327c43c13888b0150d6dfe754f400e9010212a6c4370509",
+    "round-2/manifest.json": "9a7c67c439353db3d2791e24cd3ad4cffc25118d992d32560219db4092f6ebc0",
+    "round-2/responses.jsonl": "44c3d9cbaf3e45507d5506ded53ce389b0301e001880d61c98f10873db2fa49d",
+    "round-3/manifest.json": "4f3145401552b5c34ce9e11a9f286bb7eb2e18ab2dcd43032035b8e6d4007050",
+    "round-3/responses.jsonl": "95e933807f3514877c4be3f20e57e6159103c5a71a7faadfe2ee9c2314b71a93"
+  },
+  "campaign_ref": "thesis-impact-verifier-canary:16a542de99e16404da89bdcd589a1097",
+  "corpus_hash": "e736c0fc6f6c3dcf569dde76aa40fdaa6f7cfa2311e78e8efa2153771c625703",
+  "corpus_ref": "thesis-impact-verifier-calibration:0.2",
+  "created_at": "2026-08-22T20:07:42.085029+00:00",
+  "execution_tier": "provider-controlled-v1",
+  "kind": "thesis-impact-verifier-canary-3x30-corrected-summary",
+  "model_ref": "google/gemini-3.7-flash",
+  "observed_usage": {
+    "input_tokens": 65871,
+    "output_tokens": 21244,
+    "summed_model_latency_seconds": 211.623037,
+    "total_tokens": 87115
+  },
+  "production_gate": {
+    "aggregate_spent_or_reserved_usd": "0.12906825",
+    "campaign_cap_usd": "27.00",
+    "eligible": true,
+    "production_minimum_rounds": 3,
+    "reasons": [],
+    "rounds_accepted": 3,
+    "rounds_evaluated": 3
+  },
+  "profile_id": "profile:gemini-3-7-flash",
+  "record_invariants": {
+    "fresh_execution_records": 90,
+    "provider_controlled_records": 90,
+    "thinking_low_work_orders": 90,
+    "total_records": 90,
+    "unique_invocations": 90,
+    "unique_run_refs": 3
+  },
+  "repo_commit": "83ef2ac8dd9384150e10847ab57a8e3b4b4510b6",
+  "rounds": [
+    {
+      "accepted": true,
+      "accounted_cost_usd": "0.04312275",
+      "accuracy": 1.0,
+      "cases": 30,
+      "control_failures": 0,
+      "false_positives": 0,
+      "high_severity_misses": 0,
+      "input_tokens": 21957,
+      "output_tokens": 7108,
+      "round": 1,
+      "run_ref": "thesis-impact-calibration-run:534828e8d178ce233d0dd081df05f7d6",
+      "thinking_binding_failures": 0,
+      "total_tokens": 29065
+    },
+    {
+      "accepted": true,
+      "accounted_cost_usd": "0.04418400",
+      "accuracy": 1.0,
+      "cases": 30,
+      "control_failures": 0,
+      "false_positives": 0,
+      "high_severity_misses": 0,
+      "input_tokens": 21957,
+      "output_tokens": 7391,
+      "round": 2,
+      "run_ref": "thesis-impact-calibration-run:6bd1c15470b1247f6d20de40c9ad9386",
+      "thinking_binding_failures": 0,
+      "total_tokens": 29348
+    },
+    {
+      "accepted": true,
+      "accounted_cost_usd": "0.04176150",
+      "accuracy": 1.0,
+      "cases": 30,
+      "control_failures": 0,
+      "false_positives": 0,
+      "high_severity_misses": 0,
+      "input_tokens": 21957,
+      "output_tokens": 6745,
+      "round": 3,
+      "run_ref": "thesis-impact-calibration-run:ede70441b388476bf8bc5960d67ca9a9",
+      "thinking_binding_failures": 0,
+      "total_tokens": 28702
+    }
+  ],
+  "schema_version": "0.2",
+  "thinking_level": "low"
+}

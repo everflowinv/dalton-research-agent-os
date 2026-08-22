@@ -11,8 +11,9 @@
   `profile:gpt-5-6-sol` 的 assessment phase policy。2026-08-22 原始 3×30 数据确实是 90 次 fresh provider
   execution，三轮均 30/30、0 FP、0 high miss，总花费 USD 0.127；但独立复核发现三轮共用同一个 `run_ref`，旧
   gate 又直接信任落盘 score，因此撤销原 `production_gate.eligible=true`。runner 已改为 instance-bound
-  manifest、从 records 重算 score，并要求三轮 run/profile identity 闭合；production verifier 必须在新 runner
-  下重新完成 3×30，之后才可讨论 shadow、policy activation 和 gateway restart。
+  manifest、从 records 重算 score，并要求三轮 run/profile identity 闭合。修正版随后生成三个不同 run identity，
+  90 条再次全部 fresh/provider-controlled，三轮均 30/30，总成本 USD 0.12906825，gate 为 `eligible=true`。
+  当前只解锁 isolated shadow；policy activation 和 gateway restart 尚未执行。
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
 反向改写历史结论。这里的“完成”只表示代码、测试和当前部署已经验收，不表示已达到多租户或
@@ -184,7 +185,8 @@ verification 相位可改在该 policy 下路由，且未 pin 到单一 profile 
 request hash、invocation 幂等身份和 host proof 的 closed 合同（broker 升至 0.1.0-spike.5）。live routing 和
 ThesisVersion mutation 都没有变化。host 侧 provider controls、rate card、thinkingLevel、patch 与 restart 后来已
 打通；首次真实 3×30 的 90 次 fresh 调用与质量数据有效，但因三轮 run identity 重复而撤销 production gate。
-修正后的 runner 重新完成 3×30 与 shadow 仍需单独授权。phase-pin/thinking 批次的本机验证：Python 全量 621/621、broker
+修正后的 runner 已用三个不同 run identity 重新完成 3×30，90 条均为 fresh execution，三轮均 30/30，
+`production_gate.eligible=true`；当前进入 isolated shadow 准备，production activation 仍未授权。phase-pin/thinking 批次的本机验证：Python 全量 621/621、broker
 22/22、显式 hermetic research replay canary、compileall、wheel/sdist build 与 `git diff --check` 全部通过；
 没有付费调用。报告见
 [verifier-phase-pin-and-thinking-controls-2026-08-22.md](reports/verifier-phase-pin-and-thinking-controls-2026-08-22.md)。

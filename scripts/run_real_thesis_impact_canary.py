@@ -37,7 +37,15 @@ from typing import Any, Callable
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from dalton_core.model_deployment import openclaw_broker_profiles  # noqa: E402
+from dalton_core.model_deployment import (  # noqa: E402
+    ASSESSMENT_POLICY_REF,
+    ASSESSMENT_PROFILE_ID,
+    VERIFIER_POLICY_REF,
+    VERIFIER_PROFILE_ID,
+    openclaw_assessment_policy,
+    openclaw_broker_profiles,
+    openclaw_verifier_policy,
+)
 from dalton_core.model_router import ModelRouter  # noqa: E402
 from dalton_core.observability import ObservabilityStore  # noqa: E402
 from dalton_core.openclaw_model_adapter import OpenClawModelAdapter  # noqa: E402
@@ -64,11 +72,8 @@ from dalton_core.thesis_impact_model_worker import (  # noqa: E402
 SCHEMA_VERSION = "0.1"
 CRASH_EXIT_CODE = 86
 THESIS_REF = "thesis:msft:revenue-operating-leverage"
-ROUTING_POLICY_REF = "model-routing-policy-version:gate2-real-canary:1"
 BROKER_CLIENT_ID = "client:dalton-core"
 BROKER_AGENT_ID = "chem"
-ASSESSMENT_PROFILE_ID = "profile:gpt-5-6-sol"
-VERIFIER_PROFILE_ID = "profile:deepseek-v4-flash"
 GATE2_ACTOR = "system:gate2-real-thesis-impact-canary"
 BROKER_INVOCATION_ACTOR = "runtime:openclaw-model-broker"
 SCHEDULER_POLICY_REF = "scheduler-policy:gate2-real-canary:1"
@@ -321,30 +326,14 @@ def _install_router(router_path: Path) -> dict[str, Any]:
             "research" if profile["id"] == ASSESSMENT_PROFILE_ID else "verify"
         ]
         profile["limits"]["max_cost_usd"] = 0.25
-    policy = {
-        "schema_version": SCHEMA_VERSION,
-        "policy_version_ref": ROUTING_POLICY_REF,
-        "id": "model-routing-policy:gate2-real-canary",
-        "version": 1,
-        "created_at": _wire_time(checked_at),
-        "prior_version_ref": None,
-        "filters": {
-            "allowed_profile_ids": sorted(wanted),
-            "allowed_providers": [],
-            "allowed_families": [],
-            "allowed_adapter_refs": ["adapter:openclaw-model-broker:0.1"],
-            "required_modalities": ["text"],
-            "family_independence_capabilities": ["verify"],
-        },
-        "ordered_preferences": [
-            {"field": "estimated_cost_usd", "direction": "asc"},
-            {"field": "profile_version_ref", "direction": "asc"},
-        ],
-    }
+    policies = (
+        openclaw_assessment_policy(created_at=checked_at),
+        openclaw_verifier_policy(created_at=checked_at),
+    )
     with ModelRouter(router_path) as router:
         installed_profiles = [router.register_profile(profile) for profile in profiles]
-        installed_policy = router.register_policy(policy)
-    return {"policy": installed_policy, "profiles": installed_profiles}
+        installed_policies = [router.register_policy(policy) for policy in policies]
+    return {"policies": installed_policies, "profiles": installed_profiles}
 
 
 def _key_provider(path: Path) -> Callable[[], bytes]:
@@ -480,10 +469,12 @@ def _worker(
         adapter=adapter,
         impact=authorities.impact,
         observability=authorities.observability,
-        routing_policy_ref=ROUTING_POLICY_REF,
+        routing_policy_ref=ASSESSMENT_POLICY_REF,
+        assessment_routing_policy_ref=ASSESSMENT_POLICY_REF,
+        verifier_routing_policy_ref=VERIFIER_POLICY_REF,
         credential_slot_refs=(
             "credential-slot:openclaw:openai",
-            "credential-slot:openclaw:deepseek",
+            "credential-slot:openclaw:google",
         ),
         lease_seconds=lease_seconds,
         clock=_now,
@@ -831,10 +822,12 @@ def _parent(args: argparse.Namespace) -> int:
                 adapter=deny_adapter,
                 impact=authorities.impact,
                 observability=authorities.observability,
-                routing_policy_ref=ROUTING_POLICY_REF,
+                routing_policy_ref=ASSESSMENT_POLICY_REF,
+                assessment_routing_policy_ref=ASSESSMENT_POLICY_REF,
+                verifier_routing_policy_ref=VERIFIER_POLICY_REF,
                 credential_slot_refs=(
                     "credential-slot:openclaw:openai",
-                    "credential-slot:openclaw:deepseek",
+                    "credential-slot:openclaw:google",
                 ),
                 clock=_now,
             )
@@ -1054,10 +1047,12 @@ def _finalize_existing(args: argparse.Namespace) -> int:
                 adapter=deny_adapter,
                 impact=authorities.impact,
                 observability=authorities.observability,
-                routing_policy_ref=ROUTING_POLICY_REF,
+                routing_policy_ref=ASSESSMENT_POLICY_REF,
+                assessment_routing_policy_ref=ASSESSMENT_POLICY_REF,
+                verifier_routing_policy_ref=VERIFIER_POLICY_REF,
                 credential_slot_refs=(
                     "credential-slot:openclaw:openai",
-                    "credential-slot:openclaw:deepseek",
+                    "credential-slot:openclaw:google",
                 ),
                 clock=_now,
             )

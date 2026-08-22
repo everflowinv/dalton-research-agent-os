@@ -3,7 +3,8 @@
 > **2026-08-22 独立复核更正：本报告的 `production_gate.eligible=true` 已撤销。**
 > 90 次调用和 3 轮 30/30 的质量数据均可从原始记录重算，但三轮 manifest 共用同一个 `run_ref`；旧 gate
 > 没有检查 run identity 唯一性，并且直接信任落盘 `score.json`。详情见
-> `verifier-canary-independent-audit-2026-08-22.md`。修正后的 runner 必须重新执行 3×30 后才能恢复生产资格。
+> `verifier-canary-independent-audit-2026-08-22.md`。修正版 3×30 后来已用三个不同 run identity 重新执行并通过；
+> 当前有效结论见 `verifier-canary-3x30-corrected-passed-2026-08-22.md`，本报告只保留历史记录。
 
 日期：2026-08-22
 状态：生产验收门通过（`production_gate.eligible=true`）；production verifier 解锁至"待 shadow 与单独 policy activation"，live route 仍未变化

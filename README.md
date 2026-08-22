@@ -138,12 +138,12 @@ Qwen DeepSeek V4 Flash 为 27/30；Owner 已选择 exact `google/gemini-3.7-flas
 calibration manifest 冻结 `thinking=low`，进入 broker `requiredControls`、request hash、invocation 幂等身份与
 host proof；broker 升至 0.1.0-spike.5）。
 
-候选选择仍不等于 production 可用。Gemini 3.7 的 host provider controls、rate card、thinkingLevel 和 host patch
-已经打通；首次 3×30 也确实产生 90 次 fresh provider execution，三轮质量均为 30/30。但独立复核发现旧 runner
-让三轮共用同一个 run identity，旧 gate 又直接信任落盘 score，因此已撤销原 `eligible=true`。修正后的 runner
-会从 records 重算 score，并要求三个不同 run identity 和同一 exact profile version。重新完成 3×30、shadow 和
-单独 policy activation 前，live route、ThesisVersion mutation 和旧 cron 都保持不变。assessment 同时新增独立
-phase policy，只允许 `profile:gpt-5-6-sol`；本批没有把 assessment thinking level 说成 provider-control 证明。
+Gemini 3.7 的 host provider controls、rate card、thinkingLevel 和 host patch 已经打通。首次 3×30 的 90 次
+fresh execution 与质量数据有效，但因三轮复用 run identity 而撤销 gate；修正版 runner 随后用三个不同 run
+identity 重跑，90 条仍全部 fresh/provider-controlled，三轮均 30/30，合计成本 USD 0.12906825，独立重算得到
+`eligible=true`。当前只解锁 isolated shadow；live route、ThesisVersion mutation 和旧 cron 都保持不变，production
+policy activation 与 gateway restart 仍是独立步骤。assessment 同时新增独立 phase policy，只允许
+`profile:gpt-5-6-sol`；本批没有把 assessment thinking level 说成 provider-control 证明。
 定时运行前的控制面也已就位：`dalton-thesis-impact-verifier-canary` 提供 3×30 canary 的
 三重硬顶与验收裁决，`thesis_impact_budget` authority 提供付费 lane 的 per-day 硬顶（admission/settlement、
 durable rejection）与 append-only 失败告警。详细状态见
@@ -152,4 +152,5 @@ durable rejection）与 append-only 失败告警。详细状态见
 [phase-pin 与 thinking 控制合同报告](docs/reports/verifier-phase-pin-and-thinking-controls-2026-08-22.md) 和
 [per-day 预算与告警报告](docs/reports/thesis-impact-day-budget-and-alerts-2026-08-22.md)，以及
 [3×30 独立复核更正](docs/reports/verifier-canary-independent-audit-2026-08-22.md)和
+[修正版 3×30 通过报告](docs/reports/verifier-canary-3x30-corrected-passed-2026-08-22.md)、
 [assessment producer phase pin](docs/reports/assessment-producer-phase-pin-2026-08-22.md)。

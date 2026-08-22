@@ -1,7 +1,7 @@
 # 3×30 verifier canary 独立复核与更正
 
 日期：2026-08-22
-状态：原生产资格撤销；代码修复完成后需重新运行 3×30
+状态：原生产资格撤销；修正版 3×30 已在同日重新运行并通过
 
 ## 复核结论
 
@@ -42,3 +42,10 @@ ModelInvocation，模型均为 `google/gemini-3.7-flash`；每轮从 records 重
 旧 90 次调用可保留为模型质量证据，不能再写成生产 gate 已通过。需要 owner 重新授权一次付费 3×30，使用修正后
 的 runner 生成三个不同 run identity。该 gate 通过前不进入 shadow，不 activation production policy，不重启
 gateway，也不修改 ThesisVersion。
+
+## 后续闭合
+
+Owner 随后授权修正版 3×30。新 campaign `thesis-impact-verifier-canary:16a542de99e16404da89bdcd589a1097`
+生成三个不同 run identity，90 条均为 fresh provider-controlled execution，三轮重新评分均为 30/30，合计成本
+USD 0.12906825，修正版 gate 返回 `eligible=true`。详情见
+`verifier-canary-3x30-corrected-passed-2026-08-22.md`。这只解除 shadow 的前置门，不等于 production activation。
