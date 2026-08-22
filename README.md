@@ -21,7 +21,7 @@ Dalton 是面向投研团队的独立研究控制内核。它把任务调度、�
 - Core 是 headless、event-driven 的权威层。
 - agent 负责规划和执行 WorkOrder，不能自行提交研究结论或改写治理规则。
 - 模型 fallback 必须由 Core 路由并留下 decision，provider 或 host 不能静默切换。
-- OpenClaw 可以提供模型、消息、审批和投递连接器；Core 不读取 OpenClaw 配置或凭据。
+- OpenClaw 可以提供模型、消息、审批和投递连接器；Core 常驻运行时不读取 OpenClaw 配置或凭据。显式校准命令只投影 provider/model、上下文、价格和 broker profile 等公开路由元数据，忽略密钥与 headers。
 - 旧 OpenClaw agent 的约束、研究结果和 cron 只作为 legacy input 归档。归档不代表采用、兼容或继续运行。
 
 旧工作流的初步取舍见 [docs/legacy-workflow-disposition.md](docs/legacy-workflow-disposition.md)。完整契约见 [SPEC.md](SPEC.md)，当前完成度与未完成项见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，当前执行顺序见 [docs/reports/direction-review-and-execution-plan-v0.7-2026-08-21.md](docs/reports/direction-review-and-execution-plan-v0.7-2026-08-21.md)，Connector 边界见 [docs/CONNECTOR_PROTOCOL.md](docs/CONNECTOR_PROTOCOL.md)。
@@ -68,6 +68,17 @@ python3 scripts/run_sec_revenue_growth_batch.py \
 python3 scripts/replay_sec_research_plan_canary.py \
   --output-dir temp/sec-revenue-growth-batch/samples/MSFT
 
+# 对照当前 OpenClaw 模型清单；报告不包含密钥，新/改 profile 进入 smoke_required
+python3 scripts/reconcile_openclaw_model_catalog.py \
+  --openclaw-config /ABSOLUTE/PATH/TO/openclaw.json
+
+# 显式带入当前模型清单跑一个付费 smoke；不会自动调用或自动上线新模型
+dalton-thesis-impact-calibrate-matrix \
+  --openclaw-config /ABSOLUTE/PATH/TO/openclaw.json \
+  --profile-id profile:NEW_MODEL --case-ref calibration:thesis-impact:001 \
+  --output-dir temp/model-smoke --socket-path /ABSOLUTE/PATH/TO/broker.sock \
+  --auth-key-path /ABSOLUTE/PATH/TO/broker.key
+
 cd integrations/openclaw-model-broker
 npm run check
 ```
@@ -106,8 +117,9 @@ NVIDIA、Walmart、Amazon 的 5/5 正式 closure、进程重启后无网络 repl
 `reject`。控制链、记账、family independence、离线 replay 和数据库完整性通过；verifier findings 有明显矛盾，
 所以 assessment 未进入 eligible，也未写入简报。
 
-Gate 0、Gate 1 和 Gate 2 控制面验收已完成；模型质量门仍未通过。第一版 verifier 校准已冻结并完成真实候选运行：
-DeepSeek V4 Flash 在 12 个 no-leakage 样本上准确率 75%、错误检出率 71.4%、正确样本误报率 20%，并漏掉 1 个
-高严重度错误；Claude Fable 5 第一条就超过 input/output/cost admission budget，后续 11 条未调用。当前没有
-verifier 候选获准上线，也没有部署 live、自动修改 ThesisVersion 或切旧 cron。详细状态见
-[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)。
+Gate 0、Gate 1 和 Gate 2 控制面验收已完成；模型质量门仍未通过。冻结的 12-case v0.1 已有 20 个 profile 完成
+全量评分，其中 GPT-5.6 Terra、Claude Opus 5、Gemini 3.1 Pro Preview 和 Qwen3.8 Max 为 12/12；随后冻结的
+30-case v0.2 中，Gemini 3.1 Pro Preview 为 30/30，另外三个 shortlist profile 各为 29/30。Claude Sonnet 5
+已经在放宽 Claude CLI Gateway 宿主输入预算后通过单案 smoke；Gemini 3.7 Flash 的 `MINIMAL` thinking level
+兼容补丁已通过模拟 provider 验收，仍需在 gateway 安全重启后补 live broker smoke。当前没有 verifier 候选获准
+上线，也没有部署 live、自动修改 ThesisVersion 或切旧 cron。详细状态见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)。

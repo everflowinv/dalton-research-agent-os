@@ -27,6 +27,11 @@ from typing import Any, Mapping
 from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
 from .model_deployment import ADAPTER_REF, openclaw_broker_profiles
 from .model_router import ModelRouter
+from .openclaw_catalog_reconcile import (
+    OpenClawCatalogError,
+    load_openclaw_config,
+    openclaw_broker_profiles_from_config,
+)
 from .openclaw_model_adapter import (
     OpenClawModelAdapter,
     OpenClawModelAdapterError,
@@ -445,16 +450,13 @@ def _write_checkpoint(
 def _install_exact_router(
     router_path: Path,
     *,
+    catalog: list[Mapping[str, Any]],
     profile_id: str,
     checked_at: datetime,
     per_case_cap_usd: Decimal,
     run_id: str,
 ) -> tuple[dict[str, Any], str]:
-    profiles = [
-        profile for profile in openclaw_broker_profiles(
-            checked_at=checked_at, availability_ttl=timedelta(days=7)
-        ) if profile["id"] == profile_id
-    ]
+    profiles = [profile for profile in catalog if profile["id"] == profile_id]
     if len(profiles) != 1:
         raise ThesisImpactCalibrationRunError("candidate broker profile is unavailable")
     profile = profiles[0]
@@ -505,6 +507,7 @@ def run_live_calibration(
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
     execution_tier: str = PROVIDER_CONTROL_MODE_REQUIRED,
     case_refs: list[str] | tuple[str, ...] | None = None,
+    openclaw_config_path: Path | None = None,
     resume: bool = False,
     allow_dirty: bool = False,
 ) -> dict[str, Any]:
@@ -517,10 +520,22 @@ def run_live_calibration(
         raise ThesisImpactCalibrationRunError("repository must be clean for a paid run")
     corpus = load_frozen_calibration_corpus()
     created_at = _now()
+    try:
+        catalog = (
+            openclaw_broker_profiles_from_config(
+                load_openclaw_config(openclaw_config_path),
+                checked_at=created_at,
+                availability_ttl=timedelta(days=7),
+            )
+            if openclaw_config_path is not None
+            else openclaw_broker_profiles(
+                checked_at=created_at, availability_ttl=timedelta(days=7)
+            )
+        )
+    except OpenClawCatalogError as exc:
+        raise ThesisImpactCalibrationRunError(f"invalid OpenClaw catalog: {exc}") from exc
     candidate_profiles = [
-        profile for profile in openclaw_broker_profiles(
-            checked_at=created_at, availability_ttl=timedelta(days=7)
-        ) if profile["id"] == profile_id
+        profile for profile in catalog if profile["id"] == profile_id
     ]
     if len(candidate_profiles) != 1:
         raise ThesisImpactCalibrationRunError("candidate profile is not in the broker catalog")
@@ -565,6 +580,7 @@ def run_live_calibration(
         manifest = requested_manifest
         profile, policy_ref = _install_exact_router(
             router_path,
+            catalog=catalog,
             profile_id=profile_id,
             checked_at=created_at,
             per_case_cap_usd=_money(per_case_cap_usd, "per_case_cap_usd"),
@@ -738,6 +754,7 @@ def main(argv: list[str] | None = None) -> int:
         default=PROVIDER_CONTROL_MODE_REQUIRED,
     )
     parser.add_argument("--case-ref", action="append", dest="case_refs")
+    parser.add_argument("--openclaw-config", type=Path)
     parser.add_argument("--socket-path", type=Path, required=True)
     parser.add_argument("--auth-key-path", type=Path, required=True)
     parser.add_argument("--expected-agent-id", default=DEFAULT_BROKER_AGENT_ID)
@@ -759,6 +776,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout_seconds=args.timeout_seconds,
             execution_tier=args.execution_tier,
             case_refs=args.case_refs,
+            openclaw_config_path=args.openclaw_config,
             resume=args.resume,
             allow_dirty=args.allow_dirty,
         )

@@ -11,6 +11,11 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .model_deployment import openclaw_broker_profiles
+from .openclaw_catalog_reconcile import (
+    OpenClawCatalogError,
+    load_openclaw_config,
+    openclaw_broker_profiles_from_config,
+)
 from .openclaw_model_adapter import (
     OpenClawModelAdapterError,
     PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
@@ -22,8 +27,6 @@ from .thesis_impact_calibration import (
 )
 from .thesis_impact_calibration_runner import (
     DEFAULT_BROKER_AGENT_ID,
-    DEFAULT_MAX_OUTPUT_TOKENS,
-    DEFAULT_TIMEOUT_SECONDS,
     ThesisImpactCalibrationRunError,
     _append_record,
     _git_state,
@@ -37,7 +40,9 @@ from .thesis_impact_calibration_runner import (
 SCHEMA_VERSION = "0.2"
 DEFAULT_TOTAL_CAP_USD = Decimal("4.60")
 DEFAULT_PER_CASE_CAP_USD = Decimal("0.20")
-DEFAULT_MATRIX_MAX_INPUT_TOKENS = 10_000
+DEFAULT_MATRIX_MAX_INPUT_TOKENS = 30_000
+DEFAULT_MATRIX_MAX_OUTPUT_TOKENS = 4_000
+DEFAULT_MATRIX_TIMEOUT_SECONDS = 180
 _MANIFEST_FIELDS = {
     "schema_version", "id", "created_at", "repo_commit", "corpus_ref",
     "corpus_hash", "execution_tier", "profile_ids", "case_refs",
@@ -290,8 +295,9 @@ def run_live_calibration_matrix(
     total_cap_usd: Decimal = DEFAULT_TOTAL_CAP_USD,
     per_case_cap_usd: Decimal = DEFAULT_PER_CASE_CAP_USD,
     max_input_tokens: int = DEFAULT_MATRIX_MAX_INPUT_TOKENS,
-    max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS,
-    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    max_output_tokens: int = DEFAULT_MATRIX_MAX_OUTPUT_TOKENS,
+    timeout_seconds: int = DEFAULT_MATRIX_TIMEOUT_SECONDS,
+    openclaw_config_path: Path | None = None,
     resume: bool = False,
     allow_dirty: bool = False,
 ) -> dict[str, Any]:
@@ -302,10 +308,21 @@ def run_live_calibration_matrix(
         raise ThesisImpactCalibrationRunError("repository must be clean for a paid run")
     now = datetime.now(timezone.utc)
     corpus = load_frozen_calibration_corpus()
-    catalog = openclaw_broker_profiles(
-        checked_at=now,
-        availability_ttl=timedelta(days=7),
-    )
+    try:
+        catalog = (
+            openclaw_broker_profiles_from_config(
+                load_openclaw_config(openclaw_config_path),
+                checked_at=now,
+                availability_ttl=timedelta(days=7),
+            )
+            if openclaw_config_path is not None
+            else openclaw_broker_profiles(
+                checked_at=now,
+                availability_ttl=timedelta(days=7),
+            )
+        )
+    except OpenClawCatalogError as exc:
+        raise ThesisImpactCalibrationRunError(f"invalid OpenClaw catalog: {exc}") from exc
     catalog_by_id = {profile["id"]: profile for profile in catalog}
     selected_ids = list(profile_ids) if profile_ids is not None else list(catalog_by_id)
     unknown = sorted(set(selected_ids) - set(catalog_by_id))
@@ -384,6 +401,7 @@ def run_live_calibration_matrix(
                 timeout_seconds=manifest["timeout_seconds"],
                 execution_tier=PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC,
                 case_refs=manifest["case_refs"],
+                openclaw_config_path=openclaw_config_path,
                 resume=profile_dir.exists(),
                 allow_dirty=allow_dirty,
             )
@@ -445,8 +463,13 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=DEFAULT_MATRIX_MAX_INPUT_TOKENS,
     )
-    parser.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS)
-    parser.add_argument("--timeout-seconds", type=int, default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument(
+        "--max-output-tokens", type=int, default=DEFAULT_MATRIX_MAX_OUTPUT_TOKENS
+    )
+    parser.add_argument(
+        "--timeout-seconds", type=int, default=DEFAULT_MATRIX_TIMEOUT_SECONDS
+    )
+    parser.add_argument("--openclaw-config", type=Path)
     parser.add_argument("--socket-path", type=Path, required=True)
     parser.add_argument("--auth-key-path", type=Path, required=True)
     parser.add_argument("--expected-agent-id", default=DEFAULT_BROKER_AGENT_ID)
@@ -467,6 +490,7 @@ def main(argv: list[str] | None = None) -> int:
             max_input_tokens=args.max_input_tokens,
             max_output_tokens=args.max_output_tokens,
             timeout_seconds=args.timeout_seconds,
+            openclaw_config_path=args.openclaw_config,
             resume=args.resume,
             allow_dirty=args.allow_dirty,
         )
