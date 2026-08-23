@@ -9,6 +9,7 @@ import secrets
 from pathlib import Path
 from typing import Iterable
 
+from .model_input import ModelInputLedger
 from .model_router import ModelRouter
 from .agenda import AgendaStore
 from .observability import ObservabilityStore
@@ -69,6 +70,7 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
     with DaltonStore(paths["core_db"]) as store:
         ObservabilityStore(store)
         AgendaStore(store)
+        ModelInputLedger(store)
     with Scheduler(paths["scheduler_db"]):
         pass
     if not paths["model_router_db"].exists():

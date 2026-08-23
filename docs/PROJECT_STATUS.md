@@ -1080,6 +1080,12 @@ operational verifier 与 fixture-only research coordinator 只继续第一条真
 Model IR ADR 和 offline capability sandbox 只有在首条 plan 明确需要且有验收标准时才恢复，否则等真实闭环与
 首轮质量数据完成后再决定。
 
+2026-08-23 owner 明确要求在行业研究前先补建模地基，因此已实现范围受限的 Model Input Ledger v1。它只保存
+human-gated actual/scenario/assumption/forecast version、冻结的 model run 和 reconciliation，不实现任意单元格、
+VBA、循环引用、通用估值引擎或自动 thesis mutation。研究 worker 只能写 candidate；正式 input 仍由认证人类
+准入。Valuation output 在 price/shares/FX/rates/consensus 五类正式 authority 齐备前 fail closed。这里不等于
+恢复完整 Model IR 扩建，formula census 和 Tier 1/2/3 evaluator 仍按后置门槛处理。
+
 ## 继续建设与开闸的不同门槛
 
 可以立即继续：完成最新 HEAD 的独立 CI；把无网络、无付费调用的完整 replay canary 接入 CI；修复会静默生成
@@ -1192,6 +1198,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Thesis-impact per-day 预算硬顶与失败告警：`docs/reports/thesis-impact-day-budget-and-alerts-2026-08-22.md`
 - Thesis confidence 与 coverage admission ADR：`docs/adr/0001-thesis-confidence-and-coverage-admission.md`
 - US IT Services / ACN 初始覆盖准入：`docs/reports/us-it-services-acn-admission-v1-2026-08-23.md`
+- Model Input Ledger v1：`docs/reports/model-input-ledger-v1-2026-08-23.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`

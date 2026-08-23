@@ -277,6 +277,148 @@ class WriterServiceTests(unittest.TestCase):
             "admit",
         )
 
+    def test_model_input_candidate_requires_worker_and_admission_requires_human(self):
+        evidence = self.core.register_evidence(
+            evidence={
+                "evidence_ref": "evidence:acn:revenue:2026q1",
+                "source_type": "filing",
+                "source_ref": "sec:acn:10q:2026q1",
+                "retrieved_at": "2026-08-23T12:00:00+00:00",
+                "source_lineage": ["sec:acn:10q:2026q1"],
+                "independence_group": "sec:acn:10q:2026q1",
+            }
+        )
+        payload = {
+            "schema_version": "0.1",
+            "metric_ref": "metric:revenue",
+            "subject_ref": "company:acn",
+            "business_line_ref": None,
+            "period": {
+                "start": "2026-01-01", "end": "2026-03-31",
+                "calendar": "company:fiscal", "kind": "quarter",
+            },
+            "unit": "million",
+            "currency": "USD",
+            "value": "100",
+            "source_authorities": [{
+                "authority_kind": "evidence_version",
+                "version_ref": evidence["evidence_version_id"],
+                "content_hash": evidence["content_hash"],
+            }],
+        }
+        with self.assertRaises(RemoteAuthorizationError):
+            self.verifier.propose_model_input(
+                candidate_id="candidate:forbidden", input_kind="actual",
+                model_input_ref="input:forbidden", prior_version_ref=None,
+                payload=payload, idempotency_key="candidate:forbidden",
+            )
+        candidate = self.worker.propose_model_input(
+            candidate_id="candidate:acn:revenue:2026q1",
+            input_kind="actual",
+            model_input_ref="input:acn:revenue:2026q1",
+            prior_version_ref=None,
+            payload=payload,
+            idempotency_key="candidate:acn:revenue:2026q1",
+        )["candidate"]
+        self.assertEqual("worker", candidate["proposed_by"])
+        with self.assertRaises(RemoteAuthorizationError):
+            self.core.decide_model_input(
+                decision_id="decision:forbidden", candidate_id=candidate["id"],
+                candidate_hash=candidate["content_hash"], verdict="admit",
+                rationale="not human", findings=[], version_id="version:forbidden",
+                idempotency_key="decision:forbidden",
+            )
+        admitted = self.governance.decide_model_input(
+            decision_id="decision:acn:revenue:2026q1",
+            candidate_id=candidate["id"],
+            candidate_hash=candidate["content_hash"],
+            verdict="admit",
+            rationale="Filing authority checked.",
+            findings=[],
+            version_id="input-version:acn:revenue:2026q1:1",
+            idempotency_key="decision:acn:revenue:2026q1",
+        )
+        self.assertEqual("human:coverage-owner", admitted["decision"]["reviewer_ref"])
+        self.assertEqual(
+            admitted["version"],
+            self.core.current_model_input("input:acn:revenue:2026q1"),
+        )
+        self.assertEqual(
+            candidate,
+            self.core.get_model_input_candidate(candidate["id"]),
+        )
+        self.assertTrue(self.core.model_input_integrity_report()["ok"])
+
+    def test_core_records_closed_model_run_and_reconciliation_over_rpc(self):
+        candidate = self.worker.propose_model_input(
+            candidate_id="candidate:scenario:base",
+            input_kind="scenario",
+            model_input_ref="scenario:base",
+            prior_version_ref=None,
+            payload={
+                "schema_version": "0.1", "scenario_ref": "scenario:base",
+                "label": "Base", "description": "Reviewed base case",
+                "base_scenario_version_ref": None,
+                "base_scenario_version_hash": None,
+                "owner_ref": "human:coverage-owner",
+            },
+            idempotency_key="candidate:scenario:base",
+        )["candidate"]
+        scenario = self.governance.decide_model_input(
+            decision_id="decision:scenario:base", candidate_id=candidate["id"],
+            candidate_hash=candidate["content_hash"], verdict="admit",
+            rationale="Base scenario approved.", findings=[],
+            version_id="input-version:scenario:base:1",
+            idempotency_key="decision:scenario:base",
+        )["version"]
+        run = self.core.record_model_run(
+            version_id="model-run-version:rpc:1", model_run_ref="model-run:rpc",
+            prior_version_ref=None, scenario_version_ref=scenario["id"],
+            scenario_version_hash=scenario["content_hash"],
+            input_bindings=[{
+                "binding_ref": "scenario", "role": "scenario",
+                "version_ref": scenario["id"],
+                "version_hash": scenario["content_hash"],
+            }],
+            formula_version_ref="formula:rpc:1",
+            formula_version_hash="0" * 64,
+            status="completed",
+            outputs=[{
+                "output_ref": "output:rpc", "output_kind": "metric",
+                "metric_ref": "metric:test",
+                "period": {
+                    "start": "2026-01-01", "end": "2026-03-31",
+                    "calendar": "company:fiscal", "kind": "quarter",
+                },
+                "unit": "count", "currency": None, "value": "1",
+                "authority_bindings": [],
+            }],
+            errors=[], started_at="2026-08-23T12:00:00+00:00",
+            completed_at="2026-08-23T12:00:01+00:00",
+            idempotency_key="model-run:rpc:1",
+        )["model_run"]
+        checks = [{
+            "check_kind": kind, "status": "pass", "details": "checked",
+            "authority_bindings": [{
+                "authority_kind": "model_run_version", "version_ref": run["id"],
+                "content_hash": run["content_hash"],
+            }],
+        } for kind in (
+            "financial_statement", "unit_currency", "period_calendar",
+            "share_count", "actual_override", "source_revision",
+        )]
+        reconciliation = self.core.record_model_reconciliation(
+            reconciliation_id="reconciliation:rpc:1",
+            model_run_version_ref=run["id"],
+            model_run_version_hash=run["content_hash"],
+            checks=checks, idempotency_key="reconciliation:rpc:1",
+        )["reconciliation"]
+        self.assertEqual("core", run["actor_ref"])
+        self.assertEqual("pass", reconciliation["verdict"])
+        self.assertEqual(
+            [reconciliation], self.core.get_model_reconciliations(run["id"])
+        )
+
     def test_agenda_context_operations_are_core_only_and_closed(self):
         # Materializing an Agenda context reads mandates and perception
         # snapshots.  Only the core principal may ask for it, and neither

@@ -249,6 +249,39 @@ class WriterClient:
             "get_thesis_admission_decision", {"decision_id": decision_id}
         )
 
+    def propose_model_input(self, **params: Any) -> Any:
+        return self.call("propose_model_input", params)
+
+    def get_model_input_candidate(self, candidate_id: str) -> Any:
+        return self.call("get_model_input_candidate", {"candidate_id": candidate_id})
+
+    def get_model_input_decision(self, decision_id: str) -> Any:
+        return self.call("get_model_input_decision", {"decision_id": decision_id})
+
+    def get_model_input_version(self, version_id: str) -> Any:
+        return self.call("get_model_input_version", {"version_id": version_id})
+
+    def current_model_input(self, model_input_ref: str) -> Any:
+        return self.call("current_model_input", {"model_input_ref": model_input_ref})
+
+    def decide_model_input(self, **params: Any) -> Any:
+        return self.call("decide_model_input", params)
+
+    def record_model_run(self, **params: Any) -> Any:
+        return self.call("record_model_run", params)
+
+    def record_model_reconciliation(self, **params: Any) -> Any:
+        return self.call("record_model_reconciliation", params)
+
+    def get_model_reconciliations(self, model_run_version_ref: str) -> Any:
+        return self.call(
+            "get_model_reconciliations",
+            {"model_run_version_ref": model_run_version_ref},
+        )
+
+    def model_input_integrity_report(self) -> Any:
+        return self.call("model_input_integrity_report", {})
+
     def thesis_impact_targets(
         self, company_thesis_refs: Mapping[str, str], *, limit: int = 100
     ) -> Any:

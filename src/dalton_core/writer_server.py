@@ -67,6 +67,13 @@ from .errors import (
     VerificationRequired,
 )
 from .store import DaltonStore
+from .model_input import (
+    ModelInputConflict,
+    ModelInputLedger,
+    ModelInputLedgerError,
+    ModelInputNotFound,
+    ModelInputValidationError,
+)
 from .observability import (
     ObservabilityConflict,
     ObservabilityError,
@@ -148,7 +155,7 @@ CONNECTION_IDLE_TIMEOUT = 1.0
 STORE_REQUEST_TIMEOUT = 30.0
 
 
-WORKER_OPERATIONS = frozenset({"stage_change"})
+WORKER_OPERATIONS = frozenset({"stage_change", "propose_model_input"})
 VERIFIER_OPERATIONS = frozenset({"verify_change"})
 RESEARCHER_OPERATIONS = frozenset({"register_evidence", "register_claim", "relate_evidence"})
 ADJUDICATOR_OPERATIONS = frozenset({"adjudicate_claim"})
@@ -160,6 +167,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "set_agenda_pause", "record_agenda_feedback",
     "register_driver_pack", "propose_thesis_admission",
     "decide_thesis_admission",
+    "decide_model_input",
 })
 FEEDBACK_BRIDGE_OPERATIONS = frozenset({
     "list_agenda_feedback_targets", "record_agenda_feedback",
@@ -207,6 +215,10 @@ CORE_OPERATIONS = frozenset({
     "register_driver_pack", "get_driver_pack",
     "propose_thesis_admission", "get_thesis_admission_candidate",
     "decide_thesis_admission", "get_thesis_admission_decision",
+    "propose_model_input", "get_model_input_candidate",
+    "get_model_input_decision", "get_model_input_version", "current_model_input",
+    "decide_model_input", "record_model_run", "record_model_reconciliation",
+    "get_model_reconciliations", "model_input_integrity_report",
 })
 
 
@@ -272,6 +284,30 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "get_thesis_admission_candidate": frozenset({"candidate_id"}),
     "decide_thesis_admission": frozenset({"candidate_id", "candidate_hash", "verdict", "rationale", "decision_id", "actor_ref", "idempotency_key"}),
     "get_thesis_admission_decision": frozenset({"decision_id"}),
+    "propose_model_input": frozenset({
+        "candidate_id", "input_kind", "model_input_ref", "prior_version_ref",
+        "payload", "proposed_by", "idempotency_key",
+    }),
+    "get_model_input_candidate": frozenset({"candidate_id"}),
+    "get_model_input_decision": frozenset({"decision_id"}),
+    "get_model_input_version": frozenset({"version_id"}),
+    "current_model_input": frozenset({"model_input_ref"}),
+    "decide_model_input": frozenset({
+        "decision_id", "candidate_id", "candidate_hash", "verdict", "rationale",
+        "findings", "reviewer_ref", "version_id", "idempotency_key",
+    }),
+    "record_model_run": frozenset({
+        "version_id", "model_run_ref", "prior_version_ref", "scenario_version_ref",
+        "scenario_version_hash", "input_bindings", "formula_version_ref",
+        "formula_version_hash", "status", "outputs", "errors", "started_at",
+        "completed_at", "actor_ref", "idempotency_key",
+    }),
+    "record_model_reconciliation": frozenset({
+        "reconciliation_id", "model_run_version_ref", "model_run_version_hash",
+        "checks", "actor_ref", "idempotency_key",
+    }),
+    "get_model_reconciliations": frozenset({"model_run_version_ref"}),
+    "model_input_integrity_report": frozenset(),
     "thesis_impact_targets": frozenset({"company_thesis_refs", "limit"}),
     "thesis_impact_start": frozenset({"plan_version_ref", "thesis_ref"}),
     "thesis_impact_advance_assessment": frozenset({"plan_version_ref", "thesis_ref"}),
@@ -315,6 +351,10 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "register_driver_pack": "actor_ref",
     "propose_thesis_admission": "actor_ref",
     "decide_thesis_admission": "actor_ref",
+    "propose_model_input": "proposed_by",
+    "decide_model_input": "reviewer_ref",
+    "record_model_run": "actor_ref",
+    "record_model_reconciliation": "actor_ref",
 }
 
 
@@ -458,6 +498,7 @@ class WriterServer:
         self._agenda: AgendaStore | None = None
         self._observability: ObservabilityStore | None = None
         self._coverage_admission: CoverageAdmissionAuthority | None = None
+        self._model_input: ModelInputLedger | None = None
         self._scheduler_path = None if scheduler_path is None else str(scheduler_path)
         self._scheduler: Scheduler | None = None
         self._research_plan: ResearchPlanAuthority | None = None
@@ -500,6 +541,12 @@ class WriterServer:
         if self._coverage_admission is None:
             raise WriterServerError("coverage-admission authority is unavailable")
         return self._coverage_admission
+
+    @property
+    def model_input(self) -> ModelInputLedger:
+        if self._model_input is None:
+            raise WriterServerError("model-input authority is unavailable")
+        return self._model_input
 
     @property
     def thesis_impact_control(self) -> ResearchPlanThesisImpactCoordinator:
@@ -554,6 +601,7 @@ class WriterServer:
         self._observability = ObservabilityStore(self._store)
         self._agenda = AgendaStore(self._store)
         self._coverage_admission = CoverageAdmissionAuthority(self._store)
+        self._model_input = ModelInputLedger(self._store)
         if self._scheduler_path is not None:
             self._scheduler = Scheduler(self._scheduler_path)
             self._research_plan = ResearchPlanAuthority(self._store)
@@ -646,6 +694,7 @@ class WriterServer:
         self._agenda = None
         self._observability = None
         self._coverage_admission = None
+        self._model_input = None
 
     def _serve_connection(self, conn: socket.socket) -> None:
         reader = conn.makefile("rb")
@@ -1153,6 +1202,38 @@ class WriterServer:
     def _op_get_thesis_admission_decision(self, p: Mapping[str, Any]) -> Any:
         return self.coverage_admission.decision(**dict(p))
 
+    def _op_propose_model_input(self, p: Mapping[str, Any]) -> Any:
+        return self.model_input.propose_input(**dict(p))
+
+    def _op_get_model_input_candidate(self, p: Mapping[str, Any]) -> Any:
+        return self.model_input.candidate(**dict(p))
+
+    def _op_get_model_input_decision(self, p: Mapping[str, Any]) -> Any:
+        return self.model_input.decision(**dict(p))
+
+    def _op_get_model_input_version(self, p: Mapping[str, Any]) -> Any:
+        return self.model_input.input_version(**dict(p))
+
+    def _op_current_model_input(self, p: Mapping[str, Any]) -> Any:
+        return self.model_input.current_input(**dict(p))
+
+    def _op_decide_model_input(self, p: Mapping[str, Any]) -> Any:
+        return self.model_input.decide_input(**dict(p))
+
+    def _op_record_model_run(self, p: Mapping[str, Any]) -> Any:
+        return self.model_input.record_model_run(**dict(p))
+
+    def _op_record_model_reconciliation(self, p: Mapping[str, Any]) -> Any:
+        return self.model_input.record_reconciliation(**dict(p))
+
+    def _op_get_model_reconciliations(self, p: Mapping[str, Any]) -> Any:
+        return self.model_input.reconciliations(**dict(p))
+
+    def _op_model_input_integrity_report(self, p: Mapping[str, Any]) -> Any:
+        if p:
+            raise ProtocolError("model_input_integrity_report takes no parameters")
+        return self.model_input.integrity_report()
+
     def _op_thesis_impact_targets(self, p: Mapping[str, Any]) -> Any:
         if self._research_plan is None or self._backlog is None:
             raise WriterServerError("thesis-impact control plane is unavailable")
@@ -1215,11 +1296,11 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError)):
             return "rejected"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict)):
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
@@ -1231,7 +1312,7 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, CapabilityRegistryError):
             return "store_error"
-        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError)):
+        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError)):
             return "store_error"
         return "internal_error"
 
@@ -1241,11 +1322,11 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, CoverageAdmissionValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, CoverageAdmissionValidationError, ModelInputValidationError)):
             return "request rejected by contract or gate"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, CoverageAdmissionNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, CoverageAdmissionNotFound, ModelInputNotFound)):
             return "requested object was not found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, CoverageAdmissionConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, CoverageAdmissionConflict, ModelInputConflict)):
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ContextMaterializerError, PerceptionError)):
             return "request rejected by contract or gate"
