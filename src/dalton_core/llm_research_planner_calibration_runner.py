@@ -60,6 +60,43 @@ class PlannerCalibrationRunError(RuntimeError):
     pass
 
 
+def admit_dynamic_calibration_profile(
+    profile: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Grant a newly brokered model research capability only inside calibration.
+
+    The catalog reconciler deliberately gives unknown broker profiles only a
+    conservative ``verify`` capability.  This local immutable derivative lets
+    the paid offline calibration exercise the Planner contract without
+    promoting the route into Dalton's deployment catalog.
+    """
+
+    wire = json.loads(canonical_json(profile))
+    if "research" in wire.get("capabilities", []):
+        return wire
+    if (
+        wire.get("capabilities") != ["verify"]
+        or not str(wire.get("profile_version_ref", "")).startswith(
+            "model-profile-version:dynamic-"
+        )
+    ):
+        raise PlannerCalibrationRunError(
+            "profile lacks research capability and is not a dynamic calibration candidate"
+        )
+    source_hash = content_hash(wire)
+    slug = wire["id"].removeprefix("profile:")
+    wire.update({
+        "profile_version_ref": (
+            f"model-profile-version:calibration-{slug}-{source_hash[:16]}:1"
+        ),
+        "version": 1,
+        "prior_version_ref": None,
+        "capabilities": ["research"],
+    })
+    wire.pop("content_hash", None)
+    return wire
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -442,7 +479,11 @@ def run_live_planner_calibration(
         )
     except OpenClawCatalogError as exc:
         raise PlannerCalibrationRunError(f"invalid OpenClaw catalog: {exc}") from exc
-    candidates = [item for item in catalog if item["id"] == profile_id]
+    candidates = [
+        admit_dynamic_calibration_profile(item)
+        for item in catalog
+        if item["id"] == profile_id
+    ]
     if len(candidates) != 1:
         raise PlannerCalibrationRunError("candidate profile is not in the broker catalog")
     manifest_path = output_dir / "manifest.json"

@@ -211,9 +211,9 @@ _ENDPOINTS: tuple[dict[str, Any], ...] = (
         "output_cost": 0.28,
     },
     {
-        "name": "qwen-deepseek-v4-pro",
+        "name": "qwen-deepseek-v4-pro-0813",
         "provider": "qwen",
-        "model": "deepseek-v4-pro",
+        "model": "deepseek-v4-pro-0813",
         "family": "deepseek-v4",
         "credential_slot_ref": "credential-slot:openclaw:qwen",
         "capabilities": ["research", "research-hard", "verify", "adjudicate", "code"],

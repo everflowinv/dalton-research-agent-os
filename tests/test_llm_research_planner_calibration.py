@@ -12,6 +12,8 @@ from dalton_core.llm_research_planner_calibration import (
     validate_planner_calibration_corpus,
 )
 from dalton_core.llm_research_planner_calibration_runner import (
+    PlannerCalibrationRunError,
+    admit_dynamic_calibration_profile,
     build_calibration_work_order,
     build_run_manifest,
     validate_run_manifest,
@@ -143,6 +145,46 @@ class LLMResearchPlannerCalibrationTests(unittest.TestCase):
         self.assertEqual(work.budget["max_cost_usd"], 5.0)
         with self.assertRaises(Exception):
             validate_run_manifest({**manifest, "profile_id": "profile:other"})
+
+    def test_dynamic_model_gets_calibration_only_research_profile(self) -> None:
+        source = next(
+            item for item in openclaw_broker_profiles(
+                checked_at=NOW, availability_ttl=timedelta(days=7)
+            )
+            if item["id"] == "profile:gpt-5-6-sol"
+        )
+        source.update({
+            "profile_version_ref": (
+                "model-profile-version:dynamic-zai-glm-5-3-feedface:1"
+            ),
+            "id": "profile:zai-glm-5-3",
+            "provider": "zai",
+            "model": "glm-5.3",
+            "family": "unclassified:zai",
+            "credential_slot_ref": "credential-slot:openclaw:zai",
+            "capabilities": ["verify"],
+        })
+        source.pop("content_hash", None)
+        admitted = admit_dynamic_calibration_profile(source)
+        self.assertEqual(admitted["id"], "profile:zai-glm-5-3")
+        self.assertEqual(admitted["capabilities"], ["research"])
+        self.assertTrue(
+            admitted["profile_version_ref"].startswith(
+                "model-profile-version:calibration-zai-glm-5-3-"
+            )
+        )
+        self.assertNotIn("content_hash", admitted)
+
+    def test_non_dynamic_verify_only_profile_stays_rejected(self) -> None:
+        source = next(
+            item for item in openclaw_broker_profiles(
+                checked_at=NOW, availability_ttl=timedelta(days=7)
+            )
+            if item["id"] == "profile:gpt-5-6-sol"
+        )
+        source["capabilities"] = ["verify"]
+        with self.assertRaises(PlannerCalibrationRunError):
+            admit_dynamic_calibration_profile(source)
 
 
 if __name__ == "__main__":

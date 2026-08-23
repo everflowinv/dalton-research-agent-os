@@ -51,7 +51,7 @@ class ModelDeploymentTests(unittest.TestCase):
                 ("google", "gemini-3.5-flash-lite"),
                 ("qwen", "qwen3.8-max"),
                 ("qwen", "deepseek-v4-flash-0731"),
-                ("qwen", "deepseek-v4-pro"),
+                ("qwen", "deepseek-v4-pro-0813"),
                 ("qwen", "glm-5.2"),
                 ("openai", "gpt-5.5"),
                 ("deepseek", "deepseek-v4-pro"),
