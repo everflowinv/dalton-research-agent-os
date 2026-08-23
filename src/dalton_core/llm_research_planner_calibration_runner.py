@@ -382,7 +382,9 @@ def _write_report(
         }
         for record in records
     }
-    score = score_planner_outputs(corpus, output_map)
+    score = score_planner_outputs(
+        corpus, output_map, case_refs=manifest["case_refs"]
+    )
     costs = [
         _money(
             record["accounted_cost_usd"]

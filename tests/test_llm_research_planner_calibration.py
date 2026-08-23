@@ -82,6 +82,25 @@ class LLMResearchPlannerCalibrationTests(unittest.TestCase):
         self.assertTrue(row["schema_valid"])
         self.assertFalse(row["action_match"])
 
+    def test_subset_score_does_not_count_unrun_cases_as_failures(self) -> None:
+        case = self.corpus["cases"][0]
+        outputs = {
+            case["id"]: {
+                "parsed_output": {
+                    "schema_version": "0.1",
+                    "action": case["expected_actions"][0],
+                    "rationale": "subset",
+                },
+                "parse_error": None,
+            }
+        }
+        score = score_planner_outputs(
+            self.corpus, outputs, case_refs=[case["id"]]
+        )
+        self.assertTrue(score["hard_gate_pass"])
+        self.assertEqual(score["total_cases"], 1)
+        self.assertEqual(score["action_match_cases"], 1)
+
     def test_prompt_uses_production_wrapper_and_quotes_case_data(self) -> None:
         case = next(
             item for item in self.corpus["cases"]

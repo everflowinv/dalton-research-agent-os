@@ -287,11 +287,24 @@ def build_calibration_prompt(case: Mapping[str, Any]) -> str:
 
 
 def score_planner_outputs(
-    corpus: Mapping[str, Any], outputs: Mapping[str, Any]
+    corpus: Mapping[str, Any],
+    outputs: Mapping[str, Any],
+    *,
+    case_refs: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     frozen = validate_planner_calibration_corpus(corpus)
+    available = [case["id"] for case in frozen["cases"]]
+    selected = available if case_refs is None else list(case_refs)
+    if not selected or len(selected) != len(set(selected)):
+        raise PlannerCalibrationError("case_refs must be a non-empty unique subset")
+    unknown = sorted(set(selected) - set(available))
+    if unknown:
+        raise PlannerCalibrationError(f"unknown case_refs: {unknown}")
+    selected_set = set(selected)
     rows = []
     for case in frozen["cases"]:
+        if case["id"] not in selected_set:
+            continue
         raw = outputs.get(case["id"])
         parse_error = None
         candidate = None
