@@ -260,7 +260,10 @@ def _publish_overlay(
     )
 
 
-def run(base_path: Path, manifest_path: Path, peer_manifest_path: Path) -> dict[str, Any]:
+def run(
+    base_path: Path, manifest_path: Path, peer_manifest_path: Path, *,
+    include_report_body: bool = False,
+) -> dict[str, Any]:
     base = _load(base_path)
     manifest = _load(manifest_path)
     peer_manifest = _load(peer_manifest_path)
@@ -302,6 +305,14 @@ def run(base_path: Path, manifest_path: Path, peer_manifest_path: Path) -> dict[
         brief = industry.industry_brief_snapshot(
             evidence_pack["id"], [item["id"] for item in overlays]
         )
+        rendered = industry.render_industry_brief_markdown(
+            evidence_pack["id"], [item["id"] for item in overlays]
+        )
+        replay = industry.render_industry_brief_markdown(
+            evidence_pack["id"], [item["id"] for item in overlays]
+        )
+        if rendered != replay or rendered["snapshot_hash"] != brief["content_hash"]:
+            raise RuntimeError("industry brief report did not replay deterministically")
 
         report = industry.integrity_report()
         if not report["ok"] or not model.integrity_report()["ok"]:
@@ -309,7 +320,7 @@ def run(base_path: Path, manifest_path: Path, peer_manifest_path: Path) -> dict[
         thesis_count = store.connection.execute("SELECT COUNT(*) FROM thesis_versions").fetchone()[0]
         if thesis_count != 0:
             raise RuntimeError("industry evidence canary must not create a thesis")
-        return {
+        result = {
             "ok": True, "industry_ref": evidence_pack["industry_ref"],
             "driver_pack_version_ref": pack_v3["id"], "driver_count": len(pack_v3["drivers"]),
             "metric_count": len(pack_v3["metric_specs"]),
@@ -321,6 +332,8 @@ def run(base_path: Path, manifest_path: Path, peer_manifest_path: Path) -> dict[
             "company_overlay_version_refs": [item["id"] for item in overlays],
             "company_overlay_count": len(overlays),
             "industry_brief_hash": brief["content_hash"],
+            "industry_brief_claim_count": len(brief["claim_versions"]),
+            "industry_brief_source_count": len(brief["source_authorities"]),
             "driver_scoreboard_count": len(brief["driver_scoreboard"]),
             "metric_matrix_row_count": len(brief["metric_difference_matrix"]),
             "metric_matrix_cell_count": sum(
@@ -328,7 +341,13 @@ def run(base_path: Path, manifest_path: Path, peer_manifest_path: Path) -> dict[
             ),
             "thesis_version_count": thesis_count, "paid_model_calls": 0,
             "source_accessions": peer_manifest["source_accessions"],
+            "report_hash": rendered["content_hash"],
+            "report_snapshot_hash": rendered["snapshot_hash"],
+            "report_replay_identical": rendered == replay,
         }
+        if include_report_body:
+            result["report_body"] = rendered["body"]
+        return result
 
 
 def main() -> int:
@@ -336,8 +355,15 @@ def main() -> int:
     parser.add_argument("--base", type=Path, default=DEFAULT_BASE)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
     parser.add_argument("--peer-manifest", type=Path, default=DEFAULT_PEER_MANIFEST)
+    parser.add_argument("--include-report-body", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(run(args.base, args.manifest, args.peer_manifest), ensure_ascii=False, sort_keys=True))
+    print(json.dumps(
+        run(
+            args.base, args.manifest, args.peer_manifest,
+            include_report_body=args.include_report_body,
+        ),
+        ensure_ascii=False, sort_keys=True,
+    ))
     return 0
 
 

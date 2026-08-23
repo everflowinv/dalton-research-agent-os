@@ -3,8 +3,8 @@
 ## 当前结论
 
 Dalton 现在可以在隔离环境中做有来源约束的真实行业研究，但还没有进入 live 自主研究阶段。v2 已把 ACN、CTSH、EPAM、
-IBM 四家公司放进同一份 Evidence Pack，生成四份 Company Overlay 和一份确定性的行业 brief snapshot；它仍不写 live
-Core、不建立 ThesisVersion，也不调用付费模型。
+IBM 四家公司放进同一份 Evidence Pack，生成四份 Company Overlay、一份确定性的行业 brief snapshot，以及一份只引用
+正式 ClaimVersion 的 Markdown 行业报告；它仍不写 live Core、不建立 ThesisVersion，也不调用付费模型。
 
 这轮验证的重点不是给四家公司排投资顺序，而是确认同一行业框架能保留各公司不同的披露口径。系统不得把缺失数字补成
 零，也不得把 reported、constant currency、organic constant currency、公司整体和业务分部指标混在一起。
@@ -55,6 +55,12 @@ ACN 的报告期截至 2026-05-31，另外三家截至 2026-06-30。行业输出
 本轮 snapshot 形成 4 个 driver scoreboard、19 行 KPI 矩阵和 76 个公司单元格；缺一家公司或混入旧 pack 的 overlay 都会
 fail closed。
 
+snapshot 现在还带有行业边界、覆盖池、21 条正式 ClaimVersion、对应 EvidenceRelation、5 条 SEC EvidenceVersion，以及
+公司差异、待验证问题和 falsifier ref。`render_industry_brief_markdown` 不能接收自由文本，只能用 exact pack 和 overlay
+重新生成 snapshot。它把 `observed` claim 原句写入 KPI evidence，把 `not_found_in_reviewed_sources`、`not_comparable` 和
+`not_applicable` 单独写入 KPI coverage gaps，不生成排名，也不补写投资结论。相同 exact versions 重放时，snapshot hash、
+报告正文和报告 hash 必须完全一致。
+
 ## 隔离 canary
 
 - Driver Pack：v1 → v2 → v3，4 个 driver、18 个唯一 metric；
@@ -62,15 +68,17 @@ fail closed。
 - human-admitted actual Model Input：17 条；
 - Industry Evidence Pack：v1 → v2；当前 Company Overlay：ACN v2、CTSH v1、EPAM v1、IBM v1；
 - 行业 brief：4 个 scoreboard、19 行 KPI、76 个单元格；
+- 行业报告：固定输出 boundary、driver scoreboard、KPI evidence、KPI coverage gaps、debates、falsifiers、open questions 和
+  source authorities；exact replay 一致；
 - ThesisVersion：0；paid model call：0；
 - IndustryResearch 与 ModelInput integrity report 均通过。
 
 ## 尚未完成
 
 - 未把 pack 写入 live Core，未启用 production mapping；
-- 未自动生成可发布的行业文字结论或投资判断；
+- 已生成受合同约束的证据报告，但没有生成投资判断、公司排序或 recommendation；
 - 尚未用 earnings call、AlphaEngine 或 Guidepoint 检查订单定义、AI 转化和交付效率；
 - 尚未准入任何公司 thesis，也没有估值输入和正式 valuation run。
 
-因此可以开始受控研究和积累证据，但仍应把当前版本看作开发验收环境。下一 gate 是把 earnings-call evidence 接入同一
-pack，并让报告生成器只从 exact snapshot 出稿。
+因此可以开始受控研究和积累证据，但仍应把当前版本看作开发验收环境。下一 gate 是把 earnings-call evidence 通过受治理
+connector 接入同一 pack，再检查电话会口径是否改变现有争议和 coverage gaps。

@@ -315,6 +315,27 @@ class IndustryResearchAuthorityTests(unittest.TestCase):
         second = self.authority.register_evidence_pack("industry-evidence-pack:us-it-services", **params)
         self.assertEqual(2, second["version"])
 
+    def test_snapshot_is_self_contained_and_renderer_requires_complete_contract(self) -> None:
+        params = self.pack_params()
+        params["coverage_universe"] = [params["coverage_universe"][0]]
+        pack = self.authority.register_evidence_pack(
+            "industry-evidence-pack:us-it-services", **params
+        )
+        overlay = self.authority.register_company_overlay(
+            "company-overlay:acn", **self.overlay_params(pack)
+        )
+        snapshot = self.authority.industry_brief_snapshot(pack["id"], [overlay["id"]])
+        replay = self.authority.industry_brief_snapshot(pack["id"], [overlay["id"]])
+        self.assertEqual(snapshot, replay)
+        self.assertEqual(2, len(snapshot["claim_versions"]))
+        self.assertEqual(1, len(snapshot["source_authorities"]))
+        self.assertEqual(
+            "Q3 FY2026 new bookings were USD 19.32 billion.",
+            snapshot["claim_versions"][0]["normalized_statement"],
+        )
+        with self.assertRaises(IndustryResearchConflict):
+            self.authority.render_industry_brief_markdown(pack["id"], [overlay["id"]])
+
 
 if __name__ == "__main__":
     unittest.main()

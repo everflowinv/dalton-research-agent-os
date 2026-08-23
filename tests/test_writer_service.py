@@ -290,7 +290,10 @@ class WriterServiceTests(unittest.TestCase):
             }],
             source_plan=[{"source_ref": "source:sec-edgar", "purpose": "Issuer filings", "priority": 1, "required": True}],
             report_contract={
-                "industry_brief_sections": ["drivers", "debates"],
+                "industry_brief_sections": [
+                    "boundary and universe", "driver scoreboard", "KPI evidence",
+                    "KPI coverage gaps", "debates", "falsifiers", "open questions",
+                ],
                 "company_difference_fields": ["role", "watchpoints"],
             },
             version_id="industry-evidence-pack-version:us-it-services:1", prior_version_ref=None,
@@ -306,6 +309,11 @@ class WriterServiceTests(unittest.TestCase):
                 "driver_ref": "driver:bookings-conversion", "stance": "neutral",
                 "claim_version_refs": [{"ref": claim["claim_version_id"], "hash": claim["content_hash"]}],
                 "model_input_version_refs": [], "differentiators": [],
+                "metric_coverage": [{
+                    "metric_ref": "metric:new-bookings", "status": "observed",
+                    "claim_version_refs": [claim["claim_version_id"]],
+                    "rationale": "The exact SEC filing evidence supports the bookings claim.",
+                }],
                 "watchpoints": ["Bookings conversion."],
             }],
             key_differences=["Global scale."], open_questions=["Conversion timing?"],
@@ -320,6 +328,13 @@ class WriterServiceTests(unittest.TestCase):
         self.assertEqual(
             overlay["content_hash"], self.core.get_company_overlay(overlay["id"])["content_hash"]
         )
+        snapshot = self.core.industry_brief_snapshot(industry_pack["id"], [overlay["id"]])
+        rendered = self.core.render_industry_brief_markdown(
+            industry_pack["id"], [overlay["id"]]
+        )
+        self.assertEqual(snapshot["content_hash"], rendered["snapshot_hash"])
+        self.assertIn("## KPI evidence", rendered["body"])
+        self.assertIn("New bookings were reported.", rendered["body"])
         self.assertTrue(self.core.industry_research_integrity_report()["ok"])
         candidate = self.governance.propose_thesis_admission(
             candidate_id="thesis-admission-candidate:acn:1",

@@ -298,6 +298,22 @@ class WriterClient:
     def get_company_overlay(self, version_id: str) -> Any:
         return self.call("get_company_overlay", {"version_id": version_id})
 
+    def industry_brief_snapshot(
+        self, evidence_pack_version_id: str, company_overlay_version_ids: list[str],
+    ) -> Any:
+        return self.call("industry_brief_snapshot", {
+            "evidence_pack_version_id": evidence_pack_version_id,
+            "company_overlay_version_ids": company_overlay_version_ids,
+        })
+
+    def render_industry_brief_markdown(
+        self, evidence_pack_version_id: str, company_overlay_version_ids: list[str],
+    ) -> Any:
+        return self.call("render_industry_brief_markdown", {
+            "evidence_pack_version_id": evidence_pack_version_id,
+            "company_overlay_version_ids": company_overlay_version_ids,
+        })
+
     def industry_research_integrity_report(self) -> Any:
         return self.call("industry_research_integrity_report", {})
 

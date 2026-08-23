@@ -229,6 +229,7 @@ CORE_OPERATIONS = frozenset({
     "get_model_reconciliations", "model_input_integrity_report",
     "register_industry_evidence_pack", "get_industry_evidence_pack",
     "register_company_overlay", "get_company_overlay",
+    "industry_brief_snapshot", "render_industry_brief_markdown",
     "industry_research_integrity_report",
 })
 
@@ -333,6 +334,12 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "actor_ref", "version_id", "prior_version_ref", "idempotency_key",
     }),
     "get_company_overlay": frozenset({"version_id"}),
+    "industry_brief_snapshot": frozenset({
+        "evidence_pack_version_id", "company_overlay_version_ids",
+    }),
+    "render_industry_brief_markdown": frozenset({
+        "evidence_pack_version_id", "company_overlay_version_ids",
+    }),
     "industry_research_integrity_report": frozenset(),
     "thesis_impact_targets": frozenset({"company_thesis_refs", "limit"}),
     "thesis_impact_start": frozenset({"plan_version_ref", "thesis_ref"}),
@@ -1286,6 +1293,12 @@ class WriterServer:
 
     def _op_get_company_overlay(self, p: Mapping[str, Any]) -> Any:
         return self.industry_research.company_overlay(**dict(p))
+
+    def _op_industry_brief_snapshot(self, p: Mapping[str, Any]) -> Any:
+        return self.industry_research.industry_brief_snapshot(**dict(p))
+
+    def _op_render_industry_brief_markdown(self, p: Mapping[str, Any]) -> Any:
+        return self.industry_research.render_industry_brief_markdown(**dict(p))
 
     def _op_industry_research_integrity_report(self, p: Mapping[str, Any]) -> Any:
         if p:

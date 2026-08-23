@@ -29,6 +29,15 @@ METRIC_COVERAGE_STATUSES = frozenset({
     "observed", "not_found_in_reviewed_sources", "not_comparable", "not_applicable",
 })
 POSITION_STANCES = frozenset({"supports", "against", "qualifies"})
+REQUIRED_INDUSTRY_BRIEF_SECTIONS = (
+    "boundary and universe",
+    "driver scoreboard",
+    "KPI evidence",
+    "KPI coverage gaps",
+    "debates",
+    "falsifiers",
+    "open questions",
+)
 _SCHEMA_PATH = Path(__file__).with_name("industry_research_schema.sql")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -365,12 +374,21 @@ class IndustryResearchAuthority:
             raise IndustryResearchNotFound("claim version was not found")
         if row["content_hash"] != version_hash:
             raise IndustryResearchConflict("claim version hash binding failed")
-        try:
-            wire = json.loads(row["claim_json"])
-        except json.JSONDecodeError as exc:
-            raise IndustryResearchConflict("claim version is invalid JSON") from exc
-        if not isinstance(wire, dict) or wire.get("content_hash") != version_hash:
+        wire = _canonical_record(row["claim_json"], "claim version")
+        if wire.get("content_hash") != version_hash:
             raise IndustryResearchConflict("claim version record drifted")
+        return wire
+
+    @staticmethod
+    def _evidence(cur: sqlite3.Cursor, version_ref: str) -> dict[str, Any]:
+        row = cur.execute(
+            "SELECT * FROM evidence_versions WHERE evidence_version_id=?", (version_ref,)
+        ).fetchone()
+        if row is None:
+            raise IndustryResearchNotFound("evidence version was not found")
+        wire = _canonical_record(row["evidence_json"], "evidence version")
+        if wire.get("id") != version_ref or wire.get("content_hash") != row["content_hash"]:
+            raise IndustryResearchConflict("evidence version record drifted")
         return wire
 
     @staticmethod
@@ -382,11 +400,8 @@ class IndustryResearchAuthority:
             raise IndustryResearchNotFound("evidence relation was not found")
         if row["content_hash"] != relation_hash or row["claim_version_id"] != claim_version_ref:
             raise IndustryResearchConflict("evidence relation binding failed")
-        try:
-            wire = json.loads(row["relation_json"])
-        except json.JSONDecodeError as exc:
-            raise IndustryResearchConflict("evidence relation is invalid JSON") from exc
-        if not isinstance(wire, dict) or wire.get("content_hash") != relation_hash:
+        wire = _canonical_record(row["relation_json"], "evidence relation")
+        if wire.get("content_hash") != relation_hash:
             raise IndustryResearchConflict("evidence relation record drifted")
         return wire
 
@@ -776,9 +791,56 @@ class IndustryResearchAuthority:
         driver_pack = self._driver_pack(
             self.connection, pack["driver_pack_version_ref"], pack["driver_pack_version_hash"]
         )
+        claim_versions = []
+        sources_by_ref: dict[str, dict[str, Any]] = {}
+        for binding in pack["evidence_bindings"]:
+            claim = self._claim(
+                self.connection, binding["claim_version_ref"], binding["claim_version_hash"]
+            )
+            relation_projections = []
+            for relation_ref in binding["relation_refs"]:
+                relation = self._relation(
+                    self.connection, relation_ref["ref"], relation_ref["hash"], claim["id"]
+                )
+                evidence = self._evidence(self.connection, relation["evidence_version_ref"])
+                sources_by_ref.setdefault(evidence["id"], {
+                    "evidence_version_ref": evidence["id"],
+                    "content_hash": evidence["content_hash"],
+                    "evidence_ref": evidence["evidence_ref"],
+                    "source_type": evidence["source_type"],
+                    "source_ref": evidence["source_ref"],
+                    "retrieved_at": evidence["retrieved_at"],
+                    "valid_until": evidence["valid_until"],
+                    "artifact_refs": evidence["artifact_refs"],
+                    "source_lineage": evidence["source_lineage"],
+                    "independence_group": evidence["independence_group"],
+                })
+                relation_projections.append({
+                    "relation_ref": relation["id"],
+                    "content_hash": relation["content_hash"],
+                    "relation": relation["relation"],
+                    "evidence_version_ref": relation["evidence_version_ref"],
+                })
+            claim_versions.append({
+                "claim_version_ref": claim["id"],
+                "content_hash": claim["content_hash"],
+                "claim_ref": claim["claim_ref"],
+                "subject_ref": claim["subject_ref"],
+                "metric_or_aspect": claim["metric_or_aspect"],
+                "period": claim["period"],
+                "basis": claim["basis"],
+                "normalized_statement": claim["normalized_statement"],
+                "claim_kind": claim["claim_kind"],
+                "value": claim["value"],
+                "unit": claim["unit"],
+                "evidence_relations": relation_projections,
+            })
         views_by_company = {
             company_ref: {view["driver_ref"]: view for view in overlay["driver_views"]}
             for company_ref, overlay in by_company.items()
+        }
+        metrics_by_ref = {
+            metric["metric_ref"]: metric for metric in driver_pack["metric_specs"]
         }
         scoreboard = []
         metric_matrix = []
@@ -799,9 +861,17 @@ class IndustryResearchAuthority:
                         item["metric_ref"] for item in view["metric_coverage"]
                         if item["status"] != "observed"
                     ],
+                    "differentiators": view["differentiators"],
+                    "watchpoints": view["watchpoints"],
                 })
-            scoreboard.append({"driver_ref": driver_ref, "companies": companies})
+            scoreboard.append({
+                "driver_ref": driver_ref,
+                "label": driver["label"],
+                "mechanism": driver["mechanism"],
+                "companies": companies,
+            })
             for metric_ref in driver["metric_refs"]:
+                metric = metrics_by_ref[metric_ref]
                 cells = []
                 for company in pack["coverage_universe"]:
                     view = views_by_company[company["company_ref"]][driver_ref]
@@ -816,11 +886,20 @@ class IndustryResearchAuthority:
                         "rationale": coverage["rationale"],
                     })
                 metric_matrix.append({
-                    "driver_ref": driver_ref, "metric_ref": metric_ref, "companies": cells,
+                    "driver_ref": driver_ref,
+                    "metric_ref": metric_ref,
+                    "label": metric["label"],
+                    "definition": metric["definition"],
+                    "unit": metric["unit"],
+                    "periodicity": metric["periodicity"],
+                    "caveats": metric["caveats"],
+                    "companies": cells,
                 })
         return _record({
             "schema_version": SCHEMA_VERSION, "projection_kind": "industry_brief_snapshot",
-            "industry_ref": pack["industry_ref"], "as_of": pack["as_of"],
+            "industry_ref": pack["industry_ref"], "title": pack["title"],
+            "as_of": pack["as_of"], "boundary": pack["boundary"],
+            "coverage_universe": pack["coverage_universe"],
             "evidence_pack_version_ref": pack["id"],
             "evidence_pack_version_hash": pack["content_hash"],
             "driver_pack_version_ref": driver_pack["id"],
@@ -830,8 +909,206 @@ class IndustryResearchAuthority:
                 "version_ref": by_company[company["company_ref"]]["id"],
                 "content_hash": by_company[company["company_ref"]]["content_hash"],
             } for company in pack["coverage_universe"]],
+            "company_summaries": [{
+                "company_ref": company["company_ref"],
+                "ticker": company["ticker"],
+                "role": company["role"],
+                "comparability_tier": company["comparability_tier"],
+                "key_differences": by_company[company["company_ref"]]["key_differences"],
+                "open_questions": by_company[company["company_ref"]]["open_questions"],
+                "falsifier_refs": by_company[company["company_ref"]]["falsifier_refs"],
+            } for company in pack["coverage_universe"]],
+            "claim_versions": claim_versions,
+            "source_authorities": list(sources_by_ref.values()),
             "driver_scoreboard": scoreboard, "metric_difference_matrix": metric_matrix,
             "debates": pack["debates"], "report_contract": pack["report_contract"],
+        })
+
+    @staticmethod
+    def _markdown_text(value: Any) -> str:
+        return str(value).replace("\r", " ").replace("\n", " ").strip()
+
+    def render_industry_brief_markdown(
+        self, evidence_pack_version_id: str, company_overlay_version_ids: list[str],
+    ) -> dict[str, Any]:
+        """Render formal claims and explicit gaps without generating new conclusions."""
+
+        snapshot = self.industry_brief_snapshot(
+            evidence_pack_version_id, company_overlay_version_ids
+        )
+        sections = snapshot["report_contract"]["industry_brief_sections"]
+        missing = [section for section in REQUIRED_INDUSTRY_BRIEF_SECTIONS if section not in sections]
+        if missing:
+            raise IndustryResearchConflict(
+                f"industry brief report contract is missing required sections: {missing}"
+            )
+        text = self._markdown_text
+        claims = {
+            claim["claim_version_ref"]: claim for claim in snapshot["claim_versions"]
+        }
+        sources = {
+            source["evidence_version_ref"]: source
+            for source in snapshot["source_authorities"]
+        }
+        lines = [
+            f"# {text(snapshot['title'])}",
+            "",
+            f"- As of: {text(snapshot['as_of'])}",
+            f"- Industry authority: {text(snapshot['industry_ref'])}",
+            f"- Evidence pack: {text(snapshot['evidence_pack_version_ref'])} ({snapshot['evidence_pack_version_hash']})",
+            f"- Driver pack: {text(snapshot['driver_pack_version_ref'])} ({snapshot['driver_pack_version_hash']})",
+            "",
+            "## Boundary and universe",
+            "",
+            text(snapshot["boundary"]["definition"]),
+            "",
+            "Inclusion rules:",
+            *[f"- {text(item)}" for item in snapshot["boundary"]["inclusion_rules"]],
+            "",
+            "Exclusion rules:",
+            *[f"- {text(item)}" for item in snapshot["boundary"]["exclusion_rules"]],
+            "",
+            "Coverage universe:",
+            *[
+                f"- {text(company['ticker'])} — {text(company['role'])}; "
+                f"comparability={text(company['comparability_tier'])}; company={text(company['company_ref'])}"
+                for company in snapshot["coverage_universe"]
+            ],
+            "",
+            "## Driver scoreboard",
+        ]
+        for driver in snapshot["driver_scoreboard"]:
+            lines.extend([
+                "",
+                f"### {text(driver['label'])}",
+                "",
+                f"- Driver: {text(driver['driver_ref'])}",
+                f"- Mechanism: {text(driver['mechanism'])}",
+            ])
+            for company in driver["companies"]:
+                observed = ", ".join(map(text, company["observed_metric_refs"])) or "none"
+                unresolved = ", ".join(map(text, company["unresolved_metric_refs"])) or "none"
+                lines.append(
+                    f"- {text(company['ticker'])} — stance={text(company['stance'])}; "
+                    f"observed={observed}; unresolved={unresolved}"
+                )
+                lines.extend(
+                    f"  - Differentiator: {text(item)}" for item in company["differentiators"]
+                )
+                lines.extend(
+                    f"  - Watchpoint: {text(item)}" for item in company["watchpoints"]
+                )
+
+        lines.extend(["", "## KPI evidence"])
+        for metric in snapshot["metric_difference_matrix"]:
+            observed_cells = [
+                company for company in metric["companies"] if company["status"] == "observed"
+            ]
+            if not observed_cells:
+                continue
+            lines.extend([
+                "",
+                f"### {text(metric['label'])}",
+                "",
+                f"- Metric: {text(metric['metric_ref'])}",
+                f"- Definition: {text(metric['definition'])}",
+                f"- Unit: {text(metric['unit'])}; periodicity={text(metric['periodicity'])}",
+            ])
+            lines.extend(f"- Caveat: {text(item)}" for item in metric["caveats"])
+            for company in observed_cells:
+                for claim_ref in company["claim_version_refs"]:
+                    claim = claims.get(claim_ref)
+                    if claim is None or claim["subject_ref"] != company["company_ref"]:
+                        raise IndustryResearchConflict(
+                            "observed KPI cell is not bound to its formal company claim"
+                        )
+                    evidence_refs = [
+                        relation["evidence_version_ref"]
+                        for relation in claim["evidence_relations"]
+                    ]
+                    if any(evidence_ref not in sources for evidence_ref in evidence_refs):
+                        raise IndustryResearchConflict(
+                            "formal claim references a source outside the snapshot"
+                        )
+                    lines.extend([
+                        f"- {text(company['ticker'])} — {text(claim['normalized_statement'])}",
+                        f"  - Claim: {text(claim_ref)}",
+                        f"  - Evidence: {', '.join(map(text, evidence_refs))}",
+                    ])
+
+        lines.extend(["", "## KPI coverage gaps"])
+        for metric in snapshot["metric_difference_matrix"]:
+            gaps = [
+                company for company in metric["companies"] if company["status"] != "observed"
+            ]
+            if not gaps:
+                continue
+            lines.extend(["", f"### {text(metric['label'])}", ""])
+            lines.extend(
+                f"- {text(company['ticker'])} — status={text(company['status'])}; "
+                f"rationale={text(company['rationale'])}"
+                for company in gaps
+            )
+
+        lines.extend(["", "## Debates"])
+        for debate in snapshot["debates"]:
+            lines.extend([
+                "",
+                f"### {text(debate['question'])}",
+                "",
+                f"- Debate: {text(debate['debate_ref'])}; status={text(debate['status'])}",
+            ])
+            for position in debate["positions"]:
+                lines.append(
+                    f"- {text(position['label'])} — stance={text(position['stance'])}"
+                )
+                for claim_ref in position["claim_version_refs"]:
+                    claim = claims.get(claim_ref)
+                    if claim is None:
+                        raise IndustryResearchConflict(
+                            "debate references a claim outside the snapshot"
+                        )
+                    lines.append(
+                        f"  - {text(claim['normalized_statement'])} [{text(claim_ref)}]"
+                    )
+
+        lines.extend(["", "## Falsifiers"])
+        for company in snapshot["company_summaries"]:
+            lines.extend([
+                "",
+                f"### {text(company['ticker'])}",
+                "",
+                *[f"- {text(item)}" for item in company["falsifier_refs"]],
+            ])
+
+        lines.extend(["", "## Open questions"])
+        for company in snapshot["company_summaries"]:
+            lines.extend([
+                "",
+                f"### {text(company['ticker'])}",
+                "",
+                *[f"- {text(item)}" for item in company["open_questions"]],
+            ])
+
+        lines.extend(["", "## Source authorities"])
+        for source in snapshot["source_authorities"]:
+            lineage = ", ".join(map(text, source["source_lineage"]))
+            lines.append(
+                f"- {text(source['source_ref'])} — evidence={text(source['evidence_version_ref'])}; "
+                f"type={text(source['source_type'])}; retrieved={text(source['retrieved_at'])}; "
+                f"lineage={lineage}; hash={source['content_hash']}"
+            )
+        body = "\n".join(lines).rstrip() + "\n"
+        return _record({
+            "schema_version": SCHEMA_VERSION,
+            "projection_kind": "industry_brief_markdown",
+            "snapshot_hash": snapshot["content_hash"],
+            "evidence_pack_version_ref": snapshot["evidence_pack_version_ref"],
+            "company_overlay_version_refs": [
+                item["version_ref"] for item in snapshot["company_overlay_versions"]
+            ],
+            "media_type": "text/markdown",
+            "body": body,
         })
 
     def integrity_report(self) -> dict[str, Any]:
