@@ -815,6 +815,8 @@ class PublicWebFetchAdapter:
         transport: PublicHttpTransport | None = None,
         user_agent: str = "DaltonResearchConnector/0.1 operator@example.invalid",
         clock: Any | None = None,
+        source_identity: Mapping[str, Any] | None = None,
+        allowed_operations: Sequence[str] | None = None,
     ) -> None:
         if not isinstance(url_authority_resolver, PublicWebUrlAuthorityResolver):
             raise TypeError("url_authority_resolver must be exact")
@@ -822,6 +824,55 @@ class PublicWebFetchAdapter:
         self.transport = transport or PublicHttpTransport()
         self.user_agent = _text(user_agent, "user_agent")
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self.source_identity = json.loads(canonical_json(
+            source_identity if source_identity is not None else {
+                "source_ref": "source:public-web",
+                "source_type": "public_web",
+                "source_version": "inventory-2026-08-14",
+            }
+        ))
+        if set(self.source_identity) != {
+            "source_ref", "source_type", "source_version",
+        }:
+            raise RunnerValidationError("public web fetch source identity is invalid")
+        for name in ("source_ref", "source_type", "source_version"):
+            self.source_identity[name] = _text(self.source_identity[name], name)
+        if self.source_identity["source_type"] != "public_web":
+            raise RunnerValidationError(
+                "public web fetch cannot relabel bytes as a stronger source type"
+            )
+        operations = tuple(
+            ("fetch_get", "fetch_head")
+            if allowed_operations is None else allowed_operations
+        )
+        if not operations or len(set(operations)) != len(operations) or any(
+            operation not in {"fetch_get", "fetch_head"}
+            for operation in operations
+        ):
+            raise RunnerValidationError("public web fetch operations are invalid")
+        self.allowed_operations = frozenset(operations)
+
+    def _url_ref(self, wire: Mapping[str, Any]) -> str:
+        if set(wire["parameters"]) != {"url_ref"}:
+            raise RunnerValidationError(
+                "public web fetch parameters must contain url_ref"
+            )
+        return _text(wire["parameters"]["url_ref"], "url_ref")
+
+    def _successful_source_record_ref(
+        self,
+        wire: Mapping[str, Any],
+        *,
+        canonical_final_url: str,
+        response_body: bytes,
+        method: str,
+    ) -> str:
+        final_url_hash = hashlib.sha256(
+            canonical_final_url.encode("utf-8")
+        ).hexdigest()
+        body_hash = hashlib.sha256(response_body).hexdigest()
+        prefix = "public-web-document" if method == "GET" else "public-web-head"
+        return f"{prefix}:url-sha256:{final_url_hash}:body-sha256:{body_hash}"
 
     def __call__(
         self,
@@ -834,17 +885,11 @@ class PublicWebFetchAdapter:
                 "public web fetch does not accept credential handles"
             )
         wire = validate_connector_adapter_request(request)
-        if wire["source_identity"] != {
-            "source_ref": "source:public-web",
-            "source_type": "public_web",
-            "source_version": "inventory-2026-08-14",
-        }:
+        if wire["source_identity"] != self.source_identity:
             raise RunnerConflict("public web fetch source identity drifted")
-        if wire["operation"] not in {"fetch_get", "fetch_head"}:
+        if wire["operation"] not in self.allowed_operations:
             raise RunnerValidationError("public web fetch operation is not approved")
-        if set(wire["parameters"]) != {"url_ref"}:
-            raise RunnerValidationError("public web fetch parameters must contain url_ref")
-        url_ref = _text(wire["parameters"]["url_ref"], "url_ref")
+        url_ref = self._url_ref(wire)
         authority = self.url_authority_resolver.resolve(url_ref)
         if wire["allowed_hosts"] != [authority["host"]]:
             raise RunnerConflict(
@@ -926,11 +971,11 @@ class PublicWebFetchAdapter:
                 },
             )
         final_url = canonical_public_web_url(response.final_url)
-        final_url_hash = hashlib.sha256(final_url.encode("utf-8")).hexdigest()
-        body_hash = hashlib.sha256(response.body).hexdigest()
-        prefix = "public-web-document" if method == "GET" else "public-web-head"
-        record_ref = (
-            f"{prefix}:url-sha256:{final_url_hash}:body-sha256:{body_hash}"
+        record_ref = self._successful_source_record_ref(
+            wire,
+            canonical_final_url=final_url,
+            response_body=response.body,
+            method=method,
         )
         structured = {
             "source_record_refs": [record_ref],

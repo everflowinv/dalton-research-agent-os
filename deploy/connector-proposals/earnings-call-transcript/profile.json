@@ -1,0 +1,158 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "connector_ref": "connector:earnings-call-transcript",
+  "content_hash": "b3eb067ccb8ab3b653ff49a62fa3ae806a5c0ac95467eb41de0e254712afb05a",
+  "created_at": "2026-08-23T15:00:00.000000+00:00",
+  "fixture_manifest_hash": "fb84269824dfe2e2533e8e021814fea56d49a4cac6f153085205ebbd2527bfd0",
+  "fixture_manifest_ref": "connector-fixture-manifest:earnings-call-transcript:0.1",
+  "id": "connector-profile-template:earnings-call-transcript:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "partial",
+      "input_schema_hash": "f82c7ab7d6eb8fe61b16292bedc27ace0bbaf316846cb8137b6d63235d324871",
+      "input_schema_ref": "schema:connector-proposal:earnings-call-transcript:fetch_get:input:0.1",
+      "operation": "fetch_get",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-proposal:earnings-call-transcript:fetch_get:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "fetch_get"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "killable_total_deadline_public_transport"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "adapter:earnings-call-transcript-fetch:0.1"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:search-summary",
+      "route:head-only",
+      "route:credential-channel",
+      "route:private-network",
+      "route:unapproved-transcript-host"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "company_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
+          },
+          "fiscal_quarter": {
+            "maximum": 4,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "fiscal_year": {
+            "maximum": 2200,
+            "minimum": 1900,
+            "type": "integer"
+          },
+          "issuer_ref": {
+            "maxLength": 500,
+            "minLength": 1,
+            "type": "string"
+          },
+          "source_role": {
+            "enum": [
+              "issuer_primary",
+              "third_party_transcript"
+            ],
+            "type": "string"
+          },
+          "ticker": {
+            "maxLength": 10,
+            "minLength": 1,
+            "pattern": "^[A-Z][A-Z0-9.-]{0,9}$",
+            "type": "string"
+          },
+          "url_ref": {
+            "pattern": "^public-web-url:sha256:[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url_ref",
+          "issuer_ref",
+          "ticker",
+          "company_name",
+          "fiscal_year",
+          "fiscal_quarter",
+          "source_role"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "f82c7ab7d6eb8fe61b16292bedc27ace0bbaf316846cb8137b6d63235d324871",
+      "schema_ref": "schema:connector-proposal:earnings-call-transcript:fetch_get:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "schema_ref": "schema:connector-proposal:earnings-call-transcript:fetch_get:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:company-earnings-call-transcript",
+    "source_type": "public_web",
+    "source_version": "proposal-2026-08-23"
+  },
+  "transport": {
+    "allowed_hosts": [],
+    "host_policy": "per_call_authority",
+    "kind": "public_https",
+    "target_hash": "b268f5e9bca0998438a29885f68c14cbdacf657274e41a9fd3c61e3a1543bdb4",
+    "target_ref": "adapter:earnings-call-transcript-fetch:0.1"
+  }
+}

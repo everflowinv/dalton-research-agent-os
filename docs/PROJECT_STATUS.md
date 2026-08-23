@@ -1210,6 +1210,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Model Input Ledger v1：`docs/reports/model-input-ledger-v1-2026-08-23.md`
 - US IT Services Industry Evidence Pack / ACN Overlay v1：`docs/reports/us-it-services-industry-evidence-pack-v1-2026-08-23.md`
 - US IT Services Peer Evidence Pack v2：`docs/reports/us-it-services-peer-evidence-pack-v2-2026-08-23.md`
+- 财报电话会原文 Evidence Gate v1：`docs/reports/earnings-call-transcript-evidence-gate-v1-2026-08-23.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`

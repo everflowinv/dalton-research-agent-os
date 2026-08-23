@@ -1,0 +1,48 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:earnings-call-transcript:0.1",
+  "adapter_source_hash": "dd50070617a7e38bf8bb61521e3ccbf9da069920aec9667410716ed94eebd65f",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "builder_ref": "builder:earnings-call-transcript-proposal:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:earnings-call-transcript:0.1",
+  "connector_ref": "connector:earnings-call-transcript",
+  "content_hash": "eace95831f999b4597b9f2b1237e36a491c916a05152b5c14fb52ea8ee67ccb9",
+  "created_at": "2026-08-23T15:00:00.000000+00:00",
+  "fixture_manifest_hash": "fb84269824dfe2e2533e8e021814fea56d49a4cac6f153085205ebbd2527bfd0",
+  "fixture_manifest_ref": "connector-fixture-manifest:earnings-call-transcript:0.1",
+  "id": "connector-proposal-manifest:earnings-call-transcript:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "partial",
+      "input_schema_hash": "f82c7ab7d6eb8fe61b16292bedc27ace0bbaf316846cb8137b6d63235d324871",
+      "input_schema_ref": "schema:connector-proposal:earnings-call-transcript:fetch_get:input:0.1",
+      "operation": "fetch_get",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-proposal:earnings-call-transcript:fetch_get:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "b3eb067ccb8ab3b653ff49a62fa3ae806a5c0ac95467eb41de0e254712afb05a",
+  "profile_template_ref": "connector-profile-template:earnings-call-transcript:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "adapter:earnings-call-transcript-fetch:0.1",
+    "adapter_version": "proposal-0.1",
+    "source": "source:company-earnings-call-transcript",
+    "source_version": "proposal-2026-08-23"
+  },
+  "transport_kind": "public_https",
+  "transport_target_hash": "b268f5e9bca0998438a29885f68c14cbdacf657274e41a9fd3c61e3a1543bdb4",
+  "transport_target_ref": "adapter:earnings-call-transcript-fetch:0.1"
+}
