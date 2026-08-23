@@ -28,7 +28,7 @@ fi
 "$venv_dir/bin/python" -m pip install --disable-pip-version-check --upgrade pip
 "$venv_dir/bin/python" -m pip install --disable-pip-version-check "${repo_root}[deploy]"
 
-for label in space.lumos.dalton.control space.lumos.dalton.controller space.lumos.dalton.writer; do
+for label in space.lumos.dalton.thesis-impact space.lumos.dalton.control space.lumos.dalton.controller space.lumos.dalton.writer; do
   if launchctl print "$domain/$label" >/dev/null 2>&1; then
     launchctl bootout "$domain/$label"
   fi
@@ -42,7 +42,7 @@ done
   --config "$config_path" \
   --log-dir "$log_dir"
 
-for label in space.lumos.dalton.writer space.lumos.dalton.controller space.lumos.dalton.control; do
+for label in space.lumos.dalton.writer space.lumos.dalton.controller space.lumos.dalton.control space.lumos.dalton.thesis-impact; do
   plist="$launch_agents_dir/$label.plist"
   if [[ -f "$plist" ]]; then
     launchctl bootstrap "$domain" "$plist"

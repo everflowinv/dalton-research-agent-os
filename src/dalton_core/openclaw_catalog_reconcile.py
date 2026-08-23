@@ -215,6 +215,7 @@ def openclaw_broker_profiles_from_config(
     *,
     checked_at: datetime,
     availability_ttl: timedelta = timedelta(days=7),
+    profile_ids: Sequence[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the runnable verifier catalog from explicitly brokered models.
 
@@ -228,6 +229,24 @@ def openclaw_broker_profiles_from_config(
         raise OpenClawCatalogError("availability_ttl must be positive")
     providers = _provider_models(config)
     brokers = _broker_profiles(config)
+    if profile_ids is not None:
+        selected = set(profile_ids)
+        if not selected or any(
+            not isinstance(profile_id, str)
+            or not _PROFILE_ID_RE.fullmatch(profile_id)
+            for profile_id in selected
+        ):
+            raise OpenClawCatalogError("profile_ids must be canonical profile ids")
+        missing = selected - set(brokers)
+        if missing:
+            raise OpenClawCatalogError(
+                f"requested broker profiles are unavailable: {sorted(missing)}"
+            )
+        brokers = {
+            profile_id: broker
+            for profile_id, broker in brokers.items()
+            if profile_id in selected
+        }
     static = _static_routes(checked_at)
     created = _wire_time(checked_at)
     valid_until = _wire_time(checked_at + availability_ttl)
@@ -246,6 +265,29 @@ def openclaw_broker_profiles_from_config(
                     f"broker profile {profile_id} changed route; add a new profile id"
                 )
             profile = copy.deepcopy(static_route["profile"])
+            context_window = provider_model["context_window"]
+            max_output = provider_model["max_output_tokens"]
+            broker_max = broker["max_tokens"]
+            if broker_max is not None:
+                max_output = min(
+                    max_output,
+                    _positive_int(broker_max, f"{profile_id}.maxTokens"),
+                )
+            profile["context"] = {
+                "max_context_tokens": context_window,
+                "max_output_tokens": max_output,
+            }
+            profile["cost"] = {
+                "currency": "USD",
+                "input_per_million_usd": provider_model["input_cost"],
+                "output_per_million_usd": provider_model["output_cost"],
+            }
+            profile["limits"] = {
+                "max_input_tokens": max(1, context_window - max_output),
+                "max_output_tokens": max_output,
+                "max_total_tokens": context_window,
+                "max_cost_usd": 250.0,
+            }
             profile["created_at"] = created
             profile["availability"] = {
                 "state": "available",

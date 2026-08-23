@@ -18,7 +18,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from .contracts import ModelInvocation, WorkOrder
+from .research_plan import ResearchPlanAuthority
 from .research_plan_closure import ResearchPlanClosureCoordinator
+from .research_question_backlog import ResearchQuestionBacklog
+from .scheduler import Scheduler
 from .store import canonical_json, content_hash
 from .thesis_impact import (
     VERIFIER_BINDING_MODE,
@@ -67,17 +70,33 @@ class ResearchPlanThesisImpactCoordinator:
     def __init__(
         self,
         *,
-        closure: ResearchPlanClosureCoordinator,
+        closure: ResearchPlanClosureCoordinator | None = None,
+        plan: ResearchPlanAuthority | None = None,
+        backlog: ResearchQuestionBacklog | None = None,
+        scheduler: Scheduler | None = None,
         impact: ThesisImpactAuthority,
     ) -> None:
-        if closure.plan.connection is not impact.connection:
-            raise TypeError("closure and impact must share one Core authority")
-        if closure.scheduler.connection is not impact.scheduler.connection:
-            raise TypeError("closure and impact must share one Scheduler authority")
+        if closure is not None:
+            if any(item is not None for item in (plan, backlog, scheduler)):
+                raise TypeError(
+                    "closure cannot be combined with explicit plan/backlog/scheduler"
+                )
+            plan = closure.plan
+            backlog = closure.backlog
+            scheduler = closure.scheduler
+        elif any(item is None for item in (plan, backlog, scheduler)):
+            raise TypeError(
+                "plan, backlog and scheduler are required without a closure authority"
+            )
+        assert plan is not None and backlog is not None and scheduler is not None
+        if plan.connection is not impact.connection or backlog.connection is not impact.connection:
+            raise TypeError("plan, backlog and impact must share one Core authority")
+        if scheduler.connection is not impact.scheduler.connection:
+            raise TypeError("control and impact must share one Scheduler authority")
         self.closure = closure
-        self.plan = closure.plan
-        self.backlog = closure.backlog
-        self.scheduler = closure.scheduler
+        self.plan = plan
+        self.backlog = backlog
+        self.scheduler = scheduler
         self.impact = impact
         self.store = impact.store
 
@@ -345,6 +364,10 @@ class ResearchPlanThesisImpactCoordinator:
         authorization: Mapping[str, Any],
         thesis_ref: str,
     ) -> dict[str, Any]:
+        if self.closure is None:
+            raise ResearchPlanThesisImpactConflict(
+                "closure authority is unavailable in the execution-only control plane"
+            )
         closure = self.closure.close_policy_authorized(
             plan_version_ref=plan_version_ref, authorization=authorization
         )
@@ -360,6 +383,10 @@ class ResearchPlanThesisImpactCoordinator:
         review_decision_ref: str,
         thesis_ref: str,
     ) -> dict[str, Any]:
+        if self.closure is None:
+            raise ResearchPlanThesisImpactConflict(
+                "closure authority is unavailable in the execution-only control plane"
+            )
         closure = self.closure.close(
             plan_version_ref=plan_version_ref,
             review_decision_ref=review_decision_ref,

@@ -12,7 +12,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .model_router import ModelRouter
+from .model_router import ModelRouter, canonical_json
+from .store import content_hash
 
 
 ADAPTER_REF = "adapter:openclaw-model-broker:0.1"
@@ -556,6 +557,7 @@ def upgrade_openclaw_broker_catalog(
     *,
     checked_at: datetime,
     availability_ttl: timedelta = timedelta(days=7),
+    openclaw_config_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Append broker profiles plus shared and phase-pinned policies."""
 
@@ -570,12 +572,35 @@ def upgrade_openclaw_broker_catalog(
         verifier_policy = router.register_policy(
             openclaw_verifier_policy(created_at=checked_at)
         )
+        desired_profiles = openclaw_broker_profiles(
+            checked_at=checked_at, availability_ttl=availability_ttl
+        )
+        if openclaw_config_path is not None:
+            desired_profiles = [
+                profile
+                for profile in desired_profiles
+                if profile["id"] not in {ASSESSMENT_PROFILE_ID, VERIFIER_PROFILE_ID}
+            ]
         profiles = [
-            router.register_profile(profile)
-            for profile in openclaw_broker_profiles(
-                checked_at=checked_at, availability_ttl=availability_ttl
-            )
+            _register_live_profile(router, profile, checked_at=checked_at)
+            for profile in desired_profiles
         ]
+        if openclaw_config_path is not None:
+            from .openclaw_catalog_reconcile import (
+                load_openclaw_config,
+                openclaw_broker_profiles_from_config,
+            )
+
+            live_phase_profiles = openclaw_broker_profiles_from_config(
+                load_openclaw_config(openclaw_config_path),
+                checked_at=checked_at,
+                availability_ttl=availability_ttl,
+                profile_ids=(ASSESSMENT_PROFILE_ID, VERIFIER_PROFILE_ID),
+            )
+            profiles.extend(
+                _register_live_profile(router, profile, checked_at=checked_at)
+                for profile in live_phase_profiles
+            )
     return {
         "legacy_policy": legacy_policy,
         "policy": policy,
@@ -584,6 +609,62 @@ def upgrade_openclaw_broker_catalog(
         "profiles": profiles,
         "router_path": str(router_path),
     }
+
+
+def _profile_semantics(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in profile.items()
+        if key
+        not in {
+            "schema_version",
+            "profile_version_ref",
+            "version",
+            "created_at",
+            "prior_version_ref",
+            "availability",
+            "content_hash",
+        }
+    }
+
+
+def _register_live_profile(
+    router: ModelRouter,
+    desired: dict[str, Any],
+    *,
+    checked_at: datetime,
+) -> dict[str, Any]:
+    """Append only when public route economics/capacity changed or expired."""
+
+    row = router.connection.execute(
+        "SELECT profile_json FROM model_endpoint_profile_versions "
+        "WHERE profile_id=? ORDER BY version DESC LIMIT 1",
+        (desired["id"],),
+    ).fetchone()
+    if row is None:
+        return router.register_profile(desired)
+    import json
+
+    latest = json.loads(row["profile_json"])
+    valid_until = datetime.fromisoformat(latest["availability"]["valid_until"])
+    if (
+        canonical_json(_profile_semantics(latest))
+        == canonical_json(_profile_semantics(desired))
+        and valid_until > _utc(checked_at)
+    ):
+        return {"status": "duplicate", "profile": latest}
+    version = int(latest["version"]) + 1
+    semantics_hash = content_hash(_profile_semantics(desired))[:16]
+    wire = dict(desired)
+    wire.update({
+        "profile_version_ref": (
+            f"model-profile-version:broker-{desired['id'].removeprefix('profile:')}"
+            f"-{semantics_hash}:{version}"
+        ),
+        "version": version,
+        "prior_version_ref": latest["profile_version_ref"],
+    })
+    return router.register_profile(wire)
 
 
 __all__ = [

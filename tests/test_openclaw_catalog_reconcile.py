@@ -105,6 +105,23 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
         with self.assertRaisesRegex(OpenClawCatalogError, "unknown model"):
             openclaw_broker_profiles_from_config(orphan, checked_at=NOW)
 
+    def test_selected_static_profile_uses_current_public_price(self):
+        config = _config()
+        sol = next(
+            model
+            for model in config["models"]["providers"]["openai"]["models"]
+            if model["id"] == "gpt-5.6-sol"
+        )
+        sol["cost"] = {"input": 4, "output": 20}
+        catalog = openclaw_broker_profiles_from_config(
+            config,
+            checked_at=NOW,
+            profile_ids=["profile:gpt-5-6-sol"],
+        )
+        self.assertEqual(len(catalog), 1)
+        self.assertEqual(catalog[0]["cost"]["input_per_million_usd"], 4.0)
+        self.assertEqual(catalog[0]["cost"]["output_per_million_usd"], 20.0)
+
     def test_loader_rejects_duplicate_json_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "openclaw.json"

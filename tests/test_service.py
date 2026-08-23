@@ -13,7 +13,13 @@ from dalton_core.plugins.static_dashboard import (
     render_static_dashboard,
 )
 from dalton_core.observability import ObservabilityStore
-from dalton_core.macos_launchagent import CONTROL_LABEL, CONTROLLER_LABEL, WRITER_LABEL, render
+from dalton_core.macos_launchagent import (
+    CONTROL_LABEL,
+    CONTROLLER_LABEL,
+    THESIS_IMPACT_LABEL,
+    WRITER_LABEL,
+    render,
+)
 from dalton_core.health import check
 from dalton_core.service import DaltonService, ServiceConfig, ServiceConfigError
 from dalton_core.store import DaltonStore
@@ -128,8 +134,66 @@ class ServiceTests(unittest.TestCase):
             self.assertTrue(writer["KeepAlive"])
             self.assertTrue(controller["KeepAlive"])
             self.assertIn("dalton-writer", writer["ProgramArguments"][0])
+            self.assertIn("--scheduler", writer["ProgramArguments"])
             self.assertIn("daltond", controller["ProgramArguments"][0])
             self.assertNotIn("model", " ".join(controller["ProgramArguments"]).lower())
+
+    def test_enabled_thesis_impact_gets_short_lived_launchagent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            raw = {
+                "schema_version": "0.1",
+                "core_db": str(root / "core.sqlite"),
+                "scheduler_db": str(root / "scheduler.sqlite"),
+                "projection_db": str(root / "projection.sqlite"),
+                "model_router_db": str(root / "router.sqlite"),
+                "capability_catalog_db": None,
+                "heartbeat_path": str(root / "heartbeat.json"),
+                "writer_socket": str(root / "writer.sock"),
+                "tick_seconds": 1,
+                "projection_min_interval_seconds": 1,
+                "plugin_retry_seconds": 1,
+                "plugins": [],
+                "thesis_impact": {
+                    "enabled": True,
+                    "interval_seconds": 300,
+                    "config": {
+                        "scheduler_db": str(root / "scheduler.sqlite"),
+                        "model_router_db": str(root / "router.sqlite"),
+                        "writer_socket": str(root / "writer.sock"),
+                        "token_config": str(root / "tokens.json"),
+                        "broker_socket": str(root / "broker.sock"),
+                        "broker_auth_key": str(root / "broker.key"),
+                        "budget_db": str(root / "budget.sqlite"),
+                        "routing_policy_ref": "policy:shared",
+                        "assessment_routing_policy_ref": "policy:assessment",
+                        "verifier_routing_policy_ref": "policy:verifier",
+                        "budget_policy_version_id": "budget:1",
+                        "day_cap_micros": 25_000_000,
+                        "credential_slot_refs": ["credential-slot:openai", "credential-slot:google"],
+                        "broker_client_id": "client:dalton-core",
+                        "expected_agent_id": "chem",
+                        "company_thesis_refs": {},
+                        "max_targets": 25,
+                        "timeout_seconds": 180,
+                    },
+                },
+            }
+            config.write_text(json.dumps(raw))
+            paths = render(
+                root / "LaunchAgents",
+                root / "venv" / "bin",
+                root / "state",
+                config,
+                root / "logs",
+            )
+            agent = plistlib.loads(Path(paths["thesis_impact"]).read_bytes())
+            self.assertEqual(agent["Label"], THESIS_IMPACT_LABEL)
+            self.assertNotIn("KeepAlive", agent)
+            self.assertTrue(agent["RunAtLoad"])
+            self.assertEqual(agent["StartInterval"], 300)
+            self.assertIn("dalton-thesis-impact", agent["ProgramArguments"][0])
 
     def test_enabled_control_plane_gets_a_separate_launchagent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

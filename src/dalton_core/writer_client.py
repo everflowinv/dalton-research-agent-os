@@ -225,6 +225,55 @@ class WriterClient:
     def record_cost(self, usage_entry_ref: str, **params: Any) -> Any:
         return self.call("record_cost", {"usage_entry_ref": usage_entry_ref, **params})
 
+    def thesis_impact_targets(
+        self, company_thesis_refs: Mapping[str, str], *, limit: int = 100
+    ) -> Any:
+        return self.call(
+            "thesis_impact_targets",
+            {"company_thesis_refs": dict(company_thesis_refs), "limit": limit},
+        )
+
+    def thesis_impact_start(self, *, plan_version_ref: str, thesis_ref: str) -> Any:
+        return self.call(
+            "thesis_impact_start",
+            {"plan_version_ref": plan_version_ref, "thesis_ref": thesis_ref},
+        )
+
+    def thesis_impact_advance_assessment(
+        self, *, plan_version_ref: str, thesis_ref: str
+    ) -> Any:
+        return self.call(
+            "thesis_impact_advance_assessment",
+            {"plan_version_ref": plan_version_ref, "thesis_ref": thesis_ref},
+        )
+
+    def thesis_impact_advance_verification(
+        self,
+        *,
+        plan_version_ref: str,
+        thesis_ref: str,
+        assessment_ref: str,
+    ) -> Any:
+        return self.call(
+            "thesis_impact_advance_verification",
+            {
+                "plan_version_ref": plan_version_ref,
+                "thesis_ref": thesis_ref,
+                "assessment_ref": assessment_ref,
+            },
+        )
+
+    def thesis_impact_assessment(self, assessment_ref: str) -> Any:
+        return self.call("thesis_impact_assessment", {"assessment_ref": assessment_ref})
+
+    def thesis_impact_invocation(self, invocation_ref: str) -> Any:
+        return self.call("thesis_impact_invocation", {"invocation_ref": invocation_ref})
+
+    def thesis_impact_find_invocation(self, invocation_ref: str) -> Any:
+        return self.call(
+            "thesis_impact_find_invocation", {"invocation_ref": invocation_ref}
+        )
+
     def __repr__(self) -> str:
         return f"WriterClient(socket_path=<local>, timeout={self.timeout!r})"
 

@@ -18,6 +18,7 @@ from .store import DaltonStore
 from .writer_server import (
     CORE_OPERATIONS,
     FEEDBACK_BRIDGE_OPERATIONS,
+    THESIS_IMPACT_OPERATIONS,
     Principal,
     load_principals,
     replace_token_config,
@@ -82,6 +83,13 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
                 unrestricted=True,
                 actor_ref="core",
             ),
+            Principal(
+                principal_id="thesis-impact",
+                token=secrets.token_urlsafe(48),
+                operations=THESIS_IMPACT_OPERATIONS,
+                unrestricted=False,
+                actor_ref="system:thesis-impact-model-worker",
+            ),
         ]
         if control_enabled:
             initial_principals.extend([
@@ -127,6 +135,18 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
                 unrestricted=True,
                 actor_ref=core.actor_ref,
             )
+        current_thesis_impact = principals.get("thesis-impact")
+        principals["thesis-impact"] = Principal(
+            principal_id="thesis-impact",
+            token=(
+                current_thesis_impact.token
+                if current_thesis_impact is not None
+                else secrets.token_urlsafe(48)
+            ),
+            operations=THESIS_IMPACT_OPERATIONS,
+            unrestricted=False,
+            actor_ref="system:thesis-impact-model-worker",
+        )
         if discord_feedback_enabled:
             current_feedback = principals.get("feedback-bridge")
             principals["feedback-bridge"] = Principal(

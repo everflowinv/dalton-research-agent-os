@@ -15,6 +15,7 @@ from .service import ServiceConfig
 WRITER_LABEL = "space.lumos.dalton.writer"
 CONTROLLER_LABEL = "space.lumos.dalton.controller"
 CONTROL_LABEL = "space.lumos.dalton.control"
+THESIS_IMPACT_LABEL = "space.lumos.dalton.thesis-impact"
 
 
 def _atomic_plist(path: Path, value: dict[str, Any]) -> None:
@@ -63,6 +64,7 @@ def render(
         "ProgramArguments": [
             str(bin_dir / "dalton-writer"),
             "--db", str(state / "core.sqlite"),
+            "--scheduler", str(state / "scheduler.sqlite"),
             "--socket", str(state / "run" / "writer.sock"),
             "--token-config", str(state / "writer-tokens.json"),
         ],
@@ -93,6 +95,25 @@ def render(
         result["control"] = str(control_path)
     elif control_path.exists():
         control_path.unlink()
+    thesis_impact_path = destination / f"{THESIS_IMPACT_LABEL}.plist"
+    if service_config is not None and service_config.thesis_impact is not None:
+        thesis_impact = {
+            key: value for key, value in common.items() if key != "KeepAlive"
+        } | {
+            "Label": THESIS_IMPACT_LABEL,
+            "StartInterval": int(service_config.thesis_impact_interval_seconds or 300),
+            "ProgramArguments": [
+                str(bin_dir / "dalton-thesis-impact"),
+                "--config",
+                str(config),
+            ],
+            "StandardOutPath": str(logs / "thesis-impact.stdout.log"),
+            "StandardErrorPath": str(logs / "thesis-impact.stderr.log"),
+        }
+        _atomic_plist(thesis_impact_path, thesis_impact)
+        result["thesis_impact"] = str(thesis_impact_path)
+    elif thesis_impact_path.exists():
+        thesis_impact_path.unlink()
     return result
 
 

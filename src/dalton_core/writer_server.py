@@ -67,6 +67,20 @@ from .observability import (
     ObservabilityStore,
     ObservabilityValidationError,
 )
+from .research_plan import ResearchPlanAuthority, ResearchPlanConflict, ResearchPlanNotFound
+from .research_question_backlog import ResearchQuestionBacklog
+from .scheduler import Scheduler
+from .thesis_impact import (
+    ThesisImpactAuthority,
+    ThesisImpactConflict,
+    ThesisImpactNotFound,
+    ThesisImpactValidationError,
+)
+from .thesis_impact_control import (
+    ResearchPlanThesisImpactConflict,
+    ResearchPlanThesisImpactCoordinator,
+    ResearchPlanThesisImpactPending,
+)
 from .writer_protocol import (
     MAX_FRAME_BYTES,
     PROTOCOL_VERSION,
@@ -142,6 +156,20 @@ FEEDBACK_BRIDGE_OPERATIONS = frozenset({
     "list_agenda_feedback_targets", "record_agenda_feedback",
 })
 RESEARCH_REVIEW_CONTROL_OPERATIONS = frozenset({"commit_reviewed_candidate"})
+THESIS_IMPACT_OPERATIONS = frozenset({
+    "thesis_impact_targets",
+    "thesis_impact_start",
+    "thesis_impact_advance_assessment",
+    "thesis_impact_advance_verification",
+    "thesis_impact_assessment",
+    "thesis_impact_invocation",
+    "thesis_impact_find_invocation",
+    "get_version",
+    "register_invocation",
+    "record_usage",
+    "create_price_rate_version",
+    "record_cost",
+})
 SCOPED_FEEDBACK_PRINCIPALS = {
     "feedback-bridge": ("bridge:openclaw-discord",),
     "dashboard-control": ("bridge:tailscale-dashboard",),
@@ -226,6 +254,13 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "record_usage": frozenset({"invocation_ref", "entry_id", "occurred_at", "metering_source", "measurement_status", "raw_usage", "workflow_ref", "provider_usage_ref", "correction_of_ref", "actor_ref", "idempotency_key", "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "total_tokens", "requests", "duration_ms", "input_bytes", "output_bytes"}),
     "create_price_rate_version": frozenset({"price_rate_ref", "provider", "model", "charge_type", "unit_quantity", "unit_price_micros", "currency", "effective_from", "effective_until", "source_ref", "prior_version_ref", "version_id", "idempotency_key", "actor_ref"}),
     "record_cost": frozenset({"usage_entry_ref", "price_rate_refs", "amount_micros", "currency", "cost_status", "calculation_ref", "correction_of_ref", "cost_entry_id", "idempotency_key", "actor_ref"}),
+    "thesis_impact_targets": frozenset({"company_thesis_refs", "limit"}),
+    "thesis_impact_start": frozenset({"plan_version_ref", "thesis_ref"}),
+    "thesis_impact_advance_assessment": frozenset({"plan_version_ref", "thesis_ref"}),
+    "thesis_impact_advance_verification": frozenset({"plan_version_ref", "thesis_ref", "assessment_ref"}),
+    "thesis_impact_assessment": frozenset({"assessment_ref"}),
+    "thesis_impact_invocation": frozenset({"invocation_ref"}),
+    "thesis_impact_find_invocation": frozenset({"invocation_ref"}),
 }
 
 
@@ -324,6 +359,11 @@ def load_principals(path: str | Path) -> dict[str, Principal]:
             or actor_ref != review_actor
         ):
             raise WriterServerError("token config is invalid")
+        if principal_id == "thesis-impact" and (
+            set(operations) != THESIS_IMPACT_OPERATIONS
+            or actor_ref != "system:thesis-impact-model-worker"
+        ):
+            raise WriterServerError("token config is invalid")
         if principal_id in result:
             raise WriterServerError("token config is invalid")
         result[principal_id] = Principal(
@@ -373,7 +413,15 @@ def write_token_config(path: str | Path, principals: list[Principal]) -> None:
 class WriterServer:
     """Serve a capability-scoped, local-only Dalton write API."""
 
-    def __init__(self, db_path: str | Path, socket_path: str | Path, principals: Mapping[str, Principal], *, token_config_path: str | Path | None = None):
+    def __init__(
+        self,
+        db_path: str | Path,
+        socket_path: str | Path,
+        principals: Mapping[str, Principal],
+        *,
+        token_config_path: str | Path | None = None,
+        scheduler_path: str | Path | None = None,
+    ):
         if not principals:
             raise WriterServerError("at least one principal is required")
         self.db_path = str(db_path)  # retained only by the owner process
@@ -388,6 +436,12 @@ class WriterServer:
         self._registry: CapabilityRegistry | None = None
         self._agenda: AgendaStore | None = None
         self._observability: ObservabilityStore | None = None
+        self._scheduler_path = None if scheduler_path is None else str(scheduler_path)
+        self._scheduler: Scheduler | None = None
+        self._research_plan: ResearchPlanAuthority | None = None
+        self._backlog: ResearchQuestionBacklog | None = None
+        self._thesis_impact: ThesisImpactAuthority | None = None
+        self._thesis_impact_control: ResearchPlanThesisImpactCoordinator | None = None
         self._token_config_path = None if token_config_path is None else Path(token_config_path)
         self._listener: socket.socket | None = None
         self._stop = threading.Event()
@@ -418,6 +472,18 @@ class WriterServer:
         if self._observability is None:
             self._observability = ObservabilityStore(self.store)
         return self._observability
+
+    @property
+    def thesis_impact_control(self) -> ResearchPlanThesisImpactCoordinator:
+        if self._thesis_impact_control is None:
+            raise WriterServerError("thesis-impact control plane is unavailable")
+        return self._thesis_impact_control
+
+    @property
+    def thesis_impact(self) -> ThesisImpactAuthority:
+        if self._thesis_impact is None:
+            raise WriterServerError("thesis-impact authority is unavailable")
+        return self._thesis_impact
 
     def start(self) -> None:
         if self._listener is not None:
@@ -459,6 +525,19 @@ class WriterServer:
         self._registry = CapabilityRegistry(self._store)
         self._observability = ObservabilityStore(self._store)
         self._agenda = AgendaStore(self._store)
+        if self._scheduler_path is not None:
+            self._scheduler = Scheduler(self._scheduler_path)
+            self._research_plan = ResearchPlanAuthority(self._store)
+            self._backlog = ResearchQuestionBacklog(self._store)
+            self._thesis_impact = ThesisImpactAuthority(
+                self._store, self._scheduler
+            )
+            self._thesis_impact_control = ResearchPlanThesisImpactCoordinator(
+                plan=self._research_plan,
+                backlog=self._backlog,
+                scheduler=self._scheduler,
+                impact=self._thesis_impact,
+            )
 
     def serve_forever(self) -> None:
         if self._listener is None:
@@ -524,6 +603,13 @@ class WriterServer:
             store_executor.shutdown(wait=True, cancel_futures=True)
 
     def _close_store(self) -> None:
+        if self._scheduler is not None:
+            self._scheduler.close()
+            self._scheduler = None
+        self._research_plan = None
+        self._backlog = None
+        self._thesis_impact = None
+        self._thesis_impact_control = None
         if self._store is not None:
             self._store.close()
             self._store = None
@@ -1017,17 +1103,73 @@ class WriterServer:
         usage_entry_ref = values.pop("usage_entry_ref")
         return self.observability.record_cost(usage_entry_ref, **values)
 
+    def _op_thesis_impact_targets(self, p: Mapping[str, Any]) -> Any:
+        if self._research_plan is None or self._backlog is None:
+            raise WriterServerError("thesis-impact control plane is unavailable")
+        mapping = p.get("company_thesis_refs")
+        limit = p.get("limit", 100)
+        if (
+            not isinstance(mapping, Mapping)
+            or any(
+                not isinstance(company, str)
+                or not company
+                or not isinstance(thesis, str)
+                or not thesis
+                for company, thesis in mapping.items()
+            )
+            or isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= 1000
+        ):
+            raise WriterServerError("thesis-impact target request is invalid")
+        targets: list[dict[str, Any]] = []
+        for view in self._research_plan.plans():
+            if view["state"] != "started" or view["start_binding"] is None:
+                continue
+            plan = view["plan_version"]
+            question = self._backlog.question(plan["question_ref"])
+            thesis_ref = mapping.get(question["head"]["company_ref"])
+            if question["state"] != "answered" or thesis_ref is None:
+                continue
+            targets.append({
+                "plan_version_ref": plan["id"],
+                "plan_version_hash": plan["content_hash"],
+                "company_ref": question["head"]["company_ref"],
+                "thesis_ref": thesis_ref,
+            })
+            if len(targets) >= limit:
+                break
+        return targets
+
+    def _op_thesis_impact_start(self, p: Mapping[str, Any]) -> Any:
+        return self.thesis_impact_control.start_from_closed_plan(**dict(p))
+
+    def _op_thesis_impact_advance_assessment(self, p: Mapping[str, Any]) -> Any:
+        return self.thesis_impact_control.advance_assessment(**dict(p))
+
+    def _op_thesis_impact_advance_verification(self, p: Mapping[str, Any]) -> Any:
+        return self.thesis_impact_control.advance_verification(**dict(p))
+
+    def _op_thesis_impact_assessment(self, p: Mapping[str, Any]) -> Any:
+        return self.thesis_impact.assessment(**dict(p))
+
+    def _op_thesis_impact_invocation(self, p: Mapping[str, Any]) -> Any:
+        return self.thesis_impact.invocation(**dict(p))
+
+    def _op_thesis_impact_find_invocation(self, p: Mapping[str, Any]) -> Any:
+        return self.thesis_impact.find_invocation(**dict(p))
+
     @staticmethod
     def _error_code(exc: Exception) -> str:
         if isinstance(exc, PermissionError):
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending)):
             return "rejected"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict)):
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
@@ -1071,11 +1213,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", required=True)
     parser.add_argument("--socket", required=True)
     parser.add_argument("--token-config", required=True)
+    parser.add_argument("--scheduler")
     args = parser.parse_args(argv)
     try:
         principals = load_principals(args.token_config)
         server = WriterServer(
-            args.db, args.socket, principals, token_config_path=args.token_config
+            args.db,
+            args.socket,
+            principals,
+            token_config_path=args.token_config,
+            scheduler_path=args.scheduler,
         )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:

@@ -17,6 +17,7 @@ from dalton_core.writer_server import (
     FEEDBACK_BRIDGE_OPERATIONS,
     MAX_CONNECTIONS,
     RESEARCH_REVIEW_CONTROL_OPERATIONS,
+    THESIS_IMPACT_OPERATIONS,
     VERIFIER_OPERATIONS,
     WORKER_OPERATIONS,
     Principal,
@@ -55,6 +56,7 @@ class WriterServiceTests(unittest.TestCase):
         self.verifier_token = "verifier-token-9f0c"
         self.core_token = "core-token-9f0c"
         self.review_token = "review-token-9f0c"
+        self.thesis_impact_token = "thesis-impact-token-9f0c"
         write_token_config(self.tokens, [
             Principal("worker", self.worker_token, WORKER_OPERATIONS, frozenset({"producer"}), frozenset({"wo"})),
             Principal("verifier", self.verifier_token, VERIFIER_OPERATIONS, frozenset({"verifier"}), frozenset({"wo"})),
@@ -63,6 +65,12 @@ class WriterServiceTests(unittest.TestCase):
                 "research-review-control", self.review_token,
                 RESEARCH_REVIEW_CONTROL_OPERATIONS,
                 actor_ref="bridge:tailscale-review",
+            ),
+            Principal(
+                "thesis-impact",
+                self.thesis_impact_token,
+                THESIS_IMPACT_OPERATIONS,
+                actor_ref="system:thesis-impact-model-worker",
             ),
         ])
         self.env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
@@ -73,6 +81,7 @@ class WriterServiceTests(unittest.TestCase):
     def start_server(self):
         self.proc = subprocess.Popen([
             sys.executable, "-m", "dalton_core.writer_server", "--db", str(self.db),
+            "--scheduler", str(Path(self.tmp.name) / "scheduler.sqlite"),
             "--socket", str(self.sock), "--token-config", str(self.tokens),
         ], cwd=str(Path(__file__).parents[1]), env=self.env,
            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -121,6 +130,10 @@ class WriterServiceTests(unittest.TestCase):
     def review(self):
         return WriterClient(str(self.sock), self.review_token)
 
+    @property
+    def thesis_impact(self):
+        return WriterClient(str(self.sock), self.thesis_impact_token)
+
     def test_permission_matrix_and_unknown_fields(self):
         with self.assertRaises(RemoteAuthorizationError):
             self.worker.register_invocation(invocation("worker-1", "one"))
@@ -135,6 +148,20 @@ class WriterServiceTests(unittest.TestCase):
         with self.assertRaises(RemoteError) as ctx:
             self.worker.call("stage_change", {"unknown": True})
         self.assertEqual(ctx.exception.code, "protocol_error")
+
+    def test_thesis_impact_principal_is_scoped_and_empty_discovery_is_safe(self):
+        self.assertEqual(
+            self.thesis_impact.thesis_impact_targets({}, limit=10), []
+        )
+        with self.assertRaises(RemoteAuthorizationError):
+            self.thesis_impact.stage_change(
+                change_id="forbidden",
+                thesis_id="thesis:forbidden",
+                content=thesis_payload(),
+                producer_invocation_id="missing",
+            )
+        with self.assertRaises(RemoteAuthorizationError):
+            self.worker.thesis_impact_targets({}, limit=10)
 
     def test_agenda_context_operations_are_core_only_and_closed(self):
         # Materializing an Agenda context reads mandates and perception

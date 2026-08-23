@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,7 @@ from dalton_core.model_deployment import (
     openclaw_profiles,
 )
 from dalton_core.model_router import ModelRouter
+from tests.test_openclaw_catalog_reconcile import _config
 
 
 WHEN = datetime(2026, 8, 14, 8, 0, tzinfo=timezone.utc)
@@ -163,6 +165,46 @@ class ModelDeploymentTests(unittest.TestCase):
                 )
             rerun = upgrade_openclaw_broker_catalog(path, checked_at=WHEN)
             self.assertEqual(rerun["assessment_policy"]["status"], "duplicate")
+
+    def test_live_phase_prices_append_a_new_immutable_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            router_path = root / "model-router.sqlite"
+            config_path = root / "openclaw.json"
+            config = _config()
+            sol = next(
+                model
+                for model in config["models"]["providers"]["openai"]["models"]
+                if model["id"] == "gpt-5.6-sol"
+            )
+            sol["cost"] = {"input": 4, "output": 20}
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            install_openclaw_catalog(router_path, checked_at=WHEN)
+            upgrade_openclaw_broker_catalog(router_path, checked_at=WHEN)
+            upgrade_openclaw_broker_catalog(
+                router_path,
+                checked_at=WHEN,
+                openclaw_config_path=config_path,
+            )
+            with ModelRouter(router_path) as router:
+                rows = router.connection.execute(
+                    "SELECT profile_json FROM model_endpoint_profile_versions "
+                    "WHERE profile_id=? ORDER BY version",
+                    (ASSESSMENT_PROFILE_ID,),
+                ).fetchall()
+            self.assertEqual(len(rows), 2)
+            latest = json.loads(rows[-1]["profile_json"])
+            self.assertEqual(latest["version"], 2)
+            self.assertEqual(latest["cost"]["input_per_million_usd"], 4.0)
+            self.assertEqual(latest["cost"]["output_per_million_usd"], 20.0)
+            rerun = upgrade_openclaw_broker_catalog(
+                router_path,
+                checked_at=WHEN,
+                openclaw_config_path=config_path,
+            )
+            self.assertTrue(
+                all(row["status"] == "duplicate" for row in rerun["profiles"])
+            )
 
 
 if __name__ == "__main__":

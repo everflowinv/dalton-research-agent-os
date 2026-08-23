@@ -29,6 +29,7 @@ from .backup import DatabaseBackupManager
 from .openclaw_agenda_bridge import OpenClawAgendaBridge, OpenClawAgendaBridgeConfig
 from .plugins.static_dashboard import StaticDashboardPlugin
 from .scheduler import Scheduler
+from .thesis_impact_production import ThesisImpactProductionConfig
 
 
 SCHEMA_VERSION = "0.1"
@@ -76,6 +77,8 @@ class ServiceConfig:
     control: AgendaControlConfig | None
     backup_root: Path | None
     backup_interval_seconds: float | None
+    thesis_impact: ThesisImpactProductionConfig | None
+    thesis_impact_interval_seconds: float | None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ServiceConfig":
@@ -85,7 +88,7 @@ class ServiceConfig:
             "writer_socket", "tick_seconds", "projection_min_interval_seconds",
             "plugin_retry_seconds", "plugins",
         }
-        optional = {"agenda", "outbox", "control", "backup"}
+        optional = {"agenda", "outbox", "control", "backup", "thesis_impact"}
         if not required.issubset(raw) or set(raw) - required - optional or raw.get("schema_version") != SCHEMA_VERSION:
             raise ServiceConfigError("service config has an invalid shape or schema version")
         plugin_rows = raw["plugins"]
@@ -163,6 +166,33 @@ class ServiceConfig:
                     control_config = AgendaControlConfig.from_mapping(control_raw["config"])
                 except Exception as exc:
                     raise ServiceConfigError("Agenda control config is invalid") from exc
+        thesis_impact_config = None
+        thesis_impact_interval = None
+        thesis_impact_raw = raw.get("thesis_impact")
+        if thesis_impact_raw is not None:
+            if (
+                not isinstance(thesis_impact_raw, Mapping)
+                or set(thesis_impact_raw) != {"enabled", "interval_seconds", "config"}
+                or not isinstance(thesis_impact_raw["enabled"], bool)
+            ):
+                raise ServiceConfigError("thesis-impact service config is invalid")
+            if thesis_impact_raw["enabled"]:
+                if not isinstance(thesis_impact_raw["config"], Mapping):
+                    raise ServiceConfigError(
+                        "thesis-impact.config must be an object"
+                    )
+                try:
+                    thesis_impact_config = ThesisImpactProductionConfig.from_mapping(
+                        thesis_impact_raw["config"]
+                    )
+                except Exception as exc:
+                    raise ServiceConfigError(
+                        "thesis-impact production config is invalid"
+                    ) from exc
+                thesis_impact_interval = _positive_number(
+                    thesis_impact_raw["interval_seconds"],
+                    "thesis_impact.interval_seconds",
+                )
         return cls(
             core_db=_absolute_path(raw["core_db"], "core_db"),
             scheduler_db=_absolute_path(raw["scheduler_db"], "scheduler_db"),
@@ -186,6 +216,8 @@ class ServiceConfig:
             control=control_config,
             backup_root=backup_root,
             backup_interval_seconds=backup_interval,
+            thesis_impact=thesis_impact_config,
+            thesis_impact_interval_seconds=thesis_impact_interval,
         )
 
     @classmethod
