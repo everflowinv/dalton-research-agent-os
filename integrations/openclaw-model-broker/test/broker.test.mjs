@@ -196,6 +196,45 @@ test("calls only host-owned completion with a fixed agent and exact allowed mode
   }
 });
 
+test("profile thinking level is pinned on host completion", async () => {
+  const calls = [];
+  const runtime = fakeRuntime(async (params) => {
+    calls.push(params);
+    return result();
+  });
+  const base = config();
+  const broker = new ModelBroker(runtime, {
+    ...base,
+    profiles: [{ ...base.profiles[0], thinkingLevel: "high" }],
+  });
+
+  const response = await broker.handle(request());
+
+  assert.equal(response.ok, true);
+  assert.equal(calls[0].thinkingLevel, "high");
+});
+
+test("profile thinking level rejects unknown values and provider-control conflicts", () => {
+  const base = config();
+  assert.throws(
+    () => new ModelBroker(fakeRuntime(async () => result()), {
+      ...base,
+      profiles: [{ ...base.profiles[0], thinkingLevel: "ultra" }],
+    }),
+    (error) => error instanceof ProtocolError && error.code === "INVALID_CONFIG",
+  );
+  assert.throws(
+    () => new ModelBroker(fakeRuntime(async () => result()), controlledConfig({
+      profiles: [{
+        ...base.profiles[0],
+        thinkingLevel: "high",
+        providerControls: { ...providerControlProfile(), thinkingLevel: "low" },
+      }],
+    })),
+    (error) => error instanceof ProtocolError && error.code === "INVALID_CONFIG",
+  );
+});
+
 test("closed request rejects all credential and transport authority fields", () => {
   for (const field of ["baseUrl", "header", "headers", "apiKey", "authProfile", "authProfileId", "agentId"]) {
     assert.throws(

@@ -44,6 +44,14 @@
   `profile:qwen3-8-max`，Terra 记为首选替代候选。全仓 746/746、sdist/wheel 与 wheel 内容检查通过；尚未部署 live
   worker 或 production routing。详见
   [LLM Research Planner 与模型选择 v0.1](reports/llm-research-planner-and-model-selection-v0.1-2026-08-23.md)
+- development Planner 又扩展校准了 Qwen DeepSeek V4 Flash/Pro、Grok 4.6、Gemini 3.7 Flash、OpenRouter Ox
+  Alpha 和 ZAI GLM 5.3。V4 Flash、V4 Pro、Gemini 3.7 与 Ox Alpha 均连续两轮 30/30、safety 20/20；V4
+  Flash 以两轮 USD 0.00960668 和约 2.0s 单 case 中位延迟取代 Qwen 3.8 Max，成为 immutable
+  development policy v2 的首选。Grok 有 5 次超过 frozen 800-token WorkOrder 上限并 fail closed。GLM 已证明
+  OpenClaw 新路由可发现、可做 calibration-only 准入；首轮因宿主 `xhigh` 超出 ZAI 支持范围在 provider 调用前
+  失败，broker 已增加 profile-level `thinkingLevel` 并固定为 `high`，完整重跑等待 safe restart 生效。详见
+  [LLM Research Planner 模型扩展校准 v0.2](reports/llm-research-planner-model-expansion-v0.2-2026-08-23.md)。当前全仓
+  Python 750/750、Node broker 24/24，sdist/wheel 构建通过；仍未部署 production Planner routing
 - development candidate 已增加 Gemini `web_search` discovery bridge 和独立 public-web fetch adapter。冻结 inventory
   已按真实 OpenClaw 合同修正为无 cursor，`freshness` 与显式日期窗互斥；search raw response 完整保存，向后只暴露
   由引用 URL 推导的 opaque authority ref，不把 Gemini synthesis、snippet 或 title 当作网页正文。系统只有从 exact

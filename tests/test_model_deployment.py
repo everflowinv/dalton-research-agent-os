@@ -11,6 +11,8 @@ from dalton_core.model_deployment import (
     ASSESSMENT_POLICY_REF,
     ASSESSMENT_PROFILE_ID,
     BROKER_POLICY_REF,
+    LEGACY_PLANNER_DEVELOPMENT_POLICY_REF,
+    LEGACY_PLANNER_DEVELOPMENT_PROFILE_ID,
     PLANNER_DEVELOPMENT_POLICY_REF,
     PLANNER_DEVELOPMENT_PROFILE_ID,
     VERIFIER_POLICY_REF,
@@ -169,7 +171,7 @@ class ModelDeploymentTests(unittest.TestCase):
             rerun = upgrade_openclaw_broker_catalog(path, checked_at=WHEN)
             self.assertEqual(rerun["assessment_policy"]["status"], "duplicate")
 
-    def test_planner_development_policy_pins_calibrated_qwen(self) -> None:
+    def test_planner_development_policy_appends_flash_selection(self) -> None:
         policy = openclaw_planner_development_policy(created_at=WHEN)
         self.assertEqual(
             policy["policy_version_ref"], PLANNER_DEVELOPMENT_POLICY_REF
@@ -177,6 +179,10 @@ class ModelDeploymentTests(unittest.TestCase):
         self.assertEqual(
             policy["filters"]["allowed_profile_ids"],
             [PLANNER_DEVELOPMENT_PROFILE_ID],
+        )
+        self.assertEqual(policy["version"], 2)
+        self.assertEqual(
+            policy["prior_version_ref"], LEGACY_PLANNER_DEVELOPMENT_POLICY_REF
         )
         self.assertEqual(
             policy["filters"]["family_independence_capabilities"], []
@@ -191,6 +197,12 @@ class ModelDeploymentTests(unittest.TestCase):
                 PLANNER_DEVELOPMENT_POLICY_REF,
             )
             with ModelRouter(path) as router:
+                self.assertEqual(
+                    router.get_policy(LEGACY_PLANNER_DEVELOPMENT_POLICY_REF)[
+                        "filters"
+                    ]["allowed_profile_ids"],
+                    [LEGACY_PLANNER_DEVELOPMENT_PROFILE_ID],
+                )
                 self.assertEqual(
                     router.get_policy(PLANNER_DEVELOPMENT_POLICY_REF)["filters"][
                         "allowed_profile_ids"

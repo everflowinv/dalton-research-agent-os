@@ -30,7 +30,10 @@ const PROVIDER_CONTROL_MODES = Object.freeze({
   }),
 });
 
-const THINKING_LEVELS = new Set(["low"]);
+const THINKING_LEVELS = new Set([
+  "off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max",
+]);
+const CONTROLLED_THINKING_LEVELS = new Set(["low"]);
 
 function integer(value, name, fallback, min, max) {
   const selected = value ?? fallback;
@@ -83,7 +86,7 @@ function validateProviderControlProfile(value, model) {
   }
   if (
     profile.thinkingLevel !== undefined
-    && (typeof profile.thinkingLevel !== "string" || !THINKING_LEVELS.has(profile.thinkingLevel))
+    && (typeof profile.thinkingLevel !== "string" || !CONTROLLED_THINKING_LEVELS.has(profile.thinkingLevel))
   ) {
     throw new ProtocolError("INVALID_CONFIG", "profile.providerControls.thinkingLevel is unsupported");
   }
@@ -161,7 +164,7 @@ function validateConfig(input) {
   for (const raw of config.profiles) {
     const profile = exactObject(
       raw,
-      new Set(["id", "model", "maxTokens", "timeoutMs", "providerControls"]),
+      new Set(["id", "model", "maxTokens", "timeoutMs", "thinkingLevel", "providerControls"]),
       new Set(["id", "model", "maxTokens", "timeoutMs"]),
       "profile",
     );
@@ -172,11 +175,25 @@ function validateConfig(input) {
     if (typeof profile.model !== "string" || !/^[A-Za-z0-9._-]+\/[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(profile.model)) {
       throw new ProtocolError("INVALID_CONFIG", "profile.model must be an exact provider/model ref");
     }
+    if (
+      profile.thinkingLevel !== undefined
+      && (typeof profile.thinkingLevel !== "string" || !THINKING_LEVELS.has(profile.thinkingLevel))
+    ) {
+      throw new ProtocolError("INVALID_CONFIG", "profile.thinkingLevel is unsupported");
+    }
+    if (
+      profile.thinkingLevel !== undefined
+      && profile.providerControls?.thinkingLevel !== undefined
+      && profile.thinkingLevel !== profile.providerControls.thinkingLevel
+    ) {
+      throw new ProtocolError("INVALID_CONFIG", "profile thinking levels conflict");
+    }
     profiles.set(profile.id, Object.freeze({
       id: profile.id,
       model: profile.model,
       maxTokens: integer(profile.maxTokens, "profile.maxTokens", undefined, 1, 1_000_000),
       timeoutMs: integer(profile.timeoutMs, "profile.timeoutMs", undefined, 1, 600_000),
+      thinkingLevel: profile.thinkingLevel,
       providerControls: validateProviderControlProfile(profile.providerControls, profile.model),
     }));
   }
@@ -351,6 +368,7 @@ export class ModelBroker {
         maxTokens: request.maxTokens,
         signal: controller.signal,
         agentId: this.config.dedicatedAgentId,
+        ...(profile.thinkingLevel ? { thinkingLevel: profile.thinkingLevel } : {}),
         ...(providerControls ? { providerControls } : {}),
       }));
       completion.catch(() => {});
