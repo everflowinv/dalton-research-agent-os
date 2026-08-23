@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlannerProposalVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "loop_version_ref", "loop_version_hash", "ordinal", "prior_outcome_ref", "prior_outcome_hash", "action", "remaining_budget", "directive_bindings", "planner_ref", "planner_hash", "rationale", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^planner-proposal-version:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "loop_version_ref": {"type": "string", "minLength": 1},
+    "loop_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ordinal": {"type": "integer", "minimum": 1},
+    "prior_outcome_ref": {"type": ["string", "null"]},
+    "prior_outcome_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "action": {"oneOf": [{"$ref": "#/$defs/probe"}, {"$ref": "#/$defs/terminate"}]},
+    "remaining_budget": {"$ref": "#/$defs/remaining_budget"},
+    "directive_bindings": {"type": "array", "items": {"$ref": "#/$defs/directive_binding"}},
+    "planner_ref": {"const": "planner:capital-lease-checklist:0.1"},
+    "planner_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "rationale": {"type": "string", "minLength": 1},
+    "actor_ref": {"type": "string", "minLength": 1},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "probe": {"type": "object", "additionalProperties": false, "required": ["kind", "coverage_item_ref", "template_version_ref", "template_version_hash", "parameters"], "properties": {"kind": {"const": "probe"}, "coverage_item_ref": {"type": "string", "minLength": 1}, "template_version_ref": {"type": "string", "minLength": 1}, "template_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "parameters": {"type": "object", "additionalProperties": true}}},
+    "terminate": {"type": "object", "additionalProperties": false, "required": ["kind", "reason"], "properties": {"kind": {"const": "terminate"}, "reason": {"enum": ["coverage_complete_unobservable_candidate", "evidence_observed_for_review", "human_replan_required", "human_deprioritized"]}}},
+    "remaining_budget": {"type": "object", "additionalProperties": false, "required": ["rounds_remaining", "cost_units_remaining", "seconds_remaining"], "properties": {"rounds_remaining": {"type": "integer", "minimum": 0}, "cost_units_remaining": {"type": "integer", "minimum": 0}, "seconds_remaining": {"type": "integer", "minimum": 0}}},
+    "directive_binding": {"type": "object", "additionalProperties": false, "required": ["directive_version_ref", "directive_version_hash"], "properties": {"directive_version_ref": {"type": "string", "minLength": 1}, "directive_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}
+  }
+}

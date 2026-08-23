@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResearchOutcome",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "loop_version_ref", "loop_version_hash", "round_ref", "round_hash", "round_ordinal", "coverage_item_ref", "outcome_kind", "result_envelope_ref", "result_envelope_hash", "coverage_manifest_ref", "coverage_manifest_hash", "formal_claim_refs", "formal_negative_claim_created", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^research-outcome:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "loop_version_ref": {"type": "string", "minLength": 1},
+    "loop_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "round_ref": {"type": "string", "minLength": 1},
+    "round_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "round_ordinal": {"type": "integer", "minimum": 1},
+    "coverage_item_ref": {"type": "string", "minLength": 1},
+    "outcome_kind": {"enum": ["observed", "not_found_in_scope", "source_unavailable"]},
+    "result_envelope_ref": {"type": "string", "minLength": 1},
+    "result_envelope_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "coverage_manifest_ref": {"type": "string", "minLength": 1},
+    "coverage_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "formal_claim_refs": {"const": []},
+    "formal_negative_claim_created": {"const": false},
+    "actor_ref": {"const": "core:bounded-planner-outcome"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

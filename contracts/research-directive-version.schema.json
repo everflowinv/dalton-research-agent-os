@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResearchDirectiveVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "directive_ref", "version", "prior_version_ref", "loop_version_ref", "loop_version_hash", "verbatim_text", "control_effect", "target_coverage_item_ref", "effective_round", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^research-directive-version:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "directive_ref": {"type": "string", "minLength": 1},
+    "version": {"const": 1},
+    "prior_version_ref": {"type": "null"},
+    "loop_version_ref": {"type": "string", "minLength": 1},
+    "loop_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verbatim_text": {"type": "string", "minLength": 1},
+    "control_effect": {"enum": ["focus_coverage_item", "request_replan", "deprioritize"]},
+    "target_coverage_item_ref": {"type": ["string", "null"]},
+    "effective_round": {"type": "integer", "minimum": 1},
+    "actor_ref": {"type": "string", "pattern": "^human:"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

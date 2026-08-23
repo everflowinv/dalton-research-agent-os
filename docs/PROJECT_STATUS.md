@@ -23,6 +23,12 @@
   physical calls/bytes；内部 20 页/文档的 calls 上限只是安全阀，不是供应商计费口径。Gemini 1,000 次仍是
   development governance policy，尚未部署。分页 coordinator 的测试已确认首页记 1、续页记 0，
   并覆盖页数/总响应字节/文档字符上限和 crash replay
+- development candidate 已新增单问题内的 Bounded Planner Loop v1：human-only ProbeTemplate、exact
+  ResearchQuestion/模板/checklist/预算绑定、下一轮生效的 ResearchDirective、PlannerProposal/Core decision、不可变
+  PlanRound、机器派生 CoverageManifest 和来源级 ResearchOutcome 已落地。每轮继续使用现有 Scheduler、WorkOrder、
+  WorkflowRunVersion 与 WorkOrderLink，没有第二套 queue/DAG；三轮来源级 miss 只能形成
+  `coverage_complete_unobservable_candidate`，不会自动生成负面 Claim。专项 8/8、contracts/Scheduler/
+  Observability/ResearchPlan 关联回归 59/59 通过；未接真实 LLM/connector，未部署 live
 - development candidate 已增加 Gemini `web_search` discovery bridge 和独立 public-web fetch adapter。冻结 inventory
   已按真实 OpenClaw 合同修正为无 cursor，`freshness` 与显式日期窗互斥；search raw response 完整保存，向后只暴露
   由引用 URL 推导的 opaque authority ref，不把 Gemini synthesis、snippet 或 title 当作网页正文。系统只有从 exact
@@ -58,6 +64,10 @@ v0.7 及更早报告保留为各切片启动时的历史基线，不再作为当
 
 Dalton 已经完成独立 Core、Research Ledger 核心版本链与 gate、单写者、Scheduler、模型路由、模型用量/成本、
 Capability Registry/Catalog、常驻控制服务、Agenda Shadow、durable outbox、人工反馈和备份恢复。
+开发候选现在另有单问题内的 Bounded Planner Loop：Agenda 继续负责跨问题排序，inner loop 只根据上一轮
+source-level Outcome 从 human-admitted ProbeTemplate 中提出下一 probe。Core 掌握 scope、权限、预算、coverage
+和终态，且复用现有 Scheduler/Workflow authority。该 loop 仍是离线 deterministic capital-lease reference
+planner，没有调用真实模型、连接器或 Ledger writer。
 live 部署现在能自主生成并选择研究问题，也已加载 phase-pinned thesis-impact production lane；由于 live Core
 尚无 ThesisVersion 和 company mapping，这条 lane 当前只做无模型调用的 idle 检查，不提交 assessment、verification
 或 ThesisVersion。仓库 fixture 仍可按一次性 connector plan 执行 CNINFO、SEC、AlphaEngine 三源离线流程并从
@@ -1211,6 +1221,8 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - US IT Services Industry Evidence Pack / ACN Overlay v1：`docs/reports/us-it-services-industry-evidence-pack-v1-2026-08-23.md`
 - US IT Services Peer Evidence Pack v2：`docs/reports/us-it-services-peer-evidence-pack-v2-2026-08-23.md`
 - 财报电话会原文 Evidence Gate v1：`docs/reports/earnings-call-transcript-evidence-gate-v1-2026-08-23.md`
+- 人类研究意图与 Bounded Planner Loop 架构讨论：`docs/reports/human-research-intent-and-bounded-planner-loop-v1-2026-08-23.md`
+- Bounded Planner Loop v1 实施：`docs/reports/bounded-planner-loop-v1-implementation-2026-08-23.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`

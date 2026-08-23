@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResearchDirectiveReceipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "directive_version_ref", "directive_version_hash", "current_round_ref", "current_round_unchanged", "effective_round", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^research-directive-receipt:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "directive_version_ref": {"type": "string", "minLength": 1},
+    "directive_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "current_round_ref": {"type": ["string", "null"]},
+    "current_round_unchanged": {"const": true},
+    "effective_round": {"type": "integer", "minimum": 1},
+    "actor_ref": {"const": "core:bounded-planner"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

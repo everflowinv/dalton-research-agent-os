@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResearchPlanRound",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "loop_version_ref", "loop_version_hash", "ordinal", "proposal_ref", "proposal_hash", "decision_ref", "decision_hash", "workflow_ref", "workflow_version_ref", "workflow_version_hash", "work_order_ref", "work_order_hash", "prior_round_ref", "work_order_link_ref", "work_order_link_hash", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^research-plan-round:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "loop_version_ref": {"type": "string", "minLength": 1},
+    "loop_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ordinal": {"type": "integer", "minimum": 1},
+    "proposal_ref": {"type": "string", "minLength": 1},
+    "proposal_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decision_ref": {"type": "string", "minLength": 1},
+    "decision_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "workflow_ref": {"type": "string", "minLength": 1},
+    "workflow_version_ref": {"type": "string", "minLength": 1},
+    "workflow_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "work_order_ref": {"type": "string", "minLength": 1},
+    "work_order_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "prior_round_ref": {"type": ["string", "null"]},
+    "work_order_link_ref": {"type": ["string", "null"]},
+    "work_order_link_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "actor_ref": {"const": "core:bounded-planner-admission"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

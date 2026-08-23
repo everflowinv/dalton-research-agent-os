@@ -129,6 +129,14 @@ NVIDIA、Walmart、Amazon 的 5/5 正式 closure、进程重启后无网络 repl
 `reject`。控制链、记账、family independence、离线 replay 和数据库完整性通过；verifier findings 有明显矛盾，
 所以 assessment 未进入 eligible，也未写入简报。
 
+2026-08-23 新增的 Bounded Planner Loop v1 把单个 ResearchQuestion 内的连续研究拆成不可变 round。deterministic
+capital-lease reference planner 只能从 human-admitted ProbeTemplate 中提出下一 probe；Core 冻结 scope、参数、权限、
+预算和 terminal gate，并继续使用现有 Scheduler、WorkOrder、WorkflowRunVersion 与 WorkOrderLink。CoverageManifest
+由 exact ResultEnvelope 机器派生，完整 no-match coverage 也只形成不可观察候选，不自动写负面 Claim。该切片未接
+真实 LLM、connector 或 live writer，架构讨论与实施边界见
+[讨论存档](docs/reports/human-research-intent-and-bounded-planner-loop-v1-2026-08-23.md) 和
+[实施报告](docs/reports/bounded-planner-loop-v1-implementation-2026-08-23.md)。
+
 Gate 0、Gate 1 和 Gate 2 控制面验收已完成。verifier 现改为 wrapper-owned binding：模型只返回 semantic
 `verdict/findings`，trusted worker 从 immutable WorkOrder 绑定 exact assessment ref/hash，raw ResultEnvelope 与历史
 replay 保留。同一 30-case v0.2 corpus 的 low-thinking 重跑中，Gemini 3.7 Flash 和 GPT-5.6 Luna 都是 30/30，

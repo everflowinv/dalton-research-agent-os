@@ -210,6 +210,27 @@ _LAZY_EXPORTS = {
     "ResearchPlanError": (".research_plan", "ResearchPlanError"),
     "ResearchPlanNotFound": (".research_plan", "ResearchPlanNotFound"),
     "ResearchPlanValidationError": (".research_plan", "ResearchPlanValidationError"),
+    "BoundedPlannerAuthority": (
+        ".bounded_planner_loop", "BoundedPlannerAuthority"
+    ),
+    "BoundedPlannerControlPlane": (
+        ".bounded_planner_loop", "BoundedPlannerControlPlane"
+    ),
+    "BoundedPlannerError": (
+        ".bounded_planner_loop", "BoundedPlannerError"
+    ),
+    "BoundedPlannerValidationError": (
+        ".bounded_planner_loop", "BoundedPlannerValidationError"
+    ),
+    "BoundedPlannerConflict": (
+        ".bounded_planner_loop", "BoundedPlannerConflict"
+    ),
+    "BoundedPlannerNotFound": (
+        ".bounded_planner_loop", "BoundedPlannerNotFound"
+    ),
+    "BoundedPlannerPending": (
+        ".bounded_planner_loop", "BoundedPlannerPending"
+    ),
     "plan_version_ref_for": (".research_plan", "plan_version_ref_for"),
     "ResearchQuestionConflict": (".research_question_backlog", "ResearchQuestionConflict"),
     "ResearchQuestionError": (".research_question_backlog", "ResearchQuestionError"),
