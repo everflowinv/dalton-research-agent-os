@@ -502,6 +502,10 @@ def validate_mcp_managed_transport_observation(
 
 
 def _validate_schema_instance(value: Any, schema: Mapping[str, Any], *, path: str = "$") -> None:
+    if "const" in schema and value != schema["const"]:
+        raise RunnerValidationError(f"{path} does not match the frozen const")
+    if "enum" in schema and value not in schema["enum"]:
+        raise RunnerValidationError(f"{path} is outside the frozen enum")
     expected = schema.get("type")
     types = expected if isinstance(expected, list) else [expected]
     checks = {
@@ -513,7 +517,10 @@ def _validate_schema_instance(value: Any, schema: Mapping[str, Any], *, path: st
         "number": lambda item: isinstance(item, (int, float)) and not isinstance(item, bool),
         "boolean": lambda item: isinstance(item, bool),
     }
-    if expected is not None and not any(checks[item](value) for item in types):
+    if expected is not None and (
+        any(item not in checks for item in types)
+        or not any(checks[item](value) for item in types)
+    ):
         raise RunnerValidationError(f"{path} does not match the frozen schema type")
     if isinstance(value, Mapping):
         properties = schema.get("properties", {})
@@ -522,10 +529,18 @@ def _validate_schema_instance(value: Any, schema: Mapping[str, Any], *, path: st
             raise RunnerValidationError(f"{path} misses required output fields")
         if schema.get("additionalProperties") is False and set(value) - set(properties):
             raise RunnerValidationError(f"{path} contains undeclared output fields")
+        if len(value) < schema.get("minProperties", 0):
+            raise RunnerValidationError(f"{path} has too few properties")
+        if "maxProperties" in schema and len(value) > schema["maxProperties"]:
+            raise RunnerValidationError(f"{path} has too many properties")
         for name, item in value.items():
             if name in properties:
                 _validate_schema_instance(item, properties[name], path=f"{path}.{name}")
     if isinstance(value, list):
+        if len(value) < schema.get("minItems", 0):
+            raise RunnerValidationError(f"{path} has too few items")
+        if "maxItems" in schema and len(value) > schema["maxItems"]:
+            raise RunnerValidationError(f"{path} has too many items")
         if schema.get("uniqueItems") and len(
             {canonical_json(item) for item in value}
         ) != len(value):
@@ -535,11 +550,35 @@ def _validate_schema_instance(value: Any, schema: Mapping[str, Any], *, path: st
     if isinstance(value, str):
         if len(value) < schema.get("minLength", 0):
             raise RunnerValidationError(f"{path} is too short")
+        if "maxLength" in schema and len(value) > schema["maxLength"]:
+            raise RunnerValidationError(f"{path} is too long")
         if "pattern" in schema and re.search(schema["pattern"], value) is None:
             raise RunnerValidationError(f"{path} does not match its pattern")
+        if schema.get("format") == "date":
+            try:
+                datetime.strptime(value, "%Y-%m-%d")
+            except ValueError as exc:
+                raise RunnerValidationError(f"{path} is not a calendar date") from exc
+        elif schema.get("format") == "date-time":
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise RunnerValidationError(f"{path} is not RFC3339") from exc
+            if parsed.tzinfo is None:
+                raise RunnerValidationError(f"{path} date-time lacks timezone")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if "minimum" in schema and value < schema["minimum"]:
             raise RunnerValidationError(f"{path} is below minimum")
+        if "maximum" in schema and value > schema["maximum"]:
+            raise RunnerValidationError(f"{path} is above maximum")
+
+
+def validate_mcp_schema_instance(
+    value: Any, schema: Mapping[str, Any], *, path: str = "$"
+) -> None:
+    """Validate the frozen JSON-Schema subset enforced at live MCP ingress."""
+
+    _validate_schema_instance(value, schema, path=path)
 
 
 class McpManagedRunnerAdmissionGate(ConnectorRunnerAdmissionGate):
@@ -1048,5 +1087,6 @@ __all__ = [
     "build_recorded_mcp_shadow_plan",
     "validate_mcp_managed_adapter_request",
     "validate_mcp_managed_transport_observation",
+    "validate_mcp_schema_instance",
     "validate_recorded_mcp_shadow_plan",
 ]

@@ -75,7 +75,11 @@ def _ref(value: Any, name: str) -> str:
 
 def _handle(value: Any) -> CredentialHandle:
     if value is None or isinstance(
-        value, (str, bytes, bytearray, Mapping, list, tuple, set, frozenset)
+        value,
+        (
+            bool, int, float, complex, str, bytes, bytearray, memoryview,
+            Mapping, list, tuple, set, frozenset,
+        ),
     ):
         raise CredentialGrantRejected(
             "credential handle must be an opaque host-owned object"
@@ -514,6 +518,25 @@ class CredentialAuthorityStore:
         now = self._now()
         with self._store._transaction() as cur:
             grant = self._select_grant_with_cursor(cur, now=now, **authority)
+            request_hash = content_hash(
+                {
+                    "grant_ref": grant.id,
+                    "grant_hash": grant.content_hash,
+                    "runner_request_ref": runner_request_ref,
+                    "runner_request_hash": runner_request_hash,
+                    "connector_invocation_ref": connector_invocation_ref,
+                    "connector_invocation_hash": connector_invocation_hash,
+                    "reservation_ref": reservation_ref,
+                    "reservation_hash": reservation_hash,
+                    "physical_attempt_number": physical_attempt_number,
+                    "operation": authority["operation"],
+                }
+            )
+            duplicate = self._idempotent(
+                cur, idempotency_key, "authorize_credential_use", request_hash
+            )
+            if duplicate is not None:
+                return duplicate
             base = {
                 "schema_version": "0.1",
                 "id": self._derived_id("credential-use", idempotency_key),
@@ -532,12 +555,6 @@ class CredentialAuthorityStore:
             receipt = CredentialUseReceipt.from_dict(
                 {**base, "content_hash": content_hash(base)}
             )
-            request_hash = receipt.content_hash
-            duplicate = self._idempotent(
-                cur, idempotency_key, "authorize_credential_use", request_hash
-            )
-            if duplicate is not None:
-                return duplicate
             used = int(
                 cur.execute(
                     "SELECT COUNT(*) AS n FROM credential_use_receipts WHERE grant_ref=?",

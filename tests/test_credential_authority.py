@@ -103,6 +103,10 @@ class CredentialAuthorityTests(unittest.TestCase):
         assert_wire_schema(self, "credential-use-receipt.schema.json", use)
         duplicate_use = self.authorize()
         self.assertEqual(duplicate_use["write_status"], "duplicate")
+        self.clock.advance(1)
+        later_duplicate = self.authorize()
+        self.assertEqual(later_duplicate["write_status"], "duplicate")
+        self.assertEqual(later_duplicate["content_hash"], use["content_hash"])
         authorized = self.authority.validate_use(
             use["id"],
             use_hash=use["content_hash"],
@@ -218,6 +222,33 @@ class CredentialAuthorityTests(unittest.TestCase):
                 **use_authority(),
                 **authority(),
             )
+
+        for scalar in (True, 1, 1.5):
+            with self.subTest(scalar=scalar):
+                scalar_store = DaltonStore(":memory:")
+                self.addCleanup(scalar_store.close)
+                scalar_authority = CredentialAuthorityStore(
+                    scalar_store,
+                    handle_resolver=lambda grant, value=scalar: value,
+                    clock=self.clock,
+                )
+                scalar_authority.register_grant(
+                    grant_spec(), idempotency_key=f"grant:scalar:{scalar}"
+                )
+                use = scalar_authority.authorize_use(
+                    **use_authority(),
+                    **authority(),
+                    idempotency_key=f"use:scalar:{scalar}",
+                )
+                with self.assertRaisesRegex(
+                    CredentialGrantRejected, "opaque host-owned"
+                ):
+                    scalar_authority.validate_use(
+                        use["id"],
+                        use_hash=use["content_hash"],
+                        **use_authority(),
+                        **authority(),
+                    )
 
 
 if __name__ == "__main__":

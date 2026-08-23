@@ -12,6 +12,10 @@
 - development candidate 已将首个覆盖切换为 US IT Services / ACN：ordinal ThesisVersion v0.2、versioned Driver Pack、
   human-only admission candidate/decision 和唯一 ACN mapping fixture 已在 in-memory Core 跑通；尚未写 live Core，
   尚未激活 production mapping，也没有产生付费模型调用
+- development candidate 已增加 AlphaEngine live `search_library → get_document` bridge：每次调用绑定 exact
+  CompiledConnectorPlan、credential use receipt、quota、raw Artifact 和 SourceEnvelope；真实只读 canary 已取回
+  10 条 ACN 检索结果及首个 30k 字符文档分片，续页游标为 `30000`。该 canary 没有写 live Core，完整文档分页
+  coordinator 尚未实现
 - 修正版 3×30 canary 的三个 run identity 各自独立，90/90 fresh execution，三轮均 30/30、0 FP、0 high miss，
   总成本 USD 0.12906825；随后真实 isolated shadow 固定 GPT-5.6 Sol → Gemini 3.7 Flash low，quality gate 为
   `eligible`，成本 USD 0.010518
@@ -695,6 +699,28 @@ cutover 仍须单独验收。
   引入一次性 `CompiledConnectorPlan`；Guidepoint shadow 延后到真实 research recipe 需要时；
 - 本轮没有读取 AlphaEngine token、没有调用本地 MCP、没有访问真实数据、没有部署，也没有写
   Evidence/Claim/Thesis。`get_document` 仍停留在 inventory；Guidepoint、雪球和 live MCP 仍为 No-Go。
+
+### Connector P1-0e 开发候选（AlphaEngine live bridge，未部署）
+
+- 新增 live MCP transport plan 0.1 和 AdapterRequest 0.3。两份闭合 contract 把 exact
+  `CompiledConnectorPlan/step`、frozen AlphaEngine inventory/schema、operation、参数、bridge 和 transport target
+  绑在一起；endpoint、token、cookie、server config 和任意 tool name 都不能进入可序列化对象；
+- host-owned bridge 当前只允许带显式端口的 loopback `/mcp`，关闭 proxy 和 redirect，并限制 tool allowlist、
+  deadline、response bytes、strict UTF-8/JSON/SSE 和 JSON-RPC request id。Core 只拿 opaque handle；
+- `LiveMcpRunnerAdmissionGate` 在 quota 前后重检 Runner、Catalog、profile、resolver、call、invocation、lease、compiled
+  plan 和 transport plan；每个 physical call 形成独立 credential use receipt。credential use 的幂等 hash 不再受
+  authority 当前时钟影响，scalar/collection 不能冒充 opaque credential handle；
+- `search_library` 固定使用 relevance，并把 frozen company/date/document type/geography/industry 参数映射到真实
+  AlphaEngine schema；`get_document` 只接受 `alphaengine-doc:<doc_id>` 和数字 offset cursor。成功结果先写 exact raw
+  JSON-RPC Artifact，再生成 hash-bound SourceEnvelope；不生成 Evidence、Claim 或 Thesis；
+- fake source 端到端测试已覆盖 complete/partial normalization、exact raw artifact、credential/quota、compiled-plan
+  tamper、duplicate replay 和 `after_observed` crash recovery。恢复只重放 authority 写入，不再次调用上游；
+- 真实 AlphaEngine 只读 canary 已完成 `search_library → get_document`：搜索得到 10 条结果，文档调用得到首个
+  30,000 字符分片、内容 SHA-256 和 `next_cursor=30000`。这次 canary 直接验证 bridge/adapter，没有接入 live Core
+  authority，也没有证明完整文档；
+- 尚未部署，没有 production Catalog/profile/grant/mapping，没有模型调用，没有 Evidence/Claim/Thesis mutation。
+  下一道 gate 是实现 bounded multi-page document acquisition，把每页作为独立 physical call 计量并在终点形成完整
+  文档 authority；随后再接 Gemini web search discovery 和独立 web fetch。
 
 ### P2 coordinator foundation 当前进度（fixture-only，未部署）
 

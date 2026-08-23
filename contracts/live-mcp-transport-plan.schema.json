@@ -1,0 +1,37 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "title":"LiveMcpTransportPlan",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schema_version","id","created_at","connector_profile_template_ref","connector_profile_template_hash","source_ref","source_hash","transport_target_ref","transport_target_hash","bridge_ref","bridge_hash","compiled_connector_plan_ref","compiled_connector_plan_hash","compiled_step_ref","compiled_step_hash","operation","tool_name","parameters","query_hash","input_schema_ref","input_schema_hash","output_schema_ref","output_schema_hash","content_hash"],
+  "properties":{
+    "schema_version":{"const":"0.1"},
+    "id":{"$ref":"#/$defs/ref"},
+    "created_at":{"type":"string","format":"date-time"},
+    "connector_profile_template_ref":{"$ref":"#/$defs/ref"},
+    "connector_profile_template_hash":{"$ref":"#/$defs/hash"},
+    "source_ref":{"const":"source:alphaengine"},
+    "source_hash":{"$ref":"#/$defs/hash"},
+    "transport_target_ref":{"const":"mcp-target:alphaengine"},
+    "transport_target_hash":{"$ref":"#/$defs/hash"},
+    "bridge_ref":{"const":"openclaw-bridge:alphaengine-mcp:0.1"},
+    "bridge_hash":{"$ref":"#/$defs/hash"},
+    "compiled_connector_plan_ref":{"$ref":"#/$defs/ref"},
+    "compiled_connector_plan_hash":{"$ref":"#/$defs/hash"},
+    "compiled_step_ref":{"$ref":"#/$defs/ref"},
+    "compiled_step_hash":{"$ref":"#/$defs/hash"},
+    "operation":{"enum":["search_library","get_document"]},
+    "tool_name":{"enum":["search_library","get_document"]},
+    "parameters":{"type":"object"},
+    "query_hash":{"$ref":"#/$defs/hash"},
+    "input_schema_ref":{"$ref":"#/$defs/ref"},
+    "input_schema_hash":{"$ref":"#/$defs/hash"},
+    "output_schema_ref":{"$ref":"#/$defs/ref"},
+    "output_schema_hash":{"$ref":"#/$defs/hash"},
+    "content_hash":{"$ref":"#/$defs/hash"}
+  },
+  "$defs":{
+    "hash":{"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "ref":{"type":"string","pattern":"^[A-Za-z][A-Za-z0-9+._-]*:[A-Za-z0-9][A-Za-z0-9:._-]*$","not":{"pattern":"^(file|path|https?):"}}
+  }
+}

@@ -130,6 +130,30 @@ OpenClaw skill/MCP 先进入独立的 metadata snapshot authority，不直接进
 
 当前 public transport component 尚未接 source-specific adapter 或真实网络；P0-3 仍是离线实现。
 
+### Live MCP wire 0.3
+
+AlphaEngine live lane 使用独立 `LiveMcpTransportPlan 0.1` 和 `LiveMcpAdapterRequest 0.3`，不修改 recorded
+`mcp_managed` wire 0.2：
+
+- Planner 先冻结一次 `CompiledConnectorPlan`。operator-installed transport plan 必须 exact 绑定 plan/step、
+  operation、parameters/query hash、frozen inventory schema、transport target 和 host bridge；Runner 不得在 physical
+  call 时重新做语义选择；
+- runtime profile 必须是 AlphaEngine frozen template 的单 operation 投影。Catalog descriptor、profile、resolver
+  binding、call、invocation、lease、reservation、credential grant/use 和 transport plan 任一不一致都 fail closed；
+- AdapterRequest 只保存 opaque ref/hash。MCP endpoint、token、cookie、server config、Authorization 和任意 tool name
+  不得序列化；真实 handle 留在 `CredentialAuthorityPort`，每个 physical call 在 use time 再验证 revoke、expiry、
+  max calls 和 exact operation；
+- 当前 host bridge 只连接 operator-installed loopback HTTP `/mcp`，禁用 proxy/redirect，限制 exact tool allowlist、
+  wall deadline、response bytes、strict UTF-8/JSON/SSE 和 JSON-RPC request id。未来 gateway-visible web search bridge
+  必须发布新的 bridge ref/hash，不能复用 AlphaEngine target；
+- `search_library` 的完整性上限始终是 `ranked`；cursor 只表示还有排序结果，不能升级为 enumerated。
+  `get_document` 每个 offset 分片在未到终点时只能是 `partial`；只有完整分页 coordinator 验证连续 cursor、页数上限
+  和终点后，才可把完整文档声明为 enumerated；
+- adapter 保存 exact raw JSON-RPC response，normalized output 只含 source refs、next cursor 和 provider status。
+  raw Artifact/SourceEnvelope 不是 Evidence/Claim/Thesis；后者仍需独立 builder、verifier 和 Ledger gate；
+- 崩溃恢复沿用 Runner journal。`observed` 之后只能重放 authority 写入，不能再次调用 MCP；同一 physical use 的
+  provider request id 由 credential use ref、tool 和参数确定性派生。
+
 ### P0-4a trusted snapshot sync
 
 Snapshot wire 0.2 新增 `source_instance_ref`、`exporter_version`、严格整数 `catalog_generation` 和成对的

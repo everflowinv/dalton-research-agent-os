@@ -76,7 +76,7 @@ def invoke_adapter_with_deadline(
     *,
     clock: Callable[[], datetime],
 ) -> Any:
-    """Invoke an offline adapter inside the runner-owned wall-clock boundary."""
+    """Invoke a connector adapter inside the runner-owned wall-clock boundary."""
 
     remaining = (
         _parse_time(request["deadline_at"])
@@ -86,7 +86,7 @@ def invoke_adapter_with_deadline(
         raise _AdapterDeadlineExceeded
     if threading.current_thread() is not threading.main_thread():
         raise ConnectorTransportError(
-            "recorded transport watchdog requires the runner main thread"
+            "connector transport watchdog requires the runner main thread"
         )
     prior_handler = signal.getsignal(signal.SIGALRM)
     prior_timer = signal.getitimer(signal.ITIMER_REAL)
@@ -261,7 +261,7 @@ class ConnectorTransportExecutor:
                 attempt_outcome = "timeout"
                 runner_error = {
                     "code": "deadline_exceeded",
-                    "message": "recorded transport completed after the authority deadline",
+                    "message": "connector transport completed after the authority deadline",
                     "retryable": True,
                 }
             else:
@@ -281,7 +281,7 @@ class ConnectorTransportExecutor:
             attempt_outcome = "timeout"
             runner_error = {
                 "code": "deadline_exceeded",
-                "message": "recorded transport exceeded the authority deadline",
+                "message": "connector transport exceeded the authority deadline",
                 "retryable": True,
             }
         except RawSpoolLimitExceeded as exc:
@@ -573,7 +573,7 @@ class ConnectorTransportExecutor:
                 )
             if len(admission.execution.output_refs) != 1:
                 raise ConnectorTransportError(
-                    "recorded connector execution requires one raw artifact output"
+                    "connector execution requires one raw artifact output"
                 )
             artifact_ref = admission.execution.output_refs[0]
             artifact_version_id = _derived_id(
@@ -681,7 +681,7 @@ class ConnectorTransportExecutor:
             assert source_spec is not None and raw is not None
             artifact = self._authority.register_artifact_version_v2(
                 artifact_ref,
-                title="Recorded connector raw response",
+                title="Connector raw response",
                 kind="connector_raw_response",
                 media_type="application/json",
                 artifact_content_hash=raw["content_hash"],
