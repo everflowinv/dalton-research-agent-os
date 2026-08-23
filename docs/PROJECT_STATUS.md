@@ -31,6 +31,13 @@
   都会 fail closed。本地全量回归 694/694 通过；最终 citation 上限硬化后的关联超集 53/53 通过，compileall、
   inventory 确定性重建和 Python 3.13 sdist/wheel 构建也通过。具体 OpenClaw host runner、production
   Catalog/profile/grant 和真实 canary 尚未接线或执行
+- development candidate 已完成 Model Input Ledger v1：actual、assumption、forecast line、scenario、model run 和
+  reconciliation 都使用不可变版本与 exact authority；研究 worker 只能提交 candidate，正式 input 由认证人类准入；
+  valuation 缺 price/shares/FX/rates/consensus 任一正式 authority 时 fail closed。随后新增通用
+  `IndustryResearchAuthority`：Industry Evidence Pack 只能绑定正式 Evidence/Claim/Relation，Company Overlay 只能复用
+  pack driver、公司 Claim 和同源的 human-admitted actual Model Input。隔离 US IT Services / ACN canary 已形成 4 个
+  driver、4 家 coverage universe、6 条 Claim、5 条 Model Input、1 个 industry pack 和 1 个 ACN overlay，ThesisVersion
+  与 paid model call 均为 0；尚未写 live Core。当前 pack 只有 ACN evidence，CTSH/EPAM/IBM 仍待 peer 验证
 - 修正版 3×30 canary 的三个 run identity 各自独立，90/90 fresh execution，三轮均 30/30、0 FP、0 high miss，
   总成本 USD 0.12906825；随后真实 isolated shadow 固定 GPT-5.6 Sol → Gemini 3.7 Flash low，quality gate 为
   `eligible`，成本 USD 0.010518
@@ -1199,6 +1206,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Thesis confidence 与 coverage admission ADR：`docs/adr/0001-thesis-confidence-and-coverage-admission.md`
 - US IT Services / ACN 初始覆盖准入：`docs/reports/us-it-services-acn-admission-v1-2026-08-23.md`
 - Model Input Ledger v1：`docs/reports/model-input-ledger-v1-2026-08-23.md`
+- US IT Services Industry Evidence Pack / ACN Overlay v1：`docs/reports/us-it-services-industry-evidence-pack-v1-2026-08-23.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`

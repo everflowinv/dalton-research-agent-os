@@ -282,6 +282,25 @@ class WriterClient:
     def model_input_integrity_report(self) -> Any:
         return self.call("model_input_integrity_report", {})
 
+    def register_industry_evidence_pack(self, evidence_pack_ref: str, **params: Any) -> Any:
+        return self.call(
+            "register_industry_evidence_pack", {"evidence_pack_ref": evidence_pack_ref, **params}
+        )
+
+    def get_industry_evidence_pack(self, version_id: str) -> Any:
+        return self.call("get_industry_evidence_pack", {"version_id": version_id})
+
+    def register_company_overlay(self, overlay_ref: str, **params: Any) -> Any:
+        return self.call(
+            "register_company_overlay", {"overlay_ref": overlay_ref, **params}
+        )
+
+    def get_company_overlay(self, version_id: str) -> Any:
+        return self.call("get_company_overlay", {"version_id": version_id})
+
+    def industry_research_integrity_report(self) -> Any:
+        return self.call("industry_research_integrity_report", {})
+
     def thesis_impact_targets(
         self, company_thesis_refs: Mapping[str, str], *, limit: int = 100
     ) -> Any:

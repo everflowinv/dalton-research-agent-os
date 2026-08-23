@@ -74,6 +74,13 @@ from .model_input import (
     ModelInputNotFound,
     ModelInputValidationError,
 )
+from .industry_research import (
+    IndustryResearchAuthority,
+    IndustryResearchConflict,
+    IndustryResearchError,
+    IndustryResearchNotFound,
+    IndustryResearchValidationError,
+)
 from .observability import (
     ObservabilityConflict,
     ObservabilityError,
@@ -168,6 +175,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "register_driver_pack", "propose_thesis_admission",
     "decide_thesis_admission",
     "decide_model_input",
+    "register_industry_evidence_pack", "register_company_overlay",
 })
 FEEDBACK_BRIDGE_OPERATIONS = frozenset({
     "list_agenda_feedback_targets", "record_agenda_feedback",
@@ -219,6 +227,9 @@ CORE_OPERATIONS = frozenset({
     "get_model_input_decision", "get_model_input_version", "current_model_input",
     "decide_model_input", "record_model_run", "record_model_reconciliation",
     "get_model_reconciliations", "model_input_integrity_report",
+    "register_industry_evidence_pack", "get_industry_evidence_pack",
+    "register_company_overlay", "get_company_overlay",
+    "industry_research_integrity_report",
 })
 
 
@@ -308,6 +319,21 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     }),
     "get_model_reconciliations": frozenset({"model_run_version_ref"}),
     "model_input_integrity_report": frozenset(),
+    "register_industry_evidence_pack": frozenset({
+        "evidence_pack_ref", "industry_ref", "title", "as_of", "boundary",
+        "coverage_universe", "driver_pack_version_ref", "driver_pack_version_hash",
+        "evidence_bindings", "debates", "source_plan", "report_contract",
+        "actor_ref", "version_id", "prior_version_ref", "idempotency_key",
+    }),
+    "get_industry_evidence_pack": frozenset({"version_id"}),
+    "register_company_overlay": frozenset({
+        "overlay_ref", "company_ref", "industry_ref", "title", "as_of", "role",
+        "evidence_pack_version_ref", "evidence_pack_version_hash", "driver_views",
+        "key_differences", "open_questions", "falsifier_refs", "thesis_candidate_refs",
+        "actor_ref", "version_id", "prior_version_ref", "idempotency_key",
+    }),
+    "get_company_overlay": frozenset({"version_id"}),
+    "industry_research_integrity_report": frozenset(),
     "thesis_impact_targets": frozenset({"company_thesis_refs", "limit"}),
     "thesis_impact_start": frozenset({"plan_version_ref", "thesis_ref"}),
     "thesis_impact_advance_assessment": frozenset({"plan_version_ref", "thesis_ref"}),
@@ -355,6 +381,8 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "decide_model_input": "reviewer_ref",
     "record_model_run": "actor_ref",
     "record_model_reconciliation": "actor_ref",
+    "register_industry_evidence_pack": "actor_ref",
+    "register_company_overlay": "actor_ref",
 }
 
 
@@ -499,6 +527,7 @@ class WriterServer:
         self._observability: ObservabilityStore | None = None
         self._coverage_admission: CoverageAdmissionAuthority | None = None
         self._model_input: ModelInputLedger | None = None
+        self._industry_research: IndustryResearchAuthority | None = None
         self._scheduler_path = None if scheduler_path is None else str(scheduler_path)
         self._scheduler: Scheduler | None = None
         self._research_plan: ResearchPlanAuthority | None = None
@@ -547,6 +576,12 @@ class WriterServer:
         if self._model_input is None:
             raise WriterServerError("model-input authority is unavailable")
         return self._model_input
+
+    @property
+    def industry_research(self) -> IndustryResearchAuthority:
+        if self._industry_research is None:
+            raise WriterServerError("industry-research authority is unavailable")
+        return self._industry_research
 
     @property
     def thesis_impact_control(self) -> ResearchPlanThesisImpactCoordinator:
@@ -602,6 +637,7 @@ class WriterServer:
         self._agenda = AgendaStore(self._store)
         self._coverage_admission = CoverageAdmissionAuthority(self._store)
         self._model_input = ModelInputLedger(self._store)
+        self._industry_research = IndustryResearchAuthority(self._store)
         if self._scheduler_path is not None:
             self._scheduler = Scheduler(self._scheduler_path)
             self._research_plan = ResearchPlanAuthority(self._store)
@@ -695,6 +731,7 @@ class WriterServer:
         self._observability = None
         self._coverage_admission = None
         self._model_input = None
+        self._industry_research = None
 
     def _serve_connection(self, conn: socket.socket) -> None:
         reader = conn.makefile("rb")
@@ -1234,6 +1271,27 @@ class WriterServer:
             raise ProtocolError("model_input_integrity_report takes no parameters")
         return self.model_input.integrity_report()
 
+    def _op_register_industry_evidence_pack(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        evidence_pack_ref = values.pop("evidence_pack_ref")
+        return self.industry_research.register_evidence_pack(evidence_pack_ref, **values)
+
+    def _op_get_industry_evidence_pack(self, p: Mapping[str, Any]) -> Any:
+        return self.industry_research.evidence_pack(**dict(p))
+
+    def _op_register_company_overlay(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        overlay_ref = values.pop("overlay_ref")
+        return self.industry_research.register_company_overlay(overlay_ref, **values)
+
+    def _op_get_company_overlay(self, p: Mapping[str, Any]) -> Any:
+        return self.industry_research.company_overlay(**dict(p))
+
+    def _op_industry_research_integrity_report(self, p: Mapping[str, Any]) -> Any:
+        if p:
+            raise ProtocolError("industry_research_integrity_report takes no parameters")
+        return self.industry_research.integrity_report()
+
     def _op_thesis_impact_targets(self, p: Mapping[str, Any]) -> Any:
         if self._research_plan is None or self._backlog is None:
             raise WriterServerError("thesis-impact control plane is unavailable")
@@ -1296,11 +1354,11 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError)):
             return "rejected"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict)):
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
@@ -1312,7 +1370,7 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, CapabilityRegistryError):
             return "store_error"
-        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError)):
+        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError)):
             return "store_error"
         return "internal_error"
 

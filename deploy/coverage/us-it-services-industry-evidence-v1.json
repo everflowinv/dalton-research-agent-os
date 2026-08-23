@@ -1,0 +1,223 @@
+{
+  "schema_version": "0.1",
+  "base_driver_pack_version_ref": "driver-pack-version:us-it-services:1",
+  "driver_pack_v2": {
+    "title": "US IT Services Driver Pack v2",
+    "driver_metric_additions": {
+      "driver:bookings-mix-and-conversion": ["metric:new-bookings-growth-local-currency"],
+      "driver:ai-reinvention-demand": ["metric:ai-demand-signal"],
+      "driver:delivery-economics": ["metric:operating-margin-gaap"]
+    },
+    "metric_specs": [
+      {
+        "metric_ref": "metric:new-bookings-growth-local-currency",
+        "label": "New bookings growth in local currency",
+        "definition": "Year-over-year change in total new bookings excluding foreign-exchange translation effects under the issuer's definition.",
+        "unit": "percent",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:company-earnings-release", "source:company-earnings-call-transcript"],
+        "verification_kind": "numeric_and_semantic",
+        "caveats": ["Bookings are non-GAAP operating data and definitions differ across issuers."]
+      },
+      {
+        "metric_ref": "metric:ai-demand-signal",
+        "label": "Large-scale AI transformation demand signal",
+        "definition": "Issuer commentary about the direction of large-scale AI transformation programs, retained as qualitative evidence rather than a standardized financial metric.",
+        "unit": "qualitative",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:company-earnings-release", "source:company-earnings-call-transcript"],
+        "verification_kind": "semantic",
+        "caveats": ["Management commentary is not equivalent to bookings, revenue or an independently measured market size."]
+      },
+      {
+        "metric_ref": "metric:operating-margin-gaap",
+        "label": "GAAP operating margin",
+        "definition": "GAAP operating income divided by revenue for the same period.",
+        "unit": "percent",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:sec-edgar", "source:company-earnings-release"],
+        "verification_kind": "numeric_and_semantic",
+        "caveats": ["Keep GAAP and adjusted operating margin separate when optimization or restructuring charges are excluded."]
+      }
+    ],
+    "version_id": "driver-pack-version:us-it-services:2",
+    "prior_version_ref": "driver-pack-version:us-it-services:1",
+    "idempotency_key": "driver-pack:us-it-services:2"
+  },
+  "sources": [
+    {
+      "source_key": "acn-q3fy26-release",
+      "evidence_ref": "evidence:acn:q3fy26:earnings-release",
+      "source_type": "sec-filing-exhibit",
+      "source_ref": "sec:0001467373-26-000031:q3fy26earnings8-kexhibit.htm",
+      "retrieved_at": "2026-08-23T12:00:00+00:00",
+      "source_lineage": ["sec:0001467373-26-000031", "issuer:accenture"],
+      "independence_group": "issuer:accenture:q3fy26"
+    }
+  ],
+  "claims": [
+    {
+      "claim_key": "bookings-total",
+      "claim_ref": "claim:acn:q3fy26:new-bookings-total",
+      "subject_ref": "company:sec-cik:0001467373",
+      "metric_or_aspect": "metric:new-bookings-total",
+      "period": "FY2026Q3",
+      "basis": "issuer-reported",
+      "normalized_statement": "Accenture reported Q3 FY2026 new bookings of USD 19.32 billion.",
+      "claim_kind": "quantitative",
+      "value": 19.32,
+      "unit": "USD_billion",
+      "source_key": "acn-q3fy26-release",
+      "relation": "supports"
+    },
+    {
+      "claim_key": "bookings-growth-lc",
+      "claim_ref": "claim:acn:q3fy26:new-bookings-growth-local-currency",
+      "subject_ref": "company:sec-cik:0001467373",
+      "metric_or_aspect": "metric:new-bookings-growth-local-currency",
+      "period": "FY2026Q3",
+      "basis": "issuer-reported",
+      "normalized_statement": "Accenture reported Q3 FY2026 new bookings decreased 3% in local currency year over year.",
+      "claim_kind": "quantitative",
+      "value": -3,
+      "unit": "percent",
+      "source_key": "acn-q3fy26-release",
+      "relation": "supports"
+    },
+    {
+      "claim_key": "revenue-growth-lc",
+      "claim_ref": "claim:acn:q3fy26:revenue-growth-local-currency",
+      "subject_ref": "company:sec-cik:0001467373",
+      "metric_or_aspect": "metric:revenue-growth-local-currency",
+      "period": "FY2026Q3",
+      "basis": "issuer-reported",
+      "normalized_statement": "Accenture reported Q3 FY2026 revenue growth of 3% in local currency year over year.",
+      "claim_kind": "quantitative",
+      "value": 3,
+      "unit": "percent",
+      "source_key": "acn-q3fy26-release",
+      "relation": "supports"
+    },
+    {
+      "claim_key": "ai-demand-signal",
+      "claim_ref": "claim:acn:q3fy26:ai-demand-signal",
+      "subject_ref": "company:sec-cik:0001467373",
+      "metric_or_aspect": "metric:ai-demand-signal",
+      "period": "FY2026Q3",
+      "basis": "issuer-commentary",
+      "normalized_statement": "Accenture management said it was seeing more large-scale AI transformation programs.",
+      "claim_kind": "qualitative",
+      "value": null,
+      "unit": null,
+      "source_key": "acn-q3fy26-release",
+      "relation": "supports"
+    },
+    {
+      "claim_key": "operating-margin-gaap",
+      "claim_ref": "claim:acn:q3fy26:operating-margin-gaap",
+      "subject_ref": "company:sec-cik:0001467373",
+      "metric_or_aspect": "metric:operating-margin-gaap",
+      "period": "FY2026Q3",
+      "basis": "gaap",
+      "normalized_statement": "Accenture reported Q3 FY2026 GAAP operating margin of 17.0%, up 20 basis points year over year.",
+      "claim_kind": "quantitative",
+      "value": 17,
+      "unit": "percent",
+      "source_key": "acn-q3fy26-release",
+      "relation": "supports"
+    },
+    {
+      "claim_key": "free-cash-flow",
+      "claim_ref": "claim:acn:q3fy26:free-cash-flow",
+      "subject_ref": "company:sec-cik:0001467373",
+      "metric_or_aspect": "metric:free-cash-flow",
+      "period": "FY2026Q3",
+      "basis": "issuer-reconciled-non-gaap",
+      "normalized_statement": "Accenture reported Q3 FY2026 free cash flow of USD 3.60 billion.",
+      "claim_kind": "quantitative",
+      "value": 3.6,
+      "unit": "USD_billion",
+      "source_key": "acn-q3fy26-release",
+      "relation": "supports"
+    }
+  ],
+  "model_inputs": [
+    {"claim_key": "bookings-total", "model_input_ref": "input:acn:q3fy26:new-bookings-total", "value": "19.32", "unit": "billion", "currency": "USD"},
+    {"claim_key": "bookings-growth-lc", "model_input_ref": "input:acn:q3fy26:new-bookings-growth-local-currency", "value": "-3", "unit": "percent", "currency": null},
+    {"claim_key": "revenue-growth-lc", "model_input_ref": "input:acn:q3fy26:revenue-growth-local-currency", "value": "3", "unit": "percent", "currency": null},
+    {"claim_key": "operating-margin-gaap", "model_input_ref": "input:acn:q3fy26:operating-margin-gaap", "value": "17", "unit": "percent", "currency": null},
+    {"claim_key": "free-cash-flow", "model_input_ref": "input:acn:q3fy26:free-cash-flow", "value": "3.6", "unit": "billion", "currency": "USD"}
+  ],
+  "evidence_pack": {
+    "evidence_pack_ref": "industry-evidence-pack:us-it-services",
+    "industry_ref": "industry:us-it-services",
+    "title": "US IT Services Industry Evidence Pack v1",
+    "as_of": "2026-08-23T12:00:00+00:00",
+    "boundary": {
+      "definition": "Publicly traded providers whose material businesses include IT consulting, digital engineering, systems integration, business-process services or managed IT services.",
+      "inclusion_rules": ["Material revenue from IT services or technology consulting.", "Public disclosures permit recurring KPI comparison."],
+      "exclusion_rules": ["Pure-play software, hardware and semiconductor vendors.", "Staffing firms without a material technology-services practice."]
+    },
+    "coverage_universe": [
+      {"company_ref": "company:sec-cik:0001467373", "ticker": "ACN", "role": "scaled global pure-play", "comparability_tier": "core"},
+      {"company_ref": "company:sec-cik:0001058290", "ticker": "CTSH", "role": "offshore-heavy scaled peer", "comparability_tier": "core"},
+      {"company_ref": "company:sec-cik:0001352010", "ticker": "EPAM", "role": "digital-engineering peer", "comparability_tier": "adjacent"},
+      {"company_ref": "company:sec-cik:0000051143", "ticker": "IBM", "role": "diversified integrated reference", "comparability_tier": "reference"}
+    ],
+    "evidence_bindings": [
+      {"binding_ref": "binding:acn:bookings-total", "driver_ref": "driver:bookings-mix-and-conversion", "metric_ref": "metric:new-bookings-total", "claim_key": "bookings-total"},
+      {"binding_ref": "binding:acn:bookings-growth-lc", "driver_ref": "driver:bookings-mix-and-conversion", "metric_ref": "metric:new-bookings-growth-local-currency", "claim_key": "bookings-growth-lc"},
+      {"binding_ref": "binding:acn:revenue-growth-lc", "driver_ref": "driver:bookings-mix-and-conversion", "metric_ref": "metric:revenue-growth-local-currency", "claim_key": "revenue-growth-lc"},
+      {"binding_ref": "binding:acn:ai-demand", "driver_ref": "driver:ai-reinvention-demand", "metric_ref": "metric:ai-demand-signal", "claim_key": "ai-demand-signal"},
+      {"binding_ref": "binding:acn:operating-margin", "driver_ref": "driver:delivery-economics", "metric_ref": "metric:operating-margin-gaap", "claim_key": "operating-margin-gaap"},
+      {"binding_ref": "binding:acn:free-cash-flow", "driver_ref": "driver:cash-conversion-and-capital-return", "metric_ref": "metric:free-cash-flow", "claim_key": "free-cash-flow"}
+    ],
+    "debates": [
+      {
+        "debate_ref": "debate:ai-demand-versus-bookings-conversion",
+        "question": "Will large-scale AI transformation demand convert into durable bookings and revenue growth?",
+        "status": "open",
+        "positions": [
+          {"label": "demand and revenue are visible", "stance": "supports", "claim_keys": ["ai-demand-signal", "revenue-growth-lc"]},
+          {"label": "bookings conversion remains unproven", "stance": "qualifies", "claim_keys": ["bookings-growth-lc"]}
+        ]
+      }
+    ],
+    "source_plan": [
+      {"source_ref": "source:sec-edgar", "purpose": "Financial statements, filing exhibits and accounting definitions.", "priority": 1, "required": true},
+      {"source_ref": "source:company-earnings-call-transcript", "purpose": "KPI definitions, demand commentary and management explanations.", "priority": 1, "required": true},
+      {"source_ref": "source:alphaengine", "purpose": "Transcript and sell-side discovery for cross-company debates.", "priority": 2, "required": false},
+      {"source_ref": "source:gemini-web-search", "purpose": "Public-web discovery only; summaries are not evidence.", "priority": 3, "required": false},
+      {"source_ref": "source:web-fetch", "purpose": "Independent retrieval of public source pages discovered on the web.", "priority": 2, "required": false},
+      {"source_ref": "source:guidepoint", "purpose": "Practitioner checks on demand, pricing, delivery and competitive execution.", "priority": 3, "required": false}
+    ],
+    "report_contract": {
+      "industry_brief_sections": ["boundary and universe", "driver scoreboard", "KPI evidence", "debates", "falsifiers", "open questions"],
+      "company_difference_fields": ["peer role", "driver stance", "model inputs", "differentiators", "watchpoints"]
+    },
+    "version_id": "industry-evidence-pack-version:us-it-services:1",
+    "prior_version_ref": null,
+    "idempotency_key": "industry-evidence-pack:us-it-services:1"
+  },
+  "company_overlay": {
+    "overlay_ref": "company-overlay:acn",
+    "company_ref": "company:sec-cik:0001467373",
+    "industry_ref": "industry:us-it-services",
+    "title": "Accenture Company Overlay v1",
+    "as_of": "2026-08-23T12:00:00+00:00",
+    "role": "scaled global pure-play",
+    "driver_views": [
+      {"driver_ref": "driver:bookings-mix-and-conversion", "stance": "mixed", "claim_keys": ["bookings-total", "bookings-growth-lc", "revenue-growth-lc"], "model_input_claim_keys": ["bookings-total", "bookings-growth-lc", "revenue-growth-lc"], "differentiators": ["Consulting and managed-services revenue were nearly balanced in Q3 FY2026."], "watchpoints": ["Whether bookings growth recovers and converts into local-currency revenue growth."]},
+      {"driver_ref": "driver:ai-reinvention-demand", "stance": "positive", "claim_keys": ["ai-demand-signal"], "model_input_claim_keys": [], "differentiators": ["Management described more large-scale AI transformation programs."], "watchpoints": ["Separate qualitative program commentary from disclosed AI bookings and revenue."]},
+      {"driver_ref": "driver:delivery-economics", "stance": "positive", "claim_keys": ["operating-margin-gaap"], "model_input_claim_keys": ["operating-margin-gaap"], "differentiators": ["GAAP operating margin expanded despite moderate local-currency growth."], "watchpoints": ["Track GAAP and adjusted margin separately when optimization costs recur."]},
+      {"driver_ref": "driver:cash-conversion-and-capital-return", "stance": "positive", "claim_keys": ["free-cash-flow"], "model_input_claim_keys": ["free-cash-flow"], "differentiators": ["The quarter produced USD 3.60 billion of issuer-reconciled free cash flow."], "watchpoints": ["Quarterly free cash flow is seasonal; compare full-year conversion and acquisition cash use."]}
+    ],
+    "key_differences": ["Accenture is the scaled global pure-play anchor; CTSH tests offshore-heavy delivery, EPAM tests digital engineering, and IBM tests an integrated hardware-software-services model."],
+    "open_questions": ["Do ACN's AI programs convert into bookings faster than peer programs?", "Can consulting growth improve without giving back operating-margin gains?"],
+    "falsifier_refs": ["falsifier:ai-bookings-fail-to-convert", "falsifier:consulting-weakness-overwhelms-managed-services", "falsifier:growth-requires-margin-sacrifice"],
+    "thesis_candidate_refs": [],
+    "version_id": "company-overlay-version:acn:1",
+    "prior_version_ref": null,
+    "idempotency_key": "company-overlay:acn:1"
+  }
+}

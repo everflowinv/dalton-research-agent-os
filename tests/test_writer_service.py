@@ -230,10 +230,97 @@ class WriterServiceTests(unittest.TestCase):
             prior_version_ref=None,
             idempotency_key="driver-pack:us-it-services:1",
         )
+        with self.assertRaises(RemoteAuthorizationError):
+            self.worker.register_industry_evidence_pack(
+                "industry-evidence-pack:forbidden"
+            )
         self.assertEqual(
             self.core.get_driver_pack(pack["id"])["content_hash"],
             pack["content_hash"],
         )
+        self.core.register_invocation(invocation("industry-evidence-producer"))
+        evidence = self.core.register_evidence(evidence={
+            "evidence_ref": "evidence:acn:new-bookings",
+            "source_type": "sec-filing-exhibit",
+            "source_ref": "sec:acn:q3fy26",
+            "retrieved_at": "2026-08-23T12:00:00+00:00",
+            "source_lineage": ["sec:acn:q3fy26"],
+            "independence_group": "issuer:acn:q3fy26",
+        })
+        claim = self.core.register_claim(
+            claim={
+                "claim_ref": "claim:acn:new-bookings", "subject_ref": "company:sec-cik:0001467373",
+                "metric_or_aspect": "metric:new-bookings", "period": "FY2026Q3",
+                "basis": "issuer-reported", "normalized_statement": "New bookings were reported.",
+                "claim_kind": "quantitative", "value": 19.32, "unit": "USD_billion",
+            },
+            producer_invocation_refs=["industry-evidence-producer"],
+        )
+        relation = self.core.relate_evidence(relation={
+            "id": "relation:acn:new-bookings",
+            "evidence_version_ref": evidence["evidence_version_id"],
+            "claim_version_ref": claim["claim_version_id"], "relation": "supports",
+        })
+        industry_pack = self.governance.register_industry_evidence_pack(
+            "industry-evidence-pack:us-it-services",
+            industry_ref="industry:us-it-services", title="US IT Services Evidence Pack",
+            as_of="2026-08-23T12:00:00+00:00",
+            boundary={
+                "definition": "Consulting and managed IT services providers.",
+                "inclusion_rules": ["Material IT services revenue."],
+                "exclusion_rules": ["Pure-play software vendors."],
+            },
+            coverage_universe=[{
+                "company_ref": "company:sec-cik:0001467373", "ticker": "ACN",
+                "role": "scaled global pure-play", "comparability_tier": "core",
+            }],
+            driver_pack_version_ref=pack["id"], driver_pack_version_hash=pack["content_hash"],
+            evidence_bindings=[{
+                "binding_ref": "binding:acn:new-bookings", "driver_ref": "driver:bookings-conversion",
+                "metric_ref": "metric:new-bookings", "claim_version_ref": claim["claim_version_id"],
+                "claim_version_hash": claim["content_hash"],
+                "relation_refs": [{"ref": relation["relation_id"], "hash": relation["content_hash"]}],
+            }],
+            debates=[{
+                "debate_ref": "debate:conversion", "question": "Will bookings convert?", "status": "open",
+                "positions": [
+                    {"label": "bookings support conversion", "stance": "supports", "claim_version_refs": [claim["claim_version_id"]]},
+                    {"label": "conversion lag remains", "stance": "qualifies", "claim_version_refs": [claim["claim_version_id"]]},
+                ],
+            }],
+            source_plan=[{"source_ref": "source:sec-edgar", "purpose": "Issuer filings", "priority": 1, "required": True}],
+            report_contract={
+                "industry_brief_sections": ["drivers", "debates"],
+                "company_difference_fields": ["role", "watchpoints"],
+            },
+            version_id="industry-evidence-pack-version:us-it-services:1", prior_version_ref=None,
+            idempotency_key="industry-evidence-pack:us-it-services:1",
+        )
+        overlay = self.governance.register_company_overlay(
+            "company-overlay:acn", company_ref="company:sec-cik:0001467373",
+            industry_ref="industry:us-it-services", title="Accenture overlay",
+            as_of="2026-08-23T12:00:00+00:00", role="scaled global pure-play",
+            evidence_pack_version_ref=industry_pack["id"],
+            evidence_pack_version_hash=industry_pack["content_hash"],
+            driver_views=[{
+                "driver_ref": "driver:bookings-conversion", "stance": "neutral",
+                "claim_version_refs": [{"ref": claim["claim_version_id"], "hash": claim["content_hash"]}],
+                "model_input_version_refs": [], "differentiators": [],
+                "watchpoints": ["Bookings conversion."],
+            }],
+            key_differences=["Global scale."], open_questions=["Conversion timing?"],
+            falsifier_refs=["falsifier:bookings-conversion-breaks"], thesis_candidate_refs=[],
+            version_id="company-overlay-version:acn:1", prior_version_ref=None,
+            idempotency_key="company-overlay:acn:1",
+        )
+        self.assertEqual(
+            industry_pack["content_hash"],
+            self.core.get_industry_evidence_pack(industry_pack["id"])["content_hash"],
+        )
+        self.assertEqual(
+            overlay["content_hash"], self.core.get_company_overlay(overlay["id"])["content_hash"]
+        )
+        self.assertTrue(self.core.industry_research_integrity_report()["ok"])
         candidate = self.governance.propose_thesis_admission(
             candidate_id="thesis-admission-candidate:acn:1",
             thesis_ref="thesis:acn:ai-reinvention-growth",
