@@ -97,7 +97,7 @@ npm run check
 
 ## macOS 常驻服务
 
-安装脚本会把 wheel 和 COS 可选依赖装进 Dalton 自己的 venv，在 `~/Library/Application Support/Dalton/` 创建 owner-only 配置和状态，再加载 writer、controller，以及启用时的 Agenda control LaunchAgent：
+安装脚本会把 wheel 和 COS 可选依赖装进 Dalton 自己的 venv，在 `~/Library/Application Support/Dalton/` 创建 owner-only 配置和状态，再加载 writer、controller，以及启用时的 Agenda control 和 thesis-impact 短任务 LaunchAgent：
 
 ```bash
 ./deploy/macos/install.sh
@@ -114,7 +114,10 @@ controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回
 
 ## 开发状态
 
-live 仍停在 Agenda Shadow 和 recorded connector 路径。当前未部署的开发候选已经在隔离 authority 中完成
+live 仍以 Agenda Shadow 和 recorded connector 为主要研究入口；2026-08-22 已额外启用 phase-pinned
+thesis-impact production lane。当前 live Core 没有 ThesisVersion，也没有 company→thesis mapping，因此这条
+lane 每 300 秒只执行一次无模型调用的 idle 检查，不会提交 assessment、verification 或 ThesisVersion。
+SEC 研究路径仍是未部署的开发候选，已在隔离 authority 中完成
 policy-authorized SEC public ResearchPlan：读取 Company Facts、解析同一 10-Q 的季度收入、独立复算同比、提交
 正式 Evidence/Claim 并关闭 Backlog question。固定五家公司 batch 已在同一代码 commit 上完成 Microsoft、Apple、
 NVIDIA、Walmart、Amazon 的 5/5 正式 closure、进程重启后无网络 replay，以及 Walmart stale concept fail-closed
@@ -143,10 +146,11 @@ fresh execution 与质量数据有效，但因三轮复用 run identity 而撤�
 identity 重跑，90 条仍全部 fresh/provider-controlled，三轮均 30/30，合计成本 USD 0.12906825，独立重算得到
 `eligible=true`。随后一条真实 MSFT Claim/Thesis isolated shadow 也已通过：assessment 固定 GPT-5.6 Sol、verifier
 固定 Gemini 3.7 Flash low，crash recovery、记账、离线 replay 和 thesis pointer 不变式全部成立，总成本
-USD 0.010518。live route、ThesisVersion mutation 和旧 cron 仍保持不变，production policy activation 与 gateway
-restart 是独立步骤。assessment 同时新增独立 phase policy，只允许
-`profile:gpt-5-6-sol`；本批没有把 assessment thinking level 说成 provider-control 证明。
-定时运行前的控制面也已就位：`dalton-thesis-impact-verifier-canary` 提供 3×30 canary 的
+USD 0.010518。live service 现已激活独立 phase policy：assessment 只允许 `profile:gpt-5-6-sol`，verifier
+只允许 `profile:gemini-3-7-flash` 且要求 provider-controlled `thinking=low`；USD 25 per-day 硬顶和回滚快照已安装。
+ThesisVersion 自动 mutation 和旧 cron 仍保持不变，本批也没有把 assessment thinking level 说成
+provider-control 证明。
+定时运行控制面也已就位：`dalton-thesis-impact-verifier-canary` 提供 3×30 canary 的
 三重硬顶与验收裁决，`thesis_impact_budget` authority 提供付费 lane 的 per-day 硬顶（admission/settlement、
 durable rejection）与 append-only 失败告警。详细状态见
 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)、
@@ -156,4 +160,5 @@ durable rejection）与 append-only 失败告警。详细状态见
 [3×30 独立复核更正](docs/reports/verifier-canary-independent-audit-2026-08-22.md)和
 [修正版 3×30 通过报告](docs/reports/verifier-canary-3x30-corrected-passed-2026-08-22.md)、
 [phase-pinned isolated shadow](docs/reports/thesis-impact-phase-pinned-shadow-2026-08-22.md)、
-[assessment producer phase pin](docs/reports/assessment-producer-phase-pin-2026-08-22.md)。
+[assessment producer phase pin](docs/reports/assessment-producer-phase-pin-2026-08-22.md)和
+[production activation](docs/reports/thesis-impact-production-activation-2026-08-22.md)。

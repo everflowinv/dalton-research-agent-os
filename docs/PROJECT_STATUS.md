@@ -1,21 +1,19 @@
 # Dalton 项目进度
 
 更新日期：2026-08-22
-- live deployed baseline：`6356ceeecf7e937bc1aa6fb20d7635cc4370f792`；Agenda 兼容热修复：`03ea471`
-- 本轮开发起点：`9cf86d2`；Gate 0 验收 commit：`3d2114a`；Gate 1 batch 代码 commit：`0b0f872`；
-  Gate 2 真实执行 commit：`b980bba`；离线收尾 commit：`c88746b`；
-  SEC 财务事实与 thesis-impact 开发候选均尚未部署到 live
-- live 与开发代码保持分离；本文件不把未部署代码计入 live 验收基线
-- 当前开发候选新增 wrapper-owned verifier binding、semantic-only provider schema、phase-pinned verifier
-  policy、thinking-level 控制合同、3×30 canary campaign runner、per-day 预算/告警 authority，以及只允许
-  `profile:gpt-5-6-sol` 的 assessment phase policy。2026-08-22 原始 3×30 数据确实是 90 次 fresh provider
-  execution，三轮均 30/30、0 FP、0 high miss，总花费 USD 0.127；但独立复核发现三轮共用同一个 `run_ref`，旧
-  gate 又直接信任落盘 score，因此撤销原 `production_gate.eligible=true`。runner 已改为 instance-bound
-  manifest、从 records 重算 score，并要求三轮 run/profile identity 闭合。修正版随后生成三个不同 run identity，
-  90 条再次全部 fresh/provider-controlled，三轮均 30/30，总成本 USD 0.12906825，gate 为 `eligible=true`。
-  随后一条真实 MSFT Claim/Thesis isolated shadow 也已通过：assessment 固定 GPT-5.6 Sol、verifier 固定 Gemini
-  3.7 Flash low，crash recovery、记账、离线 replay 和 thesis pointer 不变式成立，总成本 USD 0.010518。
-  production policy activation 和 gateway restart 尚未执行。
+- live deployed source：`3fe746e`；thesis-impact production runner：`9c295ca`；OpenClaw host patch chain：
+  `6f93b9b14`
+- live 已启用独立的 thesis-impact 短任务，每 300 秒运行一次；writer 持有 Core/Scheduler，worker 只能通过
+  scoped RPC 提交受限操作，不直接打开 live Core SQLite
+- assessment policy 固定 `profile:gpt-5-6-sol`；verifier policy 固定
+  `profile:gemini-3-7-flash`，并要求 provider-controlled `thinking=low`
+- production day-budget policy 为 USD 25；当前 `company_thesis_refs={}`，live Core 也没有 ThesisVersion，
+  因此短任务稳定返回 idle、provider call 为 0，也不会修改 Thesis current pointer
+- 修正版 3×30 canary 的三个 run identity 各自独立，90/90 fresh execution，三轮均 30/30、0 FP、0 high miss，
+  总成本 USD 0.12906825；随后真实 isolated shadow 固定 GPT-5.6 Sol → Gemini 3.7 Flash low，quality gate 为
+  `eligible`，成本 USD 0.010518
+- activation 前已创建并验证 `pre-thesis-impact-production-20260822-v1` 回滚快照；OpenClaw host 本轮没有配置
+  或 patch 变化，沿用已通过 canary 的现有 gateway 进程，没有为重启而重启
 
 本文是当前进度的权威入口。`docs/reports/` 下的实施报告记录各次交付当时的状态，后续实现不会
 反向改写历史结论。这里的“完成”只表示代码、测试和当前部署已经验收，不表示已达到多租户或
@@ -29,9 +27,10 @@ v0.6 及更早报告保留为各切片启动时的历史基线，不再作为当
 
 Dalton 已经完成独立 Core、Research Ledger 核心版本链与 gate、单写者、Scheduler、模型路由、模型用量/成本、
 Capability Registry/Catalog、常驻控制服务、Agenda Shadow、durable outbox、人工反馈和备份恢复。
-live 部署现在能自主生成并选择研究问题，也能在仓库 fixture 上按一次性 connector plan 执行 CNINFO、SEC、
-AlphaEngine 三源离线流程并从 checkpoint 恢复；live 仍不会访问真实 source、运行 authority verifier 或提交新的
-Evidence、Claim、Thesis。当前开发候选已能重放 fixture，也能从完整 Connector authority 解析真实 SEC public
+live 部署现在能自主生成并选择研究问题，也已加载 phase-pinned thesis-impact production lane；由于 live Core
+尚无 ThesisVersion 和 company mapping，这条 lane 当前只做无模型调用的 idle 检查，不提交 assessment、verification
+或 ThesisVersion。仓库 fixture 仍可按一次性 connector plan 执行 CNINFO、SEC、AlphaEngine 三源离线流程并从
+checkpoint 恢复；当前开发候选已能重放 fixture，也能从完整 Connector authority 解析真实 SEC public
 响应，并把 source/numeric verifier 通过的 CandidateEvidence/CandidateClaim 写入独立 staging。这条链已由
 ResearchPlanExecutor 接通，并在隔离临时 authority 中跑完一份真实 SEC public 四步 plan。Owner 已接受该 plan
 的 exact candidate；隔离 Core 已生成 1 条正式 EvidenceVersion 0.2、1 条 ClaimVersion 0.2、1 条 supports
@@ -180,16 +179,20 @@ target binding，wrapper 后 90 条均绑定成功。Python 全量 616/616、bro
 报告见
 [thesis-impact-verifier-wrapper-selection-2026-08-22.md](reports/thesis-impact-verifier-wrapper-selection-2026-08-22.md)。
 
-这不代表 production verifier 已可用。2026-08-22 后续开发候选已经补齐仓库内的两项 conformance：新增不可变
+2026-08-22 后续实现补齐 production verifier 的两项 conformance：新增不可变
 `model-routing-policy-version:dalton-openclaw-verifier:1` 只允许 exact `profile:gemini-3-7-flash`，worker 的
 verification 相位可改在该 policy 下路由，且未 pin 到单一 profile 的 policy 会在 claim 前 fail closed；
 `thinking=low` 现在冻结进 verifier WorkOrder 与 calibration manifest，进入 broker `requiredControls`、
-request hash、invocation 幂等身份和 host proof 的 closed 合同（broker 升至 0.1.0-spike.5）。live routing 和
-ThesisVersion mutation 都没有变化。host 侧 provider controls、rate card、thinkingLevel、patch 与 restart 后来已
+request hash、invocation 幂等身份和 host proof 的 closed 合同（broker 升至 0.1.0-spike.5）。host 侧
+provider controls、rate card、thinkingLevel 与 patch 后来已
 打通；首次真实 3×30 的 90 次 fresh 调用与质量数据有效，但因三轮 run identity 重复而撤销 production gate。
 修正后的 runner 已用三个不同 run identity 重新完成 3×30，90 条均为 fresh execution，三轮均 30/30，
 `production_gate.eligible=true`；随后单条 isolated shadow 也达到 `eligible`，并保持 ThesisVersion pointer 不变。
-production activation 仍未授权。phase-pin/thinking 批次的本机验证：Python 全量 621/621、broker
+Owner 后续授权 production activation，当前 live 服务已经安装独立短任务、phase policies、USD 25 day cap、
+scoped writer principal 和回滚快照。由于没有 live thesis target，activation 后 provider call 和 Thesis mutation
+均为 0。部署记录见
+[thesis-impact-production-activation-2026-08-22.md](reports/thesis-impact-production-activation-2026-08-22.md)。
+phase-pin/thinking 批次的本机验证：Python 全量 621/621、broker
 22/22、显式 hermetic research replay canary、compileall、wheel/sdist build 与 `git diff --check` 全部通过；
 没有付费调用。报告见
 [verifier-phase-pin-and-thinking-controls-2026-08-22.md](reports/verifier-phase-pin-and-thinking-controls-2026-08-22.md)。
@@ -1019,11 +1022,10 @@ provider strict Schema、输入/输出/总 token、费用硬控制、raw ResultE
 （`dalton-openclaw-verifier:1`，只允许 exact `profile:gemini-3-7-flash`，未 pin 的 policy fail closed）与
 thinking-level 控制合同（WorkOrder/manifest 冻结 `low`，进入 broker request hash、invocation 身份与 host
 proof；broker 0.1.0-spike.5）。host 配置和 patch 已经打通；首次 3×30 的 90 次 fresh 调用保留为质量证据，但
-旧 runner 复用了 run identity，production gate 已撤销。剩余一项是 owner 再次授权后用修正 runner 重跑 3×30；
-完成前 production verifier 仍为 0，live route 不变；不继续围绕 filing-count 元数据扩建
-authority。Interrupt / park /
-resume、Reflection、生产部署和
-旧 cron cutover 均后置并保持独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
+旧 runner 复用了 run identity，production gate 已撤销；修正 runner 后续用三个不同 identity 重跑 3×30 并正式
+通过。phase-pinned isolated shadow 也通过，production runner 现已部署到 live，但在没有 company→thesis mapping
+时保持 idle。ThesisVersion 自动 mutation、旧 cron cutover、Interrupt / park / resume 和 Reflection 仍后置并保持
+独立人工 gate。直接解除真实质量缺口或按明确标准改善下一轮产物的 connector/model
 增量可以推进；与真实消费者无关的扩建后置。当前没有 live staging/review/plan authority。
 
 operational verifier 与 fixture-only research coordinator 只继续第一条真实闭环需要的部分。formula census/
