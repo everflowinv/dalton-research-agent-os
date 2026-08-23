@@ -36,6 +36,14 @@
   closed。PlannerProposal 0.2 绑定 exact ContextPack，旧 0.1 保持兼容；最终专项 9/9、关联 95/95、sdist/wheel
   与 wheel-only import 通过；exact revalidation 补强前全仓 732/732，最终全仓矩阵等待同提交独立 CI。未接真实
   LLM/connector，未部署 live
+- development candidate 已把真实 LLM 接入 Bounded Planner Loop：模型只提交 `LLMPlannerCandidate 0.1`，Core
+  重新验证 exact ContextPack、catalog、coverage、预算和 terminal prerequisites 后才生成 `PlannerProposalVersion
+  0.3`；模型不能输出模板、参数、权限、预算、source 或 Claim。15-case frozen corpus 含 10 个安全 case，Qwen 3.8
+  Max、GPT-5.6 Terra/Sol、Claude Opus/Fable 均首轮 15/15，Gemini 3.1 Pro Preview 因两次 Markdown-fenced JSON
+  得 13/15、safety 9/10 并淘汰。Qwen 与 Terra 复测都再次 15/15；development-only planner policy 固定
+  `profile:qwen3-8-max`，Terra 记为首选替代候选。全仓 746/746、sdist/wheel 与 wheel 内容检查通过；尚未部署 live
+  worker 或 production routing。详见
+  [LLM Research Planner 与模型选择 v0.1](reports/llm-research-planner-and-model-selection-v0.1-2026-08-23.md)
 - development candidate 已增加 Gemini `web_search` discovery bridge 和独立 public-web fetch adapter。冻结 inventory
   已按真实 OpenClaw 合同修正为无 cursor，`freshness` 与显式日期窗互斥；search raw response 完整保存，向后只暴露
   由引用 URL 推导的 opaque authority ref，不把 Gemini synthesis、snippet 或 title 当作网页正文。系统只有从 exact
@@ -73,10 +81,11 @@ Dalton 已经完成独立 Core、Research Ledger 核心版本链与 gate、单�
 Capability Registry/Catalog、常驻控制服务、Agenda Shadow、durable outbox、人工反馈和备份恢复。
 开发候选现在另有单问题内的 Bounded Planner Loop：Agenda 继续负责跨问题排序，inner loop 只根据上一轮
 source-level Outcome 从 human-admitted ProbeTemplate 中提出下一 probe。Core 掌握 scope、权限、预算、coverage
-和终态，且复用现有 Scheduler/Workflow authority。该 loop 仍是离线 deterministic capital-lease reference
-planner，没有调用真实模型、连接器或 Ledger writer。Doctrine 与 Planner ContextPack v1 已让同一问题在不同
-human-admitted lens 下选择不同的已批准 probe，同时保留 deterministic planner 作为 fallback；下一步是让真实 LLM
-读取 exact ContextPack 并只提交 Proposal 0.2 candidate，不能绕过 Core gate。
+和终态，且复用现有 Scheduler/Workflow authority。Doctrine 与 Planner ContextPack v1 已让同一问题在不同
+human-admitted lens 下选择不同的已批准 probe；真实 LLM 现在可以读取 exact ContextPack，但只能提交严格的弱候选，
+Core 才能签发 Proposal 0.3，deterministic planner 保留为 fallback。Qwen 3.8 Max 已按两轮 30/30 的固定 corpus
+结果写入 development-only phase policy；live production 尚未启用 Planner worker 或该 policy。下一步是实现
+StatementSnapshot v1，并把它作为新的受限 probe 能力接入同一 loop。
 live 部署现在能自主生成并选择研究问题，也已加载 phase-pinned thesis-impact production lane；由于 live Core
 尚无 ThesisVersion 和 company mapping，这条 lane 当前只做无模型调用的 idle 检查，不提交 assessment、verification
 或 ThesisVersion。仓库 fixture 仍可按一次性 connector plan 执行 CNINFO、SEC、AlphaEngine 三源离线流程并从

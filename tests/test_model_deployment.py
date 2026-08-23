@@ -11,11 +11,14 @@ from dalton_core.model_deployment import (
     ASSESSMENT_POLICY_REF,
     ASSESSMENT_PROFILE_ID,
     BROKER_POLICY_REF,
+    PLANNER_DEVELOPMENT_POLICY_REF,
+    PLANNER_DEVELOPMENT_PROFILE_ID,
     VERIFIER_POLICY_REF,
     VERIFIER_PROFILE_ID,
     install_openclaw_catalog,
     openclaw_assessment_policy,
     openclaw_broker_profiles,
+    openclaw_planner_development_policy,
     openclaw_verifier_policy,
     upgrade_openclaw_broker_catalog,
     openclaw_policy,
@@ -165,6 +168,39 @@ class ModelDeploymentTests(unittest.TestCase):
                 )
             rerun = upgrade_openclaw_broker_catalog(path, checked_at=WHEN)
             self.assertEqual(rerun["assessment_policy"]["status"], "duplicate")
+
+    def test_planner_development_policy_pins_calibrated_qwen(self) -> None:
+        policy = openclaw_planner_development_policy(created_at=WHEN)
+        self.assertEqual(
+            policy["policy_version_ref"], PLANNER_DEVELOPMENT_POLICY_REF
+        )
+        self.assertEqual(
+            policy["filters"]["allowed_profile_ids"],
+            [PLANNER_DEVELOPMENT_PROFILE_ID],
+        )
+        self.assertEqual(
+            policy["filters"]["family_independence_capabilities"], []
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "model-router.sqlite"
+            install_openclaw_catalog(path, checked_at=WHEN)
+            upgraded = upgrade_openclaw_broker_catalog(path, checked_at=WHEN)
+            installed = upgraded["planner_development_policy"]
+            self.assertEqual(
+                installed["policy"]["policy_version_ref"],
+                PLANNER_DEVELOPMENT_POLICY_REF,
+            )
+            with ModelRouter(path) as router:
+                self.assertEqual(
+                    router.get_policy(PLANNER_DEVELOPMENT_POLICY_REF)["filters"][
+                        "allowed_profile_ids"
+                    ],
+                    [PLANNER_DEVELOPMENT_PROFILE_ID],
+                )
+            rerun = upgrade_openclaw_broker_catalog(path, checked_at=WHEN)
+            self.assertEqual(
+                rerun["planner_development_policy"]["status"], "duplicate"
+            )
 
     def test_live_phase_prices_append_a_new_immutable_profile(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

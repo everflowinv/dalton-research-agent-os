@@ -24,6 +24,10 @@ ASSESSMENT_PROFILE_ID = "profile:gpt-5-6-sol"
 ASSESSMENT_POLICY_REF = "model-routing-policy-version:dalton-openclaw-assessment:1"
 VERIFIER_PROFILE_ID = "profile:gemini-3-7-flash"
 VERIFIER_POLICY_REF = "model-routing-policy-version:dalton-openclaw-verifier:1"
+PLANNER_DEVELOPMENT_PROFILE_ID = "profile:qwen3-8-max"
+PLANNER_DEVELOPMENT_POLICY_REF = (
+    "model-routing-policy-version:dalton-openclaw-planner-development:1"
+)
 
 
 _LEGACY_ENDPOINT_NAMES = (
@@ -552,6 +556,37 @@ def openclaw_assessment_policy(*, created_at: datetime) -> dict[str, Any]:
     }
 
 
+def openclaw_planner_development_policy(*, created_at: datetime) -> dict[str, Any]:
+    """Pin the offline LLM planner lane to its calibrated development model.
+
+    This policy is installed with the development catalog but does not activate
+    a live planner worker. Promotion to a production policy remains a separate
+    governed deployment decision.
+    """
+
+    created = _utc(created_at).isoformat(timespec="microseconds")
+    return {
+        "schema_version": "0.1",
+        "policy_version_ref": PLANNER_DEVELOPMENT_POLICY_REF,
+        "id": "model-routing-policy:dalton-openclaw-planner-development",
+        "version": 1,
+        "created_at": created,
+        "prior_version_ref": None,
+        "filters": {
+            "allowed_profile_ids": [PLANNER_DEVELOPMENT_PROFILE_ID],
+            "allowed_providers": [],
+            "allowed_families": [],
+            "allowed_adapter_refs": [ADAPTER_REF],
+            "required_modalities": ["text"],
+            "family_independence_capabilities": [],
+        },
+        "ordered_preferences": [
+            {"field": "estimated_cost_usd", "direction": "asc"},
+            {"field": "profile_version_ref", "direction": "asc"},
+        ],
+    }
+
+
 def upgrade_openclaw_broker_catalog(
     router_path: str | Path,
     *,
@@ -576,6 +611,10 @@ def upgrade_openclaw_broker_catalog(
         verifier_policy = _register_policy_once(
             router,
             openclaw_verifier_policy(created_at=checked_at)
+        )
+        planner_development_policy = _register_policy_once(
+            router,
+            openclaw_planner_development_policy(created_at=checked_at)
         )
         desired_profiles = openclaw_broker_profiles(
             checked_at=checked_at, availability_ttl=availability_ttl
@@ -611,6 +650,7 @@ def upgrade_openclaw_broker_catalog(
         "policy": policy,
         "assessment_policy": assessment_policy,
         "verifier_policy": verifier_policy,
+        "planner_development_policy": planner_development_policy,
         "profiles": profiles,
         "router_path": str(router_path),
     }
@@ -704,6 +744,8 @@ __all__ = [
     "ASSESSMENT_POLICY_REF",
     "VERIFIER_PROFILE_ID",
     "VERIFIER_POLICY_REF",
+    "PLANNER_DEVELOPMENT_PROFILE_ID",
+    "PLANNER_DEVELOPMENT_POLICY_REF",
     "install_openclaw_catalog",
     "openclaw_policy",
     "openclaw_profiles",
@@ -711,5 +753,6 @@ __all__ = [
     "openclaw_broker_policy",
     "openclaw_assessment_policy",
     "openclaw_verifier_policy",
+    "openclaw_planner_development_policy",
     "upgrade_openclaw_broker_catalog",
 ]
