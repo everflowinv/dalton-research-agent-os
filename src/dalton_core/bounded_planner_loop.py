@@ -606,6 +606,8 @@ class BoundedPlannerAuthority:
         action: Mapping[str, Any],
         rationale: str,
         actor_ref: str,
+        planner_context_pack_ref: str | None = None,
+        planner_context_pack_hash: str | None = None,
     ) -> dict[str, Any]:
         loop = self.loop(loop_version_ref)
         if self.terminal(loop["id"]) is not None:
@@ -619,6 +621,33 @@ class BoundedPlannerAuthority:
         directive_bindings = self._directive_bindings(loop["id"], ordinal)
         actor_ref = _text(actor_ref, "actor_ref")
         rationale = _text(rationale, "rationale")
+        if (planner_context_pack_ref is None) != (planner_context_pack_hash is None):
+            raise BoundedPlannerValidationError(
+                "planner context ref and hash must be provided together"
+            )
+        context = None
+        planner_ref = CAPITAL_LEASE_PLANNER_REF
+        planner_hash = CAPITAL_LEASE_PLANNER_HASH
+        proposal_schema_version = SCHEMA_VERSION
+        if planner_context_pack_ref is not None:
+            from .research_doctrine import (
+                DOCTRINE_AWARE_PLANNER_HASH,
+                DOCTRINE_AWARE_PLANNER_REF,
+                revalidate_planner_context_pack,
+            )
+
+            context = revalidate_planner_context_pack(
+                self,
+                planner_context_pack_ref,
+                expected_hash=planner_context_pack_hash,
+            )
+            if context["loop_version_ref"] != loop["id"]:
+                raise BoundedPlannerValidationError(
+                    "planner context belongs to a different loop"
+                )
+            planner_ref = DOCTRINE_AWARE_PLANNER_REF
+            planner_hash = DOCTRINE_AWARE_PLANNER_HASH
+            proposal_schema_version = "0.2"
         identity = {
             "loop_version_ref": loop["id"], "loop_version_hash": loop["content_hash"],
             "ordinal": ordinal,
@@ -627,9 +656,12 @@ class BoundedPlannerAuthority:
             "action": action_wire,
             "remaining_budget": self._budget_snapshot(loop),
             "directive_bindings": directive_bindings,
-            "planner_ref": CAPITAL_LEASE_PLANNER_REF,
-            "planner_hash": CAPITAL_LEASE_PLANNER_HASH,
+            "planner_ref": planner_ref,
+            "planner_hash": planner_hash,
         }
+        if context is not None:
+            identity["planner_context_pack_ref"] = context["id"]
+            identity["planner_context_pack_hash"] = context["content_hash"]
         proposal_id = _deterministic_ref("planner-proposal-version", identity)
         existing = self.connection.execute(
             "SELECT * FROM bounded_planner_proposal_versions WHERE proposal_id=?",
@@ -638,7 +670,7 @@ class BoundedPlannerAuthority:
         if existing is not None:
             return {"status": "duplicate", **_decode_record(existing, "PlannerProposalVersion")}
         wire = _record({
-            "schema_version": SCHEMA_VERSION, "id": proposal_id,
+            "schema_version": proposal_schema_version, "id": proposal_id,
             "created_at": _now(), **identity, "rationale": rationale,
             "actor_ref": actor_ref,
         })
@@ -768,6 +800,101 @@ class BoundedPlannerAuthority:
             actor_ref=CAPITAL_LEASE_PLANNER_REF,
         )
 
+    def propose_next_with_context(self, planner_context_pack_ref: str) -> dict[str, Any]:
+        """Use one exact PlannerContextPack without expanding Core authority.
+
+        Human directives retain precedence.  The selected doctrine lens may
+        only reorder coverage items that the immutable loop already admitted.
+        """
+
+        from .research_doctrine import (
+            DOCTRINE_AWARE_PLANNER_REF,
+            revalidate_planner_context_pack,
+        )
+
+        context = revalidate_planner_context_pack(self, planner_context_pack_ref)
+        loop = self.loop(context["loop_version_ref"])
+        terminal = self.terminal(loop["id"])
+        if terminal is not None:
+            return {"status": "terminal", "terminal_event": terminal}
+        rounds = self.rounds(loop["id"])
+        if rounds and self.outcome_for_round(rounds[-1]["id"]) is None:
+            return {"status": "pending_round", "round": rounds[-1]}
+        directives = [item["quoted_data"] for item in context["directive_inputs"]]
+        proposal_context = {
+            "planner_context_pack_ref": context["id"],
+            "planner_context_pack_hash": context["content_hash"],
+        }
+        if any(item["control_effect"] == "request_replan" for item in directives):
+            return self.submit_proposal(
+                loop["id"], action={"kind": "terminate", "reason": "human_replan_required"},
+                rationale="An admitted human directive requires replanning on this round.",
+                actor_ref=DOCTRINE_AWARE_PLANNER_REF, **proposal_context,
+            )
+        if any(item["control_effect"] == "deprioritize" for item in directives):
+            return self.submit_proposal(
+                loop["id"], action={"kind": "terminate", "reason": "human_deprioritized"},
+                rationale="An admitted human directive deprioritized this loop.",
+                actor_ref=DOCTRINE_AWARE_PLANNER_REF, **proposal_context,
+            )
+        outcomes = self.outcomes(loop["id"])
+        by_item = {item["coverage_item_ref"]: item for item in outcomes}
+        uncovered = [item for item in loop["required_coverage_items"] if item not in by_item]
+        if not uncovered:
+            reason = (
+                "coverage_complete_unobservable_candidate"
+                if all(item["outcome_kind"] == "not_found_in_scope" for item in outcomes)
+                else "evidence_observed_for_review"
+            )
+            return self.submit_proposal(
+                loop["id"], action={"kind": "terminate", "reason": reason},
+                rationale="The governed checklist has reached a closed terminal candidate.",
+                actor_ref=DOCTRINE_AWARE_PLANNER_REF, **proposal_context,
+            )
+        focused = [
+            item["target_coverage_item_ref"] for item in directives
+            if item["control_effect"] == "focus_coverage_item"
+            and item["target_coverage_item_ref"] in uncovered
+        ]
+        priority = [
+            item for item in context["selected_lens"]["priority_topics"]
+            if item in uncovered
+        ]
+        next_item = focused[-1] if focused else (priority[0] if priority else uncovered[0])
+        binding = next(
+            item for item in loop["template_bindings"]
+            if item["coverage_item_ref"] == next_item
+        )
+        template = self.probe_template(binding["template_version_ref"])
+        remaining = self._budget_snapshot(loop)
+        if (
+            remaining["rounds_remaining"] < 1
+            or remaining["cost_units_remaining"] < template["cost"]["cost_units"]
+            or remaining["seconds_remaining"] < template["cost"]["max_seconds"]
+        ):
+            return {
+                "status": "terminal",
+                "terminal_event": self._append_terminal(
+                    loop, "budget_exhausted", proposal=None,
+                    actor_ref="core:bounded-planner-budget",
+                ),
+            }
+        return self.submit_proposal(
+            loop["id"],
+            action={
+                "kind": "probe", "coverage_item_ref": next_item,
+                "template_version_ref": binding["template_version_ref"],
+                "template_version_hash": binding["template_version_hash"],
+                "parameters": binding["parameters"],
+            },
+            rationale=(
+                "Select the next uncovered item using the exact quoted doctrine lens; "
+                "the lens may reorder but cannot expand the admitted checklist."
+            ),
+            actor_ref=DOCTRINE_AWARE_PLANNER_REF,
+            **proposal_context,
+        )
+
     def _append_terminal(
         self,
         loop: Mapping[str, Any],
@@ -832,6 +959,24 @@ class BoundedPlannerControlPlane:
     def _admission_reason(
         self, loop: Mapping[str, Any], proposal: Mapping[str, Any]
     ) -> str | None:
+        context_ref = proposal.get("planner_context_pack_ref")
+        context_hash = proposal.get("planner_context_pack_hash")
+        if (context_ref is None) != (context_hash is None):
+            return "planner_context_binding_incomplete"
+        if context_ref is not None:
+            from .research_doctrine import (
+                ResearchDoctrineConflict,
+                revalidate_planner_context_pack,
+            )
+
+            try:
+                context = revalidate_planner_context_pack(
+                    self.authority, context_ref, expected_hash=context_hash
+                )
+            except ResearchDoctrineConflict:
+                return "planner_context_binding_stale_or_invalid"
+            if context["loop_version_ref"] != loop["id"]:
+                return "planner_context_loop_mismatch"
         rounds = self.authority.rounds(loop["id"])
         if proposal["ordinal"] != len(rounds) + 1:
             return "stale_round_ordinal"

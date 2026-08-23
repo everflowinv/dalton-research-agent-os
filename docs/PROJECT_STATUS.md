@@ -29,6 +29,13 @@
   WorkflowRunVersion 与 WorkOrderLink，没有第二套 queue/DAG；三轮来源级 miss 只能形成
   `coverage_complete_unobservable_candidate`，不会自动生成负面 Claim。专项 8/8、contracts/Scheduler/
   Observability/ResearchPlan 关联回归 59/59 通过；未接真实 LLM/connector，未部署 live
+- development candidate 已新增 Doctrine 与 Planner ContextPack v1：human-only、append-only DoctrinePack 定义
+  research lens，限时 override 绑定 exact pack/loop/lens；Core 每轮冻结 exact question、Doctrine、可选 Driver Pack/
+  Thesis、Outcome 历史、directive、剩余预算和 ProbeTemplate catalog。doctrine-aware deterministic planner 只能在
+  已批准 coverage item 内重排；ContextPack stale、catalog/参数/权限/预算漂移或试图降低负面 Claim gate都会 fail
+  closed。PlannerProposal 0.2 绑定 exact ContextPack，旧 0.1 保持兼容；最终专项 9/9、关联 95/95、sdist/wheel
+  与 wheel-only import 通过；exact revalidation 补强前全仓 732/732，最终全仓矩阵等待同提交独立 CI。未接真实
+  LLM/connector，未部署 live
 - development candidate 已增加 Gemini `web_search` discovery bridge 和独立 public-web fetch adapter。冻结 inventory
   已按真实 OpenClaw 合同修正为无 cursor，`freshness` 与显式日期窗互斥；search raw response 完整保存，向后只暴露
   由引用 URL 推导的 opaque authority ref，不把 Gemini synthesis、snippet 或 title 当作网页正文。系统只有从 exact
@@ -67,7 +74,9 @@ Capability Registry/Catalog、常驻控制服务、Agenda Shadow、durable outbo
 开发候选现在另有单问题内的 Bounded Planner Loop：Agenda 继续负责跨问题排序，inner loop 只根据上一轮
 source-level Outcome 从 human-admitted ProbeTemplate 中提出下一 probe。Core 掌握 scope、权限、预算、coverage
 和终态，且复用现有 Scheduler/Workflow authority。该 loop 仍是离线 deterministic capital-lease reference
-planner，没有调用真实模型、连接器或 Ledger writer。
+planner，没有调用真实模型、连接器或 Ledger writer。Doctrine 与 Planner ContextPack v1 已让同一问题在不同
+human-admitted lens 下选择不同的已批准 probe，同时保留 deterministic planner 作为 fallback；下一步是让真实 LLM
+读取 exact ContextPack 并只提交 Proposal 0.2 candidate，不能绕过 Core gate。
 live 部署现在能自主生成并选择研究问题，也已加载 phase-pinned thesis-impact production lane；由于 live Core
 尚无 ThesisVersion 和 company mapping，这条 lane 当前只做无模型调用的 idle 检查，不提交 assessment、verification
 或 ThesisVersion。仓库 fixture 仍可按一次性 connector plan 执行 CNINFO、SEC、AlphaEngine 三源离线流程并从
@@ -1223,6 +1232,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - 财报电话会原文 Evidence Gate v1：`docs/reports/earnings-call-transcript-evidence-gate-v1-2026-08-23.md`
 - 人类研究意图与 Bounded Planner Loop 架构讨论：`docs/reports/human-research-intent-and-bounded-planner-loop-v1-2026-08-23.md`
 - Bounded Planner Loop v1 实施：`docs/reports/bounded-planner-loop-v1-implementation-2026-08-23.md`
+- Doctrine 与 Planner ContextPack v1：`docs/reports/doctrine-and-planner-context-pack-v1-2026-08-23.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`

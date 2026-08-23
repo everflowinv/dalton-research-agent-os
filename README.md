@@ -137,6 +137,12 @@ capital-lease reference planner 只能从 human-admitted ProbeTemplate 中提出
 [讨论存档](docs/reports/human-research-intent-and-bounded-planner-loop-v1-2026-08-23.md) 和
 [实施报告](docs/reports/bounded-planner-loop-v1-implementation-2026-08-23.md)。
 
+同日新增的 Doctrine 与 Planner ContextPack v1 把人类研究 lens 做成 human-only、不可变 authority，并支持绑定 exact
+loop 和有效期的临时 override。Core 为每轮冻结 ResearchQuestion、Doctrine、可选 Driver Pack/Thesis、历史 Outcome、
+directive、剩余预算和 ProbeTemplate catalog；doctrine-aware deterministic planner 只能据此重排既有 coverage item，
+不能扩 scope、权限、参数或预算。PlannerProposal 0.2 绑定 exact ContextPack，旧 0.1 planner/proposal 保持兼容；实施
+边界见 [Doctrine 与 Planner ContextPack v1](docs/reports/doctrine-and-planner-context-pack-v1-2026-08-23.md)。
+
 Gate 0、Gate 1 和 Gate 2 控制面验收已完成。verifier 现改为 wrapper-owned binding：模型只返回 semantic
 `verdict/findings`，trusted worker 从 immutable WorkOrder 绑定 exact assessment ref/hash，raw ResultEnvelope 与历史
 replay 保留。同一 30-case v0.2 corpus 的 low-thinking 重跑中，Gemini 3.7 Flash 和 GPT-5.6 Luna 都是 30/30，

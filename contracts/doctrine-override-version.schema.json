@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DoctrineOverrideVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "override_ref", "version", "prior_version_ref", "doctrine_pack_version_ref", "doctrine_pack_version_hash", "loop_version_ref", "loop_version_hash", "lens_ref", "rationale", "effective_from", "effective_until", "revoked", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^doctrine-override-version:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "override_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "prior_version_ref": {"type": ["string", "null"]},
+    "doctrine_pack_version_ref": {"type": "string", "minLength": 1},
+    "doctrine_pack_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "loop_version_ref": {"type": "string", "minLength": 1},
+    "loop_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "lens_ref": {"type": "string", "minLength": 1},
+    "rationale": {"type": "string", "minLength": 1},
+    "effective_from": {"type": "string", "format": "date-time"},
+    "effective_until": {"type": "string", "format": "date-time"},
+    "revoked": {"type": "boolean"},
+    "actor_ref": {"type": "string", "pattern": "^human:"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

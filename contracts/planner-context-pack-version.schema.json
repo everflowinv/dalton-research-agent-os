@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlannerContextPackVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "loop_version_ref", "loop_version_hash", "round_ordinal", "as_of", "question_input", "doctrine_input", "selected_lens_ref", "selected_lens", "override_input", "driver_pack_input", "thesis_inputs", "outcome_inputs", "directive_inputs", "remaining_budget", "catalog_inputs", "builder_ref", "builder_hash", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^planner-context-pack-version:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "loop_version_ref": {"type": "string", "minLength": 1},
+    "loop_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "round_ordinal": {"type": "integer", "minimum": 1},
+    "as_of": {"type": "string", "format": "date-time"},
+    "question_input": {"$ref": "#/$defs/authority_input"},
+    "doctrine_input": {"$ref": "#/$defs/authority_input"},
+    "selected_lens_ref": {"type": "string", "minLength": 1},
+    "selected_lens": {"type": "object", "additionalProperties": true},
+    "override_input": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/authority_input"}]},
+    "driver_pack_input": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/authority_input"}]},
+    "thesis_inputs": {"type": "array", "items": {"type": "object", "additionalProperties": true}},
+    "outcome_inputs": {"type": "array", "items": {"$ref": "#/$defs/authority_input"}},
+    "directive_inputs": {"type": "array", "items": {"$ref": "#/$defs/authority_input"}},
+    "remaining_budget": {"$ref": "#/$defs/remaining_budget"},
+    "catalog_inputs": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": true}},
+    "builder_ref": {"const": "builder:planner-context-pack:0.1"},
+    "builder_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "actor_ref": {"const": "core:planner-context-materializer"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "authority_input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "hash", "quoted_data"],
+      "properties": {
+        "ref": {"type": "string", "minLength": 1},
+        "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "quoted_data": {"type": "object", "additionalProperties": true}
+      }
+    },
+    "remaining_budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rounds_remaining", "cost_units_remaining", "seconds_remaining"],
+      "properties": {
+        "rounds_remaining": {"type": "integer", "minimum": 0},
+        "cost_units_remaining": {"type": "integer", "minimum": 0},
+        "seconds_remaining": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

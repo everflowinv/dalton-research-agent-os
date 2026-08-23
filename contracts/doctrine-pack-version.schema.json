@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DoctrinePackVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "doctrine_pack_ref", "version", "prior_version_ref", "title", "default_lens_ref", "lenses", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^doctrine-pack-version:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "doctrine_pack_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "prior_version_ref": {"type": ["string", "null"]},
+    "title": {"type": "string", "minLength": 1},
+    "default_lens_ref": {"type": "string", "minLength": 1},
+    "lenses": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/lens"}},
+    "actor_ref": {"type": "string", "pattern": "^human:"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "lens": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lens_ref", "label", "objective", "priority_topics", "evidence_standard"],
+      "properties": {
+        "lens_ref": {"type": "string", "minLength": 1},
+        "label": {"type": "string", "minLength": 1},
+        "objective": {"type": "string", "minLength": 1},
+        "priority_topics": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "evidence_standard": {"$ref": "#/$defs/evidence_standard"}
+      }
+    },
+    "evidence_standard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preferred_source_classes", "minimum_independent_sources", "negative_claim_rule"],
+      "properties": {
+        "preferred_source_classes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "minimum_independent_sources": {"type": "integer", "minimum": 1},
+        "negative_claim_rule": {"const": "candidate_only_until_separate_claim_admission"}
+      }
+    }
+  }
+}
