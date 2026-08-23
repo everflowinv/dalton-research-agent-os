@@ -13,8 +13,8 @@ from dalton_core.connector import ConnectorStore
 from dalton_core.connector_authority_port import ConnectorAuthorityPort
 from dalton_core.connector_inventory import load_packaged_connector_inventory
 from dalton_core.connector_quota_policy import (
-    apply_call_quota_to_limits,
-    governed_daily_call_quota,
+    apply_governed_quota_to_limits,
+    governed_daily_quota,
 )
 from dalton_core.connector_runner import (
     RunnerConflict,
@@ -117,8 +117,11 @@ def search_parameters() -> dict:
     }
 
 
-def document_parameters() -> dict:
-    return {"document_ref": "alphaengine-doc:320000610033807"}
+def document_parameters(cursor: str | None = None) -> dict:
+    parameters = {"document_ref": "alphaengine-doc:320000610033807"}
+    if cursor is not None:
+        parameters["cursor"] = cursor
+    return parameters
 
 
 def adapter_request(operation: str, parameters: dict) -> tuple[dict, dict]:
@@ -507,13 +510,13 @@ class LiveGateHarness:
             ),
             idempotency_key=f"alphaengine-live:{operation}:price",
         )
-        quota = governed_daily_call_quota("alphaengine", operation)
+        quota = governed_daily_quota("alphaengine", operation)
         rate = rate_policy_spec(
             self.profile["id"],
             identifier=f"connector-rate-policy:alphaengine-live-{operation}:v1",
             price_rate_refs=(price["id"],),
             required_price_meters=("calls",),
-            limits=apply_call_quota_to_limits(
+            limits=apply_governed_quota_to_limits(
                 quota,
                 max_response_bytes=self.profile["max_response_bytes"],
                 max_records=self.profile["max_records"],
@@ -861,11 +864,11 @@ class LiveMcpEndToEndTests(unittest.TestCase):
         self.assertEqual(duplicate["idempotency_status"], "duplicate")
         self.assertEqual(len(harness.handle.calls), 1)
 
-    def test_live_alphaengine_operations_use_beijing_daily_call_ceilings(self) -> None:
-        for operation, parameters, payload, expected_calls in (
+    def test_live_alphaengine_operations_use_beijing_daily_unit_ceilings(self) -> None:
+        for operation, parameters, payload, expected_calls, expected_units in (
             (
                 "search_library", search_parameters(),
-                {"results": [], "cursor": None, "has_more": False}, 50,
+                {"results": [], "cursor": None, "has_more": False}, 50, 500,
             ),
             (
                 "get_document", document_parameters(),
@@ -879,15 +882,60 @@ class LiveMcpEndToEndTests(unittest.TestCase):
                     "next_offset": None,
                     "complete": True,
                 },
-                80,
+                1_600, 80,
             ),
         ):
             with self.subTest(operation=operation):
                 harness = self.harness(operation, parameters, payload)
                 self.assertEqual(harness.rate_policy["limits"]["calls"], expected_calls)
+                self.assertEqual(
+                    harness.rate_policy["limits"]["records"], expected_units
+                )
                 self.assertEqual(harness.rate_policy["window_seconds"], 86_400)
                 self.assertEqual(
                     harness.rate_policy["reset_timezone"], "Asia/Shanghai"
+                )
+
+    def test_get_document_charges_one_document_unit_only_on_first_page(self) -> None:
+        cases = (
+            (document_parameters(), 0, 0, 1),
+            (document_parameters("12"), 12, 12, 0),
+        )
+        for parameters, offset, content_chars, expected_document_units in cases:
+            with self.subTest(cursor=parameters.get("cursor")):
+                harness = self.harness(
+                    "get_document",
+                    parameters,
+                    {
+                        "metadata": {"doc_id": "320000610033807"},
+                        "content_chars": content_chars,
+                        "content_sha256": "e" * 64,
+                        "offset": offset,
+                        "returned_chars": 0,
+                        "text": "",
+                        "next_offset": None,
+                        "complete": True,
+                    },
+                )
+                response = harness.execute()
+                self.assertEqual(response["outcome"], "succeeded")
+                reservation = json.loads(
+                    harness.core.connection.execute(
+                        "SELECT record_json FROM connector_quota_reservations"
+                    ).fetchone()["record_json"]
+                )
+                usage = json.loads(
+                    harness.core.connection.execute(
+                        "SELECT record_json FROM connector_usage_entries"
+                    ).fetchone()["record_json"]
+                )
+                self.assertEqual(reservation["reserved"]["calls"], 1)
+                self.assertEqual(usage["metrics"]["calls"], 1)
+                self.assertEqual(
+                    reservation["reserved"]["records"], expected_document_units
+                )
+                self.assertEqual(
+                    usage["metrics"]["records"], expected_document_units
                 )
 
     def test_get_document_commits_hash_bound_raw_artifact(self) -> None:

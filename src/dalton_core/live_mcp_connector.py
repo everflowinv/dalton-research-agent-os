@@ -868,6 +868,43 @@ def _tool_text_payload(result: Mapping[str, Any]) -> dict[str, Any]:
     return dict(payload)
 
 
+def alphaengine_document_page_from_raw_response(
+    raw_response: bytes,
+    *,
+    expected_doc_id: str,
+    expected_offset: int,
+    max_chars: int,
+) -> tuple[str, dict[str, Any]]:
+    """Recover and validate one document page from its exact JSON-RPC bytes."""
+
+    if not isinstance(raw_response, bytes):
+        raise RunnerValidationError("AlphaEngine raw response must be bytes")
+    try:
+        rpc = json.loads(raw_response.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RunnerValidationError(
+            "AlphaEngine raw response is not strict UTF-8 JSON"
+        ) from exc
+    if (
+        not isinstance(rpc, Mapping)
+        or rpc.get("jsonrpc") != "2.0"
+        or not isinstance(rpc.get("id"), str)
+        or not rpc["id"]
+        or not isinstance(rpc.get("result"), Mapping)
+        or "error" in rpc
+    ):
+        raise RunnerValidationError(
+            "AlphaEngine raw response is not a successful JSON-RPC result"
+        )
+    page = validate_alphaengine_document_page(
+        _tool_text_payload(rpc["result"]),
+        expected_doc_id=expected_doc_id,
+        expected_offset=expected_offset,
+        max_chars=max_chars,
+    )
+    return rpc["id"], page
+
+
 def validate_alphaengine_document_page(
     payload: Mapping[str, Any],
     *,
@@ -1188,6 +1225,7 @@ __all__ = [
     "LiveMcpRunnerAdmissionGate",
     "OPENCLAW_ALPHAENGINE_BRIDGE_HASH",
     "OPENCLAW_ALPHAENGINE_BRIDGE_REF",
+    "alphaengine_document_page_from_raw_response",
     "alphaengine_tool_arguments",
     "build_live_mcp_transport_plan",
     "validate_live_mcp_adapter_request",

@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AlphaEngineDocumentAcquisitionManifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "plan_ref", "plan_hash",
+    "document_ref", "source_ref", "bridge_ref", "status",
+    "termination_reason", "content_chars", "declared_content_sha256",
+    "assembled_prefix_sha256", "assembled_object", "pages", "failed_page",
+    "next_cursor", "physical_calls", "total_raw_response_bytes",
+    "document_quota_units", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^alphaengine-document-acquisition:"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "plan_ref": {"type": "string", "pattern": "^alphaengine-document-plan:"},
+    "plan_hash": {"$ref": "#/$defs/hash"},
+    "document_ref": {"type": "string", "pattern": "^alphaengine-doc:[A-Za-z0-9._-]{1,128}$"},
+    "source_ref": {"const": "source:alphaengine"},
+    "bridge_ref": {"type": "string", "minLength": 1},
+    "status": {"enum": ["complete", "partial", "failed"]},
+    "termination_reason": {"enum": ["terminal", "max_pages", "max_response_bytes", "max_document_chars", "page_failed"]},
+    "content_chars": {"type": ["integer", "null"], "minimum": 0},
+    "declared_content_sha256": {"oneOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+    "assembled_prefix_sha256": {"oneOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]},
+    "assembled_object": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["content_hash", "size_bytes", "storage_locator"],
+          "properties": {
+            "content_hash": {"$ref": "#/$defs/hash"},
+            "size_bytes": {"type": "integer", "minimum": 0},
+            "storage_locator": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "pages": {"type": "array", "maxItems": 20, "items": {"$ref": "#/$defs/page"}},
+    "failed_page": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/failed_page"}]},
+    "next_cursor": {"type": ["string", "null"], "pattern": "^[0-9]+$"},
+    "physical_calls": {"type": "integer", "minimum": 1, "maximum": 20},
+    "total_raw_response_bytes": {"type": "integer", "minimum": 0},
+    "document_quota_units": {"type": "integer", "minimum": 0, "maximum": 1},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "page_ordinal", "page_request_ref", "page_request_hash",
+        "runner_response_ref", "runner_response_hash", "runner_request_ref",
+        "runner_request_hash", "connector_invocation_ref",
+        "connector_invocation_hash", "connector_profile_ref",
+        "connector_profile_hash", "call_spec_ref", "call_spec_hash",
+        "physical_attempt_ref", "physical_attempt_hash", "usage_entry_ref",
+        "usage_entry_hash", "cost_entry_ref", "cost_entry_hash",
+        "quota_settlement_ref", "quota_settlement_hash",
+        "raw_artifact_version_ref", "raw_artifact_version_hash",
+        "source_envelope_ref", "source_envelope_hash", "request_cursor",
+        "next_cursor", "offset", "returned_chars", "raw_response_hash",
+        "raw_response_bytes", "document_quota_units", "content_hash"
+      ],
+      "properties": {
+        "page_ordinal": {"type": "integer", "minimum": 1, "maximum": 20},
+        "page_request_ref": {"type": "string", "minLength": 1},
+        "page_request_hash": {"$ref": "#/$defs/hash"},
+        "runner_response_ref": {"type": "string", "minLength": 1},
+        "runner_response_hash": {"$ref": "#/$defs/hash"},
+        "runner_request_ref": {"type": "string", "minLength": 1},
+        "runner_request_hash": {"$ref": "#/$defs/hash"},
+        "connector_invocation_ref": {"type": "string", "minLength": 1},
+        "connector_invocation_hash": {"$ref": "#/$defs/hash"},
+        "connector_profile_ref": {"type": "string", "minLength": 1},
+        "connector_profile_hash": {"$ref": "#/$defs/hash"},
+        "call_spec_ref": {"type": "string", "minLength": 1},
+        "call_spec_hash": {"$ref": "#/$defs/hash"},
+        "physical_attempt_ref": {"type": "string", "minLength": 1},
+        "physical_attempt_hash": {"$ref": "#/$defs/hash"},
+        "usage_entry_ref": {"type": "string", "minLength": 1},
+        "usage_entry_hash": {"$ref": "#/$defs/hash"},
+        "cost_entry_ref": {"type": "string", "minLength": 1},
+        "cost_entry_hash": {"$ref": "#/$defs/hash"},
+        "quota_settlement_ref": {"type": "string", "minLength": 1},
+        "quota_settlement_hash": {"$ref": "#/$defs/hash"},
+        "raw_artifact_version_ref": {"type": "string", "minLength": 1},
+        "raw_artifact_version_hash": {"$ref": "#/$defs/hash"},
+        "source_envelope_ref": {"type": "string", "minLength": 1},
+        "source_envelope_hash": {"$ref": "#/$defs/hash"},
+        "request_cursor": {"type": ["string", "null"], "pattern": "^[0-9]+$"},
+        "next_cursor": {"type": ["string", "null"], "pattern": "^[0-9]+$"},
+        "offset": {"type": "integer", "minimum": 0},
+        "returned_chars": {"type": "integer", "minimum": 0},
+        "raw_response_hash": {"$ref": "#/$defs/hash"},
+        "raw_response_bytes": {"type": "integer", "minimum": 0},
+        "document_quota_units": {"type": "integer", "minimum": 0, "maximum": 1},
+        "content_hash": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "failed_page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "page_ordinal", "page_request_ref", "page_request_hash",
+        "runner_response_ref", "runner_response_hash", "outcome", "retry_at",
+        "physical_attempt_ref", "physical_attempt_hash", "usage_entry_ref",
+        "usage_entry_hash", "cost_entry_ref", "cost_entry_hash",
+        "quota_settlement_ref", "quota_settlement_hash",
+        "document_quota_units", "content_hash"
+      ],
+      "properties": {
+        "page_ordinal": {"type": "integer", "minimum": 1, "maximum": 20},
+        "page_request_ref": {"type": "string", "minLength": 1},
+        "page_request_hash": {"$ref": "#/$defs/hash"},
+        "runner_response_ref": {"type": "string", "minLength": 1},
+        "runner_response_hash": {"$ref": "#/$defs/hash"},
+        "outcome": {"enum": ["retryable", "failed"]},
+        "retry_at": {"type": ["string", "null"], "format": "date-time"},
+        "physical_attempt_ref": {"type": "string", "minLength": 1},
+        "physical_attempt_hash": {"$ref": "#/$defs/hash"},
+        "usage_entry_ref": {"type": "string", "minLength": 1},
+        "usage_entry_hash": {"$ref": "#/$defs/hash"},
+        "cost_entry_ref": {"type": "string", "minLength": 1},
+        "cost_entry_hash": {"$ref": "#/$defs/hash"},
+        "quota_settlement_ref": {"type": "string", "minLength": 1},
+        "quota_settlement_hash": {"$ref": "#/$defs/hash"},
+        "document_quota_units": {"type": "integer", "minimum": 0, "maximum": 1},
+        "content_hash": {"$ref": "#/$defs/hash"}
+      }
+    }
+  }
+}

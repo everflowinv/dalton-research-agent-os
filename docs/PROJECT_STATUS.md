@@ -14,13 +14,15 @@
   尚未激活 production mapping，也没有产生付费模型调用
 - development candidate 已增加 AlphaEngine live `search_library → get_document` bridge：每次调用绑定 exact
   CompiledConnectorPlan、credential use receipt、quota、raw Artifact 和 SourceEnvelope；真实只读 canary 已取回
-  10 条 ACN 检索结果及首个 30k 字符文档分片，续页游标为 `30000`。该 canary 没有写 live Core，完整文档分页
-  coordinator 尚未实现
+  10 条 ACN 检索结果及首个 30k 字符文档分片，续页游标为 `30000`。bounded multi-page coordinator 已在本地实现：
+  每页回查 immutable authority/raw JSON-RPC，只有连续终页的整文长度和 SHA-256 一致才 complete；真实完整文档
+  canary 和 production ResearchPlan/Scheduler 接线尚未执行
 - development candidate 已把 connector quota window 扩展到 IANA 当地日历日，并按 owner 指令冻结候选日配额：
-  AlphaEngine `search_library` 50 次、`get_document` 80 次，Gemini `search_web` 1,000 次；三者均在
-  `Asia/Shanghai` 00:00（UTC 16:00）重置。AlphaEngine live 测试 profile 已绑定 50/80，Gemini bridge 尚未实现，
-  所以 1,000 次目前只是 governance input，不是已部署 policy。document page 已新增连续 offset/长度校验；完整多页
-  coordinator 仍是下一 gate
+  AlphaEngine `search_library` 50 次、`get_document` 80 份完整文档，Gemini `search_web` 1,000 次；三者均在
+  `Asia/Shanghai` 00:00（UTC 16:00）重置。AlphaEngine 文档只在首个 page 消耗 1 个 document unit，续页只记录
+  physical calls/bytes；内部 20 页/文档的 calls 上限只是安全阀，不是供应商计费口径。Gemini bridge 尚未实现，
+  所以 1,000 次目前只是 governance input，不是已部署 policy。分页 coordinator 的测试已确认首页记 1、续页记 0，
+  并覆盖页数/总响应字节/文档字符上限和 crash replay
 - 修正版 3×30 canary 的三个 run identity 各自独立，90/90 fresh execution，三轮均 30/30、0 FP、0 high miss，
   总成本 USD 0.12906825；随后真实 isolated shadow 固定 GPT-5.6 Sol → Gemini 3.7 Flash low，quality gate 为
   `eligible`，成本 USD 0.010518
@@ -723,9 +725,12 @@ cutover 仍须单独验收。
 - 真实 AlphaEngine 只读 canary 已完成 `search_library → get_document`：搜索得到 10 条结果，文档调用得到首个
   30,000 字符分片、内容 SHA-256 和 `next_cursor=30000`。这次 canary 直接验证 bridge/adapter，没有接入 live Core
   authority，也没有证明完整文档；
+- bounded multi-page coordinator 已新增 plan/page/manifest 三份闭合 contract。每页作为独立 physical call 记录
+  calls/bytes，只有首页消耗 1 个 document unit；逐页回查 Invocation、Usage、Settlement、raw Artifact 和
+  SourceEnvelope，触及限制只形成 partial，终页整文 hash/长度一致才形成 complete manifest；
 - 尚未部署，没有 production Catalog/profile/grant/mapping，没有模型调用，没有 Evidence/Claim/Thesis mutation。
-  下一道 gate 是实现 bounded multi-page document acquisition，把每页作为独立 physical call 计量并在终点形成完整
-  文档 authority；随后再接 Gemini web search discovery 和独立 web fetch。
+  production ResearchPlan/Scheduler 接线与真实完整文档 canary 仍须单独验收；下一开发切片是 Gemini web search
+  discovery 和独立 web fetch。
 
 ### P2 coordinator foundation 当前进度（fixture-only，未部署）
 

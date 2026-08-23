@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from .connector import source_envelope_content_hash
+from .connector import connector_quota_record_units, source_envelope_content_hash
 from .connector_runner import (
     ConnectorRunnerAdmissionGate,
     RunnerConflict,
@@ -526,12 +526,21 @@ class ConnectorTransportExecutor:
         final_usage = observed["attempt_outcome"] in {"succeeded", "rate_limited"}
         raw = observed["raw_object"]
         records = [] if observation is None else observation["source_record_refs"]
+        record_units = (
+            connector_quota_record_units(
+                admission.profile,
+                admission.call_spec,
+                actual_record_count=len(records),
+            )
+            if successful
+            else 0
+        )
         usage = self._authority.record_usage(
             attempt["id"],
             {
                 "calls": 1,
                 "bytes": int(raw["size_bytes"]) if successful else 0,
-                "records": len(records) if successful else 0,
+                "records": record_units,
                 "cost_micros": 0,
             },
             measurement_status="final" if final_usage else "unavailable",

@@ -84,6 +84,43 @@ def _quota_window(
     return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
 
 
+def connector_quota_record_units(
+    profile: Mapping[str, Any],
+    call_spec: Mapping[str, Any],
+    *,
+    actual_record_count: int | None = None,
+) -> int:
+    """Map one call to the policy's logical ``records`` quota meter.
+
+    AlphaEngine bills document acquisition per logical document, while Dalton
+    still records every page as a physical call.  The first page therefore
+    consumes one document unit and continuation pages consume zero.  Other
+    connectors retain the original conservative-record reservation and
+    observed-record settlement semantics.
+    """
+
+    source = profile.get("source_identity")
+    parameters = call_spec.get("parameters")
+    if (
+        isinstance(source, Mapping)
+        and source.get("source_ref") == "source:alphaengine"
+        and call_spec.get("operation") == "get_document"
+        and isinstance(parameters, Mapping)
+    ):
+        return 1 if parameters.get("cursor") is None else 0
+    if actual_record_count is None:
+        return int(profile["max_records"])
+    if (
+        isinstance(actual_record_count, bool)
+        or not isinstance(actual_record_count, int)
+        or actual_record_count < 0
+    ):
+        raise ConnectorValidationError(
+            "actual_record_count must be a non-negative integer"
+        )
+    return actual_record_count
+
+
 class ConnectorError(Exception):
     pass
 
@@ -1545,7 +1582,7 @@ class ConnectorStore:
                     "runner requires exactly one open authority reservation"
                 )
             invocation = cur.execute(
-                "SELECT connector_profile_ref FROM connector_invocations "
+                "SELECT connector_profile_ref,call_spec_ref FROM connector_invocations "
                 "WHERE connector_invocation_id=?",
                 (connector_invocation_ref,),
             ).fetchone()
@@ -1558,6 +1595,13 @@ class ConnectorStore:
             if profile_row is None:
                 raise ConnectorNotFound(invocation["connector_profile_ref"])
             profile = json.loads(profile_row["record_json"])
+            call_row = cur.execute(
+                "SELECT record_json FROM connector_call_specs WHERE call_spec_id=?",
+                (invocation["call_spec_ref"],),
+            ).fetchone()
+            if call_row is None:
+                raise ConnectorNotFound(invocation["call_spec_ref"])
+            call_spec = json.loads(call_row["record_json"])
             policy_row = cur.execute(
                 "SELECT policy_ref,record_json,content_hash FROM connector_rate_policy_versions "
                 "WHERE policy_version_id=?",
@@ -1577,7 +1621,8 @@ class ConnectorStore:
             if (
                 int(reserved["calls"]) != 1
                 or int(reserved["bytes"]) != int(profile["max_response_bytes"])
-                or int(reserved["records"]) != int(profile["max_records"])
+                or int(reserved["records"])
+                != connector_quota_record_units(profile, call_spec)
                 or int(reserved["cost_micros"])
                 < self._conservative_price_book_cost(cur, policy, profile)
             ):
@@ -1692,7 +1737,7 @@ class ConnectorStore:
             raise ConnectorBlocked("runner reservation deadline has expired")
         policy = self._active_rate_policy(self.connection, policy_ref, now)
         invocation = self.connection.execute(
-            "SELECT connector_profile_ref FROM connector_invocations "
+            "SELECT connector_profile_ref,call_spec_ref FROM connector_invocations "
             "WHERE connector_invocation_id=?",
             (connector_invocation_ref,),
         ).fetchone()
@@ -1707,6 +1752,13 @@ class ConnectorStore:
         if profile_row is None:
             raise ConnectorNotFound(invocation["connector_profile_ref"])
         profile = json.loads(profile_row["record_json"])
+        call_row = self.connection.execute(
+            "SELECT record_json FROM connector_call_specs WHERE call_spec_id=?",
+            (invocation["call_spec_ref"],),
+        ).fetchone()
+        if call_row is None:
+            raise ConnectorNotFound(invocation["call_spec_ref"])
+        call_spec = json.loads(call_row["record_json"])
         latest = self.connection.execute(
             "SELECT MAX(physical_attempt_number) AS attempt_number "
             "FROM connector_quota_reservations WHERE connector_invocation_ref=?",
@@ -1720,7 +1772,7 @@ class ConnectorStore:
         reserved = {
             "calls": 1,
             "bytes": int(profile["max_response_bytes"]),
-            "records": int(profile["max_records"]),
+            "records": connector_quota_record_units(profile, call_spec),
             "cost_micros": self._conservative_price_book_cost(
                 self.connection, policy, profile
             ),
