@@ -15,6 +15,7 @@ from dalton_core.writer_protocol import RemoteAuthorizationError, RemoteError, d
 from dalton_core.writer_server import (
     CORE_OPERATIONS,
     FEEDBACK_BRIDGE_OPERATIONS,
+    HUMAN_GOVERNANCE_OPERATIONS,
     MAX_CONNECTIONS,
     RESEARCH_REVIEW_CONTROL_OPERATIONS,
     THESIS_IMPACT_OPERATIONS,
@@ -40,7 +41,7 @@ def invocation(i, family="family", work_order="wo"):
 
 
 def thesis_payload(statement="s"):
-    return {"statement": statement, "mechanism": "m", "confidence": 0.7,
+    return {"statement": statement, "mechanism": "m", "confidence": "medium",
             "implied_expectation": "e", "claim_refs": [], "catalyst_refs": [],
             "falsifier_refs": [], "change_reason": "test"}
 
@@ -57,6 +58,7 @@ class WriterServiceTests(unittest.TestCase):
         self.core_token = "core-token-9f0c"
         self.review_token = "review-token-9f0c"
         self.thesis_impact_token = "thesis-impact-token-9f0c"
+        self.governance_token = "governance-token-9f0c"
         write_token_config(self.tokens, [
             Principal("worker", self.worker_token, WORKER_OPERATIONS, frozenset({"producer"}), frozenset({"wo"})),
             Principal("verifier", self.verifier_token, VERIFIER_OPERATIONS, frozenset({"verifier"}), frozenset({"wo"})),
@@ -71,6 +73,11 @@ class WriterServiceTests(unittest.TestCase):
                 self.thesis_impact_token,
                 THESIS_IMPACT_OPERATIONS,
                 actor_ref="system:thesis-impact-model-worker",
+            ),
+            Principal(
+                "coverage-governance", self.governance_token,
+                HUMAN_GOVERNANCE_OPERATIONS,
+                actor_ref="human:coverage-owner",
             ),
         ])
         self.env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
@@ -134,6 +141,10 @@ class WriterServiceTests(unittest.TestCase):
     def thesis_impact(self):
         return WriterClient(str(self.sock), self.thesis_impact_token)
 
+    @property
+    def governance(self):
+        return WriterClient(str(self.sock), self.governance_token)
+
     def test_permission_matrix_and_unknown_fields(self):
         with self.assertRaises(RemoteAuthorizationError):
             self.worker.register_invocation(invocation("worker-1", "one"))
@@ -162,6 +173,109 @@ class WriterServiceTests(unittest.TestCase):
             )
         with self.assertRaises(RemoteAuthorizationError):
             self.worker.thesis_impact_targets({}, limit=10)
+
+    def test_coverage_admission_writes_require_authenticated_human(self):
+        with self.assertRaises(RemoteAuthorizationError):
+            self.worker.register_driver_pack(
+                "driver-pack:forbidden", industry_ref="industry:us-it-services"
+            )
+        with self.assertRaises(RemoteAuthorizationError):
+            self.core.register_driver_pack(
+                "driver-pack:forbidden", industry_ref="industry:us-it-services"
+            )
+
+        mandate = self.governance.create_mandate(
+            mandate_ref="mandate:us-it-services-acn",
+            objective="Admit initial ACN coverage.",
+            scope_refs=[
+                "company:sec-cik:0001467373", "industry:us-it-services"
+            ],
+            constraints={"human_thesis_admission_required": True},
+            success_criteria={"initial_thesis_count": 1},
+            effective_from="2020-01-01T00:00:00+00:00",
+            effective_until=None,
+            activate=True,
+            version_id="mandate-version:us-it-services-acn:1",
+            idempotency_key="mandate:us-it-services-acn:1",
+        )
+        pack = self.governance.register_driver_pack(
+            "driver-pack:us-it-services",
+            industry_ref="industry:us-it-services",
+            title="US IT Services Driver Pack",
+            drivers=[{
+                "driver_ref": "driver:bookings-conversion",
+                "label": "Bookings conversion",
+                "mechanism": "Bookings convert into revenue with a lag.",
+                "metric_refs": ["metric:new-bookings"],
+            }],
+            metric_specs=[{
+                "metric_ref": "metric:new-bookings",
+                "label": "New bookings",
+                "definition": "Contract value recorded as new bookings.",
+                "unit": "USD",
+                "periodicity": "quarterly",
+                "preferred_source_refs": ["source:earnings-release"],
+                "verification_kind": "numeric_and_semantic",
+                "caveats": [],
+            }],
+            thesis_templates=[{
+                "template_ref": "template:ai-reinvention-growth",
+                "statement": "AI-led reinvention work can support growth.",
+                "mechanism": "Bookings convert while productivity protects margin.",
+                "driver_refs": ["driver:bookings-conversion"],
+                "implied_expectation": "Bookings support later revenue growth.",
+                "falsifier_refs": ["falsifier:bookings-conversion-breaks"],
+            }],
+            version_id="driver-pack-version:us-it-services:1",
+            prior_version_ref=None,
+            idempotency_key="driver-pack:us-it-services:1",
+        )
+        self.assertEqual(
+            self.core.get_driver_pack(pack["id"])["content_hash"],
+            pack["content_hash"],
+        )
+        candidate = self.governance.propose_thesis_admission(
+            candidate_id="thesis-admission-candidate:acn:1",
+            thesis_ref="thesis:acn:ai-reinvention-growth",
+            company_ref="company:sec-cik:0001467373",
+            industry_ref="industry:us-it-services",
+            template_ref="template:ai-reinvention-growth",
+            driver_refs=["driver:bookings-conversion"],
+            mandate_version_ref=mandate["id"],
+            mandate_version_hash=mandate["content_hash"],
+            driver_pack_version_ref=pack["id"],
+            driver_pack_version_hash=pack["content_hash"],
+            content={
+                "statement": "AI demand can sustain Accenture growth.",
+                "mechanism": "Bookings convert while productivity protects margin.",
+                "confidence": "medium",
+                "implied_expectation": "Bookings support later revenue growth.",
+                "claim_refs": [],
+                "catalyst_refs": ["catalyst:quarterly-results"],
+                "falsifier_refs": ["falsifier:bookings-conversion-breaks"],
+                "change_reason": "Initial human-reviewed ACN admission.",
+            },
+            idempotency_key="thesis-admission-candidate:acn:1",
+        )
+        admitted = self.governance.decide_thesis_admission(
+            candidate_id=candidate["id"],
+            candidate_hash=candidate["content_hash"],
+            verdict="admit",
+            rationale="Drivers and falsifiers are explicit.",
+            decision_id="thesis-admission-decision:acn:1",
+            idempotency_key="thesis-admission-decision:acn:1",
+        )
+        self.assertEqual(admitted["thesis_version"]["authority_kind"], "human_admission")
+        self.assertEqual(
+            self.core.get_thesis_admission_candidate(candidate["id"])["id"],
+            candidate["id"],
+        )
+        self.assertEqual(
+            self.core.get_thesis_admission_decision(
+                "thesis-admission-decision:acn:1"
+            )["verdict"],
+            "admit",
+        )
 
     def test_agenda_context_operations_are_core_only_and_closed(self):
         # Materializing an Agenda context reads mandates and perception

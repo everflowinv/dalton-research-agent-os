@@ -46,6 +46,7 @@ from .policy import DEFAULT_POLICY, canonical_policy, evaluate_gate
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 _THESIS_FIELDS = frozenset({"statement", "mechanism", "confidence", "implied_expectation", "claim_refs", "catalyst_refs", "falsifier_refs", "change_reason"})
+_THESIS_CONFIDENCE_LEVELS = frozenset({"low", "medium", "high"})
 _CLAIM_FIELDS = frozenset({"subject_ref", "metric_or_aspect", "period", "basis", "normalized_statement", "claim_kind", "value", "unit", "producer_invocation_refs", "actor_ref"})
 
 
@@ -125,8 +126,96 @@ class DaltonStore:
         self.connection.execute("PRAGMA busy_timeout = 5000")
         self.connection.create_function("dalton_authorized", 0, lambda: int(self._authorized))
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._migrate_thesis_authority_columns()
         self._backfill_model_execution_links()
         self._ensure_default_policy()
+
+    def _migrate_thesis_authority_columns(self) -> None:
+        """Upgrade the legacy model-verification-only thesis table in place.
+
+        Existing v0.1 rows keep their exact JSON and verification binding.  The
+        additive authority columns permit v0.2 rows admitted by an explicit
+        human decision without inventing a model invocation.  Referencing
+        tables continue to point at the same ``thesis_versions`` name and ids.
+        """
+
+        columns = {
+            row[1] for row in self.connection.execute(
+                "PRAGMA table_info(thesis_versions)"
+            ).fetchall()
+        }
+        if {"admission_decision_id", "authority_kind", "authority_ref"} <= columns:
+            return
+        legacy = {
+            "version_id", "thesis_id", "version_number", "content_json",
+            "content_hash", "prior_version_id", "change_id", "verification_id",
+            "committed_by", "created_at",
+        }
+        if columns != legacy:
+            raise ValidationError("thesis_versions has an unsupported legacy shape")
+        if self.connection.in_transaction:
+            raise RuntimeError("thesis authority migration requires no open transaction")
+        self.connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.connection.executescript(
+                """
+                BEGIN IMMEDIATE;
+                DROP TRIGGER IF EXISTS thesis_versions_no_update;
+                DROP TRIGGER IF EXISTS thesis_versions_no_delete;
+                DROP TRIGGER IF EXISTS thesis_versions_authorized_insert;
+                CREATE TABLE thesis_versions_v2 (
+                    version_id TEXT PRIMARY KEY,
+                    thesis_id TEXT NOT NULL,
+                    version_number INTEGER NOT NULL,
+                    content_json TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    prior_version_id TEXT REFERENCES thesis_versions_v2(version_id),
+                    change_id TEXT REFERENCES staging_changes(change_id),
+                    verification_id TEXT REFERENCES verification_records(verification_id),
+                    admission_decision_id TEXT REFERENCES thesis_admission_decisions(decision_id),
+                    authority_kind TEXT NOT NULL CHECK(authority_kind IN ('verification','human_admission')),
+                    authority_ref TEXT NOT NULL,
+                    committed_by TEXT,
+                    created_at TEXT NOT NULL,
+                    CHECK(
+                        (authority_kind='verification' AND change_id IS NOT NULL AND verification_id IS NOT NULL AND admission_decision_id IS NULL AND authority_ref=verification_id)
+                        OR
+                        (authority_kind='human_admission' AND change_id IS NULL AND verification_id IS NULL AND admission_decision_id IS NOT NULL AND authority_ref=admission_decision_id)
+                    ),
+                    UNIQUE (thesis_id, version_number)
+                );
+                INSERT INTO thesis_versions_v2(
+                    version_id,thesis_id,version_number,content_json,content_hash,
+                    prior_version_id,change_id,verification_id,admission_decision_id,
+                    authority_kind,authority_ref,committed_by,created_at
+                )
+                SELECT version_id,thesis_id,version_number,content_json,content_hash,
+                       prior_version_id,change_id,verification_id,NULL,
+                       'verification',verification_id,committed_by,created_at
+                FROM thesis_versions;
+                DROP TABLE thesis_versions;
+                ALTER TABLE thesis_versions_v2 RENAME TO thesis_versions;
+                CREATE TRIGGER thesis_versions_no_update
+                BEFORE UPDATE ON thesis_versions BEGIN
+                    SELECT RAISE(ABORT, 'thesis_versions is immutable');
+                END;
+                CREATE TRIGGER thesis_versions_no_delete
+                BEFORE DELETE ON thesis_versions BEGIN
+                    SELECT RAISE(ABORT, 'thesis_versions is immutable');
+                END;
+                CREATE TRIGGER thesis_versions_authorized_insert
+                BEFORE INSERT ON thesis_versions
+                WHEN dalton_authorized() = 0 BEGIN
+                    SELECT RAISE(ABORT, 'thesis_versions insert requires DaltonStore');
+                END;
+                COMMIT;
+                """
+            )
+        finally:
+            self.connection.execute("PRAGMA foreign_keys = ON")
+        violations = self.connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise ValidationError("thesis authority migration broke foreign keys")
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -569,6 +658,8 @@ class DaltonStore:
             raise ValidationError(f"thesis content has unknown fields: {sorted(unknown)}")
         if missing:
             raise ValidationError(f"thesis content is missing fields: {sorted(missing)}")
+        if content.get("confidence") not in _THESIS_CONFIDENCE_LEVELS:
+            raise ValidationError("thesis confidence must be low, medium, or high")
         encoded = canonical_json(content)
         now = _now()
         with self._transaction() as cur:
@@ -743,6 +834,13 @@ class DaltonStore:
             stage = cur.execute("SELECT * FROM staging_changes WHERE change_id=?", (change_id,)).fetchone()
             if not stage:
                 raise NotFound(f"staging change not found: {change_id}")
+            if cur.execute(
+                "SELECT 1 FROM thesis_admission_candidates WHERE thesis_ref=? LIMIT 1",
+                (stage["thesis_id"],),
+            ).fetchone():
+                raise GateRejected(
+                    "coverage-governed thesis creation and revision require human admission authority"
+                )
             actual_stage_hash = content_hash(json.loads(stage["content_json"]))
             if actual_stage_hash != stage["content_hash"]:
                 raise GateRejected("staged content no longer matches its content hash")
@@ -813,10 +911,11 @@ class DaltonStore:
                 if not cur.execute("SELECT 1 FROM evidence_relations WHERE claim_version_id=? LIMIT 1", (claim_ref,)).fetchone():
                     raise GateRejected(f"thesis ClaimVersion has no EvidenceRelation: {claim_ref}")
             thesis_wire = {
-                "schema_version": "0.1", "id": version_id, "created_at": now,
+                "schema_version": "0.2", "id": version_id, "created_at": now,
                 "thesis_ref": stage["thesis_id"], "version": version_number,
                 **thesis_payload, "prior_version_ref": prior_id,
-                "verification_ref": verification_id, "committed_by_ref": actor_ref,
+                "authority_kind": "verification", "authority_ref": verification_id,
+                "committed_by_ref": actor_ref,
                 "content_hash": stage["content_hash"],
             }
             try:
@@ -825,8 +924,8 @@ class DaltonStore:
                 raise ValidationError(str(exc)) from exc
             thesis_encoded = canonical_json(validated_thesis.to_dict())
             cur.execute(
-                "INSERT INTO thesis_versions(version_id,thesis_id,version_number,content_json,content_hash,prior_version_id,change_id,verification_id,committed_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (version_id, stage["thesis_id"], version_number, thesis_encoded, stage["content_hash"], prior_id, change_id, verification_id, actor_ref, now),
+                "INSERT INTO thesis_versions(version_id,thesis_id,version_number,content_json,content_hash,prior_version_id,change_id,verification_id,admission_decision_id,authority_kind,authority_ref,committed_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (version_id, stage["thesis_id"], version_number, thesis_encoded, stage["content_hash"], prior_id, change_id, verification_id, None, "verification", verification_id, actor_ref, now),
             )
             if fault_at == "after_version":
                 raise RuntimeError("injected commit failure after version insert")

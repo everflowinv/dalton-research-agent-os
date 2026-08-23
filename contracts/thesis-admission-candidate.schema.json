@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/thesis-admission-candidate.schema.json",
+  "title": "ThesisAdmissionCandidate",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "thesis_ref", "company_ref",
+    "industry_ref", "template_ref", "driver_refs", "mandate_version_ref", "mandate_version_hash",
+    "driver_pack_version_ref", "driver_pack_version_hash", "content",
+    "thesis_content_hash", "proposed_by_ref", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "thesis_ref": {"type": "string", "minLength": 1},
+    "company_ref": {"type": "string", "minLength": 1},
+    "industry_ref": {"type": "string", "minLength": 1},
+    "template_ref": {"type": "string", "minLength": 1},
+    "driver_refs": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "mandate_version_ref": {"type": "string", "minLength": 1},
+    "mandate_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "driver_pack_version_ref": {"type": "string", "minLength": 1},
+    "driver_pack_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "content": {"$ref": "#/$defs/thesis_content"},
+    "thesis_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "proposed_by_ref": {"type": "string", "pattern": "^human:"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "thesis_content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "statement", "mechanism", "confidence", "implied_expectation",
+        "claim_refs", "catalyst_refs", "falsifier_refs", "change_reason"
+      ],
+      "properties": {
+        "statement": {"type": "string", "minLength": 1},
+        "mechanism": {"type": "string", "minLength": 1},
+        "confidence": {"enum": ["low", "medium", "high"]},
+        "implied_expectation": {"type": "string", "minLength": 1},
+        "claim_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "catalyst_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "falsifier_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "change_reason": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

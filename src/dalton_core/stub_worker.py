@@ -68,7 +68,7 @@ class StubModelWorker:
 
     def _produce_handler(self, work: WorkOrder, profile: RuntimeProfile) -> Mapping[str, Any]:
         result = {
-            "outputs": {"statement": work.question, "mechanism": "deterministic fixture", "confidence": 0.5,
+            "outputs": {"statement": work.question, "mechanism": "deterministic fixture", "confidence": "medium",
                         "implied_expectation": "fixture completes", "claim_refs": [], "catalyst_refs": [],
                         "falsifier_refs": [], "change_reason": "stub producer"},
             "usage": {"input_tokens": 1, "output_tokens": 1, "tokens": 2},

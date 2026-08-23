@@ -225,6 +225,30 @@ class WriterClient:
     def record_cost(self, usage_entry_ref: str, **params: Any) -> Any:
         return self.call("record_cost", {"usage_entry_ref": usage_entry_ref, **params})
 
+    def register_driver_pack(self, driver_pack_ref: str, **params: Any) -> Any:
+        return self.call(
+            "register_driver_pack", {"driver_pack_ref": driver_pack_ref, **params}
+        )
+
+    def get_driver_pack(self, version_id: str) -> Any:
+        return self.call("get_driver_pack", {"version_id": version_id})
+
+    def propose_thesis_admission(self, **params: Any) -> Any:
+        return self.call("propose_thesis_admission", params)
+
+    def get_thesis_admission_candidate(self, candidate_id: str) -> Any:
+        return self.call(
+            "get_thesis_admission_candidate", {"candidate_id": candidate_id}
+        )
+
+    def decide_thesis_admission(self, **params: Any) -> Any:
+        return self.call("decide_thesis_admission", params)
+
+    def get_thesis_admission_decision(self, decision_id: str) -> Any:
+        return self.call(
+            "get_thesis_admission_decision", {"decision_id": decision_id}
+        )
+
     def thesis_impact_targets(
         self, company_thesis_refs: Mapping[str, str], *, limit: int = 100
     ) -> Any:

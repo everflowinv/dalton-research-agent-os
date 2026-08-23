@@ -223,6 +223,33 @@ class ContractTests(unittest.TestCase):
                 "reason", None, "verify", "actor", "hash",
             )
 
+    def test_thesis_version_v0_2_uses_ordinal_and_explicit_authority(self):
+        wire = {
+            "schema_version": "0.2",
+            "id": "thesis-version:v2",
+            "created_at": "2026-08-23T00:00:00+00:00",
+            "thesis_ref": "thesis:acn",
+            "version": 1,
+            "statement": "statement",
+            "mechanism": "mechanism",
+            "confidence": "medium",
+            "implied_expectation": "expectation",
+            "claim_refs": [],
+            "catalyst_refs": [],
+            "falsifier_refs": ["falsifier:one"],
+            "change_reason": "initial human admission",
+            "prior_version_ref": None,
+            "authority_kind": "human_admission",
+            "authority_ref": "decision:one",
+            "committed_by_ref": "human:owner",
+            "content_hash": "a" * 64,
+        }
+        self.assertEqual(ThesisVersion.from_dict(wire).to_dict(), wire)
+        with self.assertRaises(ValidationError):
+            ThesisVersion.from_dict({**wire, "confidence": 0.7})
+        with self.assertRaises(ValidationError):
+            ThesisVersion.from_dict({**wire, "verification_ref": "verification:one"})
+
     def test_independence_predicate_closed_shape(self):
         pair = validate_independence_predicate({
             "left_path": "producer.model_family", "operator": "ne",

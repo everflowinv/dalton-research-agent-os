@@ -431,12 +431,37 @@ class ThesisImpactAuthority:
         except Exception as exc:
             raise ThesisImpactConflict("ThesisVersion is invalid") from exc
         payload = {field: wire[field] for field in _THESIS_CONTENT_FIELDS}
+        if wire["schema_version"] == "0.1":
+            authority_matches = (
+                wire["verification_ref"] == row["verification_id"]
+                and row["authority_kind"] == "verification"
+                and row["authority_ref"] == row["verification_id"]
+                and row["admission_decision_id"] is None
+            )
+        else:
+            authority_matches = (
+                wire["authority_kind"] == row["authority_kind"]
+                and wire["authority_ref"] == row["authority_ref"]
+                and (
+                    (
+                        row["authority_kind"] == "verification"
+                        and row["verification_id"] == row["authority_ref"]
+                        and row["admission_decision_id"] is None
+                    )
+                    or
+                    (
+                        row["authority_kind"] == "human_admission"
+                        and row["verification_id"] is None
+                        and row["admission_decision_id"] == row["authority_ref"]
+                    )
+                )
+            )
         if (
             wire["id"] != thesis_version_ref
             or wire["thesis_ref"] != row["thesis_id"]
             or wire["version"] != row["version_number"]
             or wire["prior_version_ref"] != row["prior_version_id"]
-            or wire["verification_ref"] != row["verification_id"]
+            or not authority_matches
             or wire["content_hash"] != row["content_hash"]
             or content_hash(payload) != row["content_hash"]
         ):

@@ -137,7 +137,7 @@ class Slice2IntegrationTests(unittest.TestCase):
         self.assertEqual(adjudicated["status"], "corroborated")
 
         content = {
-            "statement": "Revenue is growing", "mechanism": "volume", "confidence": 0.6,
+            "statement": "Revenue is growing", "mechanism": "volume", "confidence": "medium",
             "implied_expectation": "continued growth", "claim_refs": [claim["claim_version_id"]],
             "catalyst_refs": [], "falsifier_refs": [], "change_reason": "new filing",
         }

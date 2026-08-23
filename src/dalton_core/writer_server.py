@@ -39,6 +39,13 @@ from .context_materializer import (
     ContextMaterializerError,
     ContextMaterializerUnsupported,
 )
+from .coverage_admission import (
+    CoverageAdmissionAuthority,
+    CoverageAdmissionConflict,
+    CoverageAdmissionError,
+    CoverageAdmissionNotFound,
+    CoverageAdmissionValidationError,
+)
 from .capability_registry import (
     CapabilityConflict,
     CapabilityNotFound,
@@ -151,6 +158,8 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "create_policy", "decide_capability_promotion", "rollback_capability",
     "create_agenda_policy", "create_mandate", "create_priority_override",
     "set_agenda_pause", "record_agenda_feedback",
+    "register_driver_pack", "propose_thesis_admission",
+    "decide_thesis_admission",
 })
 FEEDBACK_BRIDGE_OPERATIONS = frozenset({
     "list_agenda_feedback_targets", "record_agenda_feedback",
@@ -195,6 +204,9 @@ CORE_OPERATIONS = frozenset({
     "pending_agenda_outbox", "claim_agenda_outbox", "record_agenda_delivery",
     "create_workflow_version", "link_work_order", "record_usage",
     "create_price_rate_version", "record_cost",
+    "register_driver_pack", "get_driver_pack",
+    "propose_thesis_admission", "get_thesis_admission_candidate",
+    "decide_thesis_admission", "get_thesis_admission_decision",
 })
 
 
@@ -254,6 +266,12 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "record_usage": frozenset({"invocation_ref", "entry_id", "occurred_at", "metering_source", "measurement_status", "raw_usage", "workflow_ref", "provider_usage_ref", "correction_of_ref", "actor_ref", "idempotency_key", "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "total_tokens", "requests", "duration_ms", "input_bytes", "output_bytes"}),
     "create_price_rate_version": frozenset({"price_rate_ref", "provider", "model", "charge_type", "unit_quantity", "unit_price_micros", "currency", "effective_from", "effective_until", "source_ref", "prior_version_ref", "version_id", "idempotency_key", "actor_ref"}),
     "record_cost": frozenset({"usage_entry_ref", "price_rate_refs", "amount_micros", "currency", "cost_status", "calculation_ref", "correction_of_ref", "cost_entry_id", "idempotency_key", "actor_ref"}),
+    "register_driver_pack": frozenset({"driver_pack_ref", "industry_ref", "title", "drivers", "metric_specs", "thesis_templates", "actor_ref", "version_id", "prior_version_ref", "idempotency_key"}),
+    "get_driver_pack": frozenset({"version_id"}),
+    "propose_thesis_admission": frozenset({"candidate_id", "thesis_ref", "company_ref", "industry_ref", "template_ref", "driver_refs", "mandate_version_ref", "mandate_version_hash", "driver_pack_version_ref", "driver_pack_version_hash", "content", "actor_ref", "idempotency_key"}),
+    "get_thesis_admission_candidate": frozenset({"candidate_id"}),
+    "decide_thesis_admission": frozenset({"candidate_id", "candidate_hash", "verdict", "rationale", "decision_id", "actor_ref", "idempotency_key"}),
+    "get_thesis_admission_decision": frozenset({"decision_id"}),
     "thesis_impact_targets": frozenset({"company_thesis_refs", "limit"}),
     "thesis_impact_start": frozenset({"plan_version_ref", "thesis_ref"}),
     "thesis_impact_advance_assessment": frozenset({"plan_version_ref", "thesis_ref"}),
@@ -294,6 +312,9 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "record_usage": "actor_ref",
     "create_price_rate_version": "actor_ref",
     "record_cost": "actor_ref",
+    "register_driver_pack": "actor_ref",
+    "propose_thesis_admission": "actor_ref",
+    "decide_thesis_admission": "actor_ref",
 }
 
 
@@ -436,6 +457,7 @@ class WriterServer:
         self._registry: CapabilityRegistry | None = None
         self._agenda: AgendaStore | None = None
         self._observability: ObservabilityStore | None = None
+        self._coverage_admission: CoverageAdmissionAuthority | None = None
         self._scheduler_path = None if scheduler_path is None else str(scheduler_path)
         self._scheduler: Scheduler | None = None
         self._research_plan: ResearchPlanAuthority | None = None
@@ -472,6 +494,12 @@ class WriterServer:
         if self._observability is None:
             self._observability = ObservabilityStore(self.store)
         return self._observability
+
+    @property
+    def coverage_admission(self) -> CoverageAdmissionAuthority:
+        if self._coverage_admission is None:
+            raise WriterServerError("coverage-admission authority is unavailable")
+        return self._coverage_admission
 
     @property
     def thesis_impact_control(self) -> ResearchPlanThesisImpactCoordinator:
@@ -525,6 +553,7 @@ class WriterServer:
         self._registry = CapabilityRegistry(self._store)
         self._observability = ObservabilityStore(self._store)
         self._agenda = AgendaStore(self._store)
+        self._coverage_admission = CoverageAdmissionAuthority(self._store)
         if self._scheduler_path is not None:
             self._scheduler = Scheduler(self._scheduler_path)
             self._research_plan = ResearchPlanAuthority(self._store)
@@ -616,6 +645,7 @@ class WriterServer:
         self._registry = None
         self._agenda = None
         self._observability = None
+        self._coverage_admission = None
 
     def _serve_connection(self, conn: socket.socket) -> None:
         reader = conn.makefile("rb")
@@ -1103,6 +1133,26 @@ class WriterServer:
         usage_entry_ref = values.pop("usage_entry_ref")
         return self.observability.record_cost(usage_entry_ref, **values)
 
+    def _op_register_driver_pack(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        driver_pack_ref = values.pop("driver_pack_ref")
+        return self.coverage_admission.register_driver_pack(driver_pack_ref, **values)
+
+    def _op_get_driver_pack(self, p: Mapping[str, Any]) -> Any:
+        return self.coverage_admission.driver_pack(**dict(p))
+
+    def _op_propose_thesis_admission(self, p: Mapping[str, Any]) -> Any:
+        return self.coverage_admission.propose_thesis_admission(**dict(p))
+
+    def _op_get_thesis_admission_candidate(self, p: Mapping[str, Any]) -> Any:
+        return self.coverage_admission.candidate(**dict(p))
+
+    def _op_decide_thesis_admission(self, p: Mapping[str, Any]) -> Any:
+        return self.coverage_admission.decide_thesis_admission(**dict(p))
+
+    def _op_get_thesis_admission_decision(self, p: Mapping[str, Any]) -> Any:
+        return self.coverage_admission.decision(**dict(p))
+
     def _op_thesis_impact_targets(self, p: Mapping[str, Any]) -> Any:
         if self._research_plan is None or self._backlog is None:
             raise WriterServerError("thesis-impact control plane is unavailable")
@@ -1165,11 +1215,11 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError)):
             return "rejected"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict)):
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
@@ -1181,7 +1231,7 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, CapabilityRegistryError):
             return "store_error"
-        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError)):
+        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError)):
             return "store_error"
         return "internal_error"
 
@@ -1191,11 +1241,11 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, CoverageAdmissionValidationError)):
             return "request rejected by contract or gate"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, CoverageAdmissionNotFound)):
             return "requested object was not found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, CoverageAdmissionConflict)):
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ContextMaterializerError, PerceptionError)):
             return "request rejected by contract or gate"

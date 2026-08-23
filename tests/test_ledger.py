@@ -86,7 +86,7 @@ class LedgerTests(unittest.TestCase):
                 "basis": "b", "normalized_statement": "s", "claim_kind": "qualitative", "status": "corroborated",
             })
         self.s.stage_change("c-missing", thesis_id="t", content={
-                "statement": "s", "mechanism": "m", "confidence": .5, "implied_expectation": "e",
+                "statement": "s", "mechanism": "m", "confidence": "medium", "implied_expectation": "e",
                 "claim_refs": ["not-a-version"], "catalyst_refs": [], "falsifier_refs": [], "change_reason": "test",
             }, producer_invocation=inv("producer-missing", "family-a"))
         self.s.verify_change("c-missing", verification_id="v-missing", verifier_invocation=inv("verifier-missing", "family-b"), verdict="pass", findings=[])
@@ -100,7 +100,7 @@ class LedgerTests(unittest.TestCase):
             "claim_version_ref": claim["claim_version_id"], "relation": "supports",
         })
         self.s.stage_change("c", thesis_id="t", content={
-            "statement": "s", "mechanism": "m", "confidence": .5, "implied_expectation": "e",
+            "statement": "s", "mechanism": "m", "confidence": "medium", "implied_expectation": "e",
             "claim_refs": [claim["claim_version_id"]], "catalyst_refs": [], "falsifier_refs": [], "change_reason": "test",
         }, producer_invocation=inv("producer-2", "family-a"))
         self.s.verify_change("c", verification_id="v", verifier_invocation=inv("verifier", "family-b"), verdict="pass", findings=[])
@@ -109,7 +109,7 @@ class LedgerTests(unittest.TestCase):
     def test_thesis_claim_requires_evidence_relation(self):
         claim = self.claim("ungrounded")
         self.s.stage_change("unrelated", thesis_id="t", content={
-            "statement": "s", "mechanism": "m", "confidence": .5, "implied_expectation": "e",
+            "statement": "s", "mechanism": "m", "confidence": "medium", "implied_expectation": "e",
             "claim_refs": [claim["claim_version_id"]], "catalyst_refs": [], "falsifier_refs": [], "change_reason": "test",
         }, producer_invocation=inv("unrelated-producer", "family-a"))
         self.s.verify_change("unrelated", verification_id="unrelated-verifier", verifier_invocation=inv("unrelated-verifier", "family-b"), verdict="pass", findings=[])
@@ -125,7 +125,7 @@ class LedgerTests(unittest.TestCase):
                 "claim_version_ref": c["claim_version_id"], "relation": relation_type,
             })
             self.s.stage_change("change-" + relation_type, thesis_id="t-" + relation_type, content={
-                "statement": "s", "mechanism": "m", "confidence": .5, "implied_expectation": "e",
+                "statement": "s", "mechanism": "m", "confidence": "medium", "implied_expectation": "e",
                 "claim_refs": [c["claim_version_id"]], "catalyst_refs": [], "falsifier_refs": [], "change_reason": "test",
             }, producer_invocation=inv("thesis-producer-" + relation_type, "family-a"))
             self.s.verify_change("change-" + relation_type, verification_id="verifier-" + relation_type, verifier_invocation=inv("verifier-" + relation_type, "family-b"), verdict="pass", findings=[])

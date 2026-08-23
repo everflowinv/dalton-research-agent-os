@@ -1,6 +1,6 @@
 # Dalton 项目进度
 
-更新日期：2026-08-22
+更新日期：2026-08-23
 - live deployed source：`3fe746e`；thesis-impact production runner：`9c295ca`；OpenClaw host patch chain：
   `6f93b9b14`
 - live 已启用独立的 thesis-impact 短任务，每 300 秒运行一次；writer 持有 Core/Scheduler，worker 只能通过
@@ -9,6 +9,9 @@
   `profile:gemini-3-7-flash`，并要求 provider-controlled `thinking=low`
 - production day-budget policy 为 USD 25；当前 `company_thesis_refs={}`，live Core 也没有 ThesisVersion，
   因此短任务稳定返回 idle、provider call 为 0，也不会修改 Thesis current pointer
+- development candidate 已将首个覆盖切换为 US IT Services / ACN：ordinal ThesisVersion v0.2、versioned Driver Pack、
+  human-only admission candidate/decision 和唯一 ACN mapping fixture 已在 in-memory Core 跑通；尚未写 live Core，
+  尚未激活 production mapping，也没有产生付费模型调用
 - 修正版 3×30 canary 的三个 run identity 各自独立，90/90 fresh execution，三轮均 30/30、0 FP、0 high miss，
   总成本 USD 0.12906825；随后真实 isolated shadow 固定 GPT-5.6 Sol → Gemini 3.7 Flash low，quality gate 为
   `eligible`，成本 USD 0.010518
@@ -859,9 +862,9 @@ Postgres/Temporal 规模化门槛和迁移。
   production object lifecycle 和 offsite disaster recovery；
 - hostile-code OS/container identity 与 sandbox，以及 production multi-runtime/scale。
 
-另有一项首个 live thesis commit 前必须裁决的 contract debt：`ThesisVersion.confidence` 当前仍是
-0..1 float，与蓝图“不用伪精确分数”存在张力。需要 ADR 决定改成 ordinal confidence，还是保留经过
-校准的概率语义。
+首个 live thesis commit 前的 confidence contract debt 已由 ADR-0001 裁决：新 `ThesisVersion` v0.2 只接受
+`low / medium / high`，旧 v0.1 float 只读兼容。US IT Services / ACN 初始 coverage thesis 只允许 human admission；
+candidate 建立后，旧 model-verification commit 不能创建或修改同一 thesis。
 
 ## 已上线的运行面
 
@@ -877,7 +880,8 @@ Postgres/Temporal 规模化门槛和迁移。
 
 已部署验证基线：Python 195/195，OpenClaw broker 15/15，Python 3.11/3.13 wheel build 与 GitHub CI
 通过；Core、Scheduler、Model Router SQLite integrity 均为 `ok`。当前工作树的专项测试、构建和 CI
-状态在提交前另行更新，不能与 live 基线混写。
+状态不能与 live 基线混写。US IT Services / ACN 开发候选已完成 Python 658/658 全量回归和 Python 3.13
+sdist/wheel 构建；尚未提交远端 CI，也尚未部署。
 
 ## Connector Fabric Shadow
 
@@ -1142,6 +1146,8 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - 3×30 canary 独立复核与更正：`docs/reports/verifier-canary-independent-audit-2026-08-22.md`
 - GPT-5.6 Sol assessment producer phase pin：`docs/reports/assessment-producer-phase-pin-2026-08-22.md`
 - Thesis-impact per-day 预算硬顶与失败告警：`docs/reports/thesis-impact-day-budget-and-alerts-2026-08-22.md`
+- Thesis confidence 与 coverage admission ADR：`docs/adr/0001-thesis-confidence-and-coverage-admission.md`
+- US IT Services / ACN 初始覆盖准入：`docs/reports/us-it-services-acn-admission-v1-2026-08-23.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`

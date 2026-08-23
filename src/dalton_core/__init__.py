@@ -35,6 +35,21 @@ _LAZY_EXPORTS = {
     ),
     "ModelRouter": (".model_router", "ModelRouter"),
     "ObservabilityStore": (".observability", "ObservabilityStore"),
+    "CoverageAdmissionAuthority": (
+        ".coverage_admission", "CoverageAdmissionAuthority"
+    ),
+    "CoverageAdmissionConflict": (
+        ".coverage_admission", "CoverageAdmissionConflict"
+    ),
+    "CoverageAdmissionError": (
+        ".coverage_admission", "CoverageAdmissionError"
+    ),
+    "CoverageAdmissionNotFound": (
+        ".coverage_admission", "CoverageAdmissionNotFound"
+    ),
+    "CoverageAdmissionValidationError": (
+        ".coverage_admission", "CoverageAdmissionValidationError"
+    ),
     "ConnectorStore": (".connector", "ConnectorStore"),
     "ConnectorAuthorityResolver": (".authority_resolver", "ConnectorAuthorityResolver"),
     "ResolvedAuthority": (".authority_resolver", "ResolvedAuthority"),
@@ -228,6 +243,11 @@ __all__ = [
     "ModelRouter",
     "McpManagedRunnerAdmissionGate",
     "ObservabilityStore",
+    "CoverageAdmissionAuthority",
+    "CoverageAdmissionConflict",
+    "CoverageAdmissionError",
+    "CoverageAdmissionNotFound",
+    "CoverageAdmissionValidationError",
     "OpenClawModelAdapter",
     "OpenClawMetadataImporter",
     "OpenClawMetadataExporter",

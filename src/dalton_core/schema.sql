@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS execution_invocation_model_links (
 
 CREATE TABLE IF NOT EXISTS verification_records (
     verification_id TEXT PRIMARY KEY,
-    change_id TEXT NOT NULL REFERENCES staging_changes(change_id),
+    change_id TEXT REFERENCES staging_changes(change_id),
     producer_invocation_id TEXT NOT NULL,
     verifier_invocation_id TEXT NOT NULL,
     verdict TEXT NOT NULL,
@@ -105,6 +105,61 @@ CREATE TABLE IF NOT EXISTS governance_policy_pointer (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS driver_pack_versions (
+    version_id TEXT PRIMARY KEY,
+    driver_pack_ref TEXT NOT NULL,
+    version_number INTEGER NOT NULL CHECK(version_number > 0),
+    prior_version_id TEXT REFERENCES driver_pack_versions(version_id),
+    industry_ref TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    actor_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(driver_pack_ref, version_number)
+);
+
+CREATE TABLE IF NOT EXISTS driver_pack_pointer (
+    driver_pack_ref TEXT PRIMARY KEY,
+    version_id TEXT NOT NULL REFERENCES driver_pack_versions(version_id)
+);
+
+CREATE TABLE IF NOT EXISTS thesis_admission_candidates (
+    candidate_id TEXT PRIMARY KEY,
+    thesis_ref TEXT NOT NULL,
+    company_ref TEXT NOT NULL,
+    industry_ref TEXT NOT NULL,
+    mandate_version_ref TEXT NOT NULL,
+    mandate_version_hash TEXT NOT NULL,
+    driver_pack_version_ref TEXT NOT NULL REFERENCES driver_pack_versions(version_id),
+    driver_pack_version_hash TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    record_hash TEXT NOT NULL,
+    proposed_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS thesis_admission_decisions (
+    decision_id TEXT PRIMARY KEY,
+    candidate_id TEXT NOT NULL UNIQUE REFERENCES thesis_admission_candidates(candidate_id),
+    candidate_hash TEXT NOT NULL,
+    verdict TEXT NOT NULL CHECK(verdict IN ('admit','reject')),
+    rationale TEXT NOT NULL,
+    reviewer_ref TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS coverage_governance_idempotency (
+    idempotency_key TEXT PRIMARY KEY,
+    operation TEXT NOT NULL,
+    request_hash TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS thesis_versions (
     version_id TEXT PRIMARY KEY,
     thesis_id TEXT NOT NULL,
@@ -112,10 +167,18 @@ CREATE TABLE IF NOT EXISTS thesis_versions (
     content_json TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     prior_version_id TEXT REFERENCES thesis_versions(version_id),
-    change_id TEXT NOT NULL REFERENCES staging_changes(change_id),
-    verification_id TEXT NOT NULL REFERENCES verification_records(verification_id),
+    change_id TEXT REFERENCES staging_changes(change_id),
+    verification_id TEXT REFERENCES verification_records(verification_id),
+    admission_decision_id TEXT REFERENCES thesis_admission_decisions(decision_id),
+    authority_kind TEXT NOT NULL CHECK(authority_kind IN ('verification','human_admission')),
+    authority_ref TEXT NOT NULL,
     committed_by TEXT,
     created_at TEXT NOT NULL,
+    CHECK(
+        (authority_kind='verification' AND change_id IS NOT NULL AND verification_id IS NOT NULL AND admission_decision_id IS NULL AND authority_ref=verification_id)
+        OR
+        (authority_kind='human_admission' AND change_id IS NULL AND verification_id IS NULL AND admission_decision_id IS NOT NULL AND authority_ref=admission_decision_id)
+    ),
     UNIQUE (thesis_id, version_number)
 );
 
@@ -299,6 +362,22 @@ CREATE TRIGGER IF NOT EXISTS governance_policy_versions_no_delete
 BEFORE DELETE ON governance_policy_versions BEGIN
     SELECT RAISE(ABORT, 'governance_policy_versions is immutable');
 END;
+CREATE TRIGGER IF NOT EXISTS driver_pack_versions_no_update
+BEFORE UPDATE ON driver_pack_versions BEGIN SELECT RAISE(ABORT, 'driver pack versions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS driver_pack_versions_no_delete
+BEFORE DELETE ON driver_pack_versions BEGIN SELECT RAISE(ABORT, 'driver pack versions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS thesis_admission_candidates_no_update
+BEFORE UPDATE ON thesis_admission_candidates BEGIN SELECT RAISE(ABORT, 'thesis admission candidates are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS thesis_admission_candidates_no_delete
+BEFORE DELETE ON thesis_admission_candidates BEGIN SELECT RAISE(ABORT, 'thesis admission candidates are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS thesis_admission_decisions_no_update
+BEFORE UPDATE ON thesis_admission_decisions BEGIN SELECT RAISE(ABORT, 'thesis admission decisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS thesis_admission_decisions_no_delete
+BEFORE DELETE ON thesis_admission_decisions BEGIN SELECT RAISE(ABORT, 'thesis admission decisions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_governance_idempotency_no_update
+BEFORE UPDATE ON coverage_governance_idempotency BEGIN SELECT RAISE(ABORT, 'coverage governance idempotency is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_governance_idempotency_no_delete
+BEFORE DELETE ON coverage_governance_idempotency BEGIN SELECT RAISE(ABORT, 'coverage governance idempotency is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS thesis_versions_no_update
 BEFORE UPDATE ON thesis_versions BEGIN
     SELECT RAISE(ABORT, 'thesis_versions is immutable');
@@ -343,6 +422,32 @@ CREATE TRIGGER IF NOT EXISTS governance_policy_versions_authorized_insert
 BEFORE INSERT ON governance_policy_versions
 WHEN dalton_authorized() = 0 BEGIN
     SELECT RAISE(ABORT, 'governance_policy_versions insert requires DaltonStore');
+END;
+CREATE TRIGGER IF NOT EXISTS driver_pack_versions_authorized_insert
+BEFORE INSERT ON driver_pack_versions WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'driver pack version insert requires DaltonStore');
+END;
+CREATE TRIGGER IF NOT EXISTS driver_pack_pointer_authorized_insert
+BEFORE INSERT ON driver_pack_pointer WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'driver pack pointer insert requires DaltonStore');
+END;
+CREATE TRIGGER IF NOT EXISTS driver_pack_pointer_authorized_update
+BEFORE UPDATE ON driver_pack_pointer WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'driver pack pointer update requires DaltonStore');
+END;
+CREATE TRIGGER IF NOT EXISTS driver_pack_pointer_no_delete
+BEFORE DELETE ON driver_pack_pointer BEGIN SELECT RAISE(ABORT, 'driver pack pointer cannot be deleted'); END;
+CREATE TRIGGER IF NOT EXISTS thesis_admission_candidates_authorized_insert
+BEFORE INSERT ON thesis_admission_candidates WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'thesis admission candidate insert requires DaltonStore');
+END;
+CREATE TRIGGER IF NOT EXISTS thesis_admission_decisions_authorized_insert
+BEFORE INSERT ON thesis_admission_decisions WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'thesis admission decision insert requires DaltonStore');
+END;
+CREATE TRIGGER IF NOT EXISTS coverage_governance_idempotency_authorized_insert
+BEFORE INSERT ON coverage_governance_idempotency WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'coverage governance idempotency insert requires DaltonStore');
 END;
 CREATE TRIGGER IF NOT EXISTS thesis_versions_authorized_insert
 BEFORE INSERT ON thesis_versions

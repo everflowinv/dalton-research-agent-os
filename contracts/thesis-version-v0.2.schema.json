@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/thesis-version-v0.2.schema.json",
+  "title": "ThesisVersionV0.2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "thesis_ref", "version",
+    "statement", "mechanism", "confidence", "implied_expectation",
+    "claim_refs", "catalyst_refs", "falsifier_refs", "change_reason",
+    "prior_version_ref", "authority_kind", "authority_ref",
+    "committed_by_ref", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.2"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "thesis_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "statement": {"type": "string", "minLength": 1},
+    "mechanism": {"type": "string", "minLength": 1},
+    "confidence": {"enum": ["low", "medium", "high"]},
+    "implied_expectation": {"type": "string", "minLength": 1},
+    "claim_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "catalyst_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "falsifier_refs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "change_reason": {"type": "string", "minLength": 1},
+    "prior_version_ref": {"type": ["string", "null"]},
+    "authority_kind": {"enum": ["verification", "human_admission"]},
+    "authority_ref": {"type": "string", "minLength": 1},
+    "committed_by_ref": {"type": "string", "minLength": 1},
+    "content_hash": {"type": "string", "minLength": 1}
+  }
+}

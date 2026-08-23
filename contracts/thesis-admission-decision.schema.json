@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/thesis-admission-decision.schema.json",
+  "title": "ThesisAdmissionDecision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "candidate_ref",
+    "candidate_hash", "verdict", "rationale", "reviewer_ref",
+    "resulting_thesis_version_ref", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "candidate_ref": {"type": "string", "minLength": 1},
+    "candidate_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verdict": {"enum": ["admit", "reject"]},
+    "rationale": {"type": "string", "minLength": 1},
+    "reviewer_ref": {"type": "string", "pattern": "^human:"},
+    "resulting_thesis_version_ref": {"type": ["string", "null"]},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

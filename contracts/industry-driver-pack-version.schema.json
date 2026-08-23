@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/industry-driver-pack-version.schema.json",
+  "title": "IndustryDriverPackVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "driver_pack_ref", "version",
+    "prior_version_ref", "industry_ref", "title", "drivers",
+    "metric_specs", "thesis_templates", "actor_ref", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "minLength": 1},
+    "driver_pack_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "prior_version_ref": {"type": ["string", "null"]},
+    "industry_ref": {"type": "string", "minLength": 1},
+    "title": {"type": "string", "minLength": 1},
+    "drivers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["driver_ref", "label", "mechanism", "metric_refs"],
+        "properties": {
+          "driver_ref": {"type": "string", "minLength": 1},
+          "label": {"type": "string", "minLength": 1},
+          "mechanism": {"type": "string", "minLength": 1},
+          "metric_refs": {
+            "type": "array", "minItems": 1, "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "metric_specs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "metric_ref", "label", "definition", "unit", "periodicity",
+          "preferred_source_refs", "verification_kind", "caveats"
+        ],
+        "properties": {
+          "metric_ref": {"type": "string", "minLength": 1},
+          "label": {"type": "string", "minLength": 1},
+          "definition": {"type": "string", "minLength": 1},
+          "unit": {"type": "string", "minLength": 1},
+          "periodicity": {"type": "string", "minLength": 1},
+          "preferred_source_refs": {
+            "type": "array", "minItems": 1, "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "verification_kind": {
+            "enum": ["numeric", "semantic", "numeric_and_semantic"]
+          },
+          "caveats": {
+            "type": "array", "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "thesis_templates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "template_ref", "statement", "mechanism", "driver_refs",
+          "implied_expectation", "falsifier_refs"
+        ],
+        "properties": {
+          "template_ref": {"type": "string", "minLength": 1},
+          "statement": {"type": "string", "minLength": 1},
+          "mechanism": {"type": "string", "minLength": 1},
+          "driver_refs": {
+            "type": "array", "minItems": 1, "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "implied_expectation": {"type": "string", "minLength": 1},
+          "falsifier_refs": {
+            "type": "array", "minItems": 1, "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "actor_ref": {"type": "string", "pattern": "^human:"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

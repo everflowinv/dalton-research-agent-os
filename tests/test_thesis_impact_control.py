@@ -133,7 +133,7 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             content={
                 "statement": "Quarterly revenue growth should support earnings growth.",
                 "mechanism": "Quarterly revenue growth sustains operating leverage.",
-                "confidence": 0.6,
+                "confidence": "medium",
                 "implied_expectation": "Reported quarterly revenue grows year over year.",
                 "claim_refs": [],
                 "catalyst_refs": [],

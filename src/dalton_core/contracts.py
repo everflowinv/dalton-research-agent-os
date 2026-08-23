@@ -828,25 +828,46 @@ class ThesisVersion:
     version: int
     statement: str
     mechanism: str
-    confidence: float
+    confidence: float | str
     implied_expectation: str
     claim_refs: tuple[str, ...]
     catalyst_refs: tuple[str, ...]
     falsifier_refs: tuple[str, ...]
     change_reason: str
     prior_version_ref: str | None
-    verification_ref: str
+    verification_ref: str | None
     committed_by_ref: str
     content_hash: str
+    authority_kind: str | None = None
+    authority_ref: str | None = None
 
     def __post_init__(self) -> None:
-        _check_common(self.schema_version, self.id, self.created_at)
-        for name, value in (("thesis_ref", self.thesis_ref), ("statement", self.statement), ("mechanism", self.mechanism), ("implied_expectation", self.implied_expectation), ("change_reason", self.change_reason), ("verification_ref", self.verification_ref), ("committed_by_ref", self.committed_by_ref), ("content_hash", self.content_hash)):
+        if self.schema_version not in {"0.1", "0.2"}:
+            raise ValidationError("unsupported ThesisVersion schema_version")
+        _require_string(self.id, "id")
+        _require_string(self.created_at, "created_at")
+        for name, value in (("thesis_ref", self.thesis_ref), ("statement", self.statement), ("mechanism", self.mechanism), ("implied_expectation", self.implied_expectation), ("change_reason", self.change_reason), ("committed_by_ref", self.committed_by_ref), ("content_hash", self.content_hash)):
             _require_string(value, name)
         if isinstance(self.version, bool) or not isinstance(self.version, int) or self.version < 1:
             raise ValidationError("version must be a positive integer")
-        if isinstance(self.confidence, bool) or not isinstance(self.confidence, (int, float)) or not 0 <= self.confidence <= 1:
-            raise ValidationError("confidence must be between 0 and 1")
+        if self.schema_version == "0.1":
+            if (
+                isinstance(self.confidence, bool)
+                or not isinstance(self.confidence, (int, float))
+                or not 0 <= self.confidence <= 1
+            ):
+                raise ValidationError("legacy confidence must be between 0 and 1")
+            _require_string(self.verification_ref, "verification_ref")
+            if self.authority_kind is not None or self.authority_ref is not None:
+                raise ValidationError("legacy ThesisVersion cannot carry v0.2 authority fields")
+        else:
+            if self.confidence not in {"low", "medium", "high"}:
+                raise ValidationError("confidence must be low, medium, or high")
+            if self.verification_ref is not None:
+                raise ValidationError("ThesisVersion v0.2 uses authority_ref")
+            if self.authority_kind not in {"verification", "human_admission"}:
+                raise ValidationError("authority_kind is invalid")
+            _require_string(self.authority_ref, "authority_ref")
         for name, value in (("claim_refs", self.claim_refs), ("catalyst_refs", self.catalyst_refs), ("falsifier_refs", self.falsifier_refs)):
             if not isinstance(value, tuple) or not all(isinstance(x, str) and x for x in value):
                 raise ValidationError(f"{name} must be a tuple of non-empty strings")
@@ -855,13 +876,45 @@ class ThesisVersion:
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ThesisVersion":
-        obj = _strict_kwargs(cls, _require_mapping(data, "ThesisVersion"))
+        obj = dict(_require_mapping(data, "ThesisVersion"))
+        schema_version = obj.get("schema_version")
+        common = {
+            "schema_version", "id", "created_at", "thesis_ref", "version",
+            "statement", "mechanism", "confidence", "implied_expectation",
+            "claim_refs", "catalyst_refs", "falsifier_refs", "change_reason",
+            "prior_version_ref", "committed_by_ref", "content_hash",
+        }
+        if schema_version == "0.1":
+            expected = common | {"verification_ref"}
+        elif schema_version == "0.2":
+            expected = common | {"authority_kind", "authority_ref"}
+        else:
+            raise ValidationError("unsupported ThesisVersion schema_version")
+        if set(obj) != expected:
+            unknown = sorted(set(obj) - expected)
+            missing = sorted(expected - set(obj))
+            raise ValidationError(
+                f"ThesisVersion fields are invalid; unknown={unknown}, missing={missing}"
+            )
+        if schema_version == "0.2":
+            obj["verification_ref"] = None
         for key in ("claim_refs", "catalyst_refs", "falsifier_refs"):
             obj[key] = tuple(obj[key])
         return cls(**obj)
 
     def to_dict(self) -> dict[str, Any]:
-        result = {f.name: getattr(self, f.name) for f in fields(self)}
+        names = (
+            "schema_version", "id", "created_at", "thesis_ref", "version",
+            "statement", "mechanism", "confidence", "implied_expectation",
+            "claim_refs", "catalyst_refs", "falsifier_refs", "change_reason",
+            "prior_version_ref", "committed_by_ref", "content_hash",
+        )
+        result = {name: getattr(self, name) for name in names}
+        if self.schema_version == "0.1":
+            result["verification_ref"] = self.verification_ref
+        else:
+            result["authority_kind"] = self.authority_kind
+            result["authority_ref"] = self.authority_ref
         for key in ("claim_refs", "catalyst_refs", "falsifier_refs"):
             result[key] = list(result[key])
         return result

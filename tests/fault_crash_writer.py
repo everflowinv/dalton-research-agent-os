@@ -13,7 +13,7 @@ def main(path: str) -> None:
                 "model": "model-" + i, "model_family": i, "runtime_ref": "runtime",
                 "actor_ref": "actor", "usage": {"tokens": 1}, "input_refs": [], "output_refs": [],
                 "started_at": "2026-01-01T00:00:00+00:00", "completed_at": None, "side_effects": [], "parent_ref": None}
-    store.stage_change("crash-change", thesis_id="crash-thesis", content={"statement": "s", "mechanism": "m", "confidence": 0.5, "implied_expectation": "e", "claim_refs": [], "catalyst_refs": [], "falsifier_refs": [], "change_reason": "crash"}, producer_invocation=invocation("crash-producer"))
+    store.stage_change("crash-change", thesis_id="crash-thesis", content={"statement": "s", "mechanism": "m", "confidence": "medium", "implied_expectation": "e", "claim_refs": [], "catalyst_refs": [], "falsifier_refs": [], "change_reason": "crash"}, producer_invocation=invocation("crash-producer"))
     store.verify_change("crash-change", verification_id="crash-verification", verifier_invocation=invocation("crash-verifier"), verdict="pass")
     original = store._insert_event
 

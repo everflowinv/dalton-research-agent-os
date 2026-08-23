@@ -21,7 +21,7 @@ def invocation(i, family="family", provider=None):
 
 
 def thesis_payload(**overrides):
-    value = {"statement": "s", "mechanism": "m", "confidence": 0.7,
+    value = {"statement": "s", "mechanism": "m", "confidence": "medium",
              "implied_expectation": "e", "claim_refs": [], "catalyst_refs": [],
              "falsifier_refs": [], "change_reason": "test"}
     value.update(overrides)

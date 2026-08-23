@@ -271,7 +271,7 @@ def _admit_thesis(authorities: Authorities, *, policy_owner: str) -> dict[str, A
                 "Microsoft quarterly revenue growth should support earnings growth."
             ),
             "mechanism": "Quarterly revenue growth sustains operating leverage.",
-            "confidence": 0.6,
+            "confidence": "medium",
             "implied_expectation": (
                 "Microsoft reports positive year-over-year quarterly revenue growth."
             ),

@@ -77,7 +77,7 @@ class ThesisImpactTests(unittest.TestCase):
             content={
                 "statement": "Revenue growth should sustain earnings growth.",
                 "mechanism": "Revenue growth sustains operating leverage.",
-                "confidence": 0.6,
+                "confidence": "medium",
                 "implied_expectation": "Quarterly revenue keeps growing year over year.",
                 "claim_refs": [],
                 "catalyst_refs": [],
