@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .model_router import ModelRouter, canonical_json
+from .model_router import ModelRouter, ModelRouterConflict, RoutingPolicyNotFound, canonical_json
 from .store import content_hash
 
 
@@ -562,14 +562,19 @@ def upgrade_openclaw_broker_catalog(
     """Append broker profiles plus shared and phase-pinned policies."""
 
     with ModelRouter(Path(router_path)) as router:
-        legacy_policy = router.register_policy(
+        legacy_policy = _register_policy_once(
+            router,
             _legacy_openclaw_broker_policy(created_at=checked_at)
         )
-        policy = router.register_policy(openclaw_broker_policy(created_at=checked_at))
-        assessment_policy = router.register_policy(
+        policy = _register_policy_once(
+            router, openclaw_broker_policy(created_at=checked_at)
+        )
+        assessment_policy = _register_policy_once(
+            router,
             openclaw_assessment_policy(created_at=checked_at)
         )
-        verifier_policy = router.register_policy(
+        verifier_policy = _register_policy_once(
+            router,
             openclaw_verifier_policy(created_at=checked_at)
         )
         desired_profiles = openclaw_broker_profiles(
@@ -609,6 +614,29 @@ def upgrade_openclaw_broker_catalog(
         "profiles": profiles,
         "router_path": str(router_path),
     }
+
+
+def _register_policy_once(
+    router: ModelRouter, desired: dict[str, Any]
+) -> dict[str, Any]:
+    """Reuse an immutable policy ref only when its semantics are unchanged."""
+
+    try:
+        existing = router.get_policy(desired["policy_version_ref"])
+    except RoutingPolicyNotFound:
+        return router.register_policy(desired)
+    ignored = {"created_at", "content_hash"}
+    existing_semantics = {
+        key: value for key, value in existing.items() if key not in ignored
+    }
+    desired_semantics = {
+        key: value for key, value in desired.items() if key not in ignored
+    }
+    if canonical_json(existing_semantics) != canonical_json(desired_semantics):
+        raise ModelRouterConflict(
+            "existing immutable routing policy differs from deployment contract"
+        )
+    return {"status": "duplicate", "policy": existing}
 
 
 def _profile_semantics(profile: dict[str, Any]) -> dict[str, Any]:

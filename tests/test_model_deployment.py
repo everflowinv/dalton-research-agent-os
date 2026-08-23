@@ -199,7 +199,7 @@ class ModelDeploymentTests(unittest.TestCase):
             self.assertEqual(latest["cost"]["output_per_million_usd"], 20.0)
             rerun = upgrade_openclaw_broker_catalog(
                 router_path,
-                checked_at=WHEN,
+                checked_at=WHEN + timedelta(hours=1),
                 openclaw_config_path=config_path,
             )
             self.assertTrue(
