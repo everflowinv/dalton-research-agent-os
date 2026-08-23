@@ -943,13 +943,26 @@ def _operation(
     completeness: str,
     pagination: str = "none",
     input_fields: Sequence[str] = ("query",),
+    optional_fields: Sequence[str] | None = None,
 ) -> dict[str, Any]:
+    optional = (
+        tuple(field for field in input_fields if field == "cursor")
+        if optional_fields is None
+        else tuple(optional_fields)
+    )
+    unknown_optional = set(optional) - set(input_fields)
+    if unknown_optional:
+        raise ConnectorInventoryError(
+            f"operation {name} optional fields are not input fields: "
+            f"{sorted(unknown_optional)}"
+        )
     return {
         "name": name,
         "source_method": name,
         "completeness": completeness,
         "pagination": pagination,
         "input_fields": tuple(input_fields),
+        "optional_fields": optional,
     }
 
 
@@ -1053,7 +1066,12 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "transport": "host_tool", "target": "host-tool:gemini-web-search",
         "hosts": (), "auth": "host_owned", "forbidden": ("route:web-fetch",), "fallbacks": (),
         "operations": (
-            _operation("search_web", completeness="ranked", pagination="cursor", input_fields=("query", "date_after", "date_before", "freshness", "cursor")),
+            _operation(
+                "search_web",
+                completeness="ranked",
+                input_fields=("query", "date_after", "date_before", "freshness"),
+                optional_fields=("date_after", "date_before", "freshness"),
+            ),
         ),
         "gate": "host_tool_runner_v0.2_and_credential_authority",
     },
@@ -1111,6 +1129,10 @@ def _field_schema(name: str) -> dict[str, Any]:
         }
     if name == "cursor":
         return {"type": ["string", "null"]}
+    if name in {"date_after", "date_before"}:
+        return {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+    if name == "freshness":
+        return {"type": "string", "enum": ["day", "week", "month", "year"]}
     if name in {"allowed_handles", "subreddits", "concept_candidates"}:
         return _array_of_strings()
     return _string()
@@ -1175,7 +1197,8 @@ def _validate_frozen_profile_contract(profile: Mapping[str, Any]) -> None:
     for operation_definition in definition["operations"]:
         name = operation_definition["name"]
         required_fields = tuple(
-            field for field in operation_definition["input_fields"] if field != "cursor"
+            field for field in operation_definition["input_fields"]
+            if field not in operation_definition["optional_fields"]
         )
         input_document = _schema_document(
             slug, name, "input",
@@ -1315,7 +1338,7 @@ def build_connector_inventory() -> dict[str, Any]:
                     {field: _field_schema(field) for field in operation_definition["input_fields"]},
                     tuple(
                         field for field in operation_definition["input_fields"]
-                        if field != "cursor"
+                        if field not in operation_definition["optional_fields"]
                     ),
                 ),
             )

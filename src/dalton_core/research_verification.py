@@ -789,6 +789,11 @@ def build_authority_source_material(resolved: Any) -> dict[str, Any]:
         "social_search", "public_web", "market_data",
     }:
         raise ResearchVerificationError("authority profile source type is not closed")
+    if source_type == "public_web" and summary.get("operation") != "fetch_get":
+        raise ResearchVerificationError(
+            "public web discovery/search/HEAD authority cannot form evidence material; "
+            "fetch_get the original source first"
+        )
     base = {
         "schema_version": "0.2",
         "id": "source-material:authority:" + summary["source_envelope_hash"],
@@ -1123,6 +1128,14 @@ def build_candidate_evidence(
     elif verification_mode == "connector_authority":
         if material_wire["schema_version"] != "0.2" or material_wire.get("provenance_mode") != "connector_authority":
             raise VerificationRejected("connector_authority evidence requires authority material")
+        if (
+            material_wire.get("source_type") == "public_web"
+            and material_wire.get("operation") != "fetch_get"
+        ):
+            raise VerificationRejected(
+                "public web discovery/search/HEAD material cannot become evidence; "
+                "fetch_get the original source first"
+            )
         # This value came from the validated connector profile when the
         # material was built; it is not accepted as a caller label.
         expected_source_type = material_wire["source_type"]

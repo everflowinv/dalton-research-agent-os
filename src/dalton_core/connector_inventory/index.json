@@ -1,5 +1,5 @@
 {
-  "content_hash": "3d47ad393f6d1bcb01ec39bab0695abeedfa0e592f79dc8743190a7bd5cb3f64",
+  "content_hash": "53d05584fb04b8671c4e939b4da34ed270608e853f02faa908c94f57f09b48b7",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "id": "connector-inventory:p1-0:0.1",
   "profiles": [
@@ -68,11 +68,11 @@
     },
     {
       "connector_ref": "connector:gemini-web-search",
-      "fixture_manifest_hash": "abbcc08c1769ac083bb99db2478d009f0d9f0eb67e35c3e171051cb566c8a047",
+      "fixture_manifest_hash": "240407ad8aa39a48aabae2d60ef11bc74f51bbc85f0aabf847c9cef2172414ef",
       "fixture_manifest_ref": "connector-fixture-manifest:gemini-web-search:0.1",
-      "profile_template_hash": "e09e671609a88522eaedcf80e7bb7f0171385b6c9cd5d3b7635150a03487ed4a",
+      "profile_template_hash": "d582375f608a1b6d17ffb9caabb18afedec83258d1ba9cd61f60f56c711f88f0",
       "profile_template_ref": "connector-profile-template:gemini-web-search:0.1",
-      "proposal_manifest_hash": "46bcf7d02c2852653c42b7874c783408a5928a4333b64aec8b9b20db60b751c4",
+      "proposal_manifest_hash": "352ba716a2aa9481ece3fbced6eac8c3a922f20eb5b09e8acb1053d1ebf89192",
       "proposal_manifest_ref": "connector-proposal-manifest:gemini-web-search:0.2"
     },
     {

@@ -24,6 +24,15 @@ _LAZY_EXPORTS = {
         ".openclaw_metadata_exporter", "OpenClawMetadataExporter"
     ),
     "PublicHttpTransport": (".public_http_transport", "PublicHttpTransport"),
+    "GeminiWebSearchAdapter": (
+        ".public_web_connector", "GeminiWebSearchAdapter"
+    ),
+    "PublicWebFetchAdapter": (
+        ".public_web_connector", "PublicWebFetchAdapter"
+    ),
+    "PublicWebUrlAuthorityResolver": (
+        ".public_web_connector", "PublicWebUrlAuthorityResolver"
+    ),
     "CredentialGrantEnvelope": (
         ".credential_authority", "CredentialGrantEnvelope"
     ),
@@ -322,7 +331,10 @@ __all__ = [
     "install_openclaw_catalog",
     "migrate_legacy_workspace",
     "ProcessRuntimeAdapter",
+    "GeminiWebSearchAdapter",
     "PublicHttpTransport",
+    "PublicWebFetchAdapter",
+    "PublicWebUrlAuthorityResolver",
     "ProjectionWriter",
     "Scheduler",
     "TrustedLaunchContext",

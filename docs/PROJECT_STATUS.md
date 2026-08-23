@@ -20,9 +20,17 @@
 - development candidate 已把 connector quota window 扩展到 IANA 当地日历日，并按 owner 指令冻结候选日配额：
   AlphaEngine `search_library` 50 次、`get_document` 80 份完整文档，Gemini `search_web` 1,000 次；三者均在
   `Asia/Shanghai` 00:00（UTC 16:00）重置。AlphaEngine 文档只在首个 page 消耗 1 个 document unit，续页只记录
-  physical calls/bytes；内部 20 页/文档的 calls 上限只是安全阀，不是供应商计费口径。Gemini bridge 尚未实现，
-  所以 1,000 次目前只是 governance input，不是已部署 policy。分页 coordinator 的测试已确认首页记 1、续页记 0，
+  physical calls/bytes；内部 20 页/文档的 calls 上限只是安全阀，不是供应商计费口径。Gemini 1,000 次仍是
+  development governance policy，尚未部署。分页 coordinator 的测试已确认首页记 1、续页记 0，
   并覆盖页数/总响应字节/文档字符上限和 crash replay
+- development candidate 已增加 Gemini `web_search` discovery bridge 和独立 public-web fetch adapter。冻结 inventory
+  已按真实 OpenClaw 合同修正为无 cursor，`freshness` 与显式日期窗互斥；search raw response 完整保存，向后只暴露
+  由引用 URL 推导的 opaque authority ref，不把 Gemini synthesis、snippet 或 title 当作网页正文。系统只有从 exact
+  search raw artifact 重建 URL authority，并经现有 public-only HTTPS transport 独立取回原始 bytes 后，才允许
+  `fetch_get` 形成 public-web authority material；search 和 HEAD 在 source-material gate 与 candidate-evidence gate
+  都会 fail closed。本地全量回归 694/694 通过；最终 citation 上限硬化后的关联超集 53/53 通过，compileall、
+  inventory 确定性重建和 Python 3.13 sdist/wheel 构建也通过。具体 OpenClaw host runner、production
+  Catalog/profile/grant 和真实 canary 尚未接线或执行
 - 修正版 3×30 canary 的三个 run identity 各自独立，90/90 fresh execution，三轮均 30/30、0 FP、0 high miss，
   总成本 USD 0.12906825；随后真实 isolated shadow 固定 GPT-5.6 Sol → Gemini 3.7 Flash low，quality gate 为
   `eligible`，成本 USD 0.010518

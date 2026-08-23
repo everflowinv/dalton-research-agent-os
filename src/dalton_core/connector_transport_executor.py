@@ -69,6 +69,25 @@ def _derived_id(prefix: str, idempotency_key: str) -> str:
     return f"{prefix}:{content_hash({'kind': prefix, 'idempotency_key': idempotency_key})}"
 
 
+def _raw_media_type(observation: Mapping[str, Any] | None) -> str:
+    """Read trusted adapter metadata without widening the source output schema."""
+
+    if observation is None:
+        return "application/json"
+    provider_usage = observation.get("provider_usage")
+    if not isinstance(provider_usage, Mapping):
+        return "application/json"
+    value = provider_usage.get("raw_media_type")
+    if (
+        not isinstance(value, str)
+        or len(value) > 127
+        or "/" not in value
+        or any(char.isspace() for char in value)
+    ):
+        return "application/json"
+    return value
+
+
 def invoke_adapter_with_deadline(
     adapter: Callable[..., Any],
     request: Mapping[str, Any],
@@ -692,7 +711,7 @@ class ConnectorTransportExecutor:
                 artifact_ref,
                 title="Connector raw response",
                 kind="connector_raw_response",
-                media_type="application/json",
+                media_type=_raw_media_type(observation),
                 artifact_content_hash=raw["content_hash"],
                 size_bytes=int(raw["size_bytes"]),
                 storage_locator=raw["storage_locator"],

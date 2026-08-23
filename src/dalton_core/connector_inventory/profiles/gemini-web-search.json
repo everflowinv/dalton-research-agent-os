@@ -6,24 +6,24 @@
     "use_time_authority": "required_future"
   },
   "connector_ref": "connector:gemini-web-search",
-  "content_hash": "e09e671609a88522eaedcf80e7bb7f0171385b6c9cd5d3b7635150a03487ed4a",
+  "content_hash": "d582375f608a1b6d17ffb9caabb18afedec83258d1ba9cd61f60f56c711f88f0",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
-  "fixture_manifest_hash": "abbcc08c1769ac083bb99db2478d009f0d9f0eb67e35c3e171051cb566c8a047",
+  "fixture_manifest_hash": "240407ad8aa39a48aabae2d60ef11bc74f51bbc85f0aabf847c9cef2172414ef",
   "fixture_manifest_ref": "connector-fixture-manifest:gemini-web-search:0.1",
   "id": "connector-profile-template:gemini-web-search:0.1",
   "operations": [
     {
       "completeness_ceiling": "ranked",
-      "input_schema_hash": "353586d293aa0f438fac914de88c7e9b3de14f8d02c902215f83be09e2a36972",
+      "input_schema_hash": "9edf401c93a613f80fd64be44fb73f325dd711a90735d8e71eae5e43082b9658",
       "input_schema_ref": "schema:connector-inventory:gemini-web-search:search_web:input:0.1",
       "operation": "search_web",
       "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
       "output_schema_ref": "schema:connector-inventory:gemini-web-search:search_web:output:0.1",
       "pagination": {
         "bounded_window_required": false,
-        "cursor_field": "cursor",
-        "max_pages": 20,
-        "mode": "cursor"
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
       },
       "side_effects": [
         "read:recorded-fixture"
@@ -52,22 +52,21 @@
       "document": {
         "additionalProperties": false,
         "properties": {
-          "cursor": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "date_after": {
-            "minLength": 1,
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
             "type": "string"
           },
           "date_before": {
-            "minLength": 1,
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
             "type": "string"
           },
           "freshness": {
-            "minLength": 1,
+            "enum": [
+              "day",
+              "week",
+              "month",
+              "year"
+            ],
             "type": "string"
           },
           "query": {
@@ -76,14 +75,11 @@
           }
         },
         "required": [
-          "query",
-          "date_after",
-          "date_before",
-          "freshness"
+          "query"
         ],
         "type": "object"
       },
-      "schema_hash": "353586d293aa0f438fac914de88c7e9b3de14f8d02c902215f83be09e2a36972",
+      "schema_hash": "9edf401c93a613f80fd64be44fb73f325dd711a90735d8e71eae5e43082b9658",
       "schema_ref": "schema:connector-inventory:gemini-web-search:search_web:input:0.1"
     },
     {
