@@ -190,6 +190,15 @@ class IndustryResearchAuthorityTests(unittest.TestCase):
                     {"ref": self.demand["claim_version_id"], "hash": self.demand["content_hash"]},
                 ],
                 "model_input_version_refs": [{"ref": self.model_input["id"], "hash": self.model_input["content_hash"]}],
+                "metric_coverage": [{
+                    "metric_ref": "metric:new-bookings", "status": "observed",
+                    "claim_version_refs": [self.bookings["claim_version_id"]],
+                    "rationale": "The reviewed filing exhibit reports total new bookings.",
+                }, {
+                    "metric_ref": "metric:ai-demand-signal", "status": "observed",
+                    "claim_version_refs": [self.demand["claim_version_id"]],
+                    "rationale": "The reviewed filing exhibit contains management AI-demand commentary.",
+                }],
                 "differentiators": ["Scaled global delivery and managed-services mix."],
                 "watchpoints": ["Bookings conversion and consulting growth."],
             }],
@@ -217,6 +226,8 @@ class IndustryResearchAuthorityTests(unittest.TestCase):
             {key: value for key, value in overlay.items() if key != "status"},
             self.authority.company_overlay(overlay["id"]),
         )
+        with self.assertRaises(IndustryResearchConflict):
+            self.authority.industry_brief_snapshot(pack["id"], [overlay["id"]])
         report = self.authority.integrity_report()
         self.assertTrue(report["ok"], report)
         self.assertEqual(1, report["evidence_pack_versions"])
@@ -250,6 +261,14 @@ class IndustryResearchAuthorityTests(unittest.TestCase):
         wrong_hash["driver_views"][0]["model_input_version_refs"][0]["hash"] = "0" * 64
         with self.assertRaises(IndustryResearchConflict):
             self.authority.register_company_overlay("company-overlay:wrong-model", **wrong_hash)
+        missing_metric = self.overlay_params(pack)
+        missing_metric["driver_views"][0]["metric_coverage"].pop()
+        with self.assertRaises(IndustryResearchConflict):
+            self.authority.register_company_overlay("company-overlay:missing-metric", **missing_metric)
+        false_gap = self.overlay_params(pack)
+        false_gap["driver_views"][0]["metric_coverage"][0]["status"] = "not_comparable"
+        with self.assertRaises(IndustryResearchValidationError):
+            self.authority.register_company_overlay("company-overlay:false-gap", **false_gap)
         other_evidence = self.store.register_evidence({
             "evidence_ref": "evidence:acn:unbound-source", "source_type": "filing",
             "source_ref": "sec:acn:unbound", "retrieved_at": NOW,

@@ -25,6 +25,9 @@ SCHEMA_VERSION = "0.1"
 COMPARABILITY_TIERS = frozenset({"core", "adjacent", "reference"})
 DEBATE_STATUSES = frozenset({"open", "resolved"})
 DRIVER_STANCES = frozenset({"positive", "neutral", "negative", "mixed", "unknown"})
+METRIC_COVERAGE_STATUSES = frozenset({
+    "observed", "not_found_in_reviewed_sources", "not_comparable", "not_applicable",
+})
 POSITION_STANCES = frozenset({"supports", "against", "qualifies"})
 _SCHEMA_PATH = Path(__file__).with_name("industry_research_schema.sql")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -253,7 +256,10 @@ def _driver_views(value: Any) -> list[dict[str, Any]]:
     for index, row in enumerate(rows):
         wire = _closed(
             row,
-            {"driver_ref", "stance", "claim_version_refs", "model_input_version_refs", "differentiators", "watchpoints"},
+            {
+                "driver_ref", "stance", "claim_version_refs", "model_input_version_refs",
+                "metric_coverage", "differentiators", "watchpoints",
+            },
             f"driver_views[{index}]",
         )
         wire["driver_ref"] = _text(wire["driver_ref"], "driver_ref")
@@ -261,6 +267,30 @@ def _driver_views(value: Any) -> list[dict[str, Any]]:
             raise IndustryResearchValidationError("driver stance is invalid")
         wire["claim_version_refs"] = _ref_hashes(wire["claim_version_refs"], "claim_version_refs", nonempty=True)
         wire["model_input_version_refs"] = _ref_hashes(wire["model_input_version_refs"], "model_input_version_refs")
+        coverage = _objects(wire["metric_coverage"], "metric_coverage", nonempty=True)
+        normalized_coverage: list[dict[str, Any]] = []
+        for coverage_index, coverage_row in enumerate(coverage):
+            item = _closed(
+                coverage_row,
+                {"metric_ref", "status", "claim_version_refs", "rationale"},
+                f"metric_coverage[{coverage_index}]",
+            )
+            item["metric_ref"] = _text(item["metric_ref"], "metric_coverage.metric_ref")
+            if item["status"] not in METRIC_COVERAGE_STATUSES:
+                raise IndustryResearchValidationError("metric coverage status is invalid")
+            item["claim_version_refs"] = _strings(
+                item["claim_version_refs"], "metric_coverage.claim_version_refs",
+                nonempty=item["status"] == "observed",
+            )
+            if item["status"] != "observed" and item["claim_version_refs"]:
+                raise IndustryResearchValidationError(
+                    "only observed metric coverage can reference claims"
+                )
+            item["rationale"] = _text(item["rationale"], "metric_coverage.rationale")
+            normalized_coverage.append(item)
+        if len(normalized_coverage) != len({item["metric_ref"] for item in normalized_coverage}):
+            raise IndustryResearchValidationError("metric coverage must contain unique metrics")
+        wire["metric_coverage"] = normalized_coverage
         wire["differentiators"] = _strings(wire["differentiators"], "differentiators")
         wire["watchpoints"] = _strings(wire["watchpoints"], "watchpoints", nonempty=True)
         result.append(wire)
@@ -581,7 +611,15 @@ class IndustryResearchAuthority:
                         raise IndustryResearchNotFound("evidence relation was not found")
                     evidence_refs.add(relation_row["evidence_version_id"])
             for view in request["driver_views"]:
+                coverage_by_metric = {
+                    item["metric_ref"]: item for item in view["metric_coverage"]
+                }
+                if set(coverage_by_metric) != driver_metrics[view["driver_ref"]]:
+                    raise IndustryResearchConflict(
+                        "company overlay must state coverage for every driver metric"
+                    )
                 view_evidence_refs: set[str] = set()
+                claim_metric_by_ref: dict[str, str] = {}
                 for claim_ref in view["claim_version_refs"]:
                     if pack_claims.get(claim_ref["ref"]) != claim_ref["hash"]:
                         raise IndustryResearchConflict("overlay claim is outside the evidence pack")
@@ -590,7 +628,20 @@ class IndustryResearchAuthority:
                         raise IndustryResearchConflict("overlay claim belongs to another subject")
                     if claim.get("metric_or_aspect") not in driver_metrics[view["driver_ref"]]:
                         raise IndustryResearchConflict("overlay claim metric belongs to another driver")
+                    claim_metric_by_ref[claim_ref["ref"]] = claim["metric_or_aspect"]
                     view_evidence_refs.update(pack_claim_evidence[claim_ref["ref"]])
+                covered_claim_refs: set[str] = set()
+                for metric_ref, coverage in coverage_by_metric.items():
+                    for claim_version_ref in coverage["claim_version_refs"]:
+                        if claim_metric_by_ref.get(claim_version_ref) != metric_ref:
+                            raise IndustryResearchConflict(
+                                "metric coverage claim is missing or belongs to another metric"
+                            )
+                        covered_claim_refs.add(claim_version_ref)
+                if covered_claim_refs != set(claim_metric_by_ref):
+                    raise IndustryResearchConflict(
+                        "every overlay claim must appear in observed metric coverage"
+                    )
                 for input_ref in view["model_input_version_refs"]:
                     model_input = self._model_input(cur, input_ref["ref"], input_ref["hash"])
                     payload = model_input.get("payload")
@@ -692,6 +743,96 @@ class IndustryResearchAuthority:
         if wire["id"] != row["version_id"] or wire["content_hash"] != row["content_hash"]:
             raise IndustryResearchConflict("company overlay row drifted")
         return wire
+
+    def industry_brief_snapshot(
+        self, evidence_pack_version_id: str, company_overlay_version_ids: list[str],
+    ) -> dict[str, Any]:
+        """Assemble one deterministic cross-company view from exact published versions."""
+
+        pack = self.evidence_pack(evidence_pack_version_id)
+        overlay_ids = _strings(
+            company_overlay_version_ids, "company_overlay_version_ids", nonempty=True
+        )
+        overlays = [self.company_overlay(version_id) for version_id in overlay_ids]
+        by_company: dict[str, dict[str, Any]] = {}
+        for overlay in overlays:
+            if (
+                overlay["industry_ref"] != pack["industry_ref"]
+                or overlay["evidence_pack_version_ref"] != pack["id"]
+                or overlay["evidence_pack_version_hash"] != pack["content_hash"]
+            ):
+                raise IndustryResearchConflict(
+                    "industry brief overlay is not bound to the evidence pack"
+                )
+            if overlay["company_ref"] in by_company:
+                raise IndustryResearchConflict("industry brief contains duplicate companies")
+            by_company[overlay["company_ref"]] = overlay
+        coverage_refs = {item["company_ref"] for item in pack["coverage_universe"]}
+        if set(by_company) != coverage_refs:
+            raise IndustryResearchConflict(
+                "industry brief requires one overlay for every coverage company"
+            )
+
+        driver_pack = self._driver_pack(
+            self.connection, pack["driver_pack_version_ref"], pack["driver_pack_version_hash"]
+        )
+        views_by_company = {
+            company_ref: {view["driver_ref"]: view for view in overlay["driver_views"]}
+            for company_ref, overlay in by_company.items()
+        }
+        scoreboard = []
+        metric_matrix = []
+        for driver in driver_pack["drivers"]:
+            driver_ref = driver["driver_ref"]
+            companies = []
+            for company in pack["coverage_universe"]:
+                view = views_by_company[company["company_ref"]][driver_ref]
+                observed = [
+                    item["metric_ref"] for item in view["metric_coverage"]
+                    if item["status"] == "observed"
+                ]
+                companies.append({
+                    "company_ref": company["company_ref"], "ticker": company["ticker"],
+                    "role": company["role"], "stance": view["stance"],
+                    "observed_metric_refs": observed,
+                    "unresolved_metric_refs": [
+                        item["metric_ref"] for item in view["metric_coverage"]
+                        if item["status"] != "observed"
+                    ],
+                })
+            scoreboard.append({"driver_ref": driver_ref, "companies": companies})
+            for metric_ref in driver["metric_refs"]:
+                cells = []
+                for company in pack["coverage_universe"]:
+                    view = views_by_company[company["company_ref"]][driver_ref]
+                    coverage = next(
+                        item for item in view["metric_coverage"]
+                        if item["metric_ref"] == metric_ref
+                    )
+                    cells.append({
+                        "company_ref": company["company_ref"], "ticker": company["ticker"],
+                        "status": coverage["status"],
+                        "claim_version_refs": coverage["claim_version_refs"],
+                        "rationale": coverage["rationale"],
+                    })
+                metric_matrix.append({
+                    "driver_ref": driver_ref, "metric_ref": metric_ref, "companies": cells,
+                })
+        return _record({
+            "schema_version": SCHEMA_VERSION, "projection_kind": "industry_brief_snapshot",
+            "industry_ref": pack["industry_ref"], "as_of": pack["as_of"],
+            "evidence_pack_version_ref": pack["id"],
+            "evidence_pack_version_hash": pack["content_hash"],
+            "driver_pack_version_ref": driver_pack["id"],
+            "driver_pack_version_hash": driver_pack["content_hash"],
+            "company_overlay_versions": [{
+                "company_ref": company["company_ref"],
+                "version_ref": by_company[company["company_ref"]]["id"],
+                "content_hash": by_company[company["company_ref"]]["content_hash"],
+            } for company in pack["coverage_universe"]],
+            "driver_scoreboard": scoreboard, "metric_difference_matrix": metric_matrix,
+            "debates": pack["debates"], "report_contract": pack["report_contract"],
+        })
 
     def integrity_report(self) -> dict[str, Any]:
         issues: list[str] = []

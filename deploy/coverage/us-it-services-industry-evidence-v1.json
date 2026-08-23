@@ -207,10 +207,56 @@
     "as_of": "2026-08-23T12:00:00+00:00",
     "role": "scaled global pure-play",
     "driver_views": [
-      {"driver_ref": "driver:bookings-mix-and-conversion", "stance": "mixed", "claim_keys": ["bookings-total", "bookings-growth-lc", "revenue-growth-lc"], "model_input_claim_keys": ["bookings-total", "bookings-growth-lc", "revenue-growth-lc"], "differentiators": ["Consulting and managed-services revenue were nearly balanced in Q3 FY2026."], "watchpoints": ["Whether bookings growth recovers and converts into local-currency revenue growth."]},
-      {"driver_ref": "driver:ai-reinvention-demand", "stance": "positive", "claim_keys": ["ai-demand-signal"], "model_input_claim_keys": [], "differentiators": ["Management described more large-scale AI transformation programs."], "watchpoints": ["Separate qualitative program commentary from disclosed AI bookings and revenue."]},
-      {"driver_ref": "driver:delivery-economics", "stance": "positive", "claim_keys": ["operating-margin-gaap"], "model_input_claim_keys": ["operating-margin-gaap"], "differentiators": ["GAAP operating margin expanded despite moderate local-currency growth."], "watchpoints": ["Track GAAP and adjusted margin separately when optimization costs recur."]},
-      {"driver_ref": "driver:cash-conversion-and-capital-return", "stance": "positive", "claim_keys": ["free-cash-flow"], "model_input_claim_keys": ["free-cash-flow"], "differentiators": ["The quarter produced USD 3.60 billion of issuer-reconciled free cash flow."], "watchpoints": ["Quarterly free cash flow is seasonal; compare full-year conversion and acquisition cash use."]}
+      {
+        "driver_ref": "driver:bookings-mix-and-conversion", "stance": "mixed",
+        "claim_keys": ["bookings-total", "bookings-growth-lc", "revenue-growth-lc"],
+        "model_input_claim_keys": ["bookings-total", "bookings-growth-lc", "revenue-growth-lc"],
+        "metric_coverage": [
+          {"metric_ref": "metric:new-bookings-total", "status": "observed", "claim_keys": ["bookings-total"], "rationale": "The reviewed Q3 FY2026 earnings exhibit reports total new bookings."},
+          {"metric_ref": "metric:new-bookings-consulting", "status": "not_found_in_reviewed_sources", "claim_keys": [], "rationale": "The evidence selected for this pack does not contain a consulting-bookings claim."},
+          {"metric_ref": "metric:new-bookings-managed-services", "status": "not_found_in_reviewed_sources", "claim_keys": [], "rationale": "The evidence selected for this pack does not contain a managed-services-bookings claim."},
+          {"metric_ref": "metric:revenue-growth-local-currency", "status": "observed", "claim_keys": ["revenue-growth-lc"], "rationale": "The reviewed exhibit reports local-currency revenue growth."},
+          {"metric_ref": "metric:new-bookings-growth-local-currency", "status": "observed", "claim_keys": ["bookings-growth-lc"], "rationale": "The reviewed exhibit reports local-currency new-bookings growth."}
+        ],
+        "differentiators": ["Consulting and managed-services revenue were nearly balanced in Q3 FY2026."],
+        "watchpoints": ["Whether bookings growth recovers and converts into local-currency revenue growth."]
+      },
+      {
+        "driver_ref": "driver:ai-reinvention-demand", "stance": "positive",
+        "claim_keys": ["ai-demand-signal"], "model_input_claim_keys": [],
+        "metric_coverage": [
+          {"metric_ref": "metric:genai-bookings", "status": "not_found_in_reviewed_sources", "claim_keys": [], "rationale": "The evidence selected for this pack does not contain a GenAI-bookings claim."},
+          {"metric_ref": "metric:genai-revenue", "status": "not_found_in_reviewed_sources", "claim_keys": [], "rationale": "The evidence selected for this pack does not contain a GenAI-revenue claim."},
+          {"metric_ref": "metric:new-bookings-total", "status": "not_comparable", "claim_keys": [], "rationale": "Total bookings are captured under conversion and are not treated as an AI-specific measure."},
+          {"metric_ref": "metric:ai-demand-signal", "status": "observed", "claim_keys": ["ai-demand-signal"], "rationale": "The reviewed exhibit contains qualitative large-scale AI program commentary."}
+        ],
+        "differentiators": ["Management described more large-scale AI transformation programs."],
+        "watchpoints": ["Separate qualitative program commentary from disclosed AI bookings and revenue."]
+      },
+      {
+        "driver_ref": "driver:delivery-economics", "stance": "positive",
+        "claim_keys": ["operating-margin-gaap"], "model_input_claim_keys": ["operating-margin-gaap"],
+        "metric_coverage": [
+          {"metric_ref": "metric:adjusted-operating-margin", "status": "not_found_in_reviewed_sources", "claim_keys": [], "rationale": "The evidence selected for this pack retains the GAAP margin claim only."},
+          {"metric_ref": "metric:utilization", "status": "not_found_in_reviewed_sources", "claim_keys": [], "rationale": "The evidence selected for this pack does not contain a utilization claim."},
+          {"metric_ref": "metric:voluntary-attrition", "status": "not_found_in_reviewed_sources", "claim_keys": [], "rationale": "The evidence selected for this pack does not contain an attrition claim."},
+          {"metric_ref": "metric:workforce", "status": "not_found_in_reviewed_sources", "claim_keys": [], "rationale": "The evidence selected for this pack does not contain a workforce claim."},
+          {"metric_ref": "metric:operating-margin-gaap", "status": "observed", "claim_keys": ["operating-margin-gaap"], "rationale": "The reviewed exhibit reports GAAP operating margin."}
+        ],
+        "differentiators": ["GAAP operating margin expanded despite moderate local-currency growth."],
+        "watchpoints": ["Track GAAP and adjusted margin separately when optimization costs recur."]
+      },
+      {
+        "driver_ref": "driver:cash-conversion-and-capital-return", "stance": "positive",
+        "claim_keys": ["free-cash-flow"], "model_input_claim_keys": ["free-cash-flow"],
+        "metric_coverage": [
+          {"metric_ref": "metric:free-cash-flow", "status": "observed", "claim_keys": ["free-cash-flow"], "rationale": "The reviewed exhibit reports issuer-reconciled free cash flow."},
+          {"metric_ref": "metric:free-cash-flow-conversion", "status": "not_found_in_reviewed_sources", "claim_keys": [], "rationale": "The evidence selected for this pack does not contain a same-period conversion claim."},
+          {"metric_ref": "metric:share-repurchase", "status": "not_found_in_reviewed_sources", "claim_keys": [], "rationale": "The evidence selected for this pack does not contain a repurchase claim."}
+        ],
+        "differentiators": ["The quarter produced USD 3.60 billion of issuer-reconciled free cash flow."],
+        "watchpoints": ["Quarterly free cash flow is seasonal; compare full-year conversion and acquisition cash use."]
+      }
     ],
     "key_differences": ["Accenture is the scaled global pure-play anchor; CTSH tests offshore-heavy delivery, EPAM tests digital engineering, and IBM tests an integrated hardware-software-services model."],
     "open_questions": ["Do ACN's AI programs convert into bookings faster than peer programs?", "Can consulting growth improve without giving back operating-margin gains?"],
