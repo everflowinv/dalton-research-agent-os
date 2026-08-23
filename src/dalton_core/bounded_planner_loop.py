@@ -608,6 +608,7 @@ class BoundedPlannerAuthority:
         actor_ref: str,
         planner_context_pack_ref: str | None = None,
         planner_context_pack_hash: str | None = None,
+        model_provenance: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         loop = self.loop(loop_version_ref)
         if self.terminal(loop["id"]) is not None:
@@ -648,6 +649,26 @@ class BoundedPlannerAuthority:
             planner_ref = DOCTRINE_AWARE_PLANNER_REF
             planner_hash = DOCTRINE_AWARE_PLANNER_HASH
             proposal_schema_version = "0.2"
+        provenance_wire = None
+        if model_provenance is not None:
+            if context is None:
+                raise BoundedPlannerValidationError(
+                    "model provenance requires an exact planner context"
+                )
+            from .llm_research_planner import (
+                LLM_RESEARCH_PLANNER_HASH,
+                LLM_RESEARCH_PLANNER_REF,
+                validate_model_provenance,
+            )
+
+            provenance_wire = validate_model_provenance(model_provenance)
+            if actor_ref != LLM_RESEARCH_PLANNER_REF:
+                raise BoundedPlannerValidationError(
+                    "model proposal actor must identify the LLM research planner"
+                )
+            planner_ref = LLM_RESEARCH_PLANNER_REF
+            planner_hash = LLM_RESEARCH_PLANNER_HASH
+            proposal_schema_version = "0.3"
         identity = {
             "loop_version_ref": loop["id"], "loop_version_hash": loop["content_hash"],
             "ordinal": ordinal,
@@ -662,6 +683,8 @@ class BoundedPlannerAuthority:
         if context is not None:
             identity["planner_context_pack_ref"] = context["id"]
             identity["planner_context_pack_hash"] = context["content_hash"]
+        if provenance_wire is not None:
+            identity["model_provenance"] = provenance_wire
         proposal_id = _deterministic_ref("planner-proposal-version", identity)
         existing = self.connection.execute(
             "SELECT * FROM bounded_planner_proposal_versions WHERE proposal_id=?",

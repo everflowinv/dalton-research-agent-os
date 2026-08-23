@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LLMPlannerCandidateV0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "action", "rationale"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "action": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "coverage_item_ref"],
+          "properties": {
+            "kind": {"const": "probe"},
+            "coverage_item_ref": {"type": "string", "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reason"],
+          "properties": {
+            "kind": {"const": "terminate"},
+            "reason": {
+              "enum": [
+                "coverage_complete_unobservable_candidate",
+                "evidence_observed_for_review",
+                "human_replan_required",
+                "human_deprioritized"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "rationale": {"type": "string", "minLength": 1, "maxLength": 2000}
+  }
+}

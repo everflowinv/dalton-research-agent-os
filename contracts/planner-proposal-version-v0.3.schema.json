@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PlannerProposalVersionV0.3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "loop_version_ref", "loop_version_hash", "ordinal", "prior_outcome_ref", "prior_outcome_hash", "action", "remaining_budget", "directive_bindings", "planner_ref", "planner_hash", "planner_context_pack_ref", "planner_context_pack_hash", "model_provenance", "rationale", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.3"},
+    "id": {"type": "string", "pattern": "^planner-proposal-version:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "loop_version_ref": {"type": "string", "minLength": 1},
+    "loop_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ordinal": {"type": "integer", "minimum": 1},
+    "prior_outcome_ref": {"type": ["string", "null"]},
+    "prior_outcome_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "action": {"oneOf": [{"$ref": "#/$defs/probe"}, {"$ref": "#/$defs/terminate"}]},
+    "remaining_budget": {"$ref": "#/$defs/remaining_budget"},
+    "directive_bindings": {"type": "array", "items": {"$ref": "#/$defs/directive_binding"}},
+    "planner_ref": {"const": "planner:llm-research-planner:0.1"},
+    "planner_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "planner_context_pack_ref": {"type": "string", "pattern": "^planner-context-pack-version:[0-9a-f]{32}$"},
+    "planner_context_pack_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "model_provenance": {"$ref": "#/$defs/model_provenance"},
+    "rationale": {"type": "string", "minLength": 1, "maxLength": 2000},
+    "actor_ref": {"const": "planner:llm-research-planner:0.1"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "probe": {"type": "object", "additionalProperties": false, "required": ["kind", "coverage_item_ref", "template_version_ref", "template_version_hash", "parameters"], "properties": {"kind": {"const": "probe"}, "coverage_item_ref": {"type": "string", "minLength": 1}, "template_version_ref": {"type": "string", "minLength": 1}, "template_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "parameters": {"type": "object", "additionalProperties": true}}},
+    "terminate": {"type": "object", "additionalProperties": false, "required": ["kind", "reason"], "properties": {"kind": {"const": "terminate"}, "reason": {"enum": ["coverage_complete_unobservable_candidate", "evidence_observed_for_review", "human_replan_required", "human_deprioritized"]}}},
+    "remaining_budget": {"type": "object", "additionalProperties": false, "required": ["rounds_remaining", "cost_units_remaining", "seconds_remaining"], "properties": {"rounds_remaining": {"type": "integer", "minimum": 0}, "cost_units_remaining": {"type": "integer", "minimum": 0}, "seconds_remaining": {"type": "integer", "minimum": 0}}},
+    "directive_binding": {"type": "object", "additionalProperties": false, "required": ["directive_version_ref", "directive_version_hash"], "properties": {"directive_version_ref": {"type": "string", "minLength": 1}, "directive_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}},
+    "model_provenance": {"type": "object", "additionalProperties": false, "required": ["work_order_ref", "result_envelope_ref", "result_envelope_hash", "model_invocation_ref", "route_decision_ref", "profile_version_ref"], "properties": {"work_order_ref": {"type": "string", "minLength": 1}, "result_envelope_ref": {"type": "string", "minLength": 1}, "result_envelope_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "model_invocation_ref": {"type": "string", "minLength": 1}, "route_decision_ref": {"type": "string", "minLength": 1}, "profile_version_ref": {"type": "string", "minLength": 1}}}
+  }
+}
