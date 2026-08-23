@@ -16,6 +16,11 @@
   CompiledConnectorPlan、credential use receipt、quota、raw Artifact 和 SourceEnvelope；真实只读 canary 已取回
   10 条 ACN 检索结果及首个 30k 字符文档分片，续页游标为 `30000`。该 canary 没有写 live Core，完整文档分页
   coordinator 尚未实现
+- development candidate 已把 connector quota window 扩展到 IANA 当地日历日，并按 owner 指令冻结候选日配额：
+  AlphaEngine `search_library` 50 次、`get_document` 80 次，Gemini `search_web` 1,000 次；三者均在
+  `Asia/Shanghai` 00:00（UTC 16:00）重置。AlphaEngine live 测试 profile 已绑定 50/80，Gemini bridge 尚未实现，
+  所以 1,000 次目前只是 governance input，不是已部署 policy。document page 已新增连续 offset/长度校验；完整多页
+  coordinator 仍是下一 gate
 - 修正版 3×30 canary 的三个 run identity 各自独立，90/90 fresh execution，三轮均 30/30、0 FP、0 high miss，
   总成本 USD 0.12906825；随后真实 isolated shadow 固定 GPT-5.6 Sol → Gemini 3.7 Flash low，quality gate 为
   `eligible`，成本 USD 0.010518
@@ -26,9 +31,9 @@
 反向改写历史结论。这里的“完成”只表示代码、测试和当前部署已经验收，不表示已达到多租户或
 hostile-code 生产安全等级。
 
-当前架构方向与执行顺序见
-[direction-review-and-execution-plan-v0.7-2026-08-21.md](reports/direction-review-and-execution-plan-v0.7-2026-08-21.md)。
-v0.6 及更早报告保留为各切片启动时的历史基线，不再作为当前执行顺序。
+当前 connector / 建模 / 行业研究的近期顺序见
+[direction-and-source-modeling-order-v0.8-2026-08-23.md](reports/direction-and-source-modeling-order-v0.8-2026-08-23.md)。
+v0.7 及更早报告保留为各切片启动时的历史基线，不再作为当前近期执行顺序。
 
 ## 当前判断
 

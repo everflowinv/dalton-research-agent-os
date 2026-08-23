@@ -868,6 +868,88 @@ def _tool_text_payload(result: Mapping[str, Any]) -> dict[str, Any]:
     return dict(payload)
 
 
+def validate_alphaengine_document_page(
+    payload: Mapping[str, Any],
+    *,
+    expected_doc_id: str,
+    expected_offset: int,
+    max_chars: int,
+) -> dict[str, Any]:
+    """Validate one exact, contiguous AlphaEngine document page."""
+
+    if not isinstance(payload, Mapping):
+        raise RunnerValidationError("AlphaEngine document payload must be an object")
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        raise RunnerValidationError("AlphaEngine document lacks metadata")
+    doc_id = metadata.get("doc_id")
+    if doc_id != expected_doc_id:
+        raise RunnerConflict("AlphaEngine document id differs from request")
+    digest = payload.get("content_sha256")
+    if not isinstance(digest, str) or _HASH_RE.fullmatch(digest) is None:
+        raise RunnerValidationError("AlphaEngine document hash is invalid")
+    text = payload.get("text")
+    if not isinstance(text, str):
+        raise RunnerValidationError("AlphaEngine document text is missing")
+    content_chars = payload.get("content_chars")
+    offset = payload.get("offset")
+    returned_chars = payload.get("returned_chars")
+    for value, name in (
+        (content_chars, "content_chars"),
+        (offset, "offset"),
+        (returned_chars, "returned_chars"),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise RunnerValidationError(
+                f"AlphaEngine document {name} must be a non-negative integer"
+            )
+    if offset != expected_offset:
+        raise RunnerConflict("AlphaEngine document offset is not contiguous")
+    if returned_chars != len(text) or returned_chars > max_chars:
+        raise RunnerValidationError(
+            "AlphaEngine returned_chars differs from text or page limit"
+        )
+    if offset + returned_chars > content_chars:
+        raise RunnerValidationError("AlphaEngine document page exceeds content_chars")
+    complete = payload.get("complete")
+    if type(complete) is not bool:
+        raise RunnerValidationError("AlphaEngine document complete flag is invalid")
+    next_offset = payload.get("next_offset")
+    if complete:
+        if next_offset is not None or offset + returned_chars != content_chars:
+            raise RunnerValidationError(
+                "complete AlphaEngine document page does not end at content_chars"
+            )
+        cursor = None
+        completeness = "enumerated"
+    else:
+        if (
+            isinstance(next_offset, bool)
+            or not isinstance(next_offset, int)
+            or returned_chars < 1
+            or next_offset != offset + returned_chars
+            or next_offset >= content_chars
+        ):
+            raise RunnerValidationError(
+                "partial AlphaEngine document next_offset is not contiguous"
+            )
+        cursor = str(next_offset)
+        completeness = "partial"
+    return {
+        "doc_id": doc_id,
+        "content_chars": content_chars,
+        "content_sha256": digest,
+        "offset": offset,
+        "returned_chars": returned_chars,
+        "text": text,
+        "next_offset": next_offset,
+        "complete": complete,
+        "cursor": cursor,
+        "completeness": completeness,
+        "source_record_ref": f"alphaengine-doc:{doc_id}:sha256:{digest}",
+    }
+
+
 _DOCUMENT_CATEGORY_MAP = {
     "research_report": ["foreign_report", "domestic_report", "sell_side_report"],
     "foreign_report": ["foreign_report"],
@@ -1032,33 +1114,15 @@ class AlphaEngineLiveAdapter:
             refs = [f"alphaengine-doc:{doc_id}" for doc_id in doc_ids]
             completeness = "ranked"
         else:
-            metadata = payload.get("metadata")
-            if not isinstance(metadata, Mapping):
-                raise RunnerValidationError("AlphaEngine document lacks metadata")
-            doc_id = metadata.get("doc_id")
-            expected_doc = arguments["doc_id"]
-            if doc_id != expected_doc:
-                raise RunnerConflict("AlphaEngine document id differs from request")
-            digest = payload.get("content_sha256")
-            if not isinstance(digest, str) or _HASH_RE.fullmatch(digest) is None:
-                raise RunnerValidationError("AlphaEngine document hash is invalid")
-            if not isinstance(payload.get("text"), str):
-                raise RunnerValidationError("AlphaEngine document text is missing")
-            complete = payload.get("complete")
-            if type(complete) is not bool:
-                raise RunnerValidationError("AlphaEngine document complete flag is invalid")
-            next_offset = payload.get("next_offset")
-            if complete:
-                if next_offset is not None:
-                    raise RunnerValidationError("complete AlphaEngine document has next_offset")
-                cursor = None
-                completeness = "enumerated"
-            else:
-                if isinstance(next_offset, bool) or not isinstance(next_offset, int) or next_offset < 1:
-                    raise RunnerValidationError("partial AlphaEngine document lacks next_offset")
-                cursor = str(next_offset)
-                completeness = "partial"
-            refs = [f"alphaengine-doc:{doc_id}:sha256:{digest}"]
+            page = validate_alphaengine_document_page(
+                payload,
+                expected_doc_id=arguments["doc_id"],
+                expected_offset=arguments["offset"],
+                max_chars=arguments["max_chars"],
+            )
+            cursor = page["cursor"]
+            completeness = page["completeness"]
+            refs = [page["source_record_ref"]]
         source_status = (
             "empty" if not refs else "partial" if cursor is not None else "complete"
         )

@@ -12,6 +12,10 @@ from dalton_core.capability_catalog import CapabilityCatalog
 from dalton_core.connector import ConnectorStore
 from dalton_core.connector_authority_port import ConnectorAuthorityPort
 from dalton_core.connector_inventory import load_packaged_connector_inventory
+from dalton_core.connector_quota_policy import (
+    apply_call_quota_to_limits,
+    governed_daily_call_quota,
+)
 from dalton_core.connector_runner import (
     RunnerConflict,
     RunnerValidationError,
@@ -30,6 +34,7 @@ from dalton_core.live_mcp_connector import (
     OPENCLAW_ALPHAENGINE_BRIDGE_HASH,
     alphaengine_tool_arguments,
     build_live_mcp_transport_plan,
+    validate_alphaengine_document_page,
     validate_live_mcp_adapter_request,
     validate_live_mcp_transport_plan,
 )
@@ -502,19 +507,23 @@ class LiveGateHarness:
             ),
             idempotency_key=f"alphaengine-live:{operation}:price",
         )
+        quota = governed_daily_call_quota("alphaengine", operation)
         rate = rate_policy_spec(
             self.profile["id"],
             identifier=f"connector-rate-policy:alphaengine-live-{operation}:v1",
             price_rate_refs=(price["id"],),
             required_price_meters=("calls",),
-            limits={
-                "calls": 2, "bytes": 2_000_000, "records": 20,
-                "cost_micros": 1000,
-            },
+            limits=apply_call_quota_to_limits(
+                quota,
+                max_response_bytes=self.profile["max_response_bytes"],
+                max_records=self.profile["max_records"],
+            ),
+            window_seconds=quota["window_seconds"],
+            reset_timezone=quota["reset_timezone"],
         )
         rate["policy_ref"] = self.binding["rate_policy_ref"]
         rate["quota_scope_ref"] = f"connector-quota-scope:alphaengine-live-{operation}"
-        self.connectors.register_rate_policy(
+        self.rate_policy = self.connectors.register_rate_policy(
             rate, idempotency_key=f"alphaengine-live:{operation}:rate"
         )
         self.scheduler.enqueue(self.work)
@@ -728,9 +737,9 @@ class AlphaEngineLiveAdapterTests(unittest.TestCase):
             "content_chars": 100,
             "content_sha256": "b" * 64,
             "offset": 0,
-            "returned_chars": 50,
+            "returned_chars": len("evidence text"),
             "text": "evidence text",
-            "next_offset": 50,
+            "next_offset": len("evidence text"),
             "complete": False,
         }
         handle = FakeHandle(tool_result(payload))
@@ -739,11 +748,43 @@ class AlphaEngineLiveAdapterTests(unittest.TestCase):
             observation["source_record_refs"],
             ["alphaengine-doc:320000610033807:sha256:" + "b" * 64],
         )
-        self.assertEqual(observation["cursor"], "50")
+        self.assertEqual(observation["cursor"], str(len("evidence text")))
         self.assertEqual(observation["completeness"], "partial")
         _, arguments = handle.calls[0]
         self.assertEqual(arguments["doc_id"], "320000610033807")
         self.assertEqual(arguments["offset"], 0)
+
+    def test_document_page_rejects_non_contiguous_offsets_and_lengths(self) -> None:
+        base = {
+            "metadata": {"doc_id": "doc-1"},
+            "content_chars": 10,
+            "content_sha256": "a" * 64,
+            "offset": 0,
+            "returned_chars": 5,
+            "text": "12345",
+            "next_offset": 5,
+            "complete": False,
+        }
+        page = validate_alphaengine_document_page(
+            base, expected_doc_id="doc-1", expected_offset=0, max_chars=5
+        )
+        self.assertEqual(page["cursor"], "5")
+        hostile = (
+            {**base, "offset": 1},
+            {**base, "returned_chars": 4},
+            {**base, "next_offset": 6},
+            {**base, "complete": True, "next_offset": None},
+        )
+        for payload in hostile:
+            with self.subTest(payload=payload), self.assertRaises(
+                (RunnerConflict, RunnerValidationError)
+            ):
+                validate_alphaengine_document_page(
+                    payload,
+                    expected_doc_id="doc-1",
+                    expected_offset=0,
+                    max_chars=5,
+                )
 
     def test_tool_error_does_not_write_raw_or_claim_success(self) -> None:
         request, _ = adapter_request("search_library", search_parameters())
@@ -769,7 +810,10 @@ class AlphaEngineLiveAdapterTests(unittest.TestCase):
             tool_result(
                 {
                     "metadata": {"doc_id": "another-doc"},
+                    "content_chars": 6,
                     "content_sha256": "c" * 64,
+                    "offset": 0,
+                    "returned_chars": 6,
                     "text": "forged",
                     "next_offset": None,
                     "complete": True,
@@ -817,6 +861,35 @@ class LiveMcpEndToEndTests(unittest.TestCase):
         self.assertEqual(duplicate["idempotency_status"], "duplicate")
         self.assertEqual(len(harness.handle.calls), 1)
 
+    def test_live_alphaengine_operations_use_beijing_daily_call_ceilings(self) -> None:
+        for operation, parameters, payload, expected_calls in (
+            (
+                "search_library", search_parameters(),
+                {"results": [], "cursor": None, "has_more": False}, 50,
+            ),
+            (
+                "get_document", document_parameters(),
+                {
+                    "metadata": {"doc_id": "320000610033807"},
+                    "content_chars": 0,
+                    "content_sha256": "e" * 64,
+                    "offset": 0,
+                    "returned_chars": 0,
+                    "text": "",
+                    "next_offset": None,
+                    "complete": True,
+                },
+                80,
+            ),
+        ):
+            with self.subTest(operation=operation):
+                harness = self.harness(operation, parameters, payload)
+                self.assertEqual(harness.rate_policy["limits"]["calls"], expected_calls)
+                self.assertEqual(harness.rate_policy["window_seconds"], 86_400)
+                self.assertEqual(
+                    harness.rate_policy["reset_timezone"], "Asia/Shanghai"
+                )
+
     def test_get_document_commits_hash_bound_raw_artifact(self) -> None:
         digest = "d" * 64
         harness = self.harness(
@@ -824,7 +897,10 @@ class LiveMcpEndToEndTests(unittest.TestCase):
             document_parameters(),
             {
                 "metadata": {"doc_id": "320000610033807", "title": "ACN"},
+                "content_chars": len("source document body"),
                 "content_sha256": digest,
+                "offset": 0,
+                "returned_chars": len("source document body"),
                 "text": "source document body",
                 "next_offset": None,
                 "complete": True,

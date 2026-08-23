@@ -16,6 +16,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .contracts import ExecutionInvocation, ExecutionKind
 from .store import canonical_json, content_hash
@@ -49,6 +50,38 @@ _SENSITIVE_PARAMETER_KEYS = frozenset(
         "token", "access_token",
     }
 )
+
+
+def _quota_window(
+    now_dt: datetime, window_seconds: int, reset_timezone: str
+) -> tuple[datetime, datetime]:
+    """Return the exact UTC quota window containing ``now_dt``.
+
+    Sub-day windows retain the original UTC epoch alignment.  A non-UTC
+    reset is deliberately limited to calendar-day windows so a governance
+    policy can say "reset at local midnight" without pretending that every
+    local day is exactly 86,400 elapsed seconds during DST transitions.
+    """
+
+    if reset_timezone == "UTC":
+        now_epoch = int(now_dt.timestamp())
+        start_epoch = now_epoch - (now_epoch % window_seconds)
+        start = datetime.fromtimestamp(start_epoch, timezone.utc)
+        return start, start + timedelta(seconds=window_seconds)
+    if window_seconds != 86_400:
+        raise ConnectorValidationError(
+            "non-UTC reset_timezone requires a 86400-second calendar-day window"
+        )
+    try:
+        reset_zone = ZoneInfo(reset_timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ConnectorValidationError(
+            "reset_timezone must be a valid IANA timezone"
+        ) from exc
+    local_now = now_dt.astimezone(reset_zone)
+    local_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    local_end = local_start + timedelta(days=1)
+    return local_start.astimezone(timezone.utc), local_end.astimezone(timezone.utc)
 
 
 class ConnectorError(Exception):
@@ -891,8 +924,19 @@ class ConnectorStore:
             wire["quota_currency"]
         ):
             raise ConnectorValidationError("quota_currency must be uppercase ISO-4217")
-        if wire["reset_timezone"] != "UTC":
-            raise ConnectorValidationError("Connector P0 supports UTC quota windows only")
+        wire["reset_timezone"] = _text(wire["reset_timezone"], "reset_timezone")
+        if len(wire["reset_timezone"]) > 64:
+            raise ConnectorValidationError("reset_timezone is too long")
+        try:
+            ZoneInfo(wire["reset_timezone"])
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ConnectorValidationError(
+                "reset_timezone must be a valid IANA timezone"
+            ) from exc
+        if wire["reset_timezone"] != "UTC" and wire["window_seconds"] != 86_400:
+            raise ConnectorValidationError(
+                "non-UTC reset_timezone requires a 86400-second calendar-day window"
+            )
         wire["price_rate_refs"] = sorted(_refs(wire["price_rate_refs"], "price_rate_refs"))
         wire["required_price_meters"] = sorted(
             _refs(wire["required_price_meters"], "required_price_meters")
@@ -923,7 +967,7 @@ class ConnectorStore:
                 return duplicate
             latest = cur.execute(
                 "SELECT policy_version_id,version_number,quota_scope_ref,connector_profile_ref,"
-                "window_seconds,quota_currency FROM connector_rate_policy_versions "
+                "window_seconds,quota_currency,record_json FROM connector_rate_policy_versions "
                 "WHERE policy_ref=? ORDER BY version_number DESC LIMIT 1",
                 (wire["policy_ref"],),
             ).fetchone()
@@ -931,13 +975,18 @@ class ConnectorStore:
             expected_prior = None if latest is None else latest["policy_version_id"]
             if wire["version"] != expected_version or wire["prior_version_ref"] != expected_prior:
                 raise ConnectorConflict("rate policy version chain is not contiguous")
-            if latest is not None and (
-                latest["quota_scope_ref"] != wire["quota_scope_ref"]
-                or latest["connector_profile_ref"] != wire["connector_profile_ref"]
-                or int(latest["window_seconds"]) != wire["window_seconds"]
-                or latest["quota_currency"] != wire["quota_currency"]
-            ):
-                raise ConnectorConflict("rate policy scope/profile/window are stable across versions")
+            if latest is not None:
+                latest_wire = json.loads(latest["record_json"])
+                if (
+                    latest["quota_scope_ref"] != wire["quota_scope_ref"]
+                    or latest["connector_profile_ref"] != wire["connector_profile_ref"]
+                    or int(latest["window_seconds"]) != wire["window_seconds"]
+                    or latest_wire["reset_timezone"] != wire["reset_timezone"]
+                    or latest["quota_currency"] != wire["quota_currency"]
+                ):
+                    raise ConnectorConflict(
+                        "rate policy scope/profile/window are stable across versions"
+                    )
             resolved_meters: set[str] = set()
             for rate_ref in wire["price_rate_refs"]:
                 rate = cur.execute(
@@ -1188,7 +1237,6 @@ class ConnectorStore:
         )
         now_dt = self._now_dt()
         now = now_dt.isoformat(timespec="microseconds")
-        now_epoch = int(now_dt.timestamp())
         drift_reason: str | None = None
         result: dict[str, Any] | None = None
         with self.store._transaction() as cur:
@@ -1301,9 +1349,9 @@ class ConnectorStore:
             if latest_health is not None and latest_health["state"] == "open_circuit":
                 raise ConnectorBlocked("connector source circuit is open")
             window_seconds = int(policy["window_seconds"])
-            window_start_epoch = now_epoch - (now_epoch % window_seconds)
-            window_start = datetime.fromtimestamp(window_start_epoch, timezone.utc)
-            window_end = window_start + timedelta(seconds=window_seconds)
+            window_start, window_end = _quota_window(
+                now_dt, window_seconds, policy["reset_timezone"]
+            )
             expires = min(now_dt + timedelta(seconds=ttl), window_end)
             rows = cur.execute(
                 "SELECT r.reservation_id,r.connector_invocation_ref,r.reserved_json,r.expires_at "

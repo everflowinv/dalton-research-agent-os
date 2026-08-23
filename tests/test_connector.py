@@ -190,6 +190,8 @@ def rate_policy_spec(
     required_price_meters: tuple[str, ...] = (),
     limits: dict | None = None,
     max_concurrency: int = 1,
+    window_seconds: int = 60,
+    reset_timezone: str = "UTC",
 ) -> dict:
     price_book = {
         "price_rate_refs": sorted(price_rate_refs),
@@ -200,8 +202,8 @@ def rate_policy_spec(
         "policy_ref": "connector-rate-policy:a-share",
         "quota_scope_ref": "connector-quota-scope:cninfo:public",
         "version": version, "prior_version_ref": prior_version_ref,
-        "connector_profile_ref": profile_ref, "window_seconds": 60,
-        "reset_timezone": "UTC", "max_concurrency": max_concurrency,
+        "connector_profile_ref": profile_ref, "window_seconds": window_seconds,
+        "reset_timezone": reset_timezone, "max_concurrency": max_concurrency,
         "quota_currency": "USD",
         **price_book,
         "price_book_hash": content_hash(price_book),
@@ -719,6 +721,89 @@ class ConnectorStoreTests(unittest.TestCase):
                 {"calls": 1, "bytes": 100, "records": 1, "cost_micros": 1},
                 ttl_seconds=30, idempotency_key="policy-scope:reserve:stale",
             )
+
+    def test_beijing_calendar_day_quota_resets_at_local_midnight(self) -> None:
+        policy_spec = rate_policy_spec(
+            self.profile["id"],
+            identifier="connector-rate-policy:beijing-day:v1",
+            price_rate_refs=(self.zero_rate["id"],),
+            required_price_meters=("calls",),
+            limits={
+                "calls": 1, "bytes": 10_000, "records": 100,
+                "cost_micros": 0,
+            },
+            window_seconds=86_400,
+            reset_timezone="Asia/Shanghai",
+        )
+        policy_spec["policy_ref"] = "connector-rate-policy:beijing-day"
+        policy_spec["quota_scope_ref"] = "connector-quota-scope:beijing-day"
+        policy = self.connectors.register_rate_policy(
+            policy_spec, idempotency_key="beijing-day:policy"
+        )
+        reservation = self.connectors.reserve_quota(
+            self.invocation["id"], policy["id"], 1,
+            {"calls": 1, "bytes": 100, "records": 1, "cost_micros": 0},
+            ttl_seconds=30, idempotency_key="beijing-day:reserve:1",
+        )
+        self.assertEqual(
+            reservation["window_started_at"],
+            "2026-08-13T16:00:00.000000+00:00",
+        )
+        self.assertEqual(
+            reservation["window_ends_at"],
+            "2026-08-14T16:00:00.000000+00:00",
+        )
+        _, usage, cost = self.record_attempt_usage(
+            reservation, 1,
+            {"calls": 1, "bytes": 100, "records": 1, "cost_micros": 0},
+            "beijing-day:1",
+        )
+        self.connectors.settle_quota(
+            reservation["id"], "consumed", usage["metrics"],
+            usage_entry_ref=usage["id"], cost_entry_ref=cost["id"],
+            idempotency_key="beijing-day:settle:1",
+        )
+        with self.assertRaises(ConnectorQuotaExceeded):
+            self.connectors.reserve_quota(
+                self.invocation["id"], policy["id"], 2,
+                {"calls": 1, "bytes": 100, "records": 1, "cost_micros": 0},
+                ttl_seconds=30, idempotency_key="beijing-day:reserve:blocked",
+            )
+        self.clock.value = datetime(2026, 8, 14, 16, 0, tzinfo=timezone.utc)
+        next_day = self.connectors.reserve_quota(
+            self.invocation["id"], policy["id"], 2,
+            {"calls": 1, "bytes": 100, "records": 1, "cost_micros": 0},
+            ttl_seconds=30, idempotency_key="beijing-day:reserve:2",
+        )
+        self.assertEqual(
+            next_day["window_started_at"],
+            "2026-08-14T16:00:00.000000+00:00",
+        )
+        self.assertEqual(
+            next_day["window_ends_at"],
+            "2026-08-15T16:00:00.000000+00:00",
+        )
+
+    def test_non_utc_quota_window_requires_calendar_day_and_iana_timezone(self) -> None:
+        for key, reset_timezone, window_seconds in (
+            ("subday", "Asia/Shanghai", 60),
+            ("unknown", "Mars/Olympus_Mons", 86_400),
+            ("path", "../UTC", 86_400),
+        ):
+            spec = rate_policy_spec(
+                self.profile["id"],
+                identifier=f"connector-rate-policy:timezone-{key}:v1",
+                price_rate_refs=(self.zero_rate["id"],),
+                required_price_meters=("calls",),
+                window_seconds=window_seconds,
+                reset_timezone=reset_timezone,
+            )
+            spec["policy_ref"] = f"connector-rate-policy:timezone-{key}"
+            spec["quota_scope_ref"] = f"connector-quota-scope:timezone-{key}"
+            with self.subTest(key=key), self.assertRaises(ConnectorValidationError):
+                self.connectors.register_rate_policy(
+                    spec, idempotency_key=f"timezone:{key}"
+                )
 
     def test_future_and_expired_rate_policy_fail_closed(self) -> None:
         policy_v2 = self.connectors.register_rate_policy(
