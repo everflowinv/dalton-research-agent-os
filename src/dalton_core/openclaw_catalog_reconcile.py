@@ -119,7 +119,6 @@ def _broker_profiles(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     plugin = _mapping(entries.get(_BROKER_PLUGIN_ID, {}), f"plugin {_BROKER_PLUGIN_ID}")
     plugin_config = _mapping(plugin.get("config", {}), f"plugin {_BROKER_PLUGIN_ID}.config")
     output: dict[str, dict[str, Any]] = {}
-    route_owners: dict[str, str] = {}
     for raw_profile in _sequence(plugin_config.get("profiles", []), "broker profiles"):
         profile = _mapping(raw_profile, "broker profile")
         profile_id = profile.get("id")
@@ -133,11 +132,6 @@ def _broker_profiles(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
             raise OpenClawCatalogError(f"broker profile {profile_id} has an invalid model")
         if profile_id in output:
             raise OpenClawCatalogError(f"duplicate broker profile id: {profile_id}")
-        if model_ref in route_owners:
-            raise OpenClawCatalogError(
-                f"broker model {model_ref} is assigned to multiple profiles"
-            )
-        route_owners[model_ref] = profile_id
         output[profile_id] = {
             "id": profile_id,
             "provider": provider,

@@ -122,6 +122,36 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
         self.assertEqual(catalog[0]["cost"]["input_per_million_usd"], 4.0)
         self.assertEqual(catalog[0]["cost"]["output_per_million_usd"], 20.0)
 
+    def test_same_model_can_have_distinct_explicit_broker_profiles(self):
+        config = _config()
+        profiles = config["plugins"]["entries"][
+            "dalton-openclaw-model-broker"
+        ]["config"]["profiles"]
+        source = next(
+            profile
+            for profile in profiles
+            if profile["id"] == "profile:deepseek-v4-flash"
+        )
+        profiles.append({
+            **source,
+            "id": "profile:deepseek-v4-flash-low-calibration",
+            "thinkingLevel": "low",
+        })
+
+        catalog = openclaw_broker_profiles_from_config(
+            config,
+            checked_at=NOW,
+            profile_ids=["profile:deepseek-v4-flash-low-calibration"],
+        )
+
+        self.assertEqual(len(catalog), 1)
+        self.assertEqual(
+            catalog[0]["id"],
+            "profile:deepseek-v4-flash-low-calibration",
+        )
+        self.assertEqual(catalog[0]["provider"], "deepseek")
+        self.assertEqual(catalog[0]["model"], "deepseek-v4-flash")
+
     def test_loader_rejects_duplicate_json_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "openclaw.json"
