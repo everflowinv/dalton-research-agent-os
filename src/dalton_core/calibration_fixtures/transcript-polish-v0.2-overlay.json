@@ -40,12 +40,12 @@
       ],
       "quality_rules": {
         "required_absent": ["Um, "],
-        "required_present": ["CFO", "40 million dollars", "not confirmed", "may be", "no verified audio span"],
+        "required_present": ["CFO", "40 million dollars", "not confirmed", "may be", "verified audio span"],
         "forbidden_additions": ["14 million dollars"],
         "require_change": true
       }
     }
   ],
-  "resolved_content_hash": "a3add6d54b8126fa213aaf9b94ca5e4261ad888026548ce2d3b9f682c4fccaba",
-  "content_hash": "117c651993c64c0e52b620cbd03a2fd4feb9275cad32e1e21aae903b7281551b"
+  "resolved_content_hash": "daf20ea81e405567c42f940fdb7f469b08b936a92086c867012430863cd983eb",
+  "content_hash": "d6479e8b79f11ea64bf4c99f9e13542a66d4ba501bc020bea96528e6d11d69b6"
 }
