@@ -33,6 +33,7 @@ from dalton_core.transcript_polish import (
     TranscriptPolishValidationError,
     TranscriptPolishWorker,
     parse_transcript_polish_candidate_text,
+    verify_transcript_polish_candidate,
 )
 from dalton_core.transcript_correction import (
     TranscriptCorrectionAuthority,
@@ -179,6 +180,18 @@ class _TranscriptFixture:
 
 
 class TranscriptPolishTests(_TranscriptFixture, unittest.TestCase):
+    def test_punctuation_fusion_is_not_misclassified_as_a_proper_term(self) -> None:
+        source = "CFO.Ryals discussed Q4.It improved."
+        polished = "CFO. Ryals discussed Q4. It improved."
+        verified = verify_transcript_polish_candidate(
+            source,
+            json.dumps(
+                candidate_for(source, polished), separators=(",", ":")
+            ),
+            additional_protected_terms=["CFO", "Ryals", "Q4"],
+        )
+        self.assertEqual(verified["polished_text"], polished)
+
     def test_verified_candidate_forms_mapped_derived_artifact_once(self) -> None:
         artifact = self.materialize()
         self.assertEqual(artifact["status"], "fresh")

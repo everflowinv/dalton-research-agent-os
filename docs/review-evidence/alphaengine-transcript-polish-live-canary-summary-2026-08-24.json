@@ -1,0 +1,72 @@
+{
+  "schema_version": "0.1",
+  "id": "alphaengine-transcript-polish-canary:7ecf936f808473194a9a6b1fdf8dba7d",
+  "created_at": "2026-08-24T09:54:11.239630+00:00",
+  "source": {
+    "document_ref": "alphaengine-doc:130000108112113",
+    "content_chars": 17703,
+    "content_sha256": "2e6a4da73ba883f4f0df073dae7a2c9c171b06a919df6667eb8a85e78080aff9",
+    "manifest_ref": "alphaengine-document-acquisition:856591aabcce44b7cc4fbd6b008ef2826d7e19eb5fa6e1055d9cdb8e3237fe34",
+    "manifest_hash": "e317142716ec1c6ac4f8c88d71823f1a0699acdc4a3aafc77e6c4434de52e618",
+    "physical_calls": 1,
+    "document_quota_units": 1
+  },
+  "correction_review": {
+    "review_scope": "targeted_flags",
+    "accepted_count": 0,
+    "unresolved_count": 1,
+    "unresolved_term_sha256": "364c430b010c6d9c6292f0cde925ad6849ca1cf45c841a195a90c7d1a5f21f2d"
+  },
+  "model": {
+    "policy_ref": "model-routing-policy-version:dalton-openclaw-transcript-polish-development:2",
+    "profile_id": "profile:gpt-5-6-terra",
+    "profile_version_ref": "model-profile-version:broker-gpt-5-6-terra:1",
+    "provider": "openai",
+    "model": "gpt-5.6-terra",
+    "scheduler_attempts": 2,
+    "physical_model_calls": 1,
+    "broker_replays": 1,
+    "input_tokens": 5344,
+    "output_tokens": 8594,
+    "total_tokens": 13938,
+    "accounted_cost_usd": "0.113816"
+  },
+  "polished_artifact": {
+    "version_ref": "transcript-polish-artifact-version:fda44af1e66a51bfe77b1e5409a5dcc6",
+    "version_hash": "271ec6e0c332f228e1fac05b58fac877983c35259157f98313e56f22bf558f55",
+    "polished_chars": 17885,
+    "polished_sha256": "2799ae897c0afb050802a9b6ce27aaf904961e49343807d00d9d6f6ff43fa646",
+    "source_to_polished_ratio": 1.010281,
+    "verification_status": "verified",
+    "citation_authority": "source_lineage_only",
+    "unresolved_term_preserved": true
+  },
+  "claim_binding_dry_run": {
+    "binding_ref": "transcript-claim-citation-binding:bdf1055dfc9f80e75df7c673b113e569",
+    "binding_hash": "5fa62d3c7a1fb26ff0089492b33fd4353cb7611f37640049e28ca80a30597483",
+    "claim_eligible": true,
+    "citation_mode": "raw_span",
+    "source_span_sha256": "6e5714c082c071c954b2d52af57be23ced8ef92a2b0d4a09cf20cbb689c1141e"
+  },
+  "formal_authority_counts": {
+    "evidence_versions": 0,
+    "claim_versions": 0,
+    "thesis_versions": 0
+  },
+  "prior_failed_canaries": [
+    {
+      "run": "v2",
+      "accounted_cost_usd": "0.085264",
+      "failure": "scheduler_lease_expired_before_candidate_admission"
+    },
+    {
+      "run": "v3",
+      "accounted_cost_usd": "0.138558",
+      "failure": "dot_fused_tokens_misclassified_as_protected_terms"
+    }
+  ],
+  "total_live_model_cost_usd": "0.337638",
+  "hard_gate_pass": true,
+  "production_activated": false,
+  "production_decision": "no_go_pending_second_independent_shadow_canary"
+}

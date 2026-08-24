@@ -16,7 +16,7 @@ from .openclaw_model_adapter import (
     OpenClawModelAdapterError,
 )
 from .research_context import count_dalton_search_tokens
-from .scheduler import Scheduler
+from .scheduler import LeaseExpired, Scheduler
 from .store import canonical_json, content_hash
 from .transcript_polish import (
     TranscriptPolishError,
@@ -217,6 +217,12 @@ class RoutedTranscriptPolishModelWorker:
     def _reuse_invocation(
         saved: Mapping[str, Any], replayed: ModelInvocation
     ) -> ModelInvocation:
+        saved_wire = dict(saved)
+        saved_alias = saved_wire.pop("invocation_id", None)
+        if saved_alias is not None and saved_alias != saved_wire.get("id"):
+            raise TranscriptPolishModelWorkerConflict(
+                "saved invocation aliases disagree"
+            )
         replayed_wire = replayed.to_dict()
         stable_fields = {
             "schema_version", "id", "work_order_ref", "profile_ref",
@@ -225,13 +231,13 @@ class RoutedTranscriptPolishModelWorker:
             "runtime_ref", "actor_ref", "parent_ref", "environment_hash",
         }
         if any(
-            saved.get(field) != replayed_wire.get(field)
+            saved_wire.get(field) != replayed_wire.get(field)
             for field in stable_fields
         ):
             raise TranscriptPolishModelWorkerConflict(
                 "replayed result differs from committed ModelInvocation"
             )
-        return ModelInvocation.from_dict(saved)
+        return ModelInvocation.from_dict(saved_wire)
 
     def run_once(
         self, work_order: WorkOrder | Mapping[str, Any]
@@ -402,6 +408,36 @@ class RoutedTranscriptPolishModelWorker:
             actor_ref=TRANSCRIPT_POLISH_MODEL_WORKER_REF,
             namespace="transcript-polish-model",
         )
+        try:
+            self.scheduler.validate_lease_for_use(
+                work.id,
+                attempt_number,
+                TRANSCRIPT_POLISH_MODEL_WORKER_REF,
+                lease["lease_token"],
+                lease_revision_ref=lease["lease"]["id"],
+                lease_hash=lease["lease"]["content_hash"],
+                work_order_hash=lease["work_order_hash"],
+            )
+        except LeaseExpired:
+            scheduler_status = self.scheduler.status(work.id)
+            return {
+                "status": (
+                    "retryable"
+                    if scheduler_status["state"] == "ready"
+                    else "failed"
+                ),
+                "work_order_ref": work.id,
+                "route": route,
+                "profile": profile,
+                "invocation": invocation.to_dict(),
+                "result": adapter_result.to_dict(),
+                "accounting": accounting,
+                "completion": None,
+                "output_error": None,
+                "route_replayed": route_replayed,
+                "late_completion_rejected": True,
+                "replayed": False,
+            }
         result = adapter_result
         output_error = None
         if result.status == "succeeded":
@@ -439,16 +475,42 @@ class RoutedTranscriptPolishModelWorker:
                         usage_refs=adapter_result.usage_refs,
                         created_at=adapter_result.created_at,
                     )
-        completion = self.scheduler.complete(
-            work.id,
-            attempt_number,
-            TRANSCRIPT_POLISH_MODEL_WORKER_REF,
-            lease["lease_token"],
-            result,
-            idempotency_key=(
-                f"transcript-polish-model-complete:{work.id}:{attempt_number}"
-            ),
-        )
+        try:
+            completion = self.scheduler.complete(
+                work.id,
+                attempt_number,
+                TRANSCRIPT_POLISH_MODEL_WORKER_REF,
+                lease["lease_token"],
+                result,
+                idempotency_key=(
+                    f"transcript-polish-model-complete:{work.id}:{attempt_number}"
+                ),
+            )
+        except LeaseExpired:
+            # The adapter may finish after its Scheduler lease.  Core correctly
+            # rejects that late completion, but the broker result and model
+            # accounting are already durable.  Return a bounded retry state so
+            # the next attempt can use adapter.replay() without another model
+            # execution.
+            scheduler_status = self.scheduler.status(work.id)
+            return {
+                "status": (
+                    "retryable"
+                    if scheduler_status["state"] == "ready"
+                    else "failed"
+                ),
+                "work_order_ref": work.id,
+                "route": route,
+                "profile": profile,
+                "invocation": invocation.to_dict(),
+                "result": result.to_dict(),
+                "accounting": accounting,
+                "completion": None,
+                "output_error": output_error,
+                "route_replayed": route_replayed,
+                "late_completion_rejected": True,
+                "replayed": False,
+            }
         if result.status == "succeeded":
             normalized = "succeeded"
         elif result.status == "retryable" and completion["work_state"] == "ready":

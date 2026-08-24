@@ -98,12 +98,16 @@
   GPT-5.6 Terra 为 TranscriptPolish 首选；Core 已把 Gemini v1 原样保留，并新增 exact Terra development policy v2，
   production pointer 未启用。Corpus v0.2 现有 12 case、11 个 safety-critical，显式保护 speaker，并增加 unresolved
   proper-name/numeric ASR 错误；Terra `xhigh` 在 clean commit 上取得 12/12、safety 11/11，中位延迟 4.142 秒，成本
-  USD 0.037506。Planner development policy 继续使用 Qwen DeepSeek V4 Flash，不受逐字稿选择影响。真实 AlphaEngine
-  canary 已尝试，但 search/get 均被上游“用户状态发生变更，刷新 token”挡在正文获取前，没有伪装成成功。详见
+  USD 0.037506。Planner development policy 继续使用 Qwen DeepSeek V4 Flash，不受逐字稿选择影响。AlphaEngine
+  登录恢复后，真实 17,703 字逐字稿 canary 已完成 acquisition → targeted human review → Terra → Core gate → Claim
+  binding dry run；最终 17,885 字 artifact 通过，unresolved 术语保留，正式 Evidence/Claim/Thesis 写入均为 0。canary
+  同时补上 late lease 的 broker replay 恢复，并把句点粘连假专名从保护规则中排除。当前继续 shadow，production pointer
+  仍未启用，需第二份独立真实逐字稿通过后再审。详见
   [TranscriptPolish 模型校准基础 v0.5](reports/transcript-polish-calibration-foundation-v0.5-2026-08-24.md)
   、[TranscriptPolish 模型初轮校准 v0.6](reports/transcript-polish-model-calibration-v0.6-2026-08-24.md)
   、[TranscriptPolish 全模型横评 v0.7](reports/transcript-polish-model-matrix-v0.7-2026-08-24.md)
-  和 [TranscriptPolish Terra policy 与 corpus v0.2](reports/transcript-polish-terra-policy-and-corpus-v0.8-2026-08-24.md)
+  、[TranscriptPolish Terra policy 与 corpus v0.2](reports/transcript-polish-terra-policy-and-corpus-v0.8-2026-08-24.md)
+  和 [AlphaEngine TranscriptPolish 真实 canary v0.9](reports/alphaengine-transcript-polish-live-canary-v0.9-2026-08-24.md)
 - development candidate 已增加 Gemini `web_search` discovery bridge 和独立 public-web fetch adapter。冻结 inventory
   已按真实 OpenClaw 合同修正为无 cursor，`freshness` 与显式日期窗互斥；search raw response 完整保存，向后只暴露
   由引用 URL 推导的 opaque authority ref，不把 Gemini synthesis、snippet 或 title 当作网页正文。系统只有从 exact
@@ -149,7 +153,8 @@ StatementSnapshot v1 与 TranscriptPolish source-lineage v0.2 均已作为受限
 `TranscriptClaimCitationBinding` 已接入通用 Claim admission，routed transcript model worker 也已复用现有
 Scheduler/Router/adapter/accounting 跑通隔离链。25 个 exact profile 的横评和四个 finalist 的第二轮复测已经完成；
 Owner 选择的 GPT-5.6 Terra 已进入 immutable development policy v2，并在 corpus v0.2 上通过 12/12、safety 11/11。
-下一步是刷新 AlphaEngine Desktop 登录态后重跑真实完整 transcript canary；通过后才能另行决定 production policy。
+首份真实 AlphaEngine 完整 transcript canary 也已通过；当前决定继续 shadow，等第二份结构不同的真实逐字稿通过后再审
+production policy。
 Planner 的 DeepSeek V4 Flash 只负责 Planner，不承担逐字稿润色。
 live 部署现在能自主生成并选择研究问题，也已加载 phase-pinned thesis-impact production lane；由于 live Core
 尚无 ThesisVersion 和 company mapping，这条 lane 当前只做无模型调用的 idle 检查，不提交 assessment、verification
@@ -1316,6 +1321,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Routed TranscriptPolish Worker v0.4：`docs/reports/routed-transcript-polish-worker-v0.4-2026-08-24.md`
 - TranscriptPolish 模型校准基础 v0.5：`docs/reports/transcript-polish-calibration-foundation-v0.5-2026-08-24.md`
 - TranscriptPolish 模型初轮校准 v0.6：`docs/reports/transcript-polish-model-calibration-v0.6-2026-08-24.md`
+- AlphaEngine TranscriptPolish 真实 canary v0.9：`docs/reports/alphaengine-transcript-polish-live-canary-v0.9-2026-08-24.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`

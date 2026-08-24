@@ -60,6 +60,18 @@ class FakeHandle:
 
 
 class AlphaEngineTranscriptPolishCanaryTests(unittest.TestCase):
+    def test_cost_summary_deduplicates_replayed_accounting(self) -> None:
+        run = {
+            "accounting": {
+                "cost": {
+                    "id": "cost-entry:fixture",
+                    "cost_status": "actual",
+                    "amount_micros": 113_816,
+                }
+            }
+        }
+        self.assertEqual(CANARY._cost_usd([run, run]), "0.113816")
+
     def test_live_page_port_forms_complete_hash_bound_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             text = "发言人Operator： Welcome.\n发言人Analyst： Revenue was $20 million."

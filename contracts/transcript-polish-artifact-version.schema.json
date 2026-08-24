@@ -83,13 +83,13 @@
         }
       }
     },
-    "polish_rule_ref": {"const": "rules:transcript-polish-conservation:0.2"},
+    "polish_rule_ref": {"const": "rules:transcript-polish-conservation:0.3"},
     "protection_manifest": {
       "type": "object",
       "additionalProperties": false,
       "required": ["rule_ref", "numeric_expressions", "semantic_qualifiers", "protected_terms", "content_hash"],
       "properties": {
-        "rule_ref": {"const": "rules:transcript-polish-conservation:0.2"},
+        "rule_ref": {"const": "rules:transcript-polish-conservation:0.3"},
         "numeric_expressions": {"type": "array", "items": {"type": "string"}},
         "semantic_qualifiers": {"type": "array", "items": {"type": "string"}},
         "protected_terms": {

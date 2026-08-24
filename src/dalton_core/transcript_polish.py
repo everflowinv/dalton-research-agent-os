@@ -36,8 +36,8 @@ TRANSCRIPT_POLISH_OPERATION = "verify_and_materialize_transcript_polish"
 TRANSCRIPT_POLISH_RUNTIME = "runtime-profile:dalton-core-transcript-polish:0.1"
 TRANSCRIPT_POLISH_PERMISSION = "read_exact_alphaengine_document_artifact"
 TRANSCRIPT_POLISH_OUTPUT_CONTRACT = "schema:transcript-polish-probe-output:0.2"
-TRANSCRIPT_POLISH_VERIFIER = "verifier:transcript-polish-conservation:0.2"
-TRANSCRIPT_POLISH_RULE_REF = "rules:transcript-polish-conservation:0.2"
+TRANSCRIPT_POLISH_VERIFIER = "verifier:transcript-polish-conservation:0.3"
+TRANSCRIPT_POLISH_RULE_REF = "rules:transcript-polish-conservation:0.3"
 
 MAX_SOURCE_CHARS = 200_000
 MAX_SEGMENTS = 256
@@ -58,8 +58,8 @@ _NUMERIC_RE = re.compile(
 )
 _AUTO_TERM_RES = (
     re.compile(r"\b[A-Z]{2,}(?:-[A-Z0-9]+)*\b"),
-    re.compile(r"\b[A-Z][A-Za-z]*[A-Z][A-Za-z0-9.-]*\b"),
-    re.compile(r"\b[A-Za-z]+\d[A-Za-z0-9.-]*\b"),
+    re.compile(r"\b[A-Z][A-Za-z]*[A-Z][A-Za-z0-9-]*\b"),
+    re.compile(r"\b[A-Za-z]+\d[A-Za-z0-9-]*\b"),
     re.compile(r"\b(?:[A-Z][a-z]+[ -]){1,4}[A-Z][a-z]+\b"),
 )
 _SEMANTIC_QUALIFIER_RE = re.compile(
@@ -195,6 +195,27 @@ def _protection_manifest(text: str, additional_terms: Sequence[str]) -> dict[str
         ],
     }
     return {**base, "content_hash": content_hash(base)}
+
+
+def transcript_polish_protected_terms(
+    source_text: str,
+    additional_protected_terms: Sequence[str],
+) -> list[str]:
+    """Return the exact ordered term list enforced by the Core gate."""
+
+    if not isinstance(source_text, str) or not source_text:
+        raise TranscriptPolishValidationError(
+            "source_text must be non-empty text"
+        )
+    terms = _unique_terms(
+        additional_protected_terms, "additional_protected_terms"
+    )
+    return [
+        item["term"]
+        for item in _protection_manifest(source_text, terms)[
+            "protected_terms"
+        ]
+    ]
 
 
 def parse_transcript_polish_candidate_text(value: str) -> dict[str, Any]:
@@ -759,4 +780,5 @@ __all__ = [
     "TranscriptPolishWorker", "TranscriptPolishError", "TranscriptPolishConflict",
     "TranscriptPolishValidationError", "TranscriptPolishNotFound",
     "parse_transcript_polish_candidate_text", "verify_transcript_polish_candidate",
+    "transcript_polish_protected_terms",
 ]

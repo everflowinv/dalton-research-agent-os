@@ -4,7 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from dalton_core.contracts import (
@@ -179,6 +179,24 @@ class FakeAdapter:
         return invocation, result
 
 
+class LateThenReplayAdapter(FakeAdapter):
+    def __init__(self, candidate_wire: dict, advance_clock) -> None:
+        super().__init__(candidate_wire)
+        self.advance_clock = advance_clock
+        self.execute_calls = 0
+        self.replay_calls = 0
+
+    def execute(self, work: WorkOrder, route: dict, selected: dict):
+        self.execute_calls += 1
+        invocation, result = super().execute(work, route, selected)
+        self.advance_clock()
+        return invocation, result
+
+    def replay(self, work: WorkOrder, route: dict, selected: dict):
+        self.replay_calls += 1
+        return super().execute(work, route, selected)
+
+
 class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -327,6 +345,53 @@ class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
         replay = self.coordinator.advance(self.probe, model_work)
         self.assertTrue(replay["replayed"])
 
+    def test_late_model_result_replays_without_second_execution(self) -> None:
+        model_work = self._prepare()
+        clock = {"now": NOW}
+        self.scheduler.clock = lambda: clock["now"]
+        adapter = LateThenReplayAdapter(
+            candidate(),
+            lambda: clock.__setitem__(
+                "now", clock["now"] + timedelta(seconds=31)
+            ),
+        )
+        worker = RoutedTranscriptPolishModelWorker(
+            scheduler=self.scheduler,
+            router=self.router,
+            adapter=adapter,
+            store=self.store,
+            observability=self.observability,
+            polish_worker=TranscriptPolishWorker(self.authority),
+            routing_policy_ref=(
+                "model-routing-policy-version:test-transcript:1"
+            ),
+            credential_slot_refs=("credential-slot:openclaw:test",),
+            clock=lambda: clock["now"],
+        )
+
+        late = worker.run_once(model_work)
+        self.assertEqual(late["status"], "retryable")
+        self.assertTrue(late["late_completion_rejected"])
+        self.assertEqual(adapter.execute_calls, 1)
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM transcript_polish_artifact_versions"
+            ).fetchone()[0],
+            0,
+        )
+
+        recovered = worker.run_once(model_work)
+        self.assertEqual(recovered["status"], "succeeded")
+        self.assertTrue(recovered["route_replayed"])
+        self.assertEqual(adapter.execute_calls, 1)
+        self.assertEqual(adapter.replay_calls, 1)
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM transcript_polish_artifact_versions"
+            ).fetchone()[0],
+            1,
+        )
+
     def test_numeric_drift_is_bounded_retry_and_never_closes_probe(self) -> None:
         model_work = self._prepare()
         drifted = candidate(POLISHED.replace("1.2 billion", "1.3 billion"))
@@ -390,6 +455,24 @@ class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
                 span["source_sha256"],
                 hashlib.sha256(span["source_text"].encode("utf-8")).hexdigest(),
             )
+
+    def test_prompt_exposes_exact_core_auto_protected_terms(self) -> None:
+        parameters = self.probe.metadata["parameters"]
+        source = self.authority.model_source_context(
+            source_manifest_ref=parameters["source_manifest_ref"],
+            source_manifest_hash=parameters["source_manifest_hash"],
+            source_content_hash=parameters["source_content_hash"],
+        )
+        source["resolved_source_text"] = "OpenAI spoke."
+        source["resolved_source_hash"] = hashlib.sha256(
+            source["resolved_source_text"].encode("utf-8")
+        ).hexdigest()
+        prompt = build_transcript_polish_model_prompt(
+            source,
+            additional_protected_terms=[],
+        )
+        quoted = json.loads(prompt.split("QUOTED_TRANSCRIPT=", 1)[1])
+        self.assertIn("OpenAI", quoted["core_protected_terms"])
 
 
 if __name__ == "__main__":

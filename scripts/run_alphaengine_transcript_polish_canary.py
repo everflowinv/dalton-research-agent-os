@@ -407,12 +407,21 @@ def _probe_work(
 
 def _cost_usd(runs: Sequence[Mapping[str, Any]]) -> str:
     total = Decimal("0")
+    seen_cost_entries: set[str] = set()
     for run in runs:
         cost = run.get("accounting", {}).get("cost", {})
         if cost.get("cost_status") != "actual":
             raise AlphaEngineTranscriptCanaryError(
                 "model cost authority is not actual"
             )
+        cost_ref = cost.get("id")
+        if not isinstance(cost_ref, str) or not cost_ref:
+            raise AlphaEngineTranscriptCanaryError(
+                "model cost authority is missing its immutable ref"
+            )
+        if cost_ref in seen_cost_entries:
+            continue
+        seen_cost_entries.add(cost_ref)
         total += Decimal(str(cost["amount_micros"])) / Decimal("1000000")
     return format(total, "f")
 
