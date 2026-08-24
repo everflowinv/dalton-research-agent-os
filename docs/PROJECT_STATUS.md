@@ -81,6 +81,15 @@
   仍只供阅读和模型上下文，不是第二份来源。相关超集 47/47、compileall、diff check、wheel 安装包 SQL 资源检查
   通过；尚未接真实 transcript routed model worker、AlphaEngine/audio canary 或 live deployment。详见
   [Transcript Claim Admission Gate v0.3](reports/transcript-claim-admission-gate-v0.3-2026-08-24.md)
+- development candidate 已接 routed TranscriptPolish model worker。Core 从 exact raw manifest 与可选 correction set
+  重建 resolved source，预切不超过 2,000 字符的 span 并计算 hash；模型只回抄 span identity 和 `polished_text`，
+  不负责计算 hash，也不能发布 correction、Evidence 或 Claim。模型 WorkOrder 走现有 Scheduler、exact-one-profile
+  ModelRouter policy、OpenClaw adapter 和 usage/cost accounting；strict JSON、数字、专名、否定词、不确定性限定词或
+  span conservation 任一失败都会进入 bounded retry。只有本地 verifier 已生成 source-lineage-only artifact，model
+  Result 才能成功，随后 routed coordinator 关闭原 probe；crash replay 复用同一 route/result 与幂等 artifact。
+  相关超集 55/55、pyflakes、compileall、schema、diff check 与 wheel 隔离导入通过；尚未跑真实模型、独立 transcript frozen corpus 或
+  live deployment。详见
+  [Routed TranscriptPolish Worker v0.4](reports/routed-transcript-polish-worker-v0.4-2026-08-24.md)
 - development candidate 已增加 Gemini `web_search` discovery bridge 和独立 public-web fetch adapter。冻结 inventory
   已按真实 OpenClaw 合同修正为无 cursor，`freshness` 与显式日期窗互斥；search raw response 完整保存，向后只暴露
   由引用 URL 推导的 opaque authority ref，不把 Gemini synthesis、snippet 或 title 当作网页正文。系统只有从 exact
@@ -123,8 +132,9 @@ human-admitted lens 下选择不同的已批准 probe；真实 LLM 现在可以�
 Core 才能签发 Proposal 0.3，deterministic planner 保留为 fallback。Qwen DeepSeek V4 Flash 0731 已按两轮
 30/30 的固定 corpus 结果写入 development-only policy v2；live production 尚未启用 Planner worker 或该 policy。
 StatementSnapshot v1 与 TranscriptPolish source-lineage v0.2 均已作为受限 probe 完成隔离接线，
-`TranscriptClaimCitationBinding` 也已接入通用 Claim admission。下一步是接 transcript routed model worker，并在
-独立 transcript corpus 上选模型；Planner 的 DeepSeek V4 Flash 结论只作为 baseline，不能直接外推到逐字稿任务。
+`TranscriptClaimCitationBinding` 已接入通用 Claim admission，routed transcript model worker 也已复用现有
+Scheduler/Router/adapter/accounting 跑通隔离链。下一步是冻结独立 transcript corpus 并横评模型；Planner 的
+DeepSeek V4 Flash 结论只作为 baseline，不能直接外推到逐字稿任务。
 live 部署现在能自主生成并选择研究问题，也已加载 phase-pinned thesis-impact production lane；由于 live Core
 尚无 ThesisVersion 和 company mapping，这条 lane 当前只做无模型调用的 idle 检查，不提交 assessment、verification
 或 ThesisVersion。仓库 fixture 仍可按一次性 connector plan 执行 CNINFO、SEC、AlphaEngine 三源离线流程并从
@@ -1287,6 +1297,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - TranscriptPolishWorker v1：`docs/reports/transcript-polish-worker-v1-2026-08-23.md`
 - Transcript Correction Authority v0.2：`docs/reports/transcript-correction-authority-v0.2-2026-08-23.md`
 - Transcript Claim Admission Gate v0.3：`docs/reports/transcript-claim-admission-gate-v0.3-2026-08-24.md`
+- Routed TranscriptPolish Worker v0.4：`docs/reports/routed-transcript-polish-worker-v0.4-2026-08-24.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`

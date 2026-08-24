@@ -36,8 +36,8 @@ TRANSCRIPT_POLISH_OPERATION = "verify_and_materialize_transcript_polish"
 TRANSCRIPT_POLISH_RUNTIME = "runtime-profile:dalton-core-transcript-polish:0.1"
 TRANSCRIPT_POLISH_PERMISSION = "read_exact_alphaengine_document_artifact"
 TRANSCRIPT_POLISH_OUTPUT_CONTRACT = "schema:transcript-polish-probe-output:0.2"
-TRANSCRIPT_POLISH_VERIFIER = "verifier:transcript-polish-conservation:0.1"
-TRANSCRIPT_POLISH_RULE_REF = "rules:transcript-polish-conservation:0.1"
+TRANSCRIPT_POLISH_VERIFIER = "verifier:transcript-polish-conservation:0.2"
+TRANSCRIPT_POLISH_RULE_REF = "rules:transcript-polish-conservation:0.2"
 
 MAX_SOURCE_CHARS = 200_000
 MAX_SEGMENTS = 256
@@ -61,6 +61,14 @@ _AUTO_TERM_RES = (
     re.compile(r"\b[A-Z][A-Za-z]*[A-Z][A-Za-z0-9.-]*\b"),
     re.compile(r"\b[A-Za-z]+\d[A-Za-z0-9.-]*\b"),
     re.compile(r"\b(?:[A-Z][a-z]+[ -]){1,4}[A-Z][a-z]+\b"),
+)
+_SEMANTIC_QUALIFIER_RE = re.compile(
+    r"\b(?:no|not|never|none|neither|nor|without|cannot|can't|won't|"
+    r"isn't|aren't|wasn't|weren't|don't|doesn't|didn't|hasn't|haven't|"
+    r"hadn't|shouldn't|wouldn't|couldn't|mustn't|may|might|could|"
+    r"uncertain|uncertainty|approximately|roughly|about)\b|"
+    r"并非|不是|不会|不能|没有|尚未|未|无|不|可能|或许|大约|约",
+    re.IGNORECASE,
 )
 
 
@@ -165,6 +173,10 @@ def _term_sequence(text: str, terms: Sequence[str] | set[str]) -> list[str]:
     return [term for _, _, term in sorted(occurrences)]
 
 
+def _semantic_qualifiers(text: str) -> list[str]:
+    return [match.group(0).casefold() for match in _SEMANTIC_QUALIFIER_RE.finditer(text)]
+
+
 def _protection_manifest(text: str, additional_terms: Sequence[str]) -> dict[str, Any]:
     terms = _auto_terms(text)
     for term in additional_terms:
@@ -177,6 +189,7 @@ def _protection_manifest(text: str, additional_terms: Sequence[str]) -> dict[str
     base = {
         "rule_ref": TRANSCRIPT_POLISH_RULE_REF,
         "numeric_expressions": _numeric_expressions(text),
+        "semantic_qualifiers": _semantic_qualifiers(text),
         "protected_terms": [
             {"term": term, "count": _term_count(text, term)} for term in terms
         ],
@@ -285,22 +298,20 @@ class TranscriptPolishAuthority:
         except UnicodeDecodeError as exc:
             raise TranscriptPolishConflict("polished object is no longer UTF-8") from exc
 
-    def materialize(
+    def model_source_context(
         self,
         *,
         source_manifest_ref: str,
         source_manifest_hash: str,
         source_content_hash: str,
-        candidate_text: str,
-        additional_protected_terms: Sequence[str],
         correction_set_version_ref: str | None = None,
         correction_set_version_hash: str | None = None,
-        prior_version_ref: str | None = None,
     ) -> dict[str, Any]:
+        """Re-read the exact source lineage exposed to a polish model call."""
+
         source_manifest_ref = _text(source_manifest_ref, "source_manifest_ref")
         source_manifest_hash = _hash(source_manifest_hash, "source_manifest_hash")
         source_content_hash = _hash(source_content_hash, "source_content_hash")
-        terms = _unique_terms(additional_protected_terms, "additional_protected_terms")
         try:
             manifest = validate_alphaengine_document_acquisition_manifest(
                 self.manifest_resolver(source_manifest_ref)
@@ -319,7 +330,9 @@ class TranscriptPolishAuthority:
             or manifest["assembled_prefix_sha256"] != source_content_hash
             or manifest["declared_content_sha256"] != source_content_hash
         ):
-            raise TranscriptPolishConflict("source manifest is not exact complete authority")
+            raise TranscriptPolishConflict(
+                "source manifest is not exact complete authority"
+            )
         original_bytes = self.spool.read_object(source_content_hash)
         if (
             len(original_bytes) != manifest["assembled_object"]["size_bytes"]
@@ -329,12 +342,20 @@ class TranscriptPolishAuthority:
         try:
             original = original_bytes.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise TranscriptPolishValidationError("source transcript must be UTF-8") from exc
+            raise TranscriptPolishValidationError(
+                "source transcript must be UTF-8"
+            ) from exc
         if not original or len(original) > MAX_SOURCE_CHARS:
-            raise TranscriptPolishValidationError("source transcript size is outside v1 bounds")
+            raise TranscriptPolishValidationError(
+                "source transcript size is outside v1 bounds"
+            )
         if manifest["content_chars"] != len(original):
-            raise TranscriptPolishConflict("manifest source character count drifted")
-        if (correction_set_version_ref is None) != (correction_set_version_hash is None):
+            raise TranscriptPolishConflict(
+                "manifest source character count drifted"
+            )
+        if (correction_set_version_ref is None) != (
+            correction_set_version_hash is None
+        ):
             raise TranscriptPolishValidationError(
                 "correction set ref and hash must be supplied together"
             )
@@ -378,6 +399,51 @@ class TranscriptPolishAuthority:
                 "unresolved_correction_spans"
             ]
             citation_mode = resolution["citation_mode"]
+        return {
+            "document_ref": manifest["document_ref"],
+            "source_manifest_ref": source_manifest_ref,
+            "source_manifest_hash": source_manifest_hash,
+            "source_content_hash": source_content_hash,
+            "correction_set_version_ref": correction_set_ref,
+            "correction_set_version_hash": correction_set_hash,
+            "resolved_source_text": resolved_source,
+            "resolved_source_hash": resolved_source_hash,
+            "correction_mappings": correction_mappings,
+            "unresolved_correction_spans": unresolved_correction_spans,
+            "citation_mode": citation_mode,
+        }
+
+    def materialize(
+        self,
+        *,
+        source_manifest_ref: str,
+        source_manifest_hash: str,
+        source_content_hash: str,
+        candidate_text: str,
+        additional_protected_terms: Sequence[str],
+        correction_set_version_ref: str | None = None,
+        correction_set_version_hash: str | None = None,
+        prior_version_ref: str | None = None,
+    ) -> dict[str, Any]:
+        terms = _unique_terms(additional_protected_terms, "additional_protected_terms")
+        source = self.model_source_context(
+            source_manifest_ref=source_manifest_ref,
+            source_manifest_hash=source_manifest_hash,
+            source_content_hash=source_content_hash,
+            correction_set_version_ref=correction_set_version_ref,
+            correction_set_version_hash=correction_set_version_hash,
+        )
+        manifest = {"document_ref": source["document_ref"]}
+        source_manifest_ref = source["source_manifest_ref"]
+        source_manifest_hash = source["source_manifest_hash"]
+        source_content_hash = source["source_content_hash"]
+        resolved_source = source["resolved_source_text"]
+        resolved_source_hash = source["resolved_source_hash"]
+        correction_set_ref = source["correction_set_version_ref"]
+        correction_set_hash = source["correction_set_version_hash"]
+        correction_mappings = source["correction_mappings"]
+        unresolved_correction_spans = source["unresolved_correction_spans"]
+        citation_mode = source["citation_mode"]
         candidate = parse_transcript_polish_candidate_text(candidate_text)
         protection = _protection_manifest(resolved_source, terms)
         mappings: list[dict[str, Any]] = []
@@ -397,6 +463,10 @@ class TranscriptPolishAuthority:
             polished = segment["polished_text"]
             if _numeric_expressions(source_slice) != _numeric_expressions(polished):
                 raise TranscriptPolishConflict(f"segment {index} numeric expressions drifted")
+            if _semantic_qualifiers(source_slice) != _semantic_qualifiers(polished):
+                raise TranscriptPolishConflict(
+                    f"segment {index} negation or uncertainty qualifiers drifted"
+                )
             terms_to_check = set(_auto_terms(source_slice)) | set(_auto_terms(polished))
             terms_to_check.update(
                 term for term in terms
@@ -428,6 +498,10 @@ class TranscriptPolishAuthority:
             raise TranscriptPolishConflict("candidate length ratio exceeds conservation bounds")
         if _numeric_expressions(resolved_source) != _numeric_expressions(polished_text):
             raise TranscriptPolishConflict("global numeric expressions drifted")
+        if _semantic_qualifiers(resolved_source) != _semantic_qualifiers(polished_text):
+            raise TranscriptPolishConflict(
+                "global negation or uncertainty qualifiers drifted"
+            )
         for item in protection["protected_terms"]:
             if _term_count(polished_text, item["term"]) != item["count"]:
                 raise TranscriptPolishConflict("global protected term counts drifted")
@@ -542,24 +616,32 @@ class TranscriptPolishWorker:
     def __init__(self, authority: TranscriptPolishAuthority) -> None:
         self.authority = authority
 
-    def execute(self, work_order: Mapping[str, Any], candidate_text: str) -> dict[str, Any]:
+    @classmethod
+    def admitted_parameters(
+        cls, work_order: WorkOrder | Mapping[str, Any]
+    ) -> tuple[WorkOrder, dict[str, Any]]:
         try:
-            work = WorkOrder.from_dict(work_order).to_dict()
+            work = (
+                work_order
+                if isinstance(work_order, WorkOrder)
+                else WorkOrder.from_dict(work_order)
+            )
         except Exception as exc:
             raise TranscriptPolishConflict("WorkOrder is invalid") from exc
-        if work["requested_capabilities"] != [TRANSCRIPT_POLISH_CAPABILITY]:
+        wire = work.to_dict()
+        if wire["requested_capabilities"] != [TRANSCRIPT_POLISH_CAPABILITY]:
             raise TranscriptPolishConflict("WorkOrder capability drifted")
-        if work["runtime_profile_ref"] != TRANSCRIPT_POLISH_RUNTIME:
+        if wire["runtime_profile_ref"] != TRANSCRIPT_POLISH_RUNTIME:
             raise TranscriptPolishConflict("WorkOrder runtime profile drifted")
-        if work["declared_side_effects"]:
+        if wire["declared_side_effects"]:
             raise TranscriptPolishConflict("transcript polish must have no external side effects")
-        metadata = work["metadata"]
+        metadata = wire["metadata"]
         if (
             metadata.get("operation") != TRANSCRIPT_POLISH_OPERATION
             or metadata.get("permission_scope") != TRANSCRIPT_POLISH_PERMISSION
         ):
             raise TranscriptPolishConflict("WorkOrder operation or permission drifted")
-        parameters = _closed(metadata.get("parameters"), self._PARAMETERS, "parameters")
+        parameters = _closed(metadata.get("parameters"), cls._PARAMETERS, "parameters")
         if parameters["source_ref"] != "source:alphaengine":
             raise TranscriptPolishConflict("WorkOrder source_ref drifted")
         locator = _text(parameters["locator"], "locator")
@@ -567,6 +649,11 @@ class TranscriptPolishWorker:
             raise TranscriptPolishConflict("WorkOrder locator is not an AlphaEngine document")
         if parameters["query_terms"] != ["transcript-polish"]:
             raise TranscriptPolishConflict("WorkOrder query_terms drifted")
+        return work, parameters
+
+    def execute(self, work_order: Mapping[str, Any], candidate_text: str) -> dict[str, Any]:
+        _, parameters = self.admitted_parameters(work_order)
+        locator = _text(parameters["locator"], "locator")
         prior = parameters["prior_polished_artifact_version_ref"]
         if prior is not None:
             prior = _text(prior, "prior_polished_artifact_version_ref")

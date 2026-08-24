@@ -229,6 +229,18 @@ class TranscriptPolishTests(_TranscriptFixture, unittest.TestCase):
         )
         expected = ORIGINAL.replace("Accenture", "Accenture plc")
         self.assertEqual(resolved["resolved_text"], expected)
+        model_source = self.authority.model_source_context(
+            source_manifest_ref=self.manifest["id"],
+            source_manifest_hash=self.manifest["content_hash"],
+            source_content_hash=self.manifest["assembled_object"]["content_hash"],
+            correction_set_version_ref=correction_set["id"],
+            correction_set_version_hash=correction_set["content_hash"],
+        )
+        self.assertEqual(model_source["resolved_source_text"], expected)
+        self.assertEqual(
+            model_source["resolved_source_hash"],
+            hashlib.sha256(expected.encode("utf-8")).hexdigest(),
+        )
         polished = expected.replace("Um, ", "")
         artifact = self.materialize(
             candidate_for(expected, polished),
@@ -361,6 +373,12 @@ class TranscriptPolishTests(_TranscriptFixture, unittest.TestCase):
         changed_number = candidate(POLISHED.replace("1.2 billion", "1.3 billion"))
         with self.assertRaisesRegex(TranscriptPolishConflict, "numeric"):
             self.materialize(changed_number)
+        removed_negation = candidate(POLISHED.replace("not certain", "certain"))
+        with self.assertRaisesRegex(TranscriptPolishConflict, "negation"):
+            self.materialize(removed_negation)
+        changed_uncertainty = candidate(POLISHED.replace("may improve", "will improve"))
+        with self.assertRaisesRegex(TranscriptPolishConflict, "uncertainty"):
+            self.materialize(changed_uncertainty)
         swapped_numbers_text = POLISHED.replace("2026", "1.2 billion", 1).replace(
             "USD 1.2 billion", "USD 2026", 1
         )

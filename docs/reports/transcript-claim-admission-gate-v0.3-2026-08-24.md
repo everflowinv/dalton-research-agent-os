@@ -3,6 +3,10 @@
 日期：2026-08-24  
 状态：development candidate；未部署 live
 
+后续状态：routed model worker 已在同日接通，见
+[Routed TranscriptPolish Worker v0.4](routed-transcript-polish-worker-v0.4-2026-08-24.md)。下文“下一步”保留本报告
+发布时的历史状态。
+
 ## 裁决
 
 原始 ASR 是不可变捕获记录，不是天然正确的事实。polished transcript 方便阅读和模型处理，但也不能成为第二份独立
