@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StatementSnapshotProbeOutput",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["matches"],
+  "properties": {
+    "matches": {
+      "type": "array", "minItems": 1, "maxItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": [
+          "source_location", "statement_snapshot_ref", "statement_snapshot_hash",
+          "concept_set_version_ref", "concept_set_version_hash", "accession",
+          "period_end", "verification_status"
+        ],
+        "properties": {
+          "source_location": {"type": "string", "minLength": 1},
+          "statement_snapshot_ref": {"type": "string"},
+          "statement_snapshot_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "concept_set_version_ref": {"type": "string"},
+          "concept_set_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "accession": {"type": "string"},
+          "period_end": {"type": "string", "format": "date"},
+          "verification_status": {"const": "verified"}
+        }
+      }
+    }
+  }
+}

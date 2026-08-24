@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StatementConceptSetVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "concept_set_ref", "version",
+    "prior_version_ref", "statement_type", "taxonomy", "unit", "line_items",
+    "equations", "actor_ref", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^statement-concept-set-version:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "concept_set_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "prior_version_ref": {"type": ["string", "null"]},
+    "statement_type": {"const": "balance_sheet"},
+    "taxonomy": {"const": "us-gaap"},
+    "unit": {"const": "USD"},
+    "line_items": {
+      "type": "array",
+      "minItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["line_item_ref", "concepts"],
+        "properties": {
+          "line_item_ref": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+          "concepts": {
+            "type": "array", "minItems": 1, "maxItems": 8, "uniqueItems": true,
+            "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9._-]*$"}
+          }
+        }
+      }
+    },
+    "equations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["equation_ref", "left_line_items", "right_line_items", "tolerance"],
+        "properties": {
+          "equation_ref": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+          "left_line_items": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+          "right_line_items": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string"}},
+          "tolerance": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"}
+        }
+      }
+    },
+    "actor_ref": {"type": "string", "pattern": "^human:"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

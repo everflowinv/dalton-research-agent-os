@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "StatementSnapshotVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "snapshot_ref", "version",
+    "prior_version_ref", "statement_type", "source_ref", "source_artifact_version_ref",
+    "source_artifact_version_hash", "source_content_hash", "concept_set_version_ref", "concept_set_version_hash",
+    "issuer_cik", "entity_name", "accession", "form", "filed", "period_end",
+    "taxonomy", "unit", "fact_rows", "reconciliations", "verification_status",
+    "actor_ref", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^statement-snapshot-version:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "snapshot_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "prior_version_ref": {"type": ["string", "null"]},
+    "statement_type": {"const": "balance_sheet"},
+    "source_ref": {"const": "source:sec-edgar"},
+    "source_artifact_version_ref": {"type": "string", "minLength": 1},
+    "source_artifact_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "concept_set_version_ref": {"type": "string", "pattern": "^statement-concept-set-version:[0-9a-f]{32}$"},
+    "concept_set_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "issuer_cik": {"type": "string", "pattern": "^[0-9]{10}$"},
+    "entity_name": {"type": "string", "minLength": 1},
+    "accession": {"type": "string", "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$"},
+    "form": {"enum": ["10-Q", "10-K"]},
+    "filed": {"type": "string", "format": "date"},
+    "period_end": {"type": "string", "format": "date"},
+    "taxonomy": {"const": "us-gaap"},
+    "unit": {"const": "USD"},
+    "fact_rows": {
+      "type": "array", "minItems": 3,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["line_item_ref", "taxonomy", "concept", "label", "unit", "value", "period_end", "accession", "form", "filed", "fy", "fp"],
+        "properties": {
+          "line_item_ref": {"type": "string"},
+          "taxonomy": {"const": "us-gaap"},
+          "concept": {"type": "string"},
+          "label": {"type": "string", "minLength": 1},
+          "unit": {"const": "USD"},
+          "value": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+          "period_end": {"type": "string", "format": "date"},
+          "accession": {"type": "string"},
+          "form": {"enum": ["10-Q", "10-K"]},
+          "filed": {"type": "string", "format": "date"},
+          "fy": {"type": "integer", "minimum": 1900, "maximum": 9999},
+          "fp": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "reconciliations": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["equation_ref", "left_value", "right_value", "difference", "tolerance", "status"],
+        "properties": {
+          "equation_ref": {"type": "string"},
+          "left_value": {"type": "string"},
+          "right_value": {"type": "string"},
+          "difference": {"type": "string"},
+          "tolerance": {"type": "string"},
+          "status": {"const": "passed"}
+        }
+      }
+    },
+    "verification_status": {"const": "verified"},
+    "actor_ref": {"const": "core:statement-snapshot-worker"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
