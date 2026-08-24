@@ -234,6 +234,123 @@ def parse_transcript_polish_candidate_text(value: str) -> dict[str, Any]:
     return {"schema_version": CANDIDATE_SCHEMA_VERSION, "segments": segments}
 
 
+def verify_transcript_polish_candidate(
+    source_text: str,
+    candidate_text: str,
+    *,
+    additional_protected_terms: Sequence[str],
+) -> dict[str, Any]:
+    """Verify one candidate without reading authority or writing an artifact."""
+
+    if not isinstance(source_text, str) or not source_text:
+        raise TranscriptPolishValidationError(
+            "source_text must be non-empty text"
+        )
+    terms = _unique_terms(
+        additional_protected_terms, "additional_protected_terms"
+    )
+    candidate = parse_transcript_polish_candidate_text(candidate_text)
+    protection = _protection_manifest(source_text, terms)
+    mappings: list[dict[str, Any]] = []
+    expected_start = 0
+    polished_parts: list[str] = []
+    polished_cursor = 0
+    for index, segment in enumerate(candidate["segments"]):
+        start = segment["source_start"]
+        end = segment["source_end"]
+        if start != expected_start or end <= start or end > len(source_text):
+            raise TranscriptPolishConflict(
+                "candidate source spans are not a contiguous partition"
+            )
+        if end - start > MAX_SOURCE_SPAN_CHARS:
+            raise TranscriptPolishValidationError(
+                "candidate source span exceeds v1 bound"
+            )
+        source_slice = source_text[start:end]
+        if hashlib.sha256(source_slice.encode("utf-8")).hexdigest() != segment[
+            "source_sha256"
+        ]:
+            raise TranscriptPolishConflict("candidate source span hash drifted")
+        polished = segment["polished_text"]
+        if _numeric_expressions(source_slice) != _numeric_expressions(polished):
+            raise TranscriptPolishConflict(
+                f"segment {index} numeric expressions drifted"
+            )
+        if _semantic_qualifiers(source_slice) != _semantic_qualifiers(polished):
+            raise TranscriptPolishConflict(
+                f"segment {index} negation or uncertainty qualifiers drifted"
+            )
+        terms_to_check = set(_auto_terms(source_slice)) | set(
+            _auto_terms(polished)
+        )
+        terms_to_check.update(
+            term for term in terms
+            if _term_count(source_slice, term) or _term_count(polished, term)
+        )
+        if _term_sequence(source_slice, terms_to_check) != _term_sequence(
+            polished, terms_to_check
+        ):
+            raise TranscriptPolishConflict(
+                f"segment {index} protected terms drifted"
+            )
+        polished_start = polished_cursor
+        polished_cursor += len(polished)
+        mappings.append({
+            "source_start": start,
+            "source_end": end,
+            "source_sha256": segment["source_sha256"],
+            "polished_start": polished_start,
+            "polished_end": polished_cursor,
+            "polished_sha256": hashlib.sha256(
+                polished.encode("utf-8")
+            ).hexdigest(),
+        })
+        polished_parts.append(polished)
+        expected_start = end
+    if expected_start != len(source_text):
+        raise TranscriptPolishConflict(
+            "candidate source spans do not cover the resolved source"
+        )
+    polished_text = "".join(polished_parts)
+    ratio = Decimal(len(polished_text)) / Decimal(len(source_text))
+    if ratio < RETENTION_FLOOR or ratio > EXPANSION_CEILING:
+        raise TranscriptPolishConflict(
+            "candidate length ratio exceeds conservation bounds"
+        )
+    if _numeric_expressions(source_text) != _numeric_expressions(polished_text):
+        raise TranscriptPolishConflict("global numeric expressions drifted")
+    if _semantic_qualifiers(source_text) != _semantic_qualifiers(polished_text):
+        raise TranscriptPolishConflict(
+            "global negation or uncertainty qualifiers drifted"
+        )
+    for item in protection["protected_terms"]:
+        if _term_count(polished_text, item["term"]) != item["count"]:
+            raise TranscriptPolishConflict(
+                "global protected term counts drifted"
+            )
+    global_terms = (
+        set(_auto_terms(source_text))
+        | set(_auto_terms(polished_text))
+        | set(terms)
+    )
+    if _term_sequence(source_text, global_terms) != _term_sequence(
+        polished_text, global_terms
+    ):
+        raise TranscriptPolishConflict(
+            "candidate introduced or removed protected-looking terms"
+        )
+    return {
+        "candidate": candidate,
+        "candidate_hash": content_hash(candidate),
+        "protection_manifest": protection,
+        "span_mappings": mappings,
+        "polished_text": polished_text,
+        "polished_content_hash": hashlib.sha256(
+            polished_text.encode("utf-8")
+        ).hexdigest(),
+    }
+
+
 class TranscriptPolishAuthority:
     """Verify and persist immutable derived polished transcript artifacts."""
 
@@ -444,80 +561,18 @@ class TranscriptPolishAuthority:
         correction_mappings = source["correction_mappings"]
         unresolved_correction_spans = source["unresolved_correction_spans"]
         citation_mode = source["citation_mode"]
-        candidate = parse_transcript_polish_candidate_text(candidate_text)
-        protection = _protection_manifest(resolved_source, terms)
-        mappings: list[dict[str, Any]] = []
-        expected_start = 0
-        polished_parts: list[str] = []
-        polished_cursor = 0
-        for index, segment in enumerate(candidate["segments"]):
-            start = segment["source_start"]
-            end = segment["source_end"]
-            if start != expected_start or end <= start or end > len(resolved_source):
-                raise TranscriptPolishConflict("candidate source spans are not a contiguous partition")
-            if end - start > MAX_SOURCE_SPAN_CHARS:
-                raise TranscriptPolishValidationError("candidate source span exceeds v1 bound")
-            source_slice = resolved_source[start:end]
-            if hashlib.sha256(source_slice.encode("utf-8")).hexdigest() != segment["source_sha256"]:
-                raise TranscriptPolishConflict("candidate source span hash drifted")
-            polished = segment["polished_text"]
-            if _numeric_expressions(source_slice) != _numeric_expressions(polished):
-                raise TranscriptPolishConflict(f"segment {index} numeric expressions drifted")
-            if _semantic_qualifiers(source_slice) != _semantic_qualifiers(polished):
-                raise TranscriptPolishConflict(
-                    f"segment {index} negation or uncertainty qualifiers drifted"
-                )
-            terms_to_check = set(_auto_terms(source_slice)) | set(_auto_terms(polished))
-            terms_to_check.update(
-                term for term in terms
-                if _term_count(source_slice, term) or _term_count(polished, term)
-            )
-            if _term_sequence(source_slice, terms_to_check) != _term_sequence(
-                polished, terms_to_check
-            ):
-                raise TranscriptPolishConflict(f"segment {index} protected terms drifted")
-            polished_start = polished_cursor
-            polished_cursor += len(polished)
-            mappings.append({
-                "source_start": start,
-                "source_end": end,
-                "source_sha256": segment["source_sha256"],
-                "polished_start": polished_start,
-                "polished_end": polished_cursor,
-                "polished_sha256": hashlib.sha256(polished.encode("utf-8")).hexdigest(),
-            })
-            polished_parts.append(polished)
-            expected_start = end
-        if expected_start != len(resolved_source):
-            raise TranscriptPolishConflict(
-                "candidate source spans do not cover the resolved source"
-            )
-        polished_text = "".join(polished_parts)
-        ratio = Decimal(len(polished_text)) / Decimal(len(resolved_source))
-        if ratio < RETENTION_FLOOR or ratio > EXPANSION_CEILING:
-            raise TranscriptPolishConflict("candidate length ratio exceeds conservation bounds")
-        if _numeric_expressions(resolved_source) != _numeric_expressions(polished_text):
-            raise TranscriptPolishConflict("global numeric expressions drifted")
-        if _semantic_qualifiers(resolved_source) != _semantic_qualifiers(polished_text):
-            raise TranscriptPolishConflict(
-                "global negation or uncertainty qualifiers drifted"
-            )
-        for item in protection["protected_terms"]:
-            if _term_count(polished_text, item["term"]) != item["count"]:
-                raise TranscriptPolishConflict("global protected term counts drifted")
-        global_terms = (
-            set(_auto_terms(resolved_source))
-            | set(_auto_terms(polished_text))
-            | set(terms)
+        verification = verify_transcript_polish_candidate(
+            resolved_source,
+            candidate_text,
+            additional_protected_terms=terms,
         )
-        if _term_sequence(resolved_source, global_terms) != _term_sequence(
-            polished_text, global_terms
-        ):
-            raise TranscriptPolishConflict("candidate introduced or removed protected-looking terms")
-
+        candidate = verification["candidate"]
+        candidate_hash = verification["candidate_hash"]
+        protection = verification["protection_manifest"]
+        mappings = verification["span_mappings"]
+        polished_text = verification["polished_text"]
+        polished_hash = verification["polished_content_hash"]
         polished_bytes = polished_text.encode("utf-8")
-        polished_hash = hashlib.sha256(polished_bytes).hexdigest()
-        candidate_hash = content_hash(candidate)
         artifact_ref = f"transcript-polish-artifact:{manifest['document_ref']}"
         latest = self.connection.execute(
             "SELECT record_json FROM transcript_polish_artifact_versions "
@@ -693,5 +748,5 @@ __all__ = [
     "TRANSCRIPT_POLISH_RULE_REF", "TranscriptPolishAuthority",
     "TranscriptPolishWorker", "TranscriptPolishError", "TranscriptPolishConflict",
     "TranscriptPolishValidationError", "TranscriptPolishNotFound",
-    "parse_transcript_polish_candidate_text",
+    "parse_transcript_polish_candidate_text", "verify_transcript_polish_candidate",
 ]

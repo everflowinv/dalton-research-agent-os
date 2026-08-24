@@ -28,6 +28,7 @@ dalton-thesis-impact-calibrate-matrix = "dalton_core.thesis_impact_calibration_m
 dalton-thesis-impact-verifier-canary = "dalton_core.thesis_impact_verifier_canary:main"
 dalton-thesis-impact = "dalton_core.thesis_impact_production:main"
 dalton-llm-planner-calibrate = "dalton_core.llm_research_planner_calibration_runner:main"
+dalton-transcript-polish-calibrate = "dalton_core.transcript_polish_calibration_runner:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

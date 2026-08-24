@@ -90,6 +90,14 @@
   相关超集 55/55、pyflakes、compileall、schema、diff check 与 wheel 隔离导入通过；尚未跑真实模型、独立 transcript frozen corpus 或
   live deployment。详见
   [Routed TranscriptPolish Worker v0.4](reports/routed-transcript-polish-worker-v0.4-2026-08-24.md)
+- development candidate 已冻结 transcript-polish 专用 10-case corpus，其中 9 个 safety-critical，覆盖 prompt
+  injection、数字/单位、否定与不确定性、专名、speaker、中文、unresolved ASR 错词、human-admitted correction 和
+  多 span 长文本。评分依次执行 strict contract、生产 conservation verifier 与最小可读性 gate；本地金标准
+  10/10、safety 9/9。新增可恢复 paid runner，绑定 clean commit、exact corpus/profile、token/cost/time cap，每个
+  case fsync 落盘并复用 broker replay；它只使用 calibration-only profile，不改 production routing。关联超集
+  74/74、compileall、diff check、sdist/wheel build 和隔离 wheel resource 回读通过；真实 DeepSeek V4 Flash、
+  GLM 5.3、GPT-5.6 Luna 横评尚未执行。详见
+  [TranscriptPolish 模型校准基础 v0.5](reports/transcript-polish-calibration-foundation-v0.5-2026-08-24.md)
 - development candidate 已增加 Gemini `web_search` discovery bridge 和独立 public-web fetch adapter。冻结 inventory
   已按真实 OpenClaw 合同修正为无 cursor，`freshness` 与显式日期窗互斥；search raw response 完整保存，向后只暴露
   由引用 URL 推导的 opaque authority ref，不把 Gemini synthesis、snippet 或 title 当作网页正文。系统只有从 exact
@@ -133,8 +141,9 @@ Core 才能签发 Proposal 0.3，deterministic planner 保留为 fallback。Qwen
 30/30 的固定 corpus 结果写入 development-only policy v2；live production 尚未启用 Planner worker 或该 policy。
 StatementSnapshot v1 与 TranscriptPolish source-lineage v0.2 均已作为受限 probe 完成隔离接线，
 `TranscriptClaimCitationBinding` 已接入通用 Claim admission，routed transcript model worker 也已复用现有
-Scheduler/Router/adapter/accounting 跑通隔离链。下一步是冻结独立 transcript corpus 并横评模型；Planner 的
-DeepSeek V4 Flash 结论只作为 baseline，不能直接外推到逐字稿任务。
+Scheduler/Router/adapter/accounting 跑通隔离链。独立 transcript corpus 和可恢复 paid runner 已冻结；下一步是在
+同一 commit 上横评 DeepSeek V4 Flash、GLM 5.3 与 GPT-5.6 Luna。Planner 的 DeepSeek V4 Flash 结论只作为 baseline，
+不能直接外推到逐字稿任务。
 live 部署现在能自主生成并选择研究问题，也已加载 phase-pinned thesis-impact production lane；由于 live Core
 尚无 ThesisVersion 和 company mapping，这条 lane 当前只做无模型调用的 idle 检查，不提交 assessment、verification
 或 ThesisVersion。仓库 fixture 仍可按一次性 connector plan 执行 CNINFO、SEC、AlphaEngine 三源离线流程并从
@@ -1298,6 +1307,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Transcript Correction Authority v0.2：`docs/reports/transcript-correction-authority-v0.2-2026-08-23.md`
 - Transcript Claim Admission Gate v0.3：`docs/reports/transcript-claim-admission-gate-v0.3-2026-08-24.md`
 - Routed TranscriptPolish Worker v0.4：`docs/reports/routed-transcript-polish-worker-v0.4-2026-08-24.md`
+- TranscriptPolish 模型校准基础 v0.5：`docs/reports/transcript-polish-calibration-foundation-v0.5-2026-08-24.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
