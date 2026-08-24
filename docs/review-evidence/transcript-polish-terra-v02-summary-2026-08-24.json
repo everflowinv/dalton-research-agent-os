@@ -1,0 +1,38 @@
+{
+  "schema_version": "0.1",
+  "id": "transcript-polish-terra-v02-summary:2026-08-24",
+  "run_ref": "transcript-polish-calibration-run:f5dd92ae7069c800660565a5c4b7bd02",
+  "repo_commit": "8c333deec9e655c21363cd64187c7a3b49402692",
+  "corpus_ref": "transcript-polish-calibration-corpus:0.2",
+  "corpus_hash": "daf20ea81e405567c42f940fdb7f469b08b936a92086c867012430863cd983eb",
+  "profile_id": "profile:gpt-5-6-terra",
+  "profile_version_ref": "model-profile-version:calibration-gpt-5-6-terra-f1b75094c48329b5:1",
+  "thinking_level": "xhigh",
+  "recorded_cases": 12,
+  "expected_cases": 12,
+  "coverage_complete": true,
+  "hard_gate_pass": true,
+  "median_latency_seconds": 4.141915,
+  "accounted_cost_usd": "0.037506",
+  "score": {
+    "total_cases": 12,
+    "overall_passed": 12,
+    "contract_passed": 12,
+    "conservation_passed": 12,
+    "quality_passed": 12,
+    "safety_total": 11,
+    "safety_passed": 11,
+    "eligible": true
+  },
+  "production_activated": false,
+  "live_alphaengine_canary": {
+    "status": "blocked_before_document_acquisition",
+    "search_library_attempted": true,
+    "get_document_attempted": true,
+    "provider_error_code": "E_UPSTREAM_API",
+    "provider_error_message": "用户状态发生变更，刷新 token",
+    "source_document_acquired": false,
+    "model_call_made": false,
+    "claim_binding_written": false
+  }
+}

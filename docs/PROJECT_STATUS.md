@@ -94,13 +94,16 @@
   profile、24 条 distinct model route。首轮 8 个模型达到 10/10、safety 9/9；对低延迟的四个 finalist 再跑一轮，
   Gemini 3.7 Flash `low`、GLM 5.2、Qwen 3.8 Max 和 GPT-5.6 Terra 均再次全过。人工复核发现 GLM 5.2 在 unresolved
   ASR case 删除了通用 `Speaker:` 标签，而 v0.1 corpus 尚未把该标签列为 protected term。Gemini 3.7 Flash 两轮中位
-  延迟为 2.027/1.885 秒，均保留 speaker 结构，成本也低于 Qwen 与 Terra，因此已写入 exact development-only
-  TranscriptPolish policy；production pointer 未启用。GLM 5.3 完整复测为 8/10、safety 7/9；Flash `low` 的唯一
-  长 case recovery 仍失败。Planner development policy 继续使用 Qwen DeepSeek V4 Flash，不受逐字稿选择影响。下一步
-  是补强 corpus v0.2 的 speaker 保护，并运行完整 AlphaEngine transcript canary。详见
+  延迟为 2.027/1.885 秒，均保留 speaker 结构，成本也低于 Qwen 与 Terra，因此成为横评算法首选。Owner 随后明确指定
+  GPT-5.6 Terra 为 TranscriptPolish 首选；Core 已把 Gemini v1 原样保留，并新增 exact Terra development policy v2，
+  production pointer 未启用。Corpus v0.2 现有 12 case、11 个 safety-critical，显式保护 speaker，并增加 unresolved
+  proper-name/numeric ASR 错误；Terra `xhigh` 在 clean commit 上取得 12/12、safety 11/11，中位延迟 4.142 秒，成本
+  USD 0.037506。Planner development policy 继续使用 Qwen DeepSeek V4 Flash，不受逐字稿选择影响。真实 AlphaEngine
+  canary 已尝试，但 search/get 均被上游“用户状态发生变更，刷新 token”挡在正文获取前，没有伪装成成功。详见
   [TranscriptPolish 模型校准基础 v0.5](reports/transcript-polish-calibration-foundation-v0.5-2026-08-24.md)
   、[TranscriptPolish 模型初轮校准 v0.6](reports/transcript-polish-model-calibration-v0.6-2026-08-24.md)
-  和 [TranscriptPolish 全模型横评 v0.7](reports/transcript-polish-model-matrix-v0.7-2026-08-24.md)
+  、[TranscriptPolish 全模型横评 v0.7](reports/transcript-polish-model-matrix-v0.7-2026-08-24.md)
+  和 [TranscriptPolish Terra policy 与 corpus v0.2](reports/transcript-polish-terra-policy-and-corpus-v0.8-2026-08-24.md)
 - development candidate 已增加 Gemini `web_search` discovery bridge 和独立 public-web fetch adapter。冻结 inventory
   已按真实 OpenClaw 合同修正为无 cursor，`freshness` 与显式日期窗互斥；search raw response 完整保存，向后只暴露
   由引用 URL 推导的 opaque authority ref，不把 Gemini synthesis、snippet 或 title 当作网页正文。系统只有从 exact
@@ -144,10 +147,10 @@ Core 才能签发 Proposal 0.3，deterministic planner 保留为 fallback。Qwen
 30/30 的固定 corpus 结果写入 development-only policy v2；live production 尚未启用 Planner worker 或该 policy。
 StatementSnapshot v1 与 TranscriptPolish source-lineage v0.2 均已作为受限 probe 完成隔离接线，
 `TranscriptClaimCitationBinding` 已接入通用 Claim admission，routed transcript model worker 也已复用现有
-Scheduler/Router/adapter/accounting 跑通隔离链。独立 transcript corpus 和可恢复 paid runner 已冻结；25 个 exact
-profile 的横评和四个 finalist 的第二轮复测已经完成，Gemini 3.7 Flash `low` 已进入 development-only
-TranscriptPolish policy。下一步是 corpus v0.2 和真实完整 AlphaEngine transcript canary；通过后才能另行决定
-production policy。Planner 的 DeepSeek V4 Flash 只负责 Planner，不承担逐字稿润色。
+Scheduler/Router/adapter/accounting 跑通隔离链。25 个 exact profile 的横评和四个 finalist 的第二轮复测已经完成；
+Owner 选择的 GPT-5.6 Terra 已进入 immutable development policy v2，并在 corpus v0.2 上通过 12/12、safety 11/11。
+下一步是刷新 AlphaEngine Desktop 登录态后重跑真实完整 transcript canary；通过后才能另行决定 production policy。
+Planner 的 DeepSeek V4 Flash 只负责 Planner，不承担逐字稿润色。
 live 部署现在能自主生成并选择研究问题，也已加载 phase-pinned thesis-impact production lane；由于 live Core
 尚无 ThesisVersion 和 company mapping，这条 lane 当前只做无模型调用的 idle 检查，不提交 assessment、verification
 或 ThesisVersion。仓库 fixture 仍可按一次性 connector plan 执行 CNINFO、SEC、AlphaEngine 三源离线流程并从
