@@ -466,6 +466,68 @@ class TranscriptCorrectionAuthority:
         binding_ref = _text(binding_ref, "binding_ref")
         return _persisted_citation_row(self.connection, binding_ref)
 
+    def review_state(
+        self,
+        correction_set_ref: str,
+        *,
+        source_start: int,
+        source_end: int,
+    ) -> dict[str, Any]:
+        """Return the durable correction/citation state without writing.
+
+        The Cockpit uses this read path after a process restart.  It does not
+        synthesize a citation on GET and therefore cannot turn a view into an
+        admission side effect.
+        """
+
+        correction_set_ref = _text(correction_set_ref, "correction_set_ref")
+        if (
+            isinstance(source_start, bool)
+            or not isinstance(source_start, int)
+            or isinstance(source_end, bool)
+            or not isinstance(source_end, int)
+            or source_start < 0
+            or source_end <= source_start
+        ):
+            raise TranscriptCorrectionValidationError(
+                "review-state citation span is invalid"
+            )
+        row = self.connection.execute(
+            "SELECT version_id FROM transcript_correction_set_versions "
+            "WHERE correction_set_ref=? ORDER BY version_number DESC LIMIT 1",
+            (correction_set_ref,),
+        ).fetchone()
+        if row is None:
+            return {
+                "status": "pending_human_review",
+                "correction_set": None,
+                "citation_binding": None,
+                "claim_eligible": False,
+            }
+        correction_set = self.correction_set(row["version_id"])
+        binding_row = self.connection.execute(
+            "SELECT binding_id FROM transcript_claim_citation_bindings "
+            "WHERE correction_set_version_ref=? AND source_start=? AND source_end=?",
+            (correction_set["id"], source_start, source_end),
+        ).fetchone()
+        if binding_row is None:
+            return {
+                "status": "correction_published",
+                "correction_set": correction_set,
+                "citation_binding": None,
+                "claim_eligible": False,
+            }
+        binding = self.claim_citation_binding(binding_row["binding_id"])
+        return {
+            "status": (
+                "claim_eligible" if binding["claim_eligible"]
+                else "citation_blocked"
+            ),
+            "correction_set": correction_set,
+            "citation_binding": binding,
+            "claim_eligible": binding["claim_eligible"],
+        }
+
     def _source(
         self,
         source_manifest_ref: str,

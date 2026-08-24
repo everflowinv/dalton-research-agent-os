@@ -1,10 +1,10 @@
-"""Owner-authenticated Agenda control plane behind Tailscale Serve.
+"""Owner-authenticated Dalton Cockpit behind Tailscale Serve.
 
 The service binds loopback only.  Tailscale Serve terminates HTTPS, strips
 spoofed identity headers, and injects ``Tailscale-User-Login``.  The backend
-adds an in-memory SameSite CSRF session before accepting feedback writes.
-It never opens an authority database; two scoped writer principals separate
-human dashboard feedback from automatic timeout acceptance.
+adds one in-memory SameSite CSRF session before accepting any write.  Agenda,
+research review, and transcript correction share this shell but retain their
+separate writer principals and fail-closed authority gates.
 """
 
 from __future__ import annotations
@@ -25,13 +25,19 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
+from .research_review import ResearchReviewError
+from .research_review_control import (
+    ResearchReviewControlConfig,
+    ResearchReviewControlError,
+    ResearchReviewControlPlane,
+)
 from .store import content_hash
 from .writer_client import WriterClient
 from .writer_server import load_principals
 
 
-_HTML_PATH = Path(__file__).with_name("agenda_control.html")
-MAX_BODY_BYTES = 8192
+_HTML_PATH = Path(__file__).with_name("cockpit_control.html")
+MAX_BODY_BYTES = 16384
 SESSION_TTL_SECONDS = 3600
 AUTOMATION_SUBJECT = "automation:timeout"
 
@@ -82,6 +88,7 @@ class AgendaControlConfig:
     endpoint_ref: str
     feedback_timeout_seconds: int
     sweep_interval_seconds: int
+    research_review: ResearchReviewControlConfig | None = None
 
     @property
     def public_url(self) -> str:
@@ -94,7 +101,7 @@ class AgendaControlConfig:
             "writer_socket", "token_config", "endpoint_ref",
             "feedback_timeout_seconds", "sweep_interval_seconds",
         }
-        if set(raw) != expected:
+        if set(raw) - expected - {"research_review"} or not expected.issubset(raw):
             raise AgendaControlError("Agenda control config has an invalid closed shape")
         host = _string(raw["host"], "host")
         if host not in {"127.0.0.1", "::1"}:
@@ -109,6 +116,15 @@ class AgendaControlConfig:
             or len(set(logins)) != len(logins)
         ):
             raise AgendaControlError("allowed_tailscale_logins must be unique strings")
+        review_config = None
+        review_raw = raw.get("research_review")
+        if review_raw is not None:
+            if not isinstance(review_raw, Mapping):
+                raise AgendaControlError("research_review must be an object or null")
+            try:
+                review_config = ResearchReviewControlConfig.from_mapping(review_raw)
+            except ResearchReviewControlError as exc:
+                raise AgendaControlError("embedded research review config is invalid") from exc
         return cls(
             host=host,
             port=_positive_int(raw["port"], "port", 65535),
@@ -124,6 +140,7 @@ class AgendaControlConfig:
             sweep_interval_seconds=_positive_int(
                 raw["sweep_interval_seconds"], "sweep_interval_seconds", 86400
             ),
+            research_review=review_config,
         )
 
     @classmethod
@@ -332,9 +349,15 @@ class _Session:
 
 
 class AgendaControlApplication:
-    def __init__(self, config: AgendaControlConfig, plane: AgendaControlPlane) -> None:
+    def __init__(
+        self,
+        config: AgendaControlConfig,
+        plane: AgendaControlPlane,
+        review_plane: ResearchReviewControlPlane | None = None,
+    ) -> None:
         self.config = config
         self.plane = plane
+        self.review_plane = review_plane
         self._sessions: dict[str, _Session] = {}
         self._lock = threading.Lock()
 
@@ -376,10 +399,37 @@ class AgendaControlApplication:
             raise AgendaControlError("request body has an invalid closed shape")
         return self.plane.record(login, value["decision_ref"], value["verdict"])
 
+    def _review_body(self, session: _Session, csrf: str | None, body: bytes) -> Mapping[str, Any]:
+        if self.review_plane is None:
+            raise AgendaControlError("research review is not enabled")
+        if not isinstance(csrf, str) or not secrets.compare_digest(csrf, session.csrf):
+            raise PermissionError("invalid CSRF token")
+        try:
+            value = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgendaControlError("request body is invalid") from exc
+        if not isinstance(value, Mapping):
+            raise AgendaControlError("request body must be an object")
+        return value
+
+    def post_review(
+        self, login: str, session: _Session, csrf: str | None, body: bytes
+    ) -> dict[str, Any]:
+        value = self._review_body(session, csrf, body)
+        assert self.review_plane is not None
+        return self.review_plane.record(login, value)
+
+    def post_transcript_review(
+        self, login: str, session: _Session, csrf: str | None, body: bytes
+    ) -> dict[str, Any]:
+        value = self._review_body(session, csrf, body)
+        assert self.review_plane is not None
+        return self.review_plane.record_transcript(login, value)
+
 
 def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "DaltonAgendaControl/0.1"
+        server_version = "DaltonCockpit/0.1"
 
         def _identity(self) -> str | None:
             return application.allowed_login(self.headers.get("Tailscale-User-Login"))
@@ -444,6 +494,24 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                     value["csrf_token"] = session.csrf
                     body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
                     content_type = "application/json; charset=utf-8"
+                elif path == "/v1/research-review":
+                    value = (
+                        {"as_of": datetime.now(timezone.utc).isoformat(), "items": [], "enabled": False}
+                        if application.review_plane is None
+                        else {**application.review_plane.view(login), "enabled": True}
+                    )
+                    value["csrf_token"] = session.csrf
+                    body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+                    content_type = "application/json; charset=utf-8"
+                elif path == "/v1/transcript-review":
+                    value = (
+                        {"as_of": datetime.now(timezone.utc).isoformat(), "items": [], "enabled": False}
+                        if application.review_plane is None
+                        else {**application.review_plane.transcript_view(login), "enabled": True}
+                    )
+                    value["csrf_token"] = session.csrf
+                    body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+                    content_type = "application/json; charset=utf-8"
                 else:
                     self._send(HTTPStatus.NOT_FOUND, "application/json", b'{"error":"not_found"}')
                     return
@@ -460,7 +528,14 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
             if context is None:
                 return
             login, session_id, session, created = context
-            if urlparse(self.path).path != "/v1/agenda/feedback":
+            path = urlparse(self.path).path
+            actions = {
+                "/v1/agenda/feedback": application.post,
+                "/v1/research-review/decision": application.post_review,
+                "/v1/transcript-review/decision": application.post_transcript_review,
+            }
+            action = actions.get(path)
+            if action is None:
                 self._send(HTTPStatus.NOT_FOUND, "application/json", b'{"error":"not_found"}')
                 return
             if self.headers.get_content_type() != "application/json":
@@ -471,13 +546,13 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 self._send(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "application/json", b'{"error":"body_size"}')
                 return
             try:
-                result = application.post(
+                result = action(
                     login, session, self.headers.get("X-Dalton-CSRF"), self.rfile.read(int(length))
                 )
             except PermissionError:
                 self._send(HTTPStatus.FORBIDDEN, "application/json", b'{"error":"csrf"}')
                 return
-            except AgendaControlError:
+            except (AgendaControlError, ResearchReviewControlError, ResearchReviewError):
                 self._send(HTTPStatus.BAD_REQUEST, "application/json", b'{"error":"invalid_request"}')
                 return
             body = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
@@ -496,7 +571,16 @@ def serve(config: AgendaControlConfig) -> None:
     if config.host not in {"127.0.0.1", "::1"}:
         raise AgendaControlError("Agenda control must bind loopback")
     plane = AgendaControlPlane(config)
-    application = AgendaControlApplication(config, plane)
+    review_plane = (
+        None
+        if config.research_review is None
+        else ResearchReviewControlPlane(
+            config.research_review,
+            writer_socket=config.writer_socket,
+            token_config=config.token_config,
+        )
+    )
+    application = AgendaControlApplication(config, plane, review_plane)
     stop = threading.Event()
 
     def sweep_loop() -> None:
@@ -509,6 +593,22 @@ def serve(config: AgendaControlConfig) -> None:
 
     sweeper = threading.Thread(target=sweep_loop, name="dalton-agenda-timeout", daemon=True)
     sweeper.start()
+    reconciler = None
+    if review_plane is not None:
+        def reconcile_loop() -> None:
+            while not stop.is_set():
+                try:
+                    review_plane.reconcile()
+                except Exception:
+                    pass
+                stop.wait(config.research_review.reconcile_interval_seconds)
+
+        reconciler = threading.Thread(
+            target=reconcile_loop,
+            name="dalton-research-review-reconcile",
+            daemon=True,
+        )
+        reconciler.start()
     server = ThreadingHTTPServer((config.host, config.port), _handler(application))
     try:
         server.serve_forever()
@@ -516,10 +616,14 @@ def serve(config: AgendaControlConfig) -> None:
         stop.set()
         server.server_close()
         sweeper.join(timeout=5)
+        if reconciler is not None:
+            reconciler.join(timeout=5)
+        if review_plane is not None:
+            review_plane.close()
 
 
 def main(argv: Iterable[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Serve the owner-only Dalton Agenda control plane")
+    parser = argparse.ArgumentParser(description="Serve the owner-only Dalton Cockpit")
     parser.add_argument("--config", type=Path, required=True)
     args = parser.parse_args(list(argv) if argv is not None else None)
     serve(AgendaControlConfig.from_service_file(args.config))

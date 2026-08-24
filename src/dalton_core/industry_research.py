@@ -609,14 +609,22 @@ class IndustryResearchAuthority:
                 raise IndustryResearchConflict("company overlay role is outside the coverage universe")
             driver_pack = self._driver_pack(cur, pack["driver_pack_version_ref"], pack["driver_pack_version_hash"])
             driver_metrics = {item["driver_ref"]: set(item["metric_refs"]) for item in driver_pack["drivers"]}
+            metric_verification_kinds = {
+                item["metric_ref"]: item["verification_kind"]
+                for item in driver_pack["metric_specs"]
+            }
             if {item["driver_ref"] for item in request["driver_views"]} != set(driver_metrics):
                 raise IndustryResearchConflict("company overlay must assess every industry driver")
             pack_claims = {
                 item["claim_version_ref"]: item["claim_version_hash"] for item in pack["evidence_bindings"]
             }
             pack_claim_evidence: dict[str, set[str]] = {}
+            pack_claim_source_types: dict[str, set[str]] = {}
             for binding in pack["evidence_bindings"]:
                 evidence_refs = pack_claim_evidence.setdefault(binding["claim_version_ref"], set())
+                source_types = pack_claim_source_types.setdefault(
+                    binding["claim_version_ref"], set()
+                )
                 for relation_ref in binding["relation_refs"]:
                     relation_row = cur.execute(
                         "SELECT evidence_version_id FROM evidence_relations WHERE relation_id=?",
@@ -625,6 +633,11 @@ class IndustryResearchAuthority:
                     if relation_row is None:
                         raise IndustryResearchNotFound("evidence relation was not found")
                     evidence_refs.add(relation_row["evidence_version_id"])
+                    source_types.add(
+                        self._evidence(
+                            cur, relation_row["evidence_version_id"]
+                        )["source_type"]
+                    )
             for view in request["driver_views"]:
                 coverage_by_metric = {
                     item["metric_ref"]: item for item in view["metric_coverage"]
@@ -653,6 +666,23 @@ class IndustryResearchAuthority:
                                 "metric coverage claim is missing or belongs to another metric"
                             )
                         covered_claim_refs.add(claim_version_ref)
+                    if (
+                        coverage["status"] == "observed"
+                        and metric_verification_kinds[metric_ref]
+                        in {"numeric", "numeric_and_semantic"}
+                        and coverage["claim_version_refs"]
+                        and not any(
+                            any(
+                                source_type != "authenticated_transcript"
+                                for source_type in pack_claim_source_types[claim_ref]
+                            )
+                            for claim_ref in coverage["claim_version_refs"]
+                        )
+                    ):
+                        raise IndustryResearchConflict(
+                            "authenticated transcript cannot be the sole observed "
+                            "authority for a numeric metric"
+                        )
                 if covered_claim_refs != set(claim_metric_by_ref):
                     raise IndustryResearchConflict(
                         "every overlay claim must appear in observed metric coverage"

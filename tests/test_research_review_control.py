@@ -1,21 +1,33 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from dalton_core.alphaengine_document_acquisition import (
+    AlphaEngineDocumentAcquisitionCoordinator,
+    build_alphaengine_document_acquisition_plan,
+)
+from dalton_core.raw_spool import RawSpool
 from dalton_core.research_review_control import (
-    ResearchReviewControlApplication,
     ResearchReviewControlConfig,
     ResearchReviewControlError,
     ResearchReviewControlPlane,
     _subject_for_login,
 )
+from dalton_core.store import content_hash
+from dalton_core.transcript_review_inbox import stage_transcript_review_bundle
+from tests.test_alphaengine_document_acquisition import (
+    FakeAuthorityReader,
+    FakePagePort,
+)
 
 
 HASH = "a" * 64
 LOGIN = "reviewer@example.com"
+WHEN = "2026-08-24T12:00:00+00:00"
 
 
 class FakeAuthority:
@@ -42,26 +54,35 @@ class FakeAuthority:
         if self.decision is not None and self.decision["verdict"] == "accept":
             state = "committed" if self.commit_results else "queued"
         return [{
-            "claim": self.claim, "evidence": self.evidence, "decision": self.decision,
-            "commit_state": state,
+            "claim": self.claim, "evidence": self.evidence,
+            "decision": self.decision, "commit_state": state,
         }]
 
     def decide(self, **params):
         self.decide_params = params
         self.decision = {
             "id": "human-review:1", "content_hash": "d" * 64,
-            "reviewer_ref": params["reviewer_ref"], "verdict": params["verdict"],
+            "reviewer_ref": params["reviewer_ref"],
+            "verdict": params["verdict"],
         }
         return {
             "write_status": "fresh", "decision_ref": "human-review:1",
             "decision_hash": "d" * 64, "verdict": params["verdict"],
-            "commit_state": "queued" if params["verdict"] == "accept" else "not_applicable",
+            "commit_state": (
+                "queued" if params["verdict"] == "accept" else "not_applicable"
+            ),
         }
 
     def pending_commits(self, *, limit=100):
-        if self.decision is None or self.decision["verdict"] != "accept" or self.commit_results:
+        if (
+            self.decision is None or self.decision["verdict"] != "accept"
+            or self.commit_results
+        ):
             return []
-        return [{"decision": self.decision, "evidence": self.evidence, "claim": self.claim}]
+        return [{
+            "decision": self.decision, "evidence": self.evidence,
+            "claim": self.claim,
+        }]
 
     def record_commit_result(self, decision_ref, **params):
         self.commit_results.append((decision_ref, params))
@@ -75,6 +96,10 @@ class FakeWriter:
     def __init__(self, *, fail=False):
         self.fail = fail
         self.calls = []
+        self.transcript_state = {
+            "status": "pending_human_review", "correction_set": None,
+            "citation_binding": None, "claim_eligible": False,
+        }
 
     def commit_reviewed_candidate(self, **params):
         self.calls.append(params)
@@ -82,26 +107,167 @@ class FakeWriter:
             raise RuntimeError("writer failed")
         return {"status": "fresh", "claim_version_ref": "claim-version:1"}
 
+    def transcript_correction_review_state(self, **params):
+        self.calls.append({"transcript_state": params})
+        return dict(self.transcript_state)
+
+
+class FakeGovernance:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, token_config, writer_socket, **params):
+        self.calls.append((token_config, writer_socket, params))
+        if params["operation"] == "publish_transcript_correction_set":
+            body = {
+                "id": "transcript-correction-set-version:1",
+                "content_hash": "e" * 64,
+            }
+            return {"status": "fresh", **body}
+        return {
+            "id": "transcript-claim-citation-binding:1",
+            "content_hash": "f" * 64,
+            "claim_eligible": True,
+        }
+
 
 class ResearchReviewControlTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        root = Path(self.temp.name)
+        self.root = Path(self.temp.name)
+        self.review_dir = self.root / "review-inbox"
+        self.review_dir.mkdir()
         self.config = ResearchReviewControlConfig.from_mapping({
-            "host": "127.0.0.1", "port": 8794,
-            "tailscale_host": "dalton.example.ts.net",
-            "allowed_tailscale_logins": [LOGIN],
-            "candidate_staging_path": str(root / "candidate.sqlite"),
-            "writer_socket": str(root / "writer.sock"),
-            "token_config": str(root / "tokens.json"),
+            "candidate_staging_path": str(self.root / "candidate.sqlite"),
+            "transcript_review_directory": str(self.review_dir),
             "reconcile_interval_seconds": 60,
         })
+
+    def plane(self, **kwargs):
+        return ResearchReviewControlPlane(
+            self.config,
+            writer_socket=self.root / "writer.sock",
+            token_config=self.root / "tokens.json",
+            authority=kwargs.pop("authority", FakeAuthority()),
+            writer=kwargs.pop("writer", FakeWriter()),
+            governance_call=kwargs.pop("governance_call", FakeGovernance()),
+            **kwargs,
+        )
+
+    def write_transcript_packet(self):
+        original = "New bookings decreased 3% in local currency. r ight"
+        acquisition = self.root / "acquisition"
+        spool = RawSpool(acquisition, max_total_bytes=1_000_000)
+        plan = build_alphaengine_document_acquisition_plan(
+            document_ref="alphaengine-doc:130000095976806",
+            created_at=WHEN,
+            max_pages=1,
+            page_max_response_bytes=20_000,
+            max_total_response_bytes=20_000,
+            max_document_chars=len(original),
+        )
+        reader = FakeAuthorityReader()
+        manifest = AlphaEngineDocumentAcquisitionCoordinator(
+            plan=plan,
+            page_port=FakePagePort(
+                plan=plan, pages=[original], authority=reader, spool=spool
+            ),
+            authority_reader=reader,
+            spool=spool,
+        ).execute()
+        citation_text = original.split(".")[0] + "."
+        flag_text = "r ight"
+        flag_start = original.index(flag_text)
+        case = self.review_dir / "acn-q3fy26"
+        case.mkdir()
+        packet = {
+            "schema_version": "0.1",
+            "id": "transcript-review-packet:acn:q3fy26:1",
+            "created_at": WHEN,
+            "source": {
+                "document_ref": manifest["document_ref"],
+                "manifest_ref": manifest["id"],
+                "manifest_hash": manifest["content_hash"],
+                "content_chars": manifest["content_chars"],
+                "content_sha256": manifest["assembled_object"]["content_hash"],
+                "page_count": len(manifest["pages"]),
+                "physical_calls": manifest["physical_calls"],
+                "title": "Accenture Q3 2026",
+                "lineage_path": "source-manifest.json",
+                "summary_fields_allowed": False,
+            },
+            "proposed_correction_set": {
+                "correction_set_ref": "transcript-correction-set:acn:q3fy26:1",
+                "review_scope": "targeted_flags",
+                "corrections": [{
+                    "source_start": flag_start,
+                    "source_end": flag_start + len(flag_text),
+                    "source_sha256": hashlib.sha256(
+                        flag_text.encode("utf-8")
+                    ).hexdigest(),
+                    "source_text": flag_text,
+                    "correction_kind": "terminology",
+                    "disposition": "unresolved",
+                    "replacement_text": None,
+                    "rationale": "Flag outside the formal citation.",
+                    "evidence_bindings": [],
+                }],
+                "actor_ref": None,
+                "human_review_required": True,
+                "unresolved_overlap_with_formal_citation": 0,
+            },
+            "candidate_claim": {
+                "candidate_claim_ref": "candidate-claim:acn:q3fy26:new-bookings",
+                "subject_ref": "company:sec-cik:0001467373",
+                "metric_or_aspect": "metric:new-bookings-growth-local-currency",
+                "period": "FY2026Q3", "basis": "management-reported",
+                "normalized_statement": "New bookings decreased 3% in local currency.",
+                "claim_kind": "quantitative", "value": "-3",
+                "unit": "percent", "currency": None, "scale": "one",
+                "formal_status": "blocked_pending_authenticated_human_review",
+                "citation": {
+                    "source_start": 0, "source_end": len(citation_text),
+                    "source_sha256": hashlib.sha256(
+                        citation_text.encode("utf-8")
+                    ).hexdigest(),
+                    "raw_span": citation_text,
+                },
+                "required_secondary_numeric_authority": {
+                    "claim_ref": "claim:acn:q3fy26:new-bookings",
+                    "source_ref": "sec:acn-q3fy26-exhibit",
+                    "source_type": "sec-filing-exhibit",
+                },
+            },
+            "research_targets": [],
+            "review_contract": {
+                "acceptance_scope": ["raw span and sign are correct"],
+                "allowed_verdicts": ["accept", "revise", "reject"],
+                "authorization": "explicit_human_review",
+                "source": "tailscale_review",
+            },
+            "formal_authority_counts": {
+                "claim_versions": 0, "evidence_versions": 0,
+                "thesis_versions": 0,
+            },
+            "production_activated": False,
+            "forbidden_inputs": [
+                "metadata.main_point", "metadata.question_answer"
+            ],
+        }
+        packet["content_hash"] = content_hash(packet)
+        (case / "review-packet.json").write_text(
+            json.dumps(packet), encoding="utf-8"
+        )
+        (case / "source-manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        return packet, manifest
 
     def test_plane_injects_identity_semantics_and_commits_accept(self):
         authority = FakeAuthority()
         writer = FakeWriter()
-        plane = ResearchReviewControlPlane(self.config, authority=authority, writer=writer)
+        plane = self.plane(authority=authority, writer=writer)
         result = plane.record(LOGIN, {
             "request_id": "request-12345678",
             "candidate_claim_ref": authority.claim["id"],
@@ -110,7 +276,9 @@ class ResearchReviewControlTests(unittest.TestCase):
             "findings": [], "proposed_revisions": None,
         })
         self.assertEqual(result["commit_state"], "committed")
-        self.assertEqual(authority.decide_params["reviewer_ref"], _subject_for_login(LOGIN))
+        self.assertEqual(
+            authority.decide_params["reviewer_ref"], _subject_for_login(LOGIN)
+        )
         self.assertEqual(
             authority.decide_params["reviewed_semantics"]["normalized_statement"],
             authority.claim["normalized_statement"],
@@ -120,8 +288,7 @@ class ResearchReviewControlTests(unittest.TestCase):
 
     def test_writer_failure_leaves_durable_pending_result(self):
         authority = FakeAuthority()
-        writer = FakeWriter(fail=True)
-        plane = ResearchReviewControlPlane(self.config, authority=authority, writer=writer)
+        plane = self.plane(authority=authority, writer=FakeWriter(fail=True))
         result = plane.record(LOGIN, {
             "request_id": "request-abcdefgh",
             "candidate_claim_ref": authority.claim["id"],
@@ -130,39 +297,133 @@ class ResearchReviewControlTests(unittest.TestCase):
             "findings": [], "proposed_revisions": None,
         })
         self.assertEqual(result["commit_state"], "pending")
-        self.assertEqual(authority.commit_results[0][1]["error_code"], "writer_rejected")
-
-    def test_application_csrf_and_closed_body(self):
-        authority = FakeAuthority()
-        plane = ResearchReviewControlPlane(
-            self.config, authority=authority, writer=FakeWriter()
+        self.assertEqual(
+            authority.commit_results[0][1]["error_code"], "writer_rejected"
         )
-        app = ResearchReviewControlApplication(self.config, plane)
-        _, session, _ = app.session(LOGIN, None)
-        body = json.dumps({
-            "request_id": "request-12345678",
-            "candidate_claim_ref": authority.claim["id"],
-            "candidate_claim_hash": authority.claim["content_hash"],
-            "verdict": "reject", "rationale": "Statement is too broad.",
-            "findings": [], "proposed_revisions": None,
-        }).encode()
-        with self.assertRaises(PermissionError):
-            app.post(LOGIN, session, "wrong", body)
-        result = app.post(LOGIN, session, session.csrf, body)
-        self.assertEqual(result["verdict"], "reject")
-        malformed = json.dumps({"request_id": "request-12345678"}).encode()
-        with self.assertRaises(ResearchReviewControlError):
-            app.post(LOGIN, session, session.csrf, malformed)
 
-    def test_config_rejects_non_loopback(self):
-        value = {
-            "host": "0.0.0.0", "port": 8794,
-            "tailscale_host": "dalton.example.ts.net",
-            "allowed_tailscale_logins": [LOGIN],
-            "candidate_staging_path": "/tmp/candidate.sqlite",
-            "writer_socket": "/tmp/writer.sock", "token_config": "/tmp/tokens.json",
-            "reconcile_interval_seconds": 60,
+    def test_transcript_packet_is_exact_and_uses_ephemeral_human_governance(self):
+        packet, _ = self.write_transcript_packet()
+        governance = FakeGovernance()
+        plane = self.plane(governance_call=governance)
+        view = plane.transcript_view(LOGIN)
+        self.assertEqual(view["items"][0]["packet_hash"], packet["content_hash"])
+        result = plane.record_transcript(LOGIN, {
+            "request_id": "request-transcript-1",
+            "packet_ref": packet["id"],
+            "packet_hash": packet["content_hash"],
+            "action": "publish_and_bind",
+        })
+        self.assertTrue(result["claim_eligible"])
+        self.assertEqual(len(governance.calls), 2)
+        self.assertEqual(
+            governance.calls[0][2]["actor_ref"], _subject_for_login(LOGIN)
+        )
+        self.assertEqual(
+            governance.calls[0][2]["operation"],
+            "publish_transcript_correction_set",
+        )
+        correction = governance.calls[0][2]["params"]["corrections"][0]
+        self.assertNotIn("source_text", correction)
+        self.assertEqual(
+            governance.calls[1][2]["operation"],
+            "bind_transcript_claim_citation",
+        )
+
+    def test_transcript_governance_failure_is_sanitized(self):
+        packet, _ = self.write_transcript_packet()
+
+        def fail_governance(*_args, **_kwargs):
+            raise RuntimeError("sensitive writer detail")
+
+        plane = self.plane(governance_call=fail_governance)
+        with self.assertRaisesRegex(
+            ResearchReviewControlError,
+            "transcript review writer rejected the admission",
+        ):
+            plane.record_transcript(LOGIN, {
+                "request_id": "request-transcript-failure",
+                "packet_ref": packet["id"],
+                "packet_hash": packet["content_hash"],
+                "action": "publish_and_bind",
+            })
+
+    def test_published_transcript_state_must_match_packet_exactly(self):
+        self.write_transcript_packet()
+        writer = FakeWriter()
+        writer.transcript_state = {
+            "status": "correction_published",
+            "correction_set": {
+                "correction_set_ref": "transcript-correction-set:acn:q3fy26:1",
+                "source_manifest_ref": "wrong-manifest",
+                "source_manifest_hash": "0" * 64,
+                "source_content_hash": "0" * 64,
+                "review_scope": "targeted_flags",
+                "corrections": [],
+            },
+            "citation_binding": None,
+            "claim_eligible": False,
         }
+        with self.assertRaisesRegex(
+            ResearchReviewControlError,
+            "published correction state disagrees",
+        ):
+            self.plane(writer=writer).transcript_view(LOGIN)
+
+    def test_packet_hash_drift_fails_closed_before_governance(self):
+        packet, _ = self.write_transcript_packet()
+        governance = FakeGovernance()
+        plane = self.plane(governance_call=governance)
+        with self.assertRaises(ResearchReviewControlError):
+            plane.record_transcript(LOGIN, {
+                "request_id": "request-transcript-2",
+                "packet_ref": packet["id"],
+                "packet_hash": "0" * 64,
+                "action": "publish_and_bind",
+            })
+        self.assertEqual(governance.calls, [])
+
+    def test_review_bundle_staging_is_immutable_and_idempotent(self):
+        packet, manifest = self.write_transcript_packet()
+        acquisition = self.root / "acquisition"
+        (acquisition / "review-packet.json").write_text(
+            json.dumps(packet), encoding="utf-8"
+        )
+        (acquisition / "source-manifest.json").write_text(
+            json.dumps(manifest), encoding="utf-8"
+        )
+        destination = self.root / "runtime-review-inbox"
+        spool_root = self.root / "runtime-transcript-spool"
+        first = stage_transcript_review_bundle(
+            acquisition, destination, spool_root
+        )
+        second = stage_transcript_review_bundle(
+            acquisition, destination, spool_root
+        )
+        self.assertEqual(first["status"], "fresh")
+        self.assertEqual(second["status"], "duplicate")
+        self.assertEqual(first["packet_hash"], packet["content_hash"])
+        self.assertEqual(first["formal_authority_writes"], 0)
+        target = RawSpool(spool_root, max_total_bytes=1_000_000)
+        self.assertTrue(
+            target.object_exists(manifest["assembled_object"]["content_hash"])
+        )
+        case = Path(first["review_case_path"])
+        self.assertEqual(
+            json.loads((case / "review-packet.json").read_text())["id"],
+            packet["id"],
+        )
+
+    def test_config_rejects_core_path_and_standalone_server_fields(self):
+        value = {
+            "candidate_staging_path": str(self.root / "candidate.sqlite"),
+            "transcript_review_directory": str(self.review_dir),
+            "reconcile_interval_seconds": 60,
+            "core_db": str(self.root / "core.sqlite"),
+        }
+        with self.assertRaises(ResearchReviewControlError):
+            ResearchReviewControlConfig.from_mapping(value)
+        value.pop("core_db")
+        value["host"] = "127.0.0.1"
         with self.assertRaises(ResearchReviewControlError):
             ResearchReviewControlConfig.from_mapping(value)
 

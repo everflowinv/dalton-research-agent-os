@@ -1,4 +1,5 @@
 import json
+import hashlib
 import os
 import signal
 import socket
@@ -10,6 +11,11 @@ import time
 import unittest
 from pathlib import Path
 
+from dalton_core.alphaengine_document_acquisition import (
+    AlphaEngineDocumentAcquisitionCoordinator,
+    build_alphaengine_document_acquisition_plan,
+)
+from dalton_core.raw_spool import RawSpool
 from dalton_core.writer_client import WriterClient
 from dalton_core.writer_protocol import RemoteAuthorizationError, RemoteError, decode_frame
 from dalton_core.writer_server import (
@@ -25,6 +31,10 @@ from dalton_core.writer_server import (
     WriterServerError,
     load_principals,
     write_token_config,
+)
+from tests.test_alphaengine_document_acquisition import (
+    FakeAuthorityReader,
+    FakePagePort,
 )
 
 
@@ -53,6 +63,7 @@ class WriterServiceTests(unittest.TestCase):
         self.db = root / "private" / "coverage.db"
         self.sock = root / "run" / "writer.sock"
         self.tokens = root / "private" / "writer-tokens.json"
+        self.transcript_spool_dir = root / "transcript-spool"
         self.worker_token = "worker-token-9f0c"
         self.verifier_token = "verifier-token-9f0c"
         self.core_token = "core-token-9f0c"
@@ -90,6 +101,7 @@ class WriterServiceTests(unittest.TestCase):
             sys.executable, "-m", "dalton_core.writer_server", "--db", str(self.db),
             "--scheduler", str(Path(self.tmp.name) / "scheduler.sqlite"),
             "--socket", str(self.sock), "--token-config", str(self.tokens),
+            "--transcript-spool-dir", str(self.transcript_spool_dir),
         ], cwd=str(Path(__file__).parents[1]), env=self.env,
            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         # Hosted runners can take more than five seconds to import sqlite-heavy
@@ -378,6 +390,85 @@ class WriterServiceTests(unittest.TestCase):
             )["verdict"],
             "admit",
         )
+
+    def test_transcript_correction_rpc_requires_human_governance(self):
+        original = "Revenue grew 3% in local currency. r ight"
+        spool = RawSpool(self.transcript_spool_dir, max_total_bytes=1_000_000_000)
+        plan = build_alphaengine_document_acquisition_plan(
+            document_ref="alphaengine-doc:130000095976806",
+            created_at="2026-08-24T12:00:00+00:00",
+            max_pages=1,
+            page_max_response_bytes=20_000,
+            max_total_response_bytes=20_000,
+            max_document_chars=len(original),
+        )
+        manifest_authority = FakeAuthorityReader()
+        manifest = AlphaEngineDocumentAcquisitionCoordinator(
+            plan=plan,
+            page_port=FakePagePort(
+                plan=plan, pages=[original], authority=manifest_authority,
+                spool=spool,
+            ),
+            authority_reader=manifest_authority,
+            spool=spool,
+        ).execute()
+        flag_start = original.index("r ight")
+        params = {
+            "correction_set_ref": "transcript-correction-set:acn-q3fy26",
+            "source_manifest": manifest,
+            "review_scope": "targeted_flags",
+            "corrections": [{
+                "source_start": flag_start,
+                "source_end": len(original),
+                "source_sha256": hashlib.sha256(
+                    original[flag_start:].encode("utf-8")
+                ).hexdigest(),
+                "correction_kind": "terminology",
+                "disposition": "unresolved",
+                "replacement_text": None,
+                "rationale": "Flag outside the exact citation span.",
+                "evidence_bindings": [],
+            }],
+            "prior_version_ref": None,
+        }
+        pending = self.review.transcript_correction_review_state(
+            source_manifest=manifest,
+            correction_set_ref=params["correction_set_ref"],
+            source_start=0,
+            source_end=original.index(". ") + 1,
+        )
+        self.assertEqual(pending["status"], "pending_human_review")
+        with self.assertRaises(RemoteAuthorizationError):
+            self.worker.transcript_correction_review_state(
+                source_manifest=manifest,
+                correction_set_ref=params["correction_set_ref"],
+                source_start=0,
+                source_end=original.index(". ") + 1,
+            )
+        with self.assertRaises(RemoteAuthorizationError):
+            self.worker.publish_transcript_correction_set(**params)
+        with self.assertRaises(RemoteAuthorizationError):
+            self.core.publish_transcript_correction_set(**params)
+        correction_set = self.governance.publish_transcript_correction_set(**params)
+        self.assertEqual(correction_set["actor_ref"], "human:coverage-owner")
+        citation = self.governance.bind_transcript_claim_citation(
+            correction_set_version_ref=correction_set["id"],
+            correction_set_version_hash=correction_set["content_hash"],
+            source_manifest=manifest,
+            source_start=0,
+            source_end=original.index(". ") + 1,
+        )
+        self.assertTrue(citation["claim_eligible"])
+        self.assertEqual(citation["unresolved_correction_indexes"], [])
+        state = self.review.transcript_correction_review_state(
+            source_manifest=manifest,
+            correction_set_ref=params["correction_set_ref"],
+            source_start=0,
+            source_end=original.index(". ") + 1,
+        )
+        self.assertEqual(state["status"], "claim_eligible")
+        self.assertEqual(state["correction_set"]["id"], correction_set["id"])
+        self.assertEqual(state["citation_binding"]["id"], citation["id"])
 
     def test_model_input_candidate_requires_worker_and_admission_requires_human(self):
         evidence = self.core.register_evidence(

@@ -178,6 +178,23 @@ class IndustryResearchAuthorityTests(unittest.TestCase):
             "industry-evidence-pack:us-it-services", **self.pack_params()
         )
 
+    def transcript_relation(self, label: str, claim: dict) -> dict:
+        evidence = self.store.register_evidence({
+            "evidence_ref": f"evidence:acn:q3fy26:transcript:{label}",
+            "source_type": "authenticated_transcript",
+            "source_ref": "alphaengine:130000095976806",
+            "retrieved_at": NOW,
+            "source_lineage": ["alphaengine-doc:130000095976806"],
+            "independence_group": "issuer:acn:q3fy26",
+            "actor_ref": "human:coverage-owner",
+        })
+        return self.store.relate_evidence({
+            "id": f"relation:acn:q3fy26:transcript:{label}",
+            "evidence_version_ref": evidence["evidence_version_id"],
+            "claim_version_ref": claim["claim_version_id"],
+            "relation": "supports",
+        })
+
     def overlay_params(self, pack: dict) -> dict:
         return {
             "company_ref": ACN, "industry_ref": INDUSTRY, "title": "Accenture company overlay v1",
@@ -250,6 +267,37 @@ class IndustryResearchAuthorityTests(unittest.TestCase):
             self.authority.register_evidence_pack(
                 "industry-evidence-pack:missing-driver", **missing_driver
             )
+
+    def test_numeric_metric_rejects_transcript_as_sole_observed_authority(self) -> None:
+        relation = self.transcript_relation("bookings", self.bookings)
+        params = self.pack_params()
+        params["evidence_bindings"][0]["relation_refs"] = [{
+            "ref": relation["relation_id"], "hash": relation["content_hash"]
+        }]
+        pack = self.authority.register_evidence_pack(
+            "industry-evidence-pack:us-it-services", **params
+        )
+        with self.assertRaisesRegex(
+            IndustryResearchConflict,
+            "authenticated transcript cannot be the sole observed authority",
+        ):
+            self.authority.register_company_overlay(
+                "company-overlay:acn", **self.overlay_params(pack)
+            )
+
+    def test_semantic_metric_accepts_transcript_as_observed_authority(self) -> None:
+        relation = self.transcript_relation("demand", self.demand)
+        params = self.pack_params()
+        params["evidence_bindings"][1]["relation_refs"] = [{
+            "ref": relation["relation_id"], "hash": relation["content_hash"]
+        }]
+        pack = self.authority.register_evidence_pack(
+            "industry-evidence-pack:us-it-services", **params
+        )
+        overlay = self.authority.register_company_overlay(
+            "company-overlay:acn", **self.overlay_params(pack)
+        )
+        self.assertEqual(overlay["status"], "fresh")
 
     def test_overlay_cannot_cross_subject_driver_or_model_authority(self) -> None:
         pack = self.register_pack()

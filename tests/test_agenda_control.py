@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import http.client
+import json
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import timedelta
+from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from dalton_core.agenda import AgendaStore
@@ -11,6 +15,7 @@ from dalton_core.agenda_control import (
     AgendaControlApplication,
     AgendaControlConfig,
     AgendaControlPlane,
+    _handler,
     _parse_time,
 )
 from dalton_core.observability import ObservabilityStore
@@ -48,6 +53,25 @@ class Client:
 
     def record_agenda_feedback(self, **params):
         return self.agenda.record_feedback(actor_ref=self.actor_ref, **params)
+
+
+class ReviewPlane:
+    def __init__(self):
+        self.calls = []
+
+    def record(self, login, value):
+        self.calls.append(("research", login, dict(value)))
+        return {"status": "research-recorded"}
+
+    def record_transcript(self, login, value):
+        self.calls.append(("transcript", login, dict(value)))
+        return {"status": "transcript-recorded"}
+
+    def view(self, login):
+        return {"as_of": NOW, "reviewer_ref": login, "items": []}
+
+    def transcript_view(self, login):
+        return {"as_of": NOW, "reviewer_ref": login, "items": []}
 
 
 class AgendaControlTests(unittest.TestCase):
@@ -143,6 +167,125 @@ class AgendaControlTests(unittest.TestCase):
         self.assertNotIn("owner@example.com", row["subject_ref"])
         self.assertEqual(row["source"], "tailscale_dashboard")
         self.assertEqual(row["actor_ref"], "bridge:tailscale-dashboard")
+
+    def test_one_session_and_csrf_guard_agenda_and_both_review_planes(self):
+        review = ReviewPlane()
+        app = AgendaControlApplication(self.config, self.plane, review)
+        session_id, session, created = app.session(LOGIN, None)
+        self.assertTrue(created)
+        same_id, same_session, created_again = app.session(
+            LOGIN, f"dalton_session={session_id}"
+        )
+        self.assertEqual(same_id, session_id)
+        self.assertIs(same_session, session)
+        self.assertFalse(created_again)
+        with self.assertRaises(PermissionError):
+            app.post_review(LOGIN, session, "wrong", b'{"x":1}')
+        self.assertEqual(
+            app.post_review(LOGIN, session, session.csrf, b'{"x":1}')["status"],
+            "research-recorded",
+        )
+        self.assertEqual(
+            app.post_transcript_review(
+                LOGIN, session, session.csrf, b'{"y":2}'
+            )["status"],
+            "transcript-recorded",
+        )
+        self.assertEqual(
+            review.calls,
+            [
+                ("research", LOGIN, {"x": 1}),
+                ("transcript", LOGIN, {"y": 2}),
+            ],
+        )
+
+    def test_embedded_review_config_has_no_second_host_or_core_path(self):
+        raw = {
+            "host": "127.0.0.1", "port": 8793,
+            "tailscale_host": "dalton.example.ts.net",
+            "tailscale_executable": sys.executable,
+            "allowed_tailscale_logins": [LOGIN],
+            "writer_socket": str(Path(self.temp.name) / "writer.sock"),
+            "token_config": str(Path(self.temp.name) / "tokens.json"),
+            "endpoint_ref": "openclaw:discord:test",
+            "feedback_timeout_seconds": 86400,
+            "sweep_interval_seconds": 60,
+            "research_review": {
+                "candidate_staging_path": str(
+                    Path(self.temp.name) / "candidate.sqlite"
+                ),
+                "transcript_review_directory": str(
+                    Path(self.temp.name) / "review-inbox"
+                ),
+                "reconcile_interval_seconds": 60,
+            },
+        }
+        config = AgendaControlConfig.from_mapping(raw)
+        self.assertIsNotNone(config.research_review)
+        raw["research_review"]["core_db"] = str(
+            Path(self.temp.name) / "core.sqlite"
+        )
+        with self.assertRaises(Exception):
+            AgendaControlConfig.from_mapping(raw)
+
+    def test_single_http_surface_serves_cockpit_and_all_review_routes(self):
+        review = ReviewPlane()
+        app = AgendaControlApplication(self.config, self.plane, review)
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(app))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=5
+            )
+            headers = {
+                "Host": "dalton.example.ts.net",
+                "Tailscale-User-Login": LOGIN,
+            }
+            connection.request("GET", "/", headers=headers)
+            response = connection.getresponse()
+            html = response.read().decode("utf-8")
+            cookie = response.getheader("Set-Cookie").split(";", 1)[0]
+            self.assertEqual(response.status, 200)
+            self.assertIn("Dalton Cockpit", html)
+            connection.request(
+                "GET", "/v1/research-review",
+                headers={**headers, "Cookie": cookie},
+            )
+            response = connection.getresponse()
+            review_payload = json.loads(response.read())
+            self.assertTrue(review_payload["enabled"])
+            connection.request(
+                "GET", "/v1/transcript-review",
+                headers={**headers, "Cookie": cookie},
+            )
+            response = connection.getresponse()
+            transcript_payload = json.loads(response.read())
+            self.assertTrue(transcript_payload["enabled"])
+            self.assertEqual(
+                review_payload["csrf_token"],
+                transcript_payload["csrf_token"],
+            )
+            body = b'{"x":1}'
+            connection.request(
+                "POST", "/v1/research-review/decision", body=body,
+                headers={
+                    **headers, "Cookie": cookie,
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                    "X-Dalton-CSRF": review_payload["csrf_token"],
+                },
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(
+                json.loads(response.read())["status"], "research-recorded"
+            )
+            connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
 
     def test_timeout_is_separate_and_late_human_feedback_overrides_effective_view(self):
         target = self.agenda.feedback_targets(endpoint_ref="openclaw:discord:test")[0]

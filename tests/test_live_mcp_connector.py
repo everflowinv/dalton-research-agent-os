@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import tempfile
 import threading
@@ -756,6 +757,31 @@ class AlphaEngineLiveAdapterTests(unittest.TestCase):
         _, arguments = handle.calls[0]
         self.assertEqual(arguments["doc_id"], "320000610033807")
         self.assertEqual(arguments["offset"], 0)
+
+    def test_get_document_cannot_inject_unfetched_source_record_refs(self) -> None:
+        request, _ = adapter_request("get_document", document_parameters())
+        digest = hashlib.sha256(b"evidence text").hexdigest()
+        payload = {
+            "metadata": {"doc_id": "320000610033807", "title": "ACN"},
+            "content_chars": len("evidence text"),
+            "content_sha256": digest,
+            "offset": 0,
+            "returned_chars": len("evidence text"),
+            "text": "evidence text",
+            "next_offset": None,
+            "complete": True,
+            "source_record_refs": [
+                "alphaengine-doc:unfetched:sha256:" + "0" * 64
+            ],
+        }
+        observation = AlphaEngineLiveAdapter()(
+            request, MemorySink(), FakeHandle(tool_result(payload))
+        )
+        self.assertEqual(
+            observation["source_record_refs"],
+            [f"alphaengine-doc:320000610033807:sha256:{digest}"],
+        )
+        self.assertNotIn("unfetched", observation["source_record_refs"][0])
 
     def test_document_page_rejects_non_contiguous_offsets_and_lengths(self) -> None:
         base = {

@@ -1213,12 +1213,37 @@ class DaltonStore:
                     raise GateRejected(
                         "transcript candidate citation authority is unavailable or invalid"
                     ) from exc
-                if (
+                correction_row = cur.execute(
+                    "SELECT record_json FROM transcript_correction_set_versions "
+                    "WHERE version_id=?",
+                    (citation["correction_set_version_ref"],),
+                ).fetchone()
+                correction_set = (
+                    None if correction_row is None
+                    else json.loads(correction_row["record_json"])
+                )
+                document_ref = (
+                    None if not isinstance(correction_set, Mapping)
+                    else correction_set.get("document_ref")
+                )
+                alphaengine_document_binding = (
+                    source_doc.get("source") == "source:alphaengine"
+                    and source_doc.get("operation") == "get_document"
+                    and isinstance(document_ref, str)
+                    and document_ref.startswith("alphaengine-doc:")
+                    and source_doc.get("source_record_refs") == [
+                        f"{document_ref}:sha256:{citation['source_content_hash']}"
+                    ]
+                    and source_doc.get("raw_response_hash")
+                    == artifact["artifact_content_hash"]
+                )
+                direct_raw_binding = (
                     citation["source_content_hash"]
-                    != artifact["artifact_content_hash"]
-                    or source_doc.get("raw_response_hash")
-                    != citation["source_content_hash"]
-                ):
+                    == artifact["artifact_content_hash"]
+                    and source_doc.get("raw_response_hash")
+                    == citation["source_content_hash"]
+                )
+                if not (alphaengine_document_binding or direct_raw_binding):
                     raise GateRejected(
                         "transcript citation does not bind the exact raw ArtifactVersion"
                     )

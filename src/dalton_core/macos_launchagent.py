@@ -67,6 +67,7 @@ def render(
             "--scheduler", str(state / "scheduler.sqlite"),
             "--socket", str(state / "run" / "writer.sock"),
             "--token-config", str(state / "writer-tokens.json"),
+            "--transcript-spool-dir", str(state / "transcript-spool"),
         ],
         "StandardOutPath": str(logs / "writer.stdout.log"),
         "StandardErrorPath": str(logs / "writer.stderr.log"),

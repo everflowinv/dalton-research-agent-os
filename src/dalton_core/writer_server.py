@@ -81,6 +81,17 @@ from .industry_research import (
     IndustryResearchNotFound,
     IndustryResearchValidationError,
 )
+from .alphaengine_document_acquisition import (
+    validate_alphaengine_document_acquisition_manifest,
+)
+from .raw_spool import RawSpool
+from .transcript_correction import (
+    TranscriptCorrectionAuthority,
+    TranscriptCorrectionConflict,
+    TranscriptCorrectionError,
+    TranscriptCorrectionNotFound,
+    TranscriptCorrectionValidationError,
+)
 from .observability import (
     ObservabilityConflict,
     ObservabilityError,
@@ -176,11 +187,14 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "decide_thesis_admission",
     "decide_model_input",
     "register_industry_evidence_pack", "register_company_overlay",
+    "publish_transcript_correction_set", "bind_transcript_claim_citation",
 })
 FEEDBACK_BRIDGE_OPERATIONS = frozenset({
     "list_agenda_feedback_targets", "record_agenda_feedback",
 })
-RESEARCH_REVIEW_CONTROL_OPERATIONS = frozenset({"commit_reviewed_candidate"})
+RESEARCH_REVIEW_CONTROL_OPERATIONS = frozenset({
+    "commit_reviewed_candidate", "transcript_correction_review_state",
+})
 THESIS_IMPACT_OPERATIONS = frozenset({
     "thesis_impact_targets",
     "thesis_impact_start",
@@ -242,6 +256,17 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "verify_change": frozenset({"change_id", "verification", "verification_id", "verifier_invocation", "verifier_invocation_id", "verdict", "findings", "actor_id"}),
     "commit": frozenset({"change_id", "verification_id", "idempotency_key", "request", "actor_id", "request_hash"}),
     "commit_reviewed_candidate": frozenset({"decision", "evidence", "claim", "idempotency_key"}),
+    "publish_transcript_correction_set": frozenset({
+        "correction_set_ref", "source_manifest", "review_scope", "corrections",
+        "prior_version_ref", "actor_ref",
+    }),
+    "bind_transcript_claim_citation": frozenset({
+        "correction_set_version_ref", "correction_set_version_hash",
+        "source_manifest", "source_start", "source_end",
+    }),
+    "transcript_correction_review_state": frozenset({
+        "source_manifest", "correction_set_ref", "source_start", "source_end",
+    }),
     "create_policy": frozenset({"policy", "policy_version_id", "version_number", "activate", "policy_ref", "effective_from", "effective_until", "actor_ref", "prior_version_ref", "change_reason", "content_hash_value"}),
     "current_pointer": frozenset({"thesis_id"}),
     "get_version": frozenset({"version_id"}),
@@ -390,6 +415,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "record_model_reconciliation": "actor_ref",
     "register_industry_evidence_pack": "actor_ref",
     "register_company_overlay": "actor_ref",
+    "publish_transcript_correction_set": "actor_ref",
 }
 
 
@@ -517,6 +543,7 @@ class WriterServer:
         *,
         token_config_path: str | Path | None = None,
         scheduler_path: str | Path | None = None,
+        transcript_spool_dir: str | Path | None = None,
     ):
         if not principals:
             raise WriterServerError("at least one principal is required")
@@ -535,6 +562,11 @@ class WriterServer:
         self._coverage_admission: CoverageAdmissionAuthority | None = None
         self._model_input: ModelInputLedger | None = None
         self._industry_research: IndustryResearchAuthority | None = None
+        self._transcript_spool_dir = (
+            None if transcript_spool_dir is None
+            else str(Path(transcript_spool_dir).expanduser().resolve())
+        )
+        self._transcript_spool: RawSpool | None = None
         self._scheduler_path = None if scheduler_path is None else str(scheduler_path)
         self._scheduler: Scheduler | None = None
         self._research_plan: ResearchPlanAuthority | None = None
@@ -589,6 +621,44 @@ class WriterServer:
         if self._industry_research is None:
             raise WriterServerError("industry-research authority is unavailable")
         return self._industry_research
+
+    def _transcript_support_authority(self, authority_ref: str) -> dict[str, Any]:
+        evidence = self.store.connection.execute(
+            "SELECT evidence_json FROM evidence_versions WHERE evidence_version_id=?",
+            (authority_ref,),
+        ).fetchone()
+        if evidence is not None:
+            return json.loads(evidence["evidence_json"])
+        try:
+            return self.observability.get_artifact_version_v2(authority_ref)
+        except ObservabilityNotFound:
+            pass
+        source = self.store.connection.execute(
+            "SELECT record_json FROM connector_source_envelopes "
+            "WHERE source_envelope_id=?",
+            (authority_ref,),
+        ).fetchone()
+        if source is not None:
+            return json.loads(source["record_json"])
+        raise TranscriptCorrectionNotFound(authority_ref)
+
+    def _transcript_corrections(
+        self, source_manifest: Mapping[str, Any]
+    ) -> tuple[TranscriptCorrectionAuthority, dict[str, Any]]:
+        if self._transcript_spool is None:
+            raise WriterServerError("transcript correction spool is unavailable")
+        manifest = validate_alphaengine_document_acquisition_manifest(
+            source_manifest
+        )
+        authority = TranscriptCorrectionAuthority(
+            self.store,
+            spool=self._transcript_spool,
+            manifest_resolver=(
+                lambda ref: manifest if ref == manifest["id"] else None
+            ),
+            evidence_resolver=self._transcript_support_authority,
+        )
+        return authority, manifest
 
     @property
     def thesis_impact_control(self) -> ResearchPlanThesisImpactCoordinator:
@@ -645,6 +715,10 @@ class WriterServer:
         self._coverage_admission = CoverageAdmissionAuthority(self._store)
         self._model_input = ModelInputLedger(self._store)
         self._industry_research = IndustryResearchAuthority(self._store)
+        if self._transcript_spool_dir is not None:
+            self._transcript_spool = RawSpool(
+                self._transcript_spool_dir, max_total_bytes=1_000_000_000
+            )
         if self._scheduler_path is not None:
             self._scheduler = Scheduler(self._scheduler_path)
             self._research_plan = ResearchPlanAuthority(self._store)
@@ -739,6 +813,7 @@ class WriterServer:
         self._coverage_admission = None
         self._model_input = None
         self._industry_research = None
+        self._transcript_spool = None
 
     def _serve_connection(self, conn: socket.socket) -> None:
         reader = conn.makefile("rb")
@@ -1278,6 +1353,42 @@ class WriterServer:
             raise ProtocolError("model_input_integrity_report takes no parameters")
         return self.model_input.integrity_report()
 
+    def _op_publish_transcript_correction_set(
+        self, p: Mapping[str, Any]
+    ) -> Any:
+        values = dict(p)
+        source_manifest = values.pop("source_manifest")
+        authority, manifest = self._transcript_corrections(source_manifest)
+        correction_set_ref = values.pop("correction_set_ref")
+        return authority.publish(
+            correction_set_ref,
+            source_manifest_ref=manifest["id"],
+            source_manifest_hash=manifest["content_hash"],
+            source_content_hash=manifest["assembled_object"]["content_hash"],
+            **values,
+        )
+
+    def _op_bind_transcript_claim_citation(
+        self, p: Mapping[str, Any]
+    ) -> Any:
+        values = dict(p)
+        source_manifest = values.pop("source_manifest")
+        authority, _ = self._transcript_corrections(source_manifest)
+        version_ref = values.pop("correction_set_version_ref")
+        version_hash = values.pop("correction_set_version_hash")
+        return authority.bind_claim_citation(
+            version_ref, version_hash, **values
+        )
+
+    def _op_transcript_correction_review_state(
+        self, p: Mapping[str, Any]
+    ) -> Any:
+        values = dict(p)
+        source_manifest = values.pop("source_manifest")
+        authority, _ = self._transcript_corrections(source_manifest)
+        correction_set_ref = values.pop("correction_set_ref")
+        return authority.review_state(correction_set_ref, **values)
+
     def _op_register_industry_evidence_pack(self, p: Mapping[str, Any]) -> Any:
         values = dict(p)
         evidence_pack_ref = values.pop("evidence_pack_ref")
@@ -1367,11 +1478,11 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, TranscriptCorrectionValidationError)):
             return "rejected"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, TranscriptCorrectionNotFound)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, TranscriptCorrectionConflict)):
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
@@ -1383,7 +1494,7 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, CapabilityRegistryError):
             return "store_error"
-        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError)):
+        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, TranscriptCorrectionError)):
             return "store_error"
         return "internal_error"
 
@@ -1393,11 +1504,11 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, CoverageAdmissionValidationError, ModelInputValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, CoverageAdmissionValidationError, ModelInputValidationError, TranscriptCorrectionValidationError)):
             return "request rejected by contract or gate"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, CoverageAdmissionNotFound, ModelInputNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, CoverageAdmissionNotFound, ModelInputNotFound, TranscriptCorrectionNotFound)):
             return "requested object was not found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, CoverageAdmissionConflict, ModelInputConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, CoverageAdmissionConflict, ModelInputConflict, TranscriptCorrectionConflict)):
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ContextMaterializerError, PerceptionError)):
             return "request rejected by contract or gate"
@@ -1416,6 +1527,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--socket", required=True)
     parser.add_argument("--token-config", required=True)
     parser.add_argument("--scheduler")
+    parser.add_argument("--transcript-spool-dir")
     args = parser.parse_args(argv)
     try:
         principals = load_principals(args.token_config)
@@ -1425,6 +1537,7 @@ def main(argv: list[str] | None = None) -> int:
             principals,
             token_config_path=args.token_config,
             scheduler_path=args.scheduler,
+            transcript_spool_dir=args.transcript_spool_dir,
         )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:

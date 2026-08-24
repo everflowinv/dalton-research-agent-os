@@ -81,6 +81,15 @@ class WriterClient:
     def commit_reviewed_candidate(self, **params: Any) -> Any:
         return self.call("commit_reviewed_candidate", params)
 
+    def publish_transcript_correction_set(self, **params: Any) -> Any:
+        return self.call("publish_transcript_correction_set", params)
+
+    def bind_transcript_claim_citation(self, **params: Any) -> Any:
+        return self.call("bind_transcript_claim_citation", params)
+
+    def transcript_correction_review_state(self, **params: Any) -> Any:
+        return self.call("transcript_correction_review_state", params)
+
     def create_policy(self, **params: Any) -> Any:
         return self.call("create_policy", params)
 

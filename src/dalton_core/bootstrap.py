@@ -20,6 +20,7 @@ from .store import DaltonStore
 from .writer_server import (
     CORE_OPERATIONS,
     FEEDBACK_BRIDGE_OPERATIONS,
+    RESEARCH_REVIEW_CONTROL_OPERATIONS,
     THESIS_IMPACT_OPERATIONS,
     Principal,
     load_principals,
@@ -68,6 +69,12 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
     control_enabled = bool(
         configured_service is not None and configured_service.control is not None
     )
+    review_enabled = bool(
+        control_enabled
+        and configured_service is not None
+        and configured_service.control is not None
+        and configured_service.control.research_review is not None
+    )
     with DaltonStore(paths["core_db"]) as store:
         ObservabilityStore(store)
         AgendaStore(store)
@@ -112,6 +119,14 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
                     actor_ref="automation:agenda-timeout",
                 ),
             ])
+        if review_enabled:
+            initial_principals.append(Principal(
+                principal_id="research-review-control",
+                token=secrets.token_urlsafe(48),
+                operations=RESEARCH_REVIEW_CONTROL_OPERATIONS,
+                unrestricted=False,
+                actor_ref="bridge:tailscale-review",
+            ))
         if discord_feedback_enabled:
             initial_principals.append(Principal(
                 principal_id="feedback-bridge",
@@ -181,6 +196,20 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
         else:
             principals.pop("dashboard-control", None)
             principals.pop("agenda-timeout", None)
+        if review_enabled:
+            current_review = principals.get("research-review-control")
+            principals["research-review-control"] = Principal(
+                principal_id="research-review-control",
+                token=(
+                    current_review.token
+                    if current_review is not None else secrets.token_urlsafe(48)
+                ),
+                operations=RESEARCH_REVIEW_CONTROL_OPERATIONS,
+                unrestricted=False,
+                actor_ref="bridge:tailscale-review",
+            )
+        else:
+            principals.pop("research-review-control", None)
         replace_token_config(paths["token_config"], list(principals.values()))
     raw = {
         "schema_version": SCHEMA_VERSION,

@@ -445,6 +445,7 @@ def run_canary(
     max_output_tokens: int,
     max_cost_usd: float,
     timeout_seconds: int,
+    acquire_only: bool = False,
 ) -> dict[str, Any]:
     _validate_review_mode(review_mode)
     if timeout_seconds > MAX_BROKER_TIMEOUT_SECONDS:
@@ -497,8 +498,40 @@ def run_canary(
             raise AlphaEngineTranscriptCanaryError(
                 f"document acquisition stopped at {manifest['termination_reason']}"
             )
+        _secure_write(output_dir / "source-manifest.json", manifest)
         source_hash = manifest["assembled_object"]["content_hash"]
         source_text = spool.read_object(source_hash).decode("utf-8")
+        if acquire_only:
+            counts = {
+                table: int(store.connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0])
+                for table in ("evidence_versions", "claim_versions", "thesis_versions")
+            }
+            summary = {
+                "schema_version": SCHEMA_VERSION,
+                "id": "alphaengine-transcript-acquisition-canary:" + content_hash({
+                    "manifest_hash": manifest["content_hash"],
+                })[:32],
+                "created_at": created_at,
+                "source": {
+                    "document_ref": manifest["document_ref"],
+                    "manifest_ref": manifest["id"],
+                    "manifest_hash": manifest["content_hash"],
+                    "content_chars": manifest["content_chars"],
+                    "content_sha256": source_hash,
+                    "physical_calls": manifest["physical_calls"],
+                    "document_quota_units": manifest["document_quota_units"],
+                },
+                "mode": "acquire_only",
+                "model_calls": 0,
+                "formal_authority_counts": counts,
+                "acquisition_gate_pass": True,
+                "claim_admission_gate_pass": False,
+                "production_activated": False,
+            }
+            _secure_write(output_dir / "summary.json", summary)
+            return summary
         correction_set = None
         all_protected_terms = list(dict.fromkeys([
             *_speaker_terms(source_text), *protected_terms,
@@ -733,6 +766,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-output-tokens", type=int, default=16_000)
     parser.add_argument("--max-cost-usd", type=float, default=2.0)
     parser.add_argument("--timeout-seconds", type=int, default=600)
+    parser.add_argument("--acquire-only", action="store_true")
     args = parser.parse_args(argv)
     try:
         summary = run_canary(
@@ -749,6 +783,7 @@ def main(argv: list[str] | None = None) -> int:
             max_output_tokens=args.max_output_tokens,
             max_cost_usd=args.max_cost_usd,
             timeout_seconds=args.timeout_seconds,
+            acquire_only=args.acquire_only,
         )
     except Exception as exc:
         print(f"AlphaEngine transcript canary failed: {exc}", file=os.sys.stderr)

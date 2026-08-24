@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from dalton_core.dashboard import ProjectionWriter
+from dalton_core.bootstrap import bootstrap
 from dalton_core.plugins.static_dashboard import (
     StaticDashboardError,
     TencentCosConfig,
@@ -23,6 +24,10 @@ from dalton_core.macos_launchagent import (
 from dalton_core.health import check
 from dalton_core.service import DaltonService, ServiceConfig, ServiceConfigError
 from dalton_core.store import DaltonStore
+from dalton_core.writer_server import (
+    RESEARCH_REVIEW_CONTROL_OPERATIONS,
+    load_principals,
+)
 from tests.test_dashboard import snapshot
 
 
@@ -222,6 +227,15 @@ class ServiceTests(unittest.TestCase):
                     "endpoint_ref": "openclaw:discord:test",
                     "feedback_timeout_seconds": 86400,
                     "sweep_interval_seconds": 60,
+                    "research_review": {
+                        "candidate_staging_path": str(
+                            root / "candidate-staging.sqlite"
+                        ),
+                        "transcript_review_directory": str(
+                            root / "review-inbox"
+                        ),
+                        "reconcile_interval_seconds": 60,
+                    },
                 }},
             }), encoding="utf-8")
             paths = render(
@@ -232,6 +246,59 @@ class ServiceTests(unittest.TestCase):
             self.assertEqual(control["Label"], CONTROL_LABEL)
             self.assertTrue(control["KeepAlive"])
             self.assertIn("dalton-control", control["ProgramArguments"][0])
+            writer = plistlib.loads(Path(paths["writer"]).read_bytes())
+            self.assertIn("--transcript-spool-dir", writer["ProgramArguments"])
+            service = ServiceConfig.from_file(config)
+            self.assertIsNotNone(service.control.research_review)
+            self.assertNotIn("research_review", paths)
+
+    def test_bootstrap_installs_embedded_review_principal_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            config = root / "config.json"
+            config.write_text(json.dumps({
+                "schema_version": "0.1",
+                "core_db": str(state / "core.sqlite"),
+                "scheduler_db": str(state / "scheduler.sqlite"),
+                "projection_db": str(state / "dashboard-projection.sqlite"),
+                "model_router_db": str(state / "model-router.sqlite"),
+                "capability_catalog_db": None,
+                "heartbeat_path": str(state / "run" / "heartbeat.json"),
+                "writer_socket": str(state / "run" / "writer.sock"),
+                "tick_seconds": 1,
+                "projection_min_interval_seconds": 1,
+                "plugin_retry_seconds": 1,
+                "plugins": [],
+                "control": {"enabled": True, "config": {
+                    "host": "127.0.0.1", "port": 8793,
+                    "tailscale_host": "dalton.example.ts.net",
+                    "tailscale_executable": "/usr/bin/true",
+                    "allowed_tailscale_logins": ["owner@example.com"],
+                    "writer_socket": str(state / "run" / "writer.sock"),
+                    "token_config": str(state / "writer-tokens.json"),
+                    "endpoint_ref": "openclaw:discord:test",
+                    "feedback_timeout_seconds": 86400,
+                    "sweep_interval_seconds": 60,
+                    "research_review": {
+                        "candidate_staging_path": str(
+                            state / "candidate-staging.sqlite"
+                        ),
+                        "transcript_review_directory": str(
+                            state / "review-inbox"
+                        ),
+                        "reconcile_interval_seconds": 60,
+                    },
+                }},
+            }), encoding="utf-8")
+            result = bootstrap(state, config)
+            principals = load_principals(result["token_config"])
+            review = principals["research-review-control"]
+            self.assertEqual(
+                review.operations, RESEARCH_REVIEW_CONTROL_OPERATIONS
+            )
+            self.assertEqual(review.actor_ref, "bridge:tailscale-review")
+            self.assertNotIn("human-governance", principals)
 
     def test_health_rejects_degraded_controller_even_with_stale_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

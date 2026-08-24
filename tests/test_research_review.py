@@ -41,6 +41,11 @@ from tests.test_alphaengine_document_acquisition import (
     FakePagePort,
 )
 from tests.test_connector_runner import assert_wire_schema
+from tests.test_live_mcp_connector import (
+    LiveGateHarness,
+    document_parameters,
+    tool_result,
+)
 
 
 REVIEWER = "human:tailscale-0123456789abcdef0123456789abcdef"
@@ -455,6 +460,171 @@ class ResearchReviewTests(unittest.TestCase):
             {"ref": binding["id"], "hash": binding["content_hash"]},
         )
         self.assertEqual(evidence["source_lineage"][-1], binding["id"])
+
+    def test_real_alphaengine_envelope_promotes_with_exact_document_digest(self) -> None:
+        original = "Revenue grew 3% in local currency. r ight"
+        document_digest = hashlib.sha256(original.encode("utf-8")).hexdigest()
+        live = LiveGateHarness(
+            "get_document",
+            document_parameters(),
+            tool_result({
+                "metadata": {"doc_id": "320000610033807", "title": "ACN"},
+                "content_chars": len(original),
+                "content_sha256": document_digest,
+                "offset": 0,
+                "returned_chars": len(original),
+                "text": original,
+                "next_offset": None,
+                "complete": True,
+            }),
+        )
+        self.addCleanup(live.close)
+        self.assertEqual(live.execute()["outcome"], "succeeded")
+        source = json.loads(live.core.connection.execute(
+            "SELECT record_json FROM connector_source_envelopes"
+        ).fetchone()[0])
+        artifact = live.observability.get_artifact_version_v2(
+            source["raw_artifact_version_ref"]
+        )
+        self.assertNotEqual(artifact["artifact_content_hash"], document_digest)
+
+        plan = build_alphaengine_document_acquisition_plan(
+            document_ref="alphaengine-doc:320000610033807",
+            created_at=WIRE_WHEN,
+            max_pages=1,
+            page_max_response_bytes=20_000,
+            max_total_response_bytes=20_000,
+            max_document_chars=len(original),
+        )
+        manifest_authority = FakeAuthorityReader()
+        manifest = AlphaEngineDocumentAcquisitionCoordinator(
+            plan=plan,
+            page_port=FakePagePort(
+                plan=plan,
+                pages=[original],
+                authority=manifest_authority,
+                spool=live.spool,
+            ),
+            authority_reader=manifest_authority,
+            spool=live.spool,
+        ).execute()
+        corrections = TranscriptCorrectionAuthority(
+            live.core,
+            spool=live.spool,
+            manifest_resolver=lambda ref: manifest if ref == manifest["id"] else None,
+            evidence_resolver=lambda _ref: None,
+        )
+        flag_start = original.index("r ight")
+        correction_set = corrections.publish(
+            "transcript-correction-set:alphaengine-envelope",
+            source_manifest_ref=manifest["id"],
+            source_manifest_hash=manifest["content_hash"],
+            source_content_hash=document_digest,
+            review_scope="targeted_flags",
+            corrections=[{
+                "source_start": flag_start,
+                "source_end": len(original),
+                "source_sha256": hashlib.sha256(
+                    original[flag_start:].encode("utf-8")
+                ).hexdigest(),
+                "correction_kind": "terminology",
+                "disposition": "unresolved",
+                "replacement_text": None,
+                "rationale": "Flag outside the exact cited span.",
+                "evidence_bindings": [],
+            }],
+            actor_ref="human:owner",
+        )
+        citation = corrections.bind_claim_citation(
+            correction_set["id"],
+            correction_set["content_hash"],
+            source_start=0,
+            source_end=original.index(". ") + 1,
+        )
+        source_verification_ref = "verification-bundle:source:alphaengine-envelope"
+        source_verification_hash = "1" * 64
+        evidence_body = {
+            "schema_version": "0.1",
+            "id": "candidate-evidence-version:alphaengine-envelope",
+            "created_at": WIRE_WHEN,
+            "candidate_evidence_ref": "candidate-evidence:alphaengine-envelope",
+            "version": 1,
+            "source_type": "alphaengine_document",
+            "source_ref": "source:alphaengine",
+            "source_envelope_ref": source["id"],
+            "source_envelope_hash": source["content_hash"],
+            "artifact_refs": [{"ref": artifact["id"], "hash": artifact["content_hash"]}],
+            "retrieved_at": WIRE_WHEN,
+            "valid_until": None,
+            "source_lineage": [source["id"]],
+            "independence_group": "issuer:acn:q3fy26",
+            "source_verification_ref": source_verification_ref,
+            "source_verification_hash": source_verification_hash,
+            "actor_ref": "system:offline-verifier",
+            "prior_version_ref": None,
+        }
+        evidence = bind_candidate_evidence_to_transcript_citation(
+            {**evidence_body, "content_hash": content_hash(evidence_body)}, citation
+        )
+        period = {
+            "kind": "fiscal_quarter", "label": "FY2026Q3",
+            "start": "2026-03-01T00:00:00.000000+00:00",
+            "end": "2026-05-31T23:59:59.000000+00:00",
+        }
+        claim_body = {
+            "schema_version": "0.1",
+            "id": "candidate-claim-version:alphaengine-envelope",
+            "created_at": WIRE_WHEN,
+            "candidate_claim_ref": "candidate-claim:alphaengine-envelope",
+            "version": 1,
+            "subject_ref": "company:sec-cik:0001467373",
+            "metric_or_aspect": "metric:revenue-growth-local-currency",
+            "period": period,
+            "basis": "management-reported",
+            "normalized_statement": "Q3 FY2026 revenue grew 3% in local currency.",
+            "semantic_verification_status": "unverified",
+            "claim_kind": "quantitative", "value": "3", "unit": "percent",
+            "currency": None, "scale": "one",
+            "candidate_evidence_refs": [{"ref": evidence["id"], "hash": evidence["content_hash"]}],
+            "source_verification_ref": source_verification_ref,
+            "source_verification_hash": source_verification_hash,
+            "numeric_spec_ref": "numeric-spec:alphaengine-envelope",
+            "numeric_spec_hash": "2" * 64,
+            "numeric_verification_ref": "verification-bundle:numeric:alphaengine-envelope",
+            "numeric_verification_hash": "3" * 64,
+            "actor_ref": "system:offline-verifier",
+            "prior_version_ref": None,
+        }
+        claim = {**claim_body, "content_hash": content_hash(claim_body)}
+        semantics = {
+            key: claim[key] for key in (
+                "subject_ref", "metric_or_aspect", "period", "basis",
+                "normalized_statement",
+            )
+        }
+        decision_body = {
+            "schema_version": "0.1", "id": "human-review-decision:alphaengine-envelope",
+            "created_at": WIRE_WHEN,
+            "candidate_claim_ref": claim["id"],
+            "candidate_claim_hash": claim["content_hash"],
+            "candidate_evidence_ref": evidence["id"],
+            "candidate_evidence_hash": evidence["content_hash"],
+            "verdict": "accept", "reviewed_semantics": semantics,
+            "proposed_revisions": None, "relation": "supports",
+            "rationale": "Hermetic authenticated-review fixture for exact lineage.",
+            "findings": ["raw document span and numeric meaning agree"],
+            "reviewer_ref": REVIEWER,
+            "authorization": "explicit_human_review", "source": "tailscale_review",
+            "source_event_ref": "research-review:alphaengine-envelope",
+        }
+        decision = {**decision_body, "content_hash": content_hash(decision_body)}
+        result = live.core.commit_reviewed_candidate(
+            decision=decision, evidence=evidence, claim=claim,
+            idempotency_key="reviewed-ledger:alphaengine-envelope",
+        )
+        self.assertEqual(result["status"], "fresh")
+        self.assertEqual(live.count("evidence_versions"), 1)
+        self.assertEqual(live.count("claim_versions"), 1)
 
     def test_unresolved_transcript_citation_cannot_reach_formal_claim(self) -> None:
         binding = self._transcript_citation("unresolved", unresolved=True)

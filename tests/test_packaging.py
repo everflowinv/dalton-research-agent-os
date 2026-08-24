@@ -35,8 +35,7 @@ class PackagingTests(unittest.TestCase):
             "transcript_correction_schema.sql",
             "thesis-impact-verifier-provider-output-v0.2.schema.json",
             "dashboard.html",
-            "agenda_control.html",
-            "research_review_control.html",
+            "cockpit_control.html",
         ):
             self.assertIn(runtime_asset, package_data["dalton_core"])
         self.assertIn("contracts/*.schema.json", data_files["share/dalton-core/contracts"])
