@@ -11,6 +11,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 from .contracts import ModelInvocation, ResultEnvelope, WorkOrder
@@ -368,6 +369,22 @@ def _model_text(result: ResultEnvelope) -> str | None:
     return text
 
 
+def _latency_seconds(invocation: ModelInvocation) -> float:
+    try:
+        started = datetime.fromisoformat(invocation.started_at)
+        completed = datetime.fromisoformat(invocation.completed_at)
+    except (TypeError, ValueError) as exc:
+        raise TranscriptPolishCalibrationRunError(
+            "invocation latency timestamps are invalid"
+        ) from exc
+    latency = (completed - started).total_seconds()
+    if latency < 0:
+        raise TranscriptPolishCalibrationRunError(
+            "invocation latency is negative"
+        )
+    return latency
+
+
 def validate_record(value: Any) -> dict[str, Any]:
     wire = _closed(
         value, _RECORD_FIELDS, "transcript polish calibration record"
@@ -494,10 +511,21 @@ def _write_report(
     corpus: Mapping[str, Any],
 ) -> dict[str, Any]:
     outputs: dict[str, Any] = {}
+    case_metrics: list[dict[str, Any]] = []
     for record in records:
-        outputs[record["case_ref"]] = _model_text(
-            ResultEnvelope.from_dict(record["result"])
-        )
+        invocation = ModelInvocation.from_dict(record["invocation"])
+        result = ResultEnvelope.from_dict(record["result"])
+        outputs[record["case_ref"]] = _model_text(result)
+        case_metrics.append({
+            "case_ref": record["case_ref"],
+            "broker_status": result.status,
+            "latency_seconds": _latency_seconds(invocation),
+            "input_tokens": invocation.usage.get("input_tokens"),
+            "output_tokens": invocation.usage.get("output_tokens"),
+            "total_tokens": invocation.usage.get("total_tokens"),
+            "accounted_cost_usd": record["accounted_cost_usd"],
+            "cost_reserve_usd": record["cost_reserve_usd"],
+        })
     recorded_case_refs = [
         case_ref for case_ref in manifest["case_refs"]
         if case_ref in outputs
@@ -525,8 +553,12 @@ def _write_report(
         "expected_cases": len(manifest["case_refs"]),
         "coverage_complete": coverage_complete,
         "hard_gate_pass": coverage_complete and score["eligible"],
+        "median_latency_seconds": median(
+            item["latency_seconds"] for item in case_metrics
+        ),
         "total_cost_or_reserve_usd": format(sum(costs, Decimal("0")), "f"),
         "score": score,
+        "case_metrics": case_metrics,
     }
     _secure_write(output_dir / "report.json", report)
     return report
