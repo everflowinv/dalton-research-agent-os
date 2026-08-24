@@ -258,11 +258,26 @@ class TranscriptPolishTests(_TranscriptFixture, unittest.TestCase):
         self.assertEqual(
             binding["citation_mode"], "raw_span_plus_admitted_correction"
         )
+        self.assertEqual(
+            self.corrections.claim_citation_binding(binding["id"]), binding
+        )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM transcript_claim_citation_bindings"
+            ).fetchone()[0],
+            1,
+        )
         with self.assertRaises(sqlite3.IntegrityError):
             self.store.connection.execute(
                 "UPDATE transcript_correction_set_versions SET actor_ref='human:other' "
                 "WHERE version_id=?",
                 (correction_set["id"],),
+            )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.connection.execute(
+                "UPDATE transcript_claim_citation_bindings "
+                "SET claim_eligible=0 WHERE binding_id=?",
+                (binding["id"],),
             )
 
     def test_high_risk_correction_requires_utterance_evidence(self) -> None:

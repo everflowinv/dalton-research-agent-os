@@ -1173,7 +1173,8 @@ class DaltonStore:
                 raise GateRejected("candidate producer execution is unavailable")
             producer_execution_ref = invocation["execution_ref"]
             artifact = cur.execute(
-                "SELECT i.version_id,v.content_hash FROM observability_artifact_version_index i "
+                "SELECT i.version_id,v.content_hash,v.artifact_content_hash,v.record_json "
+                "FROM observability_artifact_version_index i "
                 "JOIN observability_artifact_versions_v2 v ON v.version_id=i.version_id "
                 "WHERE i.version_id=? AND i.producer_execution_ref=?",
                 (evidence_wire["artifact_refs"][0]["ref"], producer_execution_ref),
@@ -1183,6 +1184,44 @@ class DaltonStore:
                 or artifact["content_hash"] != evidence_wire["artifact_refs"][0]["hash"]
             ):
                 raise GateRejected("candidate ArtifactVersion is not exact Core authority")
+            from .transcript_correction import (
+                TRANSCRIPT_EVIDENCE_SOURCE_TYPE,
+                TranscriptCorrectionError,
+                validate_persisted_transcript_claim_citation,
+            )
+
+            if evidence_wire["source_type"] == TRANSCRIPT_EVIDENCE_SOURCE_TYPE:
+                if (
+                    len(evidence_wire["artifact_refs"]) != 2
+                    or not evidence_wire["artifact_refs"][1]["ref"].startswith(
+                        "transcript-claim-citation-binding:"
+                    )
+                    or evidence_wire["source_lineage"][-1]
+                    != evidence_wire["artifact_refs"][1]["ref"]
+                ):
+                    raise GateRejected(
+                        "transcript candidate is missing its exact citation binding"
+                    )
+                citation_ref = evidence_wire["artifact_refs"][1]
+                try:
+                    citation = validate_persisted_transcript_claim_citation(
+                        self.connection,
+                        citation_ref["ref"],
+                        citation_ref["hash"],
+                    )
+                except (TranscriptCorrectionError, sqlite3.Error) as exc:
+                    raise GateRejected(
+                        "transcript candidate citation authority is unavailable or invalid"
+                    ) from exc
+                if (
+                    citation["source_content_hash"]
+                    != artifact["artifact_content_hash"]
+                    or source_doc.get("raw_response_hash")
+                    != citation["source_content_hash"]
+                ):
+                    raise GateRejected(
+                        "transcript citation does not bind the exact raw ArtifactVersion"
+                    )
 
             evidence_ref = evidence_wire["candidate_evidence_ref"].replace(
                 "candidate-evidence:", "evidence:", 1

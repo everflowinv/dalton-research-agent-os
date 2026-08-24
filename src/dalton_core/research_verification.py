@@ -35,6 +35,7 @@ from .research_coordinator import (
     validate_research_checkpoint,
 )
 from .store import canonical_json, content_hash
+from .transcript_correction import TRANSCRIPT_EVIDENCE_SOURCE_TYPE
 
 
 SCHEMA_VERSION = "0.1"
@@ -1384,18 +1385,44 @@ class CandidateStagingStore:
             or source_wire["checkpoint_hash"] != numeric_wire["checkpoint_hash"]
         ):
             raise ResearchVerificationConflict("source and numeric verification bind different checkpoints")
-        expected_artifacts = [{"ref": material_wire["artifact_ref"], "hash": material_wire["artifact_hash"]}]
+        expected_artifacts = [{
+            "ref": material_wire["artifact_ref"],
+            "hash": material_wire["artifact_hash"],
+        }]
+        transcript_evidence = (
+            evidence_wire["source_type"] == TRANSCRIPT_EVIDENCE_SOURCE_TYPE
+        )
+        if transcript_evidence:
+            transcript_shape = (
+                verification_mode == "connector_authority"
+                and material_wire["source_type"] != "recorded_fixture"
+                and len(evidence_wire["artifact_refs"]) == 2
+                and evidence_wire["artifact_refs"][:1] == expected_artifacts
+                and evidence_wire["artifact_refs"][1]["ref"].startswith(
+                    "transcript-claim-citation-binding:"
+                )
+                and evidence_wire["source_lineage"]
+                == [
+                    *material_wire["source_lineage"],
+                    evidence_wire["artifact_refs"][1]["ref"],
+                ]
+            )
+        else:
+            transcript_shape = (
+                evidence_wire["source_type"] == (
+                    "recorded_fixture"
+                    if verification_mode == "recorded_fixture"
+                    else material_wire["source_type"]
+                )
+                and evidence_wire["artifact_refs"] == expected_artifacts
+                and evidence_wire["source_lineage"]
+                == material_wire["source_lineage"]
+            )
         evidence_checks = (
-            evidence_wire["source_type"] == (
-                "recorded_fixture"
-                if verification_mode == "recorded_fixture"
-                else material_wire["source_type"]
-            ),
+            transcript_shape,
             evidence_wire["source_ref"] == material_wire["source_ref"],
             evidence_wire["source_envelope_ref"] == material_wire["source_envelope_ref"],
             evidence_wire["source_envelope_hash"] == material_wire["source_envelope_hash"],
-            evidence_wire["artifact_refs"] == expected_artifacts,
-            evidence_wire["source_lineage"] == material_wire["source_lineage"],
             evidence_wire["retrieved_at"] == material_wire["retrieved_at"],
             evidence_wire["valid_until"] is None,
             evidence_wire["independence_group"]

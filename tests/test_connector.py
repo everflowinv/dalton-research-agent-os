@@ -28,7 +28,10 @@ WHEN = datetime(2026, 8, 14, 12, 0, tzinfo=timezone.utc)
 CONTRACTS = Path(__file__).resolve().parents[1] / "contracts"
 
 
-def validate_json_schema(instance, schema: dict, root: dict, path: str = "$") -> None:
+def validate_json_schema(instance, schema: dict | bool, root: dict, path: str = "$") -> None:
+    if isinstance(schema, bool):
+        assert schema, f"{path}: false schema rejects every value"
+        return
     if "$ref" in schema:
         target = root
         for part in schema["$ref"].removeprefix("#/").split("/"):
@@ -90,8 +93,14 @@ def validate_json_schema(instance, schema: dict, root: dict, path: str = "$") ->
         if schema.get("uniqueItems"):
             encoded = [json.dumps(value, sort_keys=True) for value in instance]
             assert len(encoded) == len(set(encoded)), f"{path}: duplicate items"
+        prefix_items = schema.get("prefixItems", ())
         for index, value in enumerate(instance):
-            validate_json_schema(value, schema.get("items", {}), root, f"{path}[{index}]")
+            item_schema = (
+                prefix_items[index]
+                if index < len(prefix_items)
+                else schema.get("items", {})
+            )
+            validate_json_schema(value, item_schema, root, f"{path}[{index}]")
     if isinstance(instance, str):
         assert len(instance) >= schema.get("minLength", 0), f"{path}: too short"
         if "pattern" in schema:

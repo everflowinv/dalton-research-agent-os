@@ -3,6 +3,10 @@
 日期：2026-08-23
 状态：development candidate；取代 TranscriptPolishWorker v1 的 `original_only` 引用规则
 
+后续状态：通用 Claim admission 已在 2026-08-24 接通，见
+[Transcript Claim Admission Gate v0.3](transcript-claim-admission-gate-v0.3-2026-08-24.md)。下文“未完成项”保留本报告
+发布时的历史状态。
+
 ## 更正的架构判断
 
 原始 ASR 必须不可修改，因为它记录系统实际收到的内容，便于审计和重放；但它不等于语义正确的逐字稿。ASR 可能把

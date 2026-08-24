@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 
+from dalton_core.alphaengine_document_acquisition import (
+    AlphaEngineDocumentAcquisitionCoordinator,
+    build_alphaengine_document_acquisition_plan,
+)
 from dalton_core.errors import GateRejected
 from dalton_core.research_context import build_claim_index
 from dalton_core.research_review import (
@@ -15,6 +21,7 @@ from dalton_core.research_review import (
 )
 from dalton_core.research_verification import (
     CandidateStagingStore,
+    ResearchVerificationConflict,
     build_authority_source_material,
     build_candidate_claim,
     build_candidate_evidence,
@@ -23,6 +30,16 @@ from dalton_core.research_verification import (
 )
 from dalton_core.sec_authority_harness import SecAuthorityHarness, WIRE_WHEN
 from dalton_core.store import canonical_json, content_hash
+from dalton_core.transcript_correction import (
+    TRANSCRIPT_EVIDENCE_SOURCE_TYPE,
+    TranscriptCorrectionAuthority,
+    TranscriptCorrectionConflict,
+    bind_candidate_evidence_to_transcript_citation,
+)
+from tests.test_alphaengine_document_acquisition import (
+    FakeAuthorityReader,
+    FakePagePort,
+)
 from tests.test_connector_runner import assert_wire_schema
 
 
@@ -46,7 +63,12 @@ class ResearchReviewTests(unittest.TestCase):
         ).fetchone()
         return json.loads(row[0])
 
-    def _stage_candidate(self) -> dict:
+    def _stage_candidate(
+        self,
+        *,
+        suffix: str = "1",
+        evidence_transform: Callable[[dict], dict] | None = None,
+    ) -> dict:
         resolver = self.harness.resolver()
         source_ref = self.harness.checkpoint["source_envelopes"][0]["ref"]
         resolved = resolver.resolve(
@@ -71,7 +93,7 @@ class ResearchReviewTests(unittest.TestCase):
         }
         spec = {
             "schema_version": "0.1",
-            "id": "numeric-spec:sec:review-count:1",
+            "id": f"numeric-spec:sec:review-count:{suffix}",
             "created_at": WIRE_WHEN,
             "operator": "identity",
             "inputs": [{
@@ -97,17 +119,19 @@ class ResearchReviewTests(unittest.TestCase):
         evidence = build_candidate_evidence(
             material,
             source_bundle,
-            candidate_evidence_ref="candidate-evidence:sec:review:1",
+            candidate_evidence_ref=f"candidate-evidence:sec:review:{suffix}",
             actor_ref="system:offline-verifier",
             created_at=WIRE_WHEN,
             verification_mode="connector_authority",
         )
+        if evidence_transform is not None:
+            evidence = evidence_transform(evidence)
         claim = build_candidate_claim(
             evidence,
             source_bundle,
             spec,
             numeric_bundle,
-            candidate_claim_ref="candidate-claim:sec:review:1",
+            candidate_claim_ref=f"candidate-claim:sec:review:{suffix}",
             subject_ref="company:issuer-0000789019",
             metric_or_aspect="filing_count",
             basis="official-filing",
@@ -130,13 +154,91 @@ class ResearchReviewTests(unittest.TestCase):
                 numeric_verification=numeric_bundle,
                 evidence=evidence,
                 claim=claim,
-                idempotency_key="stage:sec:review:1",
+                idempotency_key=f"stage:sec:review:{suffix}",
                 verification_mode="connector_authority",
                 authority_resolver=resolver,
             )
         finally:
             staging.close()
         return {"evidence": evidence, "claim": claim}
+
+    def _transcript_citation(self, suffix: str, *, unresolved: bool = False) -> dict:
+        artifact_ref = self.candidate["evidence"]["artifact_refs"][0]["ref"]
+        artifact = self.harness.core.connection.execute(
+            "SELECT artifact_content_hash FROM observability_artifact_versions_v2 "
+            "WHERE version_id=?",
+            (artifact_ref,),
+        ).fetchone()
+        raw = self.harness.spool.read_object(artifact["artifact_content_hash"])
+        original = raw.decode("utf-8")
+        plan = build_alphaengine_document_acquisition_plan(
+            document_ref=f"alphaengine-doc:formal-transcript-{suffix}",
+            created_at=WIRE_WHEN,
+            max_pages=1,
+            page_max_response_bytes=20_000,
+            max_total_response_bytes=20_000,
+            max_document_chars=max(1, len(original)),
+        )
+        manifest_authority = FakeAuthorityReader()
+        manifest = AlphaEngineDocumentAcquisitionCoordinator(
+            plan=plan,
+            page_port=FakePagePort(
+                plan=plan,
+                pages=[original],
+                authority=manifest_authority,
+                spool=self.harness.spool,
+            ),
+            authority_reader=manifest_authority,
+            spool=self.harness.spool,
+        ).execute()
+        self.assertEqual(
+            manifest["assembled_object"]["content_hash"],
+            artifact["artifact_content_hash"],
+        )
+        support_body = {
+            "id": f"authority:transcript-terminology:{suffix}",
+            "kind": "primary-reference",
+        }
+        support = {**support_body, "content_hash": content_hash(support_body)}
+        corrections = TranscriptCorrectionAuthority(
+            self.harness.core,
+            spool=self.harness.spool,
+            manifest_resolver=lambda ref: manifest if ref == manifest["id"] else None,
+            evidence_resolver=lambda ref: support if ref == support["id"] else None,
+        )
+        source_text = "10-Q"
+        start = original.index(source_text)
+        correction_set = corrections.publish(
+            f"transcript-correction-set:formal-{suffix}",
+            source_manifest_ref=manifest["id"],
+            source_manifest_hash=manifest["content_hash"],
+            source_content_hash=manifest["assembled_object"]["content_hash"],
+            review_scope="targeted_flags",
+            corrections=[{
+                "source_start": start,
+                "source_end": start + len(source_text),
+                "source_sha256": hashlib.sha256(
+                    source_text.encode("utf-8")
+                ).hexdigest(),
+                "correction_kind": "terminology",
+                "disposition": "unresolved" if unresolved else "accepted",
+                "replacement_text": None if unresolved else "10-Q filing",
+                "rationale": "Exact transcript citation admission fixture.",
+                "evidence_bindings": [] if unresolved else [{
+                    "authority_ref": support["id"],
+                    "authority_hash": support["content_hash"],
+                    "evidence_kind": "primary_reference",
+                    "location": "official-term:10-Q",
+                }],
+            }],
+            actor_ref="human:owner",
+        )
+        return corrections.bind_claim_citation(
+            correction_set["id"],
+            correction_set["content_hash"],
+            source_start=0,
+            source_end=len(original),
+        )
 
     @staticmethod
     def _semantics(claim: dict) -> dict:
@@ -312,6 +414,131 @@ class ResearchReviewTests(unittest.TestCase):
         with self.assertRaises(GateRejected):
             self.harness.core.commit_reviewed_candidate(
                 **bundle, idempotency_key="reviewed-ledger:rejected"
+            )
+
+    def test_transcript_citation_binding_survives_staging_and_formal_promotion(self) -> None:
+        binding = self._transcript_citation("accepted")
+        self.candidate = self._stage_candidate(
+            suffix="transcript-accepted",
+            evidence_transform=lambda evidence: (
+                bind_candidate_evidence_to_transcript_citation(evidence, binding)
+            ),
+        )
+        assert_wire_schema(
+            self,
+            "candidate-evidence.schema.json",
+            self.candidate["evidence"],
+        )
+        self._decide(
+            idempotency_key="review:transcript:accepted",
+            source_event_ref="research-review:transcript-accepted",
+        )
+        bundle = self.review.pending_commits()[0]
+        result = self.harness.core.commit_reviewed_candidate(
+            **bundle,
+            idempotency_key="reviewed-ledger:transcript-accepted",
+        )
+        evidence = json.loads(
+            self.harness.core.connection.execute(
+                "SELECT evidence_json FROM evidence_versions WHERE evidence_version_id=?",
+                (result["evidence_version_ref"],),
+            ).fetchone()[0]
+        )
+        assert_wire_schema(
+            self,
+            "evidence-version-v0.2.schema.json",
+            evidence,
+        )
+        self.assertEqual(evidence["source_type"], TRANSCRIPT_EVIDENCE_SOURCE_TYPE)
+        self.assertEqual(
+            evidence["artifact_refs"][1],
+            {"ref": binding["id"], "hash": binding["content_hash"]},
+        )
+        self.assertEqual(evidence["source_lineage"][-1], binding["id"])
+
+    def test_unresolved_transcript_citation_cannot_reach_formal_claim(self) -> None:
+        binding = self._transcript_citation("unresolved", unresolved=True)
+
+        def hostile_transform(evidence: dict) -> dict:
+            with self.assertRaises(TranscriptCorrectionConflict):
+                bind_candidate_evidence_to_transcript_citation(evidence, binding)
+            base = {
+                key: value for key, value in evidence.items()
+                if key != "content_hash"
+            }
+            base["source_type"] = TRANSCRIPT_EVIDENCE_SOURCE_TYPE
+            base["artifact_refs"] = [
+                *evidence["artifact_refs"],
+                {"ref": binding["id"], "hash": binding["content_hash"]},
+            ]
+            base["source_lineage"] = [*evidence["source_lineage"], binding["id"]]
+            return {**base, "content_hash": content_hash(base)}
+
+        self.candidate = self._stage_candidate(
+            suffix="transcript-unresolved",
+            evidence_transform=hostile_transform,
+        )
+        self._decide(
+            idempotency_key="review:transcript:unresolved",
+            source_event_ref="research-review:transcript-unresolved",
+        )
+        with self.assertRaisesRegex(GateRejected, "citation authority"):
+            self.harness.core.commit_reviewed_candidate(
+                **self.review.pending_commits()[0],
+                idempotency_key="reviewed-ledger:transcript-unresolved",
+            )
+        self.assertEqual(
+            self.harness.core.connection.execute(
+                "SELECT COUNT(*) FROM claim_versions"
+            ).fetchone()[0],
+            0,
+        )
+
+    def test_transcript_binding_shape_and_hash_drift_fail_closed(self) -> None:
+        binding = self._transcript_citation("drift")
+
+        def missing_binding(evidence: dict) -> dict:
+            base = {
+                key: value for key, value in evidence.items()
+                if key != "content_hash"
+            }
+            base["source_type"] = TRANSCRIPT_EVIDENCE_SOURCE_TYPE
+            return {**base, "content_hash": content_hash(base)}
+
+        with self.assertRaisesRegex(
+            ResearchVerificationConflict, "candidate evidence drifted"
+        ):
+            self._stage_candidate(
+                suffix="transcript-missing",
+                evidence_transform=missing_binding,
+            )
+
+        def drifted_binding(evidence: dict) -> dict:
+            admitted = bind_candidate_evidence_to_transcript_citation(
+                evidence, binding
+            )
+            base = {
+                key: value for key, value in admitted.items()
+                if key != "content_hash"
+            }
+            base["artifact_refs"] = [
+                admitted["artifact_refs"][0],
+                {"ref": binding["id"], "hash": "0" * 64},
+            ]
+            return {**base, "content_hash": content_hash(base)}
+
+        self.candidate = self._stage_candidate(
+            suffix="transcript-drifted",
+            evidence_transform=drifted_binding,
+        )
+        self._decide(
+            idempotency_key="review:transcript:drifted",
+            source_event_ref="research-review:transcript-drifted",
+        )
+        with self.assertRaisesRegex(GateRejected, "citation authority"):
+            self.harness.core.commit_reviewed_candidate(
+                **self.review.pending_commits()[0],
+                idempotency_key="reviewed-ledger:transcript-drifted",
             )
 
 

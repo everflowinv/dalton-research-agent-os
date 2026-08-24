@@ -26,6 +26,7 @@ from .store import canonical_json, content_hash
 
 
 SCHEMA_VERSION = "0.1"
+TRANSCRIPT_EVIDENCE_SOURCE_TYPE = "authenticated_transcript"
 _SCHEMA_PATH = Path(__file__).with_name("transcript_correction_schema.sql")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _HUMAN_RE = re.compile(r"^human:[A-Za-z0-9][A-Za-z0-9._/@:-]*$")
@@ -44,6 +45,14 @@ _UTTERANCE_LEVEL_CORRECTIONS = frozenset({
     "numeric", "negation", "semantic", "speaker_label",
 })
 _REVIEW_SCOPES = frozenset({"targeted_flags", "full_document"})
+_CITATION_FIELDS = {
+    "schema_version", "id", "created_at", "source_manifest_ref",
+    "source_manifest_hash", "source_content_hash", "source_start",
+    "source_end", "source_sha256", "correction_set_version_ref",
+    "correction_set_version_hash", "accepted_correction_indexes",
+    "unresolved_correction_indexes", "citation_mode", "claim_eligible",
+    "blocking_reason", "actor_ref", "content_hash",
+}
 
 
 class TranscriptCorrectionError(RuntimeError):
@@ -107,6 +116,296 @@ def _record(base: Mapping[str, Any]) -> dict[str, Any]:
     return wire
 
 
+def _timestamp(value: Any, name: str) -> str:
+    value = _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise TranscriptCorrectionValidationError(
+            f"{name} must be RFC3339"
+        ) from exc
+    if parsed.tzinfo is None:
+        raise TranscriptCorrectionValidationError(
+            f"{name} must include timezone"
+        )
+    return value
+
+
+def _indexes(value: Any, name: str) -> list[int]:
+    if (
+        not isinstance(value, list)
+        or any(isinstance(item, bool) or not isinstance(item, int) or item < 0 for item in value)
+        or value != sorted(set(value))
+    ):
+        raise TranscriptCorrectionValidationError(
+            f"{name} must contain unique ordered non-negative integers"
+        )
+    return list(value)
+
+
+def validate_transcript_claim_citation_binding(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Validate one deterministic raw-span plus correction-lineage binding."""
+
+    wire = _closed(value, _CITATION_FIELDS, "TranscriptClaimCitationBinding")
+    if wire["schema_version"] != SCHEMA_VERSION:
+        raise TranscriptCorrectionValidationError(
+            "unsupported transcript citation schema_version"
+        )
+    for field in (
+        "id", "source_manifest_ref", "correction_set_version_ref",
+    ):
+        wire[field] = _text(wire[field], field)
+    if not wire["id"].startswith("transcript-claim-citation-binding:"):
+        raise TranscriptCorrectionValidationError(
+            "transcript citation id has an invalid namespace"
+        )
+    if not wire["correction_set_version_ref"].startswith(
+        "transcript-correction-set-version:"
+    ):
+        raise TranscriptCorrectionValidationError(
+            "transcript citation must bind a correction-set version"
+        )
+    wire["created_at"] = _timestamp(wire["created_at"], "created_at")
+    for field in (
+        "source_manifest_hash", "source_content_hash", "source_sha256",
+        "correction_set_version_hash",
+    ):
+        wire[field] = _hash(wire[field], field)
+    start = wire["source_start"]
+    end = wire["source_end"]
+    if (
+        isinstance(start, bool) or not isinstance(start, int) or start < 0
+        or isinstance(end, bool) or not isinstance(end, int) or end <= start
+    ):
+        raise TranscriptCorrectionValidationError(
+            "transcript citation source span is invalid"
+        )
+    accepted = _indexes(
+        wire["accepted_correction_indexes"], "accepted_correction_indexes"
+    )
+    unresolved = _indexes(
+        wire["unresolved_correction_indexes"], "unresolved_correction_indexes"
+    )
+    if set(accepted).intersection(unresolved):
+        raise TranscriptCorrectionValidationError(
+            "accepted and unresolved correction indexes must be disjoint"
+        )
+    expected_mode = (
+        "raw_span_plus_admitted_correction" if accepted else "raw_span"
+    )
+    if wire["citation_mode"] != expected_mode:
+        raise TranscriptCorrectionConflict(
+            "transcript citation mode disagrees with accepted corrections"
+        )
+    expected_eligible = not unresolved
+    expected_reason = None if expected_eligible else "unresolved_correction_overlap"
+    if (
+        wire["claim_eligible"] is not expected_eligible
+        or wire["blocking_reason"] != expected_reason
+    ):
+        raise TranscriptCorrectionConflict(
+            "transcript citation eligibility disagrees with unresolved corrections"
+        )
+    if wire["actor_ref"] != "core:transcript-correction-citation-gate":
+        raise TranscriptCorrectionValidationError(
+            "transcript citation actor is invalid"
+        )
+    identity = {
+        "correction_set_version_ref": wire["correction_set_version_ref"],
+        "correction_set_version_hash": wire["correction_set_version_hash"],
+        "source_start": start,
+        "source_end": end,
+    }
+    expected_id = (
+        "transcript-claim-citation-binding:" + content_hash(identity)[:32]
+    )
+    if wire["id"] != expected_id:
+        raise TranscriptCorrectionConflict("transcript citation identity drifted")
+    asserted = wire["content_hash"]
+    body = dict(wire)
+    body.pop("content_hash")
+    if asserted != content_hash(body):
+        raise TranscriptCorrectionConflict("transcript citation hash drifted")
+    return wire
+
+
+def _persisted_citation_row(
+    connection: sqlite3.Connection,
+    binding_ref: str,
+) -> dict[str, Any]:
+    row = connection.execute(
+        "SELECT * FROM transcript_claim_citation_bindings WHERE binding_id=?",
+        (binding_ref,),
+    ).fetchone()
+    if row is None:
+        raise TranscriptCorrectionNotFound(binding_ref)
+    try:
+        wire = validate_transcript_claim_citation_binding(
+            json.loads(row["record_json"])
+        )
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise TranscriptCorrectionConflict(
+            "transcript citation JSON is invalid"
+        ) from exc
+    if canonical_json(wire) != row["record_json"]:
+        raise TranscriptCorrectionConflict(
+            "transcript citation JSON is not canonical"
+        )
+    projections = {
+        "binding_id": wire["id"],
+        "correction_set_version_ref": wire["correction_set_version_ref"],
+        "source_manifest_ref": wire["source_manifest_ref"],
+        "source_manifest_hash": wire["source_manifest_hash"],
+        "source_content_hash": wire["source_content_hash"],
+        "source_start": wire["source_start"],
+        "source_end": wire["source_end"],
+        "claim_eligible": int(wire["claim_eligible"]),
+        "content_hash": wire["content_hash"],
+        "created_at": wire["created_at"],
+    }
+    if any(row[field] != expected for field, expected in projections.items()):
+        raise TranscriptCorrectionConflict(
+            "transcript citation SQL projection drifted"
+        )
+    return wire
+
+
+def validate_persisted_transcript_claim_citation(
+    connection: sqlite3.Connection,
+    binding_ref: str,
+    binding_hash: str,
+) -> dict[str, Any]:
+    """Revalidate an immutable citation and its correction-set overlap."""
+
+    binding_ref = _text(binding_ref, "binding_ref")
+    binding_hash = _hash(binding_hash, "binding_hash")
+    binding = _persisted_citation_row(connection, binding_ref)
+    if binding["content_hash"] != binding_hash:
+        raise TranscriptCorrectionConflict("transcript citation binding hash drifted")
+    row = connection.execute(
+        "SELECT record_json,content_hash,source_manifest_ref,source_manifest_hash,"
+        "source_content_hash FROM transcript_correction_set_versions WHERE version_id=?",
+        (binding["correction_set_version_ref"],),
+    ).fetchone()
+    if row is None:
+        raise TranscriptCorrectionNotFound(
+            binding["correction_set_version_ref"]
+        )
+    try:
+        correction_set = json.loads(row["record_json"])
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise TranscriptCorrectionConflict(
+            "transcript correction-set JSON is invalid"
+        ) from exc
+    body = dict(correction_set)
+    asserted = body.pop("content_hash", None)
+    if (
+        canonical_json(correction_set) != row["record_json"]
+        or asserted != content_hash(body)
+        or asserted != row["content_hash"]
+        or correction_set.get("id") != binding["correction_set_version_ref"]
+        or asserted != binding["correction_set_version_hash"]
+        or correction_set.get("source_manifest_ref") != binding["source_manifest_ref"]
+        or correction_set.get("source_manifest_hash") != binding["source_manifest_hash"]
+        or correction_set.get("source_content_hash") != binding["source_content_hash"]
+        or row["source_manifest_ref"] != binding["source_manifest_ref"]
+        or row["source_manifest_hash"] != binding["source_manifest_hash"]
+        or row["source_content_hash"] != binding["source_content_hash"]
+    ):
+        raise TranscriptCorrectionConflict(
+            "transcript citation correction-set lineage drifted"
+        )
+    accepted: list[int] = []
+    unresolved: list[int] = []
+    corrections = correction_set.get("corrections")
+    if not isinstance(corrections, list):
+        raise TranscriptCorrectionConflict(
+            "transcript correction-set entries are invalid"
+        )
+    for index, item in enumerate(corrections):
+        if not isinstance(item, Mapping):
+            raise TranscriptCorrectionConflict(
+                "transcript correction-set entry is invalid"
+            )
+        try:
+            overlaps = (
+                binding["source_start"] < item["source_end"]
+                and binding["source_end"] > item["source_start"]
+            )
+        except (KeyError, TypeError) as exc:
+            raise TranscriptCorrectionConflict(
+                "transcript correction-set span is invalid"
+            ) from exc
+        if not overlaps:
+            continue
+        if item.get("disposition") == "accepted":
+            accepted.append(index)
+        elif item.get("disposition") == "unresolved":
+            unresolved.append(index)
+        else:
+            raise TranscriptCorrectionConflict(
+                "transcript correction-set disposition is invalid"
+            )
+    if (
+        accepted != binding["accepted_correction_indexes"]
+        or unresolved != binding["unresolved_correction_indexes"]
+    ):
+        raise TranscriptCorrectionConflict(
+            "transcript citation correction overlap drifted"
+        )
+    if not binding["claim_eligible"]:
+        raise TranscriptCorrectionConflict(
+            "transcript citation is not eligible for a formal Claim"
+        )
+    return binding
+
+
+def bind_candidate_evidence_to_transcript_citation(
+    evidence: Mapping[str, Any],
+    citation_binding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Add one exact eligible transcript citation to candidate Evidence."""
+
+    from .research_verification import validate_candidate_evidence
+
+    evidence_wire = validate_candidate_evidence(evidence)
+    binding = validate_transcript_claim_citation_binding(citation_binding)
+    if not binding["claim_eligible"]:
+        raise TranscriptCorrectionConflict(
+            "unresolved transcript citation cannot bind candidate Evidence"
+        )
+    if evidence_wire["source_type"] in {
+        "recorded_fixture", TRANSCRIPT_EVIDENCE_SOURCE_TYPE,
+    }:
+        raise TranscriptCorrectionValidationError(
+            "candidate Evidence source type cannot be rebound as transcript"
+        )
+    if len(evidence_wire["artifact_refs"]) != 1:
+        raise TranscriptCorrectionValidationError(
+            "transcript candidate requires one raw ArtifactVersion before binding"
+        )
+    if binding["id"] in evidence_wire["source_lineage"]:
+        raise TranscriptCorrectionValidationError(
+            "transcript citation is already present in source lineage"
+        )
+    base = {
+        key: value for key, value in evidence_wire.items() if key != "content_hash"
+    }
+    base["source_type"] = TRANSCRIPT_EVIDENCE_SOURCE_TYPE
+    base["artifact_refs"] = [
+        *evidence_wire["artifact_refs"],
+        {"ref": binding["id"], "hash": binding["content_hash"]},
+    ]
+    base["source_lineage"] = [
+        *evidence_wire["source_lineage"], binding["id"],
+    ]
+    return validate_candidate_evidence(
+        {**base, "content_hash": content_hash(base)}
+    )
+
+
 class TranscriptCorrectionAuthority:
     """Publish and resolve immutable, evidence-bound correction sets."""
 
@@ -162,6 +461,10 @@ class TranscriptCorrectionAuthority:
         if any(row[column] != expected for column, expected in checks.items()):
             raise TranscriptCorrectionConflict("correction set SQL projection drifted")
         return wire
+
+    def claim_citation_binding(self, binding_ref: str) -> dict[str, Any]:
+        binding_ref = _text(binding_ref, "binding_ref")
+        return _persisted_citation_row(self.connection, binding_ref)
 
     def _source(
         self,
@@ -575,14 +878,50 @@ class TranscriptCorrectionAuthority:
             ),
             "actor_ref": "core:transcript-correction-citation-gate",
         }
-        return {**base, "content_hash": content_hash(base)}
+        wire = validate_transcript_claim_citation_binding(
+            {**base, "content_hash": content_hash(base)}
+        )
+        existing = self.connection.execute(
+            "SELECT record_json,content_hash FROM transcript_claim_citation_bindings "
+            "WHERE binding_id=?",
+            (wire["id"],),
+        ).fetchone()
+        if existing is not None:
+            if (
+                existing["record_json"] != canonical_json(wire)
+                or existing["content_hash"] != wire["content_hash"]
+            ):
+                raise TranscriptCorrectionConflict(
+                    "transcript citation binding identity conflict"
+                )
+            return self.claim_citation_binding(wire["id"])
+        with self.store._transaction() as cur:
+            cur.execute(
+                "INSERT INTO transcript_claim_citation_bindings "
+                "(binding_id,correction_set_version_ref,source_manifest_ref,"
+                "source_manifest_hash,source_content_hash,source_start,source_end,"
+                "claim_eligible,record_json,content_hash,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    wire["id"], wire["correction_set_version_ref"],
+                    wire["source_manifest_ref"], wire["source_manifest_hash"],
+                    wire["source_content_hash"], wire["source_start"],
+                    wire["source_end"], int(wire["claim_eligible"]),
+                    canonical_json(wire), wire["content_hash"], wire["created_at"],
+                ),
+            )
+        return wire
 
 
 __all__ = [
     "SCHEMA_VERSION",
+    "TRANSCRIPT_EVIDENCE_SOURCE_TYPE",
     "TranscriptCorrectionAuthority",
     "TranscriptCorrectionConflict",
     "TranscriptCorrectionError",
     "TranscriptCorrectionNotFound",
     "TranscriptCorrectionValidationError",
+    "bind_candidate_evidence_to_transcript_citation",
+    "validate_persisted_transcript_claim_citation",
+    "validate_transcript_claim_citation_binding",
 ]
