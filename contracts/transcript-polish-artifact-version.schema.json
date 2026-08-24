@@ -7,12 +7,15 @@
     "schema_version", "id", "created_at", "artifact_ref", "version",
     "prior_version_ref", "kind", "media_type", "source_ref", "document_ref",
     "source_manifest_ref", "source_manifest_hash", "source_content_hash",
-    "candidate_hash", "protection_manifest_hash", "polished_content_hash",
-    "polish_rule_ref", "protection_manifest", "span_mappings", "polished_object",
-    "citation_authority", "verification_status", "actor_ref", "content_hash"
+    "correction_set_version_ref", "correction_set_version_hash",
+    "resolved_source_hash", "candidate_hash", "protection_manifest_hash",
+    "polished_content_hash", "correction_mappings",
+    "unresolved_correction_spans", "polish_rule_ref", "protection_manifest",
+    "span_mappings", "polished_object", "citation_authority",
+    "claim_citation_mode", "verification_status", "actor_ref", "content_hash"
   ],
   "properties": {
-    "schema_version": {"const": "0.1"},
+    "schema_version": {"const": "0.2"},
     "id": {"type": "string", "pattern": "^transcript-polish-artifact-version:[0-9a-f]{32}$"},
     "created_at": {"type": "string", "format": "date-time"},
     "artifact_ref": {"type": "string", "pattern": "^transcript-polish-artifact:alphaengine-doc:"},
@@ -25,9 +28,61 @@
     "source_manifest_ref": {"type": "string", "minLength": 1},
     "source_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "source_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "correction_set_version_ref": {"type": ["string", "null"]},
+    "correction_set_version_hash": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "resolved_source_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "candidate_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "protection_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "polished_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "correction_mappings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_start", "source_end", "source_sha256", "resolved_start",
+          "resolved_end", "resolved_sha256", "correction_kind"
+        ],
+        "properties": {
+          "source_start": {"type": "integer", "minimum": 0},
+          "source_end": {"type": "integer", "minimum": 1},
+          "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "resolved_start": {"type": "integer", "minimum": 0},
+          "resolved_end": {"type": "integer", "minimum": 1},
+          "resolved_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "correction_kind": {
+            "enum": [
+              "proper_name", "terminology", "numeric", "negation",
+              "semantic", "speaker_label"
+            ]
+          }
+        }
+      }
+    },
+    "unresolved_correction_spans": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_start", "source_end", "source_sha256", "correction_kind"
+        ],
+        "properties": {
+          "source_start": {"type": "integer", "minimum": 0},
+          "source_end": {"type": "integer", "minimum": 1},
+          "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "correction_kind": {
+            "enum": [
+              "proper_name", "terminology", "numeric", "negation",
+              "semantic", "speaker_label"
+            ]
+          }
+        }
+      }
+    },
     "polish_rule_ref": {"const": "rules:transcript-polish-conservation:0.1"},
     "protection_manifest": {
       "type": "object",
@@ -82,7 +137,10 @@
         "storage_locator": {"type": "string", "pattern": "^spool:objects/"}
       }
     },
-    "citation_authority": {"const": "original_only"},
+    "citation_authority": {"const": "source_lineage_only"},
+    "claim_citation_mode": {
+      "enum": ["raw_span", "raw_span_plus_admitted_correction"]
+    },
     "verification_status": {"const": "verified"},
     "actor_ref": {"const": "core:transcript-polish-verifier"},
     "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}

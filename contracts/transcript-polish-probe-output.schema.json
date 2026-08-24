@@ -16,6 +16,8 @@
           "source_location", "polished_artifact_version_ref",
           "polished_artifact_version_hash", "source_manifest_ref",
           "source_manifest_hash", "source_content_hash", "citation_authority",
+          "claim_citation_mode", "correction_set_version_ref",
+          "correction_set_version_hash", "unresolved_correction_spans",
           "verification_status"
         ],
         "properties": {
@@ -25,7 +27,36 @@
           "source_manifest_ref": {"type": "string", "minLength": 1},
           "source_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
           "source_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "citation_authority": {"const": "original_only"},
+          "citation_authority": {"const": "source_lineage_only"},
+          "claim_citation_mode": {
+            "enum": ["raw_span", "raw_span_plus_admitted_correction"]
+          },
+          "correction_set_version_ref": {"type": ["string", "null"]},
+          "correction_set_version_hash": {
+            "type": ["string", "null"],
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "unresolved_correction_spans": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "source_start", "source_end", "source_sha256", "correction_kind"
+              ],
+              "properties": {
+                "source_start": {"type": "integer", "minimum": 0},
+                "source_end": {"type": "integer", "minimum": 1},
+                "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                "correction_kind": {
+                  "enum": [
+                    "proper_name", "terminology", "numeric", "negation",
+                    "semantic", "speaker_label"
+                  ]
+                }
+              }
+            }
+          },
           "verification_status": {"const": "verified"}
         }
       }

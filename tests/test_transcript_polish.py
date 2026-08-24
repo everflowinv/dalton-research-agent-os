@@ -34,6 +34,11 @@ from dalton_core.transcript_polish import (
     TranscriptPolishWorker,
     parse_transcript_polish_candidate_text,
 )
+from dalton_core.transcript_correction import (
+    TranscriptCorrectionAuthority,
+    TranscriptCorrectionConflict,
+    TranscriptCorrectionValidationError,
+)
 from tests.test_alphaengine_document_acquisition import (
     FakeAuthorityReader,
     FakePagePort,
@@ -55,9 +60,15 @@ POLISHED = (
 )
 
 
-def candidate(polished: str = POLISHED, *, start: int = 0, end: int | None = None) -> dict:
-    end = len(ORIGINAL) if end is None else end
-    source_slice = ORIGINAL[start:end]
+def candidate_for(
+    source: str,
+    polished: str,
+    *,
+    start: int = 0,
+    end: int | None = None,
+) -> dict:
+    end = len(source) if end is None else end
+    source_slice = source[start:end]
     return {
         "schema_version": "0.1",
         "segments": [{
@@ -67,6 +78,10 @@ def candidate(polished: str = POLISHED, *, start: int = 0, end: int | None = Non
             "polished_text": polished,
         }],
     }
+
+
+def candidate(polished: str = POLISHED, *, start: int = 0, end: int | None = None) -> dict:
+    return candidate_for(ORIGINAL, polished, start=start, end=end)
 
 
 class _TranscriptFixture:
@@ -96,10 +111,18 @@ class _TranscriptFixture:
             spool=self.spool,
         ).execute()
         self.manifests = {self.manifest["id"]: self.manifest}
+        self.evidence: dict[str, dict] = {}
+        self.corrections = TranscriptCorrectionAuthority(
+            self.store,
+            spool=self.spool,
+            manifest_resolver=lambda ref: self.manifests[ref],
+            evidence_resolver=lambda ref: self.evidence[ref],
+        )
         self.authority = TranscriptPolishAuthority(
             self.store,
             spool=self.spool,
             manifest_resolver=lambda ref: self.manifests[ref],
+            correction_authority=self.corrections,
         )
         self.addCleanup(self.store.close)
         self.addCleanup(self.temp.cleanup)
@@ -111,16 +134,56 @@ class _TranscriptFixture:
             "source_content_hash": self.manifest["assembled_object"]["content_hash"],
             "candidate_text": json.dumps(value or candidate(), separators=(",", ":")),
             "additional_protected_terms": ["Accenture", "Julie Sweet"],
+            "correction_set_version_ref": None,
+            "correction_set_version_hash": None,
         }
         parameters.update(overrides)
         return self.authority.materialize(**parameters)
+
+    def add_evidence(self, ref: str) -> dict:
+        body = {"id": ref, "kind": "transcript-correction-evidence"}
+        authority = {**body, "content_hash": content_hash(body)}
+        self.evidence[ref] = authority
+        return authority
+
+    def correction(
+        self,
+        source_text: str,
+        replacement_text: str | None,
+        *,
+        correction_kind: str,
+        disposition: str = "accepted",
+        evidence: list[dict] | None = None,
+    ) -> dict:
+        start = ORIGINAL.index(source_text)
+        end = start + len(source_text)
+        return {
+            "source_start": start,
+            "source_end": end,
+            "source_sha256": hashlib.sha256(source_text.encode()).hexdigest(),
+            "correction_kind": correction_kind,
+            "disposition": disposition,
+            "replacement_text": replacement_text,
+            "rationale": "Exact correction review fixture.",
+            "evidence_bindings": evidence or [],
+        }
+
+    @staticmethod
+    def evidence_binding(authority: dict, evidence_kind: str) -> dict:
+        return {
+            "authority_ref": authority["id"],
+            "authority_hash": authority["content_hash"],
+            "evidence_kind": evidence_kind,
+            "location": "exact-span:fixture",
+        }
 
 
 class TranscriptPolishTests(_TranscriptFixture, unittest.TestCase):
     def test_verified_candidate_forms_mapped_derived_artifact_once(self) -> None:
         artifact = self.materialize()
         self.assertEqual(artifact["status"], "fresh")
-        self.assertEqual(artifact["citation_authority"], "original_only")
+        self.assertEqual(artifact["citation_authority"], "source_lineage_only")
+        self.assertEqual(artifact["claim_citation_mode"], "raw_span")
         self.assertEqual(self.authority.polished_text(artifact["id"]), POLISHED)
         self.assertEqual(artifact["span_mappings"][0]["source_start"], 0)
         self.assertEqual(artifact["span_mappings"][0]["source_end"], len(ORIGINAL))
@@ -139,6 +202,145 @@ class TranscriptPolishTests(_TranscriptFixture, unittest.TestCase):
         revised = self.materialize(alternative, prior_version_ref=artifact["id"])
         self.assertEqual(revised["version"], 2)
         self.assertEqual(revised["prior_version_ref"], artifact["id"])
+
+    def test_admitted_correction_is_applied_with_exact_source_lineage(self) -> None:
+        official = self.add_evidence("authority:accenture-official-name")
+        correction_set = self.corrections.publish(
+            "transcript-correction-set:fixture",
+            source_manifest_ref=self.manifest["id"],
+            source_manifest_hash=self.manifest["content_hash"],
+            source_content_hash=self.manifest["assembled_object"]["content_hash"],
+            review_scope="targeted_flags",
+            corrections=[self.correction(
+                "Accenture",
+                "Accenture plc",
+                correction_kind="proper_name",
+                evidence=[self.evidence_binding(official, "primary_reference")],
+            )],
+            actor_ref="human:owner",
+        )
+        assert_wire_schema(
+            self,
+            "transcript-correction-set-version.schema.json",
+            {key: value for key, value in correction_set.items() if key != "status"},
+        )
+        resolved = self.corrections.resolve(
+            correction_set["id"], correction_set["content_hash"]
+        )
+        expected = ORIGINAL.replace("Accenture", "Accenture plc")
+        self.assertEqual(resolved["resolved_text"], expected)
+        polished = expected.replace("Um, ", "")
+        artifact = self.materialize(
+            candidate_for(expected, polished),
+            correction_set_version_ref=correction_set["id"],
+            correction_set_version_hash=correction_set["content_hash"],
+            additional_protected_terms=["Accenture plc", "Julie Sweet"],
+        )
+        self.assertEqual(
+            artifact["claim_citation_mode"],
+            "raw_span_plus_admitted_correction",
+        )
+        self.assertEqual(artifact["correction_set_version_ref"], correction_set["id"])
+        self.assertEqual(len(artifact["correction_mappings"]), 1)
+        self.assertEqual(artifact["unresolved_correction_spans"], [])
+        self.assertEqual(self.authority.polished_text(artifact["id"]), polished)
+        start = ORIGINAL.index("Accenture")
+        binding = self.corrections.bind_claim_citation(
+            correction_set["id"],
+            correction_set["content_hash"],
+            source_start=start,
+            source_end=start + len("Accenture"),
+        )
+        assert_wire_schema(
+            self, "transcript-claim-citation-binding.schema.json", binding
+        )
+        self.assertTrue(binding["claim_eligible"])
+        self.assertEqual(
+            binding["citation_mode"], "raw_span_plus_admitted_correction"
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.store.connection.execute(
+                "UPDATE transcript_correction_set_versions SET actor_ref='human:other' "
+                "WHERE version_id=?",
+                (correction_set["id"],),
+            )
+
+    def test_high_risk_correction_requires_utterance_evidence(self) -> None:
+        filing = self.add_evidence("authority:earnings-release")
+        weak = self.correction(
+            "1.2",
+            "1.3",
+            correction_kind="numeric",
+            evidence=[self.evidence_binding(filing, "primary_reference")],
+        )
+        source_args = {
+            "source_manifest_ref": self.manifest["id"],
+            "source_manifest_hash": self.manifest["content_hash"],
+            "source_content_hash": self.manifest["assembled_object"]["content_hash"],
+            "review_scope": "targeted_flags",
+            "actor_ref": "human:owner",
+        }
+        with self.assertRaisesRegex(
+            TranscriptCorrectionValidationError, "audio or official transcript"
+        ):
+            self.corrections.publish(
+                "transcript-correction-set:weak-numeric",
+                corrections=[weak],
+                **source_args,
+            )
+        official = self.add_evidence("authority:official-transcript")
+        strong = self.correction(
+            "1.2",
+            "1.3",
+            correction_kind="numeric",
+            evidence=[self.evidence_binding(official, "official_transcript_span")],
+        )
+        drifted = dict(strong)
+        drifted["evidence_bindings"] = [
+            {**strong["evidence_bindings"][0], "authority_hash": "0" * 64}
+        ]
+        with self.assertRaises(TranscriptCorrectionConflict):
+            self.corrections.publish(
+                "transcript-correction-set:drifted-evidence",
+                corrections=[drifted],
+                **source_args,
+            )
+        admitted = self.corrections.publish(
+            "transcript-correction-set:strong-numeric",
+            corrections=[strong],
+            **source_args,
+        )
+        self.assertEqual(admitted["accepted_count"], 1)
+        unresolved = self.corrections.publish(
+            "transcript-correction-set:unresolved-numeric",
+            corrections=[self.correction(
+                "1.2",
+                "1.3",
+                correction_kind="numeric",
+                disposition="unresolved",
+            )],
+            **source_args,
+        )
+        resolution = self.corrections.resolve(
+            unresolved["id"], unresolved["content_hash"]
+        )
+        self.assertEqual(resolution["resolved_text"], ORIGINAL)
+        self.assertEqual(len(resolution["unresolved_correction_spans"]), 1)
+        start = ORIGINAL.index("1.2")
+        binding = self.corrections.bind_claim_citation(
+            unresolved["id"],
+            unresolved["content_hash"],
+            source_start=start,
+            source_end=start + len("1.2"),
+        )
+        self.assertFalse(binding["claim_eligible"])
+        self.assertEqual(binding["blocking_reason"], "unresolved_correction_overlap")
+        with self.assertRaises(TranscriptCorrectionValidationError):
+            self.corrections.publish(
+                "transcript-correction-set:model-admission",
+                corrections=[strong],
+                **{**source_args, "actor_ref": "model:transcript-worker"},
+            )
 
     def test_numbers_names_spans_and_source_authority_fail_closed(self) -> None:
         changed_number = candidate(POLISHED.replace("1.2 billion", "1.3 billion"))
@@ -203,7 +405,7 @@ class TranscriptPolishLoopIntegrationTests(_TranscriptFixture, unittest.TestCase
             "mandate:transcript-polish",
             objective="Create a conservative model-context derivative of one exact transcript",
             scope_refs=["example"],
-            constraints={"citation_authority": "original_only"},
+            constraints={"citation_authority": "source_lineage_only"},
             success_criteria={"numeric_and_name_conservation": True},
             effective_from="2026-08-23T00:00:00+00:00",
             effective_until="2026-09-23T00:00:00+00:00",
@@ -228,6 +430,8 @@ class TranscriptPolishLoopIntegrationTests(_TranscriptFixture, unittest.TestCase
             "source_manifest_hash": self.manifest["content_hash"],
             "source_content_hash": self.manifest["assembled_object"]["content_hash"],
             "additional_protected_terms": ["Accenture", "Julie Sweet"],
+            "correction_set_version_ref": None,
+            "correction_set_version_hash": None,
             "prior_polished_artifact_version_ref": None,
         }
         template = planner.publish_probe_template(

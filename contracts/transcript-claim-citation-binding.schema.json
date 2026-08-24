@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TranscriptClaimCitationBinding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "created_at",
+    "source_manifest_ref",
+    "source_manifest_hash",
+    "source_content_hash",
+    "source_start",
+    "source_end",
+    "source_sha256",
+    "correction_set_version_ref",
+    "correction_set_version_hash",
+    "accepted_correction_indexes",
+    "unresolved_correction_indexes",
+    "citation_mode",
+    "claim_eligible",
+    "blocking_reason",
+    "actor_ref",
+    "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {
+      "type": "string",
+      "pattern": "^transcript-claim-citation-binding:[0-9a-f]{32}$"
+    },
+    "created_at": {"type": "string", "format": "date-time"},
+    "source_manifest_ref": {"type": "string", "minLength": 1},
+    "source_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_start": {"type": "integer", "minimum": 0},
+    "source_end": {"type": "integer", "minimum": 1},
+    "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "correction_set_version_ref": {
+      "type": "string",
+      "pattern": "^transcript-correction-set-version:"
+    },
+    "correction_set_version_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "accepted_correction_indexes": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 0}
+    },
+    "unresolved_correction_indexes": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 0}
+    },
+    "citation_mode": {
+      "enum": ["raw_span", "raw_span_plus_admitted_correction"]
+    },
+    "claim_eligible": {"type": "boolean"},
+    "blocking_reason": {
+      "enum": [null, "unresolved_correction_overlap"]
+    },
+    "actor_ref": {"const": "core:transcript-correction-citation-gate"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

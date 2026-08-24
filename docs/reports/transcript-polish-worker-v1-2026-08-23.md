@@ -3,6 +3,10 @@
 日期：2026-08-23
 状态：development candidate；未接 live 模型或真实 AlphaEngine 文档
 
+> 后续更正：本报告中的 `citation_authority=original_only` 只记录 v1 当时的实现，不能作为当前设计依据。
+> 原始 ASR 是不可修改的捕获记录，不等于语义正确的逐字稿。当前规则与实现见
+> [Transcript Correction Authority v0.2](transcript-correction-authority-v0.2-2026-08-23.md)。
+
 ## 完成范围
 
 本切片实现一条最小、可重放的 transcript 派生链：

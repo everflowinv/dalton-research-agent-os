@@ -3,7 +3,8 @@
 The model is only a candidate producer. Core re-reads the complete acquisition
 manifest and original UTF-8 bytes, verifies a contiguous source-span mapping,
 and enforces numeric and protected-name conservation before writing a derived
-polished artifact. The original remains the only citation authority.
+polished artifact. Citations must follow the raw-source plus admitted-correction
+lineage; the polished text is never citation authority.
 """
 
 from __future__ import annotations
@@ -24,14 +25,17 @@ from .alphaengine_document_acquisition import (
 from .contracts import WorkOrder
 from .raw_spool import RawSpool
 from .store import canonical_json, content_hash
+from .transcript_correction import TranscriptCorrectionAuthority
 
 
-SCHEMA_VERSION = "0.1"
+CANDIDATE_SCHEMA_VERSION = "0.1"
+ARTIFACT_SCHEMA_VERSION = "0.2"
+SCHEMA_VERSION = CANDIDATE_SCHEMA_VERSION
 TRANSCRIPT_POLISH_CAPABILITY = "capability:dalton:local:transcript-polish"
 TRANSCRIPT_POLISH_OPERATION = "verify_and_materialize_transcript_polish"
 TRANSCRIPT_POLISH_RUNTIME = "runtime-profile:dalton-core-transcript-polish:0.1"
 TRANSCRIPT_POLISH_PERMISSION = "read_exact_alphaengine_document_artifact"
-TRANSCRIPT_POLISH_OUTPUT_CONTRACT = "schema:transcript-polish-probe-output:0.1"
+TRANSCRIPT_POLISH_OUTPUT_CONTRACT = "schema:transcript-polish-probe-output:0.2"
 TRANSCRIPT_POLISH_VERIFIER = "verifier:transcript-polish-conservation:0.1"
 TRANSCRIPT_POLISH_RULE_REF = "rules:transcript-polish-conservation:0.1"
 
@@ -194,7 +198,7 @@ def parse_transcript_polish_candidate_text(value: str) -> dict[str, Any]:
     except (json.JSONDecodeError, TypeError) as exc:
         raise TranscriptPolishValidationError("candidate must be strict JSON") from exc
     wire = _closed(raw, {"schema_version", "segments"}, "TranscriptPolishCandidate")
-    if wire["schema_version"] != SCHEMA_VERSION:
+    if wire["schema_version"] != CANDIDATE_SCHEMA_VERSION:
         raise TranscriptPolishValidationError("unsupported candidate schema_version")
     if not isinstance(wire["segments"], list) or not 1 <= len(wire["segments"]) <= MAX_SEGMENTS:
         raise TranscriptPolishValidationError("candidate segments cardinality is invalid")
@@ -214,7 +218,7 @@ def parse_transcript_polish_candidate_text(value: str) -> dict[str, Any]:
                 f"segments[{index}].polished_text must be non-empty"
             )
         segments.append(segment)
-    return {"schema_version": SCHEMA_VERSION, "segments": segments}
+    return {"schema_version": CANDIDATE_SCHEMA_VERSION, "segments": segments}
 
 
 class TranscriptPolishAuthority:
@@ -226,6 +230,7 @@ class TranscriptPolishAuthority:
         *,
         spool: RawSpool,
         manifest_resolver: Callable[[str], Mapping[str, Any]],
+        correction_authority: TranscriptCorrectionAuthority | None = None,
     ) -> None:
         if not hasattr(store, "connection") or not hasattr(store, "_transaction"):
             raise TypeError("TranscriptPolishAuthority requires a DaltonStore")
@@ -233,10 +238,17 @@ class TranscriptPolishAuthority:
             raise TypeError("TranscriptPolishAuthority requires a RawSpool")
         if not callable(manifest_resolver):
             raise TypeError("manifest_resolver must be callable")
+        if correction_authority is not None and not isinstance(
+            correction_authority, TranscriptCorrectionAuthority
+        ):
+            raise TypeError(
+                "correction_authority must be TranscriptCorrectionAuthority or None"
+            )
         self.store = store
         self.connection: sqlite3.Connection = store.connection
         self.spool = spool
         self.manifest_resolver = manifest_resolver
+        self.correction_authority = correction_authority
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
 
     def artifact(self, version_ref: str) -> dict[str, Any]:
@@ -281,6 +293,8 @@ class TranscriptPolishAuthority:
         source_content_hash: str,
         candidate_text: str,
         additional_protected_terms: Sequence[str],
+        correction_set_version_ref: str | None = None,
+        correction_set_version_hash: str | None = None,
         prior_version_ref: str | None = None,
     ) -> dict[str, Any]:
         source_manifest_ref = _text(source_manifest_ref, "source_manifest_ref")
@@ -320,8 +334,52 @@ class TranscriptPolishAuthority:
             raise TranscriptPolishValidationError("source transcript size is outside v1 bounds")
         if manifest["content_chars"] != len(original):
             raise TranscriptPolishConflict("manifest source character count drifted")
+        if (correction_set_version_ref is None) != (correction_set_version_hash is None):
+            raise TranscriptPolishValidationError(
+                "correction set ref and hash must be supplied together"
+            )
+        if correction_set_version_ref is None:
+            resolved_source = original
+            resolved_source_hash = source_content_hash
+            correction_set_ref = None
+            correction_set_hash = None
+            correction_mappings: list[dict[str, Any]] = []
+            unresolved_correction_spans: list[dict[str, Any]] = []
+            citation_mode = "raw_span"
+        else:
+            if self.correction_authority is None:
+                raise TranscriptPolishConflict(
+                    "correction set supplied without correction authority"
+                )
+            correction_set_ref = _text(
+                correction_set_version_ref, "correction_set_version_ref"
+            )
+            correction_set_hash = _hash(
+                correction_set_version_hash, "correction_set_version_hash"
+            )
+            resolution = self.correction_authority.resolve(
+                correction_set_ref, correction_set_hash
+            )
+            correction_set = resolution["correction_set"]
+            if (
+                correction_set["document_ref"] != manifest["document_ref"]
+                or correction_set["source_manifest_ref"] != source_manifest_ref
+                or correction_set["source_manifest_hash"] != source_manifest_hash
+                or correction_set["source_content_hash"] != source_content_hash
+                or resolution["original_text"] != original
+            ):
+                raise TranscriptPolishConflict(
+                    "correction set does not bind the exact transcript source"
+                )
+            resolved_source = resolution["resolved_text"]
+            resolved_source_hash = resolution["resolved_content_hash"]
+            correction_mappings = resolution["correction_mappings"]
+            unresolved_correction_spans = resolution[
+                "unresolved_correction_spans"
+            ]
+            citation_mode = resolution["citation_mode"]
         candidate = parse_transcript_polish_candidate_text(candidate_text)
-        protection = _protection_manifest(original, terms)
+        protection = _protection_manifest(resolved_source, terms)
         mappings: list[dict[str, Any]] = []
         expected_start = 0
         polished_parts: list[str] = []
@@ -329,11 +387,11 @@ class TranscriptPolishAuthority:
         for index, segment in enumerate(candidate["segments"]):
             start = segment["source_start"]
             end = segment["source_end"]
-            if start != expected_start or end <= start or end > len(original):
+            if start != expected_start or end <= start or end > len(resolved_source):
                 raise TranscriptPolishConflict("candidate source spans are not a contiguous partition")
             if end - start > MAX_SOURCE_SPAN_CHARS:
                 raise TranscriptPolishValidationError("candidate source span exceeds v1 bound")
-            source_slice = original[start:end]
+            source_slice = resolved_source[start:end]
             if hashlib.sha256(source_slice.encode("utf-8")).hexdigest() != segment["source_sha256"]:
                 raise TranscriptPolishConflict("candidate source span hash drifted")
             polished = segment["polished_text"]
@@ -360,19 +418,25 @@ class TranscriptPolishAuthority:
             })
             polished_parts.append(polished)
             expected_start = end
-        if expected_start != len(original):
-            raise TranscriptPolishConflict("candidate source spans do not cover the full original")
+        if expected_start != len(resolved_source):
+            raise TranscriptPolishConflict(
+                "candidate source spans do not cover the resolved source"
+            )
         polished_text = "".join(polished_parts)
-        ratio = Decimal(len(polished_text)) / Decimal(len(original))
+        ratio = Decimal(len(polished_text)) / Decimal(len(resolved_source))
         if ratio < RETENTION_FLOOR or ratio > EXPANSION_CEILING:
             raise TranscriptPolishConflict("candidate length ratio exceeds conservation bounds")
-        if _numeric_expressions(original) != _numeric_expressions(polished_text):
+        if _numeric_expressions(resolved_source) != _numeric_expressions(polished_text):
             raise TranscriptPolishConflict("global numeric expressions drifted")
         for item in protection["protected_terms"]:
             if _term_count(polished_text, item["term"]) != item["count"]:
                 raise TranscriptPolishConflict("global protected term counts drifted")
-        global_terms = set(_auto_terms(original)) | set(_auto_terms(polished_text)) | set(terms)
-        if _term_sequence(original, global_terms) != _term_sequence(
+        global_terms = (
+            set(_auto_terms(resolved_source))
+            | set(_auto_terms(polished_text))
+            | set(terms)
+        )
+        if _term_sequence(resolved_source, global_terms) != _term_sequence(
             polished_text, global_terms
         ):
             raise TranscriptPolishConflict("candidate introduced or removed protected-looking terms")
@@ -390,6 +454,9 @@ class TranscriptPolishAuthority:
             "source_manifest_ref": source_manifest_ref,
             "source_manifest_hash": source_manifest_hash,
             "source_content_hash": source_content_hash,
+            "correction_set_version_ref": correction_set_ref,
+            "correction_set_version_hash": correction_set_hash,
+            "resolved_source_hash": resolved_source_hash,
             "candidate_hash": candidate_hash,
             "protection_manifest_hash": protection["content_hash"],
             "polished_content_hash": polished_hash,
@@ -400,7 +467,9 @@ class TranscriptPolishAuthority:
             version = 1
         else:
             latest_wire = json.loads(latest["record_json"])
-            if prior_version_ref is None and all(latest_wire[key] == value for key, value in binding.items()):
+            if prior_version_ref is None and all(
+                latest_wire.get(key) == value for key, value in binding.items()
+            ):
                 return {"status": "duplicate", **latest_wire}
             if prior_version_ref != latest_wire["id"]:
                 raise TranscriptPolishConflict("polished artifact must continue the latest version")
@@ -422,7 +491,7 @@ class TranscriptPolishAuthority:
             sink.abort()
             raise
         wire = _record({
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": ARTIFACT_SCHEMA_VERSION,
             "id": version_id,
             "created_at": _now(),
             "artifact_ref": artifact_ref,
@@ -433,11 +502,14 @@ class TranscriptPolishAuthority:
             "source_ref": "source:alphaengine",
             "document_ref": manifest["document_ref"],
             **binding,
+            "correction_mappings": correction_mappings,
+            "unresolved_correction_spans": unresolved_correction_spans,
             "polish_rule_ref": TRANSCRIPT_POLISH_RULE_REF,
             "protection_manifest": protection,
             "span_mappings": mappings,
             "polished_object": polished_object,
-            "citation_authority": "original_only",
+            "citation_authority": "source_lineage_only",
+            "claim_citation_mode": citation_mode,
             "verification_status": "verified",
             "actor_ref": "core:transcript-polish-verifier",
         })
@@ -463,6 +535,7 @@ class TranscriptPolishWorker:
     _PARAMETERS = {
         "source_ref", "locator", "query_terms", "source_manifest_ref",
         "source_manifest_hash", "source_content_hash", "additional_protected_terms",
+        "correction_set_version_ref", "correction_set_version_hash",
         "prior_polished_artifact_version_ref",
     }
 
@@ -503,24 +576,31 @@ class TranscriptPolishWorker:
             source_content_hash=parameters["source_content_hash"],
             candidate_text=candidate_text,
             additional_protected_terms=parameters["additional_protected_terms"],
+            correction_set_version_ref=parameters["correction_set_version_ref"],
+            correction_set_version_hash=parameters["correction_set_version_hash"],
             prior_version_ref=prior,
         )
         if artifact["document_ref"] != locator:
             raise TranscriptPolishConflict("WorkOrder locator and source manifest disagree")
         return {"matches": [{
-            "source_location": f"{locator}#full-original",
+            "source_location": f"{locator}#full-source-lineage",
             "polished_artifact_version_ref": artifact["id"],
             "polished_artifact_version_hash": artifact["content_hash"],
             "source_manifest_ref": artifact["source_manifest_ref"],
             "source_manifest_hash": artifact["source_manifest_hash"],
             "source_content_hash": artifact["source_content_hash"],
             "citation_authority": artifact["citation_authority"],
+            "claim_citation_mode": artifact["claim_citation_mode"],
+            "correction_set_version_ref": artifact["correction_set_version_ref"],
+            "correction_set_version_hash": artifact["correction_set_version_hash"],
+            "unresolved_correction_spans": artifact["unresolved_correction_spans"],
             "verification_status": artifact["verification_status"],
         }]}
 
 
 __all__ = [
-    "SCHEMA_VERSION", "TRANSCRIPT_POLISH_CAPABILITY", "TRANSCRIPT_POLISH_OPERATION",
+    "SCHEMA_VERSION", "CANDIDATE_SCHEMA_VERSION", "ARTIFACT_SCHEMA_VERSION",
+    "TRANSCRIPT_POLISH_CAPABILITY", "TRANSCRIPT_POLISH_OPERATION",
     "TRANSCRIPT_POLISH_RUNTIME", "TRANSCRIPT_POLISH_PERMISSION",
     "TRANSCRIPT_POLISH_OUTPUT_CONTRACT", "TRANSCRIPT_POLISH_VERIFIER",
     "TRANSCRIPT_POLISH_RULE_REF", "TranscriptPolishAuthority",

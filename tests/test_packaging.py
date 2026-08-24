@@ -32,6 +32,7 @@ class PackagingTests(unittest.TestCase):
             "research_review_schema.sql",
             "research_question_backlog_schema.sql",
             "research_plan_schema.sql",
+            "transcript_correction_schema.sql",
             "thesis-impact-verifier-provider-output-v0.2.schema.json",
             "dashboard.html",
             "agenda_control.html",
