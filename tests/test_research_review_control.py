@@ -88,6 +88,24 @@ class FakeAuthority:
         self.commit_results.append((decision_ref, params))
         return {"state": "committed" if params.get("ledger_result") else "failed"}
 
+    def commit_event(self, decision_ref):
+        if self.decision is None or self.decision["id"] != decision_ref:
+            raise RuntimeError("decision unavailable")
+        if self.decision["verdict"] != "accept":
+            return None
+        ledger_result = (
+            None if not self.commit_results
+            else self.commit_results[-1][1].get("ledger_result")
+        )
+        state = "queued" if ledger_result is None else "committed"
+        event = {
+            "id": f"human-review-commit-event:{state}",
+            "content_hash": "9" * 64,
+            "state": state,
+            "ledger_result": ledger_result,
+        }
+        return event
+
     def close(self):
         return None
 
@@ -329,6 +347,107 @@ class ResearchReviewControlTests(unittest.TestCase):
             "bind_transcript_claim_citation",
         )
 
+    def test_trajectory_is_deterministic_read_only_and_exposes_gaps(self):
+        packet, manifest = self.write_transcript_packet()
+        plane = self.plane()
+        first = plane.trajectory_view(LOGIN)
+        second = plane.trajectory_view(LOGIN)
+        self.assertTrue(first["projection_only"])
+        self.assertEqual(len(first["items"]), 1)
+        trajectory = first["items"][0]
+        self.assertEqual(trajectory["content_hash"], second["items"][0]["content_hash"])
+        self.assertEqual(trajectory["source_packet_ref"], packet["id"])
+        self.assertFalse(trajectory["admission_effect"])
+        self.assertEqual(
+            [node["stage"] for node in trajectory["nodes"]],
+            [
+                "agenda", "research_question", "planning", "connector",
+                "raw_artifact", "transcript_correction", "citation_binding",
+                "candidate", "human_review", "formal_ledger", "brief",
+            ],
+        )
+        by_stage = {node["stage"]: node for node in trajectory["nodes"]}
+        self.assertEqual(by_stage["agenda"]["status"], "unrecorded")
+        self.assertEqual(by_stage["planning"]["status"], "unrecorded")
+        self.assertEqual(by_stage["connector"]["status"], "complete")
+        self.assertEqual(by_stage["transcript_correction"]["status"], "pending")
+        self.assertEqual(by_stage["citation_binding"]["status"], "blocked")
+        self.assertEqual(by_stage["formal_ledger"]["status"], "blocked")
+        raw_ref = by_stage["raw_artifact"]["exact_refs"][0]
+        self.assertEqual(raw_ref["ref"], manifest["document_ref"])
+        self.assertEqual(
+            raw_ref["hash"], manifest["assembled_object"]["content_hash"]
+        )
+        for event in trajectory["nodes"]:
+            self.assertTrue(event["exact_refs"])
+            for exact in event["exact_refs"]:
+                self.assertEqual(len(exact["hash"]), 64)
+
+        # Mutating a returned projection changes neither the next rebuild nor
+        # the exact packet that the write path independently revalidates.
+        trajectory["nodes"][0]["status"] = "complete"
+        rebuilt = plane.trajectory_view(LOGIN)["items"][0]
+        self.assertEqual(rebuilt["nodes"][0]["status"], "unrecorded")
+        with self.assertRaises(ResearchReviewControlError):
+            plane.record_transcript(LOGIN, {
+                "request_id": "request-projection-tamper",
+                "packet_ref": packet["id"],
+                "packet_hash": rebuilt["content_hash"],
+                "action": "publish_and_bind",
+            })
+
+    def test_trajectory_advances_only_after_exact_correction_and_candidate_state(self):
+        packet, manifest = self.write_transcript_packet()
+        writer = FakeWriter()
+        correction = packet["proposed_correction_set"]
+        citation = packet["candidate_claim"]["citation"]
+        published = {
+            "id": "transcript-correction-set-version:1",
+            "content_hash": "e" * 64,
+            "correction_set_ref": correction["correction_set_ref"],
+            "source_manifest_ref": manifest["id"],
+            "source_manifest_hash": manifest["content_hash"],
+            "source_content_hash": manifest["assembled_object"]["content_hash"],
+            "review_scope": correction["review_scope"],
+            "corrections": [
+                {key: item[key] for key in item if key != "source_text"}
+                for item in correction["corrections"]
+            ],
+        }
+        binding = {
+            "id": "transcript-claim-citation-binding:1",
+            "content_hash": "f" * 64,
+            "correction_set_version_ref": published["id"],
+            "correction_set_version_hash": published["content_hash"],
+            "source_manifest_ref": manifest["id"],
+            "source_manifest_hash": manifest["content_hash"],
+            "source_content_hash": manifest["assembled_object"]["content_hash"],
+            "source_start": citation["source_start"],
+            "source_end": citation["source_end"],
+            "claim_eligible": True,
+        }
+        writer.transcript_state = {
+            "status": "claim_eligible",
+            "correction_set": published,
+            "citation_binding": binding,
+            "claim_eligible": True,
+        }
+        authority = FakeAuthority()
+        authority.claim["candidate_claim_ref"] = packet["candidate_claim"][
+            "candidate_claim_ref"
+        ]
+        authority.claim["prior_version_ref"] = None
+        trajectory = self.plane(
+            writer=writer, authority=authority
+        ).trajectory_view(LOGIN)["items"][0]
+        by_stage = {node["stage"]: node for node in trajectory["nodes"]}
+        self.assertEqual(trajectory["state"], "awaiting_candidate_review")
+        self.assertEqual(by_stage["transcript_correction"]["status"], "complete")
+        self.assertEqual(by_stage["citation_binding"]["status"], "complete")
+        self.assertEqual(by_stage["candidate"]["status"], "complete")
+        self.assertEqual(by_stage["human_review"]["status"], "pending")
+        self.assertEqual(by_stage["formal_ledger"]["status"], "blocked")
+
     def test_transcript_governance_failure_is_sanitized(self):
         packet, _ = self.write_transcript_packet()
 
@@ -353,6 +472,8 @@ class ResearchReviewControlTests(unittest.TestCase):
         writer.transcript_state = {
             "status": "correction_published",
             "correction_set": {
+                "id": "transcript-correction-set-version:wrong",
+                "content_hash": "e" * 64,
                 "correction_set_ref": "transcript-correction-set:acn:q3fy26:1",
                 "source_manifest_ref": "wrong-manifest",
                 "source_manifest_hash": "0" * 64,
@@ -368,6 +489,16 @@ class ResearchReviewControlTests(unittest.TestCase):
             "published correction state disagrees",
         ):
             self.plane(writer=writer).transcript_view(LOGIN)
+
+    def test_contradictory_transcript_state_cannot_advance_trajectory(self):
+        self.write_transcript_packet()
+        writer = FakeWriter()
+        writer.transcript_state["status"] = "claim_eligible"
+        with self.assertRaisesRegex(
+            ResearchReviewControlError,
+            "contradictory state",
+        ):
+            self.plane(writer=writer).trajectory_view(LOGIN)
 
     def test_packet_hash_drift_fails_closed_before_governance(self):
         packet, _ = self.write_transcript_packet()

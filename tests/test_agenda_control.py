@@ -73,6 +73,14 @@ class ReviewPlane:
     def transcript_view(self, login):
         return {"as_of": NOW, "reviewer_ref": login, "items": []}
 
+    def trajectory_view(self, login):
+        return {
+            "as_of": NOW,
+            "viewer_ref": login,
+            "projection_only": True,
+            "items": [],
+        }
+
 
 class AgendaControlTests(unittest.TestCase):
     def setUp(self):
@@ -262,10 +270,35 @@ class AgendaControlTests(unittest.TestCase):
             response = connection.getresponse()
             transcript_payload = json.loads(response.read())
             self.assertTrue(transcript_payload["enabled"])
+            connection.request(
+                "GET", "/v1/research-trajectory",
+                headers={**headers, "Cookie": cookie},
+            )
+            response = connection.getresponse()
+            trajectory_payload = json.loads(response.read())
+            self.assertTrue(trajectory_payload["enabled"])
+            self.assertTrue(trajectory_payload["projection_only"])
             self.assertEqual(
                 review_payload["csrf_token"],
                 transcript_payload["csrf_token"],
             )
+            self.assertEqual(
+                review_payload["csrf_token"],
+                trajectory_payload["csrf_token"],
+            )
+            body = b'{}'
+            connection.request(
+                "POST", "/v1/research-trajectory", body=body,
+                headers={
+                    **headers, "Cookie": cookie,
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                    "X-Dalton-CSRF": review_payload["csrf_token"],
+                },
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 404)
+            response.read()
             body = b'{"x":1}'
             connection.request(
                 "POST", "/v1/research-review/decision", body=body,

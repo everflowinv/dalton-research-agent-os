@@ -50,14 +50,19 @@
   Cockpit 不持有 Core DB 路径。独立 `dalton-review` CLI、HTML 和部署入口已移除。真实 ACN Q3 FY2026 packet 可按
   exact packet/manifest/raw-object hash 写入 owner-only review inbox，GET 只读 correction/citation 状态，人工确认后才发布
   correction set 并绑定 citation；packet/hash 漂移、source lineage 漂移和 unresolved overlap 均 fail closed。伪造
-  AlphaEngine `source_record_refs` 的敌对测试也已补齐。当前只完成首个合并切片；trajectory、自然语言 composer 与
-  ad-hoc sufficiency/freshness router 尚未开发，live `:8793` 仍是旧 Agenda，production pointer 关闭，正式
-  Evidence/Claim/Thesis 写入仍为 0。最终关联回归 60/60、Cockpit JavaScript 语法、compileall 和 diff check
-  通过；全仓 `unittest discover` 在无失败输出的情况下运行 40 分钟后仍停在既有
+  AlphaEngine `source_record_refs` 的敌对测试也已补齐。S2 又增加 `/v1/research-trajectory` 和 Cockpit「轨迹」页：
+  投影从已验证的 packet、manifest、correction/citation state 和 candidate staging state 即时重建，不建新 authority，
+  也没有 POST 接口；每个节点绑定 exact ref/hash，packet fragment 与正式 authority 分开标记。真实 ACN Q3 FY2026
+  packet 已渲染为 11 个节点、2 页、51,034 字；acquire-only canary 缺少的 Agenda、PlanRound、WorkOrder 和
+  WorkflowRun 明确显示为 `unrecorded`，系统没有补造上游轨迹。当前状态仍为 `awaiting_transcript_review`；自然语言
+  composer 与 ad-hoc sufficiency/freshness router 尚未开发，live `:8793` 仍是旧 Agenda，production pointer 关闭，
+  正式 Evidence/Claim/Thesis 写入仍为 0。最终关联回归 80/80、Cockpit JavaScript 语法、compileall、真实 ACN
+  projection 和 diff check 通过；全仓 `unittest discover` 在无失败输出的情况下运行 40 分钟后仍停在既有
   `test_routed_worker_retries_contract_then_verifies_independently` 的 connector inventory `canonical_json`
   热点，已人工中断，因此不能记为全仓绿色。当前本机 Python 3.13/3.14 均缺少 `build`/`setuptools`
   backend，本轮只验证了 packaging manifest test，未重跑 sdist/wheel。架构裁决见
   [Dalton Cockpit 与自然语言方向控制](reports/dalton-cockpit-natural-language-control-architecture-review-2026-08-24.md)
+  及 [ACN 研究轨迹只读投影 v0.1](reports/acn-research-trajectory-read-projection-v0.1-2026-08-24.md)
 - development Planner 又扩展校准了 Qwen DeepSeek V4 Flash/Pro、Grok 4.6、Gemini 3.7 Flash、OpenRouter Ox
   Alpha、ZAI GLM 5.3 和 GPT-5.6 Luna。V4 Flash、V4 Pro、Gemini 3.7 与 Ox Alpha 均连续两轮
   30/30、safety 20/20；V4 Flash 以两轮 USD 0.00960668 和约 2.0s 单 case 中位延迟取代 Qwen 3.8 Max，
@@ -1018,8 +1023,8 @@ Postgres/Temporal 规模化门槛和迁移。
 
 ### 仍未完成的横切蓝图
 
-- 完整 coverage requirement/mandate policy 与自然语言 steering；development Cockpit 首个切片已合并 Agenda 与研究
-  审阅，live HTML 仍只处理 Agenda feedback。trajectory、composer、全局 agenda pause、通用
+- 完整 coverage requirement/mandate policy 与自然语言 steering；development Cockpit 已合并 Agenda、研究审阅和
+  ACN 只读 trajectory，live HTML 仍只处理 Agenda feedback。composer、全局 agenda pause、通用
   cancel/approve/emergency-stop command/event bridge 均未完成；
 - native event inbox，以及 expiry、catalyst、falsifier、source failure 触发；Agenda portfolio pools 和
   跨公司容量校准未完成；
@@ -1333,6 +1338,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - 财报电话会原文 Evidence Gate v1：`docs/reports/earnings-call-transcript-evidence-gate-v1-2026-08-23.md`
 - 人类研究意图与 Bounded Planner Loop 架构讨论：`docs/reports/human-research-intent-and-bounded-planner-loop-v1-2026-08-23.md`
 - Dalton Cockpit 与自然语言方向控制：`docs/reports/dalton-cockpit-natural-language-control-architecture-review-2026-08-24.md`
+- ACN 研究轨迹只读投影 v0.1：`docs/reports/acn-research-trajectory-read-projection-v0.1-2026-08-24.md`
 - Bounded Planner Loop v1 实施：`docs/reports/bounded-planner-loop-v1-implementation-2026-08-23.md`
 - Doctrine 与 Planner ContextPack v1：`docs/reports/doctrine-and-planner-context-pack-v1-2026-08-23.md`
 - LLM Research Planner 模型扩展校准：`docs/reports/llm-research-planner-model-expansion-v0.2-2026-08-23.md`

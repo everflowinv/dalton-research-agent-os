@@ -429,7 +429,7 @@ class AgendaControlApplication:
 
 def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "DaltonCockpit/0.1"
+        server_version = "DaltonCockpit/0.2"
 
         def _identity(self) -> str | None:
             return application.allowed_login(self.headers.get("Tailscale-User-Login"))
@@ -508,6 +508,20 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                         {"as_of": datetime.now(timezone.utc).isoformat(), "items": [], "enabled": False}
                         if application.review_plane is None
                         else {**application.review_plane.transcript_view(login), "enabled": True}
+                    )
+                    value["csrf_token"] = session.csrf
+                    body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+                    content_type = "application/json; charset=utf-8"
+                elif path == "/v1/research-trajectory":
+                    value = (
+                        {
+                            "as_of": datetime.now(timezone.utc).isoformat(),
+                            "items": [],
+                            "projection_only": True,
+                            "enabled": False,
+                        }
+                        if application.review_plane is None
+                        else {**application.review_plane.trajectory_view(login), "enabled": True}
                     )
                     value["csrf_token"] = session.csrf
                     body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()

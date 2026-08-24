@@ -21,6 +21,7 @@ from .alphaengine_document_acquisition import (
 )
 from .governance_cli import ephemeral_call
 from .research_review import HumanReviewAuthority
+from .research_trajectory import build_research_trajectory_projection
 from .store import content_hash
 from .writer_client import WriterClient
 from .writer_server import load_principals
@@ -495,57 +496,101 @@ class ResearchReviewControlPlane:
             )
         return matches[0]
 
+    def _transcript_state(
+        self, packet: Mapping[str, Any], manifest: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        correction = packet["proposed_correction_set"]
+        citation = packet["candidate_claim"]["citation"]
+        state = self.writer.transcript_correction_review_state(
+            source_manifest=manifest,
+            correction_set_ref=correction["correction_set_ref"],
+            source_start=citation["source_start"],
+            source_end=citation["source_end"],
+        )
+        if not isinstance(state, Mapping) or set(state) != {
+            "status", "correction_set", "citation_binding", "claim_eligible",
+        }:
+            raise ResearchReviewControlError(
+                "transcript review writer returned an invalid state"
+            )
+        published = state.get("correction_set")
+        if isinstance(published, Mapping):
+            _string(published.get("id"), "published correction set id")
+            _hash(
+                published.get("content_hash"),
+                "published correction set content_hash",
+            )
+        expected_corrections = [
+            {key: item[key] for key in item if key != "source_text"}
+            for item in correction["corrections"]
+        ]
+        if published is not None and (
+            not isinstance(published, Mapping)
+            or published.get("correction_set_ref")
+            != correction["correction_set_ref"]
+            or published.get("source_manifest_ref") != manifest["id"]
+            or published.get("source_manifest_hash")
+            != manifest["content_hash"]
+            or published.get("source_content_hash")
+            != manifest["assembled_object"]["content_hash"]
+            or published.get("review_scope") != correction["review_scope"]
+            or published.get("corrections") != expected_corrections
+        ):
+            raise ResearchReviewControlError(
+                "published correction state disagrees with the review packet"
+            )
+        binding = state.get("citation_binding")
+        if isinstance(binding, Mapping):
+            _string(binding.get("id"), "citation binding id")
+            _hash(binding.get("content_hash"), "citation binding content_hash")
+        if binding is not None and (
+            published is None
+            or not isinstance(binding, Mapping)
+            or binding.get("correction_set_version_ref")
+            != published.get("id")
+            or binding.get("correction_set_version_hash")
+            != published.get("content_hash")
+            or binding.get("source_manifest_ref") != manifest["id"]
+            or binding.get("source_manifest_hash")
+            != manifest["content_hash"]
+            or binding.get("source_content_hash")
+            != manifest["assembled_object"]["content_hash"]
+            or binding.get("source_start") != citation["source_start"]
+            or binding.get("source_end") != citation["source_end"]
+            or binding.get("claim_eligible") is not state.get("claim_eligible")
+        ):
+            raise ResearchReviewControlError(
+                "citation state disagrees with the review packet"
+            )
+        status = state.get("status")
+        eligible = state.get("claim_eligible")
+        valid_state = (
+            status == "pending_human_review"
+            and published is None
+            and binding is None
+            and eligible is False
+        ) or (
+            status == "correction_published"
+            and published is not None
+            and binding is None
+            and eligible is False
+        ) or (
+            status in {"claim_eligible", "citation_blocked"}
+            and published is not None
+            and binding is not None
+            and eligible is (status == "claim_eligible")
+        )
+        if not valid_state:
+            raise ResearchReviewControlError(
+                "transcript review writer returned a contradictory state"
+            )
+        return dict(state)
+
     def transcript_view(self, login: str) -> dict[str, Any]:
         items = []
         for packet, manifest in self._packets():
             correction = packet["proposed_correction_set"]
-            citation = packet["candidate_claim"]["citation"]
-            state = self.writer.transcript_correction_review_state(
-                source_manifest=manifest,
-                correction_set_ref=correction["correction_set_ref"],
-                source_start=citation["source_start"],
-                source_end=citation["source_end"],
-            )
-            published = state.get("correction_set")
-            expected_corrections = [
-                {key: item[key] for key in item if key != "source_text"}
-                for item in correction["corrections"]
-            ]
-            if published is not None and (
-                not isinstance(published, Mapping)
-                or published.get("correction_set_ref")
-                != correction["correction_set_ref"]
-                or published.get("source_manifest_ref") != manifest["id"]
-                or published.get("source_manifest_hash")
-                != manifest["content_hash"]
-                or published.get("source_content_hash")
-                != manifest["assembled_object"]["content_hash"]
-                or published.get("review_scope") != correction["review_scope"]
-                or published.get("corrections") != expected_corrections
-            ):
-                raise ResearchReviewControlError(
-                    "published correction state disagrees with the review packet"
-                )
-            binding = state.get("citation_binding")
-            if binding is not None and (
-                published is None
-                or not isinstance(binding, Mapping)
-                or binding.get("correction_set_version_ref")
-                != published.get("id")
-                or binding.get("correction_set_version_hash")
-                != published.get("content_hash")
-                or binding.get("source_manifest_ref") != manifest["id"]
-                or binding.get("source_manifest_hash")
-                != manifest["content_hash"]
-                or binding.get("source_content_hash")
-                != manifest["assembled_object"]["content_hash"]
-                or binding.get("source_start") != citation["source_start"]
-                or binding.get("source_end") != citation["source_end"]
-                or binding.get("claim_eligible") is not state.get("claim_eligible")
-            ):
-                raise ResearchReviewControlError(
-                    "citation state disagrees with the review packet"
-                )
+            state = self._transcript_state(packet, manifest)
             items.append({
                 "packet_ref": packet["id"],
                 "packet_hash": packet["content_hash"],
@@ -559,6 +604,63 @@ class ResearchReviewControlPlane:
         return {
             "as_of": _now(),
             "reviewer_ref": _subject_for_login(login),
+            "items": items,
+        }
+
+    def _trajectory_candidate(
+        self, packet: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        candidate_ref = packet["candidate_claim"]["candidate_claim_ref"]
+        matches = []
+        for item in self.authority.list_candidates(limit=500):
+            claim = item["claim"]
+            if (
+                claim.get("candidate_claim_ref") == candidate_ref
+                or claim.get("id") == candidate_ref
+            ):
+                matches.append(item)
+        if not matches:
+            return None
+        parent_refs = {
+            item["claim"].get("prior_version_ref")
+            for item in matches
+            if item["claim"].get("prior_version_ref") is not None
+        }
+        leaves = [
+            item for item in matches if item["claim"]["id"] not in parent_refs
+        ]
+        if len(leaves) != 1:
+            raise ResearchReviewControlError(
+                "trajectory candidate lineage is ambiguous"
+            )
+        current = dict(leaves[0])
+        decision = current.get("decision")
+        current["commit_event"] = (
+            None
+            if decision is None
+            else self.authority.commit_event(decision["id"])
+        )
+        event = current["commit_event"]
+        if event is not None and event.get("state") != current.get("commit_state"):
+            raise ResearchReviewControlError(
+                "trajectory candidate commit state drifted"
+            )
+        return current
+
+    def trajectory_view(self, login: str) -> dict[str, Any]:
+        items = []
+        for packet, manifest in self._packets():
+            state = self._transcript_state(packet, manifest)
+            items.append(build_research_trajectory_projection(
+                packet=packet,
+                manifest=manifest,
+                transcript_state=state,
+                candidate=self._trajectory_candidate(packet),
+            ))
+        return {
+            "as_of": _now(),
+            "viewer_ref": _subject_for_login(login),
+            "projection_only": True,
             "items": items,
         }
 
