@@ -12,6 +12,9 @@
     "document_quota_units": 1
   },
   "correction_review": {
+    "selection_authority": "canary_automation",
+    "human_reviewed": false,
+    "authority_valid_for_claim_admission": false,
     "review_scope": "targeted_flags",
     "accepted_count": 0,
     "unresolved_count": 1,
@@ -42,9 +45,12 @@
     "unresolved_term_preserved": true
   },
   "claim_binding_dry_run": {
+    "status": "invalidated_missing_human_review",
     "binding_ref": "transcript-claim-citation-binding:bdf1055dfc9f80e75df7c673b113e569",
     "binding_hash": "5fa62d3c7a1fb26ff0089492b33fd4353cb7611f37640049e28ca80a30597483",
-    "claim_eligible": true,
+    "technical_core_result_claim_eligible": true,
+    "authority_eligible": false,
+    "blocking_reason": "human_review_not_demonstrated",
     "citation_mode": "raw_span",
     "source_span_sha256": "6e5714c082c071c954b2d52af57be23ced8ef92a2b0d4a09cf20cbb689c1141e"
   },
@@ -66,7 +72,9 @@
     }
   ],
   "total_live_model_cost_usd": "0.337638",
-  "hard_gate_pass": true,
+  "shadow_artifact_gate_pass": true,
+  "claim_admission_gate_pass": false,
+  "hard_gate_pass": false,
   "production_activated": false,
-  "production_decision": "no_go_pending_second_independent_shadow_canary"
+  "production_decision": "no_go_pending_human_review_and_second_independent_shadow_canary"
 }

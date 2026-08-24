@@ -46,7 +46,6 @@ from dalton_core.live_mcp_connector import (
 from dalton_core.raw_spool import RawSpool
 from dalton_core.scheduler import Scheduler
 from dalton_core.store import DaltonStore, canonical_json, content_hash
-from dalton_core.transcript_correction import TranscriptCorrectionAuthority
 from dalton_core.transcript_polish import (
     TRANSCRIPT_POLISH_CAPABILITY,
     TRANSCRIPT_POLISH_OPERATION,
@@ -64,6 +63,9 @@ from dalton_core.transcript_polish_routed import (
 
 
 SCHEMA_VERSION = "0.1"
+REVIEW_MODE_NONE = "none"
+REVIEW_MODES = (REVIEW_MODE_NONE,)
+MAX_BROKER_TIMEOUT_SECONDS = 600
 DEFAULT_MCP_ENDPOINT = "http://127.0.0.1:8950/mcp"
 DEFAULT_BROKER_SOCKET = Path(
     "/Users/everflow/.openclaw/dalton-model-broker.sock"
@@ -103,17 +105,6 @@ def _secure_write(path: Path, value: Mapping[str, Any]) -> None:
         os.fsync(handle.fileno())
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
-
-
-def _single_span(text: str, term: str, name: str) -> tuple[int, int]:
-    if not isinstance(term, str) or not term:
-        raise AlphaEngineTranscriptCanaryError(f"{name} must be non-empty")
-    start = text.find(term)
-    if start < 0:
-        raise AlphaEngineTranscriptCanaryError(f"{name} was not found")
-    if text.find(term, start + 1) >= 0:
-        raise AlphaEngineTranscriptCanaryError(f"{name} is not unique")
-    return start, start + len(term)
 
 
 class _CanaryAuthorityReader:
@@ -363,13 +354,17 @@ def _speaker_terms(text: str) -> list[str]:
 def _probe_work(
     *,
     manifest: Mapping[str, Any],
-    correction_set: Mapping[str, Any],
+    correction_set: Mapping[str, Any] | None,
     protected_terms: Sequence[str],
     created_at: str,
 ) -> WorkOrder:
+    correction_ref = None if correction_set is None else correction_set["id"]
+    correction_hash = (
+        None if correction_set is None else correction_set["content_hash"]
+    )
     identity = content_hash({
         "manifest_hash": manifest["content_hash"],
-        "correction_set_hash": correction_set["content_hash"],
+        "correction_set_hash": correction_hash,
         "protected_terms": list(protected_terms),
     })
     parameters = {
@@ -380,8 +375,8 @@ def _probe_work(
         "source_manifest_hash": manifest["content_hash"],
         "source_content_hash": manifest["assembled_object"]["content_hash"],
         "additional_protected_terms": list(protected_terms),
-        "correction_set_version_ref": correction_set["id"],
-        "correction_set_version_hash": correction_set["content_hash"],
+        "correction_set_version_ref": correction_ref,
+        "correction_set_version_hash": correction_hash,
         "prior_polished_artifact_version_ref": None,
     }
     return WorkOrder(
@@ -396,7 +391,9 @@ def _probe_work(
         idempotency_key=f"transcript-polish-live-canary:{identity}",
         declared_side_effects=(),
         status="ready",
-        input_refs=(manifest["id"], correction_set["id"]),
+        input_refs=(manifest["id"],) if correction_ref is None else (
+            manifest["id"], correction_ref,
+        ),
         metadata={
             "operation": TRANSCRIPT_POLISH_OPERATION,
             "permission_scope": TRANSCRIPT_POLISH_PERMISSION,
@@ -426,13 +423,18 @@ def _cost_usd(runs: Sequence[Mapping[str, Any]]) -> str:
     return format(total, "f")
 
 
+def _validate_review_mode(review_mode: str) -> None:
+    if review_mode not in REVIEW_MODES:
+        raise AlphaEngineTranscriptCanaryError(
+            "live canary supports unreviewed shadow mode only"
+        )
+
+
 def run_canary(
     *,
     output_dir: Path,
     document_id: str,
-    unresolved_term: str,
-    claim_quote: str,
-    actor_ref: str,
+    review_mode: str,
     protected_terms: Sequence[str],
     mcp_endpoint: str,
     broker_socket: Path,
@@ -444,6 +446,11 @@ def run_canary(
     max_cost_usd: float,
     timeout_seconds: int,
 ) -> dict[str, Any]:
+    _validate_review_mode(review_mode)
+    if timeout_seconds > MAX_BROKER_TIMEOUT_SECONDS:
+        raise AlphaEngineTranscriptCanaryError(
+            "timeout_seconds exceeds the broker protocol maximum of 600"
+        )
     output_dir = output_dir.expanduser().resolve()
     if output_dir.exists():
         raise AlphaEngineTranscriptCanaryError(
@@ -492,41 +499,7 @@ def run_canary(
             )
         source_hash = manifest["assembled_object"]["content_hash"]
         source_text = spool.read_object(source_hash).decode("utf-8")
-        unresolved_start, unresolved_end = _single_span(
-            source_text, unresolved_term, "unresolved_term"
-        )
-        claim_start, claim_end = _single_span(
-            source_text, claim_quote, "claim_quote"
-        )
-        correction_authority = TranscriptCorrectionAuthority(
-            store,
-            spool=spool,
-            manifest_resolver=lambda ref: manifest,
-            evidence_resolver=lambda ref: {},
-        )
-        correction_set = correction_authority.publish(
-            f"transcript-correction-set:live-canary-{document_id}",
-            source_manifest_ref=manifest["id"],
-            source_manifest_hash=manifest["content_hash"],
-            source_content_hash=source_hash,
-            review_scope="targeted_flags",
-            corrections=[{
-                "source_start": unresolved_start,
-                "source_end": unresolved_end,
-                "source_sha256": hashlib.sha256(
-                    unresolved_term.encode("utf-8")
-                ).hexdigest(),
-                "correction_kind": "terminology",
-                "disposition": "unresolved",
-                "replacement_text": None,
-                "rationale": (
-                    "Live canary review flagged a suspected ASR term; no exact "
-                    "audio or official transcript evidence was admitted."
-                ),
-                "evidence_bindings": [],
-            }],
-            actor_ref=actor_ref,
-        )
+        correction_set = None
         all_protected_terms = list(dict.fromkeys([
             *_speaker_terms(source_text), *protected_terms,
         ]))
@@ -534,7 +507,7 @@ def run_canary(
             store,
             spool=spool,
             manifest_resolver=lambda ref: manifest,
-            correction_authority=correction_authority,
+            correction_authority=None,
         )
         scheduler = Scheduler(connection=store.connection, clock=_now)
         probe = _probe_work(
@@ -638,20 +611,6 @@ def run_canary(
         artifact_ref = advanced["result"]["artifact_refs"][0]
         artifact = polish_authority.artifact(artifact_ref)
         polished_text = polish_authority.polished_text(artifact_ref)
-        if unresolved_term not in polished_text:
-            raise AlphaEngineTranscriptCanaryError(
-                "unresolved term did not survive the verified artifact"
-            )
-        citation = correction_authority.bind_claim_citation(
-            correction_set["id"],
-            correction_set["content_hash"],
-            source_start=claim_start,
-            source_end=claim_end,
-        )
-        if not citation["claim_eligible"]:
-            raise AlphaEngineTranscriptCanaryError(
-                "clean canary quote was not claim eligible"
-            )
         counts = {
             table: int(store.connection.execute(
                 f"SELECT COUNT(*) FROM {table}"
@@ -669,7 +628,8 @@ def run_canary(
             "id": "alphaengine-transcript-polish-canary:" + content_hash({
                 "manifest_hash": manifest["content_hash"],
                 "artifact_hash": artifact["content_hash"],
-                "citation_hash": citation["content_hash"],
+                "citation_hash": None,
+                "review_mode": review_mode,
             })[:32],
             "created_at": created_at,
             "source": {
@@ -682,15 +642,15 @@ def run_canary(
                 "document_quota_units": manifest["document_quota_units"],
             },
             "correction_review": {
-                "actor_ref": actor_ref,
-                "review_scope": correction_set["review_scope"],
-                "correction_set_ref": correction_set["id"],
-                "correction_set_hash": correction_set["content_hash"],
-                "accepted_count": correction_set["accepted_count"],
-                "unresolved_count": correction_set["unresolved_count"],
-                "unresolved_term_sha256": hashlib.sha256(
-                    unresolved_term.encode("utf-8")
-                ).hexdigest(),
+                "mode": review_mode,
+                "human_reviewed": False,
+                "actor_ref": None,
+                "review_scope": None,
+                "correction_set_ref": None,
+                "correction_set_hash": None,
+                "accepted_count": 0,
+                "unresolved_count": 0,
+                "unresolved_term_sha256": None,
             },
             "model": {
                 "policy_ref": TRANSCRIPT_POLISH_DEVELOPMENT_POLICY_REF,
@@ -714,18 +674,22 @@ def run_canary(
                 ),
                 "verification_status": artifact["verification_status"],
                 "citation_authority": artifact["citation_authority"],
-                "unresolved_term_preserved": True,
+                "unresolved_term_preserved": None,
             },
             "claim_binding_dry_run": {
-                "binding_ref": citation["id"],
-                "binding_hash": citation["content_hash"],
-                "claim_eligible": citation["claim_eligible"],
-                "citation_mode": citation["citation_mode"],
-                "source_span_sha256": citation["source_sha256"],
+                "status": "blocked",
+                "blocking_reason": "authenticated_human_review_path_required",
+                "binding_ref": None,
+                "binding_hash": None,
+                "claim_eligible": False,
+                "citation_mode": None,
+                "source_span_sha256": None,
             },
             "formal_authority_counts": counts,
             "production_activated": False,
-            "hard_gate_pass": True,
+            "shadow_artifact_gate_pass": True,
+            "claim_admission_gate_pass": False,
+            "hard_gate_pass": False,
         }
         _secure_write(output_dir / "summary.json", summary)
         return summary
@@ -752,9 +716,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--document-id", required=True)
-    parser.add_argument("--unresolved-term", required=True)
-    parser.add_argument("--claim-quote", required=True)
-    parser.add_argument("--actor-ref", required=True)
+    parser.add_argument(
+        "--review-mode", choices=REVIEW_MODES, default=REVIEW_MODE_NONE
+    )
     parser.add_argument("--protected-term", action="append", default=[])
     parser.add_argument("--mcp-endpoint", default=DEFAULT_MCP_ENDPOINT)
     parser.add_argument(
@@ -774,9 +738,7 @@ def main(argv: list[str] | None = None) -> int:
         summary = run_canary(
             output_dir=args.output_dir,
             document_id=args.document_id,
-            unresolved_term=args.unresolved_term,
-            claim_quote=args.claim_quote,
-            actor_ref=args.actor_ref,
+            review_mode=args.review_mode,
             protected_terms=args.protected_term,
             mcp_endpoint=args.mcp_endpoint,
             broker_socket=args.broker_socket,

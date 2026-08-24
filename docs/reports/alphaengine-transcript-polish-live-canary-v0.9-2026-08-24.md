@@ -1,13 +1,17 @@
 # AlphaEngine TranscriptPolish 真实 canary v0.9
 
 日期：2026-08-24  
-状态：真实 canary 已通过；继续 shadow，暂不启用 production policy
+状态：shadow artifact gate 已通过；Claim admission gate 未通过，production policy 不启用
 
 ## 结论
 
-AlphaEngine 登录恢复后，隔离 canary 完成了真实文档读取、人工 targeted correction review、GPT-5.6 Terra 生成、
-Core conservation/source-lineage gate 和 Claim citation binding dry run。最终产物通过硬门，未写正式 Evidence、Claim
-或 Thesis，也没有修改 production pointer。
+AlphaEngine 登录恢复后，隔离 canary 完成了真实文档读取、GPT-5.6 Terra 生成和 Core
+conservation/source-lineage gate。最终 artifact 通过 shadow gate，未写正式 Evidence、Claim 或 Thesis，也没有修改
+production pointer。
+
+事后审计发现，canary 自动挑选疑似术语后，把执行消息所属 owner 写成了 `human:` actor。这不能证明 owner 审阅过具体
+术语，因此不算人工 targeted correction review。已经生成的 Claim citation binding 只保留为技术执行记录，不具备 Claim
+admission authority；本报告和机器可读 summary 已据此把 hard gate 改为失败。
 
 本轮允许进入受控 shadow，但不启用 production。原因是目前只有一份真实逐字稿通过，而且前两次 canary 分别暴露了
 Scheduler lease 恢复缺口和句点粘连词的假阳性保护。修复后需要再用一份结构不同的真实逐字稿验证，才能排除规则只适配
@@ -17,12 +21,13 @@ Scheduler lease 恢复缺口和句点粘连词的假阳性保护。修复后需�
 
 - 来源：AlphaEngine `Flowers Foods Q2 2026 (Q&A)`，document id `130000108112113`；
 - 原文：17,703 字，单次 `get_document` 完整取得，manifest 与 assembled object 均有 SHA-256 绑定；
-- correction review：人工标记 1 个疑似 ASR 术语，但没有音频或官方逐字稿支持，因此保持 unresolved；
+- correction overlay：canary 自动挑选 1 个疑似 ASR 术语并保持 unresolved；没有证据证明人工审阅过该具体术语；
 - Terra：development policy v2、`profile:gpt-5-6-terra`、宿主 `thinking=xhigh`；
 - 实际模型调用：1 次；Scheduler attempt 2 次，其中第 2 次只读取 broker durable replay；
 - provider usage：输入 5,344 tokens，输出 8,594 tokens，实际成本 USD 0.113816；
 - polished artifact：17,885 字，source/polished 比例 1.010281；数字、限定词、专名顺序和 unresolved 术语均通过 Core；
-- Claim binding dry run：clean raw span 为 `claim_eligible=true`，引用模式为 `raw_span`；
+- Claim binding dry run：Core 当时返回技术结果 `claim_eligible=true`、引用模式 `raw_span`；因缺少真实人工审阅，该 binding
+  已在交付证据中标为无 admission authority；
 - 正式 authority 写入：Evidence 0、Claim 0、Thesis 0。
 
 仓库只保存 hash、authority ref、usage 和 gate 结果。原始逐字稿与模型输出仍留在 owner-only 临时目录，没有提交。
@@ -49,14 +54,21 @@ canary summary 原先按两次 Scheduler attempt 累加同一 cost entry，导�
 
 失败 run 没有混入最终结果，也没有被改写成通过。
 
+## 权限边界修正
+
+canary runner 现在只支持 `review-mode=none`：不发布 correction set，不接受 `human:` actor，也不生成 Claim citation
+binding。人工 correction 必须改走未来的认证 review path，不能由 canary CLI 代填 actor。未审阅 canary 仍可验证
+AlphaEngine → Terra → Core 的 artifact 链，但 `claim_admission_gate_pass` 和 `hard_gate_pass` 必须为 false。
+
 ## Production 决定
 
-当前决定是 `no-go pending second independent shadow canary`：
+当前决定是 `no-go pending human review and second independent shadow canary`：
 
 - development policy v2 继续固定 Terra；
 - production pointer 不启用；
 - 下一次 shadow canary 应选另一家公司、不同 speaker/标点结构的完整逐字稿；
-- 第二份样本必须继续经过人工 correction review，并保持正式 Evidence/Claim/Thesis 写入为 0；
+- 第二份样本先按未人工审阅模式验证 artifact 链；Claim binding 保持阻断；
+- 只有人工明确审阅具体 correction 后，才能另跑 Claim binding gate；
 - 通过后再单独审核 production worker 的 lease policy、预算和部署范围。
 
 机器可读证据：`docs/review-evidence/alphaengine-transcript-polish-live-canary-summary-2026-08-24.json`。

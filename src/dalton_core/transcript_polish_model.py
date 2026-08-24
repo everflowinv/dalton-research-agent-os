@@ -26,7 +26,7 @@ from .transcript_polish import (
 
 
 SCHEMA_VERSION = "0.1"
-TRANSCRIPT_POLISH_MODEL_REF = "model-task:transcript-polish-candidate:0.3"
+TRANSCRIPT_POLISH_MODEL_REF = "model-task:transcript-polish-candidate:0.4"
 TRANSCRIPT_POLISH_MODEL_HASH = content_hash({
     "model_task_ref": TRANSCRIPT_POLISH_MODEL_REF,
     "input": "exact_resolved_transcript_source_lineage",
@@ -225,6 +225,8 @@ def build_transcript_polish_model_prompt(
         "Use every source_segments entry exactly once and in order. Copy its exact "
         "source_start, source_end, and source_sha256; do not calculate or change them. "
         "Return only the corresponding polished_text for each entry.\n"
+        "Preserve each source_text entry's leading and trailing whitespace "
+        "byte-for-byte in its polished_text so adjacent segments remain separated. "
         "You may remove filler words and repair punctuation or readability. Preserve "
         "every numeric expression, negation, uncertainty qualifier, speaker meaning, "
         "and protected proper name in the same order. Every core_protected_terms "

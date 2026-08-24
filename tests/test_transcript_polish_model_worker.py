@@ -303,6 +303,10 @@ class RoutedTranscriptPolishWorkerTests(unittest.TestCase):
             prepared["work_order"]["question"],
         )
         self.assertIn(
+            "leading and trailing whitespace",
+            prepared["work_order"]["question"],
+        )
+        self.assertIn(
             candidate()["segments"][0]["source_sha256"],
             prepared["work_order"]["question"],
         )

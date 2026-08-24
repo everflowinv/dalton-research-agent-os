@@ -113,10 +113,51 @@ class AlphaEngineTranscriptPolishCanaryTests(unittest.TestCase):
                 CANARY._speaker_terms(text),
                 ["发言人Operator", "发言人Analyst"],
             )
+            work = CANARY._probe_work(
+                manifest=manifest,
+                correction_set=None,
+                protected_terms=("发言人Operator", "发言人Analyst"),
+                created_at=plan["created_at"],
+            )
+            self.assertEqual(work.input_refs, (manifest["id"],))
+            self.assertIsNone(
+                work.metadata["parameters"]["correction_set_version_ref"]
+            )
+            self.assertIsNone(
+                work.metadata["parameters"]["correction_set_version_hash"]
+            )
 
-    def test_single_span_rejects_ambiguous_review_authority(self) -> None:
-        with self.assertRaises(CANARY.AlphaEngineTranscriptCanaryError):
-            CANARY._single_span("same same", "same", "term")
+    def test_canary_exposes_unreviewed_shadow_mode_only(self) -> None:
+        CANARY._validate_review_mode("none")
+        with self.assertRaisesRegex(
+            CANARY.AlphaEngineTranscriptCanaryError,
+            "unreviewed shadow mode only",
+        ):
+            CANARY._validate_review_mode("human-unresolved")
+
+    def test_canary_rejects_timeout_above_broker_protocol_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            output_dir = Path(temporary) / "canary"
+            with self.assertRaisesRegex(
+                CANARY.AlphaEngineTranscriptCanaryError,
+                "broker protocol maximum of 600",
+            ):
+                CANARY.run_canary(
+                    output_dir=output_dir,
+                    document_id="fixture",
+                    review_mode="none",
+                    protected_terms=(),
+                    mcp_endpoint=CANARY.DEFAULT_MCP_ENDPOINT,
+                    broker_socket=CANARY.DEFAULT_BROKER_SOCKET,
+                    broker_auth_key=CANARY.DEFAULT_BROKER_AUTH_KEY,
+                    expected_agent_id="chem",
+                    page_max_chars=30_000,
+                    max_input_tokens=50_000,
+                    max_output_tokens=16_000,
+                    max_cost_usd=2.0,
+                    timeout_seconds=601,
+                )
+            self.assertFalse(output_dir.exists())
 
 
 if __name__ == "__main__":

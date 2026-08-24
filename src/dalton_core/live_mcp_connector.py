@@ -952,8 +952,16 @@ def validate_alphaengine_document_page(
     if type(complete) is not bool:
         raise RunnerValidationError("AlphaEngine document complete flag is invalid")
     next_offset = payload.get("next_offset")
+    terminal_by_bounds = (
+        next_offset is None and offset + returned_chars == content_chars
+    )
+    if not complete and terminal_by_bounds:
+        # AlphaEngine currently returns complete=false on some exact final
+        # pages.  The immutable raw response is retained; normalize only when
+        # length, offset, and null continuation independently prove terminal.
+        complete = True
     if complete:
-        if next_offset is not None or offset + returned_chars != content_chars:
+        if not terminal_by_bounds:
             raise RunnerValidationError(
                 "complete AlphaEngine document page does not end at content_chars"
             )

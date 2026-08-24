@@ -192,6 +192,60 @@ class TranscriptPolishTests(_TranscriptFixture, unittest.TestCase):
         )
         self.assertEqual(verified["polished_text"], polished)
 
+    def test_acronym_hyphenation_is_not_a_new_proper_term(self) -> None:
+        source = "The workload is CPU heavy and uses GPUs."
+        polished = "The workload is CPU-heavy and uses GPUs."
+        verified = verify_transcript_polish_candidate(
+            source,
+            json.dumps(
+                candidate_for(source, polished), separators=(",", ":")
+            ),
+            additional_protected_terms=[],
+        )
+        self.assertEqual(verified["polished_text"], polished)
+
+    def test_mixed_case_business_term_remains_protected(self) -> None:
+        source = "CapEx was unchanged."
+        polished = "Capex was unchanged."
+        with self.assertRaisesRegex(TranscriptPolishConflict, "protected term"):
+            verify_transcript_polish_candidate(
+                source,
+                json.dumps(
+                    candidate_for(source, polished), separators=(",", ":")
+                ),
+                additional_protected_terms=[],
+            )
+
+    def test_segment_boundary_whitespace_cannot_be_trimmed(self) -> None:
+        source = "We cannot leave."
+        segments = [
+            {
+                "source_start": 0,
+                "source_end": 3,
+                "source_sha256": hashlib.sha256(b"We ").hexdigest(),
+                "polished_text": "We",
+            },
+            {
+                "source_start": 3,
+                "source_end": len(source),
+                "source_sha256": hashlib.sha256(
+                    "cannot leave.".encode("utf-8")
+                ).hexdigest(),
+                "polished_text": "cannot leave.",
+            },
+        ]
+        with self.assertRaisesRegex(
+            TranscriptPolishConflict, "boundary whitespace"
+        ):
+            verify_transcript_polish_candidate(
+                source,
+                json.dumps(
+                    {"schema_version": "0.1", "segments": segments},
+                    separators=(",", ":"),
+                ),
+                additional_protected_terms=[],
+            )
+
     def test_verified_candidate_forms_mapped_derived_artifact_once(self) -> None:
         artifact = self.materialize()
         self.assertEqual(artifact["status"], "fresh")

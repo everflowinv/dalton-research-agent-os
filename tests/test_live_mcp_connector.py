@@ -789,6 +789,26 @@ class AlphaEngineLiveAdapterTests(unittest.TestCase):
                     max_chars=5,
                 )
 
+    def test_document_page_normalizes_false_terminal_flag_at_exact_end(self) -> None:
+        page = validate_alphaengine_document_page(
+            {
+                "metadata": {"doc_id": "doc-1"},
+                "content_chars": 10,
+                "content_sha256": "a" * 64,
+                "offset": 5,
+                "returned_chars": 5,
+                "text": "67890",
+                "next_offset": None,
+                "complete": False,
+            },
+            expected_doc_id="doc-1",
+            expected_offset=5,
+            max_chars=5,
+        )
+        self.assertTrue(page["complete"])
+        self.assertIsNone(page["cursor"])
+        self.assertEqual(page["completeness"], "enumerated")
+
     def test_tool_error_does_not_write_raw_or_claim_success(self) -> None:
         request, _ = adapter_request("search_library", search_parameters())
         handle = FakeHandle(

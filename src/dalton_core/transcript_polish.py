@@ -36,8 +36,8 @@ TRANSCRIPT_POLISH_OPERATION = "verify_and_materialize_transcript_polish"
 TRANSCRIPT_POLISH_RUNTIME = "runtime-profile:dalton-core-transcript-polish:0.1"
 TRANSCRIPT_POLISH_PERMISSION = "read_exact_alphaengine_document_artifact"
 TRANSCRIPT_POLISH_OUTPUT_CONTRACT = "schema:transcript-polish-probe-output:0.2"
-TRANSCRIPT_POLISH_VERIFIER = "verifier:transcript-polish-conservation:0.3"
-TRANSCRIPT_POLISH_RULE_REF = "rules:transcript-polish-conservation:0.3"
+TRANSCRIPT_POLISH_VERIFIER = "verifier:transcript-polish-conservation:0.4"
+TRANSCRIPT_POLISH_RULE_REF = "rules:transcript-polish-conservation:0.4"
 
 MAX_SOURCE_CHARS = 200_000
 MAX_SEGMENTS = 256
@@ -58,7 +58,7 @@ _NUMERIC_RE = re.compile(
 )
 _AUTO_TERM_RES = (
     re.compile(r"\b[A-Z]{2,}(?:-[A-Z0-9]+)*\b"),
-    re.compile(r"\b[A-Z][A-Za-z]*[A-Z][A-Za-z0-9-]*\b"),
+    re.compile(r"\b[A-Z][a-z]+(?:[A-Z][A-Za-z0-9]*)+\b"),
     re.compile(r"\b[A-Za-z]+\d[A-Za-z0-9-]*\b"),
     re.compile(r"\b(?:[A-Z][a-z]+[ -]){1,4}[A-Z][a-z]+\b"),
 )
@@ -293,6 +293,15 @@ def verify_transcript_polish_candidate(
         ]:
             raise TranscriptPolishConflict("candidate source span hash drifted")
         polished = segment["polished_text"]
+        if (
+            re.match(r"\s*", source_slice).group(0)
+            != re.match(r"\s*", polished).group(0)
+            or re.search(r"\s*$", source_slice).group(0)
+            != re.search(r"\s*$", polished).group(0)
+        ):
+            raise TranscriptPolishConflict(
+                f"segment {index} boundary whitespace drifted"
+            )
         if _numeric_expressions(source_slice) != _numeric_expressions(polished):
             raise TranscriptPolishConflict(
                 f"segment {index} numeric expressions drifted"

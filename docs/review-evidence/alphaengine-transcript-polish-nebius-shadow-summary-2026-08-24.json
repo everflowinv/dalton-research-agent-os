@@ -1,0 +1,85 @@
+{
+  "schema_version": "0.1",
+  "id": "alphaengine-transcript-polish-canary:5c2315471c5dfc3f0b54de9e06c110e3",
+  "created_at": "2026-08-24T10:43:36.916743+00:00",
+  "source": {
+    "title": "Nebius Q2 2026",
+    "publish_date": "2026-08-12",
+    "document_ref": "alphaengine-doc:130000105789517",
+    "content_chars": 42279,
+    "content_sha256": "0b3f384d24176233f9c304c85b7120e2e8d16e08bae3397c0416ffc865cf6a90",
+    "manifest_ref": "alphaengine-document-acquisition:d3b55d6e3f28675ab535ffee68d4289e65f46acffc158014078de610c59c0f37",
+    "manifest_hash": "7f37aaf51816c90fc62785c800328b379e68070c8351cb8187808e1b3e736418",
+    "physical_calls": 2,
+    "document_quota_units": 1,
+    "speaker_label_count": 16
+  },
+  "correction_review": {
+    "mode": "none",
+    "human_reviewed": false,
+    "actor_ref": null,
+    "correction_set_ref": null,
+    "correction_set_hash": null,
+    "accepted_count": 0,
+    "unresolved_count": 0
+  },
+  "model": {
+    "policy_ref": "model-routing-policy-version:dalton-openclaw-transcript-polish-development:2",
+    "profile_id": "profile:gpt-5-6-terra",
+    "profile_version_ref": "model-profile-version:broker-gpt-5-6-terra:1",
+    "provider": "openai",
+    "model": "gpt-5.6-terra",
+    "scheduler_attempts": 2,
+    "physical_model_calls": 1,
+    "input_tokens": 11072,
+    "output_tokens": 15079,
+    "total_tokens": 26151,
+    "accounted_cost_usd": "0.203092"
+  },
+  "polished_artifact": {
+    "version_ref": "transcript-polish-artifact-version:d6fdca1b254abc0b5e6ddeed7c561cb6",
+    "version_hash": "584d8b0fda93754c842c58a1e2eed588af43f09053d99bd2cbe1cc8cf413e438",
+    "polished_chars": 42632,
+    "polished_sha256": "6aefd816eb41dcd0c1647c33f696c5388054509636c0af49d4e10c32766461fe",
+    "source_to_polished_ratio": 1.008349,
+    "verification_status": "verified",
+    "citation_authority": "source_lineage_only"
+  },
+  "claim_binding_dry_run": {
+    "status": "blocked",
+    "blocking_reason": "human_correction_review_required",
+    "binding_ref": null,
+    "binding_hash": null,
+    "claim_eligible": false,
+    "citation_mode": null,
+    "source_span_sha256": null
+  },
+  "formal_authority_counts": {
+    "evidence_versions": 0,
+    "claim_versions": 0,
+    "thesis_versions": 0
+  },
+  "prior_failed_attempts": [
+    {
+      "run": "v1",
+      "accounted_cost_usd": "0",
+      "failure": "alphaengine_false_terminal_flag_rejected"
+    },
+    {
+      "run": "v2",
+      "accounted_cost_usd": "0",
+      "failure": "broker_timeout_profile_limit_exceeded"
+    },
+    {
+      "run": "v3",
+      "accounted_cost_usd": "0.179294",
+      "failure": "segment_boundary_whitespace_drift_and_hyphenated_acronym_false_positive"
+    }
+  ],
+  "total_second_sample_model_cost_usd": "0.382386",
+  "shadow_artifact_gate_pass": true,
+  "claim_admission_gate_pass": false,
+  "hard_gate_pass": false,
+  "production_activated": false,
+  "production_decision": "no_go_pending_explicit_human_correction_review"
+}
