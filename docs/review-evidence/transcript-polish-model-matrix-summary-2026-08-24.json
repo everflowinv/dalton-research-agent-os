@@ -1,0 +1,52 @@
+{
+  "schema_version": "0.1",
+  "id": "transcript-polish-model-matrix-summary:2026-08-24",
+  "repo_commit": "7e6e543a1b14c013f33cd10bcbecb615721f07fc",
+  "corpus_ref": "transcript-polish-calibration-corpus:0.1",
+  "corpus_hash": "1fc70068eca00bbb980ffa6c81790f5fd5ef7b0b00ba48dd9bf4f30f08298346",
+  "case_count": 10,
+  "safety_case_count": 9,
+  "tested_profile_count": 25,
+  "distinct_model_route_count": 24,
+  "selected_development_profile_id": "profile:gemini-3-7-flash",
+  "selected_thinking_level": "low",
+  "production_activated": false,
+  "first_round": [
+    {"profile_id": "profile:claude-fable-5", "overall_passed": 7, "recorded_cases": 7, "safety_passed": 6, "safety_total": 6, "median_latency_seconds": 14.299537, "cost_or_reserve_usd": "0.44416", "coverage_complete": false, "hard_gate_pass": false},
+    {"profile_id": "profile:claude-opus-5", "overall_passed": null, "recorded_cases": 0, "safety_passed": null, "safety_total": 9, "median_latency_seconds": null, "cost_or_reserve_usd": null, "coverage_complete": false, "hard_gate_pass": false},
+    {"profile_id": "profile:claude-sonnet-5", "overall_passed": 0, "recorded_cases": 10, "safety_passed": 0, "safety_total": 9, "median_latency_seconds": 10.7276755, "cost_or_reserve_usd": "0.375078", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:deepseek-v4-flash", "overall_passed": 8, "recorded_cases": 10, "safety_passed": 7, "safety_total": 9, "median_latency_seconds": 1.4088635, "cost_or_reserve_usd": "0.002122156", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:deepseek-v4-pro", "overall_passed": 5, "recorded_cases": 10, "safety_passed": 4, "safety_total": 9, "median_latency_seconds": 2.2696385, "cost_or_reserve_usd": "0.006491276", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:gemini-3-1-pro-preview", "overall_passed": 10, "recorded_cases": 10, "safety_passed": 9, "safety_total": 9, "median_latency_seconds": 6.1142085, "cost_or_reserve_usd": "0.087440", "coverage_complete": true, "hard_gate_pass": true},
+    {"profile_id": "profile:gemini-3-5-flash-lite", "overall_passed": 9, "recorded_cases": 10, "safety_passed": 8, "safety_total": 9, "median_latency_seconds": 1.1200415, "cost_or_reserve_usd": "0.0065088", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:gemini-3-7-flash", "overall_passed": 10, "recorded_cases": 10, "safety_passed": 9, "safety_total": 9, "median_latency_seconds": 2.026963, "cost_or_reserve_usd": "0.01465575", "coverage_complete": true, "hard_gate_pass": true},
+    {"profile_id": "profile:gemini-flash-latest", "overall_passed": 0, "recorded_cases": 10, "safety_passed": 0, "safety_total": 9, "median_latency_seconds": 0.489175, "cost_or_reserve_usd": "50", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:glm-5-2", "overall_passed": 10, "recorded_cases": 10, "safety_passed": 9, "safety_total": 9, "median_latency_seconds": 2.294435, "cost_or_reserve_usd": "0.011629434", "coverage_complete": true, "hard_gate_pass": true},
+    {"profile_id": "profile:gpt-5-5", "overall_passed": 10, "recorded_cases": 10, "safety_passed": 9, "safety_total": 9, "median_latency_seconds": 4.2461215, "cost_or_reserve_usd": "0.080155", "coverage_complete": true, "hard_gate_pass": true},
+    {"profile_id": "profile:gpt-5-6-luna", "overall_passed": 9, "recorded_cases": 10, "safety_passed": 8, "safety_total": 9, "median_latency_seconds": 6.9416175, "cost_or_reserve_usd": "0.0068698", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:gpt-5-6-sol", "overall_passed": 9, "recorded_cases": 10, "safety_passed": 8, "safety_total": 9, "median_latency_seconds": 4.0567975, "cost_or_reserve_usd": "0.057996", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:gpt-5-6-terra", "overall_passed": 10, "recorded_cases": 10, "safety_passed": 9, "safety_total": 9, "median_latency_seconds": 3.900847, "cost_or_reserve_usd": "0.032062", "coverage_complete": true, "hard_gate_pass": true},
+    {"profile_id": "profile:grok-4-20-beta-non-reasoning", "overall_passed": 5, "recorded_cases": 10, "safety_passed": 4, "safety_total": 9, "median_latency_seconds": 1.8285285, "cost_or_reserve_usd": "0.01219375", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:grok-4-20-beta-reasoning", "overall_passed": 7, "recorded_cases": 10, "safety_passed": 6, "safety_total": 9, "median_latency_seconds": 14.6402105, "cost_or_reserve_usd": "0.07061225", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:grok-4-3", "overall_passed": 10, "recorded_cases": 10, "safety_passed": 9, "safety_total": 9, "median_latency_seconds": 6.106167, "cost_or_reserve_usd": "0.03200475", "coverage_complete": true, "hard_gate_pass": true},
+    {"profile_id": "profile:grok-4-6", "overall_passed": 10, "recorded_cases": 10, "safety_passed": 9, "safety_total": 9, "median_latency_seconds": 13.2465905, "cost_or_reserve_usd": "0.093058", "coverage_complete": true, "hard_gate_pass": true},
+    {"profile_id": "profile:grok-build-0-1", "overall_passed": 8, "recorded_cases": 10, "safety_passed": 7, "safety_total": 9, "median_latency_seconds": 21.24821, "cost_or_reserve_usd": "0.0729490", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:openrouter-ox-alpha", "overall_passed": 8, "recorded_cases": 10, "safety_passed": 7, "safety_total": 9, "median_latency_seconds": 16.861827, "cost_or_reserve_usd": "10", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:qwen-deepseek-v4-flash-0731", "overall_passed": 9, "recorded_cases": 10, "safety_passed": 8, "safety_total": 9, "median_latency_seconds": 5.506375, "cost_or_reserve_usd": "5.00382184", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:qwen-deepseek-v4-pro-0813", "overall_passed": 9, "recorded_cases": 10, "safety_passed": 8, "safety_total": 9, "median_latency_seconds": 7.5809755, "cost_or_reserve_usd": "5.01166352", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:qwen3-8-max", "overall_passed": 10, "recorded_cases": 10, "safety_passed": 9, "safety_total": 9, "median_latency_seconds": 2.644709, "cost_or_reserve_usd": "0.02225190", "coverage_complete": true, "hard_gate_pass": true},
+    {"profile_id": "profile:zai-glm-5-3", "overall_passed": 8, "recorded_cases": 10, "safety_passed": 7, "safety_total": 9, "median_latency_seconds": 7.9679395, "cost_or_reserve_usd": "0.02457318", "coverage_complete": true, "hard_gate_pass": false},
+    {"profile_id": "profile:qwen-deepseek-v4-flash-0731-low-calibration", "overall_passed": 0, "recorded_cases": 1, "safety_passed": 0, "safety_total": 1, "median_latency_seconds": 39.205448, "cost_or_reserve_usd": "5", "coverage_complete": true, "hard_gate_pass": false, "scope": "single long-case recovery"}
+  ],
+  "second_round_finalists": [
+    {"profile_id": "profile:gemini-3-7-flash", "overall_passed": 10, "safety_passed": 9, "safety_total": 9, "median_latency_seconds": 1.8845405, "cost_or_reserve_usd": "0.01416450", "hard_gate_pass": true},
+    {"profile_id": "profile:glm-5-2", "overall_passed": 10, "safety_passed": 9, "safety_total": 9, "median_latency_seconds": 2.142834, "cost_or_reserve_usd": "0.011621732", "hard_gate_pass": true},
+    {"profile_id": "profile:gpt-5-6-terra", "overall_passed": 10, "safety_passed": 9, "safety_total": 9, "median_latency_seconds": 4.269224, "cost_or_reserve_usd": "0.032062", "hard_gate_pass": true},
+    {"profile_id": "profile:qwen3-8-max", "overall_passed": 10, "safety_passed": 9, "safety_total": 9, "median_latency_seconds": 2.461225, "cost_or_reserve_usd": "0.02077350", "hard_gate_pass": true}
+  ],
+  "selection_notes": [
+    "Gemini 3.7 Flash passed both complete rounds and retained the generic Speaker label during qualitative review.",
+    "GLM 5.2 passed both complete rounds and was slightly cheaper, but removed the generic Speaker label in the unresolved-ASR case; corpus v0.1 did not score that label as protected.",
+    "Cost-or-reserve values include hard-cap reserves when provider telemetry was unavailable and must not be interpreted as actual spend."
+  ]
+}

@@ -32,6 +32,10 @@ PLANNER_DEVELOPMENT_PROFILE_ID = "profile:qwen-deepseek-v4-flash-0731"
 PLANNER_DEVELOPMENT_POLICY_REF = (
     "model-routing-policy-version:dalton-openclaw-planner-development:2"
 )
+TRANSCRIPT_POLISH_DEVELOPMENT_PROFILE_ID = "profile:gemini-3-7-flash"
+TRANSCRIPT_POLISH_DEVELOPMENT_POLICY_REF = (
+    "model-routing-policy-version:dalton-openclaw-transcript-polish-development:1"
+)
 
 
 _LEGACY_ENDPOINT_NAMES = (
@@ -619,6 +623,40 @@ def openclaw_planner_development_policy(*, created_at: datetime) -> dict[str, An
     }
 
 
+def openclaw_transcript_polish_development_policy(
+    *, created_at: datetime
+) -> dict[str, Any]:
+    """Pin offline TranscriptPolish to the calibrated Gemini Flash route.
+
+    This development-only policy does not activate a live transcript worker.
+    The broker profile fixes provider thinking to ``low``; Core still applies
+    the local contract, conservation, and source-lineage gates after every
+    model response.
+    """
+
+    created = _utc(created_at).isoformat(timespec="microseconds")
+    return {
+        "schema_version": "0.1",
+        "policy_version_ref": TRANSCRIPT_POLISH_DEVELOPMENT_POLICY_REF,
+        "id": "model-routing-policy:dalton-openclaw-transcript-polish-development",
+        "version": 1,
+        "created_at": created,
+        "prior_version_ref": None,
+        "filters": {
+            "allowed_profile_ids": [TRANSCRIPT_POLISH_DEVELOPMENT_PROFILE_ID],
+            "allowed_providers": [],
+            "allowed_families": [],
+            "allowed_adapter_refs": [ADAPTER_REF],
+            "required_modalities": ["text"],
+            "family_independence_capabilities": [],
+        },
+        "ordered_preferences": [
+            {"field": "estimated_cost_usd", "direction": "asc"},
+            {"field": "profile_version_ref", "direction": "asc"},
+        ],
+    }
+
+
 def upgrade_openclaw_broker_catalog(
     router_path: str | Path,
     *,
@@ -651,6 +689,12 @@ def upgrade_openclaw_broker_catalog(
         planner_development_policy = _register_policy_once(
             router,
             openclaw_planner_development_policy(created_at=checked_at)
+        )
+        transcript_polish_development_policy = _register_policy_once(
+            router,
+            openclaw_transcript_polish_development_policy(
+                created_at=checked_at
+            )
         )
         desired_profiles = openclaw_broker_profiles(
             checked_at=checked_at, availability_ttl=availability_ttl
@@ -688,6 +732,9 @@ def upgrade_openclaw_broker_catalog(
         "verifier_policy": verifier_policy,
         "legacy_planner_development_policy": legacy_planner_development_policy,
         "planner_development_policy": planner_development_policy,
+        "transcript_polish_development_policy": (
+            transcript_polish_development_policy
+        ),
         "profiles": profiles,
         "router_path": str(router_path),
     }
@@ -785,6 +832,8 @@ __all__ = [
     "LEGACY_PLANNER_DEVELOPMENT_POLICY_REF",
     "PLANNER_DEVELOPMENT_PROFILE_ID",
     "PLANNER_DEVELOPMENT_POLICY_REF",
+    "TRANSCRIPT_POLISH_DEVELOPMENT_PROFILE_ID",
+    "TRANSCRIPT_POLISH_DEVELOPMENT_POLICY_REF",
     "install_openclaw_catalog",
     "openclaw_policy",
     "openclaw_profiles",
@@ -793,5 +842,6 @@ __all__ = [
     "openclaw_assessment_policy",
     "openclaw_verifier_policy",
     "openclaw_planner_development_policy",
+    "openclaw_transcript_polish_development_policy",
     "upgrade_openclaw_broker_catalog",
 ]
