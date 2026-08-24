@@ -483,6 +483,7 @@ class TranscriptPolishAuthority:
             correction_set_hash = None
             correction_mappings: list[dict[str, Any]] = []
             unresolved_correction_spans: list[dict[str, Any]] = []
+            unresolved_protected_terms: list[str] = []
             citation_mode = "raw_span"
         else:
             if self.correction_authority is None:
@@ -515,6 +516,11 @@ class TranscriptPolishAuthority:
             unresolved_correction_spans = resolution[
                 "unresolved_correction_spans"
             ]
+            unresolved_protected_terms = list(dict.fromkeys(
+                item["source_text"]
+                for item in correction_set["corrections"]
+                if item["disposition"] == "unresolved"
+            ))
             citation_mode = resolution["citation_mode"]
         return {
             "document_ref": manifest["document_ref"],
@@ -527,6 +533,7 @@ class TranscriptPolishAuthority:
             "resolved_source_hash": resolved_source_hash,
             "correction_mappings": correction_mappings,
             "unresolved_correction_spans": unresolved_correction_spans,
+            "unresolved_protected_terms": unresolved_protected_terms,
             "citation_mode": citation_mode,
         }
 
@@ -560,11 +567,14 @@ class TranscriptPolishAuthority:
         correction_set_hash = source["correction_set_version_hash"]
         correction_mappings = source["correction_mappings"]
         unresolved_correction_spans = source["unresolved_correction_spans"]
+        unresolved_protected_terms = source["unresolved_protected_terms"]
         citation_mode = source["citation_mode"]
         verification = verify_transcript_polish_candidate(
             resolved_source,
             candidate_text,
-            additional_protected_terms=terms,
+            additional_protected_terms=list(dict.fromkeys([
+                *terms, *unresolved_protected_terms,
+            ])),
         )
         candidate = verification["candidate"]
         candidate_hash = verification["candidate_hash"]

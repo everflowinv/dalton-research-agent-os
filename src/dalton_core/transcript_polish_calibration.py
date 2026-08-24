@@ -407,6 +407,13 @@ def build_transcript_polish_calibration_prompt(
             "correction_kind": "proper_name",
         } for term in case.get("unresolved_terms", [])])
         for term in [correction["term"]]],
+        "unresolved_protected_terms": list(dict.fromkeys(
+            correction["term"]
+            for correction in case.get("unresolved_corrections", [{
+                "term": term,
+                "correction_kind": "proper_name",
+            } for term in case.get("unresolved_terms", [])])
+        )),
         "citation_mode": (
             "raw_span_plus_admitted_correction" if admitted else "raw_span"
         ),

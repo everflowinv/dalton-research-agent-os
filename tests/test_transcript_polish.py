@@ -362,6 +362,33 @@ class TranscriptPolishTests(_TranscriptFixture, unittest.TestCase):
         )
         self.assertFalse(binding["claim_eligible"])
         self.assertEqual(binding["blocking_reason"], "unresolved_correction_overlap")
+
+        unresolved_term = self.corrections.publish(
+            "transcript-correction-set:unresolved-terminology",
+            corrections=[self.correction(
+                "revenue was",
+                "sales were",
+                correction_kind="terminology",
+                disposition="unresolved",
+            )],
+            **source_args,
+        )
+        source = self.authority.model_source_context(
+            source_manifest_ref=self.manifest["id"],
+            source_manifest_hash=self.manifest["content_hash"],
+            source_content_hash=self.manifest["assembled_object"]["content_hash"],
+            correction_set_version_ref=unresolved_term["id"],
+            correction_set_version_hash=unresolved_term["content_hash"],
+        )
+        self.assertEqual(source["unresolved_protected_terms"], ["revenue was"])
+        with self.assertRaisesRegex(TranscriptPolishConflict, "protected term"):
+            self.materialize(
+                candidate(ORIGINAL.replace("Um, ", "").replace(
+                    "revenue was", "sales were"
+                )),
+                correction_set_version_ref=unresolved_term["id"],
+                correction_set_version_hash=unresolved_term["content_hash"],
+            )
         with self.assertRaises(TranscriptCorrectionValidationError):
             self.corrections.publish(
                 "transcript-correction-set:model-admission",
