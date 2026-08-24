@@ -175,14 +175,30 @@ class LLMResearchPlannerCalibrationTests(unittest.TestCase):
         )
         self.assertNotIn("content_hash", admitted)
 
-    def test_non_dynamic_verify_only_profile_stays_rejected(self) -> None:
+    def test_curated_non_research_profile_gets_calibration_only_derivative(self) -> None:
         source = next(
             item for item in openclaw_broker_profiles(
                 checked_at=NOW, availability_ttl=timedelta(days=7)
             )
-            if item["id"] == "profile:gpt-5-6-sol"
+            if item["id"] == "profile:gpt-5-6-luna"
         )
-        source["capabilities"] = ["verify"]
+        admitted = admit_dynamic_calibration_profile(source)
+        self.assertEqual(admitted["id"], "profile:gpt-5-6-luna")
+        self.assertEqual(admitted["capabilities"], ["research"])
+        self.assertTrue(
+            admitted["profile_version_ref"].startswith(
+                "model-profile-version:calibration-gpt-5-6-luna-"
+            )
+        )
+
+    def test_unavailable_or_non_broker_profile_stays_rejected(self) -> None:
+        source = next(
+            item for item in openclaw_broker_profiles(
+                checked_at=NOW, availability_ttl=timedelta(days=7)
+            )
+            if item["id"] == "profile:gpt-5-6-luna"
+        )
+        source["availability"]["state"] = "unavailable"
         with self.assertRaises(PlannerCalibrationRunError):
             admit_dynamic_calibration_profile(source)
 

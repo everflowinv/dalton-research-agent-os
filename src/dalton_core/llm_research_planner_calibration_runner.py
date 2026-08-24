@@ -63,25 +63,24 @@ class PlannerCalibrationRunError(RuntimeError):
 def admit_dynamic_calibration_profile(
     profile: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Grant a newly brokered model research capability only inside calibration.
+    """Grant a brokered model research capability only inside calibration.
 
-    The catalog reconciler deliberately gives unknown broker profiles only a
-    conservative ``verify`` capability.  This local immutable derivative lets
-    the paid offline calibration exercise the Planner contract without
-    promoting the route into Dalton's deployment catalog.
+    Broker profiles can lack production research capability either because the
+    route is newly discovered or because its curated role is narrower.  This
+    local immutable derivative lets the paid offline calibration exercise the
+    Planner contract without promoting the route into Dalton's deployment
+    catalog.
     """
 
     wire = json.loads(canonical_json(profile))
-    if "research" in wire.get("capabilities", []):
-        return wire
     if (
-        wire.get("capabilities") != ["verify"]
-        or not str(wire.get("profile_version_ref", "")).startswith(
-            "model-profile-version:dynamic-"
-        )
+        wire.get("adapter_ref") != ADAPTER_REF
+        or wire.get("availability", {}).get("state") != "available"
+        or not isinstance(wire.get("capabilities"), list)
+        or not wire["capabilities"]
     ):
         raise PlannerCalibrationRunError(
-            "profile lacks research capability and is not a dynamic calibration candidate"
+            "profile lacks research capability and is not an admitted broker candidate"
         )
     source_hash = content_hash(wire)
     slug = wire["id"].removeprefix("profile:")
@@ -367,17 +366,17 @@ def load_records(path: Path) -> list[dict[str, Any]]:
 def _install_router(
     path: Path,
     *,
-    catalog: Sequence[Mapping[str, Any]],
-    profile_id: str,
+    profile: Mapping[str, Any],
     checked_at: datetime,
     case_cap: Decimal,
     run_id: str,
 ) -> tuple[dict[str, Any], str]:
-    profiles = [dict(item) for item in catalog if item["id"] == profile_id]
-    if len(profiles) != 1:
-        raise PlannerCalibrationRunError("candidate profile is unavailable")
-    profile = profiles[0]
-    profile["capabilities"] = ["research"]
+    profile = json.loads(canonical_json(profile))
+    profile_id = profile["id"]
+    if profile.get("capabilities") != ["research"]:
+        raise PlannerCalibrationRunError(
+            "calibration router requires an exact research-only profile"
+        )
     profile["limits"]["max_cost_usd"] = float(case_cap)
     suffix = hashlib.sha256(run_id.encode()).hexdigest()[:16]
     policy_ref = f"model-routing-policy-version:llm-planner-calibration-{suffix}:1"
@@ -515,8 +514,7 @@ def run_live_planner_calibration(
         os.chmod(output_dir, 0o700)
         profile, policy_ref = _install_router(
             router_path,
-            catalog=catalog,
-            profile_id=profile_id,
+            profile=candidates[0],
             checked_at=created_at,
             case_cap=_money(per_case_cap_usd, "case cap"),
             run_id=manifest["id"],
