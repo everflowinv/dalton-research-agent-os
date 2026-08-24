@@ -13,6 +13,8 @@ from dalton_core.model_deployment import (
     BROKER_POLICY_REF,
     LEGACY_PLANNER_DEVELOPMENT_POLICY_REF,
     LEGACY_PLANNER_DEVELOPMENT_PROFILE_ID,
+    LEGACY_TRANSCRIPT_POLISH_DEVELOPMENT_POLICY_REF,
+    LEGACY_TRANSCRIPT_POLISH_DEVELOPMENT_PROFILE_ID,
     PLANNER_DEVELOPMENT_POLICY_REF,
     PLANNER_DEVELOPMENT_PROFILE_ID,
     TRANSCRIPT_POLISH_DEVELOPMENT_POLICY_REF,
@@ -217,7 +219,7 @@ class ModelDeploymentTests(unittest.TestCase):
                 rerun["planner_development_policy"]["status"], "duplicate"
             )
 
-    def test_transcript_polish_development_policy_pins_gemini_flash(self) -> None:
+    def test_transcript_polish_development_policy_pins_terra_v2(self) -> None:
         policy = openclaw_transcript_polish_development_policy(
             created_at=WHEN
         )
@@ -232,7 +234,10 @@ class ModelDeploymentTests(unittest.TestCase):
         self.assertEqual(
             policy["filters"]["family_independence_capabilities"], []
         )
-        self.assertIsNone(policy["prior_version_ref"])
+        self.assertEqual(
+            policy["prior_version_ref"],
+            LEGACY_TRANSCRIPT_POLISH_DEVELOPMENT_POLICY_REF,
+        )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "model-router.sqlite"
             install_openclaw_catalog(path, checked_at=WHEN)
@@ -245,6 +250,13 @@ class ModelDeploymentTests(unittest.TestCase):
                 TRANSCRIPT_POLISH_DEVELOPMENT_POLICY_REF,
             )
             with ModelRouter(path) as router:
+                legacy = router.get_policy(
+                    LEGACY_TRANSCRIPT_POLISH_DEVELOPMENT_POLICY_REF
+                )
+                self.assertEqual(
+                    legacy["filters"]["allowed_profile_ids"],
+                    [LEGACY_TRANSCRIPT_POLISH_DEVELOPMENT_PROFILE_ID],
+                )
                 pinned = router.get_policy(
                     TRANSCRIPT_POLISH_DEVELOPMENT_POLICY_REF
                 )

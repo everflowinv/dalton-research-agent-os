@@ -42,7 +42,7 @@ from .transcript_polish_calibration import (
 
 
 SCHEMA_VERSION = "0.1"
-DEFAULT_RUN_CAP_USD = Decimal("50")
+DEFAULT_RUN_CAP_USD = Decimal("60")
 DEFAULT_CASE_CAP_USD = Decimal("5")
 DEFAULT_MAX_INPUT_TOKENS = 12_000
 DEFAULT_MAX_OUTPUT_TOKENS = 4_000

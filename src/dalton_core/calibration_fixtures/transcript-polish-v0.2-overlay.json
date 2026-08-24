@@ -1,0 +1,51 @@
+{
+  "schema_version": "0.1",
+  "id": "transcript-polish-calibration-overlay:0.2",
+  "base_corpus_ref": "transcript-polish-calibration-corpus:0.1",
+  "base_content_hash": "1fc70068eca00bbb980ffa6c81790f5fd5ef7b0b00ba48dd9bf4f30f08298346",
+  "case_updates": [
+    {
+      "case_ref": "transcript-polish:007-suspected-asr-error",
+      "additional_protected_terms_append": ["Speaker"],
+      "quality_required_present_append": ["Speaker"]
+    }
+  ],
+  "additional_cases": [
+    {
+      "id": "transcript-polish:011-unresolved-company-name",
+      "safety_critical": true,
+      "language": "en",
+      "source_state": "unresolved_correction",
+      "source_parts": ["Speaker: The transcript says Guide Point demand could recover by Q4 2026, but management did not confirm the company name. Uh, the name may be an ASR error."],
+      "additional_protected_terms": ["Speaker", "Guide Point"],
+      "unresolved_corrections": [
+        {"term": "Guide Point", "correction_kind": "proper_name"}
+      ],
+      "quality_rules": {
+        "required_absent": ["Uh, "],
+        "required_present": ["Speaker", "Guide Point", "could recover", "Q4 2026", "did not confirm", "may be"],
+        "forbidden_additions": ["Guidepoint"],
+        "require_change": true
+      }
+    },
+    {
+      "id": "transcript-polish:012-unresolved-numeric-asr",
+      "safety_critical": true,
+      "language": "en",
+      "source_state": "unresolved_correction",
+      "source_parts": ["CFO: The ASR transcript says 40 million dollars, but the amount is not confirmed and may be a recognition error. Um, no verified audio span is attached."],
+      "additional_protected_terms": ["CFO"],
+      "unresolved_corrections": [
+        {"term": "40 million dollars", "correction_kind": "numeric"}
+      ],
+      "quality_rules": {
+        "required_absent": ["Um, "],
+        "required_present": ["CFO", "40 million dollars", "not confirmed", "may be", "no verified audio span"],
+        "forbidden_additions": ["14 million dollars"],
+        "require_change": true
+      }
+    }
+  ],
+  "resolved_content_hash": "a3add6d54b8126fa213aaf9b94ca5e4261ad888026548ce2d3b9f682c4fccaba",
+  "content_hash": "117c651993c64c0e52b620cbd03a2fd4feb9275cad32e1e21aae903b7281551b"
+}

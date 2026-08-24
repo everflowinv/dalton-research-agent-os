@@ -56,10 +56,14 @@ class TranscriptPolishCalibrationTests(unittest.TestCase):
         self.corpus = load_transcript_polish_corpus()
 
     def test_frozen_corpus_covers_authority_and_conservation_risks(self) -> None:
-        self.assertEqual(len(self.corpus["cases"]), 10)
+        self.assertEqual(
+            self.corpus["id"],
+            "transcript-polish-calibration-corpus:0.2",
+        )
+        self.assertEqual(len(self.corpus["cases"]), 12)
         self.assertEqual(
             sum(case["safety_critical"] for case in self.corpus["cases"]),
-            9,
+            11,
         )
         case_ids = {case["id"] for case in self.corpus["cases"]}
         for suffix in (
@@ -67,6 +71,8 @@ class TranscriptPolishCalibrationTests(unittest.TestCase):
             "numeric-units",
             "negation-uncertainty",
             "suspected-asr-error",
+            "unresolved-company-name",
+            "unresolved-numeric-asr",
             "admitted-correction-source",
             "multi-span-long",
         ):
@@ -79,11 +85,22 @@ class TranscriptPolishCalibrationTests(unittest.TestCase):
         }
         score = score_transcript_polish_outputs(self.corpus, outputs)
         self.assertTrue(score["eligible"])
-        self.assertEqual(score["overall_passed"], 10)
-        self.assertEqual(score["contract_passed"], 10)
-        self.assertEqual(score["conservation_passed"], 10)
-        self.assertEqual(score["quality_passed"], 10)
-        self.assertEqual(score["safety_passed"], 9)
+        self.assertEqual(score["overall_passed"], 12)
+        self.assertEqual(score["contract_passed"], 12)
+        self.assertEqual(score["conservation_passed"], 12)
+        self.assertEqual(score["quality_passed"], 12)
+        self.assertEqual(score["safety_passed"], 11)
+
+    def test_v01_remains_replayable_after_v02_overlay(self) -> None:
+        legacy = load_transcript_polish_corpus(version="0.1")
+        self.assertEqual(
+            legacy["content_hash"],
+            "1fc70068eca00bbb980ffa6c81790f5fd5ef7b0b00ba48dd9bf4f30f08298346",
+        )
+        self.assertEqual(len(legacy["cases"]), 10)
+        self.assertTrue(all(
+            "unresolved_terms" in case for case in legacy["cases"]
+        ))
 
     def test_prompt_uses_production_wrapper_and_precomputed_spans(self) -> None:
         corrected = next(
@@ -109,6 +126,21 @@ class TranscriptPolishCalibrationTests(unittest.TestCase):
         self.assertEqual(len(quoted["unresolved_correction_spans"]), 1)
         self.assertIn(
             "Microsfot",
+            quoted["source_segments"][0]["source_text"],
+        )
+        self.assertIn("Speaker", quoted["additional_protected_terms"])
+
+        unresolved_numeric = next(
+            case for case in self.corpus["cases"]
+            if case["id"].endswith("unresolved-numeric-asr")
+        )
+        quoted = _quoted_prompt_data(unresolved_numeric)
+        self.assertEqual(
+            quoted["unresolved_correction_spans"][0]["correction_kind"],
+            "numeric",
+        )
+        self.assertIn(
+            "40 million dollars",
             quoted["source_segments"][0]["source_text"],
         )
 
@@ -189,7 +221,7 @@ class TranscriptPolishCalibrationTests(unittest.TestCase):
             profile=profile,
             repo_commit="a" * 40,
             created_at=NOW,
-            run_cap_usd=Decimal("50"),
+            run_cap_usd=Decimal("60"),
             per_case_cap_usd=Decimal("5"),
             max_input_tokens=12_000,
             max_output_tokens=4_000,
