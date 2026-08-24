@@ -64,6 +64,14 @@
   observed Outcome，未增加 queue/DAG，也未自动写 Evidence、Claim 或 Model Input。专项 4/4；真实 SEC connector
   canary 与 live worker 尚未执行。详见
   [StatementSnapshot v1](reports/statement-snapshot-v1-2026-08-23.md)
+- development candidate 已实现 TranscriptPolishWorker v1 的 deterministic admission/verifier：只接受 exact complete
+  AlphaEngine document manifest 与 assembled UTF-8 bytes；模型形状候选必须用连续、无缝、逐段 SHA-256 绑定的 source
+  spans 覆盖整份原稿。Core 对每段及全局按出现顺序核对金额/币种/比例/年份/量级和受保护专名，并限制成稿长度为原稿
+  的 0.65–1.20；改数字、换数字顺序、改/换专名、新增专名、缺 span 或 source drift 全部拒绝。通过后只生成
+  `citation_authority=original_only` 的 append-only derived artifact，供模型上下文和阅读；不写 Evidence、Claim、Thesis、
+  Model Input 或 generic ArtifactVersion。专项 4/4、相关 31/31 通过；真实 routed model、transcript 专用模型横评、真实
+  AlphaEngine canary 和 live deployment 尚未执行。详见
+  [TranscriptPolishWorker v1](reports/transcript-polish-worker-v1-2026-08-23.md)
 - development candidate 已增加 Gemini `web_search` discovery bridge 和独立 public-web fetch adapter。冻结 inventory
   已按真实 OpenClaw 合同修正为无 cursor，`freshness` 与显式日期窗互斥；search raw response 完整保存，向后只暴露
   由引用 URL 推导的 opaque authority ref，不把 Gemini synthesis、snippet 或 title 当作网页正文。系统只有从 exact
@@ -105,7 +113,8 @@ source-level Outcome 从 human-admitted ProbeTemplate 中提出下一 probe。Co
 human-admitted lens 下选择不同的已批准 probe；真实 LLM 现在可以读取 exact ContextPack，但只能提交严格的弱候选，
 Core 才能签发 Proposal 0.3，deterministic planner 保留为 fallback。Qwen DeepSeek V4 Flash 0731 已按两轮
 30/30 的固定 corpus 结果写入 development-only policy v2；live production 尚未启用 Planner worker 或该 policy。
-StatementSnapshot v1 已作为新的受限本地 probe 完成隔离接线；下一步是 AlphaEngine TranscriptPolishWorker。
+StatementSnapshot v1 与 TranscriptPolishWorker v1 均已作为受限 probe 完成隔离接线；下一步是接 transcript routed
+model worker，并在独立 transcript corpus 上选模型，不能直接沿用 Planner 的模型结论。
 live 部署现在能自主生成并选择研究问题，也已加载 phase-pinned thesis-impact production lane；由于 live Core
 尚无 ThesisVersion 和 company mapping，这条 lane 当前只做无模型调用的 idle 检查，不提交 assessment、verification
 或 ThesisVersion。仓库 fixture 仍可按一次性 connector plan 执行 CNINFO、SEC、AlphaEngine 三源离线流程并从
@@ -1265,6 +1274,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - LLM Research Planner 模型扩展校准：`docs/reports/llm-research-planner-model-expansion-v0.2-2026-08-23.md`
 - GLM / Luna 复测与宿主 thinking 修正：`docs/reports/llm-research-planner-glm-luna-follow-up-v0.3-2026-08-23.md`
 - StatementSnapshot v1：`docs/reports/statement-snapshot-v1-2026-08-23.md`
+- TranscriptPolishWorker v1：`docs/reports/transcript-polish-worker-v1-2026-08-23.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`

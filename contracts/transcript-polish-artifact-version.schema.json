@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "TranscriptPolishArtifactVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "artifact_ref", "version",
+    "prior_version_ref", "kind", "media_type", "source_ref", "document_ref",
+    "source_manifest_ref", "source_manifest_hash", "source_content_hash",
+    "candidate_hash", "protection_manifest_hash", "polished_content_hash",
+    "polish_rule_ref", "protection_manifest", "span_mappings", "polished_object",
+    "citation_authority", "verification_status", "actor_ref", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^transcript-polish-artifact-version:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "artifact_ref": {"type": "string", "pattern": "^transcript-polish-artifact:alphaengine-doc:"},
+    "version": {"type": "integer", "minimum": 1},
+    "prior_version_ref": {"type": ["string", "null"]},
+    "kind": {"const": "derived_polished_transcript"},
+    "media_type": {"const": "text/plain; charset=utf-8"},
+    "source_ref": {"const": "source:alphaengine"},
+    "document_ref": {"type": "string", "pattern": "^alphaengine-doc:"},
+    "source_manifest_ref": {"type": "string", "minLength": 1},
+    "source_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "candidate_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "protection_manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "polished_content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "polish_rule_ref": {"const": "rules:transcript-polish-conservation:0.1"},
+    "protection_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule_ref", "numeric_expressions", "protected_terms", "content_hash"],
+      "properties": {
+        "rule_ref": {"const": "rules:transcript-polish-conservation:0.1"},
+        "numeric_expressions": {"type": "array", "items": {"type": "string"}},
+        "protected_terms": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["term", "count"],
+            "properties": {
+              "term": {"type": "string", "minLength": 1},
+              "count": {"type": "integer", "minimum": 1}
+            }
+          }
+        },
+        "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "span_mappings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "source_start", "source_end", "source_sha256",
+          "polished_start", "polished_end", "polished_sha256"
+        ],
+        "properties": {
+          "source_start": {"type": "integer", "minimum": 0},
+          "source_end": {"type": "integer", "minimum": 1},
+          "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "polished_start": {"type": "integer", "minimum": 0},
+          "polished_end": {"type": "integer", "minimum": 1},
+          "polished_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
+    "polished_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["content_hash", "size_bytes", "storage_locator"],
+      "properties": {
+        "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "storage_locator": {"type": "string", "pattern": "^spool:objects/"}
+      }
+    },
+    "citation_authority": {"const": "original_only"},
+    "verification_status": {"const": "verified"},
+    "actor_ref": {"const": "core:transcript-polish-verifier"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
