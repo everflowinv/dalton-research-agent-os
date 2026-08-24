@@ -115,6 +115,10 @@ _LAZY_EXPORTS = {
     "ResearchReviewControlPlane": (
         ".research_review_control", "ResearchReviewControlPlane"
     ),
+    "HumanIntentAuthority": (".human_intent", "HumanIntentAuthority"),
+    "NaturalLanguageComposerPlane": (
+        ".human_intent", "NaturalLanguageComposerPlane"
+    ),
     "DocumentIndex": (".document_index", "DocumentIndex"),
     "DocumentIndexInput": (".document_index", "DocumentIndexInput"),
     "make_document_index_input": (".document_index", "make_document_index_input"),
@@ -297,6 +301,8 @@ __all__ = [
     "normalize_sec_submissions",
     "HumanReviewAuthority",
     "ResearchReviewControlPlane",
+    "HumanIntentAuthority",
+    "NaturalLanguageComposerPlane",
     "DocumentIndex",
     "DocumentIndexInput",
     "make_document_index_input",

@@ -143,6 +143,12 @@ directive、剩余预算和 ProbeTemplate catalog；doctrine-aware deterministic
 不能扩 scope、权限、参数或预算。PlannerProposal 0.2 绑定 exact ContextPack，旧 0.1 planner/proposal 保持兼容；实施
 边界见 [Doctrine 与 Planner ContextPack v1](docs/reports/doctrine-and-planner-context-pack-v1-2026-08-23.md)。
 
+2026-08-24 的 development Cockpit 已加入 candidate-only 自然语言 composer。服务端保存 owner 原文和 exact
+Cockpit context，独立模型解释器只能生成 closed question/directive/priority/approval/meta 候选；UI 和 API 没有执行
+或确认端点。16-case GPT-5.6 Terra 校准为 16/16、safety 9/9。taxonomy、后续 ad-hoc answer route 和未完成边界见
+[ADR-0002](docs/adr/0002-natural-language-intent-and-answer-routing.md) 与
+[实施报告](docs/reports/natural-language-intent-composer-v0.1-2026-08-24.md)。
+
 Gate 0、Gate 1 和 Gate 2 控制面验收已完成。verifier 现改为 wrapper-owned binding：模型只返回 semantic
 `verdict/findings`，trusted worker 从 immutable WorkOrder 绑定 exact assessment ref/hash，raw ResultEnvelope 与历史
 replay 保留。同一 30-case v0.2 corpus 的 low-thinking 重跑中，Gemini 3.7 Flash 和 GPT-5.6 Luna 都是 30/30，

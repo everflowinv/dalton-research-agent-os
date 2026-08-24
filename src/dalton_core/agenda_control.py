@@ -25,6 +25,12 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
+from .human_intent import (
+    HumanIntentError,
+    IntentComposerConfig,
+    NaturalLanguageComposerPlane,
+    build_cockpit_intent_context,
+)
 from .research_review import ResearchReviewError
 from .research_review_control import (
     ResearchReviewControlConfig,
@@ -89,6 +95,7 @@ class AgendaControlConfig:
     feedback_timeout_seconds: int
     sweep_interval_seconds: int
     research_review: ResearchReviewControlConfig | None = None
+    intent_composer: IntentComposerConfig | None = None
 
     @property
     def public_url(self) -> str:
@@ -101,7 +108,8 @@ class AgendaControlConfig:
             "writer_socket", "token_config", "endpoint_ref",
             "feedback_timeout_seconds", "sweep_interval_seconds",
         }
-        if set(raw) - expected - {"research_review"} or not expected.issubset(raw):
+        optional = {"research_review", "intent_composer"}
+        if set(raw) - expected - optional or not expected.issubset(raw):
             raise AgendaControlError("Agenda control config has an invalid closed shape")
         host = _string(raw["host"], "host")
         if host not in {"127.0.0.1", "::1"}:
@@ -125,6 +133,15 @@ class AgendaControlConfig:
                 review_config = ResearchReviewControlConfig.from_mapping(review_raw)
             except ResearchReviewControlError as exc:
                 raise AgendaControlError("embedded research review config is invalid") from exc
+        intent_config = None
+        intent_raw = raw.get("intent_composer")
+        if intent_raw is not None:
+            if not isinstance(intent_raw, Mapping):
+                raise AgendaControlError("intent_composer must be an object or null")
+            try:
+                intent_config = IntentComposerConfig.from_mapping(intent_raw)
+            except HumanIntentError as exc:
+                raise AgendaControlError("embedded intent composer config is invalid") from exc
         return cls(
             host=host,
             port=_positive_int(raw["port"], "port", 65535),
@@ -141,6 +158,7 @@ class AgendaControlConfig:
                 raw["sweep_interval_seconds"], "sweep_interval_seconds", 86400
             ),
             research_review=review_config,
+            intent_composer=intent_config,
         )
 
     @classmethod
@@ -243,6 +261,8 @@ class AgendaControlPlane:
                 resolution = "pending"
             rows.append({
                 "decision_ref": self._decision_ref(target),
+                "message_ref": target.get("message_id"),
+                "payload_hash": target.get("payload_hash"),
                 "company_ref": payload.get("company_ref"),
                 "selected": payload.get("selected", []),
                 "deferred_count": int(payload.get("deferred_count", 0)),
@@ -354,10 +374,12 @@ class AgendaControlApplication:
         config: AgendaControlConfig,
         plane: AgendaControlPlane,
         review_plane: ResearchReviewControlPlane | None = None,
+        intent_plane: NaturalLanguageComposerPlane | None = None,
     ) -> None:
         self.config = config
         self.plane = plane
         self.review_plane = review_plane
+        self.intent_plane = intent_plane
         self._sessions: dict[str, _Session] = {}
         self._lock = threading.Lock()
 
@@ -426,10 +448,25 @@ class AgendaControlApplication:
         assert self.review_plane is not None
         return self.review_plane.record_transcript(login, value)
 
+    def post_intent(
+        self, login: str, session: _Session, csrf: str | None, body: bytes
+    ) -> dict[str, Any]:
+        if self.intent_plane is None:
+            raise AgendaControlError("natural-language composer is not enabled")
+        if not isinstance(csrf, str) or not secrets.compare_digest(csrf, session.csrf):
+            raise PermissionError("invalid CSRF token")
+        try:
+            value = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgendaControlError("request body is invalid") from exc
+        if not isinstance(value, Mapping):
+            raise AgendaControlError("request body must be an object")
+        return self.intent_plane.compose(login, value)
+
 
 def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "DaltonCockpit/0.2"
+        server_version = "DaltonCockpit/0.3"
 
         def _identity(self) -> str | None:
             return application.allowed_login(self.headers.get("Tailscale-User-Login"))
@@ -526,6 +563,21 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                     value["csrf_token"] = session.csrf
                     body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
                     content_type = "application/json; charset=utf-8"
+                elif path == "/v1/intent":
+                    value = (
+                        {
+                            "as_of": datetime.now(timezone.utc).isoformat(),
+                            "items": [],
+                            "candidate_only": True,
+                            "execution_enabled": False,
+                            "enabled": False,
+                        }
+                        if application.intent_plane is None
+                        else {**application.intent_plane.view(login), "enabled": True}
+                    )
+                    value["csrf_token"] = session.csrf
+                    body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+                    content_type = "application/json; charset=utf-8"
                 else:
                     self._send(HTTPStatus.NOT_FOUND, "application/json", b'{"error":"not_found"}')
                     return
@@ -547,6 +599,7 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 "/v1/agenda/feedback": application.post,
                 "/v1/research-review/decision": application.post_review,
                 "/v1/transcript-review/decision": application.post_transcript_review,
+                "/v1/intent/compose": application.post_intent,
             }
             action = actions.get(path)
             if action is None:
@@ -566,7 +619,10 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
             except PermissionError:
                 self._send(HTTPStatus.FORBIDDEN, "application/json", b'{"error":"csrf"}')
                 return
-            except (AgendaControlError, ResearchReviewControlError, ResearchReviewError):
+            except (
+                AgendaControlError, HumanIntentError,
+                ResearchReviewControlError, ResearchReviewError,
+            ):
                 self._send(HTTPStatus.BAD_REQUEST, "application/json", b'{"error":"invalid_request"}')
                 return
             body = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
@@ -594,7 +650,38 @@ def serve(config: AgendaControlConfig) -> None:
             token_config=config.token_config,
         )
     )
-    application = AgendaControlApplication(config, plane, review_plane)
+    intent_plane = None
+    if config.intent_composer is not None:
+        def context_provider(login: str) -> Mapping[str, Any]:
+            review = (
+                {"items": []}
+                if review_plane is None
+                else review_plane.view(login)
+            )
+            transcript = (
+                {"items": []}
+                if review_plane is None
+                else review_plane.transcript_view(login)
+            )
+            trajectory = (
+                {"items": []}
+                if review_plane is None
+                else review_plane.trajectory_view(login)
+            )
+            return build_cockpit_intent_context(
+                agenda=plane.view(login),
+                research_review=review,
+                transcript_review=transcript,
+                trajectory=trajectory,
+            )
+
+        intent_plane = NaturalLanguageComposerPlane(
+            config.intent_composer,
+            context_provider=context_provider,
+        )
+    application = AgendaControlApplication(
+        config, plane, review_plane, intent_plane
+    )
     stop = threading.Event()
 
     def sweep_loop() -> None:
@@ -634,6 +721,8 @@ def serve(config: AgendaControlConfig) -> None:
             reconciler.join(timeout=5)
         if review_plane is not None:
             review_plane.close()
+        if intent_plane is not None:
+            intent_plane.close()
 
 
 def main(argv: Iterable[str] | None = None) -> int:

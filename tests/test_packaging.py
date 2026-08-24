@@ -30,6 +30,7 @@ class PackagingTests(unittest.TestCase):
             "research_coordinator_schema.sql",
             "candidate_staging_schema.sql",
             "research_review_schema.sql",
+            "human_intent_schema.sql",
             "research_question_backlog_schema.sql",
             "research_plan_schema.sql",
             "transcript_correction_schema.sql",

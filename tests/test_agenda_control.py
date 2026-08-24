@@ -82,6 +82,27 @@ class ReviewPlane:
         }
 
 
+class IntentPlane:
+    def __init__(self):
+        self.calls = []
+
+    def view(self, login):
+        return {
+            "as_of": NOW,
+            "actor_ref": login,
+            "candidate_only": True,
+            "execution_enabled": False,
+            "items": [],
+        }
+
+    def compose(self, login, value):
+        self.calls.append((login, dict(value)))
+        return {
+            "status": "fresh",
+            "candidate": {"candidate_only": True, "executable": False},
+        }
+
+
 class AgendaControlTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -176,9 +197,10 @@ class AgendaControlTests(unittest.TestCase):
         self.assertEqual(row["source"], "tailscale_dashboard")
         self.assertEqual(row["actor_ref"], "bridge:tailscale-dashboard")
 
-    def test_one_session_and_csrf_guard_agenda_and_both_review_planes(self):
+    def test_one_session_and_csrf_guard_all_cockpit_write_planes(self):
         review = ReviewPlane()
-        app = AgendaControlApplication(self.config, self.plane, review)
+        intent = IntentPlane()
+        app = AgendaControlApplication(self.config, self.plane, review, intent)
         session_id, session, created = app.session(LOGIN, None)
         self.assertTrue(created)
         same_id, same_session, created_again = app.session(
@@ -199,6 +221,22 @@ class AgendaControlTests(unittest.TestCase):
             )["status"],
             "transcript-recorded",
         )
+        with self.assertRaises(PermissionError):
+            app.post_intent(
+                LOGIN,
+                session,
+                "wrong",
+                '{"request_id":"1","utterance":"查 ACN"}'.encode(),
+            )
+        self.assertEqual(
+            app.post_intent(
+                LOGIN,
+                session,
+                session.csrf,
+                b'{"request_id":"1","utterance":"\xe6\x9f\xa5 ACN"}',
+            )["status"],
+            "fresh",
+        )
         self.assertEqual(
             review.calls,
             [
@@ -206,6 +244,7 @@ class AgendaControlTests(unittest.TestCase):
                 ("transcript", LOGIN, {"y": 2}),
             ],
         )
+        self.assertEqual(intent.calls, [(LOGIN, {"request_id": "1", "utterance": "查 ACN"})])
 
     def test_embedded_review_config_has_no_second_host_or_core_path(self):
         raw = {
@@ -227,9 +266,25 @@ class AgendaControlTests(unittest.TestCase):
                 ),
                 "reconcile_interval_seconds": 60,
             },
+            "intent_composer": {
+                "staging_path": str(Path(self.temp.name) / "intent.sqlite"),
+                "scheduler_db": str(Path(self.temp.name) / "scheduler.sqlite"),
+                "model_router_db": str(Path(self.temp.name) / "router.sqlite"),
+                "broker_socket": str(Path(self.temp.name) / "broker.sock"),
+                "broker_auth_key": str(Path(self.temp.name) / "broker.key"),
+                "routing_policy_ref": "model-routing-policy-version:intent:1",
+                "credential_slot_refs": ["credential-slot:openclaw:intent"],
+                "broker_client_id": "client:dalton-intent",
+                "expected_agent_id": "chem",
+                "timeout_seconds": 60,
+                "max_input_tokens": 16000,
+                "max_output_tokens": 1200,
+                "max_cost_usd": 1.0,
+            },
         }
         config = AgendaControlConfig.from_mapping(raw)
         self.assertIsNotNone(config.research_review)
+        self.assertIsNotNone(config.intent_composer)
         raw["research_review"]["core_db"] = str(
             Path(self.temp.name) / "core.sqlite"
         )
@@ -238,7 +293,8 @@ class AgendaControlTests(unittest.TestCase):
 
     def test_single_http_surface_serves_cockpit_and_all_review_routes(self):
         review = ReviewPlane()
-        app = AgendaControlApplication(self.config, self.plane, review)
+        intent = IntentPlane()
+        app = AgendaControlApplication(self.config, self.plane, review, intent)
         server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(app))
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
@@ -286,6 +342,18 @@ class AgendaControlTests(unittest.TestCase):
                 review_payload["csrf_token"],
                 trajectory_payload["csrf_token"],
             )
+            connection.request(
+                "GET", "/v1/intent",
+                headers={**headers, "Cookie": cookie},
+            )
+            response = connection.getresponse()
+            intent_payload = json.loads(response.read())
+            self.assertTrue(intent_payload["enabled"])
+            self.assertTrue(intent_payload["candidate_only"])
+            self.assertFalse(intent_payload["execution_enabled"])
+            self.assertEqual(
+                review_payload["csrf_token"], intent_payload["csrf_token"]
+            )
             body = b'{}'
             connection.request(
                 "POST", "/v1/research-trajectory", body=body,
@@ -313,6 +381,23 @@ class AgendaControlTests(unittest.TestCase):
             self.assertEqual(response.status, 200)
             self.assertEqual(
                 json.loads(response.read())["status"], "research-recorded"
+            )
+            body = b'{"request_id":"intent-1","utterance":"check ACN"}'
+            connection.request(
+                "POST", "/v1/intent/compose", body=body,
+                headers={
+                    **headers, "Cookie": cookie,
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                    "X-Dalton-CSRF": review_payload["csrf_token"],
+                },
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertTrue(json.loads(response.read())["candidate"]["candidate_only"])
+            self.assertEqual(
+                intent.calls,
+                [(LOGIN, {"request_id": "intent-1", "utterance": "check ACN"})],
             )
             connection.close()
         finally:

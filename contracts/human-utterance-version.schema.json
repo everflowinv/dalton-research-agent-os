@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HumanUtteranceVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "request_id", "actor_ref", "surface", "verbatim_text", "context_pack_ref", "context_pack_hash", "executable", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "minLength": 1},
+    "created_at": {"type": "string", "format": "date-time"},
+    "request_id": {"type": "string", "pattern": "^[A-Za-z0-9._-]{1,128}$"},
+    "actor_ref": {"type": "string", "pattern": "^human:[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+    "surface": {"const": "dalton_cockpit"},
+    "verbatim_text": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "context_pack_ref": {"type": "string", "minLength": 1},
+    "context_pack_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "executable": {"const": false},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
