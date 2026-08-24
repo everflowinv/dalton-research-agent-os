@@ -27,6 +27,7 @@ from dalton_core.contracts import WorkOrder
 from dalton_core.model_deployment import (
     TRANSCRIPT_POLISH_DEVELOPMENT_POLICY_REF,
     TRANSCRIPT_POLISH_DEVELOPMENT_PROFILE_ID,
+    install_openclaw_catalog,
     upgrade_openclaw_broker_catalog,
 )
 from dalton_core.model_router import ModelRouter
@@ -556,6 +557,11 @@ def run_canary(
         model_work = WorkOrder.from_dict(prepared["work_order"])
 
         router_path = output_dir / "router.sqlite"
+        install_openclaw_catalog(
+            router_path,
+            checked_at=created,
+            availability_ttl=timedelta(days=1),
+        )
         upgrade_openclaw_broker_catalog(
             router_path,
             checked_at=created,
