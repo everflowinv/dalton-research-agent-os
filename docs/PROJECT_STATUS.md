@@ -45,13 +45,16 @@
   worker 或 production routing。详见
   [LLM Research Planner 与模型选择 v0.1](reports/llm-research-planner-and-model-selection-v0.1-2026-08-23.md)
 - development Planner 又扩展校准了 Qwen DeepSeek V4 Flash/Pro、Grok 4.6、Gemini 3.7 Flash、OpenRouter Ox
-  Alpha 和 ZAI GLM 5.3。V4 Flash、V4 Pro、Gemini 3.7 与 Ox Alpha 均连续两轮 30/30、safety 20/20；V4
-  Flash 以两轮 USD 0.00960668 和约 2.0s 单 case 中位延迟取代 Qwen 3.8 Max，成为 immutable
-  development policy v2 的首选。Grok 有 5 次超过 frozen 800-token WorkOrder 上限并 fail closed。GLM 已证明
-  OpenClaw 新路由可发现、可做 calibration-only 准入；首轮因宿主 `xhigh` 超出 ZAI 支持范围在 provider 调用前
-  失败，broker 已增加 profile-level `thinkingLevel` 并固定为 `high`，完整重跑等待 safe restart 生效。详见
-  [LLM Research Planner 模型扩展校准 v0.2](reports/llm-research-planner-model-expansion-v0.2-2026-08-23.md)。当前全仓
-  Python 750/750、Node broker 24/24，sdist/wheel 构建通过；仍未部署 production Planner routing
+  Alpha、ZAI GLM 5.3 和 GPT-5.6 Luna。V4 Flash、V4 Pro、Gemini 3.7 与 Ox Alpha 均连续两轮
+  30/30、safety 20/20；V4 Flash 以两轮 USD 0.00960668 和约 2.0s 单 case 中位延迟取代 Qwen 3.8 Max，
+  成为 immutable development policy v2 的首选。Luna 完整复测为 14/15、safety 10/10、USD 0.0058576、
+  中位 3.191s，不替代 Flash；Grok 有 5 次超过 frozen 800-token WorkOrder 上限并 fail closed。GLM 已证明
+  OpenClaw 新路由可发现、可做 calibration-only 准入，但复查确认旧宿主静默忽略 broker 的
+  profile-level `thinkingLevel`。host runtime 已补 exact forwarding/capability，broker 也会在宿主不支持时启动失败；
+  fake provider 与 Node 25/25 已通过。safe restart 已排队，GLM 完整重跑仍待新进程。详见
+  [模型扩展校准 v0.2](reports/llm-research-planner-model-expansion-v0.2-2026-08-23.md)及
+  [GLM / Luna follow-up v0.3](reports/llm-research-planner-glm-luna-follow-up-v0.3-2026-08-23.md)。仍未部署
+  production Planner routing
 - development candidate 已增加 Gemini `web_search` discovery bridge 和独立 public-web fetch adapter。冻结 inventory
   已按真实 OpenClaw 合同修正为无 cursor，`freshness` 与显式日期窗互斥；search raw response 完整保存，向后只暴露
   由引用 URL 推导的 opaque authority ref，不把 Gemini synthesis、snippet 或 title 当作网页正文。系统只有从 exact
@@ -91,8 +94,8 @@ Capability Registry/Catalog、常驻控制服务、Agenda Shadow、durable outbo
 source-level Outcome 从 human-admitted ProbeTemplate 中提出下一 probe。Core 掌握 scope、权限、预算、coverage
 和终态，且复用现有 Scheduler/Workflow authority。Doctrine 与 Planner ContextPack v1 已让同一问题在不同
 human-admitted lens 下选择不同的已批准 probe；真实 LLM 现在可以读取 exact ContextPack，但只能提交严格的弱候选，
-Core 才能签发 Proposal 0.3，deterministic planner 保留为 fallback。Qwen 3.8 Max 已按两轮 30/30 的固定 corpus
-结果写入 development-only phase policy；live production 尚未启用 Planner worker 或该 policy。下一步是实现
+Core 才能签发 Proposal 0.3，deterministic planner 保留为 fallback。Qwen DeepSeek V4 Flash 0731 已按两轮
+30/30 的固定 corpus 结果写入 development-only policy v2；live production 尚未启用 Planner worker 或该 policy。下一步是实现
 StatementSnapshot v1，并把它作为新的受限 probe 能力接入同一 loop。
 live 部署现在能自主生成并选择研究问题，也已加载 phase-pinned thesis-impact production lane；由于 live Core
 尚无 ThesisVersion 和 company mapping，这条 lane 当前只做无模型调用的 idle 检查，不提交 assessment、verification
@@ -1250,6 +1253,8 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - 人类研究意图与 Bounded Planner Loop 架构讨论：`docs/reports/human-research-intent-and-bounded-planner-loop-v1-2026-08-23.md`
 - Bounded Planner Loop v1 实施：`docs/reports/bounded-planner-loop-v1-implementation-2026-08-23.md`
 - Doctrine 与 Planner ContextPack v1：`docs/reports/doctrine-and-planner-context-pack-v1-2026-08-23.md`
+- LLM Research Planner 模型扩展校准：`docs/reports/llm-research-planner-model-expansion-v0.2-2026-08-23.md`
+- GLM / Luna 复测与宿主 thinking 修正：`docs/reports/llm-research-planner-glm-luna-follow-up-v0.3-2026-08-23.md`
 - OpenAI Responses provider controls：`docs/reports/openai-responses-provider-controls-2026-08-22.md`
 - Connector Fabric 独立复核与更正：`docs/reports/connector-fabric-next-phase-2026-08-14.md`
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`

@@ -3,6 +3,10 @@
 日期：2026-08-23  
 状态：development calibration；未部署 live production
 
+> 后续更正：本报告所述 broker `thinkingLevel` 当时没有被 OpenClaw 2026.7.1 宿主真正转发。
+> 宿主修正、Luna 复测和 GLM 待重跑状态见
+> [v0.3 follow-up](llm-research-planner-glm-luna-follow-up-v0.3-2026-08-23.md)。
+
 ## 裁决
 
 `profile:qwen-deepseek-v4-flash-0731` 取代 Qwen 3.8 Max，成为 development-only Planner 首选。

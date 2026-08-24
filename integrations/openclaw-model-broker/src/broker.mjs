@@ -233,6 +233,23 @@ export class ModelBroker {
     }
     this.runtime = runtime;
     this.config = validateConfig(rawConfig);
+    const configuredThinkingLevels = new Set(
+      [...this.config.profiles.values()]
+        .map((profile) => profile.thinkingLevel)
+        .filter((level) => level !== undefined),
+    );
+    if (configuredThinkingLevels.size > 0) {
+      const advertisedLevels = runtime.llm.capabilities?.thinkingLevel?.levels;
+      if (
+        !Array.isArray(advertisedLevels)
+        || [...configuredThinkingLevels].some((level) => !advertisedLevels.includes(level))
+      ) {
+        throw new ProtocolError(
+          "INVALID_RUNTIME",
+          "runtime.llm does not advertise every configured profile thinking level",
+        );
+      }
+    }
     this.journal = journal ?? new MemoryIdempotencyJournal({ ttlMs: this.config.journalTtlMs });
     this.active = 0;
     this.reserved = 0;

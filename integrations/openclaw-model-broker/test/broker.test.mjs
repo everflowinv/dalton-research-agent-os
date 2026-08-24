@@ -96,24 +96,32 @@ function requiredControls(overrides = {}) {
   };
 }
 
-function fakeRuntime(complete, { controlled = false } = {}) {
+function fakeRuntime(complete, { controlled = false, thinking = false } = {}) {
   return {
     version: "2026.7.1",
     llm: {
-      ...(controlled ? {
+      ...((controlled || thinking) ? {
         capabilities: {
-          providerControls: {
-            version: "0.1",
-            modes: [
-              "openai-responses-input-count-v1",
-              "google-generative-ai-count-tokens-v1",
-            ],
-            transport: "openai/openai-responses",
-            transports: {
-              "openai-responses-input-count-v1": "openai/openai-responses",
-              "google-generative-ai-count-tokens-v1": "google/google-generative-ai",
+          ...(thinking ? {
+            thinkingLevel: {
+              version: "0.1",
+              levels: ["off", "minimal", "low", "medium", "high", "xhigh", "adaptive", "max"],
             },
-          },
+          } : {}),
+          ...(controlled ? {
+            providerControls: {
+              version: "0.1",
+              modes: [
+                "openai-responses-input-count-v1",
+                "google-generative-ai-count-tokens-v1",
+              ],
+              transport: "openai/openai-responses",
+              transports: {
+                "openai-responses-input-count-v1": "openai/openai-responses",
+                "google-generative-ai-count-tokens-v1": "google/google-generative-ai",
+              },
+            },
+          } : {}),
         },
       } : {}),
       complete,
@@ -201,7 +209,7 @@ test("profile thinking level is pinned on host completion", async () => {
   const runtime = fakeRuntime(async (params) => {
     calls.push(params);
     return result();
-  });
+  }, { thinking: true });
   const base = config();
   const broker = new ModelBroker(runtime, {
     ...base,
@@ -212,6 +220,17 @@ test("profile thinking level is pinned on host completion", async () => {
 
   assert.equal(response.ok, true);
   assert.equal(calls[0].thinkingLevel, "high");
+});
+
+test("profile thinking level rejects a host that cannot enforce it", () => {
+  const base = config();
+  assert.throws(
+    () => new ModelBroker(fakeRuntime(async () => result()), {
+      ...base,
+      profiles: [{ ...base.profiles[0], thinkingLevel: "high" }],
+    }),
+    (error) => error instanceof ProtocolError && error.code === "INVALID_RUNTIME",
+  );
 });
 
 test("profile thinking level rejects unknown values and provider-control conflicts", () => {
