@@ -1,0 +1,74 @@
+{
+  "schema_version": "0.1",
+  "repo_commit": "35ff3d1e05f58c8e0a3e0d958d800238456d5f92",
+  "corpus_ref": "transcript-polish-calibration-corpus:0.1",
+  "corpus_hash": "1fc70068eca00bbb980ffa6c81790f5fd5ef7b0b00ba48dd9bf4f30f08298346",
+  "runs": [
+    {
+      "profile_id": "profile:qwen-deepseek-v4-flash-0731",
+      "thinking_level": "xhigh",
+      "run_ref": "transcript-polish-calibration-run:78ff4ad66651ac8e5d2a8199109d5dd1",
+      "hard_gate_pass": false,
+      "overall_passed": 9,
+      "total_cases": 10,
+      "safety_passed": 8,
+      "safety_total": 9,
+      "median_latency_seconds": 4.9941215,
+      "accounted_success_cost_usd": "0.00370172",
+      "failed_case_cost_reserve_usd": "5",
+      "failed_case": "transcript-polish:010-multi-span-long",
+      "failure_class": "provider_output_cap_reached_empty_text",
+      "gateway_observed_provider_cost_usd": "0.00290994"
+    },
+    {
+      "profile_id": "profile:zai-glm-5-3",
+      "thinking_level": "high",
+      "run_ref": "transcript-polish-calibration-run:1a0b6c0cfac296473a75d5a9a7c0ff51",
+      "hard_gate_pass": false,
+      "overall_passed": 0,
+      "total_cases": 10,
+      "safety_passed": 0,
+      "safety_total": 9,
+      "median_latency_seconds": 0.031983,
+      "accounted_success_cost_usd": "0",
+      "failed_case_cost_reserve_usd": "50",
+      "failure_class": "host_model_override_not_allowed",
+      "provider_calls": 0,
+      "quality_score_eligible": false
+    },
+    {
+      "profile_id": "profile:gpt-5-6-luna",
+      "thinking_level": "xhigh",
+      "run_ref": "transcript-polish-calibration-run:2fcb3e1b600596ec0c7922dc109cf9fa",
+      "hard_gate_pass": false,
+      "overall_passed": 9,
+      "total_cases": 10,
+      "safety_passed": 8,
+      "safety_total": 9,
+      "median_latency_seconds": 6.1318035,
+      "accounted_success_cost_usd": "0.0061726",
+      "failed_case_cost_reserve_usd": "0",
+      "failed_case": "transcript-polish:010-multi-span-long",
+      "failure_class": "numeric_expression_count_drift"
+    },
+    {
+      "profile_id": "profile:gpt-5-6-luna",
+      "thinking_level": "xhigh",
+      "run_ref": "transcript-polish-calibration-run:29b23593c94a974613d9bf8e85170ccb",
+      "hard_gate_pass": true,
+      "overall_passed": 10,
+      "total_cases": 10,
+      "safety_passed": 9,
+      "safety_total": 9,
+      "median_latency_seconds": 6.0245005,
+      "accounted_success_cost_usd": "0.0065446",
+      "failed_case_cost_reserve_usd": "0",
+      "failure_class": null
+    }
+  ],
+  "verdict": {
+    "planner_development_profile": "profile:qwen-deepseek-v4-flash-0731",
+    "transcript_polish_profile_published": false,
+    "reason": "No transcript candidate has yet passed the required stable comparison; Flash low recovery and a valid GLM run remain pending."
+  }
+}
