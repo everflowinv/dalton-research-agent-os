@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/answer-route-decision.schema.json",
+  "title": "AnswerRouteDecision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "route", "reason_codes",
+    "answer_context_pack_ref", "answer_context_pack_hash", "subject_ref",
+    "subject_hash", "question", "direct_claim_refs", "direct_evidence_refs",
+    "refresh_route_available", "adhoc_research_route_available",
+    "agenda_recommendation", "write_performed", "content_hash"
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ref": {"type": "string", "minLength": 1},
+    "reason": {
+      "enum": [
+        "answer_direct_ready", "policy_unavailable", "policy_stale",
+        "question_not_admitted", "question_not_answered",
+        "answered_claim_superseded", "claim_without_support",
+        "insufficient_formal_claims", "insufficient_formal_evidence",
+        "unclassified_source_type", "stale_evidence",
+        "too_many_contested_claims", "too_many_open_questions",
+        "too_many_unobservable_terminals", "insufficient_driver_coverage"
+      ]
+    }
+  },
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^answer-route-decision:[0-9a-f]{64}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "route": {"enum": ["answer_direct", "recommend_agenda_item"]},
+    "reason_codes": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/reason"}
+    },
+    "answer_context_pack_ref": {"$ref": "#/$defs/ref"},
+    "answer_context_pack_hash": {"$ref": "#/$defs/hash"},
+    "subject_ref": {"$ref": "#/$defs/ref"},
+    "subject_hash": {"$ref": "#/$defs/hash"},
+    "question": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "direct_claim_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
+    "direct_evidence_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
+    "refresh_route_available": {"const": false},
+    "adhoc_research_route_available": {"const": false},
+    "agenda_recommendation": {"type": ["object", "null"]},
+    "write_performed": {"const": false},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  }
+}

@@ -64,6 +64,7 @@ dalton_core = [
   "statement_snapshot_schema.sql",
   "transcript_polish_schema.sql",
   "transcript_correction_schema.sql",
+  "answer_routing_schema.sql",
   "connector_inventory/*.json",
   "connector_inventory/profiles/*.json",
   "connector_inventory/fixtures/*.json",

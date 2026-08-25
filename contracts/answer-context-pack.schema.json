@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/answer-context-pack.schema.json",
+  "title": "AnswerContextPack",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "projection_kind", "question",
+    "subject_binding", "mandate_version", "policy_version",
+    "matched_research_question", "claim_versions", "evidence_versions",
+    "current_thesis_versions", "industry_driver_packs", "company_overlays",
+    "industry_evidence_packs", "open_questions", "unobservable_terminals",
+    "metrics", "content_hash"
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ref": {"type": "string", "minLength": 1},
+    "authorityRecord": {
+      "type": "object",
+      "required": ["id", "content_hash"],
+      "properties": {
+        "id": {"$ref": "#/$defs/ref"},
+        "content_hash": {"$ref": "#/$defs/hash"}
+      }
+    }
+  },
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^answer-context-pack:[0-9a-f]{64}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "projection_kind": {"const": "answer_context_pack"},
+    "question": {"type": "string", "minLength": 1, "maxLength": 4000},
+    "subject_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "kind", "ref", "hash", "label", "company_ref",
+        "mandate_ref", "mandate_version_ref", "mandate_version_hash",
+        "policy_state", "policy_version_ref", "policy_version_hash"
+      ],
+      "properties": {
+        "schema_version": {"const": "0.1"},
+        "kind": {"const": "answer_subject"},
+        "ref": {"$ref": "#/$defs/ref"},
+        "hash": {"$ref": "#/$defs/hash"},
+        "label": {"type": "string", "minLength": 1},
+        "company_ref": {"$ref": "#/$defs/ref"},
+        "mandate_ref": {"$ref": "#/$defs/ref"},
+        "mandate_version_ref": {"$ref": "#/$defs/ref"},
+        "mandate_version_hash": {"$ref": "#/$defs/hash"},
+        "policy_state": {"enum": ["active", "stale", "unavailable"]},
+        "policy_version_ref": {"type": ["string", "null"]},
+        "policy_version_hash": {
+          "oneOf": [{"$ref": "#/$defs/hash"}, {"type": "null"}]
+        }
+      }
+    },
+    "mandate_version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "hash", "mandate_ref", "objective", "scope_refs"],
+      "properties": {
+        "ref": {"$ref": "#/$defs/ref"},
+        "hash": {"$ref": "#/$defs/hash"},
+        "mandate_ref": {"$ref": "#/$defs/ref"},
+        "objective": {"type": "string", "minLength": 1},
+        "scope_refs": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/ref"}
+        }
+      }
+    },
+    "policy_version": {"type": ["object", "null"]},
+    "matched_research_question": {"type": ["object", "null"]},
+    "claim_versions": {"type": "array", "items": {"type": "object"}},
+    "evidence_versions": {"type": "array", "items": {"type": "object"}},
+    "current_thesis_versions": {"type": "array", "items": {"type": "object"}},
+    "industry_driver_packs": {
+      "type": "array", "items": {"$ref": "#/$defs/authorityRecord"}
+    },
+    "company_overlays": {
+      "type": "array", "items": {"$ref": "#/$defs/authorityRecord"}
+    },
+    "industry_evidence_packs": {
+      "type": "array", "items": {"$ref": "#/$defs/authorityRecord"}
+    },
+    "open_questions": {"type": "array", "items": {"type": "object"}},
+    "unobservable_terminals": {"type": "array", "items": {"type": "object"}},
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "formal_claim_count", "formal_evidence_count", "contested_claim_count",
+        "open_question_count", "unobservable_terminal_count",
+        "covered_driver_count", "driver_count", "driver_coverage_bps",
+        "claims_without_support", "unclassified_evidence_refs",
+        "stale_evidence_refs", "answered_claim_superseded",
+        "evidence_freshness"
+      ],
+      "properties": {
+        "formal_claim_count": {"type": "integer", "minimum": 0},
+        "formal_evidence_count": {"type": "integer", "minimum": 0},
+        "contested_claim_count": {"type": "integer", "minimum": 0},
+        "open_question_count": {"type": "integer", "minimum": 0},
+        "unobservable_terminal_count": {"type": "integer", "minimum": 0},
+        "covered_driver_count": {"type": "integer", "minimum": 0},
+        "driver_count": {"type": "integer", "minimum": 0},
+        "driver_coverage_bps": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "claims_without_support": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
+        "unclassified_evidence_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
+        "stale_evidence_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
+        "answered_claim_superseded": {"type": "boolean"},
+        "evidence_freshness": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "content_hash": {"$ref": "#/$defs/hash"}
+  }
+}

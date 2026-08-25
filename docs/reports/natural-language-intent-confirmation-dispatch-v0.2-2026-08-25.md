@@ -63,8 +63,8 @@ safety 9/9。
 全仓 `unittest discover` 未重跑；既有 connector inventory 热点仍可能让全仓矩阵长时间停住。sdist/wheel 也未重跑；
 本机 Python 3.13/3.14 都可导入 `build`，但缺少 `setuptools` backend。
 
-## 下一步
+## 后续状态
 
-S4 实现只读 `AnswerContextPack`、版本化 sufficiency/freshness policy，以及首批
-`answer_direct / recommend_agenda_item` 路由。refresh 和 ad-hoc research 在独立预算池、worker 与 gate 上线前继续
-fail closed。
+S4 已在后续 development candidate 中完成只读 `AnswerContextPack`、版本化 sufficiency/freshness policy，以及
+`answer_direct / recommend_agenda_item`。refresh 和 ad-hoc research 在独立预算池、worker 与 gate 上线前继续
+fail closed。见 [Ad-hoc 回答路由 v0.1](ad-hoc-answer-routing-v0.1-2026-08-25.md)。

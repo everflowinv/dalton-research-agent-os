@@ -228,6 +228,70 @@ class WriterServiceTests(unittest.TestCase):
         self.assertEqual(result["mandate_version_ref"], mandate["id"])
         self.assertEqual(result["authority_result"]["status"], "fresh")
 
+    def test_answer_routing_rpc_keeps_policy_human_and_route_read_only(self):
+        mandate = self.governance.create_mandate(
+            mandate_ref="mandate:answer-rpc",
+            objective="Answer admitted ACN research questions.",
+            scope_refs=["company:acn"],
+            constraints={"public_sources_only": True},
+            success_criteria={"formal_claims_required": True},
+            effective_from="2020-01-01T00:00:00+00:00",
+            effective_until=None,
+            activate=True,
+            version_id="mandate-version:answer-rpc:1",
+            idempotency_key="mandate:answer-rpc:1",
+        )
+        policy = self.governance.publish_answer_sufficiency_policy(
+            policy_ref="answer-policy:answer-rpc",
+            mandate_version_ref=mandate["id"],
+            mandate_version_hash=mandate["content_hash"],
+            thresholds={
+                "min_driver_coverage_bps": 0,
+                "max_evidence_age_days_by_source_type": {"sec-filing": 30},
+                "allowed_contested_claims": 0,
+                "allowed_open_questions": 0,
+                "allowed_unobservable_terminals": 0,
+                "min_formal_claims": 1,
+                "min_formal_evidence": 1,
+            },
+            refresh_route={
+                "enabled": False,
+                "max_cost_units": 0,
+                "probe_template_bindings": [],
+            },
+            adhoc_research_route={
+                "enabled": False,
+                "max_cost_units": 0,
+                "max_rounds": 0,
+            },
+            effective_from="2020-01-01T00:00:00+00:00",
+            effective_until=None,
+            version_id="answer-policy-version:answer-rpc:1",
+            prior_version_ref=None,
+            idempotency_key="answer-policy:answer-rpc:1",
+        )
+        self.assertEqual(policy["status"], "fresh")
+        subjects = self.dashboard.answer_subjects()
+        subject = next(
+            item for item in subjects
+            if item["mandate_version_ref"] == mandate["id"]
+        )
+        self.assertEqual(subject["policy_state"], "active")
+        routed = self.dashboard.route_answer(
+            subject_binding=subject,
+            question="What changed in ACN organic growth?",
+        )
+        self.assertEqual(
+            routed["decision"]["route"], "recommend_agenda_item"
+        )
+        self.assertFalse(routed["decision"]["write_performed"])
+        with self.assertRaises(RemoteAuthorizationError):
+            self.worker.answer_subjects()
+        with self.assertRaises(RemoteAuthorizationError):
+            self.dashboard.publish_answer_sufficiency_policy(
+                policy_ref="answer-policy:forbidden"
+            )
+
     def test_coverage_admission_writes_require_authenticated_human(self):
         with self.assertRaises(RemoteAuthorizationError):
             self.worker.register_driver_pack(

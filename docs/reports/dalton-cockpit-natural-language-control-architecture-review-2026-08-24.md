@@ -148,6 +148,9 @@ Cockpit 用两张连续的待审卡完成这条路径。Transcript correction �
 
 先实现 `answer_direct` 与 `recommend_agenda_item`。AnswerContextPack、freshness policy 和事实引用均确定性校验；回答不写正式 authority。
 
+2026-08-25 development candidate 已完成这两条只读 route；refresh 与 ad-hoc research 仍按本裁决关闭。实现记录见
+[Ad-hoc 回答路由 v0.1](ad-hoc-answer-routing-v0.1-2026-08-25.md)。
+
 ### S5：有限刷新与 ad-hoc research
 
 接入独立日预算池和 Bounded Planner Loop。预算耗尽必须以 `budget_exhausted` 结束；新事实全部进入 candidate staging。

@@ -48,6 +48,7 @@ class Client:
     def __init__(self, agenda: AgendaStore, actor_ref: str):
         self.agenda = agenda
         self.actor_ref = actor_ref
+        self.answer_calls = []
 
     def list_agenda_feedback_targets(self, **params):
         return self.agenda.feedback_targets(**params)
@@ -57,6 +58,31 @@ class Client:
 
     def intent_context_bindings(self):
         return []
+
+    def answer_subjects(self):
+        return [{
+            "ref": "answer-subject:test",
+            "hash": "a" * 64,
+            "label": "wanhua · Find the best question",
+            "company_ref": "wanhua",
+            "policy_state": "active",
+        }]
+
+    def route_answer(self, **params):
+        self.answer_calls.append(dict(params))
+        return {
+            "context_pack": {
+                "id": "answer-context-pack:test",
+                "content_hash": "b" * 64,
+                "claim_versions": [],
+                "evidence_versions": [],
+            },
+            "decision": {
+                "route": "recommend_agenda_item",
+                "reason_codes": ["question_not_admitted"],
+                "write_performed": False,
+            },
+        }
 
 
 class ReviewPlane:
@@ -270,6 +296,25 @@ class AgendaControlTests(unittest.TestCase):
                 "decision": "confirm",
             }),
         ])
+        with self.assertRaises(PermissionError):
+            app.post_answer(
+                LOGIN,
+                session,
+                "wrong",
+                b'{"subject_binding":{},"question":"Why?"}',
+            )
+        answer_subject = self.plane.answer_view()["subjects"][0]
+        answer = app.post_answer(
+            LOGIN,
+            session,
+            session.csrf,
+            json.dumps({
+                "subject_binding": answer_subject,
+                "question": "Why?",
+            }).encode(),
+        )
+        self.assertEqual(answer["decision"]["route"], "recommend_agenda_item")
+        self.assertFalse(answer["decision"]["write_performed"])
 
     def test_embedded_review_config_has_no_second_host_or_core_path(self):
         raw = {
@@ -379,6 +424,18 @@ class AgendaControlTests(unittest.TestCase):
             self.assertEqual(
                 review_payload["csrf_token"], intent_payload["csrf_token"]
             )
+            connection.request(
+                "GET", "/v1/answer",
+                headers={**headers, "Cookie": cookie},
+            )
+            response = connection.getresponse()
+            answer_payload = json.loads(response.read())
+            self.assertEqual(response.status, 200)
+            self.assertFalse(answer_payload["refresh_enabled"])
+            self.assertFalse(answer_payload["adhoc_research_enabled"])
+            self.assertEqual(
+                review_payload["csrf_token"], answer_payload["csrf_token"]
+            )
             body = b'{}'
             connection.request(
                 "POST", "/v1/research-trajectory", body=body,
@@ -437,6 +494,25 @@ class AgendaControlTests(unittest.TestCase):
             response = connection.getresponse()
             self.assertEqual(response.status, 200)
             self.assertEqual(json.loads(response.read())["status"], "dispatched")
+            body = json.dumps({
+                "subject_binding": answer_payload["subjects"][0],
+                "question": "Why?",
+            }).encode()
+            connection.request(
+                "POST", "/v1/answer/route", body=body,
+                headers={
+                    **headers, "Cookie": cookie,
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                    "X-Dalton-CSRF": review_payload["csrf_token"],
+                },
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(
+                json.loads(response.read())["decision"]["route"],
+                "recommend_agenda_item",
+            )
             connection.close()
         finally:
             server.shutdown()

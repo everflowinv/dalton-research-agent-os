@@ -228,6 +228,15 @@ class WriterClient:
     def issue_intent_directive(self, **params: Any) -> Any:
         return self.call("issue_intent_directive", params)
 
+    def publish_answer_sufficiency_policy(self, **params: Any) -> Any:
+        return self.call("publish_answer_sufficiency_policy", params)
+
+    def answer_subjects(self, **params: Any) -> Any:
+        return self.call("answer_subjects", params)
+
+    def route_answer(self, **params: Any) -> Any:
+        return self.call("route_answer", params)
+
     def create_workflow_version(self, **params: Any) -> Any:
         return self.call("create_workflow_version", params)
 

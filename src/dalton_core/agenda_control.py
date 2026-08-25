@@ -229,6 +229,37 @@ class AgendaControlPlane:
             raise AgendaControlError("writer returned invalid intent context bindings")
         return [dict(item) for item in value]
 
+    def answer_view(self) -> dict[str, Any]:
+        value = self.dashboard.answer_subjects()
+        if not isinstance(value, list) or any(
+            not isinstance(item, Mapping) for item in value
+        ):
+            raise AgendaControlError("writer returned invalid answer subjects")
+        return {
+            "as_of": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "subjects": [dict(item) for item in value],
+            "routes": ["answer_direct", "recommend_agenda_item"],
+            "refresh_enabled": False,
+            "adhoc_research_enabled": False,
+        }
+
+    def route_answer(
+        self, subject_binding: Mapping[str, Any], question: str
+    ) -> dict[str, Any]:
+        if not isinstance(subject_binding, Mapping):
+            raise AgendaControlError("subject_binding must be an object")
+        result = self.dashboard.route_answer(
+            subject_binding=dict(subject_binding),
+            question=_string(question, "question"),
+        )
+        if (
+            not isinstance(result, Mapping)
+            or not isinstance(result.get("context_pack"), Mapping)
+            or not isinstance(result.get("decision"), Mapping)
+        ):
+            raise AgendaControlError("writer returned invalid answer route")
+        return dict(result)
+
     @staticmethod
     def _decision_ref(target: Mapping[str, Any]) -> str:
         payload = target.get("payload")
@@ -618,6 +649,24 @@ class AgendaControlApplication:
             raise AgendaControlError("request body must be an object")
         return self.intent_plane.confirm(login, value)
 
+    def post_answer(
+        self, login: str, session: _Session, csrf: str | None, body: bytes
+    ) -> dict[str, Any]:
+        del login
+        if not isinstance(csrf, str) or not secrets.compare_digest(csrf, session.csrf):
+            raise PermissionError("invalid CSRF token")
+        try:
+            value = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgendaControlError("request body is invalid") from exc
+        if not isinstance(value, Mapping) or set(value) != {
+            "subject_binding", "question"
+        }:
+            raise AgendaControlError("request body has an invalid closed shape")
+        return self.plane.route_answer(
+            value["subject_binding"], value["question"]
+        )
+
 
 def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
@@ -734,6 +783,13 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                     value["csrf_token"] = session.csrf
                     body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
                     content_type = "application/json; charset=utf-8"
+                elif path == "/v1/answer":
+                    value = application.plane.answer_view()
+                    value["csrf_token"] = session.csrf
+                    body = json.dumps(
+                        value, ensure_ascii=False, separators=(",", ":")
+                    ).encode()
+                    content_type = "application/json; charset=utf-8"
                 else:
                     self._send(HTTPStatus.NOT_FOUND, "application/json", b'{"error":"not_found"}')
                     return
@@ -757,6 +813,7 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 "/v1/transcript-review/decision": application.post_transcript_review,
                 "/v1/intent/compose": application.post_intent,
                 "/v1/intent/confirm": application.post_intent_confirm,
+                "/v1/answer/route": application.post_answer,
             }
             action = actions.get(path)
             if action is None:

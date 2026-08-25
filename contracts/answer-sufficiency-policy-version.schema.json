@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dalton.local/schemas/answer-sufficiency-policy-version.schema.json",
+  "title": "AnswerSufficiencyPolicyVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "policy_ref", "version",
+    "prior_version_ref", "mandate_ref", "mandate_version_ref",
+    "mandate_version_hash", "thresholds", "refresh_route",
+    "adhoc_research_route", "effective_from", "effective_until",
+    "actor_ref", "content_hash"
+  ],
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ref": {"type": "string", "minLength": 1, "maxLength": 256},
+    "nonnegative": {"type": "integer", "minimum": 0},
+    "positive": {"type": "integer", "minimum": 1}
+  },
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"$ref": "#/$defs/ref"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "policy_ref": {"$ref": "#/$defs/ref"},
+    "version": {"$ref": "#/$defs/positive"},
+    "prior_version_ref": {
+      "oneOf": [{"$ref": "#/$defs/ref"}, {"type": "null"}]
+    },
+    "mandate_ref": {"$ref": "#/$defs/ref"},
+    "mandate_version_ref": {"$ref": "#/$defs/ref"},
+    "mandate_version_hash": {"$ref": "#/$defs/hash"},
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_driver_coverage_bps", "max_evidence_age_days_by_source_type",
+        "allowed_contested_claims", "allowed_open_questions",
+        "allowed_unobservable_terminals", "min_formal_claims",
+        "min_formal_evidence"
+      ],
+      "properties": {
+        "min_driver_coverage_bps": {
+          "type": "integer", "minimum": 0, "maximum": 10000
+        },
+        "max_evidence_age_days_by_source_type": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"minLength": 1, "maxLength": 128},
+          "additionalProperties": {
+            "type": "integer", "minimum": 0, "maximum": 36500
+          }
+        },
+        "allowed_contested_claims": {"$ref": "#/$defs/nonnegative"},
+        "allowed_open_questions": {"$ref": "#/$defs/nonnegative"},
+        "allowed_unobservable_terminals": {"$ref": "#/$defs/nonnegative"},
+        "min_formal_claims": {"$ref": "#/$defs/positive"},
+        "min_formal_evidence": {"$ref": "#/$defs/positive"}
+      }
+    },
+    "refresh_route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "max_cost_units", "probe_template_bindings"],
+      "properties": {
+        "enabled": {"const": false},
+        "max_cost_units": {"const": 0},
+        "probe_template_bindings": {"type": "array", "maxItems": 0}
+      }
+    },
+    "adhoc_research_route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "max_cost_units", "max_rounds"],
+      "properties": {
+        "enabled": {"const": false},
+        "max_cost_units": {"const": 0},
+        "max_rounds": {"const": 0}
+      }
+    },
+    "effective_from": {"type": "string", "format": "date-time"},
+    "effective_until": {"type": ["string", "null"], "format": "date-time"},
+    "actor_ref": {
+      "type": "string", "pattern": "^human:[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    },
+    "content_hash": {"$ref": "#/$defs/hash"}
+  }
+}

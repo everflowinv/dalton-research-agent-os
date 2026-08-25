@@ -33,6 +33,13 @@ from .agenda import (
     AgendaValidationError,
 )
 from .agenda_context import build_agenda_context
+from .answer_routing import (
+    AnswerRoutingAuthority,
+    AnswerRoutingConflict,
+    AnswerRoutingError,
+    AnswerRoutingNotFound,
+    AnswerRoutingValidationError,
+)
 from .perception import PerceptionError
 from .context_materializer import (
     ContextMaterializerConflict,
@@ -209,12 +216,18 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "register_industry_evidence_pack", "register_company_overlay",
     "publish_transcript_correction_set", "bind_transcript_claim_citation",
     "admit_intent_question", "issue_intent_directive",
+    "publish_answer_sufficiency_policy",
 })
 FEEDBACK_BRIDGE_OPERATIONS = frozenset({
     "list_agenda_feedback_targets", "record_agenda_feedback",
 })
 INTENT_CONTEXT_OPERATIONS = frozenset({"intent_context_bindings"})
-DASHBOARD_CONTROL_OPERATIONS = FEEDBACK_BRIDGE_OPERATIONS | INTENT_CONTEXT_OPERATIONS
+ANSWER_ROUTING_OPERATIONS = frozenset({"answer_subjects", "route_answer"})
+DASHBOARD_CONTROL_OPERATIONS = (
+    FEEDBACK_BRIDGE_OPERATIONS
+    | INTENT_CONTEXT_OPERATIONS
+    | ANSWER_ROUTING_OPERATIONS
+)
 RESEARCH_REVIEW_CONTROL_OPERATIONS = frozenset({
     "commit_reviewed_candidate", "transcript_correction_review_state",
 })
@@ -274,6 +287,7 @@ CORE_OPERATIONS = frozenset({
     "industry_brief_snapshot", "render_industry_brief_markdown",
     "industry_research_integrity_report",
     "intent_context_bindings", "admit_intent_question", "issue_intent_directive",
+    "publish_answer_sufficiency_policy", "answer_subjects", "route_answer",
 })
 
 
@@ -350,6 +364,14 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "control_effect", "candidate_version_ref", "candidate_version_hash",
         "confirmation_ref", "confirmation_hash", "actor_ref",
     }),
+    "publish_answer_sufficiency_policy": frozenset({
+        "policy_ref", "mandate_version_ref", "mandate_version_hash",
+        "thresholds", "refresh_route", "adhoc_research_route",
+        "effective_from", "effective_until", "actor_ref", "version_id",
+        "prior_version_ref", "idempotency_key",
+    }),
+    "answer_subjects": frozenset({"as_of"}),
+    "route_answer": frozenset({"subject_binding", "question", "as_of"}),
     "create_workflow_version": frozenset({"workflow_ref", "title", "objective", "scope_refs", "root_work_order_refs", "governance_policy_ref", "prior_version_ref", "version_id", "idempotency_key", "actor_ref"}),
     "link_work_order": frozenset({"workflow_ref", "parent_work_order_ref", "child_work_order_ref", "relation", "sequence", "actor_ref", "link_id", "idempotency_key"}),
     "record_usage": frozenset({"invocation_ref", "entry_id", "occurred_at", "metering_source", "measurement_status", "raw_usage", "workflow_ref", "provider_usage_ref", "correction_of_ref", "actor_ref", "idempotency_key", "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "total_tokens", "requests", "duration_ms", "input_bytes", "output_bytes"}),
@@ -443,6 +465,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "record_agenda_feedback": "actor_ref",
     "admit_intent_question": "actor_ref",
     "issue_intent_directive": "actor_ref",
+    "publish_answer_sufficiency_policy": "actor_ref",
     "create_workflow_version": "actor_ref",
     "link_work_order": "actor_ref",
     "record_usage": "actor_ref",
@@ -616,6 +639,7 @@ class WriterServer:
         self._backlog: ResearchQuestionBacklog | None = None
         self._bounded_planner: BoundedPlannerAuthority | None = None
         self._intent_writer: IntentWriterAuthority | None = None
+        self._answer_routing: AnswerRoutingAuthority | None = None
         self._thesis_impact: ThesisImpactAuthority | None = None
         self._thesis_impact_control: ResearchPlanThesisImpactCoordinator | None = None
         self._token_config_path = None if token_config_path is None else Path(token_config_path)
@@ -723,6 +747,12 @@ class WriterServer:
             raise WriterServerError("intent writer authority is unavailable")
         return self._intent_writer
 
+    @property
+    def answer_routing(self) -> AnswerRoutingAuthority:
+        if self._answer_routing is None:
+            raise WriterServerError("answer-routing authority is unavailable")
+        return self._answer_routing
+
     def start(self) -> None:
         if self._listener is not None:
             raise WriterServerError("writer server is already started")
@@ -770,6 +800,13 @@ class WriterServer:
         self._bounded_planner = BoundedPlannerAuthority(self._store)
         self._intent_writer = IntentWriterAuthority(
             self._agenda, self._backlog, self._bounded_planner
+        )
+        self._answer_routing = AnswerRoutingAuthority(
+            self._store,
+            self._agenda,
+            self._backlog,
+            self._bounded_planner,
+            self._industry_research,
         )
         if self._transcript_spool_dir is not None:
             self._transcript_spool = RawSpool(
@@ -859,6 +896,7 @@ class WriterServer:
         self._backlog = None
         self._bounded_planner = None
         self._intent_writer = None
+        self._answer_routing = None
         self._thesis_impact = None
         self._thesis_impact_control = None
         if self._store is not None:
@@ -1350,6 +1388,17 @@ class WriterServer:
     def _op_issue_intent_directive(self, p: Mapping[str, Any]) -> Any:
         return self.intent_writer.issue_directive(**dict(p))
 
+    def _op_publish_answer_sufficiency_policy(
+        self, p: Mapping[str, Any]
+    ) -> Any:
+        return self.answer_routing.publish_policy(**dict(p))
+
+    def _op_answer_subjects(self, p: Mapping[str, Any]) -> Any:
+        return self.answer_routing.subjects(**dict(p))
+
+    def _op_route_answer(self, p: Mapping[str, Any]) -> Any:
+        return self.answer_routing.route(**dict(p))
+
     def _op_create_workflow_version(self, p: Mapping[str, Any]) -> Any:
         return self.observability.create_workflow_version(**dict(p))
 
@@ -1548,11 +1597,11 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError)):
             return "rejected"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict)):
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
@@ -1564,7 +1613,7 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, CapabilityRegistryError):
             return "store_error"
-        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError)):
+        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError)):
             return "store_error"
         return "internal_error"
 
@@ -1574,11 +1623,11 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, CoverageAdmissionValidationError, ModelInputValidationError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, CoverageAdmissionValidationError, ModelInputValidationError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError)):
             return "request rejected by contract or gate"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, CoverageAdmissionNotFound, ModelInputNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, CoverageAdmissionNotFound, ModelInputNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound)):
             return "requested object was not found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, CoverageAdmissionConflict, ModelInputConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, CoverageAdmissionConflict, ModelInputConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict)):
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ContextMaterializerError, PerceptionError)):
             return "request rejected by contract or gate"

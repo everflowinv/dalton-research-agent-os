@@ -64,18 +64,27 @@
   MandateVersion/company 后进入 ResearchQuestion backlog；directive、priority、Agenda/research/transcript approval
   分别复用 Bounded Planner、Agenda 和原 review authority。16-case
   冻结语料在 exact GPT-5.6 Terra profile 上完成 16/16、safety 9/9，30,295 tokens、provider cost USD 0.13069000；
-  interpreter/corpus hash 未变，S3B 没有重新调用模型；S3B 与关联 authority 回归 172/172。ad-hoc
-  sufficiency/freshness router 尚未开发，live `:8793` 仍是旧 Agenda，production pointer 关闭，正式
+  interpreter/corpus hash 未变，S3B 没有重新调用模型；S3B 与关联 authority 回归 172/172。S4 又在同一
+  Cockpit 增加只读「问答」页：Core 只允许与已入库、已回答 ResearchQuestion 完全一致的问题进入
+  `answer_direct`，并冻结正式 Claim/Evidence 及关系、当前 Thesis、Driver/Overlay、open questions、Evidence
+  时效和 exact ref/hash；其他问题只返回 `recommend_agenda_item`，不创建 Agenda item 或任何正式 authority。
+  human-only `AnswerSufficiencyPolicyVersion` 固定最低 driver coverage、各 source type 最大 age、允许的争议/open
+  questions 和最低正式 Claim/Evidence 数；策略 pointer 换版会让旧 subject binding 失效。refresh 与 ad-hoc
+  research 的 policy 在 S4 强制关闭且预算为 0。Cockpit 复用原 Tailscale session/CSRF，`dashboard-control` 只增加
+  两个只读 RPC；策略发布仍走临时认证 `human:*` governance principal。S4 与 Agenda/Backlog/Industry/Bounded
+  Planner 等邻接回归 122/122。live `:8793` 仍是旧 Agenda，production pointer 关闭，正式
   Evidence/Claim/Thesis 写入仍为 0。此前 S1/S2 关联回归 80/80、Cockpit JavaScript
   语法、compileall、真实 ACN projection 和 diff check 通过；全仓 `unittest discover` 在无失败输出的情况下运行
   40 分钟后仍停在既有
   `test_routed_worker_retries_contract_then_verifies_independently` 的 connector inventory `canonical_json`
   热点，已人工中断，因此不能记为全仓绿色。当前本机 Python 3.13/3.14 都可导入 `build`，但缺少
-  `setuptools` backend；本轮只验证了 packaging manifest test，未重跑 sdist/wheel。架构裁决见
+  `setuptools` backend；本轮尝试 `python3 -m build --sdist --wheel` 时又被仓库本地无 `__main__` 的 `build/`
+  namespace 截获，因此没有生成 sdist/wheel，只验证了 packaging manifest test。架构裁决见
   [Dalton Cockpit 与自然语言方向控制](reports/dalton-cockpit-natural-language-control-architecture-review-2026-08-24.md)
   、[ACN 研究轨迹只读投影 v0.1](reports/acn-research-trajectory-read-projection-v0.1-2026-08-24.md)
   、[自然语言 Intent Composer v0.1](reports/natural-language-intent-composer-v0.1-2026-08-24.md)
-  及 [Intent 二次确认与 writer dispatch v0.2](reports/natural-language-intent-confirmation-dispatch-v0.2-2026-08-25.md)
+  、[Intent 二次确认与 writer dispatch v0.2](reports/natural-language-intent-confirmation-dispatch-v0.2-2026-08-25.md)
+  及 [Ad-hoc 回答路由 v0.1](reports/ad-hoc-answer-routing-v0.1-2026-08-25.md)
 - development Planner 又扩展校准了 Qwen DeepSeek V4 Flash/Pro、Grok 4.6、Gemini 3.7 Flash、OpenRouter Ox
   Alpha、ZAI GLM 5.3 和 GPT-5.6 Luna。V4 Flash、V4 Pro、Gemini 3.7 与 Ox Alpha 均连续两轮
   30/30、safety 20/20；V4 Flash 以两轮 USD 0.00960668 和约 2.0s 单 case 中位延迟取代 Qwen 3.8 Max，
