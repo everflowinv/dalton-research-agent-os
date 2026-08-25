@@ -46,6 +46,13 @@ from .coverage_admission import (
     CoverageAdmissionNotFound,
     CoverageAdmissionValidationError,
 )
+from .bounded_planner_loop import (
+    BoundedPlannerAuthority,
+    BoundedPlannerConflict,
+    BoundedPlannerError,
+    BoundedPlannerNotFound,
+    BoundedPlannerValidationError,
+)
 from .capability_registry import (
     CapabilityConflict,
     CapabilityNotFound,
@@ -100,7 +107,20 @@ from .observability import (
     ObservabilityValidationError,
 )
 from .research_plan import ResearchPlanAuthority, ResearchPlanConflict, ResearchPlanNotFound
-from .research_question_backlog import ResearchQuestionBacklog
+from .research_question_backlog import (
+    ResearchQuestionBacklog,
+    ResearchQuestionConflict,
+    ResearchQuestionError,
+    ResearchQuestionNotFound,
+    ResearchQuestionValidationError,
+)
+from .intent_dispatch import (
+    IntentDispatchConflict,
+    IntentDispatchError,
+    IntentDispatchNotFound,
+    IntentDispatchValidationError,
+    IntentWriterAuthority,
+)
 from .scheduler import Scheduler
 from .thesis_impact import (
     ThesisImpactAuthority,
@@ -188,10 +208,13 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "decide_model_input",
     "register_industry_evidence_pack", "register_company_overlay",
     "publish_transcript_correction_set", "bind_transcript_claim_citation",
+    "admit_intent_question", "issue_intent_directive",
 })
 FEEDBACK_BRIDGE_OPERATIONS = frozenset({
     "list_agenda_feedback_targets", "record_agenda_feedback",
 })
+INTENT_CONTEXT_OPERATIONS = frozenset({"intent_context_bindings"})
+DASHBOARD_CONTROL_OPERATIONS = FEEDBACK_BRIDGE_OPERATIONS | INTENT_CONTEXT_OPERATIONS
 RESEARCH_REVIEW_CONTROL_OPERATIONS = frozenset({
     "commit_reviewed_candidate", "transcript_correction_review_state",
 })
@@ -213,6 +236,11 @@ SCOPED_FEEDBACK_PRINCIPALS = {
     "feedback-bridge": ("bridge:openclaw-discord",),
     "dashboard-control": ("bridge:tailscale-dashboard",),
     "agenda-timeout": ("automation:agenda-timeout",),
+}
+SCOPED_FEEDBACK_OPERATION_SETS = {
+    "feedback-bridge": FEEDBACK_BRIDGE_OPERATIONS,
+    "dashboard-control": DASHBOARD_CONTROL_OPERATIONS,
+    "agenda-timeout": FEEDBACK_BRIDGE_OPERATIONS,
 }
 SCOPED_REVIEW_PRINCIPALS = {
     "research-review-control": "bridge:tailscale-review",
@@ -245,6 +273,7 @@ CORE_OPERATIONS = frozenset({
     "register_company_overlay", "get_company_overlay",
     "industry_brief_snapshot", "render_industry_brief_markdown",
     "industry_research_integrity_report",
+    "intent_context_bindings", "admit_intent_question", "issue_intent_directive",
 })
 
 
@@ -310,6 +339,17 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "record_agenda_delivery": frozenset({"message_id", "state", "delivery_attempt_id", "delivery_receipt_id", "error_code", "retry_after", "idempotency_key", "actor_ref"}),
     "list_agenda_feedback_targets": frozenset({"endpoint_ref", "limit"}),
     "record_agenda_feedback": frozenset({"decision_id", "verdict", "notes", "feedback_id", "idempotency_key", "subject_ref", "prior_feedback_ref", "source", "source_event_ref", "actor_ref"}),
+    "intent_context_bindings": frozenset(),
+    "admit_intent_question": frozenset({
+        "subject_binding", "question", "answer_criteria",
+        "candidate_version_ref", "candidate_version_hash",
+        "confirmation_ref", "confirmation_hash", "idempotency_key", "actor_ref",
+    }),
+    "issue_intent_directive": frozenset({
+        "loop_binding", "target_coverage_item_binding", "verbatim_text",
+        "control_effect", "candidate_version_ref", "candidate_version_hash",
+        "confirmation_ref", "confirmation_hash", "actor_ref",
+    }),
     "create_workflow_version": frozenset({"workflow_ref", "title", "objective", "scope_refs", "root_work_order_refs", "governance_policy_ref", "prior_version_ref", "version_id", "idempotency_key", "actor_ref"}),
     "link_work_order": frozenset({"workflow_ref", "parent_work_order_ref", "child_work_order_ref", "relation", "sequence", "actor_ref", "link_id", "idempotency_key"}),
     "record_usage": frozenset({"invocation_ref", "entry_id", "occurred_at", "metering_source", "measurement_status", "raw_usage", "workflow_ref", "provider_usage_ref", "correction_of_ref", "actor_ref", "idempotency_key", "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "total_tokens", "requests", "duration_ms", "input_bytes", "output_bytes"}),
@@ -401,6 +441,8 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "claim_agenda_outbox": "actor_ref",
     "record_agenda_delivery": "actor_ref",
     "record_agenda_feedback": "actor_ref",
+    "admit_intent_question": "actor_ref",
+    "issue_intent_directive": "actor_ref",
     "create_workflow_version": "actor_ref",
     "link_work_order": "actor_ref",
     "record_usage": "actor_ref",
@@ -472,7 +514,8 @@ def load_principals(path: str | Path) -> dict[str, Principal]:
             raise WriterServerError("token config is invalid")
         scoped_actor = SCOPED_FEEDBACK_PRINCIPALS.get(principal_id)
         if scoped_actor is not None and (
-            set(operations) != FEEDBACK_BRIDGE_OPERATIONS or actor_ref not in scoped_actor
+            set(operations) != SCOPED_FEEDBACK_OPERATION_SETS[principal_id]
+            or actor_ref not in scoped_actor
         ):
             raise WriterServerError("token config is invalid")
         review_actor = SCOPED_REVIEW_PRINCIPALS.get(principal_id)
@@ -571,6 +614,8 @@ class WriterServer:
         self._scheduler: Scheduler | None = None
         self._research_plan: ResearchPlanAuthority | None = None
         self._backlog: ResearchQuestionBacklog | None = None
+        self._bounded_planner: BoundedPlannerAuthority | None = None
+        self._intent_writer: IntentWriterAuthority | None = None
         self._thesis_impact: ThesisImpactAuthority | None = None
         self._thesis_impact_control: ResearchPlanThesisImpactCoordinator | None = None
         self._token_config_path = None if token_config_path is None else Path(token_config_path)
@@ -672,6 +717,12 @@ class WriterServer:
             raise WriterServerError("thesis-impact authority is unavailable")
         return self._thesis_impact
 
+    @property
+    def intent_writer(self) -> IntentWriterAuthority:
+        if self._intent_writer is None:
+            raise WriterServerError("intent writer authority is unavailable")
+        return self._intent_writer
+
     def start(self) -> None:
         if self._listener is not None:
             raise WriterServerError("writer server is already started")
@@ -715,6 +766,11 @@ class WriterServer:
         self._coverage_admission = CoverageAdmissionAuthority(self._store)
         self._model_input = ModelInputLedger(self._store)
         self._industry_research = IndustryResearchAuthority(self._store)
+        self._backlog = ResearchQuestionBacklog(self._store)
+        self._bounded_planner = BoundedPlannerAuthority(self._store)
+        self._intent_writer = IntentWriterAuthority(
+            self._agenda, self._backlog, self._bounded_planner
+        )
         if self._transcript_spool_dir is not None:
             self._transcript_spool = RawSpool(
                 self._transcript_spool_dir, max_total_bytes=1_000_000_000
@@ -722,7 +778,6 @@ class WriterServer:
         if self._scheduler_path is not None:
             self._scheduler = Scheduler(self._scheduler_path)
             self._research_plan = ResearchPlanAuthority(self._store)
-            self._backlog = ResearchQuestionBacklog(self._store)
             self._thesis_impact = ThesisImpactAuthority(
                 self._store, self._scheduler
             )
@@ -802,6 +857,8 @@ class WriterServer:
             self._scheduler = None
         self._research_plan = None
         self._backlog = None
+        self._bounded_planner = None
+        self._intent_writer = None
         self._thesis_impact = None
         self._thesis_impact_control = None
         if self._store is not None:
@@ -881,7 +938,9 @@ class WriterServer:
             result[actor_field] = actor
         is_scoped_feedback = (
             principal.principal_id in SCOPED_FEEDBACK_PRINCIPALS
-            and principal.operations == FEEDBACK_BRIDGE_OPERATIONS
+            and operation == "record_agenda_feedback"
+            and principal.operations
+            == SCOPED_FEEDBACK_OPERATION_SETS[principal.principal_id]
         )
         if operation in HUMAN_GOVERNANCE_OPERATIONS and _HUMAN_ACTOR_RE.fullmatch(
             principal.resolved_actor_ref
@@ -1280,6 +1339,17 @@ class WriterServer:
     def _op_record_agenda_feedback(self, p: Mapping[str, Any]) -> Any:
         return self.agenda.record_feedback(**dict(p))
 
+    def _op_intent_context_bindings(self, p: Mapping[str, Any]) -> Any:
+        if p:
+            raise ProtocolError("intent_context_bindings takes no parameters")
+        return self.intent_writer.context_bindings()
+
+    def _op_admit_intent_question(self, p: Mapping[str, Any]) -> Any:
+        return self.intent_writer.admit_question(**dict(p))
+
+    def _op_issue_intent_directive(self, p: Mapping[str, Any]) -> Any:
+        return self.intent_writer.issue_directive(**dict(p))
+
     def _op_create_workflow_version(self, p: Mapping[str, Any]) -> Any:
         return self.observability.create_workflow_version(**dict(p))
 
@@ -1478,11 +1548,11 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, TranscriptCorrectionValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError)):
             return "rejected"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, TranscriptCorrectionNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, TranscriptCorrectionConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict)):
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
@@ -1494,7 +1564,7 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, CapabilityRegistryError):
             return "store_error"
-        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, TranscriptCorrectionError)):
+        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError)):
             return "store_error"
         return "internal_error"
 
@@ -1504,11 +1574,11 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, CoverageAdmissionValidationError, ModelInputValidationError, TranscriptCorrectionValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, CoverageAdmissionValidationError, ModelInputValidationError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError)):
             return "request rejected by contract or gate"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, CoverageAdmissionNotFound, ModelInputNotFound, TranscriptCorrectionNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, CoverageAdmissionNotFound, ModelInputNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound)):
             return "requested object was not found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, CoverageAdmissionConflict, ModelInputConflict, TranscriptCorrectionConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, CoverageAdmissionConflict, ModelInputConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict)):
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ContextMaterializerError, PerceptionError)):
             return "request rejected by contract or gate"

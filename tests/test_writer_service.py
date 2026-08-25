@@ -20,6 +20,7 @@ from dalton_core.writer_client import WriterClient
 from dalton_core.writer_protocol import RemoteAuthorizationError, RemoteError, decode_frame
 from dalton_core.writer_server import (
     CORE_OPERATIONS,
+    DASHBOARD_CONTROL_OPERATIONS,
     FEEDBACK_BRIDGE_OPERATIONS,
     HUMAN_GOVERNANCE_OPERATIONS,
     MAX_CONNECTIONS,
@@ -70,6 +71,7 @@ class WriterServiceTests(unittest.TestCase):
         self.review_token = "review-token-9f0c"
         self.thesis_impact_token = "thesis-impact-token-9f0c"
         self.governance_token = "governance-token-9f0c"
+        self.dashboard_token = "dashboard-token-9f0c"
         write_token_config(self.tokens, [
             Principal("worker", self.worker_token, WORKER_OPERATIONS, frozenset({"producer"}), frozenset({"wo"})),
             Principal("verifier", self.verifier_token, VERIFIER_OPERATIONS, frozenset({"verifier"}), frozenset({"wo"})),
@@ -89,6 +91,11 @@ class WriterServiceTests(unittest.TestCase):
                 "coverage-governance", self.governance_token,
                 HUMAN_GOVERNANCE_OPERATIONS,
                 actor_ref="human:coverage-owner",
+            ),
+            Principal(
+                "dashboard-control", self.dashboard_token,
+                DASHBOARD_CONTROL_OPERATIONS,
+                actor_ref="bridge:tailscale-dashboard",
             ),
         ])
         self.env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
@@ -157,6 +164,10 @@ class WriterServiceTests(unittest.TestCase):
     def governance(self):
         return WriterClient(str(self.sock), self.governance_token)
 
+    @property
+    def dashboard(self):
+        return WriterClient(str(self.sock), self.dashboard_token)
+
     def test_permission_matrix_and_unknown_fields(self):
         with self.assertRaises(RemoteAuthorizationError):
             self.worker.register_invocation(invocation("worker-1", "one"))
@@ -185,6 +196,37 @@ class WriterServiceTests(unittest.TestCase):
             )
         with self.assertRaises(RemoteAuthorizationError):
             self.worker.thesis_impact_targets({}, limit=10)
+
+    def test_confirmed_question_rpc_reuses_human_governance_and_backlog(self):
+        mandate = self.governance.create_mandate(
+            mandate_ref="mandate:intent-rpc",
+            objective="Resolve the confirmed Cockpit question.",
+            scope_refs=["company:acn"],
+            constraints={"public_sources_only": True},
+            success_criteria={"decision_useful": True},
+            effective_from="2020-01-01T00:00:00+00:00",
+            effective_until=None,
+            activate=True,
+            version_id="mandate-version:intent-rpc:1",
+            idempotency_key="mandate:intent-rpc:1",
+        )
+        bindings = self.dashboard.intent_context_bindings()
+        binding = next(item for item in bindings if item["ref"] == mandate["id"])
+        with self.assertRaises(RemoteAuthorizationError):
+            self.worker.intent_context_bindings()
+        result = self.governance.admit_intent_question(
+            subject_binding=binding,
+            question="Why did bookings not convert to organic growth?",
+            answer_criteria="Reconcile bookings, revenue, and timing.",
+            candidate_version_ref="intent-candidate-version:rpc",
+            candidate_version_hash="a" * 64,
+            confirmation_ref="intent-confirmation:rpc",
+            confirmation_hash="b" * 64,
+            idempotency_key="intent-question:rpc",
+        )
+        self.assertEqual(result["operation"], "record_backlog_question")
+        self.assertEqual(result["mandate_version_ref"], mandate["id"])
+        self.assertEqual(result["authority_result"]["status"], "fresh")
 
     def test_coverage_admission_writes_require_authenticated_human(self):
         with self.assertRaises(RemoteAuthorizationError):
@@ -772,14 +814,20 @@ class WriterServiceTests(unittest.TestCase):
             load_principals(bad_config)
 
     def test_scoped_feedback_principals_require_exact_actor_and_operations(self):
-        for principal_id, actor_ref in (
-            ("dashboard-control", "bridge:tailscale-dashboard"),
-            ("agenda-timeout", "automation:agenda-timeout"),
+        for principal_id, actor_ref, operations in (
+            (
+                "dashboard-control", "bridge:tailscale-dashboard",
+                DASHBOARD_CONTROL_OPERATIONS,
+            ),
+            (
+                "agenda-timeout", "automation:agenda-timeout",
+                FEEDBACK_BRIDGE_OPERATIONS,
+            ),
         ):
             valid = Path(self.tmp.name) / "private" / f"{principal_id}.json"
             write_token_config(valid, [
                 Principal(
-                    principal_id, f"{principal_id}-token", FEEDBACK_BRIDGE_OPERATIONS,
+                    principal_id, f"{principal_id}-token", operations,
                     actor_ref=actor_ref,
                 )
             ])
@@ -787,7 +835,7 @@ class WriterServiceTests(unittest.TestCase):
             invalid = Path(self.tmp.name) / "private" / f"{principal_id}-invalid.json"
             write_token_config(invalid, [
                 Principal(
-                    principal_id, f"{principal_id}-bad-token", FEEDBACK_BRIDGE_OPERATIONS,
+                    principal_id, f"{principal_id}-bad-token", operations,
                     actor_ref="bridge:openclaw-discord",
                 )
             ])

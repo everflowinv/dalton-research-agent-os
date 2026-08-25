@@ -143,11 +143,16 @@ directive、剩余预算和 ProbeTemplate catalog；doctrine-aware deterministic
 不能扩 scope、权限、参数或预算。PlannerProposal 0.2 绑定 exact ContextPack，旧 0.1 planner/proposal 保持兼容；实施
 边界见 [Doctrine 与 Planner ContextPack v1](docs/reports/doctrine-and-planner-context-pack-v1-2026-08-23.md)。
 
-2026-08-24 的 development Cockpit 已加入 candidate-only 自然语言 composer。服务端保存 owner 原文和 exact
-Cockpit context，独立模型解释器只能生成 closed question/directive/priority/approval/meta 候选；UI 和 API 没有执行
-或确认端点。16-case GPT-5.6 Terra 校准为 16/16、safety 9/9。taxonomy、后续 ad-hoc answer route 和未完成边界见
+2026-08-25 的 development Cockpit 已完成自然语言 composer 的二次确认与 writer dispatch。服务端仍先保存 owner
+原文和 exact Cockpit context，独立模型解释器只能生成 closed question/directive/priority/approval/meta 候选；只有
+原提交人显式确认、Core 用最新 context 逐字段复核通过后，typed effect 才交给既有 writer principal。确认和每次
+dispatch 都有 append-only receipt；候选本身继续保持 `candidate_only=true / executable=false`。question 重新绑定 exact
+MandateVersion 并进入 ResearchQuestion backlog，directive、priority、Agenda/research/transcript approval 分别复用原
+authority。16-case GPT-5.6 Terra 校准仍为 16/16、safety 9/9，interpreter/corpus hash 未变，因此本切片没有重新调用
+模型。taxonomy、后续 ad-hoc answer route 和部署边界见
 [ADR-0002](docs/adr/0002-natural-language-intent-and-answer-routing.md) 与
-[实施报告](docs/reports/natural-language-intent-composer-v0.1-2026-08-24.md)。
+[S3A 实施报告](docs/reports/natural-language-intent-composer-v0.1-2026-08-24.md)、
+[S3B 实施报告](docs/reports/natural-language-intent-confirmation-dispatch-v0.2-2026-08-25.md)。
 
 Gate 0、Gate 1 和 Gate 2 控制面验收已完成。verifier 现改为 wrapper-owned binding：模型只返回 semantic
 `verdict/findings`，trusted worker 从 immutable WorkOrder 绑定 exact assessment ref/hash，raw ResultEnvelope 与历史

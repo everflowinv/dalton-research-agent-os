@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IntentDispatchReceipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "confirmation_ref", "confirmation_hash", "ordinal", "status", "effect_kind", "result", "error_code", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^intent-dispatch:[0-9a-f]{64}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "confirmation_ref": {"type": "string", "pattern": "^intent-confirmation:[0-9a-f]{64}$"},
+    "confirmation_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "ordinal": {"type": "integer", "minimum": 1},
+    "status": {"enum": ["succeeded", "failed"]},
+    "effect_kind": {"enum": ["research_question_draft", "research_directive_candidate", "priority_override_candidate", "context_bound_approval_candidate"]},
+    "result": {"type": ["object", "null"]},
+    "error_code": {"type": ["string", "null"]},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "allOf": [
+    {"if": {"properties": {"status": {"const": "succeeded"}}}, "then": {"properties": {"result": {"type": "object"}, "error_code": {"type": "null"}}}},
+    {"if": {"properties": {"status": {"const": "failed"}}}, "then": {"properties": {"result": {"type": "null"}, "error_code": {"type": "string", "minLength": 1}}}}
+  ]
+}

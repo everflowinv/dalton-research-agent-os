@@ -19,6 +19,7 @@ from .service import SCHEMA_VERSION, ServiceConfig
 from .store import DaltonStore
 from .writer_server import (
     CORE_OPERATIONS,
+    DASHBOARD_CONTROL_OPERATIONS,
     FEEDBACK_BRIDGE_OPERATIONS,
     RESEARCH_REVIEW_CONTROL_OPERATIONS,
     THESIS_IMPACT_OPERATIONS,
@@ -107,7 +108,7 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
                 Principal(
                     principal_id="dashboard-control",
                     token=secrets.token_urlsafe(48),
-                    operations=FEEDBACK_BRIDGE_OPERATIONS,
+                    operations=DASHBOARD_CONTROL_OPERATIONS,
                     unrestricted=False,
                     actor_ref="bridge:tailscale-dashboard",
                 ),
@@ -181,15 +182,21 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
         else:
             principals.pop("feedback-bridge", None)
         if control_enabled:
-            for principal_id, actor_ref in (
-                ("dashboard-control", "bridge:tailscale-dashboard"),
-                ("agenda-timeout", "automation:agenda-timeout"),
+            for principal_id, actor_ref, operations in (
+                (
+                    "dashboard-control", "bridge:tailscale-dashboard",
+                    DASHBOARD_CONTROL_OPERATIONS,
+                ),
+                (
+                    "agenda-timeout", "automation:agenda-timeout",
+                    FEEDBACK_BRIDGE_OPERATIONS,
+                ),
             ):
                 current = principals.get(principal_id)
                 principals[principal_id] = Principal(
                     principal_id=principal_id,
                     token=current.token if current is not None else secrets.token_urlsafe(48),
-                    operations=FEEDBACK_BRIDGE_OPERATIONS,
+                    operations=operations,
                     unrestricted=False,
                     actor_ref=actor_ref,
                 )

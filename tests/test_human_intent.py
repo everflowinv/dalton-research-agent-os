@@ -16,6 +16,7 @@ from dalton_core.human_intent import (
     INTERPRETER_REF,
     CallableIntentInterpreter,
     HumanIntentAuthority,
+    HumanIntentConflict,
     HumanIntentValidationError,
     IntentComposerConfig,
     InterpreterOutput,
@@ -596,6 +597,20 @@ class HumanIntentComposerTests(unittest.TestCase):
             return InterpreterOutput(text=text, provenance=provenance(text))
         return CallableIntentInterpreter(callback)
 
+    class Dispatcher:
+        def __init__(self, *, fail: bool = False):
+            self.fail = fail
+            self.calls = []
+
+        def dispatch(self, login, bundle, confirmation):
+            self.calls.append((login, bundle["candidate"]["id"], confirmation["id"]))
+            if self.fail:
+                raise RuntimeError("writer unavailable")
+            return {
+                "operation": "record_backlog_question",
+                "authority_result": {"question_ref": "research-question:1"},
+            }
+
     def test_compose_records_exact_chain_and_is_idempotent(self):
         plane = NaturalLanguageComposerPlane(
             self.config,
@@ -646,6 +661,153 @@ class HumanIntentComposerTests(unittest.TestCase):
                 "status": "rejected",
                 "error_code": "candidate_contract_rejected",
             })
+        finally:
+            plane.close()
+
+    def test_confirmation_revalidates_context_and_records_dispatch_receipts(self):
+        dispatcher = self.Dispatcher()
+        plane = NaturalLanguageComposerPlane(
+            self.config,
+            context_provider=lambda _login: self.ctx,
+            interpreter=self._interpreter(),
+            dispatcher=dispatcher,
+        )
+        try:
+            composed = plane.compose(
+                "owner@example.com",
+                {"request_id": "compose-confirm", "utterance": "ACN 的增长为何背离？"},
+            )
+            candidate = composed["candidate"]
+            request = {
+                "request_id": "confirm-1",
+                "candidate_version_ref": candidate["id"],
+                "candidate_version_hash": candidate["content_hash"],
+                "decision": "confirm",
+            }
+            first = plane.confirm("owner@example.com", request)
+            second = plane.confirm("owner@example.com", request)
+            self.assertEqual(first["status"], "dispatched")
+            self.assertEqual(second["status"], "dispatched")
+            self.assertEqual(len(dispatcher.calls), 1)
+            view = plane.view("owner@example.com")
+            self.assertTrue(view["confirmation_enabled"])
+            self.assertEqual(view["items"][0]["dispatch"]["status"], "succeeded")
+            self.assertEqual(
+                view["items"][0]["confirmation"]["candidate_version_hash"],
+                candidate["content_hash"],
+            )
+            with self.assertRaises(sqlite3.IntegrityError):
+                plane.authority.connection.execute(
+                    "DELETE FROM intent_confirmation_receipts"
+                )
+        finally:
+            plane.close()
+
+    def test_confirmation_rejects_stale_binding_and_another_human(self):
+        current = {"value": self.ctx}
+        plane = NaturalLanguageComposerPlane(
+            self.config,
+            context_provider=lambda _login: current["value"],
+            interpreter=self._interpreter(),
+            dispatcher=self.Dispatcher(),
+        )
+        try:
+            composed = plane.compose(
+                "owner@example.com",
+                {"request_id": "compose-stale", "utterance": "ACN 的增长为何背离？"},
+            )
+            candidate = composed["candidate"]
+            request = {
+                "request_id": "confirm-stale",
+                "candidate_version_ref": candidate["id"],
+                "candidate_version_hash": candidate["content_hash"],
+                "decision": "confirm",
+            }
+            with self.assertRaises(HumanIntentValidationError):
+                plane.confirm("another@example.com", request)
+            changed = json.loads(json.dumps(self.ctx))
+            target = next(
+                item for item in changed["bindings"]
+                if item["kind"] == "agenda_decision"
+            )
+            target["state"] = "explicit_human"
+            body = dict(changed)
+            body.pop("content_hash")
+            body["id"] = "intent-context-pack:" + content_hash(body)
+            body["content_hash"] = content_hash(body)
+            current["value"] = body
+            with self.assertRaises(HumanIntentConflict):
+                plane.confirm("owner@example.com", request)
+        finally:
+            plane.close()
+
+    def test_failed_dispatch_is_append_only_and_can_retry_with_new_request(self):
+        dispatcher = self.Dispatcher(fail=True)
+        plane = NaturalLanguageComposerPlane(
+            self.config,
+            context_provider=lambda _login: self.ctx,
+            interpreter=self._interpreter(),
+            dispatcher=dispatcher,
+        )
+        try:
+            composed = plane.compose(
+                "owner@example.com",
+                {"request_id": "compose-retry", "utterance": "ACN 的增长为何背离？"},
+            )
+            candidate = composed["candidate"]
+            base = {
+                "candidate_version_ref": candidate["id"],
+                "candidate_version_hash": candidate["content_hash"],
+                "decision": "confirm",
+            }
+            failed = plane.confirm(
+                "owner@example.com", {"request_id": "confirm-fail", **base}
+            )
+            self.assertEqual(failed["status"], "dispatch_failed")
+            dispatcher.fail = False
+            retried = plane.confirm(
+                "owner@example.com", {"request_id": "confirm-retry", **base}
+            )
+            self.assertEqual(retried["status"], "dispatched")
+            rows = plane.authority.connection.execute(
+                "SELECT status FROM intent_dispatch_receipts ORDER BY ordinal"
+            ).fetchall()
+            self.assertEqual([row["status"] for row in rows], ["failed", "succeeded"])
+        finally:
+            plane.close()
+
+    def test_confirmation_and_dispatch_receipts_match_closed_schemas(self):
+        plane = NaturalLanguageComposerPlane(
+            self.config,
+            context_provider=lambda _login: self.ctx,
+            interpreter=self._interpreter(),
+            dispatcher=self.Dispatcher(),
+        )
+        try:
+            composed = plane.compose(
+                "owner@example.com",
+                {"request_id": "compose-schema", "utterance": "ACN 的增长为何背离？"},
+            )
+            candidate = composed["candidate"]
+            plane.confirm("owner@example.com", {
+                "request_id": "confirm-schema",
+                "candidate_version_ref": candidate["id"],
+                "candidate_version_hash": candidate["content_hash"],
+                "decision": "confirm",
+            })
+            item = plane.view("owner@example.com")["items"][0]
+            root = Path(__file__).resolve().parents[1] / "contracts"
+            for filename, wire in (
+                ("intent-confirmation-receipt.schema.json", item["confirmation"]),
+                ("intent-dispatch-receipt.schema.json", item["dispatch"]),
+            ):
+                schema = json.loads((root / filename).read_text(encoding="utf-8"))
+                with self.subTest(contract=filename):
+                    self.assertFalse(schema["additionalProperties"])
+                    self.assertEqual(set(wire), set(schema["required"]))
+                    body = dict(wire)
+                    asserted = body.pop("content_hash")
+                    self.assertEqual(asserted, content_hash(body))
         finally:
             plane.close()
 

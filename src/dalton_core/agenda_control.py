@@ -3,8 +3,8 @@
 The service binds loopback only.  Tailscale Serve terminates HTTPS, strips
 spoofed identity headers, and injects ``Tailscale-User-Login``.  The backend
 adds one in-memory SameSite CSRF session before accepting any write.  Agenda,
-research review, and transcript correction share this shell but retain their
-separate writer principals and fail-closed authority gates.
+research review, transcript correction, and confirmed intent share this shell
+but retain their separate writer principals and fail-closed authority gates.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
+from .governance_cli import ephemeral_call
 from .human_intent import (
     HumanIntentError,
     IntentComposerConfig,
@@ -220,6 +221,14 @@ class AgendaControlPlane:
             raise AgendaControlError("writer returned invalid Agenda targets")
         return value
 
+    def intent_context_bindings(self) -> list[dict[str, Any]]:
+        value = self.dashboard.intent_context_bindings()
+        if not isinstance(value, list) or any(
+            not isinstance(item, Mapping) for item in value
+        ):
+            raise AgendaControlError("writer returned invalid intent context bindings")
+        return [dict(item) for item in value]
+
     @staticmethod
     def _decision_ref(target: Mapping[str, Any]) -> str:
         payload = target.get("payload")
@@ -368,6 +377,137 @@ class _Session:
     expires_at: float
 
 
+class CockpitIntentDispatcher:
+    """Route one confirmed effect through its existing writer principal."""
+
+    def __init__(
+        self,
+        config: AgendaControlConfig,
+        agenda_plane: AgendaControlPlane,
+        review_plane: ResearchReviewControlPlane | None,
+        *,
+        governance_call: Any = ephemeral_call,
+    ) -> None:
+        self.config = config
+        self.agenda_plane = agenda_plane
+        self.review_plane = review_plane
+        self.governance_call = governance_call
+
+    def _governance(
+        self, login: str, operation: str, params: Mapping[str, Any]
+    ) -> Any:
+        return self.governance_call(
+            self.config.token_config,
+            self.config.writer_socket,
+            actor_ref=_subject_for_login(login),
+            operation=operation,
+            params=dict(params),
+        )
+
+    def dispatch(
+        self,
+        login: str,
+        bundle: Mapping[str, Any],
+        confirmation: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        candidate = bundle["candidate"]
+        utterance = bundle["utterance"]
+        translated = candidate["candidate"]
+        effect = translated["effect"]
+        kind = effect["kind"]
+        provenance = {
+            "candidate_version_ref": candidate["id"],
+            "candidate_version_hash": candidate["content_hash"],
+            "confirmation_ref": confirmation["id"],
+            "confirmation_hash": confirmation["content_hash"],
+        }
+        if kind == "research_question_draft":
+            return self._governance(
+                login,
+                "admit_intent_question",
+                {
+                    "subject_binding": effect["subject_binding"],
+                    "question": effect["question"],
+                    "answer_criteria": effect["answer_criteria"],
+                    **provenance,
+                    "idempotency_key": f"intent-question:{confirmation['id']}",
+                },
+            )
+        if kind == "research_directive_candidate":
+            return self._governance(
+                login,
+                "issue_intent_directive",
+                {
+                    "loop_binding": effect["loop_binding"],
+                    "target_coverage_item_binding": effect[
+                        "target_coverage_item_binding"
+                    ],
+                    "verbatim_text": utterance["verbatim_text"],
+                    "control_effect": effect["control_effect"],
+                    **provenance,
+                },
+            )
+        if kind == "priority_override_candidate":
+            effective_from = _parse_time(
+                confirmation["created_at"], "confirmation.created_at"
+            )
+            effective_until = effective_from + timedelta(
+                days=effect["effective_for_days"]
+            )
+            identity = {
+                "candidate_version_ref": candidate["id"],
+                "confirmation_ref": confirmation["id"],
+            }
+            digest = content_hash(identity)[:32]
+            return self._governance(
+                login,
+                "create_priority_override",
+                {
+                    "override_ref": f"priority-override:intent:{digest}",
+                    "scope_refs": [item["ref"] for item in effect["scope_bindings"]],
+                    "weight_deltas": effect["weight_deltas"],
+                    "rationale": effect["rationale"],
+                    "effective_from": effective_from.isoformat(timespec="microseconds"),
+                    "effective_until": effective_until.isoformat(timespec="microseconds"),
+                    "revoked": False,
+                    "version_id": f"priority-override-version:{digest}",
+                    "idempotency_key": f"intent-priority:{confirmation['id']}",
+                },
+            )
+        if kind != "context_bound_approval_candidate":
+            raise AgendaControlError("intent effect is not dispatchable")
+        target = effect["target_binding"]
+        if target["kind"] == "agenda_decision":
+            return self.agenda_plane.record(login, target["ref"], effect["verdict"])
+        if self.review_plane is None:
+            raise AgendaControlError("research review is not enabled")
+        request_id = content_hash({"confirmation_ref": confirmation["id"]})[:32]
+        if target["kind"] == "candidate_claim":
+            return self.review_plane.record(
+                login,
+                {
+                    "request_id": request_id,
+                    "candidate_claim_ref": target["ref"],
+                    "candidate_claim_hash": target["hash"],
+                    "verdict": effect["verdict"],
+                    "rationale": translated["rationale"],
+                    "findings": [f"Confirmed by {confirmation['id']}"],
+                    "proposed_revisions": None,
+                },
+            )
+        if target["kind"] == "transcript_review_packet":
+            return self.review_plane.record_transcript(
+                login,
+                {
+                    "request_id": request_id,
+                    "packet_ref": target["ref"],
+                    "packet_hash": target["hash"],
+                    "action": effect["verdict"],
+                },
+            )
+        raise AgendaControlError("approval target has no original writer route")
+
+
 class AgendaControlApplication:
     def __init__(
         self,
@@ -463,10 +603,25 @@ class AgendaControlApplication:
             raise AgendaControlError("request body must be an object")
         return self.intent_plane.compose(login, value)
 
+    def post_intent_confirm(
+        self, login: str, session: _Session, csrf: str | None, body: bytes
+    ) -> dict[str, Any]:
+        if self.intent_plane is None:
+            raise AgendaControlError("natural-language composer is not enabled")
+        if not isinstance(csrf, str) or not secrets.compare_digest(csrf, session.csrf):
+            raise PermissionError("invalid CSRF token")
+        try:
+            value = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgendaControlError("request body is invalid") from exc
+        if not isinstance(value, Mapping):
+            raise AgendaControlError("request body must be an object")
+        return self.intent_plane.confirm(login, value)
+
 
 def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
-        server_version = "DaltonCockpit/0.3"
+        server_version = "DaltonCockpit/0.4"
 
         def _identity(self) -> str | None:
             return application.allowed_login(self.headers.get("Tailscale-User-Login"))
@@ -569,6 +724,7 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                             "as_of": datetime.now(timezone.utc).isoformat(),
                             "items": [],
                             "candidate_only": True,
+                            "confirmation_enabled": False,
                             "execution_enabled": False,
                             "enabled": False,
                         }
@@ -600,6 +756,7 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 "/v1/research-review/decision": application.post_review,
                 "/v1/transcript-review/decision": application.post_transcript_review,
                 "/v1/intent/compose": application.post_intent,
+                "/v1/intent/confirm": application.post_intent_confirm,
             }
             action = actions.get(path)
             if action is None:
@@ -673,11 +830,15 @@ def serve(config: AgendaControlConfig) -> None:
                 research_review=review,
                 transcript_review=transcript,
                 trajectory=trajectory,
+                extra_bindings=plane.intent_context_bindings(),
             )
 
         intent_plane = NaturalLanguageComposerPlane(
             config.intent_composer,
             context_provider=context_provider,
+            dispatcher=CockpitIntentDispatcher(
+                config, plane, review_plane
+            ),
         )
     application = AgendaControlApplication(
         config, plane, review_plane, intent_plane
@@ -739,5 +900,5 @@ if __name__ == "__main__":  # pragma: no cover
 
 __all__ = [
     "AgendaControlApplication", "AgendaControlConfig", "AgendaControlError",
-    "AgendaControlPlane", "serve",
+    "AgendaControlPlane", "CockpitIntentDispatcher", "serve",
 ]

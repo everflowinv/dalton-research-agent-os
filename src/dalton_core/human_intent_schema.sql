@@ -50,6 +50,41 @@ CREATE TABLE IF NOT EXISTS intent_compose_requests (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS intent_confirmation_receipts (
+    confirmation_id TEXT PRIMARY KEY,
+    candidate_version_ref TEXT NOT NULL UNIQUE,
+    actor_ref TEXT NOT NULL,
+    confirmation_context_pack_ref TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(candidate_version_ref) REFERENCES intent_candidate_versions(candidate_version_id),
+    FOREIGN KEY(confirmation_context_pack_ref) REFERENCES intent_context_packs(context_pack_id)
+);
+
+CREATE TABLE IF NOT EXISTS intent_dispatch_receipts (
+    dispatch_id TEXT PRIMARY KEY,
+    confirmation_ref TEXT NOT NULL,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 1),
+    status TEXT NOT NULL CHECK(status IN ('succeeded', 'failed')),
+    error_code TEXT,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY(confirmation_ref) REFERENCES intent_confirmation_receipts(confirmation_id),
+    UNIQUE(confirmation_ref, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS intent_confirmation_requests (
+    request_key TEXT PRIMARY KEY,
+    request_hash TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS intent_dispatch_single_success
+ON intent_dispatch_receipts(confirmation_ref) WHERE status='succeeded';
+
 CREATE TRIGGER IF NOT EXISTS intent_context_packs_no_update
 BEFORE UPDATE ON intent_context_packs BEGIN SELECT RAISE(ABORT, 'intent_context_packs is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS intent_context_packs_no_delete
@@ -70,3 +105,15 @@ CREATE TRIGGER IF NOT EXISTS intent_compose_requests_no_update
 BEFORE UPDATE ON intent_compose_requests BEGIN SELECT RAISE(ABORT, 'intent_compose_requests is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS intent_compose_requests_no_delete
 BEFORE DELETE ON intent_compose_requests BEGIN SELECT RAISE(ABORT, 'intent_compose_requests is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS intent_confirmation_receipts_no_update
+BEFORE UPDATE ON intent_confirmation_receipts BEGIN SELECT RAISE(ABORT, 'intent_confirmation_receipts is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS intent_confirmation_receipts_no_delete
+BEFORE DELETE ON intent_confirmation_receipts BEGIN SELECT RAISE(ABORT, 'intent_confirmation_receipts is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS intent_dispatch_receipts_no_update
+BEFORE UPDATE ON intent_dispatch_receipts BEGIN SELECT RAISE(ABORT, 'intent_dispatch_receipts is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS intent_dispatch_receipts_no_delete
+BEFORE DELETE ON intent_dispatch_receipts BEGIN SELECT RAISE(ABORT, 'intent_dispatch_receipts is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS intent_confirmation_requests_no_update
+BEFORE UPDATE ON intent_confirmation_requests BEGIN SELECT RAISE(ABORT, 'intent_confirmation_requests is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS intent_confirmation_requests_no_delete
+BEFORE DELETE ON intent_confirmation_requests BEGIN SELECT RAISE(ABORT, 'intent_confirmation_requests is immutable'); END;

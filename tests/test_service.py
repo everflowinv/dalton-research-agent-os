@@ -25,6 +25,7 @@ from dalton_core.health import check
 from dalton_core.service import DaltonService, ServiceConfig, ServiceConfigError
 from dalton_core.store import DaltonStore
 from dalton_core.writer_server import (
+    DASHBOARD_CONTROL_OPERATIONS,
     RESEARCH_REVIEW_CONTROL_OPERATIONS,
     load_principals,
 )
@@ -298,6 +299,13 @@ class ServiceTests(unittest.TestCase):
                 review.operations, RESEARCH_REVIEW_CONTROL_OPERATIONS
             )
             self.assertEqual(review.actor_ref, "bridge:tailscale-review")
+            dashboard = principals["dashboard-control"]
+            self.assertEqual(
+                dashboard.operations, DASHBOARD_CONTROL_OPERATIONS
+            )
+            self.assertEqual(
+                dashboard.actor_ref, "bridge:tailscale-dashboard"
+            )
             self.assertNotIn("human-governance", principals)
 
     def test_health_rejects_degraded_controller_even_with_stale_files(self) -> None:

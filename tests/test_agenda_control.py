@@ -15,6 +15,7 @@ from dalton_core.agenda_control import (
     AgendaControlApplication,
     AgendaControlConfig,
     AgendaControlPlane,
+    CockpitIntentDispatcher,
     _handler,
     _parse_time,
 )
@@ -53,6 +54,9 @@ class Client:
 
     def record_agenda_feedback(self, **params):
         return self.agenda.record_feedback(actor_ref=self.actor_ref, **params)
+
+    def intent_context_bindings(self):
+        return []
 
 
 class ReviewPlane:
@@ -96,11 +100,15 @@ class IntentPlane:
         }
 
     def compose(self, login, value):
-        self.calls.append((login, dict(value)))
+        self.calls.append(("compose", login, dict(value)))
         return {
             "status": "fresh",
             "candidate": {"candidate_only": True, "executable": False},
         }
+
+    def confirm(self, login, value):
+        self.calls.append(("confirm", login, dict(value)))
+        return {"status": "dispatched"}
 
 
 class AgendaControlTests(unittest.TestCase):
@@ -238,13 +246,30 @@ class AgendaControlTests(unittest.TestCase):
             "fresh",
         )
         self.assertEqual(
+            app.post_intent_confirm(
+                LOGIN,
+                session,
+                session.csrf,
+                b'{"request_id":"2","candidate_version_ref":"candidate:1","candidate_version_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","decision":"confirm"}',
+            )["status"],
+            "dispatched",
+        )
+        self.assertEqual(
             review.calls,
             [
                 ("research", LOGIN, {"x": 1}),
                 ("transcript", LOGIN, {"y": 2}),
             ],
         )
-        self.assertEqual(intent.calls, [(LOGIN, {"request_id": "1", "utterance": "查 ACN"})])
+        self.assertEqual(intent.calls, [
+            ("compose", LOGIN, {"request_id": "1", "utterance": "查 ACN"}),
+            ("confirm", LOGIN, {
+                "request_id": "2",
+                "candidate_version_ref": "candidate:1",
+                "candidate_version_hash": "a" * 64,
+                "decision": "confirm",
+            }),
+        ])
 
     def test_embedded_review_config_has_no_second_host_or_core_path(self):
         raw = {
@@ -397,8 +422,21 @@ class AgendaControlTests(unittest.TestCase):
             self.assertTrue(json.loads(response.read())["candidate"]["candidate_only"])
             self.assertEqual(
                 intent.calls,
-                [(LOGIN, {"request_id": "intent-1", "utterance": "check ACN"})],
+                [("compose", LOGIN, {"request_id": "intent-1", "utterance": "check ACN"})],
             )
+            body = b'{"request_id":"confirm-1","candidate_version_ref":"candidate:1","candidate_version_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","decision":"confirm"}'
+            connection.request(
+                "POST", "/v1/intent/confirm", body=body,
+                headers={
+                    **headers, "Cookie": cookie,
+                    "Content-Type": "application/json",
+                    "Content-Length": str(len(body)),
+                    "X-Dalton-CSRF": review_payload["csrf_token"],
+                },
+            )
+            response = connection.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read())["status"], "dispatched")
             connection.close()
         finally:
             server.shutdown()
@@ -424,6 +462,73 @@ class AgendaControlTests(unittest.TestCase):
         self.assertEqual(rows[0]["subject_ref"], "automation:timeout")
         self.assertEqual(rows[0]["source"], "auto_accept_timeout")
         self.assertEqual(rows[0]["verdict"], "agree")
+
+    def test_confirmed_effects_route_through_original_writer_principals(self):
+        governance_calls = []
+
+        def governance_call(token_config, writer_socket, **kwargs):
+            governance_calls.append(kwargs)
+            return {"status": "governance-recorded", "operation": kwargs["operation"]}
+
+        review = ReviewPlane()
+        dispatcher = CockpitIntentDispatcher(
+            self.config,
+            self.plane,
+            review,
+            governance_call=governance_call,
+        )
+        confirmation = {
+            "id": "intent-confirmation:" + "1" * 64,
+            "content_hash": "2" * 64,
+            "created_at": "2026-08-25T05:00:00+00:00",
+        }
+        candidate = {
+            "id": "intent-candidate-version:" + "3" * 64,
+            "content_hash": "4" * 64,
+        }
+        question_effect = {
+            "kind": "research_question_draft",
+            "question": "Why?",
+            "answer_criteria": "Use governed sources.",
+            "subject_binding": {"kind": "mandate", "ref": "mandate-version:1"},
+        }
+        result = dispatcher.dispatch(LOGIN, {
+            "candidate": {**candidate, "candidate": {
+                "effect": question_effect, "rationale": "Question",
+            }},
+            "utterance": {"verbatim_text": "Why?"},
+        }, confirmation)
+        self.assertEqual(result["operation"], "admit_intent_question")
+        self.assertEqual(governance_calls[-1]["operation"], "admit_intent_question")
+        priority = {
+            "kind": "priority_override_candidate",
+            "scope_bindings": [{"ref": "mandate-version:1"}],
+            "weight_deltas": {"decision_impact": 2},
+            "rationale": "Seven-day focus",
+            "effective_for_days": 7,
+        }
+        dispatcher.dispatch(LOGIN, {
+            "candidate": {**candidate, "candidate": {
+                "effect": priority, "rationale": "Priority",
+            }},
+            "utterance": {"verbatim_text": "Raise priority"},
+        }, confirmation)
+        self.assertEqual(governance_calls[-1]["operation"], "create_priority_override")
+        approval = {
+            "kind": "context_bound_approval_candidate",
+            "target_binding": {
+                "kind": "candidate_claim", "ref": "candidate-claim:1",
+                "hash": "5" * 64,
+            },
+            "verdict": "accept",
+        }
+        dispatcher.dispatch(LOGIN, {
+            "candidate": {**candidate, "candidate": {
+                "effect": approval, "rationale": "Reviewed exact claim",
+            }},
+            "utterance": {"verbatim_text": "Accept claim"},
+        }, confirmation)
+        self.assertEqual(review.calls[-1][0], "research")
 
 
 if __name__ == "__main__":

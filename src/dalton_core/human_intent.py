@@ -926,6 +926,64 @@ def validate_interpreter_candidate(
     }
 
 
+def revalidate_confirmation_context(
+    candidate: Mapping[str, Any], fresh_context: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Require every effect binding to remain byte-for-byte current.
+
+    The candidate remains non-executable.  This gate only decides whether a
+    separate explicit confirmation may be handed to the original writer.
+    """
+
+    context = validate_intent_context_pack(fresh_context)
+    translated = candidate.get("candidate")
+    if not isinstance(translated, Mapping):
+        raise HumanIntentValidationError("intent candidate body is unavailable")
+    if translated.get("disposition") != "candidate":
+        raise HumanIntentValidationError("only a candidate can be confirmed")
+    effect = translated.get("effect")
+    if not isinstance(effect, Mapping):
+        raise HumanIntentValidationError("confirmed candidate has no typed effect")
+    effect_kind = effect.get("kind")
+    bindings: list[Mapping[str, Any]] = []
+    if effect_kind == "research_question_draft":
+        subject = effect.get("subject_binding")
+        if subject is None:
+            raise HumanIntentValidationError(
+                "question confirmation requires a mandate-resolvable subject"
+            )
+        if subject.get("kind") not in {
+            "agenda_decision", "bounded_planner_loop", "coverage_item", "mandate",
+        }:
+            raise HumanIntentValidationError(
+                "question subject cannot be resolved to an exact mandate"
+            )
+        bindings.append(subject)
+    elif effect_kind == "research_directive_candidate":
+        bindings.append(effect.get("loop_binding"))
+        target = effect.get("target_coverage_item_binding")
+        if target is not None:
+            bindings.append(target)
+    elif effect_kind == "priority_override_candidate":
+        scopes = effect.get("scope_bindings")
+        if not isinstance(scopes, list) or not scopes:
+            raise HumanIntentValidationError("priority confirmation has no exact scope")
+        bindings.extend(scopes)
+    elif effect_kind == "context_bound_approval_candidate":
+        bindings.append(effect.get("target_binding"))
+    else:
+        raise HumanIntentValidationError("intent effect is not dispatchable")
+    current = {
+        (item["kind"], item["ref"]): item for item in context["bindings"]
+    }
+    for index, raw in enumerate(bindings):
+        binding = _binding(raw, f"confirmation binding[{index}]")
+        live = current.get((binding["kind"], binding["ref"]))
+        if live is None or canonical_json(live) != canonical_json(binding):
+            raise HumanIntentConflict("intent candidate binding is stale or unavailable")
+    return context
+
+
 def parse_interpreter_candidate_text(
     text: Any,
     *,
@@ -1156,6 +1214,15 @@ class IntentInterpreter(Protocol):
     def interpret(
         self, context: Mapping[str, Any], utterance_version: Mapping[str, Any]
     ) -> InterpreterOutput: ...
+
+
+class IntentDispatcher(Protocol):
+    def dispatch(
+        self,
+        login: str,
+        bundle: Mapping[str, Any],
+        confirmation: Mapping[str, Any],
+    ) -> Mapping[str, Any]: ...
 
 
 class CallableIntentInterpreter:
@@ -1834,59 +1901,337 @@ class HumanIntentAuthority:
             )
         return result_wire
 
+    @staticmethod
+    def _candidate_query() -> str:
+        return (
+            "SELECT c.*,u.record_json AS utterance_json,"
+            "u.content_hash AS utterance_hash,u.context_pack_ref,"
+            "p.record_json AS context_json,p.content_hash AS context_hash,"
+            "a.record_json AS attempt_json,a.content_hash AS attempt_hash,"
+            "f.record_json AS confirmation_json,f.content_hash AS confirmation_hash,"
+            "d.record_json AS dispatch_json,d.content_hash AS dispatch_hash "
+            "FROM intent_candidate_versions c JOIN human_utterance_versions u "
+            "ON u.utterance_version_id=c.utterance_version_ref "
+            "JOIN intent_context_packs p ON p.context_pack_id=u.context_pack_ref "
+            "JOIN intent_interpretation_attempts a ON a.attempt_id=c.attempt_ref "
+            "LEFT JOIN intent_confirmation_receipts f "
+            "ON f.candidate_version_ref=c.candidate_version_id "
+            "LEFT JOIN intent_dispatch_receipts d ON d.confirmation_ref=f.confirmation_id "
+            "AND d.ordinal=(SELECT MAX(dx.ordinal) FROM intent_dispatch_receipts dx "
+            "WHERE dx.confirmation_ref=f.confirmation_id) "
+        )
+
+    def _candidate_bundle(self, row: sqlite3.Row) -> dict[str, Any]:
+        candidate = self._load_record(
+            row["record_json"], row["content_hash"], "IntentCandidateVersion"
+        )
+        utterance = self._load_record(
+            row["utterance_json"], row["utterance_hash"], "HumanUtteranceVersion"
+        )
+        attempt = self._load_record(
+            row["attempt_json"], row["attempt_hash"], "IntentInterpretationAttempt"
+        )
+        context = validate_intent_context_pack(json.loads(row["context_json"]))
+        normalized = validate_interpreter_candidate(
+            candidate.get("candidate"),
+            context=context,
+            utterance=utterance.get("verbatim_text"),
+        )
+        if (
+            row["candidate_version_id"] != candidate.get("id")
+            or row["utterance_version_ref"] != utterance.get("id")
+            or row["attempt_ref"] != attempt.get("id")
+            or row["intent_kind"] != normalized["intent_kind"]
+            or row["disposition"] != normalized["disposition"]
+            or candidate.get("utterance_version_hash") != utterance.get("content_hash")
+            or candidate.get("attempt_hash") != attempt.get("content_hash")
+            or utterance.get("context_pack_ref") != context.get("id")
+            or utterance.get("context_pack_hash") != context.get("content_hash")
+            or canonical_json(candidate.get("candidate")) != canonical_json(normalized)
+            or candidate.get("candidate_only") is not True
+            or candidate.get("executable") is not False
+            or attempt.get("status") != "accepted"
+        ):
+            raise HumanIntentConflict("stored intent candidate lineage drifted")
+        confirmation = None
+        if row["confirmation_json"] is not None:
+            confirmation = self._load_record(
+                row["confirmation_json"], row["confirmation_hash"],
+                "IntentConfirmationReceipt",
+            )
+            expected = {
+                "schema_version", "id", "created_at", "candidate_version_ref",
+                "candidate_version_hash", "utterance_version_ref",
+                "utterance_version_hash", "original_context_pack_ref",
+                "original_context_pack_hash", "confirmation_context_pack_ref",
+                "confirmation_context_pack_hash", "actor_ref", "decision",
+                "effect_kind", "content_hash",
+            }
+            if (
+                set(confirmation) != expected
+                or confirmation.get("schema_version") != SCHEMA_VERSION
+                or confirmation.get("candidate_version_ref") != candidate["id"]
+                or confirmation.get("candidate_version_hash") != candidate["content_hash"]
+                or confirmation.get("utterance_version_ref") != utterance["id"]
+                or confirmation.get("utterance_version_hash") != utterance["content_hash"]
+                or confirmation.get("original_context_pack_ref") != context["id"]
+                or confirmation.get("original_context_pack_hash") != context["content_hash"]
+                or confirmation.get("actor_ref") != utterance["actor_ref"]
+                or confirmation.get("decision") != "confirm"
+                or confirmation.get("effect_kind")
+                != normalized.get("effect", {}).get("kind")
+            ):
+                raise HumanIntentConflict("stored intent confirmation lineage drifted")
+            confirmation_context_row = self.connection.execute(
+                "SELECT record_json FROM intent_context_packs WHERE context_pack_id=?",
+                (confirmation["confirmation_context_pack_ref"],),
+            ).fetchone()
+            if confirmation_context_row is None:
+                raise HumanIntentConflict(
+                    "stored intent confirmation context is unavailable"
+                )
+            confirmation_context = self._load_record(
+                confirmation_context_row["record_json"],
+                confirmation["confirmation_context_pack_hash"],
+                "confirmation IntentContextPack",
+            )
+            revalidate_confirmation_context(candidate, confirmation_context)
+        dispatch = None
+        if row["dispatch_json"] is not None:
+            dispatch = self._load_record(
+                row["dispatch_json"], row["dispatch_hash"], "IntentDispatchReceipt"
+            )
+            expected = {
+                "schema_version", "id", "created_at", "confirmation_ref",
+                "confirmation_hash", "ordinal", "status", "effect_kind",
+                "result", "error_code", "content_hash",
+            }
+            if (
+                confirmation is None
+                or set(dispatch) != expected
+                or dispatch.get("schema_version") != SCHEMA_VERSION
+                or dispatch.get("confirmation_ref") != confirmation["id"]
+                or dispatch.get("confirmation_hash") != confirmation["content_hash"]
+                or dispatch.get("effect_kind") != confirmation["effect_kind"]
+                or dispatch.get("status") not in {"succeeded", "failed"}
+                or (dispatch.get("status") == "succeeded")
+                != (dispatch.get("result") is not None)
+                or (dispatch.get("status") == "failed")
+                != (dispatch.get("error_code") is not None)
+            ):
+                raise HumanIntentConflict("stored intent dispatch lineage drifted")
+        return {
+            "candidate": candidate,
+            "utterance": utterance,
+            "context": context,
+            "confirmation": confirmation,
+            "dispatch": dispatch,
+        }
+
+    def candidate_bundle(
+        self, candidate_version_ref: str, candidate_version_hash: str
+    ) -> dict[str, Any]:
+        candidate_version_ref = _text(candidate_version_ref, "candidate_version_ref")
+        candidate_version_hash = _hash(candidate_version_hash, "candidate_version_hash")
+        with self._lock:
+            row = self.connection.execute(
+                self._candidate_query() + "WHERE c.candidate_version_id=?",
+                (candidate_version_ref,),
+            ).fetchone()
+        if row is None:
+            raise HumanIntentValidationError("intent candidate is unavailable")
+        bundle = self._candidate_bundle(row)
+        if bundle["candidate"]["content_hash"] != candidate_version_hash:
+            raise HumanIntentConflict("intent candidate hash drifted")
+        return bundle
+
     def list_candidates(self, *, limit: int = 100) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise HumanIntentValidationError("limit must be 1..500")
         with self._lock:
             rows = self.connection.execute(
-                "SELECT c.*,u.record_json AS utterance_json,"
-                "u.content_hash AS utterance_hash,u.context_pack_ref,"
-                "p.record_json AS context_json,p.content_hash AS context_hash,"
-                "a.record_json AS attempt_json,a.content_hash AS attempt_hash "
-                "FROM intent_candidate_versions c JOIN human_utterance_versions u "
-                "ON u.utterance_version_id=c.utterance_version_ref "
-                "JOIN intent_context_packs p ON p.context_pack_id=u.context_pack_ref "
-                "JOIN intent_interpretation_attempts a ON a.attempt_id=c.attempt_ref "
-                "ORDER BY c.created_at DESC,c.candidate_version_id DESC LIMIT ?",
+                self._candidate_query()
+                + "ORDER BY c.created_at DESC,c.candidate_version_id DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-        result = []
-        for row in rows:
-            candidate = self._load_record(
-                row["record_json"], row["content_hash"], "IntentCandidateVersion"
+        return [self._candidate_bundle(row) for row in rows]
+
+    def confirmation_request_result(
+        self, request_key: str, request_hash: str
+    ) -> dict[str, Any] | None:
+        with self._lock:
+            row = self.connection.execute(
+                "SELECT request_hash,result_json FROM intent_confirmation_requests "
+                "WHERE request_key=?",
+                (request_key,),
+            ).fetchone()
+        if row is None:
+            return None
+        if row["request_hash"] != request_hash:
+            raise HumanIntentConflict("intent confirmation request id was reused")
+        return json.loads(row["result_json"])
+
+    def save_confirmation_request_result(
+        self,
+        *,
+        request_key: str,
+        request_hash: str,
+        result: Mapping[str, Any],
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        created = _timestamp(created_at or _now(), "confirmation request created_at")
+        result_wire = json.loads(canonical_json(result))
+        with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT request_hash,result_json FROM intent_confirmation_requests "
+                "WHERE request_key=?",
+                (request_key,),
+            ).fetchone()
+            if row is not None:
+                if row["request_hash"] != request_hash:
+                    raise HumanIntentConflict("intent confirmation request id was reused")
+                return json.loads(row["result_json"])
+            cur.execute(
+                "INSERT INTO intent_confirmation_requests "
+                "(request_key,request_hash,result_json,created_at) VALUES(?,?,?,?)",
+                (request_key, request_hash, canonical_json(result_wire), created),
             )
-            utterance = self._load_record(
-                row["utterance_json"], row["utterance_hash"], "HumanUtteranceVersion"
+        return result_wire
+
+    def record_confirmation(
+        self,
+        *,
+        bundle: Mapping[str, Any],
+        confirmation_context: Mapping[str, Any],
+        actor_ref: str,
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        candidate = bundle["candidate"]
+        utterance = bundle["utterance"]
+        original_context = bundle["context"]
+        if actor_ref != utterance["actor_ref"] or _HUMAN_RE.fullmatch(actor_ref) is None:
+            raise HumanIntentValidationError("only the originating human can confirm")
+        saved_context = self.save_context_pack(confirmation_context)
+        fresh = validate_intent_context_pack({
+            name: value for name, value in saved_context.items() if name != "status"
+        })
+        revalidate_confirmation_context(candidate, fresh)
+        effect_kind = candidate["candidate"]["effect"]["kind"]
+        identity = {
+            "candidate_version_ref": candidate["id"],
+            "candidate_version_hash": candidate["content_hash"],
+            "actor_ref": actor_ref,
+            "decision": "confirm",
+        }
+        created = _timestamp(created_at or _now(), "confirmation created_at")
+        wire = self._record({
+            "schema_version": SCHEMA_VERSION,
+            "id": f"intent-confirmation:{content_hash(identity)}",
+            "created_at": created,
+            "candidate_version_ref": candidate["id"],
+            "candidate_version_hash": candidate["content_hash"],
+            "utterance_version_ref": utterance["id"],
+            "utterance_version_hash": utterance["content_hash"],
+            "original_context_pack_ref": original_context["id"],
+            "original_context_pack_hash": original_context["content_hash"],
+            "confirmation_context_pack_ref": fresh["id"],
+            "confirmation_context_pack_hash": fresh["content_hash"],
+            "actor_ref": actor_ref,
+            "decision": "confirm",
+            "effect_kind": effect_kind,
+        })
+        with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT record_json,content_hash FROM intent_confirmation_receipts "
+                "WHERE candidate_version_ref=?",
+                (candidate["id"],),
+            ).fetchone()
+            if row is not None:
+                saved = self._load_record(
+                    row["record_json"], row["content_hash"],
+                    "IntentConfirmationReceipt",
+                )
+                for name, expected in identity.items():
+                    if saved.get(name) != expected:
+                        raise HumanIntentConflict(
+                            "intent candidate already has a different confirmation"
+                        )
+                return {"status": "duplicate", **saved}
+            cur.execute(
+                "INSERT INTO intent_confirmation_receipts "
+                "(confirmation_id,candidate_version_ref,actor_ref,"
+                "confirmation_context_pack_ref,record_json,content_hash,created_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (
+                    wire["id"], candidate["id"], actor_ref, fresh["id"],
+                    canonical_json(wire), wire["content_hash"], created,
+                ),
             )
-            attempt = self._load_record(
-                row["attempt_json"], row["attempt_hash"], "IntentInterpretationAttempt"
+        return {"status": "fresh", **wire}
+
+    def record_dispatch(
+        self,
+        *,
+        confirmation: Mapping[str, Any],
+        status: str,
+        result: Mapping[str, Any] | None,
+        error_code: str | None,
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
+        if status not in {"succeeded", "failed"}:
+            raise HumanIntentValidationError("dispatch status is invalid")
+        if status == "succeeded":
+            if not isinstance(result, Mapping) or error_code is not None:
+                raise HumanIntentValidationError("successful dispatch result is invalid")
+            result_wire = json.loads(canonical_json(result))
+            error = None
+        else:
+            if result is not None:
+                raise HumanIntentValidationError("failed dispatch cannot contain a result")
+            result_wire = None
+            error = _text(error_code, "dispatch error_code", maximum=128)
+        created = _timestamp(created_at or _now(), "dispatch created_at")
+        with self._transaction() as cur:
+            succeeded = cur.execute(
+                "SELECT record_json,content_hash FROM intent_dispatch_receipts "
+                "WHERE confirmation_ref=? AND status='succeeded'",
+                (confirmation["id"],),
+            ).fetchone()
+            if succeeded is not None:
+                saved = self._load_record(
+                    succeeded["record_json"], succeeded["content_hash"],
+                    "IntentDispatchReceipt",
+                )
+                return {"status": "duplicate", **saved}
+            row = cur.execute(
+                "SELECT COALESCE(MAX(ordinal),0)+1 AS ordinal "
+                "FROM intent_dispatch_receipts WHERE confirmation_ref=?",
+                (confirmation["id"],),
+            ).fetchone()
+            ordinal = int(row["ordinal"])
+            identity = {"confirmation_ref": confirmation["id"], "ordinal": ordinal}
+            wire = self._record({
+                "schema_version": SCHEMA_VERSION,
+                "id": f"intent-dispatch:{content_hash(identity)}",
+                "created_at": created,
+                "confirmation_ref": confirmation["id"],
+                "confirmation_hash": confirmation["content_hash"],
+                "ordinal": ordinal,
+                "status": status,
+                "effect_kind": confirmation["effect_kind"],
+                "result": result_wire,
+                "error_code": error,
+            })
+            cur.execute(
+                "INSERT INTO intent_dispatch_receipts "
+                "(dispatch_id,confirmation_ref,ordinal,status,error_code,record_json,"
+                "content_hash,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    wire["id"], confirmation["id"], ordinal, status, error,
+                    canonical_json(wire), wire["content_hash"], created,
+                ),
             )
-            context = validate_intent_context_pack(json.loads(row["context_json"]))
-            normalized = validate_interpreter_candidate(
-                candidate.get("candidate"),
-                context=context,
-                utterance=utterance.get("verbatim_text"),
-            )
-            if (
-                row["candidate_version_id"] != candidate.get("id")
-                or row["utterance_version_ref"] != utterance.get("id")
-                or row["attempt_ref"] != attempt.get("id")
-                or row["intent_kind"] != normalized["intent_kind"]
-                or row["disposition"] != normalized["disposition"]
-                or candidate.get("utterance_version_hash")
-                != utterance.get("content_hash")
-                or candidate.get("attempt_hash") != attempt.get("content_hash")
-                or utterance.get("context_pack_ref") != context.get("id")
-                or utterance.get("context_pack_hash") != context.get("content_hash")
-                or canonical_json(candidate.get("candidate"))
-                != canonical_json(normalized)
-                or candidate.get("candidate_only") is not True
-                or candidate.get("executable") is not False
-                or attempt.get("status") != "accepted"
-            ):
-                raise HumanIntentConflict("stored intent candidate lineage drifted")
-            result.append({"candidate": candidate, "utterance": utterance})
-        return result
+        return {"status": "fresh", **wire}
 
 
 class NaturalLanguageComposerPlane:
@@ -1899,11 +2244,13 @@ class NaturalLanguageComposerPlane:
         context_provider: Callable[[str], Mapping[str, Any]],
         interpreter: IntentInterpreter | None = None,
         authority: HumanIntentAuthority | None = None,
+        dispatcher: IntentDispatcher | None = None,
     ) -> None:
         self.config = config
         self.context_provider = context_provider
         self.interpreter = interpreter or OpenClawIntentInterpreter(config)
         self.authority = authority or HumanIntentAuthority(config.staging_path)
+        self.dispatcher = dispatcher
         self._lock = threading.Lock()
 
     def close(self) -> None:
@@ -1920,9 +2267,134 @@ class NaturalLanguageComposerPlane:
             "as_of": _now(),
             "actor_ref": actor,
             "candidate_only": True,
-            "execution_enabled": False,
+            "confirmation_enabled": self.dispatcher is not None,
+            "execution_enabled": self.dispatcher is not None,
             "items": self.authority.list_candidates(limit=100),
         }
+
+    def confirm(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        if self.dispatcher is None:
+            raise HumanIntentValidationError("intent confirmation is not enabled")
+        request = _closed(
+            value,
+            {
+                "request_id", "candidate_version_ref", "candidate_version_hash",
+                "decision",
+            },
+            "confirmation request",
+        )
+        request_id = request["request_id"]
+        if not isinstance(request_id, str) or _REQUEST_ID_RE.fullmatch(request_id) is None:
+            raise HumanIntentValidationError("request_id has an invalid shape")
+        if request["decision"] != "confirm":
+            raise HumanIntentValidationError("confirmation decision is invalid")
+        candidate_ref = _text(
+            request["candidate_version_ref"], "candidate_version_ref"
+        )
+        candidate_hash = _hash(
+            request["candidate_version_hash"], "candidate_version_hash"
+        )
+        actor = self._actor(login)
+        request_key = f"{actor}:{request_id}"
+        request_hash = content_hash({
+            "actor_ref": actor,
+            "request_id": request_id,
+            "candidate_version_ref": candidate_ref,
+            "candidate_version_hash": candidate_hash,
+            "decision": "confirm",
+        })
+        with self._lock:
+            saved = self.authority.confirmation_request_result(
+                request_key, request_hash
+            )
+            if saved is not None:
+                return saved
+            bundle = self.authority.candidate_bundle(candidate_ref, candidate_hash)
+            candidate = bundle["candidate"]
+            if (
+                candidate.get("requires_confirmation") is not True
+                or candidate.get("risk_level") != "high"
+                or candidate.get("candidate", {}).get("disposition") != "candidate"
+            ):
+                raise HumanIntentValidationError(
+                    "intent candidate does not admit confirmation"
+                )
+            if bundle["utterance"].get("actor_ref") != actor:
+                raise HumanIntentValidationError(
+                    "only the originating human can confirm"
+                )
+            fresh_context = validate_intent_context_pack(
+                self.context_provider(login)
+            )
+            revalidate_confirmation_context(candidate, fresh_context)
+            confirmation = bundle.get("confirmation")
+            if confirmation is None:
+                confirmation = self.authority.record_confirmation(
+                    bundle=bundle,
+                    confirmation_context=fresh_context,
+                    actor_ref=actor,
+                )
+                confirmation = {
+                    name: item
+                    for name, item in confirmation.items()
+                    if name != "status"
+                }
+            prior_dispatch = bundle.get("dispatch")
+            if (
+                isinstance(prior_dispatch, Mapping)
+                and prior_dispatch.get("status") == "succeeded"
+            ):
+                result = {
+                    "status": "duplicate",
+                    "candidate_version_ref": candidate["id"],
+                    "candidate_version_hash": candidate["content_hash"],
+                    "confirmation": confirmation,
+                    "dispatch": prior_dispatch,
+                }
+                return self.authority.save_confirmation_request_result(
+                    request_key=request_key,
+                    request_hash=request_hash,
+                    result=result,
+                )
+            try:
+                dispatch_result = self.dispatcher.dispatch(
+                    login, bundle, confirmation
+                )
+                if not isinstance(dispatch_result, Mapping):
+                    raise HumanIntentInterpreterError(
+                        "intent dispatcher returned an invalid result"
+                    )
+                dispatch = self.authority.record_dispatch(
+                    confirmation=confirmation,
+                    status="succeeded",
+                    result=dispatch_result,
+                    error_code=None,
+                )
+                status = "dispatched"
+            except Exception as exc:
+                code = getattr(exc, "code", None)
+                error_code = (
+                    code if isinstance(code, str) and code else "writer_rejected"
+                )
+                dispatch = self.authority.record_dispatch(
+                    confirmation=confirmation,
+                    status="failed",
+                    result=None,
+                    error_code=error_code,
+                )
+                status = "dispatch_failed"
+            result = {
+                "status": status,
+                "candidate_version_ref": candidate["id"],
+                "candidate_version_hash": candidate["content_hash"],
+                "confirmation": confirmation,
+                "dispatch": dispatch,
+            }
+            return self.authority.save_confirmation_request_result(
+                request_key=request_key,
+                request_hash=request_hash,
+                result=result,
+            )
 
     def compose(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
         request = _closed(value, {"request_id", "utterance"}, "compose request")
@@ -2099,11 +2571,13 @@ __all__ = [
     "FROZEN_INTENT_CORPUS_HASH", "HumanIntentError", "HumanIntentInterpreterError",
     "HumanIntentValidationError", "INTERPRETER_CANDIDATE_CONTRACT_HASH",
     "INTERPRETER_HASH", "INTERPRETER_REF", "IntentComposerConfig",
+    "IntentDispatcher",
     "InterpreterOutput", "NaturalLanguageComposerPlane",
     "OpenClawIntentInterpreter", "build_cockpit_intent_context",
     "build_intent_interpreter_prompt", "build_intent_interpreter_work_order",
     "load_frozen_intent_corpus",
     "score_intent_calibration_case",
-    "parse_interpreter_candidate_text", "validate_intent_context_pack",
-    "validate_interpreter_candidate", "validate_interpreter_provenance",
+    "parse_interpreter_candidate_text", "revalidate_confirmation_context",
+    "validate_intent_context_pack", "validate_interpreter_candidate",
+    "validate_interpreter_provenance",
 ]

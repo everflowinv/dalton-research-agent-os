@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "IntentConfirmationReceipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "candidate_version_ref", "candidate_version_hash", "utterance_version_ref", "utterance_version_hash", "original_context_pack_ref", "original_context_pack_hash", "confirmation_context_pack_ref", "confirmation_context_pack_hash", "actor_ref", "decision", "effect_kind", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^intent-confirmation:[0-9a-f]{64}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "candidate_version_ref": {"type": "string", "minLength": 1},
+    "candidate_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "utterance_version_ref": {"type": "string", "minLength": 1},
+    "utterance_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "original_context_pack_ref": {"type": "string", "minLength": 1},
+    "original_context_pack_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "confirmation_context_pack_ref": {"type": "string", "minLength": 1},
+    "confirmation_context_pack_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "actor_ref": {"type": "string", "pattern": "^human:[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+    "decision": {"const": "confirm"},
+    "effect_kind": {"enum": ["research_question_draft", "research_directive_candidate", "priority_override_candidate", "context_bound_approval_candidate"]},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

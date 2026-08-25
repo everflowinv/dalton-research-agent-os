@@ -59,10 +59,16 @@ verbatim owner utterance + exact Cockpit context
 `HumanUtteranceVersion` 保留原文、匿名化 human actor、exact context ref/hash 和 request id。模型调用另有
 interpreter WorkOrder、route decision 和 formal ResultEnvelope；intent staging 保存其 exact provenance。
 
-S3 没有 effect 执行端点。directive、priority、approval 只生成高风险候选；question draft 也必须在后续 admission
-边界重新绑定 mandate。全局 composer 中没有 focused target 时，“同意”“批准”“可以”“yes”等裸审批必须返回
-`clarification_required`。即使目标明确，approval candidate 也必须绑定用户当时看到的 exact ref/hash，并在未来由
-原 writer principal 二次确认。Agenda timeout 和自动化账号永远不能冒充这一步。
+S3A 没有 effect 执行端点。S3B 增加独立确认链：只有原提交人能显式确认 high-risk candidate；Core 必须重新读取
+当前 `IntentContextPack`，并逐字段核对 effect 内每个 binding。确认不会把候选改成 executable，也不会直接取得
+writer 权限；系统另存 append-only `IntentConfirmationReceipt`，再把 effect 交给原 writer principal。每次分派另存
+append-only `IntentDispatchReceipt`，失败重试要使用新的 request id，成功后不得重复写入。
+
+question draft 在 writer 内重新绑定 exact MandateVersion；Agenda decision、bounded planner loop 和 coverage item
+必须能确定性解析到单一 mandate/company。directive 继续走 Bounded Planner writer，priority 继续走 Agenda writer，
+Agenda/research/transcript approval 继续走各自控制面。全局 composer 中没有 focused target 时，“同意”“批准”
+“可以”“yes”等裸审批仍必须返回 `clarification_required`。Agenda timeout 和自动化账号永远不能生成 human
+confirmation。context、candidate 或 writer authority 任一漂移都 fail closed。
 
 ### 3. Ad-hoc sufficiency/freshness closed contract
 
@@ -99,6 +105,8 @@ Thesis 或后续 ContextPack 的权威输入。
 ## 影响
 
 - Owner 可以只写自然语言；结构化合同和权限校验仍由 Core 决定。
-- S3 可以先上线安全预览和校准，不会提前打开 directive、priority 或 approval 的执行路径。
+- S3A 先完成安全预览和校准；S3B 只在显式 human confirmation 与 exact revalidation 后开放原 writer 路径，
+  不合并 principal，也不把 staging 变成 authority。
 - S4/S5 的回答与刷新路径已有封闭状态机，不需要让模型临时判断“资料够不够新”。
-- 本决定不部署 live Cockpit、不打开 production pointer，也不授权新的 mandate、预算、connector 或 formal research 写入。
+- 本决定不部署 live Cockpit、不打开 production pointer，也不新增 mandate、预算或 connector 权限。formal research
+  写入仍只发生在 explicit human confirmation 后，并继续经过既有 review writer 与 gate。

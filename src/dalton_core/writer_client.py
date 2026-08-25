@@ -219,6 +219,15 @@ class WriterClient:
     def record_agenda_feedback(self, **params: Any) -> Any:
         return self.call("record_agenda_feedback", params)
 
+    def intent_context_bindings(self) -> Any:
+        return self.call("intent_context_bindings", {})
+
+    def admit_intent_question(self, **params: Any) -> Any:
+        return self.call("admit_intent_question", params)
+
+    def issue_intent_directive(self, **params: Any) -> Any:
+        return self.call("issue_intent_directive", params)
+
     def create_workflow_version(self, **params: Any) -> Any:
         return self.call("create_workflow_version", params)
 
