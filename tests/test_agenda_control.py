@@ -14,6 +14,7 @@ from dalton_core.agenda import AgendaStore
 from dalton_core.agenda_control import (
     AgendaControlApplication,
     AgendaControlConfig,
+    AgendaControlError,
     AgendaControlPlane,
     CockpitIntentDispatcher,
     _handler,
@@ -316,6 +317,60 @@ class AgendaControlTests(unittest.TestCase):
         self.assertEqual(answer["decision"]["route"], "recommend_agenda_item")
         self.assertFalse(answer["decision"]["write_performed"])
 
+    def test_answer_refresh_dispatch_uses_ephemeral_human_and_closed_decision(self):
+        calls = []
+
+        def governance_call(token_config, writer_socket, **params):
+            calls.append((token_config, writer_socket, params))
+            return {
+                "status": "fresh",
+                "reservation": {"id": "answer-refresh-reservation:test"},
+                "dispatch": {
+                    "id": "answer-refresh-dispatch:test",
+                    "work_order_ref": "work:bounded-planner:test",
+                },
+            }
+
+        plane = AgendaControlPlane(
+            self.config,
+            dashboard_client=self.plane.dashboard,
+            timeout_client=self.plane.timeout,
+            governance_call=governance_call,
+        )
+        app = AgendaControlApplication(self.config, plane)
+        _session_id, session, _created = app.session(LOGIN, None)
+        subject = plane.answer_view()["subjects"][0]
+        payload = {
+            "subject_binding": subject,
+            "question": "Why?",
+            "route_decision_ref": "answer-route-decision:test",
+            "route_decision_hash": "c" * 64,
+            "route_as_of": "2026-08-25T10:00:00.000000+00:00",
+        }
+        with self.assertRaises(PermissionError):
+            app.post_answer_refresh(
+                LOGIN, session, "wrong", json.dumps(payload).encode()
+            )
+        with self.assertRaises(AgendaControlError):
+            app.post_answer_refresh(
+                LOGIN,
+                session,
+                session.csrf,
+                json.dumps({**payload, "max_cost_units": 100}).encode(),
+            )
+        result = app.post_answer_refresh(
+            LOGIN, session, session.csrf, json.dumps(payload).encode()
+        )
+        self.assertEqual(result["status"], "fresh")
+        self.assertEqual(len(calls), 1)
+        token_config, writer_socket, call = calls[0]
+        self.assertEqual(token_config, self.config.token_config)
+        self.assertEqual(writer_socket, self.config.writer_socket)
+        self.assertEqual(call["operation"], "dispatch_answer_refresh")
+        self.assertTrue(call["actor_ref"].startswith("human:tailscale-"))
+        self.assertNotIn(LOGIN, call["actor_ref"])
+        self.assertEqual(call["params"], payload)
+
     def test_embedded_review_config_has_no_second_host_or_core_path(self):
         raw = {
             "host": "127.0.0.1", "port": 8793,
@@ -431,7 +486,7 @@ class AgendaControlTests(unittest.TestCase):
             response = connection.getresponse()
             answer_payload = json.loads(response.read())
             self.assertEqual(response.status, 200)
-            self.assertFalse(answer_payload["refresh_enabled"])
+            self.assertTrue(answer_payload["refresh_enabled"])
             self.assertFalse(answer_payload["adhoc_research_enabled"])
             self.assertEqual(
                 review_payload["csrf_token"], answer_payload["csrf_token"]

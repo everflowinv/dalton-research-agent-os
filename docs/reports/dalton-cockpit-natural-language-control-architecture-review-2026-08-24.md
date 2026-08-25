@@ -158,15 +158,22 @@ Cockpit 用两张连续的待审卡完成这条路径。Transcript correction �
 2026-08-25 的 S5A development candidate 已先完成 `answer_after_refresh`：只有 stale-only 的 exact answered question
 可以绑定一个 human-created、未启动、单轮 Bounded Planner Loop。独立日预算先生成 append-only reservation，再复用
 既有 Scheduler/WorkOrder；无命中形成 `coverage_complete_unobservable_candidate`，有命中必须绑定 exact
-ResultEnvelope、SourceEnvelope 和 CandidateStaging receipt。Cockpit 目前只显示获准计划，没有 dispatch endpoint；
+ResultEnvelope、SourceEnvelope 和 CandidateStaging receipt。S5A 当时只显示获准计划，没有 dispatch endpoint；
 ad-hoc research 继续关闭。实现记录见
 [有限回答刷新 S5A v0.2](answer-after-refresh-s5a-v0.2-2026-08-25.md)。
 
 S5B 随后用进程内合成 SEC 响应跑通 production connector/authority 代码路径到 CandidateStaging，再关闭一条 observed
 refresh。finalize 现会独立重读 exact SourceEnvelope 和 raw ArtifactVersion；caller 只提交 ref/hash 不再够用。候选仍是
-`semantic_verification_status=unverified`，没有自动进入正式 authority。Cockpit dispatch 与 ad-hoc research 仍未开放。
+`semantic_verification_status=unverified`，没有自动进入正式 authority。
 实现记录见
 [S5B connector → CandidateStaging 隔离 canary](answer-refresh-connector-canary-s5b-v0.3-2026-08-25.md)。
+
+S5C 随后只开放 Cockpit 的显式 human dispatch。页面把 exact subject/question/RouteDecision ref/hash/as-of 原样回交，
+服务端从 Tailscale login 派生 human actor，并通过临时认证 `human:*` principal 复用原
+`AnswerRefreshControlPlane.dispatch`。Core 当天重算 route；换日、context 或 hash 漂移都会拒绝。页面不能创建
+ProbeTemplate、Bounded Loop、connector plan 或提高预算，`dashboard-control` 也没有获得 dispatch 权限。ad-hoc
+research 继续关闭。实现记录见
+[S5C Cockpit human dispatch](answer-refresh-cockpit-human-dispatch-s5c-v0.4-2026-08-25.md)。
 
 ## 主要失效模式
 

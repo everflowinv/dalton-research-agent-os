@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import secrets
 import threading
 import time
@@ -25,7 +26,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import urlparse
 
-from .governance_cli import ephemeral_call
+from .governance_cli import GovernanceCliError, ephemeral_call
 from .human_intent import (
     HumanIntentError,
     IntentComposerConfig,
@@ -40,6 +41,7 @@ from .research_review_control import (
 )
 from .store import content_hash
 from .writer_client import WriterClient
+from .writer_protocol import RemoteError
 from .writer_server import load_principals
 
 
@@ -47,6 +49,7 @@ _HTML_PATH = Path(__file__).with_name("cockpit_control.html")
 MAX_BODY_BYTES = 16384
 SESSION_TTL_SECONDS = 3600
 AUTOMATION_SUBJECT = "automation:timeout"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class AgendaControlError(RuntimeError):
@@ -68,6 +71,13 @@ def _path(value: Any, name: str) -> Path:
 def _positive_int(value: Any, name: str, upper: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= upper:
         raise AgendaControlError(f"{name} must be 1..{upper}")
+    return value
+
+
+def _sha256(value: Any, name: str) -> str:
+    value = _string(value, name)
+    if _SHA256_RE.fullmatch(value) is None:
+        raise AgendaControlError(f"{name} must be lowercase SHA-256")
     return value
 
 
@@ -195,6 +205,7 @@ class AgendaControlPlane:
         *,
         dashboard_client: WriterClient | None = None,
         timeout_client: WriterClient | None = None,
+        governance_call: Any = ephemeral_call,
     ) -> None:
         self.config = config
         principals = None
@@ -212,6 +223,7 @@ class AgendaControlPlane:
             timeout_client = WriterClient(str(config.writer_socket), principal.token, timeout=30)
         self.dashboard = dashboard_client
         self.timeout = timeout_client
+        self.governance_call = governance_call
 
     def _targets(self, client: WriterClient) -> list[dict[str, Any]]:
         value = client.list_agenda_feedback_targets(
@@ -241,7 +253,7 @@ class AgendaControlPlane:
             "routes": [
                 "answer_direct", "answer_after_refresh", "recommend_agenda_item",
             ],
-            "refresh_enabled": False,
+            "refresh_enabled": True,
             "adhoc_research_enabled": False,
         }
 
@@ -260,6 +272,54 @@ class AgendaControlPlane:
             or not isinstance(result.get("decision"), Mapping)
         ):
             raise AgendaControlError("writer returned invalid answer route")
+        return dict(result)
+
+    def dispatch_answer_refresh(
+        self,
+        login: str,
+        *,
+        subject_binding: Mapping[str, Any],
+        question: str,
+        route_decision_ref: str,
+        route_decision_hash: str,
+        route_as_of: str,
+    ) -> dict[str, Any]:
+        if not isinstance(subject_binding, Mapping):
+            raise AgendaControlError("subject_binding must be an object")
+        normalized_as_of = _parse_time(route_as_of, "route_as_of").isoformat(
+            timespec="microseconds"
+        )
+        try:
+            result = self.governance_call(
+                self.config.token_config,
+                self.config.writer_socket,
+                actor_ref=_subject_for_login(login),
+                operation="dispatch_answer_refresh",
+                params={
+                    "subject_binding": dict(subject_binding),
+                    "question": _string(question, "question"),
+                    "route_decision_ref": _string(
+                        route_decision_ref, "route_decision_ref"
+                    ),
+                    "route_decision_hash": _sha256(
+                        route_decision_hash, "route_decision_hash"
+                    ),
+                    "route_as_of": normalized_as_of,
+                },
+            )
+        except (GovernanceCliError, RemoteError) as exc:
+            raise AgendaControlError(
+                "answer refresh dispatch was rejected"
+            ) from exc
+        if (
+            not isinstance(result, Mapping)
+            or result.get("status") not in {"fresh", "duplicate"}
+            or not isinstance(result.get("reservation"), Mapping)
+            or not isinstance(result.get("dispatch"), Mapping)
+        ):
+            raise AgendaControlError(
+                "writer returned invalid answer refresh dispatch"
+            )
         return dict(result)
 
     @staticmethod
@@ -669,6 +729,30 @@ class AgendaControlApplication:
             value["subject_binding"], value["question"]
         )
 
+    def post_answer_refresh(
+        self, login: str, session: _Session, csrf: str | None, body: bytes
+    ) -> dict[str, Any]:
+        if not isinstance(csrf, str) or not secrets.compare_digest(csrf, session.csrf):
+            raise PermissionError("invalid CSRF token")
+        try:
+            value = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise AgendaControlError("request body is invalid") from exc
+        expected = {
+            "subject_binding", "question", "route_decision_ref",
+            "route_decision_hash", "route_as_of",
+        }
+        if not isinstance(value, Mapping) or set(value) != expected:
+            raise AgendaControlError("request body has an invalid closed shape")
+        return self.plane.dispatch_answer_refresh(
+            login,
+            subject_binding=value["subject_binding"],
+            question=value["question"],
+            route_decision_ref=value["route_decision_ref"],
+            route_decision_hash=value["route_decision_hash"],
+            route_as_of=value["route_as_of"],
+        )
+
 
 def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
@@ -816,6 +900,7 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 "/v1/intent/compose": application.post_intent,
                 "/v1/intent/confirm": application.post_intent_confirm,
                 "/v1/answer/route": application.post_answer,
+                "/v1/answer/refresh/dispatch": application.post_answer_refresh,
             }
             action = actions.get(path)
             if action is None:

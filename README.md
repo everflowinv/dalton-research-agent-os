@@ -165,9 +165,13 @@ route 前后表计数、`total_changes` 和完整 authority 指纹不变，网�
 S5A 随后只打开 stale-only 的 `answer_after_refresh`。Core 要求 exact answered question、human-created 单轮
 Bounded Planner Loop、human-admitted read-only ProbeTemplate 和独立日预算同时满足；预算 reservation 后仍复用原
 Scheduler/WorkOrder。无命中只能形成不可观测候选，有命中必须先绑定 exact ResultEnvelope、SourceEnvelope 和
-CandidateStaging receipt，不能直接写正式 Evidence/Claim/Thesis。Cockpit 当前只显示获准计划，没有 dispatch endpoint；
-ad-hoc research 继续关闭。见
-[有限回答刷新 S5A v0.2](docs/reports/answer-after-refresh-s5a-v0.2-2026-08-25.md)。
+CandidateStaging receipt，不能直接写正式 Evidence/Claim/Thesis。S5B 已用隔离 connector canary 验证这条候选链；S5C
+又在 Cockpit 增加显式 human dispatch。浏览器只能回交 exact subject/question/RouteDecision ref/hash/as-of，Core 当天
+重算通过后才预留既有预算并把既有 probe 送入原 Scheduler；页面不能创建模板、loop、connector plan 或扩大预算。
+`dashboard-control` 仍只有只读 answer RPC，dispatch 使用临时认证 `human:*` principal。ad-hoc research 继续关闭。见
+[有限回答刷新 S5A v0.2](docs/reports/answer-after-refresh-s5a-v0.2-2026-08-25.md)、
+[S5B connector canary v0.3](docs/reports/answer-refresh-connector-canary-s5b-v0.3-2026-08-25.md) 与
+[S5C Cockpit human dispatch v0.4](docs/reports/answer-refresh-cockpit-human-dispatch-s5c-v0.4-2026-08-25.md)。
 
 Gate 0、Gate 1 和 Gate 2 控制面验收已完成。verifier 现改为 wrapper-owned binding：模型只返回 semantic
 `verdict/findings`，trusted worker 从 immutable WorkOrder 绑定 exact assessment ref/hash，raw ResultEnvelope 与历史

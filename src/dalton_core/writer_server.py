@@ -34,6 +34,7 @@ from .agenda import (
 )
 from .agenda_context import build_agenda_context
 from .answer_routing import (
+    AnswerRefreshControlPlane,
     AnswerRoutingAuthority,
     AnswerRoutingConflict,
     AnswerRoutingError,
@@ -55,6 +56,7 @@ from .coverage_admission import (
 )
 from .bounded_planner_loop import (
     BoundedPlannerAuthority,
+    BoundedPlannerControlPlane,
     BoundedPlannerConflict,
     BoundedPlannerError,
     BoundedPlannerNotFound,
@@ -217,6 +219,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "publish_transcript_correction_set", "bind_transcript_claim_citation",
     "admit_intent_question", "issue_intent_directive",
     "publish_answer_sufficiency_policy",
+    "dispatch_answer_refresh",
 })
 FEEDBACK_BRIDGE_OPERATIONS = frozenset({
     "list_agenda_feedback_targets", "record_agenda_feedback",
@@ -288,6 +291,7 @@ CORE_OPERATIONS = frozenset({
     "industry_research_integrity_report",
     "intent_context_bindings", "admit_intent_question", "issue_intent_directive",
     "publish_answer_sufficiency_policy", "answer_subjects", "route_answer",
+    "dispatch_answer_refresh",
 })
 
 
@@ -372,6 +376,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     }),
     "answer_subjects": frozenset({"as_of"}),
     "route_answer": frozenset({"subject_binding", "question", "as_of"}),
+    "dispatch_answer_refresh": frozenset({
+        "subject_binding", "question", "route_decision_ref",
+        "route_decision_hash", "route_as_of", "actor_ref",
+    }),
     "create_workflow_version": frozenset({"workflow_ref", "title", "objective", "scope_refs", "root_work_order_refs", "governance_policy_ref", "prior_version_ref", "version_id", "idempotency_key", "actor_ref"}),
     "link_work_order": frozenset({"workflow_ref", "parent_work_order_ref", "child_work_order_ref", "relation", "sequence", "actor_ref", "link_id", "idempotency_key"}),
     "record_usage": frozenset({"invocation_ref", "entry_id", "occurred_at", "metering_source", "measurement_status", "raw_usage", "workflow_ref", "provider_usage_ref", "correction_of_ref", "actor_ref", "idempotency_key", "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens", "cache_write_tokens", "total_tokens", "requests", "duration_ms", "input_bytes", "output_bytes"}),
@@ -466,6 +474,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "admit_intent_question": "actor_ref",
     "issue_intent_directive": "actor_ref",
     "publish_answer_sufficiency_policy": "actor_ref",
+    "dispatch_answer_refresh": "actor_ref",
     "create_workflow_version": "actor_ref",
     "link_work_order": "actor_ref",
     "record_usage": "actor_ref",
@@ -638,8 +647,10 @@ class WriterServer:
         self._research_plan: ResearchPlanAuthority | None = None
         self._backlog: ResearchQuestionBacklog | None = None
         self._bounded_planner: BoundedPlannerAuthority | None = None
+        self._bounded_control: BoundedPlannerControlPlane | None = None
         self._intent_writer: IntentWriterAuthority | None = None
         self._answer_routing: AnswerRoutingAuthority | None = None
+        self._answer_refresh: AnswerRefreshControlPlane | None = None
         self._thesis_impact: ThesisImpactAuthority | None = None
         self._thesis_impact_control: ResearchPlanThesisImpactCoordinator | None = None
         self._token_config_path = None if token_config_path is None else Path(token_config_path)
@@ -753,6 +764,12 @@ class WriterServer:
             raise WriterServerError("answer-routing authority is unavailable")
         return self._answer_routing
 
+    @property
+    def answer_refresh(self) -> AnswerRefreshControlPlane:
+        if self._answer_refresh is None:
+            raise WriterServerError("answer-refresh control plane is unavailable")
+        return self._answer_refresh
+
     def start(self) -> None:
         if self._listener is not None:
             raise WriterServerError("writer server is already started")
@@ -814,6 +831,15 @@ class WriterServer:
             )
         if self._scheduler_path is not None:
             self._scheduler = Scheduler(self._scheduler_path)
+            self._bounded_control = BoundedPlannerControlPlane(
+                self._bounded_planner,
+                self._observability,
+                self._scheduler,
+            )
+            self._answer_refresh = AnswerRefreshControlPlane(
+                self._answer_routing,
+                self._bounded_control,
+            )
             self._research_plan = ResearchPlanAuthority(self._store)
             self._thesis_impact = ThesisImpactAuthority(
                 self._store, self._scheduler
@@ -895,8 +921,10 @@ class WriterServer:
         self._research_plan = None
         self._backlog = None
         self._bounded_planner = None
+        self._bounded_control = None
         self._intent_writer = None
         self._answer_routing = None
+        self._answer_refresh = None
         self._thesis_impact = None
         self._thesis_impact_control = None
         if self._store is not None:
@@ -1398,6 +1426,9 @@ class WriterServer:
 
     def _op_route_answer(self, p: Mapping[str, Any]) -> Any:
         return self.answer_routing.route(**dict(p))
+
+    def _op_dispatch_answer_refresh(self, p: Mapping[str, Any]) -> Any:
+        return self.answer_refresh.dispatch(**dict(p))
 
     def _op_create_workflow_version(self, p: Mapping[str, Any]) -> Any:
         return self.observability.create_workflow_version(**dict(p))

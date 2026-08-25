@@ -969,11 +969,12 @@ class BoundedPlannerControlPlane:
         self.observability = observability
         self.scheduler = scheduler
         self.fault_injector = fault_injector
-        if not (
-            authority.connection is getattr(observability, "connection", None)
-            is getattr(scheduler, "connection", None)
-        ):
-            raise TypeError("bounded authority, observability and scheduler must share one Core connection")
+        if authority.connection is not getattr(observability, "connection", None):
+            raise TypeError(
+                "bounded authority and observability must share one Core connection"
+            )
+        if not callable(getattr(scheduler, "work_order_authority", None)):
+            raise TypeError("bounded control requires Scheduler WorkOrder authority")
 
     def _inject(self, seam: str) -> None:
         if self.fault_injector is not None:
@@ -1240,16 +1241,16 @@ class BoundedPlannerControlPlane:
         loop = self.authority.loop(round_wire["loop_version_ref"])
         proposal = self.authority.proposal(round_wire["proposal_ref"])
         template = self.authority.probe_template(proposal["action"]["template_version_ref"])
-        work_row = self.authority.connection.execute(
-            "SELECT work_order_json,work_order_hash FROM scheduler_work_orders WHERE work_order_id=?",
-            (round_wire["work_order_ref"],),
-        ).fetchone()
-        if work_row is None:
+        work_authority = self.scheduler.work_order_authority(
+            round_wire["work_order_ref"]
+        )
+        if work_authority is None:
             raise BoundedPlannerNotFound("round WorkOrder is missing from Scheduler")
         expected_work = self._work_order(loop, proposal, template)
         if (
-            work_row["work_order_json"] != canonical_json(expected_work)
-            or work_row["work_order_hash"] != content_hash(expected_work)
+            canonical_json(work_authority["work_order"])
+            != canonical_json(expected_work)
+            or work_authority["work_order_hash"] != content_hash(expected_work)
             or round_wire["work_order_hash"] != content_hash(expected_work)
         ):
             raise BoundedPlannerConflict("round WorkOrder drifted from proposal authority")

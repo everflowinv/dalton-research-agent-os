@@ -82,8 +82,8 @@
   question 必须唯一绑定 human-created、未启动的单轮 Bounded Planner Loop 和 human-admitted read-only
   ProbeTemplate；独立 policy 日预算先写 append-only reservation，再复用原 Scheduler/WorkOrder。重复 dispatch 与
   reservation 后崩溃重试不会重复计费或排队；无命中只形成 `coverage_complete_unobservable_candidate`，有命中必须
-  绑定本次 ResultEnvelope、SourceEnvelope 和 CandidateStaging stage receipt，不能直接写正式 authority。Cockpit
-  目前只显示获准 plan，没有 dispatch endpoint；ad-hoc research 继续关闭。S5A 关联 authority 矩阵 153/153；最后
+  绑定本次 ResultEnvelope、SourceEnvelope 和 CandidateStaging stage receipt，不能直接写正式 authority。S5A 关联
+  authority 矩阵 153/153；最后
   两项 crash-hardening 写入后，Answer Routing/Contracts/Packaging 最终超集 24/24，Cockpit JavaScript、compileall、
   JSON schema 解析和 diff check 通过。S5B 又补了 observed refresh 的 connector → CandidateStaging 隔离 canary：进程内
   合成 SEC 响应走完整 Connector/Artifact/SourceEnvelope/resolver/verifier/staging production code path，1 次 physical
@@ -91,10 +91,19 @@
   refresh。finalize 现在必须从只读 connector receipt authority 重读 exact SourceEnvelope 和 raw ArtifactVersion；只给
   caller ref/hash 或缺 reader 会在 ResearchOutcome 前拒绝，同一候选命中多条 stage receipt 也 fail closed。重复 finalize
   只返回原 receipt；CandidateClaim 仍是 `semantic_verification_status=unverified`，正式 Evidence/Claim/Thesis 增量为 0。
-  canary 没有外网、付费模型、live DB 或部署。
+  canary 没有外网、付费模型、live DB 或部署。S5C 现已给 development Cockpit 增加显式 human dispatch：浏览器只提交
+  exact subject/question/RouteDecision ref/hash/as-of，服务端从 Tailscale login 派生稳定 human actor，再用临时认证
+  `human:*` writer principal 调用原 `AnswerRefreshControlPlane`；`dashboard-control` 继续只有两个只读 answer RPC。Core
+  会按同一 as-of 重算 route，换日、ref/hash/context 漂移都拒绝；UI 不能创建 ProbeTemplate、Bounded Loop、connector
+  plan 或改预算。writer 的 Core 与 Scheduler 仍是两个 SQLite，本切片把 Bounded Planner 的 WorkOrder 复核改为从 exact
+  Scheduler authority 读取，并验证 enqueue 后崩溃重放只产生一个 WorkOrder。ad-hoc research 继续关闭；本切片未部署
+  live `:8793`，也未打开 production pointer。S5C 的 Answer Routing 与相邻 Scheduler/Cockpit/writer/Doctrine/
+  StatementSnapshot/TranscriptPolish/ResearchPlan/Backlog/Industry/CandidateStaging/Observability 回归 197/197 通过；
+  Cockpit JavaScript、compileall、全部 JSON contract 与 diff check 也通过。
   实现记录见
   [有限回答刷新 S5A v0.2](reports/answer-after-refresh-s5a-v0.2-2026-08-25.md) 和
-  [S5B connector → CandidateStaging 隔离 canary](reports/answer-refresh-connector-canary-s5b-v0.3-2026-08-25.md)。live `:8793` 仍是旧 Agenda，
+  [S5B connector → CandidateStaging 隔离 canary](reports/answer-refresh-connector-canary-s5b-v0.3-2026-08-25.md) 和
+  [S5C Cockpit human dispatch](reports/answer-refresh-cockpit-human-dispatch-s5c-v0.4-2026-08-25.md)。live `:8793` 仍是旧 Agenda，
   production pointer 关闭，正式
   Evidence/Claim/Thesis 写入仍为 0。此前 S1/S2 关联回归 80/80、Cockpit JavaScript
   语法、compileall、真实 ACN projection 和 diff check 通过；全仓 `unittest discover` 在无失败输出的情况下运行

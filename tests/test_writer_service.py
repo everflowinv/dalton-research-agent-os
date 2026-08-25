@@ -292,6 +292,26 @@ class WriterServiceTests(unittest.TestCase):
                 policy_ref="answer-policy:forbidden"
             )
 
+    def test_answer_refresh_dispatch_rpc_is_human_only_and_uses_control_plane(self):
+        params = {
+            "subject_binding": {},
+            "question": "Why?",
+            "route_decision_ref": "answer-route-decision:missing",
+            "route_decision_hash": "d" * 64,
+            "route_as_of": "2026-08-25T10:00:00.000000+00:00",
+        }
+        with self.assertRaises(RemoteAuthorizationError):
+            self.dashboard.dispatch_answer_refresh(**params)
+        with self.assertRaises(RemoteAuthorizationError):
+            self.worker.dispatch_answer_refresh(**params)
+        with self.assertRaises(RemoteAuthorizationError):
+            self.governance.dispatch_answer_refresh(
+                **params, actor_ref="human:spoofed-owner"
+            )
+        with self.assertRaises(RemoteError) as caught:
+            self.governance.dispatch_answer_refresh(**params)
+        self.assertNotEqual(caught.exception.code, "forbidden")
+
     def test_coverage_admission_writes_require_authenticated_human(self):
         with self.assertRaises(RemoteAuthorizationError):
             self.worker.register_driver_pack(

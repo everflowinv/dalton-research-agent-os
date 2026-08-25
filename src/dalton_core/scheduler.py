@@ -1915,6 +1915,31 @@ class Scheduler:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def work_order_authority(self, work_order_id: str) -> dict[str, Any] | None:
+        """Return the immutable Scheduler copy of one admitted WorkOrder."""
+        row = self.connection.execute(
+            "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
+            "WHERE work_order_id=?",
+            (_nonempty(work_order_id, "work_order_id"),),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            wire = json.loads(row["work_order_json"])
+            normalized = WorkOrder.from_dict(wire).to_dict()
+        except Exception as exc:
+            raise SchedulerConflict("stored WorkOrder authority is invalid") from exc
+        calculated = content_hash(normalized)
+        if (
+            canonical_json(normalized) != row["work_order_json"]
+            or calculated != row["work_order_hash"]
+        ):
+            raise SchedulerConflict("stored WorkOrder authority drifted")
+        return {
+            "work_order": normalized,
+            "work_order_hash": row["work_order_hash"],
+        }
+
     def formal_result(self, work_order_id: str) -> dict[str, Any] | None:
         row = self.connection.execute(
             "SELECT * FROM scheduler_formal_results WHERE work_order_id=?",

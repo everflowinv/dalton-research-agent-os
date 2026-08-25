@@ -393,9 +393,16 @@ class AnswerRoutingTests(unittest.TestCase):
         )
         return self.answers.subjects()[0], template, loop
 
-    def complete_refresh_work(self, dispatch: dict, matches: list[dict]) -> dict:
+    def complete_refresh_work(
+        self,
+        dispatch: dict,
+        matches: list[dict],
+        *,
+        scheduler: Scheduler | None = None,
+    ) -> dict:
+        scheduler = scheduler or self.scheduler
         work_order_ref = dispatch["work_order_ref"]
-        lease = self.scheduler.claim(
+        lease = scheduler.claim(
             "worker:answer-refresh", work_order_id=work_order_ref
         )
         self.assertIsNotNone(lease)
@@ -413,7 +420,7 @@ class AnswerRoutingTests(unittest.TestCase):
             "error": None,
             "metadata": {"fixture": True},
         }
-        return self.scheduler.complete(
+        return scheduler.complete(
             work_order_ref,
             1,
             "worker:answer-refresh",
@@ -586,6 +593,67 @@ class AnswerRoutingTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM scheduler_work_orders"
             ).fetchone()[0],
             scheduler_before + 1,
+        )
+
+    def test_refresh_dispatch_reuses_external_writer_scheduler(self) -> None:
+        subject, _, _ = self.refresh_ready()
+        external = Scheduler(Path(self.tmp.name) / "writer-scheduler.sqlite")
+        self.addCleanup(external.close)
+        external_control = BoundedPlannerControlPlane(
+            self.bounded, self.observability, external
+        )
+        refresh = AnswerRefreshControlPlane(self.answers, external_control)
+        routed = self.answers.route(subject_binding=subject, question=QUESTION)
+        decision = routed["decision"]
+        before_core = self.store.connection.execute(
+            "SELECT COUNT(*) FROM scheduler_work_orders"
+        ).fetchone()[0]
+        first = refresh.dispatch(
+            subject_binding=subject,
+            question=QUESTION,
+            route_decision_ref=decision["id"],
+            route_decision_hash=decision["content_hash"],
+            route_as_of=decision["created_at"],
+            actor_ref="human:owner",
+        )
+        second = refresh.dispatch(
+            subject_binding=subject,
+            question=QUESTION,
+            route_decision_ref=decision["id"],
+            route_decision_hash=decision["content_hash"],
+            route_as_of=decision["created_at"],
+            actor_ref="human:owner",
+        )
+        self.assertEqual(first["status"], "fresh")
+        self.assertEqual(second["status"], "duplicate")
+        self.assertEqual(
+            external.connection.execute(
+                "SELECT COUNT(*) FROM scheduler_work_orders"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM scheduler_work_orders"
+            ).fetchone()[0],
+            before_core,
+        )
+        authority = external.work_order_authority(
+            first["dispatch"]["work_order_ref"]
+        )
+        self.assertEqual(
+            authority["work_order_hash"], first["dispatch"]["work_order_hash"]
+        )
+        self.complete_refresh_work(first["dispatch"], [], scheduler=external)
+        finalized = refresh.finalize(
+            first["dispatch"]["id"],
+            candidate_staging_binding=None,
+            actor_ref="human:owner",
+        )
+        self.assertEqual(finalized["status"], "fresh")
+        self.assertEqual(
+            finalized["outcome_receipt"]["terminal_state"],
+            "coverage_complete_unobservable_candidate",
         )
 
     def test_refresh_dispatch_recovers_after_reserved_budget_crash(self) -> None:

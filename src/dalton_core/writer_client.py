@@ -237,6 +237,9 @@ class WriterClient:
     def route_answer(self, **params: Any) -> Any:
         return self.call("route_answer", params)
 
+    def dispatch_answer_refresh(self, **params: Any) -> Any:
+        return self.call("dispatch_answer_refresh", params)
+
     def create_workflow_version(self, **params: Any) -> Any:
         return self.call("create_workflow_version", params)
 

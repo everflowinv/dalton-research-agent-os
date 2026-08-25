@@ -261,6 +261,76 @@ class BoundedPlannerLoopTests(unittest.TestCase):
             1,
         )
 
+    def test_external_scheduler_crash_replay_and_outcome_use_exact_authority(self) -> None:
+        external = Scheduler(Path(self.temp.name) / "external-scheduler.sqlite")
+        self.addCleanup(external.close)
+        loop = self._loop()
+        proposal = self.authority.propose_next_capital_lease(loop["id"])
+
+        def crash(seam: str) -> None:
+            if seam == "after_enqueue":
+                raise InjectedCrash(seam)
+
+        crashing = BoundedPlannerControlPlane(
+            self.authority,
+            self.observability,
+            external,
+            fault_injector=crash,
+        )
+        with self.assertRaises(InjectedCrash):
+            crashing.admit_proposal(proposal["id"])
+        self.assertEqual(
+            external.connection.execute(
+                "SELECT COUNT(*) FROM scheduler_work_orders"
+            ).fetchone()[0],
+            1,
+        )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM scheduler_work_orders"
+            ).fetchone()[0],
+            0,
+        )
+        control = BoundedPlannerControlPlane(
+            self.authority, self.observability, external
+        )
+        replay = control.admit_proposal(proposal["id"])
+        self.assertEqual(replay["status"], "fresh")
+        round_wire = replay["round"]
+        lease = external.claim(
+            "worker:external", work_order_id=round_wire["work_order_ref"]
+        )
+        self.assertIsNotNone(lease)
+        result = {
+            "schema_version": "0.1",
+            "id": "result:bounded:external",
+            "created_at": NOW,
+            "work_order_ref": round_wire["work_order_ref"],
+            "invocation_ref": "invocation:bounded:external",
+            "status": "succeeded",
+            "outputs": {"matches": []},
+            "actual_side_effects": [],
+            "usage_refs": [],
+            "artifact_refs": [],
+            "error": None,
+            "metadata": {"fixture": True},
+        }
+        completed = external.complete(
+            round_wire["work_order_ref"],
+            1,
+            "worker:external",
+            lease["lease_token"],
+            result,
+            idempotency_key="complete:bounded:external",
+        )
+        self.assertEqual(completed["work_state"], "succeeded")
+        outcome = control.record_outcome(round_wire["id"])
+        self.assertEqual(outcome["outcome"]["outcome_kind"], "not_found_in_scope")
+        authority = external.work_order_authority(round_wire["work_order_ref"])
+        self.assertEqual(
+            authority["work_order_hash"], round_wire["work_order_hash"]
+        )
+
     def test_second_round_crash_after_link_converges_to_one_workflow_tree(self) -> None:
         loop = self._loop()
         self._run_one(loop)
