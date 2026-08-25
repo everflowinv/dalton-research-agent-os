@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AnswerRefreshDispatchReceipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "reservation_ref",
+    "reservation_hash", "decision_ref", "decision_hash", "loop_version_ref",
+    "loop_version_hash", "proposal_ref", "proposal_hash", "round_ref",
+    "round_hash", "work_order_ref", "work_order_hash",
+    "candidate_staging_required", "formal_authority_writes", "actor_ref",
+    "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^answer-refresh-dispatch:[0-9a-f]{64}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "reservation_ref": {"type": "string", "minLength": 1},
+    "reservation_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decision_ref": {"type": "string", "minLength": 1},
+    "decision_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "loop_version_ref": {"type": "string", "minLength": 1},
+    "loop_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "proposal_ref": {"type": "string", "minLength": 1},
+    "proposal_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "round_ref": {"type": "string", "minLength": 1},
+    "round_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "work_order_ref": {"type": "string", "minLength": 1},
+    "work_order_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "candidate_staging_required": {"const": true},
+    "formal_authority_writes": {"const": 0},
+    "actor_ref": {"type": "string", "pattern": "^human:"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

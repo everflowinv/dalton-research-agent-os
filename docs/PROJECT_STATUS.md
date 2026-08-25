@@ -78,14 +78,23 @@
   route 前后表计数、SQLite `total_changes` 和完整 authority 指纹不变，policy 换版后旧 subject binding 失效；
   网络、付费模型、成本记录和 live 写入均为 0。canary 同时修正 router 对 ThesisVersion 的 hash 口径：现在重验
   v0.1/v0.2 闭合 wire、exact version/thesis/authority binding，并只对 thesis 正文复算保存的 hash。S4.1 与关联
-  authority 回归 153/153。live `:8793` 仍是旧 Agenda，production pointer 关闭，正式
+  authority 回归 153/153。S5A 现只打开 stale-only 的 `answer_after_refresh` development route：exact answered
+  question 必须唯一绑定 human-created、未启动的单轮 Bounded Planner Loop 和 human-admitted read-only
+  ProbeTemplate；独立 policy 日预算先写 append-only reservation，再复用原 Scheduler/WorkOrder。重复 dispatch 与
+  reservation 后崩溃重试不会重复计费或排队；无命中只形成 `coverage_complete_unobservable_candidate`，有命中必须
+  绑定本次 ResultEnvelope、SourceEnvelope 和 CandidateStaging stage receipt，不能直接写正式 authority。Cockpit
+  目前只显示获准 plan，没有 dispatch endpoint；ad-hoc research 继续关闭。S5A 关联 authority 矩阵 153/153；最后
+  两项 crash-hardening 写入后，Answer Routing/Contracts/Packaging 最终超集 24/24，Cockpit JavaScript、compileall、
+  JSON schema 解析和 diff check 通过。
+  实现记录见
+  [有限回答刷新 S5A v0.2](reports/answer-after-refresh-s5a-v0.2-2026-08-25.md)。live `:8793` 仍是旧 Agenda，
+  production pointer 关闭，正式
   Evidence/Claim/Thesis 写入仍为 0。此前 S1/S2 关联回归 80/80、Cockpit JavaScript
   语法、compileall、真实 ACN projection 和 diff check 通过；全仓 `unittest discover` 在无失败输出的情况下运行
   40 分钟后仍停在既有
   `test_routed_worker_retries_contract_then_verifies_independently` 的 connector inventory `canonical_json`
-  热点，已人工中断，因此不能记为全仓绿色。当前本机 Python 3.13/3.14 都可导入 `build`，但缺少
-  `setuptools` backend；本轮尝试 `python3 -m build --sdist --wheel` 时又被仓库本地无 `__main__` 的 `build/`
-  namespace 截获，因此没有生成 sdist/wheel，只验证了 packaging manifest test。架构裁决见
+  热点，已人工中断，因此不能记为全仓绿色。当前本机 Python 3.13/3.14 都没有 `build` 模块，因此本轮没有生成
+  sdist/wheel，只验证了 packaging manifest test。架构裁决见
   [Dalton Cockpit 与自然语言方向控制](reports/dalton-cockpit-natural-language-control-architecture-review-2026-08-24.md)
   、[ACN 研究轨迹只读投影 v0.1](reports/acn-research-trajectory-read-projection-v0.1-2026-08-24.md)
   、[自然语言 Intent Composer v0.1](reports/natural-language-intent-composer-v0.1-2026-08-24.md)

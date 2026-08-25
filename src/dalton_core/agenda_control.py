@@ -238,7 +238,9 @@ class AgendaControlPlane:
         return {
             "as_of": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "subjects": [dict(item) for item in value],
-            "routes": ["answer_direct", "recommend_agenda_item"],
+            "routes": [
+                "answer_direct", "answer_after_refresh", "recommend_agenda_item",
+            ],
             "refresh_enabled": False,
             "adhoc_research_enabled": False,
         }

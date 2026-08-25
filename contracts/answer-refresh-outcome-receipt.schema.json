@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AnswerRefreshOutcomeReceipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "dispatch_ref", "dispatch_hash",
+    "outcome_ref", "outcome_hash", "outcome_kind", "terminal_ref",
+    "terminal_hash", "terminal_state", "candidate_staging_binding",
+    "formal_authority_writes", "actor_ref", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^answer-refresh-outcome:[0-9a-f]{64}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "dispatch_ref": {"type": "string", "minLength": 1},
+    "dispatch_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "outcome_ref": {"type": "string", "minLength": 1},
+    "outcome_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "outcome_kind": {"enum": ["observed", "not_found_in_scope"]},
+    "terminal_ref": {"type": "string", "minLength": 1},
+    "terminal_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "terminal_state": {
+      "enum": [
+        "coverage_complete_unobservable_candidate", "evidence_observed_for_review"
+      ]
+    },
+    "candidate_staging_binding": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "candidate_evidence_ref", "candidate_evidence_hash",
+            "candidate_claim_ref", "candidate_claim_hash",
+            "candidate_stage_idempotency_key", "candidate_stage_request_hash",
+            "result_envelope_ref", "result_envelope_hash",
+            "source_envelope_ref", "source_envelope_hash"
+          ],
+          "properties": {
+            "candidate_evidence_ref": {"type": "string", "minLength": 1},
+            "candidate_evidence_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "candidate_claim_ref": {"type": "string", "minLength": 1},
+            "candidate_claim_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "candidate_stage_idempotency_key": {"type": "string", "minLength": 1},
+            "candidate_stage_request_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "result_envelope_ref": {"type": "string", "minLength": 1},
+            "result_envelope_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "source_envelope_ref": {"type": "string", "minLength": 1},
+            "source_envelope_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          }
+        }
+      ]
+    },
+    "formal_authority_writes": {"const": 0},
+    "actor_ref": {"type": "string", "pattern": "^human:"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

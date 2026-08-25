@@ -8,7 +8,8 @@
     "schema_version", "id", "created_at", "route", "reason_codes",
     "answer_context_pack_ref", "answer_context_pack_hash", "subject_ref",
     "subject_hash", "question", "direct_claim_refs", "direct_evidence_refs",
-    "refresh_route_available", "adhoc_research_route_available",
+    "refresh_route_available", "refresh_plan",
+    "adhoc_research_route_available",
     "agenda_recommendation", "write_performed", "content_hash"
   ],
   "$defs": {
@@ -22,15 +23,20 @@
         "insufficient_formal_claims", "insufficient_formal_evidence",
         "unclassified_source_type", "stale_evidence",
         "too_many_contested_claims", "too_many_open_questions",
-        "too_many_unobservable_terminals", "insufficient_driver_coverage"
+        "too_many_unobservable_terminals", "insufficient_driver_coverage",
+        "refresh_disabled", "refresh_probe_unavailable",
+        "refresh_probe_ambiguous", "refresh_budget_exhausted",
+        "refresh_required"
       ]
     }
   },
   "properties": {
-    "schema_version": {"const": "0.1"},
+    "schema_version": {"const": "0.2"},
     "id": {"type": "string", "pattern": "^answer-route-decision:[0-9a-f]{64}$"},
     "created_at": {"type": "string", "format": "date-time"},
-    "route": {"enum": ["answer_direct", "recommend_agenda_item"]},
+    "route": {
+      "enum": ["answer_direct", "answer_after_refresh", "recommend_agenda_item"]
+    },
     "reason_codes": {
       "type": "array", "minItems": 1, "uniqueItems": true,
       "items": {"$ref": "#/$defs/reason"}
@@ -42,7 +48,59 @@
     "question": {"type": "string", "minLength": 1, "maxLength": 4000},
     "direct_claim_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
     "direct_evidence_refs": {"type": "array", "items": {"$ref": "#/$defs/ref"}},
-    "refresh_route_available": {"const": false},
+    "refresh_route_available": {"type": "boolean"},
+    "refresh_plan": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object", "additionalProperties": false,
+          "required": [
+            "schema_version", "id", "created_at", "policy_version_ref",
+            "policy_version_hash", "question_ref", "question_version_ref",
+            "question_version_hash", "loop_version_ref", "loop_version_hash",
+            "coverage_item_ref", "template_version_ref", "template_version_hash",
+            "parameters", "cost_units", "budget", "stale_evidence_refs",
+            "candidate_staging_required", "content_hash"
+          ],
+          "properties": {
+            "schema_version": {"const": "0.2"},
+            "id": {"type": "string", "pattern": "^answer-refresh-plan:[0-9a-f]{64}$"},
+            "created_at": {"type": "string", "format": "date-time"},
+            "policy_version_ref": {"$ref": "#/$defs/ref"},
+            "policy_version_hash": {"$ref": "#/$defs/hash"},
+            "question_ref": {"$ref": "#/$defs/ref"},
+            "question_version_ref": {"$ref": "#/$defs/ref"},
+            "question_version_hash": {"$ref": "#/$defs/hash"},
+            "loop_version_ref": {"$ref": "#/$defs/ref"},
+            "loop_version_hash": {"$ref": "#/$defs/hash"},
+            "coverage_item_ref": {"$ref": "#/$defs/ref"},
+            "template_version_ref": {"$ref": "#/$defs/ref"},
+            "template_version_hash": {"$ref": "#/$defs/hash"},
+            "parameters": {"type": "object"},
+            "cost_units": {"type": "integer", "minimum": 1},
+            "budget": {
+              "type": "object", "additionalProperties": false,
+              "required": [
+                "budget_day", "daily_limit_cost_units", "reserved_cost_units",
+                "remaining_cost_units"
+              ],
+              "properties": {
+                "budget_day": {"type": "string", "format": "date"},
+                "daily_limit_cost_units": {"type": "integer", "minimum": 1},
+                "reserved_cost_units": {"type": "integer", "minimum": 0},
+                "remaining_cost_units": {"type": "integer", "minimum": 0}
+              }
+            },
+            "stale_evidence_refs": {
+              "type": "array", "minItems": 1, "uniqueItems": true,
+              "items": {"$ref": "#/$defs/ref"}
+            },
+            "candidate_staging_required": {"const": true},
+            "content_hash": {"$ref": "#/$defs/hash"}
+          }
+        }
+      ]
+    },
     "adhoc_research_route_available": {"const": false},
     "agenda_recommendation": {"type": ["object", "null"]},
     "write_performed": {"const": false},

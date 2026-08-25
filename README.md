@@ -162,6 +162,13 @@ authority 完成 in-memory 回放：精确问题命中 2 条正式 Claim，改�
 route 前后表计数、`total_changes` 和完整 authority 指纹不变，网络、付费模型和 live 写入均为 0。实现与验证见
 [Ad-hoc 回答路由 v0.1](docs/reports/ad-hoc-answer-routing-v0.1-2026-08-25.md)。
 
+S5A 随后只打开 stale-only 的 `answer_after_refresh`。Core 要求 exact answered question、human-created 单轮
+Bounded Planner Loop、human-admitted read-only ProbeTemplate 和独立日预算同时满足；预算 reservation 后仍复用原
+Scheduler/WorkOrder。无命中只能形成不可观测候选，有命中必须先绑定 exact ResultEnvelope、SourceEnvelope 和
+CandidateStaging receipt，不能直接写正式 Evidence/Claim/Thesis。Cockpit 当前只显示获准计划，没有 dispatch endpoint；
+ad-hoc research 继续关闭。见
+[有限回答刷新 S5A v0.2](docs/reports/answer-after-refresh-s5a-v0.2-2026-08-25.md)。
+
 Gate 0、Gate 1 和 Gate 2 控制面验收已完成。verifier 现改为 wrapper-owned binding：模型只返回 semantic
 `verdict/findings`，trusted worker 从 immutable WorkOrder 绑定 exact assessment ref/hash，raw ResultEnvelope 与历史
 replay 保留。同一 30-case v0.2 corpus 的 low-thinking 重跑中，Gemini 3.7 Flash 和 GPT-5.6 Luna 都是 30/30，

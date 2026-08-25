@@ -155,6 +155,13 @@ Cockpit 用两张连续的待审卡完成这条路径。Transcript correction �
 
 接入独立日预算池和 Bounded Planner Loop。预算耗尽必须以 `budget_exhausted` 结束；新事实全部进入 candidate staging。
 
+2026-08-25 的 S5A development candidate 已先完成 `answer_after_refresh`：只有 stale-only 的 exact answered question
+可以绑定一个 human-created、未启动、单轮 Bounded Planner Loop。独立日预算先生成 append-only reservation，再复用
+既有 Scheduler/WorkOrder；无命中形成 `coverage_complete_unobservable_candidate`，有命中必须绑定 exact
+ResultEnvelope、SourceEnvelope 和 CandidateStaging receipt。Cockpit 目前只显示获准计划，没有 dispatch endpoint；
+ad-hoc research 继续关闭。实现记录见
+[有限回答刷新 S5A v0.2](answer-after-refresh-s5a-v0.2-2026-08-25.md)。
+
 ## 主要失效模式
 
 - 语义错译：封闭 taxonomy、原文留档、typed effect 回显；

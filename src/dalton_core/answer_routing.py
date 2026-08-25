@@ -1,10 +1,12 @@
-"""Deterministic, read-only ad-hoc answer context and routing.
+"""Deterministic ad-hoc answer context, routing, and bounded refresh admission.
 
-S4 deliberately supports only two routes.  An exact, already-answered
-ResearchQuestion may route to ``answer_direct`` when every Core-derived policy
-gate passes.  Everything else routes to ``recommend_agenda_item``.  The module
-does not call a model, execute a connector, create a WorkOrder, or write any
-Evidence, Claim, Thesis, Agenda item, or answer artifact.
+An exact, already-answered ResearchQuestion may route to ``answer_direct``
+when every Core-derived policy gate passes.  S5 additionally allows a stale-
+only question to route to ``answer_after_refresh`` when one human-admitted,
+single-round Bounded Planner loop and independent day budget are available.
+Routing itself remains read-only.  A separate control plane may reserve that
+budget and enqueue the existing loop's WorkOrder; it never calls a connector
+or writes Evidence, Claim, Thesis, an Agenda item, or an answer artifact.
 """
 
 from __future__ import annotations
@@ -14,10 +16,14 @@ import re
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from .agenda import AgendaStore, read_exact_mandate_version
-from .bounded_planner_loop import BoundedPlannerAuthority
+from .bounded_planner_loop import (
+    BoundedPlannerAuthority,
+    BoundedPlannerControlPlane,
+    BoundedPlannerNotFound,
+)
 from .contracts import ThesisVersion, ValidationError as ContractValidationError
 from .industry_research import IndustryResearchAuthority
 from .research_question_backlog import (
@@ -27,7 +33,8 @@ from .research_question_backlog import (
 from .store import DaltonStore, canonical_json, content_hash
 
 
-SCHEMA_VERSION = "0.1"
+SCHEMA_VERSION = "0.2"
+LEGACY_SCHEMA_VERSION = "0.1"
 _SCHEMA_PATH = Path(__file__).with_name("answer_routing_schema.sql")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _HUMAN_RE = re.compile(r"^human:[A-Za-z0-9][A-Za-z0-9._:-]*$")
@@ -53,6 +60,8 @@ _REFRESH_FIELDS = {
     "enabled", "max_cost_units", "probe_template_bindings",
 }
 _ADHOC_FIELDS = {"enabled", "max_cost_units", "max_rounds"}
+ANSWER_REFRESH_OUTPUT_CONTRACT_REF = "schema:bounded-planner-probe-output:0.1"
+ANSWER_REFRESH_VERIFIER_REF = "verifier:source-level-coverage:0.1"
 _THESIS_CONTENT_FIELDS = (
     "statement", "mechanism", "confidence", "implied_expectation",
     "claim_refs", "catalyst_refs", "falsifier_refs", "change_reason",
@@ -72,6 +81,11 @@ _ROUTE_REASON_ORDER = (
     "too_many_open_questions",
     "too_many_unobservable_terminals",
     "insufficient_driver_coverage",
+    "refresh_disabled",
+    "refresh_probe_unavailable",
+    "refresh_probe_ambiguous",
+    "refresh_budget_exhausted",
+    "refresh_required",
 )
 
 
@@ -186,7 +200,9 @@ def _load_record(
     return result
 
 
-def _route_budget(value: Any, kind: str) -> dict[str, Any]:
+def _route_budget(
+    value: Any, kind: str, *, schema_version: str = SCHEMA_VERSION
+) -> dict[str, Any]:
     fields = _REFRESH_FIELDS if kind == "refresh" else _ADHOC_FIELDS
     wire = _closed(value, fields, f"{kind} route")
     if not isinstance(wire["enabled"], bool):
@@ -216,17 +232,26 @@ def _route_budget(value: Any, kind: str) -> dict[str, Any]:
         wire["max_rounds"] = _integer(
             wire["max_rounds"], "adhoc.max_rounds", minimum=0, maximum=100
         )
-    if wire["enabled"] or wire["max_cost_units"] != 0:
+    if kind == "adhoc":
+        if wire["enabled"] or wire["max_cost_units"] != 0 or wire["max_rounds"] != 0:
+            raise AnswerRoutingValidationError(
+                "ad-hoc research must remain disabled in S5 v0.2"
+            )
+        return wire
+    if schema_version == LEGACY_SCHEMA_VERSION:
+        if wire["enabled"] or wire["max_cost_units"] != 0 or normalized:
+            raise AnswerRoutingValidationError(
+                "refresh route must remain disabled in S4 v0.1"
+            )
+        return wire
+    if wire["enabled"]:
+        if wire["max_cost_units"] == 0 or not normalized:
+            raise AnswerRoutingValidationError(
+                "enabled refresh requires positive day budget and probe bindings"
+            )
+    elif wire["max_cost_units"] != 0 or normalized:
         raise AnswerRoutingValidationError(
-            f"{kind} route must remain disabled in S4 v0.1"
-        )
-    if kind == "refresh" and wire["probe_template_bindings"]:
-        raise AnswerRoutingValidationError(
-            "refresh bindings require a later enabled route version"
-        )
-    if kind == "adhoc" and wire["max_rounds"] != 0:
-        raise AnswerRoutingValidationError(
-            "ad-hoc rounds require a later enabled route version"
+            "disabled refresh cannot retain budget or probe bindings"
         )
     return wire
 
@@ -265,8 +290,9 @@ def _thresholds(value: Any) -> dict[str, Any]:
 
 def validate_answer_sufficiency_policy(value: Any) -> dict[str, Any]:
     wire = _closed(value, _POLICY_FIELDS, "AnswerSufficiencyPolicyVersion")
-    if wire["schema_version"] != SCHEMA_VERSION:
+    if wire["schema_version"] not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
         raise AnswerRoutingValidationError("answer policy schema version is unsupported")
+    schema_version = wire["schema_version"]
     for name in (
         "id", "policy_ref", "mandate_ref", "mandate_version_ref",
     ):
@@ -293,9 +319,11 @@ def validate_answer_sufficiency_policy(value: Any) -> dict[str, Any]:
             wire["prior_version_ref"], "prior_version_ref", maximum=256
         )
     wire["thresholds"] = _thresholds(wire["thresholds"])
-    wire["refresh_route"] = _route_budget(wire["refresh_route"], "refresh")
+    wire["refresh_route"] = _route_budget(
+        wire["refresh_route"], "refresh", schema_version=schema_version
+    )
     wire["adhoc_research_route"] = _route_budget(
-        wire["adhoc_research_route"], "adhoc"
+        wire["adhoc_research_route"], "adhoc", schema_version=schema_version
     )
     wire["actor_ref"] = _human(wire["actor_ref"])
     asserted = wire.pop("content_hash")
@@ -361,6 +389,37 @@ class AnswerRoutingAuthority:
             self.connection.rollback()
             raise
 
+    def _validate_refresh_templates(
+        self, refresh_route: Mapping[str, Any]
+    ) -> list[dict[str, Any]]:
+        if not refresh_route["enabled"]:
+            return []
+        templates = []
+        for binding in refresh_route["probe_template_bindings"]:
+            try:
+                template = self.bounded.probe_template(binding["ref"])
+            except BoundedPlannerNotFound as exc:
+                raise AnswerRoutingConflict(
+                    "answer refresh ProbeTemplate is unavailable"
+                ) from exc
+            if template["content_hash"] != binding["hash"]:
+                raise AnswerRoutingConflict(
+                    "answer refresh ProbeTemplate hash drifted"
+                )
+            if (
+                template["side_effect_class"] != "read_only"
+                or template["output_contract_ref"]
+                != ANSWER_REFRESH_OUTPUT_CONTRACT_REF
+                or template["verifier_ref"] != ANSWER_REFRESH_VERIFIER_REF
+                or template["cost"]["cost_units"]
+                > refresh_route["max_cost_units"]
+            ):
+                raise AnswerRoutingConflict(
+                    "answer refresh ProbeTemplate exceeds the closed S5 contract"
+                )
+            templates.append(template)
+        return templates
+
     def publish_policy(
         self,
         *,
@@ -400,6 +459,7 @@ class AnswerRoutingAuthority:
         threshold_wire = _thresholds(thresholds)
         refresh_wire = _route_budget(refresh_route, "refresh")
         adhoc_wire = _route_budget(adhoc_research_route, "adhoc")
+        self._validate_refresh_templates(refresh_wire)
         request = {
             "policy_ref": policy_ref,
             "mandate_version_ref": mandate_version_ref,
@@ -954,6 +1014,121 @@ class AnswerRoutingAuthority:
             })
         return result
 
+    def _refresh_budget_state(
+        self, policy: Mapping[str, Any], when: datetime
+    ) -> dict[str, Any]:
+        budget_day = when.astimezone(timezone.utc).date().isoformat()
+        reserved = self.connection.execute(
+            "SELECT COALESCE(SUM(reserved_cost_units),0) AS total "
+            "FROM answer_refresh_budget_reservations "
+            "WHERE policy_version_ref=? AND budget_day=?",
+            (policy["id"], budget_day),
+        ).fetchone()["total"]
+        limit = policy["refresh_route"]["max_cost_units"]
+        return {
+            "budget_day": budget_day,
+            "daily_limit_cost_units": limit,
+            "reserved_cost_units": int(reserved),
+            "remaining_cost_units": max(limit - int(reserved), 0),
+        }
+
+    def _eligible_refresh_plan(
+        self,
+        *,
+        policy: Mapping[str, Any],
+        question: Mapping[str, Any],
+        stale_evidence_refs: list[str],
+        created_at: str,
+        when: datetime,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        refresh = policy["refresh_route"]
+        if not refresh["enabled"]:
+            return None, "refresh_disabled"
+        allowed = {
+            (item["ref"], item["hash"])
+            for item in refresh["probe_template_bindings"]
+        }
+        rows = self.connection.execute(
+            "SELECT v.version_id FROM bounded_planner_loop_versions v "
+            "WHERE v.question_version_ref=? AND v.version_number=("
+            "SELECT MAX(v2.version_number) FROM bounded_planner_loop_versions v2 "
+            "WHERE v2.loop_ref=v.loop_ref) ORDER BY v.version_id",
+            (question["head"]["id"],),
+        ).fetchall()
+        structural: list[tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+        for row in rows:
+            loop = self.bounded.loop(row["version_id"])
+            if self.bounded.terminal(loop["id"]) is not None:
+                continue
+            if self.bounded.rounds(loop["id"]):
+                continue
+            if (
+                loop["budget"]["max_rounds"] != 1
+                or len(loop["required_coverage_items"]) != 1
+                or len(loop["template_bindings"]) != 1
+            ):
+                continue
+            binding = loop["template_bindings"][0]
+            if (
+                binding["coverage_item_ref"]
+                != loop["required_coverage_items"][0]
+                or (
+                    binding["template_version_ref"],
+                    binding["template_version_hash"],
+                ) not in allowed
+            ):
+                continue
+            template = self.bounded.probe_template(
+                binding["template_version_ref"]
+            )
+            cost = template["cost"]
+            if (
+                template["content_hash"] != binding["template_version_hash"]
+                or template["side_effect_class"] != "read_only"
+                or template["output_contract_ref"]
+                != ANSWER_REFRESH_OUTPUT_CONTRACT_REF
+                or template["verifier_ref"] != ANSWER_REFRESH_VERIFIER_REF
+                or cost["cost_units"] > refresh["max_cost_units"]
+                or cost["cost_units"] > loop["budget"]["max_cost_units"]
+                or cost["max_seconds"] > loop["budget"]["max_seconds"]
+            ):
+                continue
+            structural.append((loop, binding, template))
+        if not structural:
+            return None, "refresh_probe_unavailable"
+        if len(structural) != 1:
+            return None, "refresh_probe_ambiguous"
+        loop, binding, template = structural[0]
+        budget = self._refresh_budget_state(policy, when)
+        cost_units = template["cost"]["cost_units"]
+        if cost_units > budget["remaining_cost_units"]:
+            return None, "refresh_budget_exhausted"
+        body = {
+            "schema_version": SCHEMA_VERSION,
+            "id": "pending",
+            "created_at": created_at,
+            "policy_version_ref": policy["id"],
+            "policy_version_hash": policy["content_hash"],
+            "question_ref": question["question_ref"],
+            "question_version_ref": question["head"]["id"],
+            "question_version_hash": question["head"]["content_hash"],
+            "loop_version_ref": loop["id"],
+            "loop_version_hash": loop["content_hash"],
+            "coverage_item_ref": binding["coverage_item_ref"],
+            "template_version_ref": template["id"],
+            "template_version_hash": template["content_hash"],
+            "parameters": binding["parameters"],
+            "cost_units": cost_units,
+            "budget": budget,
+            "stale_evidence_refs": sorted(stale_evidence_refs),
+            "candidate_staging_required": True,
+        }
+        identity = content_hash({
+            name: value for name, value in body.items() if name != "id"
+        })
+        body["id"] = f"answer-refresh-plan:{identity}"
+        return _record(body), None
+
     def route(
         self,
         *,
@@ -1144,13 +1319,36 @@ class AnswerRoutingAuthority:
                     reasons.add("too_many_unobservable_terminals")
                 if coverage_bps < thresholds["min_driver_coverage_bps"]:
                     reasons.add("insufficient_driver_coverage")
+            refresh_plan = None
+            if (
+                reasons == {"stale_evidence"}
+                and policy is not None
+                and admitted_question is not None
+            ):
+                refresh_plan, refresh_failure = self._eligible_refresh_plan(
+                    policy=policy,
+                    question=admitted_question,
+                    stale_evidence_refs=sorted(stale),
+                    created_at=created,
+                    when=when,
+                )
+                if refresh_plan is None:
+                    assert refresh_failure is not None
+                    reasons.add(refresh_failure)
+                else:
+                    reasons.add("refresh_required")
             ordered_reasons = [
                 reason for reason in _ROUTE_REASON_ORDER if reason in reasons
             ]
-            route = "answer_direct" if not ordered_reasons else "recommend_agenda_item"
+            if not ordered_reasons:
+                route = "answer_direct"
+            elif refresh_plan is not None:
+                route = "answer_after_refresh"
+            else:
+                route = "recommend_agenda_item"
             decision = _record({
                 "schema_version": SCHEMA_VERSION,
-                "id": f"answer-route-decision:{content_hash({'context': pack['id'], 'route': route})}",
+                "id": f"answer-route-decision:{content_hash({'context': pack['id'], 'route': route, 'refresh_plan': None if refresh_plan is None else refresh_plan['id']})}",
                 "created_at": created,
                 "route": route,
                 "reason_codes": ordered_reasons or ["answer_direct_ready"],
@@ -1166,10 +1364,11 @@ class AnswerRoutingAuthority:
                 "direct_evidence_refs": (
                     sorted(supporting_evidence) if route == "answer_direct" else []
                 ),
-                "refresh_route_available": False,
+                "refresh_route_available": refresh_plan is not None,
+                "refresh_plan": refresh_plan,
                 "adhoc_research_route_available": False,
                 "agenda_recommendation": (
-                    None if route == "answer_direct" else {
+                    None if route != "recommend_agenda_item" else {
                         "mandate_version_ref": mandate["id"],
                         "mandate_version_hash": mandate["content_hash"],
                         "company_ref": subject["company_ref"],
@@ -1182,9 +1381,634 @@ class AnswerRoutingAuthority:
             })
             return {"context_pack": pack, "decision": decision}
 
+    def refresh_reservation_for_decision(
+        self, decision_ref: str
+    ) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM answer_refresh_budget_reservations WHERE decision_ref=?",
+            (_text(decision_ref, "decision_ref", maximum=256),),
+        ).fetchone()
+        if row is None:
+            return None
+        return _load_record(
+            row["record_json"], row["content_hash"],
+            "AnswerRefreshBudgetReservation",
+        )
+
+    def refresh_dispatch_for_reservation(
+        self, reservation_ref: str
+    ) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM answer_refresh_dispatch_receipts WHERE reservation_ref=?",
+            (_text(reservation_ref, "reservation_ref", maximum=256),),
+        ).fetchone()
+        if row is None:
+            return None
+        return _load_record(
+            row["record_json"], row["content_hash"],
+            "AnswerRefreshDispatchReceipt",
+        )
+
+    def refresh_outcome_for_dispatch(
+        self, dispatch_ref: str
+    ) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM answer_refresh_outcome_receipts WHERE dispatch_ref=?",
+            (_text(dispatch_ref, "dispatch_ref", maximum=256),),
+        ).fetchone()
+        if row is None:
+            return None
+        return _load_record(
+            row["record_json"], row["content_hash"],
+            "AnswerRefreshOutcomeReceipt",
+        )
+
+    def _reserve_refresh(
+        self, routed: Mapping[str, Any], *, actor_ref: str
+    ) -> dict[str, Any]:
+        actor_ref = _human(actor_ref)
+        decision = routed["decision"]
+        pack = routed["context_pack"]
+        if (
+            decision["route"] != "answer_after_refresh"
+            or not decision["refresh_route_available"]
+            or decision["refresh_plan"] is None
+        ):
+            raise AnswerRoutingConflict("route decision does not authorize refresh")
+        plan = decision["refresh_plan"]
+        with self._transaction() as cur:
+            existing = cur.execute(
+                "SELECT * FROM answer_refresh_budget_reservations "
+                "WHERE decision_ref=?",
+                (decision["id"],),
+            ).fetchone()
+            if existing is not None:
+                reservation = _load_record(
+                    existing["record_json"], existing["content_hash"],
+                    "AnswerRefreshBudgetReservation",
+                )
+                if (
+                    reservation["decision_hash"] != decision["content_hash"]
+                    or reservation["refresh_plan_hash"] != plan["content_hash"]
+                    or reservation["actor_ref"] != actor_ref
+                ):
+                    raise AnswerRoutingConflict(
+                        "answer refresh reservation identity conflicts"
+                    )
+                return {"status": "duplicate", **reservation}
+            loop_reservation = cur.execute(
+                "SELECT decision_ref FROM answer_refresh_budget_reservations "
+                "WHERE loop_version_ref=?",
+                (plan["loop_version_ref"],),
+            ).fetchone()
+            if loop_reservation is not None:
+                raise AnswerRoutingConflict(
+                    "answer refresh loop already has another budget reservation"
+                )
+            pointer = cur.execute(
+                "SELECT version_id,content_hash FROM "
+                "answer_sufficiency_policy_pointer WHERE mandate_ref=?",
+                (pack["mandate_version"]["mandate_ref"],),
+            ).fetchone()
+            if (
+                pointer is None
+                or pointer["version_id"] != plan["policy_version_ref"]
+                or pointer["content_hash"] != plan["policy_version_hash"]
+            ):
+                raise AnswerRoutingConflict(
+                    "answer refresh policy changed before reservation"
+                )
+            policy = self.policy(plan["policy_version_ref"])
+            loop = self.bounded.loop(plan["loop_version_ref"])
+            template = self.bounded.probe_template(plan["template_version_ref"])
+            binding = loop["template_bindings"]
+            if (
+                loop["content_hash"] != plan["loop_version_hash"]
+                or self.bounded.terminal(loop["id"]) is not None
+                or self.bounded.rounds(loop["id"])
+                or len(binding) != 1
+                or binding[0]["coverage_item_ref"] != plan["coverage_item_ref"]
+                or binding[0]["template_version_ref"] != template["id"]
+                or binding[0]["template_version_hash"] != template["content_hash"]
+                or binding[0]["parameters"] != plan["parameters"]
+                or template["content_hash"] != plan["template_version_hash"]
+            ):
+                raise AnswerRoutingConflict(
+                    "answer refresh loop changed before reservation"
+                )
+            self._validate_refresh_templates(policy["refresh_route"])
+            when = _datetime(decision["created_at"], "decision created_at")
+            budget = self._refresh_budget_state(policy, when)
+            if (
+                budget["budget_day"] != plan["budget"]["budget_day"]
+                or plan["cost_units"] > budget["remaining_cost_units"]
+            ):
+                raise AnswerRoutingConflict("answer refresh day budget is exhausted")
+            identity = {
+                "decision_ref": decision["id"],
+                "decision_hash": decision["content_hash"],
+                "answer_context_pack_ref": pack["id"],
+                "answer_context_pack_hash": pack["content_hash"],
+                "policy_version_ref": policy["id"],
+                "policy_version_hash": policy["content_hash"],
+                "loop_version_ref": loop["id"],
+                "loop_version_hash": loop["content_hash"],
+                "budget_day": budget["budget_day"],
+                "reserved_cost_units": plan["cost_units"],
+                "refresh_plan_ref": plan["id"],
+                "refresh_plan_hash": plan["content_hash"],
+                "refresh_plan": plan,
+                "actor_ref": actor_ref,
+            }
+            reservation_id = (
+                "answer-refresh-reservation:" + content_hash(identity)
+            )
+            reservation = _record({
+                "schema_version": "0.1",
+                "id": reservation_id,
+                "created_at": _now(),
+                **identity,
+            })
+            cur.execute(
+                "INSERT INTO answer_refresh_budget_reservations "
+                "(reservation_id,decision_ref,policy_version_ref,loop_version_ref,budget_day,"
+                "reserved_cost_units,record_json,content_hash,actor_ref,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    reservation["id"], reservation["decision_ref"],
+                    reservation["policy_version_ref"], reservation["loop_version_ref"],
+                    reservation["budget_day"],
+                    reservation["reserved_cost_units"], canonical_json(reservation),
+                    reservation["content_hash"], reservation["actor_ref"],
+                    reservation["created_at"],
+                ),
+            )
+            return {"status": "fresh", **reservation}
+
+    def _record_refresh_dispatch(
+        self,
+        reservation: Mapping[str, Any],
+        round_wire: Mapping[str, Any],
+        *,
+        actor_ref: str,
+    ) -> dict[str, Any]:
+        actor_ref = _human(actor_ref)
+        with self._transaction() as cur:
+            existing = cur.execute(
+                "SELECT * FROM answer_refresh_dispatch_receipts "
+                "WHERE reservation_ref=?",
+                (reservation["id"],),
+            ).fetchone()
+            if existing is not None:
+                receipt = _load_record(
+                    existing["record_json"], existing["content_hash"],
+                    "AnswerRefreshDispatchReceipt",
+                )
+                return {"status": "duplicate", **receipt}
+            plan = reservation["refresh_plan"]
+            if (
+                round_wire["loop_version_ref"] != plan["loop_version_ref"]
+                or round_wire["loop_version_hash"] != plan["loop_version_hash"]
+            ):
+                raise AnswerRoutingConflict(
+                    "answer refresh round belongs to another loop"
+                )
+            proposal = self.bounded.proposal(round_wire["proposal_ref"])
+            action = proposal["action"]
+            if (
+                action["kind"] != "probe"
+                or action["coverage_item_ref"] != plan["coverage_item_ref"]
+                or action["template_version_ref"] != plan["template_version_ref"]
+                or action["template_version_hash"] != plan["template_version_hash"]
+                or action["parameters"] != plan["parameters"]
+            ):
+                raise AnswerRoutingConflict(
+                    "answer refresh proposal drifted from the reserved plan"
+                )
+            identity = {
+                "reservation_ref": reservation["id"],
+                "reservation_hash": reservation["content_hash"],
+                "decision_ref": reservation["decision_ref"],
+                "decision_hash": reservation["decision_hash"],
+                "loop_version_ref": round_wire["loop_version_ref"],
+                "loop_version_hash": round_wire["loop_version_hash"],
+                "proposal_ref": proposal["id"],
+                "proposal_hash": proposal["content_hash"],
+                "round_ref": round_wire["id"],
+                "round_hash": round_wire["content_hash"],
+                "work_order_ref": round_wire["work_order_ref"],
+                "work_order_hash": round_wire["work_order_hash"],
+                "candidate_staging_required": True,
+                "formal_authority_writes": 0,
+                "actor_ref": actor_ref,
+            }
+            receipt = _record({
+                "schema_version": "0.1",
+                "id": "answer-refresh-dispatch:" + content_hash(identity),
+                "created_at": _now(),
+                **identity,
+            })
+            cur.execute(
+                "INSERT INTO answer_refresh_dispatch_receipts "
+                "(receipt_id,reservation_ref,decision_ref,loop_version_ref,round_ref,"
+                "work_order_ref,record_json,content_hash,actor_ref,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    receipt["id"], receipt["reservation_ref"],
+                    receipt["decision_ref"], receipt["loop_version_ref"],
+                    receipt["round_ref"], receipt["work_order_ref"],
+                    canonical_json(receipt), receipt["content_hash"],
+                    receipt["actor_ref"], receipt["created_at"],
+                ),
+            )
+            return {"status": "fresh", **receipt}
+
+    def _record_refresh_outcome(
+        self,
+        dispatch: Mapping[str, Any],
+        outcome: Mapping[str, Any],
+        terminal: Mapping[str, Any],
+        candidate_binding: Mapping[str, Any] | None,
+        *,
+        actor_ref: str,
+    ) -> dict[str, Any]:
+        actor_ref = _human(actor_ref)
+        with self._transaction() as cur:
+            existing = cur.execute(
+                "SELECT * FROM answer_refresh_outcome_receipts WHERE dispatch_ref=?",
+                (dispatch["id"],),
+            ).fetchone()
+            if existing is not None:
+                receipt = _load_record(
+                    existing["record_json"], existing["content_hash"],
+                    "AnswerRefreshOutcomeReceipt",
+                )
+                return {"status": "duplicate", **receipt}
+            identity = {
+                "dispatch_ref": dispatch["id"],
+                "dispatch_hash": dispatch["content_hash"],
+                "outcome_ref": outcome["id"],
+                "outcome_hash": outcome["content_hash"],
+                "outcome_kind": outcome["outcome_kind"],
+                "terminal_ref": terminal["id"],
+                "terminal_hash": terminal["content_hash"],
+                "terminal_state": terminal["terminal_state"],
+                "candidate_staging_binding": candidate_binding,
+                "formal_authority_writes": 0,
+                "actor_ref": actor_ref,
+            }
+            receipt = _record({
+                "schema_version": "0.1",
+                "id": "answer-refresh-outcome:" + content_hash(identity),
+                "created_at": _now(),
+                **identity,
+            })
+            cur.execute(
+                "INSERT INTO answer_refresh_outcome_receipts "
+                "(receipt_id,dispatch_ref,outcome_ref,record_json,content_hash,"
+                "actor_ref,created_at) VALUES(?,?,?,?,?,?,?)",
+                (
+                    receipt["id"], receipt["dispatch_ref"],
+                    receipt["outcome_ref"], canonical_json(receipt),
+                    receipt["content_hash"], receipt["actor_ref"],
+                    receipt["created_at"],
+                ),
+            )
+            return {"status": "fresh", **receipt}
+
+
+class AnswerRefreshControlPlane:
+    """Reserve one day-budget slot and reuse the existing bounded queue."""
+
+    def __init__(
+        self,
+        answers: AnswerRoutingAuthority,
+        bounded_control: BoundedPlannerControlPlane,
+        *,
+        candidate_staging: Any | None = None,
+        fault_injector: Callable[[str], None] | None = None,
+    ) -> None:
+        if answers.bounded is not bounded_control.authority:
+            raise TypeError(
+                "answer refresh and bounded control must share one authority"
+            )
+        self.answers = answers
+        self.bounded = answers.bounded
+        self.control = bounded_control
+        self.scheduler = bounded_control.scheduler
+        self.candidate_staging = candidate_staging
+        self.fault_injector = fault_injector
+
+    def _inject(self, seam: str) -> None:
+        if self.fault_injector is not None:
+            self.fault_injector(seam)
+
+    def dispatch(
+        self,
+        *,
+        subject_binding: Mapping[str, Any],
+        question: str,
+        route_decision_ref: str,
+        route_decision_hash: str,
+        route_as_of: str,
+        actor_ref: str,
+    ) -> dict[str, Any]:
+        actor_ref = _human(actor_ref)
+        route_decision_ref = _text(
+            route_decision_ref, "route_decision_ref", maximum=256
+        )
+        route_decision_hash = _hash(
+            route_decision_hash, "route_decision_hash"
+        )
+        route_as_of = _time(route_as_of, "route_as_of")
+        current_day = _datetime(_now(), "current time").date()
+        if _datetime(route_as_of, "route_as_of").date() != current_day:
+            raise AnswerRoutingConflict(
+                "answer refresh dispatch requires a current-day route decision"
+            )
+        reservation = self.answers.refresh_reservation_for_decision(
+            route_decision_ref
+        )
+        if reservation is None:
+            routed = self.answers.route(
+                subject_binding=subject_binding,
+                question=question,
+                as_of=route_as_of,
+            )
+            decision = routed["decision"]
+            if (
+                decision["id"] != route_decision_ref
+                or decision["content_hash"] != route_decision_hash
+            ):
+                raise AnswerRoutingConflict(
+                    "answer refresh route decision is stale or drifted"
+                )
+            reservation = self.answers._reserve_refresh(
+                routed, actor_ref=actor_ref
+            )
+            self._inject("after_reservation")
+        else:
+            if (
+                reservation["decision_hash"] != route_decision_hash
+                or reservation["actor_ref"] != actor_ref
+            ):
+                raise AnswerRoutingConflict(
+                    "answer refresh reservation belongs to another decision or actor"
+                )
+        existing = self.answers.refresh_dispatch_for_reservation(
+            reservation["id"]
+        )
+        if existing is not None:
+            return {
+                "status": "duplicate",
+                "reservation": reservation,
+                "dispatch": existing,
+            }
+        plan = reservation["refresh_plan"]
+        rounds = self.bounded.rounds(plan["loop_version_ref"])
+        if len(rounds) > 1:
+            raise AnswerRoutingConflict(
+                "single-round answer refresh loop has multiple rounds"
+            )
+        if rounds:
+            round_wire = rounds[0]
+        else:
+            proposal = self.bounded.propose_next_capital_lease(
+                plan["loop_version_ref"]
+            )
+            if proposal.get("action", {}).get("kind") != "probe":
+                raise AnswerRoutingConflict(
+                    "answer refresh loop did not produce one probe proposal"
+                )
+            self._inject("after_proposal")
+            admitted = self.control.admit_proposal(proposal["id"])
+            if admitted["status"] not in {"fresh", "duplicate"}:
+                raise AnswerRoutingConflict(
+                    "answer refresh proposal was not admitted"
+                )
+            round_wire = admitted["round"]
+            self._inject("after_admission")
+        dispatch = self.answers._record_refresh_dispatch(
+            reservation, round_wire, actor_ref=actor_ref
+        )
+        self._inject("after_dispatch")
+        return {
+            "status": dispatch["status"],
+            "reservation": reservation,
+            "dispatch": dispatch,
+        }
+
+    def _candidate_staging_binding(
+        self,
+        value: Mapping[str, Any],
+        *,
+        result: Mapping[str, Any],
+        result_hash: str,
+    ) -> dict[str, str]:
+        binding = _closed(
+            value,
+            {
+                "candidate_evidence_ref", "candidate_evidence_hash",
+                "candidate_claim_ref", "candidate_claim_hash",
+            },
+            "candidate staging binding",
+        )
+        normalized = {
+            "candidate_evidence_ref": _text(
+                binding["candidate_evidence_ref"], "candidate_evidence_ref"
+            ),
+            "candidate_evidence_hash": _hash(
+                binding["candidate_evidence_hash"], "candidate_evidence_hash"
+            ),
+            "candidate_claim_ref": _text(
+                binding["candidate_claim_ref"], "candidate_claim_ref"
+            ),
+            "candidate_claim_hash": _hash(
+                binding["candidate_claim_hash"], "candidate_claim_hash"
+            ),
+        }
+        if self.candidate_staging is None:
+            raise AnswerRoutingConflict(
+                "observed refresh requires the candidate-staging authority"
+            )
+        from .research_verification import (
+            validate_candidate_claim,
+            validate_candidate_evidence,
+        )
+
+        connection = self.candidate_staging.connection
+        evidence_row = connection.execute(
+            "SELECT * FROM candidate_evidence_versions WHERE version_id=?",
+            (normalized["candidate_evidence_ref"],),
+        ).fetchone()
+        claim_row = connection.execute(
+            "SELECT * FROM candidate_claim_versions WHERE version_id=?",
+            (normalized["candidate_claim_ref"],),
+        ).fetchone()
+        if evidence_row is None or claim_row is None:
+            raise AnswerRoutingConflict(
+                "candidate-staging binding does not resolve"
+            )
+        evidence = validate_candidate_evidence(
+            json.loads(evidence_row["record_json"])
+        )
+        claim = validate_candidate_claim(json.loads(claim_row["record_json"]))
+        source_envelope_ref = _text(
+            result["outputs"].get("source_envelope_ref"),
+            "outputs.source_envelope_ref",
+        )
+        source_envelope_hash = _hash(
+            result["outputs"].get("source_envelope_hash"),
+            "outputs.source_envelope_hash",
+        )
+        if (
+            evidence["content_hash"] != evidence_row["content_hash"]
+            or evidence["content_hash"] != normalized["candidate_evidence_hash"]
+            or claim["content_hash"] != claim_row["content_hash"]
+            or claim["content_hash"] != normalized["candidate_claim_hash"]
+            or claim_row["evidence_version_id"] != evidence["id"]
+            or {"ref": evidence["id"], "hash": evidence["content_hash"]}
+            not in claim["candidate_evidence_refs"]
+            or evidence["source_envelope_ref"] != source_envelope_ref
+            or evidence["source_envelope_hash"] != source_envelope_hash
+        ):
+            raise AnswerRoutingConflict(
+                "candidate-staging evidence/claim binding drifted"
+            )
+        stage_receipt = None
+        for row in connection.execute(
+            "SELECT idempotency_key,request_hash,result_json "
+            "FROM candidate_stage_requests"
+        ).fetchall():
+            stage_result = json.loads(row["result_json"])
+            if all(
+                stage_result.get(name) == item
+                for name, item in normalized.items()
+            ):
+                stage_receipt = {
+                    "candidate_stage_idempotency_key": row["idempotency_key"],
+                    "candidate_stage_request_hash": row["request_hash"],
+                }
+                break
+        if stage_receipt is None:
+            raise AnswerRoutingConflict(
+                "candidate-staging binding lacks an exact stage receipt"
+            )
+        return {
+            **normalized,
+            **stage_receipt,
+            "result_envelope_ref": _text(result["id"], "result_envelope_ref"),
+            "result_envelope_hash": _hash(result_hash, "result_envelope_hash"),
+            "source_envelope_ref": source_envelope_ref,
+            "source_envelope_hash": source_envelope_hash,
+        }
+
+    def finalize(
+        self,
+        dispatch_ref: str,
+        *,
+        candidate_staging_binding: Mapping[str, Any] | None,
+        actor_ref: str,
+    ) -> dict[str, Any]:
+        actor_ref = _human(actor_ref)
+        dispatch_ref = _text(dispatch_ref, "dispatch_ref", maximum=256)
+        existing = self.answers.refresh_outcome_for_dispatch(dispatch_ref)
+        if existing is not None:
+            return {"status": "duplicate", "outcome_receipt": existing}
+        row = self.answers.connection.execute(
+            "SELECT * FROM answer_refresh_dispatch_receipts WHERE receipt_id=?",
+            (dispatch_ref,),
+        ).fetchone()
+        if row is None:
+            raise AnswerRoutingNotFound("answer refresh dispatch was not found")
+        dispatch = _load_record(
+            row["record_json"], row["content_hash"],
+            "AnswerRefreshDispatchReceipt",
+        )
+        formal = self.scheduler.formal_result(dispatch["work_order_ref"])
+        if formal is None or formal["terminal_state"] != "succeeded":
+            raise AnswerRoutingConflict(
+                "answer refresh WorkOrder has no successful formal result"
+            )
+        result = formal["result_envelope"]
+        matches = result["outputs"].get("matches")
+        if not isinstance(matches, list) or not all(
+            isinstance(item, Mapping) for item in matches
+        ):
+            raise AnswerRoutingConflict(
+                "answer refresh result lacks machine-readable matches"
+            )
+        candidate_binding = None
+        if matches:
+            if candidate_staging_binding is None:
+                raise AnswerRoutingConflict(
+                    "observed refresh cannot bypass candidate staging"
+                )
+            candidate_binding = self._candidate_staging_binding(
+                candidate_staging_binding,
+                result=result,
+                result_hash=formal["result_envelope_hash"],
+            )
+        elif candidate_staging_binding is not None:
+            raise AnswerRoutingConflict(
+                "no-match refresh cannot attach a candidate-staging binding"
+            )
+        before_formal = {
+            table: self.answers.connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            for table in ("evidence_versions", "claim_versions", "thesis_versions")
+        }
+        outcome_result = self.control.record_outcome(dispatch["round_ref"])
+        outcome = outcome_result["outcome"]
+        terminal = self.bounded.terminal(dispatch["loop_version_ref"])
+        if terminal is None:
+            terminal_proposal = self.bounded.propose_next_capital_lease(
+                dispatch["loop_version_ref"]
+            )
+            if terminal_proposal.get("action", {}).get("kind") != "terminate":
+                raise AnswerRoutingConflict(
+                    "completed answer refresh did not reach a bounded terminal"
+                )
+            terminal_result = self.control.admit_proposal(terminal_proposal["id"])
+            if terminal_result["status"] != "terminal":
+                raise AnswerRoutingConflict(
+                    "answer refresh terminal proposal was not admitted"
+                )
+            terminal = terminal_result["terminal_event"]
+        expected_terminal = (
+            "evidence_observed_for_review"
+            if matches else "coverage_complete_unobservable_candidate"
+        )
+        if terminal["terminal_state"] != expected_terminal:
+            raise AnswerRoutingConflict(
+                "answer refresh reached an unexpected terminal state"
+            )
+        self._inject("after_terminal")
+        after_formal = {
+            table: self.answers.connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            for table in before_formal
+        }
+        if after_formal != before_formal:
+            raise AnswerRoutingConflict(
+                "answer refresh wrote formal Evidence, Claim, or Thesis"
+            )
+        receipt = self.answers._record_refresh_outcome(
+            dispatch,
+            outcome,
+            terminal,
+            candidate_binding,
+            actor_ref=actor_ref,
+        )
+        return {"status": receipt["status"], "outcome_receipt": receipt}
+
 
 __all__ = [
-    "AnswerRoutingAuthority", "AnswerRoutingConflict", "AnswerRoutingError",
+    "ANSWER_REFRESH_OUTPUT_CONTRACT_REF", "ANSWER_REFRESH_VERIFIER_REF",
+    "AnswerRefreshControlPlane", "AnswerRoutingAuthority",
+    "AnswerRoutingConflict", "AnswerRoutingError",
     "AnswerRoutingNotFound", "AnswerRoutingValidationError",
     "validate_answer_sufficiency_policy",
 ]

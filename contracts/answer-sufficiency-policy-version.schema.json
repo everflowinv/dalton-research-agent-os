@@ -18,7 +18,7 @@
     "positive": {"type": "integer", "minimum": 1}
   },
   "properties": {
-    "schema_version": {"const": "0.1"},
+    "schema_version": {"const": "0.2"},
     "id": {"$ref": "#/$defs/ref"},
     "created_at": {"type": "string", "format": "date-time"},
     "policy_ref": {"$ref": "#/$defs/ref"},
@@ -62,10 +62,37 @@
       "additionalProperties": false,
       "required": ["enabled", "max_cost_units", "probe_template_bindings"],
       "properties": {
-        "enabled": {"const": false},
-        "max_cost_units": {"const": 0},
-        "probe_template_bindings": {"type": "array", "maxItems": 0}
-      }
+        "enabled": {"type": "boolean"},
+        "max_cost_units": {"type": "integer", "minimum": 0},
+        "probe_template_bindings": {
+          "type": "array", "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["ref", "hash"],
+            "properties": {
+              "ref": {"$ref": "#/$defs/ref"},
+              "hash": {"$ref": "#/$defs/hash"}
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"enabled": {"const": true}}},
+          "then": {
+            "properties": {
+              "max_cost_units": {"type": "integer", "minimum": 1},
+              "probe_template_bindings": {"minItems": 1}
+            }
+          },
+          "else": {
+            "properties": {
+              "max_cost_units": {"const": 0},
+              "probe_template_bindings": {"maxItems": 0}
+            }
+          }
+        }
+      ]
     },
     "adhoc_research_route": {
       "type": "object",

@@ -1,4 +1,4 @@
-"""Adversarial tests for the S4 read-only answer-routing authority."""
+"""Adversarial tests for answer routing and the S5 bounded refresh path."""
 
 from __future__ import annotations
 
@@ -6,15 +6,22 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from dalton_core.agenda import AgendaStore
 from dalton_core.answer_routing import (
+    ANSWER_REFRESH_OUTPUT_CONTRACT_REF,
+    ANSWER_REFRESH_VERIFIER_REF,
+    AnswerRefreshControlPlane,
     AnswerRoutingAuthority,
     AnswerRoutingConflict,
     AnswerRoutingValidationError,
 )
-from dalton_core.bounded_planner_loop import BoundedPlannerAuthority
+from dalton_core.bounded_planner_loop import (
+    BoundedPlannerAuthority,
+    BoundedPlannerControlPlane,
+)
 from dalton_core.industry_research import IndustryResearchAuthority
 from dalton_core.observability import ObservabilityStore
 from dalton_core.research_plan import (
@@ -96,9 +103,15 @@ class AnswerRoutingTests(unittest.TestCase):
             self.plans, self.backlog, self.observability, self.scheduler
         )
         self.bounded = BoundedPlannerAuthority(self.store)
+        self.bounded_control = BoundedPlannerControlPlane(
+            self.bounded, self.observability, self.scheduler
+        )
         self.industry = IndustryResearchAuthority(self.store)
         self.answers = AnswerRoutingAuthority(
             self.store, self.agenda, self.backlog, self.bounded, self.industry
+        )
+        self.refresh = AnswerRefreshControlPlane(
+            self.answers, self.bounded_control
         )
         self.addCleanup(self.store.close)
         self.addCleanup(self.tmp.cleanup)
@@ -152,6 +165,8 @@ class AnswerRoutingTests(unittest.TestCase):
         version_id: str = "answer-policy-version:1",
         prior_version_ref: str | None = None,
         idempotency_key: str = "answer-policy:1",
+        refresh_template: dict | None = None,
+        refresh_cost_units: int = 1,
     ) -> dict:
         return self.answers.publish_policy(
             policy_ref="answer-policy:wanhua",
@@ -169,9 +184,16 @@ class AnswerRoutingTests(unittest.TestCase):
                 "min_formal_evidence": 1,
             },
             refresh_route={
-                "enabled": False,
-                "max_cost_units": 0,
-                "probe_template_bindings": [],
+                "enabled": refresh_template is not None,
+                "max_cost_units": (
+                    refresh_cost_units if refresh_template is not None else 0
+                ),
+                "probe_template_bindings": (
+                    [] if refresh_template is None else [{
+                        "ref": refresh_template["id"],
+                        "hash": refresh_template["content_hash"],
+                    }]
+                ),
             },
             adhoc_research_route={
                 "enabled": False,
@@ -319,6 +341,87 @@ class AnswerRoutingTests(unittest.TestCase):
         self.answer_question()
         return self.answers.subjects(as_of=NOW)[0]
 
+    def refresh_template(self, *, suffix: str = "1") -> dict:
+        return self.bounded.publish_probe_template(
+            f"probe-template:answer-refresh:{suffix}",
+            capability_ref="capability:sec-read-only",
+            operation="refresh_sec_filing",
+            runtime_profile_ref="runtime:sec-read-only:0.1",
+            parameter_contract={
+                "allowed_fields": ["source_ref", "locator", "query_terms"],
+                "required_fields": ["source_ref", "locator", "query_terms"],
+                "constants": {"source_ref": "source:sec-edgar"},
+            },
+            output_contract_ref=ANSWER_REFRESH_OUTPUT_CONTRACT_REF,
+            verifier_ref=ANSWER_REFRESH_VERIFIER_REF,
+            permission_scope="public_sec_read",
+            declared_side_effects=["read:public-http"],
+            cost={"cost_units": 1, "max_attempts": 1, "max_seconds": 10},
+            actor_ref="human:owner",
+        )
+
+    def refresh_loop(self, template: dict, *, suffix: str = "1") -> dict:
+        question = self.backlog.question(
+            question_ref_for("mandate:answer-routing", "wanhua", QUESTION)
+        )
+        return self.bounded.create_loop(
+            f"bounded-loop:answer-refresh:{suffix}",
+            question_version_ref=question["head"]["id"],
+            template_bindings=[{
+                "coverage_item_ref": "latest-reported-revenue",
+                "template_version_ref": template["id"],
+                "parameters": {
+                    "source_ref": "source:sec-edgar",
+                    "locator": "latest 10-Q revenue disclosure",
+                    "query_terms": ["revenue", "2026 Q2"],
+                },
+            }],
+            required_coverage_items=["latest-reported-revenue"],
+            budget={
+                "max_rounds": 1, "max_cost_units": 1, "max_seconds": 10,
+            },
+            actor_ref="human:owner",
+        )
+
+    def refresh_ready(self) -> tuple[dict, dict, dict]:
+        mandate = self.govern()
+        self.answer_question()
+        template = self.refresh_template()
+        loop = self.refresh_loop(template)
+        self.publish_answer_policy(
+            mandate, max_age_days=1, refresh_template=template
+        )
+        return self.answers.subjects()[0], template, loop
+
+    def complete_refresh_work(self, dispatch: dict, matches: list[dict]) -> dict:
+        work_order_ref = dispatch["work_order_ref"]
+        lease = self.scheduler.claim(
+            "worker:answer-refresh", work_order_id=work_order_ref
+        )
+        self.assertIsNotNone(lease)
+        result = {
+            "schema_version": "0.1",
+            "id": "result:answer-refresh:" + str(len(matches)),
+            "created_at": "2026-08-25T12:00:00.000000+00:00",
+            "work_order_ref": work_order_ref,
+            "invocation_ref": "invocation:answer-refresh",
+            "status": "succeeded",
+            "outputs": {"matches": matches},
+            "actual_side_effects": [],
+            "usage_refs": [],
+            "artifact_refs": [],
+            "error": None,
+            "metadata": {"fixture": True},
+        }
+        return self.scheduler.complete(
+            work_order_ref,
+            1,
+            "worker:answer-refresh",
+            lease["lease_token"],
+            result,
+            idempotency_key="complete:answer-refresh:" + str(len(matches)),
+        )
+
     def test_exact_answered_question_routes_direct_without_writes(self) -> None:
         subject = self.ready()
         before = self.table_counts()
@@ -383,6 +486,307 @@ class AnswerRoutingTests(unittest.TestCase):
             routed["decision"]["route"], "recommend_agenda_item"
         )
         self.assertIn("stale_evidence", routed["decision"]["reason_codes"])
+        self.assertIn("refresh_disabled", routed["decision"]["reason_codes"])
+
+    def test_stale_only_question_routes_to_exact_bounded_refresh(self) -> None:
+        subject, template, loop = self.refresh_ready()
+        before = self.table_counts()
+        routed = self.answers.route(subject_binding=subject, question=QUESTION)
+        decision = routed["decision"]
+        self.assertEqual(decision["route"], "answer_after_refresh")
+        self.assertEqual(
+            decision["reason_codes"], ["stale_evidence", "refresh_required"]
+        )
+        self.assertTrue(decision["refresh_route_available"])
+        self.assertEqual(
+            decision["refresh_plan"]["template_version_ref"], template["id"]
+        )
+        self.assertEqual(
+            decision["refresh_plan"]["loop_version_ref"], loop["id"]
+        )
+        self.assertEqual(decision["refresh_plan"]["cost_units"], 1)
+        self.assertTrue(decision["refresh_plan"]["candidate_staging_required"])
+        self.assertEqual(self.table_counts(), before)
+
+    def test_refresh_dispatch_is_human_gated_budgeted_and_idempotent(self) -> None:
+        subject, _, _ = self.refresh_ready()
+        routed = self.answers.route(subject_binding=subject, question=QUESTION)
+        decision = routed["decision"]
+        with self.assertRaises(AnswerRoutingValidationError):
+            self.refresh.dispatch(
+                subject_binding=subject,
+                question=QUESTION,
+                route_decision_ref=decision["id"],
+                route_decision_hash=decision["content_hash"],
+                route_as_of=decision["created_at"],
+                actor_ref="core:answer-refresh",
+            )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM answer_refresh_budget_reservations"
+            ).fetchone()[0],
+            0,
+        )
+        scheduler_before = self.store.connection.execute(
+            "SELECT COUNT(*) FROM scheduler_work_orders"
+        ).fetchone()[0]
+        first = self.refresh.dispatch(
+            subject_binding=subject,
+            question=QUESTION,
+            route_decision_ref=decision["id"],
+            route_decision_hash=decision["content_hash"],
+            route_as_of=decision["created_at"],
+            actor_ref="human:owner",
+        )
+        second = self.refresh.dispatch(
+            subject_binding=subject,
+            question=QUESTION,
+            route_decision_ref=decision["id"],
+            route_decision_hash=decision["content_hash"],
+            route_as_of=decision["created_at"],
+            actor_ref="human:owner",
+        )
+        self.assertEqual(first["status"], "fresh")
+        self.assertEqual(second["status"], "duplicate")
+        self.assertEqual(
+            first["dispatch"]["work_order_ref"],
+            second["dispatch"]["work_order_ref"],
+        )
+        contracts = Path(__file__).resolve().parents[1] / "contracts"
+        reservation = self.answers.refresh_reservation_for_decision(
+            decision["id"]
+        )
+        dispatch = self.answers.refresh_dispatch_for_reservation(
+            reservation["id"]
+        )
+        for name, wire in (
+            ("answer-refresh-budget-reservation.schema.json", reservation),
+            ("answer-refresh-dispatch-receipt.schema.json", dispatch),
+        ):
+            schema = json.loads((contracts / name).read_text(encoding="utf-8"))
+            self.assertEqual(set(wire), set(schema["required"]), name)
+            self.assertEqual(
+                wire["schema_version"],
+                schema["properties"]["schema_version"]["const"],
+            )
+        for table in (
+            "answer_refresh_budget_reservations",
+            "answer_refresh_dispatch_receipts",
+            "bounded_research_plan_rounds",
+        ):
+            self.assertEqual(
+                self.store.connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0],
+                1,
+                table,
+            )
+        self.assertEqual(
+            self.store.connection.execute(
+                "SELECT COUNT(*) FROM scheduler_work_orders"
+            ).fetchone()[0],
+            scheduler_before + 1,
+        )
+
+    def test_refresh_dispatch_recovers_after_reserved_budget_crash(self) -> None:
+        subject, _, _ = self.refresh_ready()
+        routed = self.answers.route(subject_binding=subject, question=QUESTION)
+        decision = routed["decision"]
+        competing_as_of = (
+            datetime.fromisoformat(decision["created_at"]) + timedelta(microseconds=1)
+        ).isoformat()
+        competing = self.answers.route(
+            subject_binding=subject, question=QUESTION, as_of=competing_as_of
+        )["decision"]
+        self.assertNotEqual(competing["id"], decision["id"])
+
+        def crash(seam: str) -> None:
+            if seam == "after_reservation":
+                raise RuntimeError("fixture crash after durable reservation")
+
+        crashing = AnswerRefreshControlPlane(
+            self.answers, self.bounded_control, fault_injector=crash
+        )
+        with self.assertRaises(RuntimeError):
+            crashing.dispatch(
+                subject_binding=subject,
+                question=QUESTION,
+                route_decision_ref=decision["id"],
+                route_decision_hash=decision["content_hash"],
+                route_as_of=decision["created_at"],
+                actor_ref="human:owner",
+            )
+        with self.assertRaises(AnswerRoutingConflict):
+            self.refresh.dispatch(
+                subject_binding=subject,
+                question=QUESTION,
+                route_decision_ref=competing["id"],
+                route_decision_hash=competing["content_hash"],
+                route_as_of=competing["created_at"],
+                actor_ref="human:owner",
+            )
+        recovered = self.refresh.dispatch(
+            subject_binding=subject,
+            question=QUESTION,
+            route_decision_ref=decision["id"],
+            route_decision_hash=decision["content_hash"],
+            route_as_of=decision["created_at"],
+            actor_ref="human:owner",
+        )
+        self.assertEqual(recovered["status"], "fresh")
+        for table in (
+            "answer_refresh_budget_reservations",
+            "answer_refresh_dispatch_receipts",
+            "bounded_research_plan_rounds",
+        ):
+            self.assertEqual(
+                self.store.connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0],
+                1,
+                table,
+            )
+
+    def test_refresh_no_match_finalizes_without_formal_writes(self) -> None:
+        subject, _, _ = self.refresh_ready()
+        routed = self.answers.route(subject_binding=subject, question=QUESTION)
+        decision = routed["decision"]
+        dispatched = self.refresh.dispatch(
+            subject_binding=subject,
+            question=QUESTION,
+            route_decision_ref=decision["id"],
+            route_decision_hash=decision["content_hash"],
+            route_as_of=decision["created_at"],
+            actor_ref="human:owner",
+        )
+        self.complete_refresh_work(dispatched["dispatch"], [])
+        before = {
+            table: self.store.connection.execute(
+                f"SELECT COUNT(*) FROM {table}"
+            ).fetchone()[0]
+            for table in ("evidence_versions", "claim_versions", "thesis_versions")
+        }
+        finalized = self.refresh.finalize(
+            dispatched["dispatch"]["id"],
+            candidate_staging_binding=None,
+            actor_ref="human:owner",
+        )
+        receipt = finalized["outcome_receipt"]
+        self.assertEqual(
+            receipt["terminal_state"],
+            "coverage_complete_unobservable_candidate",
+        )
+        self.assertEqual(receipt["outcome_kind"], "not_found_in_scope")
+        self.assertIsNone(receipt["candidate_staging_binding"])
+        self.assertEqual(receipt["formal_authority_writes"], 0)
+        persisted = self.answers.refresh_outcome_for_dispatch(
+            dispatched["dispatch"]["id"]
+        )
+        schema = json.loads(
+            (
+                Path(__file__).resolve().parents[1]
+                / "contracts/answer-refresh-outcome-receipt.schema.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(set(persisted), set(schema["required"]))
+        for table, count in before.items():
+            self.assertEqual(
+                self.store.connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0],
+                count,
+            )
+
+    def test_refresh_finalize_recovers_after_terminal_before_receipt(self) -> None:
+        subject, _, loop = self.refresh_ready()
+        routed = self.answers.route(subject_binding=subject, question=QUESTION)
+        decision = routed["decision"]
+        dispatched = self.refresh.dispatch(
+            subject_binding=subject,
+            question=QUESTION,
+            route_decision_ref=decision["id"],
+            route_decision_hash=decision["content_hash"],
+            route_as_of=decision["created_at"],
+            actor_ref="human:owner",
+        )
+        self.complete_refresh_work(dispatched["dispatch"], [])
+
+        def crash(seam: str) -> None:
+            if seam == "after_terminal":
+                raise RuntimeError("fixture crash after bounded terminal")
+
+        crashing = AnswerRefreshControlPlane(
+            self.answers, self.bounded_control, fault_injector=crash
+        )
+        with self.assertRaises(RuntimeError):
+            crashing.finalize(
+                dispatched["dispatch"]["id"],
+                candidate_staging_binding=None,
+                actor_ref="human:owner",
+            )
+        self.assertIsNotNone(self.bounded.terminal(loop["id"]))
+        self.assertIsNone(
+            self.answers.refresh_outcome_for_dispatch(
+                dispatched["dispatch"]["id"]
+            )
+        )
+        recovered = self.refresh.finalize(
+            dispatched["dispatch"]["id"],
+            candidate_staging_binding=None,
+            actor_ref="human:owner",
+        )
+        self.assertEqual(recovered["status"], "fresh")
+        self.assertEqual(
+            recovered["outcome_receipt"]["terminal_state"],
+            "coverage_complete_unobservable_candidate",
+        )
+
+    def test_observed_refresh_cannot_bypass_candidate_staging(self) -> None:
+        subject, _, loop = self.refresh_ready()
+        routed = self.answers.route(subject_binding=subject, question=QUESTION)
+        decision = routed["decision"]
+        dispatched = self.refresh.dispatch(
+            subject_binding=subject,
+            question=QUESTION,
+            route_decision_ref=decision["id"],
+            route_decision_hash=decision["content_hash"],
+            route_as_of=decision["created_at"],
+            actor_ref="human:owner",
+        )
+        self.complete_refresh_work(
+            dispatched["dispatch"],
+            [{"source_location": "accession:answer-refresh#revenue"}],
+        )
+        with self.assertRaises(AnswerRoutingConflict):
+            self.refresh.finalize(
+                dispatched["dispatch"]["id"],
+                candidate_staging_binding=None,
+                actor_ref="human:owner",
+            )
+        self.assertEqual(self.bounded.outcomes(loop["id"]), [])
+        self.assertIsNone(self.bounded.terminal(loop["id"]))
+
+    def test_refresh_day_budget_exhaustion_fails_closed(self) -> None:
+        subject, template, _ = self.refresh_ready()
+        routed = self.answers.route(subject_binding=subject, question=QUESTION)
+        decision = routed["decision"]
+        self.refresh.dispatch(
+            subject_binding=subject,
+            question=QUESTION,
+            route_decision_ref=decision["id"],
+            route_decision_hash=decision["content_hash"],
+            route_as_of=decision["created_at"],
+            actor_ref="human:owner",
+        )
+        self.refresh_loop(template, suffix="2")
+        exhausted = self.answers.route(subject_binding=subject, question=QUESTION)
+        self.assertEqual(
+            exhausted["decision"]["route"], "recommend_agenda_item"
+        )
+        self.assertIn(
+            "refresh_budget_exhausted", exhausted["decision"]["reason_codes"]
+        )
+        self.assertIsNone(exhausted["decision"]["refresh_plan"])
 
     def test_policy_rotation_invalidates_old_subject_binding(self) -> None:
         subject = self.ready()
@@ -404,7 +808,7 @@ class AnswerRoutingTests(unittest.TestCase):
                 ("f" * 64, "mandate:answer-routing"),
             )
 
-    def test_s4_policy_rejects_enabled_refresh_or_adhoc_routes(self) -> None:
+    def test_s5_policy_rejects_malformed_refresh_or_enabled_adhoc(self) -> None:
         mandate = self.govern()
         with self.assertRaises(AnswerRoutingValidationError):
             self.answers.publish_policy(
@@ -436,6 +840,33 @@ class AnswerRoutingTests(unittest.TestCase):
                 version_id="answer-policy-version:invalid",
                 prior_version_ref=None,
                 idempotency_key="answer-policy:invalid",
+            )
+
+    def test_refresh_policy_rejects_probe_outside_closed_contract(self) -> None:
+        mandate = self.govern()
+        template = self.bounded.publish_probe_template(
+            "probe-template:answer-refresh:wrong-verifier",
+            capability_ref="capability:sec-read-only",
+            operation="refresh_sec_filing",
+            runtime_profile_ref="runtime:sec-read-only:0.1",
+            parameter_contract={
+                "allowed_fields": ["source_ref", "locator", "query_terms"],
+                "required_fields": ["source_ref", "locator", "query_terms"],
+                "constants": {"source_ref": "source:sec-edgar"},
+            },
+            output_contract_ref=ANSWER_REFRESH_OUTPUT_CONTRACT_REF,
+            verifier_ref="verifier:unapproved",
+            permission_scope="public_sec_read",
+            declared_side_effects=["read:public-http"],
+            cost={"cost_units": 1, "max_attempts": 1, "max_seconds": 10},
+            actor_ref="human:owner",
+        )
+        with self.assertRaises(AnswerRoutingConflict):
+            self.publish_answer_policy(
+                mandate,
+                refresh_template=template,
+                idempotency_key="answer-policy:wrong-verifier",
+                version_id="answer-policy-version:wrong-verifier",
             )
 
 

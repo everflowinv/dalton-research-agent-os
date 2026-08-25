@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "AnswerRefreshBudgetReservation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "decision_ref", "decision_hash",
+    "answer_context_pack_ref", "answer_context_pack_hash",
+    "policy_version_ref", "policy_version_hash", "loop_version_ref",
+    "loop_version_hash", "budget_day",
+    "reserved_cost_units", "refresh_plan_ref", "refresh_plan_hash",
+    "refresh_plan", "actor_ref", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^answer-refresh-reservation:[0-9a-f]{64}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "decision_ref": {"type": "string", "minLength": 1},
+    "decision_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "answer_context_pack_ref": {"type": "string", "minLength": 1},
+    "answer_context_pack_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "policy_version_ref": {"type": "string", "minLength": 1},
+    "policy_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "loop_version_ref": {"type": "string", "minLength": 1},
+    "loop_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "budget_day": {"type": "string", "format": "date"},
+    "reserved_cost_units": {"type": "integer", "minimum": 1},
+    "refresh_plan_ref": {"type": "string", "minLength": 1},
+    "refresh_plan_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "refresh_plan": {"type": "object"},
+    "actor_ref": {"type": "string", "pattern": "^human:"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
