@@ -925,6 +925,19 @@ class WriterServiceTests(unittest.TestCase):
             ])
             with self.assertRaises(WriterServerError):
                 load_principals(invalid)
+            missing_operation = Path(self.tmp.name) / "private" / (
+                f"{principal_id}-missing-operation.json"
+            )
+            write_token_config(missing_operation, [
+                Principal(
+                    principal_id,
+                    f"{principal_id}-missing-operation-token",
+                    frozenset(set(operations) - {next(iter(operations))}),
+                    actor_ref=actor_ref,
+                )
+            ])
+            with self.assertRaises(WriterServerError):
+                load_principals(missing_operation)
 
     def test_research_review_principal_is_exact_and_rejects_automation(self):
         with self.assertRaises(RemoteAuthorizationError):

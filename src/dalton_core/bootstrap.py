@@ -141,7 +141,10 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
             initial_principals,
         )
     else:
-        principals = load_principals(paths["token_config"])
+        principals = load_principals(
+            paths["token_config"],
+            allow_managed_operation_subset=True,
+        )
         core = principals.get("core")
         if core is None:
             raise RuntimeError("existing token config is missing the core principal")

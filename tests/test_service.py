@@ -27,6 +27,7 @@ from dalton_core.store import DaltonStore
 from dalton_core.writer_server import (
     DASHBOARD_CONTROL_OPERATIONS,
     RESEARCH_REVIEW_CONTROL_OPERATIONS,
+    WriterServerError,
     load_principals,
 )
 from tests.test_dashboard import snapshot
@@ -307,6 +308,39 @@ class ServiceTests(unittest.TestCase):
                 dashboard.actor_ref, "bridge:tailscale-dashboard"
             )
             self.assertNotIn("human-governance", principals)
+
+            token_config = Path(result["token_config"])
+            legacy = json.loads(token_config.read_text(encoding="utf-8"))
+            for entry in legacy["principals"]:
+                if entry["principal_id"] == "dashboard-control":
+                    dashboard_token = entry["token"]
+                    entry["operations"] = [
+                        "list_agenda_feedback_targets",
+                        "record_agenda_feedback",
+                    ]
+            token_config.write_text(
+                json.dumps(legacy, sort_keys=True, separators=(",", ":")) + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(WriterServerError):
+                load_principals(token_config)
+
+            bootstrap(state, config)
+            migrated = load_principals(token_config)["dashboard-control"]
+            self.assertEqual(migrated.token, dashboard_token)
+            self.assertEqual(migrated.operations, DASHBOARD_CONTROL_OPERATIONS)
+
+            unauthorized = json.loads(token_config.read_text(encoding="utf-8"))
+            for entry in unauthorized["principals"]:
+                if entry["principal_id"] == "dashboard-control":
+                    entry["operations"].append("commit")
+            token_config.write_text(
+                json.dumps(unauthorized, sort_keys=True, separators=(",", ":"))
+                + "\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(WriterServerError):
+                bootstrap(state, config)
 
     def test_health_rejects_degraded_controller_even_with_stale_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

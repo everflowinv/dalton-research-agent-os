@@ -502,8 +502,17 @@ def _require_owner_only(path: Path, label: str) -> None:
         raise WriterServerError(f"{label} must be owner-only")
 
 
-def load_principals(path: str | Path) -> dict[str, Principal]:
-    """Load an owner-only token config without retaining unrelated fields."""
+def load_principals(
+    path: str | Path,
+    *,
+    allow_managed_operation_subset: bool = False,
+) -> dict[str, Principal]:
+    """Load an owner-only token config without retaining unrelated fields.
+
+    Bootstrap may opt into accepting an older, non-empty operation subset for
+    managed principals so it can atomically migrate the file to the current
+    exact set.  Runtime callers remain exact and fail closed.
+    """
     config_path = Path(path)
     _require_owner_only(config_path, "token config")
     try:
@@ -545,19 +554,35 @@ def load_principals(path: str | Path) -> dict[str, Principal]:
         if principal_id == "verifier" and not set(operations) <= VERIFIER_OPERATIONS:
             raise WriterServerError("token config is invalid")
         scoped_actor = SCOPED_FEEDBACK_PRINCIPALS.get(principal_id)
+        scoped_operations = SCOPED_FEEDBACK_OPERATION_SETS.get(principal_id)
+        scoped_operations_match = (
+            set(operations) <= scoped_operations
+            if allow_managed_operation_subset and scoped_operations is not None
+            else set(operations) == scoped_operations
+        )
         if scoped_actor is not None and (
-            set(operations) != SCOPED_FEEDBACK_OPERATION_SETS[principal_id]
+            not scoped_operations_match
             or actor_ref not in scoped_actor
         ):
             raise WriterServerError("token config is invalid")
         review_actor = SCOPED_REVIEW_PRINCIPALS.get(principal_id)
+        review_operations_match = (
+            set(operations) <= RESEARCH_REVIEW_CONTROL_OPERATIONS
+            if allow_managed_operation_subset
+            else set(operations) == RESEARCH_REVIEW_CONTROL_OPERATIONS
+        )
         if review_actor is not None and (
-            set(operations) != RESEARCH_REVIEW_CONTROL_OPERATIONS
+            not review_operations_match
             or actor_ref != review_actor
         ):
             raise WriterServerError("token config is invalid")
+        thesis_impact_operations_match = (
+            set(operations) <= THESIS_IMPACT_OPERATIONS
+            if allow_managed_operation_subset
+            else set(operations) == THESIS_IMPACT_OPERATIONS
+        )
         if principal_id == "thesis-impact" and (
-            set(operations) != THESIS_IMPACT_OPERATIONS
+            not thesis_impact_operations_match
             or actor_ref != "system:thesis-impact-model-worker"
         ):
             raise WriterServerError("token config is invalid")
