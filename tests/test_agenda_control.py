@@ -437,6 +437,8 @@ class AgendaControlTests(unittest.TestCase):
             cookie = response.getheader("Set-Cookie").split(";", 1)[0]
             self.assertEqual(response.status, 200)
             self.assertIn("Dalton Cockpit", html)
+            self.assertIn("Promise.allSettled", html)
+            self.assertNotIn("async function load(){try{", html)
             connection.request(
                 "GET", "/v1/research-review",
                 headers={**headers, "Cookie": cookie},

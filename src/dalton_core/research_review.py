@@ -19,8 +19,10 @@ import json
 import os
 import re
 import sqlite3
+import threading
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +59,17 @@ class ResearchReviewConflict(ResearchReviewError):
 
 class ResearchReviewRejected(ResearchReviewError):
     """A candidate is not eligible for the requested review transition."""
+
+
+def _serialized(method: Any) -> Any:
+    """Serialize one shared SQLite connection across HTTP worker threads."""
+
+    @wraps(method)
+    def wrapped(self: "HumanReviewAuthority", *args: Any, **kwargs: Any) -> Any:
+        with self._connection_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
 
 
 def _json(value: Any, name: str) -> Any:
@@ -379,10 +392,15 @@ class HumanReviewAuthority:
 
     def __init__(self, path: str | Path = ":memory:") -> None:
         self.path = str(path)
+        self._connection_lock = threading.RLock()
         if self.path != ":memory:":
             target = Path(self.path)
             target.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.path, isolation_level=None)
+        self.connection = sqlite3.connect(
+            self.path,
+            isolation_level=None,
+            check_same_thread=False,
+        )
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
         required = self.connection.execute(
@@ -394,6 +412,7 @@ class HumanReviewAuthority:
         if self.path != ":memory:":
             os.chmod(self.path, 0o600)
 
+    @_serialized
     def close(self) -> None:
         self.connection.close()
 
@@ -406,6 +425,7 @@ class HumanReviewAuthority:
         except (TypeError, json.JSONDecodeError) as exc:
             raise ResearchReviewConflict(f"{name} record is corrupt") from exc
 
+    @_serialized
     def _candidate_pair(self, claim_version_ref: str) -> tuple[dict[str, Any], dict[str, Any]]:
         claim_row = self.connection.execute(
             "SELECT * FROM candidate_claim_versions WHERE version_id=?", (claim_version_ref,)
@@ -446,6 +466,7 @@ class HumanReviewAuthority:
             raise ResearchReviewConflict("candidate claim/evidence binding drifted")
         return claim, evidence
 
+    @_serialized
     def list_candidates(self, *, limit: int = 100) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise ResearchReviewError("limit must be 1..500")
@@ -465,6 +486,7 @@ class HumanReviewAuthority:
             })
         return result
 
+    @_serialized
     def candidate_bundle(self, candidate_claim_ref: str) -> dict[str, Any]:
         """Return one exact staged candidate pair without creating a review."""
 
@@ -473,6 +495,7 @@ class HumanReviewAuthority:
         )
         return {"evidence": evidence, "claim": claim}
 
+    @_serialized
     def candidate_authority_bundle(
         self, candidate_claim_ref: str
     ) -> dict[str, Any]:
@@ -544,6 +567,7 @@ class HumanReviewAuthority:
             "numeric_verification": numeric_verification,
         }
 
+    @_serialized
     def decide(
         self,
         *,
@@ -663,6 +687,7 @@ class HumanReviewAuthority:
                 self.connection.execute("ROLLBACK")
             raise
 
+    @_serialized
     def _current_commit_event(self, decision_ref: str) -> sqlite3.Row | None:
         return self.connection.execute(
             "SELECT event_id,state FROM human_review_commit_events WHERE decision_ref=? "
@@ -670,6 +695,7 @@ class HumanReviewAuthority:
             "WHERE prior_event_ref IS NOT NULL) LIMIT 1", (decision_ref,)
         ).fetchone()
 
+    @_serialized
     def _commit_event(
         self,
         decision_ref: str,
@@ -718,6 +744,7 @@ class HumanReviewAuthority:
         )
         return base
 
+    @_serialized
     def decision_bundle(self, decision_ref: str) -> dict[str, Any]:
         row = self.connection.execute(
             "SELECT * FROM human_review_decisions WHERE decision_id=?",
@@ -740,6 +767,7 @@ class HumanReviewAuthority:
         claim, evidence = self._candidate_pair(row["candidate_claim_version_ref"])
         return {"decision": decision, "evidence": evidence, "claim": claim}
 
+    @_serialized
     def consume_revision(self, decision_ref: str) -> dict[str, Any]:
         """Consume one exact revise decision into the next candidate claim version.
 
@@ -833,6 +861,7 @@ class HumanReviewAuthority:
             "candidate_evidence_hash": evidence["content_hash"],
         }
 
+    @_serialized
     def revision_lineage(self, candidate_claim_ref: str) -> dict[str, Any]:
         """Re-read and validate the complete lineage ending at one candidate head."""
 
@@ -893,6 +922,7 @@ class HumanReviewAuthority:
             "revision_decisions": decisions,
         }
 
+    @_serialized
     def commit_event(self, decision_ref: str) -> dict[str, Any] | None:
         """Return the exact current commit event after validating its full chain."""
 
@@ -976,6 +1006,7 @@ class HumanReviewAuthority:
             )
         return current
 
+    @_serialized
     def pending_commits(self, *, limit: int = 100) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise ResearchReviewError("limit must be 1..500")
@@ -989,6 +1020,7 @@ class HumanReviewAuthority:
         ).fetchall()
         return [self.decision_bundle(row["decision_id"]) for row in rows]
 
+    @_serialized
     def record_commit_result(
         self,
         decision_ref: str,
@@ -1011,6 +1043,7 @@ class HumanReviewAuthority:
                 self.connection.execute("ROLLBACK")
             raise
 
+    @_serialized
     def counts(self) -> dict[str, int]:
         return {
             table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])

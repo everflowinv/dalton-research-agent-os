@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
+import threading
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -272,6 +273,28 @@ class ResearchReviewTests(unittest.TestCase):
         }
         params.update(overrides)
         return self.review.decide(**params)
+
+    def test_authority_can_be_read_from_threaded_http_worker(self) -> None:
+        results: list[list[dict]] = []
+        errors: list[BaseException] = []
+
+        def read_candidates() -> None:
+            try:
+                results.append(self.review.list_candidates())
+            except BaseException as exc:  # pragma: no cover - asserted below
+                errors.append(exc)
+
+        worker = threading.Thread(target=read_candidates)
+        worker.start()
+        worker.join(timeout=5)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            results[0][0]["claim"]["id"],
+            self.candidate["claim"]["id"],
+        )
 
     def test_explicit_accept_promotes_losslessly_and_atomically(self) -> None:
         decision_result = self._decide()
