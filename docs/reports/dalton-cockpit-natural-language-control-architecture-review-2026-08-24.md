@@ -162,6 +162,12 @@ ResultEnvelope、SourceEnvelope 和 CandidateStaging receipt。Cockpit 目前只
 ad-hoc research 继续关闭。实现记录见
 [有限回答刷新 S5A v0.2](answer-after-refresh-s5a-v0.2-2026-08-25.md)。
 
+S5B 随后用进程内合成 SEC 响应跑通 production connector/authority 代码路径到 CandidateStaging，再关闭一条 observed
+refresh。finalize 现会独立重读 exact SourceEnvelope 和 raw ArtifactVersion；caller 只提交 ref/hash 不再够用。候选仍是
+`semantic_verification_status=unverified`，没有自动进入正式 authority。Cockpit dispatch 与 ad-hoc research 仍未开放。
+实现记录见
+[S5B connector → CandidateStaging 隔离 canary](answer-refresh-connector-canary-s5b-v0.3-2026-08-25.md)。
+
 ## 主要失效模式
 
 - 语义错译：封闭 taxonomy、原文留档、typed effect 回显；

@@ -85,9 +85,16 @@
   绑定本次 ResultEnvelope、SourceEnvelope 和 CandidateStaging stage receipt，不能直接写正式 authority。Cockpit
   目前只显示获准 plan，没有 dispatch endpoint；ad-hoc research 继续关闭。S5A 关联 authority 矩阵 153/153；最后
   两项 crash-hardening 写入后，Answer Routing/Contracts/Packaging 最终超集 24/24，Cockpit JavaScript、compileall、
-  JSON schema 解析和 diff check 通过。
+  JSON schema 解析和 diff check 通过。S5B 又补了 observed refresh 的 connector → CandidateStaging 隔离 canary：进程内
+  合成 SEC 响应走完整 Connector/Artifact/SourceEnvelope/resolver/verifier/staging production code path，1 次 physical
+  attempt 形成 1 条 CandidateEvidence 和 1 条 CandidateClaim，再以 `observed / evidence_observed_for_review` 关闭 bounded
+  refresh。finalize 现在必须从只读 connector receipt authority 重读 exact SourceEnvelope 和 raw ArtifactVersion；只给
+  caller ref/hash 或缺 reader 会在 ResearchOutcome 前拒绝，同一候选命中多条 stage receipt 也 fail closed。重复 finalize
+  只返回原 receipt；CandidateClaim 仍是 `semantic_verification_status=unverified`，正式 Evidence/Claim/Thesis 增量为 0。
+  canary 没有外网、付费模型、live DB 或部署。
   实现记录见
-  [有限回答刷新 S5A v0.2](reports/answer-after-refresh-s5a-v0.2-2026-08-25.md)。live `:8793` 仍是旧 Agenda，
+  [有限回答刷新 S5A v0.2](reports/answer-after-refresh-s5a-v0.2-2026-08-25.md) 和
+  [S5B connector → CandidateStaging 隔离 canary](reports/answer-refresh-connector-canary-s5b-v0.3-2026-08-25.md)。live `:8793` 仍是旧 Agenda，
   production pointer 关闭，正式
   Evidence/Claim/Thesis 写入仍为 0。此前 S1/S2 关联回归 80/80、Cockpit JavaScript
   语法、compileall、真实 ACN projection 和 diff check 通过；全仓 `unittest discover` 在无失败输出的情况下运行

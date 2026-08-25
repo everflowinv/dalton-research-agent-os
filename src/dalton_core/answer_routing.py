@@ -1686,17 +1686,35 @@ class AnswerRefreshControlPlane:
         bounded_control: BoundedPlannerControlPlane,
         *,
         candidate_staging: Any | None = None,
+        connector_receipts: Any | None = None,
         fault_injector: Callable[[str], None] | None = None,
     ) -> None:
         if answers.bounded is not bounded_control.authority:
             raise TypeError(
                 "answer refresh and bounded control must share one authority"
             )
+        if candidate_staging is not None:
+            from .research_verification import CandidateStagingStore
+
+            if type(candidate_staging) is not CandidateStagingStore:
+                raise TypeError(
+                    "answer refresh requires an exact CandidateStagingStore"
+                )
+        if connector_receipts is not None:
+            from .connector_authority_port import (
+                ConnectorCompletionReceiptReader,
+            )
+
+            if type(connector_receipts) is not ConnectorCompletionReceiptReader:
+                raise TypeError(
+                    "answer refresh requires an exact connector receipt reader"
+                )
         self.answers = answers
         self.bounded = answers.bounded
         self.control = bounded_control
         self.scheduler = bounded_control.scheduler
         self.candidate_staging = candidate_staging
+        self.connector_receipts = connector_receipts
         self.fault_injector = fault_injector
 
     def _inject(self, seam: str) -> None:
@@ -1831,10 +1849,15 @@ class AnswerRefreshControlPlane:
             raise AnswerRoutingConflict(
                 "observed refresh requires the candidate-staging authority"
             )
+        if self.connector_receipts is None:
+            raise AnswerRoutingConflict(
+                "observed refresh requires the connector receipt authority"
+            )
         from .research_verification import (
             validate_candidate_claim,
             validate_candidate_evidence,
         )
+        from .observability import ObservabilityNotFound
 
         connection = self.candidate_staging.connection
         evidence_row = connection.execute(
@@ -1861,6 +1884,61 @@ class AnswerRefreshControlPlane:
             result["outputs"].get("source_envelope_hash"),
             "outputs.source_envelope_hash",
         )
+        source_envelope = self.connector_receipts.get_source_envelope(
+            source_envelope_ref
+        )
+        if not isinstance(source_envelope, Mapping):
+            raise AnswerRoutingConflict(
+                "candidate-staging source envelope is unavailable"
+            )
+        source_asserted_hash = source_envelope.get("content_hash")
+        source_body = dict(source_envelope)
+        source_body.pop("content_hash", None)
+        if (
+            source_envelope.get("id") != source_envelope_ref
+            or source_asserted_hash != source_envelope_hash
+            or content_hash(source_body) != source_envelope_hash
+        ):
+            raise AnswerRoutingConflict(
+                "candidate-staging source envelope authority drifted"
+            )
+        raw_artifact_ref = _text(
+            source_envelope.get("raw_artifact_version_ref"),
+            "source envelope raw_artifact_version_ref",
+        )
+        try:
+            raw_artifact = self.connector_receipts.get_artifact_version(
+                raw_artifact_ref
+            )
+        except ObservabilityNotFound as exc:
+            raise AnswerRoutingConflict(
+                "candidate-staging raw artifact authority is unavailable"
+            ) from exc
+        if not isinstance(raw_artifact, Mapping):
+            raise AnswerRoutingConflict(
+                "candidate-staging raw artifact authority is unavailable"
+            )
+        raw_artifact_hash = _hash(
+            raw_artifact.get("content_hash"), "raw artifact content_hash"
+        )
+        raw_artifact_body = dict(raw_artifact)
+        raw_artifact_body.pop("content_hash", None)
+        if (
+            raw_artifact.get("id") != raw_artifact_ref
+            or content_hash(raw_artifact_body) != raw_artifact_hash
+        ):
+            raise AnswerRoutingConflict(
+                "candidate-staging raw artifact authority drifted"
+            )
+        evidence_artifacts = evidence.get("artifact_refs")
+        if (
+            not isinstance(evidence_artifacts, list)
+            or {"ref": raw_artifact_ref, "hash": raw_artifact_hash}
+            not in evidence_artifacts
+        ):
+            raise AnswerRoutingConflict(
+                "candidate-staging raw artifact binding drifted"
+            )
         if (
             evidence["content_hash"] != evidence_row["content_hash"]
             or evidence["content_hash"] != normalized["candidate_evidence_hash"]
@@ -1875,7 +1953,7 @@ class AnswerRefreshControlPlane:
             raise AnswerRoutingConflict(
                 "candidate-staging evidence/claim binding drifted"
             )
-        stage_receipt = None
+        stage_receipts = []
         for row in connection.execute(
             "SELECT idempotency_key,request_hash,result_json "
             "FROM candidate_stage_requests"
@@ -1885,15 +1963,27 @@ class AnswerRefreshControlPlane:
                 stage_result.get(name) == item
                 for name, item in normalized.items()
             ):
-                stage_receipt = {
+                stage_receipts.append({
                     "candidate_stage_idempotency_key": row["idempotency_key"],
                     "candidate_stage_request_hash": row["request_hash"],
-                }
-                break
-        if stage_receipt is None:
+                })
+        if not stage_receipts:
             raise AnswerRoutingConflict(
                 "candidate-staging binding lacks an exact stage receipt"
             )
+        if len(stage_receipts) != 1:
+            raise AnswerRoutingConflict(
+                "candidate-staging binding resolves to multiple stage receipts"
+            )
+        stage_receipt = stage_receipts[0]
+        _text(
+            stage_receipt["candidate_stage_idempotency_key"],
+            "candidate_stage_idempotency_key",
+        )
+        _hash(
+            stage_receipt["candidate_stage_request_hash"],
+            "candidate_stage_request_hash",
+        )
         return {
             **normalized,
             **stage_receipt,
