@@ -72,7 +72,13 @@
   questions 和最低正式 Claim/Evidence 数；策略 pointer 换版会让旧 subject binding 失效。refresh 与 ad-hoc
   research 的 policy 在 S4 强制关闭且预算为 0。Cockpit 复用原 Tailscale session/CSRF，`dashboard-control` 只增加
   两个只读 RPC；策略发布仍走临时认证 `human:*` governance principal。S4 与 Agenda/Backlog/Industry/Bounded
-  Planner 等邻接回归 122/122。live `:8793` 仍是旧 Agenda，production pointer 关闭，正式
+  Planner 等邻接回归 122/122。S4.1 又在单个 in-memory Core 中回放仓库已有的 ACN SEC authority：精确问题从
+  2 条 answer binding 读取 USD 19.32 billion new bookings 和同比 -3% local-currency bookings growth，返回
+  `answer_direct`；改写问题和证据超过 30 天分别以 `question_not_admitted`、`stale_evidence` 回退到 Agenda 建议。
+  route 前后表计数、SQLite `total_changes` 和完整 authority 指纹不变，policy 换版后旧 subject binding 失效；
+  网络、付费模型、成本记录和 live 写入均为 0。canary 同时修正 router 对 ThesisVersion 的 hash 口径：现在重验
+  v0.1/v0.2 闭合 wire、exact version/thesis/authority binding，并只对 thesis 正文复算保存的 hash。S4.1 与关联
+  authority 回归 153/153。live `:8793` 仍是旧 Agenda，production pointer 关闭，正式
   Evidence/Claim/Thesis 写入仍为 0。此前 S1/S2 关联回归 80/80、Cockpit JavaScript
   语法、compileall、真实 ACN projection 和 diff check 通过；全仓 `unittest discover` 在无失败输出的情况下运行
   40 分钟后仍停在既有

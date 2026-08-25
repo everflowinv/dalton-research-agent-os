@@ -260,6 +260,62 @@ def _publish_overlay(
     )
 
 
+def seed_acn_industry_authority(
+    store: DaltonStore,
+    base_path: Path = DEFAULT_BASE,
+    manifest_path: Path = DEFAULT_MANIFEST,
+) -> dict[str, Any]:
+    """Seed the recorded ACN SEC authority set into one caller-owned Core.
+
+    This is shared by isolated canaries only.  It performs no network or model
+    call and returns the exact authority objects needed by downstream replay
+    harnesses; it does not admit a Thesis or create a ResearchQuestion.
+    """
+
+    base = _load(base_path)
+    manifest = _load(manifest_path)
+    if manifest.get("schema_version") != "0.1":
+        raise ValueError("unsupported ACN evidence canary manifest")
+    model = ModelInputLedger(store)
+    coverage = CoverageAdmissionAuthority(store)
+    industry = IndustryResearchAuthority(store)
+    driver_pack_v1 = _driver_pack_v1(coverage, base)
+    if manifest["base_driver_pack_version_ref"] != driver_pack_v1["id"]:
+        raise ValueError("ACN evidence manifest is bound to another driver pack")
+    driver_pack_v2 = _extend_driver_pack(
+        coverage, driver_pack_v1, manifest["driver_pack_v2"]
+    )
+    evidence, claims, relations, model_inputs = _register_dataset(
+        store, model, [manifest]
+    )
+    evidence_pack = _publish_evidence_pack(
+        industry, manifest["evidence_pack"], driver_pack_v2, claims, relations
+    )
+    overlay = _publish_overlay(
+        industry,
+        manifest["company_overlay"],
+        evidence_pack,
+        driver_pack_v2,
+        claims,
+        model_inputs,
+    )
+    return {
+        "base_manifest": base,
+        "evidence_manifest": manifest,
+        "model": model,
+        "coverage": coverage,
+        "industry": industry,
+        "driver_pack_v1": driver_pack_v1,
+        "driver_pack_v2": driver_pack_v2,
+        "evidence_by_key": evidence,
+        "claim_by_key": claims,
+        "relation_by_key": relations,
+        "model_input_by_claim_key": model_inputs,
+        "evidence_pack": evidence_pack,
+        "company_overlay": overlay,
+    }
+
+
 def run(
     base_path: Path, manifest_path: Path, peer_manifest_path: Path, *,
     include_report_body: bool = False,

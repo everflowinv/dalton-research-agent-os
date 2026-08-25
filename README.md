@@ -157,7 +157,9 @@ authority。16-case GPT-5.6 Terra 校准仍为 16/16、safety 9/9，interpreter/
 同日完成的 S4 在 Cockpit 增加只读研究问答。Core 只允许与已入库、已回答 ResearchQuestion 完全一致的问题进入
 `answer_direct`，并从正式 Claim/Evidence、当前 Thesis、Driver/Overlay、open questions 和 Evidence 时效生成
 `AnswerContextPack`；其余问题只返回 `recommend_agenda_item`，不执行写入。版本化 sufficiency/freshness policy 只能
-由认证人类发布；refresh 与 ad-hoc research 在独立预算和 worker 上线前固定关闭。实现与验证见
+由认证人类发布；refresh 与 ad-hoc research 在独立预算和 worker 上线前固定关闭。S4.1 又用仓库内 ACN SEC
+authority 完成 in-memory 回放：精确问题命中 2 条正式 Claim，改写问题和超过 30 天的证据均 fail closed；三次
+route 前后表计数、`total_changes` 和完整 authority 指纹不变，网络、付费模型和 live 写入均为 0。实现与验证见
 [Ad-hoc 回答路由 v0.1](docs/reports/ad-hoc-answer-routing-v0.1-2026-08-25.md)。
 
 Gate 0、Gate 1 和 Gate 2 控制面验收已完成。verifier 现改为 wrapper-owned binding：模型只返回 semantic

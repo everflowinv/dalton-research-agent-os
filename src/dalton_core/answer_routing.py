@@ -18,6 +18,7 @@ from typing import Any, Iterator, Mapping
 
 from .agenda import AgendaStore, read_exact_mandate_version
 from .bounded_planner_loop import BoundedPlannerAuthority
+from .contracts import ThesisVersion, ValidationError as ContractValidationError
 from .industry_research import IndustryResearchAuthority
 from .research_question_backlog import (
     ResearchQuestionBacklog,
@@ -52,6 +53,10 @@ _REFRESH_FIELDS = {
     "enabled", "max_cost_units", "probe_template_bindings",
 }
 _ADHOC_FIELDS = {"enabled", "max_cost_units", "max_rounds"}
+_THESIS_CONTENT_FIELDS = (
+    "statement", "mechanism", "confidence", "implied_expectation",
+    "claim_refs", "catalyst_refs", "falsifier_refs", "change_reason",
+)
 _ROUTE_REASON_ORDER = (
     "policy_unavailable",
     "policy_stale",
@@ -866,11 +871,34 @@ class AnswerRoutingAuthority:
         for row in rows:
             try:
                 content = json.loads(row["content_json"])
-            except (TypeError, json.JSONDecodeError) as exc:
+                thesis = ThesisVersion.from_dict(content)
+            except (
+                TypeError, json.JSONDecodeError, ContractValidationError
+            ) as exc:
                 raise AnswerRoutingConflict("current ThesisVersion is invalid") from exc
+            thesis_wire = thesis.to_dict()
+            thesis_content = {
+                field: thesis_wire[field] for field in _THESIS_CONTENT_FIELDS
+            }
+            if thesis.schema_version == "0.1":
+                authority_matches = (
+                    thesis.verification_ref == row["verification_id"]
+                    and row["authority_kind"] == "verification"
+                    and row["authority_ref"] == thesis.verification_ref
+                )
+            else:
+                authority_matches = (
+                    thesis.authority_kind == row["authority_kind"]
+                    and thesis.authority_ref == row["authority_ref"]
+                )
             if (
-                canonical_json(content) != row["content_json"]
-                or content_hash(content) != row["content_hash"]
+                canonical_json(thesis_wire) != row["content_json"]
+                or thesis.id != row["version_id"]
+                or thesis.thesis_ref != row["thesis_id"]
+                or thesis.version != row["version_number"]
+                or not authority_matches
+                or thesis.content_hash != row["content_hash"]
+                or content_hash(thesis_content) != row["content_hash"]
             ):
                 raise AnswerRoutingConflict("current ThesisVersion content hash drifted")
             admitted = self.connection.execute(

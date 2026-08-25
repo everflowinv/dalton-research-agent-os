@@ -2,7 +2,7 @@
 
 ## 结果
 
-S4 已进入 development candidate。Dalton Cockpit 新增「问答」页；Core 会先冻结只读 `AnswerContextPack`，再按
+S4 已进入 development candidate，S4.1 隔离 ACN canary 也已通过。Dalton Cockpit 新增「问答」页；Core 会先冻结只读 `AnswerContextPack`，再按
 版本化 `AnswerSufficiencyPolicyVersion` 决定 `answer_direct` 或 `recommend_agenda_item`。这条路径不调用模型，
 不创建 ResearchQuestion、WorkOrder、Evidence、Claim、Thesis 或回答 authority。
 
@@ -28,6 +28,28 @@ ClaimVersion，再沿正式 EvidenceRelation 读取 EvidenceVersion；任一 ref
 最低正式 Claim/Evidence 数、source-class 时效、争议数、open questions、不可观测终态和 driver coverage。任一条件失败
 只返回 `recommend_agenda_item`，并明确记录 `write_performed=false`。
 
+## 隔离 ACN canary
+
+`scripts/run_isolated_acn_answer_canary.py` 在单个 in-memory Core 中回放仓库已有的 ACN SEC authority。它先重建
+Agenda、ResearchQuestion、ResearchPlan、正式 Evidence/Claim/Relation、Industry Evidence Pack、Company Overlay
+和 human-admitted Thesis，再发布 development-only answer policy。脚本不连接网络，不调用付费模型，也不打开 live
+数据库。
+
+回放结果：
+
+- 精确问题命中两条 answer binding，返回 `answer_direct`：Q3 FY2026 new bookings 为 USD 19.32 billion，
+  local-currency bookings growth 为同比 -3%；
+- 改写后的宽泛问题没有命中已入库问题，返回 `recommend_agenda_item / question_not_admitted`；
+- 同一精确问题在证据超过 30 天后返回 `recommend_agenda_item / stale_evidence`；
+- route 前后的所有表计数、SQLite `total_changes` 和完整 `iterdump` 指纹一致；
+- policy v1 换成 v2 后，旧 subject binding 被拒绝；
+- 最终 authority 有 1 条 EvidenceVersion、6 条 ClaimVersion、6 条 EvidenceRelation、1 条 ThesisVersion；
+  付费模型调用、成本记录、网络调用和 live 数据库写入均为 0。
+
+canary 首次把 human-admitted Thesis 放进 answer context 时发现一处验证口径错误：router 误把整个
+`ThesisVersion` wire 当成正文计算 hash。现在会先按 ThesisVersion v0.1/v0.2 闭合合同重建 wire，再只对八个 thesis
+正文字段复算 `content_hash`，并同时核对 version、thesis、authority 和 legacy verification binding。
+
 ## 策略和权限
 
 `AnswerSufficiencyPolicyVersion` 是 human-only、append-only authority，绑定 active MandateVersion 的 exact hash。
@@ -50,7 +72,8 @@ context/decision hash、正式 Claim/Evidence、时效状态和闭合原因。
 
 ## 验证
 
-- S4、Cockpit、writer、Agenda、Backlog、Industry、Bounded Planner 与合同邻接回归：122/122；
+- S4.1 canary、Answer Routing、Coverage Admission、Agenda、Backlog、ResearchPlan、Industry、Bounded Planner、
+  Contracts 与 Packaging 关联回归：153/153；
 - Cockpit JavaScript 语法检查；
 - Python `compileall`；
 - JSON Schema closed-shape 与 packaging manifest；
@@ -62,5 +85,5 @@ context/decision hash、正式 Claim/Evidence、时效状态和闭合原因。
 
 ## 下一步
 
-先用隔离 ACN 正式 authority 发布一版 development-only sufficiency policy，确认已回答问题能生成首条只读直答，
-未匹配或陈旧问题只返回 Agenda 建议。完成真实只读 canary 后，再进入 S5 的有限刷新和独立 ad-hoc research 预算。
+进入 S5 前先冻结有限刷新的独立预算、权限和 candidate-staging gate。`answer_after_refresh` 与 `adhoc_research` 仍须
+分开实现和验收；在相应 worker 与 human promotion gate 完成前，S4 policy 继续强制两条 route 关闭且预算为 0。
