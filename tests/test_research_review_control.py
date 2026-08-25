@@ -409,10 +409,7 @@ class ResearchReviewControlTests(unittest.TestCase):
             "source_manifest_hash": manifest["content_hash"],
             "source_content_hash": manifest["assembled_object"]["content_hash"],
             "review_scope": correction["review_scope"],
-            "corrections": [
-                {key: item[key] for key in item if key != "source_text"}
-                for item in correction["corrections"]
-            ],
+            "corrections": correction["corrections"],
         }
         binding = {
             "id": "transcript-claim-citation-binding:1",

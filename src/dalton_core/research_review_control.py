@@ -520,10 +520,7 @@ class ResearchReviewControlPlane:
                 published.get("content_hash"),
                 "published correction set content_hash",
             )
-        expected_corrections = [
-            {key: item[key] for key in item if key != "source_text"}
-            for item in correction["corrections"]
-        ]
+        expected_corrections = correction["corrections"]
         if published is not None and (
             not isinstance(published, Mapping)
             or published.get("correction_set_ref")
