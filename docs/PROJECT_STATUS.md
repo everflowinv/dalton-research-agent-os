@@ -9,11 +9,21 @@
 - live 万华 Agenda Shadow 自 08-25 起连续 `PROVIDER_BUDGET_EXCEEDED`：Dalton 冻结 tokenizer 把整段中文数成 1 个 token，
   DeepSeek 实际计数是它的 3.4 倍，policy 8,000 按后者事后执行。S7a development candidate 已按 provider 单位 bounding
   perception snapshot 并在付费前预检，见
-  [S7a 报告](reports/agenda-provider-token-budget-s7a-2026-08-26.md)；建议 owner 把 policy `max_input_tokens` 提到 16,000
+  [S7a 报告](reports/agenda-provider-token-budget-s7a-2026-08-26.md)。owner 已于 2026-08-26 用 `dalton-gov`
+  发布 `agenda-policy-version:phase1-shadow-v3`（`max_input_tokens` 16,000，`effective_from` 2026-08-27T00:00Z），
+  8/27 起的 cycle 用新预算；S7a 代码本身仍待 CI 绿后部署
 - S7c-1 development candidate：writer 新增 human governance op `acquire_alphaengine_document` /
   `alphaengine_acquisition_status`，以子进程（不是线程，`SIGALRM` watchdog 只能在主线程）跑 S6b 的 Core-hosted 获取；
   owner 用 `dalton-connector-governance approve` 批准治理记录，launcher 对 `proposed` 记录 fail closed。见
-  [S7c-1 报告](reports/s7c-writer-hosted-alphaengine-acquisition-v0.1-2026-08-26.md)
+  [S7c-1 报告](reports/s7c-writer-hosted-alphaengine-acquisition-v0.1-2026-08-26.md)。仓库里的
+  `deploy/connector-governance/alphaengine-get-document-v1.json` 已由 `human:lumos` 于 2026-08-26 批准
+  （`approved`，content_hash `2f6ad555…997c49`）；live state 目录尚无该文件，install.sh 部署时首次复制
+- S7c-2 development candidate：writer 新增 human-only op `stage_transcript_candidate` /
+  `transcript_candidate_status` 和 `--candidate-staging` 参数，把 Core-held AlphaEngine 获取结果经 S7b 入口写进
+  Cockpit 共用的 candidate-staging 文件（verification mode 固定 `transcript_core_authority`），
+  `HumanReviewAuthority.candidate_status` 只读回读。专项 6/6，合并后关联回归 93/93。部署前提：install.sh /
+  LaunchAgent 还没加 `--candidate-staging`，live writer 上这两个 op 只会返回 `rejected`。见
+  [S7c-2 报告](reports/s7c2-stage-transcript-candidate-op-v0.1-2026-08-26.md)
 - S7b development candidate：ADR-0003 裁决为 B（Accepted，owner 可否决）。transcript 候选以 `claim_kind = qualitative`
   进 CandidateStaging，数值字段全为 null，只收带 exact citation binding 的 transcript evidence，policy 路径一律拒绝，
   只经 explicit human review 入库；新增闭合 verification mode `transcript_core_authority` 和
