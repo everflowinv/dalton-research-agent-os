@@ -82,7 +82,7 @@ class LaneTests(unittest.TestCase):
             state_dir=self.state,
             staging_path=self.staging,
             governance=kw.pop("governance", RehearsalGovernance(approved_by="human:tester")),
-            issuers=(ISSUER,),
+            issuers=kw.pop("issuers", (ISSUER,)),
             adapter=kw.pop("adapter", fake_adapter(self.clock)),
             clock=self.clock,
             **kw,
@@ -144,11 +144,13 @@ class LaneTests(unittest.TestCase):
     def test_locates_own_candidate_when_staging_has_other_candidates(self) -> None:
         install_lane_rules(self.state)
         # Seed the shared staging file with a foreign plan's candidate first.
-        with self._lane() as lane:
-            foreign = Issuer("MSFT", "789019", "company:sec-cik:0000789019", "Microsoft")
+        foreign = Issuer("MSFT", "789019", "company:sec-cik:0000789019", "Microsoft")
+        with self._lane(issuers=(ISSUER, foreign)) as lane:
             lane.run_issuer(foreign, actor_ref="human:tester", run_key="seed", **WINDOW)
-        with self._lane() as lane:
+            self.assertEqual(len(lane.review.list_candidates()), 1)
+        with self._lane(issuers=(ISSUER, foreign)) as lane:
             summary = self._run(lane)
+            self.assertEqual(len(lane.review.list_candidates()), 2)
             self.assertEqual(summary["status"], "committed", summary)
             self.assertEqual(summary["candidate"]["subject_ref"].endswith("320193"), True,
                              summary["candidate"])
@@ -177,6 +179,15 @@ class LaneTests(unittest.TestCase):
         self.assertTrue(summary["ok"], summary)
         self.assertEqual(summary["issuers"][0]["status"], "committed")
         self.assertEqual(oct(os.stat(summary_dir / "summary.json").st_mode & 0o777), "0o600")
+
+    def test_agenda_binding_with_different_issuer_set_is_refused(self) -> None:
+        install_lane_rules(self.state)
+        with self._lane() as lane:
+            lane.ensure_agenda_bindings(actor_ref="human:tester")
+        other = Issuer("MSFT", "789019", "company:sec-cik:0000789019", "Microsoft")
+        with self._lane(issuers=(other,)) as lane:
+            with self.assertRaises(LanePreconditionError):
+                lane.ensure_agenda_bindings(actor_ref="human:tester")
 
     def test_default_issuers_are_the_four_us_it_services_names(self) -> None:
         self.assertEqual([i.ticker for i in US_IT_SERVICES_ISSUERS], ["ACN", "CTSH", "EPAM", "IBM"])

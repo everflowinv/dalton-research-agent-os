@@ -39,7 +39,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from .agenda import AgendaStore
+from .agenda import AgendaConflict, AgendaStore
 from .authority_resolver import ConnectorAuthorityResolver
 from .capability_catalog import CapabilityCatalog, CapabilityNotFound
 from .connector import ConnectorStore
@@ -151,8 +151,21 @@ class RehearsalGovernance(_PublicAuthorities):
         self.id = f"connector-governance:sec-public:rehearsal:{approved_by.split(':', 1)[1]}"
         self.content_hash = content_hash({"rehearsal": self.id, "approved": approved})
 
+    def policy(self, query: Mapping[str, Any]) -> dict[str, Any]:
+        wire: dict[str, Any] = {
+            "schema_version": "0.1",
+            "policy_ref": query["policy_ref"],
+            "effective_from": self.effective_from,
+            "effective_until": None,
+            "allowed_principal_refs": [self.principal_ref],
+            "allowed_permissions": copy.deepcopy(self.allowed_permissions),
+            "max_lease_seconds": 120,
+        }
+        wire["content_hash"] = content_hash(wire)
+        return wire
+
     def policy_hash(self) -> str:
-        return content_hash(self.policy({"capability_id": "rehearsal"}))
+        return self.policy({"policy_ref": self.policy_ref})["content_hash"]
 
 
 def _wire_time(value: datetime) -> str:
@@ -306,6 +319,8 @@ class SecCompanyFactsLane:
             self.template = load_packaged_connector_inventory()["templates"]["sec"]
             self.identity = sec_connector_identity(self.template, OPERATION)
             self.permissions = copy.deepcopy(dict(governance.allowed_permissions))
+            # Wire timestamps carry microseconds; governance effective_from may not.
+            self.created_at = _wire_time(datetime.fromisoformat(governance.effective_from))
             self.descriptor = self._ensure_descriptor()
             self.manifest = self._runner_manifest()
             self.adapter = (
@@ -396,7 +411,7 @@ class SecCompanyFactsLane:
         spec = sec_descriptor_spec(
             self.template,
             self.permissions,
-            self.governance.effective_from,
+            self.created_at,
             capability_policy_ref=self.governance.policy_ref,
             operation_name=OPERATION,
         )
@@ -441,7 +456,7 @@ class SecCompanyFactsLane:
         payload = {
             "schema_version": "0.1",
             "id": "runner-environment:sec-public:v1",
-            "created_at": self.governance.effective_from,
+            "created_at": self.created_at,
             "runner_runtime_ref": "runner-runtime:sec-public:v1",
             "runner_actor_ref": "runner:research-plan-executor",
             "resolver_ref": "resolver:connector-static:0.1",
@@ -466,6 +481,22 @@ class SecCompanyFactsLane:
         # across runs; the lane only ever binds cycles to these exact versions.
         effective_from = "2026-08-01T00:00:00+00:00"
         effective_until = "2036-08-01T00:00:00+00:00"
+        try:
+            self._bind_agenda(company_refs, actor_ref, effective_from, effective_until)
+        except AgendaConflict as exc:
+            raise LanePreconditionError(
+                f"lane agenda binding {AGENDA_POLICY_VERSION_ID!r} / {MANDATE_VERSION_ID!r} "
+                "already exists for a different issuer set or actor; the v1 binding is "
+                f"immutable, pass the same issuers/actor or bump the lane version: {exc}"
+            ) from exc
+        return {
+            "agenda_policy_version_ref": AGENDA_POLICY_VERSION_ID,
+            "mandate_version_ref": MANDATE_VERSION_ID,
+        }
+
+    def _bind_agenda(
+        self, company_refs: list[str], actor_ref: str, effective_from: str, effective_until: str
+    ) -> None:
         self.agenda.create_policy(
             _agenda_policy(company_refs),
             effective_from=effective_from,
@@ -488,10 +519,6 @@ class SecCompanyFactsLane:
             version_id=MANDATE_VERSION_ID,
             idempotency_key=f"mandate:{LANE_SLUG}:v1",
         )
-        return {
-            "agenda_policy_version_ref": AGENDA_POLICY_VERSION_ID,
-            "mandate_version_ref": MANDATE_VERSION_ID,
-        }
 
     def _register_question(
         self, issuer: Issuer, *, filed_from: str, filed_to: str, run_key: str
