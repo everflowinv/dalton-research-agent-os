@@ -12,10 +12,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .provider_token_estimate import (
+    PROVIDER_INPUT_ESTIMATOR_REF,
+    estimate_provider_input_tokens,
+)
 from .store import canonical_json, content_hash
 
 
 SCHEMA_VERSION = "0.1"
+# Deterministic bounding rule: when a snapshot must fit a provider-token budget,
+# the oldest evidence rows are dropped first, then the oldest catalysts, then
+# the oldest filings.  Every list is already newest-first, so dropping is a
+# pop from the tail.  What was fetched and what was dropped is recorded in
+# the snapshot itself, so the cycle that binds the snapshot can audit it.
+PERCEPTION_BOUNDING_REF = "perception-bounding:oldest-first-drop:0.1"
+_BOUNDED_SECTIONS = ("evidence", "catalysts", "filings")
 _REQUIRED_COLUMNS = {
     "companies": {"slug", "name", "ticker", "market", "coverage_tier", "coverage_status", "archetype", "investment_view", "updated_at"},
     "events": {"id", "event_key", "company_slug", "event_type", "occurred_at", "title", "summary", "materiality", "status", "source_url", "updated_at"},
@@ -55,7 +66,9 @@ def validate_snapshot(value: Any) -> dict[str, Any]:
         "source_snapshot_hash", "company", "catalysts", "evidence", "filings",
         "content_hash",
     }
-    if set(value) != expected or value.get("schema_version") != SCHEMA_VERSION:
+    # ``bounding`` is the only optional key: it is present exactly when the
+    # adapter was asked to fit a provider-token budget.
+    if set(value) - {"bounding"} != expected or value.get("schema_version") != SCHEMA_VERSION:
         raise PerceptionError("perception snapshot has an invalid closed shape")
     wire = dict(value)
     asserted = wire.pop("content_hash")
@@ -66,7 +79,81 @@ def validate_snapshot(value: Any) -> dict[str, Any]:
     for name in ("catalysts", "evidence", "filings"):
         if not isinstance(value[name], list) or not all(isinstance(item, Mapping) for item in value[name]):
             raise PerceptionError(f"perception {name} must be an object array")
+    if "bounding" in value:
+        bounding = value["bounding"]
+        if (
+            not isinstance(bounding, Mapping)
+            or bounding.get("bounding_ref") != PERCEPTION_BOUNDING_REF
+            or bounding.get("estimator_ref") != PROVIDER_INPUT_ESTIMATOR_REF
+            or not isinstance(bounding.get("max_estimated_tokens"), int)
+            or not isinstance(bounding.get("estimated_tokens"), int)
+            or bounding["estimated_tokens"] > bounding["max_estimated_tokens"]
+            or not isinstance(bounding.get("fetched"), Mapping)
+            or not isinstance(bounding.get("dropped"), Mapping)
+            or set(bounding["fetched"]) != set(_BOUNDED_SECTIONS)
+            or set(bounding["dropped"]) != set(_BOUNDED_SECTIONS)
+        ):
+            raise PerceptionError("perception bounding record is invalid")
+        for name in _BOUNDED_SECTIONS:
+            if bounding["fetched"][name] - bounding["dropped"][name] != len(value[name]):
+                raise PerceptionError("perception bounding record does not match the snapshot")
     return dict(value)
+
+
+def _bound_sections(
+    header: Mapping[str, Any],
+    company: Mapping[str, Any],
+    sections: dict[str, list[dict[str, Any]]],
+    max_estimated_tokens: int,
+) -> dict[str, Any]:
+    """Drop oldest rows until the whole snapshot wire fits ``max_estimated_tokens``.
+
+    The estimate covers the exact wire that will be registered -- header,
+    company, sections, this bounding record and a content hash of the same
+    length -- so the number recorded here is the number the coordinator can
+    hold the prompt against.
+    """
+
+    if isinstance(max_estimated_tokens, bool) or not isinstance(max_estimated_tokens, int) or max_estimated_tokens < 1:
+        raise PerceptionError("max_estimated_tokens must be a positive integer")
+    fetched = {name: len(sections[name]) for name in _BOUNDED_SECTIONS}
+
+    def record(estimated: int) -> dict[str, Any]:
+        return {
+            "bounding_ref": PERCEPTION_BOUNDING_REF,
+            "estimator_ref": PROVIDER_INPUT_ESTIMATOR_REF,
+            "max_estimated_tokens": max_estimated_tokens,
+            "estimated_tokens": estimated,
+            "fetched": fetched,
+            "dropped": {name: fetched[name] - len(sections[name]) for name in _BOUNDED_SECTIONS},
+        }
+
+    def estimate(previous: int) -> int:
+        wire = {
+            **dict(header),
+            "company": dict(company),
+            **{name: sections[name] for name in _BOUNDED_SECTIONS},
+            "bounding": record(previous),
+            "content_hash": "0" * 64,
+        }
+        return estimate_provider_input_tokens(canonical_json(wire))
+
+    estimated = estimate(max_estimated_tokens)
+    while estimated > max_estimated_tokens:
+        for name in _BOUNDED_SECTIONS:
+            if sections[name]:
+                sections[name].pop()
+                break
+        else:
+            raise PerceptionError(
+                "perception snapshot exceeds the estimated token budget even with no rows"
+            )
+        estimated = estimate(estimated)
+    # One more pass with the final digits in the record itself.
+    estimated = estimate(estimated)
+    if estimated > max_estimated_tokens:
+        raise PerceptionError("perception bounding did not converge")
+    return record(estimated)
 
 
 class LegacyCoveragePerceptionAdapter:
@@ -86,7 +173,16 @@ class LegacyCoveragePerceptionAdapter:
             if missing:
                 raise PerceptionError(f"legacy table {table} is missing required columns")
 
-    def build(self, company_slug: str) -> dict[str, Any]:
+    def build(
+        self, company_slug: str, *, max_estimated_tokens: int | None = None
+    ) -> dict[str, Any]:
+        """Build the snapshot; optionally bound it to a provider-token estimate.
+
+        ``max_estimated_tokens`` is measured with the same estimator the Agenda
+        coordinator uses for its pre-flight budget check, so a bounded snapshot
+        is one the policy's ``max_input_tokens`` can actually hold.
+        """
+
         if not isinstance(company_slug, str) or not company_slug:
             raise PerceptionError("company_slug must be a non-empty string")
         with tempfile.TemporaryDirectory(prefix="dalton-perception-") as directory:
@@ -125,22 +221,37 @@ class LegacyCoveragePerceptionAdapter:
             finally:
                 conn.close()
         generated_at = _now()
-        wire = {
+        header = {
             "schema_version": SCHEMA_VERSION,
             "snapshot_id": f"perception-snapshot:{company_slug}:{generated_at[:10]}",
             "generated_at": generated_at,
             "source_kind": "legacy-coverage-sqlite-backup-v1",
             "source_snapshot_hash": source_snapshot_hash,
+        }
+        bounding = None
+        if max_estimated_tokens is not None:
+            sections = {"catalysts": catalysts, "evidence": evidence, "filings": filings}
+            bounding = _bound_sections(header, dict(company), sections, max_estimated_tokens)
+        wire = {
+            **header,
             "company": dict(company),
             "catalysts": catalysts,
             "evidence": evidence,
             "filings": filings,
         }
+        if bounding is not None:
+            wire["bounding"] = bounding
         wire["content_hash"] = content_hash(wire)
         return validate_snapshot(wire)
 
-    def write(self, company_slug: str, output_path: str | Path) -> dict[str, Any]:
-        snapshot = self.build(company_slug)
+    def write(
+        self,
+        company_slug: str,
+        output_path: str | Path,
+        *,
+        max_estimated_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        snapshot = self.build(company_slug, max_estimated_tokens=max_estimated_tokens)
         _atomic_json(Path(output_path).expanduser().resolve(), snapshot)
         return snapshot
 

@@ -1,6 +1,15 @@
 # Dalton 项目进度
 
 更新日期：2026-08-26
+- **当前阶段：Phase 7「live 研究记忆启动」**，裁决见
+  [愿景复盘与下一阶段 v0.9](reports/vision-review-and-next-phase-v0.9-2026-08-26.md)。方向不变；问题是 13 天来所有
+  正式 Evidence / Claim 都在隔离 Core，live Core 正式记录为 0。顺序：S7a live Agenda 预算修复 → S7b ADR-0003 选 B
+  （transcript 语义候选）→ S7c writer 内 AlphaEngine 获取 + 真实 ACN 落库 + brief v3 → S7d US IT Services SEC lane 上
+  live → S7e 首份每周简报。止损：2026-09-09 live 仍无正式 Claim 则停止新能力开发
+- live 万华 Agenda Shadow 自 08-25 起连续 `PROVIDER_BUDGET_EXCEEDED`：Dalton 冻结 tokenizer 把整段中文数成 1 个 token，
+  DeepSeek 实际计数是它的 3.4 倍，policy 8,000 按后者事后执行。S7a development candidate 已按 provider 单位 bounding
+  perception snapshot 并在付费前预检，见
+  [S7a 报告](reports/agenda-provider-token-budget-s7a-2026-08-26.md)；建议 owner 把 policy `max_input_tokens` 提到 16,000
 - live deployed source：`3fe746e`；thesis-impact production runner：`9c295ca`；OpenClaw host patch chain：
   `6f93b9b14`
 - live 已启用独立的 thesis-impact 短任务，每 300 秒运行一次；writer 持有 Core/Scheduler，worker 只能通过

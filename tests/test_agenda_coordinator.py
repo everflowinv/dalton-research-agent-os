@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -461,6 +462,98 @@ class AgendaCoordinatorTests(unittest.TestCase):
                 self.assertEqual(scheduler.status(work.id)["state"], "failed")
                 formal = scheduler.formal_result(work.id)
                 self.assertEqual(formal["result_envelope"]["error"]["code"], "model_adapter_rejected_or_failed")
+
+    def test_cjk_heavy_snapshot_is_bounded_to_the_provider_token_budget(self):
+        """Replay of the 2026-08-25/26 live failure.
+
+        The Dalton tokenizer counted those prompts at ~2.7k tokens against an
+        8,000 policy budget, DeepSeek counted 8.5k-9.3k, and the paid
+        completion was discarded as PROVIDER_BUDGET_EXCEEDED.  The coordinator
+        must now bound the perception snapshot up front and never hand the
+        adapter a prompt whose provider estimate exceeds the policy budget.
+        """
+        from tests.test_provider_token_estimate import seed_legacy
+        from dalton_core.provider_token_estimate import estimate_provider_input_tokens
+        from dalton_core.research_context import count_dalton_search_tokens
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            core = root / "core.sqlite"; scheduler = root / "scheduler.sqlite"; router = root / "router.sqlite"
+            socket = root / "run" / "writer.sock"; tokens = root / "tokens.json"
+            legacy = root / "legacy.sqlite"
+            seed_legacy(legacy, evidence_rows=40, event_rows=10)
+            write_token_config(tokens, [Principal("core", "core-token", CORE_OPERATIONS, unrestricted=True)])
+            install_openclaw_catalog(
+                router,
+                checked_at=datetime(2026, 8, 14, 9, tzinfo=timezone.utc),
+                availability_ttl=timedelta(days=365),
+            )
+            env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+            process = subprocess.Popen(
+                [sys.executable, "-m", "dalton_core.writer_server", "--db", str(core), "--socket", str(socket), "--token-config", str(tokens)],
+                cwd=str(Path(__file__).parents[1]), env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                deadline = time.time() + 5
+                while time.time() < deadline and not socket.exists():
+                    time.sleep(0.02)
+                config = AgendaCoordinatorConfig(
+                    scheduler_db=scheduler, model_router_db=router, writer_socket=socket,
+                    core_token_config=tokens, broker_socket=root / "broker.sock",
+                    broker_auth_key=root / "broker.key", perception_source_db=legacy,
+                    perception_snapshot_path=root / "perception.json", company_ref="wanhua",
+                    routing_policy_ref="model-routing-policy-version:dalton-openclaw:1",
+                    credential_slot_refs=("credential-slot:openclaw:deepseek",),
+                    broker_client_id="client:dalton-core", expected_agent_id="chem",
+                    timeout_seconds=30,
+                )
+                # The unbounded snapshot is far over 8,000 provider tokens but
+                # under 8,000 Dalton tokens: exactly the live shape.
+                from dalton_core.perception import LegacyCoveragePerceptionAdapter
+                from dalton_core.store import canonical_json
+                unbounded = LegacyCoveragePerceptionAdapter(legacy).build("wanhua")
+                self.assertGreater(estimate_provider_input_tokens(canonical_json(unbounded)), 8000)
+                self.assertLess(count_dalton_search_tokens(canonical_json(unbounded)), 8000)
+                self.govern(tokens, socket, max_input_tokens=8000)
+                coordinator = AgendaCoordinator(config)
+                FakeAdapter.calls = 0
+                with patch.object(AgendaCoordinator, "_adapter", return_value=FakeAdapter()):
+                    first = coordinator.run_once(now=datetime(2026, 8, 14, 10, tzinfo=timezone.utc))
+                self.assertEqual(first["status"], "decided")
+                self.assertEqual(FakeAdapter.calls, 1)
+                question = FakeAdapter.last_question
+                self.assertLessEqual(estimate_provider_input_tokens(question), 8000)
+                conn = sqlite3.connect(core)
+                conn.row_factory = sqlite3.Row
+                registered = json.loads(conn.execute(
+                    "SELECT record_json FROM perception_snapshot_versions"
+                ).fetchone()["record_json"])
+                bounding = registered["bounding"]
+                self.assertEqual(bounding["fetched"]["evidence"], 40)
+                self.assertGreater(bounding["dropped"]["evidence"], 0)
+                self.assertEqual(bounding["dropped"]["catalysts"], 0)
+                self.assertEqual(len(registered["evidence"]), 40 - bounding["dropped"]["evidence"])
+                # The registered snapshot is the one the prompt quotes.
+                self.assertIn(registered["evidence"][0]["evidence_key"], question)
+                dropped_key = unbounded["evidence"][-1]["evidence_key"]
+                self.assertNotIn(dropped_key, question)
+                conn.close()
+                with Scheduler(scheduler) as sched:
+                    work = json.loads(sched.connection.execute(
+                        "SELECT work_order_json FROM scheduler_work_orders"
+                    ).fetchone()[0])
+                self.assertEqual(
+                    work["metadata"]["provider_input_estimator_ref"],
+                    "estimator:provider-input-chars-per-token:2.2",
+                )
+                self.assertLessEqual(work["metadata"]["estimated_provider_input_tokens"], 8000)
+                self.assertGreater(
+                    work["metadata"]["estimated_provider_input_tokens"],
+                    work["metadata"]["prompt_tokens"],
+                )
+            finally:
+                process.terminate(); process.wait(timeout=3)
 
 
 if __name__ == "__main__":

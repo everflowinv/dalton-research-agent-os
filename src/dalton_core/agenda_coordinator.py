@@ -19,6 +19,10 @@ from .context_materializer import AGENDA_RENDERER_REF
 from .model_router import ModelRouter
 from .openclaw_model_adapter import OpenClawModelAdapter
 from .perception import LegacyCoveragePerceptionAdapter
+from .provider_token_estimate import (
+    PROVIDER_INPUT_ESTIMATOR_REF,
+    estimate_provider_input_tokens,
+)
 from .research_context import count_dalton_search_tokens
 from .scheduler import Scheduler
 from .store import canonical_json, content_hash
@@ -36,6 +40,15 @@ TOKENIZER_REF = "tokenizer:dalton-search-token:0.1"
 # oversized render fails as a budget conflict with a readable manifest rather
 # than as an opaque transport error.
 MAX_CONTEXT_BYTES = 512 * 1024
+# ``max_input_tokens`` in the Agenda policy is enforced against provider
+# telemetry after the paid call.  The frozen Dalton tokenizer undercounts CJK
+# prompts by ~3.4x, so the perception snapshot is bounded and the final prompt
+# is pre-checked with the provider-unit estimator instead.  The perception
+# budget is the policy budget minus the fixed wrapper, minus the mandate wire,
+# minus this reserve for the materialization framing (refs, hashes, binding
+# ids, envelope markers).  The framing measured ~1,700 characters (~800
+# estimated tokens) on the coordinator test fixture; 1,000 leaves margin.
+MATERIALIZATION_FRAMING_RESERVE_TOKENS = 1_000
 
 
 class CoordinatorError(RuntimeError):
@@ -586,11 +599,24 @@ class AgendaCoordinator:
             if len(scoped) != 1:
                 raise CoordinatorError("exactly one active mandate must cover the trial company")
             mandate = scoped[0]
+            # Bound the perception snapshot to what the policy's provider-token
+            # budget can hold once the fixed wrapper and the envelope reserve
+            # are taken out.  A budget too small for even the wrapper is left
+            # unbounded so the cycle still starts and fails closed below with a
+            # recorded reason instead of dying before any record exists.
+            head, tail = prompt_wrapper()
+            perception_budget = (
+                policy["max_input_tokens"]
+                - estimate_provider_input_tokens(head + tail)
+                - estimate_provider_input_tokens(canonical_json(mandate))
+                - MATERIALIZATION_FRAMING_RESERVE_TOKENS
+            )
             # The adapter still writes an operational snapshot file, but the
             # file is mutable and is no longer replay authority: the cycle can
             # only bind to the append-only record registered here.
             snapshot = LegacyCoveragePerceptionAdapter(self.config.perception_source_db).write(
-                self.config.company_ref, self.config.perception_snapshot_path
+                self.config.company_ref, self.config.perception_snapshot_path,
+                max_estimated_tokens=perception_budget if perception_budget >= 1 else None,
             )
             client.register_perception_snapshot(
                 snapshot=snapshot,
@@ -645,7 +671,26 @@ class AgendaCoordinator:
                     actor_ref=COORDINATOR_ACTOR,
                 )
                 raise CoordinatorError("agenda prompt exceeds policy input-token budget")
-            estimated_input = prompt_tokens
+            # Second gate, in the provider's unit.  The adapter will reject the
+            # paid completion if provider telemetry exceeds the WorkOrder
+            # budget, so an over-estimate here must fail before any call.
+            estimated_provider_input = estimate_provider_input_tokens(prompt)
+            if estimated_provider_input > policy["max_input_tokens"]:
+                client.fail_agenda_cycle(
+                    cycle_id=cycle_id, reason="prompt_input_budget_exceeded",
+                    metadata={
+                        "prompt_tokens": prompt_tokens,
+                        "estimated_provider_input_tokens": estimated_provider_input,
+                        "max_input_tokens": policy["max_input_tokens"],
+                        "tokenizer_ref": TOKENIZER_REF,
+                        "estimator_ref": PROVIDER_INPUT_ESTIMATOR_REF,
+                    },
+                    actor_ref=COORDINATOR_ACTOR,
+                )
+                raise CoordinatorError(
+                    "agenda prompt is estimated to exceed the provider input-token budget"
+                )
+            estimated_input = estimated_provider_input
             allowed_source_refs = context["allowed_source_refs"]
             company_ref = context["company_ref"]
             input_refs = (
@@ -685,6 +730,9 @@ class AgendaCoordinator:
                     "agenda_context_binding_hash": context["binding"]["content_hash"],
                     "rendered_context_hash": context["manifest"]["rendered_content_hash"],
                     "prompt_content_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+                    "prompt_tokens": prompt_tokens,
+                    "estimated_provider_input_tokens": estimated_provider_input,
+                    "provider_input_estimator_ref": PROVIDER_INPUT_ESTIMATOR_REF,
                 },
             )
             self._workflow(client, work, cycle_id, context["policy_version_ref"])
