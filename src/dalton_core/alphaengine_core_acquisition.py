@@ -41,6 +41,11 @@ from .capability_catalog import (
     canonical_hash,
 )
 from .connector import ConnectorStore
+from .connector_governance import (
+    ConnectorGovernance,
+    ConnectorGovernanceError,
+    GOVERNANCE_FIELDS,
+)
 from .connector_authority_port import (
     ConnectorAuthorityPort,
     ConnectorCompletionReceiptReader,
@@ -94,13 +99,7 @@ PRICE_RATE_REF = "connector-price-rate:alphaengine-get-document:calls"
 PLANNER_REF = "planner:dalton-core-alphaengine-acquisition:0.1"
 ROUTING_POLICY_REF = "routing:dalton-core-alphaengine-acquisition:0.1"
 
-_GOVERNANCE_FIELDS = {
-    "schema_version", "id", "status", "capability_id", "approved_by",
-    "principal_ref", "policy_ref", "approval_ref", "decision_ref",
-    "registry_revision_ref", "attestation_ref", "effective_from",
-    "effective_until", "max_lease_seconds", "allowed_permissions",
-    "expected_source_hash", "expected_schema_hash", "content_hash",
-}
+_GOVERNANCE_FIELDS = set(GOVERNANCE_FIELDS)
 _GOVERNANCE_STATUSES = {"proposed", "approved"}
 
 
@@ -227,157 +226,29 @@ def build_governance_record(
     return _with_hash(base)
 
 
-class StaticConnectorGovernance:
-    """Operator-reviewed approval and policy authority for one connector.
-
-    The catalog asks two trusted resolvers for an approval receipt and a
-    governance policy.  This object answers both from one closed record and
-    only while ``status == "approved"``.  A ``proposed`` record is readable
-    but never authorizes anything.
-    """
+class StaticConnectorGovernance(ConnectorGovernance):
+    """Backward-compatible AlphaEngine-only view of generic governance."""
 
     def __init__(self, value: Mapping[str, Any]) -> None:
-        if not isinstance(value, Mapping) or set(value) != _GOVERNANCE_FIELDS:
+        try:
+            super().__init__(value)
+        except ConnectorGovernanceError as exc:
+            # Existing AlphaEngine callers use this module's exception type.
+            raise AlphaEngineCoreAcquisitionError(str(exc)) from exc
+        if self.capability_id != CAPABILITY_ID:
             raise AlphaEngineCoreAcquisitionError(
-                "connector governance record has an invalid closed shape"
+                "governance capability_id is not this connector"
             )
-        wire = json.loads(canonical_json(value))
-        if wire["schema_version"] != GOVERNANCE_SCHEMA_VERSION:
-            raise AlphaEngineCoreAcquisitionError("unsupported governance schema_version")
-        if wire["status"] not in _GOVERNANCE_STATUSES:
-            raise AlphaEngineCoreAcquisitionError("governance status is invalid")
-        if wire["capability_id"] != CAPABILITY_ID:
-            raise AlphaEngineCoreAcquisitionError("governance capability_id is not this connector")
-        approved_by = wire["approved_by"]
-        if not isinstance(approved_by, str) or not approved_by.startswith("human:") or len(approved_by) <= 6:
-            raise AlphaEngineCoreAcquisitionError("governance approved_by must be a human actor")
-        for name in (
-            "id", "principal_ref", "policy_ref", "approval_ref", "decision_ref",
-            "registry_revision_ref", "attestation_ref",
-        ):
-            if not isinstance(wire[name], str) or ":" not in wire[name]:
-                raise AlphaEngineCoreAcquisitionError(f"governance {name} must be a namespaced ref")
-        _parse_time(wire["effective_from"], "effective_from")
-        if wire["effective_until"] is not None:
-            until = _parse_time(wire["effective_until"], "effective_until")
-            if until <= _parse_time(wire["effective_from"], "effective_from"):
-                raise AlphaEngineCoreAcquisitionError("governance interval is invalid")
-        lease = wire["max_lease_seconds"]
-        if isinstance(lease, bool) or not isinstance(lease, int) or lease < 1:
-            raise AlphaEngineCoreAcquisitionError("max_lease_seconds must be a positive integer")
-        CapabilityPermissions.from_dict(wire["allowed_permissions"])
-        for name in ("expected_source_hash", "expected_schema_hash"):
-            if not isinstance(wire[name], str) or len(wire[name]) != 64:
-                raise AlphaEngineCoreAcquisitionError(f"governance {name} must be SHA-256 hex")
-        declared = wire.pop("content_hash")
-        if content_hash(wire) != declared:
-            raise AlphaEngineCoreAcquisitionError("governance content_hash mismatch")
-        wire["content_hash"] = declared
-        self.wire = wire
 
     @classmethod
     def load(cls, path: str | Path) -> "StaticConnectorGovernance":
         return cls(json.loads(Path(path).read_text(encoding="utf-8")))
 
-    @property
-    def id(self) -> str:
-        return self.wire["id"]
-
-    @property
-    def content_hash(self) -> str:
-        return self.wire["content_hash"]
-
-    @property
-    def status(self) -> str:
-        return self.wire["status"]
-
-    @property
-    def approved(self) -> bool:
-        return self.wire["status"] == "approved"
-
-    @property
-    def principal_ref(self) -> str:
-        return self.wire["principal_ref"]
-
-    @property
-    def policy_ref(self) -> str:
-        return self.wire["policy_ref"]
-
-    @property
-    def approved_by(self) -> str:
-        return self.wire["approved_by"]
-
-    @property
-    def effective_from(self) -> str:
-        return self.wire["effective_from"]
-
     def _require_approved(self) -> None:
-        if not self.approved:
-            raise AlphaEngineCoreAcquisitionError(
-                f"connector governance {self.id} is {self.status}; owner approval is required"
-            )
-
-    def approval(self, query: Mapping[str, Any]) -> dict[str, Any] | None:
-        """Trusted approval resolver for ``CapabilityCatalog``."""
-
-        self._require_approved()
-        if (
-            query.get("capability_id") != CAPABILITY_ID
-            or query.get("source_hash") != self.wire["expected_source_hash"]
-            or query.get("schema_hash") != self.wire["expected_schema_hash"]
-        ):
-            return None
-        template, _ = alphaengine_get_document_contract()
-        receipt = {
-            "schema_version": "0.1",
-            "approval_ref": self.wire["approval_ref"],
-            "capability_id": CAPABILITY_ID,
-            "registry_revision_ref": self.wire["registry_revision_ref"],
-            "artifact_ref": query["source_ref"],
-            "artifact_hash": query["source_hash"],
-            "schema_hash": query["schema_hash"],
-            "fixture_manifest_hash": template["fixture_manifest_hash"],
-            "attestation_ref": self.wire["attestation_ref"],
-            "attestation_hash": content_hash(
-                {"governance_id": self.id, "governance_hash": self.content_hash}
-            ),
-            "decision_ref": self.wire["decision_ref"],
-            "decision": "approve",
-            "approved_by": self.approved_by,
-            "approved_permissions": json.loads(
-                canonical_json(self.wire["allowed_permissions"])
-            ),
-            "active": True,
-            "effective_from": self.wire["effective_from"],
-            "effective_until": self.wire["effective_until"],
-        }
-        receipt["receipt_hash"] = canonical_hash(receipt)
-        return receipt
-
-    def policy(self, query: Mapping[str, Any]) -> dict[str, Any] | None:
-        """Trusted governance policy resolver for ``CapabilityCatalog``."""
-
-        self._require_approved()
-        if query.get("policy_ref") != self.policy_ref:
-            return None
-        wire = {
-            "schema_version": "0.1",
-            "policy_ref": self.policy_ref,
-            "effective_from": self.wire["effective_from"],
-            "effective_until": self.wire["effective_until"],
-            "allowed_principal_refs": [self.principal_ref],
-            "allowed_permissions": json.loads(
-                canonical_json(self.wire["allowed_permissions"])
-            ),
-            "max_lease_seconds": self.wire["max_lease_seconds"],
-        }
-        wire["content_hash"] = canonical_hash(wire)
-        return wire
-
-    def policy_hash(self) -> str:
-        policy = self.policy({"policy_ref": self.policy_ref})
-        assert policy is not None
-        return policy["content_hash"]
+        try:
+            super()._require_approved()
+        except ConnectorGovernanceError as exc:
+            raise AlphaEngineCoreAcquisitionError(str(exc)) from exc
 
 
 class AlphaEngineCoreAcquisition:
