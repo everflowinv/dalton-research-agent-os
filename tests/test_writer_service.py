@@ -964,6 +964,37 @@ class WriterServiceTests(unittest.TestCase):
         with self.assertRaises(WriterServerError):
             load_principals(invalid)
 
+    def test_candidate_promotions_is_review_scoped_read(self):
+        self.assertEqual(self.review.candidate_promotions(candidate_claim_refs=[]), [])
+        self.assertEqual(
+            self.review.candidate_promotions(
+                candidate_claim_refs=["candidate-claim-version:" + "0" * 64]
+            ),
+            [],
+        )
+        with self.assertRaises(RemoteAuthorizationError):
+            self.worker.candidate_promotions(candidate_claim_refs=[])
+        with self.assertRaises(RemoteError):
+            self.review.candidate_promotions(candidate_claim_refs=["claim-version:x"])
+        # A review principal issued before the read-only op existed (holding a
+        # strict subset of the review operations) is still the scoped review
+        # principal for commit purposes; it is only denied the op it lacks.
+        legacy = Path(self.tmp.name) / "private" / "research-review-legacy.json"
+        legacy_ops = frozenset({"commit_reviewed_candidate", "transcript_correction_review_state"})
+        write_token_config(legacy, [
+            Principal(
+                "research-review-control", "legacy-review-token",
+                legacy_ops, actor_ref="bridge:tailscale-review",
+            )
+        ])
+        with self.assertRaises(WriterServerError):
+            load_principals(legacy)
+        principal = load_principals(
+            legacy, allow_managed_operation_subset=True
+        )["research-review-control"]
+        self.assertEqual(principal.operations, legacy_ops)
+        self.assertTrue(frozenset(principal.operations) <= RESEARCH_REVIEW_CONTROL_OPERATIONS)
+
     def test_partial_frame_does_not_block_valid_client_and_connection_limit(self):
         partial = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.addCleanup(partial.close)

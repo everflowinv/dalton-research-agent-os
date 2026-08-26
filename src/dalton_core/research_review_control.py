@@ -144,12 +144,21 @@ class ResearchReviewControlPlane:
         self.authority.close()
 
     @staticmethod
-    def project_candidate(item: Mapping[str, Any]) -> dict[str, Any]:
+    def project_candidate(
+        item: Mapping[str, Any],
+        *,
+        promotion: Mapping[str, Any] | None = None,
+        promotion_state: str = "known",
+    ) -> dict[str, Any]:
         """Cockpit projection of one staged candidate pair.
 
         ``claim_kind`` lets the page distinguish a qualitative (semantic)
         candidate, whose ``value``/``unit``/``currency``/``scale`` are null by
-        contract (ADR-0003 B), from a quantitative one.
+        contract (ADR-0003 B), from a quantitative one.  ``promotion`` is the
+        Ledger's ``reviewed_candidate_commits`` receipt when Core already
+        holds this candidate (policy or human path); ``promotion_state`` is
+        ``"unknown"`` when Core could not be read, in which case the page
+        must not offer human actions.
         """
         claim = item["claim"]
         evidence = item["evidence"]
@@ -172,13 +181,50 @@ class ResearchReviewControlPlane:
             "artifact_refs": evidence["artifact_refs"],
             "decision": item["decision"],
             "commit_state": item.get("commit_state"),
+            "commit_error_code": item.get("commit_error_code"),
+            "promotion": promotion,
+            "promotion_state": promotion_state,
         }
+
+    def _promotions(
+        self, items: list[Mapping[str, Any]]
+    ) -> tuple[dict[str, dict[str, Any]], str]:
+        """Ask Core which of these staged candidates the Ledger already holds.
+
+        Returns ``(promotions_by_candidate_ref, state)`` where ``state`` is
+        ``"known"`` or ``"unknown"``.  Unknown means the writer could not be
+        read; callers must fail closed (hide human actions, refuse to record
+        a decision) rather than assume the candidate is still open.
+        """
+        refs = [item["claim"]["id"] for item in items]
+        if not refs:
+            return {}, "known"
+        try:
+            rows = self.writer.candidate_promotions(candidate_claim_refs=refs)
+        except Exception:
+            return {}, "unknown"
+        if not isinstance(rows, list):
+            return {}, "unknown"
+        promotions: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, Mapping):
+                return {}, "unknown"
+            ref = row.get("candidate_claim_ref")
+            if isinstance(ref, str) and ref in refs:
+                promotions[ref] = dict(row)
+        return promotions, "known"
 
     def view(self, login: str) -> dict[str, Any]:
         reviewer = _subject_for_login(login)
+        staged = self.authority.list_candidates(limit=200)
+        promotions, promotion_state = self._promotions(staged)
         items = [
-            self.project_candidate(item)
-            for item in self.authority.list_candidates(limit=200)
+            self.project_candidate(
+                item,
+                promotion=promotions.get(item["claim"]["id"]),
+                promotion_state=promotion_state,
+            )
+            for item in staged
         ]
         return {"as_of": _now(), "reviewer_ref": reviewer, "items": items}
 
@@ -233,6 +279,18 @@ class ResearchReviewControlPlane:
             )
         candidate = self._candidate(candidate_claim_ref, candidate_claim_hash)
         claim = candidate["claim"]
+        promotions, promotion_state = self._promotions([candidate])
+        if promotion_state != "known":
+            raise ResearchReviewControlError(
+                "Ledger promotion state is unavailable; no decision was recorded"
+            )
+        promoted = promotions.get(claim["id"])
+        if promoted is not None:
+            raise ResearchReviewControlError(
+                "candidate was already promoted into the Ledger by "
+                f"{promoted.get('authority')} review "
+                f"({promoted.get('claim_version_ref')}); no human decision was recorded"
+            )
         reviewer_ref = _subject_for_login(login)
         digest = content_hash({
             "request_id": request_id,

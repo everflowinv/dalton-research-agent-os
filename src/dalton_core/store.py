@@ -978,6 +978,54 @@ class DaltonStore:
     def _row_json(row: sqlite3.Row, key: str) -> dict[str, Any]:
         return json.loads(row[key])
 
+    def candidate_promotions(
+        self, *, candidate_claim_refs: list[str] | tuple[str, ...]
+    ) -> list[dict[str, Any]]:
+        """Read back which staged candidates the Ledger already promoted.
+
+        One row per ``candidate_claim_ref`` that holds a
+        ``reviewed_candidate_commits`` receipt, whether the promotion came
+        from the active governance policy (``policy-commit:*``) or from an
+        explicit human review (``human-review:*``).  The Cockpit uses this
+        to stop offering accept/revise/reject on a candidate the policy path
+        already wrote, and to explain a human accept that can no longer enter
+        the Ledger.  Read-only; never touches the staging store.
+        """
+        if isinstance(candidate_claim_refs, (str, bytes)) or not isinstance(
+            candidate_claim_refs, (list, tuple)
+        ):
+            raise ValidationError("candidate_claim_refs must be a list of candidate claim version ids")
+        refs = list(candidate_claim_refs)
+        if len(refs) > 500 or any(
+            not isinstance(ref, str) or not ref.startswith("candidate-claim-version:")
+            for ref in refs
+        ):
+            raise ValidationError("candidate_claim_refs must hold 0..500 candidate claim version ids")
+        if not refs:
+            return []
+        placeholders = ",".join("?" for _ in refs)
+        rows = self.connection.execute(
+            "SELECT candidate_claim_ref,candidate_evidence_ref,review_decision_ref,"
+            "result_json,created_at FROM reviewed_candidate_commits "
+            f"WHERE candidate_claim_ref IN ({placeholders}) "
+            "ORDER BY created_at,candidate_claim_ref",
+            tuple(refs),
+        ).fetchall()
+        result = []
+        for row in rows:
+            ledger = json.loads(row["result_json"])
+            decision_ref = row["review_decision_ref"]
+            result.append({
+                "candidate_claim_ref": row["candidate_claim_ref"],
+                "candidate_evidence_ref": row["candidate_evidence_ref"],
+                "review_decision_ref": decision_ref,
+                "authority": "policy" if decision_ref.startswith("policy-commit:") else "human",
+                "claim_version_ref": ledger.get("claim_version_ref"),
+                "evidence_version_ref": ledger.get("evidence_version_ref"),
+                "promoted_at": row["created_at"],
+            })
+        return result
+
     def commit_reviewed_candidate(
         self,
         *,

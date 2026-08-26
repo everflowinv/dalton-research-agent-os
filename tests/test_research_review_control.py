@@ -38,6 +38,7 @@ class FakeAuthority:
             "period": {"kind": "quarter", "label": "2026Q2", "start": "2026-04-01T00:00:00+00:00", "end": "2026-06-30T00:00:00+00:00"},
             "basis": "reported", "normalized_statement": "Revenue was 3.",
             "value": "3", "unit": "USD", "currency": "USD", "scale": "million",
+            "claim_kind": "quantitative",
         }
         self.evidence = {
             "id": "candidate-evidence:version:1", "content_hash": "b" * 64,
@@ -124,6 +125,16 @@ class FakeWriter:
         if self.fail:
             raise RuntimeError("writer failed")
         return {"status": "fresh", "claim_version_ref": "claim-version:1"}
+
+    def candidate_promotions(self, **params):
+        self.calls.append({"candidate_promotions": params})
+        if getattr(self, "promotions_fail", False):
+            raise RuntimeError("writer unavailable")
+        refs = params["candidate_claim_refs"]
+        return [
+            row for row in getattr(self, "promotions", [])
+            if row["candidate_claim_ref"] in refs
+        ]
 
     def transcript_correction_review_state(self, **params):
         self.calls.append({"transcript_state": params})
@@ -301,8 +312,60 @@ class ResearchReviewControlTests(unittest.TestCase):
             authority.decide_params["reviewed_semantics"]["normalized_statement"],
             authority.claim["normalized_statement"],
         )
-        self.assertEqual(len(writer.calls), 1)
+        self.assertEqual(len([call for call in writer.calls if "decision" in call]), 1)
         self.assertEqual(len(authority.commit_results), 1)
+
+    def test_policy_promoted_candidate_is_marked_and_refuses_human_decision(self):
+        authority = FakeAuthority()
+        writer = FakeWriter()
+        writer.promotions = [{
+            "candidate_claim_ref": authority.claim["id"],
+            "candidate_evidence_ref": authority.evidence["id"],
+            "review_decision_ref": "policy-commit:" + "e" * 64,
+            "authority": "policy",
+            "claim_version_ref": "claim-version:policy-1",
+            "evidence_version_ref": "evidence-version:policy-1",
+            "promoted_at": "2026-08-26T19:02:30+00:00",
+        }]
+        plane = self.plane(authority=authority, writer=writer)
+        view = plane.view(LOGIN)
+        item = view["items"][0]
+        self.assertEqual(item["promotion_state"], "known")
+        self.assertEqual(item["promotion"]["authority"], "policy")
+        self.assertEqual(item["promotion"]["claim_version_ref"], "claim-version:policy-1")
+        self.assertIsNone(item["decision"])
+        self.assertIsNone(item["commit_error_code"])
+        with self.assertRaises(ResearchReviewControlError):
+            plane.record(LOGIN, {
+                "request_id": "request-promoted1",
+                "candidate_claim_ref": authority.claim["id"],
+                "candidate_claim_hash": authority.claim["content_hash"],
+                "verdict": "accept", "rationale": "Checked the source.",
+                "findings": [], "proposed_revisions": None,
+            })
+        self.assertIsNone(authority.decision)
+        self.assertFalse(
+            any("decision" in call for call in writer.calls),
+            "no Ledger commit may be attempted for a promoted candidate",
+        )
+
+    def test_unknown_promotion_state_fails_closed(self):
+        authority = FakeAuthority()
+        writer = FakeWriter()
+        writer.promotions_fail = True
+        plane = self.plane(authority=authority, writer=writer)
+        item = plane.view(LOGIN)["items"][0]
+        self.assertEqual(item["promotion_state"], "unknown")
+        self.assertIsNone(item["promotion"])
+        with self.assertRaises(ResearchReviewControlError):
+            plane.record(LOGIN, {
+                "request_id": "request-unknown01",
+                "candidate_claim_ref": authority.claim["id"],
+                "candidate_claim_hash": authority.claim["content_hash"],
+                "verdict": "reject", "rationale": "Checked the source.",
+                "findings": [], "proposed_revisions": None,
+            })
+        self.assertIsNone(authority.decision)
 
     def test_writer_failure_leaves_durable_pending_result(self):
         authority = FakeAuthority()

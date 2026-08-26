@@ -61,6 +61,13 @@ class ResearchReviewRejected(ResearchReviewError):
     """A candidate is not eligible for the requested review transition."""
 
 
+# Writer error codes that make an accepted decision's commit terminal: the
+# Ledger refused it deterministically (``conflict`` = the candidate or decision
+# was already promoted, typically by the governance policy path), so the
+# reconciler must not retry it every interval.
+NON_RETRYABLE_COMMIT_ERRORS = frozenset({"conflict"})
+
+
 def _serialized(method: Any) -> Any:
     """Serialize one shared SQLite connection across HTTP worker threads."""
 
@@ -492,6 +499,7 @@ class HumanReviewAuthority:
             result.append({
                 "claim": claim, "evidence": evidence, "decision": decision,
                 "commit_state": None if event is None else event["state"],
+                "commit_error_code": None if event is None else event["error_code"],
             })
         return result
 
@@ -551,6 +559,7 @@ class HumanReviewAuthority:
             "evidence": evidence,
             "decision": decision,
             "commit_state": None if event is None else event["state"],
+            "commit_error_code": None if event is None else event["error_code"],
         }
 
     @_serialized
@@ -765,7 +774,7 @@ class HumanReviewAuthority:
     @_serialized
     def _current_commit_event(self, decision_ref: str) -> sqlite3.Row | None:
         return self.connection.execute(
-            "SELECT event_id,state FROM human_review_commit_events WHERE decision_ref=? "
+            "SELECT event_id,state,error_code FROM human_review_commit_events WHERE decision_ref=? "
             "AND event_id NOT IN (SELECT prior_event_ref FROM human_review_commit_events "
             "WHERE prior_event_ref IS NOT NULL) LIMIT 1", (decision_ref,)
         ).fetchone()
@@ -1083,17 +1092,37 @@ class HumanReviewAuthority:
 
     @_serialized
     def pending_commits(self, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Accepted decisions the reconciler should still try to promote.
+
+        A ``failed`` head event whose ``error_code`` is in
+        ``NON_RETRYABLE_COMMIT_ERRORS`` is terminal: the Ledger has
+        deterministically refused the promotion (for example the candidate
+        was already promoted by the governance policy), so retrying every
+        reconcile interval can never succeed.  Such decisions stay visible
+        through ``list_candidates`` / ``candidate_status`` with their
+        ``commit_error_code`` but are no longer pending.
+        """
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
             raise ResearchReviewError("limit must be 1..500")
         rows = self.connection.execute(
-            "SELECT d.decision_id FROM human_review_decisions d WHERE d.verdict='accept' "
-            "AND COALESCE((SELECT e.state FROM human_review_commit_events e "
-            "WHERE e.decision_ref=d.decision_id AND e.event_id NOT IN "
-            "(SELECT child.prior_event_ref FROM human_review_commit_events child "
-            "WHERE child.prior_event_ref IS NOT NULL) LIMIT 1),'queued') "
-            "IN ('queued','failed') ORDER BY d.created_at,d.decision_id LIMIT ?", (limit,)
+            "SELECT decision_id FROM human_review_decisions WHERE verdict='accept' "
+            "ORDER BY created_at,decision_id"
         ).fetchall()
-        return [self.decision_bundle(row["decision_id"]) for row in rows]
+        result = []
+        for row in rows:
+            event = self._current_commit_event(row["decision_id"])
+            if event is not None:
+                if event["state"] == "committed":
+                    continue
+                if (
+                    event["state"] == "failed"
+                    and event["error_code"] in NON_RETRYABLE_COMMIT_ERRORS
+                ):
+                    continue
+            result.append(self.decision_bundle(row["decision_id"]))
+            if len(result) >= limit:
+                break
+        return result
 
     @_serialized
     def record_commit_result(

@@ -296,6 +296,50 @@ class ResearchReviewTests(unittest.TestCase):
             self.candidate["claim"]["id"],
         )
 
+    def test_conflict_commit_failure_is_terminal_and_promotion_is_readable(self) -> None:
+        decision_result = self._decide()
+        bundle = self.review.pending_commits()[0]
+        claim_ref = bundle["claim"]["id"]
+        # Nothing promoted yet: Core reports no receipt for this candidate.
+        self.assertEqual(
+            self.harness.core.candidate_promotions(candidate_claim_refs=[claim_ref]), []
+        )
+        self.assertEqual(self.harness.core.candidate_promotions(candidate_claim_refs=[]), [])
+        # A transport failure stays pending: the reconciler may retry it.
+        self.review.record_commit_result(
+            decision_result["decision_ref"], created_at=WIRE_WHEN, error_code="transport_error"
+        )
+        self.assertEqual(len(self.review.pending_commits()), 1)
+        status = self.review.candidate_status(claim_ref)
+        self.assertEqual(status["commit_state"], "failed")
+        self.assertEqual(status["commit_error_code"], "transport_error")
+        # A Ledger conflict (candidate already promoted elsewhere) is terminal:
+        # it is no longer pending, but stays visible with its error code.
+        self.review.record_commit_result(
+            decision_result["decision_ref"], created_at=WIRE_WHEN, error_code="conflict"
+        )
+        self.assertEqual(self.review.pending_commits(), [])
+        status = self.review.candidate_status(claim_ref)
+        self.assertEqual(status["review_state"], "failed")
+        self.assertEqual(status["commit_error_code"], "conflict")
+        listed = [item for item in self.review.list_candidates() if item["claim"]["id"] == claim_ref]
+        self.assertEqual(listed[0]["commit_error_code"], "conflict")
+        # A human promotion is readable back with its authority and Ledger refs.
+        result = self.harness.core.commit_reviewed_candidate(
+            **bundle, idempotency_key="reviewed-ledger:sec:conflict-test"
+        )
+        promotions = self.harness.core.candidate_promotions(candidate_claim_refs=[claim_ref, "candidate-claim-version:missing"])
+        self.assertEqual(len(promotions), 1)
+        self.assertEqual(promotions[0]["candidate_claim_ref"], claim_ref)
+        self.assertEqual(promotions[0]["authority"], "human")
+        self.assertEqual(promotions[0]["review_decision_ref"], bundle["decision"]["id"])
+        self.assertEqual(promotions[0]["claim_version_ref"], result["claim_version_ref"])
+        self.assertEqual(promotions[0]["evidence_version_ref"], result["evidence_version_ref"])
+        with self.assertRaises(Exception):
+            self.harness.core.candidate_promotions(candidate_claim_refs="candidate-claim-version:x")
+        with self.assertRaises(Exception):
+            self.harness.core.candidate_promotions(candidate_claim_refs=["claim-version:not-a-candidate"])
+
     def test_explicit_accept_promotes_losslessly_and_atomically(self) -> None:
         decision_result = self._decide()
         self.assertEqual(decision_result["commit_state"], "queued")

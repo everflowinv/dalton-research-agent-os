@@ -90,6 +90,9 @@ class WriterClient:
     def transcript_correction_review_state(self, **params: Any) -> Any:
         return self.call("transcript_correction_review_state", params)
 
+    def candidate_promotions(self, **params: Any) -> Any:
+        return self.call("candidate_promotions", params)
+
     def create_policy(self, **params: Any) -> Any:
         return self.call("create_policy", params)
 

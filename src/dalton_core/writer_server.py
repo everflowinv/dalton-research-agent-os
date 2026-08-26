@@ -264,6 +264,7 @@ DASHBOARD_CONTROL_OPERATIONS = (
 )
 RESEARCH_REVIEW_CONTROL_OPERATIONS = frozenset({
     "commit_reviewed_candidate", "transcript_correction_review_state",
+    "candidate_promotions",
 })
 THESIS_IMPACT_OPERATIONS = frozenset({
     "thesis_impact_targets",
@@ -294,7 +295,7 @@ SCOPED_REVIEW_PRINCIPALS = {
 }
 CORE_OPERATIONS = frozenset({
     "register_invocation", "stage_change", "verify_change", "commit",
-    "commit_reviewed_candidate",
+    "commit_reviewed_candidate", "candidate_promotions",
     "current_pointer", "get_version", "list_events", "active_policy",
     "register_evidence", "register_claim", "relate_evidence", "adjudicate_claim",
     "submit_capability_proposal", "record_capability_evaluation",
@@ -345,6 +346,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "transcript_correction_review_state": frozenset({
         "source_manifest", "correction_set_ref", "source_start", "source_end",
     }),
+    "candidate_promotions": frozenset({"candidate_claim_refs"}),
     "acquire_alphaengine_document": frozenset({
         "document_ref", "expected_content_sha256", "max_pages", "actor_ref",
     }),
@@ -1147,9 +1149,13 @@ class WriterServer:
             if not valid:
                 raise PermissionError("scoped feedback provenance is invalid")
         if operation == "commit_reviewed_candidate" and not principal.is_unrestricted:
+            # The scoped review principal may hold a subset of the review
+            # control operations (a live token file issued before a read-only
+            # op was added still qualifies); it may never hold any other op.
             if (
                 principal.principal_id not in SCOPED_REVIEW_PRINCIPALS
-                or principal.operations != RESEARCH_REVIEW_CONTROL_OPERATIONS
+                or not frozenset(principal.operations) <= RESEARCH_REVIEW_CONTROL_OPERATIONS
+                or "commit_reviewed_candidate" not in principal.operations
             ):
                 raise PermissionError("review promotion requires the scoped review control principal")
             decision = result.get("decision")
@@ -1734,6 +1740,9 @@ class WriterServer:
         return authority.bind_claim_citation(
             version_ref, version_hash, **values
         )
+
+    def _op_candidate_promotions(self, p: Mapping[str, Any]) -> Any:
+        return self.store.candidate_promotions(**dict(p))
 
     def _op_transcript_correction_review_state(
         self, p: Mapping[str, Any]
