@@ -11,27 +11,41 @@
   perception snapshot 并在付费前预检，见
   [S7a 报告](reports/agenda-provider-token-budget-s7a-2026-08-26.md)。owner 已于 2026-08-26 用 `dalton-gov`
   发布 `agenda-policy-version:phase1-shadow-v3`（`max_input_tokens` 16,000，`effective_from` 2026-08-27T00:00Z），
-  8/27 起的 cycle 用新预算；S7a 代码本身仍待 CI 绿后部署
+  8/27 起的 cycle 用新预算。**S7a 代码已于 2026-08-26 17:18 UTC 随 `dc747de` 部署 live**
+- **live 事故（2026-08-26 17:01–）**：v3 发布时 `activate` 默认 true，pointer 立刻指向一个 `effective_from` 在未来的版本，
+  `AgendaStore.active_policy()` 不回退 prior，于是每个 Agenda tick 报 `requested object was not found`。已发布 v4
+  （内容同 v3，`effective_from` 17:21:42Z，content_hash `28679036…326c11`）把 pointer 修正。之后到 8/27 00:00 UTC 前
+  Agenda 仍每小时报 `conflict`：v4 触发当日第二个 cycle，S7a bounding 后的 snapshot 内容变了但 `snapshot_id` 仍按日期生成，
+  与 00:57 UTC 已登记版本冲突；发生在模型调用之前，不花钱。S7a + v4 的首次真实验证是 8/27 00:xx UTC 的 cycle。
+  两处待改：`active_policy()` 回退 prior chain / 未来生效默认不 activate；snapshot_id 带内容 hash。见
+  [S7c-3 报告](reports/s7c3-live-deploy-candidate-staging-wiring-v0.1-2026-08-26.md)
 - S7c-1 development candidate：writer 新增 human governance op `acquire_alphaengine_document` /
   `alphaengine_acquisition_status`，以子进程（不是线程，`SIGALRM` watchdog 只能在主线程）跑 S6b 的 Core-hosted 获取；
   owner 用 `dalton-connector-governance approve` 批准治理记录，launcher 对 `proposed` 记录 fail closed。见
   [S7c-1 报告](reports/s7c-writer-hosted-alphaengine-acquisition-v0.1-2026-08-26.md)。仓库里的
   `deploy/connector-governance/alphaengine-get-document-v1.json` 已由 `human:lumos` 于 2026-08-26 批准
-  （`approved`，content_hash `2f6ad555…997c49`）；live state 目录尚无该文件，install.sh 部署时首次复制
+  （`approved`，content_hash `2f6ad555…997c49`）；2026-08-26 部署时 install.sh 已把它复制到
+  `state/dalton-core/connector-governance/`，live writer 以 `--connector-governance` 启动。尚未调过真实 AlphaEngine
 - S7c-2 development candidate：writer 新增 human-only op `stage_transcript_candidate` /
   `transcript_candidate_status` 和 `--candidate-staging` 参数，把 Core-held AlphaEngine 获取结果经 S7b 入口写进
   Cockpit 共用的 candidate-staging 文件（verification mode 固定 `transcript_core_authority`），
-  `HumanReviewAuthority.candidate_status` 只读回读。专项 6/6，合并后关联回归 93/93。部署前提：install.sh /
-  LaunchAgent 还没加 `--candidate-staging`，live writer 上这两个 op 只会返回 `rejected`。见
+  `HumanReviewAuthority.candidate_status` 只读回读。专项 6/6，合并后关联回归 93/93。见
   [S7c-2 报告](reports/s7c2-stage-transcript-candidate-op-v0.1-2026-08-26.md)
+- S7c-3 已部署：`macos_launchagent.render` 从 `control.config.research_review.candidate_staging_path` 推导 writer 的
+  `--candidate-staging`，writer 与 Cockpit 写同一个 `candidate-staging.sqlite`。live 探针 `transcript_candidate_status`
+  对未知 ref 返回 `not_found`（未配置时是 `rejected`）。见
+  [S7c-3 报告](reports/s7c3-live-deploy-candidate-staging-wiring-v0.1-2026-08-26.md)。
+  下一步 S7c-4：在 live 上跑一次真实 `acquire_alphaengine_document`（8/24 ACN，治理记录已批准）→ `stage_transcript_candidate`
+  → Cockpit 人工 accept，产出 live Core 第一条正式 qualitative Claim
 - S7b development candidate：ADR-0003 裁决为 B（Accepted，owner 可否决）。transcript 候选以 `claim_kind = qualitative`
   进 CandidateStaging，数值字段全为 null，只收带 exact citation binding 的 transcript evidence，policy 路径一律拒绝，
   只经 explicit human review 入库；新增闭合 verification mode `transcript_core_authority` 和
   `stage_transcript_qualitative_candidate` 入口（S7c writer op 直接调用）。隔离端到端：ACN 语义候选 stage → accept →
   commit 写出 1 条 EvidenceVersion + 1 条 qualitative ClaimVersion 0.2。见
   [S7b 报告](reports/s7b-qualitative-transcript-candidate-staging-v0.1-2026-08-26.md)
-- live deployed source：`3fe746e`；thesis-impact production runner：`9c295ca`；OpenClaw host patch chain：
-  `6f93b9b14`
+- live deployed source：`dc747de`（2026-08-26 17:18 UTC，含 S7a / S7b / S7c-1 / S7c-2 / S7c-3；上一版 `3fe746e`）；
+  thesis-impact production runner：`9c295ca`；OpenClaw host patch chain：`6f93b9b14`；claude-cli-gateway 心跳补丁：
+  workspace `935a751be`
 - live 已启用独立的 thesis-impact 短任务，每 300 秒运行一次；writer 持有 Core/Scheduler，worker 只能通过
   scoped RPC 提交受限操作，不直接打开 live Core SQLite
 - assessment policy 固定 `profile:gpt-5-6-sol`；verifier policy 固定
@@ -1462,4 +1476,5 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - S6 正式晋级前置缺口与 Core-hosted AlphaEngine 获取 v0.1：`docs/reports/s6-formal-promotion-authority-gaps-and-core-acquisition-v0.1-2026-08-26.md`
 - transcript 候选进入 CandidateStaging 的裁决（Accepted，选 B）：`docs/adr/0003-transcript-candidate-admission.md`
 - S7b 语义 transcript 候选进入 CandidateStaging v0.1：`docs/reports/s7b-qualitative-transcript-candidate-staging-v0.1-2026-08-26.md`
+- S7c-3 live 部署与 writer `--candidate-staging` 接线 v0.1：`docs/reports/s7c3-live-deploy-candidate-staging-wiring-v0.1-2026-08-26.md`
 - AlphaEngine get_document 连接器治理记录（proposed）：`deploy/connector-governance/alphaengine-get-document-v1.json`
