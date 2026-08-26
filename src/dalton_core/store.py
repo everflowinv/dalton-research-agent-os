@@ -1151,6 +1151,25 @@ class DaltonStore:
                     raise GateRejected("research authorization policy is no longer active")
                 self._assert_policy_effective(policy_row)
 
+            required_authority_tables = (
+                "connector_invocations", "connector_source_envelopes",
+                "observability_artifact_version_index",
+                "observability_artifact_versions_v2",
+            )
+            present_tables = {
+                row["name"] for row in cur.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?,?,?)",
+                    required_authority_tables,
+                ).fetchall()
+            }
+            if present_tables != set(required_authority_tables):
+                # A Core that never opened its connector authority cannot verify
+                # any candidate SourceEnvelope.  Reject explicitly instead of
+                # surfacing a raw sqlite error from a missing table.
+                raise GateRejected(
+                    "Core connector authority is unavailable; "
+                    "candidate SourceEnvelope cannot be verified"
+                )
             source = cur.execute(
                 "SELECT connector_invocation_ref,record_json,content_hash FROM "
                 "connector_source_envelopes WHERE source_envelope_id=?",

@@ -1,6 +1,6 @@
 # Dalton 项目进度
 
-更新日期：2026-08-25
+更新日期：2026-08-26
 - live deployed source：`3fe746e`；thesis-impact production runner：`9c295ca`；OpenClaw host patch chain：
   `6f93b9b14`
 - live 已启用独立的 thesis-impact 短任务，每 300 秒运行一次；writer 持有 Core/Scheduler，worker 只能通过
@@ -116,6 +116,23 @@
   、[自然语言 Intent Composer v0.1](reports/natural-language-intent-composer-v0.1-2026-08-24.md)
   、[Intent 二次确认与 writer dispatch v0.2](reports/natural-language-intent-confirmation-dispatch-v0.2-2026-08-25.md)
   及 [Ad-hoc 回答路由 v0.1](reports/ad-hoc-answer-routing-v0.1-2026-08-25.md)
+- S6 于 2026-08-25 完成 live Cockpit `research_review` 部署与真实 Tailscale transcript gate（1 条
+  `TranscriptCorrectionSetVersion`、1 条 `TranscriptClaimCitationBinding`，`claim_eligible = true`），轨迹停在
+  `awaiting_candidate_staging`。2026-08-26 复核发现两道结构性的门：live Core 从未打开 connector authority
+  schema（`connector_source_envelopes` / `connector_invocations` 不存在，`observability_artifact_versions_v2` 为 0），
+  `_commit_authorized_candidate` 无法核对任何候选 SourceEnvelope；CandidateStaging 0.1 只收能从同一份 material
+  的 normalized payload 复算的数值候选，AlphaEngine `get_document` 的 payload 抽不出逐字稿里的 -3%。S6b 开发候选
+  已关闭第一道门：Core gate 对缺表明确 `GateRejected`；writer 启动时打开 `ConnectorStore` schema；新增
+  `alphaengine_core_acquisition`，用 owner 审批、hash 绑定的 `StaticConnectorGovernance` 充当 catalog 的
+  approval / policy resolver，把 AlphaEngine `get_document` 通过既有 `LiveMcpRunnerAdmissionGate +
+  ConnectorTransportExecutor` 写进 Core 自己的 connector / artifact authority，再由既有 coordinator 从 Core 回读
+  receipt 拼接文档。hermetic 9/9：两页文档入 Core、journal 重放零 provider call、篡改 schema hash 被 catalog 拒绝、
+  `proposed` 治理记录 fail closed，且 **Core-held authority 已能让 transcript 候选经 `commit_reviewed_candidate`
+  写入正式 Evidence / Claim**（数值 spec 仍为占位）。用 8/24 真实 ACN 原文做的无网络演练两页入库，assembled digest
+  与用户已确认的 `a8a9fbff…bd96bd` 一致。未部署 live、未调用真实 AlphaEngine、未接 writer RPC；
+  `deploy/connector-governance/alphaengine-get-document-v1.json` 为 `proposed`，需 owner 批准。第二道门写成
+  ADR-0003（Proposed，推荐双 material 候选：数值绑定 SEC exhibit、来源绑定逐字稿）。详见
+  [S6 正式晋级前置缺口与 Core-hosted AlphaEngine 获取 v0.1](reports/s6-formal-promotion-authority-gaps-and-core-acquisition-v0.1-2026-08-26.md)
 - development Planner 又扩展校准了 Qwen DeepSeek V4 Flash/Pro、Grok 4.6、Gemini 3.7 Flash、OpenRouter Ox
   Alpha、ZAI GLM 5.3 和 GPT-5.6 Luna。V4 Flash、V4 Pro、Gemini 3.7 与 Ox Alpha 均连续两轮
   30/30、safety 20/20；V4 Flash 以两轮 USD 0.00960668 和约 2.0s 单 case 中位延迟取代 Qwen 3.8 Max，
@@ -1413,3 +1430,6 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Connector P0-1 authority foundation：`docs/reports/connector-p0-1-authority-foundation-2026-08-14.md`
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`
 - Connector Protocol 与自生成模板：`docs/CONNECTOR_PROTOCOL.md`
+- S6 正式晋级前置缺口与 Core-hosted AlphaEngine 获取 v0.1：`docs/reports/s6-formal-promotion-authority-gaps-and-core-acquisition-v0.1-2026-08-26.md`
+- transcript 候选进入 CandidateStaging 的裁决草案：`docs/adr/0003-transcript-candidate-admission.md`
+- AlphaEngine get_document 连接器治理记录（proposed）：`deploy/connector-governance/alphaengine-get-document-v1.json`

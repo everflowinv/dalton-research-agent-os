@@ -101,6 +101,7 @@ from .alphaengine_document_acquisition import (
     validate_alphaengine_document_acquisition_manifest,
 )
 from .raw_spool import RawSpool
+from .connector import ConnectorStore
 from .transcript_correction import (
     TranscriptCorrectionAuthority,
     TranscriptCorrectionConflict,
@@ -659,6 +660,7 @@ class WriterServer:
         self._registry: CapabilityRegistry | None = None
         self._agenda: AgendaStore | None = None
         self._observability: ObservabilityStore | None = None
+        self._connectors: ConnectorStore | None = None
         self._coverage_admission: CoverageAdmissionAuthority | None = None
         self._model_input: ModelInputLedger | None = None
         self._industry_research: IndustryResearchAuthority | None = None
@@ -834,6 +836,10 @@ class WriterServer:
         self._store = DaltonStore(self.db_path)
         self._registry = CapabilityRegistry(self._store)
         self._observability = ObservabilityStore(self._store)
+        # Open the connector authority schema on the same Core so that
+        # candidate promotion can verify SourceEnvelope / ArtifactVersion
+        # provenance instead of failing on a missing table.
+        self._connectors = ConnectorStore(self._store)
         self._agenda = AgendaStore(self._store)
         self._coverage_admission = CoverageAdmissionAuthority(self._store)
         self._model_input = ModelInputLedger(self._store)
@@ -958,6 +964,7 @@ class WriterServer:
         self._registry = None
         self._agenda = None
         self._observability = None
+        self._connectors = None
         self._coverage_admission = None
         self._model_input = None
         self._industry_research = None
