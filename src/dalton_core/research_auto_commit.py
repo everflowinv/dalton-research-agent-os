@@ -147,10 +147,16 @@ def authorize_policy_candidate(
 ) -> dict[str, Any]:
     """Evaluate one exact candidate against Core authority and active policy."""
 
-    rule = _policy_rule(policy_version)
-    selected_rule = rule["selected_rule"]
     evidence_wire = validate_candidate_evidence(evidence)
     claim_wire = validate_candidate_claim(claim)
+    if claim_wire["claim_kind"] != "quantitative":
+        # ADR-0003 option B: qualitative (transcript) candidates are never
+        # policy-authorized; they require explicit human review.
+        raise ResearchAutoCommitRejected(
+            "qualitative candidates require explicit human review; no policy rule admits them"
+        )
+    rule = _policy_rule(policy_version)
+    selected_rule = rule["selected_rule"]
     if (
         evidence_wire["version"] != 1
         or evidence_wire["prior_version_ref"] is not None

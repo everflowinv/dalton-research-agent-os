@@ -22,7 +22,7 @@
     "source_ref": {"type": "string", "minLength": 1},
     "source_type": {"enum": ["official_filing", "authenticated_library", "social_enumeration", "social_search", "public_web", "market_data"]},
     "operation": {"type": "string", "minLength": 1},
-    "provenance_mode": {"const": "connector_authority"},
+    "provenance_mode": {"enum": ["connector_authority", "transcript_core_authority"]},
     "authority_resolution_ref": {"type": "string", "minLength": 1},
     "authority_resolution_hash": {"$ref": "#/$defs/hash"},
     "source_record_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
