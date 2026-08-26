@@ -47,17 +47,13 @@ _HUMAN_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
 _TICKER_RE = re.compile(r"[A-Z][A-Z0-9.]{0,7}\Z")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 LIVE_MODE_ARGS = ("--allow-network",)
-# The writer runs under launchd ``ProcessType: Background`` and children
-# inherit PRIO_DARWIN_BG: on 2026-08-26 a live EPAM lane step that takes <30s
-# in a foreground shell ran for 6+ minutes at "100%" of an efficiency core.
-# ``taskpolicy -B`` cannot be used as an exec prefix (it only accepts ``-p``),
-# and ``taskpolicy -B -p <child>`` measured no effect; the only thing that
-# measured as effective (0.35s vs 2.2s on a CPU probe under ``taskpolicy -b``)
-# is the child itself calling ``setpriority(PRIO_DARWIN_PROCESS, 0, 0)``, so
-# the CLI gets ``--foreground`` and does that before any work.  The writer
-# itself stays a background daemon.
-FOREGROUND_ARGS = ("--foreground",)
-
+# Children inherit the writer's launchd ``ProcessType``.  Measured on
+# 2026-08-26 (CPU probe, 6M-iteration loop): ``ProcessType: Background``
+# 1.98s vs ``Standard`` 0.32s, and neither ``setpriority(PRIO_DARWIN_PROCESS,
+# 0, 0)`` in the child nor ``taskpolicy -B -p <pid>`` from outside lifts the
+# launchd clamp (1.88s / 2.38s).  The only lever is the writer LaunchAgent's
+# ``ProcessType`` (``macos_launchagent``), so this launcher does not try to
+# re-prioritise the child.  A live CTSH step under Background took 6m31s.
 # Writer-hosted children cannot be attached to without root (sample /
 # sys.remote_exec both need the task port), so the child writes its own
 # Python stack to run.log every interval; a stall then has a trace.
@@ -209,7 +205,6 @@ class SecLaneLauncher:
             "--filed-to", filed_to,
             "--quiet",
             "--stack-dump-seconds", str(STACK_DUMP_SECONDS),
-            *FOREGROUND_ARGS,
         ]
         for ticker in issuers:
             command += ["--issuer", ticker]

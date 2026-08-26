@@ -110,37 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="periodically dump the Python stack to stderr (diagnostic for writer-hosted "
              "runs, which cannot be attached to without root)",
     )
-    parser.add_argument(
-        "--foreground", action="store_true",
-        help="on macOS, leave PRIO_DARWIN_BG inherited from a launchd Background parent "
-             "(writer-hosted runs) before doing any work; no-op elsewhere",
-    )
     return parser
-
-
-PRIO_DARWIN_PROCESS = 4  # <sys/resource.h>; ``setpriority(PRIO_DARWIN_PROCESS, 0, 0)`` clears PRIO_DARWIN_BG
-
-
-def leave_darwin_background() -> str:
-    """Best effort: clear inherited PRIO_DARWIN_BG on the calling process.
-
-    Returns a one-line status for the run log; never raises.  Measured on
-    2026-08-26: a CPU probe under ``taskpolicy -b`` drops from 2.2s to 0.35s
-    after this call, while ``taskpolicy -B -p <pid>`` from outside changes
-    nothing.
-    """
-    if sys.platform != "darwin":
-        return f"foreground: skipped (platform {sys.platform})"
-    try:
-        import ctypes
-
-        libc = ctypes.CDLL(None, use_errno=True)
-        rc = libc.setpriority(PRIO_DARWIN_PROCESS, 0, 0)
-        if rc != 0:
-            return f"foreground: setpriority(PRIO_DARWIN_PROCESS) failed errno={ctypes.get_errno()}"
-        return "foreground: setpriority(PRIO_DARWIN_PROCESS, 0, 0) ok"
-    except Exception as exc:  # pragma: no cover - platform specific
-        return f"foreground: unavailable ({exc.__class__.__name__}: {exc})"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -164,8 +134,6 @@ def main(argv: list[str] | None = None) -> int:
         # stderr is the launcher's run.log; a stalled child then leaves a
         # timestamped Python stack every interval instead of nothing.
         faulthandler.dump_traceback_later(args.stack_dump_seconds, repeat=True, file=sys.stderr)
-    if args.foreground:
-        print(f"{datetime.now(timezone.utc).isoformat()} {leave_darwin_background()}", file=sys.stderr, flush=True)
 
     overrides = {}
     for item in args.issuer_cik:

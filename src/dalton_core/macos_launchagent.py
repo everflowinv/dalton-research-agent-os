@@ -80,6 +80,13 @@ def render(
     }
     writer = common | {
         "Label": WRITER_LABEL,
+        # S7d: the writer hosts CPU-bound children (AlphaEngine acquisition,
+        # SEC company-facts lane) that inherit its launchd process type.
+        # Measured 2026-08-26: ``Background`` runs CPU work ~6x slower than
+        # ``Standard`` and nothing inside the child can lift the clamp; a live
+        # CTSH lane step took 6m31s under Background.  Only the writer moves
+        # to ``Standard``; the other agents keep ``Background``.
+        "ProcessType": "Standard",
         "ProgramArguments": [
             str(bin_dir / "dalton-writer"),
             "--db", str(state / "core.sqlite"),

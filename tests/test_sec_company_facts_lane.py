@@ -195,6 +195,19 @@ class LaneTests(unittest.TestCase):
             with self.assertRaises(LanePreconditionError):
                 lane.ensure_agenda_bindings(actor_ref="human:tester")
 
+    def test_partial_issuer_runs_within_the_universe_share_one_binding(self) -> None:
+        # v2 binding: a later run for a different in-universe ticker must
+        # replay the same idempotent binding instead of conflicting (live
+        # 2026-08-26: ACN+EPAM first, CTSH later).
+        install_lane_rules(self.state)
+        first, second = US_IT_SERVICES_ISSUERS[0], US_IT_SERVICES_ISSUERS[1]
+        with self._lane(issuers=(first,)) as lane:
+            binding_a = lane.ensure_agenda_bindings(actor_ref="human:tester")
+        with self._lane(issuers=(second,)) as lane:
+            binding_b = lane.ensure_agenda_bindings(actor_ref="human:tester")
+        self.assertEqual(binding_a, binding_b)
+        self.assertTrue(binding_a["agenda_policy_version_ref"].endswith(":v2"))
+
     def test_default_issuers_are_the_four_us_it_services_names(self) -> None:
         self.assertEqual([i.ticker for i in US_IT_SERVICES_ISSUERS], ["ACN", "CTSH", "EPAM", "IBM"])
         self.assertEqual(US_IT_SERVICES_ISSUERS[3].company_ref, "company:sec-cik:0000051143")

@@ -145,6 +145,24 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("daltond", controller["ProgramArguments"][0])
             self.assertNotIn("model", " ".join(controller["ProgramArguments"]).lower())
 
+    def test_writer_launchagent_is_standard_process_type_others_background(self) -> None:
+        # S7d: writer-hosted children inherit the writer's launchd process
+        # type; Background runs CPU work ~6x slower and cannot be lifted from
+        # inside the child (measured 2026-08-26).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            paths = render(
+                root / "LaunchAgents",
+                root / "venv" / "bin",
+                root / "state",
+                root / "config.json",
+                root / "logs",
+            )
+            writer = plistlib.loads(Path(paths["writer"]).read_bytes())
+            controller = plistlib.loads(Path(paths["controller"]).read_bytes())
+            self.assertEqual(writer["ProcessType"], "Standard")
+            self.assertEqual(controller["ProcessType"], "Background")
+
     def test_enabled_thesis_impact_gets_short_lived_launchagent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -8,6 +8,7 @@ resolve a Runner binding.
 from __future__ import annotations
 
 import ipaddress
+import copy
 import json
 import re
 from collections.abc import Mapping, Sequence
@@ -1761,8 +1762,29 @@ def _validate_inventory_graph_entry(
         raise ConnectorInventoryError("connector inventory graph binding is not exact")
 
 
+# S7d: the packaged inventory is immutable for the life of a process, but
+# every ``ResearchPlanAuthority.plan()`` read re-validated it from disk via
+# ``_sec_template()`` (24 loads per SEC plan view).  On live, three SEC lane
+# plans made ``thesis_impact_targets`` take 11.5s in a foreground profile and
+# >30s in the ``ProcessType: Background`` writer, so the thesis-impact worker
+# failed every run from 19:07Z on 2026-08-26.  The packaged load is cached
+# once per process and handed out as a deep copy (1.5ms vs 150-420ms), so
+# callers keep private, mutable results.  Explicit ``root`` loads stay
+# uncached: tests point them at mutated copies and expect fresh validation.
+_PACKAGED_INVENTORY_CACHE: dict[Path, dict[str, Any]] = {}
+
+
 def load_packaged_connector_inventory(root: str | Path | None = None) -> dict[str, Any]:
-    directory = INVENTORY_DIR if root is None else Path(root)
+    if root is not None:
+        return _load_connector_inventory(Path(root))
+    cached = _PACKAGED_INVENTORY_CACHE.get(INVENTORY_DIR)
+    if cached is None:
+        cached = _load_connector_inventory(INVENTORY_DIR)
+        _PACKAGED_INVENTORY_CACHE[INVENTORY_DIR] = cached
+    return copy.deepcopy(cached)
+
+
+def _load_connector_inventory(directory: Path) -> dict[str, Any]:
     index = validate_connector_inventory_index(
         json.loads((directory / "index.json").read_text(encoding="utf-8"))
     )
