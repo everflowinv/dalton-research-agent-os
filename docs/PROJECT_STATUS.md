@@ -64,13 +64,20 @@
   inventory 24 次，`thesis_impact_targets` 超 30 秒、thesis-impact worker 自 19:07 UTC 起每次失败 → inventory 每进程缓存，0.25 秒，worker 恢复 idle。
   见 [S7d 报告](reports/s7d-live-sec-lane-rollout-v0.1-2026-08-26.md)、[S7d-1](reports/s7d1-sec-company-facts-lane-v0.1-2026-08-26.md)、
   [S7d-2](reports/s7d2-connector-governance-generalization-v0.1-2026-08-26.md)
+- **S7d-4 已部署（2026-08-26 20:24 UTC，`8357465`）**：owner 19:21–19:22 UTC 在 Cockpit 对已被 `policy-2` 自动入库的 ACN、EPAM SEC 候选点了
+  accept——Cockpit 只看 staging 库的人工决定，不知道 Core `reviewed_candidate_commits` 已有 policy 收据，所以仍给按钮；之后 reconcile 每 60 秒
+  重试 `commit_reviewed_candidate`，Core 每次 `conflict`，一小时累积 110 条 commit event。Core 无脏数据。修法：Core 新增只读 `candidate_promotions`，
+  writer 对 review principal 开放；Cockpit `view()` 每次渲染读 Core 收据并标「已由 policy 自动入库」、不渲染按钮，`record()` 对已提升候选和
+  writer 不可读一律拒绝；`pending_commits()` 把 `failed / conflict` 当终态不再重试。部署后事件停在 110 条，`pending_commits` 0。
+  owner 的两条 accept 决定保留为不可变记录，页面注明「人工接受未另行写入」。见
+  [S7d-4 报告](reports/s7d4-cockpit-promotion-visibility-and-terminal-conflict-v0.1-2026-08-26.md)
 - S7b development candidate：ADR-0003 裁决为 B（Accepted，owner 可否决）。transcript 候选以 `claim_kind = qualitative`
   进 CandidateStaging，数值字段全为 null，只收带 exact citation binding 的 transcript evidence，policy 路径一律拒绝，
   只经 explicit human review 入库；新增闭合 verification mode `transcript_core_authority` 和
   `stage_transcript_qualitative_candidate` 入口（S7c writer op 直接调用）。隔离端到端：ACN 语义候选 stage → accept →
   commit 写出 1 条 EvidenceVersion + 1 条 qualitative ClaimVersion 0.2。见
   [S7b 报告](reports/s7b-qualitative-transcript-candidate-staging-v0.1-2026-08-26.md)
-- live deployed source：`ea160d6`（2026-08-26 20:04 UTC，S7d 性能修复；之前 `abff89f` 19:45 UTC、`326a62f` 19:00 UTC S7d 首版、`0efe8f5` 17:36 UTC S7c-4 spool 接线修复；上一版 `dc747de` 17:18 UTC，含 S7a / S7b /
+- live deployed source：`8357465`（2026-08-26 20:24 UTC，S7d-4 Cockpit 提升状态回读；之前 `ea160d6` 20:04 UTC S7d 性能修复、`abff89f` 19:45 UTC、`326a62f` 19:00 UTC S7d 首版、`0efe8f5` 17:36 UTC S7c-4 spool 接线修复；上一版 `dc747de` 17:18 UTC，含 S7a / S7b /
   S7c-1 / S7c-2 / S7c-3；再上一版 `3fe746e`）；
   thesis-impact production runner：`9c295ca`；OpenClaw host patch chain：`6f93b9b14`；claude-cli-gateway 心跳补丁：
   workspace `935a751be`
@@ -1506,4 +1513,5 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - S7b 语义 transcript 候选进入 CandidateStaging v0.1：`docs/reports/s7b-qualitative-transcript-candidate-staging-v0.1-2026-08-26.md`
 - S7c-3 live 部署与 writer `--candidate-staging` 接线 v0.1：`docs/reports/s7c3-live-deploy-candidate-staging-wiring-v0.1-2026-08-26.md`
 - S7c-4 live 首次真实 AlphaEngine 获取 + ACN 语义候选进 staging v0.1：`docs/reports/s7c4-live-acn-acquisition-and-candidate-staging-v0.1-2026-08-26.md`
+- S7d-4 Cockpit 读回 Ledger 提升状态、conflict 终态 v0.1：`docs/reports/s7d4-cockpit-promotion-visibility-and-terminal-conflict-v0.1-2026-08-26.md`
 - AlphaEngine get_document 连接器治理记录（proposed）：`deploy/connector-governance/alphaengine-get-document-v1.json`
