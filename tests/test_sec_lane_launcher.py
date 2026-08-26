@@ -76,7 +76,10 @@ class SecLaneLauncherTests(unittest.TestCase):
         gov = root / "sec-gov.json"
         gov.write_text("{}\n", encoding="utf-8")
         kwargs.setdefault("governance_loader", lambda _path: _governance())
-        kwargs.setdefault("python_executable", str(_stub_child(root)))
+        if "python_executable" not in kwargs:
+            # Only build the default stub when the test did not supply one:
+            # ``_stub_child`` rewrites the same file.
+            kwargs["python_executable"] = str(_stub_child(root))
         kwargs.setdefault("mode_args", ("--fixture-company-facts", str(root / "facts.json")))
         launcher = SecLaneLauncher(
             state_dir=state, governance_path=gov, staging_path=staging, **kwargs
