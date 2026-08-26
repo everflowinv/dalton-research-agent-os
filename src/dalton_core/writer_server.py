@@ -25,6 +25,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from .alphaengine_acquisition_launcher import (
+    AcquisitionLaunchConflict,
+    AcquisitionLaunchError,
+    AcquisitionLaunchRejected,
+    AcquisitionTicketNotFound,
+    AlphaEngineAcquisitionLauncher,
+)
 from .agenda import (
     AgendaConflict,
     AgendaError,
@@ -221,6 +228,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "admit_intent_question", "issue_intent_directive",
     "publish_answer_sufficiency_policy",
     "dispatch_answer_refresh",
+    "acquire_alphaengine_document", "alphaengine_acquisition_status",
 })
 FEEDBACK_BRIDGE_OPERATIONS = frozenset({
     "list_agenda_feedback_targets", "record_agenda_feedback",
@@ -315,6 +323,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "transcript_correction_review_state": frozenset({
         "source_manifest", "correction_set_ref", "source_start", "source_end",
     }),
+    "acquire_alphaengine_document": frozenset({
+        "document_ref", "expected_content_sha256", "max_pages", "actor_ref",
+    }),
+    "alphaengine_acquisition_status": frozenset({"ticket_ref"}),
     "create_policy": frozenset({"policy", "policy_version_id", "version_number", "activate", "policy_ref", "effective_from", "effective_until", "actor_ref", "prior_version_ref", "change_reason", "content_hash_value"}),
     "current_pointer": frozenset({"thesis_id"}),
     "get_version": frozenset({"version_id"}),
@@ -491,6 +503,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "register_industry_evidence_pack": "actor_ref",
     "register_company_overlay": "actor_ref",
     "publish_transcript_correction_set": "actor_ref",
+    "acquire_alphaengine_document": "actor_ref",
 }
 
 
@@ -645,9 +658,11 @@ class WriterServer:
         token_config_path: str | Path | None = None,
         scheduler_path: str | Path | None = None,
         transcript_spool_dir: str | Path | None = None,
+        acquisition_launcher: AlphaEngineAcquisitionLauncher | None = None,
     ):
         if not principals:
             raise WriterServerError("at least one principal is required")
+        self._acquisition_launcher = acquisition_launcher
         self.db_path = str(db_path)  # retained only by the owner process
         self.socket_path = str(socket_path)
         if len(os.fsencode(self.socket_path)) >= 104:
@@ -946,6 +961,8 @@ class WriterServer:
             store_executor.shutdown(wait=True, cancel_futures=True)
 
     def _close_store(self) -> None:
+        if self._acquisition_launcher is not None:
+            self._acquisition_launcher.close()
         if self._scheduler is not None:
             self._scheduler.close()
             self._scheduler = None
@@ -1535,6 +1552,28 @@ class WriterServer:
             raise ProtocolError("model_input_integrity_report takes no parameters")
         return self.model_input.integrity_report()
 
+    @property
+    def acquisition_launcher(self) -> AlphaEngineAcquisitionLauncher:
+        if self._acquisition_launcher is None:
+            raise AcquisitionLaunchRejected(
+                "AlphaEngine acquisition launcher is not configured on this writer"
+            )
+        return self._acquisition_launcher
+
+    def _op_acquire_alphaengine_document(self, p: Mapping[str, Any]) -> Any:
+        # Runs out of process; see alphaengine_acquisition_launcher.  The
+        # store thread only validates, checks governance and spawns.
+        values = dict(p)
+        return self.acquisition_launcher.start(
+            document_ref=values["document_ref"],
+            actor_ref=values["actor_ref"],
+            expected_content_sha256=values.get("expected_content_sha256"),
+            max_pages=values.get("max_pages", 20),
+        )
+
+    def _op_alphaengine_acquisition_status(self, p: Mapping[str, Any]) -> Any:
+        return self.acquisition_launcher.status(dict(p)["ticket_ref"])
+
     def _op_publish_transcript_correction_set(
         self, p: Mapping[str, Any]
     ) -> Any:
@@ -1668,6 +1707,14 @@ class WriterServer:
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
+        if isinstance(exc, AcquisitionLaunchRejected):
+            return "rejected"
+        if isinstance(exc, AcquisitionLaunchConflict):
+            return "conflict"
+        if isinstance(exc, AcquisitionTicketNotFound):
+            return "not_found"
+        if isinstance(exc, AcquisitionLaunchError):
+            return "store_error"
         if isinstance(exc, (CapabilityConflict,)):
             return "conflict"
         if isinstance(exc, (CapabilityNotFound,)):
@@ -1710,9 +1757,43 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token-config", required=True)
     parser.add_argument("--scheduler")
     parser.add_argument("--transcript-spool-dir")
+    parser.add_argument(
+        "--connector-governance",
+        help="approved AlphaEngine connector governance record; enables acquisition launches",
+    )
+    parser.add_argument(
+        "--alphaengine-mcp-endpoint", default="http://127.0.0.1:8950/mcp",
+        help="loopback AlphaEngine MCP endpoint used by networked acquisitions",
+    )
+    parser.add_argument(
+        "--acquisition-rehearsal-document",
+        help="rehearsal only: page a local file instead of the network (tests)",
+    )
+    parser.add_argument(
+        "--acquisition-rehearsal-approved-by",
+        help="rehearsal only: in-memory approved governance principal (tests)",
+    )
     args = parser.parse_args(argv)
     try:
         principals = load_principals(args.token_config)
+        launcher = None
+        if args.connector_governance is not None:
+            if args.acquisition_rehearsal_document is not None:
+                mode_args: tuple[str, ...] = (
+                    "--fake-document-file", args.acquisition_rehearsal_document,
+                )
+                if args.acquisition_rehearsal_approved_by is not None:
+                    mode_args += (
+                        "--governance-approved-by", args.acquisition_rehearsal_approved_by,
+                    )
+            else:
+                mode_args = ("--allow-network",)
+            launcher = AlphaEngineAcquisitionLauncher(
+                state_dir=Path(args.db).expanduser().resolve().parent,
+                governance_path=args.connector_governance,
+                mode_args=mode_args,
+                mcp_endpoint=args.alphaengine_mcp_endpoint,
+            )
         server = WriterServer(
             args.db,
             args.socket,
@@ -1720,6 +1801,7 @@ def main(argv: list[str] | None = None) -> int:
             token_config_path=args.token_config,
             scheduler_path=args.scheduler,
             transcript_spool_dir=args.transcript_spool_dir,
+            acquisition_launcher=launcher,
         )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:

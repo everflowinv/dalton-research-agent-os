@@ -35,6 +35,19 @@ for label in space.lumos.dalton.thesis-impact space.lumos.dalton.control space.l
 done
 
 "$venv_dir/bin/dalton-bootstrap" --state-dir "$state_dir" --config "$config_path"
+
+# Connector governance: the writer launches AlphaEngine acquisitions only
+# against an *approved* record at this path.  Seed the committed proposal once;
+# never overwrite an existing (possibly approved) record.  The owner approves
+# in place with: dalton-connector-governance approve --path <file> --approved-by human:<owner>
+governance_dir="$state_dir/connector-governance"
+governance_file="$governance_dir/alphaengine-get-document-v1.json"
+mkdir -p "$governance_dir"
+chmod 700 "$governance_dir"
+if [[ ! -f "$governance_file" ]]; then
+  cp "$repo_root/deploy/connector-governance/alphaengine-get-document-v1.json" "$governance_file"
+  chmod 600 "$governance_file"
+fi
 "$venv_dir/bin/python" -m dalton_core.macos_launchagent \
   --launch-agents-dir "$launch_agents_dir" \
   --python-env-bin "$venv_dir/bin" \

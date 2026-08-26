@@ -68,6 +68,8 @@ def render(
             "--socket", str(state / "run" / "writer.sock"),
             "--token-config", str(state / "writer-tokens.json"),
             "--transcript-spool-dir", str(state / "transcript-spool"),
+            "--connector-governance",
+            str(state / "connector-governance" / "alphaengine-get-document-v1.json"),
         ],
         "StandardOutPath": str(logs / "writer.stdout.log"),
         "StandardErrorPath": str(logs / "writer.stderr.log"),

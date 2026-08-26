@@ -10,6 +10,10 @@
   DeepSeek 实际计数是它的 3.4 倍，policy 8,000 按后者事后执行。S7a development candidate 已按 provider 单位 bounding
   perception snapshot 并在付费前预检，见
   [S7a 报告](reports/agenda-provider-token-budget-s7a-2026-08-26.md)；建议 owner 把 policy `max_input_tokens` 提到 16,000
+- S7c-1 development candidate：writer 新增 human governance op `acquire_alphaengine_document` /
+  `alphaengine_acquisition_status`，以子进程（不是线程，`SIGALRM` watchdog 只能在主线程）跑 S6b 的 Core-hosted 获取；
+  owner 用 `dalton-connector-governance approve` 批准治理记录，launcher 对 `proposed` 记录 fail closed。见
+  [S7c-1 报告](reports/s7c-writer-hosted-alphaengine-acquisition-v0.1-2026-08-26.md)
 - live deployed source：`3fe746e`；thesis-impact production runner：`9c295ca`；OpenClaw host patch chain：
   `6f93b9b14`
 - live 已启用独立的 thesis-impact 短任务，每 300 秒运行一次；writer 持有 Core/Scheduler，worker 只能通过

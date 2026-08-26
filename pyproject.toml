@@ -29,6 +29,8 @@ dalton-thesis-impact = "dalton_core.thesis_impact_production:main"
 dalton-llm-planner-calibrate = "dalton_core.llm_research_planner_calibration_runner:main"
 dalton-transcript-polish-calibrate = "dalton_core.transcript_polish_calibration_runner:main"
 dalton-stage-transcript-review = "dalton_core.transcript_review_inbox:main"
+dalton-acquire-alphaengine = "dalton_core.alphaengine_acquisition_cli:main"
+dalton-connector-governance = "dalton_core.connector_governance_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
