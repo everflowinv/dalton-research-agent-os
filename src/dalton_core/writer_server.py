@@ -1898,6 +1898,10 @@ def main(argv: list[str] | None = None) -> int:
                 governance_path=args.connector_governance,
                 mode_args=mode_args,
                 mcp_endpoint=args.alphaengine_mcp_endpoint,
+                # Same spool the writer reads through for
+                # stage_transcript_candidate, so the acquired page bytes are
+                # verifiable in place.
+                spool_dir=args.transcript_spool_dir,
             )
         server = WriterServer(
             args.db,

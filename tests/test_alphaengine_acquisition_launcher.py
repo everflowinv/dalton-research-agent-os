@@ -29,6 +29,7 @@ from dalton_core.connector_governance_cli import (
     approve_governance_record,
     main as governance_main,
 )
+from dalton_core.raw_spool import RawSpool
 from dalton_core.store import DaltonStore, canonical_json, content_hash
 from dalton_core.writer_client import WriterClient
 from dalton_core.writer_protocol import RemoteAuthorizationError, RemoteError
@@ -228,10 +229,15 @@ class WriterAcquisitionOpsTests(unittest.TestCase):
             Principal("dashboard-control", self.dashboard_token, DASHBOARD_CONTROL_OPERATIONS, actor_ref="bridge:tailscale-dashboard"),
         ])
         env = {**os.environ, "PYTHONPATH": str(Path(__file__).parents[1] / "src")}
+        # Live layout: the writer reads raw page bytes back through its own
+        # transcript spool when staging a transcript candidate, so the
+        # acquisition child must write into that same spool.
+        self.spool_dir = self.state / "transcript-spool"
         self.proc = subprocess.Popen([
             sys.executable, "-m", "dalton_core.writer_server", "--db", str(self.db),
             "--scheduler", str(self.state / "scheduler.sqlite"),
             "--socket", str(self.sock), "--token-config", str(self.tokens),
+            "--transcript-spool-dir", str(self.spool_dir),
             "--connector-governance", str(self.gov),
             "--acquisition-rehearsal-document", str(self.document),
             "--acquisition-rehearsal-approved-by", OWNER,
@@ -291,7 +297,20 @@ class WriterAcquisitionOpsTests(unittest.TestCase):
         conn = sqlite3.connect(self.db)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM connector_source_envelopes").fetchone()[0], 2)
         self.assertEqual(conn.execute("SELECT COUNT(*) FROM claim_versions").fetchone()[0], 0)
+        # Every raw page ArtifactVersion the child registered must be readable
+        # through the writer's transcript spool (what stage_transcript_candidate
+        # verifies against), not a private <state>/connector-spool.
+        page_hashes = [
+            json.loads(row[0])["artifact_content_hash"]
+            for row in conn.execute("SELECT record_json FROM observability_artifact_versions_v2")
+        ]
         conn.close()
+        self.assertEqual(len(page_hashes), 2)
+        writer_spool = RawSpool(str(self.spool_dir), max_total_bytes=50_000_000)
+        for digest in page_hashes:
+            self.assertEqual(hashlib.sha256(writer_spool.read_object(digest)).hexdigest(), digest)
+        self.assertEqual(writer_spool.read_object(DIGEST).decode("utf-8"), DOCUMENT)
+        self.assertFalse((self.state / "connector-spool").exists())
         with self.assertRaises(RemoteError) as missing:
             governance.call("alphaengine_acquisition_status", {"ticket_ref": "alphaengine-acquisition:" + "f" * 24})
         self.assertEqual(missing.exception.code, "not_found")

@@ -112,16 +112,24 @@ def run_acquisition(
     max_pages: int = 20,
     expected_content_sha256: str | None = None,
     catalog_db: Path | None = None,
+    spool_dir: Path | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run one governed acquisition and write ``summary.json`` / ``manifest.json``.
 
     Returns ``(summary, manifest)``.  The caller decides the exit status from
     ``summary["transcript_authority_probe"]["ok"]`` and
     ``summary["expected_digest_match"]``.
+
+    ``spool_dir`` is the ``RawSpool`` data directory the raw page objects are
+    written to.  The writer passes its ``--transcript-spool-dir`` here so the
+    ``stage_transcript_candidate`` verifier (which reads through the writer's
+    spool) finds the exact page bytes; the default keeps the isolated
+    rehearsal layout ``<state>/connector-spool``.
     """
 
     state = secure_dir(state_dir)
     out = secure_dir(summary_dir)
+    spool_root = secure_dir(spool_dir if spool_dir is not None else state / "connector-spool")
     core = DaltonStore(str(state / "core.sqlite"))
     connectors = ConnectorStore(core)
     observability = ObservabilityStore(core)
@@ -134,7 +142,7 @@ def run_acquisition(
         approval_resolver=governance.approval,
         policy_resolver=governance.policy,
     )
-    spool = RawSpool(str(secure_dir(state / "connector-spool")), max_total_bytes=1_000_000_000)
+    spool = RawSpool(str(spool_root), max_total_bytes=1_000_000_000)
     acquisition = AlphaEngineCoreAcquisition(
         store=core,
         connectors=connectors,
@@ -219,6 +227,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-content-sha256")
     parser.add_argument("--summary-dir", type=Path, help="defaults to the state dir")
     parser.add_argument("--catalog-db", type=Path, help="defaults to <state>/catalog.sqlite")
+    parser.add_argument(
+        "--spool-dir", type=Path,
+        help="RawSpool data directory for raw page objects; defaults to <state>/connector-spool. "
+        "The writer passes its transcript spool so the stage verifier can read the page bytes",
+    )
     parser.add_argument("--quiet", action="store_true", help="do not print the summary")
     return parser
 
@@ -271,6 +284,7 @@ def main(argv: list[str] | None = None) -> int:
         max_pages=args.max_pages,
         expected_content_sha256=args.expected_content_sha256,
         catalog_db=args.catalog_db,
+        spool_dir=args.spool_dir,
     )
     if not args.quiet:
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))

@@ -88,9 +88,16 @@ class AlphaEngineAcquisitionLauncher:
         mcp_endpoint: str | None = None,
         python_executable: str | None = None,
         clock: Callable[[], datetime] | None = None,
+        spool_dir: str | Path | None = None,
     ) -> None:
         self.state_dir = Path(state_dir).expanduser().resolve()
         self.governance_path = Path(governance_path).expanduser().resolve()
+        # RawSpool data directory for the raw page objects.  The writer passes
+        # its own transcript spool so ``stage_transcript_candidate`` can read
+        # the page bytes back; ``None`` keeps the CLI default.
+        self.spool_dir = (
+            None if spool_dir is None else Path(spool_dir).expanduser().resolve()
+        )
         self.mode_args = tuple(str(item) for item in mode_args)
         self.mcp_endpoint = mcp_endpoint
         self.python_executable = python_executable or sys.executable
@@ -149,6 +156,8 @@ class AlphaEngineAcquisitionLauncher:
         ]
         if expected_content_sha256 is not None:
             command += ["--expected-content-sha256", expected_content_sha256]
+        if self.spool_dir is not None:
+            command += ["--spool-dir", str(self.spool_dir)]
         if self.networked and self.mcp_endpoint is not None:
             command += ["--mcp-endpoint", self.mcp_endpoint]
         command += list(self.mode_args)
