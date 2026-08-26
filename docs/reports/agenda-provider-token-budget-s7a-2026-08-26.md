@@ -70,7 +70,16 @@ bounding）。
   两周的 evidence；Agenda 恢复产出，但看到的证据比 08-24 之前少约三分之一。
 - **建议 owner 另行发布 `agenda-policy-version:phase1-shadow-v3`，把 `max_input_tokens` 提到 16,000**：DeepSeek V4 Flash
   输入价 USD 0.22 / M token，一个 cycle 多花不到 0.002 美元，日预算 0.5 美元完全够；policy 是 human governance 对象，
-  Eve 不代发。
+  Eve 不代发。参数文件已备好：`deploy/phase1/agenda-policy-v3.params.json`（`effective_from` 2026-08-27，其余与 v2 相同），
+  owner 在 Mac mini 上执行（ephemeral human principal，跑完自动撤销）：
+
+  ```bash
+  ~/Library/Application\ Support/Dalton/runtime/venv/bin/dalton-gov \
+    --token-config "$HOME/Library/Application Support/Dalton/state/dalton-core/writer-tokens.json" \
+    --socket "$HOME/Library/Application Support/Dalton/state/dalton-core/run/writer.sock" \
+    --actor human:lumos --operation create_agenda_policy \
+    --params ~/Projects/dalton-research-agent-os/deploy/phase1/agenda-policy-v3.params.json
+  ```
 
 ## 明确没做
 
