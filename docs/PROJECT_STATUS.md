@@ -39,10 +39,21 @@
   （ticket `alphaengine-acquisition:75a314bc4dac29482e5dbccb`，2 页、1 document unit），装配 digest 与 8/25 owner 确认的
   correction set / citation 绑定的 `a8a9fbff…bd96bd` 一致，probe ok；随后 `stage_transcript_candidate` 把 ACN Q3 FY2026
   「新签订单本币口径同比下降」写成 qualitative 候选 `candidate-claim-version:3fafc07d…e9a87d`，30 项 source verification 全 pass，
-  `review_state=staged`。**等 owner 在 Cockpit accept 后 live Core 才写第一条正式 Evidence / Claim（当前仍为 0）。**
+  `review_state=staged`。**owner 于 17:42:45 UTC 在 Cockpit accept，review control 随即 `commit_reviewed_candidate`：live Core
+  现有正式 `claim-version:e93760a1…df7a9`（qualitative，value null）+ `evidence-version:954b29af…c58fb1`（authenticated_transcript）
+  + 1 条 supports relation，`review_state=committed`——live Core 第一条正式 Evidence / Claim。**
   执行前修了一个路径 bug（`0efe8f5`，已部署）：获取子进程原来写 `<state>/connector-spool`，writer 的 stage 校验却从
   `--transcript-spool-dir` 读，live 上 `raw_artifact_bytes` 必 fail；现在 CLI `--spool-dir` 由 writer 传自己的 transcript spool。见
   [S7c-4 报告](reports/s7c4-live-acn-acquisition-and-candidate-staging-v0.1-2026-08-26.md)
+- **S7c-5 brief v3**：隔离 canary（`scripts/run_isolated_us_it_services_brief_v3_canary.py` + manifest
+  `deploy/coverage/us-it-services-industry-evidence-v3.json`）在一个临时 Core 上重走 ADR-0003 B 全链（fake-handle 获取 →
+  correction set / citation → stage → accept → commit），得到 1 条正式 qualitative transcript Claim，再叠上 v2 的 21 条 SEC
+  Claim：driver pack v4（+ semantic aspect `aspect:new-bookings-direction-local-currency`）、pack v3（22 binding）、四份 overlay，
+  brief 22 Claim / 6 来源 / 20 行 KPI / 80 单元格，replay 一致。用 8/24 真实 ACN 原文跑，citation span 与 live 一致。
+  专项 1/1，关联 29/29。**live 上暂时做不出 brief v3**：`register_evidence_pack` 要求每个 driver 至少一条正式 Claim、
+  overlay 每个 driver view 至少引用一条本公司 Claim，而 live 只有 ACN 这一条；v2 的 SEC Claim 只在隔离 canary。
+  两条路等 owner 选：A 先做 S7d（SEC lane 上 live）再出 live brief v3（推荐）；B 放宽合同出一份 1 Claim + 79 gap 的 brief。
+  见 [S7c-5 报告](reports/s7c5-brief-v3-isolated-canary-and-live-brief-gate-v0.1-2026-08-26.md)
 - S7b development candidate：ADR-0003 裁决为 B（Accepted，owner 可否决）。transcript 候选以 `claim_kind = qualitative`
   进 CandidateStaging，数值字段全为 null，只收带 exact citation binding 的 transcript evidence，policy 路径一律拒绝，
   只经 explicit human review 入库；新增闭合 verification mode `transcript_core_authority` 和

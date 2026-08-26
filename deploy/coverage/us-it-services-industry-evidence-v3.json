@@ -1,0 +1,1032 @@
+{
+  "schema_version": "0.1",
+  "base_peer_evidence_pack_version_ref": "industry-evidence-pack-version:us-it-services:2",
+  "driver_pack_v4": {
+    "title": "US IT Services Driver Pack v4",
+    "driver_metric_additions": {
+      "driver:bookings-mix-and-conversion": [
+        "aspect:new-bookings-direction-local-currency"
+      ]
+    },
+    "metric_specs": [
+      {
+        "metric_ref": "aspect:new-bookings-direction-local-currency",
+        "label": "New bookings direction in local currency (management commentary)",
+        "definition": "Direction of the year-over-year change in quarterly new bookings in local currency as stated by management on the earnings call. Direction only; the rate is not part of this aspect.",
+        "unit": "qualitative",
+        "periodicity": "quarterly",
+        "preferred_source_refs": [
+          "source:company-earnings-call-transcript",
+          "source:alphaengine"
+        ],
+        "verification_kind": "semantic",
+        "caveats": [
+          "Transcript commentary corroborates the filing-backed bookings growth rate; it never replaces it.",
+          "An authenticated transcript cannot be the sole observed authority for a numeric bookings metric."
+        ]
+      }
+    ],
+    "version_id": "driver-pack-version:us-it-services:4",
+    "prior_version_ref": "driver-pack-version:us-it-services:3",
+    "idempotency_key": "driver-pack:us-it-services:4"
+  },
+  "transcript_candidate": {
+    "claim_key": "acn-transcript-bookings-direction-lc",
+    "document_ref": "alphaengine-doc:130000095976806",
+    "expected_content_sha256": null,
+    "correction_set_ref": "transcript-correction-set:acn:q3fy26:brief-v3",
+    "review_scope": "targeted_flags",
+    "asr_flag_texts": [
+      "r ight",
+      "g rowth",
+      "bu ying",
+      "sam e",
+      "clien ts"
+    ],
+    "asr_flag_rationale": "ASR word-boundary flag outside the proposed formal citation.",
+    "citation": {
+      "start_text": "New bookings were $19.3 billion",
+      "end_text": "book-to-bill of 1.0."
+    },
+    "subject_ref": "company:sec-cik:0001467373",
+    "metric_or_aspect": "aspect:new-bookings-direction-local-currency",
+    "period": {
+      "kind": "fiscal_quarter",
+      "label": "FY2026Q3",
+      "start": "2026-03-01T00:00:00.000000+00:00",
+      "end": "2026-05-31T23:59:59.000000+00:00"
+    },
+    "basis": "management-reported",
+    "normalized_statement": "Accenture management said Q3 FY2026 new bookings declined year over year in local currency; the numeric growth rate is not asserted by this claim.",
+    "stager_actor_ref": "system:transcript-candidate-stager",
+    "reviewer_ref": "human:tailscale-0123456789abcdef0123456789abcdef",
+    "review_rationale": "Raw span says bookings fell 3% in local currency; the semantic statement asserts direction only.",
+    "review_findings": [
+      "raw span supports the direction statement"
+    ],
+    "source_event_ref": "research-review:acn:q3fy26:brief-v3",
+    "stage_idempotency_key": "stage:acn:q3fy26:qualitative:brief-v3",
+    "review_idempotency_key": "review:acn:q3fy26:qualitative:brief-v3",
+    "commit_idempotency_key": "reviewed-ledger:acn:q3fy26:qualitative:brief-v3"
+  },
+  "evidence_pack": {
+    "evidence_pack_ref": "industry-evidence-pack:us-it-services",
+    "industry_ref": "industry:us-it-services",
+    "title": "US IT Services Industry Evidence Pack v3",
+    "as_of": "2026-08-26T18:00:00+00:00",
+    "boundary": {
+      "definition": "Publicly traded providers whose material businesses include IT consulting, digital engineering, systems integration, business-process services or managed IT services.",
+      "inclusion_rules": [
+        "Material revenue from IT services or technology consulting.",
+        "Public disclosures permit recurring KPI comparison or an explicit disclosure-gap assessment."
+      ],
+      "exclusion_rules": [
+        "Pure-play software, hardware and semiconductor vendors.",
+        "Staffing firms without a material technology-services practice."
+      ]
+    },
+    "coverage_universe": [
+      {
+        "company_ref": "company:sec-cik:0001467373",
+        "ticker": "ACN",
+        "role": "scaled global pure-play",
+        "comparability_tier": "core"
+      },
+      {
+        "company_ref": "company:sec-cik:0001058290",
+        "ticker": "CTSH",
+        "role": "offshore-heavy scaled peer",
+        "comparability_tier": "core"
+      },
+      {
+        "company_ref": "company:sec-cik:0001352010",
+        "ticker": "EPAM",
+        "role": "digital-engineering peer",
+        "comparability_tier": "adjacent"
+      },
+      {
+        "company_ref": "company:sec-cik:0000051143",
+        "ticker": "IBM",
+        "role": "diversified integrated reference",
+        "comparability_tier": "reference"
+      }
+    ],
+    "evidence_bindings": [
+      {
+        "binding_ref": "binding:v3:acn:bookings-total",
+        "driver_ref": "driver:bookings-mix-and-conversion",
+        "metric_ref": "metric:new-bookings-total",
+        "claim_key": "bookings-total"
+      },
+      {
+        "binding_ref": "binding:v3:acn:bookings-growth-lc",
+        "driver_ref": "driver:bookings-mix-and-conversion",
+        "metric_ref": "metric:new-bookings-growth-local-currency",
+        "claim_key": "bookings-growth-lc"
+      },
+      {
+        "binding_ref": "binding:v3:acn:revenue-growth-lc",
+        "driver_ref": "driver:bookings-mix-and-conversion",
+        "metric_ref": "metric:revenue-growth-local-currency",
+        "claim_key": "revenue-growth-lc"
+      },
+      {
+        "binding_ref": "binding:v3:acn:ai-demand",
+        "driver_ref": "driver:ai-reinvention-demand",
+        "metric_ref": "metric:ai-demand-signal",
+        "claim_key": "ai-demand-signal"
+      },
+      {
+        "binding_ref": "binding:v3:acn:operating-margin",
+        "driver_ref": "driver:delivery-economics",
+        "metric_ref": "metric:operating-margin-gaap",
+        "claim_key": "operating-margin-gaap"
+      },
+      {
+        "binding_ref": "binding:v3:acn:free-cash-flow",
+        "driver_ref": "driver:cash-conversion-and-capital-return",
+        "metric_ref": "metric:free-cash-flow",
+        "claim_key": "free-cash-flow"
+      },
+      {
+        "binding_ref": "binding:v3:ctsh:bookings-total",
+        "driver_ref": "driver:bookings-mix-and-conversion",
+        "metric_ref": "metric:new-bookings-total",
+        "claim_key": "ctsh-bookings-ttm-total"
+      },
+      {
+        "binding_ref": "binding:v3:ctsh:bookings-growth",
+        "driver_ref": "driver:bookings-mix-and-conversion",
+        "metric_ref": "metric:new-bookings-growth-reported",
+        "claim_key": "ctsh-bookings-growth-reported"
+      },
+      {
+        "binding_ref": "binding:v3:ctsh:revenue-growth",
+        "driver_ref": "driver:bookings-mix-and-conversion",
+        "metric_ref": "metric:revenue-growth-local-currency",
+        "claim_key": "ctsh-revenue-growth-lc"
+      },
+      {
+        "binding_ref": "binding:v3:ctsh:ai-demand",
+        "driver_ref": "driver:ai-reinvention-demand",
+        "metric_ref": "metric:ai-demand-signal",
+        "claim_key": "ctsh-ai-demand-signal"
+      },
+      {
+        "binding_ref": "binding:v3:ctsh:operating-margin",
+        "driver_ref": "driver:delivery-economics",
+        "metric_ref": "metric:operating-margin-gaap",
+        "claim_key": "ctsh-operating-margin-gaap"
+      },
+      {
+        "binding_ref": "binding:v3:ctsh:repurchase",
+        "driver_ref": "driver:cash-conversion-and-capital-return",
+        "metric_ref": "metric:share-repurchase",
+        "claim_key": "ctsh-share-repurchase"
+      },
+      {
+        "binding_ref": "binding:v3:epam:revenue-growth",
+        "driver_ref": "driver:bookings-mix-and-conversion",
+        "metric_ref": "metric:revenue-growth-local-currency",
+        "claim_key": "epam-revenue-growth-lc"
+      },
+      {
+        "binding_ref": "binding:v3:epam:ai-demand",
+        "driver_ref": "driver:ai-reinvention-demand",
+        "metric_ref": "metric:ai-demand-signal",
+        "claim_key": "epam-ai-demand-signal"
+      },
+      {
+        "binding_ref": "binding:v3:epam:operating-margin",
+        "driver_ref": "driver:delivery-economics",
+        "metric_ref": "metric:operating-margin-gaap",
+        "claim_key": "epam-operating-margin-gaap"
+      },
+      {
+        "binding_ref": "binding:v3:epam:workforce",
+        "driver_ref": "driver:delivery-economics",
+        "metric_ref": "metric:workforce",
+        "claim_key": "epam-workforce"
+      },
+      {
+        "binding_ref": "binding:v3:epam:repurchase",
+        "driver_ref": "driver:cash-conversion-and-capital-return",
+        "metric_ref": "metric:share-repurchase",
+        "claim_key": "epam-share-repurchase"
+      },
+      {
+        "binding_ref": "binding:v3:ibm:consulting-revenue-growth",
+        "driver_ref": "driver:bookings-mix-and-conversion",
+        "metric_ref": "metric:revenue-growth-local-currency",
+        "claim_key": "ibm-consulting-revenue-growth-lc"
+      },
+      {
+        "binding_ref": "binding:v3:ibm:ai-demand",
+        "driver_ref": "driver:ai-reinvention-demand",
+        "metric_ref": "metric:ai-demand-signal",
+        "claim_key": "ibm-ai-demand-signal"
+      },
+      {
+        "binding_ref": "binding:v3:ibm:gross-margin",
+        "driver_ref": "driver:delivery-economics",
+        "metric_ref": "metric:gross-margin-gaap",
+        "claim_key": "ibm-gross-margin-gaap"
+      },
+      {
+        "binding_ref": "binding:v3:ibm:free-cash-flow",
+        "driver_ref": "driver:cash-conversion-and-capital-return",
+        "metric_ref": "metric:free-cash-flow",
+        "claim_key": "ibm-free-cash-flow"
+      },
+      {
+        "binding_ref": "binding:v3:acn:transcript-bookings-direction-lc",
+        "driver_ref": "driver:bookings-mix-and-conversion",
+        "metric_ref": "aspect:new-bookings-direction-local-currency",
+        "claim_key": "acn-transcript-bookings-direction-lc"
+      }
+    ],
+    "debates": [
+      {
+        "debate_ref": "debate:peer-growth-breadth",
+        "question": "Is demand broad enough to lift revenue growth across the peer set?",
+        "status": "open",
+        "positions": [
+          {
+            "label": "core and engineering peers show positive constant-currency growth",
+            "stance": "supports",
+            "claim_keys": [
+              "revenue-growth-lc",
+              "ctsh-revenue-growth-lc",
+              "epam-revenue-growth-lc"
+            ]
+          },
+          {
+            "label": "IBM Consulting remains slower",
+            "stance": "qualifies",
+            "claim_keys": [
+              "ibm-consulting-revenue-growth-lc"
+            ]
+          }
+        ]
+      },
+      {
+        "debate_ref": "debate:ai-demand-versus-bookings-conversion-v3",
+        "question": "Will qualitative enterprise AI demand convert into stronger standardized bookings?",
+        "status": "open",
+        "positions": [
+          {
+            "label": "all four issuers describe enterprise AI demand",
+            "stance": "supports",
+            "claim_keys": [
+              "ai-demand-signal",
+              "ctsh-ai-demand-signal",
+              "epam-ai-demand-signal",
+              "ibm-ai-demand-signal"
+            ]
+          },
+          {
+            "label": "near-term bookings can still contract",
+            "stance": "qualifies",
+            "claim_keys": [
+              "bookings-growth-lc",
+              "ctsh-bookings-growth-reported",
+              "acn-transcript-bookings-direction-lc"
+            ]
+          }
+        ]
+      }
+    ],
+    "source_plan": [
+      {
+        "source_ref": "source:sec-edgar",
+        "purpose": "Financial statements, filing exhibits and accounting definitions.",
+        "priority": 1,
+        "required": true
+      },
+      {
+        "source_ref": "source:company-earnings-call-transcript",
+        "purpose": "KPI definitions, demand commentary and management explanations.",
+        "priority": 1,
+        "required": true
+      },
+      {
+        "source_ref": "source:alphaengine",
+        "purpose": "Transcript and sell-side discovery for cross-company debates.",
+        "priority": 2,
+        "required": false
+      },
+      {
+        "source_ref": "source:gemini-web-search",
+        "purpose": "Public-web discovery only; summaries are not evidence.",
+        "priority": 3,
+        "required": false
+      },
+      {
+        "source_ref": "source:web-fetch",
+        "purpose": "Independent retrieval of public source pages discovered on the web.",
+        "priority": 2,
+        "required": false
+      },
+      {
+        "source_ref": "source:guidepoint",
+        "purpose": "Practitioner checks on demand, pricing, delivery and competitive execution.",
+        "priority": 3,
+        "required": false
+      }
+    ],
+    "report_contract": {
+      "industry_brief_sections": [
+        "boundary and universe",
+        "driver scoreboard",
+        "KPI evidence",
+        "KPI coverage gaps",
+        "debates",
+        "falsifiers",
+        "open questions"
+      ],
+      "company_difference_fields": [
+        "peer role",
+        "driver stance",
+        "model inputs",
+        "metric coverage",
+        "differentiators",
+        "watchpoints"
+      ]
+    },
+    "version_id": "industry-evidence-pack-version:us-it-services:3",
+    "prior_version_ref": "industry-evidence-pack-version:us-it-services:2",
+    "idempotency_key": "industry-evidence-pack:us-it-services:3"
+  },
+  "company_overlays": [
+    {
+      "overlay_ref": "company-overlay:acn",
+      "company_ref": "company:sec-cik:0001467373",
+      "industry_ref": "industry:us-it-services",
+      "title": "Accenture Company Overlay v2",
+      "as_of": "2026-08-26T18:00:00+00:00",
+      "role": "scaled global pure-play",
+      "driver_views": [
+        {
+          "driver_ref": "driver:bookings-mix-and-conversion",
+          "stance": "mixed",
+          "claim_keys": [
+            "bookings-total",
+            "bookings-growth-lc",
+            "revenue-growth-lc",
+            "acn-transcript-bookings-direction-lc"
+          ],
+          "model_input_claim_keys": [
+            "bookings-total",
+            "bookings-growth-lc",
+            "revenue-growth-lc"
+          ],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The selected ACN evidence does not supply this exact metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:new-bookings-total",
+              "status": "observed",
+              "claim_keys": [
+                "bookings-total"
+              ],
+              "rationale": "The filing exhibit reports total new bookings."
+            },
+            {
+              "metric_ref": "metric:new-bookings-growth-local-currency",
+              "status": "observed",
+              "claim_keys": [
+                "bookings-growth-lc"
+              ],
+              "rationale": "The filing exhibit reports local-currency bookings growth."
+            },
+            {
+              "metric_ref": "metric:revenue-growth-local-currency",
+              "status": "observed",
+              "claim_keys": [
+                "revenue-growth-lc"
+              ],
+              "rationale": "The filing exhibit reports local-currency revenue growth."
+            },
+            {
+              "metric_ref": "aspect:new-bookings-direction-local-currency",
+              "status": "observed",
+              "claim_keys": [
+                "acn-transcript-bookings-direction-lc"
+              ],
+              "rationale": "The authenticated earnings-call transcript citation states that new bookings declined year over year in local currency."
+            }
+          ],
+          "differentiators": [
+            "Only ACN in the pack separates consulting and managed-services scale in the quarter."
+          ],
+          "watchpoints": [
+            "Bookings growth was weaker than revenue growth.",
+            "Management commentary on the call corroborates the direction of the filing-backed local-currency bookings decline; the transcript claim asserts direction only, not the rate."
+          ]
+        },
+        {
+          "driver_ref": "driver:ai-reinvention-demand",
+          "stance": "positive",
+          "claim_keys": [
+            "ai-demand-signal"
+          ],
+          "model_input_claim_keys": [],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The selected ACN evidence does not supply this exact AI metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:ai-demand-signal",
+              "status": "observed",
+              "claim_keys": [
+                "ai-demand-signal"
+              ],
+              "rationale": "Management described more large-scale AI transformation programs."
+            },
+            {
+              "metric_ref": "metric:new-bookings-total",
+              "status": "not_comparable",
+              "claim_keys": [],
+              "rationale": "Total bookings are not identified as AI-specific bookings."
+            }
+          ],
+          "differentiators": [
+            "Management explicitly referred to large-scale AI transformation programs."
+          ],
+          "watchpoints": [
+            "Do not treat qualitative programs as disclosed GenAI bookings or revenue."
+          ]
+        },
+        {
+          "driver_ref": "driver:delivery-economics",
+          "stance": "positive",
+          "claim_keys": [
+            "operating-margin-gaap"
+          ],
+          "model_input_claim_keys": [
+            "operating-margin-gaap"
+          ],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The selected ACN evidence does not supply this exact delivery metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:operating-margin-gaap",
+              "status": "observed",
+              "claim_keys": [
+                "operating-margin-gaap"
+              ],
+              "rationale": "The filing exhibit reports GAAP operating margin."
+            }
+          ],
+          "differentiators": [
+            "ACN has the highest observed GAAP operating margin among the pure-play peers in this pack."
+          ],
+          "watchpoints": [
+            "IBM gross margin is not comparable to ACN operating margin."
+          ]
+        },
+        {
+          "driver_ref": "driver:cash-conversion-and-capital-return",
+          "stance": "positive",
+          "claim_keys": [
+            "free-cash-flow"
+          ],
+          "model_input_claim_keys": [
+            "free-cash-flow"
+          ],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The selected ACN evidence does not supply this exact cash metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:free-cash-flow",
+              "status": "observed",
+              "claim_keys": [
+                "free-cash-flow"
+              ],
+              "rationale": "The filing exhibit reports issuer-reconciled free cash flow."
+            }
+          ],
+          "differentiators": [
+            "Quarterly free cash flow was USD 3.60 billion."
+          ],
+          "watchpoints": [
+            "Compare seasonal cash generation on a full-year basis."
+          ]
+        }
+      ],
+      "key_differences": [
+        "ACN remains the scaled pure-play anchor with the broadest comparable bookings disclosures."
+      ],
+      "open_questions": [
+        "Will AI program commentary convert into stronger local-currency bookings?"
+      ],
+      "falsifier_refs": [
+        "falsifier:ai-bookings-fail-to-convert",
+        "falsifier:growth-requires-margin-sacrifice"
+      ],
+      "thesis_candidate_refs": [],
+      "version_id": "company-overlay-version:acn:3",
+      "prior_version_ref": "company-overlay-version:acn:2",
+      "idempotency_key": "company-overlay:acn:3"
+    },
+    {
+      "overlay_ref": "company-overlay:ctsh",
+      "company_ref": "company:sec-cik:0001058290",
+      "industry_ref": "industry:us-it-services",
+      "title": "Cognizant Company Overlay v1",
+      "as_of": "2026-08-26T18:00:00+00:00",
+      "role": "offshore-heavy scaled peer",
+      "driver_views": [
+        {
+          "driver_ref": "driver:bookings-mix-and-conversion",
+          "stance": "mixed",
+          "claim_keys": [
+            "ctsh-bookings-ttm-total",
+            "ctsh-bookings-growth-reported",
+            "ctsh-revenue-growth-lc"
+          ],
+          "model_input_claim_keys": [
+            "ctsh-bookings-ttm-total",
+            "ctsh-bookings-growth-reported",
+            "ctsh-revenue-growth-lc"
+          ],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The reviewed CTSH release does not supply this exact metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:new-bookings-total",
+              "status": "observed",
+              "claim_keys": [
+                "ctsh-bookings-ttm-total"
+              ],
+              "rationale": "The release reports trailing-twelve-month total bookings."
+            },
+            {
+              "metric_ref": "metric:new-bookings-growth-reported",
+              "status": "observed",
+              "claim_keys": [
+                "ctsh-bookings-growth-reported"
+              ],
+              "rationale": "The release reports quarterly bookings growth without a constant-currency label."
+            },
+            {
+              "metric_ref": "metric:new-bookings-growth-local-currency",
+              "status": "not_comparable",
+              "claim_keys": [],
+              "rationale": "The reported bookings-growth rate is not identified as constant currency."
+            },
+            {
+              "metric_ref": "metric:revenue-growth-local-currency",
+              "status": "observed",
+              "claim_keys": [
+                "ctsh-revenue-growth-lc"
+              ],
+              "rationale": "The release reports constant-currency revenue growth."
+            },
+            {
+              "metric_ref": "aspect:new-bookings-direction-local-currency",
+              "status": "not_found_in_reviewed_sources",
+              "claim_keys": [],
+              "rationale": "No authenticated earnings-call transcript for this issuer has been acquired into Core."
+            }
+          ],
+          "differentiators": [
+            "CTSH reports a trailing-twelve-month book-to-bill framework rather than ACN's quarterly bookings mix."
+          ],
+          "watchpoints": [
+            "Quarterly bookings declined even though trailing-twelve-month bookings increased."
+          ]
+        },
+        {
+          "driver_ref": "driver:ai-reinvention-demand",
+          "stance": "positive",
+          "claim_keys": [
+            "ctsh-ai-demand-signal"
+          ],
+          "model_input_claim_keys": [],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The reviewed CTSH release does not supply this exact AI metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:ai-demand-signal",
+              "status": "observed",
+              "claim_keys": [
+                "ctsh-ai-demand-signal"
+              ],
+              "rationale": "Management described enterprise-scale AI execution."
+            },
+            {
+              "metric_ref": "metric:new-bookings-total",
+              "status": "not_comparable",
+              "claim_keys": [],
+              "rationale": "Total bookings are not identified as AI-specific bookings."
+            }
+          ],
+          "differentiators": [
+            "Management framed the issue as an AI execution gap."
+          ],
+          "watchpoints": [
+            "Require disclosed AI bookings or revenue before quantifying the signal."
+          ]
+        },
+        {
+          "driver_ref": "driver:delivery-economics",
+          "stance": "positive",
+          "claim_keys": [
+            "ctsh-operating-margin-gaap"
+          ],
+          "model_input_claim_keys": [
+            "ctsh-operating-margin-gaap"
+          ],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The reviewed CTSH release does not supply this exact delivery metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:operating-margin-gaap",
+              "status": "observed",
+              "claim_keys": [
+                "ctsh-operating-margin-gaap"
+              ],
+              "rationale": "The release reports GAAP operating margin."
+            }
+          ],
+          "differentiators": [
+            "GAAP operating margin reached 15.9%."
+          ],
+          "watchpoints": [
+            "Keep GAAP and adjusted margin separate."
+          ]
+        },
+        {
+          "driver_ref": "driver:cash-conversion-and-capital-return",
+          "stance": "positive",
+          "claim_keys": [
+            "ctsh-share-repurchase"
+          ],
+          "model_input_claim_keys": [
+            "ctsh-share-repurchase"
+          ],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The reviewed CTSH release does not supply this exact cash metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:share-repurchase",
+              "status": "observed",
+              "claim_keys": [
+                "ctsh-share-repurchase"
+              ],
+              "rationale": "The release reports quarterly repurchase spending."
+            }
+          ],
+          "differentiators": [
+            "CTSH deployed USD 1.153 billion to repurchases in the quarter."
+          ],
+          "watchpoints": [
+            "Separate gross repurchase spending from net share-count reduction."
+          ]
+        }
+      ],
+      "key_differences": [
+        "CTSH combines positive revenue growth with weaker quarterly bookings and heavy buybacks."
+      ],
+      "open_questions": [
+        "Does the quarterly bookings decline reverse before it reaches revenue?"
+      ],
+      "falsifier_refs": [
+        "falsifier:bookings-decline-reaches-revenue",
+        "falsifier:buybacks-mask-slow-organic-growth"
+      ],
+      "thesis_candidate_refs": [],
+      "version_id": "company-overlay-version:ctsh:2",
+      "prior_version_ref": "company-overlay-version:ctsh:1",
+      "idempotency_key": "company-overlay:ctsh:2"
+    },
+    {
+      "overlay_ref": "company-overlay:epam",
+      "company_ref": "company:sec-cik:0001352010",
+      "industry_ref": "industry:us-it-services",
+      "title": "EPAM Company Overlay v1",
+      "as_of": "2026-08-26T18:00:00+00:00",
+      "role": "digital-engineering peer",
+      "driver_views": [
+        {
+          "driver_ref": "driver:bookings-mix-and-conversion",
+          "stance": "positive",
+          "claim_keys": [
+            "epam-revenue-growth-lc"
+          ],
+          "model_input_claim_keys": [
+            "epam-revenue-growth-lc"
+          ],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The reviewed EPAM release does not supply this exact metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:revenue-growth-local-currency",
+              "status": "observed",
+              "claim_keys": [
+                "epam-revenue-growth-lc"
+              ],
+              "rationale": "The release reports organic constant-currency revenue growth."
+            },
+            {
+              "metric_ref": "aspect:new-bookings-direction-local-currency",
+              "status": "not_found_in_reviewed_sources",
+              "claim_keys": [],
+              "rationale": "No authenticated earnings-call transcript for this issuer has been acquired into Core."
+            }
+          ],
+          "differentiators": [
+            "EPAM's disclosed growth measure removes both acquisitions and currency."
+          ],
+          "watchpoints": [
+            "Do not compare organic constant-currency growth mechanically with peers' broader constant-currency measures."
+          ]
+        },
+        {
+          "driver_ref": "driver:ai-reinvention-demand",
+          "stance": "positive",
+          "claim_keys": [
+            "epam-ai-demand-signal"
+          ],
+          "model_input_claim_keys": [],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The reviewed EPAM release does not supply this exact AI metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:ai-demand-signal",
+              "status": "observed",
+              "claim_keys": [
+                "epam-ai-demand-signal"
+              ],
+              "rationale": "Management described continued AI-native momentum."
+            }
+          ],
+          "differentiators": [
+            "EPAM positions itself around AI-native engineering rather than scaled managed services."
+          ],
+          "watchpoints": [
+            "The release does not quantify AI bookings or revenue."
+          ]
+        },
+        {
+          "driver_ref": "driver:delivery-economics",
+          "stance": "positive",
+          "claim_keys": [
+            "epam-operating-margin-gaap",
+            "epam-workforce"
+          ],
+          "model_input_claim_keys": [
+            "epam-operating-margin-gaap",
+            "epam-workforce"
+          ],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The reviewed EPAM release does not supply this exact delivery metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:operating-margin-gaap",
+              "status": "observed",
+              "claim_keys": [
+                "epam-operating-margin-gaap"
+              ],
+              "rationale": "The release reports GAAP income from operations as a share of revenue."
+            },
+            {
+              "metric_ref": "metric:workforce",
+              "status": "observed",
+              "claim_keys": [
+                "epam-workforce"
+              ],
+              "rationale": "The release reports approximate period-end headcount."
+            }
+          ],
+          "differentiators": [
+            "EPAM pairs a lower GAAP operating margin with an explicitly disclosed engineering workforce."
+          ],
+          "watchpoints": [
+            "Track whether margin expansion persists if revenue growth slows."
+          ]
+        },
+        {
+          "driver_ref": "driver:cash-conversion-and-capital-return",
+          "stance": "mixed",
+          "claim_keys": [
+            "epam-share-repurchase"
+          ],
+          "model_input_claim_keys": [
+            "epam-share-repurchase"
+          ],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The reviewed EPAM release does not supply this exact cash metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:share-repurchase",
+              "status": "observed",
+              "claim_keys": [
+                "epam-share-repurchase"
+              ],
+              "rationale": "The release reports quarterly repurchase spending."
+            }
+          ],
+          "differentiators": [
+            "EPAM repurchased USD 85 million of shares in the quarter."
+          ],
+          "watchpoints": [
+            "First-half operating cash flow was negative, but that metric is outside the current comparison pack."
+          ]
+        }
+      ],
+      "key_differences": [
+        "EPAM is the engineering-focused peer and lacks a standardized bookings disclosure in the reviewed release."
+      ],
+      "open_questions": [
+        "Can AI-native positioning sustain organic growth while GAAP margins expand?"
+      ],
+      "falsifier_refs": [
+        "falsifier:organic-growth-slows",
+        "falsifier:margin-expansion-reverses"
+      ],
+      "thesis_candidate_refs": [],
+      "version_id": "company-overlay-version:epam:2",
+      "prior_version_ref": "company-overlay-version:epam:1",
+      "idempotency_key": "company-overlay:epam:2"
+    },
+    {
+      "overlay_ref": "company-overlay:ibm",
+      "company_ref": "company:sec-cik:0000051143",
+      "industry_ref": "industry:us-it-services",
+      "title": "IBM Company Overlay v1",
+      "as_of": "2026-08-26T18:00:00+00:00",
+      "role": "diversified integrated reference",
+      "driver_views": [
+        {
+          "driver_ref": "driver:bookings-mix-and-conversion",
+          "stance": "neutral",
+          "claim_keys": [
+            "ibm-consulting-revenue-growth-lc"
+          ],
+          "model_input_claim_keys": [
+            "ibm-consulting-revenue-growth-lc"
+          ],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The reviewed IBM release does not supply this exact company-wide services metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:revenue-growth-local-currency",
+              "status": "observed",
+              "claim_keys": [
+                "ibm-consulting-revenue-growth-lc"
+              ],
+              "rationale": "The release reports constant-currency growth for IBM Consulting only."
+            },
+            {
+              "metric_ref": "aspect:new-bookings-direction-local-currency",
+              "status": "not_found_in_reviewed_sources",
+              "claim_keys": [],
+              "rationale": "No authenticated earnings-call transcript for this issuer has been acquired into Core."
+            }
+          ],
+          "differentiators": [
+            "IBM contributes a Consulting segment observation rather than a pure-play company observation."
+          ],
+          "watchpoints": [
+            "Keep segment growth separate from consolidated IBM growth."
+          ]
+        },
+        {
+          "driver_ref": "driver:ai-reinvention-demand",
+          "stance": "positive",
+          "claim_keys": [
+            "ibm-ai-demand-signal"
+          ],
+          "model_input_claim_keys": [],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The reviewed IBM release does not supply this exact AI metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:ai-demand-signal",
+              "status": "observed",
+              "claim_keys": [
+                "ibm-ai-demand-signal"
+              ],
+              "rationale": "IBM described enterprise-scale AI deployment."
+            }
+          ],
+          "differentiators": [
+            "IBM can combine software, infrastructure and consulting in AI programs."
+          ],
+          "watchpoints": [
+            "The qualitative signal is not a GenAI bookings or revenue measure."
+          ]
+        },
+        {
+          "driver_ref": "driver:delivery-economics",
+          "stance": "unknown",
+          "claim_keys": [
+            "ibm-gross-margin-gaap"
+          ],
+          "model_input_claim_keys": [
+            "ibm-gross-margin-gaap"
+          ],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The reviewed IBM sources do not supply this exact delivery metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:gross-margin-gaap",
+              "status": "observed",
+              "claim_keys": [
+                "ibm-gross-margin-gaap"
+              ],
+              "rationale": "The 10-Q GAAP facts imply consolidated gross margin."
+            },
+            {
+              "metric_ref": "metric:operating-margin-gaap",
+              "status": "not_comparable",
+              "claim_keys": [],
+              "rationale": "This pack derives IBM gross margin and does not substitute it for peer operating margin."
+            }
+          ],
+          "differentiators": [
+            "IBM's diversified mix makes consolidated gross margin structurally different from pure-play operating margins."
+          ],
+          "watchpoints": [
+            "Do not rank IBM against ACN, CTSH or EPAM on this margin field."
+          ]
+        },
+        {
+          "driver_ref": "driver:cash-conversion-and-capital-return",
+          "stance": "positive",
+          "claim_keys": [
+            "ibm-free-cash-flow"
+          ],
+          "model_input_claim_keys": [
+            "ibm-free-cash-flow"
+          ],
+          "default_metric_coverage": {
+            "status": "not_found_in_reviewed_sources",
+            "rationale": "The reviewed IBM release does not supply this exact cash metric."
+          },
+          "metric_coverage": [
+            {
+              "metric_ref": "metric:free-cash-flow",
+              "status": "observed",
+              "claim_keys": [
+                "ibm-free-cash-flow"
+              ],
+              "rationale": "The release reports issuer-defined quarterly free cash flow."
+            }
+          ],
+          "differentiators": [
+            "IBM generated USD 2.5 billion of free cash flow while funding large acquisitions year to date."
+          ],
+          "watchpoints": [
+            "IBM's free-cash-flow definition excludes Financing receivables and is issuer-specific."
+          ]
+        }
+      ],
+      "key_differences": [
+        "IBM is a diversified reference, so segment growth and consolidated margins cannot be ranked mechanically against pure plays."
+      ],
+      "open_questions": [
+        "Can IBM Consulting reaccelerate as software-led AI deployments scale?"
+      ],
+      "falsifier_refs": [
+        "falsifier:consulting-growth-stalls",
+        "falsifier:integrated-model-fails-to-convert-ai-demand"
+      ],
+      "thesis_candidate_refs": [],
+      "version_id": "company-overlay-version:ibm:2",
+      "prior_version_ref": "company-overlay-version:ibm:1",
+      "idempotency_key": "company-overlay:ibm:2"
+    }
+  ]
+}
