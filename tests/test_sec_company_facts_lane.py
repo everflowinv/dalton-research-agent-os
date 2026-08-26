@@ -139,10 +139,6 @@ class LaneTests(unittest.TestCase):
             }
         self.assertEqual(before, after)
 
-    @unittest.skip(
-        "second issuer in one Core hits ConnectorQuotaExceeded (connector bytes quota); "
-        "the lane's per-issuer ConnectorStore quota handling is open (see S7d-1 report)"
-    )
     def test_locates_own_candidate_when_staging_has_other_candidates(self) -> None:
         install_lane_rules(self.state)
         # Seed the shared staging file with a foreign plan's candidate first.
@@ -156,6 +152,9 @@ class LaneTests(unittest.TestCase):
             self.assertEqual(seed["status"], "committed", seed)
             self.assertEqual(len(lane.review.list_candidates()), 1)
         with self._lane(issuers=(ISSUER, foreign)) as lane:
+            # Same rehearsal clock as the seed run: the second issuer must move
+            # into the next 60-second SEC quota window or the connector rejects it.
+            lane.advance_past_quota_window()
             summary = self._run(lane)
             self.assertEqual(len(lane.review.list_candidates()), 2)
             self.assertEqual(summary["status"], "committed", summary)

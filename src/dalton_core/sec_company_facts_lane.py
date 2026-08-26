@@ -34,6 +34,7 @@ from __future__ import annotations
 import copy
 import json
 import sqlite3
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -116,6 +117,12 @@ US_IT_SERVICES_ISSUERS: tuple[Issuer, ...] = (
     Issuer("EPAM", "1352010", "company:sec-cik:0001352010", "EPAM Systems Inc"),
     Issuer("IBM", "51143", "company:sec-cik:0000051143", "International Business Machines Corp"),
 )
+
+# Mirrors the executor's SEC rate policy (``connector-rate-policy:sec-public``):
+# every call reserves ``max_response_bytes`` inside a 60-second UTC-aligned
+# window whose byte limit is exactly one such reservation, so two issuers in
+# the same window are rejected with ``ConnectorQuotaExceeded``.
+SEC_QUOTA_WINDOW_SECONDS = 60
 
 
 class GovernanceLike(Protocol):
@@ -271,6 +278,8 @@ class SecCompanyFactsLane:
         self.staging_path = Path(staging_path)
         self.user_agent = user_agent
         self.clock = clock if clock is not None else MutableClock(datetime.now(timezone.utc))
+        # A caller-supplied clock is a rehearsal clock: advance it instead of sleeping.
+        self._realtime = clock is None
         self._opened = False
 
         self.core = DaltonStore(self.state_dir / "core.sqlite")
@@ -767,6 +776,28 @@ class SecCompanyFactsLane:
         }
         return summary
 
+    def advance_past_quota_window(self) -> None:
+        """Move the lane clock into the next SEC connector quota window.
+
+        The lane clock is frozen at construction (rehearsals inject one), so
+        every issuer would otherwise reserve inside the same 60-second window
+        and the second one fails with ``ConnectorQuotaExceeded``.  In real
+        time the lane first sleeps until wall-clock time has crossed the
+        boundary so record timestamps never run ahead of real time.
+        """
+        now = self.clock()
+        epoch = int(now.timestamp())
+        boundary = datetime.fromtimestamp(
+            epoch - (epoch % SEC_QUOTA_WINDOW_SECONDS) + SEC_QUOTA_WINDOW_SECONDS,
+            timezone.utc,
+        )
+        step = int((boundary - now).total_seconds()) + 1
+        if self._realtime:
+            delay = (boundary - datetime.now(timezone.utc)).total_seconds() + 1
+            if delay > 0:
+                time.sleep(delay)
+        self.clock.advance(step)
+
     def run_lane(
         self,
         *,
@@ -779,6 +810,8 @@ class SecCompanyFactsLane:
     ) -> dict[str, Any]:
         results = []
         for issuer in (issuers or self.issuers):
+            if results:
+                self.advance_past_quota_window()
             try:
                 results.append(self.run_issuer(
                     issuer, filed_from=filed_from, filed_to=filed_to,
