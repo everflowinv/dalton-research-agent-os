@@ -253,6 +253,45 @@ class ServiceTests(unittest.TestCase):
             service = ServiceConfig.from_file(config)
             self.assertIsNotNone(service.control.research_review)
             self.assertNotIn("research_review", paths)
+            # S7c-3: the writer stages transcript candidates into the very
+            # file the Cockpit reviews, derived from the control config.
+            writer_args = writer["ProgramArguments"]
+            self.assertIn("--candidate-staging", writer_args)
+            self.assertEqual(
+                writer_args[writer_args.index("--candidate-staging") + 1],
+                str(service.control.research_review.candidate_staging_path),
+            )
+            self.assertEqual(
+                writer_args[writer_args.index("--candidate-staging") + 1],
+                str(root / "candidate-staging.sqlite"),
+            )
+
+    def test_writer_without_control_plane_has_no_candidate_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "config.json"
+            config.write_text(json.dumps({
+                "schema_version": "0.1",
+                "core_db": str(root / "core.sqlite"),
+                "scheduler_db": str(root / "scheduler.sqlite"),
+                "projection_db": str(root / "projection.sqlite"),
+                "model_router_db": None,
+                "capability_catalog_db": None,
+                "heartbeat_path": str(root / "heartbeat.json"),
+                "writer_socket": str(root / "writer.sock"),
+                "tick_seconds": 1,
+                "projection_min_interval_seconds": 1,
+                "plugin_retry_seconds": 1,
+                "plugins": [],
+            }), encoding="utf-8")
+            paths = render(
+                root / "LaunchAgents", root / "venv" / "bin", root / "state",
+                config, root / "logs",
+            )
+            writer = plistlib.loads(Path(paths["writer"]).read_bytes())
+            self.assertNotIn("--candidate-staging", writer["ProgramArguments"])
+            self.assertIn("--connector-governance", writer["ProgramArguments"])
+            self.assertNotIn("control", paths)
 
     def test_bootstrap_installs_embedded_review_principal_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

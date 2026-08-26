@@ -50,6 +50,22 @@ def render(
     logs = Path(log_dir).expanduser().resolve()
     logs.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(logs, 0o700)
+    service_config = ServiceConfig.from_file(config) if config.is_file() else None
+    # S7c-3: the writer's human-only transcript candidate ops stage into the
+    # *same* CandidateStaging file the Cockpit reviews.  The only source of
+    # truth for that path is control.config.research_review, so the writer
+    # LaunchAgent derives it from there instead of a second path convention.
+    # Without an embedded research_review block the writer runs without
+    # staging and those ops answer ``rejected``.
+    candidate_staging_path: str | None = None
+    if (
+        service_config is not None
+        and service_config.control is not None
+        and service_config.control.research_review is not None
+    ):
+        candidate_staging_path = str(
+            service_config.control.research_review.candidate_staging_path
+        )
     common: dict[str, Any] = {
         "RunAtLoad": True,
         "KeepAlive": True,
@@ -70,7 +86,10 @@ def render(
             "--transcript-spool-dir", str(state / "transcript-spool"),
             "--connector-governance",
             str(state / "connector-governance" / "alphaengine-get-document-v1.json"),
-        ],
+        ] + (
+            ["--candidate-staging", candidate_staging_path]
+            if candidate_staging_path is not None else []
+        ),
         "StandardOutPath": str(logs / "writer.stdout.log"),
         "StandardErrorPath": str(logs / "writer.stderr.log"),
     }
@@ -85,7 +104,6 @@ def render(
     _atomic_plist(writer_path, writer)
     _atomic_plist(controller_path, controller)
     result = {"writer": str(writer_path), "controller": str(controller_path)}
-    service_config = ServiceConfig.from_file(config) if config.is_file() else None
     control_path = destination / f"{CONTROL_LABEL}.plist"
     if service_config is not None and service_config.control is not None:
         control = common | {
