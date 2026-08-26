@@ -14,6 +14,12 @@
   `alphaengine_acquisition_status`，以子进程（不是线程，`SIGALRM` watchdog 只能在主线程）跑 S6b 的 Core-hosted 获取；
   owner 用 `dalton-connector-governance approve` 批准治理记录，launcher 对 `proposed` 记录 fail closed。见
   [S7c-1 报告](reports/s7c-writer-hosted-alphaengine-acquisition-v0.1-2026-08-26.md)
+- S7b development candidate：ADR-0003 裁决为 B（Accepted，owner 可否决）。transcript 候选以 `claim_kind = qualitative`
+  进 CandidateStaging，数值字段全为 null，只收带 exact citation binding 的 transcript evidence，policy 路径一律拒绝，
+  只经 explicit human review 入库；新增闭合 verification mode `transcript_core_authority` 和
+  `stage_transcript_qualitative_candidate` 入口（S7c writer op 直接调用）。隔离端到端：ACN 语义候选 stage → accept →
+  commit 写出 1 条 EvidenceVersion + 1 条 qualitative ClaimVersion 0.2。见
+  [S7b 报告](reports/s7b-qualitative-transcript-candidate-staging-v0.1-2026-08-26.md)
 - live deployed source：`3fe746e`；thesis-impact production runner：`9c295ca`；OpenClaw host patch chain：
   `6f93b9b14`
 - live 已启用独立的 thesis-impact 短任务，每 300 秒运行一次；writer 持有 Core/Scheduler，worker 只能通过
@@ -144,7 +150,7 @@
   写入正式 Evidence / Claim**（数值 spec 仍为占位）。用 8/24 真实 ACN 原文做的无网络演练两页入库，assembled digest
   与用户已确认的 `a8a9fbff…bd96bd` 一致。未部署 live、未调用真实 AlphaEngine、未接 writer RPC；
   `deploy/connector-governance/alphaengine-get-document-v1.json` 为 `proposed`，需 owner 批准。第二道门写成
-  ADR-0003（Proposed，推荐双 material 候选：数值绑定 SEC exhibit、来源绑定逐字稿）。详见
+  ADR-0003（草案推荐 A 双 material 候选；2026-08-26 裁决为 B 语义候选，见 S7b）。详见
   [S6 正式晋级前置缺口与 Core-hosted AlphaEngine 获取 v0.1](reports/s6-formal-promotion-authority-gaps-and-core-acquisition-v0.1-2026-08-26.md)
 - development Planner 又扩展校准了 Qwen DeepSeek V4 Flash/Pro、Grok 4.6、Gemini 3.7 Flash、OpenRouter Ox
   Alpha、ZAI GLM 5.3 和 GPT-5.6 Luna。V4 Flash、V4 Pro、Gemini 3.7 与 Ox Alpha 均连续两轮
@@ -1444,5 +1450,6 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Context、Memory 与 Log 裁决：`docs/reports/context-memory-log-subsystem-2026-08-14.md`
 - Connector Protocol 与自生成模板：`docs/CONNECTOR_PROTOCOL.md`
 - S6 正式晋级前置缺口与 Core-hosted AlphaEngine 获取 v0.1：`docs/reports/s6-formal-promotion-authority-gaps-and-core-acquisition-v0.1-2026-08-26.md`
-- transcript 候选进入 CandidateStaging 的裁决草案：`docs/adr/0003-transcript-candidate-admission.md`
+- transcript 候选进入 CandidateStaging 的裁决（Accepted，选 B）：`docs/adr/0003-transcript-candidate-admission.md`
+- S7b 语义 transcript 候选进入 CandidateStaging v0.1：`docs/reports/s7b-qualitative-transcript-candidate-staging-v0.1-2026-08-26.md`
 - AlphaEngine get_document 连接器治理记录（proposed）：`deploy/connector-governance/alphaengine-get-document-v1.json`
