@@ -35,15 +35,22 @@
   `--candidate-staging`，writer 与 Cockpit 写同一个 `candidate-staging.sqlite`。live 探针 `transcript_candidate_status`
   对未知 ref 返回 `not_found`（未配置时是 `rejected`）。见
   [S7c-3 报告](reports/s7c3-live-deploy-candidate-staging-wiring-v0.1-2026-08-26.md)。
-  下一步 S7c-4：在 live 上跑一次真实 `acquire_alphaengine_document`（8/24 ACN，治理记录已批准）→ `stage_transcript_candidate`
-  → Cockpit 人工 accept，产出 live Core 第一条正式 qualitative Claim
+- **S7c-4 已在 live 执行（2026-08-26 17:38 UTC）**：live writer 以 `human:lumos` 真实调用 AlphaEngine 一次
+  （ticket `alphaengine-acquisition:75a314bc4dac29482e5dbccb`，2 页、1 document unit），装配 digest 与 8/25 owner 确认的
+  correction set / citation 绑定的 `a8a9fbff…bd96bd` 一致，probe ok；随后 `stage_transcript_candidate` 把 ACN Q3 FY2026
+  「新签订单本币口径同比下降」写成 qualitative 候选 `candidate-claim-version:3fafc07d…e9a87d`，30 项 source verification 全 pass，
+  `review_state=staged`。**等 owner 在 Cockpit accept 后 live Core 才写第一条正式 Evidence / Claim（当前仍为 0）。**
+  执行前修了一个路径 bug（`0efe8f5`，已部署）：获取子进程原来写 `<state>/connector-spool`，writer 的 stage 校验却从
+  `--transcript-spool-dir` 读，live 上 `raw_artifact_bytes` 必 fail；现在 CLI `--spool-dir` 由 writer 传自己的 transcript spool。见
+  [S7c-4 报告](reports/s7c4-live-acn-acquisition-and-candidate-staging-v0.1-2026-08-26.md)
 - S7b development candidate：ADR-0003 裁决为 B（Accepted，owner 可否决）。transcript 候选以 `claim_kind = qualitative`
   进 CandidateStaging，数值字段全为 null，只收带 exact citation binding 的 transcript evidence，policy 路径一律拒绝，
   只经 explicit human review 入库；新增闭合 verification mode `transcript_core_authority` 和
   `stage_transcript_qualitative_candidate` 入口（S7c writer op 直接调用）。隔离端到端：ACN 语义候选 stage → accept →
   commit 写出 1 条 EvidenceVersion + 1 条 qualitative ClaimVersion 0.2。见
   [S7b 报告](reports/s7b-qualitative-transcript-candidate-staging-v0.1-2026-08-26.md)
-- live deployed source：`dc747de`（2026-08-26 17:18 UTC，含 S7a / S7b / S7c-1 / S7c-2 / S7c-3；上一版 `3fe746e`）；
+- live deployed source：`0efe8f5`（2026-08-26 17:36 UTC，S7c-4 spool 接线修复；上一版 `dc747de` 17:18 UTC，含 S7a / S7b /
+  S7c-1 / S7c-2 / S7c-3；再上一版 `3fe746e`）；
   thesis-impact production runner：`9c295ca`；OpenClaw host patch chain：`6f93b9b14`；claude-cli-gateway 心跳补丁：
   workspace `935a751be`
 - live 已启用独立的 thesis-impact 短任务，每 300 秒运行一次；writer 持有 Core/Scheduler，worker 只能通过
@@ -1477,4 +1484,5 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - transcript 候选进入 CandidateStaging 的裁决（Accepted，选 B）：`docs/adr/0003-transcript-candidate-admission.md`
 - S7b 语义 transcript 候选进入 CandidateStaging v0.1：`docs/reports/s7b-qualitative-transcript-candidate-staging-v0.1-2026-08-26.md`
 - S7c-3 live 部署与 writer `--candidate-staging` 接线 v0.1：`docs/reports/s7c3-live-deploy-candidate-staging-wiring-v0.1-2026-08-26.md`
+- S7c-4 live 首次真实 AlphaEngine 获取 + ACN 语义候选进 staging v0.1：`docs/reports/s7c4-live-acn-acquisition-and-candidate-staging-v0.1-2026-08-26.md`
 - AlphaEngine get_document 连接器治理记录（proposed）：`deploy/connector-governance/alphaengine-get-document-v1.json`
