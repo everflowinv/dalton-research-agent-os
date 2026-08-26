@@ -143,32 +143,43 @@ class ResearchReviewControlPlane:
     def close(self) -> None:
         self.authority.close()
 
+    @staticmethod
+    def project_candidate(item: Mapping[str, Any]) -> dict[str, Any]:
+        """Cockpit projection of one staged candidate pair.
+
+        ``claim_kind`` lets the page distinguish a qualitative (semantic)
+        candidate, whose ``value``/``unit``/``currency``/``scale`` are null by
+        contract (ADR-0003 B), from a quantitative one.
+        """
+        claim = item["claim"]
+        evidence = item["evidence"]
+        return {
+            "candidate_claim_ref": claim["id"],
+            "candidate_claim_hash": claim["content_hash"],
+            "subject_ref": claim["subject_ref"],
+            "metric_or_aspect": claim["metric_or_aspect"],
+            "period": claim["period"],
+            "basis": claim["basis"],
+            "normalized_statement": claim["normalized_statement"],
+            "claim_kind": claim["claim_kind"],
+            "value": claim["value"],
+            "unit": claim["unit"],
+            "currency": claim["currency"],
+            "scale": claim["scale"],
+            "source_type": evidence["source_type"],
+            "source_ref": evidence["source_ref"],
+            "source_envelope_ref": evidence["source_envelope_ref"],
+            "artifact_refs": evidence["artifact_refs"],
+            "decision": item["decision"],
+            "commit_state": item.get("commit_state"),
+        }
+
     def view(self, login: str) -> dict[str, Any]:
         reviewer = _subject_for_login(login)
-        items = []
-        for item in self.authority.list_candidates(limit=200):
-            claim = item["claim"]
-            evidence = item["evidence"]
-            decision = item["decision"]
-            items.append({
-                "candidate_claim_ref": claim["id"],
-                "candidate_claim_hash": claim["content_hash"],
-                "subject_ref": claim["subject_ref"],
-                "metric_or_aspect": claim["metric_or_aspect"],
-                "period": claim["period"],
-                "basis": claim["basis"],
-                "normalized_statement": claim["normalized_statement"],
-                "value": claim["value"],
-                "unit": claim["unit"],
-                "currency": claim["currency"],
-                "scale": claim["scale"],
-                "source_type": evidence["source_type"],
-                "source_ref": evidence["source_ref"],
-                "source_envelope_ref": evidence["source_envelope_ref"],
-                "artifact_refs": evidence["artifact_refs"],
-                "decision": decision,
-                "commit_state": item.get("commit_state"),
-            })
+        items = [
+            self.project_candidate(item)
+            for item in self.authority.list_candidates(limit=200)
+        ]
         return {"as_of": _now(), "reviewer_ref": reviewer, "items": items}
 
     def _candidate(

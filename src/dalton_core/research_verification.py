@@ -65,6 +65,21 @@ _AUTHORITY_SOURCE_VERIFIER_HASH = content_hash({
         "source-hash", "schema", "completeness", "time-order",
     ],
 })
+# ADR-0003 option B: transcript candidates whose raw ArtifactVersion is
+# Core-held AlphaEngine authority have no ResearchCheckpoint and no numeric
+# authority.  Their source verification is a separate closed verifier.
+TRANSCRIPT_CORE_AUTHORITY_MODE = "transcript_core_authority"
+_AUTHORITY_PROVENANCE_MODES = frozenset({"connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE})
+TRANSCRIPT_SOURCE_VERIFIER_REF = "verifier:transcript-core-authority-source:0.1"
+TRANSCRIPT_SOURCE_VERIFIER_HASH = content_hash({
+    "ref": TRANSCRIPT_SOURCE_VERIFIER_REF,
+    "rules": [
+        "persisted-citation-eligibility", "correction-set-lineage",
+        "core-source-envelope", "core-invocation-execution", "core-raw-artifact",
+        "alphaengine-document-digest-binding", "profile-source-type", "schema",
+        "citation-projection", "time-order",
+    ],
+})
 _NUMERIC_VERIFIER_REF = "verifier:offline-numeric:0.1"
 _NUMERIC_VERIFIER_HASH = content_hash({
     "ref": _NUMERIC_VERIFIER_REF,
@@ -255,7 +270,7 @@ def _validate_authority_source_verification_material(value: Mapping[str, Any]) -
         "operation", "provenance_mode", "authority_resolution_ref",
     ):
         wire[name] = _text(wire[name], name)
-    if wire["provenance_mode"] != "connector_authority":
+    if wire["provenance_mode"] not in _AUTHORITY_PROVENANCE_MODES:
         raise ResearchVerificationError("authority material provenance_mode is closed")
     if wire["source_type"] not in {
         "official_filing", "authenticated_library", "social_enumeration",
@@ -464,7 +479,11 @@ def validate_verification_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
     if wire["kind"] not in {"source", "numeric"}:
         raise ResearchVerificationError("VerificationBundle.kind is invalid")
     expected_verifiers = (
-        {(_SOURCE_VERIFIER_REF, _SOURCE_VERIFIER_HASH), (_AUTHORITY_SOURCE_VERIFIER_REF, _AUTHORITY_SOURCE_VERIFIER_HASH)}
+        {
+            (_SOURCE_VERIFIER_REF, _SOURCE_VERIFIER_HASH),
+            (_AUTHORITY_SOURCE_VERIFIER_REF, _AUTHORITY_SOURCE_VERIFIER_HASH),
+            (TRANSCRIPT_SOURCE_VERIFIER_REF, TRANSCRIPT_SOURCE_VERIFIER_HASH),
+        }
         if wire["kind"] == "source"
         else {(_NUMERIC_VERIFIER_REF, _NUMERIC_VERIFIER_HASH)}
     )
@@ -522,7 +541,7 @@ def validate_candidate_claim(value: Mapping[str, Any]) -> dict[str, Any]:
     wire = _closed(value, _CANDIDATE_CLAIM_FIELDS, "CandidateClaim")
     if wire["schema_version"] != SCHEMA_VERSION:
         raise ResearchVerificationError("unsupported CandidateClaim schema_version")
-    for name in ("id", "candidate_claim_ref", "subject_ref", "metric_or_aspect", "basis", "normalized_statement", "source_verification_ref", "numeric_spec_ref", "numeric_verification_ref", "actor_ref"):
+    for name in ("id", "candidate_claim_ref", "subject_ref", "metric_or_aspect", "basis", "normalized_statement", "source_verification_ref", "actor_ref"):
         wire[name] = _text(wire[name], name)
     if not wire["candidate_claim_ref"].startswith("candidate-claim:"):
         raise ResearchVerificationError("CandidateClaim must use a candidate-only identity")
@@ -533,17 +552,38 @@ def validate_candidate_claim(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ResearchVerificationError(
             "candidate claim semantics remain unverified until human review"
         )
-    if wire["claim_kind"] != "quantitative":
+    if wire["claim_kind"] == "quantitative":
+        for name in ("numeric_spec_ref", "numeric_verification_ref"):
+            wire[name] = _text(wire[name], name)
+        wire["value"] = _decimal(wire["value"], "value")
+        wire["unit"] = _text(wire["unit"], "unit")
+        wire["scale"] = _scale(wire["scale"], "scale")
+        wire["currency"] = _currency(wire["currency"], "currency")
+        for name in ("numeric_spec_hash", "numeric_verification_hash"):
+            wire[name] = _hash(wire[name], name)
+    elif wire["claim_kind"] == "qualitative":
+        # ADR-0003 option B: a semantic candidate carries no numeric authority.
+        # Any value or numeric reference is an attempt to smuggle a number
+        # past the deterministic numeric verifier and is rejected outright.
+        offending = [
+            name for name in (
+                "value", "unit", "currency", "scale", "numeric_spec_ref",
+                "numeric_spec_hash", "numeric_verification_ref",
+                "numeric_verification_hash",
+            )
+            if wire[name] is not None
+        ]
+        if offending:
+            raise ResearchVerificationError(
+                "qualitative candidate claim must not carry numeric fields: "
+                + ", ".join(offending)
+            )
+    else:
         raise ResearchVerificationError(
-            "candidate staging 0.1 accepts only quantitatively verified claims"
+            "CandidateClaim.claim_kind must be quantitative or qualitative"
         )
-    wire["value"] = _decimal(wire["value"], "value")
-    wire["unit"] = _text(wire["unit"], "unit")
-    wire["scale"] = _scale(wire["scale"], "scale")
-    wire["currency"] = _currency(wire["currency"], "currency")
     wire["candidate_evidence_refs"] = _ref_hashes(wire["candidate_evidence_refs"], "candidate_evidence_refs", nonempty=True)
-    for name in ("source_verification_hash", "numeric_spec_hash", "numeric_verification_hash"):
-        wire[name] = _hash(wire[name], name)
+    wire["source_verification_hash"] = _hash(wire["source_verification_hash"], "source_verification_hash")
     wire["prior_version_ref"] = None if wire["prior_version_ref"] is None else _text(wire["prior_version_ref"], "prior_version_ref")
     return _with_hash(wire, "CandidateClaim")
 
@@ -1140,6 +1180,25 @@ def build_candidate_evidence(
         # This value came from the validated connector profile when the
         # material was built; it is not accepted as a caller label.
         expected_source_type = material_wire["source_type"]
+    elif verification_mode == TRANSCRIPT_CORE_AUTHORITY_MODE:
+        if (
+            material_wire["schema_version"] != "0.2"
+            or material_wire.get("provenance_mode") != TRANSCRIPT_CORE_AUTHORITY_MODE
+        ):
+            raise VerificationRejected(
+                "transcript_core_authority evidence requires transcript Core authority material"
+            )
+        if (
+            verification["verifier_ref"] != TRANSCRIPT_SOURCE_VERIFIER_REF
+            or verification["verifier_hash"] != TRANSCRIPT_SOURCE_VERIFIER_HASH
+        ):
+            raise VerificationRejected(
+                "transcript_core_authority evidence requires the transcript Core source verifier"
+            )
+        # The profile source type is read from Core by the transcript Core
+        # resolver; the citation binder later relabels the evidence as
+        # authenticated_transcript.
+        expected_source_type = material_wire["source_type"]
     else:
         raise VerificationRejected("verification_mode is not a closed value")
     base = {
@@ -1315,86 +1374,148 @@ class CandidateStagingStore:
     def stage(
         self,
         *,
-        checkpoint: Mapping[str, Any],
-        plan: Mapping[str, Any],
-        context_pack: Mapping[str, Any],
-        step: Mapping[str, Any],
-        runner_request: Mapping[str, Any],
-        receipt: Mapping[str, Any],
         material: Mapping[str, Any],
-        numeric_spec: Mapping[str, Any],
         source_verification: Mapping[str, Any],
-        numeric_verification: Mapping[str, Any],
         evidence: Mapping[str, Any],
         claim: Mapping[str, Any],
         idempotency_key: str,
+        checkpoint: Mapping[str, Any] | None = None,
+        plan: Mapping[str, Any] | None = None,
+        context_pack: Mapping[str, Any] | None = None,
+        step: Mapping[str, Any] | None = None,
+        runner_request: Mapping[str, Any] | None = None,
+        receipt: Mapping[str, Any] | None = None,
+        numeric_spec: Mapping[str, Any] | None = None,
+        numeric_verification: Mapping[str, Any] | None = None,
         verification_mode: str = "recorded_fixture",
         authority_resolver: Any | None = None,
     ) -> dict[str, Any]:
+        """Stage one verified candidate pair.
+
+        ``quantitative`` candidates keep the 0.1 contract: numeric spec and
+        numeric verification are mandatory and are recomputed here.
+        ``qualitative`` candidates (ADR-0003 option B) carry no numeric
+        authority at all; they are admitted only as ``authenticated_transcript``
+        evidence with an exact citation binding, and never through a policy
+        path.  ``transcript_core_authority`` is the closed verification mode
+        for transcript candidates whose raw ArtifactVersion is Core-held
+        AlphaEngine authority without a ResearchCheckpoint.
+        """
         material_wire = validate_source_verification_material(material)
-        spec_wire = validate_numeric_verification_spec(numeric_spec)
         source_wire = self._require_clean_pass(source_verification, "source")
-        numeric_wire = self._require_clean_pass(numeric_verification, "numeric")
         evidence_wire = validate_candidate_evidence(evidence)
         claim_wire = validate_candidate_claim(claim)
         key = _text(idempotency_key, "idempotency_key")
-
         verification_mode = _text(verification_mode, "verification_mode")
-        if verification_mode == "connector_authority":
-            if authority_resolver is None:
-                raise VerificationRejected("connector_authority staging requires an authority resolver")
-            recomputed_source = verify_authority_source_material(
-                material_wire, resolver=authority_resolver, checkpoint=checkpoint,
-                plan=plan, context_pack=context_pack, step=step,
-                runner_request=runner_request, receipt=receipt,
-            )
-        elif verification_mode == "recorded_fixture":
-            if material_wire["schema_version"] != "0.1":
-                raise VerificationRejected("recorded_fixture staging requires fixture material")
-            recomputed_source = verify_source_material(
-                material_wire, checkpoint=checkpoint, plan=plan,
-                context_pack=context_pack, step=step,
-                runner_request=runner_request, receipt=receipt,
-            )
+        qualitative = claim_wire["claim_kind"] == "qualitative"
+        transcript_evidence = (
+            evidence_wire["source_type"] == TRANSCRIPT_EVIDENCE_SOURCE_TYPE
+        )
+
+        spec_wire: dict[str, Any] | None
+        numeric_wire: dict[str, Any] | None
+        if qualitative:
+            if numeric_spec is not None or numeric_verification is not None:
+                raise VerificationRejected(
+                    "qualitative candidate cannot carry numeric spec or numeric verification"
+                )
+            if not transcript_evidence:
+                raise VerificationRejected(
+                    "qualitative candidate requires authenticated transcript evidence "
+                    "with an exact citation binding"
+                )
+            spec_wire = None
+            numeric_wire = None
         else:
-            raise VerificationRejected("verification_mode is not a closed value")
+            if numeric_spec is None or numeric_verification is None:
+                raise VerificationRejected(
+                    "quantitative candidate requires numeric spec and numeric verification"
+                )
+            spec_wire = validate_numeric_verification_spec(numeric_spec)
+            numeric_wire = self._require_clean_pass(numeric_verification, "numeric")
+
+        if verification_mode == TRANSCRIPT_CORE_AUTHORITY_MODE:
+            if not qualitative:
+                raise VerificationRejected(
+                    "transcript_core_authority staging admits qualitative candidates only; "
+                    "a transcript is not a numeric authority"
+                )
+            if authority_resolver is None or not callable(
+                getattr(authority_resolver, "verify_source_material", None)
+            ):
+                raise VerificationRejected(
+                    "transcript_core_authority staging requires a transcript Core authority resolver"
+                )
+            if material_wire.get("provenance_mode") != TRANSCRIPT_CORE_AUTHORITY_MODE:
+                raise VerificationRejected(
+                    "transcript_core_authority staging requires transcript Core authority material"
+                )
+            recomputed_source = authority_resolver.verify_source_material(material_wire)
+        else:
+            bindings = (checkpoint, plan, context_pack, step, runner_request, receipt)
+            if any(item is None for item in bindings):
+                raise VerificationRejected(
+                    f"{verification_mode} staging requires checkpoint, plan, context pack, "
+                    "step, runner request and receipt"
+                )
+            if verification_mode == "connector_authority":
+                if authority_resolver is None:
+                    raise VerificationRejected("connector_authority staging requires an authority resolver")
+                if material_wire.get("provenance_mode") != "connector_authority":
+                    raise VerificationRejected(
+                        "connector_authority staging requires connector authority material"
+                    )
+                recomputed_source = verify_authority_source_material(
+                    material_wire, resolver=authority_resolver, checkpoint=checkpoint,
+                    plan=plan, context_pack=context_pack, step=step,
+                    runner_request=runner_request, receipt=receipt,
+                )
+            elif verification_mode == "recorded_fixture":
+                if material_wire["schema_version"] != "0.1":
+                    raise VerificationRejected("recorded_fixture staging requires fixture material")
+                recomputed_source = verify_source_material(
+                    material_wire, checkpoint=checkpoint, plan=plan,
+                    context_pack=context_pack, step=step,
+                    runner_request=runner_request, receipt=receipt,
+                )
+            else:
+                raise VerificationRejected("verification_mode is not a closed value")
         if canonical_json(recomputed_source) != canonical_json(source_wire):
             raise ResearchVerificationConflict(
                 "source verification was not produced by the deterministic verifier"
             )
-        recomputed_numeric = verify_numeric_spec(
-            spec_wire, checkpoint_ref=recomputed_source["checkpoint_ref"],
-            checkpoint_hash=recomputed_source["checkpoint_hash"],
-            source_material=material_wire, source_bundle=recomputed_source,
-        )
-        if canonical_json(recomputed_numeric) != canonical_json(numeric_wire):
-            raise ResearchVerificationConflict(
-                "numeric verification was not produced by the deterministic verifier"
+        if spec_wire is not None and numeric_wire is not None:
+            recomputed_numeric = verify_numeric_spec(
+                spec_wire, checkpoint_ref=recomputed_source["checkpoint_ref"],
+                checkpoint_hash=recomputed_source["checkpoint_hash"],
+                source_material=material_wire, source_bundle=recomputed_source,
             )
+            if canonical_json(recomputed_numeric) != canonical_json(numeric_wire):
+                raise ResearchVerificationConflict(
+                    "numeric verification was not produced by the deterministic verifier"
+                )
 
         if (source_wire["subject_ref"], source_wire["subject_hash"]) != (
             material_wire["id"], material_wire["content_hash"]
         ):
             raise ResearchVerificationConflict("source verification binds another material")
-        if (numeric_wire["subject_ref"], numeric_wire["subject_hash"]) != (
-            spec_wire["id"], spec_wire["content_hash"]
-        ):
-            raise ResearchVerificationConflict("numeric verification binds another spec")
-        if (
-            source_wire["checkpoint_ref"] != numeric_wire["checkpoint_ref"]
-            or source_wire["checkpoint_hash"] != numeric_wire["checkpoint_hash"]
-        ):
-            raise ResearchVerificationConflict("source and numeric verification bind different checkpoints")
+        if spec_wire is not None and numeric_wire is not None:
+            if (numeric_wire["subject_ref"], numeric_wire["subject_hash"]) != (
+                spec_wire["id"], spec_wire["content_hash"]
+            ):
+                raise ResearchVerificationConflict("numeric verification binds another spec")
+            if (
+                source_wire["checkpoint_ref"] != numeric_wire["checkpoint_ref"]
+                or source_wire["checkpoint_hash"] != numeric_wire["checkpoint_hash"]
+            ):
+                raise ResearchVerificationConflict("source and numeric verification bind different checkpoints")
         expected_artifacts = [{
             "ref": material_wire["artifact_ref"],
             "hash": material_wire["artifact_hash"],
         }]
-        transcript_evidence = (
-            evidence_wire["source_type"] == TRANSCRIPT_EVIDENCE_SOURCE_TYPE
-        )
         if transcript_evidence:
             transcript_shape = (
-                verification_mode == "connector_authority"
+                verification_mode in {"connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE}
                 and material_wire["source_type"] != "recorded_fixture"
                 and len(evidence_wire["artifact_refs"]) == 2
                 and evidence_wire["artifact_refs"][:1] == expected_artifacts
@@ -1433,28 +1554,40 @@ class CandidateStagingStore:
         if not all(evidence_checks):
             raise ResearchVerificationConflict("candidate evidence drifted from verified source material")
         expected_evidence = [{"ref": evidence_wire["id"], "hash": evidence_wire["content_hash"]}]
-        claim_checks = (
+        claim_checks = [
             claim_wire["candidate_evidence_refs"] == expected_evidence,
             claim_wire["source_verification_ref"] == source_wire["id"],
             claim_wire["source_verification_hash"] == source_wire["content_hash"],
-            claim_wire["numeric_spec_ref"] == spec_wire["id"],
-            claim_wire["numeric_spec_hash"] == spec_wire["content_hash"],
-            claim_wire["numeric_verification_ref"] == numeric_wire["id"],
-            claim_wire["numeric_verification_hash"] == numeric_wire["content_hash"],
-            claim_wire["value"] == spec_wire["output_value"],
-            claim_wire["unit"] == spec_wire["output_unit"],
-            claim_wire["currency"] == spec_wire["output_currency"],
-            claim_wire["scale"] == spec_wire["output_scale"],
-            canonical_json(claim_wire["period"]) == canonical_json(spec_wire["output_period"]),
-        )
+        ]
+        if spec_wire is not None and numeric_wire is not None:
+            claim_checks.extend((
+                claim_wire["numeric_spec_ref"] == spec_wire["id"],
+                claim_wire["numeric_spec_hash"] == spec_wire["content_hash"],
+                claim_wire["numeric_verification_ref"] == numeric_wire["id"],
+                claim_wire["numeric_verification_hash"] == numeric_wire["content_hash"],
+                claim_wire["value"] == spec_wire["output_value"],
+                claim_wire["unit"] == spec_wire["output_unit"],
+                claim_wire["currency"] == spec_wire["output_currency"],
+                claim_wire["scale"] == spec_wire["output_scale"],
+                canonical_json(claim_wire["period"]) == canonical_json(spec_wire["output_period"]),
+            ))
+        else:
+            claim_checks.extend(
+                claim_wire[field] is None
+                for field in (
+                    "value", "unit", "currency", "scale", "numeric_spec_ref",
+                    "numeric_spec_hash", "numeric_verification_ref",
+                    "numeric_verification_hash",
+                )
+            )
         if not all(claim_checks):
             raise ResearchVerificationConflict("candidate claim drifted from verified inputs")
 
         request_hash = content_hash({
             "material_hash": material_wire["content_hash"],
-            "numeric_spec_hash": spec_wire["content_hash"],
+            "numeric_spec_hash": None if spec_wire is None else spec_wire["content_hash"],
             "source_verification_hash": source_wire["content_hash"],
-            "numeric_verification_hash": numeric_wire["content_hash"],
+            "numeric_verification_hash": None if numeric_wire is None else numeric_wire["content_hash"],
             "evidence_hash": evidence_wire["content_hash"],
             "claim_hash": claim_wire["content_hash"],
         })
@@ -1483,9 +1616,11 @@ class CandidateStagingStore:
                 version=claim_wire["version"], prior_ref=claim_wire["prior_version_ref"],
             )
             self._insert_immutable(self.connection, "candidate_source_materials", "material_id", material_wire["id"], material_wire)
-            self._insert_immutable(self.connection, "candidate_numeric_specs", "numeric_spec_id", spec_wire["id"], spec_wire)
+            if spec_wire is not None:
+                self._insert_immutable(self.connection, "candidate_numeric_specs", "numeric_spec_id", spec_wire["id"], spec_wire)
             self._insert_immutable(self.connection, "candidate_verifications", "verification_id", source_wire["id"], source_wire)
-            self._insert_immutable(self.connection, "candidate_verifications", "verification_id", numeric_wire["id"], numeric_wire)
+            if numeric_wire is not None:
+                self._insert_immutable(self.connection, "candidate_verifications", "verification_id", numeric_wire["id"], numeric_wire)
             self.connection.execute(
                 "INSERT INTO candidate_evidence_versions(version_id,candidate_evidence_ref,version_number,prior_version_id,record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?)",
                 (evidence_wire["id"], evidence_wire["candidate_evidence_ref"], evidence_wire["version"], evidence_wire["prior_version_ref"], canonical_json(evidence_wire), evidence_wire["content_hash"], evidence_wire["created_at"]),
@@ -1501,7 +1636,7 @@ class CandidateStagingStore:
                 "candidate_claim_ref": claim_wire["id"],
                 "candidate_claim_hash": claim_wire["content_hash"],
                 "source_verification_ref": source_wire["id"],
-                "numeric_verification_ref": numeric_wire["id"],
+                "numeric_verification_ref": None if numeric_wire is None else numeric_wire["id"],
             }
             self.connection.execute(
                 "INSERT INTO candidate_stage_requests(idempotency_key,request_hash,result_json,created_at) VALUES(?,?,?,?)",
@@ -1533,6 +1668,8 @@ class CandidateStagingStore:
 __all__ = [
     "ResearchVerificationError", "ResearchVerificationConflict", "VerificationRejected",
     "InjectedStagingCrash", "CandidateStagingStore",
+    "TRANSCRIPT_CORE_AUTHORITY_MODE", "TRANSCRIPT_SOURCE_VERIFIER_REF",
+    "TRANSCRIPT_SOURCE_VERIFIER_HASH",
     "build_source_verification_material", "build_authority_source_material",
     "validate_source_verification_material",
     "validate_numeric_verification_spec", "validate_verification_bundle",

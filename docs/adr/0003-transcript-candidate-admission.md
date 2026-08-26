@@ -1,7 +1,7 @@
 # ADR-0003：transcript 候选如何进入 CandidateStaging
 
-- 状态：Proposed（等 owner 裁决）
-- 日期：2026-08-26
+- 状态：Accepted（2026-08-26，owner 授权 Eve 裁决，选 B；owner 可否决）
+- 日期：2026-08-26（Proposed）→ 2026-08-26（Accepted）
 - 适用范围：S6 ACN 首条正式 Claim、后续所有以电话会 / 访谈逐字稿为来源的候选
 
 ## 背景
@@ -52,7 +52,24 @@ S6 计划让「ACN Q3 FY2026 新签订单本地货币同比 -3%」从 AlphaEngin
 - 把逐字稿当成数值 authority，与「transcript 不能作为 numeric metric 唯一 observed authority」的既定原则冲突；
   抽取规则也很难做成闭合、可审计的确定性合同。不推荐。
 
-## 推荐
+## 裁决（2026-08-26）
+
+**选 B，不选 A / C。** 实现见 `reports/s7b-qualitative-transcript-candidate-staging-v0.1-2026-08-26.md`。
+
+- A 的隐藏成本比草案写的大。仓库里 ACN 的 SEC 数字（USD 19.32bn、-3%）来自
+  `deploy/coverage/us-it-services-industry-evidence-v1.json`，是 `human:coverage-owner` 手工登记的 evidence pack，
+  不是 connector 数值验证产物；SEC exhibit 是 HTML，现有 numeric extractor 只有 `number` / `count` 两种 JSON
+  pointer。A 要先造一个 exhibit 解析器才能让 deterministic verifier 从 SEC material 复算 -3%，本质上又回到
+  文本抽数——和 C 是同一个问题，只是换了来源。
+- 2026-08-24 已定原则：`authenticated_transcript` 不能作为 numeric / numeric_and_semantic metric 的唯一 observed
+  authority，但 semantic metric 可以。B 就是把这条原则写成合同：transcript 候选以 `claim_kind = qualitative` 进
+  staging，数值字段全为 null，「-3%」回 SEC Claim。
+- B 打开的口子用三道 guard 关住：qualitative 只接受带 exact citation binding 的 transcript evidence；
+  `commit_policy_candidate` 与 `research_auto_commit` 的所有 policy 路径拒绝 qualitative；正式入库只经
+  explicit human review。
+- 代价：S6 的第一条正式 transcript Claim 是语义陈述，不是 -3%。数值 Claim 走 S7d 的 SEC lane。
+
+## 推荐（裁决前原文，保留供追溯）
 
 **A**，理由：它和 packet 里已经写下的 `required_secondary_numeric_authority` 一致，正式 Claim 仍是 quantitative，
 不动 Ledger 0.2，且顺带把 SEC connector 也推上 Core-hosted 路径——这是 US IT Services brief v3 本来就需要的。

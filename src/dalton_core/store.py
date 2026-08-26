@@ -1028,7 +1028,14 @@ class DaltonStore:
         source, metric, statement, record count, policy version, or actor.
         """
         from .research_auto_commit import authorize_policy_candidate
+        from .research_verification import validate_candidate_claim
 
+        if validate_candidate_claim(claim)["claim_kind"] != "quantitative":
+            # ADR-0003 option B: no policy rule exists for qualitative
+            # (transcript) candidates; reject before touching policy state.
+            raise GateRejected(
+                "qualitative candidates enter the Ledger only through explicit human review"
+            )
         policy = self.active_policy()
         decision_wire = authorize_policy_candidate(
             connection=self.connection,
@@ -1073,11 +1080,27 @@ class DaltonStore:
             validate_candidate_evidence,
         )
 
+        from .transcript_correction import TRANSCRIPT_EVIDENCE_SOURCE_TYPE
+
         decision_wire = dict(decision_wire)
         evidence_wire = validate_candidate_evidence(evidence)
         claim_wire = validate_candidate_claim(claim)
         if decision_wire["verdict"] != "accept":
             raise GateRejected("only an accepted authorization can enter the Ledger")
+        if claim_wire["claim_kind"] == "qualitative":
+            # ADR-0003 option B: a semantic transcript candidate never enters
+            # the Ledger through a policy path, and only as transcript evidence.
+            if (
+                active_policy_binding is not None
+                or decision_wire.get("authorization") != "explicit_human_review"
+            ):
+                raise GateRejected(
+                    "qualitative candidates enter the Ledger only through explicit human review"
+                )
+            if evidence_wire["source_type"] != TRANSCRIPT_EVIDENCE_SOURCE_TYPE:
+                raise GateRejected(
+                    "qualitative candidates require authenticated transcript evidence"
+                )
         if not isinstance(idempotency_key, str) or not idempotency_key:
             raise ValidationError("idempotency_key is required")
         if decision_wire["reviewer_ref"] == claim_wire["actor_ref"]:

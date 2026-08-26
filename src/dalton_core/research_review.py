@@ -319,16 +319,25 @@ def validate_claim_version_v0_2(value: Mapping[str, Any]) -> dict[str, Any]:
         raise ResearchReviewError("unsupported ClaimVersionV0.2 schema_version")
     for field in (
         "id", "claim_ref", "subject_ref", "metric_or_aspect", "basis",
-        "normalized_statement", "unit", "scale", "semantic_review_ref",
+        "normalized_statement", "semantic_review_ref",
         "candidate_origin_ref", "actor_ref",
     ):
         wire[field] = _text(wire[field], field)
     wire["version"] = _positive_int(wire["version"], "version")
     wire["created_at"] = _timestamp(wire["created_at"], "created_at")
-    if wire["claim_kind"] != "quantitative":
-        raise ResearchReviewError("ClaimVersionV0.2 promotion currently accepts quantitative claims only")
-    if not isinstance(wire["value"], str) or _DECIMAL_RE.fullmatch(wire["value"]) is None:
-        raise ResearchReviewError("ClaimVersionV0.2.value must be canonical Decimal text")
+    if wire["claim_kind"] == "quantitative":
+        if not isinstance(wire["value"], str) or _DECIMAL_RE.fullmatch(wire["value"]) is None:
+            raise ResearchReviewError("ClaimVersionV0.2.value must be canonical Decimal text")
+        for field in ("unit", "scale"):
+            wire[field] = _text(wire[field], field)
+    elif wire["claim_kind"] == "qualitative":
+        # ADR-0003 option B: a semantic claim carries no numeric authority.
+        if any(wire[field] is not None for field in ("value", "unit", "currency", "scale")):
+            raise ResearchReviewError(
+                "qualitative ClaimVersionV0.2 must not carry value, unit, currency or scale"
+            )
+    else:
+        raise ResearchReviewError("ClaimVersionV0.2.claim_kind must be quantitative or qualitative")
     if wire["currency"] is not None and (
         not isinstance(wire["currency"], str) or re.fullmatch(r"[A-Z]{3}", wire["currency"]) is None
     ):
@@ -523,38 +532,55 @@ class HumanReviewAuthority:
                 raise ResearchReviewConflict(f"{name} authority drifted")
             return wire
 
-        numeric_spec = validate_numeric_verification_spec(load(
-            "candidate_numeric_specs", "numeric_spec_id",
-            claim["numeric_spec_ref"], "candidate numeric spec",
-        ))
         source_verification = validate_verification_bundle(load(
             "candidate_verifications", "verification_id",
             claim["source_verification_ref"], "candidate source verification",
         ))
-        numeric_verification = validate_verification_bundle(load(
-            "candidate_verifications", "verification_id",
-            claim["numeric_verification_ref"], "candidate numeric verification",
-        ))
-        material_refs = {
-            (item["source_material_ref"], item["source_material_hash"])
-            for item in numeric_spec["inputs"]
-        }
-        if len(material_refs) != 1:
-            raise ResearchReviewConflict(
-                "candidate numeric spec does not bind one exact source material"
-            )
-        material_ref, material_hash = next(iter(material_refs))
+        if claim["claim_kind"] == "qualitative":
+            # ADR-0003 option B: no numeric authority exists; the source
+            # verification is the only staged authority and it binds the
+            # material directly.
+            numeric_spec = None
+            numeric_verification = None
+            material_ref = source_verification["subject_ref"]
+            material_hash = source_verification["subject_hash"]
+        else:
+            numeric_spec = validate_numeric_verification_spec(load(
+                "candidate_numeric_specs", "numeric_spec_id",
+                claim["numeric_spec_ref"], "candidate numeric spec",
+            ))
+            numeric_verification = validate_verification_bundle(load(
+                "candidate_verifications", "verification_id",
+                claim["numeric_verification_ref"], "candidate numeric verification",
+            ))
+            material_refs = {
+                (item["source_material_ref"], item["source_material_hash"])
+                for item in numeric_spec["inputs"]
+            }
+            if len(material_refs) != 1:
+                raise ResearchReviewConflict(
+                    "candidate numeric spec does not bind one exact source material"
+                )
+            material_ref, material_hash = next(iter(material_refs))
         material = validate_source_verification_material(load(
             "candidate_source_materials", "material_id", material_ref,
             "candidate source material",
         ))
         if (
             material["content_hash"] != material_hash
-            or claim["numeric_spec_hash"] != numeric_spec["content_hash"]
             or claim["source_verification_hash"]
             != source_verification["content_hash"]
-            or claim["numeric_verification_hash"]
-            != numeric_verification["content_hash"]
+            or source_verification["subject_ref"] != material["id"]
+            or source_verification["subject_hash"] != material["content_hash"]
+            or (
+                numeric_spec is not None
+                and claim["numeric_spec_hash"] != numeric_spec["content_hash"]
+            )
+            or (
+                numeric_verification is not None
+                and claim["numeric_verification_hash"]
+                != numeric_verification["content_hash"]
+            )
         ):
             raise ResearchReviewConflict(
                 "candidate authority bundle hash binding drifted"
