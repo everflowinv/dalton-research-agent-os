@@ -32,6 +32,13 @@ from .alphaengine_acquisition_launcher import (
     AcquisitionTicketNotFound,
     AlphaEngineAcquisitionLauncher,
 )
+from .sec_lane_launcher import (
+    LaneLaunchConflict,
+    LaneLaunchError,
+    LaneLaunchRejected,
+    LaneTicketNotFound,
+    SecLaneLauncher,
+)
 from .research_review import (
     HumanReviewAuthority,
     ResearchReviewConflict,
@@ -243,6 +250,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "dispatch_answer_refresh",
     "acquire_alphaengine_document", "alphaengine_acquisition_status",
     "stage_transcript_candidate", "transcript_candidate_status",
+    "run_sec_company_facts_lane", "sec_lane_status",
 })
 FEEDBACK_BRIDGE_OPERATIONS = frozenset({
     "list_agenda_feedback_targets", "record_agenda_feedback",
@@ -346,6 +354,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "period", "basis", "normalized_statement", "idempotency_key", "actor_ref",
     }),
     "transcript_candidate_status": frozenset({"candidate_claim_ref"}),
+    "run_sec_company_facts_lane": frozenset({
+        "issuers", "filed_from", "filed_to", "actor_ref",
+    }),
+    "sec_lane_status": frozenset({"ticket_ref"}),
     "create_policy": frozenset({"policy", "policy_version_id", "version_number", "activate", "policy_ref", "effective_from", "effective_until", "actor_ref", "prior_version_ref", "change_reason", "content_hash_value"}),
     "current_pointer": frozenset({"thesis_id"}),
     "get_version": frozenset({"version_id"}),
@@ -524,6 +536,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "publish_transcript_correction_set": "actor_ref",
     "acquire_alphaengine_document": "actor_ref",
     "stage_transcript_candidate": "actor_ref",
+    "run_sec_company_facts_lane": "actor_ref",
 }
 
 
@@ -680,10 +693,13 @@ class WriterServer:
         transcript_spool_dir: str | Path | None = None,
         acquisition_launcher: AlphaEngineAcquisitionLauncher | None = None,
         candidate_staging_path: str | Path | None = None,
+        sec_lane_launcher: SecLaneLauncher | None = None,
     ):
         if not principals:
             raise WriterServerError("at least one principal is required")
         self._acquisition_launcher = acquisition_launcher
+        # S7d: out-of-process SEC company-facts lane runs (human-only ops).
+        self._sec_lane_launcher = sec_lane_launcher
         # The same owner-only CandidateStaging file the Cockpit review plane
         # opens as ``research_review.candidate_staging_path``; the writer
         # stages transcript candidates into it and reads status back from it.
@@ -996,6 +1012,8 @@ class WriterServer:
     def _close_store(self) -> None:
         if self._acquisition_launcher is not None:
             self._acquisition_launcher.close()
+        if self._sec_lane_launcher is not None:
+            self._sec_lane_launcher.close()
         if self._candidate_review is not None:
             self._candidate_review.close()
             self._candidate_review = None
@@ -1614,6 +1632,30 @@ class WriterServer:
         return self.acquisition_launcher.status(dict(p)["ticket_ref"])
 
     @property
+    def sec_lane_launcher(self) -> SecLaneLauncher:
+        if self._sec_lane_launcher is None:
+            raise LaneLaunchRejected(
+                "SEC company-facts lane launcher is not configured on this writer"
+            )
+        return self._sec_lane_launcher
+
+    def _op_run_sec_company_facts_lane(self, p: Mapping[str, Any]) -> Any:
+        # Runs out of process; see sec_lane_launcher.  The store thread only
+        # validates, checks the SEC governance record and spawns.  The lane's
+        # Core writes (plans, candidates, policy-committed Claims) happen in
+        # the child under the active governance policy, never here.
+        values = dict(p)
+        return self.sec_lane_launcher.start(
+            issuers=values["issuers"],
+            filed_from=values["filed_from"],
+            filed_to=values["filed_to"],
+            actor_ref=values["actor_ref"],
+        )
+
+    def _op_sec_lane_status(self, p: Mapping[str, Any]) -> Any:
+        return self.sec_lane_launcher.status(dict(p)["ticket_ref"])
+
+    @property
     def candidate_staging(self) -> CandidateStagingStore:
         if self._candidate_staging is None:
             raise VerificationRejected(
@@ -1799,17 +1841,17 @@ class WriterServer:
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
-        if isinstance(exc, AcquisitionLaunchRejected):
+        if isinstance(exc, (AcquisitionLaunchRejected, LaneLaunchRejected)):
             return "rejected"
-        if isinstance(exc, AcquisitionLaunchConflict):
+        if isinstance(exc, (AcquisitionLaunchConflict, LaneLaunchConflict)):
             return "conflict"
         if isinstance(exc, (ResearchVerificationConflict, ResearchReviewConflict)):
             return "conflict"
         if isinstance(exc, (ResearchVerificationError, ResearchReviewError)):
             return "rejected"
-        if isinstance(exc, AcquisitionTicketNotFound):
+        if isinstance(exc, (AcquisitionTicketNotFound, LaneTicketNotFound)):
             return "not_found"
-        if isinstance(exc, AcquisitionLaunchError):
+        if isinstance(exc, (AcquisitionLaunchError, LaneLaunchError)):
             return "store_error"
         if isinstance(exc, (CapabilityConflict,)):
             return "conflict"
@@ -1878,10 +1920,50 @@ def main(argv: list[str] | None = None) -> int:
         "--acquisition-rehearsal-approved-by",
         help="rehearsal only: in-memory approved governance principal (tests)",
     )
+    parser.add_argument(
+        "--sec-lane-governance",
+        help="approved SEC company-facts connector governance record; enables "
+             "run_sec_company_facts_lane (requires --candidate-staging)",
+    )
+    parser.add_argument(
+        "--sec-lane-user-agent",
+        help="operator-visible SEC User-Agent passed to lane runs",
+    )
+    parser.add_argument(
+        "--sec-lane-rehearsal-fixture",
+        help="rehearsal only: company-facts fixture file served instead of data.sec.gov (tests)",
+    )
+    parser.add_argument(
+        "--sec-lane-rehearsal-approved-by",
+        help="rehearsal only: in-memory approved SEC governance principal (tests)",
+    )
     args = parser.parse_args(argv)
     try:
         principals = load_principals(args.token_config)
         launcher = None
+        sec_lane_launcher = None
+        if args.sec_lane_governance is not None:
+            if args.candidate_staging is None:
+                raise WriterServerError(
+                    "--sec-lane-governance requires --candidate-staging"
+                )
+            if args.sec_lane_rehearsal_fixture is not None:
+                lane_mode_args: tuple[str, ...] = (
+                    "--fixture-company-facts", args.sec_lane_rehearsal_fixture,
+                )
+                if args.sec_lane_rehearsal_approved_by is not None:
+                    lane_mode_args += (
+                        "--rehearsal-approved-by", args.sec_lane_rehearsal_approved_by,
+                    )
+            else:
+                lane_mode_args = ("--allow-network",)
+            sec_lane_launcher = SecLaneLauncher(
+                state_dir=Path(args.db).expanduser().resolve().parent,
+                governance_path=args.sec_lane_governance,
+                staging_path=args.candidate_staging,
+                mode_args=lane_mode_args,
+                user_agent=args.sec_lane_user_agent,
+            )
         if args.connector_governance is not None:
             if args.acquisition_rehearsal_document is not None:
                 mode_args: tuple[str, ...] = (
@@ -1912,6 +1994,7 @@ def main(argv: list[str] | None = None) -> int:
             transcript_spool_dir=args.transcript_spool_dir,
             acquisition_launcher=launcher,
             candidate_staging_path=args.candidate_staging,
+            sec_lane_launcher=sec_lane_launcher,
         )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:

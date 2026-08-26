@@ -13,6 +13,9 @@ from .service import ServiceConfig
 
 
 WRITER_LABEL = "space.lumos.dalton.writer"
+# Operator-visible SEC User-Agent for lane runs (SEC fair-access policy asks
+# for a contact string; no credentials are involved).
+SEC_LANE_USER_AGENT = "Dalton Research Agent OS SEC company-facts lane (owner: lumos)"
 CONTROLLER_LABEL = "space.lumos.dalton.controller"
 CONTROL_LABEL = "space.lumos.dalton.control"
 THESIS_IMPACT_LABEL = "space.lumos.dalton.thesis-impact"
@@ -87,7 +90,14 @@ def render(
             "--connector-governance",
             str(state / "connector-governance" / "alphaengine-get-document-v1.json"),
         ] + (
-            ["--candidate-staging", candidate_staging_path]
+            # S7d: the SEC company-facts lane stages into the same Cockpit
+            # staging file and is only enabled when that file is configured.
+            [
+                "--candidate-staging", candidate_staging_path,
+                "--sec-lane-governance",
+                str(state / "connector-governance" / "sec-company-facts-v1.json"),
+                "--sec-lane-user-agent", SEC_LANE_USER_AGENT,
+            ]
             if candidate_staging_path is not None else []
         ),
         "StandardOutPath": str(logs / "writer.stdout.log"),
