@@ -505,6 +505,55 @@ class HumanReviewAuthority:
         return {"evidence": evidence, "claim": claim}
 
     @_serialized
+    def candidate_status(self, candidate_claim_ref: str) -> dict[str, Any]:
+        """Read one staged candidate back with its review decision and commit state.
+
+        ``candidate_claim_ref`` may be the exact claim version id or the
+        stable ``candidate_claim_ref``; the stable form resolves to the
+        highest staged version.  Read-only; never creates a review.
+        """
+
+        ref = _text(candidate_claim_ref, "candidate_claim_ref")
+        row = self.connection.execute(
+            "SELECT version_id FROM candidate_claim_versions WHERE version_id=?", (ref,)
+        ).fetchone()
+        if row is None:
+            row = self.connection.execute(
+                "SELECT version_id FROM candidate_claim_versions WHERE candidate_claim_ref=? "
+                "ORDER BY version_number DESC LIMIT 1", (ref,)
+            ).fetchone()
+        if row is None:
+            raise ResearchReviewRejected("candidate claim is unavailable")
+        claim, evidence = self._candidate_pair(row["version_id"])
+        decision_row = self.connection.execute(
+            "SELECT decision_json FROM human_review_decisions WHERE candidate_claim_version_ref=?",
+            (claim["id"],),
+        ).fetchone()
+        decision = (
+            None if decision_row is None
+            else validate_human_review_decision(json.loads(decision_row["decision_json"]))
+        )
+        event = None if decision is None else self._current_commit_event(decision["id"])
+        if decision is None:
+            review_state = "staged"
+        elif event is None:
+            review_state = "decided"
+        else:
+            review_state = event["state"]
+        return {
+            "candidate_claim_ref": claim["id"],
+            "candidate_claim_hash": claim["content_hash"],
+            "candidate_evidence_ref": evidence["id"],
+            "candidate_evidence_hash": evidence["content_hash"],
+            "claim_kind": claim["claim_kind"],
+            "review_state": review_state,
+            "claim": claim,
+            "evidence": evidence,
+            "decision": decision,
+            "commit_state": None if event is None else event["state"],
+        }
+
+    @_serialized
     def candidate_authority_bundle(
         self, candidate_claim_ref: str
     ) -> dict[str, Any]:
