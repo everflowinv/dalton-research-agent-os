@@ -19,7 +19,7 @@
     },
     "research_candidate_auto_commit": {
       "enabled": true,
-      "rules": ["research-candidate-auto-commit:sec-public-company-facts:v1"],
+      "rules": ["research-auto-commit:sec-public-company-facts-growth:v1"],
       "max_records": 20
     }
   }
