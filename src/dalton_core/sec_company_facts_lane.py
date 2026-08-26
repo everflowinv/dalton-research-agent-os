@@ -497,7 +497,7 @@ class SecCompanyFactsLane:
     def _bind_agenda(
         self, company_refs: list[str], actor_ref: str, effective_from: str, effective_until: str
     ) -> None:
-        self.agenda.create_policy(
+        policy_result = self.agenda.create_policy(
             _agenda_policy(company_refs),
             effective_from=effective_from,
             effective_until=effective_until,
@@ -506,7 +506,9 @@ class SecCompanyFactsLane:
             version_id=AGENDA_POLICY_VERSION_ID,
             idempotency_key=f"agenda-policy:{LANE_SLUG}:v1",
         )
-        self.agenda.create_mandate(
+        if policy_result.get("status") == "conflict":
+            raise AgendaConflict("agenda policy idempotency conflict")
+        mandate_result = self.agenda.create_mandate(
             MANDATE_REF,
             objective="Track reported quarterly revenue for US IT services issuers from SEC company facts",
             scope_refs=company_refs,
@@ -519,6 +521,8 @@ class SecCompanyFactsLane:
             version_id=MANDATE_VERSION_ID,
             idempotency_key=f"mandate:{LANE_SLUG}:v1",
         )
+        if mandate_result.get("status") == "conflict":
+            raise AgendaConflict("mandate idempotency conflict")
 
     def _register_question(
         self, issuer: Issuer, *, filed_from: str, filed_to: str, run_key: str
