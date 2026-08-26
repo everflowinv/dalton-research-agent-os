@@ -48,6 +48,12 @@ if [[ ! -f "$governance_file" ]]; then
   cp "$repo_root/deploy/connector-governance/alphaengine-get-document-v1.json" "$governance_file"
   chmod 600 "$governance_file"
 fi
+# S7d: the SEC company-facts lane has its own record; same seed-once rule.
+sec_governance_file="$governance_dir/sec-company-facts-v1.json"
+if [[ ! -f "$sec_governance_file" && -f "$repo_root/deploy/connector-governance/sec-company-facts-v1.json" ]]; then
+  cp "$repo_root/deploy/connector-governance/sec-company-facts-v1.json" "$sec_governance_file"
+  chmod 600 "$sec_governance_file"
+fi
 "$venv_dir/bin/python" -m dalton_core.macos_launchagent \
   --launch-agents-dir "$launch_agents_dir" \
   --python-env-bin "$venv_dir/bin" \

@@ -257,6 +257,14 @@ class ServiceTests(unittest.TestCase):
             # file the Cockpit reviews, derived from the control config.
             writer_args = writer["ProgramArguments"]
             self.assertIn("--candidate-staging", writer_args)
+            # S7d: the SEC lane rides on the same staging file and is only
+            # wired when that file is configured.
+            self.assertIn("--sec-lane-governance", writer_args)
+            self.assertEqual(
+                writer_args[writer_args.index("--sec-lane-governance") + 1],
+                str((root / "state").resolve() / "connector-governance" / "sec-company-facts-v1.json"),
+            )
+            self.assertIn("--sec-lane-user-agent", writer_args)
             self.assertEqual(
                 writer_args[writer_args.index("--candidate-staging") + 1],
                 str(service.control.research_review.candidate_staging_path),
@@ -290,6 +298,7 @@ class ServiceTests(unittest.TestCase):
             )
             writer = plistlib.loads(Path(paths["writer"]).read_bytes())
             self.assertNotIn("--candidate-staging", writer["ProgramArguments"])
+            self.assertNotIn("--sec-lane-governance", writer["ProgramArguments"])
             self.assertIn("--connector-governance", writer["ProgramArguments"])
             self.assertNotIn("control", paths)
 
