@@ -52,15 +52,25 @@
   brief 22 Claim / 6 来源 / 20 行 KPI / 80 单元格，replay 一致。用 8/24 真实 ACN 原文跑，citation span 与 live 一致。
   专项 1/1，关联 29/29。**live 上暂时做不出 brief v3**：`register_evidence_pack` 要求每个 driver 至少一条正式 Claim、
   overlay 每个 driver view 至少引用一条本公司 Claim，而 live 只有 ACN 这一条；v2 的 SEC Claim 只在隔离 canary。
-  两条路等 owner 选：A 先做 S7d（SEC lane 上 live）再出 live brief v3（推荐）；B 放宽合同出一份 1 Claim + 79 gap 的 brief。
+  owner 于 2026-08-26 18:03 UTC 选 A：先做 S7d（见下一条），再出 live brief v3。
   见 [S7c-5 报告](reports/s7c5-brief-v3-isolated-canary-and-live-brief-gate-v0.1-2026-08-26.md)
+- **S7d 已在 live 执行（2026-08-26 19:02–20:05 UTC）**：US IT Services SEC company-facts lane（S7d-1 `sec_company_facts_lane` +
+  `dalton-sec-lane`；S7d-2 通用 `connector_governance`，SEC 记录 `connector-governance:sec-company-facts:v1` 由 `human:lumos` 批准；
+  S7d-3 writer human-only op `run_sec_company_facts_lane` / `sec_lane_status`，子进程 + ticket）。live governance policy `policy-2`
+  自动提交 ACN（+5.59%）、EPAM（+4.53%）、CTSH（+5.83%，Q1，API 未收录 Q2）三条 quantitative Claim，0 人工 gate；**live Core 现有
+  4 Claim / 4 Evidence**。IBM 被 5 MiB 响应上限挡住，等 owner 决定是否提到 8 MiB；Phase 7 门槛「≥5 条 policy 自动提交 SEC Claim」未达（3）。
+  上 live 暴露两处性能根因并已修（`ea160d6`）：writer LaunchAgent `ProcessType: Background` 让 CPU 工作慢 6 倍且子进程无法自行解除
+  （EPAM 步骤 6 分钟以上、CTSH 391 秒）→ writer 改 `Standard`；`ResearchPlanAuthority.plans()` 每个 SEC plan 重新加载校验 packaged
+  inventory 24 次，`thesis_impact_targets` 超 30 秒、thesis-impact worker 自 19:07 UTC 起每次失败 → inventory 每进程缓存，0.25 秒，worker 恢复 idle。
+  见 [S7d 报告](reports/s7d-live-sec-lane-rollout-v0.1-2026-08-26.md)、[S7d-1](reports/s7d1-sec-company-facts-lane-v0.1-2026-08-26.md)、
+  [S7d-2](reports/s7d2-connector-governance-generalization-v0.1-2026-08-26.md)
 - S7b development candidate：ADR-0003 裁决为 B（Accepted，owner 可否决）。transcript 候选以 `claim_kind = qualitative`
   进 CandidateStaging，数值字段全为 null，只收带 exact citation binding 的 transcript evidence，policy 路径一律拒绝，
   只经 explicit human review 入库；新增闭合 verification mode `transcript_core_authority` 和
   `stage_transcript_qualitative_candidate` 入口（S7c writer op 直接调用）。隔离端到端：ACN 语义候选 stage → accept →
   commit 写出 1 条 EvidenceVersion + 1 条 qualitative ClaimVersion 0.2。见
   [S7b 报告](reports/s7b-qualitative-transcript-candidate-staging-v0.1-2026-08-26.md)
-- live deployed source：`0efe8f5`（2026-08-26 17:36 UTC，S7c-4 spool 接线修复；上一版 `dc747de` 17:18 UTC，含 S7a / S7b /
+- live deployed source：`ea160d6`（2026-08-26 20:04 UTC，S7d 性能修复；之前 `abff89f` 19:45 UTC、`326a62f` 19:00 UTC S7d 首版、`0efe8f5` 17:36 UTC S7c-4 spool 接线修复；上一版 `dc747de` 17:18 UTC，含 S7a / S7b /
   S7c-1 / S7c-2 / S7c-3；再上一版 `3fe746e`）；
   thesis-impact production runner：`9c295ca`；OpenClaw host patch chain：`6f93b9b14`；claude-cli-gateway 心跳补丁：
   workspace `935a751be`
