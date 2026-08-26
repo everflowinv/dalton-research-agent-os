@@ -47,6 +47,21 @@ _HUMAN_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
 _TICKER_RE = re.compile(r"[A-Z][A-Z0-9.]{0,7}\Z")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 LIVE_MODE_ARGS = ("--allow-network",)
+# The writer runs under launchd ``ProcessType: Background`` and children
+# inherit PRIO_DARWIN_BG: on 2026-08-26 a live EPAM lane step that takes <30s
+# in a foreground shell ran for 6+ minutes at "100%" of an efficiency core.
+# ``taskpolicy -B`` cannot be used as an exec prefix (it only accepts ``-p``),
+# and ``taskpolicy -B -p <child>`` measured no effect; the only thing that
+# measured as effective (0.35s vs 2.2s on a CPU probe under ``taskpolicy -b``)
+# is the child itself calling ``setpriority(PRIO_DARWIN_PROCESS, 0, 0)``, so
+# the CLI gets ``--foreground`` and does that before any work.  The writer
+# itself stays a background daemon.
+FOREGROUND_ARGS = ("--foreground",)
+
+# Writer-hosted children cannot be attached to without root (sample /
+# sys.remote_exec both need the task port), so the child writes its own
+# Python stack to run.log every interval; a stall then has a trace.
+STACK_DUMP_SECONDS = 60
 CLI_MODULE = "dalton_core.sec_lane_cli"
 MAX_ISSUERS = 8
 
@@ -193,6 +208,8 @@ class SecLaneLauncher:
             "--filed-from", filed_from,
             "--filed-to", filed_to,
             "--quiet",
+            "--stack-dump-seconds", str(STACK_DUMP_SECONDS),
+            *FOREGROUND_ARGS,
         ]
         for ticker in issuers:
             command += ["--issuer", ticker]

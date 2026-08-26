@@ -85,9 +85,13 @@ from .store import DaltonStore, content_hash
 OPERATION = "get_company_facts"
 LANE_KIND = "sec-company-facts-lane-v1"
 LANE_SLUG = "us-it-services-sec-lane"
-AGENDA_POLICY_VERSION_ID = f"agenda-policy-version:{LANE_SLUG}:v1"
+# v2: the binding scope is the whole coverage universe (plus any explicitly
+# added issuer), never the subset selected for one run, so partial runs
+# (one ticker at a time) share one immutable binding instead of conflicting.
+AGENDA_BINDING_VERSION = "v2"
+AGENDA_POLICY_VERSION_ID = f"agenda-policy-version:{LANE_SLUG}:{AGENDA_BINDING_VERSION}"
 MANDATE_REF = f"mandate:{LANE_SLUG}"
-MANDATE_VERSION_ID = f"mandate-version:{LANE_SLUG}:v1"
+MANDATE_VERSION_ID = f"mandate-version:{LANE_SLUG}:{AGENDA_BINDING_VERSION}"
 QUESTION = "How did reported quarterly revenue change year over year?"
 ANSWER_CRITERIA = "Return the exact same-filing SEC quarterly revenue comparison."
 DEFAULT_USER_AGENT = "Dalton Research Agent SEC company-facts lane"
@@ -485,7 +489,12 @@ class SecCompanyFactsLane:
 
         if not actor_ref.startswith("human:"):
             raise LanePreconditionError("actor_ref must use the human: namespace")
-        company_refs = [issuer.company_ref for issuer in self.issuers]
+        # Bind the coverage universe, not this run's subset: a later run for a
+        # different ticker must replay the same idempotent binding request.
+        company_refs = sorted(
+            {issuer.company_ref for issuer in US_IT_SERVICES_ISSUERS}
+            | {issuer.company_ref for issuer in self.issuers}
+        )
         # Fixed effective window keeps the idempotent request hash stable
         # across runs; the lane only ever binds cycles to these exact versions.
         effective_from = "2026-08-01T00:00:00+00:00"
@@ -495,8 +504,9 @@ class SecCompanyFactsLane:
         except AgendaConflict as exc:
             raise LanePreconditionError(
                 f"lane agenda binding {AGENDA_POLICY_VERSION_ID!r} / {MANDATE_VERSION_ID!r} "
-                "already exists for a different issuer set or actor; the v1 binding is "
-                f"immutable, pass the same issuers/actor or bump the lane version: {exc}"
+                "already exists for a different issuer universe or actor; the "
+                f"{AGENDA_BINDING_VERSION} binding is immutable, pass the same "
+                f"issuers/actor or bump AGENDA_BINDING_VERSION: {exc}"
             ) from exc
         return {
             "agenda_policy_version_ref": AGENDA_POLICY_VERSION_ID,
@@ -513,7 +523,7 @@ class SecCompanyFactsLane:
             actor_ref=actor_ref,
             activate=False,
             version_id=AGENDA_POLICY_VERSION_ID,
-            idempotency_key=f"agenda-policy:{LANE_SLUG}:v1",
+            idempotency_key=f"agenda-policy:{LANE_SLUG}:{AGENDA_BINDING_VERSION}",
         )
         if policy_result.get("status") == "conflict":
             raise AgendaConflict("agenda policy idempotency conflict")
@@ -528,7 +538,7 @@ class SecCompanyFactsLane:
             actor_ref=actor_ref,
             activate=False,
             version_id=MANDATE_VERSION_ID,
-            idempotency_key=f"mandate:{LANE_SLUG}:v1",
+            idempotency_key=f"mandate:{LANE_SLUG}:{AGENDA_BINDING_VERSION}",
         )
         if mandate_result.get("status") == "conflict":
             raise AgendaConflict("mandate idempotency conflict")
