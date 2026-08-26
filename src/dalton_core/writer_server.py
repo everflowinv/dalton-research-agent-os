@@ -32,6 +32,19 @@ from .alphaengine_acquisition_launcher import (
     AcquisitionTicketNotFound,
     AlphaEngineAcquisitionLauncher,
 )
+from .research_review import (
+    HumanReviewAuthority,
+    ResearchReviewConflict,
+    ResearchReviewError,
+    ResearchReviewRejected,
+)
+from .research_verification import (
+    CandidateStagingStore,
+    ResearchVerificationConflict,
+    ResearchVerificationError,
+    VerificationRejected,
+)
+from .transcript_candidate_staging import stage_transcript_qualitative_candidate
 from .agenda import (
     AgendaConflict,
     AgendaError,
@@ -229,6 +242,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "publish_answer_sufficiency_policy",
     "dispatch_answer_refresh",
     "acquire_alphaengine_document", "alphaengine_acquisition_status",
+    "stage_transcript_candidate", "transcript_candidate_status",
 })
 FEEDBACK_BRIDGE_OPERATIONS = frozenset({
     "list_agenda_feedback_targets", "record_agenda_feedback",
@@ -327,6 +341,11 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "document_ref", "expected_content_sha256", "max_pages", "actor_ref",
     }),
     "alphaengine_acquisition_status": frozenset({"ticket_ref"}),
+    "stage_transcript_candidate": frozenset({
+        "correction_set_ref", "citation_ref", "subject_ref", "metric_or_aspect",
+        "period", "basis", "normalized_statement", "idempotency_key", "actor_ref",
+    }),
+    "transcript_candidate_status": frozenset({"candidate_claim_ref"}),
     "create_policy": frozenset({"policy", "policy_version_id", "version_number", "activate", "policy_ref", "effective_from", "effective_until", "actor_ref", "prior_version_ref", "change_reason", "content_hash_value"}),
     "current_pointer": frozenset({"thesis_id"}),
     "get_version": frozenset({"version_id"}),
@@ -504,6 +523,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "register_company_overlay": "actor_ref",
     "publish_transcript_correction_set": "actor_ref",
     "acquire_alphaengine_document": "actor_ref",
+    "stage_transcript_candidate": "actor_ref",
 }
 
 
@@ -659,10 +679,20 @@ class WriterServer:
         scheduler_path: str | Path | None = None,
         transcript_spool_dir: str | Path | None = None,
         acquisition_launcher: AlphaEngineAcquisitionLauncher | None = None,
+        candidate_staging_path: str | Path | None = None,
     ):
         if not principals:
             raise WriterServerError("at least one principal is required")
         self._acquisition_launcher = acquisition_launcher
+        # The same owner-only CandidateStaging file the Cockpit review plane
+        # opens as ``research_review.candidate_staging_path``; the writer
+        # stages transcript candidates into it and reads status back from it.
+        self._candidate_staging_path = (
+            None if candidate_staging_path is None
+            else str(Path(candidate_staging_path).expanduser().resolve())
+        )
+        self._candidate_staging: CandidateStagingStore | None = None
+        self._candidate_review: HumanReviewAuthority | None = None
         self.db_path = str(db_path)  # retained only by the owner process
         self.socket_path = str(socket_path)
         if len(os.fsencode(self.socket_path)) >= 104:
@@ -875,6 +905,9 @@ class WriterServer:
             self._transcript_spool = RawSpool(
                 self._transcript_spool_dir, max_total_bytes=1_000_000_000
             )
+        if self._candidate_staging_path is not None:
+            self._candidate_staging = CandidateStagingStore(self._candidate_staging_path)
+            self._candidate_review = HumanReviewAuthority(self._candidate_staging_path)
         if self._scheduler_path is not None:
             self._scheduler = Scheduler(self._scheduler_path)
             self._bounded_control = BoundedPlannerControlPlane(
@@ -963,6 +996,12 @@ class WriterServer:
     def _close_store(self) -> None:
         if self._acquisition_launcher is not None:
             self._acquisition_launcher.close()
+        if self._candidate_review is not None:
+            self._candidate_review.close()
+            self._candidate_review = None
+        if self._candidate_staging is not None:
+            self._candidate_staging.close()
+            self._candidate_staging = None
         if self._scheduler is not None:
             self._scheduler.close()
             self._scheduler = None
@@ -1574,6 +1613,59 @@ class WriterServer:
     def _op_alphaengine_acquisition_status(self, p: Mapping[str, Any]) -> Any:
         return self.acquisition_launcher.status(dict(p)["ticket_ref"])
 
+    @property
+    def candidate_staging(self) -> CandidateStagingStore:
+        if self._candidate_staging is None:
+            raise VerificationRejected(
+                "candidate staging is not configured on this writer"
+            )
+        return self._candidate_staging
+
+    @property
+    def candidate_review(self) -> HumanReviewAuthority:
+        if self._candidate_review is None:
+            raise VerificationRejected(
+                "candidate staging is not configured on this writer"
+            )
+        return self._candidate_review
+
+    def _read_transcript_artifact(self, artifact: Mapping[str, Any]) -> bytes:
+        if self._transcript_spool is None:
+            raise VerificationRejected("transcript spool is not configured on this writer")
+        return self._transcript_spool.read_object(artifact["artifact_content_hash"])
+
+    def _op_stage_transcript_candidate(self, p: Mapping[str, Any]) -> Any:
+        # Human-only (HUMAN_GOVERNANCE_OPERATIONS).  Reads the Core-held
+        # AlphaEngine authority and writes only CandidateStaging; the
+        # verification mode is fixed to ``transcript_core_authority`` by the
+        # S7b entry point and no policy path is touched.  ADR-0003 option B.
+        values = dict(p)
+        staging = self.candidate_staging
+        artifact_reader = (
+            None if self._transcript_spool is None else self._read_transcript_artifact
+        )
+        return stage_transcript_qualitative_candidate(
+            self.store,
+            staging,
+            correction_set_ref=values["correction_set_ref"],
+            citation_ref=values["citation_ref"],
+            subject_ref=values["subject_ref"],
+            metric_or_aspect=values["metric_or_aspect"],
+            period=values["period"],
+            basis=values["basis"],
+            normalized_statement=values["normalized_statement"],
+            actor_ref=values["actor_ref"],
+            idempotency_key=values["idempotency_key"],
+            artifact_reader=artifact_reader,
+        )
+
+    def _op_transcript_candidate_status(self, p: Mapping[str, Any]) -> Any:
+        ref = dict(p)["candidate_claim_ref"]
+        try:
+            return self.candidate_review.candidate_status(ref)
+        except ResearchReviewRejected as exc:
+            raise NotFound(str(exc)) from exc
+
     def _op_publish_transcript_correction_set(
         self, p: Mapping[str, Any]
     ) -> Any:
@@ -1711,6 +1803,10 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, AcquisitionLaunchConflict):
             return "conflict"
+        if isinstance(exc, (ResearchVerificationConflict, ResearchReviewConflict)):
+            return "conflict"
+        if isinstance(exc, (ResearchVerificationError, ResearchReviewError)):
+            return "rejected"
         if isinstance(exc, AcquisitionTicketNotFound):
             return "not_found"
         if isinstance(exc, AcquisitionLaunchError):
@@ -1741,6 +1837,10 @@ class WriterServer:
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ContextMaterializerError, PerceptionError)):
             return "request rejected by contract or gate"
+        if isinstance(exc, (ResearchVerificationConflict, ResearchReviewConflict)):
+            return "request conflicts with existing immutable data"
+        if isinstance(exc, (ResearchVerificationError, ResearchReviewError)):
+            return "request rejected by contract or gate"
         if isinstance(exc, CapabilityConflict):
             return "request conflicts with existing immutable capability data"
         if isinstance(exc, CapabilityNotFound):
@@ -1757,6 +1857,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--token-config", required=True)
     parser.add_argument("--scheduler")
     parser.add_argument("--transcript-spool-dir")
+    parser.add_argument(
+        "--candidate-staging",
+        help="owner-only CandidateStaging sqlite shared with the Cockpit review plane "
+             "(research_review.candidate_staging_path); enables stage_transcript_candidate",
+    )
     parser.add_argument(
         "--connector-governance",
         help="approved AlphaEngine connector governance record; enables acquisition launches",
@@ -1802,6 +1907,7 @@ def main(argv: list[str] | None = None) -> int:
             scheduler_path=args.scheduler,
             transcript_spool_dir=args.transcript_spool_dir,
             acquisition_launcher=launcher,
+            candidate_staging_path=args.candidate_staging,
         )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:
