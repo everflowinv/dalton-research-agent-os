@@ -23,6 +23,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from fractions import Fraction
@@ -962,6 +963,25 @@ class ThesisImpactModelWorker:
         if self.fault_hook is not None:
             self.fault_hook("after_model_accounting")
         result = adapter_result
+        if (
+            result.status == "failed"
+            and isinstance(result.error, Mapping)
+            and result.error.get("code") == "HOST_COMPLETION_FAILED"
+        ):
+            # A broker-reported host completion failure is a transient
+            # provider-side stop (live 2026-08-27: one Gemini verifier call
+            # died inside the host).  Retry inside the existing bounded
+            # attempts instead of parking the exact binding on attempt one;
+            # the day budget still gates every new paid call and this stays
+            # non-redriveable.
+            result = replace(
+                result,
+                status=self._bounded_failure_status(lease),
+                metadata={
+                    **dict(result.metadata),
+                    "host_failure_bounded_retry": True,
+                },
+            )
         if result.status == "succeeded":
             try:
                 self._validate_output(work, phase, result)

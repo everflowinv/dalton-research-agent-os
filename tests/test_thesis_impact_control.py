@@ -1211,6 +1211,147 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
         ):
             assessment_unpinned._phase_policy_ref("assessment")
 
+    def test_host_completion_failure_retries_within_bounded_attempts(self) -> None:
+        committed = self._seed_thesis()
+        started = self._close_and_start()
+        claim = self.harness.core.get_claim(
+            started["impact"]["claim_version_ref"]
+        )["claim"]
+        thesis = self.harness.core.get_version(committed["version_id"])["content"]
+        assessment_output = {
+            "schema_version": "0.1",
+            "claim_version_ref": claim["id"],
+            "claim_version_hash": claim["content_hash"],
+            "thesis_version_ref": thesis["id"],
+            "thesis_version_hash": thesis["content_hash"],
+            "driver_statement": thesis["mechanism"],
+            "impact": "supports",
+            "rationale": (
+                "The exact reported growth is directionally consistent with the "
+                "bound operating-leverage driver."
+            ),
+            "follow_up_question": None,
+        }
+        fixed_now = datetime(2026, 8, 22, 1, 30, tzinfo=timezone.utc)
+        router = ModelRouter(
+            Path(self.temp.name) / "host-retry-router.sqlite",
+            clock=lambda: fixed_now,
+        )
+        self.addCleanup(router.close)
+        shared_ref, assessment_ref, verifier_ref = self._impact_profiles_and_policies(
+            router, pinned_profile_id=None
+        )
+
+        def responder(request: dict[str, Any]) -> dict[str, Any]:
+            core = {key: value for key, value in request.items() if key != "auth"}
+            provider, model = core["model"].split("/", 1)
+            wire: dict[str, Any] = {
+                "schemaVersion": "0.1",
+                "brokerVersion": "0.1.0-recorded",
+                "runtimeVersion": "2026.8.22",
+                "invocationId": core["invocationId"],
+                "workOrderId": core["workOrderId"],
+                "profileId": core["profileId"],
+                "requestHash": broker_hash(core),
+                "idempotencyStatus": "fresh",
+                "ok": True,
+                "provider": provider,
+                "model": model,
+                "canonicalModel": core["model"],
+                "agentId": "dalton-model-broker",
+                "usage": {
+                    "inputTokens": 100,
+                    "outputTokens": 50,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": None,
+                    "totalTokens": 150,
+                },
+                "cost": {"available": True, "usd": 0.001},
+                "error": None,
+            }
+            if len(broker.requests) == 1:
+                wire["text"] = canonical_json(assessment_output)
+            elif len(broker.requests) == 2:
+                # Live 2026-08-27 shape: the broker reported a transient host
+                # completion failure for the verifier's first attempt.
+                wire.update({
+                    "ok": False,
+                    "provider": None,
+                    "model": None,
+                    "canonicalModel": None,
+                    "agentId": None,
+                    "text": None,
+                    "usage": {
+                        "inputTokens": None,
+                        "outputTokens": None,
+                        "cacheReadTokens": None,
+                        "cacheWriteTokens": None,
+                        "totalTokens": None,
+                    },
+                    "cost": {"available": False, "usd": None},
+                    "error": {
+                        "code": "HOST_COMPLETION_FAILED",
+                        "message": "host completion failed",
+                    },
+                })
+            else:
+                wire["text"] = canonical_json({
+                    "schema_version": "0.1",
+                    "verdict": "pass",
+                    "findings": [],
+                })
+            wire["contentHash"] = broker_hash(wire)
+            return wire
+
+        broker = FakeBroker(Path(self.temp.name), responder, connections=3)
+        self.addCleanup(broker.close)
+        adapter = OpenClawModelAdapter(
+            broker.path,
+            route_resolver=router.get_decision,
+            auth_client_id="client:thesis-impact-runtime",
+            auth_key_provider=lambda: b"a" * 64,
+            timeout_seconds=1.0,
+            clock=lambda: fixed_now,
+        )
+        worker = ThesisImpactModelWorker(
+            scheduler=self.harness.scheduler(),
+            router=router,
+            adapter=adapter,
+            impact=self.impact,
+            observability=self.harness.observability,
+            routing_policy_ref=shared_ref,
+            assessment_routing_policy_ref=assessment_ref,
+            verifier_routing_policy_ref=verifier_ref,
+            credential_slot_refs=(
+                "credential-slot:openai:impact-a",
+                "credential-slot:anthropic:impact-b",
+            ),
+            token_counter=lambda _text: 800,
+            clock=lambda: fixed_now,
+        )
+        runtime = ResearchPlanThesisImpactRuntime(control=self.control, worker=worker)
+        # First pass: the verifier's first attempt dies in the host; the
+        # bounded retry keeps the phase runnable instead of parking it.
+        first = runtime.run_once(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+        )
+        self.assertEqual("verification_retryable", first["status"])
+        self.assertEqual(2, len(broker.requests))
+        # Second pass: the retried verifier attempt completes and passes.
+        second = runtime.run_once(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+        )
+        self.assertEqual("eligible", second["status"])
+        self.assertEqual(3, len(broker.requests))
+        self.assertEqual(
+            1,
+            self.harness.core.connection.execute(
+                "SELECT COUNT(*) FROM thesis_impact_verifications"
+            ).fetchone()[0],
+        )
+
     def test_day_budget_gates_paid_calls_and_alerts(self) -> None:
         committed = self._seed_thesis()
         started = self._close_and_start()
