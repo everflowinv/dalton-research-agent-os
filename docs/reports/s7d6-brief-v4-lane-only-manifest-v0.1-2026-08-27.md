@@ -33,5 +33,11 @@
 
 ## 未做
 
-- 未写 v4 isolated canary / 测试：现有 v3 canary 假设其 21 条 exhibit Claim 加 transcript，而 v4 要独立构造三条 formal SEC Claim 并支持 replacement driver pack；应在主 session 另开切片。
 - 未访问或改写 live Core、未部署、未合并 main。
+
+## 主 session 复核
+
+- 复核 live Core 后确认 driver pack、industry evidence pack、company overlay 三条版本链都还是空表。草案最初把隔离 canary 的 v4/v3 当 live prior，会被「first version cannot have a prior」合同拒绝；已改成独立的 `live-sec-lane-v1` refs，全部 `prior_version_ref=null`。隔离 canary 的编号不再冒充 live authority。
+- 在 live Core + candidate staging 的 SQLite 一致性副本上注册 manifest：driver pack v1、evidence pack v1、三家公司 overlay v1 全部成功；快照含 1 个 driver、3 家公司、3 条 formal Claim。
+- Markdown 渲染 7,448 bytes；同一组 exact refs 重放逐字节一致，render hash `1def0359…04a48`。副本中已有 IBM 演练 Claim，但 v4 草案按 as-of 边界只覆盖 ACN/CTSH/EPAM，证明 coverage universe 不会从 Core 自动扩张。
+- live 仍未写；IBM 在 live policy-commit 后应把实际 live Claim/relation ref/hash 加入 manifest，再做最终 live 首次发布。
