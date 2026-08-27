@@ -91,7 +91,9 @@ LANE_SLUG = "us-it-services-sec-lane"
 # v2: the binding scope is the whole coverage universe (plus any explicitly
 # added issuer), never the subset selected for one run, so partial runs
 # (one ticker at a time) share one immutable binding instead of conflicting.
-AGENDA_BINDING_VERSION = "v2"
+# v3: DXC joins the coverage universe as the fifth issuer; the immutable v2
+# binding cannot be rewritten, so the universe change bumps the version.
+AGENDA_BINDING_VERSION = "v3"
 AGENDA_POLICY_VERSION_ID = f"agenda-policy-version:{LANE_SLUG}:{AGENDA_BINDING_VERSION}"
 MANDATE_REF = f"mandate:{LANE_SLUG}"
 MANDATE_VERSION_ID = f"mandate-version:{LANE_SLUG}:{AGENDA_BINDING_VERSION}"
@@ -123,6 +125,7 @@ US_IT_SERVICES_ISSUERS: tuple[Issuer, ...] = (
     Issuer("CTSH", "1058290", "company:sec-cik:0001058290", "Cognizant Technology Solutions Corp"),
     Issuer("EPAM", "1352010", "company:sec-cik:0001352010", "EPAM Systems Inc"),
     Issuer("IBM", "51143", "company:sec-cik:0000051143", "International Business Machines Corp"),
+    Issuer("DXC", "1688568", "company:sec-cik:001688568", "DXC Technology Co"),
 )
 
 # Mirrors the executor's SEC rate policy (the budget-head sibling of
