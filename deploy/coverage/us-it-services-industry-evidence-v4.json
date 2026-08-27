@@ -1,0 +1,278 @@
+{
+  "schema_version": "0.1",
+  "manifest_kind": "lane-only-industry-brief",
+  "publish_actor_ref": "human:lumos",
+  "driver_pack_v5": {
+    "driver_pack_ref": "driver-pack:us-it-services",
+    "industry_ref": "industry:us-it-services",
+    "title": "US IT Services SEC Lane Revenue Growth Driver Pack v5",
+    "drivers": [
+      {
+        "driver_ref": "driver:revenue-growth-usd-gaap",
+        "label": "Reported quarterly revenue growth",
+        "mechanism": "Same-filing XBRL revenue comparisons show whether reported top-line growth is broad across the selected peer set.",
+        "metric_refs": [
+          "quarterly_revenue_yoy_growth"
+        ]
+      }
+    ],
+    "metric_specs": [
+      {
+        "metric_ref": "quarterly_revenue_yoy_growth",
+        "label": "Reported quarterly revenue growth (USD, GAAP/XBRL)",
+        "definition": "Year-over-year percentage change in reported quarterly revenue, computed from current and comparable-prior values in the same SEC 10-Q Company Facts accession. The binding key deliberately matches the SEC lane's formal Claim metric_or_aspect.",
+        "unit": "percent",
+        "periodicity": "quarterly",
+        "preferred_source_refs": [
+          "source:sec-edgar"
+        ],
+        "verification_kind": "numeric",
+        "caveats": [
+          "Issuers can use different permitted US-GAAP revenue concepts (for example, Revenues or RevenueFromContractWithCustomerExcludingAssessedTax).",
+          "Fiscal-quarter end dates differ by issuer; compare the reported year-over-year rate, not an assumed common calendar quarter.",
+          "This lane-only pack excludes issuer earnings-release/exhibit KPIs and the ACN earnings-call transcript claim."
+        ]
+      }
+    ],
+    "thesis_templates": [
+      {
+        "template_ref": "thesis-template:us-it-services:reported-revenue-growth",
+        "statement": "Reported quarterly revenue growth is broadening or narrowing across the selected US IT services peer set.",
+        "mechanism": "Comparable same-filing revenue-growth claims show the direction and dispersion of reported demand realization.",
+        "driver_refs": [
+          "driver:revenue-growth-usd-gaap"
+        ],
+        "implied_expectation": "Subsequent SEC lane claims will preserve or reverse the current cross-company growth pattern.",
+        "falsifier_refs": [
+          "falsifier:us-it-services:reported-revenue-growth-reversal"
+        ]
+      }
+    ],
+    "version_id": "driver-pack-version:us-it-services:5",
+    "prior_version_ref": "driver-pack-version:us-it-services:4",
+    "idempotency_key": "driver-pack:us-it-services:5"
+  },
+  "evidence_pack": {
+    "evidence_pack_ref": "industry-evidence-pack:us-it-services",
+    "industry_ref": "industry:us-it-services",
+    "title": "US IT Services SEC Lane-only Industry Evidence Pack v4",
+    "as_of": "2026-08-26T20:04:00+00:00",
+    "boundary": {
+      "definition": "Selected publicly traded IT-services peers covered by the live SEC Company Facts revenue-growth lane.",
+      "inclusion_rules": [
+        "Issuer has a policy-committed formal SEC Company Facts quarterly-revenue-growth Claim.",
+        "Claim uses the lane's same-filing US-GAAP/XBRL comparison."
+      ],
+      "exclusion_rules": [
+        "Issuer has no formal lane Claim at this manifest's as-of time.",
+        "Earnings-release/exhibit KPIs and unauthenticated commentary."
+      ]
+    },
+    "coverage_universe": [
+      {
+        "company_ref": "company:sec-cik:0001467373",
+        "ticker": "ACN",
+        "role": "scaled global pure-play",
+        "comparability_tier": "core"
+      },
+      {
+        "company_ref": "company:sec-cik:0001058290",
+        "ticker": "CTSH",
+        "role": "offshore-heavy scaled peer",
+        "comparability_tier": "core"
+      },
+      {
+        "company_ref": "company:sec-cik:0001352010",
+        "ticker": "EPAM",
+        "role": "digital-engineering peer",
+        "comparability_tier": "adjacent"
+      }
+    ],
+    "evidence_bindings": [
+      {
+        "binding_ref": "binding:v4:acn:quarterly-revenue-yoy-growth",
+        "driver_ref": "driver:revenue-growth-usd-gaap",
+        "metric_ref": "quarterly_revenue_yoy_growth",
+        "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+        "claim_version_hash": "3e454d85a70145b3cbc48cddff8b9ec0a7c37b1f35349e98ab32c4334d3ba1c1",
+        "relation_refs": [
+          {
+            "ref": "relation:reviewed:08f37fd892914c79e7716dd0ead2de1e75b6b4d079aec44d654e394e7672b8bf",
+            "hash": "2b5834bf6dddb3c91e15172ef1dcac41dbd0b836827f78c3070968b4b3ffb33a"
+          }
+        ]
+      },
+      {
+        "binding_ref": "binding:v4:ctsh:quarterly-revenue-yoy-growth",
+        "driver_ref": "driver:revenue-growth-usd-gaap",
+        "metric_ref": "quarterly_revenue_yoy_growth",
+        "claim_version_ref": "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+        "claim_version_hash": "ab3fa72f6cc7a72b02cf080b3f719961ffa8626a16cceae411a711baa6e4b3aa",
+        "relation_refs": [
+          {
+            "ref": "relation:reviewed:dfed46a1f77d903c8ad435d00c59e7801bab3b9f4f35864c0ddf9cf780bc85fd",
+            "hash": "bce7aa64099a3604ed172a92064a694fb552a7010c5e4407de6fe17ef30930ae"
+          }
+        ]
+      },
+      {
+        "binding_ref": "binding:v4:epam:quarterly-revenue-yoy-growth",
+        "driver_ref": "driver:revenue-growth-usd-gaap",
+        "metric_ref": "quarterly_revenue_yoy_growth",
+        "claim_version_ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+        "claim_version_hash": "31db4fee73d50f059856352415b551bb93b7ea1cb45e7e67758bbd353dd9ae92",
+        "relation_refs": [
+          {
+            "ref": "relation:reviewed:51362aa075e2237d31d7bd52456b8cbdf7d5cc6d087b481918b437cb85d21dbd",
+            "hash": "50a981e4b9ed4b6eef72fef74ac2de6f4d70a600b5a6fce859138965e68780d9"
+          }
+        ]
+      }
+    ],
+    "debates": [
+      {
+        "debate_ref": "debate:v4:reported-revenue-growth-dispersion",
+        "question": "How broad is reported quarterly revenue growth across the lane-covered peer set?",
+        "status": "open",
+        "positions": [
+          {
+            "label": "ACN and EPAM show positive reported quarterly revenue growth",
+            "stance": "supports",
+            "claim_version_refs": [
+              "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+              "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025"
+            ]
+          },
+          {
+            "label": "Cognizant supplies a different issuer period and US-GAAP revenue concept",
+            "stance": "qualifies",
+            "claim_version_refs": [
+              "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0"
+            ]
+          }
+        ]
+      }
+    ],
+    "source_plan": [
+      {
+        "source_ref": "source:sec-edgar",
+        "purpose": "Formal Company Facts XBRL revenue comparisons produced through the SEC lane.",
+        "priority": 1,
+        "required": true
+      }
+    ],
+    "report_contract": {
+      "industry_brief_sections": [
+        "boundary and universe",
+        "driver scoreboard",
+        "KPI evidence",
+        "KPI coverage gaps",
+        "debates",
+        "falsifiers",
+        "open questions"
+      ],
+      "company_difference_fields": [
+        "peer role",
+        "driver stance",
+        "metric coverage",
+        "differentiators",
+        "watchpoints"
+      ]
+    },
+    "version_id": "industry-evidence-pack-version:us-it-services:4",
+    "prior_version_ref": "industry-evidence-pack-version:us-it-services:3",
+    "idempotency_key": "industry-evidence-pack:us-it-services:4"
+  },
+  "company_overlays": [
+    {
+      "overlay_ref": "company-overlay:acn",
+      "company_ref": "company:sec-cik:0001467373",
+      "industry_ref": "industry:us-it-services",
+      "title": "Accenture SEC Lane-only Company Overlay v3",
+      "as_of": "2026-08-26T20:04:00+00:00",
+      "role": "scaled global pure-play",
+      "driver_views": [
+        {
+          "driver_ref": "driver:revenue-growth-usd-gaap",
+          "stance": "positive",
+          "claim_version_refs": [
+            {"ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05", "hash": "3e454d85a70145b3cbc48cddff8b9ec0a7c37b1f35349e98ab32c4334d3ba1c1"}
+          ],
+          "model_input_version_refs": [],
+          "metric_coverage": [
+            {"metric_ref": "quarterly_revenue_yoy_growth", "status": "observed", "claim_version_refs": ["claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05"], "rationale": "Policy-committed SEC lane Claim covers Accenture's fiscal Q3 FY2026."}
+          ],
+          "differentiators": ["The lane selected the Revenues US-GAAP concept for Accenture's fiscal quarter."],
+          "watchpoints": ["Compare subsequent fiscal-quarter claims by reported year-over-year rate rather than calendar-quarter labels."]
+        }
+      ],
+      "key_differences": ["Accenture's latest lane period is fiscal Q3 FY2026."],
+      "open_questions": ["Will the next SEC lane run preserve positive reported revenue growth?"],
+      "falsifier_refs": ["falsifier:acn:reported-revenue-growth-reversal"],
+      "thesis_candidate_refs": [],
+      "version_id": "company-overlay-version:acn:3",
+      "prior_version_ref": "company-overlay-version:acn:2",
+      "idempotency_key": "company-overlay:acn:3"
+    },
+    {
+      "overlay_ref": "company-overlay:ctsh",
+      "company_ref": "company:sec-cik:0001058290",
+      "industry_ref": "industry:us-it-services",
+      "title": "Cognizant SEC Lane-only Company Overlay v3",
+      "as_of": "2026-08-26T20:04:00+00:00",
+      "role": "offshore-heavy scaled peer",
+      "driver_views": [
+        {
+          "driver_ref": "driver:revenue-growth-usd-gaap",
+          "stance": "positive",
+          "claim_version_refs": [
+            {"ref": "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0", "hash": "ab3fa72f6cc7a72b02cf080b3f719961ffa8626a16cceae411a711baa6e4b3aa"}
+          ],
+          "model_input_version_refs": [],
+          "metric_coverage": [
+            {"metric_ref": "quarterly_revenue_yoy_growth", "status": "observed", "claim_version_refs": ["claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0"], "rationale": "Policy-committed SEC lane Claim covers Cognizant's calendar Q1 2026 because the Company Facts window did not yet include Q2."}
+          ],
+          "differentiators": ["The lane's available latest same-filing comparison is calendar Q1 2026."],
+          "watchpoints": ["Refresh when a later Cognizant 10-Q is available through the Company Facts lane."]
+        }
+      ],
+      "key_differences": ["Cognizant's observed period precedes the other two issuers' latest periods."],
+      "open_questions": ["Will the next available quarter change the observed growth rate?"],
+      "falsifier_refs": ["falsifier:ctsh:reported-revenue-growth-reversal"],
+      "thesis_candidate_refs": [],
+      "version_id": "company-overlay-version:ctsh:3",
+      "prior_version_ref": "company-overlay-version:ctsh:2",
+      "idempotency_key": "company-overlay:ctsh:3"
+    },
+    {
+      "overlay_ref": "company-overlay:epam",
+      "company_ref": "company:sec-cik:0001352010",
+      "industry_ref": "industry:us-it-services",
+      "title": "EPAM SEC Lane-only Company Overlay v3",
+      "as_of": "2026-08-26T20:04:00+00:00",
+      "role": "digital-engineering peer",
+      "driver_views": [
+        {
+          "driver_ref": "driver:revenue-growth-usd-gaap",
+          "stance": "positive",
+          "claim_version_refs": [
+            {"ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025", "hash": "31db4fee73d50f059856352415b551bb93b7ea1cb45e7e67758bbd353dd9ae92"}
+          ],
+          "model_input_version_refs": [],
+          "metric_coverage": [
+            {"metric_ref": "quarterly_revenue_yoy_growth", "status": "observed", "claim_version_refs": ["claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025"], "rationale": "Policy-committed SEC lane Claim covers EPAM's calendar Q2 2026."}
+          ],
+          "differentiators": ["The lane selected RevenueFromContractWithCustomerExcludingAssessedTax for EPAM."],
+          "watchpoints": ["Keep the permitted US-GAAP concept difference visible in cross-company comparisons."]
+        }
+      ],
+      "key_differences": ["EPAM's lane claim uses the ASC 606 revenue concept."],
+      "open_questions": ["Will the next SEC lane comparison confirm continued positive revenue growth?"],
+      "falsifier_refs": ["falsifier:epam:reported-revenue-growth-reversal"],
+      "thesis_candidate_refs": [],
+      "version_id": "company-overlay-version:epam:3",
+      "prior_version_ref": "company-overlay-version:epam:2",
+      "idempotency_key": "company-overlay:epam:3"
+    }
+  ]
+}
