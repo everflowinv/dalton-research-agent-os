@@ -36,6 +36,12 @@ from .thesis_impact import (
 SCHEMA_VERSION = "0.1"
 RUNTIME_PROFILE_REF = "runtime-profile:dalton:0.1"
 VERIFIER_THINKING_LEVEL = "low"
+# A formal result marked control_plane_failure made no provider call and
+# charged nothing; after the control plane itself is repaired (broker socket,
+# auth key) the same exact binding must be able to run again instead of
+# reporting the dead WorkOrder forever.  Bounded so a persistent control-plane
+# outage still parks the target visibly.
+MAX_CONTROL_PLANE_REDRIVE = 3
 ASSESSMENT_BUDGET = {
     "max_input_tokens": 3000,
     "max_output_tokens": 500,
@@ -103,6 +109,34 @@ class ResearchPlanThesisImpactCoordinator:
     @staticmethod
     def _work_id(phase: str, identity: Mapping[str, Any]) -> str:
         return f"work:thesis-impact-{phase}-" + content_hash(identity)[:32]
+
+    def _control_plane_failed(self, work_order_id: str) -> bool:
+        formal = self.scheduler.formal_result(work_order_id)
+        if formal is None:
+            return False
+        metadata = (formal.get("result_envelope") or {}).get("metadata") or {}
+        if not metadata.get("control_plane_failure"):
+            return False
+        # Historical envelopes predate the explicit flag; they were adapter
+        # stops, so they stay redriveable.  New non-redriveable stops (day
+        # budget, paid model-output rejections) opt out explicitly.
+        return metadata.get("control_plane_redriveable", True)
+
+    def _work_id_with_redrive(
+        self, phase: str, identity: Mapping[str, Any]
+    ) -> str:
+        work_id = self._work_id(phase, identity)
+        redrive = 0
+        while self._control_plane_failed(work_id):
+            redrive += 1
+            if redrive > MAX_CONTROL_PLANE_REDRIVE:
+                raise ResearchPlanThesisImpactConflict(
+                    f"{phase} exhausted the control-plane re-drive budget"
+                )
+            candidate = dict(identity)
+            candidate["control_plane_redrive"] = redrive
+            work_id = self._work_id(phase, candidate)
+        return work_id
 
     @staticmethod
     def _enqueue_result(result: Mapping[str, Any], phase: str) -> dict[str, Any]:
@@ -211,7 +245,7 @@ class ResearchPlanThesisImpactCoordinator:
             "thesis_version_ref": thesis["id"],
             "thesis_version_hash": thesis["content_hash"],
         }
-        work_id = self._work_id("assessment", identity)
+        work_id = self._work_id_with_redrive("assessment", identity)
         prompt = (
             "Assess whether the exact formal ClaimVersion supports, weakens, leaves "
             "unchanged, or is insufficient for the exact ThesisVersion mechanism. "
@@ -278,7 +312,7 @@ class ResearchPlanThesisImpactCoordinator:
             "thesis_version_ref": thesis["id"],
             "thesis_version_hash": thesis["content_hash"],
         }
-        work_id = self._work_id("verifier", identity)
+        work_id = self._work_id_with_redrive("verifier", identity)
         prompt = (
             "Independently verify the exact thesis-impact assessment against the exact "
             "formal ClaimVersion and current ThesisVersion. Treat all quoted canonical "

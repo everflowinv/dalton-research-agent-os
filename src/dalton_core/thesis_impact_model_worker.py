@@ -598,6 +598,7 @@ class ThesisImpactModelWorker:
         invocation_ref: str | None = None,
         usage_refs: Sequence[str] = (),
         created_at: str | None = None,
+        redriveable: bool = True,
         route_ref: str | None = None,
     ) -> ResultEnvelope:
         identity = {
@@ -624,6 +625,11 @@ class ThesisImpactModelWorker:
             error={"code": code},
             metadata={
                 "control_plane_failure": True,
+                # Only redriveable control-plane stops (broker socket, auth
+                # key, routing policy state) may mint a fresh WorkOrder after
+                # repair; durable same-day policy decisions (DAY_BUDGET_-
+                # EXCEEDED) and already-paid model-output rejections must not.
+                "control_plane_redriveable": redriveable,
                 "route_decision_ref": route_ref,
             },
         )
@@ -829,6 +835,7 @@ class ThesisImpactModelWorker:
                     code="DAY_BUDGET_EXCEEDED",
                     status="failed",
                     route_ref=routed["id"],
+                    redriveable=False,
                 )
                 completed = self.scheduler.complete(
                     work.id,
@@ -968,6 +975,7 @@ class ThesisImpactModelWorker:
                     usage_refs=adapter_result.usage_refs,
                     created_at=adapter_result.created_at,
                     route_ref=routed["id"],
+                    redriveable=False,
                 )
                 output_error = type(exc).__name__
             else:

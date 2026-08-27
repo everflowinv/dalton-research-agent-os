@@ -23,8 +23,11 @@ from dalton_core.thesis_impact import ThesisImpactAuthority
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
 from dalton_core.thesis_impact_control import (
     ASSESSMENT_BUDGET,
+    MAX_CONTROL_PLANE_REDRIVE,
     VERIFIER_BUDGET,
+    ResearchPlanThesisImpactConflict,
     ResearchPlanThesisImpactCoordinator,
+    ResearchPlanThesisImpactPending,
 )
 from dalton_core.thesis_impact_model_worker import (
     ResearchPlanThesisImpactRuntime,
@@ -430,6 +433,79 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM thesis_versions"
             ).fetchone()[0],
             1,
+        )
+
+    def test_terminal_control_plane_failure_redrives_with_bounded_budget(self) -> None:
+        self._seed_thesis()
+        started = self._close_and_start()
+        work = started["impact"]["assessment_work_order"]
+        original_id = work["id"]
+
+        def fail_control_plane(work_order: dict) -> None:
+            owner = "worker:control-plane"
+            lease = self.harness.scheduler().claim(
+                owner, work_order_id=work_order["id"]
+            )
+            identifier = f"control-{work_order['id'].removeprefix('work:')}"
+            result = {
+                "schema_version": "0.1",
+                "id": f"result:{identifier}",
+                "created_at": CREATED_AT,
+                "work_order_ref": work_order["id"],
+                "invocation_ref": f"invocation:not-started:{identifier}",
+                "status": "failed",
+                "outputs": {},
+                "artifact_refs": [],
+                "actual_side_effects": [],
+                "usage_refs": [],
+                "error": {"code": "MODEL_ADAPTER_REJECTED"},
+                "metadata": {"control_plane_failure": True},
+            }
+            self.harness.scheduler().complete(
+                work_order["id"],
+                lease["attempt"]["attempt_number"],
+                owner,
+                lease["lease_token"],
+                result,
+                idempotency_key=f"complete:{identifier}",
+            )
+
+        fail_control_plane(work)
+        # Before a re-drive the dead WorkOrder parks the phase (live incident
+        # 2026-08-27: a missing broker auth key file failed every tick).
+        with self.assertRaises(ResearchPlanThesisImpactPending):
+            self.control.advance_assessment(
+                plan_version_ref=self.harness.plan_wire["id"],
+                thesis_ref=self.thesis_ref,
+            )
+        # After the control plane is repaired the same binding re-drives.
+        redriven = self.control.start_from_closed_plan(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+        )
+        self.assertNotEqual(original_id, redriven["assessment_work_order"]["id"])
+        seen = {original_id, redriven["assessment_work_order"]["id"]}
+        fail_control_plane(redriven["assessment_work_order"])
+        # The budget is bounded: base identity plus MAX_CONTROL_PLANE_REDRIVE
+        # re-drives, then a persistent control-plane outage parks the target.
+        for _ in range(MAX_CONTROL_PLANE_REDRIVE - 1):
+            attempt = self.control.start_from_closed_plan(
+                plan_version_ref=self.harness.plan_wire["id"],
+                thesis_ref=self.thesis_ref,
+            )
+            self.assertNotIn(attempt["assessment_work_order"]["id"], seen)
+            seen.add(attempt["assessment_work_order"]["id"])
+            fail_control_plane(attempt["assessment_work_order"])
+        with self.assertRaises(ResearchPlanThesisImpactConflict):
+            self.control.start_from_closed_plan(
+                plan_version_ref=self.harness.plan_wire["id"],
+                thesis_ref=self.thesis_ref,
+            )
+        # Historical formal failures stay immutable.
+        formal = self.harness.scheduler().formal_result(original_id)
+        self.assertEqual("failed", formal["result_envelope"]["status"])
+        self.assertTrue(
+            formal["result_envelope"]["metadata"]["control_plane_failure"]
         )
 
     def test_routed_worker_retries_contract_then_verifies_independently(self) -> None:
