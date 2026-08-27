@@ -566,8 +566,20 @@ test("required thinking level is enforced end to end", async () => {
   const legacyProof = new ModelBroker(fakeRuntime(async () => result({
     providerControlProof: providerControlProof(thinkingControls),
   }), { controlled: true }), thinkingConfig);
-  const rejected = await legacyProof.handle(request({
+  // The current host proof contract omits thinkingLevel entirely; the broker
+  // accepts that shape and only checks the value when the host includes it.
+  const currentHostShape = await legacyProof.handle(request({
     invocationId: "invocation:thinking-legacy-proof",
+    requiredControls: thinkingControls,
+  }));
+  assert.equal(currentHostShape.ok, true);
+  const wrongThinkingProof = new ModelBroker(fakeRuntime(async () => result({
+    providerControlProof: providerControlProof(thinkingControls, {
+      thinkingLevel: "high",
+    }),
+  }), { controlled: true }), thinkingConfig);
+  const rejected = await wrongThinkingProof.handle(request({
+    invocationId: "invocation:thinking-wrong-proof",
     requiredControls: thinkingControls,
   }));
   assert.equal(rejected.error.code, "INVALID_HOST_RESULT");

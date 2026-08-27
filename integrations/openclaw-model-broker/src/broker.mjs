@@ -501,17 +501,22 @@ export class ModelBroker {
   }
 
   #validateProviderControlProof(request, proof) {
-    const expectedKeys = new Set([
+    const baseKeys = new Set([
       "version", "mode", "model", "schemaHash", "rateCardHash", "inputTokens",
       "maxInputTokens", "maxOutputTokens", "maxTotalTokens", "worstCaseCostUsd", "serviceTier",
     ]);
-    if (request.requiredControls.thinkingLevel !== undefined) {
-      expectedKeys.add("thinkingLevel");
-    }
+    // The current host proof contract omits thinkingLevel (the level is
+    // enforced by the profile exact-match check plus the top-level
+    // llm.complete parameter); older hosts included it.  Accept both, and
+    // whenever present the value must match the required level.
+    const withThinking = new Set([...baseKeys, "thinkingLevel"]);
     if (!proof || typeof proof !== "object" || Array.isArray(proof)) {
       throw new ProtocolError("INVALID_HOST_RESULT", "controlled completion lacks provider control proof");
     }
-    if (Object.keys(proof).length !== expectedKeys.size || Object.keys(proof).some((key) => !expectedKeys.has(key))) {
+    const proofKeys = Object.keys(proof);
+    const matchesBase = proofKeys.length === baseKeys.size && proofKeys.every((key) => baseKeys.has(key));
+    const matchesWithThinking = proofKeys.length === withThinking.size && proofKeys.every((key) => withThinking.has(key));
+    if (!matchesBase && !matchesWithThinking) {
       throw new ProtocolError("INVALID_HOST_RESULT", "provider control proof has an invalid shape");
     }
     const profile = this.config.profiles.get(request.profileId);
@@ -526,7 +531,7 @@ export class ModelBroker {
       || proof.maxInputTokens !== controls.maxInputTokens
       || proof.maxOutputTokens !== controls.maxOutputTokens
       || proof.maxTotalTokens !== controls.maxTotalTokens
-      || (controls.thinkingLevel !== undefined && proof.thinkingLevel !== controls.thinkingLevel)
+      || (proof.thinkingLevel !== undefined && proof.thinkingLevel !== controls.thinkingLevel)
       || !Number.isSafeInteger(proof.inputTokens)
       || proof.inputTokens < 0
       || proof.inputTokens > controls.maxInputTokens
