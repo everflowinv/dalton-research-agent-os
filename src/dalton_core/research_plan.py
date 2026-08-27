@@ -101,7 +101,26 @@ STAGING_RUNTIME_PROFILE_REF = "runtime:dalton-core:candidate-staging:0.1"
 SEC_ALLOWED_FORMS = frozenset({"10-K", "10-Q", "8-K"})
 SEC_WINDOW_MAX_DAYS = 366
 SEC_MAX_ATTEMPTS = 2
-SEC_MAX_RESPONSE_BYTES = 5 * 1024 * 1024
+# Response-byte budget registry for the single-step SEC plan.  ``v1`` is the
+# frozen 5 MiB bound that every pre-upgrade plan carries inside its immutable
+# execution scope; ``v2`` (8 MiB) is the current head approved for IBM-scale
+# companyfacts payloads (IBM's response is ~5.65 MB).  Revalidation accepts
+# any registered version so historical plans keep verifying byte-for-byte;
+# newly created plans always bind the head.  Appending a new entry is the
+# only supported way to change the bound; editing historical entries breaks
+# every plan that carries them.
+SEC_RESPONSE_BUDGET_V1_BYTES = 5 * 1024 * 1024
+SEC_RESPONSE_BUDGET_V2_BYTES = 8 * 1024 * 1024
+SEC_RESPONSE_BUDGETS: tuple[tuple[str, int], ...] = (
+    ("v1", SEC_RESPONSE_BUDGET_V1_BYTES),
+    ("v2", SEC_RESPONSE_BUDGET_V2_BYTES),
+)
+SEC_RESPONSE_BUDGET_CURRENT = "v2"
+# The connector rate policy ref for budget-tag ``v1`` is the historical
+# single policy; later budget tags get their own policy ref because rate
+# policy versions must keep one connector profile ref, while a larger
+# response budget requires a second profile version.
+SEC_RATE_POLICY_REF = "connector-rate-policy:sec-public"
 SEC_MAX_SECONDS = 60
 PERMISSION_SCOPE = "public_sec_list_filings"
 COMPANY_FACTS_PERMISSION_SCOPE = "public_sec_company_facts"
@@ -175,6 +194,71 @@ _STEP_FIELDS = frozenset({
 _BUDGET_FIELDS = frozenset({
     "max_attempts", "max_pages", "max_response_bytes", "max_seconds",
 })
+
+
+def sec_response_budget_bytes(tag: str) -> int:
+    """Frozen response-byte bound for one registry tag (fail closed)."""
+
+    for name, value in SEC_RESPONSE_BUDGETS:
+        if name == tag:
+            return value
+    raise ResearchPlanConflict(f"unknown SEC response budget tag: {tag!r}")
+
+
+def sec_response_budget_tag(response_bytes: int) -> str:
+    """Registry tag for a plan's frozen response bound (fail closed)."""
+
+    if isinstance(response_bytes, bool) or not isinstance(response_bytes, int):
+        raise ResearchPlanConflict("SEC response budget must be an integer")
+    for name, value in SEC_RESPONSE_BUDGETS:
+        if value == response_bytes:
+            return name
+    raise ResearchPlanConflict(
+        f"plan response budget {response_bytes} is outside the frozen registry"
+    )
+
+
+def sec_response_budget_head_bytes() -> int:
+    """The bound every newly created plan binds (the registry head)."""
+
+    return sec_response_budget_bytes(SEC_RESPONSE_BUDGET_CURRENT)
+
+
+def sec_rate_policy_ref_for_budget(tag: str) -> str:
+    """Connector rate policy ref owning one budget tag's quota limits.
+
+    ``v1`` keeps the historical single ref so pre-upgrade authority records
+    replay byte-for-byte; every later tag gets a sibling ref because rate
+    policy versions must keep one connector profile ref stable.
+    """
+
+    sec_response_budget_bytes(tag)
+    if tag == "v1":
+        return SEC_RATE_POLICY_REF
+    return f"{SEC_RATE_POLICY_REF}:budget-{tag}"
+
+
+def sec_current_rate_policy_ref() -> str:
+    """Runner-manifest rate policy ref for plans at the budget head."""
+
+    return sec_rate_policy_ref_for_budget(SEC_RESPONSE_BUDGET_CURRENT)
+
+
+def sec_current_runner_binding_ref() -> str:
+    """Immutable runner-binding ref for the response-budget head."""
+
+    if SEC_RESPONSE_BUDGET_CURRENT == "v1":
+        return "runner-binding:sec-public:v1"
+    return f"runner-binding:sec-public:budget-{SEC_RESPONSE_BUDGET_CURRENT}:v1"
+
+
+def sec_current_runner_environment_ref() -> str:
+    """Immutable runner-environment ref for the response-budget head."""
+
+    if SEC_RESPONSE_BUDGET_CURRENT == "v1":
+        return "runner-environment:sec-public:v1"
+    return f"runner-environment:sec-public:budget-{SEC_RESPONSE_BUDGET_CURRENT}:v1"
+
 
 _HUMAN_ACTOR_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
 _CIK_RE = re.compile(r"[0-9]{1,10}\Z")
@@ -453,26 +537,45 @@ def _sec_operation(
 
 
 def _execution_budget(
-    template: Mapping[str, Any], operation_name: str = SEC_OPERATION
+    template: Mapping[str, Any],
+    operation_name: str = SEC_OPERATION,
+    *,
+    response_bytes: int | None = None,
 ) -> dict[str, int]:
     """Frozen budget/retry bounds for the single-step SEC plan.
 
     ``max_pages`` is taken from the packed template pagination so plan
-    bounds stay authority-tied; the remaining bounds are the frozen v0.1
-    plan policy constants.  The reader rebuilds the same dict and any drift
-    fails closed.
+    bounds stay authority-tied; the remaining bounds are the frozen plan
+    policy constants.  ``response_bytes`` defaults to the registry head for
+    newly created plans; passing an explicit registered value rebuilds a
+    historical budget.  Any other value fails closed.
     """
 
     pagination = _sec_operation(template, operation_name).get("pagination")
     max_pages = 20
     if isinstance(pagination, Mapping) and isinstance(pagination.get("max_pages"), int):
         max_pages = pagination["max_pages"]
+    if response_bytes is None:
+        response_bytes = sec_response_budget_head_bytes()
+    else:
+        sec_response_budget_tag(response_bytes)
     return {
         "max_attempts": SEC_MAX_ATTEMPTS,
         "max_pages": max_pages,
-        "max_response_bytes": SEC_MAX_RESPONSE_BYTES,
+        "max_response_bytes": response_bytes,
         "max_seconds": SEC_MAX_SECONDS,
     }
+
+
+def _execution_budget_registry(
+    template: Mapping[str, Any], operation_name: str = SEC_OPERATION
+) -> list[dict[str, int]]:
+    """Every registered budget for one operation, oldest tag first."""
+
+    return [
+        _execution_budget(template, operation_name, response_bytes=value)
+        for _tag, value in SEC_RESPONSE_BUDGETS
+    ]
 
 
 _DOWNSTREAM_STEP_SPECS: tuple[dict[str, Any], ...] = (
@@ -864,8 +967,13 @@ def _revalidate_execution_scope(
     budget = scope["budget"]
     if not isinstance(budget, Mapping) or set(budget) != _BUDGET_FIELDS:
         raise ResearchPlanConflict("plan budget has an invalid closed shape")
-    expected_budget = _execution_budget(template, operation_name)
-    if canonical_json(budget) != canonical_json(expected_budget):
+    # Historical plans keep the budget they were created with: the stored
+    # budget must match any registered version, not only the head.
+    registered_budgets = {
+        canonical_json(item)
+        for item in _execution_budget_registry(template, operation_name)
+    }
+    if canonical_json(budget) not in registered_budgets:
         raise ResearchPlanConflict("plan budget drifted from the frozen bounds")
     steps = scope["steps"]
     expected_steps = build_research_plan_steps(

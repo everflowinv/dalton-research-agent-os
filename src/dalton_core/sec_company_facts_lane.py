@@ -64,6 +64,9 @@ from .research_plan import (
     ResearchPlanAuthority,
     ResearchPlanControlPlane,
     _plan_work_orders,
+    sec_current_rate_policy_ref,
+    sec_current_runner_binding_ref,
+    sec_current_runner_environment_ref,
 )
 from .research_plan_closure import ResearchPlanClosureCoordinator
 from .research_plan_coordinator import ResearchPlanCoordinator
@@ -122,10 +125,11 @@ US_IT_SERVICES_ISSUERS: tuple[Issuer, ...] = (
     Issuer("IBM", "51143", "company:sec-cik:0000051143", "International Business Machines Corp"),
 )
 
-# Mirrors the executor's SEC rate policy (``connector-rate-policy:sec-public``):
-# every call reserves ``max_response_bytes`` inside a 60-second UTC-aligned
-# window whose byte limit is exactly one such reservation, so two issuers in
-# the same window are rejected with ``ConnectorQuotaExceeded``.
+# Mirrors the executor's SEC rate policy (the budget-head sibling of
+# ``connector-rate-policy:sec-public``): every call reserves its plan's
+# ``max_response_bytes`` inside a 60-second UTC-aligned window whose byte
+# limit is exactly one such reservation, so two issuers in the same window
+# are rejected with ``ConnectorQuotaExceeded``.
 SEC_QUOTA_WINDOW_SECONDS = 60
 
 
@@ -448,7 +452,7 @@ class SecCompanyFactsLane:
     def _runner_manifest(self) -> dict[str, Any]:
         identity = self.identity
         binding = {
-            "binding_ref": "runner-binding:sec-public:v1",
+            "binding_ref": sec_current_runner_binding_ref(),
             "descriptor_revision_ref": self.descriptor.revision_ref,
             "descriptor_hash": self.descriptor.content_hash,
             "adapter_ref": identity["adapter_ref"],
@@ -464,11 +468,11 @@ class SecCompanyFactsLane:
             "credential_slot_refs": [],
             "required_permissions": copy.deepcopy(self.permissions),
             "side_effects": ["read:public-http"],
-            "rate_policy_ref": "connector-rate-policy:sec-public",
+            "rate_policy_ref": sec_current_rate_policy_ref(),
         }
         payload = {
             "schema_version": "0.1",
-            "id": "runner-environment:sec-public:v1",
+            "id": sec_current_runner_environment_ref(),
             "created_at": self.created_at,
             "runner_runtime_ref": "runner-runtime:sec-public:v1",
             "runner_actor_ref": "runner:research-plan-executor",
