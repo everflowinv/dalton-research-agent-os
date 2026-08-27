@@ -25,11 +25,14 @@
      service config 附件目录与 `weekly_brief` block、`policy-3`（保留全部既有规则 + `weekly_brief_auto_publish`
      exact plan v3 hash；`effective_from`=激活时刻避免 S7a 式指针事故）、live 副本故障演练 `ok=true`。
      **首个自动窗口 2026-09-03 07:00 America/New_York**，心跳 `weekly_brief: waiting`。
-  5. **thesis-impact 首条真实链**：ACN mapping 激活后 assessment（gpt-5-6-sol，真实付费）成功，裁决
-     **insufficient**（单一 SEC 收入 Claim 不能证明 AI-reinvention 机制——正确的认识论行为）。两次 live 事故修复并部署：
-     ①配置类控制面失败（`broker_auth_key` 指向缺失文件）原会永久卡死，现有界 **re-drive**（day-budget 与已付费
-     输出违约显式排除）；②host `HOST_COMPLETION_FAILED`（零费用）原有 attempt-1 终态，现进入有界重试并可 re-drive。
-     **未决：OpenClaw host 的 Gemini 路径持续失败（非 Dalton 控制面），verifier 有界重试中，需 host 侧排查。**
+  5. **thesis-impact 首条真实链已闭环**：ACN mapping 激活后 assessment（gpt-5-6-sol，真实付费）裁决
+     **insufficient**（单一 SEC 收入 Claim 不能证明 AI-reinvention 机制——正确的认识论行为），独立 verifier
+     （gemini-3-7-flash，provider controls + thinking low）**pass / 0 findings**，
+     `thesis-impact-verification:379796f9…` 入库，runner `completed / eligible`。当日三次 live 事故修复并部署：
+     ①配置类控制面失败（`broker_auth_key` 指向缺失文件）原有界 **re-drive**；②Gemini host 路径故障 root cause 为
+     broker 把 `thinkingLevel` spread 进 `providerControls`（8/23 host 补丁严格化后首个真实调用暴露；另修 proof
+     形状校验），broker 侧两处修复后端到端验证通过；③`INVALID_HOST_RESULT` 纳入 re-drive、上限提到 5、writer
+     `_error_message` 补齐错误类。host 补丁链未改动。
 - **P8a Research Constitution 与初始 Thesis development candidate 已完成（2026-08-27）。** 新增 human-only、
   append-only 的版本化 ResearchConstitution authority（`research_constitution.py` + 新 packaged SQL schema）：
   publish 时以 exact `ref+hash` 绑定 MandateVersion、Driver Pack、active GovernancePolicyVersion、可选

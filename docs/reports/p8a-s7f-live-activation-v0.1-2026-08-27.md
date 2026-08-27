@@ -83,8 +83,26 @@ mapping 激活后 runner 找到 ACN target（plan `research-plan:fc579bbd…` ×
 - 已知未决：OpenClaw host 的 Gemini 路径故障（影响 thesis-impact verifier 与未来 gemini profile 调用），
   需在 host 侧排查；Dalton 侧已有界重试。
 
-## 下一步
+## 下一步（2026-08-27 追记：Gemini host 事故已关闭）
 
-1. host 侧排查 Gemini 路径；verifier 通过后 ACN 链路完成「获取→验证→提交→thesis-impact→brief」闭环。
-2. 9/3 首个自动 weekly brief 窗口：验证 delta（对照 w35）、附件投递与 DeliveryReceipt。
-3. P8b CompanyResearchView 与结构化知识查询；doctrine writer ops（供 constitution v2 绑定）。
+当日 13:4x–14:2x UTC 完成 root cause 排查并修复，**ACN 全链路当日闭环**：
+
+- **root cause**（对照实验定位）：broker 把 `requiredControls`（含 `thinkingLevel`）整个 spread 进
+  `providerControls`，而 host 侧 google provider-controls 补丁（2026-08-23 重新应用的严格版）按封闭 7-key
+  集合校验——多出的 `thinkingLevel` 使每次 provider-controlled Gemini 调用在 host 内 throw，broker 统一包装为
+  `HOST_COMPLETION_FAILED`。裸调用与不含 thinkingLevel 的 controls 均成功，锁定为该字段。8/22 的 3×30 canary
+  跑在旧版补丁上；8/23 补丁严格化后一周内没有真实 provider-controlled Gemini 调用，回归静默存在。
+- **修复**（均在 broker 仓库侧，host 补丁链未动）：①providerControls 显式挑选字段，不再 spread（thinking level
+  仍由 exact-match 校验 + 顶层 `llm.complete` 参数强制）；②proof 校验接受含/不含 `thinkingLevel` 两种形状
+  （当前 host proof 合同为 11 个基础字段）。broker 测试 25/25；gateway 重启加载后，verifier 形状调用端到端成功
+  （真实 Gemini 调用、结构化输出、费用遥测齐全）。
+- **伴随修复**：①`INVALID_HOST_RESULT`（broker 对 host frame 的合同校验，无模型语义）纳入有界 re-drive；
+  ②re-drive 上限 3→5（host 故障窗口 12:45–13:42 以 5 分钟节拍合法耗尽了 4 个身份；5 档 × 3 attempts 可容忍
+  约一小时的基础设施故障）；③writer `_error_message` 补齐 thesis-impact / research-plan 错误类（此前
+  conflict 被泛化成 internal 消息）。
+- **链路完成**：re-drive 第 5 档 verifier 真实通过——assessment（gpt-5.6-sol）`insufficient` +
+  独立 verifier（gemini-3-7-flash，provider controls + thinking low）**pass / 0 findings**，
+  `thesis-impact-verification:379796f9…d1cd4` 入库，runner 状态 `completed / eligible`。重放走 broker journal，
+  无重复 provider 调用。「获取→验证→正式提交→thesis-impact」已闭环，9/3 首个自动 brief 窗口补上最后一环。
+
+后续顺序不变：9/3 窗口验证 delta / 附件投递 / DeliveryReceipt；P8b CompanyResearchView；doctrine writer ops。
