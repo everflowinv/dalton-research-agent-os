@@ -56,7 +56,7 @@
     "evidence_pack_ref": "industry-evidence-pack:us-it-services",
     "industry_ref": "industry:us-it-services",
     "title": "US IT Services SEC Lane-only Industry Evidence Pack (Live v1)",
-    "as_of": "2026-08-26T20:04:00+00:00",
+    "as_of": "2026-08-27T06:32:12+00:00",
     "boundary": {
       "definition": "Selected publicly traded IT-services peers covered by the live SEC Company Facts revenue-growth lane.",
       "inclusion_rules": [
@@ -85,6 +85,12 @@
         "company_ref": "company:sec-cik:0001352010",
         "ticker": "EPAM",
         "role": "digital-engineering peer",
+        "comparability_tier": "adjacent"
+      },
+      {
+        "company_ref": "company:sec-cik:0000051143",
+        "ticker": "IBM",
+        "role": "scaled hybrid consulting and infrastructure incumbent",
         "comparability_tier": "adjacent"
       }
     ],
@@ -127,6 +133,19 @@
             "hash": "50a981e4b9ed4b6eef72fef74ac2de6f4d70a600b5a6fce859138965e68780d9"
           }
         ]
+      },
+      {
+        "binding_ref": "binding:live-sec-lane-v1:ibm:quarterly-revenue-yoy-growth",
+        "driver_ref": "driver:revenue-growth-usd-gaap",
+        "metric_ref": "quarterly_revenue_yoy_growth",
+        "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+        "claim_version_hash": "fc6e75dfb1ca7a26e70274487f5a0340a6fd3271138c89eca5ab185cff6637ea",
+        "relation_refs": [
+          {
+            "ref": "relation:reviewed:7dc270eda5afa61b3732e2ca2911d34deb9db8fddb1892bea7d26553c29e4a8b",
+            "hash": "17d9d378dd643ffe33cf639bf4bb1da8c45561591aa879afab206d1f00ea66a4"
+          }
+        ]
       }
     ],
     "debates": [
@@ -148,6 +167,13 @@
             "stance": "qualifies",
             "claim_version_refs": [
               "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0"
+            ]
+          },
+          {
+            "label": "IBM also reported positive quarterly revenue growth in calendar Q2 2026",
+            "stance": "supports",
+            "claim_version_refs": [
+              "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67"
             ]
           }
         ]
@@ -189,7 +215,7 @@
       "company_ref": "company:sec-cik:0001467373",
       "industry_ref": "industry:us-it-services",
       "title": "Accenture SEC Lane-only Company Overlay (Live v1)",
-      "as_of": "2026-08-26T20:04:00+00:00",
+      "as_of": "2026-08-27T06:32:12+00:00",
       "role": "scaled global pure-play",
       "driver_views": [
         {
@@ -219,7 +245,7 @@
       "company_ref": "company:sec-cik:0001058290",
       "industry_ref": "industry:us-it-services",
       "title": "Cognizant SEC Lane-only Company Overlay (Live v1)",
-      "as_of": "2026-08-26T20:04:00+00:00",
+      "as_of": "2026-08-27T06:32:12+00:00",
       "role": "offshore-heavy scaled peer",
       "driver_views": [
         {
@@ -249,7 +275,7 @@
       "company_ref": "company:sec-cik:0001352010",
       "industry_ref": "industry:us-it-services",
       "title": "EPAM SEC Lane-only Company Overlay (Live v1)",
-      "as_of": "2026-08-26T20:04:00+00:00",
+      "as_of": "2026-08-27T06:32:12+00:00",
       "role": "digital-engineering peer",
       "driver_views": [
         {
@@ -273,6 +299,36 @@
       "version_id": "company-overlay-version:epam:live-sec-lane-v1",
       "prior_version_ref": null,
       "idempotency_key": "company-overlay:epam:live-sec-lane-v1"
+    },
+    {
+      "overlay_ref": "company-overlay:ibm",
+      "company_ref": "company:sec-cik:0000051143",
+      "industry_ref": "industry:us-it-services",
+      "title": "IBM SEC Lane-only Company Overlay (Live v1)",
+      "as_of": "2026-08-27T06:32:12+00:00",
+      "role": "scaled hybrid consulting and infrastructure incumbent",
+      "driver_views": [
+        {
+          "driver_ref": "driver:revenue-growth-usd-gaap",
+          "stance": "positive",
+          "claim_version_refs": [
+            {"ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67", "hash": "fc6e75dfb1ca7a26e70274487f5a0340a6fd3271138c89eca5ab185cff6637ea"}
+          ],
+          "model_input_version_refs": [],
+          "metric_coverage": [
+            {"metric_ref": "quarterly_revenue_yoy_growth", "status": "observed", "claim_version_refs": ["claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67"], "rationale": "Policy-committed SEC lane Claim covers IBM's calendar Q2 2026."}
+          ],
+          "differentiators": ["The lane selected the Revenues US-GAAP concept for IBM's calendar quarter."],
+          "watchpoints": ["Compare subsequent periods on the same-filing year-over-year basis and keep IBM's broader business mix visible."]
+        }
+      ],
+      "key_differences": ["IBM's lane claim covers calendar Q2 2026 and uses the Revenues concept."],
+      "open_questions": ["Will IBM's next SEC lane comparison preserve positive reported revenue growth?"],
+      "falsifier_refs": ["falsifier:ibm:reported-revenue-growth-reversal"],
+      "thesis_candidate_refs": [],
+      "version_id": "company-overlay-version:ibm:live-sec-lane-v1",
+      "prior_version_ref": null,
+      "idempotency_key": "company-overlay:ibm:live-sec-lane-v1"
     }
   ]
 }
