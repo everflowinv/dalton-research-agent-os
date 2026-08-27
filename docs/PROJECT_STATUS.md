@@ -1,11 +1,15 @@
 # Dalton 项目进度
 
 更新日期：2026-08-27
-- **当前阶段：Phase 7「live 研究记忆启动」已完成计划内四家公司 SEC lane；S7e 每周研究 brief 的 issue、投递和内容反馈 authority 已部署 live，并交付首期基线。**
+- **当前阶段：Phase 7「live 研究记忆启动」已完成计划内四家公司 SEC lane；S7e 每周研究 brief 的 issue、投递和内容反馈 authority 已部署 live，并交付首期基线。Phase 8「单主题自主认知闭环」已确定为下一执行阶段。**
   裁决见 [愿景复盘与下一阶段 v0.9](reports/vision-review-and-next-phase-v0.9-2026-08-26.md)。live Core 已有 5 条正式 Claim / 5 条
   Evidence：4 条 policy 自动提交 SEC quantitative + 1 条 owner 人工接受 transcript qualitative；driver pack、industry evidence pack、
   四家公司 overlay 和可重放 Markdown 均已在 live。原止损条件「2026-09-09 live 仍无正式 Claim」已解除。若继续保留
-  「≥5 条 policy 自动提交 SEC Claim」的严格退出门槛，还需增加第 5 家 issuer；S7e 同时要把每周 brief 与内容反馈接进正式 authority。
+  「≥5 条 policy 自动提交 SEC Claim」的严格退出门槛，还需增加第 5 家 issuer。S7e 已把 issue、delivery 和内容反馈接进正式 authority，
+  但尚未建立 weekly coordinator 或 cron。Phase 8 的裁决、切片和四周退出门槛见
+  [单主题自主认知闭环 v1.0](reports/phase8-single-topic-autonomous-cognition-loop-v1.0-2026-08-27.md)。
+- **下一开发切片：S7f Weekly Brief coordinator development candidate。** 先完成可重放 issue / delivery 计划、production policy gate、
+  隔离 canary 和 macOS 调度接线，不激活 live 自动发布。DXC live lane 和 automatic delivery activation 分别保留 exact owner gate。
 - live 万华 Agenda Shadow 自 08-25 起连续 `PROVIDER_BUDGET_EXCEEDED`：Dalton 冻结 tokenizer 把整段中文数成 1 个 token，
   DeepSeek 实际计数是它的 3.4 倍，policy 8,000 按后者事后执行。S7a development candidate 已按 provider 单位 bounding
   perception snapshot 并在付费前预检，见

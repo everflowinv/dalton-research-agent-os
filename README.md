@@ -24,7 +24,7 @@ Dalton 是面向投研团队的独立研究控制内核。它把任务调度、�
 - OpenClaw 可以提供模型、消息、审批和投递连接器；Core 常驻运行时不读取 OpenClaw 配置或凭据。显式校准命令只投影 provider/model、上下文、价格和 broker profile 等公开路由元数据，忽略密钥与 headers。
 - 旧 OpenClaw agent 的约束、研究结果和 cron 只作为 legacy input 归档。归档不代表采用、兼容或继续运行。
 
-旧工作流的初步取舍见 [docs/legacy-workflow-disposition.md](docs/legacy-workflow-disposition.md)。完整契约见 [SPEC.md](SPEC.md)，当前完成度与未完成项见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，当前执行顺序见 [docs/reports/direction-review-and-execution-plan-v0.7-2026-08-21.md](docs/reports/direction-review-and-execution-plan-v0.7-2026-08-21.md)，Connector 边界见 [docs/CONNECTOR_PROTOCOL.md](docs/CONNECTOR_PROTOCOL.md)。
+旧工作流的初步取舍见 [docs/legacy-workflow-disposition.md](docs/legacy-workflow-disposition.md)。完整契约见 [SPEC.md](SPEC.md)，当前完成度与未完成项见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，当前执行顺序见 [Phase 8 单主题自主认知闭环](docs/reports/phase8-single-topic-autonomous-cognition-loop-v1.0-2026-08-27.md)，Connector 边界见 [docs/CONNECTOR_PROTOCOL.md](docs/CONNECTOR_PROTOCOL.md)。
 
 ## 本地验证
 
@@ -114,95 +114,23 @@ controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回
 
 ## 开发状态
 
-live 仍以 Agenda Shadow 和 recorded connector 为主要研究入口；2026-08-22 已额外启用 phase-pinned
-thesis-impact production lane。当前 live Core 没有 ThesisVersion，也没有 company→thesis mapping，因此这条
-lane 每 300 秒只执行一次无模型调用的 idle 检查，不会提交 assessment、verification 或 ThesisVersion。
-SEC 研究路径仍是未部署的开发候选，已在隔离 authority 中完成
-policy-authorized SEC public ResearchPlan：读取 Company Facts、解析同一 10-Q 的季度收入、独立复算同比、提交
-正式 Evidence/Claim 并关闭 Backlog question。固定五家公司 batch 已在同一代码 commit 上完成 Microsoft、Apple、
-NVIDIA、Walmart、Amazon 的 5/5 正式 closure、进程重启后无网络 replay，以及 Walmart stale concept fail-closed
-控制样本；脱敏摘要和简报已提交。该结果仍是隔离开发验收，不代表已部署到 live。
+截至 2026-08-27，Phase 7 已把第一条真实研究链搬上 live：
 
-开发候选还包含 Claim → thesis impact assessment、不同 model family verifier、ModelRouter/OpenClaw broker 接线，
-以及模型返回后崩溃时的 durable replay。Gate 2 已在 USD 1.00 hard cap 下使用真实 ThesisVersion 和真实模型完成
-隔离 canary：GPT-5.6 Sol assessment 经 crash 后由 `replayOnly` 无重复恢复，DeepSeek V4 Flash 独立复核并给出
-`reject`。控制链、记账、family independence、离线 replay 和数据库完整性通过；verifier findings 有明显矛盾，
-所以 assessment 未进入 eligible，也未写入简报。
+- live Core 有 5 条正式 Claim / 5 条 Evidence：4 条 SEC policy 自动提交，1 条 transcript 经 owner 人工确认；
+- ACN、CTSH、EPAM、IBM 已有 live driver pack、industry evidence pack 和 company overlay，lane-only brief 可重放；
+- 首期 Weekly Brief 已发布并记录 exact DeliveryReceipt 和内容反馈；
+- Agenda Shadow 最新 live cycle 正常交付，controller、writer、projection 和 dashboard health 均为 running；
+- phase-pinned thesis-impact runner 已部署，但 live 还没有 ThesisVersion 或 company→thesis mapping，因此当前只做零模型调用的 idle 检查；
+- Doctrine、Bounded Planner、LLM Planner、Answer Router 和 DocumentIndex 仍是 development candidate，尚未接入同一条 live 认知循环。
 
-2026-08-23 新增的 Bounded Planner Loop v1 把单个 ResearchQuestion 内的连续研究拆成不可变 round。deterministic
-capital-lease reference planner 只能从 human-admitted ProbeTemplate 中提出下一 probe；Core 冻结 scope、参数、权限、
-预算和 terminal gate，并继续使用现有 Scheduler、WorkOrder、WorkflowRunVersion 与 WorkOrderLink。CoverageManifest
-由 exact ResultEnvelope 机器派生，完整 no-match coverage 也只形成不可观察候选，不自动写负面 Claim。该切片未接
-真实 LLM、connector 或 live writer，架构讨论与实施边界见
-[讨论存档](docs/reports/human-research-intent-and-bounded-planner-loop-v1-2026-08-23.md) 和
-[实施报告](docs/reports/bounded-planner-loop-v1-implementation-2026-08-23.md)。
+当前阶段是 **Phase 8「单主题自主认知闭环」**。首个主题固定为「美国 IT 服务需求是否见底」，近期顺序是：
 
-同日新增的 Doctrine 与 Planner ContextPack v1 把人类研究 lens 做成 human-only、不可变 authority，并支持绑定 exact
-loop 和有效期的临时 override。Core 为每轮冻结 ResearchQuestion、Doctrine、可选 Driver Pack/Thesis、历史 Outcome、
-directive、剩余预算和 ProbeTemplate catalog；doctrine-aware deterministic planner 只能据此重排既有 coverage item，
-不能扩 scope、权限、参数或预算。PlannerProposal 0.2 绑定 exact ContextPack，旧 0.1 planner/proposal 保持兼容；实施
-边界见 [Doctrine 与 Planner ContextPack v1](docs/reports/doctrine-and-planner-context-pack-v1-2026-08-23.md)。
+1. 关闭 Phase 7 剩余门槛：第五家 SEC issuer、可定时且可重放的 Weekly Brief coordinator；
+2. 建立最小 Research Constitution、行业 Thesis 和 ACN Thesis；
+3. 增加可重建的 CompanyResearchView 和结构化知识查询；
+4. 把 Tier 1 Bounded Planner 接进 live，只能选择已批准的 probe；
+5. 用 Weekly Brief、Agenda 和 Claim review 的真实反馈建立冻结评测集；
+6. 连续四周通过后，才开放 Tier 2 Planner 和语义检索。
 
-2026-08-25 的 development Cockpit 已完成自然语言 composer 的二次确认与 writer dispatch。服务端仍先保存 owner
-原文和 exact Cockpit context，独立模型解释器只能生成 closed question/directive/priority/approval/meta 候选；只有
-原提交人显式确认、Core 用最新 context 逐字段复核通过后，typed effect 才交给既有 writer principal。确认和每次
-dispatch 都有 append-only receipt；候选本身继续保持 `candidate_only=true / executable=false`。question 重新绑定 exact
-MandateVersion 并进入 ResearchQuestion backlog，directive、priority、Agenda/research/transcript approval 分别复用原
-authority。16-case GPT-5.6 Terra 校准仍为 16/16、safety 9/9，interpreter/corpus hash 未变，因此本切片没有重新调用
-模型。taxonomy、后续 ad-hoc answer route 和部署边界见
-[ADR-0002](docs/adr/0002-natural-language-intent-and-answer-routing.md) 与
-[S3A 实施报告](docs/reports/natural-language-intent-composer-v0.1-2026-08-24.md)、
-[S3B 实施报告](docs/reports/natural-language-intent-confirmation-dispatch-v0.2-2026-08-25.md)。
-
-同日完成的 S4 在 Cockpit 增加只读研究问答。Core 只允许与已入库、已回答 ResearchQuestion 完全一致的问题进入
-`answer_direct`，并从正式 Claim/Evidence、当前 Thesis、Driver/Overlay、open questions 和 Evidence 时效生成
-`AnswerContextPack`；其余问题只返回 `recommend_agenda_item`，不执行写入。版本化 sufficiency/freshness policy 只能
-由认证人类发布；refresh 与 ad-hoc research 在独立预算和 worker 上线前固定关闭。S4.1 又用仓库内 ACN SEC
-authority 完成 in-memory 回放：精确问题命中 2 条正式 Claim，改写问题和超过 30 天的证据均 fail closed；三次
-route 前后表计数、`total_changes` 和完整 authority 指纹不变，网络、付费模型和 live 写入均为 0。实现与验证见
-[Ad-hoc 回答路由 v0.1](docs/reports/ad-hoc-answer-routing-v0.1-2026-08-25.md)。
-
-S5A 随后只打开 stale-only 的 `answer_after_refresh`。Core 要求 exact answered question、human-created 单轮
-Bounded Planner Loop、human-admitted read-only ProbeTemplate 和独立日预算同时满足；预算 reservation 后仍复用原
-Scheduler/WorkOrder。无命中只能形成不可观测候选，有命中必须先绑定 exact ResultEnvelope、SourceEnvelope 和
-CandidateStaging receipt，不能直接写正式 Evidence/Claim/Thesis。S5B 已用隔离 connector canary 验证这条候选链；S5C
-又在 Cockpit 增加显式 human dispatch。浏览器只能回交 exact subject/question/RouteDecision ref/hash/as-of，Core 当天
-重算通过后才预留既有预算并把既有 probe 送入原 Scheduler；页面不能创建模板、loop、connector plan 或扩大预算。
-`dashboard-control` 仍只有只读 answer RPC，dispatch 使用临时认证 `human:*` principal。ad-hoc research 继续关闭。见
-[有限回答刷新 S5A v0.2](docs/reports/answer-after-refresh-s5a-v0.2-2026-08-25.md)、
-[S5B connector canary v0.3](docs/reports/answer-refresh-connector-canary-s5b-v0.3-2026-08-25.md) 与
-[S5C Cockpit human dispatch v0.4](docs/reports/answer-refresh-cockpit-human-dispatch-s5c-v0.4-2026-08-25.md)。
-
-Gate 0、Gate 1 和 Gate 2 控制面验收已完成。verifier 现改为 wrapper-owned binding：模型只返回 semantic
-`verdict/findings`，trusted worker 从 immutable WorkOrder 绑定 exact assessment ref/hash，raw ResultEnvelope 与历史
-replay 保留。同一 30-case v0.2 corpus 的 low-thinking 重跑中，Gemini 3.7 Flash 和 GPT-5.6 Luna 都是 30/30，
-Qwen DeepSeek V4 Flash 为 27/30；Owner 已选择 exact `google/gemini-3.7-flash` low 作为主候选，Luna 保留为
-低成本候选。
-
-仓库内的 production conformance 已补齐两项：phase-pinned immutable verifier policy
-（`model-routing-policy-version:dalton-openclaw-verifier:1` 只允许 exact `profile:gemini-3-7-flash`，未 pin 到
-单一 profile 的 verifier policy 在路由前 fail closed），以及 thinking-level 控制合同（verifier WorkOrder 与
-calibration manifest 冻结 `thinking=low`，进入 broker `requiredControls`、request hash、invocation 幂等身份与
-host proof；broker 升至 0.1.0-spike.5）。
-
-Gemini 3.7 的 host provider controls、rate card、thinkingLevel 和 host patch 已经打通。首次 3×30 的 90 次
-fresh execution 与质量数据有效，但因三轮复用 run identity 而撤销 gate；修正版 runner 随后用三个不同 run
-identity 重跑，90 条仍全部 fresh/provider-controlled，三轮均 30/30，合计成本 USD 0.12906825，独立重算得到
-`eligible=true`。随后一条真实 MSFT Claim/Thesis isolated shadow 也已通过：assessment 固定 GPT-5.6 Sol、verifier
-固定 Gemini 3.7 Flash low，crash recovery、记账、离线 replay 和 thesis pointer 不变式全部成立，总成本
-USD 0.010518。live service 现已激活独立 phase policy：assessment 只允许 `profile:gpt-5-6-sol`，verifier
-只允许 `profile:gemini-3-7-flash` 且要求 provider-controlled `thinking=low`；USD 25 per-day 硬顶和回滚快照已安装。
-ThesisVersion 自动 mutation 和旧 cron 仍保持不变，本批也没有把 assessment thinking level 说成
-provider-control 证明。
-定时运行控制面也已就位：`dalton-thesis-impact-verifier-canary` 提供 3×30 canary 的
-三重硬顶与验收裁决，`thesis_impact_budget` authority 提供付费 lane 的 per-day 硬顶（admission/settlement、
-durable rejection）与 append-only 失败告警。详细状态见
-[docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)、
-[wrapper binding 与候选选择报告](docs/reports/thesis-impact-verifier-wrapper-selection-2026-08-22.md)、
-[phase-pin 与 thinking 控制合同报告](docs/reports/verifier-phase-pin-and-thinking-controls-2026-08-22.md) 和
-[per-day 预算与告警报告](docs/reports/thesis-impact-day-budget-and-alerts-2026-08-22.md)，以及
-[3×30 独立复核更正](docs/reports/verifier-canary-independent-audit-2026-08-22.md)和
-[修正版 3×30 通过报告](docs/reports/verifier-canary-3x30-corrected-passed-2026-08-22.md)、
-[phase-pinned isolated shadow](docs/reports/thesis-impact-phase-pinned-shadow-2026-08-22.md)、
-[assessment producer phase pin](docs/reports/assessment-producer-phase-pin-2026-08-22.md)和
-[production activation](docs/reports/thesis-impact-production-activation-2026-08-22.md)。
+当前状态和历史实现记录见 [PROJECT_STATUS](docs/PROJECT_STATUS.md)。Phase 8 的裁决、切片和退出门槛见
+[单主题自主认知闭环 v1.0](docs/reports/phase8-single-topic-autonomous-cognition-loop-v1.0-2026-08-27.md)。
