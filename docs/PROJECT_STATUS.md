@@ -23,6 +23,16 @@
   claim_committed）、ACN ContextPack 2 claims / 443 tokens 预算内、integrity ok、0 付费调用。专项/邻接
   106/106、全仓 949/949、broker check 通过。**未部署（只读投影随下次 install.sh 上线）。**见
   [P8b 报告](reports/p8b-company-research-view-v0.1-2026-08-27.md)。
+- **P8c-1 常驻问题与 Tier 1 Bounded Planner Loop 准入已完成并进入 live（2026-08-27）。** writer 新增
+  human-governed ops `record_backlog_question` / `publish_probe_template` / `create_bounded_planner_loop`
+  与读 ops `bounded_probe_template` / `bounded_planner_loop`。live（`human:lumos`）已准入：常驻研究问题
+  `research-question:8359…52d9`（"Has US IT services demand bottomed?"，主体 industry，绑 P8a mandate）、
+  SEC revenue-growth ProbeTemplate `probe-template-version:3c374282…`（read-only、source-level coverage
+  合同）、Bounded Planner Loop v1 `bounded-planner-loop-version:ae3363ca…`（5 个 coverage item、
+  预算 6 rounds/6 units/900s）——**循环停泊待 P8c-2 controller 驱动**。隔离 canary（live Core+Scheduler
+  副本）：确定性 planner 完整跑 5 轮（proposal→准入→WorkOrder→stub 结果→observed outcome）至终态
+  `evidence_observed_for_review`，重放 duplicate，integrity ok，0 付费调用。邻接 76/76、全仓 950/950。见
+  [P8c-1 报告](reports/p8c1-standing-question-and-loop-admission-v0.1-2026-08-27.md)。
 - **2026-08-27 owner 批准全部保留 gate 后已在 live 执行（详见
   [live 激活报告](reports/p8a-s7f-live-activation-v0.1-2026-08-27.md)）**：
   1. **DXC 第 5 家 SEC issuer 完成**：catalog 加入 DXC（CIK 001688568，agenda binding v2→v3），live lane 取

@@ -173,3 +173,9 @@ P8b（最小知识调用层）development candidate 亦已完成：可重建 `Co
 period / status 结构化查询（immutable ref/hash）、writer 只读 ops，以及视图 claim → ContextMaterializer 的
 token-bounded ContextPack 接手；隔离 live-copy canary 5 家公司全通过。全仓 949/949。见
 [P8b 报告](p8b-company-research-view-v0.1-2026-08-27.md)。下一开发切片为 P8c Tier 1 Planner 接入 live。
+
+P8c-1 亦已完成并进入 live（2026-08-27）：常驻研究问题「Has US IT services demand bottomed?」、SEC
+revenue-growth ProbeTemplate 与五家公司 Bounded Planner Loop v1 经 human-governed ops 准入；隔离 canary
+证明确定性 planner 在 live 副本上完整跑通 proposal→准入→WorkOrder→outcome→终态。循环停泊等待 P8c-2 的
+controller 驱动与真实 probe 执行接线。全仓 950/950。见
+[P8c-1 报告](p8c1-standing-question-and-loop-admission-v0.1-2026-08-27.md)。

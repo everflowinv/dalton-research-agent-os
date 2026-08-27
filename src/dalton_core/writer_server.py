@@ -281,6 +281,9 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "stage_transcript_candidate", "transcript_candidate_status",
     "run_sec_company_facts_lane", "sec_lane_status",
     "company_research_view", "company_research_query",
+    "record_backlog_question", "publish_probe_template",
+    "create_bounded_planner_loop", "bounded_probe_template",
+    "bounded_planner_loop",
 })
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
@@ -354,6 +357,9 @@ CORE_OPERATIONS = frozenset({
     "publish_research_constitution", "get_research_constitution",
     "get_active_research_constitution", "research_constitution_report",
     "company_research_view", "company_research_query",
+    "record_backlog_question", "publish_probe_template",
+    "create_bounded_planner_loop", "bounded_probe_template",
+    "bounded_planner_loop",
     "propose_model_input", "get_model_input_candidate",
     "get_model_input_decision", "get_model_input_version", "current_model_input",
     "decide_model_input", "record_model_run", "record_model_reconciliation",
@@ -489,6 +495,11 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "research_constitution_report": frozenset(),
     "company_research_view": frozenset({"company_ref"}),
     "company_research_query": frozenset({"company_ref", "aspect", "period", "status", "limit"}),
+    "record_backlog_question": frozenset({"mandate_version_ref", "company_ref", "question", "answer_criteria", "source_refs", "actor_ref", "idempotency_key"}),
+    "publish_probe_template": frozenset({"template_ref", "capability_ref", "operation", "runtime_profile_ref", "parameter_contract", "output_contract_ref", "verifier_ref", "permission_scope", "declared_side_effects", "cost", "actor_ref", "prior_version_ref"}),
+    "create_bounded_planner_loop": frozenset({"loop_ref", "question_version_ref", "template_bindings", "required_coverage_items", "budget", "actor_ref", "prior_version_ref"}),
+    "bounded_probe_template": frozenset({"version_ref"}),
+    "bounded_planner_loop": frozenset({"version_ref"}),
     "propose_model_input": frozenset({
         "candidate_id", "input_kind", "model_input_ref", "prior_version_ref",
         "payload", "proposed_by", "idempotency_key",
@@ -607,6 +618,9 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "propose_thesis_admission": "actor_ref",
     "decide_thesis_admission": "actor_ref",
     "publish_research_constitution": "actor_ref",
+    "record_backlog_question": "actor_ref",
+    "publish_probe_template": "actor_ref",
+    "create_bounded_planner_loop": "actor_ref",
     "propose_model_input": "proposed_by",
     "decide_model_input": "reviewer_ref",
     "record_model_run": "actor_ref",
@@ -889,6 +903,18 @@ class WriterServer:
         if self._research_constitution is None:
             raise WriterServerError("research-constitution authority is unavailable")
         return self._research_constitution
+
+    @property
+    def backlog(self) -> ResearchQuestionBacklog:
+        if self._backlog is None:
+            raise WriterServerError("research-question backlog is unavailable")
+        return self._backlog
+
+    @property
+    def bounded_planner(self) -> BoundedPlannerAuthority:
+        if self._bounded_planner is None:
+            raise WriterServerError("bounded-planner authority is unavailable")
+        return self._bounded_planner
 
     def _transcript_support_authority(self, authority_ref: str) -> dict[str, Any]:
         evidence = self.store.connection.execute(
@@ -1737,6 +1763,25 @@ class WriterServer:
             "projection_kind": "company_research_query",
             "claims": query_company_research(self.store, **values),
         }
+
+    def _op_record_backlog_question(self, p: Mapping[str, Any]) -> Any:
+        return self.backlog.record_question(**dict(p))
+
+    def _op_publish_probe_template(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        template_ref = values.pop("template_ref")
+        return self.bounded_planner.publish_probe_template(template_ref, **values)
+
+    def _op_create_bounded_planner_loop(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        loop_ref = values.pop("loop_ref")
+        return self.bounded_planner.create_loop(loop_ref, **values)
+
+    def _op_bounded_probe_template(self, p: Mapping[str, Any]) -> Any:
+        return self.bounded_planner.probe_template(dict(p)["version_ref"])
+
+    def _op_bounded_planner_loop(self, p: Mapping[str, Any]) -> Any:
+        return self.bounded_planner.loop(dict(p)["version_ref"])
 
     def _op_propose_model_input(self, p: Mapping[str, Any]) -> Any:
         return self.model_input.propose_input(**dict(p))

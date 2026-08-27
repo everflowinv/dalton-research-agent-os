@@ -18,6 +18,7 @@ from dalton_core.writer_server import (
 
 
 OWNER = "human:coverage-owner"
+INDUSTRY_REF = "industry:us-it-services"
 INDUSTRY = "industry:us-it-services"
 GOVERNANCE_TOKEN = "governance-test-token"
 CORE_TOKEN = "core-test-token"
@@ -220,6 +221,81 @@ class CompanyResearchViewWriterTests(unittest.TestCase):
             })
         with self.assertRaises(Exception):
             self.h.governance.call("company_research_query", {"status": "bogus"})
+
+
+class BoundedPlannerWriterOpsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.h = ConstitutionWriterHarness(Path(root.name))
+        self.addCleanup(self.h.close)
+
+    def test_question_template_and_loop_admission_require_human(self) -> None:
+        mandate = self.h.governance.call("create_mandate", {
+            "mandate_ref": "mandate:p8c", "actor_ref": OWNER,
+            "objective": "Admit the standing demand question.",
+            "scope_refs": [INDUSTRY_REF], "constraints": {}, "success_criteria": {},
+            "effective_from": "2026-08-23T00:00:00+00:00", "effective_until": None,
+        })
+        question = self.h.governance.call("record_backlog_question", {
+            "mandate_version_ref": mandate["id"], "company_ref": INDUSTRY_REF,
+            "question": "Has US IT services demand bottomed?",
+            "answer_criteria": "Same-filing quarterly revenue comparisons across the lane.",
+            "source_refs": ["source:sec-edgar"], "actor_ref": OWNER,
+            "idempotency_key": "question:p8c:1",
+        })
+        self.assertIn("question_version_ref", question)
+        template = self.h.governance.call("publish_probe_template", {
+            "template_ref": "probe-template:sec-revenue-growth:v1",
+            "capability_ref": "capability:sec-read-only",
+            "operation": "get_company_facts",
+            "runtime_profile_ref": "runtime:sec-read-only:0.1",
+            "parameter_contract": {
+                "allowed_fields": ["source_ref", "locator", "query_terms"],
+                "required_fields": ["source_ref", "locator", "query_terms"],
+                "constants": {"source_ref": "source:sec-edgar"},
+            },
+            "output_contract_ref": "schema:bounded-planner-probe-output:0.1",
+            "verifier_ref": "verifier:source-level-coverage:0.1",
+            "permission_scope": "public_sec_read",
+            "declared_side_effects": ["read:public-http"],
+            "cost": {"cost_units": 1, "max_attempts": 2, "max_seconds": 120},
+            "actor_ref": OWNER, "prior_version_ref": None,
+        })
+        self.assertEqual("fresh", template["status"])
+        loop = self.h.governance.call("create_bounded_planner_loop", {
+            "loop_ref": "bounded-loop:us-it-services-demand:v1",
+            "question_version_ref": question["question_version_ref"],
+            "template_bindings": [{
+                "coverage_item_ref": "coverage:revenue-growth",
+                "template_version_ref": template["id"],
+                "parameters": {
+                    "source_ref": "source:sec-edgar",
+                    "locator": "company-facts/CIK0001467373",
+                    "query_terms": ["Revenues", "10-Q"],
+                },
+            }],
+            "required_coverage_items": ["coverage:revenue-growth"],
+            "budget": {"max_rounds": 2, "max_cost_units": 2, "max_seconds": 300},
+            "actor_ref": OWNER, "prior_version_ref": None,
+        })
+        self.assertEqual("fresh", loop["status"])
+        reread = self.h.governance.call("bounded_planner_loop", {
+            "version_ref": loop["id"],
+        })
+        self.assertEqual(loop["content_hash"], reread["content_hash"])
+        template_reread = self.h.governance.call("bounded_probe_template", {
+            "version_ref": template["id"],
+        })
+        self.assertEqual(template["content_hash"], template_reread["content_hash"])
+        with self.assertRaises(RemoteAuthorizationError):
+            self.h.worker.call("publish_probe_template", {
+                "template_ref": "probe-template:x", "actor_ref": OWNER,
+            })
+        with self.assertRaises(RemoteAuthorizationError):
+            self.h.core.call("create_bounded_planner_loop", {
+                "loop_ref": "loop:x", "actor_ref": "system:planner",
+            })
 
 
 if __name__ == "__main__":

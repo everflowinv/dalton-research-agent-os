@@ -133,6 +133,8 @@ controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回
   providerControls 与 proof 形状两处脱节），ACN 链路全链闭环；
 - P8b CompanyResearchView 与结构化知识查询已完成 development candidate：纯投影 + writer 只读 ops +
   ContextMaterializer 接手，live 副本 canary 5 家公司全通过；
+- P8c-1 已把 Tier 1 Bounded Planner 准入面接进 live：常驻研究问题「美国 IT 服务需求是否见底」、
+  SEC revenue-growth ProbeTemplate 与五家公司循环 v1 已人工准入（循环停泊等待 controller 驱动）；
 - Agenda Shadow 最新 live cycle 正常交付，controller、writer、projection 和 dashboard health 均为 running；
 - Doctrine（writer ops）、Bounded Planner、LLM Planner、Answer Router 和 DocumentIndex 仍是 development candidate，
   尚未接入同一条 live 认知循环。
