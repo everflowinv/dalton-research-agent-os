@@ -516,6 +516,69 @@ class WriterServiceTests(unittest.TestCase):
             )["verdict"],
             "admit",
         )
+        with self.assertRaises(RemoteAuthorizationError):
+            self.worker.publish_weekly_brief(
+                "weekly-brief:us-it-services",
+                period_start="2026-08-20T00:00:00+00:00",
+                period_end="2026-08-27T00:00:00+00:00",
+                evidence_pack_version_id=industry_pack["id"],
+                company_overlay_version_ids=[overlay["id"]],
+                company_thesis_refs={},
+                version_id="weekly-brief-version:us-it-services:1",
+                prior_version_ref=None,
+                idempotency_key="weekly-brief:us-it-services:1:forbidden",
+            )
+        issue = self.governance.publish_weekly_brief(
+            "weekly-brief:us-it-services",
+            period_start="2026-08-20T00:00:00+00:00",
+            period_end="2026-08-27T00:00:00+00:00",
+            evidence_pack_version_id=industry_pack["id"],
+            company_overlay_version_ids=[overlay["id"]],
+            company_thesis_refs={
+                "company:sec-cik:0001467373": "thesis:acn:ai-reinvention-growth"
+            },
+            version_id="weekly-brief-version:us-it-services:1",
+            prior_version_ref=None,
+            idempotency_key="weekly-brief:us-it-services:1",
+        )
+        self.assertEqual(
+            issue["content_hash"],
+            self.core.get_weekly_brief_issue(issue["id"])["content_hash"],
+        )
+        weekly_markdown = self.dashboard.render_weekly_brief_markdown(issue["id"])
+        self.assertIn("AI demand can sustain Accenture growth", weekly_markdown["body"])
+        artifact_sha256 = hashlib.sha256(
+            weekly_markdown["body"].encode("utf-8")
+        ).hexdigest()
+        delivery = self.governance.record_weekly_brief_delivery(
+            issue_version_ref=issue["id"],
+            issue_version_hash=issue["content_hash"],
+            destination_ref="discord:channel:test",
+            external_message_ref="discord-message:123",
+            artifact_sha256=artifact_sha256,
+            delivered_at="2026-08-27T12:00:00+00:00",
+            delivery_id="weekly-brief-delivery:us-it-services:1",
+            idempotency_key="weekly-brief-delivery:us-it-services:1",
+        )
+        self.assertEqual("fresh", delivery["status"])
+        feedback = self.dashboard.record_weekly_brief_feedback(
+            issue_version_ref=issue["id"],
+            issue_version_hash=issue["content_hash"],
+            verdict="needs_more_evidence",
+            target_kind="brief",
+            target_ref=issue["id"],
+            notes="Separate weekly research changes from development activity.",
+            feedback_id="weekly-brief-feedback:us-it-services:1",
+            prior_feedback_ref=None,
+            subject_ref="human:tailscale-test-owner",
+            idempotency_key="weekly-brief-feedback:us-it-services:1",
+        )
+        self.assertEqual("bridge:tailscale-dashboard", feedback["actor_ref"])
+        self.assertEqual(
+            "human:tailscale-test-owner", feedback["subject_ref"]
+        )
+        self.assertEqual(1, len(self.dashboard.weekly_brief_feedback(issue["id"])))
+        self.assertTrue(self.core.weekly_brief_integrity_report()["ok"])
 
     def test_transcript_correction_rpc_requires_human_governance(self):
         original = "Revenue grew 3% in local currency. r ight"

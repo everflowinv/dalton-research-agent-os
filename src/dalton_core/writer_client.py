@@ -350,6 +350,33 @@ class WriterClient:
     def industry_research_integrity_report(self) -> Any:
         return self.call("industry_research_integrity_report", {})
 
+    def publish_weekly_brief(self, brief_ref: str, **params: Any) -> Any:
+        return self.call(
+            "publish_weekly_brief", {"brief_ref": brief_ref, **params}
+        )
+
+    def get_weekly_brief_issue(self, version_id: str) -> Any:
+        return self.call("get_weekly_brief_issue", {"version_id": version_id})
+
+    def render_weekly_brief_markdown(self, version_id: str) -> Any:
+        return self.call(
+            "render_weekly_brief_markdown", {"version_id": version_id}
+        )
+
+    def record_weekly_brief_delivery(self, **params: Any) -> Any:
+        return self.call("record_weekly_brief_delivery", params)
+
+    def record_weekly_brief_feedback(self, **params: Any) -> Any:
+        return self.call("record_weekly_brief_feedback", params)
+
+    def weekly_brief_feedback(self, issue_version_ref: str) -> Any:
+        return self.call(
+            "weekly_brief_feedback", {"issue_version_ref": issue_version_ref}
+        )
+
+    def weekly_brief_integrity_report(self) -> Any:
+        return self.call("weekly_brief_integrity_report", {})
+
     def thesis_impact_targets(
         self, company_thesis_refs: Mapping[str, str], *, limit: int = 100
     ) -> Any:

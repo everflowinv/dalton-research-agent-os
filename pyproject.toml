@@ -62,6 +62,7 @@ dalton_core = [
   "thesis_impact_budget_schema.sql",
   "model_input_schema.sql",
   "industry_research_schema.sql",
+  "weekly_brief_schema.sql",
   "bounded_planner_loop_schema.sql",
   "research_doctrine_schema.sql",
   "statement_snapshot_schema.sql",
