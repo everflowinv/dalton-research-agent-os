@@ -30,6 +30,10 @@ from .openclaw_agenda_bridge import OpenClawAgendaBridge, OpenClawAgendaBridgeCo
 from .plugins.static_dashboard import StaticDashboardPlugin
 from .scheduler import Scheduler
 from .thesis_impact_production import ThesisImpactProductionConfig
+from .weekly_brief_coordinator import (
+    WeeklyBriefCoordinator,
+    WeeklyBriefCoordinatorConfig,
+)
 
 
 SCHEMA_VERSION = "0.1"
@@ -72,6 +76,8 @@ class ServiceConfig:
     plugins: tuple[StaticDashboardPlugin, ...]
     agenda: AgendaCoordinatorConfig | None
     agenda_interval_seconds: float | None
+    weekly_brief: WeeklyBriefCoordinatorConfig | None
+    weekly_brief_interval_seconds: float | None
     outbox: OpenClawAgendaBridgeConfig | None
     outbox_interval_seconds: float | None
     control: AgendaControlConfig | None
@@ -88,7 +94,10 @@ class ServiceConfig:
             "writer_socket", "tick_seconds", "projection_min_interval_seconds",
             "plugin_retry_seconds", "plugins",
         }
-        optional = {"agenda", "outbox", "control", "backup", "thesis_impact"}
+        optional = {
+            "agenda", "weekly_brief", "outbox", "control", "backup",
+            "thesis_impact",
+        }
         if not required.issubset(raw) or set(raw) - required - optional or raw.get("schema_version") != SCHEMA_VERSION:
             raise ServiceConfigError("service config has an invalid shape or schema version")
         plugin_rows = raw["plugins"]
@@ -121,6 +130,29 @@ class ServiceConfig:
                 except Exception as exc:
                     raise ServiceConfigError("agenda coordinator config is invalid") from exc
                 agenda_interval = _positive_number(agenda_raw["interval_seconds"], "agenda.interval_seconds")
+        weekly_brief_config = None
+        weekly_brief_interval = None
+        weekly_brief_raw = raw.get("weekly_brief")
+        if weekly_brief_raw is not None:
+            if not isinstance(weekly_brief_raw, Mapping) or set(weekly_brief_raw) != {
+                "enabled", "interval_seconds", "config",
+            } or not isinstance(weekly_brief_raw["enabled"], bool):
+                raise ServiceConfigError("weekly brief service config is invalid")
+            if weekly_brief_raw["enabled"]:
+                if not isinstance(weekly_brief_raw["config"], Mapping):
+                    raise ServiceConfigError("weekly_brief.config must be an object")
+                try:
+                    weekly_brief_config = WeeklyBriefCoordinatorConfig.from_mapping(
+                        weekly_brief_raw["config"]
+                    )
+                except Exception as exc:
+                    raise ServiceConfigError(
+                        "weekly brief coordinator config is invalid"
+                    ) from exc
+                weekly_brief_interval = _positive_number(
+                    weekly_brief_raw["interval_seconds"],
+                    "weekly_brief.interval_seconds",
+                )
         backup_root = None
         backup_interval = None
         backup_raw = raw.get("backup")
@@ -149,6 +181,22 @@ class ServiceConfig:
                     raise ServiceConfigError("OpenClaw agenda bridge config is invalid") from exc
                 outbox_interval = _positive_number(
                     outbox_raw["interval_seconds"], "outbox.interval_seconds"
+                )
+        if weekly_brief_config is not None:
+            if outbox_config is None:
+                raise ServiceConfigError(
+                    "enabled weekly brief coordinator requires the outbox bridge"
+                )
+            if (
+                weekly_brief_config.plan.destination_ref
+                != outbox_config.endpoint_ref
+            ):
+                raise ServiceConfigError(
+                    "weekly brief destination must match the outbox endpoint"
+                )
+            if outbox_config.weekly_brief_attachment_dir is None:
+                raise ServiceConfigError(
+                    "weekly brief delivery requires an attachment directory"
                 )
         control_config = None
         control_raw = raw.get("control")
@@ -211,6 +259,8 @@ class ServiceConfig:
             plugins=tuple(plugins),
             agenda=agenda_config,
             agenda_interval_seconds=agenda_interval,
+            weekly_brief=weekly_brief_config,
+            weekly_brief_interval_seconds=weekly_brief_interval,
             outbox=outbox_config,
             outbox_interval_seconds=outbox_interval,
             control=control_config,
@@ -301,6 +351,18 @@ class DaltonService:
             "last_started_at": None, "last_completed_at": None,
             "last_result": None, "last_error": None,
         }
+        self._weekly_brief = (
+            None if config.weekly_brief is None
+            else WeeklyBriefCoordinator(config.weekly_brief)
+        )
+        self._weekly_brief_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._weekly_brief_future: concurrent.futures.Future[dict[str, Any]] | None = None
+        self._weekly_brief_last_launch_monotonic = 0.0
+        self._weekly_brief_state: dict[str, Any] = {
+            "state": "disabled" if self._weekly_brief is None else "pending",
+            "last_started_at": None, "last_completed_at": None,
+            "last_result": None, "last_error": None,
+        }
         self._outbox = None if config.outbox is None else OpenClawAgendaBridge(config.outbox)
         self._outbox_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._outbox_future: concurrent.futures.Future[dict[str, Any]] | None = None
@@ -341,6 +403,10 @@ class DaltonService:
             self._agenda_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="dalton-agenda"
             )
+        if self._weekly_brief is not None:
+            self._weekly_brief_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="dalton-weekly-brief"
+            )
         if self._outbox is not None:
             self._outbox_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="dalton-outbox"
@@ -354,6 +420,11 @@ class DaltonService:
         outbox_executor, self._outbox_executor = self._outbox_executor, None
         if outbox_executor is not None:
             outbox_executor.shutdown(wait=False, cancel_futures=True)
+        weekly_executor, self._weekly_brief_executor = (
+            self._weekly_brief_executor, None
+        )
+        if weekly_executor is not None:
+            weekly_executor.shutdown(wait=False, cancel_futures=True)
         executor, self._agenda_executor = self._agenda_executor, None
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -412,6 +483,42 @@ class DaltonService:
                 self._outbox_last_launch_monotonic = time.monotonic()
                 self._outbox_state.update(state="running", last_started_at=_utc_now(), last_error=None)
                 self._outbox_future = executor.submit(self._outbox.run_once)
+
+    def _poll_weekly_brief(self) -> None:
+        if self._weekly_brief is None:
+            return
+        future = self._weekly_brief_future
+        if future is not None and future.done():
+            self._weekly_brief_future = None
+            self._weekly_brief_state["last_completed_at"] = _utc_now()
+            try:
+                result = future.result()
+            except Exception as exc:
+                self._weekly_brief_state.update(
+                    state="error", last_error=f"{type(exc).__name__}: {exc}",
+                    last_result=None,
+                )
+            else:
+                self._weekly_brief_state.update(
+                    state=str(result.get("status", "ready")),
+                    last_error=None, last_result=result,
+                )
+        interval = self.config.weekly_brief_interval_seconds
+        executor = self._weekly_brief_executor
+        if (
+            self._weekly_brief_future is None
+            and interval is not None
+            and executor is not None
+        ):
+            elapsed = time.monotonic() - self._weekly_brief_last_launch_monotonic
+            if self._weekly_brief_last_launch_monotonic == 0.0 or elapsed >= interval:
+                self._weekly_brief_last_launch_monotonic = time.monotonic()
+                self._weekly_brief_state.update(
+                    state="running", last_started_at=_utc_now(), last_error=None
+                )
+                self._weekly_brief_future = executor.submit(
+                    self._weekly_brief.run_once
+                )
 
     def _run_backup(self) -> None:
         if self._backup is None or self.config.backup_interval_seconds is None:
@@ -486,6 +593,7 @@ class DaltonService:
         self._expired_lease_count += len(expired)
         self._last_sweep_at = _utc_now()
         self._poll_agenda()
+        self._poll_weekly_brief()
         self._poll_outbox()
         self._run_backup()
         current_signature = self._sources()
@@ -507,9 +615,9 @@ class DaltonService:
         self._last_error = None
         degraded = any(
             plugin["state"] == "error" for plugin in self._plugin_states.values()
-        ) or self._agenda_state["state"] == "error" or self._outbox_state["state"] in {
-            "error", "degraded",
-        }
+        ) or self._agenda_state["state"] == "error" or self._weekly_brief_state[
+            "state"
+        ] == "error" or self._outbox_state["state"] in {"error", "degraded"}
         state = "degraded" if degraded else "running"
         return self._write_heartbeat(state)
 
@@ -532,6 +640,7 @@ class DaltonService:
             "writer_socket_present": self.config.writer_socket.exists(),
             "plugins": plugin_states,
             "agenda": dict(self._agenda_state),
+            "weekly_brief": dict(self._weekly_brief_state),
             "outbox": dict(self._outbox_state),
             "backup": dict(self._backup_state),
             "last_error": self._last_error,

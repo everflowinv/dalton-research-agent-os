@@ -8,6 +8,7 @@ selection function and tie-break are deterministic.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import sqlite3
@@ -1096,6 +1097,99 @@ class AgendaStore:
     def _outbox_wire(row: sqlite3.Row) -> dict[str, Any]:
         return {**dict(row), "payload": json.loads(row["payload_json"])}
 
+    def enqueue_weekly_brief(
+        self,
+        *,
+        payload: Mapping[str, Any],
+        actor_ref: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        value = _object(payload, "weekly brief outbox payload")
+        expected = {
+            "schema_version", "kind", "cycle_ref", "issue_version_ref",
+            "issue_version_hash", "brief_ref", "industry_ref", "period",
+            "destination_ref", "artifact_sha256", "body", "created_at",
+        }
+        if (
+            set(value) != expected
+            or value.get("schema_version") != SCHEMA_VERSION
+            or value.get("kind") != "weekly_research_brief"
+        ):
+            raise AgendaValidationError(
+                "weekly brief outbox payload has an invalid closed shape"
+            )
+        actor_ref = _text(actor_ref, "actor_ref")
+        if actor_ref != "core":
+            raise AgendaValidationError("weekly brief outbox requires the core actor")
+        body = value["body"]
+        if not isinstance(body, str) or not body:
+            raise AgendaValidationError("body must be non-empty text")
+        normalized = {
+            "schema_version": SCHEMA_VERSION,
+            "kind": "weekly_research_brief",
+            "cycle_ref": _text(value["cycle_ref"], "cycle_ref"),
+            "issue_version_ref": _text(
+                value["issue_version_ref"], "issue_version_ref"
+            ),
+            "issue_version_hash": _hash_text(
+                value["issue_version_hash"], "issue_version_hash"
+            ),
+            "brief_ref": _text(value["brief_ref"], "brief_ref"),
+            "industry_ref": _text(value["industry_ref"], "industry_ref"),
+            "period": _object(value["period"], "period"),
+            "destination_ref": _text(value["destination_ref"], "destination_ref"),
+            "artifact_sha256": _hash_text(
+                value["artifact_sha256"], "artifact_sha256"
+            ),
+            "body": body,
+            "created_at": _timestamp(value["created_at"], "created_at"),
+        }
+        if set(normalized["period"]) != {"start", "end"}:
+            raise AgendaValidationError("weekly brief period has an invalid closed shape")
+        normalized["period"] = {
+            "start": _timestamp(normalized["period"]["start"], "period.start"),
+            "end": _timestamp(normalized["period"]["end"], "period.end"),
+        }
+        if hashlib.sha256(normalized["body"].encode("utf-8")).hexdigest() != normalized[
+            "artifact_sha256"
+        ]:
+            raise AgendaValidationError(
+                "weekly brief outbox artifact hash does not match body"
+            )
+        payload_hash = content_hash(normalized)
+        message_id = f"weekly-brief-message:{content_hash({'cycle_ref': normalized['cycle_ref']})[:32]}"
+        request_hash = content_hash({
+            "payload": normalized, "actor_ref": actor_ref,
+        })
+        with self.store._transaction() as cur:
+            duplicate = self._idem(
+                cur, idempotency_key, "enqueue_weekly_brief", request_hash
+            )
+            if duplicate is not None:
+                return duplicate
+            try:
+                cur.execute(
+                    "INSERT INTO agenda_outbox_messages("
+                    "message_id,idempotency_key,topic,payload_json,payload_hash,created_at) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (
+                        message_id, idempotency_key, "weekly_brief.issue",
+                        canonical_json(normalized), payload_hash,
+                        normalized["created_at"],
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise AgendaConflict("weekly brief outbox message already exists") from exc
+            event = self._outbox_event(cur, message_id, "pending", actor_ref=actor_ref)
+            result = {
+                "status": "fresh", "message_id": message_id,
+                "payload_hash": payload_hash, "outbox_event": event,
+            }
+            self._save_idem(
+                cur, idempotency_key, "enqueue_weekly_brief", request_hash, result
+            )
+            return result
+
     def claim_outbox(
         self,
         *,
@@ -1380,6 +1474,7 @@ class AgendaStore:
             " FROM agenda_outbox_messages m JOIN latest_delivery d ON d.message_id=m.message_id"
             " LEFT JOIN latest_feedback f ON f.decision_id=json_extract(m.payload_json,'$.decision_ref')"
             " WHERE d.state='delivered' AND d.endpoint_ref=?"
+            " AND m.topic='agenda.shadow.decision'"
             " ORDER BY m.created_at DESC,f.subject_ref LIMIT ?",
             (endpoint_ref, limit),
         ).fetchall()

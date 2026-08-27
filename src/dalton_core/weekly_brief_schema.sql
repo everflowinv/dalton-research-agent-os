@@ -1,5 +1,28 @@
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS weekly_brief_cycle_admissions (
+    cycle_id TEXT PRIMARY KEY,
+    plan_ref TEXT NOT NULL,
+    plan_hash TEXT NOT NULL,
+    policy_version_ref TEXT NOT NULL,
+    policy_version_hash TEXT NOT NULL,
+    scheduled_for TEXT NOT NULL,
+    period_start TEXT NOT NULL,
+    period_end TEXT NOT NULL,
+    brief_ref TEXT NOT NULL,
+    issue_version_ref TEXT NOT NULL UNIQUE,
+    prior_version_ref TEXT REFERENCES weekly_brief_issue_versions(version_id),
+    evidence_pack_version_ref TEXT NOT NULL REFERENCES industry_evidence_pack_versions(version_id),
+    company_overlay_version_refs_json TEXT NOT NULL,
+    company_thesis_refs_json TEXT NOT NULL,
+    destination_ref TEXT NOT NULL,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    actor_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(plan_ref, scheduled_for)
+);
+
 CREATE TABLE IF NOT EXISTS weekly_brief_issue_versions (
     version_id TEXT PRIMARY KEY,
     brief_ref TEXT NOT NULL,
@@ -66,6 +89,8 @@ CREATE TABLE IF NOT EXISTS weekly_brief_idempotency (
 
 CREATE INDEX IF NOT EXISTS idx_weekly_brief_issue_history
 ON weekly_brief_issue_versions(brief_ref, version_number);
+CREATE INDEX IF NOT EXISTS idx_weekly_brief_cycle_schedule
+ON weekly_brief_cycle_admissions(plan_ref, scheduled_for);
 CREATE INDEX IF NOT EXISTS idx_weekly_brief_deliveries_issue
 ON weekly_brief_deliveries(issue_version_ref, delivered_at);
 CREATE INDEX IF NOT EXISTS idx_weekly_brief_feedback_issue
@@ -77,6 +102,9 @@ WHERE prior_feedback_ref IS NOT NULL;
 CREATE TRIGGER IF NOT EXISTS weekly_brief_issue_versions_authorized_insert
 BEFORE INSERT ON weekly_brief_issue_versions WHEN dalton_weekly_brief_authorized() = 0 BEGIN
     SELECT RAISE(ABORT, 'weekly brief issue insert requires WeeklyBriefAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS weekly_brief_cycle_admissions_authorized_insert
+BEFORE INSERT ON weekly_brief_cycle_admissions WHEN dalton_weekly_brief_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'weekly brief cycle admission requires WeeklyBriefAuthority'); END;
 CREATE TRIGGER IF NOT EXISTS weekly_brief_issue_pointer_authorized_insert
 BEFORE INSERT ON weekly_brief_issue_pointer WHEN dalton_weekly_brief_authorized() = 0 BEGIN
     SELECT RAISE(ABORT, 'weekly brief pointer insert requires WeeklyBriefAuthority'); END;
@@ -95,6 +123,10 @@ BEFORE INSERT ON weekly_brief_idempotency WHEN dalton_weekly_brief_authorized() 
 
 CREATE TRIGGER IF NOT EXISTS weekly_brief_issue_versions_no_update
 BEFORE UPDATE ON weekly_brief_issue_versions BEGIN SELECT RAISE(ABORT, 'weekly brief issues are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS weekly_brief_cycle_admissions_no_update
+BEFORE UPDATE ON weekly_brief_cycle_admissions BEGIN SELECT RAISE(ABORT, 'weekly brief cycle admissions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS weekly_brief_cycle_admissions_no_delete
+BEFORE DELETE ON weekly_brief_cycle_admissions BEGIN SELECT RAISE(ABORT, 'weekly brief cycle admissions are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS weekly_brief_issue_versions_no_delete
 BEFORE DELETE ON weekly_brief_issue_versions BEGIN SELECT RAISE(ABORT, 'weekly brief issues are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS weekly_brief_issue_pointer_no_delete

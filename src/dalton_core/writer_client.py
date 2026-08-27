@@ -366,6 +366,12 @@ class WriterClient:
     def record_weekly_brief_delivery(self, **params: Any) -> Any:
         return self.call("record_weekly_brief_delivery", params)
 
+    def run_weekly_brief_cycle(self, **params: Any) -> Any:
+        return self.call("run_weekly_brief_cycle", params)
+
+    def record_scheduled_weekly_brief_delivery(self, **params: Any) -> Any:
+        return self.call("record_scheduled_weekly_brief_delivery", params)
+
     def record_weekly_brief_feedback(self, **params: Any) -> Any:
         return self.call("record_weekly_brief_feedback", params)
 

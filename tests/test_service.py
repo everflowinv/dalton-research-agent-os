@@ -99,6 +99,7 @@ class ServiceTests(unittest.TestCase):
             finally:
                 service.close()
             self.assertEqual(heartbeat["state"], "running")
+            self.assertEqual("disabled", heartbeat["weekly_brief"]["state"])
             self.assertIsNotNone(heartbeat["projection_watermark"])
             self.assertEqual(heartbeat["plugins"]["static_dashboard"]["state"], "ready")
             self.assertTrue((root / "projection.sqlite").is_file())
@@ -123,6 +124,67 @@ class ServiceTests(unittest.TestCase):
         }
         with self.assertRaises(ServiceConfigError):
             ServiceConfig.from_mapping(raw)
+
+    def test_weekly_brief_schedule_is_managed_by_the_existing_controller(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = {
+                "schema_version": "0.1",
+                "core_db": str(root / "core.sqlite"),
+                "scheduler_db": str(root / "scheduler.sqlite"),
+                "projection_db": str(root / "projection.sqlite"),
+                "model_router_db": None,
+                "capability_catalog_db": None,
+                "heartbeat_path": str(root / "heartbeat.json"),
+                "writer_socket": str(root / "writer.sock"),
+                "tick_seconds": 1,
+                "projection_min_interval_seconds": 1,
+                "plugin_retry_seconds": 1,
+                "plugins": [],
+                "weekly_brief": {
+                    "enabled": True,
+                    "interval_seconds": 300,
+                    "config": {
+                        "writer_socket": str(root / "writer.sock"),
+                        "token_config": str(root / "tokens.json"),
+                        "plan": {
+                            "schema_version": "0.1",
+                            "plan_ref": "weekly-brief-plan:test:v1",
+                            "brief_ref": "weekly-brief:test",
+                            "timezone": "America/New_York",
+                            "weekday": 3, "hour": 7, "minute": 0,
+                            "effective_from": "2026-08-27T00:00:00+00:00",
+                            "evidence_pack_version_id": "evidence-pack-version:test",
+                            "company_overlay_version_ids": ["overlay-version:test"],
+                            "company_thesis_refs": {},
+                            "destination_ref": "openclaw:discord:test",
+                        },
+                    },
+                },
+                "outbox": {
+                    "enabled": True,
+                    "interval_seconds": 60,
+                    "config": {
+                        "openclaw_executable": "/usr/bin/true",
+                        "writer_socket": str(root / "writer.sock"),
+                        "token_config": str(root / "tokens.json"),
+                        "account": "default", "target": "channel:123",
+                        "guild_id": "456", "channel_id": "123",
+                        "endpoint_ref": "openclaw:discord:test",
+                        "control_url": "https://dalton.example.test/",
+                        "company_labels": {}, "feedback_user_ids": [],
+                        "timeout_seconds": 30, "claim_ttl_seconds": 120,
+                        "retry_seconds": 60, "max_attempts": 5,
+                        "batch_size": 1, "feedback_limit": 10,
+                        "weekly_brief_attachment_dir": str(root / "attachments"),
+                    },
+                },
+            }
+            config = ServiceConfig.from_mapping(raw)
+            self.assertEqual(300, config.weekly_brief_interval_seconds)
+            self.assertEqual(
+                "weekly-brief-plan:test:v1", config.weekly_brief.plan.plan_ref
+            )
 
     def test_launchagents_keep_only_deterministic_services_alive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

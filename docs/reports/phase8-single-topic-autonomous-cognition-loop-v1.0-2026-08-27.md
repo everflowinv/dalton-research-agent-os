@@ -143,3 +143,10 @@ Temporal / Postgres 和 multi-agent fleet 继续后置。
 本报告后的第一笔代码是 **S7f Weekly Brief coordinator development candidate**：先完成可重放的 issue / delivery 计划、
 production policy gate、隔离 canary 和 macOS 调度接线，不激活 live 自动发布。DXC live lane 与 automatic delivery activation
 分别保留 exact owner gate。
+
+## 2026-08-27 进度更新
+
+上述第一笔代码已完成，并在 live Core 的只读临时副本上通过隔离 canary：首跑 admission / issue / outbox 为 `fresh`，同窗口
+重跑均为 `duplicate`，没有外部投递。实现复用现有 `daltond` 和 outbox，未增加常驻进程。live active policy 仍为 `policy-2`，
+自动发布没有激活。当前候选专项回归 49/49、全仓 926/926，sdist / wheel 和 wheel-only import 均通过。实现与剩余 gate 见
+[S7f Weekly Brief coordinator v0.1](s7f-weekly-brief-coordinator-v0.1-2026-08-27.md)。

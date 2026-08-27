@@ -183,6 +183,28 @@ class WriterServiceTests(unittest.TestCase):
             self.worker.call("stage_change", {"unknown": True})
         self.assertEqual(ctx.exception.code, "protocol_error")
 
+    def test_weekly_brief_cycle_rpc_is_core_only_and_policy_gated(self):
+        plan = {
+            "schema_version": "0.1",
+            "plan_ref": "weekly-brief-plan:rpc-test:v1",
+            "brief_ref": "weekly-brief:rpc-test",
+            "timezone": "UTC", "weekday": 3, "hour": 0, "minute": 0,
+            "effective_from": "2026-08-20T00:00:00+00:00",
+            "evidence_pack_version_id": "evidence-pack-version:missing",
+            "company_overlay_version_ids": ["overlay-version:missing"],
+            "company_thesis_refs": {},
+            "destination_ref": "openclaw:discord:test",
+        }
+        with self.assertRaises(RemoteAuthorizationError):
+            self.worker.run_weekly_brief_cycle(
+                plan=plan, as_of="2026-08-27T12:00:00+00:00"
+            )
+        with self.assertRaises(RemoteError) as ctx:
+            self.core.run_weekly_brief_cycle(
+                plan=plan, as_of="2026-08-27T12:00:00+00:00"
+            )
+        self.assertEqual("rejected", ctx.exception.code)
+
     def test_thesis_impact_principal_is_scoped_and_empty_discovery_is_safe(self):
         self.assertEqual(
             self.thesis_impact.thesis_impact_targets({}, limit=10), []

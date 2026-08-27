@@ -468,6 +468,222 @@ class WeeklyBriefAuthority:
             })
         return result
 
+    def cycle_admission(self, cycle_id: str) -> dict[str, Any]:
+        cycle_id = _text(cycle_id, "cycle_id")
+        row = self.connection.execute(
+            "SELECT * FROM weekly_brief_cycle_admissions WHERE cycle_id=?",
+            (cycle_id,),
+        ).fetchone()
+        if row is None:
+            raise WeeklyBriefNotFound("weekly brief cycle admission was not found")
+        wire = _canonical_record(row["record_json"], "weekly brief cycle admission")
+        for field, column in (
+            ("id", "cycle_id"), ("plan_ref", "plan_ref"),
+            ("plan_hash", "plan_hash"),
+            ("policy_version_ref", "policy_version_ref"),
+            ("policy_version_hash", "policy_version_hash"),
+            ("scheduled_for", "scheduled_for"), ("brief_ref", "brief_ref"),
+            ("issue_version_ref", "issue_version_ref"),
+            ("prior_version_ref", "prior_version_ref"),
+            ("evidence_pack_version_ref", "evidence_pack_version_ref"),
+            ("destination_ref", "destination_ref"), ("actor_ref", "actor_ref"),
+            ("created_at", "created_at"),
+        ):
+            if wire.get(field) != row[column]:
+                raise WeeklyBriefConflict(
+                    f"weekly brief cycle admission {field} column drifted"
+                )
+        if wire.get("period") != {
+            "start": row["period_start"], "end": row["period_end"]
+        }:
+            raise WeeklyBriefConflict("weekly brief cycle admission period drifted")
+        if wire.get("company_overlay_version_refs") != json.loads(
+            row["company_overlay_version_refs_json"]
+        ):
+            raise WeeklyBriefConflict("weekly brief cycle overlay bindings drifted")
+        if wire.get("company_thesis_refs") != json.loads(
+            row["company_thesis_refs_json"]
+        ):
+            raise WeeklyBriefConflict("weekly brief cycle thesis bindings drifted")
+        if wire["content_hash"] != row["content_hash"]:
+            raise WeeklyBriefConflict("weekly brief cycle admission hash drifted")
+        policy = self.connection.execute(
+            "SELECT content_hash FROM governance_policy_versions "
+            "WHERE policy_version_id=?",
+            (wire["policy_version_ref"],),
+        ).fetchone()
+        if policy is None or policy["content_hash"] != wire["policy_version_hash"]:
+            raise WeeklyBriefConflict(
+                "weekly brief cycle admission policy authority drifted"
+            )
+        return wire
+
+    def admit_scheduled_cycle(
+        self,
+        *,
+        cycle_id: str,
+        plan_ref: str,
+        plan_hash: str,
+        policy_version_ref: str,
+        policy_version_hash: str,
+        scheduled_for: str,
+        period_start: str,
+        period_end: str,
+        brief_ref: str,
+        issue_version_ref: str,
+        prior_version_ref: str | None,
+        evidence_pack_version_ref: str,
+        company_overlay_version_refs: list[str],
+        company_thesis_refs: Mapping[str, str],
+        destination_ref: str,
+        actor_ref: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        cycle_id = _text(cycle_id, "cycle_id")
+        plan_ref = _text(plan_ref, "plan_ref")
+        plan_hash = _hash(plan_hash, "plan_hash")
+        policy_version_ref = _text(policy_version_ref, "policy_version_ref")
+        policy_version_hash = _hash(policy_version_hash, "policy_version_hash")
+        scheduled_for, scheduled = _time(scheduled_for, "scheduled_for")
+        period_start, start = _time(period_start, "period_start")
+        period_end, end = _time(period_end, "period_end")
+        if end != scheduled or end <= start or end - start > timedelta(days=8):
+            raise WeeklyBriefValidationError(
+                "scheduled weekly brief period must end at schedule and span >0 and <=8 days"
+            )
+        brief_ref = _text(brief_ref, "brief_ref")
+        issue_version_ref = _text(issue_version_ref, "issue_version_ref")
+        evidence_pack_version_ref = _text(
+            evidence_pack_version_ref, "evidence_pack_version_ref"
+        )
+        if (
+            not isinstance(company_overlay_version_refs, list)
+            or not company_overlay_version_refs
+        ):
+            raise WeeklyBriefValidationError(
+                "company_overlay_version_refs must be a non-empty array"
+            )
+        overlays = [
+            _text(value, "company_overlay_version_refs[]")
+            for value in company_overlay_version_refs
+        ]
+        if len(overlays) != len(set(overlays)):
+            raise WeeklyBriefValidationError(
+                "company_overlay_version_refs must be unique"
+            )
+        if not isinstance(company_thesis_refs, Mapping):
+            raise WeeklyBriefValidationError("company_thesis_refs must be an object")
+        theses = {
+            _text(key, "company_thesis_refs key"): _text(value, "company_thesis_refs value")
+            for key, value in company_thesis_refs.items()
+        }
+        destination_ref = _text(destination_ref, "destination_ref")
+        actor_ref = _text(actor_ref, "actor_ref")
+        if actor_ref != "core":
+            raise WeeklyBriefValidationError(
+                "scheduled weekly brief admission requires the core actor"
+            )
+        idempotency_key = _text(idempotency_key, "idempotency_key")
+        if prior_version_ref is not None:
+            prior_version_ref = _text(prior_version_ref, "prior_version_ref")
+        request = {
+            "cycle_id": cycle_id, "plan_ref": plan_ref, "plan_hash": plan_hash,
+            "policy_version_ref": policy_version_ref,
+            "policy_version_hash": policy_version_hash,
+            "scheduled_for": scheduled_for, "period_start": period_start,
+            "period_end": period_end, "brief_ref": brief_ref,
+            "issue_version_ref": issue_version_ref,
+            "prior_version_ref": prior_version_ref,
+            "evidence_pack_version_ref": evidence_pack_version_ref,
+            "company_overlay_version_refs": overlays,
+            "company_thesis_refs": theses, "destination_ref": destination_ref,
+            "actor_ref": actor_ref,
+        }
+        request_hash = self._request_hash("admit_weekly_brief_cycle", request)
+        created_at = _now()
+        with self._transaction() as cur:
+            duplicate = self._idem(
+                cur, idempotency_key, "admit_weekly_brief_cycle", request_hash
+            )
+            if duplicate is not None:
+                return duplicate
+            latest = cur.execute(
+                "SELECT version_id FROM weekly_brief_issue_versions "
+                "WHERE brief_ref=? ORDER BY version_number DESC LIMIT 1",
+                (brief_ref,),
+            ).fetchone()
+            expected_prior = None if latest is None else latest["version_id"]
+            if prior_version_ref != expected_prior:
+                raise WeeklyBriefConflict(
+                    "scheduled cycle prior version is not the latest weekly issue"
+                )
+            wire = _record({
+                "schema_version": SCHEMA_VERSION, "id": cycle_id,
+                "plan_ref": plan_ref, "plan_hash": plan_hash,
+                "policy_version_ref": policy_version_ref,
+                "policy_version_hash": policy_version_hash,
+                "scheduled_for": scheduled_for,
+                "period": {"start": period_start, "end": period_end},
+                "brief_ref": brief_ref, "issue_version_ref": issue_version_ref,
+                "prior_version_ref": prior_version_ref,
+                "evidence_pack_version_ref": evidence_pack_version_ref,
+                "company_overlay_version_refs": overlays,
+                "company_thesis_refs": theses,
+                "destination_ref": destination_ref,
+                "actor_ref": actor_ref, "created_at": created_at,
+            })
+            try:
+                cur.execute(
+                    "INSERT INTO weekly_brief_cycle_admissions("
+                    "cycle_id,plan_ref,plan_hash,policy_version_ref,policy_version_hash,"
+                    "scheduled_for,period_start,period_end,brief_ref,issue_version_ref,"
+                    "prior_version_ref,evidence_pack_version_ref,"
+                    "company_overlay_version_refs_json,company_thesis_refs_json,"
+                    "destination_ref,record_json,content_hash,actor_ref,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        cycle_id, plan_ref, plan_hash, policy_version_ref,
+                        policy_version_hash, scheduled_for, period_start, period_end,
+                        brief_ref, issue_version_ref, prior_version_ref,
+                        evidence_pack_version_ref, canonical_json(overlays),
+                        canonical_json(theses), destination_ref, canonical_json(wire),
+                        wire["content_hash"], actor_ref, created_at,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise WeeklyBriefConflict(
+                    "weekly brief cycle admission already exists"
+                ) from exc
+            result = {"status": "fresh", **wire}
+            self._save_idem(
+                cur, idempotency_key, "admit_weekly_brief_cycle", request_hash,
+                result, created_at,
+            )
+            return result
+
+    def publish_scheduled_issue(
+        self, cycle_id: str, *, actor_ref: str, idempotency_key: str
+    ) -> dict[str, Any]:
+        actor_ref = _text(actor_ref, "actor_ref")
+        if actor_ref != "core":
+            raise WeeklyBriefValidationError(
+                "scheduled weekly brief publication requires the core actor"
+            )
+        admission = self.cycle_admission(cycle_id)
+        return self._publish_issue(
+            admission["brief_ref"],
+            period_start=admission["period"]["start"],
+            period_end=admission["period"]["end"],
+            evidence_pack_version_id=admission["evidence_pack_version_ref"],
+            company_overlay_version_ids=admission["company_overlay_version_refs"],
+            company_thesis_refs=admission["company_thesis_refs"],
+            actor_ref=actor_ref,
+            version_id=admission["issue_version_ref"],
+            prior_version_ref=admission["prior_version_ref"],
+            idempotency_key=idempotency_key,
+            operation="publish_scheduled_weekly_brief",
+        )
+
     def publish_issue(
         self,
         brief_ref: str,
@@ -481,6 +697,35 @@ class WeeklyBriefAuthority:
         version_id: str,
         prior_version_ref: str | None,
         idempotency_key: str,
+    ) -> dict[str, Any]:
+        return self._publish_issue(
+            brief_ref,
+            period_start=period_start,
+            period_end=period_end,
+            evidence_pack_version_id=evidence_pack_version_id,
+            company_overlay_version_ids=company_overlay_version_ids,
+            company_thesis_refs=company_thesis_refs,
+            actor_ref=_human(actor_ref),
+            version_id=version_id,
+            prior_version_ref=prior_version_ref,
+            idempotency_key=idempotency_key,
+            operation="publish_weekly_brief",
+        )
+
+    def _publish_issue(
+        self,
+        brief_ref: str,
+        *,
+        period_start: str,
+        period_end: str,
+        evidence_pack_version_id: str,
+        company_overlay_version_ids: list[str],
+        company_thesis_refs: Mapping[str, str],
+        actor_ref: str,
+        version_id: str,
+        prior_version_ref: str | None,
+        idempotency_key: str,
+        operation: str,
     ) -> dict[str, Any]:
         brief_ref = _text(brief_ref, "brief_ref")
         version_id = _text(version_id, "version_id")
@@ -498,7 +743,9 @@ class WeeklyBriefAuthority:
         period_end, end = _time(period_end, "period_end")
         if end <= start or end - start > timedelta(days=8):
             raise WeeklyBriefValidationError("weekly brief period must span >0 and <=8 days")
-        actor_ref = _human(actor_ref)
+        actor_ref = _text(actor_ref, "actor_ref")
+        if actor_ref != "core":
+            actor_ref = _actor(actor_ref)
         idempotency_key = _text(idempotency_key, "idempotency_key")
         if prior_version_ref is not None:
             prior_version_ref = _text(prior_version_ref, "prior_version_ref")
@@ -529,10 +776,10 @@ class WeeklyBriefAuthority:
             "version_id": version_id,
             "prior_version_ref": prior_version_ref,
         }
-        request_hash = self._request_hash("publish_weekly_brief", request)
+        request_hash = self._request_hash(operation, request)
         with self._transaction() as cur:
             duplicate = self._idem(
-                cur, idempotency_key, "publish_weekly_brief", request_hash
+                cur, idempotency_key, operation, request_hash
             )
             if duplicate is not None:
                 return duplicate
@@ -611,7 +858,7 @@ class WeeklyBriefAuthority:
                 )
             result = {"status": "fresh", **issue}
             self._save_idem(
-                cur, idempotency_key, "publish_weekly_brief", request_hash,
+                cur, idempotency_key, operation, request_hash,
                 result, created_at,
             )
             return result
@@ -807,6 +1054,73 @@ class WeeklyBriefAuthority:
         actor_ref: str,
         idempotency_key: str,
     ) -> dict[str, Any]:
+        return self._record_delivery(
+            issue_version_ref=issue_version_ref,
+            issue_version_hash=issue_version_hash,
+            destination_ref=destination_ref,
+            external_message_ref=external_message_ref,
+            artifact_sha256=artifact_sha256,
+            delivered_at=delivered_at,
+            delivery_id=delivery_id,
+            actor_ref=_human(actor_ref),
+            idempotency_key=idempotency_key,
+            operation="record_weekly_brief_delivery",
+        )
+
+    def record_scheduled_delivery(
+        self,
+        *,
+        cycle_id: str,
+        issue_version_ref: str,
+        issue_version_hash: str,
+        destination_ref: str,
+        external_message_ref: str,
+        artifact_sha256: str,
+        delivered_at: str,
+        delivery_id: str,
+        actor_ref: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        actor_ref = _text(actor_ref, "actor_ref")
+        if actor_ref != "core":
+            raise WeeklyBriefValidationError(
+                "scheduled weekly brief delivery requires the core actor"
+            )
+        admission = self.cycle_admission(cycle_id)
+        if (
+            admission["issue_version_ref"] != issue_version_ref
+            or admission["destination_ref"] != destination_ref
+        ):
+            raise WeeklyBriefConflict(
+                "scheduled delivery is outside the admitted issue or destination"
+            )
+        return self._record_delivery(
+            issue_version_ref=issue_version_ref,
+            issue_version_hash=issue_version_hash,
+            destination_ref=destination_ref,
+            external_message_ref=external_message_ref,
+            artifact_sha256=artifact_sha256,
+            delivered_at=delivered_at,
+            delivery_id=delivery_id,
+            actor_ref=actor_ref,
+            idempotency_key=idempotency_key,
+            operation="record_scheduled_weekly_brief_delivery",
+        )
+
+    def _record_delivery(
+        self,
+        *,
+        issue_version_ref: str,
+        issue_version_hash: str,
+        destination_ref: str,
+        external_message_ref: str,
+        artifact_sha256: str,
+        delivered_at: str,
+        delivery_id: str,
+        actor_ref: str,
+        idempotency_key: str,
+        operation: str,
+    ) -> dict[str, Any]:
         issue_version_ref = _text(issue_version_ref, "issue_version_ref")
         issue_version_hash = _hash(issue_version_hash, "issue_version_hash")
         destination_ref = _text(destination_ref, "destination_ref")
@@ -814,7 +1128,9 @@ class WeeklyBriefAuthority:
         artifact_sha256 = _hash(artifact_sha256, "artifact_sha256")
         delivered_at, _ = _time(delivered_at, "delivered_at")
         delivery_id = _text(delivery_id, "delivery_id")
-        actor_ref = _human(actor_ref)
+        actor_ref = _text(actor_ref, "actor_ref")
+        if actor_ref != "core":
+            actor_ref = _actor(actor_ref)
         idempotency_key = _text(idempotency_key, "idempotency_key")
         issue = self.issue(issue_version_ref)
         if issue["content_hash"] != issue_version_hash:
@@ -832,10 +1148,10 @@ class WeeklyBriefAuthority:
             "delivery_id": delivery_id,
             "actor_ref": actor_ref,
         }
-        request_hash = self._request_hash("record_weekly_brief_delivery", request)
+        request_hash = self._request_hash(operation, request)
         with self._transaction() as cur:
             duplicate = self._idem(
-                cur, idempotency_key, "record_weekly_brief_delivery", request_hash
+                cur, idempotency_key, operation, request_hash
             )
             if duplicate is not None:
                 return duplicate
@@ -866,7 +1182,7 @@ class WeeklyBriefAuthority:
                 raise WeeklyBriefConflict("weekly brief delivery already exists") from exc
             result = {"status": "fresh", **wire}
             self._save_idem(
-                cur, idempotency_key, "record_weekly_brief_delivery", request_hash,
+                cur, idempotency_key, operation, request_hash,
                 result, delivered_at,
             )
             return result
@@ -1001,8 +1317,8 @@ class WeeklyBriefAuthority:
     def integrity_report(self) -> dict[str, Any]:
         issues = []
         for table in (
-            "weekly_brief_issue_versions", "weekly_brief_deliveries",
-            "weekly_brief_feedback",
+            "weekly_brief_cycle_admissions", "weekly_brief_issue_versions",
+            "weekly_brief_deliveries", "weekly_brief_feedback",
         ):
             for row in self.connection.execute(f"SELECT * FROM {table}").fetchall():
                 try:
@@ -1031,6 +1347,9 @@ class WeeklyBriefAuthority:
             "issues": issues,
             "issue_versions": self.connection.execute(
                 "SELECT COUNT(*) FROM weekly_brief_issue_versions"
+            ).fetchone()[0],
+            "cycle_admissions": self.connection.execute(
+                "SELECT COUNT(*) FROM weekly_brief_cycle_admissions"
             ).fetchone()[0],
             "deliveries": self.connection.execute(
                 "SELECT COUNT(*) FROM weekly_brief_deliveries"

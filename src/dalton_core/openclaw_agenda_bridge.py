@@ -1,4 +1,4 @@
-"""Idempotent OpenClaw/Discord bridge for Agenda Shadow cards and feedback.
+"""Idempotent OpenClaw/Discord bridge for Agenda and weekly brief outbox rows.
 
 The bridge never opens an authority database. Delivery uses the scoped Core
 writer principal; reaction ingestion uses a separate feedback-only principal.
@@ -9,9 +9,11 @@ send that occurred just before the local delivery receipt was committed.
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -84,6 +86,7 @@ class OpenClawAgendaBridgeConfig:
     max_attempts: int
     batch_size: int
     feedback_limit: int
+    weekly_brief_attachment_dir: Path | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "OpenClawAgendaBridgeConfig":
@@ -93,7 +96,8 @@ class OpenClawAgendaBridgeConfig:
             "feedback_user_ids", "timeout_seconds", "claim_ttl_seconds",
             "retry_seconds", "max_attempts", "batch_size", "feedback_limit",
         }
-        if set(raw) != expected:
+        optional = {"weekly_brief_attachment_dir"}
+        if not expected.issubset(raw) or set(raw) - expected - optional:
             raise AgendaBridgeError("OpenClaw agenda bridge config has an invalid closed shape")
         labels = raw["company_labels"]
         if not isinstance(labels, Mapping) or any(
@@ -130,6 +134,14 @@ class OpenClawAgendaBridgeConfig:
             max_attempts=_positive_int(raw["max_attempts"], "max_attempts", 100),
             batch_size=_positive_int(raw["batch_size"], "batch_size", 10),
             feedback_limit=_positive_int(raw["feedback_limit"], "feedback_limit", 100),
+            weekly_brief_attachment_dir=(
+                None
+                if raw.get("weekly_brief_attachment_dir") is None
+                else _path(
+                    raw["weekly_brief_attachment_dir"],
+                    "weekly_brief_attachment_dir",
+                )
+            ),
         )
 
 
@@ -218,6 +230,40 @@ def render_agenda_card(
     return body, marker
 
 
+def render_weekly_brief_card(
+    message: Mapping[str, Any], endpoint_ref: str
+) -> tuple[str, str, str]:
+    payload = message.get("payload")
+    if not isinstance(payload, Mapping) or payload.get("kind") != "weekly_research_brief":
+        raise AgendaBridgeError("unsupported_outbox_payload")
+    payload_hash = _string(message.get("payload_hash"), "payload_hash")
+    if len(payload_hash) != 64:
+        raise AgendaBridgeError("payload_hash_is_invalid")
+    if payload.get("destination_ref") != endpoint_ref:
+        raise AgendaBridgeError("weekly_brief_destination_mismatch")
+    body = payload.get("body")
+    artifact_sha256 = payload.get("artifact_sha256")
+    if (
+        not isinstance(body, str) or not body
+        or not isinstance(artifact_sha256, str)
+        or hashlib.sha256(body.encode("utf-8")).hexdigest() != artifact_sha256
+    ):
+        raise AgendaBridgeError("weekly_brief_artifact_hash_mismatch")
+    period = payload.get("period")
+    if not isinstance(period, Mapping) or set(period) != {"start", "end"}:
+        raise AgendaBridgeError("weekly_brief_period_is_invalid")
+    marker = f"DALTON-OUTBOX-{payload_hash[:24]}"
+    caption = "\n".join([
+        "**Dalton 每周研究 Brief**",
+        f"研究窗口：{_clip(period['start'], 60)} 至 {_clip(period['end'], 60)}",
+        "附件是 Core 生成并校验 hash 的 exact Markdown 产物。",
+        f"`{marker}`",
+    ])
+    if len(caption) > MAX_DISCORD_MESSAGE_CHARS:
+        raise AgendaBridgeError("weekly_brief_caption_exceeds_discord_limit")
+    return caption, marker, body
+
+
 class OpenClawAgendaBridge:
     def __init__(
         self,
@@ -286,15 +332,68 @@ class OpenClawAgendaBridge:
         matches.sort(key=lambda row: (str(row.get("timestamp", "")), str(row.get("id", ""))))
         return _string(matches[0].get("id"), "Discord message id")
 
-    def _send(self, body: str) -> str:
-        value = self._openclaw(
+    def _send(self, body: str, *, media: Path | None = None) -> str:
+        args = [
             "send", "--channel", "discord", "--account", self.config.account,
-            "--target", self.config.target, "--message", body, "--json",
-        )
+            "--target", self.config.target, "--message", body,
+        ]
+        if media is not None:
+            args.extend(("--media", str(media)))
+        args.append("--json")
+        value = self._openclaw(*args)
         message_id = value.get("messageId")
         if not isinstance(message_id, str) or not message_id:
             raise AgendaBridgeError("openclaw_send_missing_receipt")
         return message_id
+
+    def _weekly_brief_artifact(self, claim: Mapping[str, Any], body: str) -> Path:
+        root = self.config.weekly_brief_attachment_dir
+        if root is None:
+            raise AgendaBridgeError("weekly_brief_attachment_dir_unavailable")
+        root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        payload = claim.get("payload")
+        if not isinstance(payload, Mapping):
+            raise AgendaBridgeError("weekly_brief_payload_is_invalid")
+        issue_ref = _string(
+            payload.get("issue_version_ref"),
+            "issue_version_ref",
+        )
+        name = f"dalton-weekly-brief-{content_hash({'issue_version_ref': issue_ref})[:32]}.md"
+        target = root / name
+        encoded = body.encode("utf-8")
+        if target.exists():
+            try:
+                if target.read_bytes() != encoded:
+                    raise AgendaBridgeError("weekly_brief_attachment_conflict")
+            except OSError:
+                raise AgendaBridgeError("weekly_brief_attachment_unavailable") from None
+            return target
+        try:
+            fd, temporary_name = tempfile.mkstemp(
+                prefix=f".{name}.", suffix=".tmp", dir=root
+            )
+            temporary = Path(temporary_name)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, target)
+        except OSError:
+            raise AgendaBridgeError("weekly_brief_attachment_unavailable") from None
+        finally:
+            if "temporary" in locals() and temporary.exists():
+                temporary.unlink()
+        return target
+
+    @staticmethod
+    def _discord_delivered_at(message_id: str) -> str:
+        if not message_id.isdigit():
+            raise AgendaBridgeError("discord_receipt_is_not_a_snowflake")
+        milliseconds = (int(message_id) >> 22) + 1_420_070_400_000
+        return datetime.fromtimestamp(
+            milliseconds / 1000, timezone.utc
+        ).isoformat(timespec="milliseconds")
 
     @staticmethod
     def _error_code(exc: BaseException) -> str:
@@ -311,6 +410,37 @@ class OpenClawAgendaBridge:
             delivery_attempt_id=attempt_id,
             delivery_receipt_id=f"discord:{message_id}",
             idempotency_key=f"agenda-delivery-complete:{attempt_id}",
+        )
+
+    def _record_weekly_brief_delivered(
+        self, claim: Mapping[str, Any], message_id: str
+    ) -> Mapping[str, Any]:
+        payload = claim.get("payload")
+        if not isinstance(payload, Mapping):
+            raise AgendaBridgeError("weekly_brief_payload_is_invalid")
+        identity = {
+            "issue_version_ref": payload.get("issue_version_ref"),
+            "destination_ref": payload.get("destination_ref"),
+        }
+        digest = content_hash(identity)[:32]
+        return self.core.record_scheduled_weekly_brief_delivery(
+            cycle_id=_string(payload.get("cycle_ref"), "cycle_ref"),
+            issue_version_ref=_string(
+                payload.get("issue_version_ref"), "issue_version_ref"
+            ),
+            issue_version_hash=_string(
+                payload.get("issue_version_hash"), "issue_version_hash"
+            ),
+            destination_ref=_string(
+                payload.get("destination_ref"), "destination_ref"
+            ),
+            external_message_ref=f"discord:{message_id}",
+            artifact_sha256=_string(
+                payload.get("artifact_sha256"), "artifact_sha256"
+            ),
+            delivered_at=self._discord_delivered_at(message_id),
+            delivery_id=f"weekly-brief-delivery:{digest}",
+            idempotency_key=f"weekly-brief-delivery:{digest}",
         )
 
     def _record_failed(
@@ -330,25 +460,39 @@ class OpenClawAgendaBridge:
         )
 
     def _deliver(self, claim: Mapping[str, Any], now: datetime) -> dict[str, Any]:
-        body, marker = render_agenda_card(
-            claim, self.config.company_labels, self.config.control_url
-        )
+        payload = claim.get("payload")
+        kind = payload.get("kind") if isinstance(payload, Mapping) else None
         try:
+            media = None
+            if kind == "agenda_shadow_card":
+                body, marker = render_agenda_card(
+                    claim, self.config.company_labels, self.config.control_url
+                )
+            elif kind == "weekly_research_brief":
+                body, marker, artifact = render_weekly_brief_card(
+                    claim, self.config.endpoint_ref
+                )
+                media = self._weekly_brief_artifact(claim, artifact)
+            else:
+                raise AgendaBridgeError("unsupported_outbox_payload")
             receipt = self._search_receipt(marker)
             recovered = receipt is not None
             if receipt is None:
                 try:
-                    receipt = self._send(body)
+                    receipt = self._send(body, media=media)
                 except BaseException:
                     # The CLI may have sent successfully before its local process failed.
                     receipt = self._search_receipt(marker)
                     if receipt is None:
                         raise
                     recovered = True
+            if kind == "weekly_research_brief":
+                self._record_weekly_brief_delivered(claim, receipt)
             self._record_delivered(claim, receipt)
             return {
                 "message_id": claim["message_id"], "state": "delivered",
                 "receipt": f"discord:{receipt}", "recovered": recovered,
+                "kind": kind,
             }
         except BaseException as exc:
             self._record_failed(claim, exc, now)
@@ -488,5 +632,5 @@ class OpenClawAgendaBridge:
 
 __all__ = [
     "AgendaBridgeError", "OpenClawAgendaBridge", "OpenClawAgendaBridgeConfig",
-    "render_agenda_card",
+    "render_agenda_card", "render_weekly_brief_card",
 ]

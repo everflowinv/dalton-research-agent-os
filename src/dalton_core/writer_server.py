@@ -131,6 +131,10 @@ from .weekly_brief import (
     WeeklyBriefNotFound,
     WeeklyBriefValidationError,
 )
+from .weekly_brief_coordinator import (
+    WeeklyBriefCoordinatorError,
+    run_weekly_brief_cycle,
+)
 from .alphaengine_document_acquisition import (
     validate_alphaengine_document_acquisition_manifest,
 )
@@ -340,6 +344,7 @@ CORE_OPERATIONS = frozenset({
     "industry_research_integrity_report",
     "publish_weekly_brief", "get_weekly_brief_issue",
     "render_weekly_brief_markdown", "record_weekly_brief_delivery",
+    "run_weekly_brief_cycle", "record_scheduled_weekly_brief_delivery",
     "record_weekly_brief_feedback", "weekly_brief_feedback",
     "weekly_brief_integrity_report",
     "intent_context_bindings", "admit_intent_question", "issue_intent_directive",
@@ -515,6 +520,12 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "external_message_ref", "artifact_sha256", "delivered_at",
         "delivery_id", "actor_ref", "idempotency_key",
     }),
+    "run_weekly_brief_cycle": frozenset({"plan", "as_of", "actor_ref"}),
+    "record_scheduled_weekly_brief_delivery": frozenset({
+        "cycle_id", "issue_version_ref", "issue_version_hash",
+        "destination_ref", "external_message_ref", "artifact_sha256",
+        "delivered_at", "delivery_id", "actor_ref", "idempotency_key",
+    }),
     "record_weekly_brief_feedback": frozenset({
         "issue_version_ref", "issue_version_hash", "verdict", "target_kind",
         "target_ref", "notes", "feedback_id", "prior_feedback_ref",
@@ -577,6 +588,8 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "register_company_overlay": "actor_ref",
     "publish_weekly_brief": "actor_ref",
     "record_weekly_brief_delivery": "actor_ref",
+    "run_weekly_brief_cycle": "actor_ref",
+    "record_scheduled_weekly_brief_delivery": "actor_ref",
     "record_weekly_brief_feedback": "actor_ref",
     "publish_transcript_correction_set": "actor_ref",
     "acquire_alphaengine_document": "actor_ref",
@@ -1869,6 +1882,16 @@ class WriterServer:
     def _op_record_weekly_brief_delivery(self, p: Mapping[str, Any]) -> Any:
         return self.weekly_brief.record_delivery(**dict(p))
 
+    def _op_run_weekly_brief_cycle(self, p: Mapping[str, Any]) -> Any:
+        return run_weekly_brief_cycle(
+            self.store, self.weekly_brief, self.agenda, **dict(p)
+        )
+
+    def _op_record_scheduled_weekly_brief_delivery(
+        self, p: Mapping[str, Any]
+    ) -> Any:
+        return self.weekly_brief.record_scheduled_delivery(**dict(p))
+
     def _op_record_weekly_brief_feedback(self, p: Mapping[str, Any]) -> Any:
         return self.weekly_brief.record_feedback(**dict(p))
 
@@ -1942,7 +1965,7 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError)):
             return "rejected"
         if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound)):
             return "not_found"
@@ -1980,7 +2003,7 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, CoverageAdmissionValidationError, ModelInputValidationError, WeeklyBriefValidationError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, CoverageAdmissionValidationError, ModelInputValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError)):
             return "request rejected by contract or gate"
         if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, CoverageAdmissionNotFound, ModelInputNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound)):
             return "requested object was not found"
