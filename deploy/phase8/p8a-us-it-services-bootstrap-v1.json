@@ -1,0 +1,469 @@
+{
+  "schema_version": "0.1",
+  "industry_ref": "industry:us-it-services",
+  "company_ref": "company:sec-cik:0001467373",
+  "ticker": "ACN",
+  "company_thesis_refs": {
+    "company:sec-cik:0001467373": "thesis:acn:ai-reinvention-growth"
+  },
+  "weekly_brief_plan_path": "deploy/phase1/weekly-brief-schedule-us-it-services-v2.json",
+  "mandate": {
+    "mandate_ref": "mandate:us-it-services-constitution-p8a",
+    "objective": "Admit the initial US IT Services research constitution, one industry Thesis and the Accenture company Thesis under human gate.",
+    "scope_refs": [
+      "industry:us-it-services",
+      "company:sec-cik:0001467373"
+    ],
+    "constraints": {
+      "human_thesis_admission_required": true,
+      "automatic_thesis_mutation_allowed": false,
+      "constitution_publication_human_only": true,
+      "source_priority": [
+        "source:sec-edgar",
+        "source:company-earnings-release",
+        "source:company-earnings-call-transcript"
+      ]
+    },
+    "success_criteria": {
+      "constitution_count": 1,
+      "industry_thesis_count": 1,
+      "company_thesis_count": 1,
+      "mapped_company_count": 1,
+      "unauthorized_thesis_mutations": 0
+    },
+    "effective_from": "2026-08-27T00:00:00+00:00",
+    "effective_until": null,
+    "activate": true,
+    "version_id": "mandate-version:us-it-services-constitution-p8a:1",
+    "idempotency_key": "mandate:us-it-services-constitution-p8a:1"
+  },
+  "driver_pack_core": {
+    "driver_pack_ref": "driver-pack:us-it-services",
+    "industry_ref": "industry:us-it-services",
+    "drivers": [
+      {
+        "driver_ref": "driver:bookings-mix-and-conversion",
+        "label": "Bookings mix and conversion",
+        "mechanism": "Consulting and managed-services bookings convert into revenue on different schedules, so mix and conversion determine forward growth visibility.",
+        "metric_refs": [
+          "metric:new-bookings-total",
+          "metric:new-bookings-consulting",
+          "metric:new-bookings-managed-services",
+          "metric:revenue-growth-local-currency"
+        ]
+      },
+      {
+        "driver_ref": "driver:ai-reinvention-demand",
+        "label": "AI and reinvention demand",
+        "mechanism": "Client spending on data, cloud and generative-AI programs expands the addressable transformation budget and can create follow-on managed-services work.",
+        "metric_refs": [
+          "metric:genai-bookings",
+          "metric:genai-revenue",
+          "metric:new-bookings-total"
+        ]
+      },
+      {
+        "driver_ref": "driver:delivery-economics",
+        "label": "Delivery economics",
+        "mechanism": "Utilization, workforce mix, pricing and productivity determine whether revenue growth becomes operating profit growth.",
+        "metric_refs": [
+          "metric:adjusted-operating-margin",
+          "metric:utilization",
+          "metric:voluntary-attrition",
+          "metric:workforce"
+        ]
+      },
+      {
+        "driver_ref": "driver:cash-conversion-and-capital-return",
+        "label": "Cash conversion and capital return",
+        "mechanism": "Working-capital discipline converts earnings into free cash flow that can fund buybacks and dividends.",
+        "metric_refs": [
+          "metric:free-cash-flow",
+          "metric:free-cash-flow-conversion",
+          "metric:share-repurchase"
+        ]
+      }
+    ],
+    "metric_specs": [
+      {
+        "metric_ref": "metric:new-bookings-total",
+        "label": "Total new bookings",
+        "definition": "Total contract value recorded as new bookings during the period.",
+        "unit": "USD",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:company-earnings-release", "source:company-earnings-call-transcript"],
+        "verification_kind": "numeric_and_semantic",
+        "caveats": ["Booking definitions and cancellation assumptions can differ across issuers."]
+      },
+      {
+        "metric_ref": "metric:new-bookings-consulting",
+        "label": "Consulting new bookings",
+        "definition": "New bookings attributed to consulting services during the period.",
+        "unit": "USD",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:company-earnings-release", "source:company-earnings-call-transcript"],
+        "verification_kind": "numeric_and_semantic",
+        "caveats": ["Consulting work is generally shorter-cycle and more exposed to discretionary client spending."]
+      },
+      {
+        "metric_ref": "metric:new-bookings-managed-services",
+        "label": "Managed services new bookings",
+        "definition": "New bookings attributed to managed services during the period.",
+        "unit": "USD",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:company-earnings-release", "source:company-earnings-call-transcript"],
+        "verification_kind": "numeric_and_semantic",
+        "caveats": ["Managed-services contracts are longer-cycle and may convert into revenue gradually."]
+      },
+      {
+        "metric_ref": "metric:revenue-growth-local-currency",
+        "label": "Revenue growth in local currency",
+        "definition": "Year-over-year revenue growth excluding foreign-exchange translation effects under the issuer's reported definition.",
+        "unit": "percent",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:company-earnings-release", "source:sec-edgar"],
+        "verification_kind": "numeric_and_semantic",
+        "caveats": ["Local-currency growth is a management-defined measure and must be reconciled to reported revenue."]
+      },
+      {
+        "metric_ref": "metric:genai-bookings",
+        "label": "Generative AI bookings",
+        "definition": "Bookings management attributes to generative-AI work under its disclosed classification.",
+        "unit": "USD",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:company-earnings-release", "source:company-earnings-call-transcript"],
+        "verification_kind": "numeric_and_semantic",
+        "caveats": ["Management classification can change and may overlap with cloud, data or reinvention work."]
+      },
+      {
+        "metric_ref": "metric:genai-revenue",
+        "label": "Generative AI revenue",
+        "definition": "Revenue management attributes to generative-AI work under its disclosed classification.",
+        "unit": "USD",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:company-earnings-release", "source:company-earnings-call-transcript"],
+        "verification_kind": "numeric_and_semantic",
+        "caveats": ["This is a management-defined subset and is not a standardized accounting segment."]
+      },
+      {
+        "metric_ref": "metric:adjusted-operating-margin",
+        "label": "Adjusted operating margin",
+        "definition": "Adjusted operating income divided by revenue under the issuer's reconciliation.",
+        "unit": "percent",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:company-earnings-release", "source:sec-edgar"],
+        "verification_kind": "numeric_and_semantic",
+        "caveats": ["Adjustments must be reconciled to GAAP operating income and compared consistently over time."]
+      },
+      {
+        "metric_ref": "metric:utilization",
+        "label": "Workforce utilization",
+        "definition": "Billable utilization under the issuer's disclosed workforce definition.",
+        "unit": "percent",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:company-earnings-release", "source:company-earnings-call-transcript"],
+        "verification_kind": "semantic",
+        "caveats": ["Population and methodology must be checked before comparing across companies."]
+      },
+      {
+        "metric_ref": "metric:voluntary-attrition",
+        "label": "Voluntary attrition",
+        "definition": "Trailing or period voluntary employee attrition under the issuer's disclosed definition.",
+        "unit": "percent",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:company-earnings-release", "source:company-earnings-call-transcript"],
+        "verification_kind": "semantic",
+        "caveats": ["The time window and employee population must be retained with the observation."]
+      },
+      {
+        "metric_ref": "metric:workforce",
+        "label": "Workforce",
+        "definition": "Period-end employee count under the issuer's disclosed definition.",
+        "unit": "employees",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:company-earnings-release", "source:sec-edgar"],
+        "verification_kind": "numeric_and_semantic",
+        "caveats": ["Acquisitions, contractors and workforce reclassification can affect comparability."]
+      },
+      {
+        "metric_ref": "metric:free-cash-flow",
+        "label": "Free cash flow",
+        "definition": "Operating cash flow less capital expenditures under the issuer's reconciliation.",
+        "unit": "USD",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:company-earnings-release", "source:sec-edgar"],
+        "verification_kind": "numeric_and_semantic",
+        "caveats": ["Seasonality and acquisition-related cash flows must be separated where disclosed."]
+      },
+      {
+        "metric_ref": "metric:free-cash-flow-conversion",
+        "label": "Free cash flow conversion",
+        "definition": "Free cash flow divided by the explicitly stated earnings denominator for the same period.",
+        "unit": "percent",
+        "periodicity": "trailing-twelve-months",
+        "preferred_source_refs": ["source:company-earnings-release", "source:sec-edgar"],
+        "verification_kind": "numeric_and_semantic",
+        "caveats": ["The earnings denominator and period must be retained; quarterly conversion is seasonally noisy."]
+      },
+      {
+        "metric_ref": "metric:share-repurchase",
+        "label": "Share repurchases",
+        "definition": "Cash spent on common-share repurchases during the period.",
+        "unit": "USD",
+        "periodicity": "quarterly",
+        "preferred_source_refs": ["source:sec-edgar", "source:company-earnings-release"],
+        "verification_kind": "numeric",
+        "caveats": ["Gross repurchases should not be confused with net share-count reduction."]
+      }
+    ]
+  },
+  "driver_packs": [
+    {
+      "title": "US IT Services Driver Pack v1",
+      "version_id": "driver-pack-version:us-it-services:1",
+      "prior_version_ref": null,
+      "idempotency_key": "driver-pack:us-it-services:1",
+      "thesis_templates": [
+        {
+          "template_ref": "template:ai-reinvention-growth",
+          "statement": "AI and reinvention demand plus managed services can offset weak discretionary consulting and sustain profitable growth.",
+          "mechanism": "AI-led programs create consulting work and follow-on managed-services demand; bookings conversion drives revenue while delivery productivity protects operating margin.",
+          "driver_refs": [
+            "driver:ai-reinvention-demand",
+            "driver:bookings-mix-and-conversion",
+            "driver:delivery-economics"
+          ],
+          "implied_expectation": "AI and total bookings convert into mid-single-digit local-currency revenue growth without material operating-margin dilution.",
+          "falsifier_refs": [
+            "falsifier:ai-bookings-fail-to-convert",
+            "falsifier:consulting-weakness-overwhelms-managed-services",
+            "falsifier:growth-requires-margin-sacrifice"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "US IT Services Driver Pack v2",
+      "version_id": "driver-pack-version:us-it-services:2",
+      "prior_version_ref": "driver-pack-version:us-it-services:1",
+      "idempotency_key": "driver-pack:us-it-services:2",
+      "thesis_templates": [
+        {
+          "template_ref": "template:ai-reinvention-growth",
+          "statement": "AI and reinvention demand plus managed services can offset weak discretionary consulting and sustain profitable growth.",
+          "mechanism": "AI-led programs create consulting work and follow-on managed-services demand; bookings conversion drives revenue while delivery productivity protects operating margin.",
+          "driver_refs": [
+            "driver:ai-reinvention-demand",
+            "driver:bookings-mix-and-conversion",
+            "driver:delivery-economics"
+          ],
+          "implied_expectation": "AI and total bookings convert into mid-single-digit local-currency revenue growth without material operating-margin dilution.",
+          "falsifier_refs": [
+            "falsifier:ai-bookings-fail-to-convert",
+            "falsifier:consulting-weakness-overwhelms-managed-services",
+            "falsifier:growth-requires-margin-sacrifice"
+          ]
+        },
+        {
+          "template_ref": "template:industry-demand-bottoming",
+          "statement": "US IT services demand is bottoming: discretionary consulting declines decelerate while AI-led reinvention bookings and managed-services conversion stabilize aggregate industry growth.",
+          "mechanism": "New bookings lead revenue by two to four quarters; when the bookings mix shifts toward managed services and AI-led reinvention while discretionary consulting declines decelerate, aggregate revenue growth stops decelerating and inflects to a low-single-digit recovery.",
+          "driver_refs": [
+            "driver:bookings-mix-and-conversion",
+            "driver:ai-reinvention-demand"
+          ],
+          "implied_expectation": "Aggregate US IT services revenue growth stops decelerating within two to four quarters of the bookings inflection and stabilizes at a low-single-digit rate.",
+          "falsifier_refs": [
+            "falsifier:industry-bookings-keep-contracting",
+            "falsifier:ai-budget-pool-fails-to-materialize",
+            "falsifier:managed-services-renewals-deteriorate"
+          ]
+        }
+      ]
+    }
+  ],
+  "doctrine_pack": {
+    "doctrine_pack_ref": "doctrine-pack:us-it-services",
+    "title": "US IT Services Research Doctrine v1",
+    "default_lens_ref": "lens:demand-inflection",
+    "lenses": [
+      {
+        "lens_ref": "lens:demand-inflection",
+        "label": "Demand inflection",
+        "objective": "Detect whether US IT services demand is bottoming by tracking bookings mix, conversion and AI-led reinvention demand ahead of reported revenue.",
+        "priority_topics": [
+          "new bookings trajectory",
+          "AI and reinvention bookings",
+          "managed-services conversion",
+          "discretionary consulting declines"
+        ],
+        "evidence_standard": {
+          "preferred_source_classes": [
+            "source:sec-edgar",
+            "source:company-earnings-release",
+            "source:company-earnings-call-transcript"
+          ],
+          "minimum_independent_sources": 1,
+          "negative_claim_rule": "candidate_only_until_separate_claim_admission"
+        }
+      }
+    ]
+  },
+  "constitution": {
+    "constitution_ref": "constitution:us-it-services",
+    "title": "US IT Services Research Constitution v1",
+    "version_id": "constitution-version:us-it-services:1",
+    "prior_version_ref": null,
+    "idempotency_key": "constitution:us-it-services:1",
+    "method": {
+      "question_admission": [
+        "A question is worth researching only if a verified answer would change a Thesis, a driver view or the weekly brief; before admission, state which one it changes and in which direction.",
+        "Information gain is the distance between the plausible answer distribution before and after the probe; if every outcome leaves the current view unchanged, the question is not admitted.",
+        "Prefer questions whose answers generalize across the coverage universe over single-company curiosities, unless the company is an explicit coverage anchor.",
+        "The standing question 'has US IT services demand bottomed' stays open until its falsifiers or confirmations resolve the inflection; do not fork into unrelated themes."
+      ],
+      "causal_chain": [
+        "Enterprise IT budgets are approved annually and re-allocated quarterly, so discretionary consulting spend reacts to macro confidence with a one-to-two-quarter lag.",
+        "New bookings lead revenue by two to four quarters: bookings mix and conversion determine forward revenue visibility before it appears in reported growth.",
+        "AI-led reinvention programs create a new budget pool that can offset discretionary consulting weakness and generate follow-on managed-services work.",
+        "Managed-services contracts convert annuity-style and damp revenue volatility, so their share of bookings stabilizes aggregate growth.",
+        "Delivery economics (utilization, workforce mix, pricing, productivity) transmit demand into operating margin; a demand bottom without margin stability is not a profit inflection.",
+        "Cash conversion and capital return are trailing confirmations, not demand signals; they cannot lead the inflection call."
+      ],
+      "source_standards": {
+        "hierarchy": [
+          "SEC filings (10-Q, 10-K, 8-K exhibits) are the primary numeric authority; only same-filing comparisons are admissible.",
+          "Company earnings releases sit below SEC filings for numbers but above transcripts for management-defined metrics such as bookings and local-currency growth.",
+          "Authenticated earnings-call transcripts are the primary semantic authority for management framing; transcript numbers never override filings.",
+          "Management-defined classifications (GenAI bookings, reinvention) must retain their disclosed definition and caveats with every observation."
+        ],
+        "conflict_adjudication": [
+          "A GAAP filing number always overrides a transcript or press-release restatement of the same metric.",
+          "Local-currency growth must be reconciled to reported revenue before use; unreconciled management measures are recorded as caveats, not as claims.",
+          "When two issuers' metrics conflict on the same driver, record the definitional difference as a debate instead of averaging.",
+          "Quarterly observations must bind the exact period, currency and unit; cross-period or cross-unit comparison is a definitional error."
+        ],
+        "minimum_independent_sources": 1
+      },
+      "falsification": {
+        "required_falsifier_searches": [
+          "Each weekly cycle must actively search for evidence that the demand-bottoming call is wrong, starting with aggregate bookings contraction extending two or more consecutive quarters.",
+          "Search for AI-led reinvention bookings failing to convert into revenue within two to four quarters.",
+          "Search for managed-services renewal or backlog deterioration at the largest coverage-universe issuers.",
+          "Search for pricing or margin sacrifice accompanying any growth stabilization."
+        ],
+        "alternative_explanations": [
+          "Foreign-exchange translation effects masquerading as local-currency inflection.",
+          "Inorganic growth from acquisitions inflating reported revenue.",
+          "One-off large deal wins distorting a single quarter's bookings.",
+          "Accounting reclassification or definition changes in bookings or GenAI classifications."
+        ]
+      },
+      "materiality": [
+        "Every driver observation must state its magnitude in revenue-growth percentage points before it can support or weaken a Thesis.",
+        "Demand signals must be mapped to earnings through the operating-margin bridge (utilization, pricing, mix) before influencing company Theses.",
+        "Company Theses must state the market expectation they differentiate against; a view matching consensus is not an investable Thesis.",
+        "Valuation mapping (multiple versus growth trajectory) is recorded alongside Theses but never auto-generated from a Claim."
+      ],
+      "lifecycle": {
+        "continue_when": [
+          "The weekly brief changes any Thesis, driver view or evidence gap.",
+          "New SEC filings or earnings calls for coverage-universe issuers arrive with decision-relevant metrics.",
+          "A falsifier search returns material new evidence in either direction."
+        ],
+        "refresh_when": [
+          "Evidence supporting a current Thesis exceeds its freshness window (latest quarter for numeric claims, thirty days for semantic claims).",
+          "A conflict adjudication reopens a previously settled debate."
+        ],
+        "stop_when": [
+          "All falsifiers of the industry Thesis have resolved against it, or all have resolved for it and the expectation horizon has passed.",
+          "The mandate covering the industry is retired."
+        ],
+        "escalate_when": [
+          "A major Thesis change (confidence flip, statement rewrite or falsifier resolution) is proposed; only a human can admit it.",
+          "Coverage expansion beyond the current universe, or any budget, permission or connector extension is requested.",
+          "Two consecutive cycles produce no new decision-relevant evidence despite executed probes."
+        ]
+      },
+      "output_rubric": {
+        "criteria": [
+          "The weekly brief states what changed this week, its impact on existing Theses, company and driver divergence, evidence gaps, key debates, next research questions and source authority.",
+          "Every number in an output traces to a formal EvidenceVersion or is explicitly labeled as a candidate.",
+          "Thesis status is 'insufficient' unless a formal current ThesisVersion exists; outputs never auto-generate investment conclusions.",
+          "A good research output reduces the open question set or sharpens a falsifier; a bad one restates known facts."
+        ],
+        "good_samples": ["weekly-brief-version:us-it-services:2026-w35"],
+        "bad_samples": ["weekly-brief-feedback:us-it-services:2026-w35:revise"]
+      }
+    }
+  },
+  "industry_thesis": {
+    "candidate": {
+      "candidate_id": "thesis-admission-candidate:industry-us-it-services:1",
+      "thesis_ref": "thesis:us-it-services:demand-bottoming",
+      "company_ref": "industry:us-it-services",
+      "industry_ref": "industry:us-it-services",
+      "template_ref": "template:industry-demand-bottoming",
+      "driver_refs": [
+        "driver:bookings-mix-and-conversion",
+        "driver:ai-reinvention-demand"
+      ],
+      "content": {
+        "statement": "US IT services demand is approaching a bottom: discretionary consulting declines are decelerating while AI-led reinvention bookings and managed-services conversion build, implying aggregate industry revenue growth inflects from deceleration to a low-single-digit recovery over the next two to four quarters.",
+        "mechanism": "New bookings lead revenue by two to four quarters. A bookings mix shifting toward managed services and AI-led reinvention, alongside decelerating discretionary consulting declines, stabilizes aggregate growth before it recovers.",
+        "confidence": "low",
+        "implied_expectation": "Aggregate US IT services revenue growth stops decelerating and stabilizes at a low-single-digit rate within two to four quarters of the bookings inflection.",
+        "claim_refs": [],
+        "catalyst_refs": ["catalyst:quarterly-sec-filings", "catalyst:quarterly-earnings-calls"],
+        "falsifier_refs": [
+          "falsifier:industry-bookings-keep-contracting",
+          "falsifier:ai-budget-pool-fails-to-materialize",
+          "falsifier:managed-services-renewals-deteriorate"
+        ],
+        "change_reason": "Initial industry-level admission candidate for the standing question 'has US IT services demand bottomed', bound to the US IT Services driver pack v2 under human gate."
+      },
+      "idempotency_key": "thesis-admission-candidate:industry-us-it-services:1"
+    },
+    "decision": {
+      "verdict": "admit",
+      "rationale": "Isolated canary decision: the industry candidate is bound to the active mandate, driver pack v2, the industry-demand-bottoming template, explicit drivers and falsifiers.",
+      "decision_id": "thesis-admission-decision:industry-us-it-services:1",
+      "idempotency_key": "thesis-admission-decision:industry-us-it-services:1"
+    }
+  },
+  "company_thesis": {
+    "candidate": {
+      "candidate_id": "thesis-admission-candidate:acn:1",
+      "thesis_ref": "thesis:acn:ai-reinvention-growth",
+      "company_ref": "company:sec-cik:0001467373",
+      "industry_ref": "industry:us-it-services",
+      "template_ref": "template:ai-reinvention-growth",
+      "driver_refs": [
+        "driver:ai-reinvention-demand",
+        "driver:bookings-mix-and-conversion",
+        "driver:delivery-economics"
+      ],
+      "content": {
+        "statement": "Large-scale AI and reinvention work plus managed services can offset soft discretionary consulting, allowing Accenture to sustain mid-single-digit local-currency growth without sacrificing operating margin.",
+        "mechanism": "AI-led programs create consulting work and follow-on managed-services demand; bookings conversion drives revenue while utilization and delivery productivity protect operating margin.",
+        "confidence": "medium",
+        "implied_expectation": "AI and total bookings convert into mid-single-digit local-currency revenue growth while adjusted operating margin remains stable or improves.",
+        "claim_refs": [],
+        "catalyst_refs": ["catalyst:acn-quarterly-results"],
+        "falsifier_refs": [
+          "falsifier:ai-bookings-fail-to-convert",
+          "falsifier:consulting-weakness-overwhelms-managed-services",
+          "falsifier:growth-requires-margin-sacrifice"
+        ],
+        "change_reason": "Initial human-reviewed ACN coverage candidate under the US IT Services driver pack v2, admitted alongside the P8a research constitution."
+      },
+      "idempotency_key": "thesis-admission-candidate:acn:1"
+    },
+    "decision": {
+      "verdict": "admit",
+      "rationale": "Isolated canary decision: the ACN candidate is bound to the active mandate, driver pack v2, explicit drivers and falsifiers, and its company ownership feeds the company-to-thesis mapping.",
+      "decision_id": "thesis-admission-decision:acn:1",
+      "idempotency_key": "thesis-admission-decision:acn:1"
+    }
+  }
+}

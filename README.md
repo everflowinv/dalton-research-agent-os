@@ -127,6 +127,9 @@ controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回
 - 首期 Weekly Brief 已发布并记录 exact DeliveryReceipt 和内容反馈；
 - policy-controlled Weekly Brief coordinator 已完成 development candidate 和隔离 live-copy canary；复用现有 controller/outbox，
   同窗口可重放，但尚未部署或激活 live 自动发布；
+- P8a 最小 Research Constitution 与初始 Thesis 已完成 development candidate：版本化 manifest 以 exact ref/hash 绑定
+  Mandate、Driver Pack、Verifier policy 和 Weekly Brief plan，行业 Thesis 与 ACN Thesis 经人工准入链在隔离 canary 跑通，
+  weekly brief schedule v2 携带 company→thesis 映射；live 发布保留 owner gate；
 - Agenda Shadow 最新 live cycle 正常交付，controller、writer、projection 和 dashboard health 均为 running；
 - phase-pinned thesis-impact runner 已部署，但 live 还没有 ThesisVersion 或 company→thesis mapping，因此当前只做零模型调用的 idle 检查；
 - Doctrine、Bounded Planner、LLM Planner、Answer Router 和 DocumentIndex 仍是 development candidate，尚未接入同一条 live 认知循环。
@@ -134,7 +137,7 @@ controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回
 当前阶段是 **Phase 8「单主题自主认知闭环」**。首个主题固定为「美国 IT 服务需求是否见底」，近期顺序是：
 
 1. 关闭 Phase 7 剩余门槛：第五家 SEC issuer；审核并单独批准 Weekly Brief coordinator 的 live activation；
-2. 建立最小 Research Constitution、行业 Thesis 和 ACN Thesis；
+2. 建立最小 Research Constitution、行业 Thesis 和 ACN Thesis（P8a development candidate 已完成，live 激活待 owner gate）；
 3. 增加可重建的 CompanyResearchView 和结构化知识查询；
 4. 把 Tier 1 Bounded Planner 接进 live，只能选择已批准的 probe；
 5. 用 Weekly Brief、Agenda 和 Claim review 的真实反馈建立冻结评测集；

@@ -135,6 +135,14 @@ from .weekly_brief_coordinator import (
     WeeklyBriefCoordinatorError,
     run_weekly_brief_cycle,
 )
+from .research_constitution import (
+    ResearchConstitutionAuthority,
+    ResearchConstitutionConflict,
+    ResearchConstitutionError,
+    ResearchConstitutionNotFound,
+    ResearchConstitutionValidationError,
+)
+from .research_doctrine import ResearchDoctrineAuthority
 from .alphaengine_document_acquisition import (
     validate_alphaengine_document_acquisition_manifest,
 )
@@ -253,6 +261,8 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "set_agenda_pause", "record_agenda_feedback",
     "register_driver_pack", "propose_thesis_admission",
     "decide_thesis_admission",
+    "publish_research_constitution", "get_research_constitution",
+    "get_active_research_constitution", "research_constitution_report",
     "decide_model_input",
     "register_industry_evidence_pack", "register_company_overlay",
     "publish_weekly_brief", "record_weekly_brief_delivery",
@@ -334,6 +344,8 @@ CORE_OPERATIONS = frozenset({
     "register_driver_pack", "get_driver_pack",
     "propose_thesis_admission", "get_thesis_admission_candidate",
     "decide_thesis_admission", "get_thesis_admission_decision",
+    "publish_research_constitution", "get_research_constitution",
+    "get_active_research_constitution", "research_constitution_report",
     "propose_model_input", "get_model_input_candidate",
     "get_model_input_decision", "get_model_input_version", "current_model_input",
     "decide_model_input", "record_model_run", "record_model_reconciliation",
@@ -463,6 +475,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "get_thesis_admission_candidate": frozenset({"candidate_id"}),
     "decide_thesis_admission": frozenset({"candidate_id", "candidate_hash", "verdict", "rationale", "decision_id", "actor_ref", "idempotency_key"}),
     "get_thesis_admission_decision": frozenset({"decision_id"}),
+    "publish_research_constitution": frozenset({"constitution_ref", "industry_ref", "title", "bindings", "method", "actor_ref", "version_id", "prior_version_ref", "idempotency_key"}),
+    "get_research_constitution": frozenset({"version_id"}),
+    "get_active_research_constitution": frozenset({"constitution_ref"}),
+    "research_constitution_report": frozenset(),
     "propose_model_input": frozenset({
         "candidate_id", "input_kind", "model_input_ref", "prior_version_ref",
         "payload", "proposed_by", "idempotency_key",
@@ -580,6 +596,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "register_driver_pack": "actor_ref",
     "propose_thesis_admission": "actor_ref",
     "decide_thesis_admission": "actor_ref",
+    "publish_research_constitution": "actor_ref",
     "propose_model_input": "proposed_by",
     "decide_model_input": "reviewer_ref",
     "record_model_run": "actor_ref",
@@ -784,6 +801,8 @@ class WriterServer:
         self._model_input: ModelInputLedger | None = None
         self._industry_research: IndustryResearchAuthority | None = None
         self._weekly_brief: WeeklyBriefAuthority | None = None
+        self._research_doctrine: ResearchDoctrineAuthority | None = None
+        self._research_constitution: ResearchConstitutionAuthority | None = None
         self._transcript_spool_dir = (
             None if transcript_spool_dir is None
             else str(Path(transcript_spool_dir).expanduser().resolve())
@@ -854,6 +873,12 @@ class WriterServer:
         if self._weekly_brief is None:
             raise WriterServerError("weekly-brief authority is unavailable")
         return self._weekly_brief
+
+    @property
+    def research_constitution(self) -> ResearchConstitutionAuthority:
+        if self._research_constitution is None:
+            raise WriterServerError("research-constitution authority is unavailable")
+        return self._research_constitution
 
     def _transcript_support_authority(self, authority_ref: str) -> dict[str, Any]:
         evidence = self.store.connection.execute(
@@ -973,6 +998,11 @@ class WriterServer:
         self._weekly_brief = WeeklyBriefAuthority(
             self._store, self._industry_research
         )
+        # The doctrine authority opens its append-only schema so a
+        # constitution can bind a doctrine pack; nothing here admits
+        # doctrine or context on its own.
+        self._research_doctrine = ResearchDoctrineAuthority(self._store)
+        self._research_constitution = ResearchConstitutionAuthority(self._store)
         self._backlog = ResearchQuestionBacklog(self._store)
         self._bounded_planner = BoundedPlannerAuthority(self._store)
         self._intent_writer = IntentWriterAuthority(
@@ -1101,6 +1131,8 @@ class WriterServer:
         self._thesis_impact = None
         self._thesis_impact_control = None
         self._weekly_brief = None
+        self._research_doctrine = None
+        self._research_constitution = None
         if self._store is not None:
             self._store.close()
             self._store = None
@@ -1671,6 +1703,20 @@ class WriterServer:
     def _op_get_thesis_admission_decision(self, p: Mapping[str, Any]) -> Any:
         return self.coverage_admission.decision(**dict(p))
 
+    def _op_publish_research_constitution(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        constitution_ref = values.pop("constitution_ref")
+        return self.research_constitution.publish_constitution(constitution_ref, **values)
+
+    def _op_get_research_constitution(self, p: Mapping[str, Any]) -> Any:
+        return self.research_constitution.constitution(**dict(p))
+
+    def _op_get_active_research_constitution(self, p: Mapping[str, Any]) -> Any:
+        return self.research_constitution.active_constitution(**dict(p))
+
+    def _op_research_constitution_report(self, p: Mapping[str, Any]) -> Any:
+        return self.research_constitution.constitution_report()
+
     def _op_propose_model_input(self, p: Mapping[str, Any]) -> Any:
         return self.model_input.propose_input(**dict(p))
 
@@ -1993,7 +2039,7 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, CapabilityRegistryError):
             return "store_error"
-        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, WeeklyBriefError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError)):
+        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, WeeklyBriefError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError, ResearchConstitutionError)):
             return "store_error"
         return "internal_error"
 
@@ -2003,11 +2049,11 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, CoverageAdmissionValidationError, ModelInputValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, CoverageAdmissionValidationError, ModelInputValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError)):
             return "request rejected by contract or gate"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, CoverageAdmissionNotFound, ModelInputNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, CoverageAdmissionNotFound, ModelInputNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound)):
             return "requested object was not found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, CoverageAdmissionConflict, ModelInputConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, CoverageAdmissionConflict, ModelInputConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict)):
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ContextMaterializerError, PerceptionError)):
             return "request rejected by contract or gate"

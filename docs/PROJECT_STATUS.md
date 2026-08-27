@@ -1,13 +1,32 @@
 # Dalton 项目进度
 
 更新日期：2026-08-27
-- **当前阶段：Phase 7「live 研究记忆启动」已完成计划内四家公司 SEC lane；S7e 每周研究 brief 的 issue、投递和内容反馈 authority 已部署 live，并交付首期基线。Phase 8「单主题自主认知闭环」已确定为下一执行阶段。**
+- **当前阶段：Phase 7「live 研究记忆启动」已完成计划内四家公司 SEC lane；S7e 每周研究 brief 的 issue、投递和内容反馈 authority 已部署 live，并交付首期基线。Phase 8「单主题自主认知闭环」执行中：P8a Research Constitution 与初始 Thesis 的 development candidate 已完成，下一切片 P8b。**
   裁决见 [愿景复盘与下一阶段 v0.9](reports/vision-review-and-next-phase-v0.9-2026-08-26.md)。live Core 已有 5 条正式 Claim / 5 条
   Evidence：4 条 policy 自动提交 SEC quantitative + 1 条 owner 人工接受 transcript qualitative；driver pack、industry evidence pack、
   四家公司 overlay 和可重放 Markdown 均已在 live。原止损条件「2026-09-09 live 仍无正式 Claim」已解除。若继续保留
   「≥5 条 policy 自动提交 SEC Claim」的严格退出门槛，还需增加第 5 家 issuer。S7e 已把 issue、delivery 和内容反馈接进正式 authority，
   S7f Weekly Brief coordinator development candidate 已完成并通过全量验收，但尚未部署或激活自动发布。Phase 8 的裁决、切片和四周退出门槛见
   [单主题自主认知闭环 v1.0](reports/phase8-single-topic-autonomous-cognition-loop-v1.0-2026-08-27.md)。
+- **P8a Research Constitution 与初始 Thesis development candidate 已完成（2026-08-27）。** 新增 human-only、
+  append-only 的版本化 ResearchConstitution authority（`research_constitution.py` + 新 packaged SQL schema）：
+  publish 时以 exact `ref+hash` 绑定 MandateVersion、Driver Pack、active GovernancePolicyVersion、可选
+  DoctrinePackVersion（须为该链最新）与可选 Weekly Brief schedule plan（file-contract hash），并只补研究方法：
+  问题准入与信息增益、US IT Services 需求因果链、来源等级与冲突裁决（`minimum_independent_sources=1` 与 live
+  现行强制一致）、必做 falsifier 搜索与替代解释、量级→盈利→估值→市场预期映射、continue/refresh/stop/escalate
+  条件、好坏产物冻结样本与 rubric（good sample 指向首期 live issue，bad sample 指向 owner 的 `revise` 反馈）。
+  writer 新增 `publish_research_constitution`（human-governed）与 `get_research_constitution` /
+  `get_active_research_constitution` / `research_constitution_report` 读 ops。行业 Thesis
+  `thesis:us-it-services:demand-bottoming` 以 `company_ref == industry_ref` 走既有 propose/decide 人工准入
+  （driver pack 追加 v2 与行业模板 `template:industry-demand-bottoming`），ACN Thesis 绑定 pack v2 准入；
+  `deploy/phase1/weekly-brief-schedule-us-it-services-v2.json`（hash `da9406d4…a4e6dc`）把 `company_thesis_refs`
+  从 `{}` 变为 ACN 单条映射，v1 原样保留。隔离 in-memory canary（`scripts/run_p8a_constitution_bootstrap_canary.py`
+  + `deploy/phase8/p8a-us-it-services-bootstrap-v1.json`）：constitution fresh→duplicate、2 条 `human_admission`
+  ThesisVersion、映射经 weekly brief production 读路径 `_thesis_bindings` 解析为 `current`、未映射公司
+  `insufficient`、integrity ok、0 付费调用。专项/邻接 62/62、全仓 940/940、compileall、`git diff --check`、
+  sdist/wheel 与 wheel-only 安装均通过。**未写 live Core；live 激活（P8a mandate、driver pack v2、constitution、
+  两条 Thesis、schedule v2 是否替换 v1）与 DXC lane、coordinator activation 各自保留 owner gate。**见
+  [P8a 报告](reports/p8a-research-constitution-and-initial-thesis-v0.1-2026-08-27.md)。
 - **S7f Weekly Brief coordinator development candidate 已完成代码和隔离 live-copy canary。** 新链由现有 `daltond` 唤醒，
   exact plan hash + active governance policy 准入后先写 append-only CycleAdmission，再生成 issue、把 exact Markdown 放入现有
   outbox，并由 OpenClaw bridge 以附件投递和写 DeliveryReceipt。同窗口重放不重复 issue、outbox 或 Discord 消息；issue 后、

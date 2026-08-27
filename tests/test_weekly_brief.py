@@ -4,6 +4,7 @@ import hashlib
 import sqlite3
 import unittest
 
+from dalton_core.agenda import AgendaStore
 from dalton_core.industry_research import REQUIRED_INDUSTRY_BRIEF_SECTIONS
 from dalton_core.weekly_brief import (
     WeeklyBriefAuthority,
@@ -16,6 +17,8 @@ from tests import test_industry_research as industry_fixture
 BRIEF_REF = "weekly-brief:us-it-services"
 ISSUE_1 = "weekly-brief-version:us-it-services:2026-w35"
 ISSUE_2 = "weekly-brief-version:us-it-services:2026-w36"
+INDUSTRY_REF = industry_fixture.INDUSTRY
+ACN_REF = industry_fixture.ACN
 
 
 class WeeklyBriefAuthorityTests(unittest.TestCase):
@@ -79,6 +82,82 @@ class WeeklyBriefAuthorityTests(unittest.TestCase):
         self.assertIn("尚无正式当前 ThesisVersion", rendered["body"])
         self.assertEqual(rendered, self.weekly.render_markdown(issue["id"]))
         self.assertEqual(issue["content_hash"], self.weekly.issue(issue["id"])["content_hash"])
+
+    def test_admitted_thesis_resolves_company_binding_and_industry_subject_stays_separate(self) -> None:
+        agenda = AgendaStore(self.fixture.store)
+        coverage = self.fixture.coverage
+        owner = "human:coverage-owner"
+        mandate = agenda.create_mandate(
+            "mandate:us-it-services-brief", actor_ref=owner,
+            objective="Admit the industry and ACN theses for the brief mapping.",
+            scope_refs=[INDUSTRY_REF, ACN_REF], constraints={}, success_criteria={},
+            effective_from="2026-08-23T00:00:00+00:00", effective_until=None,
+        )
+        pack = self.fixture.driver_pack
+        content = {
+            "statement": "AI demand can support growth.",
+            "mechanism": "Bookings convert into revenue.",
+            "confidence": "low",
+            "implied_expectation": "Demand signals are followed by bookings and revenue.",
+            "claim_refs": [],
+            "catalyst_refs": [],
+            "falsifier_refs": ["falsifier:conversion-breaks"],
+            "change_reason": "Brief mapping test admission.",
+        }
+
+        def admit(candidate_id: str, thesis_ref: str, subject_ref: str) -> dict:
+            candidate = coverage.propose_thesis_admission(
+                candidate_id=candidate_id, thesis_ref=thesis_ref,
+                company_ref=subject_ref, industry_ref=INDUSTRY_REF,
+                template_ref="template:demand-conversion",
+                driver_refs=["driver:demand-and-conversion"],
+                mandate_version_ref=mandate["id"],
+                mandate_version_hash=mandate["content_hash"],
+                driver_pack_version_ref=pack["id"],
+                driver_pack_version_hash=pack["content_hash"],
+                content=content, actor_ref=owner,
+                idempotency_key=candidate_id,
+            )
+            return coverage.decide_thesis_admission(
+                candidate_id=candidate["id"],
+                candidate_hash=candidate["content_hash"],
+                verdict="admit",
+                rationale="Bound to the active mandate, pack, template and falsifiers.",
+                decision_id=f"thesis-admission-decision:{candidate_id}",
+                actor_ref=owner,
+                idempotency_key=f"thesis-admission-decision:{candidate_id}",
+            )
+
+        industry = admit(
+            "thesis-admission-candidate:industry:1",
+            "thesis:us-it-services:demand-bottoming",
+            INDUSTRY_REF,
+        )
+        company = admit(
+            "thesis-admission-candidate:acn:1",
+            "thesis:acn:demand-conversion",
+            ACN_REF,
+        )
+        connection = self.fixture.store.connection
+        bindings = self.weekly._thesis_bindings(
+            connection, [ACN_REF], {ACN_REF: "thesis:acn:demand-conversion"}
+        )
+        self.assertEqual("current", bindings[0]["status"])
+        self.assertEqual(company["thesis_version"]["id"], bindings[0]["thesis_version_ref"])
+        self.assertEqual("low", bindings[0]["confidence"])
+        with self.assertRaises(WeeklyBriefConflict):
+            self.weekly._thesis_bindings(
+                connection, [ACN_REF], {ACN_REF: "thesis:us-it-services:demand-bottoming"}
+            )
+        self.assertEqual("human_admission", industry["thesis_version"]["authority_kind"])
+        params = self.issue_params()
+        params["company_thesis_refs"] = {ACN_REF: "thesis:acn:demand-conversion"}
+        brief_ref = params.pop("brief_ref")
+        issue = self.weekly.publish_issue(brief_ref, **params)
+        self.assertEqual("current", issue["thesis_bindings"][0]["status"])
+        rendered = self.weekly.render_markdown(issue["id"])["body"]
+        self.assertIn("AI demand can support growth. (confidence=low", rendered)
+        self.assertNotIn("尚无正式当前 ThesisVersion", rendered)
 
     def test_next_issue_reports_carry_forward_without_inventing_changes(self) -> None:
         first = self.publish()

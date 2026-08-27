@@ -1,0 +1,21 @@
+{
+  "schema_version": "0.1",
+  "plan_ref": "weekly-brief-plan:us-it-services:v2",
+  "brief_ref": "weekly-brief:us-it-services",
+  "timezone": "America/New_York",
+  "weekday": 3,
+  "hour": 7,
+  "minute": 0,
+  "effective_from": "2026-09-03T11:00:00.000000+00:00",
+  "evidence_pack_version_id": "industry-evidence-pack-version:us-it-services:live-sec-lane-v1",
+  "company_overlay_version_ids": [
+    "company-overlay-version:acn:live-sec-lane-v1",
+    "company-overlay-version:ctsh:live-sec-lane-v1",
+    "company-overlay-version:epam:live-sec-lane-v1",
+    "company-overlay-version:ibm:live-sec-lane-v1"
+  ],
+  "company_thesis_refs": {
+    "company:sec-cik:0001467373": "thesis:acn:ai-reinvention-growth"
+  },
+  "destination_ref": "openclaw:discord:default:channel:1481256083589697566"
+}

@@ -150,3 +150,11 @@ production policy gate、隔离 canary 和 macOS 调度接线，不激活 live �
 重跑均为 `duplicate`，没有外部投递。实现复用现有 `daltond` 和 outbox，未增加常驻进程。live active policy 仍为 `policy-2`，
 自动发布没有激活。当前候选专项回归 49/49、全仓 926/926，sdist / wheel 和 wheel-only import 均通过。实现与剩余 gate 见
 [S7f Weekly Brief coordinator v0.1](s7f-weekly-brief-coordinator-v0.1-2026-08-27.md)。
+
+P8a（最小 Research Constitution 与初始 Thesis）development candidate 亦已完成：human-only、append-only 的版本化
+ResearchConstitution authority 以 exact ref/hash 绑定 Mandate、Driver Pack、Verifier policy、可选 DoctrinePack 与
+Weekly Brief schedule plan，并补齐研究方法七要素；行业 Thesis 与 ACN Thesis 经既有 propose/decide 人工准入链在隔离
+in-memory canary 跑通（2 条 `human_admission` ThesisVersion），weekly brief schedule v2 携带 ACN 的 company→thesis
+映射并经 production 读路径验证。专项/邻接 62/62、全仓 940/940。live 发布（mandate、driver pack v2、constitution、
+两条 Thesis、schedule v2 替换 v1）与 DXC lane、coordinator activation 各自保留 owner gate。见
+[P8a 报告](p8a-research-constitution-and-initial-thesis-v0.1-2026-08-27.md)。下一开发切片为 P8b 最小知识调用层。
