@@ -13,6 +13,8 @@ from dalton_core.observability import ObservabilityStore
 from dalton_core.research_plan import (
     PLAN_AUTO_START_RULE_REF,
     PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
+    SEC_RESPONSE_BUDGET_V1_BYTES,
+    SEC_RESPONSE_BUDGET_V2_BYTES,
     ResearchPlanAuthority,
     ResearchPlanConflict,
     ResearchPlanControlPlane,
@@ -227,6 +229,59 @@ class ResearchPlanTests(unittest.TestCase):
             self.assertEqual(step["ordinal"], index + 1)
             self.assertEqual(step["depends_on"], [] if index == 0 else [wire["execution_scope"]["steps"][index - 1]["id"]])
         self._validate_contract("research-plan-version.schema.json", wire)
+
+    def test_company_facts_plan_binds_response_budget_head(self) -> None:
+        decision, records = self._selected_questions([
+            ("How did quarterly revenue change year over year at the head?",
+             "Return the exact same-filing SEC quarterly revenue comparison"),
+        ])
+        record = records[0]
+        created = self.plans.create_company_facts_plan(
+            question_ref=record["question_ref"],
+            question_version_ref=record["question_version_ref"],
+            decision_ref=decision["id"],
+            cik="789019",
+            filed_from="2025-08-20",
+            filed_to="2026-08-20",
+            actor_ref="core:planner",
+            idempotency_key="create-plan:company-facts:budget-head",
+        )
+        wire = self.plans.plan_version(created["plan_version_ref"])
+        self.assertEqual(
+            wire["execution_scope"]["budget"]["max_response_bytes"],
+            SEC_RESPONSE_BUDGET_V2_BYTES,
+        )
+
+    def test_v1_response_budget_plan_keeps_revalidating_at_v2_head(self) -> None:
+        import dalton_core.research_plan as research_plan_module
+
+        decision, records = self._selected_questions([
+            ("How did quarterly revenue change year over year historically?",
+             "Return the exact same-filing SEC quarterly revenue comparison"),
+        ])
+        record = records[0]
+        prior_head = research_plan_module.SEC_RESPONSE_BUDGET_CURRENT
+        research_plan_module.SEC_RESPONSE_BUDGET_CURRENT = "v1"
+        try:
+            created = self.plans.create_company_facts_plan(
+                question_ref=record["question_ref"],
+                question_version_ref=record["question_version_ref"],
+                decision_ref=decision["id"],
+                cik="789019",
+                filed_from="2025-08-20",
+                filed_to="2026-08-20",
+                actor_ref="core:planner",
+                idempotency_key="create-plan:company-facts:budget-v1",
+            )
+        finally:
+            research_plan_module.SEC_RESPONSE_BUDGET_CURRENT = prior_head
+        # The head is v2 again; the historical 5 MiB plan must still read and
+        # revalidate byte-for-byte through the budget registry.
+        wire = self.plans.plan_version(created["plan_version_ref"])
+        self.assertEqual(
+            wire["execution_scope"]["budget"]["max_response_bytes"],
+            SEC_RESPONSE_BUDGET_V1_BYTES,
+        )
 
     def test_company_facts_plan_is_closed_and_policy_authorizable(self) -> None:
         decision, records = self._selected_questions([

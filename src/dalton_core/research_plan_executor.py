@@ -98,6 +98,9 @@ from .research_plan import (
     plan_start_ref_for,
     read_exact_research_plan_start,
     read_exact_research_plan_version,
+    sec_rate_policy_ref_for_budget,
+    sec_response_budget_bytes,
+    sec_response_budget_tag,
 )
 from .research_plan_coordinator import (
     ResearchPlanCoordinator,
@@ -131,7 +134,6 @@ _PROFILE_ACCESS_POLICY_REF = "policy:access:public"
 _PROFILE_RETENTION_POLICY_REF = "policy:retention:filing"
 _PROFILE_TERMS_POLICY_REF = "policy:terms:sec"
 _DESCRIPTOR_POLICY_REF = "policy:capability-v1"
-_RUNNER_ENVIRONMENT_ID = "runner-environment:sec-public:v1"
 _RUNNER_ACTOR_REF = "runner:research-plan-executor"
 _RATE_POLICY_REF = "connector-rate-policy:sec-public"
 _ROUNDING = {"mode": "half_up", "digits": 0}
@@ -720,45 +722,95 @@ class ResearchPlanExecutor:
         policy = self.policy_resolver({"policy_ref": self.capability_policy_ref})
         policy_hash = _hash(policy.get("content_hash"), "resolved policy content_hash")
 
-        profile = self.connectors.register_profile({
-            "schema_version": "0.1",
-            "id": template["id"],
-            "created_at": authority_created_at,
-            "connector_ref": template["connector_ref"],
-            "version": 1,
-            "prior_version_ref": None,
-            "capability_id": descriptor.id,
-            "descriptor_revision_ref": descriptor.revision_ref,
-            "descriptor_hash": descriptor.content_hash,
-            "source_identity": identity["source_identity"],
-            "source_hash": identity["source_hash"],
-            "schema_hash": identity["schema_hash"],
-            "catalog_epoch": descriptor.catalog_epoch,
-            "adapter_ref": identity["adapter_ref"],
-            "adapter_hash": identity["adapter_hash"],
-            "runner_runtime_ref": SEC_RUNTIME_PROFILE_REF,
-            "runner_actor_ref": self.actor_ref,
-            "runner_environment_hash": self.runner_environment_hash,
-            "allowed_operations": identity["allowed_operations"],
-            "allowed_hosts": identity["allowed_hosts"],
-            "auth_mode": "none",
-            "credential_slot_refs": [],
-            "input_schema_refs": identity["input_schema_refs"],
-            "input_schema_hashes": identity["input_schema_hashes"],
-            "output_schema_refs": identity["output_schema_refs"],
-            "output_schema_hashes": identity["output_schema_hashes"],
-            "pagination": identity["pagination"],
-            "completeness": identity["completeness"],
-            "max_response_bytes": plan_wire["execution_scope"]["budget"][
-                "max_response_bytes"
-            ],
-            "max_records": 100,
-            "timeout_ms": plan_wire["execution_scope"]["budget"]["max_seconds"] * 1000,
-            "access_policy_ref": _PROFILE_ACCESS_POLICY_REF,
-            "retention_policy_ref": _PROFILE_RETENTION_POLICY_REF,
-            "terms_policy_ref": _PROFILE_TERMS_POLICY_REF,
-            "network_policy": _NETWORK_POLICY,
-        }, idempotency_key="connector-profile:sec-public:v1")
+        # The plan's frozen response budget selects the authority records:
+        # tag ``v1`` replays the historical single profile/policy pair
+        # byte-for-byte; every later tag registers a second profile version
+        # (a larger response bound is a new immutable authority) plus a
+        # sibling rate policy ref, because rate policy versions must keep
+        # one connector profile ref stable.
+        budget = plan_wire["execution_scope"]["budget"]
+        budget_tag = sec_response_budget_tag(budget["max_response_bytes"])
+
+        def _profile_spec(
+            profile_version_id: str,
+            version: int,
+            prior_version_ref: str | None,
+            max_response_bytes: int,
+        ) -> dict[str, Any]:
+            return {
+                "schema_version": "0.1",
+                "id": profile_version_id,
+                "created_at": authority_created_at,
+                "connector_ref": template["connector_ref"],
+                "version": version,
+                "prior_version_ref": prior_version_ref,
+                "capability_id": descriptor.id,
+                "descriptor_revision_ref": descriptor.revision_ref,
+                "descriptor_hash": descriptor.content_hash,
+                "source_identity": identity["source_identity"],
+                "source_hash": identity["source_hash"],
+                "schema_hash": identity["schema_hash"],
+                "catalog_epoch": descriptor.catalog_epoch,
+                "adapter_ref": identity["adapter_ref"],
+                "adapter_hash": identity["adapter_hash"],
+                "runner_runtime_ref": SEC_RUNTIME_PROFILE_REF,
+                "runner_actor_ref": self.actor_ref,
+                "runner_environment_hash": self.runner_environment_hash,
+                "allowed_operations": identity["allowed_operations"],
+                "allowed_hosts": identity["allowed_hosts"],
+                "auth_mode": "none",
+                "credential_slot_refs": [],
+                "input_schema_refs": identity["input_schema_refs"],
+                "input_schema_hashes": identity["input_schema_hashes"],
+                "output_schema_refs": identity["output_schema_refs"],
+                "output_schema_hashes": identity["output_schema_hashes"],
+                "pagination": identity["pagination"],
+                "completeness": identity["completeness"],
+                "max_response_bytes": max_response_bytes,
+                "max_records": 100,
+                "timeout_ms": budget["max_seconds"] * 1000,
+                "access_policy_ref": _PROFILE_ACCESS_POLICY_REF,
+                "retention_policy_ref": _PROFILE_RETENTION_POLICY_REF,
+                "terms_policy_ref": _PROFILE_TERMS_POLICY_REF,
+                "network_policy": _NETWORK_POLICY,
+            }
+
+        legacy_profile_key = "connector-profile:sec-public:v1"
+        if budget_tag == "v1":
+            # Historical plans replay the original single version-1 profile.
+            profile = self.connectors.register_profile(
+                _profile_spec(
+                    template["id"], 1, None, budget["max_response_bytes"]
+                ),
+                idempotency_key=legacy_profile_key,
+            )
+        else:
+            # A larger bound needs profile version 2 under the same connector
+            # ref.  Seed the historical version-1 row first when this Core has
+            # no SEC profile yet (idempotent on Cores that already have it);
+            # version 2 then anchors to it with a budget-tag-suffixed ref and
+            # idempotency key, so replays at later clock values stay stable.
+            latest_profile = self.connectors.connection.execute(
+                "SELECT profile_version_id FROM connector_profile_versions "
+                "WHERE connector_ref=? ORDER BY version_number DESC LIMIT 1",
+                (template["connector_ref"],),
+            ).fetchone()
+            if latest_profile is None:
+                self.connectors.register_profile(
+                    _profile_spec(
+                        template["id"], 1, None, sec_response_budget_bytes("v1")
+                ),
+                idempotency_key=legacy_profile_key,
+            )
+            profile = self.connectors.register_profile(
+                _profile_spec(
+                    f"{template['id']}:budget-{budget_tag}",
+                    2,
+                    template["id"],
+                    budget["max_response_bytes"],
+                ),
+                idempotency_key=f"connector-profile:sec-public:budget-{budget_tag}",
+            )
 
         parameters = sec_adapter_parameters(plan_wire)
         call_spec = self.connectors.register_call_spec({
@@ -882,11 +934,21 @@ class ResearchPlanExecutor:
                 )
             execution_wire = None
 
+        price_version_id = (
+            "connector-price:sec-public:zero:v1"
+            if budget_tag == "v1"
+            else f"connector-price:sec-public:zero:budget-{budget_tag}:v1"
+        )
+        price_rate_ref = (
+            "connector-price:sec-public:zero"
+            if budget_tag == "v1"
+            else f"connector-price:sec-public:zero:budget-{budget_tag}"
+        )
         price = self.connectors.register_price_rate({
             "schema_version": "0.1",
-            "id": "connector-price:sec-public:zero:v1",
+            "id": price_version_id,
             "created_at": authority_created_at,
-            "price_rate_ref": "connector-price:sec-public:zero",
+            "price_rate_ref": price_rate_ref,
             "version": 1,
             "prior_version_ref": None,
             "connector_profile_ref": profile["id"],
@@ -897,39 +959,64 @@ class ResearchPlanExecutor:
             "currency": "USD",
             "effective_from": authority_created_at,
             "effective_until": None,
-            "source_ref": "pricing:connector-price:sec-public:zero",
+            "source_ref": f"pricing:{price_rate_ref}",
             "actor_ref": self.actor_ref,
-        }, idempotency_key="connector-price:sec-public:zero:v1")
+        }, idempotency_key=price_version_id)
         price_book = {
             "price_rate_refs": [price["id"]],
             "required_price_meters": ["calls"],
         }
-        self.connectors.register_rate_policy({
-            "schema_version": "0.1",
-            "id": "connector-rate-policy:sec-public:v1",
-            "created_at": authority_created_at,
-            "policy_ref": _RATE_POLICY_REF,
-            "quota_scope_ref": "connector-quota-scope:sec-public",
-            "version": 1,
-            "prior_version_ref": None,
-            "connector_profile_ref": profile["id"],
-            "window_seconds": 60,
-            "reset_timezone": "UTC",
-            "max_concurrency": 2,
-            "quota_currency": "USD",
-            "price_rate_refs": price_book["price_rate_refs"],
-            "required_price_meters": price_book["required_price_meters"],
-            "price_book_hash": content_hash(price_book),
-            "limits": {
-                "calls": 2,
-                "bytes": plan_wire["execution_scope"]["budget"]["max_response_bytes"],
-                "records": 100,
-                "cost_micros": 1000,
-            },
-            "effective_from": authority_created_at,
-            "effective_until": None,
-            "actor_ref": self.actor_ref,
-        }, idempotency_key="connector-rate-policy:sec-public:v1")
+        def _rate_policy_spec(
+            policy_version_id: str, policy_ref: str
+        ) -> dict[str, Any]:
+            return {
+                "schema_version": "0.1",
+                "id": policy_version_id,
+                "created_at": authority_created_at,
+                "policy_ref": policy_ref,
+                "quota_scope_ref": "connector-quota-scope:sec-public",
+                "version": 1,
+                "prior_version_ref": None,
+                "connector_profile_ref": profile["id"],
+                "window_seconds": 60,
+                "reset_timezone": "UTC",
+                "max_concurrency": 2,
+                "quota_currency": "USD",
+                "price_rate_refs": price_book["price_rate_refs"],
+                "required_price_meters": price_book["required_price_meters"],
+                "price_book_hash": content_hash(price_book),
+                "limits": {
+                    "calls": 2,
+                    "bytes": budget["max_response_bytes"],
+                    "records": 100,
+                    "cost_micros": 1000,
+                },
+                "effective_from": authority_created_at,
+                "effective_until": None,
+                "actor_ref": self.actor_ref,
+            }
+
+        if budget_tag == "v1":
+            self.connectors.register_rate_policy(
+                _rate_policy_spec(
+                    "connector-rate-policy:sec-public:v1", _RATE_POLICY_REF
+                ),
+                idempotency_key="connector-rate-policy:sec-public:v1",
+            )
+        else:
+            # Sibling policy ref for the larger bound: one rate policy ref
+            # must keep a single connector profile ref across its versions,
+            # so the second profile version gets its own policy whose byte
+            # limit admits exactly one head-budget reservation per window.
+            # The quota scope stays shared so both policies' reservations
+            # still settle inside the same 60-second window accounting.
+            self.connectors.register_rate_policy(
+                _rate_policy_spec(
+                    f"{_RATE_POLICY_REF}:budget-{budget_tag}:v1",
+                    sec_rate_policy_ref_for_budget(budget_tag),
+                ),
+                idempotency_key=f"connector-rate-policy:sec-public:budget-{budget_tag}",
+            )
 
         return {
             "template": template,

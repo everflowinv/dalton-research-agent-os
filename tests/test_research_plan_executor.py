@@ -31,6 +31,9 @@ from dalton_core.research_plan import (
     PLAN_AUTO_START_RULE_REF,
     PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
     _plan_work_orders,
+    sec_current_rate_policy_ref,
+    sec_current_runner_binding_ref,
+    sec_current_runner_environment_ref,
 )
 from dalton_core.research_plan_coordinator import (
     ResearchPlanCoordinator,
@@ -198,7 +201,10 @@ class PlanExecutorHarness:
         )
         self.observability = ObservabilityStore(self.core)
         self.journal = RunnerJournal(self.core, clock=self.clock)
-        self.spool = RawSpool(self.temp.name, max_total_bytes=6_000_000)
+        # The spool high-water mark must admit one reservation at the current
+        # SEC response-budget head.  The response fixture itself remains
+        # tiny; this only mirrors production's conservative reservation.
+        self.spool = RawSpool(self.temp.name, max_total_bytes=10_000_000)
 
         self.template = load_packaged_connector_inventory()["templates"]["sec"]
         self.identity = sec_connector_identity(
@@ -214,7 +220,7 @@ class PlanExecutorHarness:
             operation_name=self.identity["operation"],
         ))
         binding = {
-            "binding_ref": "runner-binding:sec-public:v1",
+            "binding_ref": sec_current_runner_binding_ref(),
             "descriptor_revision_ref": self.descriptor.revision_ref,
             "descriptor_hash": self.descriptor.content_hash,
             "adapter_ref": self.identity["adapter_ref"],
@@ -230,11 +236,11 @@ class PlanExecutorHarness:
             "credential_slot_refs": [],
             "required_permissions": copy.deepcopy(self.permissions),
             "side_effects": ["read:public-http"],
-            "rate_policy_ref": "connector-rate-policy:sec-public",
+            "rate_policy_ref": sec_current_rate_policy_ref(),
         }
         manifest_payload = {
             "schema_version": "0.1",
-            "id": "runner-environment:sec-public:v1",
+            "id": sec_current_runner_environment_ref(),
             "created_at": MutableClock().value.isoformat(timespec="microseconds"),
             "runner_runtime_ref": "runner-runtime:sec-public:v1",
             "runner_actor_ref": self.actor_ref,
@@ -453,6 +459,63 @@ class ResearchPlanExecutorTests(unittest.TestCase):
             [item["status"] for item in outcomes],
             ["admitted", "admitted", "admitted", "complete"],
         )
+
+    def test_company_facts_run_registers_budget_v2_authority(self) -> None:
+        harness = self.harness(suffix="budget-v2", company_facts=True)
+        outcomes = harness.run_to_complete()
+        self.assertEqual(outcomes[-1]["status"], "complete")
+        rows = harness.connectors.connection.execute(
+            "SELECT profile_version_id, version_number, record_json "
+            "FROM connector_profile_versions "
+            "WHERE connector_ref='connector:sec-edgar' ORDER BY version_number"
+        ).fetchall()
+        self.assertEqual([row["version_number"] for row in rows], [1, 2])
+        self.assertEqual(
+            rows[0]["profile_version_id"], "connector-profile-template:sec:0.1"
+        )
+        self.assertEqual(
+            rows[1]["profile_version_id"],
+            "connector-profile-template:sec:0.1:budget-v2",
+        )
+        seeded = json.loads(rows[0]["record_json"])
+        upgraded = json.loads(rows[1]["record_json"])
+        self.assertEqual(seeded["max_response_bytes"], 5 * 1024 * 1024)
+        self.assertEqual(upgraded["max_response_bytes"], 8 * 1024 * 1024)
+        policy = harness.connectors.connection.execute(
+            "SELECT policy_ref, record_json FROM connector_rate_policy_versions "
+            "WHERE policy_version_id='connector-rate-policy:sec-public:budget-v2:v1'"
+        ).fetchone()
+        self.assertIsNotNone(policy)
+        self.assertEqual(policy["policy_ref"], "connector-rate-policy:sec-public:budget-v2")
+        self.assertEqual(
+            json.loads(policy["record_json"])["limits"]["bytes"], 8 * 1024 * 1024
+        )
+        price = harness.connectors.connection.execute(
+            "SELECT price_rate_ref, connector_profile_ref "
+            "FROM connector_price_rate_versions "
+            "WHERE price_rate_version_id="
+            "'connector-price:sec-public:zero:budget-v2:v1'"
+        ).fetchone()
+        self.assertIsNotNone(price)
+        self.assertEqual(
+            price["price_rate_ref"],
+            "connector-price:sec-public:zero:budget-v2",
+        )
+        self.assertEqual(
+            price["connector_profile_ref"],
+            "connector-profile-template:sec:0.1:budget-v2",
+        )
+        # The invocation that actually ran must bind the budget-v2 profile.
+        invocation = json.loads(
+            harness.connectors.connection.execute(
+                "SELECT record_json FROM connector_invocations"
+            ).fetchone()[0]
+        )
+        self.assertEqual(
+            invocation["connector_profile_ref"],
+            "connector-profile-template:sec:0.1:budget-v2",
+        )
+
         claim = json.loads(
             harness.staging.connection.execute(
                 "SELECT record_json FROM candidate_claim_versions"
@@ -512,7 +575,7 @@ class ResearchPlanExecutorTests(unittest.TestCase):
             ],
         )
 
-    def test_second_plan_reuses_global_sec_profile_without_authority_fork(self) -> None:
+    def test_second_plan_reuses_versioned_sec_authority_without_fork(self) -> None:
         harness = self.harness(suffix="shared-profile-a")
         harness.run_to_complete()
         harness.clock.advance(60)
@@ -534,7 +597,7 @@ class ResearchPlanExecutorTests(unittest.TestCase):
             core.execute(
                 "SELECT COUNT(*) FROM connector_profile_versions"
             ).fetchone()[0],
-            1,
+            2,
         )
         self.assertEqual(
             core.execute(
