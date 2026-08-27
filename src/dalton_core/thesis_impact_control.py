@@ -117,9 +117,13 @@ class ResearchPlanThesisImpactCoordinator:
         envelope = formal.get("result_envelope") or {}
         metadata = envelope.get("metadata") or {}
         error = envelope.get("error") or {}
+        code = error.get("code")
         # Broker-reported host completion failures carry no usage and no cost;
         # after the host recovers the binding must be able to run again.
-        if error.get("code") == "HOST_COMPLETION_FAILED":
+        # INVALID_HOST_RESULT is the broker's own contract validation of the
+        # host frame (proof shape, attribution, telemetry) — again no model
+        # semantics, so the same bounded re-drive applies.
+        if code in {"HOST_COMPLETION_FAILED", "INVALID_HOST_RESULT"}:
             return True
         if not metadata.get("control_plane_failure"):
             return False

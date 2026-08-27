@@ -551,6 +551,47 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
         self.assertNotEqual(
             host_work["id"], after_host_stop["assessment_work_order"]["id"]
         )
+        # Broker contract-validation failures (INVALID_HOST_RESULT: proof
+        # shape, attribution, telemetry) carry no model semantics and
+        # re-drive the same way (live 2026-08-27 attempt window).
+        contract_work = after_host_stop["assessment_work_order"]
+        identifier2 = f"contract-{contract_work['id'].removeprefix('work:')}"
+        lease2 = self.harness.scheduler().claim(
+            owner, work_order_id=contract_work["id"]
+        )
+        self.harness.scheduler().complete(
+            contract_work["id"],
+            lease2["attempt"]["attempt_number"],
+            owner,
+            lease2["lease_token"],
+            {
+                "schema_version": "0.1",
+                "id": f"result:{identifier2}",
+                "created_at": CREATED_AT,
+                "work_order_ref": contract_work["id"],
+                "invocation_ref": f"invocation:{identifier2}",
+                "status": "failed",
+                "outputs": {},
+                "artifact_refs": [],
+                "actual_side_effects": [],
+                "usage_refs": [],
+                "error": {
+                    "code": "INVALID_HOST_RESULT",
+                    "message": "provider control proof has an invalid shape",
+                    "source": "openclaw-model-broker",
+                },
+                "metadata": {},
+            },
+            idempotency_key=f"complete:{identifier2}",
+        )
+        after_contract_stop = self.control.start_from_closed_plan(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+        )
+        self.assertNotEqual(
+            contract_work["id"],
+            after_contract_stop["assessment_work_order"]["id"],
+        )
 
     def test_routed_worker_retries_contract_then_verifies_independently(self) -> None:
         committed = self._seed_thesis()
