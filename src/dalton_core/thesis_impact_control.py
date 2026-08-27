@@ -40,8 +40,11 @@ VERIFIER_THINKING_LEVEL = "low"
 # charged nothing; after the control plane itself is repaired (broker socket,
 # auth key) the same exact binding must be able to run again instead of
 # reporting the dead WorkOrder forever.  Bounded so a persistent control-plane
-# outage still parks the target visibly.
-MAX_CONTROL_PLANE_REDRIVE = 3
+# outage still parks the target visibly.  5 re-drives (times the Scheduler's
+# 3 attempts each) tolerates an infrastructure outage window of roughly an
+# hour at the 5-minute runner cadence before parking (live 2026-08-27: the
+# Gemini host-path incident consumed 4 identities in one hour).
+MAX_CONTROL_PLANE_REDRIVE = 5
 ASSESSMENT_BUDGET = {
     "max_input_tokens": 3000,
     "max_output_tokens": 500,
