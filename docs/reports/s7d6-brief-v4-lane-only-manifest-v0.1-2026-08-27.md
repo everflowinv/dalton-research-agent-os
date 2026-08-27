@@ -18,7 +18,7 @@
 
 先不进 live v4。它的正式 `metric_or_aspect` 是 `aspect:new-bookings-direction-local-currency`，并非 lane 的 revenue key；若要纳入，必须在同一 driver 增加这个 semantic aspect，再给 ACN overlay 增加 observed cell。这样技术上可行：metric spec 可以是 `semantic`，而 qualitative Claim 可以绑定到 driver；numeric metric 只有 transcript 作为 observed authority 才会被拒绝：`src/dalton_core/coverage_admission.py:89-137`、`src/dalton_core/industry_research.py:669-688`。
 
-但 owner 已定 lane-only / SEC-only 口径，故把它作为 future non-lane corroboration，而不是把它伪装成 revenue corroboration。v4 的三条 binding 均为 SEC lane revenue Claim。
+但 owner 已定 lane-only / SEC-only 口径，故把它作为 future non-lane corroboration，而不是把它伪装成 revenue corroboration。v4 的四条 binding 均为 SEC lane revenue Claim。
 
 ### C. IBM 缺 Claim 会不会挡 overlay？
 
@@ -31,9 +31,9 @@
 - 报告内保留 issuer 的 fiscal/calendar period 与不同 US-GAAP concept caveat；不把 ACN、EPAM、CTSH、IBM 的期间误写成同一日历季度。
 - manifest 是发布输入，不会自行写 live Core；发布器须按 `register_driver_pack` → `register_evidence_pack` → 三个 `register_company_overlay` 的顺序执行。
 
-## 未做
+## 未做（草案提交时）
 
-- 未访问或改写 live Core、未部署、未合并 main。
+- 草案提交时未访问或改写 live Core、未部署、未合并 main；后续 live 结果见 S7d-7 报告。
 
 ## 主 session 复核
 
