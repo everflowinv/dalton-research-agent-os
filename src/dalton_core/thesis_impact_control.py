@@ -114,7 +114,13 @@ class ResearchPlanThesisImpactCoordinator:
         formal = self.scheduler.formal_result(work_order_id)
         if formal is None:
             return False
-        metadata = (formal.get("result_envelope") or {}).get("metadata") or {}
+        envelope = formal.get("result_envelope") or {}
+        metadata = envelope.get("metadata") or {}
+        error = envelope.get("error") or {}
+        # Broker-reported host completion failures carry no usage and no cost;
+        # after the host recovers the binding must be able to run again.
+        if error.get("code") == "HOST_COMPLETION_FAILED":
+            return True
         if not metadata.get("control_plane_failure"):
             return False
         # Historical envelopes predate the explicit flag; they were adapter

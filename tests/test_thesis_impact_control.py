@@ -508,6 +508,50 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             formal["result_envelope"]["metadata"]["control_plane_failure"]
         )
 
+    def test_host_completion_stop_is_redriveable(self) -> None:
+        # Broker-reported host completion failures (no usage, no cost) are
+        # redriveable too: the live 2026-08-27 verifier died in the host.
+        self._seed_thesis()
+        started = self._close_and_start()
+        host_work = started["impact"]["assessment_work_order"]
+        owner = "worker:host-stop"
+        lease = self.harness.scheduler().claim(
+            owner, work_order_id=host_work["id"]
+        )
+        identifier = f"host-{host_work['id'].removeprefix('work:')}"
+        self.harness.scheduler().complete(
+            host_work["id"],
+            lease["attempt"]["attempt_number"],
+            owner,
+            lease["lease_token"],
+            {
+                "schema_version": "0.1",
+                "id": f"result:{identifier}",
+                "created_at": CREATED_AT,
+                "work_order_ref": host_work["id"],
+                "invocation_ref": f"invocation:{identifier}",
+                "status": "failed",
+                "outputs": {},
+                "artifact_refs": [],
+                "actual_side_effects": [],
+                "usage_refs": [],
+                "error": {
+                    "code": "HOST_COMPLETION_FAILED",
+                    "message": "host completion failed",
+                    "source": "openclaw-model-broker",
+                },
+                "metadata": {"broker_idempotency_status": "fresh"},
+            },
+            idempotency_key=f"complete:{identifier}",
+        )
+        after_host_stop = self.control.start_from_closed_plan(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+        )
+        self.assertNotEqual(
+            host_work["id"], after_host_stop["assessment_work_order"]["id"]
+        )
+
     def test_routed_worker_retries_contract_then_verifies_independently(self) -> None:
         committed = self._seed_thesis()
         before_pointer = dict(self.harness.core.current_pointer(self.thesis_ref))
