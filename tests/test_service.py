@@ -100,12 +100,52 @@ class ServiceTests(unittest.TestCase):
                 service.close()
             self.assertEqual(heartbeat["state"], "running")
             self.assertEqual("disabled", heartbeat["weekly_brief"]["state"])
+            self.assertEqual("disabled", heartbeat["bounded_planner"]["state"])
             self.assertIsNotNone(heartbeat["projection_watermark"])
             self.assertEqual(heartbeat["plugins"]["static_dashboard"]["state"], "ready")
             self.assertTrue((root / "projection.sqlite").is_file())
             self.assertTrue((root / "public" / "index.html").is_file())
             saved = json.loads((root / "run" / "heartbeat.json").read_text())
             self.assertEqual(saved["service"], "daltond")
+
+    def test_bounded_planner_block_parses_and_reports_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            raw = {
+                "schema_version": "0.1",
+                "core_db": str(root / "core.sqlite"),
+                "scheduler_db": str(root / "scheduler.sqlite"),
+                "projection_db": str(root / "projection.sqlite"),
+                "model_router_db": None,
+                "capability_catalog_db": None,
+                "heartbeat_path": str(root / "run" / "heartbeat.json"),
+                "writer_socket": str(root / "run" / "writer.sock"),
+                "tick_seconds": 1,
+                "projection_min_interval_seconds": 1,
+                "plugin_retry_seconds": 1,
+                "plugins": [],
+                "bounded_planner": {
+                    "enabled": True,
+                    "interval_seconds": 300,
+                    "config": {
+                        "writer_socket": str(root / "run" / "writer.sock"),
+                        "token_config": str(root / "tokens.json"),
+                        "scheduler_db": str(root / "scheduler.sqlite"),
+                        "user_agent": "Dalton Research Bounded Planner",
+                        "max_response_bytes": 8_388_608,
+                        "timeout_seconds": 60.0,
+                        "max_probes_per_tick": 1,
+                        "filed_window_days": 400,
+                    },
+                },
+            }
+            config = ServiceConfig.from_mapping(raw)
+            self.assertEqual(300.0, config.bounded_planner_interval_seconds)
+            self.assertEqual(1, config.bounded_planner.max_probes_per_tick)
+            bad = json.loads(json.dumps(raw))
+            bad["bounded_planner"]["config"]["surprise"] = True
+            with self.assertRaises(ServiceConfigError):
+                ServiceConfig.from_mapping(bad)
 
     def test_config_rejects_arbitrary_plugin_imports(self) -> None:
         raw = {

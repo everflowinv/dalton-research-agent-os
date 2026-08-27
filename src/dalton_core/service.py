@@ -30,6 +30,11 @@ from .openclaw_agenda_bridge import OpenClawAgendaBridge, OpenClawAgendaBridgeCo
 from .plugins.static_dashboard import StaticDashboardPlugin
 from .scheduler import Scheduler
 from .thesis_impact_production import ThesisImpactProductionConfig
+from .bounded_planner_driver import (
+    BoundedPlannerDriver,
+    BoundedPlannerDriverConfig,
+    BoundedPlannerDriverError,
+)
 from .weekly_brief_coordinator import (
     WeeklyBriefCoordinator,
     WeeklyBriefCoordinatorConfig,
@@ -78,6 +83,8 @@ class ServiceConfig:
     agenda_interval_seconds: float | None
     weekly_brief: WeeklyBriefCoordinatorConfig | None
     weekly_brief_interval_seconds: float | None
+    bounded_planner: BoundedPlannerDriverConfig | None
+    bounded_planner_interval_seconds: float | None
     outbox: OpenClawAgendaBridgeConfig | None
     outbox_interval_seconds: float | None
     control: AgendaControlConfig | None
@@ -95,8 +102,8 @@ class ServiceConfig:
             "plugin_retry_seconds", "plugins",
         }
         optional = {
-            "agenda", "weekly_brief", "outbox", "control", "backup",
-            "thesis_impact",
+            "agenda", "weekly_brief", "bounded_planner", "outbox", "control",
+            "backup", "thesis_impact",
         }
         if not required.issubset(raw) or set(raw) - required - optional or raw.get("schema_version") != SCHEMA_VERSION:
             raise ServiceConfigError("service config has an invalid shape or schema version")
@@ -152,6 +159,29 @@ class ServiceConfig:
                 weekly_brief_interval = _positive_number(
                     weekly_brief_raw["interval_seconds"],
                     "weekly_brief.interval_seconds",
+                )
+        bounded_planner_config = None
+        bounded_planner_interval = None
+        bounded_planner_raw = raw.get("bounded_planner")
+        if bounded_planner_raw is not None:
+            if not isinstance(bounded_planner_raw, Mapping) or set(bounded_planner_raw) != {
+                "enabled", "interval_seconds", "config",
+            } or not isinstance(bounded_planner_raw["enabled"], bool):
+                raise ServiceConfigError("bounded planner service config is invalid")
+            if bounded_planner_raw["enabled"]:
+                if not isinstance(bounded_planner_raw["config"], Mapping):
+                    raise ServiceConfigError("bounded_planner.config must be an object")
+                try:
+                    bounded_planner_config = BoundedPlannerDriverConfig.from_mapping(
+                        dict(bounded_planner_raw["config"])
+                    )
+                except Exception as exc:
+                    raise ServiceConfigError(
+                        "bounded planner driver config is invalid"
+                    ) from exc
+                bounded_planner_interval = _positive_number(
+                    bounded_planner_raw["interval_seconds"],
+                    "bounded_planner.interval_seconds",
                 )
         backup_root = None
         backup_interval = None
@@ -261,6 +291,8 @@ class ServiceConfig:
             agenda_interval_seconds=agenda_interval,
             weekly_brief=weekly_brief_config,
             weekly_brief_interval_seconds=weekly_brief_interval,
+            bounded_planner=bounded_planner_config,
+            bounded_planner_interval_seconds=bounded_planner_interval,
             outbox=outbox_config,
             outbox_interval_seconds=outbox_interval,
             control=control_config,
@@ -363,6 +395,18 @@ class DaltonService:
             "last_started_at": None, "last_completed_at": None,
             "last_result": None, "last_error": None,
         }
+        self._bounded_planner = (
+            None if config.bounded_planner is None
+            else BoundedPlannerDriver(config.bounded_planner)
+        )
+        self._bounded_planner_executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._bounded_planner_future: concurrent.futures.Future[dict[str, Any]] | None = None
+        self._bounded_planner_last_launch_monotonic = 0.0
+        self._bounded_planner_state: dict[str, Any] = {
+            "state": "disabled" if self._bounded_planner is None else "pending",
+            "last_started_at": None, "last_completed_at": None,
+            "last_result": None, "last_error": None,
+        }
         self._outbox = None if config.outbox is None else OpenClawAgendaBridge(config.outbox)
         self._outbox_executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._outbox_future: concurrent.futures.Future[dict[str, Any]] | None = None
@@ -407,6 +451,10 @@ class DaltonService:
             self._weekly_brief_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="dalton-weekly-brief"
             )
+        if self._bounded_planner is not None:
+            self._bounded_planner_executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="dalton-bounded-planner"
+            )
         if self._outbox is not None:
             self._outbox_executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=1, thread_name_prefix="dalton-outbox"
@@ -425,6 +473,11 @@ class DaltonService:
         )
         if weekly_executor is not None:
             weekly_executor.shutdown(wait=False, cancel_futures=True)
+        planner_executor, self._bounded_planner_executor = (
+            self._bounded_planner_executor, None
+        )
+        if planner_executor is not None:
+            planner_executor.shutdown(wait=False, cancel_futures=True)
         executor, self._agenda_executor = self._agenda_executor, None
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -520,6 +573,42 @@ class DaltonService:
                     self._weekly_brief.run_once
                 )
 
+    def _poll_bounded_planner(self) -> None:
+        if self._bounded_planner is None:
+            return
+        future = self._bounded_planner_future
+        if future is not None and future.done():
+            self._bounded_planner_future = None
+            self._bounded_planner_state["last_completed_at"] = _utc_now()
+            try:
+                result = future.result()
+            except Exception as exc:
+                self._bounded_planner_state.update(
+                    state="error", last_error=f"{type(exc).__name__}: {exc}",
+                    last_result=None,
+                )
+            else:
+                self._bounded_planner_state.update(
+                    state=str(result.get("status", "completed")),
+                    last_error=None, last_result=result,
+                )
+        interval = self.config.bounded_planner_interval_seconds
+        executor = self._bounded_planner_executor
+        if (
+            self._bounded_planner_future is None
+            and interval is not None
+            and executor is not None
+        ):
+            elapsed = time.monotonic() - self._bounded_planner_last_launch_monotonic
+            if self._bounded_planner_last_launch_monotonic == 0.0 or elapsed >= interval:
+                self._bounded_planner_last_launch_monotonic = time.monotonic()
+                self._bounded_planner_state.update(
+                    state="running", last_started_at=_utc_now(), last_error=None
+                )
+                self._bounded_planner_future = executor.submit(
+                    self._bounded_planner.run_once
+                )
+
     def _run_backup(self) -> None:
         if self._backup is None or self.config.backup_interval_seconds is None:
             return
@@ -594,6 +683,7 @@ class DaltonService:
         self._last_sweep_at = _utc_now()
         self._poll_agenda()
         self._poll_weekly_brief()
+        self._poll_bounded_planner()
         self._poll_outbox()
         self._run_backup()
         current_signature = self._sources()
@@ -641,6 +731,7 @@ class DaltonService:
             "plugins": plugin_states,
             "agenda": dict(self._agenda_state),
             "weekly_brief": dict(self._weekly_brief_state),
+            "bounded_planner": dict(self._bounded_planner_state),
             "outbox": dict(self._outbox_state),
             "backup": dict(self._backup_state),
             "last_error": self._last_error,

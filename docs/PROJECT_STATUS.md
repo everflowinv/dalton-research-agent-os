@@ -33,6 +33,17 @@
   副本）：确定性 planner 完整跑 5 轮（proposal→准入→WorkOrder→stub 结果→observed outcome）至终态
   `evidence_observed_for_review`，重放 duplicate，integrity ok，0 付费调用。邻接 76/76、全仓 950/950。见
   [P8c-1 报告](reports/p8c1-standing-question-and-loop-admission-v0.1-2026-08-27.md)。
+- **P8c-2 Bounded Planner controller 驱动已部署 live 并完成首次全自主循环（2026-08-27 17:06–17:2x UTC）。**
+  `daltond` 新增 `bounded_planner` 服务块（300s 唤醒，core-principal RPC）：列出未终态循环 → 确定性 planner
+  提案 → Core 准入（Scheduler WorkOrder）→ controller 经公共 SEC transport 真实执行 probe（每 tick 至多
+  1 次、8 MiB 上限、data.sec.gov 白名单）→ 源级 ResearchOutcome → 终态。新增 writer 驱动 ops（propose /
+  admit / record_outcome / active_loops）、`bounded_probe_executor.py`（10-Q accession 源级覆盖，
+  失败→source_unavailable、未命中→not_found_in_scope）与 `bounded_planner_driver.py`。**首次自主循环**：
+  ACN/CTSH/IBM observed（ACN 选中比 lane 更新的 10-Q `…000032`）、EPAM not_found_in_scope（不报告
+  us-gaap:Revenues，如实记录）、DXC source_unavailable（SEC 当天移除了该 companyfacts key，已实测复现）；
+  planner 自主 terminate，终态 `evidence_observed_for_review`；此后 driver idle。全程 0 付费调用。
+  新测试 executor 4 / driver 2 / service 2，邻接 32/32，全仓 957/957。见
+  [P8c-2 报告](reports/p8c2-controller-driven-loop-v0.1-2026-08-27.md)。
 - **2026-08-27 owner 批准全部保留 gate 后已在 live 执行（详见
   [live 激活报告](reports/p8a-s7f-live-activation-v0.1-2026-08-27.md)）**：
   1. **DXC 第 5 家 SEC issuer 完成**：catalog 加入 DXC（CIK 001688568，agenda binding v2→v3），live lane 取

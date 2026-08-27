@@ -308,6 +308,22 @@ class BoundedPlannerAuthority:
         ).fetchone()
         return None if row is None else _decode_record(row, "BoundedPlannerTerminalEvent")
 
+    def active_loops(self) -> list[dict[str, Any]]:
+        """Latest version of every loop that has not reached a terminal state."""
+
+        rows = self.connection.execute(
+            "SELECT v.version_id FROM bounded_planner_loop_versions v "
+            "WHERE v.version_number=(SELECT MAX(w.version_number) "
+            "FROM bounded_planner_loop_versions w WHERE w.loop_ref=v.loop_ref) "
+            "ORDER BY v.created_at, v.version_id"
+        ).fetchall()
+        result = []
+        for row in rows:
+            if self.terminal(row["version_id"]) is not None:
+                continue
+            result.append(self.loop(row["version_id"]))
+        return result
+
     def rounds(self, loop_version_ref: str) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             "SELECT * FROM bounded_research_plan_rounds WHERE loop_version_ref=? "

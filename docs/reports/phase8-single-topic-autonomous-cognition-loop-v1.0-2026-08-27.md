@@ -179,3 +179,10 @@ revenue-growth ProbeTemplate 与五家公司 Bounded Planner Loop v1 经 human-g
 证明确定性 planner 在 live 副本上完整跑通 proposal→准入→WorkOrder→outcome→终态。循环停泊等待 P8c-2 的
 controller 驱动与真实 probe 执行接线。全仓 950/950。见
 [P8c-1 报告](p8c1-standing-question-and-loop-admission-v0.1-2026-08-27.md)。
+
+P8c-2 亦已完成（2026-08-27）：daltond 的 `bounded_planner` 服务块周期驱动停泊循环——确定性 planner 提案、
+Core 准入、公共 SEC transport 真实执行 probe、源级 outcome、终态收尾。首次自主循环五轮：ACN/CTSH/IBM
+observed（ACN 发现更新的 10-Q）、EPAM not_found_in_scope（概念缺口如实记录）、DXC source_unavailable
+（SEC 当天移除该 companyfacts key）；终态 `evidence_observed_for_review`，0 付费调用。全仓 957/957。见
+[P8c-2 报告](p8c2-controller-driven-loop-v0.1-2026-08-27.md)。下一片：loop v2（概念候选对齐 lane allowlist）、
+observed accession → claim 链、LLM planner 与 doctrine ContextPack。

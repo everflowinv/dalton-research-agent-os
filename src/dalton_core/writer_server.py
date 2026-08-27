@@ -87,6 +87,7 @@ from .bounded_planner_loop import (
     BoundedPlannerConflict,
     BoundedPlannerError,
     BoundedPlannerNotFound,
+    BoundedPlannerPending,
     BoundedPlannerValidationError,
 )
 from .capability_registry import (
@@ -371,6 +372,8 @@ CORE_OPERATIONS = frozenset({
     "publish_weekly_brief", "get_weekly_brief_issue",
     "render_weekly_brief_markdown", "record_weekly_brief_delivery",
     "run_weekly_brief_cycle", "record_scheduled_weekly_brief_delivery",
+    "bounded_planner_propose_next", "bounded_planner_admit_proposal",
+    "bounded_planner_record_outcome", "bounded_planner_active_loops",
     "record_weekly_brief_feedback", "weekly_brief_feedback",
     "weekly_brief_integrity_report",
     "intent_context_bindings", "admit_intent_question", "issue_intent_directive",
@@ -500,6 +503,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "create_bounded_planner_loop": frozenset({"loop_ref", "question_version_ref", "template_bindings", "required_coverage_items", "budget", "actor_ref", "prior_version_ref"}),
     "bounded_probe_template": frozenset({"version_ref"}),
     "bounded_planner_loop": frozenset({"version_ref"}),
+    "bounded_planner_propose_next": frozenset({"loop_version_ref"}),
+    "bounded_planner_admit_proposal": frozenset({"proposal_ref"}),
+    "bounded_planner_record_outcome": frozenset({"round_ref"}),
+    "bounded_planner_active_loops": frozenset(),
     "propose_model_input": frozenset({
         "candidate_id", "input_kind", "model_input_ref", "prior_version_ref",
         "payload", "proposed_by", "idempotency_key",
@@ -1783,6 +1790,30 @@ class WriterServer:
     def _op_bounded_planner_loop(self, p: Mapping[str, Any]) -> Any:
         return self.bounded_planner.loop(dict(p)["version_ref"])
 
+    def _op_bounded_planner_propose_next(self, p: Mapping[str, Any]) -> Any:
+        return self.bounded_planner.propose_next_capital_lease(
+            dict(p)["loop_version_ref"]
+        )
+
+    def _op_bounded_planner_admit_proposal(self, p: Mapping[str, Any]) -> Any:
+        if self._bounded_control is None:
+            raise WriterServerError("bounded-planner control plane is unavailable")
+        return self._bounded_control.admit_proposal(dict(p)["proposal_ref"])
+
+    def _op_bounded_planner_record_outcome(self, p: Mapping[str, Any]) -> Any:
+        if self._bounded_control is None:
+            raise WriterServerError("bounded-planner control plane is unavailable")
+        return self._bounded_control.record_outcome(dict(p)["round_ref"])
+
+    def _op_bounded_planner_active_loops(self, p: Mapping[str, Any]) -> Any:
+        return {
+            "projection_kind": "bounded_planner_active_loops",
+            "loops": [
+                {"loop_version_ref": loop["id"], "loop_ref": loop["loop_ref"]}
+                for loop in self.bounded_planner.active_loops()
+            ],
+        }
+
     def _op_propose_model_input(self, p: Mapping[str, Any]) -> Any:
         return self.model_input.propose_input(**dict(p))
 
@@ -2077,7 +2108,7 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError)):
             return "rejected"
         if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound)):
             return "not_found"
@@ -2115,7 +2146,7 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError)):
             return "request rejected by contract or gate"
         if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound)):
             return "requested object was not found"
