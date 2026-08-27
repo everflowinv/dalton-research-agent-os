@@ -549,7 +549,12 @@ test("required thinking level is enforced end to end", async () => {
   }));
   assert.equal(response.ok, true);
   assert.equal(seen.length, 1);
-  assert.equal(seen[0].providerControls.thinkingLevel, "low");
+  assert.equal(seen[0].thinkingLevel, "low");
+  // The host validates a closed providerControls key set that excludes
+  // thinkingLevel; the level is enforced by the exact-match check plus the
+  // top-level thinkingLevel parameter above (live 2026-08-27 regression:
+  // spreading it into the controls object failed every Google completion).
+  assert.equal("thinkingLevel" in seen[0].providerControls, false);
   verifyHash(response);
 
   const conflict = await broker.handle(request({

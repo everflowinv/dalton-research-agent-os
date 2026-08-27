@@ -368,8 +368,21 @@ export class ModelBroker {
           "profile is not configured to enforce the required thinking level",
         );
       }
+      // The host's Google provider-control admission validates a closed
+      // key set; thinkingLevel is not part of that contract.  The thinking
+      // level is already enforced twice: the exact-match check above and the
+      // top-level llm.complete thinkingLevel parameter built from the
+      // profile below, so spreading the client's thinkingLevel into the
+      // controls object is redundant and (live 2026-08-27) made the host
+      // reject every provider-controlled Gemini completion.
       providerControls = Object.freeze({
-        ...request.requiredControls,
+        maxInputTokens: request.requiredControls.maxInputTokens,
+        maxOutputTokens: request.requiredControls.maxOutputTokens,
+        maxTotalTokens: request.requiredControls.maxTotalTokens,
+        maxCostUsd: request.requiredControls.maxCostUsd,
+        ...(request.requiredControls.structuredOutput !== undefined
+          ? { structuredOutput: request.requiredControls.structuredOutput }
+          : {}),
         mode: profile.providerControls.mode,
         rateCard: profile.providerControls.rateCard,
       });
@@ -385,7 +398,11 @@ export class ModelBroker {
         maxTokens: request.maxTokens,
         signal: controller.signal,
         agentId: this.config.dedicatedAgentId,
-        ...(profile.thinkingLevel ? { thinkingLevel: profile.thinkingLevel } : {}),
+        ...(profile.thinkingLevel !== undefined
+          ? { thinkingLevel: profile.thinkingLevel }
+          : profile.providerControls?.thinkingLevel !== undefined
+            ? { thinkingLevel: profile.providerControls.thinkingLevel }
+            : {}),
         ...(providerControls ? { providerControls } : {}),
       }));
       completion.catch(() => {});
