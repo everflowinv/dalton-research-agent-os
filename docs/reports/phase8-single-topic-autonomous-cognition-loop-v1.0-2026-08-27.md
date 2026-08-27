@@ -165,4 +165,11 @@ Owner 同日批准全部保留 gate 并已执行（详见 [live 激活报告](p8
 SEC issuer 入 lane（-5.06%，policy 自动提交，Phase 7 严格门槛达成）；evidence pack v2 / 五家 overlay；ResearchConstitution
 v1、行业 Thesis 与 ACN Thesis 人工准入进入 live；schedule plan v3 + `policy-3` 激活 weekly brief 自动发布（首个窗口
 2026-09-03）；thesis-impact 首条真实 assessment 为 insufficient。两次 live 事故（缺失 broker key 的永久卡死、host 完成
-失败一次终态）已修复为有界 re-drive / 重试。未决：OpenClaw host 的 Gemini 路径故障需 host 侧排查。
+失败一次终态）已修复为有界 re-drive / 重试。未决：OpenClaw host 的 Gemini 路径故障需 host 侧排查。（当日追记：root cause 在 broker 侧已修复，ACN 链路
+全链闭环，见 [live 激活报告](p8a-s7f-live-activation-v0.1-2026-08-27.md)。）
+
+P8b（最小知识调用层）development candidate 亦已完成：可重建 `CompanyResearchView` 纯投影（当前 Thesis、
+带 ClaimIndex 派生状态的最新 Claim、open questions、impact、最近 issue 与研究停点）、company / aspect /
+period / status 结构化查询（immutable ref/hash）、writer 只读 ops，以及视图 claim → ContextMaterializer 的
+token-bounded ContextPack 接手；隔离 live-copy canary 5 家公司全通过。全仓 949/949。见
+[P8b 报告](p8b-company-research-view-v0.1-2026-08-27.md)。下一开发切片为 P8c Tier 1 Planner 接入 live。

@@ -191,5 +191,36 @@ class ResearchConstitutionWriterTests(unittest.TestCase):
             self.h.governance.call("publish_research_constitution", params)
 
 
+class CompanyResearchViewWriterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.h = ConstitutionWriterHarness(Path(root.name))
+        self.addCleanup(self.h.close)
+
+    def test_read_ops_project_views_and_queries(self) -> None:
+        view = self.h.governance.call("company_research_view", {
+            "company_ref": "company:sec-cik:0001467373",
+        })
+        self.assertEqual("company_research_view", view["projection_kind"])
+        self.assertEqual("insufficient", view["thesis"]["status"])
+        self.assertEqual([], view["claims"])
+        replay = self.h.governance.call("company_research_view", {
+            "company_ref": "company:sec-cik:0001467373",
+        })
+        self.assertEqual(view["content_hash"], replay["content_hash"])
+        query = self.h.governance.call("company_research_query", {
+            "company_ref": "company:sec-cik:0001467373",
+        })
+        self.assertEqual("company_research_query", query["projection_kind"])
+        self.assertEqual([], query["claims"])
+        with self.assertRaises(RemoteAuthorizationError):
+            self.h.worker.call("company_research_view", {
+                "company_ref": "company:sec-cik:0001467373",
+            })
+        with self.assertRaises(Exception):
+            self.h.governance.call("company_research_query", {"status": "bogus"})
+
+
 if __name__ == "__main__":
     unittest.main()

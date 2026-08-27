@@ -128,8 +128,11 @@ controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回
 - ResearchConstitution v1、行业 Thesis 与 ACN Thesis 已经 owner 人工准入进入 live，ACN 的 company→thesis 映射已激活；
 - policy-controlled Weekly Brief coordinator 已部署并激活：schedule plan v3 绑定五家公司 pack 与 ACN 映射，
   首个自动窗口 2026-09-03 07:00 America/New_York，同窗口重放不重复投递；
-- thesis-impact 已产生首条真实 assessment（裁决 insufficient，不把单一收入指标过度解释成投资结论）；
-  OpenClaw host 的 Gemini 路径故障在有界重试中等待 host 侧修复；
+- thesis-impact 已产生首条真实 assessment（裁决 insufficient，不把单一收入指标过度解释成投资结论），
+  独立 verifier pass；当日定位并修复了 Gemini host 路径故障（broker 把 thinkingLevel 合并进
+  providerControls 与 proof 形状两处脱节），ACN 链路全链闭环；
+- P8b CompanyResearchView 与结构化知识查询已完成 development candidate：纯投影 + writer 只读 ops +
+  ContextMaterializer 接手，live 副本 canary 5 家公司全通过；
 - Agenda Shadow 最新 live cycle 正常交付，controller、writer、projection 和 dashboard health 均为 running；
 - Doctrine（writer ops）、Bounded Planner、LLM Planner、Answer Router 和 DocumentIndex 仍是 development candidate，
   尚未接入同一条 live 认知循环。

@@ -10,6 +10,19 @@
   「≥5 条 policy 自动提交 SEC Claim」的严格退出门槛，还需增加第 5 家 issuer。S7e 已把 issue、delivery 和内容反馈接进正式 authority，
   S7f Weekly Brief coordinator development candidate 已完成并通过全量验收，但尚未部署或激活自动发布。Phase 8 的裁决、切片和四周退出门槛见
   [单主题自主认知闭环 v1.0](reports/phase8-single-topic-autonomous-cognition-loop-v1.0-2026-08-27.md)。
+- **P8b CompanyResearchView 与结构化知识查询 development candidate 已完成（2026-08-27）。** 新增
+  `company_research_view.py`：纯投影（无新事实 authority、无新表），`build_company_research_view` 从
+  Ledger snapshot（含 ClaimIndex 派生状态）、thesis admission（当前 Thesis + template/driver_refs）、
+  research backlog 开放问题、thesis-impact assessment/verification、覆盖该公司的最新 weekly issue 与
+  最近研究停点装配闭合自 hash 的 `CompanyResearchView 0.1`；`built_as_of` 取输入 authority 最大时间戳，
+  同状态逐字节重建一致。`query_company_research` 按 company / aspect / period / status 过滤，行携带
+  immutable claim ref/hash 与 evidence freshness。writer 新增只读 ops `company_research_view` /
+  `company_research_query`（并补齐 `_error_code` 漏掉的 `ResearchConstitutionValidationError`）。视图 claim
+  ref/hash 可直接交给 ContextMaterializer 生成 token-bounded ContextPack。隔离 live-copy canary：5 家公司
+  全部正确（ACN current thesis + 2 claims + verified impact + open question + w35；DXC 无 issue 停在
+  claim_committed）、ACN ContextPack 2 claims / 443 tokens 预算内、integrity ok、0 付费调用。专项/邻接
+  106/106、全仓 949/949、broker check 通过。**未部署（只读投影随下次 install.sh 上线）。**见
+  [P8b 报告](reports/p8b-company-research-view-v0.1-2026-08-27.md)。
 - **2026-08-27 owner 批准全部保留 gate 后已在 live 执行（详见
   [live 激活报告](reports/p8a-s7f-live-activation-v0.1-2026-08-27.md)）**：
   1. **DXC 第 5 家 SEC issuer 完成**：catalog 加入 DXC（CIK 001688568，agenda binding v2→v3），live lane 取
