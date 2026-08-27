@@ -158,3 +158,11 @@ in-memory canary 跑通（2 条 `human_admission` ThesisVersion），weekly brie
 映射并经 production 读路径验证。专项/邻接 62/62、全仓 940/940。live 发布（mandate、driver pack v2、constitution、
 两条 Thesis、schedule v2 替换 v1）与 DXC lane、coordinator activation 各自保留 owner gate。见
 [P8a 报告](p8a-research-constitution-and-initial-thesis-v0.1-2026-08-27.md)。下一开发切片为 P8b 最小知识调用层。
+
+## 2026-08-27 owner 批准与 live 激活更新
+
+Owner 同日批准全部保留 gate 并已执行（详见 [live 激活报告](p8a-s7f-live-activation-v0.1-2026-08-27.md)）：DXC 第 5 家
+SEC issuer 入 lane（-5.06%，policy 自动提交，Phase 7 严格门槛达成）；evidence pack v2 / 五家 overlay；ResearchConstitution
+v1、行业 Thesis 与 ACN Thesis 人工准入进入 live；schedule plan v3 + `policy-3` 激活 weekly brief 自动发布（首个窗口
+2026-09-03）；thesis-impact 首条真实 assessment 为 insufficient。两次 live 事故（缺失 broker key 的永久卡死、host 完成
+失败一次终态）已修复为有界 re-drive / 重试。未决：OpenClaw host 的 Gemini 路径故障需 host 侧排查。

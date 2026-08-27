@@ -120,24 +120,24 @@ controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回
 
 ## 开发状态
 
-截至 2026-08-27，Phase 7 已把第一条真实研究链搬上 live：
+截至 2026-08-27，Phase 7 已收口，Phase 8 的首批 authority 已在 live：
 
-- live Core 有 5 条正式 Claim / 5 条 Evidence：4 条 SEC policy 自动提交，1 条 transcript 经 owner 人工确认；
-- ACN、CTSH、EPAM、IBM 已有 live driver pack、industry evidence pack 和 company overlay，lane-only brief 可重放；
-- 首期 Weekly Brief 已发布并记录 exact DeliveryReceipt 和内容反馈；
-- policy-controlled Weekly Brief coordinator 已完成 development candidate 和隔离 live-copy canary；复用现有 controller/outbox，
-  同窗口可重放，但尚未部署或激活 live 自动发布；
-- P8a 最小 Research Constitution 与初始 Thesis 已完成 development candidate：版本化 manifest 以 exact ref/hash 绑定
-  Mandate、Driver Pack、Verifier policy 和 Weekly Brief plan，行业 Thesis 与 ACN Thesis 经人工准入链在隔离 canary 跑通，
-  weekly brief schedule v2 携带 company→thesis 映射；live 发布保留 owner gate；
+- live Core 有 6 条正式 Claim / 6 条 Evidence：5 条 SEC policy 自动提交（ACN、CTSH、EPAM、IBM、DXC），1 条 transcript 经 owner 人工确认；
+  Phase 7「≥5 条 policy 自动提交 SEC Claim」严格退出门槛已达成；
+- 五家公司 live evidence pack v2 与 overlay 已注册，lane-only brief v2 可重放；
+- ResearchConstitution v1、行业 Thesis 与 ACN Thesis 已经 owner 人工准入进入 live，ACN 的 company→thesis 映射已激活；
+- policy-controlled Weekly Brief coordinator 已部署并激活：schedule plan v3 绑定五家公司 pack 与 ACN 映射，
+  首个自动窗口 2026-09-03 07:00 America/New_York，同窗口重放不重复投递；
+- thesis-impact 已产生首条真实 assessment（裁决 insufficient，不把单一收入指标过度解释成投资结论）；
+  OpenClaw host 的 Gemini 路径故障在有界重试中等待 host 侧修复；
 - Agenda Shadow 最新 live cycle 正常交付，controller、writer、projection 和 dashboard health 均为 running；
-- phase-pinned thesis-impact runner 已部署，但 live 还没有 ThesisVersion 或 company→thesis mapping，因此当前只做零模型调用的 idle 检查；
-- Doctrine、Bounded Planner、LLM Planner、Answer Router 和 DocumentIndex 仍是 development candidate，尚未接入同一条 live 认知循环。
+- Doctrine（writer ops）、Bounded Planner、LLM Planner、Answer Router 和 DocumentIndex 仍是 development candidate，
+  尚未接入同一条 live 认知循环。
 
 当前阶段是 **Phase 8「单主题自主认知闭环」**。首个主题固定为「美国 IT 服务需求是否见底」，近期顺序是：
 
-1. 关闭 Phase 7 剩余门槛：第五家 SEC issuer；审核并单独批准 Weekly Brief coordinator 的 live activation；
-2. 建立最小 Research Constitution、行业 Thesis 和 ACN Thesis（P8a development candidate 已完成，live 激活待 owner gate）；
+1. 关闭 Phase 7 剩余门槛：第五家 SEC issuer；审核并单独批准 Weekly Brief coordinator 的 live activation；（两者已于 2026-08-27 完成）
+2. 建立最小 Research Constitution、行业 Thesis 和 ACN Thesis（已于 2026-08-27 进入 live）；
 3. 增加可重建的 CompanyResearchView 和结构化知识查询；
 4. 把 Tier 1 Bounded Planner 接进 live，只能选择已批准的 probe；
 5. 用 Weekly Brief、Agenda 和 Claim review 的真实反馈建立冻结评测集；

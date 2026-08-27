@@ -1,13 +1,35 @@
 # Dalton 项目进度
 
 更新日期：2026-08-27
-- **当前阶段：Phase 7「live 研究记忆启动」已完成计划内四家公司 SEC lane；S7e 每周研究 brief 的 issue、投递和内容反馈 authority 已部署 live，并交付首期基线。Phase 8「单主题自主认知闭环」执行中：P8a Research Constitution 与初始 Thesis 的 development candidate 已完成，下一切片 P8b。**
+- **当前阶段：Phase 7 已收口（第 5 家 policy 自动提交 SEC Claim 达成）；P8a Research Constitution 与初始 Thesis、
+  S7f Weekly Brief coordinator 均已于 2026-08-27 经 owner 批准部署并激活 live。Phase 8 认知循环等待 9/3 首个自动
+  brief 窗口与 verifier host 修复。**
   裁决见 [愿景复盘与下一阶段 v0.9](reports/vision-review-and-next-phase-v0.9-2026-08-26.md)。live Core 已有 5 条正式 Claim / 5 条
   Evidence：4 条 policy 自动提交 SEC quantitative + 1 条 owner 人工接受 transcript qualitative；driver pack、industry evidence pack、
   四家公司 overlay 和可重放 Markdown 均已在 live。原止损条件「2026-09-09 live 仍无正式 Claim」已解除。若继续保留
   「≥5 条 policy 自动提交 SEC Claim」的严格退出门槛，还需增加第 5 家 issuer。S7e 已把 issue、delivery 和内容反馈接进正式 authority，
   S7f Weekly Brief coordinator development candidate 已完成并通过全量验收，但尚未部署或激活自动发布。Phase 8 的裁决、切片和四周退出门槛见
   [单主题自主认知闭环 v1.0](reports/phase8-single-topic-autonomous-cognition-loop-v1.0-2026-08-27.md)。
+- **2026-08-27 owner 批准全部保留 gate 后已在 live 执行（详见
+  [live 激活报告](reports/p8a-s7f-live-activation-v0.1-2026-08-27.md)）**：
+  1. **DXC 第 5 家 SEC issuer 完成**：catalog 加入 DXC（CIK 001688568，agenda binding v2→v3），live lane 取
+     10-Q `0001688568-26-000069`（fiscal Q1 FY2027），Revenues USD 2,999M 同比 **-5.06%**，`policy-2` 自动提交
+     `claim-version:a4d5fb26…80b14`——**live 6 Claim / 6 Evidence（5 条 policy SEC），Phase 7 严格退出门槛达成**。
+  2. **lane-only brief v2**：evidence pack v2（5 binding 含 DXC、debate 增加 against 立场）+ 4 家 overlay v2 + DXC overlay v1，
+     副本渲染 11,049 bytes 逐字节一致；manifest `deploy/coverage/us-it-services-industry-evidence-v5.json`。
+  3. **P8a live 激活**：thesis driver pack v2（lane v1 超集，pointer v2）、P8a mandate、ResearchConstitution v1
+     （绑 mandate / pack v2 / policy-2 / plan v3 hash；doctrine 绑定 null 待后续 ops）、行业 Thesis
+     `thesis:us-it-services:demand-bottoming`（low）与 ACN Thesis `thesis:acn:ai-reinvention-growth`（medium）
+     均经人工准入并带 current pointer。
+  4. **S7f coordinator 激活**：schedule plan v3（hash `75153819…e9c8a1`，绑 pack v2 + 5 overlay + ACN 映射）、
+     service config 附件目录与 `weekly_brief` block、`policy-3`（保留全部既有规则 + `weekly_brief_auto_publish`
+     exact plan v3 hash；`effective_from`=激活时刻避免 S7a 式指针事故）、live 副本故障演练 `ok=true`。
+     **首个自动窗口 2026-09-03 07:00 America/New_York**，心跳 `weekly_brief: waiting`。
+  5. **thesis-impact 首条真实链**：ACN mapping 激活后 assessment（gpt-5-6-sol，真实付费）成功，裁决
+     **insufficient**（单一 SEC 收入 Claim 不能证明 AI-reinvention 机制——正确的认识论行为）。两次 live 事故修复并部署：
+     ①配置类控制面失败（`broker_auth_key` 指向缺失文件）原会永久卡死，现有界 **re-drive**（day-budget 与已付费
+     输出违约显式排除）；②host `HOST_COMPLETION_FAILED`（零费用）原有 attempt-1 终态，现进入有界重试并可 re-drive。
+     **未决：OpenClaw host 的 Gemini 路径持续失败（非 Dalton 控制面），verifier 有界重试中，需 host 侧排查。**
 - **P8a Research Constitution 与初始 Thesis development candidate 已完成（2026-08-27）。** 新增 human-only、
   append-only 的版本化 ResearchConstitution authority（`research_constitution.py` + 新 packaged SQL schema）：
   publish 时以 exact `ref+hash` 绑定 MandateVersion、Driver Pack、active GovernancePolicyVersion、可选

@@ -1,41 +1,47 @@
 {
-  "policy_ref": "commit-gate",
-  "policy_version_id": "policy-3",
-  "version_number": 3,
-  "prior_version_ref": "policy-2",
-  "activate": true,
-  "effective_from": null,
-  "effective_until": null,
-  "change_reason": "S7f candidate: authorize only the exact US IT services weekly brief schedule plan after a separate owner activation gate",
-  "policy": {
-    "allowed_verdicts": ["pass"],
-    "independence_predicates": [
-      {
-        "left_path": "producer.model_family",
-        "operator": "ne",
-        "right_path": "verifier.model_family"
-      }
-    ],
-    "required_verification": true,
-    "research_plan_auto_start": {
-      "enabled": true,
-      "rules": ["research-plan-auto-start:sec-public-company-facts:v1"]
-    },
-    "research_candidate_auto_commit": {
-      "enabled": true,
-      "rules": ["research-auto-commit:sec-public-company-facts-growth:v1"],
-      "max_records": 20
-    },
-    "weekly_brief_auto_publish": {
-      "enabled": true,
-      "rule_ref": "weekly-brief-auto-publish:scheduled-exact-plan:v1",
-      "allowed_plan_bindings": [
-        {
-          "plan_ref": "weekly-brief-plan:us-it-services:v1",
-          "plan_hash": "dde12a2fc29b7325a85dedc98c8044a4f7d102b3b2dec8268c774c7b7be846fc"
+    "policy_ref": "commit-gate",
+    "policy_version_id": "policy-3",
+    "version_number": 3,
+    "prior_version_ref": "policy-2",
+    "activate": true,
+    "effective_from": "2026-08-27T12:31:37.946954+00:00",
+    "effective_until": null,
+    "change_reason": "S7f live activation: authorize only the exact US IT services weekly brief schedule plan v3 (five-issuer evidence pack v2, ACN thesis mapping) after the owner activation gate",
+    "policy": {
+        "allowed_verdicts": [
+            "pass"
+        ],
+        "independence_predicates": [
+            {
+                "left_path": "producer.model_family",
+                "operator": "ne",
+                "right_path": "verifier.model_family"
+            }
+        ],
+        "required_verification": true,
+        "research_plan_auto_start": {
+            "enabled": true,
+            "rules": [
+                "research-plan-auto-start:sec-public-company-facts:v1"
+            ]
+        },
+        "research_candidate_auto_commit": {
+            "enabled": true,
+            "rules": [
+                "research-auto-commit:sec-public-company-facts-growth:v1"
+            ],
+            "max_records": 20
+        },
+        "weekly_brief_auto_publish": {
+            "enabled": true,
+            "rule_ref": "weekly-brief-auto-publish:scheduled-exact-plan:v1",
+            "allowed_plan_bindings": [
+                {
+                    "plan_ref": "weekly-brief-plan:us-it-services:v3",
+                    "plan_hash": "75153819af1180829c62aa45526a688914132eb427fa59ee31e083bd83e9c8a1"
+                }
+            ],
+            "max_issues_per_week": 1
         }
-      ],
-      "max_issues_per_week": 1
     }
-  }
 }
