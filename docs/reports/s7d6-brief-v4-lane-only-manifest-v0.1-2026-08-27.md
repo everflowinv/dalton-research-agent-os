@@ -26,8 +26,8 @@
 
 ## Manifest 设计
 
-- `driver-pack-version:us-it-services:5` 是 v4 后的单-driver replacement，避免继承旧四-driver pack 后触发「每个 driver 都要 formal Claim」的约束。
-- `industry-evidence-pack-version:us-it-services:4` 直接钉住三条 live Claim、Claim hash 与 Evidence relation hash，不使用 v2/v3 的 8-K exhibit Claim。
+- `driver-pack-version:us-it-services:live-sec-lane-v1` 是 live Core 的首个 driver pack；先前 v2/v3/v4 都只存在于隔离 canary，不能拿来当 live prior。故 `prior_version_ref=null`。
+- `industry-evidence-pack-version:us-it-services:live-sec-lane-v1` 是 live Core 的首个 evidence pack，直接钉住三条 live Claim、Claim hash 与 Evidence relation hash，不使用隔离 canary 的 8-K exhibit Claim；三个 overlay 同样从 live v1 开始。
 - 报告内保留 issuer 的 fiscal/calendar period 与不同 US-GAAP concept caveat；不把 ACN、EPAM、CTSH 的期间误写成同一日历季度。
 - manifest 是发布输入，不会自行写 live Core；发布器须按 `register_driver_pack` → `register_evidence_pack` → 三个 `register_company_overlay` 的顺序执行。
 
