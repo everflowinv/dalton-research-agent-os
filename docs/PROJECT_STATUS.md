@@ -1,7 +1,7 @@
 # Dalton 项目进度
 
 更新日期：2026-08-27
-- **当前阶段：Phase 7「live 研究记忆启动」已完成计划内四家公司 SEC lane 和首份 live industry brief；S7e 每周研究 brief 的正式 authority 已完成开发和 live-copy canary，等待 live 部署。**
+- **当前阶段：Phase 7「live 研究记忆启动」已完成计划内四家公司 SEC lane；S7e 每周研究 brief 的 issue、投递和内容反馈 authority 已部署 live，并交付首期基线。**
   裁决见 [愿景复盘与下一阶段 v0.9](reports/vision-review-and-next-phase-v0.9-2026-08-26.md)。live Core 已有 5 条正式 Claim / 5 条
   Evidence：4 条 policy 自动提交 SEC quantitative + 1 条 owner 人工接受 transcript qualitative；driver pack、industry evidence pack、
   四家公司 overlay 和可重放 Markdown 均已在 live。原止损条件「2026-09-09 live 仍无正式 Claim」已解除。若继续保留
@@ -84,13 +84,16 @@
   [S7d-5 报告](reports/s7d5-sec-response-budget-v2-8mib-v0.1-2026-08-27.md)、
   [S7d-6 manifest 报告](reports/s7d6-brief-v4-lane-only-manifest-v0.1-2026-08-27.md)、
   [S7d-7 live 报告](reports/s7d7-live-ibm-and-lane-only-brief-v1-2026-08-27.md)
-- **S7e development candidate 已完成**：新增 append-only `WeeklyBriefIssueVersion`、`WeeklyBriefDelivery` 和
+- **S7e 已部署 live（2026-08-27 08:05–08:09 UTC，`2cecd12`）**：新增 append-only `WeeklyBriefIssueVersion`、`WeeklyBriefDelivery` 和
   `WeeklyBriefFeedback`。brief 不是开发周报；固定写本期研究变化、对现有观点的影响、公司与 driver 分化、证据缺口、关键争议、
   下期研究问题和来源 authority。首期只建立 baseline，4 条既有 SEC Claim 不算“本周新增”；第二期才和 prior issue 做 exact delta。
   没有正式当前 ThesisVersion 的公司一律写 `insufficient`，不能由 Claim 自动补投资结论。writer 增加 human-governed publish / delivery /
   feedback ops，Cockpit 只可替 exact Tailscale human subject 写内容反馈。专项与 writer 回归 27/27，industry 邻接回归 13/13，packaging 1/1；
-  临时 state 双 bootstrap 和 live Core 一致性副本均通过。副本首期 issue 为 4 条 baseline Claim、0 条 new Claim、4 家 Thesis
-  `insufficient`，连续渲染逐字节一致。尚未部署 live、未创建 weekly cron。见
+  临时 state 双 bootstrap 和 live Core 一致性副本均通过。live 首期
+  `weekly-brief-version:us-it-services:2026-w35` 为 4 条 baseline Claim、0 条 new Claim、4 家 Thesis `insufficient`；
+  Markdown 5,180 bytes，SHA-256 `50d24d68…54d9`，已投递本 Discord channel（message `1542445868618223636`）并写入 exact
+  delivery receipt。owner 关于“brief 是每周研究变化、不是开发周报”的意见已作为 `revise` feedback 写入同一 issue。
+  live integrity 为 1 issue / 1 delivery / 1 feedback、0 问题；尚未创建 weekly cron。见
   [S7e 报告](reports/s7e-weekly-brief-authority-v0.1-2026-08-27.md)
 - S7b development candidate：ADR-0003 裁决为 B（Accepted，owner 可否决）。transcript 候选以 `claim_kind = qualitative`
   进 CandidateStaging，数值字段全为 null，只收带 exact citation binding 的 transcript evidence，policy 路径一律拒绝，
@@ -98,7 +101,7 @@
   `stage_transcript_qualitative_candidate` 入口（S7c writer op 直接调用）。隔离端到端：ACN 语义候选 stage → accept →
   commit 写出 1 条 EvidenceVersion + 1 条 qualitative ClaimVersion 0.2。见
   [S7b 报告](reports/s7b-qualitative-transcript-candidate-staging-v0.1-2026-08-26.md)
-- live deployed source：`ab894ee`（2026-08-27 06:31 UTC，含 S7d-5 SEC response budget v2；live brief exact manifest 为 `2cdcb9e`；之前 `8357465` 2026-08-26 20:24 UTC S7d-4 Cockpit 提升状态回读、`ea160d6` 20:04 UTC S7d 性能修复、`abff89f` 19:45 UTC、`326a62f` 19:00 UTC S7d 首版、`0efe8f5` 17:36 UTC S7c-4 spool 接线修复；上一版 `dc747de` 17:18 UTC，含 S7a / S7b /
+- live deployed source：`2cecd12`（2026-08-27 08:05 UTC，S7e weekly brief authority）；之前 `ab894ee`（06:31 UTC，含 S7d-5 SEC response budget v2；live brief exact manifest 为 `2cdcb9e`）、`8357465` 2026-08-26 20:24 UTC S7d-4 Cockpit 提升状态回读、`ea160d6` 20:04 UTC S7d 性能修复、`abff89f` 19:45 UTC、`326a62f` 19:00 UTC S7d 首版、`0efe8f5` 17:36 UTC S7c-4 spool 接线修复；上一版 `dc747de` 17:18 UTC，含 S7a / S7b /
   S7c-1 / S7c-2 / S7c-3；再上一版 `3fe746e`）；
   thesis-impact production runner：`9c295ca`；OpenClaw host patch chain：`6f93b9b14`；claude-cli-gateway 心跳补丁：
   workspace `935a751be`
