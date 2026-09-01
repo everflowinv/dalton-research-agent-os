@@ -48,6 +48,8 @@ class BoundedPlannerDriverConfig:
     max_probes_per_tick: int
     filed_window_days: int
     observation_mandate_version_ref: str | None
+    doctrine_pack_version_ref: str | None
+    doctrine_pack_version_hash: str | None
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "BoundedPlannerDriverConfig":
@@ -55,6 +57,7 @@ class BoundedPlannerDriverConfig:
             "writer_socket", "token_config", "scheduler_db", "user_agent",
             "max_response_bytes", "timeout_seconds", "max_probes_per_tick",
             "filed_window_days", "observation_mandate_version_ref",
+            "doctrine_pack_version_ref", "doctrine_pack_version_hash",
         }
         if set(raw) != expected:
             raise BoundedPlannerDriverError(
@@ -79,6 +82,16 @@ class BoundedPlannerDriverConfig:
             raise BoundedPlannerDriverError(
                 "observation_mandate_version_ref must be non-empty text or null"
             )
+        doctrine_ref = raw["doctrine_pack_version_ref"]
+        doctrine_hash = raw["doctrine_pack_version_hash"]
+        if (doctrine_ref is None) != (doctrine_hash is None):
+            raise BoundedPlannerDriverError(
+                "doctrine pack ref and hash must be configured together"
+            )
+        for value, label in ((doctrine_ref, "doctrine_pack_version_ref"),
+                             (doctrine_hash, "doctrine_pack_version_hash")):
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise BoundedPlannerDriverError(f"{label} must be non-empty text or null")
         numbers = {}
         for field, default in (
             ("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES),
@@ -97,6 +110,8 @@ class BoundedPlannerDriverConfig:
         return cls(  # type: ignore[arg-type]
             user_agent=user_agent,
             observation_mandate_version_ref=observation_mandate,
+            doctrine_pack_version_ref=doctrine_ref,
+            doctrine_pack_version_hash=doctrine_hash,
             **paths, **numbers,
         )
 
@@ -140,9 +155,37 @@ class BoundedPlannerDriver:
                     "reason": "probe_budget_reached",
                 })
                 continue
-            proposal = self.client.call("bounded_planner_propose_next", {
-                "loop_version_ref": loop["loop_version_ref"],
-            })
+            if self.config.doctrine_pack_version_ref is not None:
+                try:
+                    context = self.client.call(
+                        "materialize_bounded_planner_context",
+                        {
+                            "loop_version_ref": loop["loop_version_ref"],
+                            "doctrine_pack_version_ref": (
+                                self.config.doctrine_pack_version_ref
+                            ),
+                            "doctrine_pack_version_hash": (
+                                self.config.doctrine_pack_version_hash
+                            ),
+                            "as_of": datetime.now(timezone.utc).isoformat(
+                                timespec="microseconds"
+                            ),
+                        },
+                    )
+                except Exception as exc:
+                    skipped.append({
+                        "loop_version_ref": loop["loop_version_ref"],
+                        "reason": f"doctrine_context_unavailable:{type(exc).__name__}",
+                    })
+                    continue
+                proposal = self.client.call(
+                    "bounded_planner_propose_next_with_context",
+                    {"planner_context_pack_ref": context["id"]},
+                )
+            else:
+                proposal = self.client.call("bounded_planner_propose_next", {
+                    "loop_version_ref": loop["loop_version_ref"],
+                })
             status = proposal.get("status")
             if status in {"terminal", "pending_round"}:
                 skipped.append({

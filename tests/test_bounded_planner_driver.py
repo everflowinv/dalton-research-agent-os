@@ -273,6 +273,8 @@ class BoundedPlannerDriverTests(unittest.TestCase):
             max_probes_per_tick=1,
             filed_window_days=400,
             observation_mandate_version_ref=self.mandate_id,
+            doctrine_pack_version_ref=None,
+            doctrine_pack_version_hash=None,
         )
 
     def _driver(self, transport) -> BoundedPlannerDriver:
@@ -362,6 +364,72 @@ class BoundedPlannerDriverTests(unittest.TestCase):
         self.assertEqual(3, len(backlog.questions()))
         store.close()
 
+    def test_doctrine_context_mode_binds_proposals_to_context(self) -> None:
+        from dalton_core.writer_server import write_token_config
+        pack = self.governance.call("publish_doctrine_pack", {
+            "doctrine_pack_ref": "doctrine-pack:driver",
+            "title": "Driver Doctrine",
+            "default_lens_ref": "lens:demand",
+            "lenses": [{
+                "lens_ref": "lens:demand",
+                "label": "Demand",
+                "objective": "Track demand.",
+                "priority_topics": ["bookings"],
+                "evidence_standard": {
+                    "preferred_source_classes": ["source:sec-edgar"],
+                    "minimum_independent_sources": 1,
+                    "negative_claim_rule": (
+                        "candidate_only_until_separate_claim_admission"
+                    ),
+                },
+            }],
+            "actor_ref": OWNER, "prior_version_ref": None,
+        })
+        config = BoundedPlannerDriverConfig(
+            writer_socket=Path(self.socket),
+            token_config=self.root / "tokens.json",
+            scheduler_db=self.scheduler_path,
+            user_agent="Dalton Test",
+            max_response_bytes=1_000_000,
+            timeout_seconds=10.0,
+            max_probes_per_tick=1,
+            filed_window_days=400,
+            observation_mandate_version_ref=self.mandate_id,
+            doctrine_pack_version_ref=pack["id"],
+            doctrine_pack_version_hash=pack["content_hash"],
+        )
+        write_token_config(self.root / "tokens.json", list(self.server.principals.values()))
+        driver = BoundedPlannerDriver(
+            config, client=self.core,
+            transport=FakeTransport(FakeResponse(200, company_facts_body())),
+            clock=lambda: NOW,
+        )
+        executed = []
+        while len(executed) < 3:
+            result = driver.run_once()
+            executed.extend(result["executed"])
+            if not result["executed"]:
+                break
+        kinds = [entry["kind"] for entry in executed]
+        self.assertIn("terminal", kinds)
+        probes = [entry for entry in executed if entry["kind"] == "probe"]
+        self.assertGreaterEqual(len(probes), 1)
+        # The loop's proposals carry the exact planner context binding.
+        from dalton_core.bounded_planner_loop import BoundedPlannerAuthority
+        from dalton_core.store import DaltonStore
+        store = DaltonStore(str(self.root / "core.sqlite"))
+        authority = BoundedPlannerAuthority(store)
+        proposals = authority.connection.execute(
+            "SELECT record_json FROM bounded_planner_proposal_versions "
+            "WHERE loop_version_ref=?", (self.loop["id"],)
+        ).fetchall()
+        with_context = [
+            json.loads(row["record_json"]) for row in proposals
+            if json.loads(row["record_json"]).get("planner_context_pack_ref")
+        ]
+        store.close()
+        self.assertGreaterEqual(len(with_context), 1)
+
     def test_config_validates_closed_shape(self) -> None:
         raw = {
             "writer_socket": self.socket,
@@ -373,6 +441,8 @@ class BoundedPlannerDriverTests(unittest.TestCase):
             "max_probes_per_tick": 1,
             "filed_window_days": 400,
             "observation_mandate_version_ref": "mandate-version:test:1",
+            "doctrine_pack_version_ref": None,
+            "doctrine_pack_version_hash": None,
         }
         parsed = BoundedPlannerDriverConfig.from_mapping(raw)
         self.assertEqual(

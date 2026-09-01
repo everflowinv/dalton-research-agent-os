@@ -139,6 +139,8 @@ class ServiceTests(unittest.TestCase):
                         "observation_mandate_version_ref": (
                             "mandate-version:us-it-services-sec-lane:v3"
                         ),
+                        "doctrine_pack_version_ref": None,
+                        "doctrine_pack_version_hash": None,
                     },
                 },
             }

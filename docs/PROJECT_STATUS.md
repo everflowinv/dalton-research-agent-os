@@ -65,6 +65,15 @@
   messageId `1544275074763329619`，消息标注 `[DRILL]` 不复现。全仓 959/959。9/3 窗口全链条
   （admission/issue/outbox canary、--media 投递、DeliveryReceipt）均已各自验证。见
   [P8c-4a 报告](reports/p8c4a-doctrine-ops-constitution-v2-and-delivery-drill-v0.1-2026-09-01.md)。
+- **P8c-4b Doctrine ContextPack 接入驱动循环已部署 live（2026-09-01）。** writer 新增 CORE ops
+  `materialize_bounded_planner_context` / `bounded_planner_propose_next_with_context`；driver 新增
+  doctrine 模式（config `doctrine_pack_version_ref/hash` 成对，materialize 冲突如实 skip 不回退）。
+  live service config 绑定 doctrine pack v1，loop v3
+  （`bounded-planner-loop-version:1db56b1f…`，prior=v2）准入；首轮验证：提案携带
+  `planner_context_pack_ref: planner-context-pack-version:be6eb4d3…`（exact 冻结透镜），outcome
+  observed、observation unchanged。当前 lens priority_topics 与 coverage ref 不重合故重排惰性（后续
+  loop 版本可对齐命名）；LLM planner 接入留待下片。全仓 960/960。见
+  [P8c-4b 报告](reports/p8c4b-doctrine-context-driver-v0.1-2026-09-01.md)。
 - **2026-08-27 owner 批准全部保留 gate 后已在 live 执行（详见
   [live 激活报告](reports/p8a-s7f-live-activation-v0.1-2026-08-27.md)）**：
   1. **DXC 第 5 家 SEC issuer 完成**：catalog 加入 DXC（CIK 001688568，agenda binding v2→v3），live lane 取

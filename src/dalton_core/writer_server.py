@@ -380,7 +380,8 @@ CORE_OPERATIONS = frozenset({
     "run_weekly_brief_cycle", "record_scheduled_weekly_brief_delivery",
     "bounded_planner_propose_next", "bounded_planner_admit_proposal",
     "bounded_planner_record_outcome", "bounded_planner_record_observation",
-    "bounded_planner_active_loops",
+    "bounded_planner_active_loops", "materialize_bounded_planner_context",
+    "bounded_planner_propose_next_with_context",
     "record_weekly_brief_feedback", "weekly_brief_feedback",
     "weekly_brief_integrity_report",
     "intent_context_bindings", "admit_intent_question", "issue_intent_directive",
@@ -517,6 +518,8 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "bounded_planner_record_outcome": frozenset({"round_ref"}),
     "bounded_planner_record_observation": frozenset({"round_ref", "mandate_version_ref"}),
     "bounded_planner_active_loops": frozenset(),
+    "materialize_bounded_planner_context": frozenset({"loop_version_ref", "doctrine_pack_version_ref", "doctrine_pack_version_hash", "as_of"}),
+    "bounded_planner_propose_next_with_context": frozenset({"planner_context_pack_ref"}),
     "propose_model_input": frozenset({
         "candidate_id", "input_kind", "model_input_ref", "prior_version_ref",
         "payload", "proposed_by", "idempotency_key",
@@ -1812,6 +1815,20 @@ class WriterServer:
 
     def _op_bounded_planner_loop(self, p: Mapping[str, Any]) -> Any:
         return self.bounded_planner.loop(dict(p)["version_ref"])
+
+    def _op_materialize_bounded_planner_context(self, p: Mapping[str, Any]) -> Any:
+        if self._research_doctrine is None or self._bounded_planner is None:
+            raise WriterServerError("doctrine or bounded-planner authority is unavailable")
+        values = dict(p)
+        loop_version_ref = values.pop("loop_version_ref")
+        return self._research_doctrine.materialize_planner_context(
+            self._bounded_planner, loop_version_ref, **values
+        )
+
+    def _op_bounded_planner_propose_next_with_context(self, p: Mapping[str, Any]) -> Any:
+        return self.bounded_planner.propose_next_with_context(
+            dict(p)["planner_context_pack_ref"]
+        )
 
     def _op_bounded_planner_propose_next(self, p: Mapping[str, Any]) -> Any:
         return self.bounded_planner.propose_next_capital_lease(
