@@ -149,6 +149,14 @@ from .company_research_view import (
     build_company_research_view,
     query_company_research,
 )
+from .llm_research_planner_worker import LLMResearchPlannerModelWorker
+from .llm_research_planner import (
+    LLMResearchPlannerCoordinator,
+    LLMResearchPlannerError,
+    LLMResearchPlannerPending,
+    LLMResearchPlannerRejected,
+    LLMResearchPlannerValidationError,
+)
 from .research_doctrine import (
     ResearchDoctrineAuthority,
     ResearchDoctrineConflict,
@@ -381,7 +389,8 @@ CORE_OPERATIONS = frozenset({
     "bounded_planner_propose_next", "bounded_planner_admit_proposal",
     "bounded_planner_record_outcome", "bounded_planner_record_observation",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
-    "bounded_planner_propose_next_with_context",
+    "bounded_planner_propose_next_with_context", "llm_planner_prepare",
+    "llm_planner_advance", "llm_planner_execute",
     "record_weekly_brief_feedback", "weekly_brief_feedback",
     "weekly_brief_integrity_report",
     "intent_context_bindings", "admit_intent_question", "issue_intent_directive",
@@ -520,6 +529,9 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "bounded_planner_active_loops": frozenset(),
     "materialize_bounded_planner_context": frozenset({"loop_version_ref", "doctrine_pack_version_ref", "doctrine_pack_version_hash", "as_of"}),
     "bounded_planner_propose_next_with_context": frozenset({"planner_context_pack_ref"}),
+    "llm_planner_prepare": frozenset({"context_pack_ref", "max_input_tokens", "max_output_tokens", "max_cost_usd", "max_seconds"}),
+    "llm_planner_advance": frozenset({"context_pack_ref", "work_order"}),
+    "llm_planner_execute": frozenset({"context_pack_ref", "max_input_tokens", "max_output_tokens", "max_cost_usd", "max_seconds"}),
     "propose_model_input": frozenset({
         "candidate_id", "input_kind", "model_input_ref", "prior_version_ref",
         "payload", "proposed_by", "idempotency_key",
@@ -814,6 +826,7 @@ class WriterServer:
         acquisition_launcher: AlphaEngineAcquisitionLauncher | None = None,
         candidate_staging_path: str | Path | None = None,
         sec_lane_launcher: SecLaneLauncher | None = None,
+        planner_model_config: Mapping[str, Any] | None = None,
     ):
         if not principals:
             raise WriterServerError("at least one principal is required")
@@ -858,6 +871,8 @@ class WriterServer:
         self._research_plan: ResearchPlanAuthority | None = None
         self._backlog: ResearchQuestionBacklog | None = None
         self._bounded_planner: BoundedPlannerAuthority | None = None
+        self._llm_planner_coordinator_instance: LLMResearchPlannerCoordinator | None = None
+        self._planner_model_config: dict[str, Any] | None = planner_model_config
         self._bounded_control: BoundedPlannerControlPlane | None = None
         self._intent_writer: IntentWriterAuthority | None = None
         self._answer_routing: AnswerRoutingAuthority | None = None
@@ -1181,6 +1196,7 @@ class WriterServer:
         self._research_plan = None
         self._backlog = None
         self._bounded_planner = None
+        self._llm_planner_coordinator_instance = None
         self._bounded_control = None
         self._intent_writer = None
         self._answer_routing = None
@@ -1825,6 +1841,69 @@ class WriterServer:
             self._bounded_planner, loop_version_ref, **values
         )
 
+    def _llm_planner_coordinator(self) -> LLMResearchPlannerCoordinator:
+        if self._bounded_planner is None or self._scheduler is None:
+            raise WriterServerError("bounded-planner control plane is unavailable")
+        if self._llm_planner_coordinator_instance is None:
+            self._llm_planner_coordinator_instance = LLMResearchPlannerCoordinator(
+                self._bounded_planner, self._scheduler
+            )
+        return self._llm_planner_coordinator_instance
+
+    def _op_llm_planner_prepare(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        context_pack_ref = values.pop("context_pack_ref")
+        budget = {key: value for key, value in values.items() if value is not None}
+        return self._llm_planner_coordinator().prepare(context_pack_ref, **budget)
+
+    def _op_llm_planner_advance(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        return self._llm_planner_coordinator().advance(
+            values["context_pack_ref"], values["work_order"]
+        )
+
+    def _op_llm_planner_execute(self, p: Mapping[str, Any]) -> Any:
+        # Runs inside the writer: the planner model worker writes model
+        # accounting into this Core, which the driver process must not open.
+        if self._planner_model_config is None:
+            raise WriterServerError("planner model execution is not configured")
+        config = self._planner_model_config
+        values = dict(p)
+        context_pack_ref = values.pop("context_pack_ref")
+        budget = {key: value for key, value in values.items() if value is not None}
+        coordinator = self._llm_planner_coordinator()
+        prepared = coordinator.prepare(context_pack_ref, **budget)
+        if prepared.get("status") != "model_work_ready":
+            return prepared
+        work_order = prepared["work_order"]
+        from .model_router import ModelRouter
+        from .openclaw_model_adapter import OpenClawModelAdapter
+
+        with ModelRouter(config["model_router_db"]) as router:
+            adapter = OpenClawModelAdapter(
+                str(config["broker_socket"]),
+                route_resolver=router.get_decision,
+                auth_client_id=config["broker_client_id"],
+                auth_key_provider=lambda: Path(
+                    config["broker_auth_key"]
+                ).read_bytes().strip(),
+                expected_agent_id=config["expected_agent_id"],
+                timeout_seconds=120.0,
+            )
+            worker = LLMResearchPlannerModelWorker(
+                scheduler=self._scheduler,
+                router=router,
+                adapter=adapter,
+                store=self.store,
+                observability=self.observability,
+                routing_policy_ref=config["routing_policy_ref"],
+                credential_slot_refs=config["credential_slot_refs"],
+            )
+            run = worker.run_once(work_order)
+        if run.get("status") != "succeeded":
+            return {"status": f"model_{run.get('status')}", "work_order_ref": work_order["id"]}
+        return coordinator.advance(context_pack_ref, work_order)
+
     def _op_bounded_planner_propose_next_with_context(self, p: Mapping[str, Any]) -> Any:
         return self.bounded_planner.propose_next_with_context(
             dict(p)["planner_context_pack_ref"]
@@ -2157,11 +2236,11 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError)):
             return "rejected"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchDoctrineNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchDoctrineConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected)):
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
@@ -2185,7 +2264,7 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, CapabilityRegistryError):
             return "store_error"
-        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, WeeklyBriefError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError, ResearchConstitutionError, CompanyResearchViewError, ResearchDoctrineError)):
+        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, WeeklyBriefError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError, ResearchConstitutionError, CompanyResearchViewError, ResearchDoctrineError, LLMResearchPlannerError)):
             return "store_error"
         return "internal_error"
 
@@ -2195,11 +2274,11 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError)):
             return "request rejected by contract or gate"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchDoctrineNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending)):
             return "requested object was not found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchDoctrineConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected)):
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ContextMaterializerError, PerceptionError)):
             return "request rejected by contract or gate"
@@ -2257,6 +2336,13 @@ def main(argv: list[str] | None = None) -> int:
         "--sec-lane-rehearsal-fixture",
         help="rehearsal only: company-facts fixture file served instead of data.sec.gov (tests)",
     )
+    parser.add_argument("--planner-routing-policy")
+    parser.add_argument("--planner-credential-slots")
+    parser.add_argument("--planner-model-router-db")
+    parser.add_argument("--planner-broker-socket")
+    parser.add_argument("--planner-broker-auth-key")
+    parser.add_argument("--planner-broker-client-id", default="client:dalton-core")
+    parser.add_argument("--planner-expected-agent-id", default="chem")
     parser.add_argument(
         "--sec-lane-rehearsal-approved-by",
         help="rehearsal only: in-memory approved SEC governance principal (tests)",
@@ -2309,6 +2395,26 @@ def main(argv: list[str] | None = None) -> int:
                 # verifiable in place.
                 spool_dir=args.transcript_spool_dir,
             )
+        planner_model_config = None
+        if args.planner_routing_policy is not None:
+            slots = (args.planner_credential_slots or "").split(",")
+            slots = tuple(item.strip() for item in slots if item.strip())
+            if not slots or args.planner_model_router_db is None \
+                    or args.planner_broker_socket is None \
+                    or args.planner_broker_auth_key is None:
+                raise WriterServerError(
+                    "--planner-routing-policy requires credential slots, "
+                    "router db and broker socket/auth key"
+                )
+            planner_model_config = {
+                "routing_policy_ref": args.planner_routing_policy,
+                "credential_slot_refs": slots,
+                "model_router_db": args.planner_model_router_db,
+                "broker_socket": args.planner_broker_socket,
+                "broker_auth_key": args.planner_broker_auth_key,
+                "broker_client_id": args.planner_broker_client_id,
+                "expected_agent_id": args.planner_expected_agent_id,
+            }
         server = WriterServer(
             args.db,
             args.socket,
@@ -2319,6 +2425,7 @@ def main(argv: list[str] | None = None) -> int:
             acquisition_launcher=launcher,
             candidate_staging_path=args.candidate_staging,
             sec_lane_launcher=sec_lane_launcher,
+            planner_model_config=planner_model_config,
         )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:

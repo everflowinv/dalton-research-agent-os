@@ -185,10 +185,19 @@ def _revalidate_model_provenance(
     authority: Any,
     provenance: Mapping[str, str],
     context: Mapping[str, Any],
+    *,
+    scheduler_connection: Any = None,
 ) -> dict[str, Any]:
-    """Prove the candidate came from one exact successful Scheduler result."""
+    """Prove the candidate came from one exact successful Scheduler result.
 
-    work_row = authority.connection.execute(
+    Scheduler WorkOrders and formal results live in the Scheduler authority;
+    the writer hosts that authority in its own owner-only sqlite file, so the
+    caller may pass the Scheduler connection explicitly.  The Core connection
+    remains the default for the historical single-file deployment.
+    """
+
+    scheduler = scheduler_connection if scheduler_connection is not None else authority.connection
+    work_row = scheduler.execute(
         "SELECT work_order_json,work_order_hash FROM scheduler_work_orders "
         "WHERE work_order_id=?",
         (provenance["work_order_ref"],),
@@ -209,7 +218,7 @@ def _revalidate_model_provenance(
         != PLANNER_CANDIDATE_CONTRACT_HASH
     ):
         raise LLMResearchPlannerRejected("planner WorkOrder provenance drifted")
-    formal = authority.connection.execute(
+    formal = scheduler.execute(
         "SELECT * FROM scheduler_formal_results WHERE work_order_id=?",
         (work.id,),
     ).fetchone()
@@ -503,13 +512,17 @@ def bind_planner_candidate(
     candidate: Mapping[str, Any],
     *,
     model_provenance: Mapping[str, Any],
+    scheduler_connection: Any = None,
 ) -> dict[str, Any]:
     """Bind a weak model candidate to an exact Proposal 0.3 in Core."""
 
     candidate_wire = validate_planner_candidate(candidate)
     provenance = validate_model_provenance(model_provenance)
     context = revalidate_planner_context_pack(authority, context_pack_ref)
-    formal_candidate = _revalidate_model_provenance(authority, provenance, context)
+    formal_candidate = _revalidate_model_provenance(
+        authority, provenance, context,
+        scheduler_connection=scheduler_connection,
+    )
     if canonical_json(candidate_wire) != canonical_json(formal_candidate):
         raise LLMResearchPlannerRejected(
             "submitted candidate differs from the formal model result"
@@ -569,8 +582,12 @@ class LLMResearchPlannerCoordinator:
     """Create one model WorkOrder, then bind its formal result to Core."""
 
     def __init__(self, authority: Any, scheduler: Any) -> None:
-        if authority.connection is not scheduler.connection:
-            raise TypeError("planner authority and Scheduler must share one Core connection")
+        # The writer hosts this coordinator with the Core and Scheduler in
+        # separate owner-only sqlite files (the BoundedPlannerControlPlane
+        # precedent); require the trusted Scheduler authority surface instead
+        # of one shared connection.
+        if not callable(getattr(scheduler, "work_order_authority", None)):
+            raise TypeError("planner coordinator requires Scheduler WorkOrder authority")
         self.authority = authority
         self.scheduler = scheduler
 
@@ -659,6 +676,7 @@ class LLMResearchPlannerCoordinator:
             context["id"],
             candidate,
             model_provenance=provenance,
+            scheduler_connection=self.scheduler.connection,
         )
         return {
             "status": "proposal_ready",

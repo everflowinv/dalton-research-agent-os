@@ -275,6 +275,14 @@ class BoundedPlannerDriverTests(unittest.TestCase):
             observation_mandate_version_ref=self.mandate_id,
             doctrine_pack_version_ref=None,
             doctrine_pack_version_hash=None,
+            planner_routing_policy_ref=None,
+            planner_credential_slot_refs=None,
+            planner_model_router_db=None,
+            planner_broker_socket=None,
+            planner_broker_auth_key=None,
+            planner_broker_client_id="client:dalton-core",
+            planner_expected_agent_id="chem",
+            planner_max_cost_usd=0.5,
         )
 
     def _driver(self, transport) -> BoundedPlannerDriver:
@@ -397,6 +405,14 @@ class BoundedPlannerDriverTests(unittest.TestCase):
             observation_mandate_version_ref=self.mandate_id,
             doctrine_pack_version_ref=pack["id"],
             doctrine_pack_version_hash=pack["content_hash"],
+            planner_routing_policy_ref=None,
+            planner_credential_slot_refs=None,
+            planner_model_router_db=None,
+            planner_broker_socket=None,
+            planner_broker_auth_key=None,
+            planner_broker_client_id="client:dalton-core",
+            planner_expected_agent_id="chem",
+            planner_max_cost_usd=0.5,
         )
         write_token_config(self.root / "tokens.json", list(self.server.principals.values()))
         driver = BoundedPlannerDriver(
@@ -430,6 +446,73 @@ class BoundedPlannerDriverTests(unittest.TestCase):
         store.close()
         self.assertGreaterEqual(len(with_context), 1)
 
+    def test_planner_model_failure_falls_back_to_deterministic(self) -> None:
+        from dalton_core.writer_server import write_token_config
+        from dalton_core.agenda import AgendaStore
+        pack = self.governance.call("publish_doctrine_pack", {
+            "doctrine_pack_ref": "doctrine-pack:driver-llm",
+            "title": "Driver Doctrine LLM",
+            "default_lens_ref": "lens:demand",
+            "lenses": [{
+                "lens_ref": "lens:demand",
+                "label": "Demand",
+                "objective": "Track demand.",
+                "priority_topics": ["bookings"],
+                "evidence_standard": {
+                    "preferred_source_classes": ["source:sec-edgar"],
+                    "minimum_independent_sources": 1,
+                    "negative_claim_rule": (
+                        "candidate_only_until_separate_claim_admission"
+                    ),
+                },
+            }],
+            "actor_ref": OWNER, "prior_version_ref": None,
+        })
+        config = BoundedPlannerDriverConfig(
+            writer_socket=Path(self.socket),
+            token_config=self.root / "tokens.json",
+            scheduler_db=self.scheduler_path,
+            user_agent="Dalton Test",
+            max_response_bytes=1_000_000,
+            timeout_seconds=10.0,
+            max_probes_per_tick=1,
+            filed_window_days=400,
+            observation_mandate_version_ref=self.mandate_id,
+            doctrine_pack_version_ref=pack["id"],
+            doctrine_pack_version_hash=pack["content_hash"],
+            # The writer in this harness has no planner model config, so the
+            # execute RPC fails and the driver must fall back deterministically.
+            planner_routing_policy_ref="model-routing-policy-version:planner-test:1",
+            planner_credential_slot_refs=("credential-slot:openclaw:deepseek",),
+            planner_model_router_db=self.root / "router.sqlite",
+            planner_broker_socket=self.root / "broker.sock",
+            planner_broker_auth_key=self.root / "broker.key",
+            planner_broker_client_id="client:dalton-core",
+            planner_expected_agent_id="chem",
+            planner_max_cost_usd=0.5,
+        )
+        write_token_config(self.root / "tokens.json", list(self.server.principals.values()))
+        driver = BoundedPlannerDriver(
+            config, client=self.core,
+            transport=FakeTransport(FakeResponse(200, company_facts_body())),
+            clock=lambda: NOW,
+        )
+        first = driver.run_once()
+        self.assertEqual("completed", first["status"])
+        self.assertEqual(1, first["probes_executed"])
+        self.assertEqual("observed", first["executed"][0]["outcome_kind"])
+        # The deterministic doctrine planner produced the admitted proposal.
+        from dalton_core.bounded_planner_loop import BoundedPlannerAuthority
+        from dalton_core.store import DaltonStore
+        store = DaltonStore(str(self.root / "core.sqlite"))
+        authority = BoundedPlannerAuthority(store)
+        rows = authority.connection.execute(
+            "SELECT record_json FROM bounded_planner_proposal_versions "
+            "WHERE loop_version_ref=?", (self.loop["id"],)
+        ).fetchall()
+        store.close()
+        self.assertGreaterEqual(len(rows), 1)
+
     def test_config_validates_closed_shape(self) -> None:
         raw = {
             "writer_socket": self.socket,
@@ -443,6 +526,14 @@ class BoundedPlannerDriverTests(unittest.TestCase):
             "observation_mandate_version_ref": "mandate-version:test:1",
             "doctrine_pack_version_ref": None,
             "doctrine_pack_version_hash": None,
+            "planner_routing_policy_ref": None,
+            "planner_credential_slot_refs": None,
+            "planner_model_router_db": None,
+            "planner_broker_socket": None,
+            "planner_broker_auth_key": None,
+            "planner_broker_client_id": "client:dalton-core",
+                        "planner_expected_agent_id": "chem",
+            "planner_max_cost_usd": 0.5,
         }
         parsed = BoundedPlannerDriverConfig.from_mapping(raw)
         self.assertEqual(

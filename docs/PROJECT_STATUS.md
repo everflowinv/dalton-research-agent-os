@@ -74,6 +74,16 @@
   observed、observation unchanged。当前 lens priority_topics 与 coverage ref 不重合故重排惰性（后续
   loop 版本可对齐命名）；LLM planner 接入留待下片。全仓 960/960。见
   [P8c-4b 报告](reports/p8c4b-doctrine-context-driver-v0.1-2026-09-01.md)。
+- **P8c-4c LLM Planner 已接入 live（2026-09-01 晚）。** writer 新增 `llm_planner_prepare` /
+  `llm_planner_advance` / `llm_planner_execute`（模型调用在 writer 进程内执行并记账，driver 每 tick
+  先试一次 LLM、失败回退确定性 doctrine planner）；production policy
+  `model-routing-policy-version:dalton-openclaw-planner:1` pin `profile:deepseek-v4-flash`。三处真实
+  缺口修复：①LLM planner provenance 链把 Scheduler 表当 Core 表读（分文件部署必败），现接受显式
+  Scheduler 连接；②writer adapter 缺 dedicated agent id（复用 thesis-impact 教训补
+  `planner_expected_agent_id` 链）；③LaunchAgent 从 service config 派生全部 planner flag。live loop v5
+  已有 **2 条 `planner:llm-research-planner:0.1` 撰写的 probe 提案**被 Core 绑定并执行（V4 Flash 给出
+  真实 rationale）。全仓 961/961。见
+  [P8c-4c 报告](reports/p8c4c-llm-planner-driver-v0.1-2026-09-01.md)。
 - **2026-08-27 owner 批准全部保留 gate 后已在 live 执行（详见
   [live 激活报告](reports/p8a-s7f-live-activation-v0.1-2026-08-27.md)）**：
   1. **DXC 第 5 家 SEC issuer 完成**：catalog 加入 DXC（CIK 001688568，agenda binding v2→v3），live lane 取

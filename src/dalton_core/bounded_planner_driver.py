@@ -50,6 +50,14 @@ class BoundedPlannerDriverConfig:
     observation_mandate_version_ref: str | None
     doctrine_pack_version_ref: str | None
     doctrine_pack_version_hash: str | None
+    planner_routing_policy_ref: str | None
+    planner_credential_slot_refs: tuple[str, ...] | None
+    planner_model_router_db: Path | None
+    planner_broker_socket: Path | None
+    planner_broker_auth_key: Path | None
+    planner_broker_client_id: str
+    planner_expected_agent_id: str
+    planner_max_cost_usd: float
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "BoundedPlannerDriverConfig":
@@ -58,6 +66,10 @@ class BoundedPlannerDriverConfig:
             "max_response_bytes", "timeout_seconds", "max_probes_per_tick",
             "filed_window_days", "observation_mandate_version_ref",
             "doctrine_pack_version_ref", "doctrine_pack_version_hash",
+            "planner_routing_policy_ref", "planner_credential_slot_refs",
+            "planner_model_router_db", "planner_broker_socket",
+            "planner_broker_auth_key", "planner_broker_client_id",
+            "planner_expected_agent_id", "planner_max_cost_usd",
         }
         if set(raw) != expected:
             raise BoundedPlannerDriverError(
@@ -82,6 +94,63 @@ class BoundedPlannerDriverConfig:
             raise BoundedPlannerDriverError(
                 "observation_mandate_version_ref must be non-empty text or null"
             )
+        planner_policy = raw["planner_routing_policy_ref"]
+        planner_slots_raw = raw["planner_credential_slot_refs"]
+        planner_router_db = raw["planner_model_router_db"]
+        planner_broker_socket = raw["planner_broker_socket"]
+        planner_broker_key = raw["planner_broker_auth_key"]
+        planner_client_id = raw["planner_broker_client_id"]
+        planner_agent = raw["planner_expected_agent_id"]
+        if not isinstance(planner_agent, str) or not planner_agent:
+            raise BoundedPlannerDriverError(
+                "planner_expected_agent_id must be non-empty text"
+            )
+        planner_max_cost = raw["planner_max_cost_usd"]
+        planner_configured = planner_policy is not None
+        if planner_configured != (planner_slots_raw is not None) or (
+            planner_configured and (
+                planner_router_db is None or planner_broker_socket is None
+                or planner_broker_key is None
+            )
+        ):
+            raise BoundedPlannerDriverError(
+                "planner model wiring requires policy, credential slots, "
+                "router db and broker paths together"
+            )
+        if planner_configured:
+            if not isinstance(planner_policy, str) or not planner_policy.strip():
+                raise BoundedPlannerDriverError(
+                    "planner_routing_policy_ref must be non-empty text"
+                )
+            if (
+                not isinstance(planner_slots_raw, list)
+                or not planner_slots_raw
+                or any(not isinstance(item, str) or not item for item in planner_slots_raw)
+            ):
+                raise BoundedPlannerDriverError(
+                    "planner_credential_slot_refs must be a non-empty string array"
+                )
+            for field, value in (
+                ("planner_model_router_db", planner_router_db),
+                ("planner_broker_socket", planner_broker_socket),
+                ("planner_broker_auth_key", planner_broker_key),
+            ):
+                if not isinstance(value, str) or not Path(value).is_absolute():
+                    raise BoundedPlannerDriverError(f"{field} must be an absolute path")
+            if not isinstance(planner_client_id, str) or not planner_client_id:
+                raise BoundedPlannerDriverError(
+                    "planner_broker_client_id must be non-empty text"
+                )
+            if (
+                isinstance(planner_max_cost, bool)
+                or not isinstance(planner_max_cost, (int, float))
+                or planner_max_cost <= 0
+            ):
+                raise BoundedPlannerDriverError(
+                    "planner_max_cost_usd must be positive"
+                )
+        else:
+            planner_slots_raw = None
         doctrine_ref = raw["doctrine_pack_version_ref"]
         doctrine_hash = raw["doctrine_pack_version_hash"]
         if (doctrine_ref is None) != (doctrine_hash is None):
@@ -112,6 +181,24 @@ class BoundedPlannerDriverConfig:
             observation_mandate_version_ref=observation_mandate,
             doctrine_pack_version_ref=doctrine_ref,
             doctrine_pack_version_hash=doctrine_hash,
+            planner_routing_policy_ref=planner_policy,
+            planner_credential_slot_refs=(
+                None if planner_slots_raw is None else tuple(planner_slots_raw)
+            ),
+            planner_model_router_db=(
+                None if planner_router_db is None else Path(planner_router_db)
+            ),
+            planner_broker_socket=(
+                None if planner_broker_socket is None else Path(planner_broker_socket)
+            ),
+            planner_broker_auth_key=(
+                None if planner_broker_key is None else Path(planner_broker_key)
+            ),
+            planner_broker_client_id=(planner_client_id or "client:dalton-core"),
+            planner_expected_agent_id=planner_agent,
+            planner_max_cost_usd=float(
+                planner_max_cost if planner_max_cost is not None else 0.5
+            ),
             **paths, **numbers,
         )
 
@@ -178,10 +265,25 @@ class BoundedPlannerDriver:
                         "reason": f"doctrine_context_unavailable:{type(exc).__name__}",
                     })
                     continue
-                proposal = self.client.call(
-                    "bounded_planner_propose_next_with_context",
-                    {"planner_context_pack_ref": context["id"]},
-                )
+                try:
+                    executed_model = self.client.call("llm_planner_execute", {
+                        "context_pack_ref": context["id"],
+                        "max_input_tokens": 16_000,
+                        "max_output_tokens": 1_200,
+                        "max_cost_usd": self.config.planner_max_cost_usd,
+                        "max_seconds": 180,
+                    })
+                except Exception as exc:
+                    executed_model = {"status": f"unavailable:{type(exc).__name__}"}
+                if executed_model.get("status") == "proposal_ready":
+                    proposal = executed_model["proposal"]
+                else:
+                    # One bounded model attempt per tick; the deterministic
+                    # doctrine-aware planner remains the safety net.
+                    proposal = self.client.call(
+                        "bounded_planner_propose_next_with_context",
+                        {"planner_context_pack_ref": context["id"]},
+                    )
             else:
                 proposal = self.client.call("bounded_planner_propose_next", {
                     "loop_version_ref": loop["loop_version_ref"],

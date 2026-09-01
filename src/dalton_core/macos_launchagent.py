@@ -106,6 +106,33 @@ def render(
                 "--sec-lane-user-agent", SEC_LANE_USER_AGENT,
             ]
             if candidate_staging_path is not None else []
+        ) + (
+            # P8c-4c: the bounded planner's model call runs inside the writer
+            # (it accounts into this Core); derive its broker wiring from the
+            # driver's service block so there is one source of truth.
+            [
+                "--planner-routing-policy",
+                service_config.bounded_planner.planner_routing_policy_ref,
+                "--planner-credential-slots",
+                ",".join(service_config.bounded_planner.planner_credential_slot_refs),
+                "--planner-model-router-db",
+                str(service_config.bounded_planner.planner_model_router_db),
+                "--planner-broker-socket",
+                str(service_config.bounded_planner.planner_broker_socket),
+                "--planner-broker-auth-key",
+                str(service_config.bounded_planner.planner_broker_auth_key),
+                "--planner-broker-client-id",
+                service_config.bounded_planner.planner_broker_client_id,
+                "--planner-expected-agent-id",
+                service_config.bounded_planner.planner_expected_agent_id,
+            ]
+            if (
+                service_config is not None
+                and service_config.bounded_planner is not None
+                and service_config.bounded_planner.planner_routing_policy_ref
+                is not None
+            )
+            else []
         ),
         "StandardOutPath": str(logs / "writer.stdout.log"),
         "StandardErrorPath": str(logs / "writer.stderr.log"),
