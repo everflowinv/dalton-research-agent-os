@@ -373,7 +373,8 @@ CORE_OPERATIONS = frozenset({
     "render_weekly_brief_markdown", "record_weekly_brief_delivery",
     "run_weekly_brief_cycle", "record_scheduled_weekly_brief_delivery",
     "bounded_planner_propose_next", "bounded_planner_admit_proposal",
-    "bounded_planner_record_outcome", "bounded_planner_active_loops",
+    "bounded_planner_record_outcome", "bounded_planner_record_observation",
+    "bounded_planner_active_loops",
     "record_weekly_brief_feedback", "weekly_brief_feedback",
     "weekly_brief_integrity_report",
     "intent_context_bindings", "admit_intent_question", "issue_intent_directive",
@@ -506,6 +507,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "bounded_planner_propose_next": frozenset({"loop_version_ref"}),
     "bounded_planner_admit_proposal": frozenset({"proposal_ref"}),
     "bounded_planner_record_outcome": frozenset({"round_ref"}),
+    "bounded_planner_record_observation": frozenset({"round_ref", "mandate_version_ref"}),
     "bounded_planner_active_loops": frozenset(),
     "propose_model_input": frozenset({
         "candidate_id", "input_kind", "model_input_ref", "prior_version_ref",
@@ -1804,6 +1806,15 @@ class WriterServer:
         if self._bounded_control is None:
             raise WriterServerError("bounded-planner control plane is unavailable")
         return self._bounded_control.record_outcome(dict(p)["round_ref"])
+
+    def _op_bounded_planner_record_observation(self, p: Mapping[str, Any]) -> Any:
+        if self._bounded_control is None:
+            raise WriterServerError("bounded-planner control plane is unavailable")
+        values = dict(p)
+        return self._bounded_control.record_observation_followup(
+            values["round_ref"],
+            mandate_version_ref=values["mandate_version_ref"],
+        )
 
     def _op_bounded_planner_active_loops(self, p: Mapping[str, Any]) -> Any:
         return {

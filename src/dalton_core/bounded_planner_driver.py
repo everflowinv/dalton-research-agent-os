@@ -47,13 +47,14 @@ class BoundedPlannerDriverConfig:
     timeout_seconds: float
     max_probes_per_tick: int
     filed_window_days: int
+    observation_mandate_version_ref: str | None
 
     @classmethod
     def from_mapping(cls, raw: dict[str, Any]) -> "BoundedPlannerDriverConfig":
         expected = {
             "writer_socket", "token_config", "scheduler_db", "user_agent",
             "max_response_bytes", "timeout_seconds", "max_probes_per_tick",
-            "filed_window_days",
+            "filed_window_days", "observation_mandate_version_ref",
         }
         if set(raw) != expected:
             raise BoundedPlannerDriverError(
@@ -71,6 +72,13 @@ class BoundedPlannerDriverConfig:
         user_agent = raw["user_agent"]
         if not isinstance(user_agent, str) or not user_agent.strip():
             raise BoundedPlannerDriverError("user_agent must be non-empty text")
+        observation_mandate = raw["observation_mandate_version_ref"]
+        if observation_mandate is not None and (
+            not isinstance(observation_mandate, str) or not observation_mandate.strip()
+        ):
+            raise BoundedPlannerDriverError(
+                "observation_mandate_version_ref must be non-empty text or null"
+            )
         numbers = {}
         for field, default in (
             ("max_response_bytes", DEFAULT_MAX_RESPONSE_BYTES),
@@ -86,7 +94,11 @@ class BoundedPlannerDriverConfig:
             if value <= 0:
                 raise BoundedPlannerDriverError(f"{field} must be positive")
             numbers[field] = value
-        return cls(user_agent=user_agent, **paths, **numbers)  # type: ignore[arg-type]
+        return cls(  # type: ignore[arg-type]
+            user_agent=user_agent,
+            observation_mandate_version_ref=observation_mandate,
+            **paths, **numbers,
+        )
 
 
 class BoundedPlannerDriver:
@@ -200,14 +212,36 @@ class BoundedPlannerDriver:
             outcome = self.client.call("bounded_planner_record_outcome", {
                 "round_ref": round_wire["id"],
             })
-            executed.append({
+            entry = {
                 "loop_version_ref": loop["loop_version_ref"],
                 "kind": "probe",
                 "round_ref": round_wire["id"],
                 "work_order_ref": round_wire["work_order_ref"],
                 "outcome_status": outcome.get("status"),
                 "outcome_kind": (outcome.get("outcome") or {}).get("outcome_kind"),
-            })
+            }
+            if self.config.observation_mandate_version_ref is not None:
+                try:
+                    observation = self.client.call(
+                        "bounded_planner_record_observation",
+                        {
+                            "round_ref": round_wire["id"],
+                            "mandate_version_ref": (
+                                self.config.observation_mandate_version_ref
+                            ),
+                        },
+                    )
+                except Exception as exc:
+                    # An observation question is attention, never a probe
+                    # result; a scope or mandate gap must not kill the tick.
+                    entry["observation_status"] = (
+                        f"unrecorded:{type(exc).__name__}"
+                    )
+                else:
+                    entry["observation_status"] = observation.get("status")
+                    if observation.get("question_ref") is not None:
+                        entry["observation_question_ref"] = observation["question_ref"]
+            executed.append(entry)
             probes += 1
         return {
             "status": "completed" if executed else "idle",

@@ -137,6 +137,8 @@ controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回
   SEC revenue-growth ProbeTemplate 与五家公司循环 v1 已人工准入；
 - P8c-2 controller 驱动已上线并完成首次全自主循环：daltond 每 300 秒唤醒停泊循环，确定性 planner
   提案 → Core 准入 → 真实 SEC probe → 源级 outcome → 终态，五轮探测无人干预；
+- P8c-3 概念回退与新观察注意力已上线：EPAM 概念缺口关闭，探测到新 10-Q 源时自动登记 backlog
+  开放问题并进入研究视图与 brief；
 - Agenda Shadow 最新 live cycle 正常交付，controller、writer、projection 和 dashboard health 均为 running；
 - Doctrine（writer ops）、Bounded Planner、LLM Planner、Answer Router 和 DocumentIndex 仍是 development candidate，
   尚未接入同一条 live 认知循环。

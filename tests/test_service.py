@@ -136,6 +136,9 @@ class ServiceTests(unittest.TestCase):
                         "timeout_seconds": 60.0,
                         "max_probes_per_tick": 1,
                         "filed_window_days": 400,
+                        "observation_mandate_version_ref": (
+                            "mandate-version:us-it-services-sec-lane:v3"
+                        ),
                     },
                 },
             }

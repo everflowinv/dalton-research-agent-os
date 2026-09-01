@@ -44,6 +44,16 @@
   planner 自主 terminate，终态 `evidence_observed_for_review`；此后 driver idle。全程 0 付费调用。
   新测试 executor 4 / driver 2 / service 2，邻接 32/32，全仓 957/957。见
   [P8c-2 报告](reports/p8c2-controller-driven-loop-v0.1-2026-08-27.md)。
+- **P8c-3 概念回退与新观察→研究注意力已部署 live（2026-08-27 晚）。** executor 支持收入概念候选有序回退
+  （与 lane 冻结 allowlist 同序），关闭 v1 循环的 EPAM `not_found_in_scope` 缺口；控制面新增
+  `record_observation_followup`：round 的 matched source location 与同 coverage item 既往 outcome 对比，
+  新 accession 时以 `automation:bounded-planner` 在 backlog 登记开放注意问题（幂等；unchanged/not_observed
+  不提问），进入 CompanyResearchView 与 brief 的 open questions；writer core-only op
+  `bounded_planner_record_observation`，driver 在 observed 后调用（失败不中断 tick）。loop v2
+  （`bounded-planner-loop-version:52f3636c…`，query_terms 带三概念候选）已准入并自主推进：
+  ACN observed 且 observation unchanged（diff 正确）、EPAM 经回退 observed 并**自动登记首条观察问题**。
+  全仓 958/958。见
+  [P8c-3 报告](reports/p8c3-concept-fallback-and-observation-attention-v0.1-2026-08-27.md)。
 - **2026-08-27 owner 批准全部保留 gate 后已在 live 执行（详见
   [live 激活报告](reports/p8a-s7f-live-activation-v0.1-2026-08-27.md)）**：
   1. **DXC 第 5 家 SEC issuer 完成**：catalog 加入 DXC（CIK 001688568，agenda binding v2→v3），live lane 取

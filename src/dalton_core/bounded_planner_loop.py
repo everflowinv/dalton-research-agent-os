@@ -1245,6 +1245,96 @@ class BoundedPlannerControlPlane:
         }
         return WorkOrder.from_dict(wire).to_dict()
 
+    def record_observation_followup(
+        self, round_ref: str, *, mandate_version_ref: str
+    ) -> dict[str, Any]:
+        """Turn a new observed source location into one open backlog question.
+
+        The question is recorded only when this round observed a source
+        location that the same coverage item's latest prior outcome did not
+        already carry; identical observations and replayed rounds are
+        idempotent.  Questions are open research attention, never Claims.
+        """
+
+        round_wire = self.authority.round(round_ref)
+        outcome = self.authority.outcome_for_round(round_ref)
+        if outcome is None:
+            raise BoundedPlannerPending("round has no recorded ResearchOutcome")
+        loop = self.authority.loop(round_wire["loop_version_ref"])
+        proposal = self.authority.proposal(round_wire["proposal_ref"])
+        item = proposal["action"]["coverage_item_ref"]
+        manifest = self.authority._one(
+            "bounded_coverage_manifests", "manifest_id",
+            outcome["coverage_manifest_ref"], "CoverageManifest",
+        )
+        entry = next(
+            (row for row in manifest["entries"]
+             if row["coverage_item_ref"] == item), None,
+        )
+        current = list(entry["matched_source_locations"]) if entry else []
+        if not current:
+            return {"status": "not_observed", "outcome_ref": outcome["id"]}
+        prior_rows = self.authority.connection.execute(
+            "SELECT o.record_json AS outcome_json FROM bounded_research_outcomes o "
+            "JOIN bounded_research_plan_rounds r ON r.round_id=o.round_ref "
+            "WHERE json_extract(o.record_json,'$.coverage_item_ref')=? AND o.outcome_id<>? "
+            "AND r.created_at < (SELECT created_at FROM bounded_research_plan_rounds "
+            "WHERE round_id=?) ORDER BY r.created_at DESC, o.outcome_id DESC LIMIT 1",
+            (item, outcome["id"], round_ref),
+        ).fetchall()
+        prior_locations: list[str] = []
+        if prior_rows:
+            prior = json.loads(prior_rows[0]["outcome_json"])
+            prior_manifest = self.authority._one(
+                "bounded_coverage_manifests", "manifest_id",
+                prior.get("coverage_manifest_ref"), "CoverageManifest",
+            )
+            prior_entry = next(
+                (row for row in prior_manifest["entries"]
+                 if row["coverage_item_ref"] == item), None,
+            )
+            prior_locations = (
+                list(prior_entry["matched_source_locations"]) if prior_entry else []
+            )
+        if current == prior_locations:
+            return {
+                "status": "unchanged",
+                "outcome_ref": outcome["id"],
+                "prior_locations": prior_locations,
+            }
+        from .research_question_backlog import ResearchQuestionBacklog
+
+        locator = str(proposal["action"]["parameters"].get("locator", ""))
+        cik = locator.removeprefix("company-facts/CIK")
+        if not cik.isdigit():
+            raise BoundedPlannerConflict("coverage item locator has no numeric CIK")
+        company_ref = f"company:sec-cik:{cik}"
+        location = current[0]
+        backlog = ResearchQuestionBacklog(self.authority.store)
+        question = (
+            f"Loop {loop['loop_ref']} observed a new SEC source location {location} "
+            f"for {company_ref} that no formal revenue-growth claim covers yet; "
+            "refresh the lane for this accession?"
+        )
+        recorded = backlog.record_question(
+            mandate_version_ref=mandate_version_ref,
+            company_ref=company_ref,
+            question=question,
+            answer_criteria=(
+                "A policy-committed lane Claim bound to the exact observed accession."
+            ),
+            source_refs=["source:sec-edgar"],
+            actor_ref="automation:bounded-planner",
+            idempotency_key=f"bounded-observation:{round_ref}",
+        )
+        return {
+            "status": "recorded" if recorded.get("status") == "fresh" else "duplicate",
+            "outcome_ref": outcome["id"],
+            "question_ref": recorded.get("question_ref"),
+            "source_location": location,
+            "company_ref": company_ref,
+        }
+
     def record_outcome(self, round_ref: str) -> dict[str, Any]:
         round_wire = self.authority.round(round_ref)
         existing = self.authority.outcome_for_round(round_ref)

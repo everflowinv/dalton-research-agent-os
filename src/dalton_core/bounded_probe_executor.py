@@ -14,7 +14,7 @@ later round while budget remains.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
@@ -56,10 +56,23 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
+def _concept_candidates(query_terms: list[Any]) -> list[str]:
+    """Ordered revenue-concept candidates, mirroring the lane's frozen allowlist."""
+
+    candidates: list[str] = []
+    for term in query_terms:
+        if not isinstance(term, str):
+            continue
+        if term.startswith("Revenues") or term.startswith("RevenueFromContract") or term.startswith("SalesRevenueNet"):
+            if term not in candidates:
+                candidates.append(term)
+    return candidates or [DEFAULT_CONCEPT]
+
+
 def _select_latest_accession(
     payload: Mapping[str, Any],
     *,
-    concept: str,
+    concepts: Sequence[str],
     form: str,
     filed_from: str,
     filed_to: str,
@@ -70,30 +83,33 @@ def _select_latest_accession(
     us_gaap = facts.get("us-gaap")
     if not isinstance(us_gaap, Mapping):
         return None
-    concept_node = us_gaap.get(concept)
-    if not isinstance(concept_node, Mapping):
-        return None
-    units = concept_node.get("units")
-    if not isinstance(units, Mapping):
-        return None
-    best: tuple[str, str] | None = None
-    for series in units.values():
-        if not isinstance(series, list):
+    for concept in concepts:
+        best: tuple[str, str] | None = None
+        concept_node = us_gaap.get(concept)
+        if not isinstance(concept_node, Mapping):
             continue
-        for fact in series:
-            if not isinstance(fact, Mapping):
+        units = concept_node.get("units")
+        if not isinstance(units, Mapping):
+            continue
+        for series in units.values():
+            if not isinstance(series, list):
                 continue
-            if fact.get("form") != form:
-                continue
-            filed = fact.get("filed")
-            acc = fact.get("accn")
-            if not isinstance(filed, str) or not isinstance(acc, str):
-                continue
-            if not filed_from <= filed <= filed_to:
-                continue
-            if best is None or (filed, acc) > best:
-                best = (filed, acc)
-    return None if best is None else best[1].replace("-", "")
+            for fact in series:
+                if not isinstance(fact, Mapping):
+                    continue
+                if fact.get("form") != form:
+                    continue
+                filed = fact.get("filed")
+                acc = fact.get("accn")
+                if not isinstance(filed, str) or not isinstance(acc, str):
+                    continue
+                if not filed_from <= filed <= filed_to:
+                    continue
+                if best is None or (filed, acc) > best:
+                    best = (filed, acc)
+        if best is not None:
+            return best[1].replace("-", "")
+    return None
 
 
 def execute_probe_work_order(
@@ -125,14 +141,10 @@ def execute_probe_work_order(
     if not cik.isdigit():
         raise BoundedProbeExecutionError("probe locator CIK is not numeric")
     query_terms = parameters.get("query_terms") or []
-    concept = DEFAULT_CONCEPT
+    concepts = _concept_candidates(query_terms)
     form = DEFAULT_FORM
     for term in query_terms:
-        if not isinstance(term, str):
-            continue
-        if term.startswith("Revenues") or term.startswith("RevenueFromContract"):
-            concept = term
-        elif term.upper() in {"10-Q", "10-K"}:
+        if isinstance(term, str) and term.upper() in {"10-Q", "10-K"}:
             form = term.upper()
     now = clock() if clock is not None else datetime.now(timezone.utc)
     filed_to = now.date().isoformat()
@@ -202,7 +214,7 @@ def execute_probe_work_order(
         }
         return envelope
     accession = _select_latest_accession(
-        payload, concept=concept, form=form,
+        payload, concepts=concepts, form=form,
         filed_from=filed_from, filed_to=filed_to,
     )
     matches = (

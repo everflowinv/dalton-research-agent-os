@@ -127,6 +127,37 @@ class BoundedProbeExecutorTests(unittest.TestCase):
             self.assertEqual("failed", envelope["status"])
             self.assertEqual("SOURCE_UNAVAILABLE", envelope["error"]["code"])
 
+    def test_concept_candidates_fall_back_in_order(self) -> None:
+        payload = json.dumps({
+            "facts": {"us-gaap": {
+                "RevenueFromContractWithCustomerExcludingAssessedTax": {
+                    "units": {"USD": [
+                        {"form": "10-Q", "filed": "2026-05-08",
+                         "accn": "0001352010-26-000045"},
+                    ]},
+                },
+            }},
+        }).encode()
+        work = probe_work_order({
+            "source_ref": "source:sec-edgar",
+            "locator": "company-facts/CIK0001352010",
+            "query_terms": [
+                "Revenues",
+                "RevenueFromContractWithCustomerExcludingAssessedTax",
+                "10-Q", "EPAM",
+            ],
+        })
+        envelope = execute_probe_work_order(
+            work, transport=FakeTransport(FakeResponse(200, payload)),
+            user_agent="Dalton Test", max_response_bytes=1_000_000,
+            timeout_seconds=10.0, clock=lambda: NOW,
+        )
+        self.assertEqual("succeeded", envelope["status"])
+        self.assertEqual(
+            [{"source_location": "sec:accession:000135201026000045"}],
+            envelope["outputs"]["matches"],
+        )
+
     def test_non_tier1_work_orders_are_rejected(self) -> None:
         for metadata in (
             {"permission_scope": "private", "operation": "get_company_facts"},
@@ -172,7 +203,8 @@ class BoundedPlannerDriverTests(unittest.TestCase):
         self.governance = WriterClient(self.socket, GOVERNANCE_TOKEN, timeout=60)
         mandate = self.governance.call("create_mandate", {
             "mandate_ref": "mandate:driver", "actor_ref": OWNER,
-            "objective": "Driver test mandate.", "scope_refs": [INDUSTRY, ACN],
+            "objective": "Driver test mandate.",
+            "scope_refs": [INDUSTRY, ACN, "company:sec-cik:0001058290"],
             "constraints": {}, "success_criteria": {},
             "effective_from": "2026-08-23T00:00:00+00:00", "effective_until": None,
         })
@@ -229,6 +261,8 @@ class BoundedPlannerDriverTests(unittest.TestCase):
             "budget": {"max_rounds": 4, "max_cost_units": 4, "max_seconds": 600},
             "actor_ref": OWNER, "prior_version_ref": None,
         })
+        self.mandate_id = mandate["id"]
+        self.template_id = template["id"]
         self.config = BoundedPlannerDriverConfig(
             writer_socket=Path(self.socket),
             token_config=self.root / "tokens.json",
@@ -238,6 +272,7 @@ class BoundedPlannerDriverTests(unittest.TestCase):
             timeout_seconds=10.0,
             max_probes_per_tick=1,
             filed_window_days=400,
+            observation_mandate_version_ref=self.mandate_id,
         )
 
     def _driver(self, transport) -> BoundedPlannerDriver:
@@ -255,6 +290,7 @@ class BoundedPlannerDriverTests(unittest.TestCase):
         self.assertEqual("completed", first["status"])
         self.assertEqual(1, first["probes_executed"])
         self.assertEqual("observed", first["executed"][0]["outcome_kind"])
+        self.assertEqual("recorded", first["executed"][0]["observation_status"])
         self.assertEqual([], first["skipped"])
 
         second = driver.run_once()
@@ -271,12 +307,60 @@ class BoundedPlannerDriverTests(unittest.TestCase):
         self.assertEqual("idle", fourth["status"])
         self.assertEqual([], fourth["executed"])
 
-        authority = BoundedPlannerAuthority(
-            DaltonStore(str(self.root / "core.sqlite"))
-        )
+        # New observations open idempotent backlog questions.
+        backlog_rows = self.core.call("bounded_planner_active_loops", {})
+        self.assertEqual([], backlog_rows["loops"])
+        store = DaltonStore(str(self.root / "core.sqlite"))
+        authority = BoundedPlannerAuthority(store)
         self.assertEqual(2, len(authority.outcomes(self.loop["id"])))
         terminal = authority.terminal(self.loop["id"])
         self.assertEqual("evidence_observed_for_review", terminal["terminal_state"])
+        from dalton_core.research_question_backlog import ResearchQuestionBacklog
+        backlog = ResearchQuestionBacklog(store)
+        questions = backlog.questions()
+        self.assertEqual(3, len(questions))  # standing question + two observations
+        observed_accessions = {
+            question["head"]["company_ref"]: question["head"]["question"]
+            for question in questions
+        }
+        self.assertIn(ACN, observed_accessions)
+        self.assertIn("000146737326000031", observed_accessions[ACN])
+
+        # Loop v2 with the same coverage items replays the identical source:
+        # observations are unchanged, no new questions.
+        loop_v2 = self.governance.call("create_bounded_planner_loop", {
+            "loop_ref": "bounded-loop:driver:v1",
+            "question_version_ref": self.loop["question_version_ref"],
+            "template_bindings": [
+                {
+                    "coverage_item_ref": item,
+                    "template_version_ref": self.template_id,
+                    "parameters": params,
+                }
+                for item, params in (
+                    ("coverage:revenue-growth:acn", {
+                        "source_ref": "source:sec-edgar",
+                        "locator": "company-facts/CIK0001467373",
+                        "query_terms": ["Revenues", "10-Q", "ACN"],
+                    }),
+                    ("coverage:revenue-growth:other", {
+                        "source_ref": "source:sec-edgar",
+                        "locator": "company-facts/CIK0001058290",
+                        "query_terms": ["Revenues", "10-Q", "CTSH"],
+                    }),
+                )
+            ],
+            "required_coverage_items": [
+                "coverage:revenue-growth:acn", "coverage:revenue-growth:other",
+            ],
+            "budget": {"max_rounds": 4, "max_cost_units": 4, "max_seconds": 600},
+            "actor_ref": OWNER, "prior_version_ref": self.loop["id"],
+        })
+        for _ in range(3):
+            driver.run_once()
+        self.assertIsNotNone(authority.terminal(loop_v2["id"]))
+        self.assertEqual(3, len(backlog.questions()))
+        store.close()
 
     def test_config_validates_closed_shape(self) -> None:
         raw = {
@@ -288,8 +372,12 @@ class BoundedPlannerDriverTests(unittest.TestCase):
             "timeout_seconds": 5.0,
             "max_probes_per_tick": 1,
             "filed_window_days": 400,
+            "observation_mandate_version_ref": "mandate-version:test:1",
         }
         parsed = BoundedPlannerDriverConfig.from_mapping(raw)
+        self.assertEqual(
+            "mandate-version:test:1", parsed.observation_mandate_version_ref
+        )
         self.assertEqual(1, parsed.max_probes_per_tick)
         bad = dict(raw)
         bad["extra"] = True
