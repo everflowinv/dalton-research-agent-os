@@ -84,6 +84,21 @@
   已有 **2 条 `planner:llm-research-planner:0.1` 撰写的 probe 提案**被 Core 绑定并执行（V4 Flash 给出
   真实 rationale）。全仓 961/961。见
   [P8c-4c 报告](reports/p8c4c-llm-planner-driver-v0.1-2026-09-01.md)。
+- **M1 财务建模引擎与 AlphaEngine Tier 1 probe 已部署 live 并完成首次真实运行（2026-09-01，owner
+  裁决双线并行，AE 上限 24h/30 次）。** ①**M1**：新增版本化 ForecastLine authority
+  （`model_forecast.py`，value_kind 用 SPEC 冻结词表；derived 行只能绑冻结公式
+  `formula:quarterly-growth-extend:1` + exact 输入 hash，非 derived 行 human-only）与确定性
+  `extend_growth`（经 record_model_run 写 model run，全链幂等）；writer 新增
+  `publish_forecast_line` / `get_forecast_line` / `extend_growth_forecast`。**首个 live 财务模型**：
+  ACN base scenario + Q3 FY2026 收入 actual USD 18,718.144M（绑 live SEC claim evidence）+ 增速
+  1.15%/季（从 ACN Thesis implied_expectation 换算）→ 4 条 derived_deterministic 预测线
+  （Q4 FY26 18,933M → Q3 FY27 19,595M）+ model run v1。估值仍 fail closed（M2 需市场数据）。
+  ②**AE probe**：launcher 新增 automation 路径（永不伪装 human）；探测先数 trailing 24h
+  invocations，超 30 拒绝且零花费；文档已在 authority 直接命中。AE ProbeTemplate + 循环 v6
+  （5 SEC + `coverage:transcript:acn`）准入并全自主跑完：5 轮 SEC + **round 6 AE observed**
+  （0 调用），终态 evidence_observed_for_review；当日 AE 计数 0/30。顺带修复 driver 对
+  `core_action` 结果的忽略（v5 曾因此卡 40+ 悬空 terminate 提案）。新测试 3+5，全仓
+  969/969×3。见 [M1/AE 报告](reports/m1-model-engine-and-ae-probe-v0.1-2026-09-01.md)。
 - **2026-08-27 owner 批准全部保留 gate 后已在 live 执行（详见
   [live 激活报告](reports/p8a-s7f-live-activation-v0.1-2026-08-27.md)）**：
   1. **DXC 第 5 家 SEC issuer 完成**：catalog 加入 DXC（CIK 001688568，agenda binding v2→v3），live lane 取

@@ -36,6 +36,7 @@ class PackagingTests(unittest.TestCase):
             "transcript_correction_schema.sql",
             "answer_routing_schema.sql",
             "research_constitution_schema.sql",
+            "model_forecast_schema.sql",
             "thesis-impact-verifier-provider-output-v0.2.schema.json",
             "dashboard.html",
             "cockpit_control.html",

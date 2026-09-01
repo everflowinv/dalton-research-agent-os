@@ -143,6 +143,18 @@ from .research_constitution import (
     ResearchConstitutionNotFound,
     ResearchConstitutionValidationError,
 )
+from .model_forecast import (
+    ModelForecastAuthority,
+    ModelForecastConflict,
+    ModelForecastError,
+    ModelForecastNotFound,
+    ModelForecastValidationError,
+    extend_growth,
+)
+from .bounded_alphaengine_probe import (
+    BoundedAlphaEngineProbeError,
+    execute_alphaengine_probe,
+)
 from .company_research_view import (
     CompanyResearchViewError,
     CompanyResearchViewValidationError,
@@ -299,6 +311,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "record_backlog_question", "publish_probe_template",
     "create_bounded_planner_loop", "bounded_probe_template",
     "bounded_planner_loop", "publish_doctrine_pack", "get_doctrine_pack",
+    "publish_forecast_line", "get_forecast_line", "extend_growth_forecast",
 })
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
@@ -375,6 +388,7 @@ CORE_OPERATIONS = frozenset({
     "record_backlog_question", "publish_probe_template",
     "create_bounded_planner_loop", "bounded_probe_template",
     "bounded_planner_loop", "publish_doctrine_pack", "get_doctrine_pack",
+    "publish_forecast_line", "get_forecast_line", "extend_growth_forecast",
     "propose_model_input", "get_model_input_candidate",
     "get_model_input_decision", "get_model_input_version", "current_model_input",
     "decide_model_input", "record_model_run", "record_model_reconciliation",
@@ -390,7 +404,7 @@ CORE_OPERATIONS = frozenset({
     "bounded_planner_record_outcome", "bounded_planner_record_observation",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
-    "llm_planner_advance", "llm_planner_execute",
+    "llm_planner_advance", "llm_planner_execute", "bounded_alphaengine_probe",
     "record_weekly_brief_feedback", "weekly_brief_feedback",
     "weekly_brief_integrity_report",
     "intent_context_bindings", "admit_intent_question", "issue_intent_directive",
@@ -531,6 +545,10 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "bounded_planner_propose_next_with_context": frozenset({"planner_context_pack_ref"}),
     "llm_planner_prepare": frozenset({"context_pack_ref", "max_input_tokens", "max_output_tokens", "max_cost_usd", "max_seconds"}),
     "llm_planner_advance": frozenset({"context_pack_ref", "work_order"}),
+    "bounded_alphaengine_probe": frozenset({"work_order"}),
+    "publish_forecast_line": frozenset({"line_ref", "subject_ref", "metric_or_aspect", "period", "unit", "currency", "value", "value_kind", "scenario_version_ref", "scenario_version_hash", "actor_ref", "rationale", "version_id", "prior_version_ref", "idempotency_key"}),
+    "get_forecast_line": frozenset({"version_ref"}),
+    "extend_growth_forecast": frozenset({"base_input_version_ref", "growth_input_version_ref", "periods", "line_ref_prefix", "model_run_ref", "idempotency_key"}),
     "llm_planner_execute": frozenset({"context_pack_ref", "max_input_tokens", "max_output_tokens", "max_cost_usd", "max_seconds"}),
     "propose_model_input": frozenset({
         "candidate_id", "input_kind", "model_input_ref", "prior_version_ref",
@@ -652,6 +670,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "publish_research_constitution": "actor_ref",
     "record_backlog_question": "actor_ref",
     "publish_doctrine_pack": "actor_ref",
+    "publish_forecast_line": "actor_ref",
     "publish_probe_template": "actor_ref",
     "create_bounded_planner_loop": "actor_ref",
     "propose_model_input": "proposed_by",
@@ -860,6 +879,7 @@ class WriterServer:
         self._industry_research: IndustryResearchAuthority | None = None
         self._weekly_brief: WeeklyBriefAuthority | None = None
         self._research_doctrine: ResearchDoctrineAuthority | None = None
+        self._model_forecast: ModelForecastAuthority | None = None
         self._research_constitution: ResearchConstitutionAuthority | None = None
         self._transcript_spool_dir = (
             None if transcript_spool_dir is None
@@ -1074,6 +1094,7 @@ class WriterServer:
         # constitution can bind a doctrine pack; nothing here admits
         # doctrine or context on its own.
         self._research_doctrine = ResearchDoctrineAuthority(self._store)
+        self._model_forecast = ModelForecastAuthority(self._store)
         self._research_constitution = ResearchConstitutionAuthority(self._store)
         self._backlog = ResearchQuestionBacklog(self._store)
         self._bounded_planner = BoundedPlannerAuthority(self._store)
@@ -1205,6 +1226,7 @@ class WriterServer:
         self._thesis_impact_control = None
         self._weekly_brief = None
         self._research_doctrine = None
+        self._model_forecast = None
         self._research_constitution = None
         if self._store is not None:
             self._store.close()
@@ -1904,6 +1926,35 @@ class WriterServer:
             return {"status": f"model_{run.get('status')}", "work_order_ref": work_order["id"]}
         return coordinator.advance(context_pack_ref, work_order)
 
+    @property
+    def model_forecast(self) -> ModelForecastAuthority:
+        if self._model_forecast is None:
+            raise WriterServerError("model-forecast authority is unavailable")
+        return self._model_forecast
+
+    def _op_publish_forecast_line(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        line_ref = values.pop("line_ref")
+        return self.model_forecast.publish_line(line_ref, **values)
+
+    def _op_get_forecast_line(self, p: Mapping[str, Any]) -> Any:
+        return self.model_forecast.line(dict(p)["version_ref"])
+
+    def _op_extend_growth_forecast(self, p: Mapping[str, Any]) -> Any:
+        return extend_growth(self.model_input, self.model_forecast, **dict(p))
+
+    def _op_bounded_alphaengine_probe(self, p: Mapping[str, Any]) -> Any:
+        # Executes in the writer: the acquisition subprocess writes Core
+        # connector authority, which the driver process must not open, and
+        # the budget gate counts Core invocations before any call is spent.
+        if self._acquisition_launcher is None:
+            raise WriterServerError("alphaengine acquisition is not configured")
+        return execute_alphaengine_probe(
+            dict(p)["work_order"],
+            launcher=self._acquisition_launcher,
+            connection=self.store.connection,
+        )
+
     def _op_bounded_planner_propose_next_with_context(self, p: Mapping[str, Any]) -> Any:
         return self.bounded_planner.propose_next_with_context(
             dict(p)["planner_context_pack_ref"]
@@ -2236,11 +2287,11 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError)):
             return "rejected"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending, ModelForecastNotFound)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected, ModelForecastConflict)):
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
@@ -2264,7 +2315,7 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, CapabilityRegistryError):
             return "store_error"
-        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, WeeklyBriefError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError, ResearchConstitutionError, CompanyResearchViewError, ResearchDoctrineError, LLMResearchPlannerError)):
+        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, WeeklyBriefError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError, ResearchConstitutionError, CompanyResearchViewError, ResearchDoctrineError, LLMResearchPlannerError, ModelForecastError)):
             return "store_error"
         return "internal_error"
 
@@ -2274,11 +2325,11 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError)):
             return "request rejected by contract or gate"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending, ModelForecastNotFound)):
             return "requested object was not found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected, ModelForecastConflict)):
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ContextMaterializerError, PerceptionError)):
             return "request rejected by contract or gate"

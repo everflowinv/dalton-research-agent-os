@@ -277,6 +277,11 @@ class BoundedPlannerDriver:
                     executed_model = {"status": f"unavailable:{type(exc).__name__}"}
                 if executed_model.get("status") == "proposal_ready":
                     proposal = executed_model["proposal"]
+                elif executed_model.get("status") == "core_action":
+                    # The coordinator already submitted the deterministic
+                    # hard-control proposal (e.g. coverage-complete terminate);
+                    # re-proposing would only return a duplicate forever.
+                    proposal = executed_model["result"]
                 else:
                     # One bounded model attempt per tick; the deterministic
                     # doctrine-aware planner remains the safety net.
@@ -332,15 +337,22 @@ class BoundedPlannerDriver:
                     raise BoundedPlannerDriverError(
                         "admitted probe WorkOrder is missing from Scheduler"
                     )
-                envelope = execute_probe_work_order(
-                    authority["work_order"],
-                    transport=self.transport,
-                    user_agent=self.config.user_agent,
-                    max_response_bytes=int(self.config.max_response_bytes),
-                    timeout_seconds=float(self.config.timeout_seconds),
-                    filed_window_days=int(self.config.filed_window_days),
-                    clock=self.clock,
-                )
+                work = authority["work_order"]
+                operation = (work.get("metadata") or {}).get("operation")
+                if operation == "alphaengine_get_document":
+                    envelope = self.client.call("bounded_alphaengine_probe", {
+                        "work_order": work,
+                    })
+                else:
+                    envelope = execute_probe_work_order(
+                        work,
+                        transport=self.transport,
+                        user_agent=self.config.user_agent,
+                        max_response_bytes=int(self.config.max_response_bytes),
+                        timeout_seconds=float(self.config.timeout_seconds),
+                        filed_window_days=int(self.config.filed_window_days),
+                        clock=self.clock,
+                    )
                 lease = scheduler.claim(WORKER_REF, work_order_id=work_id)
                 if lease is None:
                     raise BoundedPlannerDriverError(

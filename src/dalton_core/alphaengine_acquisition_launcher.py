@@ -176,6 +176,48 @@ class AlphaEngineAcquisitionLauncher:
             raise AcquisitionLaunchRejected("document_ref must be alphaengine-doc:<id>")
         if not isinstance(actor_ref, str) or _HUMAN_RE.fullmatch(actor_ref) is None:
             raise AcquisitionLaunchRejected("acquisition must be requested by a human principal")
+        return self._launch(
+            document_ref=document_ref, actor_ref=actor_ref,
+            expected_content_sha256=expected_content_sha256, max_pages=max_pages,
+        )
+
+    def start_bounded_probe(
+        self,
+        *,
+        document_ref: str,
+        caller_ref: str,
+        expected_content_sha256: str | None = None,
+        max_pages: int = 20,
+    ) -> dict[str, Any]:
+        """Launch one acquisition requested by the bounded planner automation.
+
+        Same governed subprocess as the human path; the ticket records the
+        automation principal so the request lineage never impersonates a
+        human.  Callers enforce the owner's call budget before arriving here.
+        """
+
+        if not isinstance(document_ref, str) or _DOCUMENT_REF_RE.fullmatch(document_ref) is None:
+            raise AcquisitionLaunchRejected("document_ref must be alphaengine-doc:<id>")
+        if (
+            not isinstance(caller_ref, str)
+            or not re.fullmatch(r"automation:[A-Za-z0-9][A-Za-z0-9._/-]*", caller_ref)
+        ):
+            raise AcquisitionLaunchRejected(
+                "bounded probe acquisition must name its automation principal"
+            )
+        return self._launch(
+            document_ref=document_ref, actor_ref=caller_ref,
+            expected_content_sha256=expected_content_sha256, max_pages=max_pages,
+        )
+
+    def _launch(
+        self,
+        *,
+        document_ref: str,
+        actor_ref: str,
+        expected_content_sha256: str | None,
+        max_pages: int,
+    ) -> dict[str, Any]:
         if expected_content_sha256 is not None and (
             not isinstance(expected_content_sha256, str)
             or re.fullmatch(r"[0-9a-f]{64}", expected_content_sha256) is None
