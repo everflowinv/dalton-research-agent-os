@@ -149,7 +149,13 @@ from .company_research_view import (
     build_company_research_view,
     query_company_research,
 )
-from .research_doctrine import ResearchDoctrineAuthority
+from .research_doctrine import (
+    ResearchDoctrineAuthority,
+    ResearchDoctrineConflict,
+    ResearchDoctrineError,
+    ResearchDoctrineNotFound,
+    ResearchDoctrineValidationError,
+)
 from .alphaengine_document_acquisition import (
     validate_alphaengine_document_acquisition_manifest,
 )
@@ -284,7 +290,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "company_research_view", "company_research_query",
     "record_backlog_question", "publish_probe_template",
     "create_bounded_planner_loop", "bounded_probe_template",
-    "bounded_planner_loop",
+    "bounded_planner_loop", "publish_doctrine_pack", "get_doctrine_pack",
 })
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
@@ -360,7 +366,7 @@ CORE_OPERATIONS = frozenset({
     "company_research_view", "company_research_query",
     "record_backlog_question", "publish_probe_template",
     "create_bounded_planner_loop", "bounded_probe_template",
-    "bounded_planner_loop",
+    "bounded_planner_loop", "publish_doctrine_pack", "get_doctrine_pack",
     "propose_model_input", "get_model_input_candidate",
     "get_model_input_decision", "get_model_input_version", "current_model_input",
     "decide_model_input", "record_model_run", "record_model_reconciliation",
@@ -504,6 +510,8 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "create_bounded_planner_loop": frozenset({"loop_ref", "question_version_ref", "template_bindings", "required_coverage_items", "budget", "actor_ref", "prior_version_ref"}),
     "bounded_probe_template": frozenset({"version_ref"}),
     "bounded_planner_loop": frozenset({"version_ref"}),
+    "publish_doctrine_pack": frozenset({"doctrine_pack_ref", "title", "default_lens_ref", "lenses", "actor_ref", "prior_version_ref"}),
+    "get_doctrine_pack": frozenset({"version_ref"}),
     "bounded_planner_propose_next": frozenset({"loop_version_ref"}),
     "bounded_planner_admit_proposal": frozenset({"proposal_ref"}),
     "bounded_planner_record_outcome": frozenset({"round_ref"}),
@@ -628,6 +636,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "decide_thesis_admission": "actor_ref",
     "publish_research_constitution": "actor_ref",
     "record_backlog_question": "actor_ref",
+    "publish_doctrine_pack": "actor_ref",
     "publish_probe_template": "actor_ref",
     "create_bounded_planner_loop": "actor_ref",
     "propose_model_input": "proposed_by",
@@ -1773,6 +1782,18 @@ class WriterServer:
             "claims": query_company_research(self.store, **values),
         }
 
+    def _op_publish_doctrine_pack(self, p: Mapping[str, Any]) -> Any:
+        if self._research_doctrine is None:
+            raise WriterServerError("research-doctrine authority is unavailable")
+        values = dict(p)
+        doctrine_pack_ref = values.pop("doctrine_pack_ref")
+        return self._research_doctrine.publish_pack(doctrine_pack_ref, **values)
+
+    def _op_get_doctrine_pack(self, p: Mapping[str, Any]) -> Any:
+        if self._research_doctrine is None:
+            raise WriterServerError("research-doctrine authority is unavailable")
+        return self._research_doctrine.pack(dict(p)["version_ref"])
+
     def _op_record_backlog_question(self, p: Mapping[str, Any]) -> Any:
         return self.backlog.record_question(**dict(p))
 
@@ -2119,11 +2140,11 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError)):
             return "rejected"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchDoctrineNotFound)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchDoctrineConflict)):
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
@@ -2147,7 +2168,7 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, CapabilityRegistryError):
             return "store_error"
-        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, WeeklyBriefError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError, ResearchConstitutionError, CompanyResearchViewError)):
+        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, WeeklyBriefError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError, ResearchConstitutionError, CompanyResearchViewError, ResearchDoctrineError)):
             return "store_error"
         return "internal_error"
 
@@ -2157,11 +2178,11 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError)):
             return "request rejected by contract or gate"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchDoctrineNotFound)):
             return "requested object was not found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchDoctrineConflict)):
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ContextMaterializerError, PerceptionError)):
             return "request rejected by contract or gate"

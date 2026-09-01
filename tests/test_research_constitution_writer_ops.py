@@ -223,6 +223,64 @@ class CompanyResearchViewWriterTests(unittest.TestCase):
             self.h.governance.call("company_research_query", {"status": "bogus"})
 
 
+class DoctrineWriterOpsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.h = ConstitutionWriterHarness(Path(root.name))
+        self.addCleanup(self.h.close)
+
+    def test_doctrine_pack_publish_and_read_require_human(self) -> None:
+        pack = self.h.governance.call("publish_doctrine_pack", {
+            "doctrine_pack_ref": "doctrine-pack:us-it-services",
+            "title": "US IT Services Research Doctrine v1",
+            "default_lens_ref": "lens:demand-inflection",
+            "lenses": [{
+                "lens_ref": "lens:demand-inflection",
+                "label": "Demand inflection",
+                "objective": "Track the demand inflection.",
+                "priority_topics": ["bookings"],
+                "evidence_standard": {
+                    "preferred_source_classes": ["source:sec-edgar"],
+                    "minimum_independent_sources": 1,
+                    "negative_claim_rule": (
+                        "candidate_only_until_separate_claim_admission"
+                    ),
+                },
+            }],
+            "actor_ref": OWNER, "prior_version_ref": None,
+        })
+        self.assertEqual("fresh", pack["status"])
+        replay = self.h.governance.call("publish_doctrine_pack", {
+            "doctrine_pack_ref": "doctrine-pack:us-it-services",
+            "title": "US IT Services Research Doctrine v1",
+            "default_lens_ref": "lens:demand-inflection",
+            "lenses": [{
+                "lens_ref": "lens:demand-inflection",
+                "label": "Demand inflection",
+                "objective": "Track the demand inflection.",
+                "priority_topics": ["bookings"],
+                "evidence_standard": {
+                    "preferred_source_classes": ["source:sec-edgar"],
+                    "minimum_independent_sources": 1,
+                    "negative_claim_rule": (
+                        "candidate_only_until_separate_claim_admission"
+                    ),
+                },
+            }],
+            "actor_ref": OWNER, "prior_version_ref": None,
+        })
+        self.assertEqual("duplicate", replay["status"])
+        reread = self.h.governance.call("get_doctrine_pack", {
+            "version_ref": pack["id"],
+        })
+        self.assertEqual(pack["content_hash"], reread["content_hash"])
+        with self.assertRaises(RemoteAuthorizationError):
+            self.h.worker.call("publish_doctrine_pack", {
+                "doctrine_pack_ref": "doctrine-pack:x", "actor_ref": OWNER,
+            })
+
+
 class BoundedPlannerWriterOpsTests(unittest.TestCase):
     def setUp(self) -> None:
         root = tempfile.TemporaryDirectory()

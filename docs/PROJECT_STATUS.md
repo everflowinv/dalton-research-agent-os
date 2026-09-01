@@ -54,6 +54,17 @@
   ACN observed 且 observation unchanged（diff 正确）、EPAM 经回退 observed 并**自动登记首条观察问题**。
   全仓 958/958。见
   [P8c-3 报告](reports/p8c3-concept-fallback-and-observation-attention-v0.1-2026-08-27.md)。
+- **P8c-4a Doctrine ops、Constitution v2 与 9/3 投递演练已完成（2026-09-01）。** writer 新增
+  human-governed `publish_doctrine_pack` / `get_doctrine_pack`，错误映射补齐 `ResearchDoctrine*`
+  （并修复 P8a 遗漏：`_error_code` 的 conflict/not_found 从未含
+  `ResearchConstitutionConflict/NotFound`）。live 发布 **DoctrinePack v1**
+  （`doctrine-pack-version:13a018582c…`，需求拐点透镜）与 **ResearchConstitution v2**
+  （`constitution-version:us-it-services:2`，绑 mandate p8a + thesis pack v2 + policy-3 +
+  doctrine v1 + plan v3 hash——P8a 的 doctrine null 空缺关闭）。9/3 自动投递的最大未验证环节
+  （bridge `openclaw message send --media`）已真实演练：0600 附件 + 精确 bridge 参数形态，
+  messageId `1544275074763329619`，消息标注 `[DRILL]` 不复现。全仓 959/959。9/3 窗口全链条
+  （admission/issue/outbox canary、--media 投递、DeliveryReceipt）均已各自验证。见
+  [P8c-4a 报告](reports/p8c4a-doctrine-ops-constitution-v2-and-delivery-drill-v0.1-2026-09-01.md)。
 - **2026-08-27 owner 批准全部保留 gate 后已在 live 执行（详见
   [live 激活报告](reports/p8a-s7f-live-activation-v0.1-2026-08-27.md)）**：
   1. **DXC 第 5 家 SEC issuer 完成**：catalog 加入 DXC（CIK 001688568，agenda binding v2→v3），live lane 取
