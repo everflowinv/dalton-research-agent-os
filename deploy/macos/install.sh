@@ -54,6 +54,14 @@ if [[ ! -f "$sec_governance_file" && -f "$repo_root/deploy/connector-governance/
   cp "$repo_root/deploy/connector-governance/sec-company-facts-v1.json" "$sec_governance_file"
   chmod 600 "$sec_governance_file"
 fi
+# P9b-1: the company-facts template hash moved; the writer now launches the
+# lane against the v2 record.  Seed once as *proposed*; the owner approves in
+# place with dalton-connector-governance approve.
+sec_governance_v2_file="$governance_dir/sec-company-facts-v2.json"
+if [[ ! -f "$sec_governance_v2_file" && -f "$repo_root/deploy/connector-governance/sec-company-facts-v2.json" ]]; then
+  cp "$repo_root/deploy/connector-governance/sec-company-facts-v2.json" "$sec_governance_v2_file"
+  chmod 600 "$sec_governance_v2_file"
+fi
 "$venv_dir/bin/python" -m dalton_core.macos_launchagent \
   --launch-agents-dir "$launch_agents_dir" \
   --python-env-bin "$venv_dir/bin" \

@@ -102,7 +102,9 @@ def render(
             [
                 "--candidate-staging", candidate_staging_path,
                 "--sec-lane-governance",
-                str(state / "connector-governance" / "sec-company-facts-v1.json"),
+                # P9b-1: the company-facts template hash moved, so the lane runs
+                # against the v2 record (approved in place by the owner).
+                str(state / "connector-governance" / "sec-company-facts-v2.json"),
                 "--sec-lane-user-agent", SEC_LANE_USER_AGENT,
             ]
             if candidate_staging_path is not None else []
