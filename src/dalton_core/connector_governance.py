@@ -32,9 +32,13 @@ GOVERNANCE_FIELDS = frozenset({
 GOVERNANCE_STATUSES = frozenset({"proposed", "approved"})
 
 ALPHAENGINE_KIND = "alphaengine-get-document"
+ALPHAENGINE_SEARCH_KIND = "alphaengine-search-library"
 SEC_COMPANY_FACTS_KIND = "sec-company-facts"
 ALPHAENGINE_CAPABILITY_ID = (
     "capability:dalton:connector:alphaengine-get-document"
+)
+ALPHAENGINE_SEARCH_CAPABILITY_ID = (
+    "capability:dalton:connector:alphaengine-search-library"
 )
 SEC_CAPABILITY_ID = "capability:dalton:connector:sec-edgar"
 
@@ -92,6 +96,12 @@ def _alpha_fixture_hash() -> str:
     return template["fixture_manifest_hash"]
 
 
+def _alpha_search_schema_hash() -> str:
+    from .alphaengine_core_search import alphaengine_search_schema_hash
+
+    return alphaengine_search_schema_hash()
+
+
 def _sec_identity() -> dict[str, Any]:
     from .research_plan_executor import sec_connector_identity
 
@@ -129,6 +139,17 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         template_key="alphaengine",
         source_hash=_alpha_source_hash,
         schema_hash=_alpha_schema_hash,
+        permissions=_alpha_permissions,
+        fixture_hash=_alpha_fixture_hash,
+    ),
+    # P9d-1: the same AlphaEngine template's ``search_library`` operation is a
+    # separate capability with its own approval; the get_document record
+    # cannot be reused because its schema hash binds one operation only.
+    ALPHAENGINE_SEARCH_KIND: _KindSpec(
+        capability_id=ALPHAENGINE_SEARCH_CAPABILITY_ID,
+        template_key="alphaengine",
+        source_hash=_alpha_source_hash,
+        schema_hash=_alpha_search_schema_hash,
         permissions=_alpha_permissions,
         fixture_hash=_alpha_fixture_hash,
     ),
@@ -208,6 +229,17 @@ def build_governance_record(
         )
 
         return build_alphaengine_governance_record(
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind == ALPHAENGINE_SEARCH_KIND:
+        from .alphaengine_core_search import build_search_governance_record
+
+        return build_search_governance_record(
             approved_by=approved_by,
             status=status,
             effective_from=effective_from,

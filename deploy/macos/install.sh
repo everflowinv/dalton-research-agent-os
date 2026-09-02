@@ -62,6 +62,23 @@ if [[ ! -f "$sec_governance_v2_file" && -f "$repo_root/deploy/connector-governan
   cp "$repo_root/deploy/connector-governance/sec-company-facts-v2.json" "$sec_governance_v2_file"
   chmod 600 "$sec_governance_v2_file"
 fi
+# P9d-1: AlphaEngine search_library is a separate governed capability.  Seed
+# the committed *proposed* record once; the owner approves in place with
+# dalton-connector-governance approve.  The discovery plan is a hash-bound
+# manifest the writer loads at start; seed once, never overwrite.
+search_governance_file="$governance_dir/alphaengine-search-library-v1.json"
+if [[ ! -f "$search_governance_file" && -f "$repo_root/deploy/connector-governance/alphaengine-search-library-v1.json" ]]; then
+  cp "$repo_root/deploy/connector-governance/alphaengine-search-library-v1.json" "$search_governance_file"
+  chmod 600 "$search_governance_file"
+fi
+plan_dir="$state_dir/discovery-plans"
+plan_file="$plan_dir/us-it-services-alphaengine-v1.json"
+mkdir -p "$plan_dir"
+chmod 700 "$plan_dir"
+if [[ ! -f "$plan_file" && -f "$repo_root/deploy/phase9/p9d-us-it-services-discovery-plan-v1.json" ]]; then
+  cp "$repo_root/deploy/phase9/p9d-us-it-services-discovery-plan-v1.json" "$plan_file"
+  chmod 600 "$plan_file"
+fi
 "$venv_dir/bin/python" -m dalton_core.macos_launchagent \
   --launch-agents-dir "$launch_agents_dir" \
   --python-env-bin "$venv_dir/bin" \

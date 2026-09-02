@@ -1,6 +1,17 @@
 # Dalton 项目进度
 
 更新日期：2026-09-02
+- **P9d-1「AlphaEngine search 驱动的 mission 来源发现」development candidate 已完成，未部署。**
+  新增独立治理的 `search_library` capability、hash-bound DiscoveryPlan（US IT Services 五家公司 × 财报电话会/卖方报告
+  两类搜索）、CoverageMission 的发现/dispatch/待获取文档账本，以及 controller tick 协调器。每 tick 最多启动一条
+  search 和一条 get_document；先补已发现文档，再搜新文档；两类调用共用 mission 与 owner 的 24h 上限。自动化必须同时
+  满足 active mission、`source:alphaengine=connected`、`may_write` 含 `source_discovery` 与 `observation`；human 可在
+  `probe_only` 下排练。搜索结果和随后取得的原文只进入 connector authority，语义 Claim 仍走人工 accept，ADR-0003 B
+  不变。live Core 只读副本 canary `ok=true`：mission v1 全拒且 0 写入；human probe 成功；副本 mission v2 自动跑完
+  10/10 个 company/spec dispatch 并全部 settled，新增文档经既有 acquisition 进入 authority；Claim/Evidence/Thesis 数量
+  不变、integrity ok、0 网络 / 0 付费 / 0 live 写入。canary 同时复现 shared catalog 的 `StaleCatalog` 隐患，launcher
+  已改为 AlphaEngine search/get_document 各自独立 catalog。全仓 unittest 1030/1030，wheel/sdist 与干净安装通过。见
+  [P9d-1 报告](reports/p9d1-alphaengine-search-driven-source-discovery-v0.1-2026-09-02.md)。
 - **P9c「Forecast reconciliation——第一条 Outcome 对象」development candidate 已完成，未部署。**
   新 authority `ForecastReconciliation`（`outcome:forecast-reconciliation:1` 冻结合同）把 exact ForecastLine 版本与同公司、
   同 metric、同财季的 exact 正式 ClaimVersion 绑在一起，实际数从 Claim 自带的冻结 SEC 语句反解并逐字节重渲染核对，

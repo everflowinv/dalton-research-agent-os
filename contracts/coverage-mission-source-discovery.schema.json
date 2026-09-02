@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoverageMissionSourceDiscovery",
+  "description": "P9d-1: one completed library search, bound to the exact Core connector invocation and source envelope it produced, the mission version and the discovery plan spec that authorized it. Append-only. Documents are partitioned into those Core already held and those newly discovered; the latter are queued for budgeted acquisition, never turned into Evidence or Claims here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "mission_version_ref", "mission_version_hash", "company_ref", "source_ref", "discovery_plan_ref", "discovery_plan_hash", "spec_ref", "query_hash", "parameters", "connector_invocation_ref", "connector_invocation_hash", "source_envelope_ref", "source_envelope_hash", "document_refs", "new_document_refs", "in_authority_document_refs", "actor_ref", "requested_by", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^mission-source-discovery:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "mission_version_ref": {"type": "string", "pattern": "^coverage-mission-version:"},
+    "mission_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "company_ref": {"type": "string", "minLength": 1},
+    "source_ref": {"type": "string", "const": "source:alphaengine"},
+    "discovery_plan_ref": {"type": "string", "pattern": "^discovery-plan:"},
+    "discovery_plan_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "spec_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+    "query_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "parameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["query", "filters", "cursor"],
+      "properties": {
+        "query": {"type": "string", "minLength": 1},
+        "filters": {"type": "object"},
+        "cursor": {"type": ["string", "null"]}
+      }
+    },
+    "connector_invocation_ref": {"type": "string", "minLength": 1},
+    "connector_invocation_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_envelope_ref": {"type": "string", "minLength": 1},
+    "source_envelope_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "document_refs": {"type": "array", "items": {"type": "string", "pattern": "^alphaengine-doc:"}, "uniqueItems": true},
+    "new_document_refs": {"type": "array", "items": {"type": "string", "pattern": "^alphaengine-doc:"}, "uniqueItems": true},
+    "in_authority_document_refs": {"type": "array", "items": {"type": "string", "pattern": "^alphaengine-doc:"}, "uniqueItems": true},
+    "actor_ref": {"type": "string", "pattern": "^automation:"},
+    "requested_by": {"type": "string", "pattern": "^(human|automation):"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

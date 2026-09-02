@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MissionDiscoveryPlan",
+  "description": "P9d-1: human-authored, hash-bound list of the library searches a CoverageMission may run per company. The Core never invents queries; every discovery record names the plan hash and spec it came from. Changing terms, windows or cadence is a new plan file (new hash).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "mission_ref", "source_ref", "companies", "specs", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^discovery-plan:"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "mission_ref": {"type": "string", "pattern": "^coverage-mission:"},
+    "source_ref": {"type": "string", "const": "source:alphaengine"},
+    "companies": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["search_terms"],
+        "properties": {"search_terms": {"type": "string", "minLength": 1, "maxLength": 120}}
+      }
+    },
+    "specs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["spec_ref", "document_type", "query_template", "lookback_days", "rediscovery_interval_days", "retry_interval_days"],
+        "properties": {
+          "spec_ref": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"},
+          "document_type": {"type": "string", "enum": ["research_report", "foreign_report", "domestic_report", "sell_side_report", "sell_side_comment", "meeting_minutes", "announcement", "news"]},
+          "query_template": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": "\\{terms\\}"},
+          "lookback_days": {"type": "integer", "minimum": 1, "maximum": 3650},
+          "rediscovery_interval_days": {"type": "integer", "minimum": 1, "maximum": 365},
+          "retry_interval_days": {"type": "integer", "minimum": 1, "maximum": 365}
+        }
+      }
+    },
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

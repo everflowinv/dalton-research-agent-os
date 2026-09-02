@@ -459,8 +459,13 @@ class AlphaEngineCoreAcquisition:
             "terms_policy_ref": "policy:terms:alphaengine",
             "network_policy": None,
         }
-        profile = self.connectors.register_profile(
-            profile_wire, idempotency_key="alphaengine-get-document:profile:v1"
+        # P9d-1: the search_library profile shares this connector's version
+        # chain.  An existing get_document profile (live: v1) is reused as-is;
+        # on a fresh Core whichever capability registers first takes v1.
+        from .alphaengine_core_search import register_chained_profile
+
+        profile = register_chained_profile(
+            self.connectors, profile_wire, idempotency_key="alphaengine-get-document:profile:v1"
         )
         price = self.connectors.register_price_rate(
             {

@@ -19,6 +19,12 @@ SCHEMA_VERSION = "0.1"
 PROBE_PERMISSION_SCOPE = "alphaengine_read"
 PROBE_OPERATION = "alphaengine_get_document"
 ALPHAENGINE_PROFILE_REF = "connector-profile:alphaengine-get-document:v1"
+# P9d-1: search calls draw on the same owner cap as document pages.  Every
+# governed AlphaEngine profile is listed here; the count is the sum.
+ALPHAENGINE_PROFILE_REFS: tuple[str, ...] = (
+    ALPHAENGINE_PROFILE_REF,
+    "connector-profile:alphaengine-search-library:v1",
+)
 TRAILING_WINDOW = timedelta(hours=24)
 MAX_CALLS_PER_WINDOW = 30
 _DOCUMENT_REF_RE = re.compile(r"^alphaengine-doc:[0-9]+$")
@@ -37,18 +43,31 @@ def count_recent_alphaengine_calls(
 ) -> int:
     now = as_of or _utcnow()
     window_start = (now - TRAILING_WINDOW).isoformat(timespec="microseconds")
+    placeholders = ",".join("?" for _ in ALPHAENGINE_PROFILE_REFS)
     row = connection.execute(
         "SELECT COUNT(*) FROM connector_invocations "
-        "WHERE connector_profile_ref=? AND created_at >= ?",
-        (ALPHAENGINE_PROFILE_REF, window_start),
+        f"WHERE connector_profile_ref IN ({placeholders}) AND created_at >= ?",
+        (*ALPHAENGINE_PROFILE_REFS, window_start),
     ).fetchone()
     return int(row[0])
 
 
 def document_in_authority(connection: Any, document_ref: str) -> bool:
+    """True when Core holds at least one *successful* page of the document.
+
+    A call spec alone is not enough: the acquisition registers the call spec
+    before the capability lease, so an attempt refused at ``prepare`` (for
+    example ``StaleCatalog``) leaves a call spec behind with no page.  The
+    document counts as present only through a complete or partial
+    ``SourceEnvelope`` bound to a ``get_document`` invocation for that ref.
+    """
+
     row = connection.execute(
-        "SELECT 1 FROM connector_call_specs WHERE operation='get_document' "
-        "AND record_json LIKE ? LIMIT 1",
+        "SELECT 1 FROM connector_source_envelopes e "
+        "JOIN connector_invocations i ON i.connector_invocation_id=e.connector_invocation_ref "
+        "JOIN connector_call_specs c ON c.call_spec_id=i.call_spec_ref "
+        "WHERE c.operation='get_document' AND c.record_json LIKE ? "
+        "AND e.status IN ('complete','partial') LIMIT 1",
         (f'%"{document_ref}"%',),
     ).fetchone()
     return row is not None
@@ -152,6 +171,7 @@ def execute_alphaengine_probe(
 
 __all__ = [
     "ALPHAENGINE_PROFILE_REF",
+    "ALPHAENGINE_PROFILE_REFS",
     "BoundedAlphaEngineProbeError",
     "MAX_CALLS_PER_WINDOW",
     "TRAILING_WINDOW",

@@ -39,6 +39,14 @@ from .store import canonical_json
 
 
 TICKET_SCHEMA_VERSION = "0.1"
+# P9d-1: the acquisition child gets its own capability catalog file.
+# ``CapabilityCatalog.prepare`` admits only a descriptor published at the
+# catalog's current epoch and every publish bumps the epoch, so the shared
+# ``<state>/catalog.sqlite`` (SEC at epoch 2, AlphaEngine get_document at
+# epoch 1 since 2026-08-26) would refuse the next live AlphaEngine acquisition
+# with StaleCatalog.  A fresh per-capability catalog republishes the
+# descriptor at epoch 1, which is exactly what the live profile is bound to.
+DEFAULT_CATALOG_NAME = "catalog-alphaengine-get-document.sqlite"
 _DOCUMENT_REF_RE = re.compile(r"alphaengine-doc:[A-Za-z0-9._-]{1,64}\Z")
 _TICKET_RE = re.compile(r"alphaengine-acquisition:[0-9a-f]{24}\Z")
 _HUMAN_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
@@ -89,9 +97,14 @@ class AlphaEngineAcquisitionLauncher:
         python_executable: str | None = None,
         clock: Callable[[], datetime] | None = None,
         spool_dir: str | Path | None = None,
+        catalog_db: str | Path | None = None,
     ) -> None:
         self.state_dir = Path(state_dir).expanduser().resolve()
         self.governance_path = Path(governance_path).expanduser().resolve()
+        self.catalog_db = (
+            self.state_dir / DEFAULT_CATALOG_NAME if catalog_db is None
+            else Path(catalog_db).expanduser().resolve()
+        )
         # RawSpool data directory for the raw page objects.  The writer passes
         # its own transcript spool so ``stage_transcript_candidate`` can read
         # the page bytes back; ``None`` keeps the CLI default.
@@ -152,6 +165,7 @@ class AlphaEngineAcquisitionLauncher:
             "--governance", str(self.governance_path),
             "--summary-dir", str(ticket_dir),
             "--max-pages", str(max_pages),
+            "--catalog-db", str(self.catalog_db),
             "--quiet",
         ]
         if expected_content_sha256 is not None:
@@ -265,6 +279,7 @@ class AlphaEngineAcquisitionLauncher:
                 "governance_ref": governance.id,
                 "governance_hash": governance.content_hash,
                 "transport": "loopback-mcp" if self.networked else "rehearsal",
+                "catalog_db": str(self.catalog_db),
                 "expected_content_sha256": expected_content_sha256,
                 "max_pages": max_pages,
                 "started_at": started_at,

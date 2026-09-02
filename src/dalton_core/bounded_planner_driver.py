@@ -240,6 +240,16 @@ class BoundedPlannerDriver:
             forecast_reconciliation = self.client.call("reconcile_forecasts", {})
         except Exception as exc:
             forecast_reconciliation = {"status": f"unavailable:{type(exc).__name__}"}
+        # P9d-1: settle finished discovery / acquisition children and launch at
+        # most one search and one document acquisition under the mission grant
+        # and the shared AlphaEngine call budget.  The writer reports every
+        # skip (no grant, cadence, budget, busy) rather than hiding it.
+        try:
+            mission_source_discovery = self.client.call(
+                "dispatch_mission_source_discovery", {}
+            )
+        except Exception as exc:
+            mission_source_discovery = {"status": f"unavailable:{type(exc).__name__}"}
         listing = self.client.call("bounded_planner_active_loops", {})
         loops = listing["loops"]
         executed: list[dict[str, Any]] = []
@@ -422,6 +432,7 @@ class BoundedPlannerDriver:
             "skipped": skipped,
             "mission_sec_dispatch": mission_dispatch,
             "forecast_reconciliation": forecast_reconciliation,
+            "mission_source_discovery": mission_source_discovery,
         }
 
 

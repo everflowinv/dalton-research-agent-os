@@ -96,6 +96,13 @@ def render(
             "--transcript-spool-dir", str(state / "transcript-spool"),
             "--connector-governance",
             str(state / "connector-governance" / "alphaengine-get-document-v1.json"),
+            # P9d-1: search-driven discovery.  The governance record is seeded
+            # as *proposed* by install.sh; until the owner approves it in
+            # place, launches are refused and the tick reports the reason.
+            "--alphaengine-search-governance",
+            str(state / "connector-governance" / "alphaengine-search-library-v1.json"),
+            "--alphaengine-discovery-plan",
+            str(state / "discovery-plans" / "us-it-services-alphaengine-v1.json"),
         ] + (
             # S7d: the SEC company-facts lane stages into the same Cockpit
             # staging file and is only enabled when that file is configured.

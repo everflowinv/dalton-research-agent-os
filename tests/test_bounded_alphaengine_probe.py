@@ -72,7 +72,14 @@ def seed_invocation(conn, *, hours_ago: float, count: int = 1) -> None:
             )
 
 
-def seed_call_spec(conn, document_ref: str) -> None:
+def seed_call_spec(conn, document_ref: str, *, with_page: bool = True) -> None:
+    """Seed a get_document call spec and, by default, one successful page for it.
+
+    ``document_in_authority`` requires a complete/partial SourceEnvelope bound
+    to the call's invocation; a bare call spec (an attempt refused before any
+    page was fetched) must not count.
+    """
+
     with conn:
         cur = conn.cursor()
         cur.execute(
@@ -91,6 +98,36 @@ def seed_call_spec(conn, document_ref: str) -> None:
                     "schema_version": "0.1",
                 }),
                 "0" * 64, NOW.isoformat(timespec="microseconds"),
+            ),
+        )
+        if not with_page:
+            return
+        cur.execute(
+            "INSERT INTO connector_invocations"
+            "(connector_invocation_id,execution_ref,execution_hash,work_order_ref,"
+            "work_order_hash,connector_profile_ref,connector_profile_hash,"
+            "call_spec_ref,call_spec_hash,capability_lease_ref,"
+            "capability_lease_hash,descriptor_revision_ref,catalog_epoch,"
+            "logical_invocation_key,record_json,content_hash,created_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                f"connector-invocation:{document_ref}", f"exec:{document_ref}",
+                "0" * 64, "work:ae", "0" * 64, ALPHAENGINE_PROFILE_REF,
+                "0" * 64, f"connector-call:{document_ref}", "0" * 64, None, None, None, None,
+                f"logical:{document_ref}", canonical_json({"fixture": True}), "0" * 64,
+                (NOW - timedelta(hours=48)).isoformat(timespec="microseconds"),
+            ),
+        )
+        cur.execute(
+            "INSERT INTO connector_source_envelopes"
+            "(source_envelope_id,connector_invocation_ref,connector_profile_ref,"
+            "raw_artifact_version_ref,raw_response_hash,completeness,status,record_json,"
+            "content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                f"source-envelope:{document_ref}", f"connector-invocation:{document_ref}",
+                ALPHAENGINE_PROFILE_REF, "artifact:x", "0" * 64, "partial", "partial",
+                canonical_json({"fixture": True}), "0" * 64,
+                NOW.isoformat(timespec="microseconds"),
             ),
         )
 
@@ -117,6 +154,12 @@ class BoundedAlphaEngineProbeTests(unittest.TestCase):
             work_order_hash TEXT, connector_profile_ref TEXT, operation TEXT,
             query_hash TEXT, record_json TEXT, content_hash TEXT, created_at TEXT
         );
+        CREATE TABLE connector_source_envelopes (
+            source_envelope_id TEXT PRIMARY KEY, connector_invocation_ref TEXT,
+            connector_profile_ref TEXT, raw_artifact_version_ref TEXT,
+            raw_response_hash TEXT, completeness TEXT, status TEXT,
+            record_json TEXT, content_hash TEXT, created_at TEXT
+        );
         """)
 
     def test_present_document_answers_from_authority_without_a_call(self) -> None:
@@ -133,6 +176,12 @@ class BoundedAlphaEngineProbeTests(unittest.TestCase):
         )
         self.assertEqual(0, envelope["metadata"]["calls_spent"])
         self.assertEqual([], launcher.calls)
+
+    def test_bare_call_spec_without_page_is_not_authority(self) -> None:
+        seed_call_spec(self.conn, "alphaengine-doc:7", with_page=False)
+        self.assertFalse(document_in_authority(self.conn, "alphaengine-doc:7"))
+        seed_call_spec(self.conn, "alphaengine-doc:8")
+        self.assertTrue(document_in_authority(self.conn, "alphaengine-doc:8"))
 
     def test_budget_gate_refuses_without_spending_a_call(self) -> None:
         seed_invocation(self.conn, hours_ago=1, count=MAX_CALLS_PER_WINDOW)

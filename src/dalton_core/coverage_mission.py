@@ -77,6 +77,15 @@ AUTOMATION_WRITE_SCOPES: tuple[str, ...] = (
     # P9c: derived forecast-vs-actual outcome records.  Appended to the
     # vocabulary; existing missions that do not list it stay read-only here.
     "forecast_reconciliation",
+    # P9d-1: search-driven source discovery records (which documents a
+    # connected library holds for a covered company) and the budgeted
+    # acquisition of the documents they name.  Never Evidence or Claims.
+    "source_discovery",
+)
+DISCOVERY_DISPATCH_STATUSES: tuple[str, ...] = ("launched", "succeeded", "failed", "rejected")
+DISCOVERED_DOCUMENT_STATUSES: tuple[str, ...] = (
+    "discovered", "already_in_authority", "acquisition_launched", "acquired",
+    "acquisition_failed",
 )
 CHECKPOINT_KINDS: tuple[str, ...] = (
     "deep_insight_gate",
@@ -113,6 +122,20 @@ _STAGE_CLAIM_FIELDS = frozenset({
     "mission_version_hash", "company_ref", "stage_ref", "claim_version_ref",
     "claim_version_hash", "evidence_version_ref", "evidence_version_hash",
     "source_location", "actor_ref", "content_hash",
+})
+_SOURCE_DISCOVERY_FIELDS = frozenset({
+    "schema_version", "id", "created_at", "mission_version_ref",
+    "mission_version_hash", "company_ref", "source_ref", "discovery_plan_ref",
+    "discovery_plan_hash", "spec_ref", "query_hash", "parameters",
+    "connector_invocation_ref", "connector_invocation_hash",
+    "source_envelope_ref", "source_envelope_hash", "document_refs",
+    "new_document_refs", "in_authority_document_refs", "actor_ref",
+    "requested_by", "content_hash",
+})
+_DISCOVERY_AUTHORIZATION_FIELDS = frozenset({
+    "mission_version_ref", "mission_version_hash", "mission_ref", "company_ref",
+    "ticker", "source_ref", "actor_ref", "requested_by", "scope",
+    "max_alphaengine_calls_24h",
 })
 
 
@@ -372,6 +395,51 @@ def validate_mission_stage_claim(value: Mapping[str, Any]) -> dict[str, Any]:
     expected_hash = base.pop("content_hash")
     if content_hash(base) != expected_hash:
         raise CoverageMissionValidationError("mission stage claim content_hash is invalid")
+    return wire
+
+
+def validate_mission_source_discovery(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate one append-only source discovery record (P9d-1)."""
+
+    wire = dict(value)
+    if set(wire) != _SOURCE_DISCOVERY_FIELDS or wire.get("schema_version") != SCHEMA_VERSION:
+        raise CoverageMissionValidationError("mission source discovery has an invalid closed shape")
+    for field in (
+        "id", "created_at", "mission_version_ref", "company_ref", "source_ref",
+        "discovery_plan_ref", "spec_ref", "connector_invocation_ref",
+        "source_envelope_ref",
+    ):
+        wire[field] = _text(wire[field], field)
+    for field in (
+        "mission_version_hash", "discovery_plan_hash", "query_hash",
+        "connector_invocation_hash", "source_envelope_hash", "content_hash",
+    ):
+        wire[field] = _sha256(wire[field], field)
+    if not isinstance(wire["parameters"], Mapping):
+        raise CoverageMissionValidationError("mission source discovery parameters must be an object")
+    wire["parameters"] = json.loads(canonical_json(wire["parameters"]))
+    refs = _texts(wire["document_refs"], "document_refs")
+    if len(set(refs)) != len(refs):
+        raise CoverageMissionValidationError("mission source discovery document_refs must be unique")
+    new_refs = _texts(wire["new_document_refs"], "new_document_refs")
+    present = _texts(wire["in_authority_document_refs"], "in_authority_document_refs")
+    if sorted(new_refs + present) != sorted(refs) or set(new_refs) & set(present):
+        raise CoverageMissionValidationError(
+            "mission source discovery must partition document_refs into new and in-authority"
+        )
+    wire["document_refs"] = refs
+    wire["new_document_refs"] = new_refs
+    wire["in_authority_document_refs"] = present
+    wire["actor_ref"] = _actor(wire["actor_ref"])
+    if _AUTOMATION_RE.fullmatch(wire["actor_ref"]) is None:
+        raise CoverageMissionValidationError(
+            "mission source discovery actor_ref must use the automation: namespace"
+        )
+    wire["requested_by"] = _actor(wire["requested_by"])
+    base = dict(wire)
+    expected_hash = base.pop("content_hash")
+    if content_hash(base) != expected_hash:
+        raise CoverageMissionValidationError("mission source discovery content_hash is invalid")
     return wire
 
 
@@ -846,6 +914,567 @@ class CoverageMissionAuthority:
             "actor_ref": actor_ref,
             "scope": "forecast_reconciliation",
         }
+
+    # -- P9d-1: source discovery ---------------------------------------------
+
+    def _resolve_active_mission_for_company(
+        self,
+        company_ref: str,
+        *,
+        purpose: str,
+        mission_version_ref: str | None,
+        mission_version_hash: str | None,
+    ) -> dict[str, Any]:
+        if mission_version_ref is None:
+            candidates: list[dict[str, Any]] = []
+            for row in self.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
+            ).fetchall():
+                mission = self.mission(row["mission_version_id"])
+                if company_ref in {member["company_ref"] for member in mission["universe"]}:
+                    candidates.append(mission)
+            if len(candidates) != 1:
+                raise CoverageMissionConflict(
+                    f"{purpose} requires exactly one active mission for the company"
+                )
+            mission = candidates[0]
+        else:
+            mission = self.mission(_text(mission_version_ref, "mission_version_ref"))
+            pointer = self.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
+                (mission["mission_ref"],),
+            ).fetchone()
+            if pointer is None or pointer["mission_version_id"] != mission["id"]:
+                raise CoverageMissionConflict(f"{purpose} must bind the active mission version")
+        if mission_version_hash is not None and mission["content_hash"] != _sha256(
+            mission_version_hash, "mission_version_hash"
+        ):
+            raise CoverageMissionConflict(f"{purpose} mission hash binding failed")
+        return mission
+
+    def authorize_source_discovery(
+        self,
+        *,
+        company_ref: str,
+        source_ref: str,
+        requested_by: str,
+        mission_version_ref: str | None = None,
+        mission_version_hash: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve the mission grant for one budgeted library search.
+
+        Automation (``requested_by`` equal to the mission principal) needs the
+        source marked ``connected`` in the mission's source plan and the
+        ``source_discovery`` + ``observation`` write scopes.  A ``human:``
+        requester may run a discovery under a ``probe_only`` source (that is
+        how an owner rehearses a connector before promoting it), but the
+        record still binds the mission, its principal and its budget.
+        """
+
+        company_ref = _text(company_ref, "company_ref")
+        source_ref = _text(source_ref, "source_ref")
+        requested_by = _actor(requested_by, "requested_by")
+        mission = self._resolve_active_mission_for_company(
+            company_ref,
+            purpose="source discovery",
+            mission_version_ref=mission_version_ref,
+            mission_version_hash=mission_version_hash,
+        )
+        principal = mission["autonomy"]["automation_principal"]
+        human_request = _HUMAN_RE.fullmatch(requested_by) is not None
+        if not human_request and requested_by != principal:
+            raise CoverageMissionConflict("source discovery requester is not the mission principal")
+        member = next(
+            (item for item in mission["universe"] if item["company_ref"] == company_ref), None
+        )
+        if member is None:
+            raise CoverageMissionConflict("company is outside the mission universe")
+        source = next(
+            (item for item in mission["source_plan"] if item["source_ref"] == source_ref), None
+        )
+        if source is None:
+            raise CoverageMissionConflict(f"mission source plan does not list {source_ref}")
+        if source["status"] == "not_connected":
+            raise CoverageMissionConflict(f"mission marks {source_ref} as not_connected")
+        if not human_request:
+            if source["status"] != "connected":
+                raise CoverageMissionConflict(
+                    f"mission marks {source_ref} as {source['status']}; automation discovery "
+                    "requires connected"
+                )
+            missing = {"source_discovery", "observation"} - set(mission["autonomy"]["may_write"])
+            if missing:
+                raise CoverageMissionConflict(
+                    f"mission does not grant source discovery writes {sorted(missing)}"
+                )
+        cur = self.connection.cursor()
+        self._validate_playbook_binding(cur, mission["bindings"]["playbook_version"])
+        self._validate_constitution_binding(
+            cur, mission["bindings"]["constitution_version"], mission["industry_ref"]
+        )
+        self._validate_mandate_binding(
+            cur, mission["bindings"]["mandate_version"], mission["industry_ref"]
+        )
+        return {
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+            "mission_ref": mission["mission_ref"],
+            "company_ref": company_ref,
+            "ticker": member["ticker"],
+            "source_ref": source_ref,
+            "actor_ref": principal,
+            "requested_by": requested_by,
+            "scope": "source_discovery",
+            "max_alphaengine_calls_24h": int(mission["budget"]["max_alphaengine_calls_24h"]),
+        }
+
+    @staticmethod
+    def _validate_discovery_authorization(value: Any) -> dict[str, Any]:
+        if not isinstance(value, Mapping) or set(value) != _DISCOVERY_AUTHORIZATION_FIELDS:
+            raise CoverageMissionValidationError("discovery authorization has an invalid closed shape")
+        return json.loads(canonical_json(value))
+
+    def record_discovery_dispatch(
+        self,
+        *,
+        authorization: Mapping[str, Any],
+        discovery_plan_ref: str,
+        discovery_plan_hash: str,
+        spec_ref: str,
+        query_hash: str,
+        ticket_ref: str,
+    ) -> dict[str, Any]:
+        """Record one launched discovery child (status ``launched``)."""
+
+        authorization = self._validate_discovery_authorization(authorization)
+        exact = self.authorize_source_discovery(
+            company_ref=authorization["company_ref"],
+            source_ref=authorization["source_ref"],
+            requested_by=authorization["requested_by"],
+            mission_version_ref=authorization["mission_version_ref"],
+            mission_version_hash=authorization["mission_version_hash"],
+        )
+        if exact != authorization:
+            raise CoverageMissionConflict("discovery authorization drifted")
+        discovery_plan_ref = _text(discovery_plan_ref, "discovery_plan_ref")
+        discovery_plan_hash = _sha256(discovery_plan_hash, "discovery_plan_hash")
+        spec_ref = _text(spec_ref, "spec_ref")
+        query_hash = _sha256(query_hash, "query_hash")
+        ticket_ref = _text(ticket_ref, "ticket_ref")
+        created_at = _now()
+        identity = {
+            "mission_version_ref": exact["mission_version_ref"],
+            "company_ref": exact["company_ref"],
+            "source_ref": exact["source_ref"],
+            "spec_ref": spec_ref,
+            "query_hash": query_hash,
+            "ticket_ref": ticket_ref,
+        }
+        dispatch_id = _ref("mission-discovery-dispatch", identity)
+        record = {
+            **identity,
+            "dispatch_id": dispatch_id,
+            "mission_version_hash": exact["mission_version_hash"],
+            "discovery_plan_ref": discovery_plan_ref,
+            "discovery_plan_hash": discovery_plan_hash,
+            "actor_ref": exact["actor_ref"],
+            "requested_by": exact["requested_by"],
+            "authorization": exact,
+            "status": "launched",
+            "failure_reason": None,
+            "created_at": created_at,
+            "updated_at": created_at,
+        }
+        with self._transaction() as cur:
+            existing = cur.execute(
+                "SELECT dispatch_id FROM coverage_mission_discovery_dispatches WHERE dispatch_id=?",
+                (dispatch_id,),
+            ).fetchone()
+            if existing is not None:
+                raise CoverageMissionConflict("discovery dispatch already recorded for this ticket")
+            cur.execute(
+                "INSERT INTO coverage_mission_discovery_dispatches"
+                "(dispatch_id,mission_version_ref,mission_version_hash,company_ref,source_ref,"
+                "discovery_plan_ref,discovery_plan_hash,spec_ref,query_hash,actor_ref,requested_by,"
+                "authorization_json,status,ticket_ref,failure_reason,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    dispatch_id, exact["mission_version_ref"], exact["mission_version_hash"],
+                    exact["company_ref"], exact["source_ref"], discovery_plan_ref,
+                    discovery_plan_hash, spec_ref, query_hash, exact["actor_ref"],
+                    exact["requested_by"], canonical_json(exact), "launched", ticket_ref,
+                    None, created_at, created_at,
+                ),
+            )
+        return record
+
+    def _dispatch_row(self, row: Any) -> dict[str, Any]:
+        return {
+            "dispatch_id": row["dispatch_id"],
+            "mission_version_ref": row["mission_version_ref"],
+            "mission_version_hash": row["mission_version_hash"],
+            "company_ref": row["company_ref"],
+            "source_ref": row["source_ref"],
+            "discovery_plan_ref": row["discovery_plan_ref"],
+            "discovery_plan_hash": row["discovery_plan_hash"],
+            "spec_ref": row["spec_ref"],
+            "query_hash": row["query_hash"],
+            "actor_ref": row["actor_ref"],
+            "requested_by": row["requested_by"],
+            "authorization": json.loads(row["authorization_json"]),
+            "status": row["status"],
+            "ticket_ref": row["ticket_ref"],
+            "failure_reason": row["failure_reason"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def open_discovery_dispatches(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise CoverageMissionValidationError("discovery dispatch limit must be 1..100")
+        rows = self.connection.execute(
+            "SELECT * FROM coverage_mission_discovery_dispatches WHERE status='launched' "
+            "ORDER BY created_at,dispatch_id LIMIT ?", (limit,),
+        ).fetchall()
+        return [self._dispatch_row(row) for row in rows]
+
+    def discovery_dispatches(
+        self, mission_version_ref: str, *, company_ref: str | None = None,
+        spec_ref: str | None = None, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise CoverageMissionValidationError("discovery dispatch limit must be 1..1000")
+        query = "SELECT * FROM coverage_mission_discovery_dispatches WHERE mission_version_ref=?"
+        params: list[Any] = [_text(mission_version_ref, "mission_version_ref")]
+        if company_ref is not None:
+            query += " AND company_ref=?"
+            params.append(_text(company_ref, "company_ref"))
+        if spec_ref is not None:
+            query += " AND spec_ref=?"
+            params.append(_text(spec_ref, "spec_ref"))
+        query += " ORDER BY created_at DESC,dispatch_id DESC LIMIT ?"
+        params.append(limit)
+        return [self._dispatch_row(row) for row in self.connection.execute(query, params).fetchall()]
+
+    def settle_discovery_dispatch(
+        self, dispatch_id: str, *, status: str, reason: str | None = None
+    ) -> dict[str, Any]:
+        dispatch_id = _text(dispatch_id, "dispatch_id")
+        status = _vocabulary(status, ("succeeded", "failed", "rejected"), "status")
+        if status != "succeeded":
+            reason = _text(reason, "reason")
+        elif reason is not None:
+            raise CoverageMissionValidationError("a succeeded dispatch carries no failure reason")
+        with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_discovery_dispatches WHERE dispatch_id=?",
+                (dispatch_id,),
+            ).fetchone()
+            if row is None:
+                raise CoverageMissionNotFound("discovery dispatch was not found")
+            if row["status"] != "launched":
+                if row["status"] == status and row["failure_reason"] == reason:
+                    return self._dispatch_row(row)
+                raise CoverageMissionConflict("discovery dispatch is already settled differently")
+            now = _now()
+            cur.execute(
+                "UPDATE coverage_mission_discovery_dispatches SET status=?,failure_reason=?,"
+                "updated_at=? WHERE dispatch_id=? AND status='launched'",
+                (status, reason, now, dispatch_id),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("discovery dispatch state changed concurrently")
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_discovery_dispatches WHERE dispatch_id=?",
+                (dispatch_id,),
+            ).fetchone()
+        return self._dispatch_row(row)
+
+    def record_source_discovery(
+        self,
+        *,
+        authorization: Mapping[str, Any],
+        discovery_plan_ref: str,
+        discovery_plan_hash: str,
+        spec_ref: str,
+        query_hash: str,
+        parameters: Mapping[str, Any],
+        connector_invocation_ref: str,
+        connector_invocation_hash: str,
+        source_envelope_ref: str,
+        source_envelope_hash: str,
+        document_refs: list[str],
+        in_authority_document_refs: list[str],
+    ) -> dict[str, Any]:
+        """Append one discovery record and register its new documents.
+
+        The search itself already left Core connector authority behind; this
+        binds that exact invocation / envelope to the mission, company and
+        plan spec, and opens one ``discovered`` document row per ref Core does
+        not yet hold.  Documents already in authority are recorded as such
+        and never re-queued.
+        """
+
+        authorization = self._validate_discovery_authorization(authorization)
+        exact = self.authorize_source_discovery(
+            company_ref=authorization["company_ref"],
+            source_ref=authorization["source_ref"],
+            requested_by=authorization["requested_by"],
+            mission_version_ref=authorization["mission_version_ref"],
+            mission_version_hash=authorization["mission_version_hash"],
+        )
+        if exact != authorization:
+            raise CoverageMissionConflict("discovery authorization drifted")
+        discovery_plan_ref = _text(discovery_plan_ref, "discovery_plan_ref")
+        discovery_plan_hash = _sha256(discovery_plan_hash, "discovery_plan_hash")
+        spec_ref = _text(spec_ref, "spec_ref")
+        query_hash = _sha256(query_hash, "query_hash")
+        connector_invocation_ref = _text(connector_invocation_ref, "connector_invocation_ref")
+        connector_invocation_hash = _sha256(connector_invocation_hash, "connector_invocation_hash")
+        source_envelope_ref = _text(source_envelope_ref, "source_envelope_ref")
+        source_envelope_hash = _sha256(source_envelope_hash, "source_envelope_hash")
+        refs = _texts(document_refs, "document_refs")
+        present = _texts(in_authority_document_refs, "in_authority_document_refs")
+        if not set(present) <= set(refs):
+            raise CoverageMissionValidationError(
+                "in_authority_document_refs must be a subset of document_refs"
+            )
+        new_refs = [ref for ref in refs if ref not in set(present)]
+        invocation = self.connection.execute(
+            "SELECT content_hash FROM connector_invocations WHERE connector_invocation_id=?",
+            (connector_invocation_ref,),
+        ).fetchone()
+        if invocation is None or invocation["content_hash"] != connector_invocation_hash:
+            raise CoverageMissionConflict("discovery connector invocation binding failed")
+        envelope = self.connection.execute(
+            "SELECT connector_invocation_ref,content_hash,record_json FROM "
+            "connector_source_envelopes WHERE source_envelope_id=?",
+            (source_envelope_ref,),
+        ).fetchone()
+        if (
+            envelope is None
+            or envelope["content_hash"] != source_envelope_hash
+            or envelope["connector_invocation_ref"] != connector_invocation_ref
+        ):
+            raise CoverageMissionConflict("discovery source envelope binding failed")
+        envelope_record = json.loads(envelope["record_json"])
+        if (
+            envelope_record.get("source") != exact["source_ref"]
+            or envelope_record.get("operation") != "search_library"
+            or list(envelope_record.get("source_record_refs") or []) != refs
+        ):
+            raise CoverageMissionConflict("discovery document_refs differ from the source envelope")
+        identity = {
+            "mission_version_ref": exact["mission_version_ref"],
+            "mission_version_hash": exact["mission_version_hash"],
+            "company_ref": exact["company_ref"],
+            "source_ref": exact["source_ref"],
+            "discovery_plan_ref": discovery_plan_ref,
+            "discovery_plan_hash": discovery_plan_hash,
+            "spec_ref": spec_ref,
+            "query_hash": query_hash,
+            "parameters": json.loads(canonical_json(parameters)),
+            "connector_invocation_ref": connector_invocation_ref,
+            "connector_invocation_hash": connector_invocation_hash,
+            "source_envelope_ref": source_envelope_ref,
+            "source_envelope_hash": source_envelope_hash,
+            "document_refs": refs,
+            "new_document_refs": new_refs,
+            "in_authority_document_refs": present,
+            "actor_ref": exact["actor_ref"],
+            "requested_by": exact["requested_by"],
+        }
+        record_id = _ref("mission-source-discovery", identity)
+        existing = self.connection.execute(
+            "SELECT record_json FROM coverage_mission_source_discoveries "
+            "WHERE mission_version_ref=? AND source_envelope_ref=?",
+            (exact["mission_version_ref"], source_envelope_ref),
+        ).fetchone()
+        if existing is not None:
+            wire = validate_mission_source_discovery(
+                _canonical_record(existing["record_json"], "mission source discovery")
+            )
+            if wire["id"] != record_id:
+                raise CoverageMissionConflict("source envelope is already bound to another discovery")
+            return {**wire, "status": "duplicate"}
+        created_at = _now()
+        record = {"schema_version": SCHEMA_VERSION, "id": record_id, "created_at": created_at, **identity}
+        wire = {**record, "content_hash": content_hash(record)}
+        validate_mission_source_discovery(wire)
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_source_discoveries"
+                "(record_id,mission_version_ref,mission_version_hash,company_ref,source_ref,"
+                "discovery_plan_ref,discovery_plan_hash,spec_ref,query_hash,connector_invocation_ref,"
+                "source_envelope_ref,source_envelope_hash,actor_ref,requested_by,record_json,"
+                "content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    record_id, exact["mission_version_ref"], exact["mission_version_hash"],
+                    exact["company_ref"], exact["source_ref"], discovery_plan_ref,
+                    discovery_plan_hash, spec_ref, query_hash, connector_invocation_ref,
+                    source_envelope_ref, source_envelope_hash, exact["actor_ref"],
+                    exact["requested_by"], canonical_json(wire), wire["content_hash"], created_at,
+                ),
+            )
+            for ref in refs:
+                status = "already_in_authority" if ref in set(present) else "discovered"
+                document_id = _ref(
+                    "mission-discovered-document",
+                    {"mission_version_ref": exact["mission_version_ref"], "document_ref": ref},
+                )
+                if cur.execute(
+                    "SELECT 1 FROM coverage_mission_discovered_documents WHERE record_id=?",
+                    (document_id,),
+                ).fetchone() is not None:
+                    continue
+                cur.execute(
+                    "INSERT INTO coverage_mission_discovered_documents"
+                    "(record_id,mission_version_ref,company_ref,source_ref,document_ref,"
+                    "discovery_ref,status,ticket_ref,failure_reason,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        document_id, exact["mission_version_ref"], exact["company_ref"],
+                        exact["source_ref"], ref, record_id, status, None, None,
+                        created_at, created_at,
+                    ),
+                )
+        return {**wire, "status": "fresh"}
+
+    def source_discoveries(
+        self, mission_version_ref: str, *, company_ref: str | None = None,
+        spec_ref: str | None = None, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise CoverageMissionValidationError("discovery limit must be 1..1000")
+        query = "SELECT * FROM coverage_mission_source_discoveries WHERE mission_version_ref=?"
+        params: list[Any] = [_text(mission_version_ref, "mission_version_ref")]
+        if company_ref is not None:
+            query += " AND company_ref=?"
+            params.append(_text(company_ref, "company_ref"))
+        if spec_ref is not None:
+            query += " AND spec_ref=?"
+            params.append(_text(spec_ref, "spec_ref"))
+        query += " ORDER BY created_at DESC,record_id DESC LIMIT ?"
+        params.append(limit)
+        records = []
+        for row in self.connection.execute(query, params).fetchall():
+            wire = validate_mission_source_discovery(
+                _canonical_record(row["record_json"], "mission source discovery")
+            )
+            if wire["id"] != row["record_id"] or wire["content_hash"] != row["content_hash"]:
+                raise CoverageMissionConflict("mission source discovery authority drifted")
+            records.append(wire)
+        return records
+
+    def _document_row(self, row: Any) -> dict[str, Any]:
+        return {
+            "record_id": row["record_id"],
+            "mission_version_ref": row["mission_version_ref"],
+            "company_ref": row["company_ref"],
+            "source_ref": row["source_ref"],
+            "document_ref": row["document_ref"],
+            "discovery_ref": row["discovery_ref"],
+            "status": row["status"],
+            "ticket_ref": row["ticket_ref"],
+            "failure_reason": row["failure_reason"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
+    def discovered_documents(
+        self, mission_version_ref: str, *, company_ref: str | None = None,
+        status: str | None = None, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise CoverageMissionValidationError("discovered document limit must be 1..1000")
+        query = "SELECT * FROM coverage_mission_discovered_documents WHERE mission_version_ref=?"
+        params: list[Any] = [_text(mission_version_ref, "mission_version_ref")]
+        if company_ref is not None:
+            query += " AND company_ref=?"
+            params.append(_text(company_ref, "company_ref"))
+        if status is not None:
+            query += " AND status=?"
+            params.append(_vocabulary(status, DISCOVERED_DOCUMENT_STATUSES, "status"))
+        query += " ORDER BY created_at,record_id LIMIT ?"
+        params.append(limit)
+        return [self._document_row(row) for row in self.connection.execute(query, params).fetchall()]
+
+    def next_discovered_document(self) -> dict[str, Any] | None:
+        """Oldest ``discovered`` document across active missions, or None."""
+
+        row = self.connection.execute(
+            "SELECT d.* FROM coverage_mission_discovered_documents d "
+            "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
+            "WHERE d.status='discovered' ORDER BY d.created_at,d.record_id LIMIT 1"
+        ).fetchone()
+        return None if row is None else self._document_row(row)
+
+    def launched_discovered_documents(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise CoverageMissionValidationError("discovered document limit must be 1..100")
+        rows = self.connection.execute(
+            "SELECT * FROM coverage_mission_discovered_documents WHERE status='acquisition_launched' "
+            "ORDER BY updated_at,record_id LIMIT ?", (limit,),
+        ).fetchall()
+        return [self._document_row(row) for row in rows]
+
+    def mark_discovered_document_launched(self, record_id: str, ticket_ref: str) -> dict[str, Any]:
+        record_id = _text(record_id, "record_id")
+        ticket_ref = _text(ticket_ref, "ticket_ref")
+        with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
+            ).fetchone()
+            if row is None:
+                raise CoverageMissionNotFound("discovered document was not found")
+            if row["status"] != "discovered":
+                if row["status"] == "acquisition_launched" and row["ticket_ref"] == ticket_ref:
+                    return self._document_row(row)
+                raise CoverageMissionConflict("discovered document is not awaiting acquisition")
+            now = _now()
+            cur.execute(
+                "UPDATE coverage_mission_discovered_documents SET status='acquisition_launched',"
+                "ticket_ref=?,updated_at=? WHERE record_id=? AND status='discovered'",
+                (ticket_ref, now, record_id),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("discovered document state changed concurrently")
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
+            ).fetchone()
+        return self._document_row(row)
+
+    def settle_discovered_document(
+        self, record_id: str, *, status: str, reason: str | None = None
+    ) -> dict[str, Any]:
+        record_id = _text(record_id, "record_id")
+        status = _vocabulary(status, ("acquired", "acquisition_failed"), "status")
+        if status == "acquisition_failed":
+            reason = _text(reason, "reason")
+        elif reason is not None:
+            raise CoverageMissionValidationError("an acquired document carries no failure reason")
+        with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
+            ).fetchone()
+            if row is None:
+                raise CoverageMissionNotFound("discovered document was not found")
+            if row["status"] != "acquisition_launched":
+                if row["status"] == status and row["failure_reason"] == reason:
+                    return self._document_row(row)
+                raise CoverageMissionConflict("discovered document is not in a launched acquisition")
+            now = _now()
+            cur.execute(
+                "UPDATE coverage_mission_discovered_documents SET status=?,failure_reason=?,"
+                "updated_at=? WHERE record_id=? AND status='acquisition_launched'",
+                (status, reason, now, record_id),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("discovered document state changed concurrently")
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
+            ).fetchone()
+        return self._document_row(row)
 
     def sec_lane_authorization_for_company(self, company_ref: str) -> dict[str, Any]:
         """Resolve the sole active mission and return its exact SEC grant."""
@@ -1327,6 +1956,22 @@ class CoverageMissionAuthority:
                     "WHERE mission_version_ref=? AND company_ref=?",
                     (mission["id"], member["company_ref"]),
                 ).fetchone()[0],
+                "discovery_count": self.connection.execute(
+                    "SELECT COUNT(*) FROM coverage_mission_source_discoveries "
+                    "WHERE mission_version_ref=? AND company_ref=?",
+                    (mission["id"], member["company_ref"]),
+                ).fetchone()[0],
+                "discovered_document_count": self.connection.execute(
+                    "SELECT COUNT(*) FROM coverage_mission_discovered_documents "
+                    "WHERE mission_version_ref=? AND company_ref=?",
+                    (mission["id"], member["company_ref"]),
+                ).fetchone()[0],
+                "acquired_document_count": self.connection.execute(
+                    "SELECT COUNT(*) FROM coverage_mission_discovered_documents "
+                    "WHERE mission_version_ref=? AND company_ref=? "
+                    "AND status IN ('acquired','already_in_authority')",
+                    (mission["id"], member["company_ref"]),
+                ).fetchone()[0],
             })
         return {
             "projection_kind": "coverage_mission_progress",
@@ -1344,6 +1989,8 @@ __all__ = [
     "CHECKPOINT_KINDS",
     "COVERAGE_TIERS",
     "DELIVERABLE_KINDS",
+    "DISCOVERED_DOCUMENT_STATUSES",
+    "DISCOVERY_DISPATCH_STATUSES",
     "REQUIRED_CHECKPOINTS",
     "SOURCE_STATUSES",
     "STAGE_STATUSES",
@@ -1356,4 +2003,5 @@ __all__ = [
     "validate_mission_body",
     "validate_mission_stage_record",
     "validate_mission_stage_claim",
+    "validate_mission_source_discovery",
 ]

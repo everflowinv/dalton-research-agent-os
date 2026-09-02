@@ -257,6 +257,15 @@ class ServiceTests(unittest.TestCase):
             self.assertTrue(controller["KeepAlive"])
             self.assertIn("dalton-writer", writer["ProgramArguments"][0])
             self.assertIn("--scheduler", writer["ProgramArguments"])
+            writer_args = writer["ProgramArguments"]
+            self.assertEqual(
+                writer_args[writer_args.index("--alphaengine-search-governance") + 1],
+                str((root / "state").resolve() / "connector-governance" / "alphaengine-search-library-v1.json"),
+            )
+            self.assertEqual(
+                writer_args[writer_args.index("--alphaengine-discovery-plan") + 1],
+                str((root / "state").resolve() / "discovery-plans" / "us-it-services-alphaengine-v1.json"),
+            )
             self.assertIn("daltond", controller["ProgramArguments"][0])
             self.assertNotIn("model", " ".join(controller["ProgramArguments"]).lower())
 

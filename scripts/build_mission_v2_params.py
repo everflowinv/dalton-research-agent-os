@@ -29,6 +29,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from dalton_core.coverage_mission import (  # noqa: E402
     AUTOMATION_WRITE_SCOPES,
+    SOURCE_STATUSES,
     validate_coverage_mission_version,
 )
 
@@ -40,6 +41,7 @@ BODY_FIELDS = (
 
 def build_next_version_params(
     active: dict[str, Any], *, add_scopes: list[str], title: str | None = None,
+    source_statuses: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     for scope in add_scopes:
         if scope not in AUTOMATION_WRITE_SCOPES:
@@ -52,6 +54,16 @@ def build_next_version_params(
     for field in BODY_FIELDS:
         params[field] = json.loads(json.dumps(active[field]))
     params["autonomy"]["may_write"] = may_write
+    # P9d-1: promoting a source (probe_only -> connected) is a mission change
+    # the owner publishes as the next version; the plan keeps every other
+    # source row untouched.
+    for source_ref, status in (source_statuses or {}).items():
+        if status not in SOURCE_STATUSES:
+            raise ValueError(f"{status} is outside the frozen source status vocabulary")
+        rows = [row for row in params["source_plan"] if row["source_ref"] == source_ref]
+        if len(rows) != 1:
+            raise ValueError(f"active mission source plan does not list {source_ref}")
+        rows[0]["status"] = status
     if title is not None:
         params["title"] = title
     slug = active["mission_ref"].split(":", 1)[1]
@@ -88,11 +100,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-core", type=Path, required=True)
     parser.add_argument("--mission-ref", default="coverage-mission:us-it-services")
     parser.add_argument("--add-scope", action="append", default=[])
+    parser.add_argument(
+        "--set-source-status", action="append", default=[], metavar="SOURCE_REF=STATUS",
+        help="e.g. source:alphaengine=connected (repeatable)",
+    )
     parser.add_argument("--title")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
+    source_statuses: dict[str, str] = {}
+    for item in args.set_source_status:
+        if "=" not in item:
+            parser.error("--set-source-status expects SOURCE_REF=STATUS")
+        source_ref, status = item.split("=", 1)
+        source_statuses[source_ref] = status
     active = read_active_mission(args.source_core, args.mission_ref)
-    params = build_next_version_params(active, add_scopes=args.add_scope, title=args.title)
+    params = build_next_version_params(
+        active, add_scopes=args.add_scope, title=args.title, source_statuses=source_statuses,
+    )
     text = json.dumps(params, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output is not None:
         args.output.write_text(text, encoding="utf-8")

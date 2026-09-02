@@ -67,6 +67,13 @@ controller tick、周报「预测对账」节、thesis-impact prompt 与 Company
 
 ### P9d：多源接入按 mission source_plan 逐条开
 
+进展（2026-09-02）：P9d-1 AlphaEngine AE-2 search-driven discovery 已完成 development candidate 与 live Core
+只读副本 canary，未部署。新增独立治理的 `search_library` capability、hash-bound DiscoveryPlan、mission 发现/
+dispatch/待获取文档账本，以及 controller tick 的「先获取已知缺口、再做新搜索」协调器；搜索与文档页共用 mission /
+owner 24 小时调用上限。语义候选仍停在既有人工 accept 边界，ADR-0003 B 不变。激活需要 owner 批准 search governance，
+并发布同时含 `source_discovery`、`source:alphaengine=connected` 的 mission 新版本。见
+[P9d-1 报告](p9d1-alphaengine-search-driven-source-discovery-v0.1-2026-09-02.md)。
+
 - AlphaEngine：AE-2 search 驱动发现（search_library → stage 语义候选 → 人 accept），把 `probe_only` 变为 `connected`；不违反 ADR-0003 B。
 - web search、Guidepoint：各自走 Connector Protocol 的 shadow → gate → live，每接一条让 mission 多回答一类研究问题。顺序：web search（行业数据/管理层变动，只读公开）先于 Guidepoint（付费、一手、需 query 纪律）。
 

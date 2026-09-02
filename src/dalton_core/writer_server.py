@@ -22,9 +22,22 @@ import socket
 import stat
 import threading
 from dataclasses import dataclass, field
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from .alphaengine_core_search import search_spec_hash
+from .mission_source_discovery import (
+    AlphaEngineSearchLauncher,
+    DiscoveryLaunchConflict,
+    DiscoveryLaunchError,
+    DiscoveryLaunchRejected,
+    DiscoveryPlanError,
+    DiscoveryTicketNotFound,
+    MissionSourceDiscoveryCoordinator,
+    build_discovery_parameters,
+    load_discovery_plan,
+)
 from .alphaengine_acquisition_launcher import (
     AcquisitionLaunchConflict,
     AcquisitionLaunchError,
@@ -341,6 +354,8 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "coverage_mission_progress", "coverage_mission_stage_records",
     "reconcile_forecasts", "forecast_reconciliations",
     "get_forecast_reconciliation", "decide_forecast_overturn",
+    "run_mission_source_discovery", "mission_source_discovery_status",
+    "mission_source_discoveries", "mission_discovered_documents",
 })
 # Mission stage bookkeeping is human-governed but must also be reachable by
 # the mission's declared ``automation:`` principal; the CoverageMission
@@ -350,12 +365,21 @@ MISSION_AUTOMATION_OPERATIONS = frozenset({
     "record_mission_stage", "coverage_mission_progress",
     "coverage_mission_stage_records", "get_active_coverage_mission",
     "get_coverage_mission",
+    # P9d-1: automation may read what it discovered; launching stays human/core.
+    "mission_source_discoveries", "mission_discovered_documents",
 })
 # P9c: the controller tick (core principal) reconciles pending forecast /
 # actual pairs and reads them; the authority itself only writes under the
 # mission grant, and the overturn decision stays human-only.
 CORE_RECONCILIATION_OPERATIONS = frozenset({
     "reconcile_forecasts", "forecast_reconciliations", "get_forecast_reconciliation",
+})
+# P9d-1: the controller tick (core principal) advances mission source
+# discovery and reads its ledgers; launching a discovery on request stays a
+# human governance op.
+CORE_DISCOVERY_OPERATIONS = frozenset({
+    "dispatch_mission_source_discovery", "mission_source_discovery_status",
+    "mission_source_discoveries", "mission_discovered_documents",
 })
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
@@ -453,6 +477,8 @@ CORE_OPERATIONS = frozenset({
     "bounded_planner_record_outcome", "bounded_planner_record_observation",
     "dispatch_coverage_mission_sec_lane",
     "reconcile_forecasts", "forecast_reconciliations", "get_forecast_reconciliation",
+    "dispatch_mission_source_discovery", "mission_source_discovery_status",
+    "mission_source_discoveries", "mission_discovered_documents",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
     "llm_planner_advance", "llm_planner_execute", "bounded_alphaengine_probe",
@@ -603,6 +629,11 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "bounded_planner_record_observation": frozenset({"round_ref", "mandate_version_ref"}),
     "dispatch_coverage_mission_sec_lane": frozenset(),
     "reconcile_forecasts": frozenset({"requested_by", "company_ref", "claim_version_ref"}),
+    "dispatch_mission_source_discovery": frozenset(),
+    "run_mission_source_discovery": frozenset({"requested_by", "company_ref", "spec_ref", "as_of"}),
+    "mission_source_discovery_status": frozenset({"ticket_ref"}),
+    "mission_source_discoveries": frozenset({"mission_version_ref", "company_ref", "spec_ref", "limit"}),
+    "mission_discovered_documents": frozenset({"mission_version_ref", "company_ref", "status", "limit"}),
     "forecast_reconciliations": frozenset({
         "company_ref", "claim_version_ref", "forecast_line_ref", "created_from", "created_to",
     }),
@@ -764,6 +795,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "run_sec_company_facts_lane": "actor_ref",
     "reconcile_forecasts": "requested_by",
     "decide_forecast_overturn": "actor_ref",
+    "run_mission_source_discovery": "requested_by",
 }
 
 
@@ -922,10 +954,21 @@ class WriterServer:
         candidate_staging_path: str | Path | None = None,
         sec_lane_launcher: SecLaneLauncher | None = None,
         planner_model_config: Mapping[str, Any] | None = None,
+        search_launcher: AlphaEngineSearchLauncher | None = None,
+        discovery_plan_path: str | Path | None = None,
     ):
         if not principals:
             raise WriterServerError("at least one principal is required")
         self._acquisition_launcher = acquisition_launcher
+        # P9d-1: out-of-process AlphaEngine search discovery; the plan is the
+        # human-authored, hash-bound list of queries the mission may run.
+        self._search_launcher = search_launcher
+        self._discovery_plan_path = (
+            None if discovery_plan_path is None
+            else str(Path(discovery_plan_path).expanduser().resolve())
+        )
+        self._source_discovery: MissionSourceDiscoveryCoordinator | None = None
+        self._discovery_plan_error: str | None = None
         # S7d: out-of-process SEC company-facts lane runs (human-only ops).
         self._sec_lane_launcher = sec_lane_launcher
         # The same owner-only CandidateStaging file the Cockpit review plane
@@ -1193,6 +1236,22 @@ class WriterServer:
         # their schemas.
         self._research_playbook = ResearchPlaybookAuthority(self._store)
         self._coverage_mission = CoverageMissionAuthority(self._store)
+        if self._discovery_plan_path is not None:
+            # An unusable plan must not keep the writer (and every other lane)
+            # from starting; the discovery op reports the reason instead.
+            try:
+                plan = load_discovery_plan(self._discovery_plan_path)
+            except (OSError, ValueError) as exc:
+                self._discovery_plan_error = f"discovery plan is unusable: {exc}"
+            else:
+                self._discovery_plan_error = None
+                self._source_discovery = MissionSourceDiscoveryCoordinator(
+                    store=self._store,
+                    missions=self._coverage_mission,
+                    plan=plan,
+                    search_launcher=self._search_launcher,
+                    acquisition_launcher=self._acquisition_launcher,
+                )
         self._backlog = ResearchQuestionBacklog(self._store)
         self._bounded_planner = BoundedPlannerAuthority(self._store)
         self._intent_writer = IntentWriterAuthority(
@@ -1420,6 +1479,8 @@ class WriterServer:
         )
         is_core_reconciliation = (
             operation in CORE_RECONCILIATION_OPERATIONS and principal.is_unrestricted
+        ) or (
+            operation in CORE_DISCOVERY_OPERATIONS and principal.is_unrestricted
         )
         if operation in HUMAN_GOVERNANCE_OPERATIONS and _HUMAN_ACTOR_RE.fullmatch(
             principal.resolved_actor_ref
@@ -2151,6 +2212,97 @@ class WriterServer:
     def _op_decide_forecast_overturn(self, p: Mapping[str, Any]) -> Any:
         return self.forecast_reconciliation.decide_overturn(**dict(p))
 
+    # -- P9d-1: mission source discovery ------------------------------------
+    @property
+    def source_discovery(self) -> MissionSourceDiscoveryCoordinator:
+        if self._source_discovery is None:
+            raise DiscoveryLaunchRejected(
+                self._discovery_plan_error
+                or "mission source discovery is not configured on this writer (no discovery plan)"
+            )
+        return self._source_discovery
+
+    @property
+    def search_launcher(self) -> AlphaEngineSearchLauncher:
+        if self._search_launcher is None:
+            raise DiscoveryLaunchRejected(
+                "AlphaEngine search launcher is not configured on this writer"
+            )
+        return self._search_launcher
+
+    def _op_dispatch_mission_source_discovery(self, p: Mapping[str, Any]) -> Any:
+        # Controller tick.  Unconfigured writers answer truthfully instead of
+        # raising so the driver's tick summary shows the reason.
+        if self._source_discovery is None:
+            return {
+                "status": "unconfigured",
+                "reason": self._discovery_plan_error or "no discovery plan on this writer",
+            }
+        return self.source_discovery.dispatch_once()
+
+    def _op_run_mission_source_discovery(self, p: Mapping[str, Any]) -> Any:
+        # Human-requested discovery: the mission grant is resolved here with the
+        # human as requester (a probe_only source is allowed for rehearsal),
+        # and the child re-derives the same grant before spending a call.
+        values = dict(p)
+        plan = self.source_discovery.plan
+        authorization = self.coverage_mission.authorize_source_discovery(
+            company_ref=values["company_ref"],
+            source_ref=plan["source_ref"],
+            requested_by=values["requested_by"],
+        )
+        as_of = values.get("as_of")
+        as_of_date = None if as_of is None else date.fromisoformat(as_of)
+        ticket = self.search_launcher.start(
+            authorization=authorization, spec_ref=values["spec_ref"], as_of=as_of_date,
+        )
+        parameters = build_discovery_parameters(
+            plan, spec_ref=values["spec_ref"], company_ref=values["company_ref"],
+            as_of=as_of_date or datetime.now(timezone.utc).date(),
+        )
+        dispatch = self.coverage_mission.record_discovery_dispatch(
+            authorization=authorization,
+            discovery_plan_ref=plan["id"],
+            discovery_plan_hash=plan["content_hash"],
+            spec_ref=values["spec_ref"],
+            query_hash=search_spec_hash(parameters),
+            ticket_ref=ticket["id"],
+        )
+        return {**ticket, "dispatch_ref": dispatch["dispatch_id"], "parameters": parameters}
+
+    def _op_mission_source_discovery_status(self, p: Mapping[str, Any]) -> Any:
+        return self.search_launcher.status(dict(p)["ticket_ref"])
+
+    def _resolve_mission_version_ref(self, values: dict[str, Any]) -> str:
+        ref = values.pop("mission_version_ref", None)
+        if ref is not None:
+            return ref
+        if self._source_discovery is None:
+            raise DiscoveryLaunchRejected("mission_version_ref is required without a discovery plan")
+        return self.coverage_mission.active_mission(self._source_discovery.plan["mission_ref"])["id"]
+
+    def _op_mission_source_discoveries(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        mission_version_ref = self._resolve_mission_version_ref(values)
+        return {
+            "projection_kind": "mission_source_discoveries",
+            "mission_version_ref": mission_version_ref,
+            "discoveries": self.coverage_mission.source_discoveries(mission_version_ref, **values),
+            "dispatches": self.coverage_mission.discovery_dispatches(
+                mission_version_ref, company_ref=values.get("company_ref"),
+                spec_ref=values.get("spec_ref"), limit=values.get("limit", 100),
+            ),
+        }
+
+    def _op_mission_discovered_documents(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        mission_version_ref = self._resolve_mission_version_ref(values)
+        return {
+            "projection_kind": "mission_discovered_documents",
+            "mission_version_ref": mission_version_ref,
+            "documents": self.coverage_mission.discovered_documents(mission_version_ref, **values),
+        }
+
     def _op_bounded_alphaengine_probe(self, p: Mapping[str, Any]) -> Any:
         # Executes in the writer: the acquisition subprocess writes Core
         # connector authority, which the driver process must not open, and
@@ -2609,10 +2761,14 @@ class WriterServer:
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
-        if isinstance(exc, (AcquisitionLaunchRejected, LaneLaunchRejected)):
+        if isinstance(exc, (AcquisitionLaunchRejected, LaneLaunchRejected, DiscoveryLaunchRejected, DiscoveryPlanError)):
             return "rejected"
-        if isinstance(exc, (AcquisitionLaunchConflict, LaneLaunchConflict)):
+        if isinstance(exc, (AcquisitionLaunchConflict, LaneLaunchConflict, DiscoveryLaunchConflict)):
             return "conflict"
+        if isinstance(exc, DiscoveryTicketNotFound):
+            return "not_found"
+        if isinstance(exc, DiscoveryLaunchError):
+            return "store_error"
         if isinstance(exc, (ResearchVerificationConflict, ResearchReviewConflict)):
             return "conflict"
         if isinstance(exc, (ResearchVerificationError, ResearchReviewError)):
@@ -2701,6 +2857,24 @@ def main(argv: list[str] | None = None) -> int:
         "--sec-lane-rehearsal-fixture",
         help="rehearsal only: company-facts fixture file served instead of data.sec.gov (tests)",
     )
+    parser.add_argument(
+        "--alphaengine-search-governance",
+        help="approved AlphaEngine search_library governance record; enables mission "
+             "source discovery launches (requires --alphaengine-discovery-plan)",
+    )
+    parser.add_argument(
+        "--alphaengine-discovery-plan",
+        help="hash-bound discovery plan manifest (deploy/phase9/*discovery-plan*.json); "
+             "enables the mission source discovery coordinator",
+    )
+    parser.add_argument(
+        "--search-rehearsal-results",
+        help="rehearsal only: JSON array of search results served instead of the network (tests)",
+    )
+    parser.add_argument(
+        "--search-rehearsal-approved-by",
+        help="rehearsal only: in-memory approved search governance principal (tests)",
+    )
     parser.add_argument("--planner-routing-policy")
     parser.add_argument("--planner-credential-slots")
     parser.add_argument("--planner-model-router-db")
@@ -2760,6 +2934,30 @@ def main(argv: list[str] | None = None) -> int:
                 # verifiable in place.
                 spool_dir=args.transcript_spool_dir,
             )
+        search_launcher = None
+        if args.alphaengine_search_governance is not None:
+            if args.alphaengine_discovery_plan is None:
+                raise WriterServerError(
+                    "--alphaengine-search-governance requires --alphaengine-discovery-plan"
+                )
+            if args.search_rehearsal_results is not None:
+                search_mode_args: tuple[str, ...] = (
+                    "--fake-search-file", args.search_rehearsal_results,
+                )
+                if args.search_rehearsal_approved_by is not None:
+                    search_mode_args += (
+                        "--governance-approved-by", args.search_rehearsal_approved_by,
+                    )
+            else:
+                search_mode_args = ("--allow-network",)
+            search_launcher = AlphaEngineSearchLauncher(
+                state_dir=Path(args.db).expanduser().resolve().parent,
+                governance_path=args.alphaengine_search_governance,
+                plan_path=args.alphaengine_discovery_plan,
+                mode_args=search_mode_args,
+                mcp_endpoint=args.alphaengine_mcp_endpoint,
+                spool_dir=args.transcript_spool_dir,
+            )
         planner_model_config = None
         if args.planner_routing_policy is not None:
             slots = (args.planner_credential_slots or "").split(",")
@@ -2791,6 +2989,8 @@ def main(argv: list[str] | None = None) -> int:
             candidate_staging_path=args.candidate_staging,
             sec_lane_launcher=sec_lane_launcher,
             planner_model_config=planner_model_config,
+            search_launcher=search_launcher,
+            discovery_plan_path=args.alphaengine_discovery_plan,
         )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:

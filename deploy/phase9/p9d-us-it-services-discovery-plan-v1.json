@@ -1,0 +1,43 @@
+{
+  "companies": {
+    "company:sec-cik:0000051143": {
+      "search_terms": "IBM International Business Machines"
+    },
+    "company:sec-cik:0001058290": {
+      "search_terms": "Cognizant CTSH"
+    },
+    "company:sec-cik:0001352010": {
+      "search_terms": "EPAM Systems EPAM"
+    },
+    "company:sec-cik:0001467373": {
+      "search_terms": "Accenture ACN"
+    },
+    "company:sec-cik:001688568": {
+      "search_terms": "DXC Technology DXC"
+    }
+  },
+  "content_hash": "c463a3dac1daf95a41c8697eeec7edd3b3da90ccb0265bb800edeb6b7be47d92",
+  "created_at": "2026-09-02T18:00:00.000000+00:00",
+  "id": "discovery-plan:us-it-services:alphaengine:1",
+  "mission_ref": "coverage-mission:us-it-services",
+  "schema_version": "0.1",
+  "source_ref": "source:alphaengine",
+  "specs": [
+    {
+      "document_type": "meeting_minutes",
+      "lookback_days": 400,
+      "query_template": "{terms} earnings call transcript",
+      "rediscovery_interval_days": 7,
+      "retry_interval_days": 1,
+      "spec_ref": "earnings-call-transcripts"
+    },
+    {
+      "document_type": "sell_side_report",
+      "lookback_days": 180,
+      "query_template": "{terms} research report",
+      "rediscovery_interval_days": 7,
+      "retry_interval_days": 1,
+      "spec_ref": "sell-side-reports"
+    }
+  ]
+}
