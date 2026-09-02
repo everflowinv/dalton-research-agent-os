@@ -99,6 +99,7 @@ from .research_plan import (
     read_exact_research_plan_start,
     read_exact_research_plan_version,
     sec_rate_policy_ref_for_budget,
+    sec_template_registry_tag,
     sec_response_budget_bytes,
     sec_response_budget_tag,
 )
@@ -776,7 +777,55 @@ class ResearchPlanExecutor:
             }
 
         legacy_profile_key = "connector-profile:sec-public:v1"
-        if budget_tag == "v1":
+        # The packaged template is registered under a template tag as well
+        # (P9b widened the company-facts contract).  A later template tag
+        # changes the descriptor / schema hashes inside the profile spec, so
+        # it is a new immutable profile version anchored to whatever profile
+        # version this Core already holds, with its own idempotency key and
+        # sibling price / rate-policy refs.
+        template_tag = sec_template_registry_tag()
+        template_suffix = "" if template_tag == "v1" else f":template-{template_tag}"
+        if template_tag != "v1":
+            latest_profile = self.connectors.connection.execute(
+                "SELECT profile_version_id, version_number FROM connector_profile_versions "
+                "WHERE connector_ref=? ORDER BY version_number DESC LIMIT 1",
+                (template["connector_ref"],),
+            ).fetchone()
+            if latest_profile is None:
+                seeded = self.connectors.register_profile(
+                    _profile_spec(
+                        template["id"], 1, None, sec_response_budget_bytes("v1")
+                    ),
+                    idempotency_key=legacy_profile_key,
+                )
+                prior_id, prior_version = seeded["id"], 1
+            else:
+                prior_id = latest_profile["profile_version_id"]
+                prior_version = int(latest_profile["version_number"])
+            profile_id = f"{template['id']}:budget-{budget_tag}{template_suffix}"
+            if prior_id == profile_id:
+                # This Core already holds the template-tagged profile as its
+                # latest version: replay it rather than chaining a new one.
+                profile = self.connectors.register_profile(
+                    _profile_spec(
+                        profile_id, prior_version,
+                        self.connectors.connection.execute(
+                            "SELECT prior_version_ref FROM connector_profile_versions "
+                            "WHERE profile_version_id=?", (profile_id,),
+                        ).fetchone()[0],
+                        budget["max_response_bytes"],
+                    ),
+                    idempotency_key=f"connector-profile:sec-public:budget-{budget_tag}{template_suffix}",
+                )
+            else:
+                profile = self.connectors.register_profile(
+                    _profile_spec(
+                        profile_id, prior_version + 1, prior_id,
+                        budget["max_response_bytes"],
+                    ),
+                    idempotency_key=f"connector-profile:sec-public:budget-{budget_tag}{template_suffix}",
+                )
+        elif budget_tag == "v1":
             # Historical plans replay the original single version-1 profile.
             profile = self.connectors.register_profile(
                 _profile_spec(
@@ -935,14 +984,14 @@ class ResearchPlanExecutor:
             execution_wire = None
 
         price_version_id = (
-            "connector-price:sec-public:zero:v1"
+            f"connector-price:sec-public:zero{template_suffix}:v1"
             if budget_tag == "v1"
-            else f"connector-price:sec-public:zero:budget-{budget_tag}:v1"
+            else f"connector-price:sec-public:zero:budget-{budget_tag}{template_suffix}:v1"
         )
         price_rate_ref = (
-            "connector-price:sec-public:zero"
+            f"connector-price:sec-public:zero{template_suffix}"
             if budget_tag == "v1"
-            else f"connector-price:sec-public:zero:budget-{budget_tag}"
+            else f"connector-price:sec-public:zero:budget-{budget_tag}{template_suffix}"
         )
         price = self.connectors.register_price_rate({
             "schema_version": "0.1",
@@ -996,7 +1045,17 @@ class ResearchPlanExecutor:
                 "actor_ref": self.actor_ref,
             }
 
-        if budget_tag == "v1":
+        if template_tag != "v1":
+            # Sibling policy ref for the template-tagged profile (same
+            # reasoning as the budget sibling below).
+            self.connectors.register_rate_policy(
+                _rate_policy_spec(
+                    f"{_RATE_POLICY_REF}:budget-{budget_tag}{template_suffix}:v1",
+                    sec_rate_policy_ref_for_budget(budget_tag, template_tag),
+                ),
+                idempotency_key=f"connector-rate-policy:sec-public:budget-{budget_tag}{template_suffix}",
+            )
+        elif budget_tag == "v1":
             self.connectors.register_rate_policy(
                 _rate_policy_spec(
                     "connector-rate-policy:sec-public:v1", _RATE_POLICY_REF

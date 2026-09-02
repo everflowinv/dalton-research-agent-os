@@ -861,7 +861,7 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "filed": _string(),
                 "fy": {"type": "integer", "minimum": 1900, "maximum": 2200},
                 "fp": _string(),
-                "form": {"type": "string", "enum": ["10-Q"]},
+                "form": {"type": "string", "enum": ["10-Q", "10-K"]},
                 "frame": {"type": "string", "pattern": "^CY[0-9]{4}Q[1-4]$"},
                 "value": decimal,
                 "record_hash": sha256,
@@ -898,7 +898,7 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 },
                 "label": _string(),
                 "unit": {"type": "string", "enum": ["USD"]},
-                "form": {"type": "string", "enum": ["10-Q"]},
+                "form": {"type": "string", "enum": ["10-Q", "10-K"]},
                 "filed_from": _string(),
                 "filed_to": _string(),
                 "latest_accession": {
@@ -907,7 +907,10 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 },
                 "selection_basis": {
                     "type": "string",
-                    "enum": ["ordered_allowlist_latest_10-Q"],
+                    "enum": [
+                        "ordered_allowlist_latest_10-Q",
+                        "ordered_allowlist_latest_10-K",
+                    ],
                 },
                 "current": fact,
                 "prior": fact,

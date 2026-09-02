@@ -11,8 +11,14 @@ import unittest
 from pathlib import Path
 
 from dalton_core.public_http_transport import PublicHttpTransport
-from dalton_core.research_auto_commit import COMPANY_FACTS_RULE_REF
-from dalton_core.research_plan import PLAN_COMPANY_FACTS_AUTO_START_RULE_REF
+from dalton_core.research_auto_commit import (
+    COMPANY_FACTS_ANNUAL_RULE_REF,
+    COMPANY_FACTS_RULE_REF,
+)
+from dalton_core.research_plan import (
+    PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF,
+    PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
+)
 from dalton_core.research_verification import CandidateStagingStore
 from dalton_core.sec_authority_harness import MutableClock, _Response
 from dalton_core.sec_company_facts_lane import (
@@ -42,17 +48,59 @@ def fake_adapter(clock: MutableClock, body: bytes | None = None) -> SecPublicRou
     )
 
 
-def install_lane_rules(state: Path) -> str:
-    """Install the company-facts auto-start / auto-commit rules on a fresh Core."""
+def _sec_company_facts_annual_body() -> bytes:
+    """A 10-K that reports the fourth-quarter pair inside the annual filing (P9b)."""
+    concept = {
+        "label": "Revenues",
+        "description": "Synthetic annual filing with quarterly disclosures.",
+        "units": {"USD": [
+            {
+                "start": "2024-09-01", "end": "2025-08-31",
+                "val": 69672977000, "accn": "0000320193-25-000217",
+                "fy": 2025, "fp": "FY", "form": "10-K",
+                "filed": "2025-10-10", "frame": "CY2025",
+            },
+            {
+                "start": "2024-06-01", "end": "2024-08-31",
+                "val": 16405819000, "accn": "0000320193-25-000217",
+                "fy": 2025, "fp": "FY", "form": "10-K",
+                "filed": "2025-10-10", "frame": "CY2024Q3",
+            },
+            {
+                "start": "2025-06-01", "end": "2025-08-31",
+                "val": 17596260000, "accn": "0000320193-25-000217",
+                "fy": 2025, "fp": "FY", "form": "10-K",
+                "filed": "2025-10-10", "frame": "CY2025Q3",
+            },
+        ]},
+    }
+    payload = {
+        "cik": 320193,
+        "entityName": "APPLE INC.",
+        "facts": {"us-gaap": {"Revenues": concept}},
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+
+def install_lane_rules(state: Path, *, annual: bool = False) -> str:
+    """Install the company-facts auto-start / auto-commit rules on a fresh Core.
+
+    ``annual=True`` also lists the P9b 10-K rules next to the 10-Q rules.
+    """
     core = DaltonStore(state / "core.sqlite")
     try:
         active = core.active_policy()
         policy = dict(active["policy"])
+        start_rules = [PLAN_COMPANY_FACTS_AUTO_START_RULE_REF]
+        commit_rules = [COMPANY_FACTS_RULE_REF]
+        if annual:
+            start_rules.append(PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF)
+            commit_rules.append(COMPANY_FACTS_ANNUAL_RULE_REF)
         policy["research_plan_auto_start"] = {
-            "enabled": True, "rules": [PLAN_COMPANY_FACTS_AUTO_START_RULE_REF],
+            "enabled": True, "rules": start_rules,
         }
         policy["research_candidate_auto_commit"] = {
-            "enabled": True, "rules": [COMPANY_FACTS_RULE_REF], "max_records": 20,
+            "enabled": True, "rules": commit_rules, "max_records": 20,
         }
         installed = core.create_policy(
             policy,
@@ -161,6 +209,84 @@ class LaneTests(unittest.TestCase):
             self.assertEqual(summary["candidate"]["subject_ref"].endswith("320193"), True,
                              summary["candidate"])
             self.assertEqual(summary["formal_ledger_counts"]["claim_versions"], 2)
+
+    def test_annual_form_commits_fourth_quarter_claim_when_policy_lists_annual_rules(self) -> None:
+        """P9b: a 10-K run produces its own plan/Claim under the annual rules."""
+        install_lane_rules(self.state, annual=True)
+        window = {"filed_from": "2025-01-01", "filed_to": "2025-12-31"}
+        with self._lane(adapter=fake_adapter(self.clock, _sec_company_facts_annual_body())) as lane:
+            summary = lane.run_issuer(
+                ISSUER, actor_ref="human:tester", run_key="annual-1", form="10-K", **window
+            )
+            self.assertEqual(summary["status"], "committed", summary)
+            self.assertEqual(summary["form"], "10-K")
+            self.assertEqual(summary["plan"]["parameters"]["form"], "10-K")
+            self.assertEqual(summary["facts"]["growth_percent"], "7.26")
+            self.assertEqual(summary["facts"]["latest_accession"], "0000320193-25-000217")
+            self.assertEqual(summary["candidate"]["period"], "2025-06-01..2025-08-31")
+            self.assertEqual(
+                summary["policy_version_ref"], "policy:sec-lane-test:v2"
+            )
+            self.assertEqual([v["verdict"] for v in summary["verifications"]], ["pass", "pass"])
+            self.assertEqual(summary["formal_ledger_counts"]["claim_versions"], 1)
+            self.assertEqual(summary["integrity"]["core"], "ok")
+            # A quarterly run over the same window is a distinct plan (the
+            # annual form is part of the lane identity), not a duplicate.
+            with self.assertRaises(LanePreconditionError):
+                lane.run_issuer(
+                    ISSUER, actor_ref="human:tester", run_key="annual-1", form="8-K", **window
+                )
+        with self._lane(adapter=fake_adapter(self.clock, _sec_company_facts_annual_body())) as lane:
+            replay = lane.run_issuer(
+                ISSUER, actor_ref="human:tester", run_key="annual-1", form="10-K", **window
+            )
+            self.assertEqual(replay["status"], "duplicate", replay)
+            self.assertEqual(replay["plan"]["ref"], summary["plan"]["ref"])
+
+    def test_later_window_for_the_same_issuer_asks_a_new_question(self) -> None:
+        """P9b: a second window must not die on the issuer's answered first question."""
+        install_lane_rules(self.state)
+        with self._lane() as lane:
+            first = self._run(lane)
+            self.assertEqual(first["status"], "committed", first)
+        later = {"filed_from": "2025-09-01", "filed_to": "2026-08-20"}
+        with self._lane() as lane:
+            lane.advance_past_quota_window()
+            second = lane.run_issuer(
+                ISSUER, actor_ref="human:tester", run_key="run-2", **later
+            )
+        self.assertIn(second["status"], {"committed", "duplicate"}, second)
+        self.assertNotEqual(second["plan"]["ref"], first["plan"]["ref"])
+        core = DaltonStore(self.state / "core.sqlite")
+        try:
+            questions = core.connection.execute(
+                "SELECT json_extract(identity_json,'$.question') FROM backlog_questions ORDER BY created_at"
+            ).fetchall()
+        finally:
+            core.close()
+        self.assertEqual(len(questions), 2)
+        self.assertIn("10-Q filed 2025-08-20..2026-08-20", questions[0][0])
+        self.assertIn("10-Q filed 2025-09-01..2026-08-20", questions[1][0])
+
+    def test_annual_form_is_refused_when_policy_lists_only_quarterly_rules(self) -> None:
+        """P9b: the historical single-rule policy keeps rejecting 10-K plans."""
+        install_lane_rules(self.state)
+        window = {"filed_from": "2025-01-01", "filed_to": "2025-12-31"}
+        with self._lane(adapter=fake_adapter(self.clock, _sec_company_facts_annual_body())) as lane:
+            result = lane.run_lane(
+                actor_ref="human:tester", run_key="annual-2", form="10-K", **window
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["form"], "10-K")
+        self.assertEqual(result["issuers"][0]["status"], "failed")
+        self.assertIn("does not authorize", result["issuers"][0]["error"])
+        core = DaltonStore(self.state / "core.sqlite")
+        try:
+            self.assertEqual(
+                core.connection.execute("SELECT COUNT(*) FROM claim_versions").fetchone()[0], 0
+            )
+        finally:
+            core.close()
 
     def test_cli_fixture_path_end_to_end(self) -> None:
         install_lane_rules(self.state)

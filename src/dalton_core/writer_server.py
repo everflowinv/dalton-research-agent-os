@@ -477,7 +477,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     }),
     "transcript_candidate_status": frozenset({"candidate_claim_ref"}),
     "run_sec_company_facts_lane": frozenset({
-        "issuers", "filed_from", "filed_to", "actor_ref",
+        "issuers", "filed_from", "filed_to", "actor_ref", "form",
     }),
     "sec_lane_status": frozenset({"ticket_ref"}),
     "create_policy": frozenset({"policy", "policy_version_id", "version_number", "activate", "policy_ref", "effective_from", "effective_until", "actor_ref", "prior_version_ref", "change_reason", "content_hash_value"}),
@@ -2176,6 +2176,7 @@ class WriterServer:
             filed_from=values["filed_from"],
             filed_to=values["filed_to"],
             actor_ref=values["actor_ref"],
+            form=values.get("form", "10-Q"),
         )
 
     def _op_sec_lane_status(self, p: Mapping[str, Any]) -> Any:

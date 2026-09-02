@@ -31,6 +31,7 @@ from .sec_company_facts_lane import (
     SecCompanyFactsLane,
     US_IT_SERVICES_ISSUERS,
 )
+from .sec_public_adapter import SEC_COMPANY_FACTS_FORMS
 from .store import canonical_json
 
 
@@ -96,6 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--filed-from", required=True)
     parser.add_argument("--filed-to", required=True)
+    parser.add_argument(
+        "--form", choices=list(SEC_COMPANY_FACTS_FORMS), default="10-Q",
+        help="company-facts form: 10-Q (default) or 10-K for issuers that report the "
+             "fourth-quarter pair inside the annual filing",
+    )
     parser.add_argument("--actor", required=True, help="human:<who>")
     parser.add_argument("--run-key", help="defaults to filed-to")
     parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
@@ -171,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
                 filed_to=args.filed_to,
                 actor_ref=args.actor,
                 run_key=args.run_key or args.filed_to,
+                form=args.form,
             )
     except LanePreconditionError as exc:
         print(f"lane precondition failed: {exc}", file=sys.stderr)

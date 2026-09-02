@@ -6,7 +6,7 @@
     "use_time_authority": "none"
   },
   "connector_ref": "connector:sec-edgar",
-  "content_hash": "c5050e466467123e0c79632989a0ca0f4d27ef937402bb2948bc0d6d912c344f",
+  "content_hash": "0193636e575471507fdfb94e52bd8c940174757103bab6f784908f7f8e536dd4",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "fixture_manifest_hash": "8f88e64939d4f2140189337e323ea11479a86fbf459ca3f0afe501f3aa099957",
   "fixture_manifest_ref": "connector-fixture-manifest:sec:0.1",
@@ -89,7 +89,7 @@
       "input_schema_hash": "9391711e60bd62794d66623d67d3788b4f22f0e90d4d3e38aa610eb7d00ac232",
       "input_schema_ref": "schema:connector-inventory:sec:get_company_facts:input:0.1",
       "operation": "get_company_facts",
-      "output_schema_hash": "13a570d37c193318d25cb8b1aa7d165580504e7514deb3254d1fbc0249405b8f",
+      "output_schema_hash": "0b25854ce835ad66e57cfc71c487831d7d1b72fe652a2dd598b1c780eda13167",
       "output_schema_ref": "schema:connector-inventory:sec:get_company_facts:output:0.1",
       "pagination": {
         "bounded_window_required": true,
@@ -491,7 +491,8 @@
               },
               "form": {
                 "enum": [
-                  "10-Q"
+                  "10-Q",
+                  "10-K"
                 ],
                 "type": "string"
               },
@@ -559,7 +560,8 @@
           },
           "form": {
             "enum": [
-              "10-Q"
+              "10-Q",
+              "10-K"
             ],
             "type": "string"
           },
@@ -598,7 +600,8 @@
               },
               "form": {
                 "enum": [
-                  "10-Q"
+                  "10-Q",
+                  "10-K"
                 ],
                 "type": "string"
               },
@@ -654,7 +657,8 @@
           },
           "selection_basis": {
             "enum": [
-              "ordered_allowlist_latest_10-Q"
+              "ordered_allowlist_latest_10-Q",
+              "ordered_allowlist_latest_10-K"
             ],
             "type": "string"
           },
@@ -706,7 +710,7 @@
         ],
         "type": "object"
       },
-      "schema_hash": "13a570d37c193318d25cb8b1aa7d165580504e7514deb3254d1fbc0249405b8f",
+      "schema_hash": "0b25854ce835ad66e57cfc71c487831d7d1b72fe652a2dd598b1c780eda13167",
       "schema_ref": "schema:connector-inventory:sec:get_company_facts:output:0.1"
     }
   ],

@@ -129,6 +129,67 @@ PLAN_AUTO_START_RULE_REF = "research-plan-auto-start:sec-public-list-filings:v1"
 PLAN_COMPANY_FACTS_AUTO_START_RULE_REF = (
     "research-plan-auto-start:sec-public-company-facts:v1"
 )
+# P9b (2026-09-02): the company-facts read admits ``10-K`` next to ``10-Q``
+# for issuers that report the fourth-quarter pair inside the annual filing
+# (Accenture).  Annual-form plans are authorized by their own policy rule
+# so an active policy that lists only the ``v1`` rule keeps rejecting them;
+# the FY - 9M derivation for issuers whose 10-K carries only fiscal-year
+# facts is a separate, not yet frozen rule.
+SEC_COMPANY_FACTS_FORMS: tuple[str, ...] = ("10-Q", "10-K")
+PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF = (
+    "research-plan-auto-start:sec-public-company-facts-annual:v1"
+)
+PLAN_COMPANY_FACTS_RULE_REFS: dict[str, str] = {
+    "10-Q": PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
+    "10-K": PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF,
+}
+PLAN_AUTO_START_RULE_REFS: frozenset[str] = frozenset({
+    PLAN_AUTO_START_RULE_REF, *PLAN_COMPANY_FACTS_RULE_REFS.values(),
+})
+# Packaged SEC template registry.  Every plan binds the template's
+# ``content_hash`` and its operation's ``output_schema_hash`` inside an
+# immutable execution scope, and revalidation rebuilds the scope from the
+# packaged template.  Widening the company-facts output contract (P9b:
+# ``form`` and ``selection_basis`` admit 10-K) therefore changes both hashes;
+# historical plans keep verifying because revalidation accepts any
+# registered (template, contract) pair, while new plans always bind the
+# packaged head.  Appending is the only supported change; a test pins the
+# head to the packaged files.
+SEC_TEMPLATE_REGISTRY: tuple[tuple[str, dict[str, Any]], ...] = (
+    (
+        "v1",
+        {
+            "connector_profile_hash": (
+                "c5050e466467123e0c79632989a0ca0f4d27ef937402bb2948bc0d6d912c344f"
+            ),
+            "output_contract_hashes": {
+                "list_filings": (
+                    "d832b00d9df34a53a22d54470112af1d9a0646ed1057d747a75ace4aa2f2d979"
+                ),
+                "get_company_facts": (
+                    "13a570d37c193318d25cb8b1aa7d165580504e7514deb3254d1fbc0249405b8f"
+                ),
+            },
+        },
+    ),
+    (
+        # P9b: company-facts ``form`` / ``selection_basis`` admit 10-K.
+        "v2",
+        {
+            "connector_profile_hash": (
+                "0193636e575471507fdfb94e52bd8c940174757103bab6f784908f7f8e536dd4"
+            ),
+            "output_contract_hashes": {
+                "list_filings": (
+                    "d832b00d9df34a53a22d54470112af1d9a0646ed1057d747a75ace4aa2f2d979"
+                ),
+                "get_company_facts": (
+                    "0b25854ce835ad66e57cfc71c487831d7d1b72fe652a2dd598b1c780eda13167"
+                ),
+            },
+        },
+    ),
+)
 DEFAULT_REVENUE_CONCEPT_CANDIDATES = (
     "Revenues",
     "RevenueFromContractWithCustomerExcludingAssessedTax",
@@ -224,40 +285,61 @@ def sec_response_budget_head_bytes() -> int:
     return sec_response_budget_bytes(SEC_RESPONSE_BUDGET_CURRENT)
 
 
-def sec_rate_policy_ref_for_budget(tag: str) -> str:
+def sec_template_registry_tag() -> str:
+    """Registry tag of the packaged SEC template (the head), e.g. ``v2``."""
+
+    return sec_template_registry()[-1][0]
+
+
+def _template_suffix(template_tag: str) -> str:
+    """Ref suffix for one template registry tag (``v1`` keeps historical refs)."""
+
+    if not any(tag == template_tag for tag, _entry in SEC_TEMPLATE_REGISTRY):
+        raise ResearchPlanConflict(f"unknown SEC template registry tag: {template_tag!r}")
+    return "" if template_tag == "v1" else f":template-{template_tag}"
+
+
+def sec_rate_policy_ref_for_budget(tag: str, template_tag: str = "v1") -> str:
     """Connector rate policy ref owning one budget tag's quota limits.
 
     ``v1`` keeps the historical single ref so pre-upgrade authority records
     replay byte-for-byte; every later tag gets a sibling ref because rate
-    policy versions must keep one connector profile ref stable.
+    policy versions must keep one connector profile ref stable.  A later
+    template registry tag (P9b) is a new connector profile as well, so it
+    gets its own sibling ref for the same reason.
     """
 
     sec_response_budget_bytes(tag)
+    suffix = _template_suffix(template_tag)
     if tag == "v1":
-        return SEC_RATE_POLICY_REF
-    return f"{SEC_RATE_POLICY_REF}:budget-{tag}"
+        return f"{SEC_RATE_POLICY_REF}{suffix}"
+    return f"{SEC_RATE_POLICY_REF}:budget-{tag}{suffix}"
 
 
 def sec_current_rate_policy_ref() -> str:
-    """Runner-manifest rate policy ref for plans at the budget head."""
+    """Runner-manifest rate policy ref for plans at the budget + template head."""
 
-    return sec_rate_policy_ref_for_budget(SEC_RESPONSE_BUDGET_CURRENT)
+    return sec_rate_policy_ref_for_budget(
+        SEC_RESPONSE_BUDGET_CURRENT, sec_template_registry_tag()
+    )
 
 
 def sec_current_runner_binding_ref() -> str:
-    """Immutable runner-binding ref for the response-budget head."""
+    """Immutable runner-binding ref for the response-budget + template head."""
 
+    suffix = _template_suffix(sec_template_registry_tag())
     if SEC_RESPONSE_BUDGET_CURRENT == "v1":
-        return "runner-binding:sec-public:v1"
-    return f"runner-binding:sec-public:budget-{SEC_RESPONSE_BUDGET_CURRENT}:v1"
+        return f"runner-binding:sec-public{suffix}:v1"
+    return f"runner-binding:sec-public:budget-{SEC_RESPONSE_BUDGET_CURRENT}{suffix}:v1"
 
 
 def sec_current_runner_environment_ref() -> str:
-    """Immutable runner-environment ref for the response-budget head."""
+    """Immutable runner-environment ref for the response-budget + template head."""
 
+    suffix = _template_suffix(sec_template_registry_tag())
     if SEC_RESPONSE_BUDGET_CURRENT == "v1":
-        return "runner-environment:sec-public:v1"
-    return f"runner-environment:sec-public:budget-{SEC_RESPONSE_BUDGET_CURRENT}:v1"
+        return f"runner-environment:sec-public{suffix}:v1"
+    return f"runner-environment:sec-public:budget-{SEC_RESPONSE_BUDGET_CURRENT}{suffix}:v1"
 
 
 _HUMAN_ACTOR_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
@@ -431,9 +513,9 @@ def _validate_company_facts_request(value: Any) -> dict[str, Any]:
         value.get("filed_from"), "company_facts_request.filed_from"
     )
     filed_to = _text(value.get("filed_to"), "company_facts_request.filed_to")
-    if taxonomy != "us-gaap" or unit != "USD" or form != "10-Q":
+    if taxonomy != "us-gaap" or unit != "USD" or form not in SEC_COMPANY_FACTS_FORMS:
         raise ResearchPlanValidationError(
-            "company facts scope is closed to us-gaap/USD/10-Q"
+            "company facts scope is closed to us-gaap/USD/10-Q|10-K"
         )
     if any(
         _XBRL_CONCEPT_RE.fullmatch(candidate) is None
@@ -502,12 +584,67 @@ def _operation_permission_scope(operation: str) -> str:
     raise ResearchPlanValidationError("SEC research operation is not approved")
 
 
-def _operation_policy_rule(operation: str) -> str:
+def _operation_policy_rule(operation: str, parameters: Mapping[str, Any]) -> str:
+    """The policy rule ref that may auto-start one frozen plan scope."""
+
     if operation == SEC_OPERATION:
         return PLAN_AUTO_START_RULE_REF
     if operation == SEC_COMPANY_FACTS_OPERATION:
-        return PLAN_COMPANY_FACTS_AUTO_START_RULE_REF
+        form = parameters.get("form") if isinstance(parameters, Mapping) else None
+        if form not in PLAN_COMPANY_FACTS_RULE_REFS:
+            raise ResearchPlanConflict(
+                "company facts plan form is outside the frozen rule registry"
+            )
+        return PLAN_COMPANY_FACTS_RULE_REFS[form]
     raise ResearchPlanValidationError("SEC research operation is not approved")
+
+
+def _sec_template_registry_head() -> dict[str, Any]:
+    """The registry entry every newly created plan binds (the packaged template)."""
+
+    template = _sec_template()
+    return {
+        "connector_profile_hash": template["content_hash"],
+        "output_contract_hashes": {
+            name: _sec_operation(template, name)["output_schema_hash"]
+            for name in (SEC_OPERATION, SEC_COMPANY_FACTS_OPERATION)
+        },
+    }
+
+
+def sec_template_registry() -> tuple[tuple[str, dict[str, Any]], ...]:
+    """Every registered SEC template binding, oldest first (fail closed).
+
+    The packaged template must be the registry head: a template change
+    without an appended registry entry would otherwise silently create
+    plans that no registered version can revalidate.
+    """
+
+    head = _sec_template_registry_head()
+    if SEC_TEMPLATE_REGISTRY[-1][1] != head:
+        raise ResearchPlanConflict(
+            "packaged SEC template is not the registered head; append a "
+            "SEC_TEMPLATE_REGISTRY entry"
+        )
+    return SEC_TEMPLATE_REGISTRY
+
+
+def _assert_registered_template_binding(
+    scope: Mapping[str, Any], operation_name: str
+) -> None:
+    """Fail closed unless the scope binds one registered template version."""
+
+    for _tag, entry in sec_template_registry():
+        if (
+            scope["connector_profile_hash"] == entry["connector_profile_hash"]
+            and scope["output_contract_hash"]
+            == entry["output_contract_hashes"].get(operation_name)
+        ):
+            return
+    raise ResearchPlanConflict(
+        "plan connector profile / output contract hashes are outside the "
+        "registered SEC template versions"
+    )
 
 
 def _sec_template() -> dict[str, Any]:
@@ -947,8 +1084,10 @@ def _revalidate_execution_scope(
         raise ResearchPlanConflict("plan source drifted from the SEC template")
     if scope["connector_profile_ref"] != template["id"]:
         raise ResearchPlanConflict("plan connector profile drifted")
-    if scope["connector_profile_hash"] != template["content_hash"]:
-        raise ResearchPlanConflict("plan connector profile hash drifted")
+    # Historical plans keep the template binding they were created with:
+    # the (profile hash, output contract hash) pair must match a registered
+    # template version, not only the packaged head.
+    _assert_registered_template_binding(scope, operation_name)
     if scope["permission_scope"] != _operation_permission_scope(operation_name):
         raise ResearchPlanConflict("plan permission scope drifted from the frozen read scope")
     if scope["auth_mode"] != "none":
@@ -961,8 +1100,6 @@ def _revalidate_execution_scope(
         raise ResearchPlanConflict("plan verifier drifted from the frozen source verifier")
     if scope["output_contract_ref"] != operation["output_schema_ref"]:
         raise ResearchPlanConflict("plan output contract drifted")
-    if scope["output_contract_hash"] != operation["output_schema_hash"]:
-        raise ResearchPlanConflict("plan output contract hash drifted")
     parameters = _validate_operation_request(operation_name, scope["parameters"])
     budget = scope["budget"]
     if not isinstance(budget, Mapping) or set(budget) != _BUDGET_FIELDS:
@@ -1304,7 +1441,10 @@ def read_exact_research_plan_policy_authorization(
             "ResearchPlanPolicyAuthorization has an invalid closed shape"
         )
     plan = read_exact_research_plan_version(cursor, wire["plan_version_ref"])
-    expected_rule = _operation_policy_rule(plan["execution_scope"]["operation"])
+    expected_rule = _operation_policy_rule(
+        plan["execution_scope"]["operation"],
+        plan["execution_scope"]["parameters"],
+    )
     if (
         wire["schema_version"] != SCHEMA_VERSION
         or wire["decision"] != "accepted"
@@ -2031,10 +2171,6 @@ class ResearchPlanAuthority:
             if duplicate is not None:
                 return duplicate
             plan = read_exact_research_plan_version(cur, plan_version_ref)
-            if plan["execution_scope"]["parameters"]["form"] != "10-Q":
-                raise ResearchPlanConflict(
-                    "active autonomous plan rule currently accepts 10-Q only"
-                )
             policy_row = cur.execute(
                 "SELECT v.* FROM governance_policy_pointer p "
                 "JOIN governance_policy_versions v "
@@ -2049,13 +2185,24 @@ class ResearchPlanAuthority:
                 raise ResearchPlanConflict("active governance policy is corrupt") from exc
             rule = policy.get("research_plan_auto_start")
             expected_rule = _operation_policy_rule(
-                plan["execution_scope"]["operation"]
+                plan["execution_scope"]["operation"],
+                plan["execution_scope"]["parameters"],
             )
+            # The policy lists the exact rule refs it enables.  A plan is
+            # authorized only when its own rule is listed; every listed
+            # ref must be a known rule and the list must be duplicate-free
+            # (a single-rule policy therefore still authorizes only that
+            # one frozen scope).
+            rules = rule.get("rules") if isinstance(rule, Mapping) else None
             if (
                 not isinstance(rule, Mapping)
                 or set(rule) != {"enabled", "rules"}
                 or rule["enabled"] is not True
-                or rule["rules"] != [expected_rule]
+                or not isinstance(rules, list)
+                or not rules
+                or len(set(rules)) != len(rules)
+                or any(item not in PLAN_AUTO_START_RULE_REFS for item in rules)
+                or expected_rule not in rules
             ):
                 raise ResearchPlanConflict(
                     "active governance policy does not authorize this research plan"
@@ -2912,6 +3059,13 @@ __all__ = [
     "COMPANY_FACTS_PERMISSION_SCOPE",
     "PLAN_AUTO_START_RULE_REF",
     "PLAN_COMPANY_FACTS_AUTO_START_RULE_REF",
+    "PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF",
+    "PLAN_COMPANY_FACTS_RULE_REFS",
+    "PLAN_AUTO_START_RULE_REFS",
+    "SEC_COMPANY_FACTS_FORMS",
+    "SEC_TEMPLATE_REGISTRY",
+    "sec_template_registry",
+    "sec_template_registry_tag",
     "DEFAULT_REVENUE_CONCEPT_CANDIDATES",
     "SIDE_EFFECT_CLASS",
     "plan_identity",

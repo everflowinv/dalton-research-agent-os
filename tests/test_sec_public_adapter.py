@@ -330,6 +330,85 @@ class AdapterTests(unittest.TestCase):
             "RevenueFromContractWithCustomerExcludingAssessedTax",
         )
 
+    def test_company_facts_admits_10k_with_same_filing_fourth_quarter_pair(self):
+        """P9b: an annual filing that reports Q4 and prior-year Q4 (Accenture)."""
+        annual = {
+            "label": "Revenues",
+            "description": "Synthetic annual filing with quarterly disclosures.",
+            "units": {"USD": [
+                # Fiscal-year facts (no quarterly duration) are ignored.
+                {
+                    "start": "2024-09-01", "end": "2025-08-31",
+                    "val": 69672977000, "accn": "0000789019-25-000217",
+                    "fy": 2025, "fp": "FY", "form": "10-K",
+                    "filed": "2025-10-10", "frame": "CY2025",
+                },
+                # Prior-year fourth quarter inside the same 10-K.
+                {
+                    "start": "2024-06-01", "end": "2024-08-31",
+                    "val": 16405819000, "accn": "0000789019-25-000217",
+                    "fy": 2025, "fp": "FY", "form": "10-K",
+                    "filed": "2025-10-10", "frame": "CY2024Q3",
+                },
+                # Fourth quarter of the fiscal year being reported.
+                {
+                    "start": "2025-06-01", "end": "2025-08-31",
+                    "val": 17596260000, "accn": "0000789019-25-000217",
+                    "fy": 2025, "fp": "FY", "form": "10-K",
+                    "filed": "2025-10-10", "frame": "CY2025Q3",
+                },
+                # A later 10-Q must not leak into the 10-K selection.
+                {
+                    "start": "2025-09-01", "end": "2025-11-30",
+                    "val": 18742125000, "accn": "0000789019-25-000222",
+                    "fy": 2026, "fp": "Q1", "form": "10-Q",
+                    "filed": "2025-12-18", "frame": "CY2025Q4",
+                },
+            ]},
+        }
+        payload = {
+            "cik": 789019, "entityName": "ACCENTURE PLC",
+            "facts": {"us-gaap": {"Revenues": annual}},
+        }
+        parameters = {
+            **COMPANY_FACTS_PARAMETERS,
+            "concept_candidates": ["Revenues"],
+            "form": "10-K",
+            "filed_from": "2025-01-01", "filed_to": "2025-12-31",
+        }
+        result = normalize_sec_company_facts(payload, parameters, provider_status=200)
+        self.assertEqual(result["form"], "10-K")
+        self.assertEqual(result["selection_basis"], "ordered_allowlist_latest_10-K")
+        self.assertEqual(result["latest_accession"], "0000789019-25-000217")
+        self.assertEqual(result["current"]["frame"], "CY2025Q3")
+        self.assertEqual(result["prior"]["frame"], "CY2024Q3")
+        self.assertEqual(result["current"]["form"], "10-K")
+        # 17,596,260,000 / 16,405,819,000 - 1 = 7.2562...%
+        self.assertEqual(result["growth_percent"], "7.26")
+        self.assertEqual(len(result["source_record_refs"]), 2)
+        # The same window under form 10-Q selects the later 10-Q accession,
+        # whose lone quarter has no same-filing comparative: fail closed
+        # rather than borrow the 10-K pair.
+        with self.assertRaises(SecPublicAdapterError) as quarterly:
+            normalize_sec_company_facts(
+                payload, {**parameters, "form": "10-Q"}, provider_status=200
+            )
+        self.assertIn("latest 10-Q accession", str(quarterly.exception))
+        # A 10-K that only carries fiscal-year facts fails closed (no FY - 9M
+        # derivation is frozen yet).
+        fiscal_only = json.loads(json.dumps(payload))
+        fiscal_only["facts"]["us-gaap"]["Revenues"]["units"]["USD"] = [
+            annual["units"]["USD"][0]
+        ]
+        with self.assertRaises(SecPublicAdapterError) as failure:
+            normalize_sec_company_facts(fiscal_only, parameters, provider_status=200)
+        self.assertIn("latest 10-K accession", str(failure.exception))
+        # Forms outside the frozen registry are rejected before any selection.
+        with self.assertRaises(SecPublicAdapterError):
+            normalize_sec_company_facts(
+                payload, {**parameters, "form": "8-K"}, provider_status=200
+            )
+
     def test_company_concept_adapter_is_credential_free_and_route_bound(self):
         body = json.dumps(company_facts_payload(), separators=(",", ":")).encode()
         transport = Transport(Response(200, body))

@@ -199,6 +199,38 @@ class SecLaneLauncherTests(unittest.TestCase):
             self.assertEqual(orphan["status"], "orphaned")
             self.assertIsNotNone(orphan["completed_at"])
 
+    def test_form_is_validated_recorded_and_forwarded(self) -> None:
+        """P9b: the annual form rides the ticket and the child argv; others fail closed."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            launcher = self._launcher(root)
+            with self.assertRaises(LaneLaunchRejected):
+                launcher.start(
+                    issuers=["ACN"], filed_from="2026-06-01", filed_to="2026-10-31",
+                    actor_ref=OWNER, form="8-K",
+                )
+            self.assertEqual(os.listdir(root / "state" / "sec-lane-runs"), [])
+            ticket = launcher.start(
+                issuers=["ACN"], filed_from="2026-06-01", filed_to="2026-10-31",
+                actor_ref=OWNER, form="10-K",
+            )
+            self.assertEqual(ticket["form"], "10-K")
+            self.assertEqual(launcher.wait(timeout=30), 0)
+            argv = json.loads(
+                (root / "state" / "sec-lane-runs" / ticket["id"].split(":", 1)[1] / "argv.json").read_text()
+            )
+            self.assertEqual(argv[argv.index("--form") + 1], "10-K")
+            # Default stays the historical quarterly form.
+            default = launcher.start(
+                issuers=["CTSH"], filed_from="2026-06-01", filed_to="2026-10-31", actor_ref=OWNER,
+            )
+            self.assertEqual(default["form"], "10-Q")
+            self.assertEqual(launcher.wait(timeout=30), 0)
+            argv = json.loads(
+                (root / "state" / "sec-lane-runs" / default["id"].split(":", 1)[1] / "argv.json").read_text()
+            )
+            self.assertEqual(argv[argv.index("--form") + 1], "10-Q")
+
     def test_live_mode_passes_allow_network_and_default_governance_loader_is_lazy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

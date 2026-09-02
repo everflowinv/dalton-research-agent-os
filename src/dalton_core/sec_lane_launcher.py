@@ -37,8 +37,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .sec_public_adapter import SEC_COMPANY_FACTS_FORMS
 from .store import canonical_json
-
 
 TICKET_SCHEMA_VERSION = "0.1"
 TICKET_PREFIX = "sec-lane-run"
@@ -193,6 +193,7 @@ class SecLaneLauncher:
         filed_to: str,
         actor_ref: str,
         ticket_dir: Path,
+        form: str = "10-Q",
     ) -> list[str]:
         command = [
             self.python_executable, "-m", CLI_MODULE,
@@ -203,6 +204,7 @@ class SecLaneLauncher:
             "--actor", actor_ref,
             "--filed-from", filed_from,
             "--filed-to", filed_to,
+            "--form", form,
             "--quiet",
             "--stack-dump-seconds", str(STACK_DUMP_SECONDS),
         ]
@@ -223,9 +225,14 @@ class SecLaneLauncher:
         filed_from: str,
         filed_to: str,
         actor_ref: str,
+        form: str = "10-Q",
     ) -> dict[str, Any]:
         if not isinstance(actor_ref, str) or _HUMAN_RE.fullmatch(actor_ref) is None:
             raise LaneLaunchRejected("lane run must be requested by a human principal")
+        if not isinstance(form, str) or form not in SEC_COMPANY_FACTS_FORMS:
+            raise LaneLaunchRejected(
+                f"form must be one of {'|'.join(SEC_COMPANY_FACTS_FORMS)}"
+            )
         if (
             isinstance(issuers, (str, bytes))
             or not isinstance(issuers, Sequence)
@@ -257,6 +264,7 @@ class SecLaneLauncher:
             digest = hashlib.sha256(
                 canonical_json({
                     "issuers": tickers, "filed_from": filed_from, "filed_to": filed_to,
+                    "form": form,
                     "actor_ref": actor_ref, "started_at": started_at,
                     "governance_hash": governance.content_hash,
                 }).encode("utf-8")
@@ -265,7 +273,7 @@ class SecLaneLauncher:
             ticket_dir = _secure_dir(self.tickets_dir / digest)
             command = self._command(
                 issuers=tickers, filed_from=filed_from, filed_to=filed_to,
-                actor_ref=actor_ref, ticket_dir=ticket_dir,
+                actor_ref=actor_ref, ticket_dir=ticket_dir, form=form,
             )
             log_path = ticket_dir / "run.log"
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -286,6 +294,7 @@ class SecLaneLauncher:
                 "issuers": tickers,
                 "filed_from": filed_from,
                 "filed_to": filed_to,
+                "form": form,
                 "actor_ref": actor_ref,
                 "governance_ref": governance.id,
                 "governance_hash": governance.content_hash,

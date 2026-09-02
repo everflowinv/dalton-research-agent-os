@@ -12,6 +12,7 @@ from dalton_core.agenda import AgendaStore
 from dalton_core.observability import ObservabilityStore
 from dalton_core.research_plan import (
     PLAN_AUTO_START_RULE_REF,
+    PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF,
     PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
     SEC_RESPONSE_BUDGET_V1_BYTES,
     SEC_RESPONSE_BUDGET_V2_BYTES,
@@ -19,6 +20,8 @@ from dalton_core.research_plan import (
     ResearchPlanConflict,
     ResearchPlanControlPlane,
     ResearchPlanValidationError,
+    _assert_registered_template_binding,
+    sec_template_registry,
 )
 from dalton_core.research_question_backlog import (
     ResearchQuestionBacklog,
@@ -363,6 +366,147 @@ class ResearchPlanTests(unittest.TestCase):
         self.assertEqual(
             self._start(created, suffix="company-facts")["plan_state"], "started"
         )
+
+    def test_annual_company_facts_plan_needs_its_own_policy_rule(self) -> None:
+        """P9b: 10-K plans bind the annual rule; a 10-Q-only policy rejects them."""
+        decision, records = self._selected_questions([(
+            "How did fourth-quarter revenue change year over year?",
+            "Return the exact same-filing SEC quarterly revenue comparison",
+        )])
+        record = records[0]
+        with self.assertRaises(ResearchPlanValidationError):
+            self.plans.create_company_facts_plan(
+                question_ref=record["question_ref"],
+                question_version_ref=record["question_version_ref"],
+                decision_ref=decision["id"],
+                cik="789019",
+                filed_from="2025-01-01",
+                filed_to="2025-12-31",
+                actor_ref="core:planner",
+                form="8-K",
+            )
+        created = self.plans.create_company_facts_plan(
+            question_ref=record["question_ref"],
+            question_version_ref=record["question_version_ref"],
+            decision_ref=decision["id"],
+            cik="789019",
+            filed_from="2025-01-01",
+            filed_to="2025-12-31",
+            actor_ref="core:planner",
+            form="10-K",
+        )
+        wire = self.plans.plan_version(created["plan_version_ref"])
+        self.assertEqual(wire["execution_scope"]["parameters"]["form"], "10-K")
+        # New plans bind the packaged template head, which must be registered.
+        head = sec_template_registry()[-1][1]
+        self.assertEqual(wire["execution_scope"]["connector_profile_hash"], head["connector_profile_hash"])
+        self.assertEqual(
+            wire["execution_scope"]["output_contract_hash"],
+            head["output_contract_hashes"]["get_company_facts"],
+        )
+        active = self.store.active_policy()
+        policy_wire = dict(active["policy"])
+        policy_wire["research_plan_auto_start"] = {
+            "enabled": True,
+            "rules": [PLAN_COMPANY_FACTS_AUTO_START_RULE_REF],
+        }
+        self.store.create_policy(
+            policy_wire,
+            policy_version_id="policy:company-facts-annual:test:v2",
+            version_number=2,
+            prior_version_ref=active["policy_version_id"],
+            actor_ref="human:test-owner",
+            change_reason="quarterly rule only",
+            activate=True,
+        )
+        with self.assertRaises(ResearchPlanConflict):
+            self.plans.authorize_plan_by_policy(
+                plan_version_ref=created["plan_version_ref"],
+                idempotency_key="authorize-plan:annual-refused",
+            )
+        policy_wire["research_plan_auto_start"] = {
+            "enabled": True,
+            "rules": [
+                PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
+                PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF,
+            ],
+        }
+        self.store.create_policy(
+            policy_wire,
+            policy_version_id="policy:company-facts-annual:test:v3",
+            version_number=3,
+            prior_version_ref="policy:company-facts-annual:test:v2",
+            actor_ref="human:test-owner",
+            change_reason="add the annual rule",
+            activate=True,
+        )
+        authorized = self.plans.authorize_plan_by_policy(
+            plan_version_ref=created["plan_version_ref"],
+            idempotency_key="authorize-plan:annual",
+        )
+        self.assertEqual(
+            authorized["authorization"]["rule_ref"],
+            PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF,
+        )
+        self.assertEqual(self._start(created, suffix="annual")["plan_state"], "started")
+        # Unknown or duplicated rule refs in the policy list fail closed even
+        # when the plan's own rule is present.
+        for rules in (
+            [PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF, "research-plan-auto-start:unknown:v9"],
+            [PLAN_COMPANY_FACTS_ANNUAL_AUTO_START_RULE_REF] * 2,
+        ):
+            policy_wire["research_plan_auto_start"] = {"enabled": True, "rules": rules}
+            version = 4 if "unknown" in rules[-1] else 5
+            self.store.create_policy(
+                policy_wire,
+                policy_version_id=f"policy:company-facts-annual:test:v{version}",
+                version_number=version,
+                prior_version_ref=f"policy:company-facts-annual:test:v{version - 1}",
+                actor_ref="human:test-owner",
+                change_reason="malformed rule list",
+                activate=True,
+            )
+            other_decision, other_records = self._selected_questions([(
+                f"How did fourth-quarter revenue change (policy v{version})?",
+                "Return the exact same-filing SEC quarterly revenue comparison",
+            )])
+            other = self.plans.create_company_facts_plan(
+                question_ref=other_records[0]["question_ref"],
+                question_version_ref=other_records[0]["question_version_ref"],
+                decision_ref=other_decision["id"],
+                cik="789019",
+                filed_from="2024-01-01",
+                filed_to=f"2024-12-{version:02d}",
+                actor_ref="core:planner",
+                form="10-K",
+            )
+            with self.assertRaises(ResearchPlanConflict):
+                self.plans.authorize_plan_by_policy(
+                    plan_version_ref=other["plan_version_ref"],
+                    idempotency_key=f"authorize-plan:annual-malformed-{version}",
+                )
+
+    def test_sec_template_registry_keeps_historical_bindings(self) -> None:
+        """P9b: the v1 (10-Q-only) template pair still revalidates; unknown pairs fail."""
+        registry = sec_template_registry()
+        self.assertEqual([tag for tag, _entry in registry], ["v1", "v2"])
+        v1 = registry[0][1]
+        self.assertEqual(
+            v1["connector_profile_hash"],
+            "c5050e466467123e0c79632989a0ca0f4d27ef937402bb2948bc0d6d912c344f",
+        )
+        legacy_scope = {
+            "connector_profile_hash": v1["connector_profile_hash"],
+            "output_contract_hash": v1["output_contract_hashes"]["get_company_facts"],
+        }
+        _assert_registered_template_binding(legacy_scope, "get_company_facts")
+        with self.assertRaises(ResearchPlanConflict):
+            _assert_registered_template_binding(
+                {**legacy_scope, "output_contract_hash": registry[1][1]["output_contract_hashes"]["get_company_facts"]},
+                "get_company_facts",
+            )
+        with self.assertRaises(ResearchPlanConflict):
+            _assert_registered_template_binding(legacy_scope, "list_filings")
 
     def test_plan_binds_the_exact_selected_candidate_not_list_position(self) -> None:
         decision, records = self._selected_questions([

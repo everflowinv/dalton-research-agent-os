@@ -31,6 +31,10 @@ Tier 1 循环的提案者从确定性 planner 扩展为「LLM 优先、确定性
    （复用了 thesis-impact 的教训）；端到端补 `planner_expected_agent_id` 配置链。
 3. live 观测：修复前 3 次模型调用成功但 bind 全败（缺口 1），修好隔离副本后全链通过再部署。
 
+追记（2026-09-02）：缺口 1 的 worker 侧修复（`llm_research_planner_worker.py` 把「Scheduler 与 Core 必须同一连接」
+的构造检查换成「Scheduler 必须提供 WorkOrder authority」）在 2026-09-01 已随 wheel 部署到 live，但当时漏提交；
+2026-09-02 以 commit `ba75a78` 补入 main，专项测试 `tests/test_llm_research_planner_worker.py` 2/2。
+
 ## live 验证（2026-09-01 晚）
 
 - 隔离 live 副本全链：V4 Flash 撰写候选（选 CTSH、给出真实 rationale），Core 绑定为

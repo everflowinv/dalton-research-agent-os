@@ -1,0 +1,49 @@
+{
+  "policy_ref": "commit-gate",
+  "policy_version_id": "policy-4",
+  "version_number": 4,
+  "prior_version_ref": "policy-3",
+  "activate": true,
+  "effective_from": "2026-09-02T00:00:00+00:00",
+  "effective_until": null,
+  "change_reason": "P9b: authorize the SEC company-facts annual-filing (10-K) quarterly growth rules next to the 10-Q rules, so Accenture's Q4 FY2026 pair inside the 10-K can be read and policy-committed; weekly brief binding unchanged",
+  "policy": {
+    "allowed_verdicts": [
+      "pass"
+    ],
+    "independence_predicates": [
+      {
+        "left_path": "producer.model_family",
+        "operator": "ne",
+        "right_path": "verifier.model_family"
+      }
+    ],
+    "required_verification": true,
+    "research_plan_auto_start": {
+      "enabled": true,
+      "rules": [
+        "research-plan-auto-start:sec-public-company-facts:v1",
+        "research-plan-auto-start:sec-public-company-facts-annual:v1"
+      ]
+    },
+    "research_candidate_auto_commit": {
+      "enabled": true,
+      "rules": [
+        "research-auto-commit:sec-public-company-facts-growth:v1",
+        "research-auto-commit:sec-public-company-facts-growth-annual:v1"
+      ],
+      "max_records": 20
+    },
+    "weekly_brief_auto_publish": {
+      "enabled": true,
+      "rule_ref": "weekly-brief-auto-publish:scheduled-exact-plan:v1",
+      "allowed_plan_bindings": [
+        {
+          "plan_ref": "weekly-brief-plan:us-it-services:v3",
+          "plan_hash": "75153819af1180829c62aa45526a688914132eb427fa59ee31e083bd83e9c8a1"
+        }
+      ],
+      "max_issues_per_week": 1
+    }
+  }
+}

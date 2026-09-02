@@ -1,6 +1,25 @@
 # Dalton 项目进度
 
 更新日期：2026-09-02
+- **P9b-1「SEC company-facts 读 10-K」development candidate 已完成（2026-09-02），未部署。** 核对 live
+  companyfacts 后确认：ACN 的 10-K 本身带 Q4 单季值与上年同期值（同一 accession、frame 齐全），CTSH / EPAM /
+  IBM / DXC 的 10-K 只有全年值。因此本片让 `10-K` 走既有「同一 filing 的季度对比」规则（覆盖 10/1 之后 ACN Q4
+  FY2026 的 10-K），FY − 9M 跨 accession 派生留作后续冻结规则。追加式改动：company-facts 表单注册表
+  `10-Q|10-K`、annual 专用 policy rule（auto-start / auto-commit 各一条，只列 10-Q 规则的 policy 继续拒绝 10-K）、
+  SEC 模板注册表 `SEC_TEMPLATE_REGISTRY`（v1 旧 hash、v2 当前 hash，历史 plan 按注册版本重验）、connector profile /
+  price / rate policy 的 template 版本维度、lane / CLI / launcher / writer op 的 `form` 参数，并修掉一个潜在
+  阻断：同一 issuer 的第二个窗口会撞上「only an open question can be selected」，现在每次运行问窗口专属的问题。
+  live 只读副本排练 `scripts/run_p9b_annual_lane_canary.py` 用真实 ACN companyfacts 通过：5 条历史 plan 重验、
+  候选 policy-4 装入、10-K lane committed（Q4 FY2025 USD 17,596.26M，同比 +7.26%，source / numeric 均 pass）。
+  **live 激活需要 owner 三步同做**：批准 `deploy/connector-governance/sec-company-facts-v2.json`（模板 hash 变了，
+  只重装 wheel 不批准会让人工 lane 也拒绝启动）、用 `dalton-gov create_policy` 发布
+  `deploy/phase1/governance-policy-v4-company-facts-annual.candidate.params.json`、重装 wheel。见
+  [P9b-1 报告](reports/p9b1-sec-company-facts-annual-form-v0.1-2026-09-02.md)。
+- **P9a 已于 2026-09-02 05:05Z 发布到 live（owner go）。** 重装 wheel 后 writer 自建 playbook / mission 表，
+  `human:lumos` 发布 `research-playbook-version:team-analyst-manual:1`（hash `7fe802df…`）与
+  `coverage-mission-version:us-it-services:1`（hash `b63e1652…`，绑 constitution v2 / p8a mandate / playbook v1）。
+  注意：版本 hash 含 `created_at`，live hash 与 canary 副本不同，mission 绑定必须用 live 实际 hash。阶段账本仍为
+  0 条；没有激活任何自动化写入。
 - **当前阶段：Phase 9「任务驱动的自主研究（Coverage Mission）」已开工。** owner 2026-09-02 定下目标形态：人下达
   任务（如「建立对 US IT services 行业的首次覆盖」），OS 7×24 自主从 SEC / AlphaEngine / Guidepoint / web search
   找资料，建立行业认知、公司财务模型和预测，人只在检查点看结果。裁决、切片顺序与退出门槛见

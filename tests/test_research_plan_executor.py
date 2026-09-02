@@ -461,6 +461,8 @@ class ResearchPlanExecutorTests(unittest.TestCase):
         )
 
     def test_company_facts_run_registers_budget_v2_authority(self) -> None:
+        # P9b: the packaged template is registry tag v2, so the budget-v2 profile
+        # and its sibling price / rate-policy refs carry the template suffix.
         harness = self.harness(suffix="budget-v2", company_facts=True)
         outcomes = harness.run_to_complete()
         self.assertEqual(outcomes[-1]["status"], "complete")
@@ -475,7 +477,7 @@ class ResearchPlanExecutorTests(unittest.TestCase):
         )
         self.assertEqual(
             rows[1]["profile_version_id"],
-            "connector-profile-template:sec:0.1:budget-v2",
+            "connector-profile-template:sec:0.1:budget-v2:template-v2",
         )
         seeded = json.loads(rows[0]["record_json"])
         upgraded = json.loads(rows[1]["record_json"])
@@ -483,10 +485,10 @@ class ResearchPlanExecutorTests(unittest.TestCase):
         self.assertEqual(upgraded["max_response_bytes"], 8 * 1024 * 1024)
         policy = harness.connectors.connection.execute(
             "SELECT policy_ref, record_json FROM connector_rate_policy_versions "
-            "WHERE policy_version_id='connector-rate-policy:sec-public:budget-v2:v1'"
+            "WHERE policy_version_id='connector-rate-policy:sec-public:budget-v2:template-v2:v1'"
         ).fetchone()
         self.assertIsNotNone(policy)
-        self.assertEqual(policy["policy_ref"], "connector-rate-policy:sec-public:budget-v2")
+        self.assertEqual(policy["policy_ref"], "connector-rate-policy:sec-public:budget-v2:template-v2")
         self.assertEqual(
             json.loads(policy["record_json"])["limits"]["bytes"], 8 * 1024 * 1024
         )
@@ -494,16 +496,16 @@ class ResearchPlanExecutorTests(unittest.TestCase):
             "SELECT price_rate_ref, connector_profile_ref "
             "FROM connector_price_rate_versions "
             "WHERE price_rate_version_id="
-            "'connector-price:sec-public:zero:budget-v2:v1'"
+            "'connector-price:sec-public:zero:budget-v2:template-v2:v1'"
         ).fetchone()
         self.assertIsNotNone(price)
         self.assertEqual(
             price["price_rate_ref"],
-            "connector-price:sec-public:zero:budget-v2",
+            "connector-price:sec-public:zero:budget-v2:template-v2",
         )
         self.assertEqual(
             price["connector_profile_ref"],
-            "connector-profile-template:sec:0.1:budget-v2",
+            "connector-profile-template:sec:0.1:budget-v2:template-v2",
         )
         # The invocation that actually ran must bind the budget-v2 profile.
         invocation = json.loads(
@@ -513,7 +515,7 @@ class ResearchPlanExecutorTests(unittest.TestCase):
         )
         self.assertEqual(
             invocation["connector_profile_ref"],
-            "connector-profile-template:sec:0.1:budget-v2",
+            "connector-profile-template:sec:0.1:budget-v2:template-v2",
         )
 
         claim = json.loads(

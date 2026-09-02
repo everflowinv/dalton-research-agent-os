@@ -28,6 +28,25 @@ from .store import canonical_json, content_hash
 SCHEMA_VERSION = "0.1"
 RULE_REF = "research-auto-commit:sec-public-filing-count:v1"
 COMPANY_FACTS_RULE_REF = "research-auto-commit:sec-public-company-facts-growth:v1"
+# P9b (2026-09-02): the same same-accession quarterly growth rule applied to a
+# 10-K that reports the fourth-quarter pair (Accenture).  It is a separate
+# rule ref so a policy listing only the 10-Q rule keeps rejecting annual
+# candidates; the FY - 9M derivation is not a rule yet.
+COMPANY_FACTS_ANNUAL_RULE_REF = (
+    "research-auto-commit:sec-public-company-facts-growth-annual:v1"
+)
+COMPANY_FACTS_RULE_REFS: dict[str, str] = {
+    "10-Q": COMPANY_FACTS_RULE_REF,
+    "10-K": COMPANY_FACTS_ANNUAL_RULE_REF,
+}
+KNOWN_RULE_REFS: frozenset[str] = frozenset({RULE_REF, *COMPANY_FACTS_RULE_REFS.values()})
+_RULE_FINDINGS: dict[str, str] = {
+    RULE_REF: "matched exact deterministic SEC filing-count rule",
+    COMPANY_FACTS_RULE_REF: "matched exact deterministic SEC company-facts growth rule",
+    COMPANY_FACTS_ANNUAL_RULE_REF: (
+        "matched exact deterministic SEC company-facts annual-filing quarterly growth rule"
+    ),
+}
 ACTOR_REF = "system:research-auto-commit"
 _CIK_RE = re.compile(r"^[0-9]{10}$")
 _DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -77,12 +96,22 @@ def _policy_rule(policy_version: Mapping[str, Any]) -> dict[str, Any]:
         )
     if rule["enabled"] is not True:
         raise ResearchAutoCommitRejected("research candidate auto-commit is disabled")
-    if rule["rules"] not in ([RULE_REF], [COMPANY_FACTS_RULE_REF]):
+    rules = rule["rules"]
+    # Either the single filing-count rule, or a duplicate-free list drawn
+    # from the company-facts growth rules (one per admitted form).  The
+    # form of the staged candidate selects the rule that must be listed.
+    if (
+        not isinstance(rules, list)
+        or not rules
+        or len(set(rules)) != len(rules)
+        or any(item not in KNOWN_RULE_REFS for item in rules)
+        or (RULE_REF in rules and rules != [RULE_REF])
+    ):
         raise ResearchAutoCommitRejected("active governance policy rule set is not supported")
     max_records = rule["max_records"]
     if isinstance(max_records, bool) or not isinstance(max_records, int) or not 1 <= max_records <= 100:
         raise ResearchAutoCommitRejected("research auto-commit max_records is invalid")
-    return {**dict(rule), "selected_rule": rule["rules"][0]}
+    return {**dict(rule), "selected_rule": rules[0]}
 
 
 def validate_policy_commit_decision(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -101,7 +130,7 @@ def validate_policy_commit_decision(value: Mapping[str, Any]) -> dict[str, Any]:
         wire["reviewer_ref"] != ACTOR_REF
         or wire["authorization"] != "versioned_governance_policy"
         or wire["source"] != "governance_policy"
-        or wire["rule_ref"] not in {RULE_REF, COMPANY_FACTS_RULE_REF}
+        or wire["rule_ref"] not in KNOWN_RULE_REFS
     ):
         raise ResearchAutoCommitError("PolicyCommitDecision authority is invalid")
     for field in (
@@ -119,12 +148,7 @@ def validate_policy_commit_decision(value: Mapping[str, Any]) -> dict[str, Any]:
         "subject_ref", "metric_or_aspect", "period", "basis", "normalized_statement",
     }:
         raise ResearchAutoCommitError("PolicyCommitDecision.reviewed_semantics is invalid")
-    expected_finding = {
-        RULE_REF: "matched exact deterministic SEC filing-count rule",
-        COMPANY_FACTS_RULE_REF: (
-            "matched exact deterministic SEC company-facts growth rule"
-        ),
-    }[wire["rule_ref"]]
+    expected_finding = _RULE_FINDINGS[wire["rule_ref"]]
     if wire["findings"] != [expected_finding]:
         raise ResearchAutoCommitError("PolicyCommitDecision.findings is invalid")
     declared = wire.pop("content_hash")
@@ -329,12 +353,24 @@ def authorize_policy_candidate(
             raise ResearchAutoCommitRejected(
                 "company facts normalized payload is unavailable"
             )
+        form = payload.get("form")
+        if form not in COMPANY_FACTS_RULE_REFS:
+            raise ResearchAutoCommitRejected(
+                "company facts form is outside the frozen rule registry"
+            )
+        # The candidate's form selects the rule; the active policy must list
+        # exactly that rule for the commit to be authorized.
+        selected_rule = COMPANY_FACTS_RULE_REFS[form]
+        if selected_rule not in rule["rules"]:
+            raise ResearchAutoCommitRejected(
+                "active governance policy does not list the company facts rule for this form"
+            )
         expected_parameters = {
             "cik": payload.get("cik"),
             "taxonomy": payload.get("taxonomy"),
             "concept_candidates": payload.get("concept_candidates"),
             "unit": payload.get("unit"),
-            "form": payload.get("form"),
+            "form": form,
             "filed_from": payload.get("filed_from"),
             "filed_to": payload.get("filed_to"),
         }
@@ -350,7 +386,7 @@ def authorize_policy_candidate(
             or len(records) != 2
             or payload.get("latest_accession") != current.get("accession")
             or payload.get("selection_basis")
-            != "ordered_allowlist_latest_10-Q"
+            != f"ordered_allowlist_latest_{form}"
             or not isinstance(payload.get("eligible_concepts"), list)
             or not payload.get("eligible_concepts")
             or payload.get("eligible_concepts")[0] != payload.get("concept")
@@ -386,7 +422,7 @@ def authorize_policy_candidate(
             "semantic_verification_status": "unverified",
             "actor_ref": "runner:research-plan-executor",
         }
-        finding = "matched exact deterministic SEC company-facts growth rule"
+        finding = _RULE_FINDINGS[selected_rule]
     if any(claim_wire[field] != expected for field, expected in expected_claim.items()):
         raise ResearchAutoCommitRejected(
             "candidate semantics do not match the deterministic SEC policy rule"
@@ -437,7 +473,10 @@ def authorize_policy_candidate(
 
 __all__ = [
     "ACTOR_REF",
+    "COMPANY_FACTS_ANNUAL_RULE_REF",
     "COMPANY_FACTS_RULE_REF",
+    "COMPANY_FACTS_RULE_REFS",
+    "KNOWN_RULE_REFS",
     "RULE_REF",
     "ResearchAutoCommitError",
     "ResearchAutoCommitRejected",

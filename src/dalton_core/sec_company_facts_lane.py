@@ -55,12 +55,15 @@ from .connector_transport_executor import ConnectorTransportExecutor
 from .observability import ObservabilityStore
 from .raw_spool import RawSpool
 from .research_auto_commit import (
+    KNOWN_RULE_REFS as KNOWN_AUTO_COMMIT_RULE_REFS,
     COMPANY_FACTS_RULE_REF as COMPANY_FACTS_AUTO_COMMIT_RULE_REF,
 )
 from .research_coordinator import ResearchCoordinatorStore
 from .research_plan import (
     DEFAULT_REVENUE_CONCEPT_CANDIDATES,
+    PLAN_AUTO_START_RULE_REFS,
     PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
+    SEC_COMPANY_FACTS_FORMS,
     ResearchPlanAuthority,
     ResearchPlanControlPlane,
     _plan_work_orders,
@@ -230,25 +233,38 @@ def check_core_governance_rules(core: DaltonStore) -> dict[str, Any]:
         raise LanePreconditionError(f"Core has no active governance policy: {exc}") from exc
     policy = active["policy"]
     problems = []
+
+    def _lists(rules: Any, required: str, known: frozenset[str]) -> bool:
+        # The quarterly rule must be listed; every listed ref must be a known
+        # rule (P9b adds the annual 10-K rules next to it) and the list must
+        # be duplicate-free.  Which rule authorizes one run is decided per
+        # plan / candidate by its form, never here.
+        return (
+            isinstance(rules, list)
+            and required in rules
+            and len(set(rules)) == len(rules)
+            and all(item in known for item in rules)
+        )
+
     start = policy.get("research_plan_auto_start")
     if not (
         isinstance(start, Mapping)
         and start.get("enabled") is True
-        and start.get("rules") == [PLAN_COMPANY_FACTS_AUTO_START_RULE_REF]
+        and _lists(start.get("rules"), PLAN_COMPANY_FACTS_AUTO_START_RULE_REF, PLAN_AUTO_START_RULE_REFS)
     ):
         problems.append(
             "research_plan_auto_start must be {enabled: true, rules: "
-            f"[{PLAN_COMPANY_FACTS_AUTO_START_RULE_REF!r}]}}"
+            f"[{PLAN_COMPANY_FACTS_AUTO_START_RULE_REF!r}, ...known rules]}}"
         )
     commit = policy.get("research_candidate_auto_commit")
     if not (
         isinstance(commit, Mapping)
         and commit.get("enabled") is True
-        and commit.get("rules") == [COMPANY_FACTS_AUTO_COMMIT_RULE_REF]
+        and _lists(commit.get("rules"), COMPANY_FACTS_AUTO_COMMIT_RULE_REF, KNOWN_AUTO_COMMIT_RULE_REFS)
     ):
         problems.append(
             "research_candidate_auto_commit must be {enabled: true, rules: "
-            f"[{COMPANY_FACTS_AUTO_COMMIT_RULE_REF!r}], max_records: N}}"
+            f"[{COMPANY_FACTS_AUTO_COMMIT_RULE_REF!r}, ...known rules], max_records: N}}"
         )
     if problems:
         raise LanePreconditionError(
@@ -551,12 +567,26 @@ class SecCompanyFactsLane:
             raise AgendaConflict("mandate idempotency conflict")
 
     def _register_question(
-        self, issuer: Issuer, *, filed_from: str, filed_to: str, run_key: str
+        self, issuer: Issuer, *, filed_from: str, filed_to: str, run_key: str,
+        form: str = "10-Q",
     ) -> tuple[dict[str, Any], dict[str, Any], str]:
-        suffix = content_hash({
+        identity: dict[str, Any] = {
             "lane": LANE_KIND, "company_ref": issuer.company_ref,
             "filed_from": filed_from, "filed_to": filed_to, "run_key": run_key,
-        })[:16]
+        }
+        # The historical (10-Q) suffix must stay byte-identical so a
+        # same-parameter rerun replays the identical idempotent requests;
+        # only the annual form adds itself to the identity.
+        if form != "10-Q":
+            identity["form"] = form
+        suffix = content_hash(identity)[:16]
+        # A backlog question's identity is (mandate, company, text) and its
+        # state machine is terminal once answered, so one bare question per
+        # issuer would make every later window (a new 10-Q, the 10-K) fail
+        # with "only an open question can be selected".  Each run therefore
+        # asks its own window-specific question; exact same-parameter reruns
+        # still converge through the idempotent request keys below.
+        question_text = f"{QUESTION} ({form} filed {filed_from}..{filed_to})"
         snapshot = {
             "schema_version": "0.1",
             "snapshot_id": f"perception:{issuer.company_ref}:{filed_to}:{suffix}",
@@ -594,7 +624,7 @@ class SecCompanyFactsLane:
             candidates=[{
                 "candidate_id": f"candidate:{LANE_SLUG}:{suffix}",
                 "company_ref": issuer.company_ref,
-                "question": QUESTION,
+                "question": question_text,
                 "answer_criteria": ANSWER_CRITERIA,
                 "features": {
                     "mandate_relevance": 3, "catalyst_urgency": 2,
@@ -615,7 +645,7 @@ class SecCompanyFactsLane:
         record = self.backlog.record_question(
             mandate_version_ref=MANDATE_VERSION_ID,
             company_ref=issuer.company_ref,
-            question=QUESTION,
+            question=question_text,
             answer_criteria=ANSWER_CRITERIA,
             source_refs=["source:sec-edgar"],
             actor_ref="core",
@@ -655,11 +685,17 @@ class SecCompanyFactsLane:
         actor_ref: str,
         run_key: str,
         concept_candidates: Sequence[str] = DEFAULT_REVENUE_CONCEPT_CANDIDATES,
+        form: str = "10-Q",
     ) -> dict[str, Any]:
+        if form not in SEC_COMPANY_FACTS_FORMS:
+            raise LanePreconditionError(
+                f"form must be one of {'|'.join(SEC_COMPANY_FACTS_FORMS)}"
+            )
         active = check_core_governance_rules(self.core)
         self.ensure_agenda_bindings(actor_ref=actor_ref)
         decision, record, suffix = self._register_question(
-            issuer, filed_from=filed_from, filed_to=filed_to, run_key=run_key
+            issuer, filed_from=filed_from, filed_to=filed_to, run_key=run_key,
+            form=form,
         )
         created = self.plans.create_company_facts_plan(
             question_ref=record["question_ref"],
@@ -670,6 +706,7 @@ class SecCompanyFactsLane:
             filed_to=filed_to,
             actor_ref="core:planner",
             concept_candidates=list(concept_candidates),
+            form=form,
             idempotency_key=f"create-plan:{LANE_SLUG}:{suffix}",
         )
         plan_ref = created["plan_version_ref"]
@@ -694,6 +731,7 @@ class SecCompanyFactsLane:
                 break
         summary: dict[str, Any] = {
             "issuer": issuer.__dict__,
+            "form": form,
             "plan": {
                 "ref": plan_wire["id"],
                 "hash": plan_wire["content_hash"],
@@ -824,7 +862,12 @@ class SecCompanyFactsLane:
         run_key: str,
         issuers: Sequence[Issuer] | None = None,
         concept_candidates: Sequence[str] = DEFAULT_REVENUE_CONCEPT_CANDIDATES,
+        form: str = "10-Q",
     ) -> dict[str, Any]:
+        if form not in SEC_COMPANY_FACTS_FORMS:
+            raise LanePreconditionError(
+                f"form must be one of {'|'.join(SEC_COMPANY_FACTS_FORMS)}"
+            )
         results = []
         for issuer in (issuers or self.issuers):
             if results:
@@ -833,7 +876,7 @@ class SecCompanyFactsLane:
                 results.append(self.run_issuer(
                     issuer, filed_from=filed_from, filed_to=filed_to,
                     actor_ref=actor_ref, run_key=run_key,
-                    concept_candidates=concept_candidates,
+                    concept_candidates=concept_candidates, form=form,
                 ))
             except LanePreconditionError:
                 raise
@@ -848,6 +891,7 @@ class SecCompanyFactsLane:
             "lane": LANE_KIND,
             "created_at": _wire_time(datetime.now(timezone.utc)),
             "run_key": run_key,
+            "form": form,
             "filed_from": filed_from,
             "filed_to": filed_to,
             "governance_ref": self.governance.id,

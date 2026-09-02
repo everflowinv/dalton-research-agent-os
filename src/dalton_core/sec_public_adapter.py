@@ -244,6 +244,22 @@ def _decimal_integer(value: Any, name: str) -> Decimal:
     raise SecPublicAdapterError(f"{name} must be an exact integer")
 
 
+# Closed form registry for the company-facts quarterly comparison.  ``10-Q``
+# is the historical rule; ``10-K`` (P9b, 2026-09-02) admits the fourth-quarter
+# pair that some issuers (Accenture) report inside the annual filing.  Both
+# forms use the same same-accession quarterly selection below; a 10-K that
+# carries only fiscal-year facts fails closed.
+SEC_COMPANY_FACTS_FORMS: tuple[str, ...] = ("10-Q", "10-K")
+
+
+def company_facts_selection_basis(form: str) -> str:
+    """Frozen selection-basis label for one admitted company-facts form."""
+
+    if form not in SEC_COMPANY_FACTS_FORMS:
+        raise SecPublicAdapterError("company facts form is outside the frozen registry")
+    return f"ordered_allowlist_latest_{form}"
+
+
 def _quarterly_fact(
     value: Any,
     *,
@@ -308,9 +324,13 @@ def normalize_sec_company_concept(
 ) -> dict[str, Any]:
     """Select one exact current/prior quarterly pair and recompute YoY growth.
 
-    The pair must come from the same 10-Q accession.  That binds both values
-    to one comparative filing and avoids silently mixing later restatements,
-    different duration contexts, annual facts, or two taxonomy concepts.
+    The pair must come from the same accession of the requested form (10-Q,
+    or 10-K for issuers that report the fourth-quarter pair inside the annual
+    filing).  That binds both values to one comparative filing and avoids
+    silently mixing later restatements, different duration contexts, annual
+    facts, or two taxonomy concepts.  A 10-K that only carries fiscal-year
+    facts fails closed here; the FY - 9M derivation is a separate, not yet
+    frozen rule.
     """
 
     if not isinstance(payload, Mapping):
@@ -336,9 +356,9 @@ def normalize_sec_company_concept(
         raise SecPublicAdapterError(
             "company concept filing window must span 0..400 days"
         )
-    if taxonomy != "us-gaap" or unit != "USD" or form != "10-Q":
+    if taxonomy != "us-gaap" or unit != "USD" or form not in SEC_COMPANY_FACTS_FORMS:
         raise SecPublicAdapterError(
-            "company concept canary is closed to us-gaap/USD/10-Q"
+            "company concept canary is closed to us-gaap/USD/10-Q|10-K"
         )
     reported_cik = _issuer(str(payload.get("cik")))
     if reported_cik != cik:
@@ -503,11 +523,11 @@ def _latest_company_facts_accession(
                 latest_accessions.add(accession)
     if latest_filed is None:
         raise SecPublicAdapterError(
-            "SEC company facts has no 10-Q accession in the filing window"
+            f"SEC company facts has no {form} accession in the filing window"
         )
     if len(latest_accessions) != 1:
         raise SecPublicAdapterError(
-            "SEC company facts latest 10-Q accession is ambiguous"
+            f"SEC company facts latest {form} accession is ambiguous"
         )
     return next(iter(latest_accessions))
 
@@ -550,9 +570,9 @@ def normalize_sec_company_facts(
         raise SecPublicAdapterError(
             "company facts filing window must span 0..400 days"
         )
-    if taxonomy != "us-gaap" or unit != "USD" or form != "10-Q":
+    if taxonomy != "us-gaap" or unit != "USD" or form not in SEC_COMPANY_FACTS_FORMS:
         raise SecPublicAdapterError(
-            "company facts resolver is closed to us-gaap/USD/10-Q"
+            "company facts resolver is closed to us-gaap/USD/10-Q|10-K"
         )
     if _issuer(str(payload.get("cik"))) != cik:
         raise SecPublicAdapterError("SEC company facts CIK does not match the request")
@@ -612,14 +632,14 @@ def normalize_sec_company_facts(
             eligible.append(normalized)
     if not eligible:
         raise SecPublicAdapterError(
-            "no allowlisted revenue concept resolves on the latest 10-Q accession"
+            f"no allowlisted revenue concept resolves on the latest {form} accession"
         )
     selected = dict(eligible[0])
     selected.pop("content_hash")
     selected["concept_candidates"] = candidates
     selected["eligible_concepts"] = [item["concept"] for item in eligible]
     selected["latest_accession"] = latest_accession
-    selected["selection_basis"] = "ordered_allowlist_latest_10-Q"
+    selected["selection_basis"] = company_facts_selection_basis(form)
     selected["content_hash"] = content_hash(selected)
     return selected
 
