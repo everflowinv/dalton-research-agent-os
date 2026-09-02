@@ -66,8 +66,8 @@ class LLMResearchPlannerModelWorker:
         lease_seconds: float | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if scheduler.connection is not store.connection:
-            raise TypeError("worker and Scheduler must share one Core connection")
+        if not callable(getattr(scheduler, "work_order_authority", None)):
+            raise TypeError("planner worker requires Scheduler WorkOrder authority")
         if observability.store is not store:
             raise TypeError("worker accounting must share one Core authority")
         if not isinstance(routing_policy_ref, str) or not routing_policy_ref:
