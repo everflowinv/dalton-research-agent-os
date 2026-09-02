@@ -2,7 +2,8 @@
 
 Tier 1 covers one probe operation: SEC Company Facts source-level coverage.
 The executor performs a single bounded public HTTPS fetch per probe (no
-credentials, no connector authority), selects the latest 10-Q accession that
+credentials, no connector authority), selects the latest requested 10-Q or
+10-K accession that
 carries the queried revenue concept inside the configured filing window, and
 returns the ResultEnvelope wire for the source-level ``matches`` contract the
 BoundedPlannerControlPlane's ``record_outcome`` expects.  HTTP failures and
@@ -156,6 +157,7 @@ def execute_probe_work_order(
         "locator": locator,
         "filed_from": filed_from,
         "filed_to": filed_to,
+        "form": form,
     }
     envelope = {
         "schema_version": SCHEMA_VERSION,
@@ -169,7 +171,7 @@ def execute_probe_work_order(
         "artifact_refs": [],
         "error": None,
         "metadata": {"probe": "sec-company-facts", "filed_from": filed_from,
-                     "filed_to": filed_to, "bytes_written": 0},
+                     "filed_to": filed_to, "form": form, "bytes_written": 0},
     }
 
     sink = _MemorySink()

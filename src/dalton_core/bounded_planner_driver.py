@@ -230,6 +230,10 @@ class BoundedPlannerDriver:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def run_once(self) -> dict[str, Any]:
+        try:
+            mission_dispatch = self.client.call("dispatch_coverage_mission_sec_lane", {})
+        except Exception as exc:
+            mission_dispatch = {"status": f"unavailable:{type(exc).__name__}"}
         listing = self.client.call("bounded_planner_active_loops", {})
         loops = listing["loops"]
         executed: list[dict[str, Any]] = []
@@ -398,6 +402,10 @@ class BoundedPlannerDriver:
                     entry["observation_status"] = observation.get("status")
                     if observation.get("question_ref") is not None:
                         entry["observation_question_ref"] = observation["question_ref"]
+                    if observation.get("lane_status") is not None:
+                        entry["mission_lane_status"] = observation["lane_status"]
+                    if observation.get("lane_ticket_ref") is not None:
+                        entry["mission_lane_ticket_ref"] = observation["lane_ticket_ref"]
             executed.append(entry)
             probes += 1
         return {
@@ -406,6 +414,7 @@ class BoundedPlannerDriver:
             "probes_executed": probes,
             "executed": executed,
             "skipped": skipped,
+            "mission_sec_dispatch": mission_dispatch,
         }
 
 

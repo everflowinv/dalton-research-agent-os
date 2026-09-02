@@ -52,6 +52,7 @@ from .connector_runner import (
     validate_runner_environment_manifest,
 )
 from .connector_transport_executor import ConnectorTransportExecutor
+from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
 from .observability import ObservabilityStore
 from .raw_spool import RawSpool
 from .research_auto_commit import (
@@ -510,8 +511,14 @@ class SecCompanyFactsLane:
     def ensure_agenda_bindings(self, *, actor_ref: str) -> dict[str, str]:
         """Create the lane's inactive agenda policy + mandate once (idempotent)."""
 
-        if not actor_ref.startswith("human:"):
-            raise LanePreconditionError("actor_ref must use the human: namespace")
+        if not actor_ref.startswith(("human:", "automation:")):
+            raise LanePreconditionError(
+                "actor_ref must use the human: or automation: namespace"
+            )
+        # These inactive bindings predate mission automation and are immutable.
+        # Replay them with the governance approver, while the run itself keeps
+        # the mission automation actor in its ticket and stage-claim ledger.
+        binding_actor = self.governance.approved_by
         # Bind the coverage universe, not this run's subset: a later run for a
         # different ticker must replay the same idempotent binding request.
         company_refs = sorted(
@@ -523,7 +530,7 @@ class SecCompanyFactsLane:
         effective_from = "2026-08-01T00:00:00+00:00"
         effective_until = "2036-08-01T00:00:00+00:00"
         try:
-            self._bind_agenda(company_refs, actor_ref, effective_from, effective_until)
+            self._bind_agenda(company_refs, binding_actor, effective_from, effective_until)
         except AgendaConflict as exc:
             raise LanePreconditionError(
                 f"lane agenda binding {AGENDA_POLICY_VERSION_ID!r} / {MANDATE_VERSION_ID!r} "
@@ -686,12 +693,42 @@ class SecCompanyFactsLane:
         run_key: str,
         concept_candidates: Sequence[str] = DEFAULT_REVENUE_CONCEPT_CANDIDATES,
         form: str = "10-Q",
+        expected_accession: str | None = None,
+        mission_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if form not in SEC_COMPANY_FACTS_FORMS:
             raise LanePreconditionError(
                 f"form must be one of {'|'.join(SEC_COMPANY_FACTS_FORMS)}"
             )
         active = check_core_governance_rules(self.core)
+        mission_authority: CoverageMissionAuthority | None = None
+        mission_authorization: dict[str, Any] | None = None
+        if actor_ref.startswith("automation:"):
+            if not isinstance(mission_context, Mapping):
+                raise LanePreconditionError(
+                    "automation lane run requires exact CoverageMission context"
+                )
+            if expected_accession is None:
+                raise LanePreconditionError(
+                    "automation lane run requires the observed accession"
+                )
+            mission_authority = CoverageMissionAuthority(self.core)
+            try:
+                mission_authorization = mission_authority.authorize_sec_lane(
+                    company_ref=issuer.company_ref,
+                    ticker=issuer.ticker,
+                    actor_ref=actor_ref,
+                    mission_version_ref=mission_context.get("mission_version_ref"),
+                    mission_version_hash=mission_context.get("mission_version_hash"),
+                )
+            except CoverageMissionError as exc:
+                raise LanePreconditionError(
+                    f"CoverageMission did not authorize SEC automation: {exc}"
+                ) from exc
+            if mission_context.get("company_ref") != issuer.company_ref:
+                raise LanePreconditionError("CoverageMission company binding does not match issuer")
+        elif mission_context is not None:
+            raise LanePreconditionError("human lane runs must not carry mission automation context")
         self.ensure_agenda_bindings(actor_ref=actor_ref)
         decision, record, suffix = self._register_question(
             issuer, filed_from=filed_from, filed_to=filed_to, run_key=run_key,
@@ -748,6 +785,12 @@ class SecCompanyFactsLane:
 
         claim, evidence = self._locate_candidate(plan_wire)
         bundle = self.review.candidate_authority_bundle(claim["id"])
+        material = bundle.get("material") or {}
+        normalized = material.get("normalized_payload", {}) if isinstance(material, Mapping) else {}
+        if expected_accession is not None and normalized.get("latest_accession") != expected_accession:
+            raise LaneError(
+                "lane result did not bind the exact accession observed by the planner"
+            )
         promotion = self.core.commit_policy_candidate(
             **bundle, idempotency_key=f"policy-ledger:sec-lane:{plan_wire['id']}",
         )
@@ -765,8 +808,29 @@ class SecCompanyFactsLane:
         formal_claim = self.core.get_claim(promotion["claim_version_ref"])
         if formal_claim is None:
             raise LaneError("formal ClaimVersion is missing after policy promotion")
-        material = bundle.get("material") or {}
-        normalized = material.get("normalized_payload", {}) if isinstance(material, Mapping) else {}
+        stage_claim = None
+        if mission_authority is not None and mission_authorization is not None:
+            evidence_row = self.core.connection.execute(
+                "SELECT content_hash FROM evidence_versions WHERE evidence_version_id=?",
+                (promotion["evidence_version_ref"],),
+            ).fetchone()
+            if evidence_row is None:
+                raise LaneError("formal EvidenceVersion is missing after policy promotion")
+            try:
+                stage_claim = mission_authority.record_stage_claim(
+                    mission_version_ref=mission_authorization["mission_version_ref"],
+                    mission_version_hash=mission_authorization["mission_version_hash"],
+                    company_ref=issuer.company_ref,
+                    ticker=issuer.ticker,
+                    claim_version_ref=promotion["claim_version_ref"],
+                    claim_version_hash=formal_claim["content_hash"],
+                    evidence_version_ref=promotion["evidence_version_ref"],
+                    evidence_version_hash=evidence_row["content_hash"],
+                    source_location=f"sec:accession:{normalized['latest_accession']}",
+                    actor_ref=actor_ref,
+                )
+            except CoverageMissionError as exc:
+                raise LaneError(f"mission stage Claim binding failed: {exc}") from exc
         verifications = [
             bundle.get("source_verification"), bundle.get("numeric_verification"),
         ]
@@ -805,6 +869,7 @@ class SecCompanyFactsLane:
                 "answer_binding_ref": closure["answer_binding_ref"],
                 "replay_status": replay["status"],
             },
+            "mission_stage_claim": stage_claim,
         })
         return self._finish(summary)
 
@@ -863,6 +928,8 @@ class SecCompanyFactsLane:
         issuers: Sequence[Issuer] | None = None,
         concept_candidates: Sequence[str] = DEFAULT_REVENUE_CONCEPT_CANDIDATES,
         form: str = "10-Q",
+        expected_accession: str | None = None,
+        mission_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         if form not in SEC_COMPANY_FACTS_FORMS:
             raise LanePreconditionError(
@@ -877,6 +944,8 @@ class SecCompanyFactsLane:
                     issuer, filed_from=filed_from, filed_to=filed_to,
                     actor_ref=actor_ref, run_key=run_key,
                     concept_candidates=concept_candidates, form=form,
+                    expected_accession=expected_accession,
+                    mission_context=mission_context,
                 ))
             except LanePreconditionError:
                 raise

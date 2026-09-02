@@ -1310,6 +1310,20 @@ class BoundedPlannerControlPlane:
             raise BoundedPlannerConflict("coverage item locator has no numeric CIK")
         company_ref = f"company:sec-cik:{cik}"
         location = current[0]
+        formal = self.scheduler.formal_result(round_wire["work_order_ref"])
+        result = (formal or {}).get("result_envelope") or {}
+        metadata = result.get("metadata") or {}
+        form = metadata.get("form")
+        filed_from = metadata.get("filed_from")
+        filed_to = metadata.get("filed_to")
+        if (
+            form not in {"10-Q", "10-K"}
+            or not isinstance(filed_from, str)
+            or not isinstance(filed_to, str)
+        ):
+            raise BoundedPlannerConflict(
+                "observed SEC result lacks the exact form and filing window"
+            )
         backlog = ResearchQuestionBacklog(self.authority.store)
         question = (
             f"Loop {loop['loop_ref']} observed a new SEC source location {location} "
@@ -1333,6 +1347,9 @@ class BoundedPlannerControlPlane:
             "question_ref": recorded.get("question_ref"),
             "source_location": location,
             "company_ref": company_ref,
+            "form": form,
+            "filed_from": filed_from,
+            "filed_to": filed_to,
         }
 
     def record_outcome(self, round_ref: str) -> dict[str, Any]:

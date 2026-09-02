@@ -29,6 +29,7 @@ from dalton_core.writer_server import (
     Principal,
     WriterServer,
 )
+from dalton_core.sec_lane_launcher import LaneLaunchConflict
 
 
 OWNER = "human:coverage-owner"
@@ -102,6 +103,25 @@ class BoundedProbeExecutorTests(unittest.TestCase):
         )
         self.assertEqual(["read:public-http"], envelope["actual_side_effects"])
         self.assertIn("data.sec.gov", transport.requests[0]["url"])
+        self.assertEqual(envelope["metadata"]["form"], "10-Q")
+
+    def test_annual_probe_selects_10_k_and_records_exact_form(self) -> None:
+        transport = FakeTransport(FakeResponse(200, company_facts_body()))
+        work = probe_work_order({
+            "source_ref": "source:sec-edgar",
+            "locator": "company-facts/CIK0001467373",
+            "query_terms": ["Revenues", "10-K", "ACN"],
+        })
+        envelope = execute_probe_work_order(
+            work, transport=transport, user_agent="Dalton Test",
+            max_response_bytes=1_000_000, timeout_seconds=10.0, clock=lambda: NOW,
+        )
+        self.assertEqual(envelope["status"], "succeeded")
+        self.assertEqual(envelope["metadata"]["form"], "10-K")
+        self.assertEqual(
+            envelope["outputs"]["matches"],
+            [{"source_location": "sec:accession:000146737325000010"}],
+        )
 
     def test_no_recent_ten_q_is_not_found_in_scope(self) -> None:
         stale = json.dumps({
@@ -169,6 +189,98 @@ class BoundedProbeExecutorTests(unittest.TestCase):
                     work, transport=FakeTransport(FakeResponse(200, b"{}")),
                     user_agent="u", max_response_bytes=10, timeout_seconds=1.0,
                 )
+
+
+class MissionObservationDispatchTests(unittest.TestCase):
+    def _server(self, launcher):
+        server = WriterServer.__new__(WriterServer)
+        server._bounded_control = type("Control", (), {
+            "record_observation_followup": lambda _self, _round, **_kw: {
+                "status": "recorded", "outcome_ref": "outcome:1",
+                "question_ref": "question:1", "company_ref": ACN,
+                "source_location": "sec:accession:000146737326000031",
+                "form": "10-Q", "filed_from": "2026-01-01", "filed_to": "2026-08-27",
+            }
+        })()
+        authorization = {
+            "mission_version_ref": "coverage-mission-version:us-it-services:1",
+            "mission_version_hash": "b" * 64,
+            "mission_ref": "coverage-mission:us-it-services", "company_ref": ACN,
+            "ticker": "ACN", "actor_ref": "automation:coverage-mission",
+            "paid_calls_reserved": 0, "cost_usd_reserved": 0.0,
+            "budget": {"max_daily_paid_calls": 40, "max_daily_cost_usd": 5.0,
+                       "max_alphaengine_calls_24h": 30},
+        }
+        class Mission:
+            def __init__(self):
+                self.pending = []
+
+            def sec_lane_authorization_for_company(self, _company):
+                return authorization
+
+            def authorize_sec_lane(self, **_request):
+                return authorization
+
+            def queue_sec_dispatch(self, **request):
+                row = {
+                    "dispatch_id": "mission-sec-dispatch:" + "2" * 32,
+                    "mission_version_ref": authorization["mission_version_ref"],
+                    "mission_version_hash": authorization["mission_version_hash"],
+                    "company_ref": authorization["company_ref"],
+                    "ticker": authorization["ticker"], "actor_ref": authorization["actor_ref"],
+                    "authorization": authorization, "status": "pending", "ticket_ref": None,
+                    **{key: request[key] for key in (
+                        "form", "filed_from", "filed_to", "expected_accession"
+                    )},
+                }
+                self.pending.append(row)
+                return {**row, "status_marker": "fresh"}
+
+            def pending_sec_dispatches(self, *, limit=1):
+                return self.pending[:limit]
+
+            def mark_sec_dispatch_launched(self, dispatch_id, ticket_ref):
+                self.pending = [row for row in self.pending if row["dispatch_id"] != dispatch_id]
+                return {"status": "launched", "ticket_ref": ticket_ref}
+
+            def mark_sec_dispatch_rejected(self, dispatch_id, reason):
+                self.pending = [row for row in self.pending if row["dispatch_id"] != dispatch_id]
+                return {"status": "rejected", "failure_reason": reason}
+
+        server._coverage_mission = Mission()
+        server._sec_lane_launcher = launcher
+        return server
+
+    def test_writer_dispatches_exact_observation_under_mission_grant(self) -> None:
+        class Launcher:
+            def __init__(self):
+                self.request = None
+
+            def start(self, **request):
+                self.request = request
+                return {"id": "sec-lane-run:" + "1" * 24}
+
+        launcher = Launcher()
+        result = self._server(launcher)._op_bounded_planner_record_observation({
+            "round_ref": "round:1", "mandate_version_ref": "mandate:1",
+        })
+        self.assertEqual(result["lane_status"], "launched")
+        self.assertEqual(result["expected_accession"], "0001467373-26-000031")
+        self.assertEqual(launcher.request["issuers"], ["ACN"])
+        self.assertEqual(launcher.request["actor_ref"], "automation:coverage-mission")
+        self.assertEqual(launcher.request["form"], "10-Q")
+        self.assertEqual(launcher.request["mission_context"]["paid_calls_reserved"], 0)
+
+    def test_busy_lane_is_reported_as_deferred_not_as_launched(self) -> None:
+        class BusyLauncher:
+            def start(self, **_request):
+                raise LaneLaunchConflict("busy")
+
+        result = self._server(BusyLauncher())._op_bounded_planner_record_observation({
+            "round_ref": "round:1", "mandate_version_ref": "mandate:1",
+        })
+        self.assertEqual(result["lane_status"], "deferred")
+        self.assertNotIn("lane_ticket_ref", result)
 
 
 class BoundedPlannerDriverTests(unittest.TestCase):

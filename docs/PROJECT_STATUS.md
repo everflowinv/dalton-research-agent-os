@@ -1,7 +1,14 @@
 # Dalton 项目进度
 
 更新日期：2026-09-02
-- **P9b-1「SEC company-facts 读 10-K」development candidate 已完成（2026-09-02），未部署。** 核对 live
+- **P9b-2「CoverageMission observation → SEC lane → Claim 阶段绑定」development candidate 已完成，未部署。**
+  新 accession observation 先写持久 dispatch queue；SEC lane 忙时保持 pending，controller 每 tick 重试。writer 与 child
+  双重检查 active mission、company/ticker、source_plan=connected、may_write、exact form/window/accession 和零付费预算 receipt；
+  正式 policy Claim/Evidence 落库后，append-only `coverage_mission_stage_claims` 把 exact ref/hash 绑定当前 playbook stage，
+  不自动通过任何 gate。live Core 只读副本 + 本地 ACN companyfacts canary 通过：policy-4、历史 5 条 plan 重验、10-K Claim
+  6→7、stage-claim 0→1、source/numeric/integrity 全 pass，0 网络、0 付费、0 live 写入。见
+  [P9b-2 报告](reports/p9b2-mission-observation-sec-auto-lane-v0.1-2026-09-02.md)。
+- **P9b-1「SEC company-facts 读 10-K」已于 2026-09-02 07:01Z 激活 live。** 核对 live
   companyfacts 后确认：ACN 的 10-K 本身带 Q4 单季值与上年同期值（同一 accession、frame 齐全），CTSH / EPAM /
   IBM / DXC 的 10-K 只有全年值。因此本片让 `10-K` 走既有「同一 filing 的季度对比」规则（覆盖 10/1 之后 ACN Q4
   FY2026 的 10-K），FY − 9M 跨 accession 派生留作后续冻结规则。追加式改动：company-facts 表单注册表
@@ -11,9 +18,8 @@
   阻断：同一 issuer 的第二个窗口会撞上「only an open question can be selected」，现在每次运行问窗口专属的问题。
   live 只读副本排练 `scripts/run_p9b_annual_lane_canary.py` 用真实 ACN companyfacts 通过：5 条历史 plan 重验、
   候选 policy-4 装入、10-K lane committed（Q4 FY2025 USD 17,596.26M，同比 +7.26%，source / numeric 均 pass）。
-  **live 激活需要 owner 三步同做**：批准 `deploy/connector-governance/sec-company-facts-v2.json`（模板 hash 变了，
-  只重装 wheel 不批准会让人工 lane 也拒绝启动）、用 `dalton-gov create_policy` 发布
-  `deploy/phase1/governance-policy-v4-company-facts-annual.candidate.params.json`、重装 wheel。见
+  owner `human:lumos` 已批准 live connector governance v2（hash `f781c156…`），发布 active `policy-4`
+  （hash `39dd5b7a…`），并随 `b2f34c8` 重装 wheel、重启四服务；health 全绿，激活过程没有触发 lane 或新增 Claim。见
   [P9b-1 报告](reports/p9b1-sec-company-facts-annual-form-v0.1-2026-09-02.md)。
 - **P9a 已于 2026-09-02 05:05Z 发布到 live（owner go）。** 重装 wheel 后 writer 自建 playbook / mission 表，
   `human:lumos` 发布 `research-playbook-version:team-analyst-manual:1`（hash `7fe802df…`）与

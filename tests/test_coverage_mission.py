@@ -12,6 +12,7 @@ from dalton_core.coverage_mission import (
     CoverageMissionNotFound,
     CoverageMissionValidationError,
     validate_coverage_mission_version,
+    validate_mission_stage_claim,
     validate_mission_stage_record,
 )
 from dalton_core.store import DaltonStore
@@ -200,6 +201,104 @@ class CoverageMissionTests(unittest.TestCase):
         with self.assertRaises(CoverageMissionConflict):
             self.stage(first, ACN, "initial_screen", "entered")
         self.assertEqual(self.stage(second, ACN, "initial_screen", "entered")["status_marker"], "fresh")
+
+    def test_sec_lane_authorization_and_stage_claim_ledger(self) -> None:
+        mission = self.create()
+        authorization = self.authority.sec_lane_authorization_for_company(ACN)
+        self.assertEqual(authorization["ticker"], "ACN")
+        self.assertEqual(authorization["paid_calls_reserved"], 0)
+        self.assertEqual(authorization["cost_usd_reserved"], 0.0)
+        dispatch = self.authority.queue_sec_dispatch(
+            authorization=authorization, form="10-Q", filed_from="2026-01-01",
+            filed_to="2026-09-02", expected_accession="0001467373-26-000031",
+            observation_ref="research-outcome:acn-2026q3",
+        )
+        self.assertEqual(dispatch["status_marker"], "fresh")
+        self.assertEqual(len(self.authority.pending_sec_dispatches()), 1)
+        duplicate_dispatch = self.authority.queue_sec_dispatch(
+            authorization=authorization, form="10-Q", filed_from="2026-01-01",
+            filed_to="2026-09-02", expected_accession="0001467373-26-000031",
+            observation_ref="research-outcome:acn-2026q3",
+        )
+        self.assertEqual(duplicate_dispatch["status_marker"], "duplicate")
+        launched = self.authority.mark_sec_dispatch_launched(
+            dispatch["dispatch_id"], "sec-lane-run:" + "1" * 24
+        )
+        self.assertEqual(launched["status"], "launched")
+        self.assertEqual(self.authority.pending_sec_dispatches(), [])
+        self.assertEqual(
+            self.authority.mark_sec_dispatch_launched(
+                dispatch["dispatch_id"], "sec-lane-run:" + "1" * 24
+            )["status_marker"],
+            "duplicate",
+        )
+        with self.assertRaises(CoverageMissionConflict):
+            self.authority.authorize_sec_lane(
+                company_ref=ACN, ticker="ACN", actor_ref="automation:someone-else",
+                mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
+            )
+
+        evidence = self.store.register_evidence({
+            "evidence_ref": "evidence:acn:sec:2026q3",
+            "source_type": "filing",
+            "source_ref": "sec:accession:0001467373-26-000031",
+            "retrieved_at": "2026-09-02T00:00:00+00:00",
+            "source_lineage": ["sec:accession:0001467373-26-000031"],
+            "independence_group": "sec:0001467373-26-000031",
+            "actor_ref": "automation:coverage-mission",
+        })
+        invocation = {
+            "schema_version": "0.1", "id": "invocation:mission-sec-test",
+            "created_at": "2026-09-02T00:00:00+00:00", "work_order_ref": "work:sec-test",
+            "profile_ref": "profile:sec-test", "granularity": "task", "capability": "research",
+            "provider": "deterministic", "model": "none", "model_family": "none",
+            "runtime_ref": "runtime:sec-test", "actor_ref": "automation:coverage-mission",
+            "usage": {"tokens": 0}, "input_refs": [], "output_refs": [],
+            "started_at": "2026-09-02T00:00:00+00:00", "completed_at": None,
+            "side_effects": ["read:public-http"], "parent_ref": None,
+        }
+        self.store.register_invocation(invocation)
+        claim = self.store.register_claim({
+            "claim_ref": "claim:acn:revenue-growth:2026q3", "subject_ref": ACN,
+            "metric_or_aspect": "reported-quarterly-revenue-growth", "period": "2026Q3",
+            "basis": "reported", "normalized_statement": "ACN revenue grew year over year.",
+            "claim_kind": "quantitative", "value": 7.0, "unit": "percent",
+            "producer_invocation_refs": [invocation["id"]],
+            "actor_ref": "automation:coverage-mission",
+        })
+        recorded = self.authority.record_stage_claim(
+            mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
+            company_ref=ACN, ticker="ACN", claim_version_ref=claim["claim_version_id"],
+            claim_version_hash=claim["content_hash"],
+            evidence_version_ref=evidence["evidence_version_id"],
+            evidence_version_hash=evidence["content_hash"],
+            source_location="sec:accession:0001467373-26-000031",
+            actor_ref=AUTOMATION,
+        )
+        self.assertEqual(recorded["status"], "fresh")
+        self.assertEqual(recorded["stage_ref"], "initial_screen")
+        contract = json.loads(
+            (ROOT / "contracts/coverage-mission-stage-claim.schema.json").read_text()
+        )
+        wire = dict(recorded)
+        wire.pop("status")
+        self.assertEqual(set(contract["required"]), set(wire))
+        validate_mission_stage_claim(wire)
+        replay = self.authority.record_stage_claim(
+            mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
+            company_ref=ACN, ticker="ACN", claim_version_ref=claim["claim_version_id"],
+            claim_version_hash=claim["content_hash"],
+            evidence_version_ref=evidence["evidence_version_id"],
+            evidence_version_hash=evidence["content_hash"],
+            source_location="sec:accession:0001467373-26-000031",
+            actor_ref=AUTOMATION,
+        )
+        self.assertEqual(replay["status"], "duplicate")
+        self.assertEqual(len(self.authority.stage_claims(mission["id"], ACN)), 1)
+        progress = self.authority.mission_progress(mission["mission_ref"])
+        acn = next(item for item in progress["companies"] if item["company_ref"] == ACN)
+        self.assertEqual(acn["current_stage"], "initial_screen")
+        self.assertEqual(acn["claim_count"], 1)
 
     def test_schema_triggers_block_direct_writes(self) -> None:
         mission = self.create()

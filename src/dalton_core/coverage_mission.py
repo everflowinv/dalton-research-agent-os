@@ -16,6 +16,12 @@ Insight Gate, Investment Memo) requires a ``human:`` actor; an automation
 actor must be the mission's declared principal and hold the ``stage_record``
 write scope; ``gate_passed`` always needs evidence refs.  Nothing here writes
 Evidence, Claims, Theses or models.
+
+Phase 9b adds a second append-only ledger beside stage transitions.  A
+``coverage_mission_stage_claim`` binds every automation-created formal Claim
+and its supporting Evidence to the exact mission version and the company's
+current playbook stage.  It does not pass a gate or create a Claim; the SEC
+lane records the pair only after the policy-authorized formal write exists.
 """
 
 from __future__ import annotations
@@ -43,6 +49,7 @@ _SCHEMA_PATH = Path(__file__).with_name("coverage_mission_schema.sql")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _HUMAN_RE = re.compile(r"^human:[A-Za-z0-9][A-Za-z0-9._/@:-]*$")
 _AUTOMATION_RE = re.compile(r"^automation:[A-Za-z0-9][A-Za-z0-9._/@:-]*$")
+_ACCESSION_RE = re.compile(r"^[0-9]{10}-[0-9]{2}-[0-9]{6}$")
 
 COVERAGE_TIERS: tuple[str, ...] = ("A", "B", "C")
 BOOTSTRAP_PRIORITIES: tuple[str, ...] = ("P0", "P1", "P2")
@@ -97,6 +104,12 @@ _STAGE_RECORD_FIELDS = frozenset({
     "schema_version", "id", "created_at", "mission_version_ref", "mission_version_hash",
     "company_ref", "stage_ref", "status", "evidence_refs", "rationale", "actor_ref",
     "content_hash",
+})
+_STAGE_CLAIM_FIELDS = frozenset({
+    "schema_version", "id", "created_at", "mission_version_ref",
+    "mission_version_hash", "company_ref", "stage_ref", "claim_version_ref",
+    "claim_version_hash", "evidence_version_ref", "evidence_version_hash",
+    "source_location", "actor_ref", "content_hash",
 })
 
 
@@ -324,6 +337,38 @@ def validate_mission_stage_record(value: Mapping[str, Any]) -> dict[str, Any]:
     expected_hash = base.pop("content_hash")
     if content_hash(base) != expected_hash:
         raise CoverageMissionValidationError("mission stage record content_hash is invalid")
+    return wire
+
+
+def validate_mission_stage_claim(value: Mapping[str, Any]) -> dict[str, Any]:
+    wire = dict(value)
+    if set(wire) != _STAGE_CLAIM_FIELDS or wire.get("schema_version") != SCHEMA_VERSION:
+        raise CoverageMissionValidationError("mission stage claim has an invalid closed shape")
+    for field in (
+        "id", "created_at", "mission_version_ref", "company_ref", "claim_version_ref",
+        "evidence_version_ref", "source_location",
+    ):
+        wire[field] = _text(wire[field], field)
+    wire["mission_version_hash"] = _sha256(wire["mission_version_hash"], "mission_version_hash")
+    wire["claim_version_hash"] = _sha256(wire["claim_version_hash"], "claim_version_hash")
+    wire["evidence_version_hash"] = _sha256(
+        wire["evidence_version_hash"], "evidence_version_hash"
+    )
+    wire["stage_ref"] = _vocabulary(wire["stage_ref"], STAGE_ORDER, "stage_ref")
+    wire["actor_ref"] = _actor(wire["actor_ref"])
+    if _AUTOMATION_RE.fullmatch(wire["actor_ref"]) is None:
+        raise CoverageMissionValidationError(
+            "mission stage claim actor_ref must use the automation: namespace"
+        )
+    if not wire["source_location"].startswith("sec:accession:"):
+        raise CoverageMissionValidationError(
+            "mission stage claim source_location must bind a SEC accession"
+        )
+    wire["content_hash"] = _sha256(wire["content_hash"], "content_hash")
+    base = dict(wire)
+    expected_hash = base.pop("content_hash")
+    if content_hash(base) != expected_hash:
+        raise CoverageMissionValidationError("mission stage claim content_hash is invalid")
     return wire
 
 
@@ -637,6 +682,264 @@ class CoverageMissionAuthority:
             raise CoverageMissionConflict("coverage mission pointer drifted")
         return wire
 
+    def authorize_sec_lane(
+        self,
+        *,
+        company_ref: str,
+        ticker: str,
+        actor_ref: str,
+        mission_version_ref: str | None = None,
+        mission_version_hash: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve and validate the mission grant for one zero-cost SEC run.
+
+        The connector's own rate policy still bounds public HTTP calls.  SEC
+        carries no paid-call or dollar charge, so this authorization reserves
+        zero against the mission's paid budgets while retaining their exact
+        limits in the returned receipt.
+        """
+
+        company_ref = _text(company_ref, "company_ref")
+        ticker = _text(ticker, "ticker")
+        actor_ref = _actor(actor_ref)
+        if mission_version_ref is None:
+            candidates: list[dict[str, Any]] = []
+            for row in self.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
+            ).fetchall():
+                mission = self.mission(row["mission_version_id"])
+                if company_ref in {member["company_ref"] for member in mission["universe"]}:
+                    candidates.append(mission)
+            if len(candidates) != 1:
+                raise CoverageMissionConflict(
+                    "SEC automation requires exactly one active mission for the company"
+                )
+            mission = candidates[0]
+        else:
+            mission = self.mission(_text(mission_version_ref, "mission_version_ref"))
+            pointer = self.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
+                (mission["mission_ref"],),
+            ).fetchone()
+            if pointer is None or pointer["mission_version_id"] != mission["id"]:
+                raise CoverageMissionConflict("SEC automation must bind the active mission version")
+        if mission_version_hash is not None and mission["content_hash"] != _sha256(
+            mission_version_hash, "mission_version_hash"
+        ):
+            raise CoverageMissionConflict("SEC automation mission hash binding failed")
+        if actor_ref != mission["autonomy"]["automation_principal"]:
+            raise CoverageMissionConflict("SEC automation actor is not the mission principal")
+        member = next(
+            (item for item in mission["universe"] if item["company_ref"] == company_ref), None
+        )
+        if member is None or member["ticker"] != ticker:
+            raise CoverageMissionConflict("SEC automation company/ticker is outside the mission universe")
+        source = next(
+            (item for item in mission["source_plan"] if item["source_ref"] == "source:sec-edgar"),
+            None,
+        )
+        if source is None or source["status"] != "connected":
+            raise CoverageMissionConflict("mission does not mark SEC EDGAR as connected")
+        required_writes = {"claim", "evidence", "research_question", "observation", "stage_record"}
+        missing = required_writes - set(mission["autonomy"]["may_write"])
+        if missing:
+            raise CoverageMissionConflict(
+                f"mission does not grant SEC automation writes {sorted(missing)}"
+            )
+        cur = self.connection.cursor()
+        self._validate_playbook_binding(cur, mission["bindings"]["playbook_version"])
+        self._validate_constitution_binding(
+            cur, mission["bindings"]["constitution_version"], mission["industry_ref"]
+        )
+        self._validate_mandate_binding(
+            cur, mission["bindings"]["mandate_version"], mission["industry_ref"]
+        )
+        return {
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+            "mission_ref": mission["mission_ref"],
+            "company_ref": company_ref,
+            "ticker": ticker,
+            "actor_ref": actor_ref,
+            "paid_calls_reserved": 0,
+            "cost_usd_reserved": 0.0,
+            "budget": dict(mission["budget"]),
+        }
+
+    def sec_lane_authorization_for_company(self, company_ref: str) -> dict[str, Any]:
+        """Resolve the sole active mission and return its exact SEC grant."""
+
+        company_ref = _text(company_ref, "company_ref")
+        matches: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for row in self.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
+        ).fetchall():
+            mission = self.mission(row["mission_version_id"])
+            member = next(
+                (item for item in mission["universe"] if item["company_ref"] == company_ref),
+                None,
+            )
+            if member is not None:
+                matches.append((mission, member))
+        if len(matches) != 1:
+            raise CoverageMissionConflict(
+                "SEC observation requires exactly one active mission for the company"
+            )
+        mission, member = matches[0]
+        return self.authorize_sec_lane(
+            company_ref=company_ref,
+            ticker=member["ticker"],
+            actor_ref=mission["autonomy"]["automation_principal"],
+            mission_version_ref=mission["id"],
+            mission_version_hash=mission["content_hash"],
+        )
+
+    def queue_sec_dispatch(
+        self,
+        *,
+        authorization: Mapping[str, Any],
+        form: str,
+        filed_from: str,
+        filed_to: str,
+        expected_accession: str,
+        observation_ref: str,
+    ) -> dict[str, Any]:
+        """Persist an idempotent mission SEC dispatch before the launcher slot."""
+
+        authorization = dict(authorization)
+        exact = self.authorize_sec_lane(
+            company_ref=authorization.get("company_ref"),
+            ticker=authorization.get("ticker"),
+            actor_ref=authorization.get("actor_ref"),
+            mission_version_ref=authorization.get("mission_version_ref"),
+            mission_version_hash=authorization.get("mission_version_hash"),
+        )
+        if canonical_json(exact) != canonical_json(authorization):
+            raise CoverageMissionConflict("SEC dispatch authorization drifted")
+        if form not in {"10-Q", "10-K"}:
+            raise CoverageMissionValidationError("SEC dispatch form must be 10-Q or 10-K")
+        filed_from = _text(filed_from, "filed_from")
+        filed_to = _text(filed_to, "filed_to")
+        if filed_from > filed_to:
+            raise CoverageMissionValidationError("SEC dispatch filing window is reversed")
+        expected_accession = _text(expected_accession, "expected_accession")
+        if _ACCESSION_RE.fullmatch(expected_accession) is None:
+            raise CoverageMissionValidationError("SEC dispatch accession is invalid")
+        observation_ref = _text(observation_ref, "observation_ref")
+        request = {
+            "mission_version_ref": exact["mission_version_ref"],
+            "mission_version_hash": exact["mission_version_hash"],
+            "company_ref": exact["company_ref"],
+            "ticker": exact["ticker"],
+            "actor_ref": exact["actor_ref"],
+            "form": form,
+            "filed_from": filed_from,
+            "filed_to": filed_to,
+            "expected_accession": expected_accession,
+            "observation_ref": observation_ref,
+        }
+        request_hash = content_hash(request)
+        dispatch_id = f"mission-sec-dispatch:{request_hash[:32]}"
+        existing = self.connection.execute(
+            "SELECT * FROM coverage_mission_sec_dispatches WHERE dispatch_id=?",
+            (dispatch_id,),
+        ).fetchone()
+        if existing is not None:
+            if existing["request_hash"] != request_hash:
+                raise CoverageMissionConflict("SEC dispatch identity drifted")
+            return {**dict(existing), "authorization": json.loads(existing["authorization_json"]),
+                    "status_marker": "duplicate"}
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_sec_dispatches"
+                "(dispatch_id,mission_version_ref,mission_version_hash,company_ref,ticker,actor_ref,"
+                "form,filed_from,filed_to,expected_accession,observation_ref,authorization_json,"
+                "request_hash,status,ticket_ref,failure_reason,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,NULL,?,?)",
+                (
+                    dispatch_id, exact["mission_version_ref"], exact["mission_version_hash"],
+                    exact["company_ref"], exact["ticker"], exact["actor_ref"], form,
+                    filed_from, filed_to, expected_accession, observation_ref,
+                    canonical_json(exact), request_hash, now, now,
+                ),
+            )
+        return {
+            **request, "dispatch_id": dispatch_id, "authorization": exact,
+            "request_hash": request_hash, "status": "pending", "ticket_ref": None,
+            "created_at": now, "updated_at": now, "status_marker": "fresh",
+        }
+
+    def pending_sec_dispatches(self, *, limit: int = 1) -> list[dict[str, Any]]:
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise CoverageMissionValidationError("SEC dispatch limit must be 1..20")
+        rows = self.connection.execute(
+            "SELECT * FROM coverage_mission_sec_dispatches WHERE status='pending' "
+            "ORDER BY created_at,dispatch_id LIMIT ?", (limit,),
+        ).fetchall()
+        return [
+            {**dict(row), "authorization": json.loads(row["authorization_json"])}
+            for row in rows
+        ]
+
+    def mark_sec_dispatch_launched(self, dispatch_id: str, ticket_ref: str) -> dict[str, Any]:
+        dispatch_id = _text(dispatch_id, "dispatch_id")
+        ticket_ref = _text(ticket_ref, "ticket_ref")
+        row = self.connection.execute(
+            "SELECT * FROM coverage_mission_sec_dispatches WHERE dispatch_id=?", (dispatch_id,)
+        ).fetchone()
+        if row is None:
+            raise CoverageMissionNotFound("mission SEC dispatch was not found")
+        if row["status"] == "launched":
+            if row["ticket_ref"] != ticket_ref:
+                raise CoverageMissionConflict("mission SEC dispatch bound another ticket")
+            return {**dict(row), "authorization": json.loads(row["authorization_json"]),
+                    "status_marker": "duplicate"}
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "UPDATE coverage_mission_sec_dispatches SET status='launched',ticket_ref=?,"
+                "updated_at=? WHERE dispatch_id=? AND status='pending'",
+                (ticket_ref, now, dispatch_id),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("mission SEC dispatch state changed concurrently")
+        return {
+            **dict(row), "status": "launched", "ticket_ref": ticket_ref,
+            "updated_at": now, "authorization": json.loads(row["authorization_json"]),
+            "status_marker": "fresh",
+        }
+
+    def mark_sec_dispatch_rejected(self, dispatch_id: str, reason: str) -> dict[str, Any]:
+        dispatch_id = _text(dispatch_id, "dispatch_id")
+        reason = _text(reason, "reason")
+        row = self.connection.execute(
+            "SELECT * FROM coverage_mission_sec_dispatches WHERE dispatch_id=?", (dispatch_id,)
+        ).fetchone()
+        if row is None:
+            raise CoverageMissionNotFound("mission SEC dispatch was not found")
+        if row["status"] == "rejected":
+            if row["failure_reason"] != reason:
+                raise CoverageMissionConflict("mission SEC dispatch has another rejection reason")
+            return {**dict(row), "authorization": json.loads(row["authorization_json"]),
+                    "status_marker": "duplicate"}
+        if row["status"] != "pending":
+            raise CoverageMissionConflict("launched SEC dispatch cannot be rejected")
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "UPDATE coverage_mission_sec_dispatches SET status='rejected',failure_reason=?,"
+                "updated_at=? WHERE dispatch_id=? AND status='pending'",
+                (reason, now, dispatch_id),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("mission SEC dispatch state changed concurrently")
+        return {
+            **dict(row), "status": "rejected", "failure_reason": reason,
+            "updated_at": now, "authorization": json.loads(row["authorization_json"]),
+            "status_marker": "fresh",
+        }
+
     # -- stage records -------------------------------------------------------
 
     def _stage_state(
@@ -785,6 +1088,133 @@ class CoverageMissionAuthority:
             records.append(wire)
         return records
 
+    def record_stage_claim(
+        self,
+        *,
+        mission_version_ref: str,
+        mission_version_hash: str,
+        company_ref: str,
+        ticker: str,
+        claim_version_ref: str,
+        claim_version_hash: str,
+        evidence_version_ref: str,
+        evidence_version_hash: str,
+        source_location: str,
+        actor_ref: str,
+    ) -> dict[str, Any]:
+        """Bind one already-formal Claim/Evidence pair to the current stage."""
+
+        authorization = self.authorize_sec_lane(
+            company_ref=company_ref,
+            ticker=ticker,
+            actor_ref=actor_ref,
+            mission_version_ref=mission_version_ref,
+            mission_version_hash=mission_version_hash,
+        )
+        claim_version_ref = _text(claim_version_ref, "claim_version_ref")
+        evidence_version_ref = _text(evidence_version_ref, "evidence_version_ref")
+        claim_version_hash = _sha256(claim_version_hash, "claim_version_hash")
+        evidence_version_hash = _sha256(evidence_version_hash, "evidence_version_hash")
+        source_location = _text(source_location, "source_location")
+        claim = self.store.get_claim(claim_version_ref)
+        if (
+            claim is None
+            or claim.get("content_hash") != claim_version_hash
+            or (claim.get("claim") or {}).get("subject_ref") != company_ref
+        ):
+            raise CoverageMissionConflict("formal Claim binding failed")
+        evidence = self.connection.execute(
+            "SELECT content_hash FROM evidence_versions WHERE evidence_version_id=?",
+            (evidence_version_ref,),
+        ).fetchone()
+        if evidence is None or evidence["content_hash"] != evidence_version_hash:
+            raise CoverageMissionConflict("formal Evidence binding failed")
+
+        progress = self.mission_progress(authorization["mission_ref"])
+        company = next(
+            item for item in progress["companies"] if item["company_ref"] == company_ref
+        )
+        stage_ref = company["next_stage"] or company["current_stage"] or STAGE_ORDER[0]
+        if company["current_stage"] != stage_ref:
+            self.record_stage(
+                mission_version_ref=mission_version_ref,
+                mission_version_hash=mission_version_hash,
+                company_ref=company_ref,
+                stage_ref=stage_ref,
+                status="entered",
+                evidence_refs=[],
+                rationale="SEC automation entered the current mission stage before recording evidence.",
+                actor_ref=actor_ref,
+                idempotency_key=f"mission-stage-enter:{mission_version_ref}:{company_ref}:{stage_ref}",
+            )
+        identity = {
+            "mission_version_ref": mission_version_ref,
+            "mission_version_hash": mission_version_hash,
+            "company_ref": company_ref,
+            "stage_ref": stage_ref,
+            "claim_version_ref": claim_version_ref,
+            "claim_version_hash": claim_version_hash,
+            "evidence_version_ref": evidence_version_ref,
+            "evidence_version_hash": evidence_version_hash,
+            "source_location": source_location,
+            "actor_ref": actor_ref,
+        }
+        record_id = _ref("mission-stage-claim", identity)
+        existing = self.connection.execute(
+            "SELECT record_json FROM coverage_mission_stage_claims "
+            "WHERE mission_version_ref=? AND claim_version_ref=?",
+            (mission_version_ref, claim_version_ref),
+        ).fetchone()
+        if existing is not None:
+            wire = validate_mission_stage_claim(
+                _canonical_record(existing["record_json"], "mission stage claim")
+            )
+            if wire["id"] != record_id:
+                raise CoverageMissionConflict("formal Claim is already bound differently")
+            return {**wire, "status": "duplicate"}
+        created_at = _now()
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            "id": record_id,
+            "created_at": created_at,
+            **identity,
+        }
+        wire = {**record, "content_hash": content_hash(record)}
+        validate_mission_stage_claim(wire)
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_stage_claims"
+                "(record_id,mission_version_ref,company_ref,stage_ref,claim_version_ref,"
+                "claim_version_hash,evidence_version_ref,evidence_version_hash,source_location,"
+                "actor_ref,record_json,content_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    record_id, mission_version_ref, company_ref, stage_ref, claim_version_ref,
+                    claim_version_hash, evidence_version_ref, evidence_version_hash,
+                    source_location, actor_ref, canonical_json(wire), wire["content_hash"], created_at,
+                ),
+            )
+        return {**wire, "status": "fresh"}
+
+    def stage_claims(
+        self, mission_version_ref: str, company_ref: str | None = None
+    ) -> list[dict[str, Any]]:
+        mission_version_ref = _text(mission_version_ref, "mission_version_ref")
+        query = "SELECT * FROM coverage_mission_stage_claims WHERE mission_version_ref=?"
+        params: list[Any] = [mission_version_ref]
+        if company_ref is not None:
+            query += " AND company_ref=?"
+            params.append(_text(company_ref, "company_ref"))
+        query += " ORDER BY created_at,record_id"
+        records = []
+        for row in self.connection.execute(query, params).fetchall():
+            wire = validate_mission_stage_claim(
+                _canonical_record(row["record_json"], "mission stage claim")
+            )
+            if wire["id"] != row["record_id"] or wire["content_hash"] != row["content_hash"]:
+                raise CoverageMissionConflict("mission stage claim authority drifted")
+            records.append(wire)
+        return records
+
     def mission_progress(self, mission_ref: str) -> dict[str, Any]:
         mission = self.active_mission(mission_ref)
         companies = []
@@ -811,6 +1241,11 @@ class CoverageMissionAuthority:
                 "completed_stages": completed,
                 "next_stage": next_stage,
                 "record_count": sum(len(items) for items in history.values()),
+                "claim_count": self.connection.execute(
+                    "SELECT COUNT(*) FROM coverage_mission_stage_claims "
+                    "WHERE mission_version_ref=? AND company_ref=?",
+                    (mission["id"], member["company_ref"]),
+                ).fetchone()[0],
             })
         return {
             "projection_kind": "coverage_mission_progress",
@@ -839,4 +1274,5 @@ __all__ = [
     "validate_coverage_mission_version",
     "validate_mission_body",
     "validate_mission_stage_record",
+    "validate_mission_stage_claim",
 ]

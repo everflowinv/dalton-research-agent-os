@@ -8,13 +8,15 @@ Three checks, none of which touch the source Core, the network or a paid model:
    scope from the packaged SEC template and the ``SEC_TEMPLATE_REGISTRY``).
    A widened company-facts output contract must leave old plans readable.
 2. **Annual policy candidate** -- the ``policy-4`` candidate params file is
-   installed on the copy as ``human:<actor>``; the lane precondition check
-   must accept a policy that lists the quarterly and the annual rules.
+   installed on a pre-policy-4 copy; an already-active policy-4 is reused.
+   The lane precondition must accept quarterly and annual rules.
 3. **Annual lane run** -- ``dalton_core.sec_lane_cli`` runs against the copy
    with ``--form 10-K`` and a companyfacts fixture (for example a saved
    ``data.sec.gov`` payload for Accenture), in rehearsal governance mode.
    The summary must be ``committed`` with the annual rule ref and a
    fourth-quarter period; re-reading every plan afterwards must still pass.
+   With ``--mission-automation`` it also binds the formal pair to the copied
+   live CoverageMission stage ledger under the exact observed accession.
 
 Usage::
 
@@ -44,6 +46,7 @@ from dalton_core.research_plan import (  # noqa: E402
     ResearchPlanAuthority,
     sec_template_registry,
 )
+from dalton_core.coverage_mission import CoverageMissionAuthority  # noqa: E402
 from dalton_core.sec_company_facts_lane import check_core_governance_rules  # noqa: E402
 from dalton_core.store import DaltonStore  # noqa: E402
 
@@ -95,26 +98,41 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             active = store.active_policy()
             result["checks"]["active_policy_before"] = active["policy_version_id"]
             candidate = json.loads(POLICY_CANDIDATE.read_text(encoding="utf-8"))
-            if candidate["prior_version_ref"] != active["policy_version_id"]:
-                raise RuntimeError(
-                    "policy candidate prior_version_ref does not match the copy's active policy"
+            if active["policy_version_id"] == candidate["policy_version_id"]:
+                result["checks"]["policy_installed"] = "already-active"
+            else:
+                if candidate["prior_version_ref"] != active["policy_version_id"]:
+                    raise RuntimeError(
+                        "policy candidate prior_version_ref does not match the copy's active policy"
+                    )
+                installed = store.create_policy(
+                    candidate["policy"],
+                    policy_version_id=candidate["policy_version_id"],
+                    version_number=candidate["version_number"],
+                    prior_version_ref=candidate["prior_version_ref"],
+                    policy_ref=candidate.get("policy_ref"),
+                    effective_from=candidate.get("effective_from"),
+                    effective_until=candidate.get("effective_until"),
+                    actor_ref=args.owner,
+                    change_reason=candidate["change_reason"],
+                    activate=True,
                 )
-            installed = store.create_policy(
-                candidate["policy"],
-                policy_version_id=candidate["policy_version_id"],
-                version_number=candidate["version_number"],
-                prior_version_ref=candidate["prior_version_ref"],
-                policy_ref=candidate.get("policy_ref"),
-                effective_from=candidate.get("effective_from"),
-                effective_until=candidate.get("effective_until"),
-                actor_ref=args.actor,
-                change_reason=candidate["change_reason"],
-                activate=True,
-            )
-            result["checks"]["policy_installed"] = installed["policy_version_id"]
+                result["checks"]["policy_installed"] = installed["policy_version_id"]
             precondition = check_core_governance_rules(store)
             result["checks"]["lane_precondition_policy"] = precondition["policy_version_id"]
             claims_before = store.connection.execute("SELECT COUNT(*) FROM claim_versions").fetchone()[0]
+            mission_authorization = None
+            stage_claims_before = 0
+            if args.mission_automation:
+                company_ref = f"company:sec-cik:{int(args.cik):010d}"
+                mission_authorization = CoverageMissionAuthority(
+                    store
+                ).sec_lane_authorization_for_company(company_ref)
+                if args.expected_accession is None:
+                    raise RuntimeError("--expected-accession is required with --mission-automation")
+                stage_claims_before = store.connection.execute(
+                    "SELECT COUNT(*) FROM coverage_mission_stage_claims"
+                ).fetchone()[0]
         finally:
             store.close()
 
@@ -123,14 +141,23 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             sys.executable, "-m", "dalton_core.sec_lane_cli",
             "--state-dir", str(state),
             "--staging", str(state / "candidate-staging.sqlite"),
-            "--rehearsal-approved-by", args.actor,
+            "--rehearsal-approved-by", args.owner,
             "--issuer", args.issuer, "--issuer-cik", f"{args.issuer}={args.cik}",
             "--filed-from", args.filed_from, "--filed-to", args.filed_to,
             "--form", "10-K",
-            "--actor", args.actor,
+            "--actor", (
+                mission_authorization["actor_ref"] if mission_authorization else args.owner
+            ),
             "--fixture-company-facts", str(args.fixture),
             "--summary-dir", str(summary_dir), "--quiet",
         ]
+        if mission_authorization is not None:
+            command += [
+                "--expected-accession", args.expected_accession,
+                "--mission-version-ref", mission_authorization["mission_version_ref"],
+                "--mission-version-hash", mission_authorization["mission_version_hash"],
+                "--mission-company-ref", mission_authorization["company_ref"],
+            ]
         proc = subprocess.run(
             command, cwd=ROOT, env={**os.environ, "PYTHONPATH": str(ROOT / "src")},
             capture_output=True, text=True,
@@ -156,6 +183,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "verifications": issuer.get("verifications"),
                 "promotion": issuer.get("promotion"),
                 "integrity": issuer.get("integrity"),
+                "mission_stage_claim": issuer.get("mission_stage_claim"),
             }
 
         store = DaltonStore(state / "core.sqlite")
@@ -170,6 +198,12 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             result["checks"]["latest_authorization_rule"] = (
                 json.loads(authorization[0])["rule_ref"] if authorization else None
             )
+            result["checks"]["stage_claims_before_after"] = [
+                stage_claims_before,
+                store.connection.execute(
+                    "SELECT COUNT(*) FROM coverage_mission_stage_claims"
+                ).fetchone()[0],
+            ]
         finally:
             store.close()
 
@@ -182,6 +216,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         and result["checks"]["claims_before_after"][1] == result["checks"]["claims_before_after"][0] + 1
         and result["checks"]["historical_plans_after"]["plan_count"]
         == result["checks"]["historical_plans_before"]["plan_count"] + 1
+        and (
+            not args.mission_automation
+            or (
+                (lane.get("mission_stage_claim") or {}).get("actor_ref")
+                == "automation:coverage-mission"
+                and result["checks"]["stage_claims_before_after"][1]
+                == result["checks"]["stage_claims_before_after"][0] + 1
+            )
+        )
     )
     return result
 
@@ -194,7 +237,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cik", default="1467373")
     parser.add_argument("--filed-from", default="2025-09-01")
     parser.add_argument("--filed-to", default="2025-12-31")
-    parser.add_argument("--actor", default="human:lumos")
+    parser.add_argument("--owner", default="human:lumos")
+    parser.add_argument("--mission-automation", action="store_true")
+    parser.add_argument("--expected-accession")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     result = run(args)

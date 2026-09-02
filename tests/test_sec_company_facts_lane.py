@@ -20,6 +20,7 @@ from dalton_core.research_plan import (
     PLAN_COMPANY_FACTS_AUTO_START_RULE_REF,
 )
 from dalton_core.research_verification import CandidateStagingStore
+from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.sec_authority_harness import MutableClock, _Response
 from dalton_core.sec_company_facts_lane import (
     Issuer,
@@ -31,6 +32,7 @@ from dalton_core.sec_company_facts_lane import (
 from dalton_core.sec_public_adapter import SecPublicRouterAdapter
 from dalton_core.store import DaltonStore
 from tests.test_research_plan_executor import _sec_company_facts_body
+from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 
 REPO = Path(__file__).resolve().parents[1]
 ISSUER = Issuer("AAPL", "320193", "company:sec-cik:0000320193", "Apple Inc")
@@ -242,6 +244,40 @@ class LaneTests(unittest.TestCase):
             )
             self.assertEqual(replay["status"], "duplicate", replay)
             self.assertEqual(replay["plan"]["ref"], summary["plan"]["ref"])
+
+    def test_mission_automation_commits_exact_accession_and_stage_claim(self) -> None:
+        install_lane_rules(self.state, annual=True)
+        window = {"filed_from": "2025-01-01", "filed_to": "2025-12-31"}
+        with self._lane(adapter=fake_adapter(self.clock, _sec_company_facts_annual_body())) as lane:
+            method = bootstrap_method_authorities(lane.core)
+            params = mission_params(method)
+            params["universe"] = [{
+                "company_ref": ISSUER.company_ref, "ticker": ISSUER.ticker,
+                "coverage_tier": "A", "bootstrap_priority": "P0",
+            }]
+            mission = CoverageMissionAuthority(lane.core).create_mission(
+                params.pop("mission_ref"), **params
+            )
+            summary = lane.run_issuer(
+                ISSUER, actor_ref="automation:coverage-mission", run_key="mission-annual-1",
+                form="10-K", expected_accession="0000320193-25-000217",
+                mission_context={
+                    "mission_version_ref": mission["id"],
+                    "mission_version_hash": mission["content_hash"],
+                    "company_ref": ISSUER.company_ref,
+                },
+                **window,
+            )
+            self.assertEqual(summary["status"], "committed", summary)
+            stage_claim = summary["mission_stage_claim"]
+            self.assertEqual(stage_claim["status"], "fresh")
+            self.assertEqual(stage_claim["stage_ref"], "initial_screen")
+            self.assertEqual(stage_claim["actor_ref"], "automation:coverage-mission")
+            authority = CoverageMissionAuthority(lane.core)
+            self.assertEqual(len(authority.stage_claims(mission["id"], ISSUER.company_ref)), 1)
+            progress = authority.mission_progress(mission["mission_ref"])
+            self.assertEqual(progress["companies"][0]["claim_count"], 1)
+            self.assertEqual(progress["companies"][0]["current_stage"], "initial_screen")
 
     def test_later_window_for_the_same_issuer_asks_a_new_question(self) -> None:
         """P9b: a second window must not die on the issuer's answered first question."""

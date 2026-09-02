@@ -1,7 +1,7 @@
 # P9b-1：SEC company-facts 读 10-K（同一 filing 的 Q4 季度对比）v0.1
 
 日期：2026-09-02  
-状态：development candidate 完成；live 只读副本排练（真实 ACN companyfacts）通过；**未部署、未写 live**  
+状态：development candidate 完成；live 只读副本排练通过；**2026-09-02 07:01Z 已激活 live**
 上游：[Phase 9 v1.0](phase9-coverage-mission-autonomous-research-v1.0-2026-09-02.md) P9b、[P9a 报告](p9a-research-playbook-and-coverage-mission-v0.1-2026-09-02.md)
 
 ## 先核对事实，再定规则
@@ -45,7 +45,7 @@ P9b 原计划写「10-K + Q4 = FY − 9M 派生」。动手前先拉了五家公
    之前对每家公司只问同一句话，所以同一 issuer 的第二个窗口（新的 10-Q、10-K）会在 `select_question` 上撞
    「only an open question can be selected」。P9b-2 的自动重跑必须过这一关。现在每次运行问窗口专属的问题
    （`… (10-K filed 2025-09-01..2025-12-31)`），同参数重跑仍走幂等键收敛。
-8. **部署工件（未激活）**：`deploy/connector-governance/sec-company-facts-v2.json`（`propose`，status=proposed，
+8. **部署工件**：`deploy/connector-governance/sec-company-facts-v2.json`（仓库保留 proposal；live 副本已由 owner 批准，
    `expected_schema_hash 6ce86d8a…`）；`deploy/phase1/governance-policy-v4-company-facts-annual.candidate.params.json`
    （prior=policy-3，两组 rules 各追加 annual，weekly brief 绑定不变）。
 9. **排练脚本** `scripts/run_p9b_annual_lane_canary.py`：只读复制现有 Core → 逐条 exact 读所有历史 plan →
@@ -68,13 +68,24 @@ P9b 原计划写「10-K + Q4 = FY − 9M 派生」。动手前先拉了五家公
   year over year from USD 16405819000」、source / numeric 均 pass、Claim 6→7、6 条 plan 全部可读、integrity
   core / coordinator / staging ok。0 网络（fixture 是本机保存的 companyfacts）、0 付费调用、0 live 写入。
 
+## Live 激活记录（2026-09-02）
+
+- owner `human:lumos` 批准 live `sec-company-facts-v2.json`：status `approved`，content hash
+  `f781c156…fa074`。
+- `dalton-gov create_policy` 发布 active `policy-4`（content hash `39dd5b7a…e0f30`），prior `policy-3`；只追加
+  annual auto-start / auto-commit 两条规则，weekly brief binding 未动。
+- commit `b2f34c8` 让 install seed-once v2，并让 writer plist 指向 v2；`zsh deploy/macos/install.sh` 重装 wheel、重启
+  writer / controller / control / thesis-impact。健康检查全绿，bounded planner idle，weekly brief waiting。
+- 激活过程没有触发 SEC lane、没有新增 Claim；真实数据路径继续等 observation 或人工触发。激活后的 live Core 只读副本
+  mission canary 以 `automation:coverage-mission` 跑通 10-K，仍未写 live。
+
 ## 边界与未做
 
 - **FY − 9M 跨 accession 派生没做**（CTSH / EPAM / IBM / DXC 的 10-K 需要）。它改变 source record 数量和
   auto-commit 的「latest_accession == current.accession」不变量，要单独冻结成规则。
 - bounded planner 的观察合同 `contracts/sec-quarterly-growth-observation.schema.json` 与 `bounded_probe_executor`
   仍只认 10-Q；loop 观察到 10-K accession 是 P9b-2 的事。
-- 没有部署。**live 激活要 owner 三步一起做**，缺一不可：
+- live 激活已按以下三步一起完成：
   1. `dalton-connector-governance approve --path <state>/connector-governance/sec-company-facts-v2.json --approved-by human:lumos`
      （先把 v2 记录放到 live governance 目录）。模板 hash 变了，descriptor 的 `expected_schema_hash` 随之变；
      只重装 wheel 不批准 v2，人工 lane 也会被 launcher 拒绝启动。

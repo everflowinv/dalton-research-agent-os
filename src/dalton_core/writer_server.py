@@ -436,6 +436,7 @@ CORE_OPERATIONS = frozenset({
     "run_weekly_brief_cycle", "record_scheduled_weekly_brief_delivery",
     "bounded_planner_propose_next", "bounded_planner_admit_proposal",
     "bounded_planner_record_outcome", "bounded_planner_record_observation",
+    "dispatch_coverage_mission_sec_lane",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
     "llm_planner_advance", "llm_planner_execute", "bounded_alphaengine_probe",
@@ -584,6 +585,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "bounded_planner_admit_proposal": frozenset({"proposal_ref"}),
     "bounded_planner_record_outcome": frozenset({"round_ref"}),
     "bounded_planner_record_observation": frozenset({"round_ref", "mandate_version_ref"}),
+    "dispatch_coverage_mission_sec_lane": frozenset(),
     "bounded_planner_active_loops": frozenset(),
     "materialize_bounded_planner_context": frozenset({"loop_version_ref", "doctrine_pack_version_ref", "doctrine_pack_version_hash", "as_of"}),
     "bounded_planner_propose_next_with_context": frozenset({"planner_context_pack_ref"}),
@@ -2089,10 +2091,115 @@ class WriterServer:
         if self._bounded_control is None:
             raise WriterServerError("bounded-planner control plane is unavailable")
         values = dict(p)
-        return self._bounded_control.record_observation_followup(
+        observation = self._bounded_control.record_observation_followup(
             values["round_ref"],
             mandate_version_ref=values["mandate_version_ref"],
         )
+        if observation.get("status") != "recorded":
+            return observation
+        try:
+            authorization = self.coverage_mission.sec_lane_authorization_for_company(
+                observation["company_ref"]
+            )
+        except CoverageMissionError as exc:
+            return {
+                **observation,
+                "lane_status": "not_authorized",
+                "lane_reason": f"{type(exc).__name__}: {exc}",
+            }
+        location = observation["source_location"]
+        prefix = "sec:accession:"
+        raw_accession = location.removeprefix(prefix) if location.startswith(prefix) else ""
+        if re.fullmatch(r"[0-9]{18}", raw_accession):
+            accession = (
+                f"{raw_accession[:10]}-{raw_accession[10:12]}-{raw_accession[12:]}"
+            )
+        elif re.fullmatch(r"[0-9]{10}-[0-9]{2}-[0-9]{6}", raw_accession):
+            accession = raw_accession
+        else:
+            return {
+                **observation,
+                "lane_status": "not_authorized",
+                "lane_reason": "observed source location is not an exact SEC accession",
+            }
+        queued = self.coverage_mission.queue_sec_dispatch(
+            authorization=authorization,
+            form=observation["form"],
+            filed_from=observation["filed_from"],
+            filed_to=observation["filed_to"],
+            expected_accession=accession,
+            observation_ref=observation["outcome_ref"],
+        )
+        dispatched = self._dispatch_one_coverage_mission_sec_lane()
+        result = {
+            **observation,
+            "mission_version_ref": authorization["mission_version_ref"],
+            "mission_version_hash": authorization["mission_version_hash"],
+            "lane_status": dispatched["status"],
+            "lane_dispatch_ref": queued["dispatch_id"],
+            "expected_accession": accession,
+            "paid_calls_reserved": authorization["paid_calls_reserved"],
+            "cost_usd_reserved": authorization["cost_usd_reserved"],
+        }
+        if dispatched.get("ticket_ref") is not None:
+            result["lane_ticket_ref"] = dispatched["ticket_ref"]
+        return result
+
+    def _dispatch_one_coverage_mission_sec_lane(self) -> dict[str, Any]:
+        pending = self.coverage_mission.pending_sec_dispatches(limit=1)
+        if not pending:
+            return {"status": "idle"}
+        dispatch = pending[0]
+        authorization = dispatch["authorization"]
+        try:
+            exact = self.coverage_mission.authorize_sec_lane(
+                company_ref=dispatch["company_ref"],
+                ticker=dispatch["ticker"],
+                actor_ref=dispatch["actor_ref"],
+                mission_version_ref=dispatch["mission_version_ref"],
+                mission_version_hash=dispatch["mission_version_hash"],
+            )
+            if exact != authorization:
+                raise CoverageMissionConflict("queued SEC authorization drifted")
+        except CoverageMissionError as exc:
+            reason = f"{type(exc).__name__}: {exc}"
+            self.coverage_mission.mark_sec_dispatch_rejected(
+                dispatch["dispatch_id"], reason
+            )
+            return {
+                "status": "rejected", "dispatch_ref": dispatch["dispatch_id"],
+                "reason": reason,
+            }
+        try:
+            ticket = self.sec_lane_launcher.start(
+                issuers=[dispatch["ticker"]],
+                filed_from=dispatch["filed_from"],
+                filed_to=dispatch["filed_to"],
+                actor_ref=dispatch["actor_ref"],
+                form=dispatch["form"],
+                expected_accession=dispatch["expected_accession"],
+                mission_context=exact,
+            )
+        except LaneLaunchConflict as exc:
+            return {
+                "status": "deferred", "dispatch_ref": dispatch["dispatch_id"],
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+        except LaneLaunchRejected as exc:
+            return {
+                "status": "rejected", "dispatch_ref": dispatch["dispatch_id"],
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+        self.coverage_mission.mark_sec_dispatch_launched(
+            dispatch["dispatch_id"], ticket["id"]
+        )
+        return {
+            "status": "launched", "dispatch_ref": dispatch["dispatch_id"],
+            "ticket_ref": ticket["id"],
+        }
+
+    def _op_dispatch_coverage_mission_sec_lane(self, p: Mapping[str, Any]) -> Any:
+        return self._dispatch_one_coverage_mission_sec_lane()
 
     def _op_bounded_planner_active_loops(self, p: Mapping[str, Any]) -> Any:
         return {

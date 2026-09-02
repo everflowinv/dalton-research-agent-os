@@ -14,7 +14,8 @@ What this launcher enforces before anything is spawned:
 * the committed SEC connector governance record on disk is ``approved`` by a
   ``human:*`` principal (a ``proposed`` record, a hash mismatch or a non-human
   approver refuses the launch);
-* the requester is a ``human:*`` principal;
+* the requester is either a ``human:*`` principal or the exact automation
+  principal in an exact CoverageMission authorization receipt;
 * issuers are upper-case tickers, the filed window is two ISO dates in order;
 * only one lane run holds the slot at a time.
 
@@ -44,8 +45,10 @@ TICKET_SCHEMA_VERSION = "0.1"
 TICKET_PREFIX = "sec-lane-run"
 _TICKET_RE = re.compile(r"sec-lane-run:[0-9a-f]{24}\Z")
 _HUMAN_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
+_AUTOMATION_RE = re.compile(r"automation:[A-Za-z0-9._-]+\Z")
 _TICKER_RE = re.compile(r"[A-Z][A-Z0-9.]{0,7}\Z")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
+_ACCESSION_RE = re.compile(r"\d{10}-\d{2}-\d{6}\Z")
 LIVE_MODE_ARGS = ("--allow-network",)
 # Children inherit the writer's launchd ``ProcessType``.  Measured on
 # 2026-08-26 (CPU probe, 6M-iteration loop): ``ProcessType: Background``
@@ -194,6 +197,8 @@ class SecLaneLauncher:
         actor_ref: str,
         ticket_dir: Path,
         form: str = "10-Q",
+        expected_accession: str | None = None,
+        mission_context: Mapping[str, Any] | None = None,
     ) -> list[str]:
         command = [
             self.python_executable, "-m", CLI_MODULE,
@@ -208,6 +213,14 @@ class SecLaneLauncher:
             "--quiet",
             "--stack-dump-seconds", str(STACK_DUMP_SECONDS),
         ]
+        if expected_accession is not None:
+            command += ["--expected-accession", expected_accession]
+        if mission_context is not None:
+            command += [
+                "--mission-version-ref", mission_context["mission_version_ref"],
+                "--mission-version-hash", mission_context["mission_version_hash"],
+                "--mission-company-ref", mission_context["company_ref"],
+            ]
         for ticker in issuers:
             command += ["--issuer", ticker]
         if self.spool_dir is not None:
@@ -226,9 +239,30 @@ class SecLaneLauncher:
         filed_to: str,
         actor_ref: str,
         form: str = "10-Q",
+        expected_accession: str | None = None,
+        mission_context: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        if not isinstance(actor_ref, str) or _HUMAN_RE.fullmatch(actor_ref) is None:
-            raise LaneLaunchRejected("lane run must be requested by a human principal")
+        if not isinstance(actor_ref, str) or (
+            _HUMAN_RE.fullmatch(actor_ref) is None
+            and _AUTOMATION_RE.fullmatch(actor_ref) is None
+        ):
+            raise LaneLaunchRejected("lane run actor must use the human: or automation: namespace")
+        if _AUTOMATION_RE.fullmatch(actor_ref):
+            required = {
+                "mission_version_ref", "mission_version_hash", "mission_ref", "company_ref",
+                "ticker", "actor_ref", "paid_calls_reserved", "cost_usd_reserved", "budget",
+            }
+            if not isinstance(mission_context, Mapping) or set(mission_context) != required:
+                raise LaneLaunchRejected("automation lane run requires an exact mission authorization")
+        elif mission_context is not None:
+            raise LaneLaunchRejected("human lane runs must not carry mission automation context")
+        if expected_accession is not None and (
+            not isinstance(expected_accession, str)
+            or _ACCESSION_RE.fullmatch(expected_accession) is None
+        ):
+            raise LaneLaunchRejected("expected_accession must be a hyphenated SEC accession")
+        if _AUTOMATION_RE.fullmatch(actor_ref) and expected_accession is None:
+            raise LaneLaunchRejected("automation lane run must bind the observed accession")
         if not isinstance(form, str) or form not in SEC_COMPANY_FACTS_FORMS:
             raise LaneLaunchRejected(
                 f"form must be one of {'|'.join(SEC_COMPANY_FACTS_FORMS)}"
@@ -248,6 +282,13 @@ class SecLaneLauncher:
             if item in tickers:
                 raise LaneLaunchRejected(f"issuer {item} is listed twice")
             tickers.append(item)
+        if mission_context is not None and (
+            mission_context.get("actor_ref") != actor_ref
+            or tickers != [mission_context.get("ticker")]
+            or mission_context.get("paid_calls_reserved") != 0
+            or mission_context.get("cost_usd_reserved") != 0.0
+        ):
+            raise LaneLaunchRejected("automation lane mission authorization does not match the run")
         filed_from = _iso_date(filed_from, "filed_from")
         filed_to = _iso_date(filed_to, "filed_to")
         if filed_from > filed_to:
@@ -267,6 +308,8 @@ class SecLaneLauncher:
                     "form": form,
                     "actor_ref": actor_ref, "started_at": started_at,
                     "governance_hash": governance.content_hash,
+                    "expected_accession": expected_accession,
+                    "mission_context": dict(mission_context) if mission_context is not None else None,
                 }).encode("utf-8")
             ).hexdigest()[:24]
             ticket_id = f"{TICKET_PREFIX}:{digest}"
@@ -274,6 +317,8 @@ class SecLaneLauncher:
             command = self._command(
                 issuers=tickers, filed_from=filed_from, filed_to=filed_to,
                 actor_ref=actor_ref, ticket_dir=ticket_dir, form=form,
+                expected_accession=expected_accession,
+                mission_context=mission_context,
             )
             log_path = ticket_dir / "run.log"
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -296,6 +341,10 @@ class SecLaneLauncher:
                 "filed_to": filed_to,
                 "form": form,
                 "actor_ref": actor_ref,
+                "expected_accession": expected_accession,
+                "mission_context": (
+                    dict(mission_context) if mission_context is not None else None
+                ),
                 "governance_ref": governance.id,
                 "governance_hash": governance.content_hash,
                 "transport": "sec-public-https" if self.networked else "rehearsal",

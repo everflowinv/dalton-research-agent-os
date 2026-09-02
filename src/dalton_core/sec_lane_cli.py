@@ -102,7 +102,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="company-facts form: 10-Q (default) or 10-K for issuers that report the "
              "fourth-quarter pair inside the annual filing",
     )
-    parser.add_argument("--actor", required=True, help="human:<who>")
+    parser.add_argument("--actor", required=True, help="human:<who> or automation:<mission>")
+    parser.add_argument("--expected-accession")
+    parser.add_argument("--mission-version-ref")
+    parser.add_argument("--mission-version-hash")
+    parser.add_argument("--mission-company-ref")
     parser.add_argument("--run-key", help="defaults to filed-to")
     parser.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
     parser.add_argument("--summary-dir", type=Path, help="defaults to the state dir")
@@ -130,8 +134,18 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("networked runs require --governance; --rehearsal-approved-by is rehearsal-only")
     if args.rehearsal_approved_by is None and args.governance is None:
         parser.error("--governance is required unless --rehearsal-approved-by is used")
-    if not args.actor.startswith("human:"):
-        parser.error("--actor must use the human: namespace")
+    if not args.actor.startswith(("human:", "automation:")):
+        parser.error("--actor must use the human: or automation: namespace")
+    mission_values = (
+        args.mission_version_ref, args.mission_version_hash, args.mission_company_ref
+    )
+    if args.actor.startswith("automation:"):
+        if not args.expected_accession or any(value is None for value in mission_values):
+            parser.error(
+                "automation actor requires --expected-accession and all mission binding arguments"
+            )
+    elif args.expected_accession is not None or any(value is not None for value in mission_values):
+        parser.error("human actor must not carry mission automation arguments")
     if args.stack_dump_seconds < 0:
         parser.error("--stack-dump-seconds must be >= 0")
     if args.stack_dump_seconds:
@@ -178,6 +192,15 @@ def main(argv: list[str] | None = None) -> int:
                 actor_ref=args.actor,
                 run_key=args.run_key or args.filed_to,
                 form=args.form,
+                expected_accession=args.expected_accession,
+                mission_context=(
+                    {
+                        "mission_version_ref": args.mission_version_ref,
+                        "mission_version_hash": args.mission_version_hash,
+                        "company_ref": args.mission_company_ref,
+                    }
+                    if args.actor.startswith("automation:") else None
+                ),
             )
     except LanePreconditionError as exc:
         print(f"lane precondition failed: {exc}", file=sys.stderr)

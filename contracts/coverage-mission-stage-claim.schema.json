@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoverageMissionStageClaim",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "mission_version_ref", "mission_version_hash", "company_ref", "stage_ref", "claim_version_ref", "claim_version_hash", "evidence_version_ref", "evidence_version_hash", "source_location", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^mission-stage-claim:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "mission_version_ref": {"type": "string", "pattern": "^coverage-mission-version:"},
+    "mission_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "company_ref": {"type": "string", "minLength": 1},
+    "stage_ref": {"type": "string", "enum": ["initial_screen", "deep_insight_gate", "industry_model", "company_model", "investment_memo", "active_coverage"]},
+    "claim_version_ref": {"type": "string", "minLength": 1},
+    "claim_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "evidence_version_ref": {"type": "string", "minLength": 1},
+    "evidence_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_location": {"type": "string", "minLength": 1},
+    "actor_ref": {"type": "string", "pattern": "^automation:"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

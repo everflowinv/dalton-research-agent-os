@@ -46,6 +46,10 @@ v0.1 愿景第 1 节写的就是「人只定目标和边界、校正航向、讨
 
 ### P9b：观察 → Claim 闭环 + 10-K/Q4 派生（目标 10/1 ACN Q4 业绩前就位）
 
+进展（2026-09-02）：P9b-1 的 10-K 同 filing 季度对比已激活 live；P9b-2 的 mission observation → 持久 dispatch
+queue → exact-accession SEC lane → formal Claim/Evidence → stage-claim ledger 已完成 development candidate 与 live Core
+只读副本 canary，尚未激活自动写入。FY − 9M 跨 accession 派生仍未做。
+
 - `automation:coverage-mission` 按 mission `may_write` 中的 `claim/evidence` 触发 SEC lane：`record_observation_followup` 发现新 accession 后，在 policy 授权与 mission 日预算内调用 lane，人工路径保留。这是 Phase 8 退出门槛第 2、3 条真正需要的一步。
 - 追加式扩 company facts scope 到 10-K；Q4 = FY − 9M 作为新的冻结公式合同（照 S7d-5 预算注册表先例）；旧 plan 继续按 10-Q 重验。不改，ACN 10/1 那天 planner 会报 not_found。
 - 每条自动 Claim 同时写 mission 阶段账本的 observation，让进度投影能回答「这家公司卡在哪一步、缺什么」。

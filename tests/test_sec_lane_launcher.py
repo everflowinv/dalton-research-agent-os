@@ -27,7 +27,25 @@ from dalton_core.store import DaltonStore
 
 
 OWNER = "human:lumos"
+AUTOMATION = "automation:coverage-mission"
 ISSUERS = ["ACN", "CTSH", "EPAM", "IBM"]
+
+
+def _mission_context() -> dict:
+    return {
+        "mission_version_ref": "coverage-mission-version:us-it-services:1",
+        "mission_version_hash": "b" * 64,
+        "mission_ref": "coverage-mission:us-it-services",
+        "company_ref": "company:sec-cik:0001467373",
+        "ticker": "ACN",
+        "actor_ref": AUTOMATION,
+        "paid_calls_reserved": 0,
+        "cost_usd_reserved": 0.0,
+        "budget": {
+            "max_daily_paid_calls": 40, "max_daily_cost_usd": 5.0,
+            "max_alphaengine_calls_24h": 30,
+        },
+    }
 
 
 def _governance(*, approved: bool = True, approved_by: str = OWNER) -> SimpleNamespace:
@@ -230,6 +248,46 @@ class SecLaneLauncherTests(unittest.TestCase):
                 (root / "state" / "sec-lane-runs" / default["id"].split(":", 1)[1] / "argv.json").read_text()
             )
             self.assertEqual(argv[argv.index("--form") + 1], "10-Q")
+
+    def test_mission_automation_binds_exact_context_and_accession(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            launcher = self._launcher(root)
+            with self.assertRaises(LaneLaunchRejected):
+                launcher.start(
+                    issuers=["ACN"], filed_from="2026-06-01", filed_to="2026-10-31",
+                    actor_ref=AUTOMATION, form="10-K",
+                )
+            with self.assertRaises(LaneLaunchRejected):
+                launcher.start(
+                    issuers=["ACN", "CTSH"], filed_from="2026-06-01",
+                    filed_to="2026-10-31", actor_ref=AUTOMATION, form="10-K",
+                    expected_accession="0001467373-26-000031",
+                    mission_context=_mission_context(),
+                )
+            ticket = launcher.start(
+                issuers=["ACN"], filed_from="2026-06-01", filed_to="2026-10-31",
+                actor_ref=AUTOMATION, form="10-K",
+                expected_accession="0001467373-26-000031",
+                mission_context=_mission_context(),
+            )
+            self.assertEqual(ticket["actor_ref"], AUTOMATION)
+            self.assertEqual(ticket["expected_accession"], "0001467373-26-000031")
+            self.assertEqual(ticket["mission_context"]["mission_version_hash"], "b" * 64)
+            self.assertEqual(launcher.wait(timeout=30), 0)
+            argv = json.loads(
+                (root / "state" / "sec-lane-runs" / ticket["id"].split(":", 1)[1]
+                 / "argv.json").read_text()
+            )
+            self.assertEqual(argv[argv.index("--expected-accession") + 1], "0001467373-26-000031")
+            self.assertEqual(
+                argv[argv.index("--mission-version-ref") + 1],
+                "coverage-mission-version:us-it-services:1",
+            )
+            self.assertEqual(
+                argv[argv.index("--mission-company-ref") + 1],
+                "company:sec-cik:0001467373",
+            )
 
     def test_live_mode_passes_allow_network_and_default_governance_loader_is_lazy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
