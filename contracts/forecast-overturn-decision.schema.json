@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dalton/forecast-overturn-decision/0.1",
+  "title": "ForecastOverturnDecision",
+  "description": "Human-only, append-only decision on a forecast_overturn checkpoint raised by a ForecastReconciliation. It records the human verdict; a revised forecast is published separately through the human forecast-line and model-input operations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "reconciliation_ref", "reconciliation_hash",
+    "decision", "rationale", "actor_ref", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^forecast-overturn-decision:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "reconciliation_ref": {"type": "string", "pattern": "^forecast-reconciliation:[0-9a-f]{32}$"},
+    "reconciliation_hash": {"$ref": "#/$defs/hash"},
+    "decision": {"enum": ["keep_forecast", "revise_forecast"]},
+    "rationale": {"type": "string", "minLength": 1},
+    "actor_ref": {"type": "string", "pattern": "^human:"},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

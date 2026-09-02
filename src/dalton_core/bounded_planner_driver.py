@@ -234,6 +234,12 @@ class BoundedPlannerDriver:
             mission_dispatch = self.client.call("dispatch_coverage_mission_sec_lane", {})
         except Exception as exc:
             mission_dispatch = {"status": f"unavailable:{type(exc).__name__}"}
+        # P9c: pending forecast-vs-actual pairs are reconciled every tick under
+        # the mission grant; the writer reports skips instead of hiding them.
+        try:
+            forecast_reconciliation = self.client.call("reconcile_forecasts", {})
+        except Exception as exc:
+            forecast_reconciliation = {"status": f"unavailable:{type(exc).__name__}"}
         listing = self.client.call("bounded_planner_active_loops", {})
         loops = listing["loops"]
         executed: list[dict[str, Any]] = []
@@ -415,6 +421,7 @@ class BoundedPlannerDriver:
             "executed": executed,
             "skipped": skipped,
             "mission_sec_dispatch": mission_dispatch,
+            "forecast_reconciliation": forecast_reconciliation,
         }
 
 

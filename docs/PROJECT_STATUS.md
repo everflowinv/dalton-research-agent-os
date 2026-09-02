@@ -1,6 +1,17 @@
 # Dalton 项目进度
 
 更新日期：2026-09-02
+- **P9c「Forecast reconciliation——第一条 Outcome 对象」development candidate 已完成，未部署。**
+  新 authority `ForecastReconciliation`（`outcome:forecast-reconciliation:1` 冻结合同）把 exact ForecastLine 版本与同公司、
+  同 metric、同财季的 exact 正式 ClaimVersion 绑在一起，实际数从 Claim 自带的冻结 SEC 语句反解并逐字节重渲染核对，
+  偏差按 <1% / 1–3% / ≥3% 分为 within_tolerance / notable / overturn_candidate；≥3% 只登记 `forecast_overturn` 人工检查点，
+  预测不自动改，人用 `decide_forecast_overturn` 裁决。接入点：SEC lane 提交后立即对账、controller tick 每轮兜底、周报新增
+  「预测对账」节、thesis-impact assessment 带对账数据块、CompanyResearchView 新增字段。mission 词表追加
+  `forecast_reconciliation`；live mission v1 未授予，automation 路径会如实 skipped，激活需 owner 发布 mission v2
+  （`scripts/build_mission_v2_params.py` 生成参数）。live Core 只读副本 canary：mission v1 下 lane 提交 Claim 6→7 且对账
+  skipped、0 行写入；副本发布 v2 后 tick 对账 2 条（+1.7125% notable、+4.7396% overturn_candidate）、人工裁决
+  keep_forecast、integrity ok、0 网络 / 0 付费 / 0 live 写入。见
+  [P9c 报告](reports/p9c-forecast-reconciliation-v0.1-2026-09-02.md)。
 - **P9b-2「CoverageMission observation → SEC lane → Claim 阶段绑定」development candidate 已完成，未部署。**
   新 accession observation 先写持久 dispatch queue；SEC lane 忙时保持 pending，controller 每 tick 重试。writer 与 child
   双重检查 active mission、company/ticker、source_plan=connected、may_write、exact form/window/accession 和零付费预算 receipt；

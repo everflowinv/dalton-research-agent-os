@@ -33,6 +33,7 @@ from dalton_core.sec_public_adapter import SecPublicRouterAdapter
 from dalton_core.store import DaltonStore
 from tests.test_research_plan_executor import _sec_company_facts_body
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
+from tests.test_forecast_reconciliation import ForecastReconciliationFixture
 
 REPO = Path(__file__).resolve().parents[1]
 ISSUER = Issuer("AAPL", "320193", "company:sec-cik:0000320193", "Apple Inc")
@@ -278,6 +279,111 @@ class LaneTests(unittest.TestCase):
             progress = authority.mission_progress(mission["mission_ref"])
             self.assertEqual(progress["companies"][0]["claim_count"], 1)
             self.assertEqual(progress["companies"][0]["current_stage"], "initial_screen")
+
+    ANNUAL_PERIOD = {
+        "start": "2025-06-01", "end": "2025-08-31",
+        "calendar": "company:fiscal", "kind": "quarter",
+    }
+
+    def _publish_forecast_line(self, store: DaltonStore, value: str) -> dict:
+        fixture = ForecastReconciliationFixture(store)
+        return fixture.line(
+            value, period=self.ANNUAL_PERIOD, subject=ISSUER.company_ref,
+            line_ref="forecast-line:aapl:revenue:q4fy25",
+        )
+
+    def test_human_lane_run_reconciles_matching_forecast_line(self) -> None:
+        """P9c: the committed actual is reconciled against the latest forecast line."""
+        install_lane_rules(self.state, annual=True)
+        window = {"filed_from": "2025-01-01", "filed_to": "2025-12-31"}
+        core = DaltonStore(self.state / "core.sqlite")
+        try:
+            line = self._publish_forecast_line(core, "17300")
+        finally:
+            core.close()
+        with self._lane(adapter=fake_adapter(self.clock, _sec_company_facts_annual_body())) as lane:
+            summary = lane.run_issuer(
+                ISSUER, actor_ref="human:tester", run_key="annual-recon", form="10-K", **window
+            )
+            self.assertEqual(summary["status"], "committed", summary)
+            outcome = summary["forecast_reconciliation"]
+            self.assertEqual(outcome["status"], "reconciled", outcome)
+            self.assertEqual(outcome["skipped"], [])
+            record = outcome["created"][0]
+            self.assertEqual(record["forecast_line_version_ref"], line["id"])
+            self.assertEqual(record["actual_value"], "17596.26000000")
+            self.assertEqual(record["forecast_value"], "17300.00000000")
+            self.assertEqual(record["direction"], "above_forecast")
+            self.assertEqual(record["band"], "notable")
+            self.assertIsNone(record["mission_binding"])
+            self.assertEqual(summary["formal_ledger_counts"]["claim_versions"], 1)
+
+    def test_mission_automation_reconciles_only_with_the_scope(self) -> None:
+        """P9c: mission v1 (no scope) skips truthfully; a mission granting the scope binds it."""
+        install_lane_rules(self.state, annual=True)
+        window = {"filed_from": "2025-01-01", "filed_to": "2025-12-31"}
+        with self._lane(adapter=fake_adapter(self.clock, _sec_company_facts_annual_body())) as lane:
+            method = bootstrap_method_authorities(lane.core)
+            params = mission_params(method)
+            params["universe"] = [{
+                "company_ref": ISSUER.company_ref, "ticker": ISSUER.ticker,
+                "coverage_tier": "A", "bootstrap_priority": "P0",
+            }]
+            self.assertNotIn("forecast_reconciliation", params["autonomy"]["may_write"])
+            mission = CoverageMissionAuthority(lane.core).create_mission(
+                params.pop("mission_ref"), **params
+            )
+            self._publish_forecast_line(lane.core, "16800")
+            summary = lane.run_issuer(
+                ISSUER, actor_ref="automation:coverage-mission", run_key="mission-recon-1",
+                form="10-K", expected_accession="0000320193-25-000217",
+                mission_context={
+                    "mission_version_ref": mission["id"],
+                    "mission_version_hash": mission["content_hash"],
+                    "company_ref": ISSUER.company_ref,
+                },
+                **window,
+            )
+            self.assertEqual(summary["status"], "committed", summary)
+            outcome = summary["forecast_reconciliation"]
+            self.assertEqual(outcome["status"], "skipped", outcome)
+            self.assertEqual(outcome["created"], [])
+            self.assertIn("forecast_reconciliation", outcome["skipped"][0]["reason"])
+            self.assertEqual(
+                lane.core.connection.execute(
+                    "SELECT COUNT(*) FROM forecast_reconciliations"
+                ).fetchone()[0], 0,
+            )
+            # Owner publishes mission v2 with the scope; the pending pair is now
+            # reconcilable under the exact mission binding (the controller tick
+            # path), without re-running the lane.
+            v2 = dict(params)
+            v2["autonomy"] = {
+                **params["autonomy"],
+                "may_write": [*params["autonomy"]["may_write"], "forecast_reconciliation"],
+            }
+            v2["version_id"] = "coverage-mission-version:us-it-services:2"
+            v2["prior_version_ref"] = mission["id"]
+            v2["idempotency_key"] = "coverage-mission:us-it-services:2"
+            # The lane run opened its own CoverageMissionAuthority on this
+            # connection; open a fresh one for the post-run steps.
+            authority = CoverageMissionAuthority(lane.core)
+            mission_v2 = authority.create_mission(mission["mission_ref"], **v2)
+            from dalton_core.forecast_reconciliation import ForecastReconciliationAuthority
+            reconciler = ForecastReconciliationAuthority(lane.core)
+            result = reconciler.reconcile_pending(
+                requested_by="automation:coverage-mission",
+                mission_resolver=lambda company_ref: authority.authorize_forecast_reconciliation(
+                    company_ref=company_ref, actor_ref="automation:coverage-mission",
+                ),
+            )
+            self.assertEqual(result["status"], "reconciled", result)
+            record = result["created"][0]
+            self.assertEqual(record["mission_binding"]["mission_version_ref"], mission_v2["id"])
+            self.assertEqual(record["mission_binding"]["mission_version_hash"], mission_v2["content_hash"])
+            self.assertEqual(record["band"], "overturn_candidate")
+            self.assertEqual(record["human_checkpoint"], "forecast_overturn")
+            self.assertEqual(record["requested_by"], "automation:coverage-mission")
 
     def test_later_window_for_the_same_issuer_asks_a_new_question(self) -> None:
         """P9b: a second window must not die on the issuer's answered first question."""

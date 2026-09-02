@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .contracts import ThesisVersion
+from .forecast_reconciliation import validate_forecast_reconciliation
 from .industry_research import IndustryResearchAuthority, IndustryResearchError
 from .store import DaltonStore, canonical_json, content_hash
 
@@ -27,6 +28,7 @@ SCHEMA_VERSION = "0.1"
 ISSUE_SECTIONS = (
     "本期研究变化",
     "对现有观点的影响",
+    "预测对账",
     "公司与 driver 分化",
     "证据缺口",
     "关键争议",
@@ -136,6 +138,83 @@ def _gap_key(driver_ref: str, metric_ref: str, company_ref: str, status: str) ->
         "company_ref": company_ref,
         "status": status,
     })
+
+
+def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
+_RECONCILIATION_SUMMARY_FIELDS = (
+    "company_ref", "metric_ref", "period", "forecast_line_version_ref",
+    "claim_version_ref", "forecast_value", "actual_value", "unit", "currency",
+    "deviation_percent", "direction", "band", "human_checkpoint",
+)
+
+
+def _reconciliation_summary(record: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "ref": record["id"],
+        "hash": record["content_hash"],
+        "company_ref": record["subject_ref"],
+        "metric_ref": record["metric_ref"],
+        "period": f"{record['period']['start']}..{record['period']['end']}",
+        "forecast_line_version_ref": record["forecast_line_version_ref"],
+        "claim_version_ref": record["claim_version_ref"],
+        "forecast_value": record["forecast_value"],
+        "actual_value": record["actual_value"],
+        "unit": record["unit"],
+        "currency": record["currency"],
+        "deviation_percent": record["deviation_percent"],
+        "direction": record["direction"],
+        "band": record["band"],
+        "human_checkpoint": record["human_checkpoint"],
+    }
+
+
+def _forecast_reconciliations_in_window(
+    connection: sqlite3.Connection,
+    company_refs: list[str],
+    period_start: datetime,
+    period_end: datetime,
+) -> list[dict[str, Any]]:
+    """P9c: exact reconciliation refs created inside the issue window."""
+
+    if not _table_exists(connection, "forecast_reconciliations"):
+        return []
+    entries: list[dict[str, Any]] = []
+    for row in connection.execute(
+        "SELECT record_json, content_hash FROM forecast_reconciliations "
+        "ORDER BY created_at, reconciliation_id"
+    ).fetchall():
+        record = validate_forecast_reconciliation(json.loads(row["record_json"]))
+        if record["content_hash"] != row["content_hash"]:
+            raise WeeklyBriefConflict("forecast reconciliation row hash drifted")
+        created = datetime.fromisoformat(record["created_at"])
+        if record["subject_ref"] not in company_refs or not period_start < created <= period_end:
+            continue
+        entries.append(_reconciliation_summary(record))
+    return entries
+
+
+def _replay_forecast_reconciliations(
+    connection: sqlite3.Connection, entries: Any
+) -> None:
+    if entries is None:
+        return
+    if not isinstance(entries, list):
+        raise WeeklyBriefConflict("weekly brief forecast reconciliations are malformed")
+    for entry in entries:
+        row = connection.execute(
+            "SELECT record_json, content_hash FROM forecast_reconciliations "
+            "WHERE reconciliation_id=?", (entry.get("ref"),),
+        ).fetchone() if _table_exists(connection, "forecast_reconciliations") else None
+        if row is None or row["content_hash"] != entry.get("hash"):
+            raise WeeklyBriefConflict("weekly brief forecast reconciliation no longer replays")
+        record = validate_forecast_reconciliation(json.loads(row["record_json"]))
+        if _reconciliation_summary(record) != entry:
+            raise WeeklyBriefConflict("weekly brief forecast reconciliation summary drifted")
 
 
 def _snapshot_index(snapshot: Mapping[str, Any]) -> dict[str, Any]:
@@ -764,6 +843,9 @@ class WeeklyBriefAuthority:
         if markdown["snapshot_hash"] != snapshot["content_hash"]:
             raise WeeklyBriefConflict("industry snapshot and markdown drifted")
         index = _snapshot_index(snapshot)
+        reconciliations = _forecast_reconciliations_in_window(
+            self.connection, index["company_refs"], start, end
+        )
         created_at = _now()
         request = {
             "brief_ref": brief_ref,
@@ -827,6 +909,7 @@ class WeeklyBriefAuthority:
                 "content_index": index,
                 "change_summary": changes,
                 "thesis_bindings": thesis_bindings,
+                "forecast_reconciliations": reconciliations,
                 "sections": list(ISSUE_SECTIONS),
                 "actor_ref": actor_ref,
             })
@@ -889,6 +972,7 @@ class WeeklyBriefAuthority:
         thesis_bindings = self._replay_thesis_bindings(
             cur, wire["content_index"]["company_refs"], wire["thesis_bindings"]
         )
+        _replay_forecast_reconciliations(self.connection, wire.get("forecast_reconciliations"))
         prior = None
         prior_thesis = None
         if wire["prior_version_ref"] is not None:
@@ -976,6 +1060,26 @@ class WeeklyBriefAuthority:
                     f"(confidence={binding['confidence']}; thesis={binding['thesis_version_ref']}; "
                     f"本期版本变化={'yes' if changed else 'no'})"
                 )
+
+        lines.extend(["", "## 预测对账", ""])
+        tickers = {
+            item["company_ref"]: item["ticker"] for item in snapshot["coverage_universe"]
+        }
+        reconciliations = issue.get("forecast_reconciliations") or []
+        if not reconciliations:
+            lines.append("- 本期没有预测线被实际数对账；没有实际数落库就不写预测偏差。")
+        for item in reconciliations:
+            ticker = tickers.get(item["company_ref"], item["company_ref"])
+            checkpoint = (
+                "；触发 forecast_overturn 人工检查点，预测未自动修改"
+                if item["human_checkpoint"] == "forecast_overturn" else ""
+            )
+            lines.append(
+                f"- {ticker}｜{item['metric_ref']}｜{item['period']}｜"
+                f"预测 {item['forecast_value']} {item['unit']} {item['currency']}｜"
+                f"实际 {item['actual_value']}｜偏差 {item['deviation_percent']}%｜"
+                f"{item['direction']}｜{item['band']}{checkpoint}｜{item['ref']}"
+            )
 
         lines.extend(["", "## 公司与 driver 分化", ""])
         for driver in snapshot["driver_scoreboard"]:

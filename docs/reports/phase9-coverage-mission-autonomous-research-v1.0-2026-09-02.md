@@ -56,6 +56,12 @@ queue → exact-accession SEC lane → formal Claim/Evidence → stage-claim led
 
 ### P9c：Forecast reconciliation（第一条 Outcome 对象）
 
+进展（2026-09-02）：development candidate 已完成并通过 live Core 只读副本 canary，未部署。新增 `ForecastReconciliation`
+authority（`outcome:forecast-reconciliation:1` 冻结合同）、`forecast_overturn` 人工裁决记录，接入 SEC lane 提交点、
+controller tick、周报「预测对账」节、thesis-impact prompt 与 CompanyResearchView；mission 词表追加
+`forecast_reconciliation`，live mission v1 未授予，激活需发布 mission v2（owner gate）。见
+[P9c 报告](p9c-forecast-reconciliation-v0.1-2026-09-02.md)。
+
 - 新 authority：实际 Claim 落库后自动生成 reconciliation（预测线 exact 版本 vs 实际 Claim exact 版本、偏差、方向），喂 thesis-impact 与下一期周报。playbook `model_discipline` 最后一条在此兑现；愿景里 Evidence→Claim→Thesis→Driver→Question→Outcome 的最后一环从 0 条开始记。
 - `forecast_overturn` 是人类检查点：偏差超过 mission 定义的阈值时不自动改预测，只登记并升级人工。
 

@@ -74,6 +74,9 @@ AUTOMATION_WRITE_SCOPES: tuple[str, ...] = (
     "research_question",
     "observation",
     "stage_record",
+    # P9c: derived forecast-vs-actual outcome records.  Appended to the
+    # vocabulary; existing missions that do not list it stay read-only here.
+    "forecast_reconciliation",
 )
 CHECKPOINT_KINDS: tuple[str, ...] = (
     "deep_insight_gate",
@@ -764,6 +767,84 @@ class CoverageMissionAuthority:
             "paid_calls_reserved": 0,
             "cost_usd_reserved": 0.0,
             "budget": dict(mission["budget"]),
+        }
+
+    def authorize_forecast_reconciliation(
+        self,
+        *,
+        company_ref: str,
+        actor_ref: str | None = None,
+        mission_version_ref: str | None = None,
+        mission_version_hash: str | None = None,
+    ) -> dict[str, Any]:
+        """Resolve the mission grant for automation forecast reconciliation.
+
+        Requires exactly one active mission covering the company, the
+        ``forecast_reconciliation`` write scope and the ``forecast_overturn``
+        human checkpoint (so an overturn candidate has somewhere to escalate).
+        Reconciliation is a zero-cost derived write; no budget is reserved.
+        """
+
+        company_ref = _text(company_ref, "company_ref")
+        if mission_version_ref is None:
+            candidates: list[dict[str, Any]] = []
+            for row in self.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
+            ).fetchall():
+                mission = self.mission(row["mission_version_id"])
+                if company_ref in {member["company_ref"] for member in mission["universe"]}:
+                    candidates.append(mission)
+            if len(candidates) != 1:
+                raise CoverageMissionConflict(
+                    "forecast reconciliation requires exactly one active mission for the company"
+                )
+            mission = candidates[0]
+        else:
+            mission = self.mission(_text(mission_version_ref, "mission_version_ref"))
+            pointer = self.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
+                (mission["mission_ref"],),
+            ).fetchone()
+            if pointer is None or pointer["mission_version_id"] != mission["id"]:
+                raise CoverageMissionConflict(
+                    "forecast reconciliation must bind the active mission version"
+                )
+        if mission_version_hash is not None and mission["content_hash"] != _sha256(
+            mission_version_hash, "mission_version_hash"
+        ):
+            raise CoverageMissionConflict("forecast reconciliation mission hash binding failed")
+        principal = mission["autonomy"]["automation_principal"]
+        if actor_ref is None:
+            actor_ref = principal
+        elif _actor(actor_ref) != principal:
+            raise CoverageMissionConflict(
+                "forecast reconciliation actor is not the mission principal"
+            )
+        if company_ref not in {member["company_ref"] for member in mission["universe"]}:
+            raise CoverageMissionConflict("company is outside the mission universe")
+        if "forecast_reconciliation" not in mission["autonomy"]["may_write"]:
+            raise CoverageMissionConflict(
+                "mission does not grant forecast_reconciliation writes to automation"
+            )
+        if "forecast_overturn" not in mission["autonomy"]["human_checkpoints"]:
+            raise CoverageMissionConflict(
+                "mission does not list the forecast_overturn human checkpoint"
+            )
+        cur = self.connection.cursor()
+        self._validate_playbook_binding(cur, mission["bindings"]["playbook_version"])
+        self._validate_constitution_binding(
+            cur, mission["bindings"]["constitution_version"], mission["industry_ref"]
+        )
+        self._validate_mandate_binding(
+            cur, mission["bindings"]["mandate_version"], mission["industry_ref"]
+        )
+        return {
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+            "mission_ref": mission["mission_ref"],
+            "company_ref": company_ref,
+            "actor_ref": actor_ref,
+            "scope": "forecast_reconciliation",
         }
 
     def sec_lane_authorization_for_company(self, company_ref: str) -> dict[str, Any]:

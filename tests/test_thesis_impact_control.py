@@ -211,6 +211,34 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
             thesis_ref=self.thesis_ref,
         )
 
+    def test_assessment_binds_forecast_reconciliations_when_present(self) -> None:
+        """P9c: an existing reconciliation for the Claim enters prompt, identity and input_refs."""
+        from unittest.mock import patch
+        import dalton_core.thesis_impact_control as control_module
+
+        committed = self._seed_thesis()
+        fake = [{
+            "id": "forecast-reconciliation:" + "a" * 32, "content_hash": "b" * 64,
+            "band": "overturn_candidate", "deviation_percent": "5.6300",
+        }]
+        with patch.object(
+            control_module, "_forecast_reconciliations_for_claim", return_value=fake
+        ):
+            started = self._close_and_start()
+        assessment_work = started["impact"]["assessment_work_order"]
+        self.assertIn("FORECAST_RECONCILIATION_CANONICAL_JSON", assessment_work["question"])
+        self.assertIn(canonical_json(fake), assessment_work["question"])
+        self.assertIn(fake[0]["id"], assessment_work["input_refs"])
+        self.assertEqual(
+            assessment_work["metadata"]["forecast_reconciliation_refs"], [fake[0]["id"]]
+        )
+        self.assertEqual(
+            assessment_work["metadata"]["forecast_reconciliation_hashes"], ["b" * 64]
+        )
+        self.assertIn(canonical_json(committed and self.harness.core.get_version(
+            committed["version_id"]
+        )["content"]), assessment_work["question"])
+
     def test_recorded_supports_path_replays_without_thesis_mutation(self) -> None:
         committed = self._seed_thesis()
         before_pointer = dict(

@@ -17,6 +17,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .store import DaltonStore, canonical_json, content_hash
+from .forecast_reconciliation import validate_forecast_reconciliation
 
 
 SCHEMA_VERSION = "0.1"
@@ -262,6 +263,42 @@ def build_company_research_view(
             "created_at": row["created_at"],
         })
 
+    reconciliations: list[dict[str, Any]] = []
+    if _table_exists(connection, "forecast_reconciliations"):
+        for row in connection.execute(
+            "SELECT record_json, content_hash FROM forecast_reconciliations "
+            "WHERE subject_ref=? ORDER BY created_at, reconciliation_id",
+            (company_ref,),
+        ).fetchall():
+            record = validate_forecast_reconciliation(json.loads(row["record_json"]))
+            if record["content_hash"] != row["content_hash"]:
+                raise CompanyResearchViewError("forecast reconciliation row hash drifted")
+            decided = connection.execute(
+                "SELECT decision FROM forecast_overturn_decisions WHERE reconciliation_ref=?",
+                (record["id"],),
+            ).fetchone()
+            reconciliations.append({
+                "reconciliation_ref": record["id"],
+                "reconciliation_hash": record["content_hash"],
+                "metric_ref": record["metric_ref"],
+                "period": f"{record['period']['start']}..{record['period']['end']}",
+                "forecast_line_version_ref": record["forecast_line_version_ref"],
+                "claim_version_ref": record["claim_version_ref"],
+                "forecast_value": record["forecast_value"],
+                "actual_value": record["actual_value"],
+                "unit": record["unit"],
+                "currency": record["currency"],
+                "deviation_percent": record["deviation_percent"],
+                "direction": record["direction"],
+                "band": record["band"],
+                "human_checkpoint": record["human_checkpoint"],
+                "checkpoint_status": (
+                    "not_required" if record["human_checkpoint"] is None
+                    else ("pending_human" if decided is None else f"decided:{decided['decision']}")
+                ),
+                "created_at": record["created_at"],
+            })
+
     issues: list[Any] = []
     if _table_exists(connection, "weekly_brief_issue_versions"):
         issues = connection.execute(
@@ -306,6 +343,11 @@ def build_company_research_view(
             "kind": "question_recorded", "ref": row["question_ref"],
             "at": row["created_at"],
         })
+    for row in reconciliations:
+        stops.append({
+            "kind": "forecast_reconciled", "ref": row["reconciliation_ref"],
+            "at": row["created_at"],
+        })
     if last_issue is not None:
         stops.append({
             "kind": "brief_published", "ref": last_issue["issue_version_ref"],
@@ -336,6 +378,7 @@ def build_company_research_view(
         "claims": claims,
         "open_questions": open_questions,
         "impact": impact,
+        "forecast_reconciliations": reconciliations,
         "last_weekly_issue": last_issue,
         "last_research_stop": last_stop,
     }

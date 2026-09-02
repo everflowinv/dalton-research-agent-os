@@ -315,6 +315,20 @@ class WriterClient:
     def model_input_integrity_report(self) -> Any:
         return self.call("model_input_integrity_report", {})
 
+    def reconcile_forecasts(self, **params: Any) -> Any:
+        return self.call("reconcile_forecasts", params)
+
+    def forecast_reconciliations(self, **params: Any) -> Any:
+        return self.call("forecast_reconciliations", params)
+
+    def get_forecast_reconciliation(self, reconciliation_ref: str) -> Any:
+        return self.call(
+            "get_forecast_reconciliation", {"reconciliation_ref": reconciliation_ref}
+        )
+
+    def decide_forecast_overturn(self, **params: Any) -> Any:
+        return self.call("decide_forecast_overturn", params)
+
     def register_industry_evidence_pack(self, evidence_pack_ref: str, **params: Any) -> Any:
         return self.call(
             "register_industry_evidence_pack", {"evidence_pack_ref": evidence_pack_ref, **params}

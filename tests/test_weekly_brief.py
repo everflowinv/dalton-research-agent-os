@@ -67,6 +67,53 @@ class WeeklyBriefAuthorityTests(unittest.TestCase):
         brief_ref = params.pop("brief_ref")
         return self.weekly.publish_issue(brief_ref, **params)
 
+    def test_issue_binds_forecast_reconciliations_created_in_its_window(self) -> None:
+        """P9c: reconciliations inside the window are listed, rendered and replayed exactly."""
+        from datetime import datetime, timedelta, timezone
+        from tests.test_forecast_reconciliation import ForecastReconciliationFixture
+
+        fixture = ForecastReconciliationFixture(self.fixture.store)
+        fixture.line("17300", period={
+            "start": "2025-06-01", "end": "2025-08-31",
+            "calendar": "company:fiscal", "kind": "quarter",
+        }, subject=ACN_REF)
+        fixture.claim(current="17596260000", prior="16405819000", period={
+            "start": "2025-06-01", "end": "2025-08-31",
+            "calendar": "company:fiscal", "kind": "quarter",
+        }, subject=ACN_REF)
+        created = fixture.reconciler.reconcile_pending(
+            requested_by="human:coverage-owner", mission_resolver=None,
+        )["created"]
+        self.assertEqual(len(created), 1)
+        now = datetime.now(timezone.utc)
+        params = self.issue_params()
+        params["period_start"] = (now - timedelta(days=1)).isoformat(timespec="seconds")
+        params["period_end"] = (now + timedelta(days=1)).isoformat(timespec="seconds")
+        brief_ref = params.pop("brief_ref")
+        issue = self.weekly.publish_issue(brief_ref, **params)
+        self.assertEqual(len(issue["forecast_reconciliations"]), 1)
+        entry = issue["forecast_reconciliations"][0]
+        self.assertEqual(entry["ref"], created[0]["id"])
+        self.assertEqual(entry["hash"], created[0]["content_hash"])
+        self.assertEqual(entry["company_ref"], ACN_REF)
+        self.assertEqual(entry["band"], "notable")
+        self.assertIn("预测对账", issue["sections"])
+        replayed = self.weekly.issue(issue["id"])
+        self.assertEqual(replayed["forecast_reconciliations"], issue["forecast_reconciliations"])
+        markdown = self.weekly.render_markdown(issue["id"])["body"]
+        self.assertIn("## 预测对账", markdown)
+        self.assertIn(created[0]["id"], markdown)
+        self.assertIn("偏差 1.7125%", markdown)
+        # A window before the reconciliation existed lists nothing, and says so.
+        params = self.issue_params(second=True)
+        params["prior_version_ref"] = issue["id"]
+        params["period_start"] = (now + timedelta(days=1)).isoformat(timespec="seconds")
+        params["period_end"] = (now + timedelta(days=2)).isoformat(timespec="seconds")
+        brief_ref = params.pop("brief_ref")
+        later = self.weekly.publish_issue(brief_ref, **params)
+        self.assertEqual(later["forecast_reconciliations"], [])
+        self.assertIn("本期没有预测线被实际数对账", self.weekly.render_markdown(later["id"])["body"])
+
     def test_first_issue_is_baseline_not_fake_weekly_delta_and_replays(self) -> None:
         issue = self.publish()
         replay = self.publish()

@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "dalton/forecast-reconciliation/0.1",
+  "title": "ForecastReconciliation",
+  "description": "Derived outcome record binding one exact ForecastLine version to one exact formal ClaimVersion that reports the actual for the same subject, metric and quarter. Never edits the forecast, the Claim or a Thesis; an overturn_candidate band raises the forecast_overturn human checkpoint.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "id", "created_at", "contract_ref", "contract_hash",
+    "subject_ref", "metric_ref", "period", "forecast_line_ref",
+    "forecast_line_version_ref", "forecast_line_version_hash", "forecast_value",
+    "forecast_value_kind", "model_run_version_ref", "claim_version_ref",
+    "claim_version_hash", "claim_metric_or_aspect", "evidence_version_ref",
+    "evidence_version_hash", "actual_value", "actual_source", "unit", "currency",
+    "deviation_absolute", "deviation_percent", "direction", "band",
+    "human_checkpoint", "mission_binding", "requested_by", "actor_ref", "content_hash"
+  ],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^forecast-reconciliation:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "contract_ref": {"const": "outcome:forecast-reconciliation:1"},
+    "contract_hash": {"$ref": "#/$defs/hash"},
+    "subject_ref": {"type": "string", "minLength": 1},
+    "metric_ref": {"type": "string", "minLength": 1},
+    "period": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "calendar", "kind"],
+      "properties": {
+        "start": {"type": "string", "format": "date"},
+        "end": {"type": "string", "format": "date"},
+        "calendar": {"type": "string", "minLength": 1},
+        "kind": {"const": "quarter"}
+      }
+    },
+    "forecast_line_ref": {"type": "string", "minLength": 1},
+    "forecast_line_version_ref": {"type": "string", "minLength": 1},
+    "forecast_line_version_hash": {"$ref": "#/$defs/hash"},
+    "forecast_value": {"$ref": "#/$defs/decimal"},
+    "forecast_value_kind": {"enum": ["observed", "assumption", "derived_deterministic", "estimate", "simulation"]},
+    "model_run_version_ref": {"type": ["string", "null"]},
+    "claim_version_ref": {"type": "string", "minLength": 1},
+    "claim_version_hash": {"$ref": "#/$defs/hash"},
+    "claim_metric_or_aspect": {"type": "string", "minLength": 1},
+    "evidence_version_ref": {"type": "string", "minLength": 1},
+    "evidence_version_hash": {"$ref": "#/$defs/hash"},
+    "actual_value": {"$ref": "#/$defs/decimal"},
+    "actual_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "field", "raw_value", "raw_currency", "raw_scale"],
+      "properties": {
+        "kind": {"const": "claim_normalized_statement"},
+        "field": {"type": "string", "minLength": 1},
+        "raw_value": {"$ref": "#/$defs/decimal"},
+        "raw_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+        "raw_scale": {"enum": ["one", "thousand", "million", "billion"]}
+      }
+    },
+    "unit": {"enum": ["one", "thousand", "million", "billion"]},
+    "currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
+    "deviation_absolute": {"$ref": "#/$defs/decimal"},
+    "deviation_percent": {"$ref": "#/$defs/decimal"},
+    "direction": {"enum": ["above_forecast", "below_forecast", "in_line"]},
+    "band": {"enum": ["within_tolerance", "notable", "overturn_candidate"]},
+    "human_checkpoint": {"enum": ["forecast_overturn", null]},
+    "mission_binding": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mission_version_ref", "mission_version_hash", "mission_ref", "automation_principal"],
+          "properties": {
+            "mission_version_ref": {"type": "string", "minLength": 1},
+            "mission_version_hash": {"$ref": "#/$defs/hash"},
+            "mission_ref": {"type": "string", "minLength": 1},
+            "automation_principal": {"type": "string", "pattern": "^automation:"}
+          }
+        }
+      ]
+    },
+    "requested_by": {"type": "string", "pattern": "^(human|automation):"},
+    "actor_ref": {"const": "automation:forecast-reconciler"},
+    "content_hash": {"$ref": "#/$defs/hash"}
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decimal": {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"}
+  }
+}

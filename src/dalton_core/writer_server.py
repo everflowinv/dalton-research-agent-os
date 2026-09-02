@@ -165,6 +165,13 @@ from .model_forecast import (
     ModelForecastValidationError,
     extend_growth,
 )
+from .forecast_reconciliation import (
+    ForecastReconciliationAuthority,
+    ForecastReconciliationConflict,
+    ForecastReconciliationError,
+    ForecastReconciliationNotFound,
+    ForecastReconciliationValidationError,
+)
 from .bounded_alphaengine_probe import (
     BoundedAlphaEngineProbeError,
     execute_alphaengine_probe,
@@ -332,6 +339,8 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "create_coverage_mission", "get_coverage_mission",
     "get_active_coverage_mission", "record_mission_stage",
     "coverage_mission_progress", "coverage_mission_stage_records",
+    "reconcile_forecasts", "forecast_reconciliations",
+    "get_forecast_reconciliation", "decide_forecast_overturn",
 })
 # Mission stage bookkeeping is human-governed but must also be reachable by
 # the mission's declared ``automation:`` principal; the CoverageMission
@@ -341,6 +350,12 @@ MISSION_AUTOMATION_OPERATIONS = frozenset({
     "record_mission_stage", "coverage_mission_progress",
     "coverage_mission_stage_records", "get_active_coverage_mission",
     "get_coverage_mission",
+})
+# P9c: the controller tick (core principal) reconciles pending forecast /
+# actual pairs and reads them; the authority itself only writes under the
+# mission grant, and the overturn decision stays human-only.
+CORE_RECONCILIATION_OPERATIONS = frozenset({
+    "reconcile_forecasts", "forecast_reconciliations", "get_forecast_reconciliation",
 })
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
@@ -437,6 +452,7 @@ CORE_OPERATIONS = frozenset({
     "bounded_planner_propose_next", "bounded_planner_admit_proposal",
     "bounded_planner_record_outcome", "bounded_planner_record_observation",
     "dispatch_coverage_mission_sec_lane",
+    "reconcile_forecasts", "forecast_reconciliations", "get_forecast_reconciliation",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
     "llm_planner_advance", "llm_planner_execute", "bounded_alphaengine_probe",
@@ -586,6 +602,15 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "bounded_planner_record_outcome": frozenset({"round_ref"}),
     "bounded_planner_record_observation": frozenset({"round_ref", "mandate_version_ref"}),
     "dispatch_coverage_mission_sec_lane": frozenset(),
+    "reconcile_forecasts": frozenset({"requested_by", "company_ref", "claim_version_ref"}),
+    "forecast_reconciliations": frozenset({
+        "company_ref", "claim_version_ref", "forecast_line_ref", "created_from", "created_to",
+    }),
+    "get_forecast_reconciliation": frozenset({"reconciliation_ref"}),
+    "decide_forecast_overturn": frozenset({
+        "reconciliation_ref", "reconciliation_hash", "decision", "rationale", "actor_ref",
+        "idempotency_key",
+    }),
     "bounded_planner_active_loops": frozenset(),
     "materialize_bounded_planner_context": frozenset({"loop_version_ref", "doctrine_pack_version_ref", "doctrine_pack_version_hash", "as_of"}),
     "bounded_planner_propose_next_with_context": frozenset({"planner_context_pack_ref"}),
@@ -737,6 +762,8 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "acquire_alphaengine_document": "actor_ref",
     "stage_transcript_candidate": "actor_ref",
     "run_sec_company_facts_lane": "actor_ref",
+    "reconcile_forecasts": "requested_by",
+    "decide_forecast_overturn": "actor_ref",
 }
 
 
@@ -929,6 +956,7 @@ class WriterServer:
         self._weekly_brief: WeeklyBriefAuthority | None = None
         self._research_doctrine: ResearchDoctrineAuthority | None = None
         self._model_forecast: ModelForecastAuthority | None = None
+        self._forecast_reconciliation: ForecastReconciliationAuthority | None = None
         self._research_constitution: ResearchConstitutionAuthority | None = None
         self._research_playbook: ResearchPlaybookAuthority | None = None
         self._coverage_mission: CoverageMissionAuthority | None = None
@@ -1158,6 +1186,7 @@ class WriterServer:
         # doctrine or context on its own.
         self._research_doctrine = ResearchDoctrineAuthority(self._store)
         self._model_forecast = ModelForecastAuthority(self._store)
+        self._forecast_reconciliation = ForecastReconciliationAuthority(self._store)
         self._research_constitution = ResearchConstitutionAuthority(self._store)
         # Playbook (research method) and CoverageMission (task layer) are
         # human-only, append-only authorities; opening them only creates
@@ -1295,6 +1324,7 @@ class WriterServer:
         self._weekly_brief = None
         self._research_doctrine = None
         self._model_forecast = None
+        self._forecast_reconciliation = None
         self._research_constitution = None
         if self._store is not None:
             self._store.close()
@@ -1388,6 +1418,9 @@ class WriterServer:
             operation in MISSION_AUTOMATION_OPERATIONS
             and _AUTOMATION_ACTOR_RE.fullmatch(principal.resolved_actor_ref) is not None
         )
+        is_core_reconciliation = (
+            operation in CORE_RECONCILIATION_OPERATIONS and principal.is_unrestricted
+        )
         if operation in HUMAN_GOVERNANCE_OPERATIONS and _HUMAN_ACTOR_RE.fullmatch(
             principal.resolved_actor_ref
         ) is None:
@@ -1398,6 +1431,7 @@ class WriterServer:
                     and is_scoped_weekly_feedback
                 )
                 or is_mission_automation
+                or is_core_reconciliation
             ):
                 raise PermissionError("governance changes require an authenticated human principal")
         if operation == "record_agenda_feedback" and is_scoped_feedback:
@@ -2055,6 +2089,68 @@ class WriterServer:
     def _op_extend_growth_forecast(self, p: Mapping[str, Any]) -> Any:
         return extend_growth(self.model_input, self.model_forecast, **dict(p))
 
+    @property
+    def forecast_reconciliation(self) -> ForecastReconciliationAuthority:
+        if self._forecast_reconciliation is None:
+            raise WriterServerError("forecast-reconciliation authority is unavailable")
+        return self._forecast_reconciliation
+
+    def _op_reconcile_forecasts(self, p: Mapping[str, Any]) -> Any:
+        # P9c.  A human principal reconciles on their own request without a
+        # mission.  The core principal (controller tick) and mission automation
+        # reconcile only under the sole active CoverageMission that grants the
+        # forecast_reconciliation scope; unauthorized pairs are reported as
+        # skipped, never written.
+        values = dict(p)
+        requested_by = values.pop("requested_by")
+        resolver = None
+        if not requested_by.startswith("human:"):
+            actor = None if requested_by == "core" else requested_by
+
+            def resolver(company_ref: str, _actor=actor) -> dict[str, Any]:
+                return self.coverage_mission.authorize_forecast_reconciliation(
+                    company_ref=company_ref, actor_ref=_actor,
+                )
+            # The record names the mission principal, resolved per company.
+            requested_by = "automation:coverage-mission" if actor is None else actor
+        result = self.forecast_reconciliation.reconcile_pending(
+            requested_by=requested_by,
+            mission_resolver=resolver,
+            company_ref=values.get("company_ref"),
+            claim_version_ref=values.get("claim_version_ref"),
+        )
+        return {
+            "status": result["status"],
+            "created": [
+                {
+                    "ref": item["id"], "hash": item["content_hash"],
+                    "subject_ref": item["subject_ref"], "metric_ref": item["metric_ref"],
+                    "period": item["period"], "forecast_value": item["forecast_value"],
+                    "actual_value": item["actual_value"], "unit": item["unit"],
+                    "currency": item["currency"],
+                    "deviation_percent": item["deviation_percent"],
+                    "direction": item["direction"], "band": item["band"],
+                    "human_checkpoint": item["human_checkpoint"],
+                    "mission_binding": item["mission_binding"],
+                    "requested_by": item["requested_by"], "status": item["status"],
+                }
+                for item in result["created"]
+            ],
+            "skipped": result["skipped"],
+        }
+
+    def _op_forecast_reconciliations(self, p: Mapping[str, Any]) -> Any:
+        return {
+            "projection_kind": "forecast_reconciliations",
+            "reconciliations": self.forecast_reconciliation.reconciliations(**dict(p)),
+        }
+
+    def _op_get_forecast_reconciliation(self, p: Mapping[str, Any]) -> Any:
+        return self.forecast_reconciliation.reconciliation(dict(p)["reconciliation_ref"])
+
+    def _op_decide_forecast_overturn(self, p: Mapping[str, Any]) -> Any:
+        return self.forecast_reconciliation.decide_overturn(**dict(p))
+
     def _op_bounded_alphaengine_probe(self, p: Mapping[str, Any]) -> Any:
         # Executes in the writer: the acquisition subprocess writes Core
         # connector authority, which the driver process must not open, and
@@ -2505,11 +2601,11 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, ResearchPlaybookValidationError, CoverageMissionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, ResearchPlaybookValidationError, CoverageMissionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError, ForecastReconciliationValidationError)):
             return "rejected"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchPlaybookNotFound, CoverageMissionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending, ModelForecastNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchPlaybookNotFound, CoverageMissionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending, ModelForecastNotFound, ForecastReconciliationNotFound)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchPlaybookConflict, CoverageMissionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected, ModelForecastConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchPlaybookConflict, CoverageMissionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected, ModelForecastConflict, ForecastReconciliationConflict)):
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
@@ -2533,7 +2629,7 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, CapabilityRegistryError):
             return "store_error"
-        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, WeeklyBriefError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError, ResearchConstitutionError, ResearchPlaybookError, CoverageMissionError, CompanyResearchViewError, ResearchDoctrineError, LLMResearchPlannerError, ModelForecastError)):
+        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, WeeklyBriefError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError, ResearchConstitutionError, ResearchPlaybookError, CoverageMissionError, CompanyResearchViewError, ResearchDoctrineError, LLMResearchPlannerError, ModelForecastError, ForecastReconciliationError)):
             return "store_error"
         return "internal_error"
 
@@ -2543,11 +2639,11 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, ResearchPlaybookValidationError, CoverageMissionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, ResearchPlaybookValidationError, CoverageMissionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError, ForecastReconciliationValidationError)):
             return "request rejected by contract or gate"
-        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchPlaybookNotFound, CoverageMissionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending, ModelForecastNotFound)):
+        if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchPlaybookNotFound, CoverageMissionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending, ModelForecastNotFound, ForecastReconciliationNotFound)):
             return "requested object was not found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchPlaybookConflict, CoverageMissionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected, ModelForecastConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchPlaybookConflict, CoverageMissionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected, ModelForecastConflict, ForecastReconciliationConflict)):
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ContextMaterializerError, PerceptionError)):
             return "request rejected by contract or gate"

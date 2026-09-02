@@ -53,6 +53,10 @@ from .connector_runner import (
 )
 from .connector_transport_executor import ConnectorTransportExecutor
 from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
+from .forecast_reconciliation import (
+    ForecastReconciliationAuthority,
+    ForecastReconciliationError,
+)
 from .observability import ObservabilityStore
 from .raw_spool import RawSpool
 from .research_auto_commit import (
@@ -831,10 +835,18 @@ class SecCompanyFactsLane:
                 )
             except CoverageMissionError as exc:
                 raise LaneError(f"mission stage Claim binding failed: {exc}") from exc
+        forecast_reconciliation = self._reconcile_forecasts(
+            claim_version_ref=promotion["claim_version_ref"],
+            issuer=issuer,
+            actor_ref=actor_ref,
+            mission_authority=mission_authority,
+            mission_authorization=mission_authorization,
+        )
         verifications = [
             bundle.get("source_verification"), bundle.get("numeric_verification"),
         ]
         summary.update({
+            "forecast_reconciliation": forecast_reconciliation,
             "status": "duplicate" if promotion.get("status") == "duplicate" else "committed",
             "policy_version_ref": promotion["authorization"].get("policy_version_ref"),
             "candidate": {
@@ -872,6 +884,66 @@ class SecCompanyFactsLane:
             "mission_stage_claim": stage_claim,
         })
         return self._finish(summary)
+
+    def _reconcile_forecasts(
+        self,
+        *,
+        claim_version_ref: str,
+        issuer: Issuer,
+        actor_ref: str,
+        mission_authority: CoverageMissionAuthority | None,
+        mission_authorization: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        """P9c: reconcile forecast lines against the just-committed actual.
+
+        Runs after the formal Claim exists and never affects it.  Human runs
+        reconcile on the human's request; mission automation reconciles only
+        when the exact mission grants ``forecast_reconciliation``.  Failures
+        and skips are reported in the summary, not hidden; the controller tick
+        retries pending pairs independently.
+        """
+
+        reconciler = ForecastReconciliationAuthority(self.core)
+        resolver = None
+        if actor_ref.startswith("automation:"):
+            if mission_authority is None or mission_authorization is None:
+                return {"status": "skipped", "reason": "automation run lacks mission authorization"}
+
+            def resolver(company_ref: str) -> dict[str, Any]:
+                return mission_authority.authorize_forecast_reconciliation(
+                    company_ref=company_ref,
+                    actor_ref=actor_ref,
+                    mission_version_ref=mission_authorization["mission_version_ref"],
+                    mission_version_hash=mission_authorization["mission_version_hash"],
+                )
+        try:
+            result = reconciler.reconcile_pending(
+                requested_by=actor_ref,
+                mission_resolver=resolver,
+                claim_version_ref=claim_version_ref,
+            )
+        except ForecastReconciliationError as exc:
+            return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+        return {
+            "status": result["status"],
+            "company_ref": issuer.company_ref,
+            "created": [
+                {
+                    "ref": item["id"], "hash": item["content_hash"],
+                    "forecast_line_version_ref": item["forecast_line_version_ref"],
+                    "forecast_value": item["forecast_value"],
+                    "actual_value": item["actual_value"],
+                    "unit": item["unit"], "currency": item["currency"],
+                    "deviation_percent": item["deviation_percent"],
+                    "direction": item["direction"], "band": item["band"],
+                    "human_checkpoint": item["human_checkpoint"],
+                    "mission_binding": item["mission_binding"],
+                    "status": item["status"],
+                }
+                for item in result["created"]
+            ],
+            "skipped": result["skipped"],
+        }
 
     def _finish(self, summary: dict[str, Any]) -> dict[str, Any]:
         core = self.core.connection

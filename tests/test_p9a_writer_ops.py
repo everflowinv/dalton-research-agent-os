@@ -226,3 +226,45 @@ class P9aWriterOpsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class P9cWriterOpsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.h = P9aWriterHarness(Path(root.name))
+        self.addCleanup(self.h.close)
+
+    def test_reconcile_ops_are_idle_without_pairs_and_decisions_are_human_only(self) -> None:
+        core = self.h.core.call("reconcile_forecasts", {})
+        self.assertEqual(core["status"], "idle")
+        self.assertEqual(core["created"], [])
+        human = self.h.governance.call("reconcile_forecasts", {})
+        self.assertEqual(human["status"], "idle")
+        listing = self.h.governance.call("forecast_reconciliations", {"company_ref": ACN})
+        self.assertEqual(listing["reconciliations"], [])
+        with self.assertRaises(RemoteError) as missing:
+            self.h.core.call("get_forecast_reconciliation", {"reconciliation_ref": "forecast-reconciliation:" + "0" * 32})
+        self.assertEqual(missing.exception.code, "not_found")
+        with self.assertRaises(RemoteAuthorizationError):
+            self.h.core.call("decide_forecast_overturn", {
+                "reconciliation_ref": "forecast-reconciliation:" + "0" * 32,
+                "reconciliation_hash": "0" * 64, "decision": "keep_forecast",
+                "rationale": "core may not decide", "idempotency_key": "k",
+            })
+        with self.assertRaises(RemoteAuthorizationError):
+            self.h.automation.call("decide_forecast_overturn", {
+                "reconciliation_ref": "forecast-reconciliation:" + "0" * 32,
+                "reconciliation_hash": "0" * 64, "decision": "keep_forecast",
+                "rationale": "automation may not decide", "idempotency_key": "k",
+            })
+        with self.assertRaises(RemoteError) as unknown:
+            self.h.governance.call("decide_forecast_overturn", {
+                "reconciliation_ref": "forecast-reconciliation:" + "0" * 32,
+                "reconciliation_hash": "0" * 64, "decision": "keep_forecast",
+                "rationale": "nothing to decide", "idempotency_key": "k",
+            })
+        self.assertEqual(unknown.exception.code, "not_found")
+        with self.assertRaises(RemoteError) as spoof:
+            self.h.governance.call("reconcile_forecasts", {"requested_by": "human:someone-else"})
+        self.assertIn(spoof.exception.code, {"forbidden", "rejected"})

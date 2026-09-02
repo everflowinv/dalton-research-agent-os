@@ -105,6 +105,7 @@ class CompanyResearchViewTests(unittest.TestCase):
         expected = {
             "schema_version", "projection_kind", "id", "company_ref",
             "built_as_of", "thesis", "claims", "open_questions", "impact",
+            "forecast_reconciliations",
             "last_weekly_issue", "last_research_stop", "content_hash",
         }
         self.assertEqual(set(first), expected)
