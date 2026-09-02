@@ -24,7 +24,7 @@ Dalton 是面向投研团队的独立研究控制内核。它把任务调度、�
 - OpenClaw 可以提供模型、消息、审批和投递连接器；Core 常驻运行时不读取 OpenClaw 配置或凭据。显式校准命令只投影 provider/model、上下文、价格和 broker profile 等公开路由元数据，忽略密钥与 headers。
 - 旧 OpenClaw agent 的约束、研究结果和 cron 只作为 legacy input 归档。归档不代表采用、兼容或继续运行。
 
-旧工作流的初步取舍见 [docs/legacy-workflow-disposition.md](docs/legacy-workflow-disposition.md)。完整契约见 [SPEC.md](SPEC.md)，当前完成度与未完成项见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，当前执行顺序见 [Phase 8 单主题自主认知闭环](docs/reports/phase8-single-topic-autonomous-cognition-loop-v1.0-2026-08-27.md)，Connector 边界见 [docs/CONNECTOR_PROTOCOL.md](docs/CONNECTOR_PROTOCOL.md)。
+旧工作流的初步取舍见 [docs/legacy-workflow-disposition.md](docs/legacy-workflow-disposition.md)。完整契约见 [SPEC.md](SPEC.md)，当前完成度与未完成项见 [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md)，当前执行顺序见 [Phase 9 任务驱动的自主研究](docs/reports/phase9-coverage-mission-autonomous-research-v1.0-2026-09-02.md)（上一阶段：[Phase 8 单主题自主认知闭环](docs/reports/phase8-single-topic-autonomous-cognition-loop-v1.0-2026-08-27.md)），Connector 边界见 [docs/CONNECTOR_PROTOCOL.md](docs/CONNECTOR_PROTOCOL.md)。
 
 ## 本地验证
 

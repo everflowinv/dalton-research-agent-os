@@ -66,6 +66,8 @@ dalton_core = [
   "bounded_planner_loop_schema.sql",
   "research_doctrine_schema.sql",
   "research_constitution_schema.sql",
+  "research_playbook_schema.sql",
+  "coverage_mission_schema.sql",
   "model_forecast_schema.sql",
   "statement_snapshot_schema.sql",
   "transcript_polish_schema.sql",

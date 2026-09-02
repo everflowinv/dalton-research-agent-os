@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResearchPlaybookVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "playbook_ref", "version", "prior_version_ref", "title", "provenance", "stages", "key_questions", "deliverable_templates", "decision_vocabulary", "analyst_levels", "tracker_classes", "risk_reward_standards", "model_discipline", "evidence_discipline", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^research-playbook-version:"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "playbook_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "prior_version_ref": {"type": ["string", "null"]},
+    "title": {"type": "string", "minLength": 1},
+    "provenance": {"type": "string", "minLength": 1},
+    "stages": {
+      "type": "array",
+      "minItems": 6,
+      "maxItems": 6,
+      "prefixItems": [
+        {"$ref": "#/$defs/stage", "properties": {"stage_ref": {"const": "initial_screen"}}},
+        {"$ref": "#/$defs/stage", "properties": {"stage_ref": {"const": "deep_insight_gate"}, "human_checkpoint": {"const": true}}},
+        {"$ref": "#/$defs/stage", "properties": {"stage_ref": {"const": "industry_model"}}},
+        {"$ref": "#/$defs/stage", "properties": {"stage_ref": {"const": "company_model"}}},
+        {"$ref": "#/$defs/stage", "properties": {"stage_ref": {"const": "investment_memo"}, "human_checkpoint": {"const": true}}},
+        {"$ref": "#/$defs/stage", "properties": {"stage_ref": {"const": "active_coverage"}}}
+      ],
+      "items": false
+    },
+    "key_questions": {"$ref": "#/$defs/texts"},
+    "deliverable_templates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["initial_screen", "investment_memo"],
+      "properties": {
+        "initial_screen": {"$ref": "#/$defs/texts"},
+        "investment_memo": {"$ref": "#/$defs/texts"}
+      }
+    },
+    "decision_vocabulary": {
+      "type": "array",
+      "const": ["NO_CHANGE", "THESIS_STRENGTHENED", "THESIS_WEAKENED", "THESIS_BROKEN", "NEW_THESIS"]
+    },
+    "analyst_levels": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["level_ref", "label", "criteria"],
+        "properties": {
+          "level_ref": {"type": "string", "minLength": 1},
+          "label": {"type": "string", "minLength": 1},
+          "criteria": {"$ref": "#/$defs/texts"}
+        }
+      }
+    },
+    "tracker_classes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["tracker_ref", "label", "cadence", "agent_binding"],
+        "properties": {
+          "tracker_ref": {"type": "string", "minLength": 1},
+          "label": {"type": "string", "minLength": 1},
+          "cadence": {"type": "string", "minLength": 1},
+          "agent_binding": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "risk_reward_standards": {"$ref": "#/$defs/texts"},
+    "model_discipline": {"$ref": "#/$defs/texts"},
+    "evidence_discipline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_hierarchy", "banned_sources", "minimum_independent_sources_for_key_numbers", "number_provenance_rule"],
+      "properties": {
+        "source_hierarchy": {"$ref": "#/$defs/texts"},
+        "banned_sources": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "minimum_independent_sources_for_key_numbers": {"type": "integer", "minimum": 1},
+        "number_provenance_rule": {"const": "every_timely_number_traces_to_a_tool_result_or_primary_filing"}
+      }
+    },
+    "actor_ref": {"type": "string", "pattern": "^human:"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "texts": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage_ref", "label", "objective", "required_readings", "required_outputs", "exit_gate", "human_checkpoint"],
+      "properties": {
+        "stage_ref": {"type": "string", "enum": ["initial_screen", "deep_insight_gate", "industry_model", "company_model", "investment_memo", "active_coverage"]},
+        "label": {"type": "string", "minLength": 1},
+        "objective": {"type": "string", "minLength": 1},
+        "required_readings": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "required_outputs": {"$ref": "#/$defs/texts"},
+        "exit_gate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["questions", "pass_rule"],
+          "properties": {
+            "questions": {"$ref": "#/$defs/texts"},
+            "pass_rule": {"type": "string", "minLength": 1}
+          }
+        },
+        "human_checkpoint": {"type": "boolean"}
+      }
+    }
+  }
+}

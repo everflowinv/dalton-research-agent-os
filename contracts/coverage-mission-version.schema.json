@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoverageMissionVersion",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "mission_ref", "version", "prior_version_ref", "title", "objective", "industry_ref", "universe", "research_questions", "deliverables", "source_plan", "bindings", "autonomy", "budget", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^coverage-mission-version:"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "mission_ref": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "prior_version_ref": {"type": ["string", "null"]},
+    "title": {"type": "string", "minLength": 1},
+    "objective": {"type": "string", "minLength": 1},
+    "industry_ref": {"type": "string", "minLength": 1},
+    "universe": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["company_ref", "ticker", "coverage_tier", "bootstrap_priority"],
+        "properties": {
+          "company_ref": {"type": "string", "minLength": 1},
+          "ticker": {"type": "string", "minLength": 1},
+          "coverage_tier": {"type": "string", "enum": ["A", "B", "C"]},
+          "bootstrap_priority": {"type": "string", "enum": ["P0", "P1", "P2"]}
+        }
+      }
+    },
+    "research_questions": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "deliverables": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "enum": ["industry_framework", "initial_screen", "industry_model", "company_model", "forecast_lines", "investment_memo", "weekly_brief"]}
+    },
+    "source_plan": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source_ref", "role", "status"],
+        "properties": {
+          "source_ref": {"type": "string", "minLength": 1},
+          "role": {"type": "string", "minLength": 1},
+          "status": {"type": "string", "enum": ["connected", "probe_only", "not_connected"]}
+        }
+      }
+    },
+    "bindings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["constitution_version", "mandate_version", "playbook_version"],
+      "properties": {
+        "constitution_version": {"$ref": "#/$defs/binding"},
+        "mandate_version": {"$ref": "#/$defs/binding"},
+        "playbook_version": {"$ref": "#/$defs/binding"}
+      }
+    },
+    "autonomy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["automation_principal", "may_write", "human_checkpoints"],
+      "properties": {
+        "automation_principal": {"type": "string", "pattern": "^automation:"},
+        "may_write": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "enum": ["evidence", "claim", "forecast_line", "model_run", "research_question", "observation", "stage_record"]}
+        },
+        "human_checkpoints": {
+          "type": "array",
+          "minItems": 4,
+          "uniqueItems": true,
+          "items": {"type": "string", "enum": ["deep_insight_gate", "investment_memo", "thesis_admission", "thesis_revision", "forecast_overturn", "scope_expansion", "budget_expansion"]},
+          "allOf": [
+            {"contains": {"const": "thesis_admission"}},
+            {"contains": {"const": "thesis_revision"}},
+            {"contains": {"const": "scope_expansion"}},
+            {"contains": {"const": "budget_expansion"}}
+          ]
+        }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"],
+      "properties": {
+        "max_daily_paid_calls": {"type": "integer", "minimum": 0},
+        "max_daily_cost_usd": {"type": "number", "minimum": 0},
+        "max_alphaengine_calls_24h": {"type": "integer", "minimum": 0}
+      }
+    },
+    "actor_ref": {"type": "string", "pattern": "^human:"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "$defs": {
+    "binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ref", "hash"],
+      "properties": {
+        "ref": {"type": "string", "minLength": 1},
+        "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

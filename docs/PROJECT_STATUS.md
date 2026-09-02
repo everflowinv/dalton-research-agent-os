@@ -1,9 +1,28 @@
 # Dalton 项目进度
 
-更新日期：2026-08-27
-- **当前阶段：Phase 7 已收口（第 5 家 policy 自动提交 SEC Claim 达成）；P8a Research Constitution 与初始 Thesis、
-  S7f Weekly Brief coordinator 均已于 2026-08-27 经 owner 批准部署并激活 live。Phase 8 认知循环等待 9/3 首个自动
-  brief 窗口与 verifier host 修复。**
+更新日期：2026-09-02
+- **当前阶段：Phase 9「任务驱动的自主研究（Coverage Mission）」已开工。** owner 2026-09-02 定下目标形态：人下达
+  任务（如「建立对 US IT services 行业的首次覆盖」），OS 7×24 自主从 SEC / AlphaEngine / Guidepoint / web search
+  找资料，建立行业认知、公司财务模型和预测，人只在检查点看结果。裁决、切片顺序与退出门槛见
+  [Phase 9 v1.0](reports/phase9-coverage-mission-autonomous-research-v1.0-2026-09-02.md)，自动化写入范围见
+  [ADR-0004](adr/0004-mission-driven-autonomy-and-automation-write-scope.md)。Phase 8 的 9/3 首个自动 weekly brief
+  窗口照常值守；Phase 8 控制面（Bounded Planner、LLM planner、M1、AE probe）成为 mission 下的执行层。
+- **P9a ResearchPlaybook + CoverageMission development candidate 已完成（2026-09-02）。** chem agent 的团队分析师
+  手册（三段式流程、Deep Insight Gate 12 问、memo 12 个 key questions、analyst level 标尺、tracker 清单、模型与
+  证据纪律）转写为 human-only、append-only 的 `ResearchPlaybookVersion 0.1`（`research_playbook.py` + packaged
+  schema）：六阶段顺序、Deep Insight Gate / Investment Memo 的人类检查点、五词决定词汇、数字溯源规则由 validator
+  冻结。新增 `CoverageMissionVersion 0.1`（`coverage_mission.py`）：行业、universe+tier、研究问题、交付物、如实标注
+  connected / probe_only / not_connected 的来源计划、exact 绑定 playbook / constitution / mandate、autonomy
+  （`may_write` 冻结词表，thesis 永远不在其中；human_checkpoints 只能加不能删）、budget；阶段账本强制「进入第 k 阶段
+  先 gate_passed 第 k−1」「gate_passed 必带 evidence」「人类检查点只接受 human actor」「automation 必须是 mission
+  声明的 principal」。writer 新增 10 个 ops、3 份 JSON 合同、`deploy/phase9/` 两份 manifest（playbook v1、US IT
+  Services mission v1：ACN/CTSH/EPAM/IBM/DXC）。隔离 canary `scripts/run_p9a_playbook_mission_canary.py` 在
+  in-memory 与 **live Core 只读副本**（绑定 live 的 constitution v2 与 p8a mandate）均 `ok=true`：playbook / mission
+  fresh→duplicate、ACN 阶段演练（automation 过 initial_screen、被拒绝通过 deep_insight_gate、human 通过）、
+  integrity ok、0 付费调用、0 网络、0 live 写入。**未部署、未激活任何自动化写入；发布 playbook v1 与 mission v1 到
+  live 保留 owner gate。**见 [P9a 报告](reports/p9a-research-playbook-and-coverage-mission-v0.1-2026-09-02.md)。
+- **Phase 8 收口状态（2026-08-27 记录，仍有效）：Phase 7 已收口（第 5 家 policy 自动提交 SEC Claim 达成）；P8a Research
+  Constitution 与初始 Thesis、S7f Weekly Brief coordinator 均已于 2026-08-27 经 owner 批准部署并激活 live。**
   裁决见 [愿景复盘与下一阶段 v0.9](reports/vision-review-and-next-phase-v0.9-2026-08-26.md)。live Core 已有 5 条正式 Claim / 5 条
   Evidence：4 条 policy 自动提交 SEC quantitative + 1 条 owner 人工接受 transcript qualitative；driver pack、industry evidence pack、
   四家公司 overlay 和可重放 Markdown 均已在 live。原止损条件「2026-09-09 live 仍无正式 Claim」已解除。若继续保留

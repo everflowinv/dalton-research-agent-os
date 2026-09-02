@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CoverageMissionStageRecord",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "created_at", "mission_version_ref", "mission_version_hash", "company_ref", "stage_ref", "status", "evidence_refs", "rationale", "actor_ref", "content_hash"],
+  "properties": {
+    "schema_version": {"const": "0.1"},
+    "id": {"type": "string", "pattern": "^mission-stage-record:[0-9a-f]{32}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "mission_version_ref": {"type": "string", "pattern": "^coverage-mission-version:"},
+    "mission_version_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "company_ref": {"type": "string", "minLength": 1},
+    "stage_ref": {"type": "string", "enum": ["initial_screen", "deep_insight_gate", "industry_model", "company_model", "investment_memo", "active_coverage"]},
+    "status": {"type": "string", "enum": ["entered", "gate_passed", "gate_failed"]},
+    "evidence_refs": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "rationale": {"type": "string", "minLength": 1},
+    "actor_ref": {"type": "string", "pattern": "^(human|automation):"},
+    "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

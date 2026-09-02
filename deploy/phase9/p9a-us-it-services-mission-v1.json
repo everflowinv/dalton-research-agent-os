@@ -1,0 +1,68 @@
+{
+  "schema_version": "0.1",
+  "mission_ref": "coverage-mission:us-it-services",
+  "version_id": "coverage-mission-version:us-it-services:1",
+  "prior_version_ref": null,
+  "idempotency_key": "coverage-mission:us-it-services:1",
+  "playbook_ref": "research-playbook:team-analyst-manual",
+  "constitution_ref": "constitution:us-it-services",
+  "mandate_ref": "mandate:us-it-services-constitution-p8a",
+  "title": "US IT Services 首次覆盖任务 v1",
+  "objective": "建立对 US IT services 行业的首次覆盖：行业框架、五家公司的 Initial Screen 与财务模型/预测、行业与公司 Thesis，并把五家公司推进到持续覆盖。人类给方向、初始 Thesis 和检查点裁决；其余由 automation 在 playbook、constitution、mandate 与预算内自主推进。",
+  "industry_ref": "industry:us-it-services",
+  "universe": [
+    {"company_ref": "company:sec-cik:0001467373", "ticker": "ACN", "coverage_tier": "A", "bootstrap_priority": "P0"},
+    {"company_ref": "company:sec-cik:0001058290", "ticker": "CTSH", "coverage_tier": "A", "bootstrap_priority": "P1"},
+    {"company_ref": "company:sec-cik:0001352010", "ticker": "EPAM", "coverage_tier": "B", "bootstrap_priority": "P1"},
+    {"company_ref": "company:sec-cik:0000051143", "ticker": "IBM", "coverage_tier": "B", "bootstrap_priority": "P2"},
+    {"company_ref": "company:sec-cik:001688568", "ticker": "DXC", "coverage_tier": "C", "bootstrap_priority": "P2"}
+  ],
+  "research_questions": [
+    "US IT services 需求是否已经见底？（常驻问题，绑定 Bounded Planner）",
+    "AI / reinvention 需求能否抵消 discretionary consulting 下滑，并在 2–4 个季度内转化为收入？",
+    "五家公司在 bookings、utilization、margin 上的分化由什么解释？谁是赢家、谁是输家？",
+    "市场对各家的隐含预期与我们的预测线差在哪里？哪些事件能验证 variant view？"
+  ],
+  "deliverables": [
+    "industry_framework",
+    "initial_screen",
+    "industry_model",
+    "company_model",
+    "forecast_lines",
+    "investment_memo",
+    "weekly_brief"
+  ],
+  "source_plan": [
+    {"source_ref": "source:sec-edgar", "role": "季度收入、XBRL 财务事实与 10-Q/10-K 正文", "status": "connected"},
+    {"source_ref": "source:alphaengine", "role": "电话会转写稿与卖方观点（Tier 1 probe，24h/30 次上限）", "status": "probe_only"},
+    {"source_ref": "source:company-ir", "role": "earnings release、8-K exhibit、指引", "status": "not_connected"},
+    {"source_ref": "source:guidepoint", "role": "专家访谈一手视角（采用、竞争、渠道、执行力）", "status": "not_connected"},
+    {"source_ref": "source:web-search", "role": "行业数据、竞争格局、管理层变动", "status": "not_connected"}
+  ],
+  "autonomy": {
+    "automation_principal": "automation:coverage-mission",
+    "may_write": [
+      "evidence",
+      "claim",
+      "forecast_line",
+      "model_run",
+      "research_question",
+      "observation",
+      "stage_record"
+    ],
+    "human_checkpoints": [
+      "deep_insight_gate",
+      "investment_memo",
+      "thesis_admission",
+      "thesis_revision",
+      "forecast_overturn",
+      "scope_expansion",
+      "budget_expansion"
+    ]
+  },
+  "budget": {
+    "max_daily_paid_calls": 40,
+    "max_daily_cost_usd": 5.0,
+    "max_alphaengine_calls_24h": 30
+  }
+}

@@ -1,0 +1,382 @@
+{
+  "schema_version": "0.1",
+  "playbook_ref": "research-playbook:team-analyst-manual",
+  "version_id": "research-playbook-version:team-analyst-manual:1",
+  "prior_version_ref": null,
+  "idempotency_key": "research-playbook:team-analyst-manual:1",
+  "title": "团队分析师研究手册 Playbook v1",
+  "provenance": "源自团队新员工培训手册 2026-07-18 精粹版（workspace-chem/references/manual/research-process.md、analyst-levels.md、memo-template.md、tracker-checklist.md）、Dalton Active Coverage Architecture v1（coverage-architecture.md、config/coverage.json 的 Deep Insight Gate 12 问）与通用模型模板说明（templates/chem-model-template.md）。2026-09-02 由 Eve 转写为 Core 合同。行业特有内容（化工产品链、价差周报）未纳入，留给行业 Driver Pack 与 Research Constitution。",
+  "stages": [
+    {
+      "stage_ref": "initial_screen",
+      "label": "Initial Screen（首次筛选，≤1 周）",
+      "objective": "建立资料底座与初步判断：读过去 4 个季度财报与电话会、最新年报或招股书、近 6 个月多空券商观点；做简易 P/L 与 comp 表；识别价值创造/毁灭的关键 driver，形成初步 thesis 与风险回报。",
+      "required_readings": [
+        "过去 4 个季度财报与电话会 transcript（HK 公司读长版 earnings release，不读摘要版；管理层非英文发言对照原文）",
+        "最新年报、最新季报或半年报、近期 IPO/增发招股书",
+        "近 6 个月券商研报：理解关键进展和股价大幅波动原因；读多空两派的 initiation report",
+        "产品/用户体验：像产品经理一样过一遍产品功能树，汇总社区用户反馈（B2B 行业取下游客户/渠道视角）"
+      ],
+      "required_outputs": [
+        "简易 P/L 模型 + comp 表；收集 consensus（BBG/券商）",
+        "识别全部可得披露指标（财报、官方 filing、talking-basis 数据）",
+        "关键 driver 识别与初步 thesis：论证 thesis 足以驱动业绩/股价显著变化；说明 street 为什么没有 price in、盲点在哪",
+        "Relevance to universe：对其他标的（含跨区域）的多空含义",
+        "风险回报：长期复利型看目标盈利增速与内在价值；周期反转+催化型看对了赚多少/错了亏多少，回报是否补偿波动",
+        "Initial Screen 文档（结构见 deliverable_templates.initial_screen）"
+      ],
+      "exit_gate": {
+        "questions": [
+          "资料底座是否覆盖过去 4 季财报、电话会、最新年报和多空两派研报？",
+          "文档里的每个时效性数字是否都能回指 filing 或本轮工具结果？",
+          "是否已识别价值创造/毁灭的关键 driver，并说明它足以驱动业绩或股价显著变化？",
+          "是否写明 street 的盲点、relevance to universe 和风险回报？"
+        ],
+        "pass_rule": "四问全部为是；Initial Screen 文档存在且不是空壳；数字零错误、溯源完整。"
+      },
+      "human_checkpoint": false
+    },
+    {
+      "stage_ref": "deep_insight_gate",
+      "label": "Deep Insight Gate（深度认知门）",
+      "objective": "公司进入正式 active coverage 前必须回答 12 个问题。每题包含判断、证据、反方证据、未知项、falsifier 和下一项验证。未通过 gate 的公司保持 initializing，不得把初步假设写成正式观点。",
+      "required_readings": [
+        "本公司 Initial Screen 与其全部一手来源",
+        "行业报告：统计年鉴、行业协会年报、平台公司报告、第三方深度",
+        "竞争对手与全球同行的电话会"
+      ],
+      "required_outputs": [
+        "行业类型与 driver tree",
+        "供需和资本周期框架",
+        "长期趋势及改变条件",
+        "竞争优势巩固/破坏图",
+        "历史股价驱动复盘",
+        "可证伪 bull/bear thesis",
+        "高频跟踪指标和事件日历",
+        "来源、反方证据和未知项"
+      ],
+      "exit_gate": {
+        "questions": [
+          "这是商品周期、资本周期、合同型 compounder、结构成长还是转型公司？分类依据和反例是什么？",
+          "需求由哪些终端、数量、价格和替代关系决定？每个变量的领先指标是什么？",
+          "供给由产能、开工率、成本曲线、检修、政策、技术或区域贸易中的哪些变量决定？",
+          "行业的长期趋势是什么？哪些可观察条件出现后，趋势会改变？",
+          "公司的真正竞争优势是什么？这些优势如何巩固，又会被什么破坏？",
+          "管理层的资本配置、项目执行和历史承诺兑现情况怎样？",
+          "过去五至十年的股价主要由盈利、估值、产品价格、成本、政策还是资本周期驱动？",
+          "市场共识、主要多头逻辑和主要空头逻辑分别是什么？",
+          "哪些高频指标能证伪我们的判断？数据频率、来源和阈值是什么？",
+          "如果当前 thesis 被验证，下一阶段的盈利、估值和催化剂是什么？",
+          "如果 thesis 错了，最可能错在事实、时点、传导、估值还是执行？",
+          "哪些问题仍未知，下一项成本最低、信息增益最高的验证任务是什么？"
+        ],
+        "pass_rule": "P0 问题至少有两类独立可信来源；关键数字回到一手披露；矛盾不合并；所有核心 thesis 都有明确 falsifier。通过与否由人类裁决。"
+      },
+      "human_checkpoint": true
+    },
+    {
+      "stage_ref": "industry_model",
+      "label": "行业模型",
+      "objective": "行业模型先于公司模型：需求/TAM 与供给/产能、成本曲线、开工率、库存、贸易流、价格与价差；公司与区域/全球同行关键指标（margin、回报率、单位经济）对比，解释差距及收敛/扩大逻辑；识别高频数据并纳入更新日历。",
+      "required_readings": [
+        "行业统计年鉴、行业协会与平台公司数据",
+        "同行 filing 与电话会",
+        "月/周/日频高频数据源"
+      ],
+      "required_outputs": [
+        "需求/TAM 与供给/产能模型（多框架交叉预测）",
+        "公司 vs 同行关键指标对比及差距解释",
+        "高频数据识别并纳入行业模型与更新日历"
+      ],
+      "exit_gate": {
+        "questions": [
+          "行业模型的每个输入是否带来源与 as-of 日期？",
+          "公司与同行的差距是否有解释和收敛/扩大逻辑？",
+          "高频数据是否已识别并进入更新日历？"
+        ],
+        "pass_rule": "三问为是；无来源的数字标注缺来源，不补数。"
+      },
+      "human_checkpoint": false
+    },
+    {
+      "stage_ref": "company_model",
+      "label": "公司全模型",
+      "objective": "三表全模型：3–5 个关键 driver 的敏感性分析对照历史区间（峰/谷/均值）和同行；识别与 consensus 的分歧点；预测线带假设、来源和旧值/新值/差异原因。",
+      "required_readings": [
+        "过去 2 年全部 filing",
+        "3 年券商研报（理解股价历史）",
+        "公司经营数据公告与分部披露"
+      ],
+      "required_outputs": [
+        "历史三表（期间标准见 model_discipline）",
+        "关键 driver 敏感性（对照历史峰/谷/均值与同行）",
+        "与 consensus 的 driver bridge 与分歧点",
+        "预测线与假设说明（写入 ForecastLine authority）"
+      ],
+      "exit_gate": {
+        "questions": [
+          "历史数与 filing 是否对得上：季度加总等于 H1/FY，分部加总与集团口径差异可解释？",
+          "预测的隐藏假设是否逐条写明？",
+          "与 consensus 的分歧点是否量化？"
+        ],
+        "pass_rule": "历史数零错误；模型检查全部 OK；分歧点量化并注明来源。"
+      },
+      "human_checkpoint": false
+    },
+    {
+      "stage_ref": "investment_memo",
+      "label": "Investment Memo",
+      "objective": "一手文件、完整模型、行业 mosaic（竞争对手、客户、供应商、专家，目标 10–20+ 非公司渠道联系人）、反方证据和独立验证形成正式观点；含详细 Key Risks 和完整 Anti-thesis（anti-thesis 是完整的反向观点，不是风险清单）。",
+      "required_readings": [
+        "行业 mosaic / scuttlebutt：竞争对手、客户、供应商、专家访谈",
+        "本公司全部既有 Claim、Thesis、模型与 falsifier 状态"
+      ],
+      "required_outputs": [
+        "Investment Memo（结构见 deliverable_templates.investment_memo）",
+        "Key Risks 与 Anti-thesis 逐条论证及 mitigant 评估",
+        "Event pathway、交易时间跨度与对冲需要",
+        "估值框架（P/E、EV/EBITDA、SOTP）、vs street 与 IRR"
+      ],
+      "exit_gate": {
+        "questions": [
+          "Key Questions 12 问是否全部回答？",
+          "variant view 与 consensus 的分歧是否明确，consensus 哪里可能错？",
+          "Anti-thesis 是否是完整反向观点而不只是风险列表？",
+          "风险回报是否满足 risk_reward_standards？"
+        ],
+        "pass_rule": "四问为是；memo 中数字全部可回指；由人类审阅通过后才成为正式观点。"
+      },
+      "human_checkpoint": true
+    },
+    {
+      "stage_ref": "active_coverage",
+      "label": "Position Monitoring / Active Coverage",
+      "objective": "持续覆盖：每日/周新闻扫描、券商 initiation 与评级变化、第三方数据、filing/144 alert；月度/季度专家 check；季报对照原 thesis 预期（inline/better/worse 及原因）；zero-base thinking——如果重新开仓还买不买；财报前约 1 个月基于产业交流做季度 preview，财报后更新模型。",
+      "required_readings": [
+        "新 filing、业绩、电话会与指引",
+        "券商 initiation/评级变化与 consensus revision",
+        "第三方数据、tracker 与专家 check"
+      ],
+      "required_outputs": [
+        "每个事件映射到 driver/thesis，并留下五选一决定（decision_vocabulary）、下一项验证与时间",
+        "季度 preview 与财报后模型更新（保留旧值、新值、差异原因、受影响 thesis）",
+        "日报只报 material change；周报做完整覆盖复盘",
+        "月度 zero-base review"
+      ],
+      "exit_gate": {
+        "questions": [
+          "每个事件是否留下决定、下一项验证与时间？",
+          "thesis 验证后是否继续判断已定价、下一段盈利来自哪里、催化剂是否耗尽？",
+          "thesis 错误时是否区分事实、时点、传导、估值和执行，并写入教训？"
+        ],
+        "pass_rule": "持续阶段无终态。连续四周无重复事件、无静默失败、日报噪音可控、周报能追溯观点变化，视为稳定运行。"
+      },
+      "human_checkpoint": false
+    }
+  ],
+  "key_questions": [
+    "业务简述",
+    "收入/盈利关键 driver 及趋势",
+    "基本面研究和盈利预测里的隐藏假设是什么？",
+    "管理层：有无股东价值创造 track record？是否长期思维？",
+    "股价为什么在当前位置？过去 3 年关键事件与股价反应",
+    "可跟踪的高频数据点：月度销量？专有数据？供应商？客户？政府统计？",
+    "当前 consensus / bull camp / bear camp 观点（方向、收入、margin、EPS）",
+    "多还是空？variant view 是什么？consensus 哪里可能错？",
+    "Event pathway：验证 variant view 的事件/催化清单",
+    "交易时间跨度（做空尤其重要）",
+    "是否需要对冲？怎么对冲？",
+    "风险：怎么会错？错了能承受吗？有没有 consensus 没捕捉的风险？"
+  ],
+  "deliverable_templates": {
+    "initial_screen": [
+      "Key Information + Executive Summary",
+      "S1 公司概览（同 IM，无 ESOP 分析）",
+      "S2 行业概览（简版）",
+      "S3 核心 Thesis（简版）",
+      "S4 风险与 Anti-thesis（简版）",
+      "S5 Relevance to Universe（对 universe 内其他标的的多空含义，含跨区域）",
+      "S6 估值（street 预期、框架、event pathway、IRR）",
+      "S7 数据跟踪"
+    ],
+    "investment_memo": [
+      "Key Information：名称/ticker、日期、股价、市值（本币+USD）、30 日 ADV、建议（多/空/pass + 仓位 + 期限）",
+      "Executive Summary",
+      "S1 公司背景：历史沿革、产品与分部（收入/利润 mix + 增量 mix）、三表要点",
+      "S2 行业概览：规模与增速（多框架交叉预测）、竞争格局/份额变化、周期位置",
+      "S3 核心 Thesis：driver 识别 + 逐条论证 + 为什么 street 没 price in",
+      "S4 风险与 Anti-thesis：逐条论证 + mitigant 评估",
+      "S5 风险回报：关键 driver 敏感性",
+      "S6 管理层与股权：bio、持股、质量评估、ESOP 稀释、行业-业务-管理层匹配度",
+      "S7 预期：股价/估值历史、street 预期汇总、自己的预期 vs consensus",
+      "S8 估值：框架（P/E、EV/EBITDA、SOTP）、vs street、event pathway、IRR",
+      "S9 数据跟踪",
+      "附录：专家联系清单"
+    ]
+  },
+  "decision_vocabulary": [
+    "NO_CHANGE",
+    "THESIS_STRENGTHENED",
+    "THESIS_WEAKENED",
+    "THESIS_BROKEN",
+    "NEW_THESIS"
+  ],
+  "analyst_levels": [
+    {
+      "level_ref": "level:basic-1-desktop-research",
+      "label": "Basic Level 1 — Desktop Research",
+      "criteria": [
+        "桌面研究、数据收集/清洗/聚合、filing notes、行业跟踪与新闻扫描",
+        "数据完整性和溯源是生命线，对交付物负全责；发现异常主动 flag",
+        "建立 analyst journal（内化反馈、避免重复错误）；质量优先于速度"
+      ]
+    },
+    {
+      "level_ref": "level:basic-2-modelling",
+      "label": "Basic Level 2 — Modelling",
+      "criteria": [
+        "建财务模型，深入理解财务报表与 filing",
+        "识别预测的关键 driver 并自建 tracker；独立提出数据源/跟踪建议",
+        "主导标准尽调专家访谈；熟悉 call note、question list 和模型模板"
+      ]
+    },
+    {
+      "level_ref": "level:basic-3-critical-thinking",
+      "label": "Basic Level 3 — Critical Thinking",
+      "criteria": [
+        "独立完成模块 deep-dive；监控贡献过的公司（新闻、基本面、业绩、竞争对手、tracker）",
+        "参与业绩模型更新；挑战既有 thesis 并在指导下评估风险回报",
+        "独立发起专家访谈并起草问题清单"
+      ]
+    },
+    {
+      "level_ref": "level:basic-4-thesis-origination",
+      "label": "Basic Level 4 — Thesis Origination",
+      "criteria": [
+        "对行业/公司有与 manager 同级的掌握；从 thesis 起源到完整尽调",
+        "持续质疑自己的 thesis；独立产出 Initial Screen 和 IM",
+        "定期复盘错误"
+      ]
+    },
+    {
+      "level_ref": "level:advanced-1",
+      "label": "Advanced L1 — 正式 sector coverage",
+      "criteria": [
+        "独立项目与 industry-leading 盈利模型；独立 IS/IM",
+        "判断市场拥挤度与 consensus 催化；10–20 只股票 active coverage",
+        "建立非 IR 产业人脉"
+      ]
+    },
+    {
+      "level_ref": "level:advanced-2",
+      "label": "Advanced L2",
+      "criteria": [
+        "全流程尽调驱动；每年 2–4 个高胜率 idea（多空皆有）",
+        "子行业深度覆盖；持续选对赢家输家"
+      ]
+    },
+    {
+      "level_ref": "level:advanced-3",
+      "label": "Advanced L3",
+      "criteria": [
+        "一半 idea 来自自己；具备仓位建议能力",
+        "整行业 ownership（20–50 家）；跨区域协作"
+      ]
+    },
+    {
+      "level_ref": "level:advanced-4",
+      "label": "Advanced L4",
+      "criteria": [
+        "大多数 idea 来自自己；核心行业外的新 alpha 主题",
+        "多个行业 ownership（50–200+ 家）"
+      ]
+    }
+  ],
+  "tracker_classes": [
+    {
+      "tracker_ref": "tracker:operating-drivers",
+      "label": "Operating trackers（关键 driver + 财务指标）",
+      "cadence": "持续",
+      "agent_binding": "Driver Pack metric_specs + ForecastLine authority；行业高频序列另建 collector"
+    },
+    {
+      "tracker_ref": "tracker:filings-alert",
+      "label": "Filings alert（US: SEC；A+H: 巨潮/披露易）",
+      "cadence": "每日",
+      "agent_binding": "SEC company-facts lane（connected）+ Bounded Planner 新 accession 观察"
+    },
+    {
+      "tracker_ref": "tracker:insider-transactions",
+      "label": "Insider 买卖（US: Form 144 / A: Wind / HK: 披露易）",
+      "cadence": "每日",
+      "agent_binding": "not_connected：待建 144 与披露易扫描"
+    },
+    {
+      "tracker_ref": "tracker:sell-side-research",
+      "label": "券商研报与评级变化",
+      "cadence": "每日",
+      "agent_binding": "AlphaEngine Tier 1 probe（probe_only，24h/30 次）"
+    },
+    {
+      "tracker_ref": "tracker:keyword-news",
+      "label": "关键词新闻（Google Alerts 等价）",
+      "cadence": "每日/周",
+      "agent_binding": "web_search（not_connected：尚未接入 Core connector）"
+    },
+    {
+      "tracker_ref": "tracker:third-party-data",
+      "label": "第三方数据（Yipit / Bigone 等）",
+      "cadence": "每日",
+      "agent_binding": "人工输入喂 wiki（not_connected，无 API）"
+    },
+    {
+      "tracker_ref": "tracker:meeting-notes",
+      "label": "会议纪要 / 电话会转写",
+      "cadence": "每周 2–3 次",
+      "agent_binding": "AlphaEngine 转写稿 → qualitative candidate → 人工 accept（ADR-0003 B）"
+    },
+    {
+      "tracker_ref": "tracker:expert-interviews",
+      "label": "专家访谈",
+      "cadence": "月度/季度",
+      "agent_binding": "Guidepoint transcript search（not_connected：尚未接入 Core connector）"
+    },
+    {
+      "tracker_ref": "tracker:earnings-read-across",
+      "label": "业绩 read-across（上下游、海外同行电话会）",
+      "cadence": "财报季",
+      "agent_binding": "not_connected：待接入行业 read-across 流程"
+    }
+  ],
+  "risk_reward_standards": [
+    "长期复利型：目标盈利增速 + 内在价值；长期核心持仓 3–5 年 3–5x",
+    "周期反转 + 催化型：对了赚多少（盈利 + 估值）/ 错了亏多少；回报必须补偿波动",
+    "价值型：6–12 个月 50% upside",
+    "做空：3–6 个月 30% downside；交易时间跨度必须写明",
+    "Dalton 只提出研究观点和仓位建议，人类团队决定交易"
+  ],
+  "model_discipline": [
+    "期间标准（CY 2026-07-27，所有行业/公司模型强制）：年度历史 2018A 起、单季历史 2024Q1A 起、年度预测滚动 3 年、季度预测至次年 Q4；覆盖期只允许扩展，不得缩短",
+    "历史硬编码只来自一手 filing/公司经营数据公告；单元格级来源台账登记文件、期间、页码、URL、单位和口径",
+    "Q2/Q3/Q4 单季实际只用同口径累计 filing 做差（H1−Q1、9M−H1、FY−9M），标注 Derived filing actual；无法拆分的分部数据留空并登记缺口",
+    "Filing actual / Derived filing actual / 推算 / 假设 / 情景分层展示，不以残差或比例分摊冒充披露值",
+    "预测空假设必须保持为空，不得被 0 穿透进历史或预测；交付前重算并扫描公式错误，检查全部 OK",
+    "分部历史数必须做两项回归检查：季度加总与 H1/FY 一致、各分部加总与集团口径差异可解释",
+    "每次模型更新留下旧值、新值、差异原因和受影响 thesis；预测被实际推翻时生成 reconciliation 记录"
+  ],
+  "evidence_discipline": {
+    "source_hierarchy": [
+      "一手 filing：SEC / 巨潮 / 披露易",
+      "公司公告、经营数据与 earnings release",
+      "署名券商研报与 initiation report",
+      "国际顶刊、各国政府、国际组织与行业协会数据",
+      "专家访谈与会议纪要（一手视角，标注 verified/unverified）",
+      "新闻（只作线索，不作事实来源）"
+    ],
+    "banned_sources": [
+      "百度百科"
+    ],
+    "minimum_independent_sources_for_key_numbers": 2,
+    "number_provenance_rule": "every_timely_number_traces_to_a_tool_result_or_primary_filing"
+  }
+}
