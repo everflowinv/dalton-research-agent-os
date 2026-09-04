@@ -625,12 +625,28 @@ class MissionSourceDiscoveryCoordinator:
                 continue
             if ticket.get("status") == "running":
                 continue
+            review_status: str | None = None
+            review_id: str | None = None
             if ticket.get("status") == "succeeded" and document_in_authority(
                 self.store.connection, document["document_ref"]
             ):
                 result = self.missions.settle_discovered_document(
                     document["record_id"], status="acquired"
                 )
+                # P9d-2: every acquired document enters the human extraction
+                # queue.  Registration re-derives the mission grant, so a
+                # superseded mission simply leaves the document without a
+                # review; the tick result reports the reason.
+                try:
+                    review = self.missions.register_document_review(
+                        document["record_id"],
+                        requested_by=self.missions.mission(
+                            document["mission_version_ref"]
+                        )["autonomy"]["automation_principal"],
+                    )
+                    review_status, review_id = review["status"], review["review_id"]
+                except CoverageMissionError as exc:
+                    review_status = f"not_registered:{type(exc).__name__}"
             else:
                 reason = (
                     "acquisition succeeded but the document is not in authority"
@@ -640,10 +656,15 @@ class MissionSourceDiscoveryCoordinator:
                 result = self.missions.settle_discovered_document(
                     document["record_id"], status="acquisition_failed", reason=reason
                 )
-            settled.append({
+            entry = {
                 "record_id": document["record_id"], "document_ref": document["document_ref"],
                 "status": result["status"], "ticket_ref": document["ticket_ref"],
-            })
+            }
+            if review_status is not None:
+                entry["review_status"] = review_status
+                if review_id is not None:
+                    entry["review_id"] = review_id
+            settled.append(entry)
         return settled
 
     # -- discovery launch ----------------------------------------------------

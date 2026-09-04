@@ -1528,6 +1528,178 @@ class CoverageMissionAuthority:
             ).fetchone()
         return self._document_row(row)
 
+    # -- P9d-2: human extraction queue for acquired documents -----------------
+
+    def register_document_review(self, record_id: str, *, requested_by: str) -> dict[str, Any]:
+        """Open one human extraction review for an acquired document.
+
+        The discovery loop calls this right after a discovered document
+        settles ``acquired``.  It re-derives the mission's source_discovery
+        grant, so a mission that has since been replaced (or one that never
+        granted discovery) refuses instead of queueing work.  One review per
+        mission version + document; replay returns the existing row.
+        """
+
+        record_id = _text(record_id, "record_id")
+        requested_by = _text(requested_by, "requested_by")
+        row = self.connection.execute(
+            "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
+        ).fetchone()
+        if row is None:
+            raise CoverageMissionNotFound("discovered document was not found")
+        if row["status"] != "acquired":
+            raise CoverageMissionConflict(
+                "document review requires an acquired document"
+            )
+        authorization = self.authorize_source_discovery(
+            company_ref=row["company_ref"],
+            source_ref=row["source_ref"],
+            requested_by=requested_by,
+            mission_version_ref=row["mission_version_ref"],
+        )
+        if authorization["mission_version_ref"] != row["mission_version_ref"]:
+            raise CoverageMissionConflict("discovery authorization drifted")
+        existing = self.connection.execute(
+            "SELECT * FROM coverage_mission_document_reviews "
+            "WHERE mission_version_ref=? AND document_ref=?",
+            (row["mission_version_ref"], row["document_ref"]),
+        ).fetchone()
+        if existing is not None:
+            return {"status": "duplicate", **self._review_row(existing)}
+        review_id = _ref("mission-document-review", {
+            "mission_version_ref": row["mission_version_ref"],
+            "document_ref": row["document_ref"],
+        })
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_document_reviews("
+                "review_id,mission_version_ref,company_ref,source_ref,document_ref,"
+                "discovered_document_ref,state,registered_by,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?, 'awaiting_human_extraction', ?, ?, ?)",
+                (
+                    review_id, row["mission_version_ref"], row["company_ref"],
+                    row["source_ref"], row["document_ref"], row["record_id"],
+                    authorization["actor_ref"], now, now,
+                ),
+            )
+            review = cur.execute(
+                "SELECT * FROM coverage_mission_document_reviews WHERE review_id=?", (review_id,)
+            ).fetchone()
+        return {"status": "fresh", **self._review_row(review)}
+
+    def resolve_document_review(
+        self,
+        review_id: str,
+        *,
+        resolution: str,
+        actor_ref: str,
+        candidate_claim_version_ref: str | None = None,
+        rationale: str | None = None,
+    ) -> dict[str, Any]:
+        """Human-only close of an extraction review.
+
+        ``extraction_staged`` binds the transcript candidate the human staged
+        through the existing ADR-0003 B path; ``dismissed`` records why the
+        document is not worth extracting.  Automation cannot resolve reviews.
+        """
+
+        review_id = _text(review_id, "review_id")
+        resolution = _vocabulary(
+            resolution, ("extraction_staged", "dismissed"), "resolution"
+        )
+        actor_ref = _human(actor_ref, "actor_ref")
+        if resolution == "extraction_staged":
+            candidate_claim_version_ref = _text(
+                candidate_claim_version_ref, "candidate_claim_version_ref"
+            )
+            if not candidate_claim_version_ref.startswith("candidate-claim-version:"):
+                raise CoverageMissionValidationError(
+                    "extraction_staged requires a staged candidate claim version"
+                )
+            # The staging authority is a separate database shared with the
+            # Cockpit review plane; the writer op verifies existence there
+            # before calling this method.
+        else:
+            if candidate_claim_version_ref is not None:
+                raise CoverageMissionValidationError(
+                    "dismissed cannot bind a candidate claim version"
+                )
+        rationale = _text(rationale, "rationale") if rationale is not None else None
+        with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_document_reviews WHERE review_id=?", (review_id,)
+            ).fetchone()
+            if row is None:
+                raise CoverageMissionNotFound("document review was not found")
+            if row["state"] == resolution:
+                return {"status": "duplicate", **self._review_row(row)}
+            if row["state"] != "awaiting_human_extraction":
+                raise CoverageMissionConflict("document review is already resolved")
+            now = _now()
+            cur.execute(
+                "UPDATE coverage_mission_document_reviews SET state=?,"
+                "candidate_claim_version_ref=?,rationale=?,updated_at=? "
+                "WHERE review_id=? AND state='awaiting_human_extraction'",
+                (resolution, candidate_claim_version_ref, rationale, now, review_id),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("document review state changed concurrently")
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_document_reviews WHERE review_id=?", (review_id,)
+            ).fetchone()
+        return {"status": "fresh", **self._review_row(row)}
+
+    def document_reviews(
+        self,
+        mission_version_ref: str,
+        *,
+        state: str | None = None,
+        company_ref: str | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        mission_version_ref = _text(mission_version_ref, "mission_version_ref")
+        if state is not None:
+            state = _vocabulary(
+                state,
+                ("awaiting_human_extraction", "extraction_staged", "dismissed"),
+                "state",
+            )
+        if company_ref is not None:
+            company_ref = _text(company_ref, "company_ref")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise CoverageMissionValidationError("document review limit must be 1..500")
+        query = (
+            "SELECT * FROM coverage_mission_document_reviews WHERE mission_version_ref=?"
+        )
+        params: list[Any] = [mission_version_ref]
+        if state is not None:
+            query += " AND state=?"
+            params.append(state)
+        if company_ref is not None:
+            query += " AND company_ref=?"
+            params.append(company_ref)
+        query += " ORDER BY created_at,review_id LIMIT ?"
+        params.append(limit)
+        return [self._review_row(row) for row in self.connection.execute(query, params).fetchall()]
+
+    @staticmethod
+    def _review_row(row: Any) -> dict[str, Any]:
+        return {
+            "review_id": row["review_id"],
+            "mission_version_ref": row["mission_version_ref"],
+            "company_ref": row["company_ref"],
+            "source_ref": row["source_ref"],
+            "document_ref": row["document_ref"],
+            "discovered_document_ref": row["discovered_document_ref"],
+            "state": row["state"],
+            "candidate_claim_version_ref": row["candidate_claim_version_ref"],
+            "rationale": row["rationale"],
+            "registered_by": row["registered_by"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+
     def sec_lane_authorization_for_company(self, company_ref: str) -> dict[str, Any]:
         """Resolve the sole active mission and return its exact SEC grant."""
 
@@ -2022,6 +2194,12 @@ class CoverageMissionAuthority:
                     "SELECT COUNT(*) FROM coverage_mission_discovered_documents "
                     "WHERE mission_version_ref=? AND company_ref=? "
                     "AND status IN ('acquired','already_in_authority')",
+                    (mission["id"], member["company_ref"]),
+                ).fetchone()[0],
+                "awaiting_extraction_review_count": self.connection.execute(
+                    "SELECT COUNT(*) FROM coverage_mission_document_reviews "
+                    "WHERE mission_version_ref=? AND company_ref=? "
+                    "AND state='awaiting_human_extraction'",
                     (mission["id"], member["company_ref"]),
                 ).fetchone()[0],
             })

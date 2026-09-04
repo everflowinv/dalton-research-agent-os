@@ -585,6 +585,56 @@ class CoordinatorTests(unittest.TestCase):
         tick = self.coordinator.dispatch_once()
         self.assertEqual(tick["discovery"]["company_ref"], ACN)
 
+    def test_acquired_document_enters_human_extraction_review_queue(self) -> None:
+        v1 = self.create_mission()
+        self.mission_v2(v1)
+        seed_known_document(self.h)
+        self.coordinator.dispatch_once()  # ACN search launches
+        tick = self.coordinator.dispatch_once()  # NEW_DOC acquisition launches
+        self.acquisition_launcher.finish()
+        tick = self.coordinator.dispatch_once()
+        settled = tick["settled_documents"][0]
+        self.assertEqual(settled["status"], "acquired")
+        self.assertEqual(settled["review_status"], "fresh")
+        mission = self.missions.active_mission("coverage-mission:us-it-services")
+        reviews = self.missions.document_reviews(mission["id"])
+        self.assertEqual(len(reviews), 1)
+        review = reviews[0]
+        self.assertEqual(review["state"], "awaiting_human_extraction")
+        self.assertEqual(review["document_ref"], NEW_DOC)
+        self.assertEqual(review["registered_by"], AUTOMATION)
+        # Registration is idempotent per mission version + document.
+        replay = self.missions.register_document_review(
+            review["discovered_document_ref"], requested_by=AUTOMATION
+        )
+        self.assertEqual(replay["status"], "duplicate")
+        # Automation cannot resolve reviews; humans can dismiss with a reason.
+        with self.assertRaises(CoverageMissionValidationError):
+            self.missions.resolve_document_review(
+                review["review_id"], resolution="dismissed", actor_ref=AUTOMATION
+            )
+        with self.assertRaises(CoverageMissionValidationError):
+            self.missions.resolve_document_review(
+                review["review_id"], resolution="extraction_staged",
+                actor_ref="human:coverage-owner",
+                candidate_claim_version_ref="not-a-candidate-ref",
+            )
+        resolved = self.missions.resolve_document_review(
+            review["review_id"], resolution="dismissed",
+            actor_ref="human:coverage-owner", rationale="not an earnings transcript",
+        )
+        self.assertEqual(resolved["state"], "dismissed")
+        self.assertEqual(
+            self.missions.document_reviews(mission["id"], state="awaiting_human_extraction"),
+            [],
+        )
+        # Already-resolved reviews replay as duplicates and never reopen.
+        again = self.missions.resolve_document_review(
+            review["review_id"], resolution="dismissed",
+            actor_ref="human:coverage-owner", rationale="not an earnings transcript",
+        )
+        self.assertEqual(again["status"], "duplicate")
+
     def test_failed_acquisition_is_retried_after_interval(self) -> None:
         v1 = self.create_mission()
         self.mission_v2(v1)

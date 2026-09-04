@@ -1,6 +1,18 @@
 # Dalton 项目进度
 
 更新日期：2026-09-04
+- **P9d-2「获取文档的人工语义抽取队列」已部署 live（2026-09-04 晚）。** discovery 循环每个
+  `acquired` 文档自动登记 `coverage_mission_document_reviews`（状态 awaiting_human_extraction，
+  每 mission 版本+文档幂等一条；复用 `source_discovery` 既有授权，无新词表）；人工裁决
+  `extraction_staged`（绑定 staged candidate，writer 先核 CandidateStaging）/`dismissed`（必带
+  rationale），automation 裁决被合同拒绝；`mission_document_reviews` 读 op + 进度投影新增每公司
+  awaiting 计数。ADR-0003 B 人工链完整保留——automation 只排队、不抽取、不 accept。live 只读副本
+  canary（真实已获取文档 register→replay→dismiss→automation 拒绝，integrity ok，Claim/Evidence
+  不变）+ 全仓 **1035/1035**（+2）。同日：**万华 Agenda Shadow 经 owner 指令退役**
+  （`agenda-control-version:wanhua-shadow-retired:1` paused；心跳转干净的 paused，不再有每日调用；
+  为修截断发布的 policy v5 随之失去服务对象）；9/4 discovery 全天 126+ 文档发现、7 个完整获取，
+  AE 计数 31/30（多页文档页=调用可越过整数上限，launch 检查先于调用记录——软上限边界已记录）。
+  见 [P9d-2 报告](reports/p9d2-document-extraction-review-queue-v0.1-2026-09-04.md)。
 - **P9c + P9d-1 已部署 live 并激活（2026-09-04，owner 常设授权）：AE search 驱动的来源发现首次真实跑通，三个 live 缺陷当日修复。**
   ①owner 批准 `alphaengine-search-library:v1` 治理记录（hash `f6dff246…`）并发布 **CoverageMission v2**
   （`coverage-mission-version:us-it-services:2`，hash `36877f2c…`：may_write +`source_discovery`

@@ -55,7 +55,10 @@ class P9dWriterHarness(P9aWriterHarness):
             ),
             "mission-automation": Principal(
                 "mission-automation", AUTOMATION_TOKEN,
-                frozenset({"run_mission_source_discovery", "mission_source_discoveries"}),
+                frozenset({
+                    "run_mission_source_discovery", "mission_source_discoveries",
+                    "mission_document_reviews",
+                }),
                 actor_ref=AUTOMATION,
             ),
         }
@@ -131,6 +134,40 @@ class P9dWriterOpsTests(unittest.TestCase):
         # Automation may read discoveries but only for the exact mission version it names.
         readable = h.automation.call("mission_source_discoveries", {"mission_version_ref": mission["id"]})
         self.assertEqual(len(readable["discoveries"]), 1)
+
+    def test_document_reviews_read_and_human_only_resolution(self) -> None:
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        h = P9dWriterHarness(Path(root.name))
+        self.addCleanup(h.close)
+        state = h.bootstrap()
+        mission = h.governance.call("create_coverage_mission", h.mission_params(state))
+
+        # The queue reads empty for the active mission; automation may read
+        # its own queue but cannot resolve anything.
+        reviews = h.governance.call("mission_document_reviews", {})
+        self.assertEqual(reviews["mission_version_ref"], mission["id"])
+        self.assertEqual(reviews["reviews"], [])
+        read = h.automation.call("mission_document_reviews", {"mission_version_ref": mission["id"]})
+        self.assertEqual(read["reviews"], [])
+        with self.assertRaises(RemoteAuthorizationError):
+            h.automation.call("resolve_mission_document_review", {
+                "review_id": "mission-document-review:does-not-exist",
+                "resolution": "dismissed", "rationale": "forged",
+            })
+        with self.assertRaises(RemoteError):
+            h.governance.call("resolve_mission_document_review", {
+                "review_id": "mission-document-review:does-not-exist",
+                "resolution": "dismissed", "rationale": "no such review",
+            })
+        # extraction_staged is refused without a configured staging authority
+        # even before the mission ledger is consulted.
+        with self.assertRaises(RemoteError):
+            h.governance.call("resolve_mission_document_review", {
+                "review_id": "mission-document-review:does-not-exist",
+                "resolution": "extraction_staged",
+                "candidate_claim_version_ref": "candidate-claim-version:none",
+            })
 
     def test_writer_without_plan_reports_unconfigured(self) -> None:
         root = tempfile.TemporaryDirectory()

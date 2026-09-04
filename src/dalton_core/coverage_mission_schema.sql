@@ -230,3 +230,36 @@ CREATE TRIGGER IF NOT EXISTS coverage_mission_idempotency_no_update
 BEFORE UPDATE ON coverage_mission_idempotency BEGIN SELECT RAISE(ABORT, 'coverage mission idempotency is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS coverage_mission_idempotency_no_delete
 BEFORE DELETE ON coverage_mission_idempotency BEGIN SELECT RAISE(ABORT, 'coverage mission idempotency is immutable'); END;
+
+-- P9d-2: the human extraction queue for documents the discovery loop
+-- acquired.  Automation registers one review per acquired document (under
+-- the source_discovery scope); only a human resolves it by staging a
+-- transcript candidate or dismissing it.  Rows are never deleted; state
+-- transitions are authority UPDATEs validated in coverage_mission.py.
+CREATE TABLE IF NOT EXISTS coverage_mission_document_reviews (
+    review_id TEXT PRIMARY KEY,
+    mission_version_ref TEXT NOT NULL REFERENCES coverage_mission_versions(mission_version_id),
+    company_ref TEXT NOT NULL,
+    source_ref TEXT NOT NULL,
+    document_ref TEXT NOT NULL,
+    discovered_document_ref TEXT NOT NULL REFERENCES coverage_mission_discovered_documents(record_id),
+    state TEXT NOT NULL CHECK(state IN ('awaiting_human_extraction','extraction_staged','dismissed')),
+    candidate_claim_version_ref TEXT,
+    rationale TEXT,
+    registered_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(mission_version_ref, document_ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_coverage_mission_document_reviews_state
+ON coverage_mission_document_reviews(state, created_at, review_id);
+
+CREATE TRIGGER IF NOT EXISTS coverage_mission_document_reviews_authorized_insert
+BEFORE INSERT ON coverage_mission_document_reviews WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'mission document review insert requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_document_reviews_authorized_update
+BEFORE UPDATE ON coverage_mission_document_reviews WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'mission document review update requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_document_reviews_no_delete
+BEFORE DELETE ON coverage_mission_document_reviews BEGIN SELECT RAISE(ABORT, 'mission document reviews cannot be deleted'); END;

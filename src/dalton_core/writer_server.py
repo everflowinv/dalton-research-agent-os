@@ -356,6 +356,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "get_forecast_reconciliation", "decide_forecast_overturn",
     "run_mission_source_discovery", "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
+    "mission_document_reviews", "resolve_mission_document_review",
 })
 # Mission stage bookkeeping is human-governed but must also be reachable by
 # the mission's declared ``automation:`` principal; the CoverageMission
@@ -367,6 +368,8 @@ MISSION_AUTOMATION_OPERATIONS = frozenset({
     "get_coverage_mission",
     # P9d-1: automation may read what it discovered; launching stays human/core.
     "mission_source_discoveries", "mission_discovered_documents",
+    # P9d-2: automation may read its extraction queue; resolving is human-only.
+    "mission_document_reviews",
 })
 # P9c: the controller tick (core principal) reconciles pending forecast /
 # actual pairs and reads them; the authority itself only writes under the
@@ -479,6 +482,7 @@ CORE_OPERATIONS = frozenset({
     "reconcile_forecasts", "forecast_reconciliations", "get_forecast_reconciliation",
     "dispatch_mission_source_discovery", "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
+    "mission_document_reviews",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
     "llm_planner_advance", "llm_planner_execute", "bounded_alphaengine_probe",
@@ -634,6 +638,9 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "mission_source_discovery_status": frozenset({"ticket_ref"}),
     "mission_source_discoveries": frozenset({"mission_version_ref", "company_ref", "spec_ref", "limit"}),
     "mission_discovered_documents": frozenset({"mission_version_ref", "company_ref", "status", "limit"}),
+    "mission_document_reviews": frozenset({"mission_version_ref", "company_ref", "state", "limit"}),
+    "resolve_mission_document_review": frozenset({"review_id", "resolution", "candidate_claim_version_ref", "rationale", "actor_ref"}),
+
     "forecast_reconciliations": frozenset({
         "company_ref", "claim_version_ref", "forecast_line_ref", "created_from", "created_to",
     }),
@@ -774,6 +781,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "publish_doctrine_pack": "actor_ref",
     "publish_research_playbook": "actor_ref",
     "create_coverage_mission": "actor_ref",
+    "resolve_mission_document_review": "actor_ref",
     "record_mission_stage": "actor_ref",
     "publish_forecast_line": "actor_ref",
     "publish_probe_template": "actor_ref",
@@ -2302,6 +2310,43 @@ class WriterServer:
             "mission_version_ref": mission_version_ref,
             "documents": self.coverage_mission.discovered_documents(mission_version_ref, **values),
         }
+
+    def _op_mission_document_reviews(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        values.setdefault("state", None)
+        values.setdefault("company_ref", None)
+        mission_version_ref = self._resolve_mission_version_ref(values)
+        return {
+            "projection_kind": "mission_document_reviews",
+            "mission_version_ref": mission_version_ref,
+            "reviews": self.coverage_mission.document_reviews(mission_version_ref, **values),
+        }
+
+    def _op_resolve_mission_document_review(self, p: Mapping[str, Any]) -> Any:
+        # Human-only close of an extraction review.  The staged candidate is
+        # verified against the CandidateStaging authority (a separate database
+        # shared with the Cockpit review plane) before the mission ledger
+        # records the resolution.
+        values = dict(p)
+        if values["resolution"] == "extraction_staged":
+            ref = values["candidate_claim_version_ref"]
+            if self.candidate_staging is None:
+                raise WriterServerError("candidate staging is not configured")
+            try:
+                status = self.candidate_review.candidate_status(ref)
+            except ResearchReviewRejected as exc:
+                raise NotFound(str(exc)) from exc
+            if status.get("review_state") not in ("staged", "committed"):
+                raise WriterServerError(
+                    "candidate claim version is not in a staged review state"
+                )
+        return self.coverage_mission.resolve_document_review(
+            values["review_id"],
+            resolution=values["resolution"],
+            actor_ref=values["actor_ref"],
+            candidate_claim_version_ref=values.get("candidate_claim_version_ref"),
+            rationale=values.get("rationale"),
+        )
 
     def _op_bounded_alphaengine_probe(self, p: Mapping[str, Any]) -> Any:
         # Executes in the writer: the acquisition subprocess writes Core
