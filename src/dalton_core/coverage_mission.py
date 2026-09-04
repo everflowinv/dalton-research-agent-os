@@ -31,7 +31,7 @@ import re
 import sqlite3
 from collections.abc import Mapping
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -1409,6 +1409,29 @@ class CoverageMissionAuthority:
         ).fetchone()
         return None if row is None else self._document_row(row)
 
+    def retryable_failed_document(
+        self, *, older_than: timedelta, as_of: datetime | None = None
+    ) -> dict[str, Any] | None:
+        """Oldest ``acquisition_failed`` document whose last update is older
+        than the retry interval, or None.  Failures (provider errors, orphaned
+        children after a deploy restart) are retried once the interval passes;
+        the wait keeps the shared budget honest instead of hot-looping."""
+
+        if not isinstance(older_than, timedelta) or older_than <= timedelta(0):
+            raise CoverageMissionValidationError("retry interval must be a positive duration")
+        now = as_of if as_of is not None else datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            raise CoverageMissionValidationError("as_of must carry a timezone")
+        cutoff = (now - older_than).isoformat(timespec="microseconds")
+        row = self.connection.execute(
+            "SELECT d.* FROM coverage_mission_discovered_documents d "
+            "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
+            "WHERE d.status='acquisition_failed' AND d.updated_at<? "
+            "ORDER BY d.updated_at,d.record_id LIMIT 1",
+            (cutoff,),
+        ).fetchone()
+        return None if row is None else self._document_row(row)
+
     def launched_discovered_documents(self, *, limit: int = 20) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("discovered document limit must be 1..100")
@@ -1435,6 +1458,35 @@ class CoverageMissionAuthority:
             cur.execute(
                 "UPDATE coverage_mission_discovered_documents SET status='acquisition_launched',"
                 "ticket_ref=?,updated_at=? WHERE record_id=? AND status='discovered'",
+                (ticket_ref, now, record_id),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("discovered document state changed concurrently")
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
+            ).fetchone()
+        return self._document_row(row)
+
+    def mark_failed_document_retry_launched(self, record_id: str, ticket_ref: str) -> dict[str, Any]:
+        """Move an ``acquisition_failed`` row back to ``acquisition_launched``
+        for a bounded retry.  The coordinator enforces the retry interval; the
+        prior failure reason is cleared so the row reads like a fresh launch."""
+
+        record_id = _text(record_id, "record_id")
+        ticket_ref = _text(ticket_ref, "ticket_ref")
+        with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
+            ).fetchone()
+            if row is None:
+                raise CoverageMissionNotFound("discovered document was not found")
+            if row["status"] != "acquisition_failed":
+                raise CoverageMissionConflict("discovered document has not failed acquisition")
+            now = _now()
+            cur.execute(
+                "UPDATE coverage_mission_discovered_documents SET status='acquisition_launched',"
+                "ticket_ref=?,failure_reason=NULL,updated_at=? "
+                "WHERE record_id=? AND status='acquisition_failed'",
                 (ticket_ref, now, record_id),
             )
             if cur.rowcount != 1:

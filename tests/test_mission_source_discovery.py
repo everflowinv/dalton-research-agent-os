@@ -64,8 +64,11 @@ PLAN_PATH = ROOT / "deploy/phase9/p9d-us-it-services-discovery-plan-v1.json"
 
 
 class Clock:
-    def __init__(self, value: datetime = NOW) -> None:
-        self.value = value
+    # Dispatch / rediscovery anchors are written with the authority's real
+    # clock, so the coordinator clock must start at real "now" (frozen dates
+    # made the cadence assertions date-dependent and failed two days later).
+    def __init__(self, value: datetime | None = None) -> None:
+        self.value = value or datetime.now(timezone.utc)
 
     def __call__(self) -> datetime:
         return self.value
@@ -581,6 +584,41 @@ class CoordinatorTests(unittest.TestCase):
         self.clock.advance(days=2)
         tick = self.coordinator.dispatch_once()
         self.assertEqual(tick["discovery"]["company_ref"], ACN)
+
+    def test_failed_acquisition_is_retried_after_interval(self) -> None:
+        v1 = self.create_mission()
+        self.mission_v2(v1)
+        seed_known_document(self.h)
+        self.acquisition_launcher.outcome = "failed"
+        self.coordinator.dispatch_once()  # ACN search launches
+        tick = self.coordinator.dispatch_once()  # search settles; NEW_DOC acquisition launches
+        self.assertEqual(tick["acquisition"]["status"], "launched")
+        self.acquisition_launcher.finish()
+        tick = self.coordinator.dispatch_once()
+        self.assertEqual([item["status"] for item in tick["settled_documents"]], ["acquisition_failed"])
+        # Inside the retry interval, with no fresh document, the failure is
+        # not re-picked.
+        tick = self.coordinator.dispatch_once()
+        self.assertEqual(tick["acquisition"]["status"], "idle")
+        # Once the interval passes the document is retried under a new ticket.
+        self.acquisition_launcher.outcome = "succeeded"
+        self.clock.advance(days=2)
+        tick = self.coordinator.dispatch_once()
+        self.assertEqual(tick["acquisition"]["status"], "launched")
+        self.assertTrue(tick["acquisition"]["retry"])
+        self.acquisition_launcher.finish()
+        tick = self.coordinator.dispatch_once()
+        self.assertEqual([item["status"] for item in tick["settled_documents"]], ["acquired"])
+        documents = self.missions.discovered_documents(
+            self.missions.active_mission("coverage-mission:us-it-services")["id"]
+        )
+        self.assertEqual(
+            sorted((d["document_ref"], d["status"]) for d in documents),
+            sorted([
+                (KNOWN_DOC, "already_in_authority"),
+                (NEW_DOC, "acquired"),
+            ]),
+        )
 
     def test_budget_gate_counts_search_and_document_calls(self) -> None:
         v1 = self.create_mission()

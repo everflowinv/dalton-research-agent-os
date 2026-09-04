@@ -387,6 +387,13 @@ def run_weekly_brief_cycle(
         actor_ref=actor_ref,
         idempotency_key=f"weekly-brief-outbox:{digest}",
     )
+    if not isinstance(outbox, Mapping) or "message_id" not in outbox:
+        # A rebuilt payload that no longer byte-matches the enqueued message
+        # replays as a conflict; surface that instead of crashing on the key.
+        raise WeeklyBriefCoordinatorError(
+            "weekly brief outbox enqueue did not replay an existing message; "
+            f"status={outbox.get('status') if isinstance(outbox, Mapping) else 'invalid'}"
+        )
     return {
         "status": "ready", "cycle_ref": cycle_id,
         "scheduled_for": scheduled_for, "plan_ref": schedule.plan_ref,

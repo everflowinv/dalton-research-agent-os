@@ -114,6 +114,27 @@ class WeeklyBriefAuthorityTests(unittest.TestCase):
         self.assertEqual(later["forecast_reconciliations"], [])
         self.assertIn("本期没有预测线被实际数对账", self.weekly.render_markdown(later["id"])["body"])
 
+    def test_render_omits_reconciliation_section_for_pre_p9c_issues(self) -> None:
+        """Issues published before P9c froze a six-section list; re-rendering
+        them must reproduce the original bytes and not grow a new section."""
+        issue = self.publish()
+        self.assertIn("## 预测对账", self.weekly.render_markdown(issue["id"])["body"])
+
+        class PreP9cAuthority(WeeklyBriefAuthority):
+            def issue(self, version_id: str) -> dict:
+                record = dict(super().issue(version_id))
+                record["sections"] = [
+                    name for name in record["sections"] if name != "预测对账"
+                ]
+                record.pop("forecast_reconciliations", None)
+                return record
+
+        old = PreP9cAuthority(self.fixture.store, self.fixture.authority)
+        body = old.render_markdown(issue["id"])["body"]
+        self.assertNotIn("预测对账", body)
+        self.assertIn("## 公司与 driver 分化", body)
+        self.assertEqual(body, old.render_markdown(issue["id"])["body"])
+
     def test_first_issue_is_baseline_not_fake_weekly_delta_and_replays(self) -> None:
         issue = self.publish()
         replay = self.publish()

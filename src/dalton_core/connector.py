@@ -2693,8 +2693,14 @@ class ConnectorStore:
                 raise ConnectorConflict("complete SourceEnvelope requires source records")
             if wire["status"] == "empty" and wire["source_record_refs"]:
                 raise ConnectorConflict("empty SourceEnvelope cannot contain source records")
-            if wire["status"] == "partial" and wire["completeness"] != "partial":
-                raise ConnectorConflict("partial SourceEnvelope requires partial completeness")
+            if wire["status"] == "partial" and wire["completeness"] not in {"partial", "ranked"}:
+                # "partial" covers both a partial document page (completeness
+                # "partial") and a ranked search_library page whose cursor
+                # continues the result set (completeness "ranked", the pairing
+                # live_mcp_connector already freezes for search observations).
+                raise ConnectorConflict(
+                    "partial SourceEnvelope requires partial or ranked completeness"
+                )
             if wire["status"] == "error" and (
                 result_attempt["outcome"] == "succeeded" or wire["source_record_refs"]
             ):

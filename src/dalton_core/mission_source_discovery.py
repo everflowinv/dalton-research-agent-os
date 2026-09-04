@@ -59,6 +59,10 @@ DISCOVERY_PLAN_SCHEMA_VERSION = "0.1"
 TICKET_SCHEMA_VERSION = "0.1"
 TICKET_PREFIX = "alphaengine-discovery"
 LIVE_MODE_ARGS = ("--allow-network",)
+# An acquisition child that failed (provider error, or orphaned by a deploy
+# restart) is retried once this interval has passed; fresh documents are
+# always acquired first.
+ACQUISITION_RETRY_INTERVAL = timedelta(days=1)
 _TICKET_RE = re.compile(r"alphaengine-discovery:[0-9a-f]{24}\Z")
 _HUMAN_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
 _AUTOMATION_RE = re.compile(r"automation:[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
@@ -762,7 +766,15 @@ class MissionSourceDiscoveryCoordinator:
             return {"status": "unconfigured", "reason": "acquisition launcher is not configured"}
         if self.missions.launched_discovered_documents(limit=1):
             return {"status": "busy", "reason": "a discovered-document acquisition is still open"}
+        retry = False
         document = self.missions.next_discovered_document()
+        if document is None:
+            # No fresh documents: retry the oldest acquisition failure whose
+            # interval has passed (e.g. a child orphaned by a deploy restart).
+            document = self.missions.retryable_failed_document(
+                older_than=ACQUISITION_RETRY_INTERVAL, as_of=self.clock()
+            )
+            retry = document is not None
         if document is None:
             return {"status": "idle"}
         try:
@@ -793,11 +805,14 @@ class MissionSourceDiscoveryCoordinator:
                 "status": status, "reason": f"{name}: {exc}",
                 "document_ref": document["document_ref"], "record_id": document["record_id"],
             }
-        self.missions.mark_discovered_document_launched(document["record_id"], ticket["id"])
+        if retry:
+            self.missions.mark_failed_document_retry_launched(document["record_id"], ticket["id"])
+        else:
+            self.missions.mark_discovered_document_launched(document["record_id"], ticket["id"])
         return {
             "status": "launched", "record_id": document["record_id"],
             "document_ref": document["document_ref"], "ticket_ref": ticket["id"],
-            "budget": budget,
+            "retry": retry, "budget": budget,
         }
 
     def dispatch_once(self) -> dict[str, Any]:

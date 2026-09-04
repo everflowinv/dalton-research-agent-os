@@ -1505,6 +1505,58 @@ class ConnectorStoreTests(unittest.TestCase):
                 idempotency_key="source:missing",
             )
 
+    def test_source_envelope_partial_pairs_with_ranked_search_completeness(self) -> None:
+        # A ranked search_library page whose cursor continues the result set is
+        # status "partial" with completeness "ranked" (the pairing the live MCP
+        # gate freezes for search observations); only the old document-page
+        # pairing rule rejected it, which burned real searches on live.
+        reservation = self.reserve(1, "source-ranked:reserve")
+        started_at, completed_at = self.terminal_times()
+        attempt = self.connectors.record_physical_attempt(
+            self.invocation["id"], reservation["id"], 1, "succeeded",
+            started_at=started_at, completed_at=completed_at,
+            provider_request_id="cninfo:request:ranked",
+            idempotency_key="source-ranked:attempt",
+        )
+        self.obs.register_artifact_version_v2(
+            "artifact:cninfo:raw:1", version_id="artifact:cninfo:raw:1",
+            title="CNINFO ranked page", kind="raw_source", media_type="application/json",
+            artifact_content_hash="3" * 64, size_bytes=140,
+            storage_locator="artifact-store:cninfo/raw/ranked",
+            producer_execution_ref=self.invocation["id"],
+            result_envelope_ref="result:connector:ranked", result_envelope_hash="2" * 64,
+            access_class="internal", preview_status="unavailable",
+            actor_ref="system:artifact",
+        )
+        source = {
+            "schema_version": "0.1", "id": "source-envelope:cninfo:ranked",
+            "created_at": WHEN.isoformat(), "connector_invocation_ref": self.invocation["id"],
+            "connector_profile_ref": self.profile["id"], "physical_attempt_refs": [attempt["id"]],
+            "result_physical_attempt_ref": attempt["id"],
+            "source": "cninfo", "operation": "list_announcements",
+            "source_record_refs": ["cninfo:announcement:1"], "published_at": None,
+            "updated_at": None, "as_of": None, "retrieved_at": WHEN.isoformat(),
+            "cursor": "cursor:next", "provider_request_id": "cninfo:request:ranked",
+            "raw_artifact_version_ref": "artifact:cninfo:raw:1",
+            "raw_response_hash": "3" * 64,
+            "source_schema_hash": "6" * 64, "source_content_hash": "4" * 64,
+            "completeness": "ranked", "status": "partial",
+            "access_policy_ref": "policy:access:public",
+            "retention_policy_ref": "policy:retention:filing",
+            "terms_policy_ref": "policy:terms:cninfo", "error": None,
+        }
+        source["source_content_hash"] = source_envelope_content_hash(source)
+        saved = self.connectors.record_source_envelope(source, idempotency_key="source-ranked:1")
+        self.assertEqual(saved["status"], "partial")
+        self.assertEqual(saved["completeness"], "ranked")
+        with self.assertRaises(ConnectorConflict):
+            invalid = {
+                **source, "id": "source-envelope:cninfo:ranked-invalid",
+                "completeness": "enumerated",
+            }
+            invalid["source_content_hash"] = source_envelope_content_hash(invalid)
+            self.connectors.record_source_envelope(invalid, idempotency_key="source-ranked:invalid")
+
     def test_source_complete_or_empty_requires_a_succeeded_attempt(self) -> None:
         reservation = self.reserve(1, "source-status:reserve")
         started_at, completed_at = self.terminal_times()

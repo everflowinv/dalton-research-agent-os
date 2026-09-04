@@ -1061,25 +1061,30 @@ class WeeklyBriefAuthority:
                     f"本期版本变化={'yes' if changed else 'no'})"
                 )
 
-        lines.extend(["", "## 预测对账", ""])
-        tickers = {
-            item["company_ref"]: item["ticker"] for item in snapshot["coverage_universe"]
-        }
-        reconciliations = issue.get("forecast_reconciliations") or []
-        if not reconciliations:
-            lines.append("- 本期没有预测线被实际数对账；没有实际数落库就不写预测偏差。")
-        for item in reconciliations:
-            ticker = tickers.get(item["company_ref"], item["company_ref"])
-            checkpoint = (
-                "；触发 forecast_overturn 人工检查点，预测未自动修改"
-                if item["human_checkpoint"] == "forecast_overturn" else ""
-            )
-            lines.append(
-                f"- {ticker}｜{item['metric_ref']}｜{item['period']}｜"
-                f"预测 {item['forecast_value']} {item['unit']} {item['currency']}｜"
-                f"实际 {item['actual_value']}｜偏差 {item['deviation_percent']}%｜"
-                f"{item['direction']}｜{item['band']}{checkpoint}｜{item['ref']}"
-            )
+        # The section list is frozen in the issue record at publish time.
+        # Issues published before P9c carry no 预测对账 section; re-rendering
+        # them must reproduce the original bytes exactly, so the section is
+        # gated on the frozen list rather than rendered unconditionally.
+        if "预测对账" in issue.get("sections", []):
+            lines.extend(["", "## 预测对账", ""])
+            tickers = {
+                item["company_ref"]: item["ticker"] for item in snapshot["coverage_universe"]
+            }
+            reconciliations = issue.get("forecast_reconciliations") or []
+            if not reconciliations:
+                lines.append("- 本期没有预测线被实际数对账；没有实际数落库就不写预测偏差。")
+            for item in reconciliations:
+                ticker = tickers.get(item["company_ref"], item["company_ref"])
+                checkpoint = (
+                    "；触发 forecast_overturn 人工检查点，预测未自动修改"
+                    if item["human_checkpoint"] == "forecast_overturn" else ""
+                )
+                lines.append(
+                    f"- {ticker}｜{item['metric_ref']}｜{item['period']}｜"
+                    f"预测 {item['forecast_value']} {item['unit']} {item['currency']}｜"
+                    f"实际 {item['actual_value']}｜偏差 {item['deviation_percent']}%｜"
+                    f"{item['direction']}｜{item['band']}{checkpoint}｜{item['ref']}"
+                )
 
         lines.extend(["", "## 公司与 driver 分化", ""])
         for driver in snapshot["driver_scoreboard"]:

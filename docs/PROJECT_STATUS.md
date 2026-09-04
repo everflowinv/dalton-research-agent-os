@@ -1,6 +1,22 @@
 # Dalton 项目进度
 
-更新日期：2026-09-02
+更新日期：2026-09-04
+- **P9c + P9d-1 已部署 live 并激活（2026-09-04，owner 常设授权）：AE search 驱动的来源发现首次真实跑通，三个 live 缺陷当日修复。**
+  ①owner 批准 `alphaengine-search-library:v1` 治理记录（hash `f6dff246…`）并发布 **CoverageMission v2**
+  （`coverage-mission-version:us-it-services:2`，hash `36877f2c…`：may_write +`source_discovery`
+  +`forecast_reconciliation`，`source:alphaengine` → **connected**，预算不变）。②首次真实 `search_library`
+  烧掉 3 次调用后定位根因：带 cursor 的搜索观察冻结为 `("partial","ranked")`，而 envelope 校验硬性要求
+  `partial↔partial`（fake transport 无 cursor 未覆盖）；修复配对规则后每个 dispatch 成功 settle、单次最多命中
+  20 文档。③P9c 新「预测对账」节未按 issue 冻结 `sections` 门控，9/3 旧 issue 重渲染长出新节 → body hash 漂移 →
+  每 tick outbox 幂等 conflict + KeyError；修复后 9/3 issue 重渲染与投递 artifact **逐字节一致**
+  （`4c8266c6…`），weekly_brief 心跳恢复 ready。④`acquisition_failed` 文档原永久卡死（两次部署重启把在飞
+  child 杀成 orphan 暴露）；新增 1 天有界重试（`retryable_failed_document` + 状态迁移），新文档永远优先。
+  live 结果：**92 个文档 discovered、1 个 acquired（CTSH `alphaengine-doc:320000610044534` 完整入
+  authority）、2 个部署孤儿待自动重试**；当日 AE 共享预算 18/30，失败 cadence 与超限拒绝全部如实入账。
+  全仓 1033/1033（+3 回归）。另：9/3 首个自动 weekly brief 窗口已确认完整投递（Discord
+  `1545026666730889226` + DeliveryReceipt）；万华 Agenda 9/3 起失败根因为输出 token 随输入增长被 v4 的
+  2000 上限截断，已发布 policy v5（4000）。见
+  [P9c/P9d-1 激活与首次发现报告](reports/p9d1-live-activation-and-first-discovery-2026-09-04.md)。
 - **P9d-1「AlphaEngine search 驱动的 mission 来源发现」development candidate 已完成，未部署。**
   新增独立治理的 `search_library` capability、hash-bound DiscoveryPlan（US IT Services 五家公司 × 财报电话会/卖方报告
   两类搜索）、CoverageMission 的发现/dispatch/待获取文档账本，以及 controller tick 协调器。每 tick 最多启动一条
