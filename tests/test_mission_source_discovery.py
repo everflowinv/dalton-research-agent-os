@@ -603,6 +603,19 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(review["state"], "awaiting_human_extraction")
         self.assertEqual(review["document_ref"], NEW_DOC)
         self.assertEqual(review["registered_by"], AUTOMATION)
+        self.assertEqual(self.missions.document_review(review["review_id"]), review)
+        for rationale in (None, "", "  "):
+            with self.subTest(rationale=rationale), self.assertRaises(CoverageMissionValidationError):
+                self.missions.resolve_document_review(
+                    review["review_id"], resolution="dismissed",
+                    actor_ref="human:coverage-owner", rationale=rationale,
+                )
+        with self.assertRaises(CoverageMissionConflict):
+            self.missions.resolve_document_review(
+                review["review_id"], resolution="dismissed",
+                actor_ref="human:coverage-owner", rationale="reason",
+                expected_review_hash="0" * 64,
+            )
         # Registration is idempotent per mission version + document.
         replay = self.missions.register_document_review(
             review["discovered_document_ref"], requested_by=AUTOMATION
@@ -634,6 +647,35 @@ class CoordinatorTests(unittest.TestCase):
             actor_ref="human:coverage-owner", rationale="not an earnings transcript",
         )
         self.assertEqual(again["status"], "duplicate")
+        with self.assertRaises(CoverageMissionConflict):
+            self.missions.resolve_document_review(
+                review["review_id"], resolution="dismissed",
+                actor_ref="human:coverage-owner", rationale="changed explanation",
+            )
+
+    def test_backfill_recovers_acquired_document_after_interrupted_registration(self) -> None:
+        from unittest.mock import patch
+        v1 = self.create_mission()
+        mission = self.mission_v2(v1)
+        seed_known_document(self.h)
+        self.coordinator.dispatch_once()
+        self.coordinator.dispatch_once()
+        self.acquisition_launcher.finish()
+        # Acquisition is durable, but the registration step fails before
+        # queue insertion (the same state as an upgrade from pre-P9d-2).
+        with patch.object(self.missions, "register_document_review", side_effect=CoverageMissionConflict("interrupted")):
+            settled = self.coordinator.settle_documents()
+        self.assertEqual(settled[0]["status"], "acquired")
+        self.assertEqual(self.missions.document_reviews(mission["id"]), [])
+        tick = self.coordinator.dispatch_once()
+        self.assertEqual([item["status"] for item in tick["review_backfill"]], ["fresh"])
+        self.assertEqual(self.missions.backfill_document_reviews(self.plan["mission_ref"]), [])
+        review = self.missions.document_reviews(mission["id"])[0]
+        self.missions.resolve_document_review(
+            review["review_id"], resolution="dismissed", actor_ref="human:owner", rationale="not relevant",
+        )
+        self.assertEqual(self.missions.backfill_document_reviews(self.plan["mission_ref"]), [])
+        self.assertEqual(self.missions.document_review(review["review_id"])["state"], "dismissed")
 
     def test_failed_acquisition_is_retried_after_interval(self) -> None:
         v1 = self.create_mission()

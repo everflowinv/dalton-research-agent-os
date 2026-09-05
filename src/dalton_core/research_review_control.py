@@ -730,6 +730,64 @@ class ResearchReviewControlPlane:
             "items": items,
         }
 
+    def document_review_view(self, login: str) -> dict[str, Any]:
+        """Read the active discovery mission's pending queue through Core."""
+        try:
+            result = self._governance_call(
+                self.token_config, self.writer_socket,
+                actor_ref=_subject_for_login(login),
+                operation="mission_document_reviews",
+                params={"state": "awaiting_human_extraction", "limit": 100, "include_candidates": True},
+            )
+        except Exception as exc:
+            raise ResearchReviewControlError("document review queue is unavailable") from exc
+        return {
+            "as_of": _now(), "reviewer_ref": _subject_for_login(login),
+            "mission_version_ref": result["mission_version_ref"],
+            "items": result["reviews"],
+            "limit_reached": result["limit_reached"],
+            "candidate_limit_reached": result["candidate_limit_reached"],
+        }
+
+    def record_document_review(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        expected = {
+            "request_id", "review_id", "review_hash", "resolution",
+            "candidate_claim_version_ref", "rationale",
+        }
+        if set(value) != expected:
+            raise ResearchReviewControlError("document review request has an invalid closed shape")
+        request_id = _string(value["request_id"], "request_id")
+        if _REQUEST_ID_RE.fullmatch(request_id) is None:
+            raise ResearchReviewControlError("request_id has an invalid shape")
+        review_id = _string(value["review_id"], "review_id")
+        review_hash = _hash(value["review_hash"], "review_hash")
+        resolution = value["resolution"]
+        if resolution not in ("extraction_staged", "dismissed"):
+            raise ResearchReviewControlError("document review resolution is invalid")
+        rationale = _string(value["rationale"], "rationale")
+        if len(rationale) > 4000:
+            raise ResearchReviewControlError("rationale exceeds 4000 characters")
+        candidate = value["candidate_claim_version_ref"]
+        if resolution == "extraction_staged":
+            candidate = _string(candidate, "candidate_claim_version_ref")
+            if not candidate.startswith("candidate-claim-version:"):
+                raise ResearchReviewControlError("an exact candidate claim version is required")
+        elif candidate is not None:
+            raise ResearchReviewControlError("dismissed cannot bind a candidate")
+        try:
+            return self._governance_call(
+                self.token_config, self.writer_socket,
+                actor_ref=_subject_for_login(login),
+                operation="resolve_mission_document_review",
+                params={
+                    "review_id": review_id, "expected_review_hash": review_hash,
+                    "resolution": resolution, "candidate_claim_version_ref": candidate,
+                    "rationale": rationale,
+                },
+            )
+        except Exception as exc:
+            raise ResearchReviewControlError("document review writer rejected the decision; reload the queue") from exc
+
     def record_transcript(
         self, login: str, value: Mapping[str, Any]
     ) -> dict[str, Any]:

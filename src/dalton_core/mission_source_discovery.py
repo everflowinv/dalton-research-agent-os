@@ -839,6 +839,7 @@ class MissionSourceDiscoveryCoordinator:
     def dispatch_once(self) -> dict[str, Any]:
         settled_dispatches = self.settle_dispatches()
         settled_documents = self.settle_documents()
+        review_backfill = self.missions.backfill_document_reviews(self.plan["mission_ref"])
         # Acquiring an already-discovered document comes before spending the
         # shared budget on a new search: known gaps first, then new ones.
         acquisition = self.launch_acquisition()
@@ -850,6 +851,7 @@ class MissionSourceDiscoveryCoordinator:
             "plan_hash": self.plan["content_hash"],
             "settled_dispatches": settled_dispatches,
             "settled_documents": settled_documents,
+            "review_backfill": review_backfill,
             "discovery": discovery,
             "acquisition": acquisition,
         }

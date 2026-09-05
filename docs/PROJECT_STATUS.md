@@ -1,6 +1,15 @@
 # Dalton 项目进度
 
-更新日期：2026-09-04
+更新日期：2026-09-05
+- **P9d-3a「Cockpit 文档抽取审阅入口与历史队列恢复」开发完成，尚未部署 live。**
+  Cockpit 待审页新增文档队列、同公司同文档的候选选择、抽取完成登记及带理由忽略；登记不接受 Claim。
+  writer 核对 exact candidate、原文 citation 和公司，拒绝过期页面与内容改变的重复提交；忽略必须有理由。
+  **修正 9/4 部署记录的验收结论：9/5 本轮只读检查发现 live 已有 7 份 acquired 文档，但 review 表为 0 行，
+  不能把代码已部署等同于队列已生效。** 新增 controller 每 tick 最多补 100 条历史遗漏，逐条重验 active mission
+  授权；不重新获取、不重开已处理记录。live Core + staging 只读副本恢复 7/7，fresh/duplicate、状态过期、
+  内容漂移、automation 拒绝均通过；正式 Claim/Evidence/Thesis 与连接器调用数不变、integrity ok。
+  全仓 **1039/1039**，broker 25/25；桌面/手机页面及提交交互通过。见
+  [P9d-3a 报告](reports/p9d3a-cockpit-document-review-v0.1-2026-09-05.md)。下一片为 LLM 起草抽取建议；本片不做自动抽取。
 - **P9d-2「获取文档的人工语义抽取队列」已部署 live（2026-09-04 晚）。** discovery 循环每个
   `acquired` 文档自动登记 `coverage_mission_document_reviews`（状态 awaiting_human_extraction，
   每 mission 版本+文档幂等一条；复用 `source_discovery` 既有授权，无新词表）；人工裁决

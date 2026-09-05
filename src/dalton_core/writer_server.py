@@ -64,7 +64,10 @@ from .research_verification import (
     ResearchVerificationError,
     VerificationRejected,
 )
-from .transcript_candidate_staging import stage_transcript_qualitative_candidate
+from .transcript_candidate_staging import (
+    stage_transcript_qualitative_candidate, TranscriptCoreAuthorityResolver,
+)
+from .store import content_hash
 from .agenda import (
     AgendaConflict,
     AgendaError,
@@ -638,8 +641,8 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "mission_source_discovery_status": frozenset({"ticket_ref"}),
     "mission_source_discoveries": frozenset({"mission_version_ref", "company_ref", "spec_ref", "limit"}),
     "mission_discovered_documents": frozenset({"mission_version_ref", "company_ref", "status", "limit"}),
-    "mission_document_reviews": frozenset({"mission_version_ref", "company_ref", "state", "limit"}),
-    "resolve_mission_document_review": frozenset({"review_id", "resolution", "candidate_claim_version_ref", "rationale", "actor_ref"}),
+    "mission_document_reviews": frozenset({"mission_version_ref", "company_ref", "state", "limit", "include_candidates"}),
+    "resolve_mission_document_review": frozenset({"review_id", "resolution", "candidate_claim_version_ref", "rationale", "actor_ref", "expected_review_hash"}),
 
     "forecast_reconciliations": frozenset({
         "company_ref", "claim_version_ref", "forecast_line_ref", "created_from", "created_to",
@@ -2313,14 +2316,64 @@ class WriterServer:
 
     def _op_mission_document_reviews(self, p: Mapping[str, Any]) -> Any:
         values = dict(p)
+        include_candidates = values.pop("include_candidates", False)
+        if not isinstance(include_candidates, bool):
+            raise WriterServerError("include_candidates must be boolean")
         values.setdefault("state", None)
         values.setdefault("company_ref", None)
         mission_version_ref = self._resolve_mission_version_ref(values)
+        reviews = self.coverage_mission.document_reviews(mission_version_ref, **values)
+        if include_candidates:
+            mission = self.coverage_mission.mission(mission_version_ref)
+            company_labels = {item["company_ref"]: item["ticker"] for item in mission["universe"]}
+            candidates = (
+                [] if self._candidate_review is None
+                else self.candidate_review.list_candidates(limit=500)
+            )
+            for review in reviews:
+                review["review_hash"] = content_hash(review)
+                review["company_label"] = company_labels.get(review["company_ref"], review["company_ref"])
+                review["candidates"] = []
+                for candidate in candidates:
+                    if candidate["claim"].get("subject_ref") != review["company_ref"]:
+                        continue
+                    status = self.candidate_review.candidate_status(candidate["claim"]["id"])
+                    if self._document_review_candidate_matches(review, status):
+                        review["candidates"].append({
+                            "ref": status["candidate_claim_ref"],
+                            "statement": status["claim"]["normalized_statement"],
+                            "review_state": status["review_state"],
+                        })
         return {
             "projection_kind": "mission_document_reviews",
             "mission_version_ref": mission_version_ref,
-            "reviews": self.coverage_mission.document_reviews(mission_version_ref, **values),
+            "reviews": reviews,
+            "limit_reached": len(reviews) == values.get("limit", 100),
+            "candidate_limit_reached": include_candidates and len(candidates) == 500,
         }
+
+    def _document_review_candidate_matches(
+        self, review: Mapping[str, Any], status: Mapping[str, Any],
+    ) -> bool:
+        claim, evidence = status["claim"], status["evidence"]
+        artifacts = evidence.get("artifact_refs", [])
+        if (
+            status.get("review_state") not in ("staged", "committed")
+            or claim.get("claim_kind") != "qualitative"
+            or claim.get("subject_ref") != review["company_ref"]
+            or evidence.get("source_ref") != review["source_ref"]
+            or len(artifacts) != 2
+            or not artifacts[1]["ref"].startswith("transcript-claim-citation-binding:")
+        ):
+            return False
+        resolver = TranscriptCoreAuthorityResolver(
+            self.store, artifact_reader=self._read_transcript_artifact,
+        )
+        binding, correction = resolver.citation(artifacts[1]["ref"])
+        return (
+            binding["content_hash"] == artifacts[1]["hash"]
+            and correction["document_ref"] == review["document_ref"]
+        )
 
     def _op_resolve_mission_document_review(self, p: Mapping[str, Any]) -> Any:
         # Human-only close of an extraction review.  The staged candidate is
@@ -2336,9 +2389,10 @@ class WriterServer:
                 status = self.candidate_review.candidate_status(ref)
             except ResearchReviewRejected as exc:
                 raise NotFound(str(exc)) from exc
-            if status.get("review_state") not in ("staged", "committed"):
+            review = self.coverage_mission.document_review(values["review_id"])
+            if status["candidate_claim_ref"] != ref or not self._document_review_candidate_matches(review, status):
                 raise WriterServerError(
-                    "candidate claim version is not in a staged review state"
+                    "candidate must be an exact staged/committed qualitative version from this document and company"
                 )
         return self.coverage_mission.resolve_document_review(
             values["review_id"],
@@ -2346,6 +2400,7 @@ class WriterServer:
             actor_ref=values["actor_ref"],
             candidate_claim_version_ref=values.get("candidate_claim_version_ref"),
             rationale=values.get("rationale"),
+            expected_review_hash=values.get("expected_review_hash"),
         )
 
     def _op_bounded_alphaengine_probe(self, p: Mapping[str, Any]) -> Any:

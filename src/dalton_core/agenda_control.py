@@ -681,6 +681,13 @@ class AgendaControlApplication:
         assert self.review_plane is not None
         return self.review_plane.record_transcript(login, value)
 
+    def post_document_review(
+        self, login: str, session: _Session, csrf: str | None, body: bytes
+    ) -> dict[str, Any]:
+        value = self._review_body(session, csrf, body)
+        assert self.review_plane is not None
+        return self.review_plane.record_document_review(login, value)
+
     def post_intent(
         self, login: str, session: _Session, csrf: str | None, body: bytes
     ) -> dict[str, Any]:
@@ -830,6 +837,15 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                     value["csrf_token"] = session.csrf
                     body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
                     content_type = "application/json; charset=utf-8"
+                elif path == "/v1/mission-document-review":
+                    value = (
+                        {"as_of": datetime.now(timezone.utc).isoformat(), "items": [], "enabled": False}
+                        if application.review_plane is None
+                        else {**application.review_plane.document_review_view(login), "enabled": True}
+                    )
+                    value["csrf_token"] = session.csrf
+                    body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+                    content_type = "application/json; charset=utf-8"
                 elif path == "/v1/transcript-review":
                     value = (
                         {"as_of": datetime.now(timezone.utc).isoformat(), "items": [], "enabled": False}
@@ -897,6 +913,7 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 "/v1/agenda/feedback": application.post,
                 "/v1/research-review/decision": application.post_review,
                 "/v1/transcript-review/decision": application.post_transcript_review,
+                "/v1/mission-document-review/decision": application.post_document_review,
                 "/v1/intent/compose": application.post_intent,
                 "/v1/intent/confirm": application.post_intent_confirm,
                 "/v1/answer/route": application.post_answer,
