@@ -98,6 +98,13 @@ class ReviewPlane:
         self.calls.append(("transcript", login, dict(value)))
         return {"status": "transcript-recorded"}
 
+    def record_document_review(self, login, value):
+        self.calls.append(("document", login, dict(value)))
+        return {"status": "document-recorded"}
+
+    def document_review_view(self, login):
+        return {"as_of": NOW, "reviewer_ref": login, "items": []}
+
     def view(self, login):
         return {"as_of": NOW, "reviewer_ref": login, "items": []}
 
@@ -446,6 +453,21 @@ class AgendaControlTests(unittest.TestCase):
             response = connection.getresponse()
             review_payload = json.loads(response.read())
             self.assertTrue(review_payload["enabled"])
+            connection.request("GET", "/v1/mission-document-review", headers={**headers, "Cookie": cookie})
+            response = connection.getresponse()
+            document_payload = json.loads(response.read())
+            self.assertEqual(response.status, 200)
+            self.assertTrue(document_payload["enabled"])
+            self.assertEqual(document_payload["csrf_token"], review_payload["csrf_token"])
+            for csrf_value, expected_status in (("wrong", 403), (review_payload["csrf_token"], 200)):
+                connection.request(
+                    "POST", "/v1/mission-document-review/decision", body=b'{}',
+                    headers={**headers, "Cookie": cookie, "Content-Type": "application/json", "X-Dalton-CSRF": csrf_value},
+                )
+                response = connection.getresponse()
+                self.assertEqual(response.status, expected_status)
+                response.read()
+            self.assertEqual(sum(call[0] == "document" for call in review.calls), 1)
             connection.request(
                 "GET", "/v1/transcript-review",
                 headers={**headers, "Cookie": cookie},

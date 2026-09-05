@@ -17,7 +17,10 @@
   <div class="notice">此页面只通过 Tailscale Serve 开放。Agenda 超时接受不算人工研究审阅，也不能批准 Evidence、Claim 或 production。</div>
   <nav class="tabs"><button class="tab active" data-pane="review">待审</button><button class="tab" data-pane="trajectory">轨迹</button><button class="tab" data-pane="answer">问答</button><button class="tab" data-pane="intent">方向</button><button class="tab" data-pane="agenda">议程</button></nav>
   <section class="pane" id="review-pane">
-    <h2>Transcript 与候选 Claim</h2>
+    <h2>待抽取文档</h2>
+    <p class="section-note">系统已获取这些文档，等待你提取研究要点。登记抽取完成只会关联已有候选，不会接受研究结论。</p>
+    <div class="list" id="document-review-list"><div class="empty">正在加载待抽取文档…</div></div>
+    <h2 style="margin-top:26px">原文与引用审阅</h2>
     <p class="section-note">先核对 raw span 和未决修正，再决定是否把候选写入正式 Ledger。</p>
     <div class="list" id="transcript-list"><div class="empty">正在加载 transcript review…</div></div>
     <h2 style="margin-top:26px">候选研究结论</h2>
@@ -62,6 +65,44 @@ document.querySelectorAll(".tab").forEach(button=>button.onclick=()=>{document.q
 async function getJson(path){const response=await fetch(path,{headers:{Accept:"application/json"},cache:"no-store"});if(!response.ok)throw new Error(`${path} HTTP ${response.status}`);const value=await response.json();if(csrf&&value.csrf_token!==csrf)throw new Error("CSRF session changed");csrf=value.csrf_token;return value}
 async function postJson(path,value){const response=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json","X-Dalton-CSRF":csrf},body:JSON.stringify(value)});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
 const requestId=()=>((crypto.randomUUID&&crypto.randomUUID())||`${Date.now()}-${Math.random()}`).replace(/[^A-Za-z0-9._-]/g,"_");
+const documentReviewList=document.getElementById("document-review-list");
+function renderDocumentReviews(data){
+  documentReviewList.replaceChildren();
+  if(!data.enabled){documentReviewList.append(node("div","文档抽取队列尚未启用","empty"));return}
+  if(!data.items.length){documentReviewList.append(node("div","当前任务没有待抽取文档","empty"));return}
+  if(data.limit_reached)documentReviewList.append(node("div","当前显示最早的 100 条，处理后刷新可继续查看。","notice"));
+  if(data.candidate_limit_reached)documentReviewList.append(node("div","候选较多，匹配列表可能不完整；未显示的候选可通过已有治理入口登记。","notice"));
+  data.items.forEach(item=>{
+    const card=node("article",null,"card"),head=node("div",null,"head"),copy=node("div");
+    copy.append(node("div",`${item.company_label||item.company_ref} · 待抽取文档`,"subject"),node("div",item.source_ref==="source:alphaengine"?`AlphaEngine 文档 ${item.document_ref.replace(/^alphaengine-doc:/,"")}`:item.document_ref,"ref"));
+    head.append(copy,node("div","等待人工抽取","state pending"));
+    card.append(head,node("div",`入队 ${fmtDate(item.created_at)}`,"meta"));
+    const refs=node("details",null,"refs");
+    refs.append(node("summary","任务与文档记录"),node("div",item.mission_version_ref,"ref"),node("div",item.review_id,"ref"));card.append(refs);
+    const label=node("label","关联这份文档的已有候选"),select=node("select");
+    select.id=`candidate-${item.review_id}`;label.htmlFor=select.id;
+    select.style.cssText="width:100%;padding:10px;margin-top:8px;background:#08141d;color:var(--text);border:1px solid var(--line);border-radius:10px";
+    const placeholder=node("option",item.candidates.length?"选择已经抽取的候选":"尚无可关联候选");placeholder.value="";select.append(placeholder);
+    item.candidates.forEach(candidate=>{const option=node("option",candidate.statement);option.value=candidate.ref;select.append(option)});
+    const preview=node("div","","quote");preview.hidden=true;
+    const rationale=node("textarea");rationale.maxLength=4000;rationale.placeholder="说明抽取结果，或忽略这份文档的原因";rationale.setAttribute("aria-label","处理理由");
+    const actions=node("div",null,"actions"),staged=node("button","登记抽取完成","accept"),dismiss=node("button","忽略文档","revise"),result=node("span","","result");staged.disabled=true;
+    select.onchange=()=>{const chosen=item.candidates.find(x=>x.ref===select.value);preview.textContent=chosen?.statement||"";preview.hidden=!chosen;staged.disabled=!chosen};
+    async function submit(resolution){
+      if(!rationale.value.trim()){result.textContent="请先写明处理理由";return}
+      if(resolution==="extraction_staged"&&!select.value){result.textContent="请先选择候选";return}
+      staged.disabled=dismiss.disabled=select.disabled=true;result.textContent="正在保存…";
+      try{
+        await postJson("/v1/mission-document-review/decision",{request_id:requestId(),review_id:item.review_id,review_hash:item.review_hash,resolution,candidate_claim_version_ref:resolution==="extraction_staged"?select.value:null,rationale:rationale.value.trim()});
+        await load();
+      }catch(error){result.textContent=`未保存：${error.message}。请刷新队列后重试。`;dismiss.disabled=select.disabled=false;staged.disabled=!select.value}
+    }
+    staged.onclick=()=>submit("extraction_staged");dismiss.onclick=()=>submit("dismissed");
+    actions.append(staged,dismiss,result);card.append(label,select,preview);
+    if(!item.candidates.length)card.append(node("div","先完成原文核对、引用绑定和候选抽取，再回来登记。这里不会自动生成候选。","hint"));
+    card.append(rationale,actions);documentReviewList.append(card);
+  });
+}
 function renderTranscript(data){transcriptList.replaceChildren();if(!data.enabled){transcriptList.append(node("div","Transcript review 尚未启用","empty"));return}if(!data.items.length){transcriptList.append(node("div","没有待审 transcript packet","empty"));return}data.items.forEach(item=>{const card=node("article",null,"card"),claim=item.candidate_claim,citation=claim.citation,state=item.state||{},head=node("div",null,"head"),copy=node("div"),status=node("div",state.status==="claim_eligible"?"引用已具备 Claim 资格":state.status==="correction_published"?"修正集已发布，等待引用绑定":"等待人工审阅",`state ${state.status==="claim_eligible"?"done":"pending"}`);copy.append(node("div",`${item.source.title} · Transcript review`,"subject"),node("div",`${item.source.content_chars.toLocaleString()} 字 · ${item.source.page_count} 页 · ${item.packet_ref}`,"meta"));head.append(copy,status);card.append(head,node("div",claim.normalized_statement,"statement"),node("div",`${claim.value}% · ${claim.period}`,"number"),node("div",citation.raw_span,"quote"));const authority=node("div",null,"split");const source=node("div",null,"kv"),secondary=node("div",null,"kv");source.append(node("b","Raw authority"),node("span",`${item.source.document_ref} · SHA-256 ${item.source.content_sha256.slice(0,12)}…`));secondary.append(node("b","数值二次权威"),node("span",`${claim.required_secondary_numeric_authority.source_type} · ${claim.required_secondary_numeric_authority.source_ref}`));authority.append(source,secondary);card.append(authority,node("h3","未决 ASR 标记"));const flags=node("div",null,"flags");item.proposed_correction_set.corrections.forEach(flag=>{const row=node("div",null,"flag");row.append(node("code",flag.source_text),node("span",`${flag.disposition} · ${flag.source_start}–${flag.source_end}`,"meta"));flags.append(row)});card.append(flags,node("div",`这些标记与候选引用重叠：${item.proposed_correction_set.unresolved_overlap_with_formal_citation} 条。点击确认即表示你核对了 raw span、-3% 符号和全部未决标记。`,"hint"));if(state.status!=="claim_eligible"){const actions=node("div",null,"actions"),accept=node("button","确认未决标记并绑定引用","accept"),result=node("span","","result");accept.onclick=async()=>{if(!confirm("确认 raw span、-3% 符号和全部未决标记，并生成 Claim citation binding？"))return;accept.disabled=true;result.textContent="正在写入 correction authority…";try{await postJson("/v1/transcript-review/decision",{request_id:requestId(),packet_ref:item.packet_ref,packet_hash:item.packet_hash,action:"publish_and_bind"});await load()}catch(error){result.textContent=`保存失败：${error.message}`;accept.disabled=false}};actions.append(accept,result);card.append(actions)}transcriptList.append(card)})}
 const promotionText=item=>`${item.promotion.authority==="policy"?"已由 policy 自动入库":"已由人工审阅入库"}${item.promotion.claim_version_ref?` · ${item.promotion.claim_version_ref}`:""}`;
 const decisionText=item=>{if(item.promotion){const base=promotionText(item);return item.decision&&item.commit_state!=="committed"?`${base}；这条人工${item.decision.verdict==="accept"?"接受":"决定"}未另行写入`:base}if(item.promotion_state==="unknown")return"Core 入库状态暂不可读，稍后刷新";if(!item.decision)return"等待审阅";if(item.decision.verdict==="accept"){if(item.commit_state==="committed")return"已接受并入库";if(item.commit_state==="failed"&&item.commit_error_code==="conflict")return"接受未生效：Core 已另行入库";return"已接受，等待入库"}return item.decision.verdict==="revise"?"已要求修订":"已拒绝"};
@@ -80,6 +121,7 @@ intentSubmit.onclick=async()=>{const utterance=intentInput.value;if(!utterance.t
 const agendaState=x=>x.resolution==="explicit_human"?`人工：${x.effective_verdict}`:x.resolution==="auto_accept_timeout"?"超时默认接受":"等待处理";
 function renderAgenda(data){agendaList.replaceChildren();if(!data.items.length){agendaList.append(node("div","还没有已送达的 Agenda","empty"));return}data.items.forEach(item=>{const card=node("article",null,"card"),head=node("div",null,"head"),copy=node("div"),side=node("div",agendaState(item),`state ${item.effective_verdict}`);copy.append(node("div",item.company_ref,"company"),node("div",`送达 ${fmtDate(item.delivered_at)} · 截止 ${fmtDate(item.deadline_at)}`,"meta"));head.append(copy,side);card.append(head);const ol=node("ol");(item.selected||[]).forEach(question=>{const li=node("li",null,"question");li.append(node("span",question.question),node("span",`验收：${question.answer_criteria}`,"criteria"));ol.append(li)});card.append(ol);const actions=node("div",null,"actions"),agree=node("button","同意","agree"),disagree=node("button","不同意","disagree"),result=node("span",item.own_verdict?`你已选择：${item.own_verdict}`:"","result");async function submit(verdict){agree.disabled=disagree.disabled=true;result.textContent="正在保存…";try{await postJson("/v1/agenda/feedback",{decision_ref:item.decision_ref,verdict});await load()}catch(error){result.textContent=`保存失败：${error.message}`;agree.disabled=disagree.disabled=false}}agree.onclick=()=>submit("agree");disagree.onclick=()=>submit("disagree");actions.append(agree,disagree,result);card.append(actions);agendaList.append(card)})}
 const cockpitReads=[
+  {path:"/v1/mission-document-review",list:documentReviewList,render:renderDocumentReviews},
   {path:"/v1/agenda",list:agendaList,render:renderAgenda},
   {path:"/v1/research-review",list:researchList,render:renderResearch},
   {path:"/v1/transcript-review",list:transcriptList,render:renderTranscript},

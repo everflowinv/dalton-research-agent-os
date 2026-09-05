@@ -1530,6 +1530,36 @@ class CoverageMissionAuthority:
 
     # -- P9d-2: human extraction queue for acquired documents -----------------
 
+    def backfill_document_reviews(self, mission_ref: str, *, limit: int = 100) -> list[dict[str, Any]]:
+        """Recover acquisitions completed before queue deployment or a crash.
+
+        Select only missing reviews in the active mission, then re-derive
+        each grant through the normal registration path. No acquisition or
+        model calls occur; resolved reviews can never be reopened.
+        """
+        mission_ref = _text(mission_ref, "mission_ref")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise CoverageMissionValidationError("backfill limit must be 1..100")
+        rows = self.connection.execute(
+            "SELECT d.record_id,d.mission_version_ref FROM coverage_mission_discovered_documents d "
+            "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
+            "LEFT JOIN coverage_mission_document_reviews r "
+            "ON r.mission_version_ref=d.mission_version_ref AND r.document_ref=d.document_ref "
+            "WHERE p.mission_ref=? AND d.status='acquired' AND r.review_id IS NULL "
+            "ORDER BY d.created_at,d.record_id LIMIT ?", (mission_ref, limit),
+        ).fetchall()
+        result = []
+        for row in rows:
+            mission = self.mission(row["mission_version_ref"])
+            try:
+                review = self.register_document_review(
+                    row["record_id"], requested_by=mission["autonomy"]["automation_principal"],
+                )
+                result.append({"record_id": row["record_id"], "status": review["status"], "review_id": review["review_id"]})
+            except CoverageMissionError as exc:
+                result.append({"record_id": row["record_id"], "status": "not_registered", "reason": f"{type(exc).__name__}: {exc}"})
+        return result
+
     def register_document_review(self, record_id: str, *, requested_by: str) -> dict[str, Any]:
         """Open one human extraction review for an acquired document.
 
@@ -1596,6 +1626,7 @@ class CoverageMissionAuthority:
         actor_ref: str,
         candidate_claim_version_ref: str | None = None,
         rationale: str | None = None,
+        expected_review_hash: str | None = None,
     ) -> dict[str, Any]:
         """Human-only close of an extraction review.
 
@@ -1609,6 +1640,8 @@ class CoverageMissionAuthority:
             resolution, ("extraction_staged", "dismissed"), "resolution"
         )
         actor_ref = _human(actor_ref, "actor_ref")
+        if expected_review_hash is not None:
+            expected_review_hash = _sha256(expected_review_hash, "expected_review_hash")
         if resolution == "extraction_staged":
             candidate_claim_version_ref = _text(
                 candidate_claim_version_ref, "candidate_claim_version_ref"
@@ -1626,6 +1659,8 @@ class CoverageMissionAuthority:
                     "dismissed cannot bind a candidate claim version"
                 )
         rationale = _text(rationale, "rationale") if rationale is not None else None
+        if resolution == "dismissed" and rationale is None:
+            raise CoverageMissionValidationError("dismissed requires a rationale")
         with self._transaction() as cur:
             row = cur.execute(
                 "SELECT * FROM coverage_mission_document_reviews WHERE review_id=?", (review_id,)
@@ -1633,9 +1668,15 @@ class CoverageMissionAuthority:
             if row is None:
                 raise CoverageMissionNotFound("document review was not found")
             if row["state"] == resolution:
+                if (row["candidate_claim_version_ref"], row["rationale"]) != (
+                    candidate_claim_version_ref, rationale,
+                ):
+                    raise CoverageMissionConflict("document review resolution payload changed")
                 return {"status": "duplicate", **self._review_row(row)}
             if row["state"] != "awaiting_human_extraction":
                 raise CoverageMissionConflict("document review is already resolved")
+            if expected_review_hash is not None and expected_review_hash != content_hash(self._review_row(row)):
+                raise CoverageMissionConflict("document review changed; reload before deciding")
             now = _now()
             cur.execute(
                 "UPDATE coverage_mission_document_reviews SET state=?,"
@@ -1649,6 +1690,15 @@ class CoverageMissionAuthority:
                 "SELECT * FROM coverage_mission_document_reviews WHERE review_id=?", (review_id,)
             ).fetchone()
         return {"status": "fresh", **self._review_row(row)}
+
+    def document_review(self, review_id: str) -> dict[str, Any]:
+        row = self.connection.execute(
+            "SELECT * FROM coverage_mission_document_reviews WHERE review_id=?",
+            (_text(review_id, "review_id"),),
+        ).fetchone()
+        if row is None:
+            raise CoverageMissionNotFound("document review was not found")
+        return self._review_row(row)
 
     def document_reviews(
         self,
