@@ -58,7 +58,7 @@ def run(output: Path, browser_executable: str | None):
     output.mkdir(parents=True, exist_ok=True, mode=0o700)
     report = {'fixture_only':True,'external_network_calls':0,'paid_model_calls':0,'live_writes':0,
               'package_path':dalton_core.__file__}
-    with tempfile.TemporaryDirectory(prefix='d-p9d3b-',dir='/tmp') as name:
+    with tempfile.TemporaryDirectory(prefix='d-p9d3b-') as name:
         root=Path(name)
         fixture=ExtractionHarness(root)
         context=fixture.context(); fixture.enable_fixture()

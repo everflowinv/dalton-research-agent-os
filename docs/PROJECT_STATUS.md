@@ -1,6 +1,18 @@
 # Dalton 项目进度
 
 更新日期：2026-09-06
+- **P9d-3b 只读访问修复与启用预检已在隔离副本完成本地验收；未启用真实模型、未部署。**
+  基线 `f0ab1cb` 的三个页面读取入口仍会调用可写 router/budget 构造器，本轮改为
+  `read_only=True`（`mode=ro` + `query_only`），不 chmod、创建文件或迁移 schema；执行链仍可写。
+  新增认证 human-only `document_extraction_preflight`，只在内存 backup 中复用 canonical route/admit，
+  检查 exact source/mission/constitution/mandate/governance、单模型 policy/profile、共享预算及外层 cap；
+  拒绝过期绑定、换版 policy、超额/跨日未结算与 overrun，不建立持久 route/reservation 或调用。
+  返回明确标注 preview_only、非预留、快照会过期、执行仍须重验；不验证 broker 身份、来源送模许可或真账单。
+  最终全仓 **1110/1110**、专项邻接 **174/174**、broker **25/25**；wheel/sdist、干净安装及 installed
+  预检/合成 socket/HTTP staging/replay canary 通过，218 个 runtime 文件与 wheel 逐字节一致。
+  WAL 缺既有 sidecar 时 fail closed；SQLite SHM 读锁标记可能变化，不把它说成物理逐字节不变。
+  仅在 workspace 内 clone 开发、提交和导出 patch；没有写原仓或 live，没有网络模型调用、部署、push、merge。
+  详见 [本轮预检报告](reports/p9d3b-readonly-preflight-v0.2-2026-09-06.md)。
 - **P9d-3b 预算准入、真实 broker 接线与人工 citation/staging 已实现并通过本地自动验收；真实模型 canary 未执行，未部署。**
   不再仅允许 Hermetic adapter：复用原 Scheduler / ModelRouter / OpenClawModelAdapter / 付费账本，原子检查 owner 与 mission 预算，
   调用前预留、Core 记账后结算；未知费用、断连和跨日未结算预留不释放，超预留停止后续准入。

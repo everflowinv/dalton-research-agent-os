@@ -458,12 +458,18 @@ class ModelRouter:
         *,
         connection: sqlite3.Connection | None = None,
         clock: Callable[[], datetime] | None = None,
+        read_only: bool = False,
     ) -> None:
+        if read_only and connection is not None:
+            raise ValueError("read_only requires a file, not a caller-owned connection")
         self.path = str(path)
+        self.read_only = read_only
         self.clock = clock or _utc_now
         self._authorized = False
-        self.connection = connection or sqlite3.connect(self.path, isolation_level=None)
-        if connection is None and self.path != ":memory:":
+        from .readonly_sqlite import connect_read_only
+        self.connection = (connect_read_only(path) if read_only else
+                           connection or sqlite3.connect(self.path, isolation_level=None))
+        if not read_only and connection is None and self.path != ":memory:":
             os.chmod(self.path, 0o600)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
@@ -471,7 +477,23 @@ class ModelRouter:
         self.connection.create_function(
             "dalton_model_router_authorized", 0, lambda: int(self._authorized)
         )
-        self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        if not read_only:
+            self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    def memory_snapshot(self) -> "ModelRouter":
+        """Disposable writable snapshot; backup replaces the entire schema too.
+
+        No migrations run after backup, so an old authority stays old and
+        canonical operations fail closed on missing tables/columns.
+        """
+        snapshot = ModelRouter(clock=self.clock)
+        try:
+            self.connection.backup(snapshot.connection)
+            snapshot.connection.execute("PRAGMA temp_store=MEMORY")
+        except BaseException:
+            snapshot.close()
+            raise
+        return snapshot
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -493,6 +515,8 @@ class ModelRouter:
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
+        if self.read_only:
+            raise sqlite3.OperationalError("ModelRouter is read_only")
         if self.connection.in_transaction:
             raise RuntimeError("ModelRouter operation cannot be nested")
         self.connection.execute("BEGIN IMMEDIATE")

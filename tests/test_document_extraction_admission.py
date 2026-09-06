@@ -246,7 +246,7 @@ class BrokerAdmissionTests(unittest.TestCase):
 
     def test_real_adapter_socket_protocol_with_synthetic_provider_and_budget(self):
         from tests.test_openclaw_model_adapter import FakeBroker, success_response, seal, AUTH_SECRET
-        socket_temp=tempfile.TemporaryDirectory(prefix='d-ext-',dir='/tmp');self.addCleanup(socket_temp.cleanup)
+        socket_temp=tempfile.TemporaryDirectory(prefix='d-ext-');self.addCleanup(socket_temp.cleanup)
         h=self.h
         # Known synthetic fixture key; no installed credential is read.
         key=h.root/'no-key';key.write_bytes(AUTH_SECRET);key.chmod(0o600)

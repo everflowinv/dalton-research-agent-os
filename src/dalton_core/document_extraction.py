@@ -52,6 +52,26 @@ TASK_HASH = content_hash({"task": TASK_REF, "output": OUTPUT_SCHEMA, "window_cha
                           "quote_chars": QUOTE_CHARS, "authority": "suggestions_only_human_citation_and_accept"})
 
 
+def validate_model_config(value):
+    """Pure closed installation shape check; never reads a credential file."""
+    fields = {"routing_policy_ref", "credential_slot_refs", "model_router_db", "broker_socket",
+              "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"}
+    if not isinstance(value, Mapping):
+        raise ResearchVerificationError("invalid document extraction model configuration")
+    config = dict(value)
+    if set(config) != fields or any(not isinstance(config[k], str) or not config[k] for k in fields - {"credential_slot_refs"}):
+        raise ResearchVerificationError("invalid document extraction model configuration")
+    if not isinstance(config["credential_slot_refs"], list) or not config["credential_slot_refs"] or any(
+        not isinstance(v, str) or not v for v in config["credential_slot_refs"]):
+        raise ResearchVerificationError("document extraction credential slots are required")
+    from .openclaw_model_adapter import _AGENT_ID_RE, _CLIENT_ID_RE
+    if not _AGENT_ID_RE.fullmatch(config["expected_agent_id"]) or not _CLIENT_ID_RE.fullmatch(config["broker_client_id"]):
+        raise ResearchVerificationError("invalid broker client or dedicated agent identity syntax")
+    if any(not Path(config[k]).is_absolute() for k in ("model_router_db", "budget_db", "broker_socket", "broker_auth_key")):
+        raise ResearchVerificationError("document extraction authority and broker paths must be absolute")
+    return config
+
+
 def _hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
@@ -369,7 +389,26 @@ class DocumentExtractionService:
     def __init__(self, writer):
         self.writer = writer
 
-    def context(self, review_id, expected_review_hash, offset, actor_ref):
+    def preflight(self, **params):
+        from .document_extraction_preflight import preflight
+        return preflight(self, **params)
+
+    @staticmethod
+    def model_policy(router, policy_ref):
+        policy = router.get_policy(policy_ref)
+        from .model_router import _policy_wire
+        if _policy_wire(policy) != policy or policy["policy_version_ref"] != policy_ref:
+            raise ResearchVerificationConflict("extraction routing policy binding drifted")
+        if len(policy.get("filters", {}).get("allowed_profile_ids", [])) != 1:
+            raise ResearchVerificationError("extraction must pin exactly one approved model")
+        if router.connection.execute(
+            "SELECT 1 FROM model_routing_policy_versions WHERE policy_id=? AND version>?",
+            (policy["id"], policy["version"]),
+        ).fetchone():
+            raise ResearchVerificationConflict("extraction routing policy was superseded")
+        return policy
+
+    def _source_context(self, review_id, expected_review_hash, offset, actor_ref):
         writer = self.writer
         if not isinstance(actor_ref, str) or re.fullmatch(r"human:[A-Za-z0-9][A-Za-z0-9._/@:-]*", actor_ref) is None:
             raise ResearchVerificationError("document extraction requires authenticated human request")
@@ -416,7 +455,11 @@ class DocumentExtractionService:
             "next_offset": end if end < len(text) else None,
             "quotes": quotes, "untrusted_source": True, "coverage": "visible_window_only",
         }
-        config = getattr(writer, "_document_extraction_model_config", None)
+        return base
+
+    def context(self, review_id, expected_review_hash, offset, actor_ref):
+        base = self._source_context(review_id, expected_review_hash, offset, actor_ref)
+        config = getattr(self.writer, "_document_extraction_model_config", None)
         if config is not None:
             from .model_router import ModelRouter
             from .thesis_impact_budget import ThesisImpactBudgetStore
@@ -425,15 +468,13 @@ class DocumentExtractionService:
             for key in ("model_router_db", "budget_db"):
                 if not Path(config[key]).is_file():
                     raise ResearchVerificationError("configured model authority is missing: " + key)
-            with ModelRouter(config["model_router_db"]) as router, ThesisImpactBudgetStore(config["budget_db"]) as budget:
-                policy = router.get_policy(config["routing_policy_ref"])
+            with ModelRouter(config["model_router_db"], read_only=True) as router, ThesisImpactBudgetStore(config["budget_db"], read_only=True) as budget:
+                policy = self.model_policy(router, config["routing_policy_ref"])
                 cap = budget.policy(config["budget_policy_ref"])
-            if len(policy.get("filters", {}).get("allowed_profile_ids", [])) != 1:
-                raise ResearchVerificationError("extraction must pin exactly one approved model")
             base["model_binding"] = {"config_hash": content_hash(config),
                 "routing_policy_ref": config["routing_policy_ref"], "routing_policy_hash": content_hash(policy),
                 "budget_policy_ref": config["budget_policy_ref"], "budget_policy_hash": cap["content_hash"],
-                "outer_budget": self.outer_budget(grant["mission_version_ref"])}
+                "outer_budget": self.outer_budget(base["mission_version_ref"])}
         return _record({"id": "document-extraction-context:" + content_hash(base)[:32], **base})
 
     def outer_budget(self, mission_version_ref):
@@ -534,7 +575,7 @@ class DocumentExtractionService:
             from .model_router import ModelRouter
             from .thesis_impact_budget import ThesisImpactBudgetStore
             config = self.writer._document_extraction_model_config
-            with ModelRouter(config["model_router_db"]) as router, ThesisImpactBudgetStore(config["budget_db"]) as budget:
+            with ModelRouter(config["model_router_db"], read_only=True) as router, ThesisImpactBudgetStore(config["budget_db"], read_only=True) as budget:
                 route = router.get_decision(inv["parent_ref"])
                 profile = router.get_profile(inv["profile_ref"])
                 admitted = budget.connection.execute(
@@ -573,7 +614,7 @@ class DocumentExtractionService:
             return None
         from .thesis_impact_budget import ThesisImpactBudgetStore
         work = build_work(context)
-        with ThesisImpactBudgetStore(config["budget_db"]) as budget:
+        with ThesisImpactBudgetStore(config["budget_db"], read_only=True) as budget:
             row = budget.connection.execute(
                 "SELECT a.admission_id,a.reserved_micros,a.day,s.actual_micros,s.usage_entry_ref "
                 "FROM thesis_impact_day_admissions a LEFT JOIN thesis_impact_day_settlements s "

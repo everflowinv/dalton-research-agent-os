@@ -5,6 +5,10 @@
 分支：`p9d3b-llm-document-extraction`；接续基线 `7d51c53`，保留上一轮未提交改动。
 上游：[前一轮阶段报告](p9d3b-document-evidence-and-extraction-scaffold-v0.1-2026-09-05.md)、[ADR-0003](../adr/0003-transcript-candidate-admission.md)。
 
+## 同日隔离副本接续
+
+`f0ab1cb` 之后新增的只读修复与启用预检见 [v0.2 报告](p9d3b-readonly-preflight-v0.2-2026-09-06.md)。本报告以下保留上一轮记录：其中“读取只打开已有 authority”只说明没有主动发布授权，**不能证明构造器不写库**；接续检查发现 context、suggestions、budget status 仍会触发 chmod/schema/WAL 初始化，现已在 workspace 内 clone 修复。最终全仓 1110/1110、专项邻接 174/174、broker 25/25 及 installed canary 证据以 v0.2 为准。没有复制回原仓或启用 live。
+
 ## 结果与边界
 
 已接通可配置的真实 `OpenClawModelAdapter`，不再仅允许 Hermetic adapter。生成前，writer 重验 active mission、已获取原文、exact context、单模型 routing policy 和已有共享预算 policy；模型只给出建议。Cockpit 可以校订陈述、指标、期间与口径，缩小原文引用范围，再由已登录的人明确确认 citation 并保存为 qualitative 待审候选。

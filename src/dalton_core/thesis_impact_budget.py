@@ -99,20 +99,36 @@ class ThesisImpactBudgetStore:
         path: str | Path = ":memory:",
         *,
         clock: Callable[[], datetime] | None = None,
+        read_only: bool = False,
     ) -> None:
         self.path = str(path)
-        if self.path != ":memory:":
+        self.read_only = read_only
+        if not read_only and self.path != ":memory:":
             target = Path(self.path)
             target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             target.touch(mode=0o600, exist_ok=True)
             os.chmod(target, 0o600)
-        self.connection = sqlite3.connect(self.path, isolation_level=None)
+        from .readonly_sqlite import connect_read_only
+        self.connection = (connect_read_only(path) if read_only else
+                           sqlite3.connect(self.path, isolation_level=None))
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
-        self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
-        if self.path != ":memory:":
+        if not read_only:
+            self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        if not read_only and self.path != ":memory:":
             self.connection.execute("PRAGMA journal_mode=WAL")
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def memory_snapshot(self) -> "ThesisImpactBudgetStore":
+        """Disposable exact backup; never migrate the copied authority."""
+        snapshot = ThesisImpactBudgetStore(clock=self.clock)
+        try:
+            self.connection.backup(snapshot.connection)
+            snapshot.connection.execute("PRAGMA temp_store=MEMORY")
+        except BaseException:
+            snapshot.close()
+            raise
+        return snapshot
 
     def close(self) -> None:
         self.connection.close()
@@ -125,6 +141,8 @@ class ThesisImpactBudgetStore:
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
+        if self.read_only:
+            raise sqlite3.OperationalError("ThesisImpactBudgetStore is read_only")
         if self.connection.in_transaction:
             raise ThesisImpactBudgetError("nested budget transaction")
         self.connection.execute("BEGIN IMMEDIATE")

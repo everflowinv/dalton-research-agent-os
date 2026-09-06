@@ -64,7 +64,7 @@ from .research_verification import (
     ResearchVerificationError,
     VerificationRejected,
 )
-from .document_extraction import DocumentExtractionService
+from .document_extraction import DocumentExtractionService, validate_model_config
 from .transcript_candidate_staging import (
     stage_transcript_qualitative_candidate, TranscriptCoreAuthorityResolver,
 )
@@ -362,6 +362,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "mission_source_discoveries", "mission_discovered_documents",
     "mission_document_reviews", "resolve_mission_document_review",
     "mission_document_evidence", "generate_document_extraction", "stage_document_extraction",
+    "document_extraction_preflight",
 })
 # Mission stage bookkeeping is human-governed but must also be reachable by
 # the mission's declared ``automation:`` principal; the CoverageMission
@@ -645,6 +646,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "mission_discovered_documents": frozenset({"mission_version_ref", "company_ref", "status", "limit"}),
     "mission_document_reviews": frozenset({"mission_version_ref", "company_ref", "state", "limit", "include_candidates"}),
     "mission_document_evidence": frozenset({"review_id", "expected_review_hash", "offset", "actor_ref"}),
+    "document_extraction_preflight": frozenset({"review_id", "expected_review_hash", "offset", "expected_context_hash", "actor_ref"}),
     "generate_document_extraction": frozenset({"review_id", "expected_review_hash", "offset", "expected_context_hash", "actor_ref"}),
     "stage_document_extraction": frozenset({"review_id", "expected_review_hash", "offset", "expected_context_hash",
         "suggestion_ref", "suggestion_hash", "request_id", "normalized_statement", "metric_or_aspect", "period", "basis",
@@ -794,6 +796,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "create_coverage_mission": "actor_ref",
     "resolve_mission_document_review": "actor_ref",
     "mission_document_evidence": "actor_ref",
+    "document_extraction_preflight": "actor_ref",
     "generate_document_extraction": "actor_ref",
     "stage_document_extraction": "actor_ref",
     "record_mission_stage": "actor_ref",
@@ -985,15 +988,10 @@ class WriterServer:
         # Explicit local installation only; never derive authority from an
         # existing planner permission or synthesize a new budget policy.
         if document_extraction_model_config is not None:
-            fields = {"routing_policy_ref", "credential_slot_refs", "model_router_db", "broker_socket",
-                      "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"}
-            config = dict(document_extraction_model_config)
-            if set(config) != fields or any(not isinstance(config[k], str) or not config[k] for k in fields - {"credential_slot_refs"}):
-                raise WriterServerError("invalid document extraction model configuration")
-            if not isinstance(config["credential_slot_refs"], list) or not config["credential_slot_refs"] or any(
-                not isinstance(v, str) or not v for v in config["credential_slot_refs"]):
-                raise WriterServerError("document extraction credential slots are required")
-            document_extraction_model_config = config
+            try:
+                document_extraction_model_config = validate_model_config(document_extraction_model_config)
+            except ResearchVerificationError as exc:
+                raise WriterServerError(str(exc)) from exc
         self._document_extraction_model_config = document_extraction_model_config
         self._document_extraction_worker_factory = None
         self._acquisition_launcher = acquisition_launcher
@@ -2342,6 +2340,9 @@ class WriterServer:
 
     def _op_mission_document_evidence(self, p: Mapping[str, Any]) -> Any:
         return DocumentExtractionService(self).view(**dict(p))
+
+    def _op_document_extraction_preflight(self, p: Mapping[str, Any]) -> Any:
+        return DocumentExtractionService(self).preflight(**dict(p))
 
     def _op_generate_document_extraction(self, p: Mapping[str, Any]) -> Any:
         return DocumentExtractionService(self).generate(**dict(p))
