@@ -4,11 +4,14 @@
 - **P9d-3b 预算准入、真实 broker 接线与人工 citation/staging 已实现并通过本地自动验收；真实模型 canary 未执行，未部署。**
   不再仅允许 Hermetic adapter：复用原 Scheduler / ModelRouter / OpenClawModelAdapter / 付费账本，原子检查 owner 与 mission 预算，
   调用前预留、Core 记账后结算；未知费用、断连和跨日未结算预留不释放，超预留停止后续准入。
+  父审发现 `a3cb1bd` 未显式约束 mandate/governance 研究预算，已补强：缺外层 cap 或 mission 声明超上限即拒绝，
+  exact 版本/hash 进入准入，外层调用数/费用在共享账本跨 mission 原子累计；没有修改 live authority。
   Cockpit 可校订语义陈述、缩小 exact 原文 span，并由认证 human 明确确认 citation 后写 CandidateStaging；
   新增有界 `verified_raw_span` 人工原文确认，既有 ASR correction 约束保留，不能绕过未决重叠或过期版本。
   qualitative 的 value/unit/scale=null；数字仍走 SEC；不自动关闭 review、不 accept Claim/Thesis、不伪装 human。
-  全仓 **1074/1074**、专项邻接 **127/127**、broker **25/25**、真实本地 socket/HTTP、1280/390 人工交互、wheel/sdist 和干净安装均通过。
-  本地 socket 使用合成 provider，真实模型调用 **0**：尚未核验已批准 extraction 接线及共享 live 预算绑定，不擅用 planner 权限。
+  补丁后全仓 **1080/1080**、专项邻接 **133/133**、真实本地 socket、wheel/sdist 和干净安装通过；
+  broker **25/25**、1280/390 人工交互沿用未变组件此前通过的证据，不算新模型调用。
+  本地 socket 使用合成 provider，真实模型调用 **0**：尚未核验已批准 extraction 接线、mandate/governance 显式研究预算及共享 live 余额，不擅用 planner 权限。
   人工看图仍待父处理权限及独立审阅；没有 live 写、部署、push、merge 或远端 CI。见
   [P9d-3b 接续报告](reports/p9d3b-budgeted-broker-and-human-staging-v0.1-2026-09-06.md)；
   [上一轮离线阶段记录](reports/p9d3b-document-evidence-and-extraction-scaffold-v0.1-2026-09-05.md)保留供追溯。

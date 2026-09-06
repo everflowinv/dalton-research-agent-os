@@ -17,6 +17,7 @@
 
 ### 模型与预算
 
+- 外层预算补丁后，全仓 1080/1080、专项 133/133 通过；下面的父审小节明确记录 `a3cb1bd` 原缺口及修复，不把此前 1074/1074 当成完整预算证明。
 - 复用 `Scheduler` 的 WorkOrder、lease、ResultEnvelope、`ModelRouter` 的 immutable route/profile、原 model accounting 的 invocation/usage/cost；没有新增队列、路由器或第二份费用账本。
 - 在既有 `ThesisImpactBudgetStore` 的 admission/settlement 中增加 mission binding。一次 `BEGIN IMMEDIATE` 同时检查 owner cap 与 mission 的日调用数、日费用上限，然后预留完整 WorkOrder 费用。mission 换版仍按同一 mission 累计；尚未绑定 mission 的共享支出也保守计入，不当成免费额度。
 - 日界线为 UTC。跨日尚未结算的预留仍占额度；实际费用未知或只有估算时不释放余额。provider 返回实际费用后，先写 Core usage/cost，再结算预算。解析失败照样记账。
@@ -33,6 +34,18 @@
 - 人工提交先在 mission workflow journal 冻结 exact 请求和理由，再依次调用原 correction、citation、CandidateStaging authority。相同 actor/request id 的不同内容被拒绝；跨 Core/staging 的中断可按原请求恢复。局部成功可能留下 citation 或待审候选，但不会留下 accept。
 - 人工校订后的陈述再次通过 qualitative closed validator。正式 source verification 和 transcript-only policy 拒绝规则保持不变。
 
+### 父审补强：mandate/governance 不能被 mission 预算替代
+
+父按 [ADR-0004](../adr/0004-mission-driven-autonomy-and-automation-write-scope.md) 第 7 条复核后，确认 `a3cb1bd` 有一处实际缺口：它验证了 active mandate 身份和共享 owner 费用 cap，但没有要求 mandate/governance 明确给出研究预算，也没有在外层强制共享日调用数。此前没有真实模型调用或 live 部署，因此没有据此发生实际超支；这一缺口不能用原有绿色测试掩盖。
+
+补丁在**付费文档抽取准入**增加以下检查，继续使用同一预算账本：
+
+- `MandateVersion.constraints.research_budget` 与 `GovernancePolicyVersion.policy.research_budget` 都必须明确存在，且只包含 `max_daily_paid_calls / max_daily_cost_usd / max_alphaengine_calls_24h`。缺失、非有限数、负数或未知字段都拒绝，绝不把缺省解释成无限额度。
+- mission 的三项声明上限必须分别不大于这两个外层上限；不能用一个较大的 mission 预算覆盖较小的 mandate/governance 预算。
+- mission、constitution、mandate 和当前 governance 的 ref/hash 必须一致且仍有效；governance pointer 换版使旧 context 失效。外层预算及其 exact 版本/hash 进入 context 和同一 admission 的 binding。
+- 在同一个原子预算事务中，外层日调用数和费用按共享账本中的**所有 mission、未绑定的旧记录，以及跨日未结算调用**保守累计。mission、mandate 或 governance 换版均不重置余额。此口径可能提早拒绝，但不能放宽限制。
+- 新增跨 mission 并发抢额、跨 mission 成本上限、未知调用跨日、缺失外层 cap、mission 大于外层 cap、governance 换版等回归。它不追溯重写历史 mission，也不声称已把其他 legacy lane 自动迁入新准入路径。
+
 ## 配置方案：只安装接线，不创造授权
 
 配置入口是 `control.config.research_review.document_extraction_model_config_path`，必须是绝对路径。已有 macOS renderer 只把它传给 writer 的 `--document-extraction-model-config`，不把 broker 凭据交给 Cockpit。未配置时，原文和人工处理功能保留，生成返回明确的 gated 状态。
@@ -48,7 +61,7 @@
 | `broker_auth_key` | 本机既有受保护 key 文件路径；配置中不放 key 内容 |
 | `budget_db`、`budget_policy_ref` | 与已有付费 lane 共用的预算账本及有效 policy；不能新建空库假装有余额 |
 
-启用前必须核对模型和来源送模许可、exact policy/profile、credential slot、active mission，以及共享账本剩余额度。当前代码不会自动注册 cap、提高预算、扩 provider/source 允许范围或回退到另一模型。
+启用前必须核对模型和来源送模许可、exact policy/profile、credential slot、active mission，以及共享账本剩余额度；还必须有上述 mandate/governance 显式研究预算。当前读取的仓库 P8a mandate 模板没有 `research_budget`，不能据此推断已获付费抽取授权，live 当前版本仍未核验。若现有版本缺字段，须由 owner 通过既有版本化发布流程明确已有上限，并更新 constitution/mission 的 exact bindings；不能在配置文件里伪造外层 cap。当前代码不会自动注册 cap、提高预算、扩 provider/source 允许范围或回退到另一模型。
 
 如补齐接线后做真实 canary，**总量最多 1 次、最多 0.05 USD**，只发送已获准的公开/合成文本或该模型已获准处理的来源；预留必须写入真实共享预算账本，费用记录要可回查。一旦调用、解析、来源或费用验证失败立即停止，不换模型重试。本轮未执行这一步，也未读取真实凭据。
 
@@ -56,21 +69,21 @@
 
 | 验证 | 结果 | 证据（均在 `temp/p9d3b-continuation/`） |
 |---|---|---|
-| 全仓 unittest | **1074/1074**，140.953 秒，EXIT=0 | `full-regression-final.log` |
-| 专项与邻接 unittest | **127/127**，23.093 秒；与全仓重叠，不相加 | `targeted-final.log` |
+| 全仓 unittest | **1080/1080**，146.270 秒，EXIT=0 | `outer-full-final.log` |
+| 专项与邻接 unittest | **133/133**，25.374 秒；与全仓重叠，不相加 | `outer-targeted-final.log` |
 | OpenClaw model broker | **25/25**，0 fail | `broker.log` |
 | 独立真实本地 adapter/socket 检查 | **1/1**；合成 provider，不是真实模型 | `broker-socket-canary.log` |
-| 预算协议 canary | 1 次合成 socket 请求；重复生成不再发请求；50000 微美元预留、1000 微美元合成费用结算 | `budget-canary/result.json` |
+| 预算协议 canary | 1 次合成 socket 请求；重复生成不再发请求；50000 微美元预留、1000 微美元合成费用结算 | `outer-budget-canary/result.json` |
 | HTTP/writer RPC 与人工 staging | 通过；1 次明确人工 staging，重放幂等 | `http-canary/result.json` |
 | 1280/390 浏览器交互 | 两个宽度分别编辑并人工确认；无横向溢出、XSS、页面错误或外部请求 | `browser-final/result.json`、`desktop.png`、`mobile.png` |
 | 既有 hermetic research replay | 1/1，0 provider calls | `hermetic-replay.log` |
-| wheel/sdist | 构建成功 | `build.log`、`dist/` |
-| 干净 Python 3.13 wheel 安装 | `--no-index --no-deps` 成功；installed HTTP/staging canary 通过，import 来自新环境 site-packages | `clean-install.log`、`installed-canary/result.json` |
-| 静态检查与安装产物核对 | `compileall`、`git diff --check` 通过；wheel 内 216 个 runtime 文件与最终源码逐字节一致 | `checkpoint-final.json` |
+| wheel/sdist | 外层预算补丁后重新构建成功 | `outer-build.log`、`outer-dist/` |
+| 干净 Python 3.13 wheel 安装 | `--no-index --no-deps` 成功；installed HTTP/staging canary 通过，import 来自新环境 site-packages | `outer-clean-install.log`、`outer-installed-http/result.json`、`outer-installed-budget/result.json` |
+| 静态检查与安装产物核对 | `compileall`、`git diff --check` 通过；wheel 内 216 个 runtime 文件与最终源码逐字节一致 | `outer-checkpoint-final.json` |
 
-浏览器 canary 前后正式 Claim/Evidence 均为 0，连接器 invocation 保持 4；仅人工操作新增 2 个 correction set、2 个 citation 和待审候选，Core/staging integrity 均为 ok。以上都是隔离 fixture，不是 live 数据。
+broker 与浏览器组件未受外层预算补丁影响，保留此前通过的 25/25 与 1280/390 交互证据，没有为凑次数重跑；补丁后的真正本地 socket 与 installed canary 已重跑。浏览器 canary 前后正式 Claim/Evidence 均为 0，连接器 invocation 保持 4；仅人工操作新增 2 个 correction set、2 个 citation 和待审候选，Core/staging integrity 均为 ok。以上都是隔离 fixture，不是 live 数据。
 
-预算 canary 的 Core cost entry 为 `cost-entry:1013e3073dc79be1b7a1fc28ad3866e6`，绑定 `usage-entry:018b00527279cd8ec44089a81bc7474f`；完整 admission、route、mission binding、settlement 的 ref/hash 保存在 JSON。**1000 微美元来自合成 provider response，不能当真实账单；真实模型调用/花费仍为 0 / 0 USD。**
+补丁后预算 canary 的 Core cost entry 为 `cost-entry:9af441d433f038cf17677a3e27358c8d`，绑定 `usage-entry:912e6d69d0b8982a800b3c1878e7839d`；完整 admission、route、mission binding、settlement 的 ref/hash 保存在 JSON。**1000 微美元来自合成 provider response，不能当真实账单；真实模型调用/花费仍为 0 / 0 USD。**
 
 以下场景已建立自动测试与可重放脚本：
 
@@ -81,7 +94,7 @@
 
 ## 未完成、未做与权限边界
 
-1. 真实模型 canary 未执行，真实模型抽取质量和抗提示注入表现未验证。当前证明的是 deterministic guards 和本地 broker 协议，不是模型总能理解原文。
+1. 真实模型 canary 未执行：除了 approved extraction 接线与共享余额尚未核验，mandate/governance 的显式研究预算也未在 live 核验。真实模型抽取质量和抗提示注入表现未验证。当前证明的是 deterministic guards 和本地 broker 协议，不是模型总能理解原文。
 2. 截图已产出：`temp/p9d3b-continuation/browser-final/desktop.png` 与 `mobile.png`；人工视觉审阅仍未完成。本轮未重试被拒的 `view_image`，未复制图片、绕路读取或修改系统权限。父负责处理权限及独立审阅。
 3. 没有 live 数据副本验收；原文、mission、模型输出均使用明确标注的隔离 fixture。没有 live mission/config 写入、部署、服务重启、push、merge 或远端 CI。
 4. page 生成是同步、受限 RPC，不是新增后台自动提取器；人工改写的语义是否准确，仍需正式 human review 再决定 accept。中英混合或高字节密度窗口可能因保守输入上限拒绝，不支持默认提限。
@@ -97,17 +110,17 @@
   tests.test_agenda_control tests.test_writer_service tests.test_contracts tests.test_service -v
 (cd integrations/openclaw-model-broker && npm run check)
 .venv/bin/python scripts/run_hermetic_research_replay_canary.py
-.venv/bin/python scripts/run_p9d3b_budget_canary.py --output temp/p9d3b-continuation/budget-canary
+.venv/bin/python scripts/run_p9d3b_budget_canary.py --output temp/p9d3b-continuation/outer-budget-canary
 .venv/bin/python scripts/run_p9d3b_document_extraction_canary.py --output temp/p9d3b-continuation/http-final
 PYTHONPATH=src python3 scripts/run_p9d3b_document_extraction_canary.py \
   --output temp/p9d3b-continuation/browser-final \
   --browser-executable '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-.venv/bin/python -m build --no-isolation --outdir temp/p9d3b-continuation/dist
-.venv/bin/python -m venv temp/p9d3b-continuation/clean-install
-temp/p9d3b-continuation/clean-install/bin/python -m pip install --no-index --no-deps \
-  temp/p9d3b-continuation/dist/dalton_core-0.1.0.dev0-py3-none-any.whl
-temp/p9d3b-continuation/clean-install/bin/python scripts/run_p9d3b_document_extraction_canary.py \
-  --output temp/p9d3b-continuation/installed-canary
+.venv/bin/python -m build --no-isolation --outdir temp/p9d3b-continuation/outer-dist
+.venv/bin/python -m venv temp/p9d3b-continuation/outer-clean-install
+temp/p9d3b-continuation/outer-clean-install/bin/python -m pip install --no-index --no-deps \
+  temp/p9d3b-continuation/outer-dist/dalton_core-0.1.0.dev0-py3-none-any.whl
+temp/p9d3b-continuation/outer-clean-install/bin/python scripts/run_p9d3b_document_extraction_canary.py \
+  --output temp/p9d3b-continuation/outer-installed-http
 ```
 
 本机 `.venv` 不含 Playwright；浏览器运行使用已安装 Playwright 的系统 Python，未下载浏览器或改系统权限。干净 Python 3.13 环境使用本地 wheel、`pip --no-index --no-deps` 安装，另外验证 installed package 路径和 HTTP/staging canary，不以 editable import 冒充安装验收。

@@ -32,11 +32,19 @@ TICKET = 'alphaengine-acquisition:' + 'd' * 24
 
 
 class ExtractionHarness:
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, paid_budget_authorized=False, paid_budget_overrides=None):
         self.root = root
         self.h = SearchHarness(root, [{"doc_id": NEW_DOC.split(':')[1]}])
         h = self.h
-        self.state = bootstrap_method_authorities(h.core)
+        outer = {"max_daily_paid_calls": 40, "max_daily_cost_usd": 5.0, "max_alphaengine_calls_24h": 30}
+        overrides = paid_budget_overrides or {}
+        if paid_budget_authorized:
+            gov_budget = overrides.get("governance", outer)
+            h.core.create_policy({**h.core.active_policy_version().policy, **({"research_budget": gov_budget} if gov_budget is not None else {})},
+                policy_version_id="policy:synthetic-paid-research:2", actor_ref=OWNER,
+                change_reason="Synthetic fixture only: explicit outer research budget")
+        self.state = bootstrap_method_authorities(h.core,
+            mandate_constraints={"research_budget": overrides.get("mandate", outer)} if paid_budget_authorized else None)
         self.missions = CoverageMissionAuthority(h.core)
         params = mission_params(self.state)
         self.mission = self.missions.create_mission(params.pop('mission_ref'), **params)

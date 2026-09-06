@@ -293,7 +293,8 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
             scope = {"mission_ref": mission["mission_ref"], "mission_version_ref": mission["id"],
                      "mission_version_hash": mission["content_hash"],
                      "max_daily_paid_calls": mission["budget"]["max_daily_paid_calls"],
-                     "max_daily_cost_micros": int(Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1000000)}
+                     "max_daily_cost_micros": int(Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1000000),
+                     "outer_budget": binding["outer_budget"]}
             prior = self.budget_store.connection.execute(
                 "SELECT record_json FROM thesis_impact_day_admissions WHERE work_order_ref=? AND attempt_number=? AND phase='assessment'",
                 (work.id, route["attempt_number"]),
@@ -431,8 +432,66 @@ class DocumentExtractionService:
                 raise ResearchVerificationError("extraction must pin exactly one approved model")
             base["model_binding"] = {"config_hash": content_hash(config),
                 "routing_policy_ref": config["routing_policy_ref"], "routing_policy_hash": content_hash(policy),
-                "budget_policy_ref": config["budget_policy_ref"], "budget_policy_hash": cap["content_hash"]}
+                "budget_policy_ref": config["budget_policy_ref"], "budget_policy_hash": cap["content_hash"],
+                "outer_budget": self.outer_budget(grant["mission_version_ref"])}
         return _record({"id": "document-extraction-context:" + content_hash(base)[:32], **base})
+
+    def outer_budget(self, mission_version_ref):
+        """ADR-0004: a mission cannot manufacture its outer spend authority.
+
+        Both signed versioned authorities must explicitly supply closed daily
+        research caps. Missing caps are NOT interpreted as unlimited permission.
+        No authority is published or changed here.
+        """
+        mission = self.writer.coverage_mission.mission(mission_version_ref)
+        cur = self.writer.store.connection.cursor()
+        try:
+            mandate = self.writer.coverage_mission._validate_mandate_binding(
+                cur, mission["bindings"]["mandate_version"], mission["industry_ref"])
+            constitution = self.writer.coverage_mission._validate_constitution_binding(
+                cur, mission["bindings"]["constitution_version"], mission["industry_ref"])
+        finally:
+            cur.close()
+        policy = self.writer.store.active_policy_version().to_dict()
+        bound = constitution["bindings"]["governance_policy_version"]
+        if (constitution["bindings"]["mandate_version"] != mission["bindings"]["mandate_version"] or
+            policy["id"] != bound["ref"] or policy["content_hash"] != bound["hash"] or
+            content_hash({k: v for k, v in policy.items() if k != "content_hash"}) != policy["content_hash"]):
+            raise ResearchVerificationConflict("mission constitution does not bind current governance policy")
+        # Verify the frozen policy body as stored by the canonical Core authority.
+        from .contracts import GovernancePolicyVersion
+        GovernancePolicyVersion.from_dict(policy)
+        now = datetime.now(timezone.utc)
+        for field, expired in (("effective_from", False), ("effective_until", True)):
+            value = policy[field]
+            if value is not None:
+                moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                if moment.tzinfo is None or (moment <= now if expired else moment > now):
+                    raise ResearchVerificationConflict("governance policy is outside its effective window")
+        constraints = mandate["constraints"]
+        if constraints.get("research_execution") is False:
+            raise ResearchVerificationError("mandate explicitly forbids research execution")
+        fields = {"max_daily_paid_calls", "max_daily_cost_usd", "max_alphaengine_calls_24h"}
+        caps = []
+        for name, parent in (("mandate", constraints), ("governance", policy["policy"])):
+            cap = parent.get("research_budget")
+            if not isinstance(cap, dict) or set(cap) != fields:
+                raise ResearchVerificationError(name + " lacks explicit closed research_budget authority")
+            for key in fields:
+                value = cap[key]
+                if key == "max_daily_cost_usd":
+                    if type(value) not in (int, float) or not Decimal(str(value)).is_finite() or value < 0:
+                        raise ResearchVerificationError(name + " budget is invalid")
+                elif type(value) is not int or value < 0:
+                    raise ResearchVerificationError(name + " budget is invalid")
+                if mission["budget"][key] > value:
+                    raise ResearchVerificationError("mission exceeds " + name + " budget: " + key)
+            caps.append(cap)
+        return {"mandate_ref": mandate["mandate_ref"], "mandate_version_ref": mandate["id"],
+                "mandate_version_hash": mandate["content_hash"], "governance_policy_ref": policy["policy_ref"],
+                "governance_policy_version_ref": policy["id"], "governance_policy_version_hash": policy["content_hash"],
+                "max_daily_paid_calls": min(c["max_daily_paid_calls"] for c in caps),
+                "max_daily_cost_micros": int(min(Decimal(str(c["max_daily_cost_usd"])) for c in caps) * 1000000)}
 
     def reread(self, context, actor_ref):
         return self.context(context["review_id"], context["review_hash"], context["offset"], actor_ref)

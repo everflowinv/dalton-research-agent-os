@@ -284,12 +284,23 @@ class ThesisImpactBudgetStore:
         if mission_binding is not None:
             mission_binding = dict(mission_binding)
             fields = {"mission_ref", "mission_version_ref", "mission_version_hash", "max_daily_paid_calls", "max_daily_cost_micros"}
-            if set(mission_binding) != fields:
+            if not fields <= set(mission_binding) or set(mission_binding) - fields - {"outer_budget"}:
                 raise ThesisImpactBudgetValidationError("invalid mission budget binding")
             for key in ("mission_ref", "mission_version_ref", "mission_version_hash"):
                 _text(mission_binding[key], key)
             for key in ("max_daily_paid_calls", "max_daily_cost_micros"):
                 _micros(mission_binding[key], key)
+            outer = mission_binding.get("outer_budget")
+            if outer is not None:
+                ref_fields = {"mandate_ref", "mandate_version_ref", "mandate_version_hash", "governance_policy_ref", "governance_policy_version_ref", "governance_policy_version_hash"}
+                if not isinstance(outer, Mapping) or set(outer) != ref_fields | {"max_daily_paid_calls", "max_daily_cost_micros"}:
+                    raise ThesisImpactBudgetValidationError("invalid outer research budget binding")
+                for key in ref_fields:
+                    _text(outer[key], key)
+                for key in ("max_daily_paid_calls", "max_daily_cost_micros"):
+                    _micros(outer[key], key)
+                    if mission_binding[key] > outer[key]:
+                        raise ThesisImpactBudgetValidationError("mission budget exceeds bound outer authority")
         policy = self.policy(policy_version_id)
         day = _day(day)
         work_order_ref = _text(work_order_ref, "work_order_ref")
@@ -391,7 +402,21 @@ class ThesisImpactBudgetStore:
                     mission_cost = sum(r["reserved_micros"] if r["actual_micros"] is None else r["actual_micros"] for r in rows)
                     mission_exceeded = (len(rows) + 1 > mission_binding["max_daily_paid_calls"] or
                                         mission_cost + reserved_micros > mission_binding["max_daily_cost_micros"])
-                if mission_exceeded or committed + reserved_micros > policy["day_cap_micros"]:
+                outer_exceeded = False
+                if mission_binding is not None and mission_binding.get("outer_budget") is not None:
+                    outer = mission_binding["outer_budget"]
+                    # Conservative across ALL missions sharing this paid ledger,
+                    # including unbound legacy entries and open prior-day calls.
+                    # This cannot reset on mission/mandate/governance version changes.
+                    outer_rows = cur.execute(
+                        "SELECT a.reserved_micros,s.actual_micros FROM thesis_impact_day_admissions a "
+                        "LEFT JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
+                        "WHERE a.day=? OR s.admission_id IS NULL", (day,),
+                    ).fetchall()
+                    outer_cost = sum(r["reserved_micros"] if r["actual_micros"] is None else r["actual_micros"] for r in outer_rows)
+                    outer_exceeded = (len(outer_rows) + 1 > outer["max_daily_paid_calls"] or
+                                      outer_cost + reserved_micros > outer["max_daily_cost_micros"])
+                if mission_exceeded or outer_exceeded or committed + reserved_micros > policy["day_cap_micros"]:
                     rejection = {
                         "schema_version": SCHEMA_VERSION,
                         "rejection_id": "thesis-impact-rejection:"
@@ -407,7 +432,8 @@ class ThesisImpactBudgetStore:
                     }
                     if mission_binding is not None:
                         rejection["mission_binding"] = mission_binding
-                        rejection["reason"] = "mission_budget_exceeded" if mission_exceeded else "owner_budget_exceeded"
+                        rejection["reason"] = ("mission_budget_exceeded" if mission_exceeded else
+                                               "outer_research_budget_exceeded" if outer_exceeded else "owner_budget_exceeded")
                     rejection["content_hash"] = content_hash(rejection)
                     cur.execute(
                         "INSERT INTO thesis_impact_day_rejections("

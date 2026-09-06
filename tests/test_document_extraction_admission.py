@@ -157,11 +157,56 @@ class MissionBudgetTests(unittest.TestCase):
         with self.assertRaises(ThesisImpactDayBudgetExceeded):self.admit('new:mission')
 
 
+    def outer(self, **changes):
+        return {"mandate_ref":"mandate:test","mandate_version_ref":"mandate:test:1","mandate_version_hash":"1"*64,
+            "governance_policy_ref":"governance:test","governance_policy_version_ref":"governance:test:1",
+            "governance_policy_version_hash":"2"*64,"max_daily_paid_calls":1,"max_daily_cost_micros":100000,**changes}
+
+    def test_different_missions_share_outer_call_cap_even_after_settlement(self):
+        a=self.admit('outer:a',scope={**self.scope,'outer_budget':self.outer()})
+        self.b.settle(a['admission_id'],actual_micros=1000)
+        with self.assertRaises(ThesisImpactDayBudgetExceeded) as caught:
+            self.admit('outer:b',scope={**self.scope,'mission_ref':'mission:other','outer_budget':self.outer()})
+        self.assertEqual(caught.exception.rejection['reason'],'outer_research_budget_exceeded')
+
+    def test_parallel_different_missions_share_outer_reservation_atomically(self):
+        barrier=threading.Barrier(2);results=[]
+        def reserve(n):
+            with ThesisImpactBudgetStore(self.path) as b:
+                barrier.wait()
+                try:
+                    b.admit(policy_version_id='budget:owner:1',day='2026-09-06',work_order_ref='outer:'+str(n),attempt_number=1,
+                        phase='assessment',route_decision_ref='route:'+str(n),reserved_micros=50000,
+                        mission_binding={**self.scope,'mission_ref':'mission:'+str(n),'outer_budget':self.outer()})
+                except ThesisImpactDayBudgetExceeded:results.append('rejected')
+                else:results.append('admitted')
+        threads=[threading.Thread(target=reserve,args=(n,)) for n in range(2)]
+        for t in threads:t.start()
+        for t in threads:t.join(10)
+        self.assertEqual(sorted(results),['admitted','rejected'])
+
+    def test_unknown_prior_day_call_still_consumes_outer_budget_for_another_mission(self):
+        self.admit('outer:unknown',scope={**self.scope,'outer_budget':self.outer()})
+        with self.assertRaises(ThesisImpactDayBudgetExceeded):
+            self.b.admit(policy_version_id='budget:owner:1',day='2026-09-07',work_order_ref='outer:tomorrow',attempt_number=1,
+                phase='assessment',route_decision_ref='outer:tomorrow',reserved_micros=50000,
+                mission_binding={**self.scope,'mission_ref':'mission:other','outer_budget':self.outer()})
+
+    def test_outer_cost_cap_cannot_be_reset_by_other_mission_or_policy_version(self):
+        outer=self.outer(max_daily_paid_calls=10)
+        a=self.admit('outer:cost:a',scope={**self.scope,'outer_budget':outer})
+        self.b.settle(a['admission_id'],actual_micros=50000)
+        self.admit('outer:cost:b',scope={**self.scope,'mission_ref':'mission:second','outer_budget':outer})
+        with self.assertRaises(ThesisImpactDayBudgetExceeded):
+            self.admit('outer:cost:c',scope={**self.scope,'mission_ref':'mission:third',
+                'outer_budget':{**outer,'governance_policy_version_ref':'governance:test:2'}})
+
+
 
 class BrokerAdmissionTests(unittest.TestCase):
     def setUp(self):
         t=tempfile.TemporaryDirectory();self.addCleanup(t.cleanup)
-        self.h=ExtractionHarness(Path(t.name));self.addCleanup(self.h.close)
+        self.h=ExtractionHarness(Path(t.name), paid_budget_authorized=True);self.addCleanup(self.h.close)
         h=self.h
         # Register synthetic route in a separate local router, never touch installed model permissions.
         from dalton_core.model_router import ModelRouter
@@ -268,6 +313,29 @@ class BrokerAdmissionTests(unittest.TestCase):
         with self.assertRaises(ThesisImpactBudgetConflict):
             self.b.admit(policy_version_id='budget:owner:1',day='2026-09-06',work_order_ref='new:work',attempt_number=1,
                 phase='assessment',route_decision_ref='new:route',reserved_micros=50000)
+
+    def test_outer_authority_missing_or_smaller_than_mission_blocks_before_any_call(self):
+        cap={"max_daily_paid_calls":40,"max_daily_cost_usd":5.0,"max_alphaengine_calls_24h":30}
+        cases=[({'mandate':None},'mandate lacks'),({'governance':None},'governance lacks'),
+               ({'mandate':{**cap,'max_daily_cost_usd':0.01}},'mission exceeds mandate'),
+               ({'governance':{**cap,'max_daily_paid_calls':0}},'mission exceeds governance'),
+               ({'governance':{**cap,'max_alphaengine_calls_24h':0}},'mission exceeds governance')]
+        for n,(overrides,reason) in enumerate(cases):
+            (self.h.root/('outer-case-'+str(n))).mkdir()
+            h=ExtractionHarness(self.h.root/('outer-case-'+str(n)),paid_budget_authorized=True,paid_budget_overrides=overrides)
+            try:
+                h.writer._document_extraction_model_config=self.h.writer._document_extraction_model_config
+                with self.subTest(overrides=overrides),self.assertRaisesRegex(ResearchVerificationError,reason):h.generate()
+            finally:h.close()
+        self.assertEqual(self.b.connection.execute('SELECT count(*) FROM thesis_impact_day_admissions').fetchone()[0],0)
+
+    def test_governance_pointer_change_invalidates_frozen_extraction_context(self):
+        h=self.h;context=h.context()
+        h.h.core.create_policy({**h.h.core.active_policy_version().policy},policy_version_id='policy:synthetic:3',
+            actor_ref=OWNER,change_reason='Synthetic governance version rollover')
+        with self.patch_execute(),self.assertRaises(ResearchVerificationConflict):
+            h.service.generate(**h.params,expected_context_hash=context['content_hash'])
+        self.assertEqual(self.calls,0)
 
     def test_missing_config_authority_fails_without_creating_new_budget(self):
         path=self.h.root/'missing-budget.sqlite';self.h.writer._document_extraction_model_config['budget_db']=str(path)
