@@ -31,10 +31,17 @@ from .thesis_impact import (
     VERIFIER_OUTPUT_SCHEMA_VERSION,
     ThesisImpactAuthority,
     ThesisImpactIneligible,
+    ThesisImpactVerificationPolicySuperseded,
 )
 
 
 SCHEMA_VERSION = "0.1"
+# A passed verification is frozen against the policy version that admitted it.
+# When the owner publishes a new governance policy version, that binding can
+# never become eligible again on its own, so re-driving it every run only
+# repeats work and hides the real blocker.  The target is parked under this
+# status until a human decides whether to re-assess under the new policy.
+POLICY_SUPERSEDED_STATUS = "verification_policy_superseded"
 RUNTIME_PROFILE_REF = "runtime-profile:dalton:0.1"
 VERIFIER_THINKING_LEVEL = "low"
 # A formal result marked control_plane_failure made no provider call and
@@ -255,6 +262,17 @@ class ResearchPlanThesisImpactCoordinator:
             "company_ref": question["head"]["company_ref"],
         }
 
+    def _parked_by_policy(self, context: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Read-only check for a pass frozen against a superseded policy."""
+
+        routed = context["routed"]
+        if routed["status"] != "assessment_required":
+            return None
+        return self.impact.superseded_verification(
+            claim_version_ref=routed["claim_version_ref"],
+            thesis_version_ref=routed["thesis_version_ref"],
+        )
+
     def _assessment_work_order(self, context: Mapping[str, Any]) -> dict[str, Any]:
         routed = context["routed"]
         if routed["status"] != "assessment_required":
@@ -431,6 +449,16 @@ class ResearchPlanThesisImpactCoordinator:
                 "route": context["routed"],
                 "assessment_work_order": None,
             }
+        parked = self._parked_by_policy(context)
+        if parked is not None:
+            return {
+                "status": POLICY_SUPERSEDED_STATUS,
+                "plan_version_ref": context["plan"]["id"],
+                "question_ref": context["question"]["question_ref"],
+                "claim_version_ref": context["answer_binding"]["claim_version_ref"],
+                "assessment_work_order": None,
+                "policy_binding": parked,
+            }
         work = self._assessment_work_order(context)
         enqueued = self._enqueue_result(
             self.scheduler.enqueue(work), "assessment"
@@ -564,6 +592,16 @@ class ResearchPlanThesisImpactCoordinator:
             }
         try:
             eligible = self.impact.eligible_assessment(assessment_ref)
+        except ThesisImpactVerificationPolicySuperseded as exc:
+            # Still ineligible, and nothing is promoted.  Report the exact
+            # binding so the owner can decide; do not re-verify automatically.
+            return {
+                "status": POLICY_SUPERSEDED_STATUS,
+                "verification": verified,
+                "eligible": None,
+                "follow_up": None,
+                "policy_binding": dict(exc.detail),
+            }
         except ThesisImpactIneligible as exc:
             raise ResearchPlanThesisImpactConflict(
                 "passed verification did not produce an eligible assessment"
@@ -596,6 +634,7 @@ class ResearchPlanThesisImpactCoordinator:
 
 __all__ = [
     "ASSESSMENT_BUDGET",
+    "POLICY_SUPERSEDED_STATUS",
     "VERIFIER_BUDGET",
     "VERIFIER_THINKING_LEVEL",
     "ResearchPlanThesisImpactConflict",

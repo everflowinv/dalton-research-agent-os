@@ -21,9 +21,18 @@ from .observability import ObservabilityStore
 from .openclaw_model_adapter import OpenClawModelAdapter
 from .scheduler import Scheduler
 from .thesis_impact_budget import ThesisImpactBudgetStore
+from .thesis_impact_control import POLICY_SUPERSEDED_STATUS
 from .thesis_impact_model_worker import ThesisImpactModelWorker
 from .writer_client import WriterClient
+from .writer_protocol import RemoteError
 from .writer_server import THESIS_IMPACT_OPERATIONS, load_principals
+
+
+# Per-target outcomes that need nothing further from this runner.
+SETTLED_STATUSES = frozenset({"eligible", "rejected", "follow_up_recorded"})
+# Per-target outcomes that only an owner decision can move; retrying them
+# changes nothing, so the pass reports them instead of failing every cadence.
+BLOCKED_STATUSES = frozenset({POLICY_SUPERSEDED_STATUS})
 
 
 class ThesisImpactProductionError(RuntimeError):
@@ -271,6 +280,13 @@ class ThesisImpactProductionRunner:
         )
         if started["status"] == "follow_up_recorded":
             return {"status": "follow_up_recorded", "target": dict(target)}
+        if started["status"] == POLICY_SUPERSEDED_STATUS:
+            # Parked before any WorkOrder is enqueued or replayed.
+            return {
+                "status": POLICY_SUPERSEDED_STATUS,
+                "target": dict(target),
+                "policy_binding": started["policy_binding"],
+            }
         assessment_run = worker.run_once(started["assessment_work_order"])
         if assessment_run["status"] != "succeeded":
             return {
@@ -295,6 +311,13 @@ class ThesisImpactProductionRunner:
             thesis_ref=thesis_ref,
             assessment_ref=assessment_ref,
         )
+        if final["status"] == POLICY_SUPERSEDED_STATUS:
+            return {
+                "status": POLICY_SUPERSEDED_STATUS,
+                "target": dict(target),
+                "assessment_ref": assessment_ref,
+                "policy_binding": final["policy_binding"],
+            }
         return {
             "status": final["status"],
             "target": dict(target),
@@ -322,19 +345,35 @@ class ThesisImpactProductionRunner:
                 }
             worker = self._worker(client, scheduler, router, budget)
             results = [self._run_target(client, worker, target) for target in targets]
+            statuses = {row["status"] for row in results}
+            if statuses <= SETTLED_STATUSES:
+                status = "completed"
+            elif statuses <= SETTLED_STATUSES | BLOCKED_STATUSES:
+                # Every unsettled target is parked on an owner decision, not on
+                # a fault this runner can retry into a different outcome.
+                status = "blocked_pending_human"
+            else:
+                status = "incomplete"
             return {
-                "status": (
-                    "completed"
-                    if all(
-                        row["status"]
-                        in {"eligible", "rejected", "follow_up_recorded"}
-                        for row in results
-                    )
-                    else "incomplete"
-                ),
+                "status": status,
                 "target_count": len(targets),
                 "results": results,
             }
+
+
+def _failure_report(exc: Exception) -> dict[str, Any]:
+    """Name the blocker without echoing prompts, sources or credentials."""
+
+    report: dict[str, Any] = {"status": "failed", "error_type": type(exc).__name__}
+    if isinstance(exc, RemoteError):
+        # The writer's mapped code plus its own fixed message text; neither
+        # carries source content, prompts or credentials.
+        if isinstance(exc.code, str) and exc.code:
+            report["error_code"] = exc.code[:200]
+        report["error_message"] = str(exc)[:200]
+    elif isinstance(exc, ThesisImpactProductionError):
+        report["error_message"] = str(exc)[:200]
+    return report
 
 
 def load_config(path: str | Path) -> ThesisImpactProductionConfig:
@@ -371,15 +410,14 @@ def main(argv: Iterable[str] | None = None) -> int:
     try:
         result = ThesisImpactProductionRunner(load_config(args.config)).run_once()
     except Exception as exc:
-        print(
-            json.dumps(
-                {"status": "failed", "error_type": type(exc).__name__},
-                sort_keys=True,
-            )
-        )
+        print(json.dumps(_failure_report(exc), ensure_ascii=False, sort_keys=True))
         return 2
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-    return 0 if result["status"] in {"idle", "completed"} else 2
+    if result["status"] in {"idle", "completed"}:
+        return 0
+    # Exit 3 keeps "waiting for a human decision" distinct from a fault (2);
+    # neither is reported as success.
+    return 3 if result["status"] == "blocked_pending_human" else 2
 
 
 if __name__ == "__main__":
@@ -387,6 +425,8 @@ if __name__ == "__main__":
 
 
 __all__ = [
+    "BLOCKED_STATUSES",
+    "SETTLED_STATUSES",
     "ThesisImpactProductionConfig",
     "ThesisImpactProductionError",
     "ThesisImpactProductionRunner",

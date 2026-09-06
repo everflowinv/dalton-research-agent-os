@@ -89,6 +89,20 @@ class ThesisImpactIneligible(ThesisImpactError):
     pass
 
 
+class ThesisImpactVerificationPolicySuperseded(ThesisImpactIneligible):
+    """A passed verification is frozen against a governance policy version that
+    is no longer the active pointer.
+
+    This stays ineligible: the gate is unchanged and no assessment is promoted.
+    It is a distinct type only so callers can park the target for a human
+    instead of retrying an outcome that can never converge on its own.
+    """
+
+    def __init__(self, detail: Mapping[str, Any]) -> None:
+        super().__init__("assessment verification policy is no longer active")
+        self.detail = dict(detail)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
@@ -929,6 +943,54 @@ class ThesisImpactAuthority:
         assessment_ref = _text(assessment_ref, "assessment_ref")
         return self._read_assessment(self.connection.cursor(), assessment_ref)
 
+    def superseded_verification(
+        self, *, claim_version_ref: str, thesis_version_ref: str
+    ) -> dict[str, Any] | None:
+        """Report a passed verification whose bound policy version was replaced.
+
+        Read-only and additive: it publishes nothing and relaxes no check.  A
+        caller uses it to park an exact binding before enqueueing or replaying
+        WorkOrders that cannot become eligible under the current pointer.
+        """
+
+        claim_version_ref = _text(claim_version_ref, "claim_version_ref")
+        thesis_version_ref = _text(thesis_version_ref, "thesis_version_ref")
+        cur = self.connection.cursor()
+        try:
+            row = cur.execute(
+                "SELECT v.verification_id, v.assessment_ref, v.policy_version_ref, "
+                "v.policy_version_hash FROM thesis_impact_verifications v "
+                "JOIN thesis_impact_assessments a ON a.assessment_id=v.assessment_ref "
+                "WHERE a.claim_version_ref=? AND a.thesis_version_ref=? AND v.verdict='pass' "
+                "ORDER BY v.created_at DESC, v.verification_id DESC LIMIT 1",
+                (claim_version_ref, thesis_version_ref),
+            ).fetchone()
+            if row is None:
+                return None
+            policy = cur.execute(
+                "SELECT v.policy_version_id, v.content_hash "
+                "FROM governance_policy_pointer p "
+                "JOIN governance_policy_versions v "
+                "ON v.policy_version_id=p.policy_version_id WHERE p.pointer_id=1"
+            ).fetchone()
+            if policy is None or (
+                row["policy_version_ref"] == policy["policy_version_id"]
+                and row["policy_version_hash"] == policy["content_hash"]
+            ):
+                # No pointer, or the binding is current: both stay on the
+                # existing paths, which keep their own fail-closed checks.
+                return None
+            return {
+                "verification_ref": row["verification_id"],
+                "assessment_ref": row["assessment_ref"],
+                "verification_policy_version_ref": row["policy_version_ref"],
+                "verification_policy_version_hash": row["policy_version_hash"],
+                "active_policy_version_ref": policy["policy_version_id"],
+                "active_policy_version_hash": policy["content_hash"],
+            }
+        finally:
+            cur.close()
+
     def invocation(self, invocation_ref: str) -> dict[str, Any]:
         """Return one exact ModelInvocation already committed to Core authority."""
 
@@ -1160,12 +1222,20 @@ class ThesisImpactAuthority:
             "JOIN governance_policy_versions v ON v.policy_version_id=p.policy_version_id "
             "WHERE p.pointer_id=1"
         ).fetchone()
+        if policy is None:
+            raise ThesisImpactIneligible("assessment verification policy is no longer active")
         if (
-            policy is None
-            or verification["policy_version_ref"] != policy["policy_version_id"]
+            verification["policy_version_ref"] != policy["policy_version_id"]
             or verification["policy_version_hash"] != policy["content_hash"]
         ):
-            raise ThesisImpactIneligible("assessment verification policy is no longer active")
+            raise ThesisImpactVerificationPolicySuperseded({
+                "verification_ref": verification["id"],
+                "assessment_ref": assessment_ref,
+                "verification_policy_version_ref": verification["policy_version_ref"],
+                "verification_policy_version_hash": verification["policy_version_hash"],
+                "active_policy_version_ref": policy["policy_version_id"],
+                "active_policy_version_hash": policy["content_hash"],
+            })
         self.store._assert_policy_effective(policy)
         producer_row = cur.execute(
             "SELECT * FROM model_invocations WHERE invocation_id=?",
@@ -1199,6 +1269,7 @@ __all__ = [
     "ThesisImpactIneligible",
     "ThesisImpactNotFound",
     "ThesisImpactValidationError",
+    "ThesisImpactVerificationPolicySuperseded",
     "bind_thesis_impact_verifier_decision",
     "validate_thesis_impact_model_output",
     "validate_thesis_impact_verifier_consistency",

@@ -24,6 +24,7 @@ from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
 from dalton_core.thesis_impact_control import (
     ASSESSMENT_BUDGET,
     MAX_CONTROL_PLANE_REDRIVE,
+    POLICY_SUPERSEDED_STATUS,
     VERIFIER_BUDGET,
     ResearchPlanThesisImpactConflict,
     ResearchPlanThesisImpactCoordinator,
@@ -374,6 +375,110 @@ class ResearchPlanThesisImpactControlTests(unittest.TestCase):
         )
         self.assertEqual(
             self.harness.scheduler().connection.execute(
+                "PRAGMA integrity_check"
+            ).fetchone()[0],
+            "ok",
+        )
+
+    def test_policy_rollover_parks_the_target_instead_of_looping(self) -> None:
+        """A pass frozen against a replaced policy is reported, never promoted."""
+
+        committed = self._seed_thesis()
+        before_pointer = dict(self.harness.core.current_pointer(self.thesis_ref))
+        started = self._close_and_start()
+        claim = self.harness.core.get_claim(
+            started["impact"]["claim_version_ref"]
+        )["claim"]
+        thesis = self.harness.core.get_version(committed["version_id"])["content"]
+        producer = self._complete_model(
+            work=started["impact"]["assessment_work_order"],
+            model_family="impact-a",
+            output={
+                "schema_version": "0.1",
+                "claim_version_ref": claim["id"],
+                "claim_version_hash": claim["content_hash"],
+                "thesis_version_ref": thesis["id"],
+                "thesis_version_hash": thesis["content_hash"],
+                "driver_statement": thesis["mechanism"],
+                "impact": "supports",
+                "rationale": "The exact reported growth is directionally consistent with the driver.",
+                "follow_up_question": None,
+            },
+        )
+        assessed = self.control.advance_assessment(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+            producer_invocation=producer,
+        )
+        assessment = assessed["assessment"]["assessment"]
+        verifier = self._complete_model(
+            work=assessed["verifier_work_order"],
+            model_family="impact-b",
+            output={"schema_version": "0.1", "verdict": "pass", "findings": []},
+        )
+        completed = self.control.advance_verification(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+            assessment_ref=assessment["id"],
+            verifier_invocation=verifier,
+        )
+        self.assertEqual(completed["status"], "eligible")
+
+        counts = lambda: [
+            self.harness.core.connection.execute(
+                "SELECT COUNT(*) FROM " + table
+            ).fetchone()[0]
+            for table in (
+                "thesis_impact_assessments",
+                "thesis_impact_verifications",
+                "thesis_versions",
+            )
+        ] + [
+            self.harness.scheduler().connection.execute(
+                "SELECT COUNT(*) FROM scheduler_work_orders"
+            ).fetchone()[0]
+        ]
+        before = counts()
+        self.harness.core.create_policy(
+            {**self.harness.core.active_policy_version().policy},
+            policy_version_id="policy:rollover:" + self._testMethodName,
+            actor_ref="human:policy-owner",
+            change_reason="Owner published a new governance policy version.",
+        )
+
+        parked_start = self.control.start_from_closed_plan(
+            plan_version_ref=self.harness.plan_wire["id"], thesis_ref=self.thesis_ref
+        )
+        self.assertEqual(parked_start["status"], POLICY_SUPERSEDED_STATUS)
+        self.assertIsNone(parked_start["assessment_work_order"])
+        binding = parked_start["policy_binding"]
+        self.assertEqual(binding["assessment_ref"], assessment["id"])
+        self.assertEqual(
+            binding["verification_policy_version_ref"],
+            completed["verification"]["verification"]["policy_version_ref"],
+        )
+        self.assertEqual(
+            binding["active_policy_version_ref"],
+            self.harness.core.active_policy_version().id,
+        )
+
+        parked_verification = self.control.advance_verification(
+            plan_version_ref=self.harness.plan_wire["id"],
+            thesis_ref=self.thesis_ref,
+            assessment_ref=assessment["id"],
+            verifier_invocation=verifier,
+        )
+        self.assertEqual(parked_verification["status"], POLICY_SUPERSEDED_STATUS)
+        self.assertIsNone(parked_verification["eligible"])
+        self.assertIsNone(parked_verification["follow_up"])
+        self.assertEqual(parked_verification["policy_binding"], binding)
+
+        self.assertEqual(counts(), before)
+        self.assertEqual(
+            self.harness.core.current_pointer(self.thesis_ref), before_pointer
+        )
+        self.assertEqual(
+            self.harness.core.connection.execute(
                 "PRAGMA integrity_check"
             ).fetchone()[0],
             "ok",

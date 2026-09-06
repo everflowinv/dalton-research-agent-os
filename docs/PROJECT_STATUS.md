@@ -1,6 +1,16 @@
 # Dalton 项目进度
 
 更新日期：2026-09-06
+- **live 缺陷修复：thesis-impact 定时任务的治理政策换版死循环已在隔离副本修好，未部署。**
+  live LaunchAgent 自 2026-09-02 起连续 1225 次 exit 2，日志只有 `{"error_type": "RemoteError"}`。根因是
+  唯一一条 pass verification 绑定 `policy-3`，而 `governance_policy_pointer` 在 2026-09-02T07:01:12Z
+  （P9b-1 上线）换到 `policy-4`，`eligible_assessment` 因此永久拒绝，runner 每 5 分钟重放一次同样的失败。
+  本轮不放宽 gate：新增 `ThesisImpactVerificationPolicySuperseded` 与只读 `superseded_verification`，
+  控制面在入队前就把该绑定停泊为 `verification_policy_superseded`，runner 整趟返回 `blocked_pending_human`
+  （退出码 3，区别于故障 2 与成功 0），失败输出改为带 writer 映射 code 与固定文本、不泄露内容。
+  全仓 **1117/1117**、专项 91/91、wheel 与干净安装通过；live 只读副本端到端复跑返回停泊状态且 0 写入、
+  0 provider 调用。**在 `policy-4` 下重跑评估/验证会产生付费调用与新 authority 记录，保留 owner gate。** 见
+  [政策换版停泊报告](reports/thesis-impact-policy-rollover-park-v0.1-2026-09-06.md)。
 - **P9d-3b 只读访问修复与启用预检已在隔离副本完成本地验收；未启用真实模型、未部署。**
   基线 `f0ab1cb` 的三个页面读取入口仍会调用可写 router/budget 构造器，本轮改为
   `read_only=True`（`mode=ro` + `query_only`），不 chmod、创建文件或迁移 schema；执行链仍可写。
