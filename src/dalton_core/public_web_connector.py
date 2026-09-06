@@ -345,6 +345,12 @@ def _tool_text_payload(result: Mapping[str, Any]) -> dict[str, Any]:
     return dict(payload)
 
 
+def gemini_web_search_payload_from_result(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Public accessor for the single JSON text block of a ``web_search`` result."""
+
+    return _tool_text_payload(result)
+
+
 def _credential_shaped_query_key(value: str) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
     return normalized in _SENSITIVE_QUERY_KEYS or any(

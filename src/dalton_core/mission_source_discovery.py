@@ -1,25 +1,32 @@
-"""Mission-driven AlphaEngine source discovery (P9d-1).
+"""Mission-driven source discovery (P9d-1 AlphaEngine, P9d-4a web search).
 
 Three pieces sit here:
 
 * ``DiscoveryPlan`` -- a human-authored, hash-bound manifest that says, per
   covered company, which search terms and which frozen search specs
   (document type, query template, look-back window, re-discovery cadence)
-  the mission may run.  The Core never invents queries; every discovery
-  record names the exact plan hash and spec it came from.
-* ``AlphaEngineSearchLauncher`` -- the writer-owned launcher for the
-  out-of-process ``dalton_core.alphaengine_search_cli`` child (the transport
-  executor's SIGALRM watchdog needs a process main thread), mirroring the
-  acquisition and SEC lane launchers: approved human governance record,
-  single slot, owner-only tickets under ``<state>/discoveries/<ticket>/``.
-* ``MissionSourceDiscoveryCoordinator`` -- what the controller tick calls.
-  It settles finished children, launches at most one discovery and at most
-  one budgeted document acquisition per call, and reports every skip with
-  its reason (mission grant, cadence, budget, busy slot) instead of hiding it.
+  the mission may run against one discovery source.  The Core never invents
+  queries; every discovery record names the exact plan hash and spec it came
+  from.  Schema 0.1 is the committed AlphaEngine plan; 0.2 adds
+  ``source:web-search`` (Gemini ``search_web`` specs without a document type)
+  and a plan-level trailing-24h call budget that binds every source.
+* ``AlphaEngineSearchLauncher`` / ``WebSearchLauncher`` -- the writer-owned
+  launchers for the out-of-process search children (the transport executor's
+  SIGALRM watchdog needs a process main thread), mirroring the acquisition
+  and SEC lane launchers: approved human governance record, single slot,
+  owner-only tickets under ``<state>/discoveries/<ticket>/``.  Each launcher
+  serves exactly one source; a plan for another source is refused.
+* ``MissionSourceDiscoveryCoordinator`` -- what the controller tick calls,
+  one instance per plan.  It settles finished children of its own source,
+  launches at most one discovery and (AlphaEngine only, for now) at most one
+  budgeted document acquisition per call, and reports every skip with its
+  reason (mission grant, cadence, budget, busy slot) instead of hiding it.
 
 Nothing here writes Evidence, Claims or Theses.  Discovered documents that
 Core acquires are raw connector authority; turning them into candidates is
-the existing human-reviewed transcript path.
+the existing human-reviewed path.  Web search leaves only opaque URL refs
+behind; fetching the cited page is a separate lane (P9d-4b), so discovered
+URLs stay queued as ``discovered`` until it exists.
 """
 
 from __future__ import annotations
@@ -48,22 +55,38 @@ from .bounded_alphaengine_probe import (
     document_in_authority,
 )
 from .coverage_mission import (
+    DISCOVERY_SOURCES,
     CoverageMissionAuthority,
     CoverageMissionError,
     CoverageMissionNotFound,
+)
+from .public_web_core_search import (
+    WebSearchConnectorGovernance,
+    count_recent_web_search_calls,
+    validate_web_search_spec,
+    web_search_spec_hash,
 )
 from .store import DaltonStore, canonical_json, content_hash
 
 
 DISCOVERY_PLAN_SCHEMA_VERSION = "0.1"
+DISCOVERY_PLAN_SCHEMA_VERSION_V2 = "0.2"
+DISCOVERY_PLAN_SCHEMA_VERSIONS: tuple[str, ...] = (
+    DISCOVERY_PLAN_SCHEMA_VERSION, DISCOVERY_PLAN_SCHEMA_VERSION_V2,
+)
+ALPHAENGINE_SOURCE_REF = "source:alphaengine"
+WEB_SEARCH_SOURCE_REF = "source:web-search"
 TICKET_SCHEMA_VERSION = "0.1"
 TICKET_PREFIX = "alphaengine-discovery"
+WEB_SEARCH_TICKET_PREFIX = "web-search-discovery"
 LIVE_MODE_ARGS = ("--allow-network",)
+# Hard ceiling on a plan's own trailing-24h call budget; a bigger number is
+# an owner decision that belongs in governance, not in a plan file.
+MAX_PLAN_CALLS_24H = 1000
 # An acquisition child that failed (provider error, or orphaned by a deploy
 # restart) is retried once this interval has passed; fresh documents are
 # always acquired first.
 ACQUISITION_RETRY_INTERVAL = timedelta(days=1)
-_TICKET_RE = re.compile(r"alphaengine-discovery:[0-9a-f]{24}\Z")
 _HUMAN_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
 _AUTOMATION_RE = re.compile(r"automation:[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _SPEC_REF_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
@@ -71,11 +94,15 @@ _PLAN_FIELDS = frozenset({
     "schema_version", "id", "created_at", "mission_ref", "source_ref", "companies", "specs",
     "content_hash",
 })
+_PLAN_FIELDS_V2 = _PLAN_FIELDS | frozenset({"budget"})
+_BUDGET_FIELDS = frozenset({"max_calls_24h"})
 _COMPANY_FIELDS = frozenset({"search_terms"})
 _SPEC_FIELDS = frozenset({
     "spec_ref", "document_type", "query_template", "lookback_days",
     "rediscovery_interval_days", "retry_interval_days",
 })
+# Web search has no library document type: one ranked page per query.
+_WEB_SPEC_FIELDS = _SPEC_FIELDS - frozenset({"document_type"})
 
 
 class DiscoveryPlanError(ValueError):
@@ -126,19 +153,40 @@ def _plan_time(value: Any) -> str:
 
 
 def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
-    if not isinstance(value, Mapping) or set(value) != _PLAN_FIELDS:
+    if not isinstance(value, Mapping) or not isinstance(value.get("schema_version"), str):
+        raise DiscoveryPlanError("discovery plan has an invalid closed shape")
+    schema_version = value["schema_version"]
+    if schema_version not in DISCOVERY_PLAN_SCHEMA_VERSIONS:
+        raise DiscoveryPlanError("unsupported discovery plan schema_version")
+    fields = _PLAN_FIELDS if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION else _PLAN_FIELDS_V2
+    if set(value) != fields:
         raise DiscoveryPlanError("discovery plan has an invalid closed shape")
     wire = json.loads(canonical_json(value))
-    if wire["schema_version"] != DISCOVERY_PLAN_SCHEMA_VERSION:
-        raise DiscoveryPlanError("unsupported discovery plan schema_version")
     plan_id = _plan_text(wire["id"], "id")
     if not plan_id.startswith("discovery-plan:"):
         raise DiscoveryPlanError("discovery plan id must use the discovery-plan: namespace")
     mission_ref = _plan_text(wire["mission_ref"], "mission_ref")
     if not mission_ref.startswith("coverage-mission:"):
         raise DiscoveryPlanError("discovery plan mission_ref must use the coverage-mission: namespace")
-    if wire["source_ref"] != "source:alphaengine":
-        raise DiscoveryPlanError("discovery plan source_ref must be source:alphaengine (P9d-1)")
+    source_ref = wire["source_ref"]
+    if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION:
+        if source_ref != ALPHAENGINE_SOURCE_REF:
+            raise DiscoveryPlanError("discovery plan 0.1 source_ref must be source:alphaengine (P9d-1)")
+    elif source_ref not in DISCOVERY_SOURCES:
+        raise DiscoveryPlanError(
+            f"discovery plan source_ref must be one of {sorted(DISCOVERY_SOURCES)}"
+        )
+    budget: dict[str, int] | None = None
+    if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V2:
+        raw_budget = wire["budget"]
+        if not isinstance(raw_budget, Mapping) or set(raw_budget) != _BUDGET_FIELDS:
+            raise DiscoveryPlanError("discovery plan budget must have exactly max_calls_24h")
+        budget = {
+            "max_calls_24h": _positive_int(
+                raw_budget["max_calls_24h"], "budget.max_calls_24h", maximum=MAX_PLAN_CALLS_24H
+            ),
+        }
+    spec_fields = _SPEC_FIELDS if source_ref == ALPHAENGINE_SOURCE_REF else _WEB_SPEC_FIELDS
     companies = wire["companies"]
     if not isinstance(companies, Mapping) or not companies:
         raise DiscoveryPlanError("discovery plan companies must be a non-empty object")
@@ -156,22 +204,21 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
     cleaned_specs: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw in specs:
-        if not isinstance(raw, Mapping) or set(raw) != _SPEC_FIELDS:
+        if not isinstance(raw, Mapping) or set(raw) != spec_fields:
             raise DiscoveryPlanError("discovery plan spec has an invalid closed shape")
         spec_ref = _plan_text(raw["spec_ref"], "spec_ref", maximum=64)
         if _SPEC_REF_RE.fullmatch(spec_ref) is None or spec_ref in seen:
             raise DiscoveryPlanError("discovery plan spec_ref must be a unique kebab-case slug")
         seen.add(spec_ref)
-        if raw["document_type"] not in SEARCH_DOCUMENT_TYPES:
+        if "document_type" in spec_fields and raw["document_type"] not in SEARCH_DOCUMENT_TYPES:
             raise DiscoveryPlanError(f"discovery plan spec {spec_ref} document_type is not mapped")
         template = _plan_text(raw["query_template"], "query_template")
         if "{terms}" not in template or template.count("{") != 1 or template.count("}") != 1:
             raise DiscoveryPlanError(
                 f"discovery plan spec {spec_ref} query_template must contain exactly one {{terms}}"
             )
-        cleaned_specs.append({
+        cleaned = {
             "spec_ref": spec_ref,
-            "document_type": raw["document_type"],
             "query_template": template,
             "lookback_days": _positive_int(raw["lookback_days"], "lookback_days", maximum=3650),
             "rediscovery_interval_days": _positive_int(
@@ -180,16 +227,21 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
             "retry_interval_days": _positive_int(
                 raw["retry_interval_days"], "retry_interval_days", maximum=365
             ),
-        })
+        }
+        if "document_type" in spec_fields:
+            cleaned["document_type"] = raw["document_type"]
+        cleaned_specs.append(cleaned)
     base = {
-        "schema_version": DISCOVERY_PLAN_SCHEMA_VERSION,
+        "schema_version": schema_version,
         "id": plan_id,
         "created_at": _plan_time(wire["created_at"]),
         "mission_ref": mission_ref,
-        "source_ref": "source:alphaengine",
+        "source_ref": source_ref,
         "companies": cleaned_companies,
         "specs": cleaned_specs,
     }
+    if budget is not None:
+        base["budget"] = budget
     expected = content_hash(base)
     if wire["content_hash"] != expected:
         raise DiscoveryPlanError("discovery plan content_hash does not bind its content")
@@ -203,18 +255,30 @@ def build_discovery_plan(
     mission_ref: str,
     companies: Mapping[str, str],
     specs: Sequence[Mapping[str, Any]],
+    source_ref: str = ALPHAENGINE_SOURCE_REF,
+    max_calls_24h: int | None = None,
 ) -> dict[str, Any]:
-    """Author a plan (hash appended) from search terms and spec rows."""
+    """Author a plan (hash appended) from search terms and spec rows.
 
-    base = {
+    Without ``max_calls_24h`` an AlphaEngine plan is authored at schema 0.1
+    (byte-identical to the committed P9d-1 plan); any other source, or an
+    explicit plan budget, authors a 0.2 plan.
+    """
+
+    base: dict[str, Any] = {
         "schema_version": DISCOVERY_PLAN_SCHEMA_VERSION,
         "id": plan_id,
         "created_at": created_at,
         "mission_ref": mission_ref,
-        "source_ref": "source:alphaengine",
+        "source_ref": source_ref,
         "companies": {ref: {"search_terms": terms} for ref, terms in companies.items()},
         "specs": [dict(spec) for spec in specs],
     }
+    if source_ref != ALPHAENGINE_SOURCE_REF or max_calls_24h is not None:
+        if max_calls_24h is None:
+            raise DiscoveryPlanError("a 0.2 discovery plan requires max_calls_24h")
+        base["schema_version"] = DISCOVERY_PLAN_SCHEMA_VERSION_V2
+        base["budget"] = {"max_calls_24h": max_calls_24h}
     return validate_discovery_plan({**base, "content_hash": content_hash(base)})
 
 
@@ -232,7 +296,11 @@ def plan_spec(plan: Mapping[str, Any], spec_ref: str) -> dict[str, Any]:
 def build_discovery_parameters(
     plan: Mapping[str, Any], *, spec_ref: str, company_ref: str, as_of: date
 ) -> dict[str, Any]:
-    """Deterministic ``search_library`` parameters for one plan spec and company."""
+    """Deterministic search parameters for one plan spec and company.
+
+    AlphaEngine plans compile to ``search_library`` specs; web search plans
+    compile to ``search_web`` specs with an explicit date window.
+    """
 
     spec = plan_spec(plan, spec_ref)
     company = plan["companies"].get(company_ref)
@@ -241,15 +309,30 @@ def build_discovery_parameters(
     if not isinstance(as_of, date) or isinstance(as_of, datetime):
         raise DiscoveryPlanError("as_of must be a calendar date")
     query = spec["query_template"].replace("{terms}", company["search_terms"])
+    window_start = (as_of - timedelta(days=spec["lookback_days"])).isoformat()
+    if plan["source_ref"] == WEB_SEARCH_SOURCE_REF:
+        return validate_web_search_spec({
+            "query": query,
+            "date_after": window_start,
+            "date_before": as_of.isoformat(),
+        })
     return validate_search_spec({
         "query": query,
         "filters": {
             "document_type": spec["document_type"],
-            "date_from": (as_of - timedelta(days=spec["lookback_days"])).isoformat(),
+            "date_from": window_start,
             "date_to": as_of.isoformat(),
         },
         "cursor": None,
     })
+
+
+def discovery_query_hash(plan: Mapping[str, Any], parameters: Mapping[str, Any]) -> str:
+    """Query hash of compiled parameters under the plan's source operation."""
+
+    if plan["source_ref"] == WEB_SEARCH_SOURCE_REF:
+        return web_search_spec_hash(parameters)
+    return search_spec_hash(parameters)
 
 
 # ---------------------------------------------------------------------------
@@ -272,8 +355,19 @@ def _write_owner_only(path: Path, value: Mapping[str, Any]) -> None:
     os.replace(tmp, path)
 
 
-class AlphaEngineSearchLauncher:
-    """Launch the search-discovery child against the writer's state directory."""
+class _SearchLauncherBase:
+    """Launch one source's search-discovery child against the writer's state dir.
+
+    Subclasses freeze the source, the child module, the ticket prefix and how
+    the governance record is loaded; the launch protocol (exact mission
+    authorization, plan/governance re-validation, single slot, owner-only
+    tickets) is shared.
+    """
+
+    SOURCE_REF: str = ""
+    TICKET_PREFIX: str = ""
+    CHILD_MODULE: str = ""
+    LIVE_TRANSPORT_LABEL: str = "live"
 
     def __init__(
         self,
@@ -282,7 +376,6 @@ class AlphaEngineSearchLauncher:
         governance_path: str | Path,
         plan_path: str | Path,
         mode_args: Sequence[str] = LIVE_MODE_ARGS,
-        mcp_endpoint: str | None = None,
         python_executable: str | None = None,
         clock: Callable[[], datetime] | None = None,
         spool_dir: str | Path | None = None,
@@ -292,11 +385,11 @@ class AlphaEngineSearchLauncher:
         self.plan_path = Path(plan_path).expanduser().resolve()
         self.spool_dir = None if spool_dir is None else Path(spool_dir).expanduser().resolve()
         self.mode_args = tuple(str(item) for item in mode_args)
-        self.mcp_endpoint = mcp_endpoint
         self.python_executable = python_executable or sys.executable
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._lock = threading.Lock()
         self._current: tuple[str, subprocess.Popen[bytes]] | None = None
+        self._ticket_re = re.compile(re.escape(self.TICKET_PREFIX) + r":[0-9a-f]{24}\Z")
         if not self.state_dir.is_dir():
             raise DiscoveryLaunchError("discovery state directory is missing")
         self.tickets_dir = _secure_dir(self.state_dir / "discoveries")
@@ -305,9 +398,18 @@ class AlphaEngineSearchLauncher:
     def networked(self) -> bool:
         return "--allow-network" in self.mode_args
 
-    def load_governance(self) -> SearchConnectorGovernance:
+    def _load_governance_record(self) -> Any:
+        raise NotImplementedError
+
+    def _refuse_networked_launch(self) -> None:
+        """Hook: refuse before spawning when live transport is unavailable."""
+
+    def _extra_command_args(self) -> list[str]:
+        return []
+
+    def load_governance(self) -> Any:
         try:
-            governance = SearchConnectorGovernance.load(self.governance_path)
+            governance = self._load_governance_record()
         except FileNotFoundError as exc:
             raise DiscoveryLaunchRejected(
                 "search connector governance record is missing; owner approval is required"
@@ -328,11 +430,16 @@ class AlphaEngineSearchLauncher:
 
     def load_plan(self) -> dict[str, Any]:
         try:
-            return load_discovery_plan(self.plan_path)
+            plan = load_discovery_plan(self.plan_path)
         except FileNotFoundError as exc:
             raise DiscoveryLaunchRejected("discovery plan is missing") from exc
         except (DiscoveryPlanError, json.JSONDecodeError) as exc:
             raise DiscoveryLaunchRejected(f"discovery plan is invalid: {exc}") from exc
+        if plan["source_ref"] != self.SOURCE_REF:
+            raise DiscoveryLaunchRejected(
+                f"discovery plan source {plan['source_ref']} is not served by this launcher"
+            )
+        return plan
 
     def _ticket_path(self, ticket_id: str) -> Path:
         return self.tickets_dir / ticket_id.split(":", 1)[1] / "ticket.json"
@@ -349,7 +456,7 @@ class AlphaEngineSearchLauncher:
         ticket_dir: Path,
     ) -> list[str]:
         command = [
-            self.python_executable, "-m", "dalton_core.alphaengine_search_cli",
+            self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
             "--governance", str(self.governance_path),
             "--discovery-plan", str(self.plan_path),
@@ -364,8 +471,7 @@ class AlphaEngineSearchLauncher:
         ]
         if self.spool_dir is not None:
             command += ["--spool-dir", str(self.spool_dir)]
-        if self.networked and self.mcp_endpoint is not None:
-            command += ["--mcp-endpoint", self.mcp_endpoint]
+        command += self._extra_command_args()
         command += list(self.mode_args)
         return command
 
@@ -407,6 +513,8 @@ class AlphaEngineSearchLauncher:
         except DiscoveryPlanError as exc:
             raise DiscoveryLaunchRejected(str(exc)) from exc
         governance = self.load_governance()
+        if self.networked:
+            self._refuse_networked_launch()
         as_of_date = as_of or self.clock().date()
         if not isinstance(as_of_date, date) or isinstance(as_of_date, datetime):
             raise DiscoveryLaunchRejected("as_of must be a calendar date")
@@ -422,7 +530,7 @@ class AlphaEngineSearchLauncher:
                     "plan_hash": plan["content_hash"],
                 }).encode("utf-8")
             ).hexdigest()[:24]
-            ticket_id = f"{TICKET_PREFIX}:{digest}"
+            ticket_id = f"{self.TICKET_PREFIX}:{digest}"
             ticket_dir = _secure_dir(self.tickets_dir / digest)
             command = self._command(
                 company_ref=authorization["company_ref"], spec_ref=spec_ref,
@@ -458,7 +566,7 @@ class AlphaEngineSearchLauncher:
                 "governance_hash": governance.content_hash,
                 "plan_ref": plan["id"],
                 "plan_hash": plan["content_hash"],
-                "transport": "loopback-mcp" if self.networked else "rehearsal",
+                "transport": self.LIVE_TRANSPORT_LABEL if self.networked else "rehearsal",
                 "started_at": started_at,
                 "pid": process.pid,
                 "status": "running",
@@ -470,8 +578,8 @@ class AlphaEngineSearchLauncher:
             return dict(record)
 
     def status(self, ticket_ref: str) -> dict[str, Any]:
-        if not isinstance(ticket_ref, str) or _TICKET_RE.fullmatch(ticket_ref) is None:
-            raise DiscoveryLaunchRejected(f"ticket_ref must be {TICKET_PREFIX}:<hex>")
+        if not isinstance(ticket_ref, str) or self._ticket_re.fullmatch(ticket_ref) is None:
+            raise DiscoveryLaunchRejected(f"ticket_ref must be {self.TICKET_PREFIX}:<hex>")
         path = self._ticket_path(ticket_ref)
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
@@ -533,6 +641,51 @@ class AlphaEngineSearchLauncher:
                 current[1].kill()
 
 
+class AlphaEngineSearchLauncher(_SearchLauncherBase):
+    """Launch the AlphaEngine ``search_library`` child (P9d-1)."""
+
+    SOURCE_REF = ALPHAENGINE_SOURCE_REF
+    TICKET_PREFIX = TICKET_PREFIX
+    CHILD_MODULE = "dalton_core.alphaengine_search_cli"
+    LIVE_TRANSPORT_LABEL = "loopback-mcp"
+
+    def __init__(self, *, mcp_endpoint: str | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.mcp_endpoint = mcp_endpoint
+
+    def _load_governance_record(self) -> SearchConnectorGovernance:
+        return SearchConnectorGovernance.load(self.governance_path)
+
+    def _extra_command_args(self) -> list[str]:
+        if self.networked and self.mcp_endpoint is not None:
+            return ["--mcp-endpoint", self.mcp_endpoint]
+        return []
+
+
+class WebSearchLauncher(_SearchLauncherBase):
+    """Launch the Gemini ``search_web`` child (P9d-4a).
+
+    Only the rehearsal transport exists in this slice.  A networked launch
+    would need the OpenClaw gateway to hand the child a host-owned
+    ``web_search`` handle; until that bridge is wired the launcher refuses
+    before any process starts, and the coordinator reports the reason.
+    """
+
+    SOURCE_REF = WEB_SEARCH_SOURCE_REF
+    TICKET_PREFIX = WEB_SEARCH_TICKET_PREFIX
+    CHILD_MODULE = "dalton_core.public_web_search_cli"
+    LIVE_TRANSPORT_LABEL = "openclaw-host-tool"
+
+    def _load_governance_record(self) -> WebSearchConnectorGovernance:
+        return WebSearchConnectorGovernance.load(self.governance_path)
+
+    def _refuse_networked_launch(self) -> None:
+        raise DiscoveryLaunchRejected(
+            "web search host bridge is not wired: OpenClaw gateway web_search handle "
+            "is unavailable to the child (rehearsal transport only, P9d-4b)"
+        )
+
+
 # ---------------------------------------------------------------------------
 # controller-tick coordinator
 # ---------------------------------------------------------------------------
@@ -552,7 +705,13 @@ def _parse_wire_time(value: str) -> datetime:
 
 
 class MissionSourceDiscoveryCoordinator:
-    """Advance mission source discovery by at most one search + one acquisition."""
+    """Advance one plan's source discovery by at most one search + one acquisition.
+
+    The coordinator only ever touches dispatches and documents of its own
+    plan's source, so an AlphaEngine coordinator never settles a web search
+    ticket (or the reverse) and never hands a URL ref to the AlphaEngine
+    acquisition launcher.
+    """
 
     def __init__(
         self,
@@ -568,6 +727,12 @@ class MissionSourceDiscoveryCoordinator:
         self.store = store
         self.missions = missions
         self.plan = validate_discovery_plan(plan)
+        self.source_ref = self.plan["source_ref"]
+        if acquisition_launcher is not None and self.source_ref != ALPHAENGINE_SOURCE_REF:
+            raise DiscoveryPlanError(
+                "only AlphaEngine discovery has an acquisition launcher; web search "
+                "documents wait for the public-web fetch lane"
+            )
         self.search_launcher = search_launcher
         self.acquisition_launcher = acquisition_launcher
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -578,7 +743,7 @@ class MissionSourceDiscoveryCoordinator:
         settled: list[dict[str, Any]] = []
         if self.search_launcher is None:
             return settled
-        for dispatch in self.missions.open_discovery_dispatches():
+        for dispatch in self.missions.open_discovery_dispatches(source_ref=self.source_ref):
             try:
                 ticket = self.search_launcher.status(dispatch["ticket_ref"])
             except DiscoveryTicketNotFound:
@@ -614,7 +779,7 @@ class MissionSourceDiscoveryCoordinator:
         settled: list[dict[str, Any]] = []
         if self.acquisition_launcher is None:
             return settled
-        for document in self.missions.launched_discovered_documents():
+        for document in self.missions.launched_discovered_documents(source_ref=self.source_ref):
             try:
                 ticket = self.acquisition_launcher.status(document["ticket_ref"])
             except LookupError:
@@ -689,15 +854,35 @@ class MissionSourceDiscoveryCoordinator:
     def _reserved_calls(self) -> int:
         """Children launched but not yet settled may not have recorded their call yet."""
 
-        open_dispatches = len(self.missions.open_discovery_dispatches(limit=100))
-        open_documents = len(self.missions.launched_discovered_documents(limit=100))
+        open_dispatches = len(self.missions.open_discovery_dispatches(
+            limit=100, source_ref=self.source_ref,
+        ))
+        open_documents = len(self.missions.launched_discovered_documents(
+            limit=100, source_ref=self.source_ref,
+        ))
         return open_dispatches + open_documents
 
     def _budget(self, mission_cap: int) -> dict[str, int]:
-        budget = alphaengine_calls_remaining(
-            self.store.connection, mission_cap=mission_cap,
-            owner_cap=self.owner_call_cap, as_of=self.clock(),
-        )
+        """Remaining trailing-24h calls for this plan's source.
+
+        AlphaEngine: the tighter of the mission grant and the owner cap
+        (search + document pages share one window), further tightened by a
+        0.2 plan budget.  Web search: the plan budget alone bounds Gemini
+        calls -- the mission body has no web-search field, and the host owns
+        the bill, so the human-authored, hash-bound plan is the cap.
+        """
+
+        plan_cap = (self.plan.get("budget") or {}).get("max_calls_24h")
+        if self.source_ref == WEB_SEARCH_SOURCE_REF:
+            spent = count_recent_web_search_calls(self.store.connection, as_of=self.clock())
+            cap = int(plan_cap)
+            budget = {"spent": spent, "cap": cap, "remaining": max(0, cap - spent)}
+        else:
+            owner_cap = self.owner_call_cap if plan_cap is None else min(self.owner_call_cap, int(plan_cap))
+            budget = alphaengine_calls_remaining(
+                self.store.connection, mission_cap=mission_cap,
+                owner_cap=owner_cap, as_of=self.clock(),
+            )
         reserved = self._reserved_calls()
         budget["reserved"] = reserved
         budget["remaining"] = max(0, budget["remaining"] - reserved)
@@ -767,7 +952,7 @@ class MissionSourceDiscoveryCoordinator:
                     discovery_plan_ref=self.plan["id"],
                     discovery_plan_hash=self.plan["content_hash"],
                     spec_ref=spec["spec_ref"],
-                    query_hash=search_spec_hash(parameters),
+                    query_hash=discovery_query_hash(self.plan, parameters),
                     ticket_ref=ticket["id"],
                 )
                 return {
@@ -783,17 +968,25 @@ class MissionSourceDiscoveryCoordinator:
 
     # -- document acquisition ------------------------------------------------
     def launch_acquisition(self) -> dict[str, Any]:
+        if self.source_ref == WEB_SEARCH_SOURCE_REF:
+            queued = self.missions.next_discovered_document(source_ref=self.source_ref)
+            return {
+                "status": "unconfigured",
+                "reason": "public-web fetch lane is not wired; discovered URLs stay queued (P9d-4b)",
+                "queued": queued is not None,
+            }
         if self.acquisition_launcher is None:
             return {"status": "unconfigured", "reason": "acquisition launcher is not configured"}
-        if self.missions.launched_discovered_documents(limit=1):
+        if self.missions.launched_discovered_documents(limit=1, source_ref=self.source_ref):
             return {"status": "busy", "reason": "a discovered-document acquisition is still open"}
         retry = False
-        document = self.missions.next_discovered_document()
+        document = self.missions.next_discovered_document(source_ref=self.source_ref)
         if document is None:
             # No fresh documents: retry the oldest acquisition failure whose
             # interval has passed (e.g. a child orphaned by a deploy restart).
             document = self.missions.retryable_failed_document(
-                older_than=ACQUISITION_RETRY_INTERVAL, as_of=self.clock()
+                older_than=ACQUISITION_RETRY_INTERVAL, as_of=self.clock(),
+                source_ref=self.source_ref,
             )
             retry = document is not None
         if document is None:
@@ -847,6 +1040,7 @@ class MissionSourceDiscoveryCoordinator:
         active = discovery.get("status") == "launched" or acquisition.get("status") == "launched"
         return {
             "status": "launched" if active else "idle",
+            "source_ref": self.source_ref,
             "plan_ref": self.plan["id"],
             "plan_hash": self.plan["content_hash"],
             "settled_dispatches": settled_dispatches,
@@ -858,18 +1052,26 @@ class MissionSourceDiscoveryCoordinator:
 
 
 __all__ = [
+    "ALPHAENGINE_SOURCE_REF",
     "AlphaEngineSearchLauncher",
     "DISCOVERY_PLAN_SCHEMA_VERSION",
+    "DISCOVERY_PLAN_SCHEMA_VERSION_V2",
+    "DISCOVERY_PLAN_SCHEMA_VERSIONS",
     "DiscoveryLaunchConflict",
     "DiscoveryLaunchError",
     "DiscoveryLaunchRejected",
     "DiscoveryPlanError",
     "DiscoveryTicketNotFound",
     "LIVE_MODE_ARGS",
+    "MAX_PLAN_CALLS_24H",
     "MissionSourceDiscoveryCoordinator",
+    "WEB_SEARCH_SOURCE_REF",
+    "WEB_SEARCH_TICKET_PREFIX",
+    "WebSearchLauncher",
     "alphaengine_calls_remaining",
     "build_discovery_parameters",
     "build_discovery_plan",
+    "discovery_query_hash",
     "load_discovery_plan",
     "plan_spec",
     "validate_discovery_plan",

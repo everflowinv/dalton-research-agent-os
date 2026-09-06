@@ -30,6 +30,12 @@ _LAZY_EXPORTS = {
     "PublicWebFetchAdapter": (
         ".public_web_connector", "PublicWebFetchAdapter"
     ),
+    "PublicWebCoreSearch": (
+        ".public_web_core_search", "PublicWebCoreSearch"
+    ),
+    "WebSearchLauncher": (
+        ".mission_source_discovery", "WebSearchLauncher"
+    ),
     "PublicWebUrlAuthorityResolver": (
         ".public_web_connector", "PublicWebUrlAuthorityResolver"
     ),
@@ -361,7 +367,9 @@ __all__ = [
     "GeminiWebSearchAdapter",
     "PublicHttpTransport",
     "PublicWebFetchAdapter",
+    "PublicWebCoreSearch",
     "PublicWebUrlAuthorityResolver",
+    "WebSearchLauncher",
     "ProjectionWriter",
     "Scheduler",
     "TrustedLaunchContext",

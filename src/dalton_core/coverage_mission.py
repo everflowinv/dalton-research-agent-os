@@ -30,6 +30,7 @@ import json
 import re
 import sqlite3
 from collections.abc import Mapping
+from types import MappingProxyType
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -83,6 +84,26 @@ AUTOMATION_WRITE_SCOPES: tuple[str, ...] = (
     "source_discovery",
 )
 DISCOVERY_DISPATCH_STATUSES: tuple[str, ...] = ("launched", "succeeded", "failed", "rejected")
+# Sources a mission may run search-driven discovery against, and the Core
+# connector authority each one leaves behind.  ``source_ref`` is the mission
+# source-plan key; ``connector_source_ref`` / ``operation`` are what the
+# search's SourceEnvelope must carry; ``document_ref_prefix`` is the only
+# shape a discovered document ref may take.  A source outside this table is
+# never a discovery source, whatever its source-plan status says.
+DISCOVERY_SOURCES: Mapping[str, Mapping[str, str]] = MappingProxyType({
+    "source:alphaengine": MappingProxyType({
+        "connector_source_ref": "source:alphaengine",
+        "operation": "search_library",
+        "document_ref_prefix": "alphaengine-doc:",
+    }),
+    # P9d-4a: Gemini web search.  Results are opaque URL refs derived from
+    # citations; the page itself only enters authority through fetch_get.
+    "source:web-search": MappingProxyType({
+        "connector_source_ref": "source:public-web",
+        "operation": "search_web",
+        "document_ref_prefix": "public-web-url:sha256:",
+    }),
+})
 DISCOVERED_DOCUMENT_STATUSES: tuple[str, ...] = (
     "discovered", "already_in_authority", "acquisition_launched", "acquired",
     "acquisition_failed",
@@ -427,6 +448,18 @@ def validate_mission_source_discovery(value: Mapping[str, Any]) -> dict[str, Any
         raise CoverageMissionValidationError(
             "mission source discovery must partition document_refs into new and in-authority"
         )
+    source = DISCOVERY_SOURCES.get(wire["source_ref"])
+    if source is None:
+        raise CoverageMissionValidationError("mission source discovery source_ref is not a discovery source")
+    if any(not ref.startswith(source["document_ref_prefix"]) for ref in refs):
+        raise CoverageMissionValidationError(
+            f"mission source discovery document_refs must start with {source['document_ref_prefix']}"
+        )
+    if source["operation"] == "search_library":
+        if set(wire["parameters"]) != {"query", "filters", "cursor"}:
+            raise CoverageMissionValidationError("search_library discovery parameters have an invalid shape")
+    elif set(wire["parameters"]) != {"query", "date_after", "date_before"}:
+        raise CoverageMissionValidationError("search_web discovery parameters have an invalid shape")
     wire["document_refs"] = refs
     wire["new_document_refs"] = new_refs
     wire["in_authority_document_refs"] = present
@@ -989,6 +1022,8 @@ class CoverageMissionAuthority:
         )
         if member is None:
             raise CoverageMissionConflict("company is outside the mission universe")
+        if source_ref not in DISCOVERY_SOURCES:
+            raise CoverageMissionConflict(f"{source_ref} is not a search-driven discovery source")
         source = next(
             (item for item in mission["source_plan"] if item["source_ref"] == source_ref), None
         )
@@ -1129,13 +1164,19 @@ class CoverageMissionAuthority:
             "updated_at": row["updated_at"],
         }
 
-    def open_discovery_dispatches(self, *, limit: int = 20) -> list[dict[str, Any]]:
+    def open_discovery_dispatches(
+        self, *, limit: int = 20, source_ref: str | None = None
+    ) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("discovery dispatch limit must be 1..100")
-        rows = self.connection.execute(
-            "SELECT * FROM coverage_mission_discovery_dispatches WHERE status='launched' "
-            "ORDER BY created_at,dispatch_id LIMIT ?", (limit,),
-        ).fetchall()
+        query = "SELECT * FROM coverage_mission_discovery_dispatches WHERE status='launched'"
+        params: list[Any] = []
+        if source_ref is not None:
+            query += " AND source_ref=?"
+            params.append(_text(source_ref, "source_ref"))
+        query += " ORDER BY created_at,dispatch_id LIMIT ?"
+        params.append(limit)
+        rows = self.connection.execute(query, params).fetchall()
         return [self._dispatch_row(row) for row in rows]
 
     def discovery_dispatches(
@@ -1258,9 +1299,10 @@ class CoverageMissionAuthority:
         ):
             raise CoverageMissionConflict("discovery source envelope binding failed")
         envelope_record = json.loads(envelope["record_json"])
+        discovery_source = DISCOVERY_SOURCES[exact["source_ref"]]
         if (
-            envelope_record.get("source") != exact["source_ref"]
-            or envelope_record.get("operation") != "search_library"
+            envelope_record.get("source") != discovery_source["connector_source_ref"]
+            or envelope_record.get("operation") != discovery_source["operation"]
             or list(envelope_record.get("source_record_refs") or []) != refs
         ):
             raise CoverageMissionConflict("discovery document_refs differ from the source envelope")
@@ -1399,18 +1441,29 @@ class CoverageMissionAuthority:
         params.append(limit)
         return [self._document_row(row) for row in self.connection.execute(query, params).fetchall()]
 
-    def next_discovered_document(self) -> dict[str, Any] | None:
-        """Oldest ``discovered`` document across active missions, or None."""
+    def next_discovered_document(self, *, source_ref: str | None = None) -> dict[str, Any] | None:
+        """Oldest ``discovered`` document across active missions, or None.
 
-        row = self.connection.execute(
+        ``source_ref`` narrows to one discovery source: each acquisition lane
+        only ever picks documents its own connector can fetch.
+        """
+
+        query = (
             "SELECT d.* FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
-            "WHERE d.status='discovered' ORDER BY d.created_at,d.record_id LIMIT 1"
-        ).fetchone()
+            "WHERE d.status='discovered'"
+        )
+        params: list[Any] = []
+        if source_ref is not None:
+            query += " AND d.source_ref=?"
+            params.append(_text(source_ref, "source_ref"))
+        query += " ORDER BY d.created_at,d.record_id LIMIT 1"
+        row = self.connection.execute(query, params).fetchone()
         return None if row is None else self._document_row(row)
 
     def retryable_failed_document(
-        self, *, older_than: timedelta, as_of: datetime | None = None
+        self, *, older_than: timedelta, as_of: datetime | None = None,
+        source_ref: str | None = None,
     ) -> dict[str, Any] | None:
         """Oldest ``acquisition_failed`` document whose last update is older
         than the retry interval, or None.  Failures (provider errors, orphaned
@@ -1423,22 +1476,32 @@ class CoverageMissionAuthority:
         if now.tzinfo is None:
             raise CoverageMissionValidationError("as_of must carry a timezone")
         cutoff = (now - older_than).isoformat(timespec="microseconds")
-        row = self.connection.execute(
+        query = (
             "SELECT d.* FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
-            "WHERE d.status='acquisition_failed' AND d.updated_at<? "
-            "ORDER BY d.updated_at,d.record_id LIMIT 1",
-            (cutoff,),
-        ).fetchone()
+            "WHERE d.status='acquisition_failed' AND d.updated_at<?"
+        )
+        params: list[Any] = [cutoff]
+        if source_ref is not None:
+            query += " AND d.source_ref=?"
+            params.append(_text(source_ref, "source_ref"))
+        query += " ORDER BY d.updated_at,d.record_id LIMIT 1"
+        row = self.connection.execute(query, params).fetchone()
         return None if row is None else self._document_row(row)
 
-    def launched_discovered_documents(self, *, limit: int = 20) -> list[dict[str, Any]]:
+    def launched_discovered_documents(
+        self, *, limit: int = 20, source_ref: str | None = None
+    ) -> list[dict[str, Any]]:
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise CoverageMissionValidationError("discovered document limit must be 1..100")
-        rows = self.connection.execute(
-            "SELECT * FROM coverage_mission_discovered_documents WHERE status='acquisition_launched' "
-            "ORDER BY updated_at,record_id LIMIT ?", (limit,),
-        ).fetchall()
+        query = "SELECT * FROM coverage_mission_discovered_documents WHERE status='acquisition_launched'"
+        params: list[Any] = []
+        if source_ref is not None:
+            query += " AND source_ref=?"
+            params.append(_text(source_ref, "source_ref"))
+        query += " ORDER BY updated_at,record_id LIMIT ?"
+        params.append(limit)
+        rows = self.connection.execute(query, params).fetchall()
         return [self._document_row(row) for row in rows]
 
     def mark_discovered_document_launched(self, record_id: str, ticket_ref: str) -> dict[str, Any]:
@@ -2265,6 +2328,7 @@ class CoverageMissionAuthority:
 
 __all__ = [
     "AUTOMATION_WRITE_SCOPES",
+    "DISCOVERY_SOURCES",
     "BOOTSTRAP_PRIORITIES",
     "CHECKPOINT_KINDS",
     "COVERAGE_TIERS",

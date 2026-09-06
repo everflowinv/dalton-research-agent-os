@@ -79,6 +79,21 @@ if [[ ! -f "$plan_file" && -f "$repo_root/deploy/phase9/p9d-us-it-services-disco
   cp "$repo_root/deploy/phase9/p9d-us-it-services-discovery-plan-v1.json" "$plan_file"
   chmod 600 "$plan_file"
 fi
+# P9d-4a: Gemini web search is its own governed capability with its own
+# 0.2 discovery plan.  Seed both once as *proposed* / hash-bound; the owner
+# approves the record in place with dalton-connector-governance approve.
+# Seeding creates no authority: the live mission still marks
+# source:web-search as not_connected, and this slice has no live transport.
+web_search_governance_file="$governance_dir/gemini-web-search-v1.json"
+if [[ ! -f "$web_search_governance_file" && -f "$repo_root/deploy/connector-governance/gemini-web-search-v1.json" ]]; then
+  cp "$repo_root/deploy/connector-governance/gemini-web-search-v1.json" "$web_search_governance_file"
+  chmod 600 "$web_search_governance_file"
+fi
+web_plan_file="$plan_dir/us-it-services-web-search-v1.json"
+if [[ ! -f "$web_plan_file" && -f "$repo_root/deploy/phase9/p9d4-us-it-services-web-search-plan-v1.json" ]]; then
+  cp "$repo_root/deploy/phase9/p9d4-us-it-services-web-search-plan-v1.json" "$web_plan_file"
+  chmod 600 "$web_plan_file"
+fi
 "$venv_dir/bin/python" -m dalton_core.macos_launchagent \
   --launch-agents-dir "$launch_agents_dir" \
   --python-env-bin "$venv_dir/bin" \

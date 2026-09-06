@@ -34,6 +34,7 @@ GOVERNANCE_STATUSES = frozenset({"proposed", "approved"})
 ALPHAENGINE_KIND = "alphaengine-get-document"
 ALPHAENGINE_SEARCH_KIND = "alphaengine-search-library"
 SEC_COMPANY_FACTS_KIND = "sec-company-facts"
+GEMINI_WEB_SEARCH_KIND = "gemini-web-search"
 ALPHAENGINE_CAPABILITY_ID = (
     "capability:dalton:connector:alphaengine-get-document"
 )
@@ -41,6 +42,7 @@ ALPHAENGINE_SEARCH_CAPABILITY_ID = (
     "capability:dalton:connector:alphaengine-search-library"
 )
 SEC_CAPABILITY_ID = "capability:dalton:connector:sec-edgar"
+GEMINI_WEB_SEARCH_CAPABILITY_ID = "capability:dalton:connector:gemini-web-search"
 
 
 class ConnectorGovernanceError(RuntimeError):
@@ -131,6 +133,30 @@ def _sec_fixture_hash() -> str:
     ]
 
 
+def _web_search_source_hash() -> str:
+    from .public_web_core_search import web_search_source_hash
+
+    return web_search_source_hash()
+
+
+def _web_search_schema_hash() -> str:
+    from .public_web_core_search import web_search_schema_hash
+
+    return web_search_schema_hash()
+
+
+def _web_search_permissions() -> dict[str, Any]:
+    from .public_web_core_search import web_search_permissions
+
+    return copy.deepcopy(web_search_permissions())
+
+
+def _web_search_fixture_hash() -> str:
+    from .public_web_core_search import web_search_fixture_hash
+
+    return web_search_fixture_hash()
+
+
 # Capability id is deliberately the dispatch key at load time because it is
 # the only kind identity present in the closed governance record.
 GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
@@ -160,6 +186,16 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         schema_hash=_sec_schema_hash,
         permissions=_sec_permissions,
         fixture_hash=_sec_fixture_hash,
+    ),
+    # P9d-4a: OpenClaw's host-owned Gemini web_search is its own governed
+    # capability (discovery-only public-web source), approved separately.
+    GEMINI_WEB_SEARCH_KIND: _KindSpec(
+        capability_id=GEMINI_WEB_SEARCH_CAPABILITY_ID,
+        template_key="gemini-web-search",
+        source_hash=_web_search_source_hash,
+        schema_hash=_web_search_schema_hash,
+        permissions=_web_search_permissions,
+        fixture_hash=_web_search_fixture_hash,
     ),
 }
 # Public aliases make the registry discoverable without exposing mutable
@@ -240,6 +276,17 @@ def build_governance_record(
         from .alphaengine_core_search import build_search_governance_record
 
         return build_search_governance_record(
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind == GEMINI_WEB_SEARCH_KIND:
+        from .public_web_core_search import build_web_search_governance_record
+
+        return build_web_search_governance_record(
             approved_by=approved_by,
             status=status,
             effective_from=effective_from,
@@ -495,6 +542,7 @@ __all__ = [
     "ALPHAENGINE_CAPABILITY_ID", "ALPHAENGINE_KIND", "CONNECTOR_GOVERNANCE_KINDS",
     "ConnectorGovernance", "ConnectorGovernanceError", "GOVERNANCE_FIELDS",
     "GOVERNANCE_KIND_REGISTRY", "GOVERNANCE_KINDS", "GOVERNANCE_SCHEMA_VERSION",
+    "GEMINI_WEB_SEARCH_CAPABILITY_ID", "GEMINI_WEB_SEARCH_KIND",
     "SEC_CAPABILITY_ID", "SEC_COMPANY_FACTS_KIND", "build_governance_record",
     "governance_kind_for_capability", "load_connector_governance",
     "write_governance_proposal",

@@ -4,6 +4,14 @@ This module adds a new live wire without changing the recorded AlphaEngine
 0.2 replay contract.  It accepts only operator-installed transport plans that
 bind an exact ``CompiledConnectorPlan`` step, an operation-scoped runtime
 profile, a frozen inventory schema, and one host-owned bridge target.
+
+P9d-4a: the lane serves a frozen registry of host-owned bridges instead of
+one.  Each bridge names its inventory template, its operation -> host tool
+map, the source type its template declares and its logical credential slot.
+Operations are unique across bridges, so every validator resolves the bridge
+from the operation name; the AlphaEngine wire (ids, hashes, error paths) is
+unchanged.  The second entry is OpenClaw's Gemini ``web_search`` host tool
+(``search_web``), whose results are discovery-only URL refs.
 """
 
 from __future__ import annotations
@@ -11,6 +19,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any
@@ -31,6 +40,10 @@ from .openclaw_connector_bridge import (
     BridgePermissionDenied,
     BridgeRateLimited,
     HostToolInvocationResult,
+)
+from .public_web_connector import (
+    OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH,
+    OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_REF,
 )
 from .research_context import (
     validate_compiled_connector_plan,
@@ -56,6 +69,60 @@ OPENCLAW_ALPHAENGINE_BRIDGE_HASH = content_hash(
         "credential_material_serialized": False,
     }
 )
+GEMINI_WEB_SEARCH_CREDENTIAL_SLOT_REF = "credential-slot:gemini-web-search"
+
+
+@dataclass(frozen=True, slots=True)
+class HostToolBridge:
+    """One host-owned bridge the live lane may route an operation through."""
+
+    template_key: str
+    bridge_ref: str
+    bridge_hash: str
+    tool_names: Mapping[str, str]
+    source_type: str
+    credential_slot_ref: str
+    plan_prefix: str
+
+
+_BRIDGES: tuple[HostToolBridge, ...] = (
+    HostToolBridge(
+        template_key="alphaengine",
+        bridge_ref=OPENCLAW_ALPHAENGINE_BRIDGE_REF,
+        bridge_hash=OPENCLAW_ALPHAENGINE_BRIDGE_HASH,
+        tool_names=MappingProxyType(dict(_ALPHAENGINE_TOOL_NAMES)),
+        source_type="authenticated_library",
+        credential_slot_ref="credential-slot:alphaengine",
+        plan_prefix="live-mcp-plan:alphaengine",
+    ),
+    # P9d-4a: Gemini web search through the same host-owned handle protocol.
+    # The bridge identity is the one the standalone discovery adapter froze;
+    # the host key stays with OpenClaw, Core only carries a logical slot ref.
+    HostToolBridge(
+        template_key="gemini-web-search",
+        bridge_ref=OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_REF,
+        bridge_hash=OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH,
+        tool_names=MappingProxyType({"search_web": "web_search"}),
+        source_type="public_web",
+        credential_slot_ref=GEMINI_WEB_SEARCH_CREDENTIAL_SLOT_REF,
+        plan_prefix="live-mcp-plan:gemini-web-search",
+    ),
+)
+_BRIDGE_BY_OPERATION: Mapping[str, HostToolBridge] = MappingProxyType({
+    operation: bridge for bridge in _BRIDGES for operation in bridge.tool_names
+})
+assert len(_BRIDGE_BY_OPERATION) == sum(len(bridge.tool_names) for bridge in _BRIDGES), (
+    "host tool operations must be unique across bridges"
+)
+
+
+def host_tool_bridge_for_operation(operation: str) -> HostToolBridge:
+    """Resolve the frozen bridge that serves ``operation`` (fail closed)."""
+
+    bridge = _BRIDGE_BY_OPERATION.get(operation) if isinstance(operation, str) else None
+    if bridge is None:
+        raise RunnerValidationError("live MCP operation is not served by a frozen host bridge")
+    return bridge
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _REF_RE = re.compile(
@@ -138,16 +205,19 @@ def _validate_hash(wire: Mapping[str, Any], name: str) -> None:
         raise RunnerConflict(f"{name} content_hash mismatch")
 
 
-def _alphaengine_template_operation(operation: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def _bridge_template_operation(
+    operation: str,
+) -> tuple[HostToolBridge, dict[str, Any], dict[str, Any]]:
+    bridge = host_tool_bridge_for_operation(operation)
     inventory = load_packaged_connector_inventory()
-    template = inventory["templates"]["alphaengine"]
+    template = inventory["templates"][bridge.template_key]
     matches = [
         item for item in template["operations"]
         if item["operation"] == operation
     ]
     if len(matches) != 1:
-        raise RunnerValidationError("AlphaEngine operation is not frozen")
-    return template, matches[0]
+        raise RunnerValidationError("host bridge operation is not frozen")
+    return bridge, template, matches[0]
 
 
 _LIVE_PLAN_FIELDS = {
@@ -171,18 +241,18 @@ def build_live_mcp_transport_plan(
     installed = [item for item in plan["steps"] if item["id"] == step["id"]]
     if len(installed) != 1 or installed[0] != step:
         raise RunnerConflict("compiled MCP step is not installed in its plan")
-    template, operation = _alphaengine_template_operation(step["operation"])
+    bridge, template, operation = _bridge_template_operation(step["operation"])
     identity = {
         "compiled_connector_plan_ref": plan["id"],
         "compiled_connector_plan_hash": plan["content_hash"],
         "compiled_step_ref": step["id"],
         "compiled_step_hash": step["content_hash"],
-        "bridge_hash": OPENCLAW_ALPHAENGINE_BRIDGE_HASH,
+        "bridge_hash": bridge.bridge_hash,
     }
     base = {
         "schema_version": LIVE_MCP_TRANSPORT_PLAN_VERSION,
         "id": (
-            f"live-mcp-plan:alphaengine:{step['operation']}:"
+            f"{bridge.plan_prefix}:{step['operation']}:"
             + content_hash(identity)
         ),
         "created_at": plan["created_at"],
@@ -192,11 +262,11 @@ def build_live_mcp_transport_plan(
         "source_hash": content_hash(template["source_identity"]),
         "transport_target_ref": template["transport"]["target_ref"],
         "transport_target_hash": template["transport"]["target_hash"],
-        "bridge_ref": OPENCLAW_ALPHAENGINE_BRIDGE_REF,
-        "bridge_hash": OPENCLAW_ALPHAENGINE_BRIDGE_HASH,
+        "bridge_ref": bridge.bridge_ref,
+        "bridge_hash": bridge.bridge_hash,
         **identity,
         "operation": step["operation"],
-        "tool_name": _ALPHAENGINE_TOOL_NAMES[step["operation"]],
+        "tool_name": bridge.tool_names[step["operation"]],
         "parameters": step["parameters"],
         "query_hash": step["query_hash"],
         "input_schema_ref": operation["input_schema_ref"],
@@ -238,13 +308,13 @@ def validate_live_mcp_transport_plan(
         {"operation": wire["operation"], "parameters": wire["parameters"]}
     ):
         raise RunnerConflict("LiveMcpTransportPlan query_hash mismatch")
+    bridge, template, operation = _bridge_template_operation(wire["operation"])
     if (
-        wire["bridge_ref"] != OPENCLAW_ALPHAENGINE_BRIDGE_REF
-        or wire["bridge_hash"] != OPENCLAW_ALPHAENGINE_BRIDGE_HASH
-        or wire["tool_name"] != _ALPHAENGINE_TOOL_NAMES.get(wire["operation"])
+        wire["bridge_ref"] != bridge.bridge_ref
+        or wire["bridge_hash"] != bridge.bridge_hash
+        or wire["tool_name"] != bridge.tool_names.get(wire["operation"])
     ):
         raise RunnerConflict("LiveMcpTransportPlan bridge authority drifted")
-    template, operation = _alphaengine_template_operation(wire["operation"])
     expected_inventory = (
         template["id"], template["content_hash"],
         template["source_identity"]["source_ref"],
@@ -282,7 +352,7 @@ def validate_live_mcp_transport_plan(
         "bridge_hash": wire["bridge_hash"],
     }
     expected_id = (
-        f"live-mcp-plan:alphaengine:{wire['operation']}:"
+        f"{bridge.plan_prefix}:{wire['operation']}:"
         + content_hash(identity)
     )
     if wire["id"] != expected_id:
@@ -337,6 +407,7 @@ def validate_live_mcp_adapter_request(
     ):
         wire[name] = _hash(wire[name], name)
     wire["operation"] = _text(wire["operation"], "operation")
+    bridge = host_tool_bridge_for_operation(wire["operation"])
     wire["tool_name"] = _text(wire["tool_name"], "tool_name")
     wire["deadline_at"] = _timestamp(wire["deadline_at"], "deadline_at")
     wire["physical_attempt_number"] = _integer(
@@ -359,8 +430,10 @@ def validate_live_mcp_adapter_request(
     identity["source_ref"] = _ref(identity["source_ref"], "source_identity.source_ref")
     identity["source_type"] = _text(identity["source_type"], "source_identity.source_type")
     identity["source_version"] = _text(identity["source_version"], "source_identity.source_version")
-    if identity["source_type"] != "authenticated_library":
-        raise RunnerValidationError("live MCP source must be an authenticated library")
+    if identity["source_type"] != bridge.source_type:
+        raise RunnerValidationError(
+            "live MCP source type differs from the bridge's frozen template"
+        )
     wire["source_identity"] = identity
     if wire["source_hash"] != content_hash(identity):
         raise RunnerConflict("live MCP source_hash does not bind source_identity")
@@ -372,9 +445,9 @@ def validate_live_mcp_adapter_request(
     ):
         raise RunnerConflict("live MCP query_hash mismatch")
     if (
-        wire["bridge_ref"] != OPENCLAW_ALPHAENGINE_BRIDGE_REF
-        or wire["bridge_hash"] != OPENCLAW_ALPHAENGINE_BRIDGE_HASH
-        or wire["tool_name"] != _ALPHAENGINE_TOOL_NAMES.get(wire["operation"])
+        wire["bridge_ref"] != bridge.bridge_ref
+        or wire["bridge_hash"] != bridge.bridge_hash
+        or wire["tool_name"] != bridge.tool_names.get(wire["operation"])
     ):
         raise RunnerConflict("live MCP adapter request bridge drifted")
     _validate_hash(wire, "LiveMcpAdapterRequest")
@@ -413,7 +486,11 @@ class LiveMcpRunnerAdmissionGate(ConnectorRunnerAdmissionGate):
             ):
                 raise RunnerConflict("live MCP transport plan lacks compiled authority")
         self.credential_authority = credential_authority
-        self._template = load_packaged_connector_inventory()["templates"]["alphaengine"]
+        self._templates = load_packaged_connector_inventory()["templates"]
+
+    def _bridge_template(self, operation: str) -> tuple[HostToolBridge, dict[str, Any]]:
+        bridge = host_tool_bridge_for_operation(operation)
+        return bridge, self._templates[bridge.template_key]
 
     def _validate_runner_request_protocol(self, wire: Mapping[str, Any]) -> None:
         if wire["schema_version"] != "0.2":
@@ -467,15 +544,16 @@ class LiveMcpRunnerAdmissionGate(ConnectorRunnerAdmissionGate):
         compiled: Mapping[str, Any],
         step: Mapping[str, Any],
     ) -> None:
+        bridge, template = self._bridge_template(transport["operation"])
         operation = next(
-            item for item in self._template["operations"]
+            item for item in template["operations"]
             if item["operation"] == transport["operation"]
         )
         profile = admission.profile
         expected_profile = (
-            self._template["connector_ref"], self._template["source_identity"],
-            self._template["transport"]["target_ref"], "mcp_managed",
-            ["credential-slot:alphaengine"], [], None,
+            template["connector_ref"], template["source_identity"],
+            template["transport"]["target_ref"], "mcp_managed",
+            [bridge.credential_slot_ref], [], None,
             [operation["operation"]],
             {operation["operation"]: operation["input_schema_ref"]},
             {operation["operation"]: operation["input_schema_hash"]},
@@ -498,17 +576,17 @@ class LiveMcpRunnerAdmissionGate(ConnectorRunnerAdmissionGate):
             profile["pagination"], profile["completeness"],
         )
         if expected_profile != actual_profile:
-            raise RunnerConflict("runtime profile is not an operation-scoped AlphaEngine projection")
+            raise RunnerConflict("runtime profile is not an operation-scoped host bridge projection")
         binding = admission.binding
         if (
             binding["auth_mode"] != "mcp_managed"
-            or binding["credential_slot_refs"] != ["credential-slot:alphaengine"]
-            or binding["adapter_ref"] != self._template["transport"]["target_ref"]
+            or binding["credential_slot_refs"] != [bridge.credential_slot_ref]
+            or binding["adapter_ref"] != template["transport"]["target_ref"]
             or binding["operation"] != operation["operation"]
             or binding["input_schema_hash"] != operation["input_schema_hash"]
             or binding["output_schema_hash"] != operation["output_schema_hash"]
         ):
-            raise RunnerConflict("resolver binding is not the exact AlphaEngine live route")
+            raise RunnerConflict("resolver binding is not the exact host bridge live route")
         request = admission.request
         expected_compiled = (
             compiled["id"], compiled["content_hash"], step["id"],
@@ -817,8 +895,9 @@ class LiveMcpRunnerAdmissionGate(ConnectorRunnerAdmissionGate):
             raise RunnerConflict("live MCP observation lacks transport authority")
         self._validate_adapter_request_authority(request, transport)
         if observation["outcome"] == "succeeded":
+            _, template = self._bridge_template(request["operation"])
             documents = {
-                item["schema_ref"]: item for item in self._template["schema_documents"]
+                item["schema_ref"]: item for item in template["schema_documents"]
             }
             document = documents.get(request["output_schema_ref"])
             if document is None or document["schema_hash"] != request["output_schema_hash"]:
@@ -834,7 +913,9 @@ class LiveMcpRunnerAdmissionGate(ConnectorRunnerAdmissionGate):
                 raise RunnerConflict("live MCP normalized output is not exact")
             refs = observation["source_record_refs"]
             cursor = observation["cursor"]
-            if request["operation"] == "search_library":
+            if request["operation"] == "search_web" and cursor is not None:
+                raise RunnerConflict("web search is a single ranked page; it carries no cursor")
+            if request["operation"] in {"search_library", "search_web"}:
                 expected = (
                     "empty" if not refs else "partial" if cursor is not None else "complete",
                     "ranked",
@@ -1228,11 +1309,14 @@ class AlphaEngineLiveAdapter:
 
 __all__ = [
     "AlphaEngineLiveAdapter",
+    "GEMINI_WEB_SEARCH_CREDENTIAL_SLOT_REF",
+    "HostToolBridge",
     "LIVE_MCP_ADAPTER_PROTOCOL_VERSION",
     "LIVE_MCP_TRANSPORT_PLAN_VERSION",
     "LiveMcpRunnerAdmissionGate",
     "OPENCLAW_ALPHAENGINE_BRIDGE_HASH",
     "OPENCLAW_ALPHAENGINE_BRIDGE_REF",
+    "host_tool_bridge_for_operation",
     "alphaengine_document_page_from_raw_response",
     "alphaengine_tool_arguments",
     "build_live_mcp_transport_plan",

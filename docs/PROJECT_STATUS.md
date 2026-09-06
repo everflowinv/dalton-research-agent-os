@@ -1,6 +1,26 @@
 # Dalton 项目进度
 
 更新日期：2026-09-06
+- **P9d-4a「web search 作为 mission 第二个发现来源」development candidate 已完成（shadow），未部署、无真实 host 调用。**
+  live MCP 通道由单一 AlphaEngine 桥改为冻结的两条目 host bridge 注册表（AlphaEngine 的 id/hash/错误路径逐字节不变），
+  新增 Core-hosted Gemini `search_web` 治理能力 `capability:dalton:connector:gemini-web-search`（proposed 记录已入
+  deploy）、单槽子进程 `public_web_search_cli`、DiscoveryPlan 0.2（`source:web-search` spec 无 document_type，
+  计划级 `budget.max_calls_24h` 作为硬上限，因 mission body 无 web 预算字段且 Gemini 由 host 计费）、
+  `coverage_mission.DISCOVERY_SOURCES` 来源表（表外来源不能做发现）、按来源过滤的协调器（AlphaEngine 协调器不结算
+  web 票据、不把 URL ref 交给 AlphaEngine 获取；web 协调器不接受 acquisition launcher，URL 停在 `discovered`）。
+  搜索结果只是发现：Gemini 综合与 snippet 留在原始 artifact，向后只暴露 `public-web-url:sha256:` ref，页面原始字节
+  须经 P9d-4b 的 public-web `fetch_get` lane 才进 authority。授权规则不变：`not_connected` 拒绝所有人，`probe_only`
+  只允许 human 排练，自动化需 `connected`+`source_discovery`；live mission v2 的 web-search 仍 `not_connected`。
+  本片没有真实 transport：`WebSearchLauncher` 在网络模式下 spawn 前拒绝，子进程 `--allow-network` 也在触碰 Core 前
+  写固定失败 summary。新增专项 18/18，邻接（live MCP、AlphaEngine 搜索/发现、writer ops、治理、inventory、配额、
+  service、contracts）原样通过，全仓 **1133/1135**（两条失败为既有 `test_document_extraction_preflight` 路径断言，
+  基线 `df7a8b0` 原样复现，与本片无关）；wheel/sdist 与干净 Python 3.14 安装后 installed 专项 18/18。live Core
+  只读副本 canary `ok=true`：v2 下自动化与 owner 均被 `not_connected` 拒绝；副本 v3 `probe_only` 下 owner 排练走
+  真实子进程（fake citations，2 个 URL ref、1 次调用、0 正式写入）；副本 v4 `connected` 下自动化 **15/15
+  dispatch succeeded** 到 idle；Claim/Evidence/Thesis 与 AlphaEngine 发现行数不变，integrity ok，0 网络、0 付费、
+  0 live 写入。激活需 owner ①批准 `gemini-web-search-v1.json`，②发布 mission 新版本改 web-search 状态；真实
+  OpenClaw gateway `web_search` handle 与 fetch lane 留待 P9d-4b。见
+  [P9d-4a 报告](reports/p9d4a-web-search-mission-discovery-v0.1-2026-09-06.md)。
 - **live 缺陷修复：thesis-impact 定时任务的治理政策换版死循环已在隔离副本修好，未部署。**
   live LaunchAgent 自 2026-09-02 起连续 1225 次 exit 2，日志只有 `{"error_type": "RemoteError"}`。根因是
   唯一一条 pass verification 绑定 `policy-3`，而 `governance_policy_pointer` 在 2026-09-02T07:01:12Z

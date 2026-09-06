@@ -26,8 +26,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from .alphaengine_core_search import search_spec_hash
 from .mission_source_discovery import (
+    ALPHAENGINE_SOURCE_REF,
     AlphaEngineSearchLauncher,
     DiscoveryLaunchConflict,
     DiscoveryLaunchError,
@@ -35,7 +35,11 @@ from .mission_source_discovery import (
     DiscoveryPlanError,
     DiscoveryTicketNotFound,
     MissionSourceDiscoveryCoordinator,
+    WEB_SEARCH_SOURCE_REF,
+    WEB_SEARCH_TICKET_PREFIX,
+    WebSearchLauncher,
     build_discovery_parameters,
+    discovery_query_hash,
     load_discovery_plan,
 )
 from .alphaengine_acquisition_launcher import (
@@ -640,7 +644,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "dispatch_coverage_mission_sec_lane": frozenset(),
     "reconcile_forecasts": frozenset({"requested_by", "company_ref", "claim_version_ref"}),
     "dispatch_mission_source_discovery": frozenset(),
-    "run_mission_source_discovery": frozenset({"requested_by", "company_ref", "spec_ref", "as_of"}),
+    "run_mission_source_discovery": frozenset({"requested_by", "company_ref", "spec_ref", "as_of", "source_ref"}),
     "mission_source_discovery_status": frozenset({"ticket_ref"}),
     "mission_source_discoveries": frozenset({"mission_version_ref", "company_ref", "spec_ref", "limit"}),
     "mission_discovered_documents": frozenset({"mission_version_ref", "company_ref", "status", "limit"}),
@@ -982,6 +986,8 @@ class WriterServer:
         document_extraction_model_config: Mapping[str, Any] | None = None,
         search_launcher: AlphaEngineSearchLauncher | None = None,
         discovery_plan_path: str | Path | None = None,
+        web_search_launcher: WebSearchLauncher | None = None,
+        web_search_plan_path: str | Path | None = None,
     ):
         if not principals:
             raise WriterServerError("at least one principal is required")
@@ -1004,6 +1010,15 @@ class WriterServer:
         )
         self._source_discovery: MissionSourceDiscoveryCoordinator | None = None
         self._discovery_plan_error: str | None = None
+        # P9d-4a: web search is a second discovery source with its own plan,
+        # launcher and coordinator; the same tick drives both.
+        self._web_search_launcher = web_search_launcher
+        self._web_search_plan_path = (
+            None if web_search_plan_path is None
+            else str(Path(web_search_plan_path).expanduser().resolve())
+        )
+        self._web_source_discovery: MissionSourceDiscoveryCoordinator | None = None
+        self._web_search_plan_error: str | None = None
         # S7d: out-of-process SEC company-facts lane runs (human-only ops).
         self._sec_lane_launcher = sec_lane_launcher
         # The same owner-only CandidateStaging file the Cockpit review plane
@@ -1286,6 +1301,22 @@ class WriterServer:
                     plan=plan,
                     search_launcher=self._search_launcher,
                     acquisition_launcher=self._acquisition_launcher,
+                )
+        if self._web_search_plan_path is not None:
+            try:
+                plan = load_discovery_plan(self._web_search_plan_path)
+                if plan["source_ref"] != WEB_SEARCH_SOURCE_REF:
+                    raise DiscoveryPlanError("web search plan source_ref is not source:web-search")
+            except (OSError, ValueError) as exc:
+                self._web_search_plan_error = f"web search discovery plan is unusable: {exc}"
+            else:
+                self._web_search_plan_error = None
+                self._web_source_discovery = MissionSourceDiscoveryCoordinator(
+                    store=self._store,
+                    missions=self._coverage_mission,
+                    plan=plan,
+                    search_launcher=self._web_search_launcher,
+                    acquisition_launcher=None,
                 )
         self._backlog = ResearchQuestionBacklog(self._store)
         self._bounded_planner = BoundedPlannerAuthority(self._store)
@@ -2265,22 +2296,63 @@ class WriterServer:
             )
         return self._search_launcher
 
+    @property
+    def web_source_discovery(self) -> MissionSourceDiscoveryCoordinator:
+        if self._web_source_discovery is None:
+            raise DiscoveryLaunchRejected(
+                self._web_search_plan_error
+                or "web search discovery is not configured on this writer (no web search plan)"
+            )
+        return self._web_source_discovery
+
+    @property
+    def web_search_launcher(self) -> WebSearchLauncher:
+        if self._web_search_launcher is None:
+            raise DiscoveryLaunchRejected(
+                "web search launcher is not configured on this writer"
+            )
+        return self._web_search_launcher
+
+    def _discovery_for_source(self, source_ref: str) -> tuple[MissionSourceDiscoveryCoordinator, Any]:
+        """Coordinator + launcher serving one discovery source (fail closed)."""
+
+        if source_ref == ALPHAENGINE_SOURCE_REF:
+            return self.source_discovery, self.search_launcher
+        if source_ref == WEB_SEARCH_SOURCE_REF:
+            return self.web_source_discovery, self.web_search_launcher
+        raise DiscoveryLaunchRejected(f"{source_ref} is not a search-driven discovery source")
+
     def _op_dispatch_mission_source_discovery(self, p: Mapping[str, Any]) -> Any:
         # Controller tick.  Unconfigured writers answer truthfully instead of
-        # raising so the driver's tick summary shows the reason.
+        # raising so the driver's tick summary shows the reason.  The
+        # AlphaEngine tick keeps its P9d-1 shape; the web search tick rides
+        # along under ``web_search``.
         if self._source_discovery is None:
-            return {
+            result: dict[str, Any] = {
                 "status": "unconfigured",
                 "reason": self._discovery_plan_error or "no discovery plan on this writer",
             }
-        return self.source_discovery.dispatch_once()
+        else:
+            result = self.source_discovery.dispatch_once()
+        if self._web_source_discovery is None:
+            result["web_search"] = {
+                "status": "unconfigured",
+                "reason": self._web_search_plan_error or "no web search discovery plan on this writer",
+            }
+        else:
+            result["web_search"] = self.web_source_discovery.dispatch_once()
+        return result
 
     def _op_run_mission_source_discovery(self, p: Mapping[str, Any]) -> Any:
         # Human-requested discovery: the mission grant is resolved here with the
         # human as requester (a probe_only source is allowed for rehearsal),
         # and the child re-derives the same grant before spending a call.
         values = dict(p)
-        plan = self.source_discovery.plan
+        source_ref = values.get("source_ref") or ALPHAENGINE_SOURCE_REF
+        if not isinstance(source_ref, str):
+            raise WriterServerError("source_ref must be text")
+        coordinator, launcher = self._discovery_for_source(source_ref)
+        plan = coordinator.plan
         authorization = self.coverage_mission.authorize_source_discovery(
             company_ref=values["company_ref"],
             source_ref=plan["source_ref"],
@@ -2288,7 +2360,7 @@ class WriterServer:
         )
         as_of = values.get("as_of")
         as_of_date = None if as_of is None else date.fromisoformat(as_of)
-        ticket = self.search_launcher.start(
+        ticket = launcher.start(
             authorization=authorization, spec_ref=values["spec_ref"], as_of=as_of_date,
         )
         parameters = build_discovery_parameters(
@@ -2300,21 +2372,25 @@ class WriterServer:
             discovery_plan_ref=plan["id"],
             discovery_plan_hash=plan["content_hash"],
             spec_ref=values["spec_ref"],
-            query_hash=search_spec_hash(parameters),
+            query_hash=discovery_query_hash(plan, parameters),
             ticket_ref=ticket["id"],
         )
         return {**ticket, "dispatch_ref": dispatch["dispatch_id"], "parameters": parameters}
 
     def _op_mission_source_discovery_status(self, p: Mapping[str, Any]) -> Any:
-        return self.search_launcher.status(dict(p)["ticket_ref"])
+        ticket_ref = dict(p)["ticket_ref"]
+        if isinstance(ticket_ref, str) and ticket_ref.startswith(f"{WEB_SEARCH_TICKET_PREFIX}:"):
+            return self.web_search_launcher.status(ticket_ref)
+        return self.search_launcher.status(ticket_ref)
 
     def _resolve_mission_version_ref(self, values: dict[str, Any]) -> str:
         ref = values.pop("mission_version_ref", None)
         if ref is not None:
             return ref
-        if self._source_discovery is None:
+        coordinator = self._source_discovery or self._web_source_discovery
+        if coordinator is None:
             raise DiscoveryLaunchRejected("mission_version_ref is required without a discovery plan")
-        return self.coverage_mission.active_mission(self._source_discovery.plan["mission_ref"])["id"]
+        return self.coverage_mission.active_mission(coordinator.plan["mission_ref"])["id"]
 
     def _op_mission_source_discoveries(self, p: Mapping[str, Any]) -> Any:
         values = dict(p)
@@ -3011,6 +3087,25 @@ def main(argv: list[str] | None = None) -> int:
         "--search-rehearsal-approved-by",
         help="rehearsal only: in-memory approved search governance principal (tests)",
     )
+    parser.add_argument(
+        "--web-search-governance",
+        help="Gemini web_search governance record (P9d-4a); enables web search "
+             "discovery launches (requires --web-search-discovery-plan). Only the "
+             "rehearsal transport exists in this slice; networked launches are refused",
+    )
+    parser.add_argument(
+        "--web-search-discovery-plan",
+        help="hash-bound 0.2 discovery plan for source:web-search; enables the web "
+             "search discovery coordinator",
+    )
+    parser.add_argument(
+        "--web-search-rehearsal-citations",
+        help="rehearsal only: JSON array of {url,title} citations served instead of the host tool (tests)",
+    )
+    parser.add_argument(
+        "--web-search-rehearsal-approved-by",
+        help="rehearsal only: in-memory approved web search governance principal (tests)",
+    )
     parser.add_argument("--document-extraction-model-config", help="Explicit approved broker/router and existing shared budget authority JSON; no secrets inline")
     parser.add_argument("--planner-routing-policy")
     parser.add_argument("--planner-credential-slots")
@@ -3095,6 +3190,29 @@ def main(argv: list[str] | None = None) -> int:
                 mcp_endpoint=args.alphaengine_mcp_endpoint,
                 spool_dir=args.transcript_spool_dir,
             )
+        web_search_launcher = None
+        if args.web_search_governance is not None:
+            if args.web_search_discovery_plan is None:
+                raise WriterServerError(
+                    "--web-search-governance requires --web-search-discovery-plan"
+                )
+            if args.web_search_rehearsal_citations is not None:
+                web_mode_args: tuple[str, ...] = (
+                    "--fake-citations-file", args.web_search_rehearsal_citations,
+                )
+                if args.web_search_rehearsal_approved_by is not None:
+                    web_mode_args += (
+                        "--governance-approved-by", args.web_search_rehearsal_approved_by,
+                    )
+            else:
+                web_mode_args = ("--allow-network",)
+            web_search_launcher = WebSearchLauncher(
+                state_dir=Path(args.db).expanduser().resolve().parent,
+                governance_path=args.web_search_governance,
+                plan_path=args.web_search_discovery_plan,
+                mode_args=web_mode_args,
+                spool_dir=args.transcript_spool_dir,
+            )
         planner_model_config = None
         if args.planner_routing_policy is not None:
             slots = (args.planner_credential_slots or "").split(",")
@@ -3130,6 +3248,8 @@ def main(argv: list[str] | None = None) -> int:
                 else json.loads(Path(args.document_extraction_model_config).read_text(encoding="utf-8"))),
             search_launcher=search_launcher,
             discovery_plan_path=args.alphaengine_discovery_plan,
+            web_search_launcher=web_search_launcher,
+            web_search_plan_path=args.web_search_discovery_plan,
         )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:

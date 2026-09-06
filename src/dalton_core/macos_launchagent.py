@@ -106,6 +106,16 @@ def render(
             str(state / "connector-governance" / "alphaengine-search-library-v1.json"),
             "--alphaengine-discovery-plan",
             str(state / "discovery-plans" / "us-it-services-alphaengine-v1.json"),
+            # P9d-4a: web search discovery.  Same seed-once rule for the
+            # proposed governance record and the hash-bound plan.  Only the
+            # rehearsal transport exists in this slice: with the live mode
+            # the launcher refuses before spawning and the tick reports it;
+            # the live mission also still marks source:web-search as
+            # not_connected, so automation is refused at the grant first.
+            "--web-search-governance",
+            str(state / "connector-governance" / "gemini-web-search-v1.json"),
+            "--web-search-discovery-plan",
+            str(state / "discovery-plans" / "us-it-services-web-search-v1.json"),
         ] + (
             # S7d: the SEC company-facts lane stages into the same Cockpit
             # staging file and is only enabled when that file is configured.

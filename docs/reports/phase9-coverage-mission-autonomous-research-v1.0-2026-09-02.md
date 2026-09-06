@@ -77,6 +77,11 @@ owner 24 小时调用上限。语义候选仍停在既有人工 accept 边界，
 - AlphaEngine：AE-2 search 驱动发现（search_library → stage 语义候选 → 人 accept），把 `probe_only` 变为 `connected`；不违反 ADR-0003 B。
 - web search、Guidepoint：各自走 Connector Protocol 的 shadow → gate → live，每接一条让 mission 多回答一类研究问题。顺序：web search（行业数据/管理层变动，只读公开）先于 Guidepoint（付费、一手、需 query 纪律）。
 
+进展（2026-09-06）：P9d-4a 已把 web search 接成 mission 的第二个搜索驱动发现来源（shadow）：host bridge 注册表、
+Core-hosted Gemini `search_web` 治理能力、DiscoveryPlan 0.2、来源表与按来源过滤的协调器；live Core 只读副本 canary
+通过，未部署。真实 gateway handle 与 public-web `fetch_get` lane 留待 P9d-4b；激活需 owner 批准治理记录并发布
+mission 新版本。见 [P9d-4a 报告](p9d4a-web-search-mission-discovery-v0.1-2026-09-06.md)。
+
 ### P9e：建模自主化（M2）
 
 - 从 XBRL 历史生成标准化三表（playbook 期间标准），套 IT services driver（headcount、utilization、bookings、book-to-bill）产出预测线；估值 fail closed 直到市场数据 connector 解冻（owner gate）。
