@@ -1,0 +1,45 @@
+{
+  "id": "dalton-openclaw-web-search-broker",
+  "name": "Dalton OpenClaw Web Search Broker",
+  "description": "Host-owned web search bridge for an external Dalton runtime.",
+  "version": "0.1.0-spike.1",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["clientId", "expectedProvider"],
+    "properties": {
+      "clientId": {
+        "type": "string",
+        "pattern": "^client:[A-Za-z0-9._-]+$"
+      },
+      "expectedProvider": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9-]{0,63}$"
+      },
+      "profileId": {
+        "type": "string",
+        "pattern": "^profile:[A-Za-z0-9._-]+$",
+        "default": "profile:web-search"
+      },
+      "socketName": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9._-]+\\.sock$",
+        "default": "dalton-web-search-broker.sock"
+      },
+      "maxQueryChars": {"type": "integer", "minimum": 1, "maximum": 4000, "default": 400},
+      "maxCount": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+      "maxFrameBytes": {"type": "integer", "minimum": 1024, "maximum": 1048576, "default": 65536},
+      "maxResponseBytes": {"type": "integer", "minimum": 1024, "maximum": 1048576, "default": 262144},
+      "maxConcurrent": {"type": "integer", "minimum": 1, "maximum": 8, "default": 1},
+      "idleTimeoutMs": {"type": "integer", "minimum": 100, "maximum": 60000, "default": 5000},
+      "maxTimeoutMs": {"type": "integer", "minimum": 1000, "maximum": 600000, "default": 240000},
+      "authMaxSkewMs": {"type": "integer", "minimum": 1000, "maximum": 300000, "default": 30000},
+      "journalTtlMs": {"type": "integer", "minimum": 60000, "maximum": 604800000, "default": 86400000},
+      "journalMaxRecords": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 1000},
+      "journalMaxBytes": {"type": "integer", "minimum": 4096, "maximum": 67108864, "default": 8388608}
+    }
+  }
+}

@@ -91,6 +91,11 @@ mission 新版本。见 [P9d-4a 报告](p9d4a-web-search-mission-discovery-v0.1-
 通过，未部署。owner 已批准 web search 与 web fetch 两条治理记录，但 live mission 的 `source:web-search` 仍
 `not_connected`，尚未启用。见 [P9d-4c 报告](p9d4c-public-web-extraction-source-v0.1-2026-09-06.md)。
 
+进展（2026-09-06，同日）：P9d-4d 补上 web search 此前缺失的真实 transport——Dalton 自有的 host-owned OpenClaw
+web search broker 插件（owner-only socket、HMAC、幂等、provider 核对、payload 逐字透传）与 Python handle；
+Node 15/15、Python 8/8、跨语言回环通过。插件未安装、未部署、0 次真实搜索；启用仍需 owner 装插件、接线并发布
+mission 新版本。见 [P9d-4d 报告](p9d4d-openclaw-web-search-broker-v0.1-2026-09-06.md)。
+
 ### P9e：建模自主化（M2）
 
 - 从 XBRL 历史生成标准化三表（playbook 期间标准），套 IT services driver（headcount、utilization、bookings、book-to-bill）产出预测线；估值 fail closed 直到市场数据 connector 解冻（owner gate）。

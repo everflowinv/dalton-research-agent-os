@@ -426,7 +426,7 @@ class WebSearchChildTests(unittest.TestCase):
         live = WebSearchLauncher(state_dir=self.state, governance_path=self.governance_path, plan_path=self.plan_path)
         with self.assertRaises(DiscoveryLaunchRejected) as ctx:
             live.start(authorization=authorization, spec_ref="management-changes")
-        self.assertIn("not wired", str(ctx.exception))
+        self.assertIn("broker is not configured", str(ctx.exception))
         alpha_plan_path = self.root / "alpha-plan.json"
         alpha_plan_path.write_text(json.dumps(plan_for_tests()), encoding="utf-8")
         wrong = WebSearchLauncher(
@@ -456,6 +456,7 @@ class WebSearchChildTests(unittest.TestCase):
         summary = json.loads((summary_dir / "summary.json").read_text())
         self.assertEqual((code, summary["status"], summary["failure_reason"], summary["provider_calls"]),
                          (1, "failed", NETWORK_UNAVAILABLE_REASON, 0))
+        self.assertIn("broker", NETWORK_UNAVAILABLE_REASON)
 
     def test_child_records_web_discovery_under_human_request(self) -> None:
         launcher = WebSearchLauncher(

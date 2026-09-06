@@ -16,9 +16,10 @@ Modes:
   citations served by an in-process stand-in for the host-owned ``web_search``
   handle.  No network; ``--governance-approved-by human:<who>`` may build an
   in-memory approved record for rehearsal.
-* ``--allow-network``: refused.  The OpenClaw gateway does not yet hand a
-  host-owned ``web_search`` handle to this child (P9d-4b); the program exits
-  with a fixed failure summary and spends nothing.
+* ``--allow-network``: call the host-owned OpenClaw web search broker over
+  its owner-only Unix socket (P9d-4d).  The broker owns the provider and its
+  credential; this child sends one exact query and never a key.  Without
+  broker socket/key arguments the run is refused before touching Core.
 
 Outputs (``--summary-dir``, owner-only): ``summary.json``.
 """
@@ -43,6 +44,7 @@ from .mission_source_discovery import (
     load_discovery_plan,
 )
 from .observability import ObservabilityStore
+from .openclaw_web_search_broker_client import WebSearchBrokerHandle
 from .public_web_core_search import (
     FakeWebSearchHandle,
     PublicWebCoreSearch,
@@ -61,8 +63,8 @@ from .store import DaltonStore, canonical_json
 DEFAULT_CATALOG_NAME = "catalog-gemini-web-search.sqlite"
 SUMMARY_SCHEMA_VERSION = "0.1"
 NETWORK_UNAVAILABLE_REASON = (
-    "web search host bridge is not wired: OpenClaw gateway web_search handle is "
-    "unavailable to the child (rehearsal transport only, P9d-4b)"
+    "web search host bridge is not configured: --broker-socket and --broker-auth-key "
+    "are required for a networked search"
 )
 
 
@@ -253,6 +255,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--as-of", help="YYYY-MM-DD; defaults to today (UTC)")
     parser.add_argument("--fake-citations-file", type=Path)
     parser.add_argument("--allow-network", action="store_true")
+    parser.add_argument("--broker-socket", help="owner-only OpenClaw web search broker socket")
+    parser.add_argument("--broker-auth-key", help="owner-only shared key file for that broker")
+    parser.add_argument("--broker-client-id", default="client:dalton-core")
+    parser.add_argument("--broker-profile-id", default="profile:web-search")
     parser.add_argument("--summary-dir", type=Path, help="defaults to the state dir")
     parser.add_argument(
         "--catalog-db", type=Path,
@@ -287,33 +293,43 @@ def main(argv: list[str] | None = None) -> int:
     as_of = date.fromisoformat(args.as_of) if args.as_of else datetime.now(timezone.utc).date()
     summary_dir = args.summary_dir if args.summary_dir is not None else args.state_dir
     if args.allow_network:
-        # Fail closed before touching the Core: there is no host handle to
-        # give this process yet, and the parent must see a fixed reason.
-        summary = {
-            "schema_version": SUMMARY_SCHEMA_VERSION,
-            "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
-            "source_ref": WEB_SEARCH_SOURCE_REF,
-            "transport": "openclaw-host-tool",
-            "plan_ref": plan["id"],
-            "plan_hash": plan["content_hash"],
-            "company_ref": args.company_ref,
-            "spec_ref": args.spec_ref,
-            "requested_by": args.requested_by,
-            "as_of": as_of.isoformat(),
-            "status": "failed",
-            "failure_reason": NETWORK_UNAVAILABLE_REASON,
-            "discovery_ref": None,
-            "new_document_count": 0,
-            "provider_calls": 0,
-            "formal_authority_writes": 0,
-        }
-        _write_owner_only(secure_dir(summary_dir) / "summary.json", summary)
-        if not args.quiet:
-            print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))
-        return 1
-    citations = json.loads(args.fake_citations_file.read_text(encoding="utf-8"))
-    if not isinstance(citations, list):
-        parser.error("--fake-citations-file must hold a JSON array of citations")
+        if not args.broker_socket or not args.broker_auth_key:
+            # Fail closed before touching Core; the parent sees a fixed reason.
+            summary = {
+                "schema_version": SUMMARY_SCHEMA_VERSION,
+                "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+                "source_ref": WEB_SEARCH_SOURCE_REF,
+                "transport": "openclaw-search-broker",
+                "plan_ref": plan["id"],
+                "plan_hash": plan["content_hash"],
+                "company_ref": args.company_ref,
+                "spec_ref": args.spec_ref,
+                "requested_by": args.requested_by,
+                "as_of": as_of.isoformat(),
+                "status": "failed",
+                "failure_reason": NETWORK_UNAVAILABLE_REASON,
+                "discovery_ref": None,
+                "new_document_count": 0,
+                "provider_calls": 0,
+                "formal_authority_writes": 0,
+            }
+            _write_owner_only(secure_dir(summary_dir) / "summary.json", summary)
+            if not args.quiet:
+                print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))
+            return 1
+        handle: Any = WebSearchBrokerHandle(
+            socket_path=args.broker_socket,
+            auth_key_path=args.broker_auth_key,
+            client_id=args.broker_client_id,
+            profile_id=args.broker_profile_id,
+        )
+        transport_label = "openclaw-search-broker"
+    else:
+        citations = json.loads(args.fake_citations_file.read_text(encoding="utf-8"))
+        if not isinstance(citations, list):
+            parser.error("--fake-citations-file must hold a JSON array of citations")
+        handle = FakeWebSearchHandle(citations)
+        transport_label = "fake"
     summary = run_discovery(
         state_dir=args.state_dir,
         governance=governance,
@@ -324,8 +340,8 @@ def main(argv: list[str] | None = None) -> int:
         mission_version_ref=args.mission_version_ref,
         mission_version_hash=args.mission_version_hash,
         as_of=as_of,
-        handle=FakeWebSearchHandle(citations),
-        transport="fake",
+        handle=handle,
+        transport=transport_label,
         summary_dir=summary_dir,
         catalog_db=args.catalog_db,
         spool_dir=args.spool_dir,

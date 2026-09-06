@@ -676,16 +676,45 @@ class WebSearchLauncher(_SearchLauncherBase):
     SOURCE_REF = WEB_SEARCH_SOURCE_REF
     TICKET_PREFIX = WEB_SEARCH_TICKET_PREFIX
     CHILD_MODULE = "dalton_core.public_web_search_cli"
-    LIVE_TRANSPORT_LABEL = "openclaw-host-tool"
+    LIVE_TRANSPORT_LABEL = "openclaw-search-broker"
+
+    def __init__(
+        self,
+        *,
+        broker_socket: str | Path | None = None,
+        broker_auth_key: str | Path | None = None,
+        broker_client_id: str = "client:dalton-core",
+        broker_profile_id: str = "profile:web-search",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self.broker_socket = None if broker_socket is None else str(Path(broker_socket).expanduser())
+        self.broker_auth_key = None if broker_auth_key is None else str(Path(broker_auth_key).expanduser())
+        self.broker_client_id = broker_client_id
+        self.broker_profile_id = broker_profile_id
 
     def _load_governance_record(self) -> WebSearchConnectorGovernance:
         return WebSearchConnectorGovernance.load(self.governance_path)
 
     def _refuse_networked_launch(self) -> None:
-        raise DiscoveryLaunchRejected(
-            "web search host bridge is not wired: OpenClaw gateway web_search handle "
-            "is unavailable to the child (rehearsal transport only, P9d-4b)"
-        )
+        # P9d-4d: a networked search goes through the host-owned OpenClaw
+        # search broker.  Without its socket and key there is nothing to call,
+        # so refuse before spawning rather than spending a launch.
+        if not self.broker_socket or not self.broker_auth_key:
+            raise DiscoveryLaunchRejected(
+                "web search broker is not configured: the launcher needs the host "
+                "broker socket and its owner-only key"
+            )
+
+    def _extra_command_args(self) -> list[str]:
+        if not self.networked or not self.broker_socket or not self.broker_auth_key:
+            return []
+        return [
+            "--broker-socket", self.broker_socket,
+            "--broker-auth-key", self.broker_auth_key,
+            "--broker-client-id", self.broker_client_id,
+            "--broker-profile-id", self.broker_profile_id,
+        ]
 
 
 # ---------------------------------------------------------------------------

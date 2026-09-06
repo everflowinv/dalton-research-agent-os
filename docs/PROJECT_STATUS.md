@@ -1,6 +1,24 @@
 # Dalton 项目进度
 
 更新日期：2026-09-06
+- **P9d-4d「host-owned OpenClaw web search broker」development candidate 已完成；插件未安装、未部署、0 次真实搜索。**
+  调查确认 P9d-4a 的真实 transport 此前**根本不存在**：本机 OpenClaw 只在 MCP 上暴露 guidepoint(8943)、
+  alphaengine(8950) 与远端 firecrawl，web search 是 agent 工具与插件运行时能力。本片按模型 broker 的既有边界
+  补上：新增 Dalton 自有 OpenClaw 插件 `integrations/openclaw-web-search-broker`，宿主保管 provider 与凭据，
+  经 owner-only Unix socket 只提供一次有界搜索（HMAC-SHA-256 + 时间偏移 + nonce 重放保护，key 0600 且不进
+  应答/参数/日志），闭合请求只含 query/count/可选日期窗/timeout——客户端不能传 key、provider、model、endpoint
+  或 header。broker 调用 `api.runtime.webSearch.search` 后核对宿主实际使用的 provider，与配置不符即
+  `PROVIDER_CONTRACT_DRIFT` 而不是交出另一种 payload 形状；payload 逐字透传进 tool-result 信封，因此**存进
+  Core 的原始 artifact 就是 broker 应答帧**，P9d-4b 的 URL authority 重建无需改动即可解析（已专项验证）。
+  幂等以 Dalton 的 credential-use ref 为键：崩溃留下的 pending 报 `IDEMPOTENCY_INDETERMINATE`，绝不自动重搜。
+  Python 侧 `WebSearchBrokerHandle` 实现与 loopback MCP handle 相同的协议，其上 adapter/transport plan/authority
+  链逐字未变；`WebSearchLauncher` 网络模式改为仅在缺 socket 或 key 时拒绝。插件 Node 专项 15/15、模型 broker
+  25/25 原样通过、Python 专项 8/8，含**跨语言回环**（Python 签名 → 真实 Node broker → fresh/duplicate/conflict），
+  并已验证两侧规范化 JSON 对非 ASCII 逐字节一致；全仓 **1159/1161**。本机事实：`tools.web.search` 已启用且
+  provider 为 `gemini`，`models.providers.google.apiKey` 已配置。**唯一未经真实验证的契约**是
+  `api.runtime.webSearch.search` 的返回形状；若不是 provider payload 本身，broker 会拒绝而非交出错误形状。
+  启用需 owner：装插件并配置 → 把 socket/key 传给 writer → 发布 mission 新版本改 `source:web-search` 状态。见
+  [P9d-4d 报告](reports/p9d4d-openclaw-web-search-broker-v0.1-2026-09-06.md)。
 - **owner 已批准两条 connector 治理记录（2026-09-06）。** `connector-governance:gemini-web-search:v1`
   （hash `927c25ed…`）与 `connector-governance:web-fetch:v1`（hash `87c094ca…`）已按既有流程 seed 到 live state
   `connector-governance/` 并由 `human:lumos` 原地 approve，文件权限 0600；仓库 deploy 模板仍为 `proposed`。

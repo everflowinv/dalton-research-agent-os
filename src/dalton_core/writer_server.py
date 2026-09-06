@@ -3146,6 +3146,18 @@ def main(argv: list[str] | None = None) -> int:
         help="rehearsal only: in-memory approved web search governance principal (tests)",
     )
     parser.add_argument(
+        "--web-search-broker-socket",
+        help="owner-only OpenClaw web search broker socket (P9d-4d); required for a "
+             "networked web search, which is otherwise refused before spawning",
+    )
+    parser.add_argument(
+        "--web-search-broker-auth-key",
+        help="owner-only shared key file for the web search broker; the key content "
+             "never appears in arguments or logs",
+    )
+    parser.add_argument("--web-search-broker-client-id", default="client:dalton-core")
+    parser.add_argument("--web-search-broker-profile-id", default="profile:web-search")
+    parser.add_argument(
         "--web-fetch-governance",
         help="public-web fetch_get governance record (P9d-4b); enables fetching URLs a "
              "web search cited (credential-free public HTTPS)",
@@ -3268,6 +3280,10 @@ def main(argv: list[str] | None = None) -> int:
                 plan_path=args.web_search_discovery_plan,
                 mode_args=web_mode_args,
                 spool_dir=args.transcript_spool_dir,
+                broker_socket=args.web_search_broker_socket,
+                broker_auth_key=args.web_search_broker_auth_key,
+                broker_client_id=args.web_search_broker_client_id,
+                broker_profile_id=args.web_search_broker_profile_id,
             )
         web_fetch_launcher = None
         if args.web_fetch_governance is not None:
