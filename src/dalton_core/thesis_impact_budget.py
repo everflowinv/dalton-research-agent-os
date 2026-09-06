@@ -238,10 +238,10 @@ class ThesisImpactBudgetStore:
         open_reserved = cur.execute(
             "SELECT COALESCE(SUM(a.reserved_micros),0) AS total "
             "FROM thesis_impact_day_admissions a "
-            f"WHERE a.policy_version_id IN ({placeholders}) AND a.day=? AND NOT EXISTS ("
+            f"WHERE a.policy_version_id IN ({placeholders}) AND NOT EXISTS ("
             " SELECT 1 FROM thesis_impact_day_settlements s "
             " WHERE s.admission_id=a.admission_id)",
-            (*policy_ids, day),
+            policy_ids,
         ).fetchone()["total"]
         return int(settled) + int(open_reserved)
 
@@ -272,6 +272,7 @@ class ThesisImpactBudgetStore:
         phase: str,
         route_decision_ref: str,
         reserved_micros: int,
+        mission_binding: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Reserve against the day cap or persist a durable rejection.
 
@@ -280,6 +281,15 @@ class ThesisImpactBudgetStore:
         decision is durable.
         """
 
+        if mission_binding is not None:
+            mission_binding = dict(mission_binding)
+            fields = {"mission_ref", "mission_version_ref", "mission_version_hash", "max_daily_paid_calls", "max_daily_cost_micros"}
+            if set(mission_binding) != fields:
+                raise ThesisImpactBudgetValidationError("invalid mission budget binding")
+            for key in ("mission_ref", "mission_version_ref", "mission_version_hash"):
+                _text(mission_binding[key], key)
+            for key in ("max_daily_paid_calls", "max_daily_cost_micros"):
+                _micros(mission_binding[key], key)
         policy = self.policy(policy_version_id)
         day = _day(day)
         work_order_ref = _text(work_order_ref, "work_order_ref")
@@ -329,6 +339,10 @@ class ThesisImpactBudgetStore:
                     raise ThesisImpactBudgetConflict(
                         "admission identity was reused with different semantics"
                     )
+                binding_row = cur.execute("SELECT record_json FROM model_mission_budget_bindings WHERE admission_id=?", (persisted["admission_id"],)).fetchone()
+                saved_binding = None if binding_row is None else json.loads(binding_row["record_json"])
+                if saved_binding != mission_binding:
+                    raise ThesisImpactBudgetConflict("mission budget binding changed on replay")
                 return {**persisted, "status": "duplicate"}
             prior_row = cur.execute(
                 "SELECT record_json FROM thesis_impact_day_rejections "
@@ -356,8 +370,28 @@ class ThesisImpactBudgetStore:
                     raise ThesisImpactBudgetConflict(
                         "budget policy was superseded and cannot admit new spend"
                     )
+                # A provider overrun has already been recorded in the existing
+                # alert authority. Do not free the short reservation or admit
+                # another call while owner reconciliation is outstanding.
+                alerts = cur.execute("SELECT detail_json FROM thesis_impact_alerts WHERE kind='work_order_failed'").fetchall()
+                if any(json.loads(a["detail_json"]).get("reason") == "model_reservation_overrun" for a in alerts):
+                    raise ThesisImpactBudgetConflict("model reservation overrun requires owner reconciliation")
                 committed = self._day_committed(cur, policy_version_id, day)
-                if committed + reserved_micros > policy["day_cap_micros"]:
+                mission_exceeded = False
+                if mission_binding is not None:
+                    # Same immutable paid-call ledger, atomic with the owner cap.
+                    # Open reservations from older days remain charged after rollover.
+                    rows = cur.execute(
+                        "SELECT a.reserved_micros,s.actual_micros FROM thesis_impact_day_admissions a "
+                        "LEFT JOIN model_mission_budget_bindings b ON a.admission_id=b.admission_id "
+                        "LEFT JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
+                        "WHERE (b.mission_ref=? OR b.admission_id IS NULL) AND (a.day=? OR s.admission_id IS NULL)",
+                        (mission_binding["mission_ref"], day),
+                    ).fetchall()
+                    mission_cost = sum(r["reserved_micros"] if r["actual_micros"] is None else r["actual_micros"] for r in rows)
+                    mission_exceeded = (len(rows) + 1 > mission_binding["max_daily_paid_calls"] or
+                                        mission_cost + reserved_micros > mission_binding["max_daily_cost_micros"])
+                if mission_exceeded or committed + reserved_micros > policy["day_cap_micros"]:
                     rejection = {
                         "schema_version": SCHEMA_VERSION,
                         "rejection_id": "thesis-impact-rejection:"
@@ -371,6 +405,9 @@ class ThesisImpactBudgetStore:
                         "day_cap_micros": policy["day_cap_micros"],
                         "created_at": _utc(self.clock()),
                     }
+                    if mission_binding is not None:
+                        rejection["mission_binding"] = mission_binding
+                        rejection["reason"] = "mission_budget_exceeded" if mission_exceeded else "owner_budget_exceeded"
                     rejection["content_hash"] = content_hash(rejection)
                     cur.execute(
                         "INSERT INTO thesis_impact_day_rejections("
@@ -416,6 +453,9 @@ class ThesisImpactBudgetStore:
                         wire["created_at"],
                     ),
                 )
+                if mission_binding is not None:
+                    cur.execute("INSERT INTO model_mission_budget_bindings(admission_id,mission_ref,record_json) VALUES(?,?,?)",
+                                (wire["admission_id"], mission_binding["mission_ref"], canonical_json(mission_binding)))
         if rejection is not None:
             raise ThesisImpactDayBudgetExceeded(rejection)
         return {**wire, "status": "fresh"}

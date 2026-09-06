@@ -61,6 +61,7 @@ def render(
     # Without an embedded research_review block the writer runs without
     # staging and those ops answer ``rejected``.
     candidate_staging_path: str | None = None
+    extraction_config_path: str | None = None
     if (
         service_config is not None
         and service_config.control is not None
@@ -69,6 +70,8 @@ def render(
         candidate_staging_path = str(
             service_config.control.research_review.candidate_staging_path
         )
+        if service_config.control.research_review.document_extraction_model_config_path is not None:
+            extraction_config_path = str(service_config.control.research_review.document_extraction_model_config_path)
     common: dict[str, Any] = {
         "RunAtLoad": True,
         "KeepAlive": True,
@@ -146,6 +149,8 @@ def render(
         "StandardOutPath": str(logs / "writer.stdout.log"),
         "StandardErrorPath": str(logs / "writer.stderr.log"),
     }
+    if extraction_config_path is not None:
+        writer["ProgramArguments"].extend(["--document-extraction-model-config", extraction_config_path])
     controller = common | {
         "Label": CONTROLLER_LABEL,
         "ProgramArguments": [str(bin_dir / "daltond"), "--config", str(config)],

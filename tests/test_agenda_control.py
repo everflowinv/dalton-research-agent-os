@@ -102,6 +102,10 @@ class ReviewPlane:
         self.calls.append(("document", login, dict(value)))
         return {"status": "document-recorded"}
 
+    def document_extraction(self, login, value, *, generate=False):
+        self.calls.append(("extract" if generate else "evidence", login, dict(value)))
+        return {"status": "gated" if generate else "source-read"}
+
     def document_review_view(self, login):
         return {"as_of": NOW, "reviewer_ref": login, "items": []}
 
@@ -468,6 +472,16 @@ class AgendaControlTests(unittest.TestCase):
                 self.assertEqual(response.status, expected_status)
                 response.read()
             self.assertEqual(sum(call[0] == "document" for call in review.calls), 1)
+            for path in ("evidence", "extract"):
+                for csrf_value, code in (("wrong", 403), (review_payload["csrf_token"], 200)):
+                    connection.request("POST", "/v1/mission-document-review/"+path, body=b'{}',
+                        headers={**headers,"Cookie":cookie,"Content-Type":"application/json","X-Dalton-CSRF":csrf_value})
+                    response=connection.getresponse(); self.assertEqual(response.status,code); response.read()
+                connection.request("POST", "/v1/mission-document-review/"+path, body=b'{}',
+                    headers={**headers,"Tailscale-User-Login":"stranger@example.com","Cookie":cookie,
+                             "Content-Type":"application/json","X-Dalton-CSRF":review_payload["csrf_token"]})
+                response=connection.getresponse(); self.assertEqual(response.status,403); response.read()
+            self.assertEqual(sum(call[0] in ("evidence","extract") for call in review.calls),2)
             connection.request(
                 "GET", "/v1/transcript-review",
                 headers={**headers, "Cookie": cookie},

@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DocumentExtractionSuggestionsV0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "suggestions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "0.1"
+    },
+    "suggestions": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "quote_id",
+          "normalized_statement",
+          "metric_or_aspect",
+          "period",
+          "basis"
+        ],
+        "properties": {
+          "quote_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "normalized_statement": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          },
+          "metric_or_aspect": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "period": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "basis": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          }
+        }
+      }
+    }
+  }
+}

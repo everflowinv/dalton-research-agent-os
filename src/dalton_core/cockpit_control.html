@@ -66,6 +66,69 @@ async function getJson(path){const response=await fetch(path,{headers:{Accept:"a
 async function postJson(path,value){const response=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json","X-Dalton-CSRF":csrf},body:JSON.stringify(value)});if(!response.ok)throw new Error(`HTTP ${response.status}`);return response.json()}
 const requestId=()=>((crypto.randomUUID&&crypto.randomUUID())||`${Date.now()}-${Math.random()}`).replace(/[^A-Za-z0-9._-]/g,"_");
 const documentReviewList=document.getElementById("document-review-list");
+function documentEvidencePanel(item){
+  const panel=node("section",null,"document-evidence"),actions=node("div",null,"actions"),open=node("button","查看原文与抽取建议","revise"),status=node("span","","result"),body=node("div");
+  let busy=false,context=null;
+  actions.append(open,status);panel.append(actions,body);
+  const request=()=>({review_id:item.review_id,review_hash:item.review_hash,offset:context?.offset||0});
+  function render(data){
+    context=data.context;body.replaceChildren();
+    body.append(node("div",`当前仅查看原文 ${context.offset}–${context.end} / ${context.total_chars} 字；建议只覆盖本窗口，不代表全文抽取。`,"notice"));
+    const refs=node("details",null,"refs");refs.append(node("summary","原文版本与完整 SHA-256"));
+    [context.document_ref,context.source_manifest_ref,context.source_manifest_hash,context.source_content_hash,context.content_hash].forEach(value=>refs.append(node("div",value,"ref")));body.append(refs);
+    const original=node("details");original.open=true;original.style.cssText="max-height:520px;overflow-y:auto";original.append(node("summary","已获取原文（不可信内容，仅按文字展示）"));
+    context.quotes.forEach(q=>{const part=node("div");part.append(node("div",`${q.source_start}–${q.source_end} · SHA-256 ${q.source_sha256}`,"ref"));const pre=node("pre",q.raw_text,"quote");pre.style.cssText="white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow-y:auto";part.append(pre);original.append(part)});body.append(original);
+    const paging=node("div",null,"actions"),prev=node("button","上一段","revise"),next=node("button","下一段","revise"),generate=node("button","生成本段抽取建议","accept");
+    prev.disabled=context.offset===0;next.disabled=context.next_offset===null;generate.disabled=!data.generation_enabled;
+    prev.onclick=()=>read(Math.max(0,context.offset-12000));next.onclick=()=>read(context.next_offset);
+    generate.onclick=async()=>{if(busy)return;busy=true;prev.disabled=next.disabled=generate.disabled=open.disabled=true;status.textContent="正在生成本段建议…";try{const output=await postJson("/v1/mission-document-review/extract",{...request(),context_hash:context.content_hash});if(output.status==="gated"){status.textContent="真实模型尚未获准，未发起调用";generate.disabled=true}else{render(output);status.textContent="建议已保存，仍需人工核对"}}catch(error){status.textContent=`未生成：${error.message}。请重新打开原文，不能使用旧页面重试。`;body.replaceChildren()}finally{busy=false;open.disabled=false}};
+    paging.append(prev,next,generate);body.append(paging);
+    if(!data.generation_enabled)body.append(node("div","未安装已批准的抽取模型配置。本页不会调用模型，也不会修改预算或权限。","notice"));
+    if(data.model_budget){const b=data.model_budget;body.append(node("div",`模型预算：${b.status}；预留 ${b.reserved_micros??"—"} 微美元；已确认费用 ${b.actual_micros??"未知（保留预留额）"} 微美元。失败或费用未知不会释放预算。`,"hint"))}
+    if(data.hermetic_fixture)body.append(node("div","以下为零网络 fixture 演练输出，不是真实模型或真实研究结论。","notice"));
+    if(data.status==="failed")body.append(node("div",`抽取失败：${data.error_code}。未生成可用建议。`,"error"));
+    if(data.status==="succeeded"&&!data.suggestions.length)body.append(node("div","本段没有生成可用建议；不代表全文没有相关信息。","empty"));
+    if(data.status==="pending")body.append(node("div","抽取任务仍在等待完成或重放；尚无可用建议。","notice"));
+    data.suggestions.forEach(suggestion=>{
+      const card=node("section",null,"card");card.append(node("h3","待核对的语义建议（非正式 Claim）"),node("div",suggestion.normalized_statement,"statement"),node("div",`${suggestion.metric_or_aspect} · ${suggestion.period} · ${suggestion.basis}`,"meta"));
+      const q=suggestion.citation,quote=node("pre",q.raw_text,"quote");quote.style.cssText="white-space:pre-wrap;overflow-wrap:anywhere;max-height:360px;overflow-y:auto";
+      card.append(node("div",`原文证据 ${q.source_start}–${q.source_end} · ${q.source_sha256}`,"ref"),quote,node("div","引用坐标已经绑定原文，但尚未经过人工 citation 准入。请沿用 correction → citation → CandidateStaging → 人工接受流程；本页不会接受 Claim，也不会自动把文档标为已抽取。","hint"));
+      const editor=node("div",null,"extraction-editor"),fields={};
+      for(const [name,label,max] of [["normalized_statement","校订后的语义陈述",2000],["metric_or_aspect","研究指标或主题",200],["period","适用期间",200],["basis","口径与归属",200],["rationale","人工核对理由",4000]]){
+        const lab=node("label",label),input=node("textarea");input.maxLength=max;input.value=suggestion[name]||"";input.setAttribute("aria-label",label);fields[name]=input;lab.append(input);editor.append(lab);
+      }
+      const start=node("input"),end=node("input"),selected=node("pre",q.raw_text,"quote");
+      selected.style.cssText="white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow-y:auto";
+      for(const [input,label,value] of [[start,"引用起点",q.source_start],[end,"引用终点",q.source_end]]){
+        input.type="number";input.min=q.source_start;input.max=q.source_end;input.value=value;input.setAttribute("aria-label",label);input.style.width="100%";const lab=node("label",label);lab.append(input);editor.append(lab);
+      }
+      const selection=()=>Array.from(q.raw_text).slice(Number(start.value)-q.source_start,Number(end.value)-q.source_start).join("");
+      start.oninput=end.oninput=()=>{selected.textContent=selection()};editor.append(selected);
+      const correctionRef=node("input"),correctionHash=node("input");
+      for(const [input,label] of [[correctionRef,"已有修正集版本（可选）"],[correctionHash,"已有修正集 SHA-256（成对填写）"]]){input.setAttribute("aria-label",label);input.style.width="100%";const lab=node("label",label);lab.append(input);editor.append(lab)}
+      editor.append(node("div","原文不能在此改写。若需 ASR 修正，先用既有 correction authority 校订并填写版本与 hash；未决修正与引用重叠时禁止 staging。不填写修正集表示你确认当前原文片段可直接引用，不表示全文已审阅。","hint"));
+      const confirmLabel=node("label"),checked=node("input");checked.type="checkbox";checked.setAttribute("aria-label","已核对原文引用及校订陈述");confirmLabel.append(checked,document.createTextNode(" 我已核对选中原文、归属、否定和不确定性，确认此引用及校订后的语义陈述。"));editor.append(confirmLabel);
+      const submit=node("button","确认引用并保存为待审候选","accept"),saved=node("span","","result"),controls=node("div",null,"actions");
+      let frozen=null,submitted=false;submit.disabled=true;checked.onchange=()=>{submit.disabled=!checked.checked||submitted};
+      submit.onclick=async()=>{
+        if(busy||submitted)return;
+        if(!fields.rationale.value.trim()){saved.textContent="请先填写人工核对理由";return}
+        const payload={...request(),context_hash:context.content_hash,suggestion_ref:suggestion.id,suggestion_hash:suggestion.content_hash,
+          ...Object.fromEntries(Object.entries(fields).map(([k,v])=>[k,v.value.trim()])),source_start:Number(start.value),source_end:Number(end.value),raw_text:selection(),
+          confirm_citation:checked.checked,correction_set_version_ref:correctionRef.value.trim()||null,correction_set_version_hash:correctionHash.value.trim()||null};
+        if(frozen&&JSON.stringify(payload)!==frozen.content){saved.textContent="提交内容已改变。请重新打开原文后重新核对，不能复用旧请求。";return}
+        if(!frozen)frozen={content:JSON.stringify(payload),id:requestId()};
+        busy=true;submit.disabled=open.disabled=true;saved.textContent="正在核对 citation 并保存候选…";
+        try{const output=await postJson("/v1/mission-document-review/stage",{...payload,request_id:frozen.id});submitted=true;saved.textContent=`已保存待审候选：${output.candidate_claim_ref}。未接受 Claim；文档仍待人工处理。`;saved.className="result ref"}
+        catch(error){saved.textContent=`未确认保存：${error.message}。仅可按原内容重试；过期时请重新打开原文。`}
+        finally{busy=false;open.disabled=false;submit.disabled=submitted||!checked.checked}
+      };controls.append(submit,saved);editor.append(controls);card.append(editor);
+      const lineage=node("details",null,"refs");lineage.append(node("summary","建议与模型来源记录"));[suggestion.id,suggestion.content_hash,suggestion.producer_ref,suggestion.work_order_ref,suggestion.result_ref,suggestion.result_hash,suggestion.invocation_ref,suggestion.route_ref,suggestion.profile_ref].forEach(value=>lineage.append(node("div",value,"ref")));card.append(lineage);body.append(card);
+    });
+  }
+  async function read(offset){if(busy)return;busy=true;open.disabled=true;status.textContent="正在核对原文与来源记录…";body.replaceChildren();try{const output=await postJson("/v1/mission-document-review/evidence",{review_id:item.review_id,review_hash:item.review_hash,offset});render(output);status.textContent="原文与来源校验通过"}catch(error){context=null;status.textContent=`无法读取：${error.message}。请刷新待审队列。`}finally{busy=false;open.disabled=false}}
+  open.onclick=()=>read(0);return panel;
+}
 function renderDocumentReviews(data){
   documentReviewList.replaceChildren();
   if(!data.enabled){documentReviewList.append(node("div","文档抽取队列尚未启用","empty"));return}
@@ -79,6 +142,7 @@ function renderDocumentReviews(data){
     card.append(head,node("div",`入队 ${fmtDate(item.created_at)}`,"meta"));
     const refs=node("details",null,"refs");
     refs.append(node("summary","任务与文档记录"),node("div",item.mission_version_ref,"ref"),node("div",item.review_id,"ref"));card.append(refs);
+    card.append(documentEvidencePanel(item));
     const label=node("label","关联这份文档的已有候选"),select=node("select");
     select.id=`candidate-${item.review_id}`;label.htmlFor=select.id;
     select.style.cssText="width:100%;padding:10px;margin-top:8px;background:#08141d;color:var(--text);border:1px solid var(--line);border-radius:10px";
@@ -99,7 +163,7 @@ function renderDocumentReviews(data){
     }
     staged.onclick=()=>submit("extraction_staged");dismiss.onclick=()=>submit("dismissed");
     actions.append(staged,dismiss,result);card.append(label,select,preview);
-    if(!item.candidates.length)card.append(node("div","先完成原文核对、引用绑定和候选抽取，再回来登记。这里不会自动生成候选。","hint"));
+    if(!item.candidates.length)card.append(node("div","可先查看原文和待核对的抽取建议。完成引用绑定与候选 staging 后再登记；建议不会自动成为正式 Claim。","hint"));
     card.append(rationale,actions);documentReviewList.append(card);
   });
 }

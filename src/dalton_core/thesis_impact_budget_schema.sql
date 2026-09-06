@@ -123,3 +123,16 @@ BEFORE UPDATE ON thesis_impact_alert_events BEGIN
 CREATE TRIGGER IF NOT EXISTS thesis_impact_alert_events_no_delete
 BEFORE DELETE ON thesis_impact_alert_events BEGIN
     SELECT RAISE(ABORT, 'thesis impact alert events are append-only'); END;
+
+-- Additive mission scope for the SAME paid-call admission/settlement ledger.
+-- No second queue or second copy of costs. Survives mission version changes.
+CREATE TABLE IF NOT EXISTS model_mission_budget_bindings (
+    admission_id TEXT PRIMARY KEY REFERENCES thesis_impact_day_admissions(admission_id),
+    mission_ref TEXT NOT NULL,
+    record_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS model_mission_budget_scope ON model_mission_budget_bindings(mission_ref);
+CREATE TRIGGER IF NOT EXISTS model_mission_budget_no_update
+BEFORE UPDATE ON model_mission_budget_bindings BEGIN SELECT RAISE(ABORT, 'mission budget bindings are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS model_mission_budget_no_delete
+BEFORE DELETE ON model_mission_budget_bindings BEGIN SELECT RAISE(ABORT, 'mission budget bindings are immutable'); END;

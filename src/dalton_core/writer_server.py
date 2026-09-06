@@ -64,6 +64,7 @@ from .research_verification import (
     ResearchVerificationError,
     VerificationRejected,
 )
+from .document_extraction import DocumentExtractionService
 from .transcript_candidate_staging import (
     stage_transcript_qualitative_candidate, TranscriptCoreAuthorityResolver,
 )
@@ -360,6 +361,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "run_mission_source_discovery", "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
     "mission_document_reviews", "resolve_mission_document_review",
+    "mission_document_evidence", "generate_document_extraction", "stage_document_extraction",
 })
 # Mission stage bookkeeping is human-governed but must also be reachable by
 # the mission's declared ``automation:`` principal; the CoverageMission
@@ -642,6 +644,12 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "mission_source_discoveries": frozenset({"mission_version_ref", "company_ref", "spec_ref", "limit"}),
     "mission_discovered_documents": frozenset({"mission_version_ref", "company_ref", "status", "limit"}),
     "mission_document_reviews": frozenset({"mission_version_ref", "company_ref", "state", "limit", "include_candidates"}),
+    "mission_document_evidence": frozenset({"review_id", "expected_review_hash", "offset", "actor_ref"}),
+    "generate_document_extraction": frozenset({"review_id", "expected_review_hash", "offset", "expected_context_hash", "actor_ref"}),
+    "stage_document_extraction": frozenset({"review_id", "expected_review_hash", "offset", "expected_context_hash",
+        "suggestion_ref", "suggestion_hash", "request_id", "normalized_statement", "metric_or_aspect", "period", "basis",
+        "source_start", "source_end", "raw_text", "rationale", "confirm_citation", "correction_set_version_ref",
+        "correction_set_version_hash", "actor_ref"}),
     "resolve_mission_document_review": frozenset({"review_id", "resolution", "candidate_claim_version_ref", "rationale", "actor_ref", "expected_review_hash"}),
 
     "forecast_reconciliations": frozenset({
@@ -785,6 +793,9 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "publish_research_playbook": "actor_ref",
     "create_coverage_mission": "actor_ref",
     "resolve_mission_document_review": "actor_ref",
+    "mission_document_evidence": "actor_ref",
+    "generate_document_extraction": "actor_ref",
+    "stage_document_extraction": "actor_ref",
     "record_mission_stage": "actor_ref",
     "publish_forecast_line": "actor_ref",
     "publish_probe_template": "actor_ref",
@@ -965,11 +976,26 @@ class WriterServer:
         candidate_staging_path: str | Path | None = None,
         sec_lane_launcher: SecLaneLauncher | None = None,
         planner_model_config: Mapping[str, Any] | None = None,
+        document_extraction_model_config: Mapping[str, Any] | None = None,
         search_launcher: AlphaEngineSearchLauncher | None = None,
         discovery_plan_path: str | Path | None = None,
     ):
         if not principals:
             raise WriterServerError("at least one principal is required")
+        # Explicit local installation only; never derive authority from an
+        # existing planner permission or synthesize a new budget policy.
+        if document_extraction_model_config is not None:
+            fields = {"routing_policy_ref", "credential_slot_refs", "model_router_db", "broker_socket",
+                      "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"}
+            config = dict(document_extraction_model_config)
+            if set(config) != fields or any(not isinstance(config[k], str) or not config[k] for k in fields - {"credential_slot_refs"}):
+                raise WriterServerError("invalid document extraction model configuration")
+            if not isinstance(config["credential_slot_refs"], list) or not config["credential_slot_refs"] or any(
+                not isinstance(v, str) or not v for v in config["credential_slot_refs"]):
+                raise WriterServerError("document extraction credential slots are required")
+            document_extraction_model_config = config
+        self._document_extraction_model_config = document_extraction_model_config
+        self._document_extraction_worker_factory = None
         self._acquisition_launcher = acquisition_launcher
         # P9d-1: out-of-process AlphaEngine search discovery; the plan is the
         # human-authored, hash-bound list of queries the mission may run.
@@ -2314,6 +2340,15 @@ class WriterServer:
             "documents": self.coverage_mission.discovered_documents(mission_version_ref, **values),
         }
 
+    def _op_mission_document_evidence(self, p: Mapping[str, Any]) -> Any:
+        return DocumentExtractionService(self).view(**dict(p))
+
+    def _op_generate_document_extraction(self, p: Mapping[str, Any]) -> Any:
+        return DocumentExtractionService(self).generate(**dict(p))
+
+    def _op_stage_document_extraction(self, p: Mapping[str, Any]) -> Any:
+        return DocumentExtractionService(self).stage(**dict(p))
+
     def _op_mission_document_reviews(self, p: Mapping[str, Any]) -> Any:
         values = dict(p)
         include_candidates = values.pop("include_candidates", False)
@@ -2975,6 +3010,7 @@ def main(argv: list[str] | None = None) -> int:
         "--search-rehearsal-approved-by",
         help="rehearsal only: in-memory approved search governance principal (tests)",
     )
+    parser.add_argument("--document-extraction-model-config", help="Explicit approved broker/router and existing shared budget authority JSON; no secrets inline")
     parser.add_argument("--planner-routing-policy")
     parser.add_argument("--planner-credential-slots")
     parser.add_argument("--planner-model-router-db")
@@ -3089,6 +3125,8 @@ def main(argv: list[str] | None = None) -> int:
             candidate_staging_path=args.candidate_staging,
             sec_lane_launcher=sec_lane_launcher,
             planner_model_config=planner_model_config,
+            document_extraction_model_config=(None if args.document_extraction_model_config is None
+                else json.loads(Path(args.document_extraction_model_config).read_text(encoding="utf-8"))),
             search_launcher=search_launcher,
             discovery_plan_path=args.alphaengine_discovery_plan,
         )

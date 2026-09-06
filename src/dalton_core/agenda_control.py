@@ -688,6 +688,18 @@ class AgendaControlApplication:
         assert self.review_plane is not None
         return self.review_plane.record_document_review(login, value)
 
+    def post_document_evidence(self, login, session, csrf, body):
+        value = self._review_body(session, csrf, body)
+        return self.review_plane.document_extraction(login, value)
+
+    def post_document_staging(self, login, session, csrf, body):
+        value = self._review_body(session, csrf, body)
+        return self.review_plane.stage_document_extraction(login, value)
+
+    def post_document_extraction(self, login, session, csrf, body):
+        value = self._review_body(session, csrf, body)
+        return self.review_plane.document_extraction(login, value, generate=True)
+
     def post_intent(
         self, login: str, session: _Session, csrf: str | None, body: bytes
     ) -> dict[str, Any]:
@@ -914,6 +926,9 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 "/v1/research-review/decision": application.post_review,
                 "/v1/transcript-review/decision": application.post_transcript_review,
                 "/v1/mission-document-review/decision": application.post_document_review,
+                "/v1/mission-document-review/evidence": application.post_document_evidence,
+                "/v1/mission-document-review/extract": application.post_document_extraction,
+                "/v1/mission-document-review/stage": application.post_document_staging,
                 "/v1/intent/compose": application.post_intent,
                 "/v1/intent/confirm": application.post_intent_confirm,
                 "/v1/answer/route": application.post_answer,

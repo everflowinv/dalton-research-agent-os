@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -323,6 +324,45 @@ class AlphaEngineAcquisitionLauncher:
         if record["status"] != "running" and summary_path.is_file():
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
         return {**record, "summary": summary}
+
+    def read_completed_manifest(self, ticket_ref: str, document_ref: str) -> dict[str, Any]:
+        """Read a settled acquisition without polling, spawning or mutating it.
+
+        Only server-derived ticket refs are used; no client path/manifest is
+        accepted. Receipt and raw-byte verification is the caller's next gate.
+        """
+        if not isinstance(ticket_ref, str) or _TICKET_RE.fullmatch(ticket_ref) is None:
+            raise AcquisitionLaunchRejected("invalid acquisition ticket reference")
+        directory = self._ticket_path(ticket_ref).parent
+        if directory.is_symlink() or directory.parent.is_symlink():
+            raise AcquisitionLaunchRejected("acquisition directory cannot be a symlink")
+        records = []
+        for name in ("ticket.json", "summary.json", "manifest.json"):
+            path = directory / name
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(fd, "rb") as handle:
+                    info = os.fstat(handle.fileno())
+                    if (not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077
+                            or info.st_uid != os.getuid() or info.st_size > 2000000):
+                        raise AcquisitionLaunchRejected("acquisition file must be bounded and owner-only")
+                    value = json.loads(handle.read(2000001).decode("utf-8"))
+                if not isinstance(value, dict):
+                    raise ValueError("not an object")
+                records.append(value)
+            except (OSError, ValueError) as exc:
+                raise AcquisitionLaunchRejected("completed acquisition files are unavailable") from exc
+        ticket, summary, manifest = records
+        if (ticket.get("id") != ticket_ref or ticket.get("status") != "succeeded"
+                or ticket.get("document_ref") != document_ref
+                or summary.get("document_ref") != document_ref
+                or manifest.get("document_ref") != document_ref
+                or summary.get("manifest_ref") != manifest.get("id")
+                or summary.get("manifest_hash") != manifest.get("content_hash")
+                or summary.get("manifest_status") != "complete"
+                or summary.get("assembled_content_sha256") != manifest.get("declared_content_sha256")):
+            raise AcquisitionLaunchRejected("ticket, summary and manifest disagree")
+        return manifest
 
     @staticmethod
     def _pid_alive(pid: Any) -> bool:

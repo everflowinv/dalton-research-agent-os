@@ -44,7 +44,7 @@ _UTTERANCE_EVIDENCE_KINDS = frozenset({
 _UTTERANCE_LEVEL_CORRECTIONS = frozenset({
     "numeric", "negation", "semantic", "speaker_label",
 })
-_REVIEW_SCOPES = frozenset({"targeted_flags", "full_document"})
+_REVIEW_SCOPES = frozenset({"targeted_flags", "full_document", "verified_raw_span"})
 _CITATION_FIELDS = {
     "schema_version", "id", "created_at", "source_manifest_ref",
     "source_manifest_hash", "source_content_hash", "source_start",
@@ -319,6 +319,10 @@ def validate_persisted_transcript_claim_citation(
         )
     accepted: list[int] = []
     unresolved: list[int] = []
+    if correction_set.get("review_scope") == "verified_raw_span":
+        reviewed = correction_set.get("raw_review", {})
+        if not reviewed.get("source_start", -1) <= binding["source_start"] < binding["source_end"] <= reviewed.get("source_end", -1):
+            raise TranscriptCorrectionConflict("citation exceeds human-reviewed raw span")
     corrections = correction_set.get("corrections")
     if not isinstance(corrections, list):
         raise TranscriptCorrectionConflict(
@@ -707,6 +711,7 @@ class TranscriptCorrectionAuthority:
         corrections: Sequence[Mapping[str, Any]],
         actor_ref: str,
         prior_version_ref: str | None = None,
+        raw_review: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         correction_set_ref = _text(correction_set_ref, "correction_set_ref")
         source_manifest_ref = _text(source_manifest_ref, "source_manifest_ref")
@@ -718,7 +723,23 @@ class TranscriptCorrectionAuthority:
         manifest, original = self._source(
             source_manifest_ref, source_manifest_hash, source_content_hash
         )
-        normalized = self._corrections(corrections, original)
+        if review_scope == "verified_raw_span":
+            # Separate explicit human no-correction admission. Existing ASR
+            # correction scopes still require at least one evidence-bound entry.
+            raw_review = _closed(raw_review, {"source_start", "source_end", "source_sha256", "rationale"}, "raw_review")
+            start, end = raw_review["source_start"], raw_review["source_end"]
+            if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(original) or end-start > 1200:
+                raise TranscriptCorrectionValidationError("raw review requires a bounded exact citation span")
+            if raw_review["source_sha256"] != hashlib.sha256(original[start:end].encode("utf-8")).hexdigest():
+                raise TranscriptCorrectionConflict("reviewed raw span hash differs")
+            rationale = _text(raw_review["rationale"], "raw_review.rationale")
+            if not rationale.strip() or len(rationale) > 4000 or corrections != []:
+                raise TranscriptCorrectionValidationError("raw review requires explicit rationale and no source edits")
+            normalized = []
+        else:
+            if raw_review is not None:
+                raise TranscriptCorrectionValidationError("raw review is not an ASR correction")
+            normalized = self._corrections(corrections, original)
         latest = self.connection.execute(
             "SELECT * FROM transcript_correction_set_versions "
             "WHERE correction_set_ref=? ORDER BY version_number DESC LIMIT 1",
@@ -732,6 +753,8 @@ class TranscriptCorrectionAuthority:
             "review_scope": review_scope,
             "corrections": normalized,
         }
+        if raw_review is not None:
+            stable["raw_review"] = raw_review
         if latest is None:
             if prior_version_ref is not None:
                 raise TranscriptCorrectionConflict(
@@ -808,6 +831,13 @@ class TranscriptCorrectionAuthority:
             correction_set["source_manifest_hash"],
             correction_set["source_content_hash"],
         )
+        if correction_set.get("review_scope") == "verified_raw_span":
+            reviewed = correction_set["raw_review"]
+            start, end = reviewed["source_start"], reviewed["source_end"]
+            if (type(start) is not int or type(end) is not int or not 0 <= start < end <= len(original)
+                or end-start > 1200 or correction_set["corrections"]
+                or hashlib.sha256(original[start:end].encode("utf-8")).hexdigest() != reviewed["source_sha256"]):
+                raise TranscriptCorrectionConflict("human-reviewed original changed")
         parts: list[str] = []
         cursor = 0
         resolved_cursor = 0
@@ -894,6 +924,10 @@ class TranscriptCorrectionAuthority:
                 "claim citation source span is invalid"
             )
         correction_set = resolved["correction_set"]
+        if correction_set.get("review_scope") == "verified_raw_span":
+            reviewed = correction_set["raw_review"]
+            if not reviewed["source_start"] <= source_start < source_end <= reviewed["source_end"]:
+                raise TranscriptCorrectionConflict("citation exceeds human-reviewed raw span")
         accepted_indexes: list[int] = []
         unresolved_indexes: list[int] = []
         for index, item in enumerate(correction_set["corrections"]):

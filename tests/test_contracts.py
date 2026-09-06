@@ -53,6 +53,7 @@ class ContractTests(unittest.TestCase):
                     "ThesisImpactVerifierOutputV0.2",
                     "LLMPlannerCandidateV0.1",
                     "TranscriptPolishCandidateV0.1",
+                    "DocumentExtractionSuggestionsV0.1",
                 }:
                     # Model-owned output is bound by its WorkOrder and target
                     # assessment; authority adds id/created_at only after validation.

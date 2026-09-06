@@ -79,6 +79,7 @@ class ResearchReviewControlConfig:
     candidate_staging_path: Path
     transcript_review_directory: Path
     reconcile_interval_seconds: int
+    document_extraction_model_config_path: Path | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ResearchReviewControlConfig":
@@ -86,7 +87,8 @@ class ResearchReviewControlConfig:
             "candidate_staging_path", "transcript_review_directory",
             "reconcile_interval_seconds",
         }
-        if set(raw) != expected:
+        optional = {"document_extraction_model_config_path"}
+        if not expected <= set(raw) or set(raw) - expected - optional:
             raise ResearchReviewControlError(
                 "embedded research review config has an invalid closed shape"
             )
@@ -98,6 +100,8 @@ class ResearchReviewControlConfig:
                 raw["transcript_review_directory"],
                 "transcript_review_directory",
             ),
+            document_extraction_model_config_path=(None if raw.get("document_extraction_model_config_path") is None
+                else _absolute_path(raw["document_extraction_model_config_path"], "document_extraction_model_config_path")),
             reconcile_interval_seconds=_positive_int(
                 raw["reconcile_interval_seconds"],
                 "reconcile_interval_seconds",
@@ -748,6 +752,45 @@ class ResearchReviewControlPlane:
             "limit_reached": result["limit_reached"],
             "candidate_limit_reached": result["candidate_limit_reached"],
         }
+
+    def document_extraction(self, login: str, value: Mapping[str, Any], *, generate=False) -> dict[str, Any]:
+        expected = {"review_id", "review_hash", "offset"}
+        if generate:
+            expected.add("context_hash")
+        if set(value) != expected:
+            raise ResearchReviewControlError("document extraction request has an invalid closed shape")
+        review_id = _string(value["review_id"], "review_id")
+        if len(review_id) > 200 or not review_id.startswith("mission-document-review:"):
+            raise ResearchReviewControlError("invalid review id")
+        offset = value["offset"]
+        if type(offset) is not int or not 0 <= offset < 600000 or offset % 12000:
+            raise ResearchReviewControlError("invalid original window")
+        params = {"review_id": review_id, "expected_review_hash": _hash(value["review_hash"], "review_hash"),
+                  "offset": offset}
+        if generate:
+            params["expected_context_hash"] = _hash(value["context_hash"], "context_hash")
+        try:
+            return self._governance_call(
+                self.token_config, self.writer_socket, actor_ref=_subject_for_login(login),
+                operation="generate_document_extraction" if generate else "mission_document_evidence", params=params,
+            )
+        except Exception as exc:
+            raise ResearchReviewControlError("original or extraction unavailable; reload document review") from exc
+
+    def stage_document_extraction(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        fields = {"review_id", "review_hash", "offset", "context_hash", "suggestion_ref", "suggestion_hash",
+                  "request_id", "normalized_statement", "metric_or_aspect", "period", "basis", "source_start",
+                  "source_end", "raw_text", "rationale", "confirm_citation", "correction_set_version_ref", "correction_set_version_hash"}
+        if set(value) != fields:
+            raise ResearchReviewControlError("human staging requires an exact closed request")
+        params = dict(value)
+        params["expected_review_hash"] = _hash(params.pop("review_hash"), "review_hash")
+        params["expected_context_hash"] = _hash(params.pop("context_hash"), "context_hash")
+        try:
+            return self._governance_call(self.token_config, self.writer_socket, actor_ref=_subject_for_login(login),
+                                         operation="stage_document_extraction", params=params)
+        except Exception as exc:
+            raise ResearchReviewControlError("citation/staging rejected; reload and check exact original") from exc
 
     def record_document_review(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
         expected = {

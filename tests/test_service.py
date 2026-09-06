@@ -416,6 +416,17 @@ class ServiceTests(unittest.TestCase):
                 str(root / "candidate-staging.sqlite"),
             )
 
+            self.assertNotIn("--document-extraction-model-config", writer_args)
+            raw = json.loads(config.read_text())
+            extraction = str(root / "approved-extraction.json")
+            raw["control"]["config"]["research_review"]["document_extraction_model_config_path"] = extraction
+            config.write_text(json.dumps(raw))
+            paths = render(root / "LaunchAgents", root / "venv" / "bin", root / "state", config, root / "logs")
+            writer_args = plistlib.loads(Path(paths["writer"]).read_bytes())["ProgramArguments"]
+            self.assertEqual(writer_args[writer_args.index("--document-extraction-model-config") + 1], extraction)
+            control_args = plistlib.loads(Path(paths["control"]).read_bytes())["ProgramArguments"]
+            self.assertNotIn("--document-extraction-model-config", control_args)
+
     def test_writer_without_control_plane_has_no_candidate_staging(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

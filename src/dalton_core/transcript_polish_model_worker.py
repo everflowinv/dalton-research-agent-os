@@ -58,6 +58,24 @@ def _utc(clock: Callable[[], datetime]) -> str:
 class RoutedTranscriptPolishModelWorker:
     """Route, execute, account, and close one candidate-generation call."""
 
+    # Subclasses may specialize the closed task and output contract while
+    # retaining the same Scheduler lease, route, replay and accounting chain.
+    worker_ref = TRANSCRIPT_POLISH_MODEL_WORKER_REF
+    namespace = "transcript-polish-model"
+
+    @staticmethod
+    def _validate_candidate_sink(sink: Any) -> None:
+        if not isinstance(sink, TranscriptPolishWorker):
+            raise TypeError("polish_worker must be TranscriptPolishWorker")
+
+    @staticmethod
+    def _validate_scheduler_store(scheduler, store):
+        if scheduler.connection is not store.connection:
+            raise TypeError("worker and Scheduler must share one Core connection")
+
+    def _parse_candidate(self, text: str, work: WorkOrder) -> None:
+        parse_transcript_polish_candidate_text(text)
+
     def __init__(
         self,
         *,
@@ -73,12 +91,10 @@ class RoutedTranscriptPolishModelWorker:
         lease_seconds: float | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if scheduler.connection is not store.connection:
-            raise TypeError("worker and Scheduler must share one Core connection")
+        self._validate_scheduler_store(scheduler, store)
         if observability.store is not store:
             raise TypeError("worker accounting must share one Core authority")
-        if not isinstance(polish_worker, TranscriptPolishWorker):
-            raise TypeError("polish_worker must be TranscriptPolishWorker")
+        self._validate_candidate_sink(polish_worker)
         if not isinstance(routing_policy_ref, str) or not routing_policy_ref:
             raise ValueError("routing_policy_ref must be non-empty")
         slots = tuple(credential_slot_refs)
@@ -239,6 +255,12 @@ class RoutedTranscriptPolishModelWorker:
             )
         return ModelInvocation.from_dict(saved_wire)
 
+    def _before_model_call(self, work, route, profile, replayed):
+        """Specialized tasks reserve budget before any broker I/O."""
+
+    def _after_accounting(self, work, route, accounting):
+        """Specialized tasks settle only after durable usage/cost records."""
+
     def run_once(
         self, work_order: WorkOrder | Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -257,7 +279,7 @@ class RoutedTranscriptPolishModelWorker:
                 "replayed": True,
             }
         lease = self.scheduler.claim(
-            TRANSCRIPT_POLISH_MODEL_WORKER_REF,
+            self.worker_ref,
             work_order_id=work.id,
             lease_seconds=self.lease_seconds,
         )
@@ -299,7 +321,7 @@ class RoutedTranscriptPolishModelWorker:
                 previous_decision_ref=None if not prior else prior[-1]["id"],
                 producer_family=None,
                 idempotency_key=(
-                    f"transcript-polish-model-route:{work.id}:{attempt_number}"
+                    f"{self.namespace}-route:{work.id}:{attempt_number}"
                 ),
             )
             route = routed["decision"]
@@ -314,16 +336,17 @@ class RoutedTranscriptPolishModelWorker:
             completion = self.scheduler.complete(
                 work.id,
                 attempt_number,
-                TRANSCRIPT_POLISH_MODEL_WORKER_REF,
+                self.worker_ref,
                 lease["lease_token"],
                 result,
                 idempotency_key=(
-                    f"transcript-polish-model-complete:{work.id}:{attempt_number}"
+                    f"{self.namespace}-complete:{work.id}:{attempt_number}"
                 ),
             )
             return {"status": "failed", "route": route, "completion": completion}
         profile = self.router.get_profile(route["selected_profile_version_ref"])
         try:
+            self._before_model_call(work, route, profile, route_replayed)
             if route_replayed:
                 invocation, adapter_result = self.adapter.replay(
                     work, route, profile
@@ -352,11 +375,11 @@ class RoutedTranscriptPolishModelWorker:
             completion = self.scheduler.complete(
                 work.id,
                 attempt_number,
-                TRANSCRIPT_POLISH_MODEL_WORKER_REF,
+                self.worker_ref,
                 lease["lease_token"],
                 result,
                 idempotency_key=(
-                    f"transcript-polish-model-complete:{work.id}:{attempt_number}"
+                    f"{self.namespace}-complete:{work.id}:{attempt_number}"
                 ),
             )
             return {
@@ -387,11 +410,11 @@ class RoutedTranscriptPolishModelWorker:
             completion = self.scheduler.complete(
                 work.id,
                 attempt_number,
-                TRANSCRIPT_POLISH_MODEL_WORKER_REF,
+                self.worker_ref,
                 lease["lease_token"],
                 result,
                 idempotency_key=(
-                    f"transcript-polish-model-complete:{work.id}:{attempt_number}"
+                    f"{self.namespace}-complete:{work.id}:{attempt_number}"
                 ),
             )
             return {"status": "failed", "route": route, "completion": completion}
@@ -405,14 +428,15 @@ class RoutedTranscriptPolishModelWorker:
             invocation,
             route,
             profile,
-            actor_ref=TRANSCRIPT_POLISH_MODEL_WORKER_REF,
-            namespace="transcript-polish-model",
+            actor_ref=self.worker_ref,
+            namespace=self.namespace,
         )
+        accounting_failure = self._after_accounting(work, route, accounting)
         try:
             self.scheduler.validate_lease_for_use(
                 work.id,
                 attempt_number,
-                TRANSCRIPT_POLISH_MODEL_WORKER_REF,
+                self.worker_ref,
                 lease["lease_token"],
                 lease_revision_ref=lease["lease"]["id"],
                 lease_hash=lease["lease"]["content_hash"],
@@ -439,6 +463,10 @@ class RoutedTranscriptPolishModelWorker:
                 "replayed": False,
             }
         result = adapter_result
+        if accounting_failure is not None:
+            result = self._control_result(work, attempt_number, code=accounting_failure, status="failed",
+                invocation_ref=invocation.id, route_ref=route["id"], usage_refs=adapter_result.usage_refs,
+                created_at=adapter_result.created_at)
         output_error = None
         if result.status == "succeeded":
             try:
@@ -447,7 +475,7 @@ class RoutedTranscriptPolishModelWorker:
                 text = result.outputs["text"]
                 if not isinstance(text, str):
                     raise ValueError("result text is invalid")
-                parse_transcript_polish_candidate_text(text)
+                self._parse_candidate(text, work)
             except Exception as exc:
                 output_error = type(exc).__name__
                 result = self._control_result(
@@ -479,11 +507,11 @@ class RoutedTranscriptPolishModelWorker:
             completion = self.scheduler.complete(
                 work.id,
                 attempt_number,
-                TRANSCRIPT_POLISH_MODEL_WORKER_REF,
+                self.worker_ref,
                 lease["lease_token"],
                 result,
                 idempotency_key=(
-                    f"transcript-polish-model-complete:{work.id}:{attempt_number}"
+                    f"{self.namespace}-complete:{work.id}:{attempt_number}"
                 ),
             )
         except LeaseExpired:

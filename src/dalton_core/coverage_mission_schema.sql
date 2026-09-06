@@ -263,3 +263,16 @@ BEFORE UPDATE ON coverage_mission_document_reviews WHEN dalton_coverage_mission_
     SELECT RAISE(ABORT, 'mission document review update requires CoverageMissionAuthority'); END;
 CREATE TRIGGER IF NOT EXISTS coverage_mission_document_reviews_no_delete
 BEFORE DELETE ON coverage_mission_document_reviews BEGIN SELECT RAISE(ABORT, 'mission document reviews cannot be deleted'); END;
+
+-- Human confirmation journal for the multi-store correction -> citation ->
+-- CandidateStaging workflow. Not a second candidate or evidence authority.
+CREATE TABLE IF NOT EXISTS coverage_mission_document_staging_requests (
+    request_id TEXT PRIMARY KEY,
+    review_id TEXT NOT NULL,
+    request_json TEXT NOT NULL,
+    request_hash TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS mission_document_staging_request_no_update
+BEFORE UPDATE ON coverage_mission_document_staging_requests BEGIN SELECT RAISE(ABORT, 'human staging requests are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS mission_document_staging_request_no_delete
+BEFORE DELETE ON coverage_mission_document_staging_requests BEGIN SELECT RAISE(ABORT, 'human staging requests are immutable'); END;

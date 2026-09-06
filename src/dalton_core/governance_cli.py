@@ -66,7 +66,11 @@ def ephemeral_call(token_config: str | Path, socket_path: str | Path, *, actor_r
         )
         replace_token_config(config, [*principals.values(), human])
         try:
-            return WriterClient(str(socket), token).call(operation, dict(params))
+            # Keep the ephemeral human principal valid through the bounded
+            # broker round-trip. Other governance operations retain their
+            # existing timeout; no retry or second model call is introduced.
+            timeout = 90 if operation == "generate_document_extraction" else 10
+            return WriterClient(str(socket), token, timeout=timeout).call(operation, dict(params))
         finally:
             current = load_principals(config)
             current.pop(principal_id, None)
