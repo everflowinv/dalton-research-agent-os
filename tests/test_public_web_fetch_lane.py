@@ -41,6 +41,7 @@ from dalton_core.public_web_core_search import (
     public_web_urls_in_authority,
     web_search_spec_hash,
 )
+from dalton_core.document_extraction import WEB_GATE_REASON
 from dalton_core.public_web_fetch_cli import fake_page_transport
 from dalton_core.public_web_fetch_launcher import (
     FetchLaunchRejected,
@@ -527,12 +528,45 @@ class P9d4bWriterOpsTests(unittest.TestCase):
         reviews = h.governance.call("mission_document_reviews", {"state": "awaiting_human_extraction"})
         self.assertEqual([item["document_ref"] for item in reviews["reviews"]], [URL_A])
         review = reviews["reviews"][0]
-        # The review is real and human-only to resolve; its page cannot yet be
-        # rendered as an extraction source (P9d-4c): the writer rejects the
-        # view (message bodies are fixed text by design) and the review stays queued.
+        # P9d-4c: the fetched page is a verified read-only original. The human
+        # sees the URL it came from and bounded quotes of its exact bytes.
+        review_hash = content_hash(review)
+        evidence = h.governance.call("mission_document_evidence", {
+            "review_id": review["review_id"], "expected_review_hash": review_hash, "offset": 0,
+        })
+        context = evidence["context"]
+        self.assertEqual((context["source_ref"], context["document_ref"]), (WEB_SEARCH_SOURCE_REF, URL_A))
+        self.assertEqual((context["canonical_url"], context["host"]), ("https://example.com/investors?q=ai", "example.com"))
+        self.assertEqual((context["source_renderer"], context["body_sha256"]), ("html-visible-blocks:0.1", BODY_HASH))
+        self.assertEqual(context["source_content_hash"], hashlib.sha256(
+            "Leadership update\n\noriginal bytes, never a snippet".encode("utf-8")).hexdigest())
+        self.assertEqual(context["quotes"][0]["raw_text"], "Leadership update\n\noriginal bytes, never a snippet")
+        self.assertEqual((context["total_chars"], context["next_offset"], context["untrusted_source"]),
+                         (len(context["quotes"][0]["raw_text"]), None, True))
+        # Drafting and staging stay refused: the candidate chain is bound to
+        # transcript correction authority, so no model budget is spent here.
+        self.assertEqual((evidence["generation_enabled"], evidence["gate_reason"], evidence["status"]),
+                         (False, WEB_GATE_REASON, "not_generated"))
+        gated = h.governance.call("generate_document_extraction", {
+            "review_id": review["review_id"], "expected_review_hash": review_hash, "offset": 0,
+            "expected_context_hash": context["content_hash"],
+        })
+        self.assertEqual((gated["status"], gated["reason"], gated["formal_authority_writes"]),
+                         ("gated", WEB_GATE_REASON, 0))
+        with self.assertRaises(RemoteError):
+            h.governance.call("stage_document_extraction", {
+                "review_id": review["review_id"], "expected_review_hash": review_hash, "offset": 0,
+                "expected_context_hash": context["content_hash"],
+                "suggestion_ref": "document-extraction-suggestion:x", "suggestion_hash": "0" * 64,
+                "request_id": "req-1", "normalized_statement": "s", "metric_or_aspect": "m",
+                "period": "2026Q3", "basis": "reported", "source_start": 0, "source_end": 5,
+                "raw_text": "Leade", "rationale": "checked", "confirm_citation": True,
+                "correction_set_version_ref": None, "correction_set_version_hash": None,
+            })
+        # A stale review hash still fails closed on the new lane.
         with self.assertRaises(RemoteError):
             h.governance.call("mission_document_evidence", {
-                "review_id": review["review_id"], "expected_review_hash": content_hash(review), "offset": 0,
+                "review_id": review["review_id"], "expected_review_hash": "0" * 64, "offset": 0,
             })
         self.assertEqual(h.governance.call("mission_document_reviews", {"state": "awaiting_human_extraction"})["reviews"][0]["review_id"], review["review_id"])
         # The same tick already launched the second URL; a human request while

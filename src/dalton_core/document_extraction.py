@@ -20,6 +20,7 @@ from .alphaengine_document_acquisition import validate_alphaengine_document_acqu
 from .contracts import WorkOrder, ResultEnvelope, ModelInvocation, InvocationGranularity
 from .connector_authority_port import ConnectorCompletionReceiptReader
 from .live_mcp_connector import alphaengine_document_page_from_raw_response
+from .public_web_extraction_source import verified_public_web_source
 from .research_verification import ResearchVerificationConflict, ResearchVerificationError
 from .store import canonical_json, content_hash
 from .transcript_candidate_staging import TranscriptCoreAuthorityResolver
@@ -32,6 +33,14 @@ WINDOW_CHARS = 12000
 QUOTE_CHARS = 1200
 MAX_DOCUMENT_CHARS = 600000
 GATE_REASON = "document_extraction_model_config_not_installed"
+# P9d-4c: a fetched public-web page can be read and cited by a human, but the
+# suggestion/staging chain below is bound to transcript correction authority
+# and AlphaEngine document lineage, so model drafting and candidate staging
+# stay refused for web pages until that chain has its own slice.
+WEB_GATE_REASON = "public_web_extraction_drafting_not_supported"
+ALPHAENGINE_SOURCE_REF = "source:alphaengine"
+PUBLIC_WEB_SOURCE_REF = "source:web-search"
+SUPPORTED_SOURCE_REFS = frozenset({ALPHAENGINE_SOURCE_REF, PUBLIC_WEB_SOURCE_REF})
 OUTPUT_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "DocumentExtractionSuggestionsV0.1",
@@ -419,12 +428,9 @@ class DocumentExtractionService:
             company_ref=review["company_ref"], source_ref=review["source_ref"],
             requested_by=actor_ref, mission_version_ref=review["mission_version_ref"],
         )
-        if review["source_ref"] != "source:alphaengine":
-            # P9d-4b queues fetched public-web pages; rendering their bytes as
-            # a verified extraction source is the next slice (P9d-4c).
+        if review["source_ref"] not in SUPPORTED_SOURCE_REFS:
             raise ResearchVerificationError(
-                "only acquired AlphaEngine documents can be viewed here; fetched "
-                "public-web pages await the public-web extraction source (P9d-4c)"
+                "only acquired AlphaEngine documents and fetched public-web pages can be viewed here"
             )
         row = writer.store.connection.execute(
             "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?",
@@ -434,11 +440,32 @@ class DocumentExtractionService:
             row[key] != review[key] for key in ("document_ref", "company_ref", "source_ref", "mission_version_ref")
         ):
             raise ResearchVerificationConflict("review no longer binds the acquired document")
-        manifest = writer.acquisition_launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
+        # Both lanes stream their raw bytes into the same owner-only spool.
         if writer._transcript_spool is None:
             raise ResearchVerificationError("original spool is unavailable")
         reader = ConnectorCompletionReceiptReader(connectors=writer._connectors, observability=writer.observability)
-        manifest, text = verified_source(writer.store, writer._transcript_spool, manifest, reader)
+        web_fields: dict[str, Any] = {}
+        if review["source_ref"] == ALPHAENGINE_SOURCE_REF:
+            manifest = writer.acquisition_launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
+            manifest, text = verified_source(writer.store, writer._transcript_spool, manifest, reader)
+            source_content_hash = manifest["declared_content_sha256"]
+        else:
+            # The review names the URL ref; the manifest names the fetched
+            # record (url hash + body hash).  The launcher cross-checks both.
+            manifest = writer.web_fetch_launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
+            manifest, rendering = verified_public_web_source(
+                writer.store, writer._transcript_spool, manifest, reader
+            )
+            text = rendering["text"]
+            # A web page has no declared content hash of its own: the citable
+            # original is the deterministic rendering of its exact bytes, so
+            # the renderer identity is part of what a context binds.
+            source_content_hash = _hash_text(text)
+            web_fields = {
+                "canonical_url": manifest["canonical_url"], "host": manifest["host"],
+                "raw_media_type": manifest["raw_media_type"], "body_sha256": manifest["body_sha256"],
+                "source_renderer": rendering["renderer"], "source_truncated": rendering["truncated"],
+            }
         if type(offset) is not int or offset < 0 or offset >= len(text) or offset % WINDOW_CHARS:
             raise ResearchVerificationError("source offset must be a valid bounded window")
         end = min(offset + WINDOW_CHARS, len(text))
@@ -455,10 +482,11 @@ class DocumentExtractionService:
             "mission_version_hash": grant["mission_version_hash"], "company_ref": review["company_ref"],
             "source_ref": review["source_ref"], "document_ref": review["document_ref"],
             "discovered_document_hash": content_hash(dict(row)), "source_manifest_ref": manifest["id"],
-            "source_manifest_hash": manifest["content_hash"], "source_content_hash": manifest["declared_content_sha256"],
+            "source_manifest_hash": manifest["content_hash"], "source_content_hash": source_content_hash,
             "offset": offset, "end": end, "total_chars": len(text),
             "next_offset": end if end < len(text) else None,
             "quotes": quotes, "untrusted_source": True, "coverage": "visible_window_only",
+            **web_fields,
         }
         return base
 
@@ -632,6 +660,11 @@ class DocumentExtractionService:
 
     def view(self, *, review_id, expected_review_hash, offset, actor_ref):
         context = self.context(review_id, expected_review_hash, offset, actor_ref)
+        if context["source_ref"] == PUBLIC_WEB_SOURCE_REF:
+            # Read-only original: verified windows and quotes, no drafting.
+            return {"context": context, "model_budget": {"status": "not_reserved"},
+                    "model_execution": "gated", "gate_reason": WEB_GATE_REASON,
+                    "generation_enabled": False, "status": "not_generated", "suggestions": []}
         configured = bool(context.get("model_binding"))
         return {"context": context, "model_budget": self.budget_status(context), "model_execution": "broker" if configured else "gated", "gate_reason": None if configured else GATE_REASON,
                 "generation_enabled": configured or self.writer._document_extraction_worker_factory is not None,
@@ -641,6 +674,10 @@ class DocumentExtractionService:
         context = self.context(review_id, expected_review_hash, offset, actor_ref)
         if context["content_hash"] != expected_context_hash:
             raise ResearchVerificationConflict("source context changed; reload original")
+        if context["source_ref"] == PUBLIC_WEB_SOURCE_REF:
+            # Drafting would spend model budget on suggestions that cannot be
+            # staged, so it is refused before any route or reservation.
+            return {"status": "gated", "reason": WEB_GATE_REASON, "formal_authority_writes": 0}
         factory = self.writer._document_extraction_worker_factory
         config = getattr(self.writer, "_document_extraction_model_config", None)
         if factory is None and config is None:
@@ -698,6 +735,13 @@ class DocumentExtractionService:
         context = self.context(review_id, expected_review_hash, offset, actor_ref)
         if context["content_hash"] != expected_context_hash:
             raise ResearchVerificationConflict("source context is stale")
+        if context["source_ref"] == PUBLIC_WEB_SOURCE_REF:
+            # The candidate chain below binds transcript correction authority
+            # and AlphaEngine document lineage; a fetched page cannot enter it.
+            raise ResearchVerificationError(
+                "fetched public-web pages can be read and dismissed, but not staged as "
+                "candidates; that chain is bound to transcript correction authority"
+            )
         suggestions = self._suggestions(context)["suggestions"]
         suggestion = next((s for s in suggestions if s["id"] == suggestion_ref and s["content_hash"] == suggestion_hash), None)
         if suggestion is None:

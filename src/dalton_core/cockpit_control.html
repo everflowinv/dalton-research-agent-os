@@ -137,7 +137,7 @@ function renderDocumentReviews(data){
   if(data.candidate_limit_reached)documentReviewList.append(node("div","候选较多，匹配列表可能不完整；未显示的候选可通过已有治理入口登记。","notice"));
   data.items.forEach(item=>{
     const card=node("article",null,"card"),head=node("div",null,"head"),copy=node("div");
-    copy.append(node("div",`${item.company_label||item.company_ref} · 待抽取文档`,"subject"),node("div",item.source_ref==="source:alphaengine"?`AlphaEngine 文档 ${item.document_ref.replace(/^alphaengine-doc:/,"")}`:item.document_ref,"ref"));
+    copy.append(node("div",`${item.company_label||item.company_ref} · 待抽取文档`,"subject"),node("div",item.source_ref==="source:alphaengine"?`AlphaEngine 文档 ${item.document_ref.replace(/^alphaengine-doc:/,"")}`:item.source_ref==="source:web-search"?`公开网页 ${item.document_ref.replace(/^public-web-url:sha256:/,"").slice(0,16)}…`:item.document_ref,"ref"));
     head.append(copy,node("div","等待人工抽取","state pending"));
     card.append(head,node("div",`入队 ${fmtDate(item.created_at)}`,"meta"));
     const refs=node("details",null,"refs");

@@ -86,6 +86,11 @@ mission 新版本。见 [P9d-4a 报告](p9d4a-web-search-mission-discovery-v0.1-
 搜索字节重建 URL authority、原始字节进 authority、`acquired` 后进人工抽取队列；live Core 只读副本 canary 通过，未部署，
 0 网络调用。页面渲染为抽取来源留待 P9d-4c。见 [P9d-4b 报告](p9d4b-public-web-fetch-lane-v0.1-2026-09-06.md)。
 
+进展（2026-09-06，同日）：P9d-4c 让已获取网页成为**可核验的只读抽取来源**——逐跳核验 Core 回执、确定性渲染、
+窗口与引文可用；模型起草与候选 staging 对网页仍关闭（该链绑定 transcript 修正权威）。live Core 只读副本 canary
+通过，未部署。owner 已批准 web search 与 web fetch 两条治理记录，但 live mission 的 `source:web-search` 仍
+`not_connected`，尚未启用。见 [P9d-4c 报告](p9d4c-public-web-extraction-source-v0.1-2026-09-06.md)。
+
 ### P9e：建模自主化（M2）
 
 - 从 XBRL 历史生成标准化三表（playbook 期间标准），套 IT services driver（headcount、utilization、bookings、book-to-bill）产出预测线；估值 fail closed 直到市场数据 connector 解冻（owner gate）。

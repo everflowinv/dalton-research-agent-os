@@ -1,6 +1,28 @@
 # Dalton 项目进度
 
 更新日期：2026-09-06
+- **owner 已批准两条 connector 治理记录（2026-09-06）。** `connector-governance:gemini-web-search:v1`
+  （hash `927c25ed…`）与 `connector-governance:web-fetch:v1`（hash `87c094ca…`）已按既有流程 seed 到 live state
+  `connector-governance/` 并由 `human:lumos` 原地 approve，文件权限 0600；仓库 deploy 模板仍为 `proposed`。
+  **批准本身没有激活任何东西**：live mission v2 的 `source:web-search` 仍是 `not_connected`，P9d-4a/4b/4c 的代码
+  未部署，真实 gateway `web_search` handle 未接线，因此 live 上没有搜索、没有获取、没有网页。启用仍需 owner
+  发布 mission 新版本改 `source:web-search` 状态（先 `probe_only` 排练，再 `connected`）。
+- **P9d-4c「已获取网页作为可核验的抽取来源」development candidate 已完成，未部署、0 网络调用。**
+  P9d-4b 收进 authority 的网页现在人能真正读到：新 `public_web_extraction_source` 从 fetch manifest 逐跳核验
+  Core 回执（manifest→invocation→call spec/profile，manifest→source envelope→raw artifact，spool 字节必须 hash 成
+  record 自己命名的 body hash，另反查恰好一条 `succeeded` attempt 与 `consumed` settlement），再确定性渲染成文本
+  供既有窗口/引文机制使用。只渲染 UTF-8 的 HTML/纯文本，PDF、图片、非 UTF-8 一律拒绝；script/style/noscript 等
+  整体丢弃；零宽字符删除、Unicode 空白折叠，避免隐形内容藏进引文；超过 60 万字符按控制面上限截断并声明。
+  AlphaEngine 路径逐字未动（既有 17/17 通过），网页 context 只**追加** `canonical_url/host/raw_media_type/
+  body_sha256/source_renderer/source_truncated`，其 `source_content_hash` 是渲染文本的 sha256。
+  **网页只读**：模型起草在任何 route/预留前 gated（不花预算），候选 staging 明确拒绝——那条链绑定 transcript
+  修正权威与 AlphaEngine 谱系，需另立一片并复核 ADR-0003。Cockpit 队列把网页项显示为「公开网页 <短 hash>」。
+  新增专项 10/10，fetch lane writer 用例改为真实端到端（socket 上取回可核验窗口、起草 gated、staging 拒绝），
+  邻接 107/107，全仓 **1151/1153**（两条为既有环境路径断言）；wheel/sdist 与干净安装后 installed 专项 36/36。
+  live Core 只读副本 canary `ok=true`（条件具名全真）：真实 search + fetch child 收进一页并登记
+  `awaiting_human_extraction`，两次渲染逐字一致、脚本样式被排除、引文 hash 绑定精确文本、篡改 host 的 manifest
+  被拒；Claim/Evidence/Thesis 与 AlphaEngine 行数不变，integrity ok。见
+  [P9d-4c 报告](reports/p9d4c-public-web-extraction-source-v0.1-2026-09-06.md)。
 - **P9d-4b「public-web fetch lane」development candidate 已完成，未部署、0 网络调用。**
   web search 发现的 `public-web-url:sha256:` ref 现在能像 AlphaEngine 文档一样被协调器按预算获取：新
   `capability:dalton:connector:web-fetch`（proposed 记录已入 deploy，配额 200 页/日）、Core-hosted
