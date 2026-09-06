@@ -41,6 +41,15 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "window_seconds": 86_400,
                     "reset_timezone": "Asia/Shanghai",
                 },
+                {
+                    "connector_slug": "web-fetch",
+                    "operation": "fetch_get",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 200,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
             ],
         )
 

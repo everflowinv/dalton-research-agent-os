@@ -40,6 +40,15 @@ _DAILY_QUOTAS = MappingProxyType(
                 "max_physical_calls_per_unit": 1,
             }
         ),
+        # P9d-4b: one cited page per unit; the mission plan cap and the
+        # per-host profile chain bound this further.
+        ("web-fetch", "fetch_get"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 200,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
     }
 )
 

@@ -1,6 +1,6 @@
 {
   "budget": {
-    "max_calls_24h": 20
+    "max_calls_24h": 40
   },
   "companies": {
     "company:sec-cik:0000051143": {
@@ -19,7 +19,7 @@
       "search_terms": "DXC Technology DXC"
     }
   },
-  "content_hash": "8fe2c122fa472bcbaff737fbef6c990219d6fa55bd02278e8f6c36323d8dc173",
+  "content_hash": "3cdc34dae535d596ef24423c151fe18a579a18b6db4a071b329fc3086b6607f9",
   "created_at": "2026-09-06T12:00:00.000000+00:00",
   "id": "discovery-plan:us-it-services:web-search:1",
   "mission_ref": "coverage-mission:us-it-services",

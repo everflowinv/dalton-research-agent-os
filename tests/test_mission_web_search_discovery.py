@@ -104,7 +104,8 @@ class DiscoveryPlanV2Tests(unittest.TestCase):
     def test_committed_web_plan_loads_and_binds_hash(self) -> None:
         plan = load_discovery_plan(WEB_PLAN_PATH)
         self.assertEqual((plan["schema_version"], plan["source_ref"]), ("0.2", WEB_SEARCH_SOURCE_REF))
-        self.assertEqual(plan["budget"], {"max_calls_24h": 20})
+        # Searches and page fetches share this window (P9d-4b).
+        self.assertEqual(plan["budget"], {"max_calls_24h": 40})
         self.assertEqual(sorted(plan["companies"]), sorted(load_discovery_plan(
             ROOT / "deploy/phase9/p9d-us-it-services-discovery-plan-v1.json")["companies"]))
         self.assertEqual([spec["spec_ref"] for spec in plan["specs"]],
@@ -318,13 +319,6 @@ class WebCoordinatorTests(unittest.TestCase):
         ref = params.pop("mission_ref")
         return self.missions.create_mission(ref, **params)
 
-    def test_web_plan_refuses_an_acquisition_launcher(self) -> None:
-        with self.assertRaises(DiscoveryPlanError):
-            MissionSourceDiscoveryCoordinator(
-                store=self.h.core, missions=self.missions, plan=self.plan,
-                search_launcher=self.launcher, acquisition_launcher=object(), clock=self.clock,
-            )
-
     def test_not_connected_then_connected_cycle_with_plan_budget(self) -> None:
         tick = self.coordinator.dispatch_once()
         self.assertEqual((tick["source_ref"], tick["discovery"]["status"]), (WEB_SEARCH_SOURCE_REF, "no_active_mission"))
@@ -349,7 +343,7 @@ class WebCoordinatorTests(unittest.TestCase):
         # URLs stay queued: no fetch lane yet, and this is reported, not hidden.
         self.assertEqual(tick["acquisition"]["status"], "unconfigured")
         self.assertTrue(tick["acquisition"]["queued"])
-        self.assertIn("P9d-4b", tick["acquisition"]["reason"])
+        self.assertIn("fetch launcher is not configured", tick["acquisition"]["reason"])
         # The plan's own 24h cap (1 call) now blocks CTSH; nothing else was spent.
         self.assertEqual(tick["discovery"]["status"], "budget_exhausted")
         self.assertEqual(tick["discovery"]["budget"], {"spent": 1, "cap": 1, "remaining": 0, "reserved": 0})

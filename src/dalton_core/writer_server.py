@@ -42,6 +42,13 @@ from .mission_source_discovery import (
     discovery_query_hash,
     load_discovery_plan,
 )
+from .public_web_fetch_launcher import (
+    FetchLaunchConflict,
+    FetchLaunchError,
+    FetchLaunchRejected,
+    FetchTicketNotFound,
+    PublicWebFetchLauncher,
+)
 from .alphaengine_acquisition_launcher import (
     AcquisitionLaunchConflict,
     AcquisitionLaunchError,
@@ -348,6 +355,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "publish_answer_sufficiency_policy",
     "dispatch_answer_refresh",
     "acquire_alphaengine_document", "alphaengine_acquisition_status",
+    "acquire_public_web_document", "public_web_fetch_status",
     "stage_transcript_candidate", "transcript_candidate_status",
     "run_sec_company_facts_lane", "sec_lane_status",
     "company_research_view", "company_research_query",
@@ -528,6 +536,8 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "document_ref", "expected_content_sha256", "max_pages", "actor_ref",
     }),
     "alphaengine_acquisition_status": frozenset({"ticket_ref"}),
+    "acquire_public_web_document": frozenset({"document_ref", "actor_ref"}),
+    "public_web_fetch_status": frozenset({"ticket_ref"}),
     "stage_transcript_candidate": frozenset({
         "correction_set_ref", "citation_ref", "subject_ref", "metric_or_aspect",
         "period", "basis", "normalized_statement", "idempotency_key", "actor_ref",
@@ -820,6 +830,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "record_weekly_brief_feedback": "actor_ref",
     "publish_transcript_correction_set": "actor_ref",
     "acquire_alphaengine_document": "actor_ref",
+    "acquire_public_web_document": "actor_ref",
     "stage_transcript_candidate": "actor_ref",
     "run_sec_company_facts_lane": "actor_ref",
     "reconcile_forecasts": "requested_by",
@@ -988,6 +999,7 @@ class WriterServer:
         discovery_plan_path: str | Path | None = None,
         web_search_launcher: WebSearchLauncher | None = None,
         web_search_plan_path: str | Path | None = None,
+        web_fetch_launcher: PublicWebFetchLauncher | None = None,
     ):
         if not principals:
             raise WriterServerError("at least one principal is required")
@@ -1019,6 +1031,8 @@ class WriterServer:
         )
         self._web_source_discovery: MissionSourceDiscoveryCoordinator | None = None
         self._web_search_plan_error: str | None = None
+        # P9d-4b: out-of-process public-web fetch of URLs a web search cited.
+        self._web_fetch_launcher = web_fetch_launcher
         # S7d: out-of-process SEC company-facts lane runs (human-only ops).
         self._sec_lane_launcher = sec_lane_launcher
         # The same owner-only CandidateStaging file the Cockpit review plane
@@ -1316,7 +1330,7 @@ class WriterServer:
                     missions=self._coverage_mission,
                     plan=plan,
                     search_launcher=self._web_search_launcher,
-                    acquisition_launcher=None,
+                    acquisition_launcher=self._web_fetch_launcher,
                 )
         self._backlog = ResearchQuestionBacklog(self._store)
         self._bounded_planner = BoundedPlannerAuthority(self._store)
@@ -1425,6 +1439,8 @@ class WriterServer:
     def _close_store(self) -> None:
         if self._acquisition_launcher is not None:
             self._acquisition_launcher.close()
+        if self._web_fetch_launcher is not None:
+            self._web_fetch_launcher.close()
         if self._sec_lane_launcher is not None:
             self._sec_lane_launcher.close()
         if self._candidate_review is not None:
@@ -2377,6 +2393,23 @@ class WriterServer:
         )
         return {**ticket, "dispatch_ref": dispatch["dispatch_id"], "parameters": parameters}
 
+    @property
+    def web_fetch_launcher(self) -> PublicWebFetchLauncher:
+        if self._web_fetch_launcher is None:
+            raise FetchLaunchRejected("public-web fetch launcher is not configured on this writer")
+        return self._web_fetch_launcher
+
+    def _op_acquire_public_web_document(self, p: Mapping[str, Any]) -> Any:
+        # Human-requested fetch of one discovered URL; the child re-derives
+        # the mission grant and rebuilds the URL authority before any byte.
+        values = dict(p)
+        return self.web_fetch_launcher.start(
+            document_ref=values["document_ref"], actor_ref=values["actor_ref"],
+        )
+
+    def _op_public_web_fetch_status(self, p: Mapping[str, Any]) -> Any:
+        return self.web_fetch_launcher.status(dict(p)["ticket_ref"])
+
     def _op_mission_source_discovery_status(self, p: Mapping[str, Any]) -> Any:
         ticket_ref = dict(p)["ticket_ref"]
         if isinstance(ticket_ref, str) and ticket_ref.startswith(f"{WEB_SEARCH_TICKET_PREFIX}:"):
@@ -2973,13 +3006,13 @@ class WriterServer:
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
-        if isinstance(exc, (AcquisitionLaunchRejected, LaneLaunchRejected, DiscoveryLaunchRejected, DiscoveryPlanError)):
+        if isinstance(exc, (AcquisitionLaunchRejected, LaneLaunchRejected, DiscoveryLaunchRejected, DiscoveryPlanError, FetchLaunchRejected)):
             return "rejected"
-        if isinstance(exc, (AcquisitionLaunchConflict, LaneLaunchConflict, DiscoveryLaunchConflict)):
+        if isinstance(exc, (AcquisitionLaunchConflict, LaneLaunchConflict, DiscoveryLaunchConflict, FetchLaunchConflict)):
             return "conflict"
-        if isinstance(exc, DiscoveryTicketNotFound):
+        if isinstance(exc, (DiscoveryTicketNotFound, FetchTicketNotFound)):
             return "not_found"
-        if isinstance(exc, DiscoveryLaunchError):
+        if isinstance(exc, (DiscoveryLaunchError, FetchLaunchError)):
             return "store_error"
         if isinstance(exc, (ResearchVerificationConflict, ResearchReviewConflict)):
             return "conflict"
@@ -3015,6 +3048,12 @@ class WriterServer:
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ContextMaterializerError, PerceptionError)):
             return "request rejected by contract or gate"
+        if isinstance(exc, FetchLaunchRejected):
+            return "request rejected by contract or gate"
+        if isinstance(exc, FetchLaunchConflict):
+            return "request conflicts with a running fetch"
+        if isinstance(exc, FetchTicketNotFound):
+            return "requested object was not found"
         if isinstance(exc, (ResearchVerificationConflict, ResearchReviewConflict)):
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ResearchVerificationError, ResearchReviewError)):
@@ -3105,6 +3144,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--web-search-rehearsal-approved-by",
         help="rehearsal only: in-memory approved web search governance principal (tests)",
+    )
+    parser.add_argument(
+        "--web-fetch-governance",
+        help="public-web fetch_get governance record (P9d-4b); enables fetching URLs a "
+             "web search cited (credential-free public HTTPS)",
+    )
+    parser.add_argument(
+        "--web-fetch-user-agent",
+        help="operator-visible User-Agent for public-web fetches",
+    )
+    parser.add_argument(
+        "--web-fetch-rehearsal-page",
+        help="rehearsal only: local file served as every fetched page (tests)",
+    )
+    parser.add_argument(
+        "--web-fetch-rehearsal-approved-by",
+        help="rehearsal only: in-memory approved fetch governance principal (tests)",
     )
     parser.add_argument("--document-extraction-model-config", help="Explicit approved broker/router and existing shared budget authority JSON; no secrets inline")
     parser.add_argument("--planner-routing-policy")
@@ -3213,6 +3269,24 @@ def main(argv: list[str] | None = None) -> int:
                 mode_args=web_mode_args,
                 spool_dir=args.transcript_spool_dir,
             )
+        web_fetch_launcher = None
+        if args.web_fetch_governance is not None:
+            if args.web_fetch_rehearsal_page is not None:
+                fetch_mode_args: tuple[str, ...] = ("--fake-page-file", args.web_fetch_rehearsal_page)
+                if args.web_fetch_rehearsal_approved_by is not None:
+                    fetch_mode_args += ("--governance-approved-by", args.web_fetch_rehearsal_approved_by)
+            else:
+                fetch_mode_args = ("--allow-network",)
+            fetch_kwargs: dict[str, Any] = {}
+            if args.web_fetch_user_agent is not None:
+                fetch_kwargs["user_agent"] = args.web_fetch_user_agent
+            web_fetch_launcher = PublicWebFetchLauncher(
+                state_dir=Path(args.db).expanduser().resolve().parent,
+                governance_path=args.web_fetch_governance,
+                mode_args=fetch_mode_args,
+                spool_dir=args.transcript_spool_dir,
+                **fetch_kwargs,
+            )
         planner_model_config = None
         if args.planner_routing_policy is not None:
             slots = (args.planner_credential_slots or "").split(",")
@@ -3250,6 +3324,7 @@ def main(argv: list[str] | None = None) -> int:
             discovery_plan_path=args.alphaengine_discovery_plan,
             web_search_launcher=web_search_launcher,
             web_search_plan_path=args.web_search_discovery_plan,
+            web_fetch_launcher=web_fetch_launcher,
         )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:

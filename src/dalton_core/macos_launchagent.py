@@ -116,6 +116,11 @@ def render(
             str(state / "connector-governance" / "gemini-web-search-v1.json"),
             "--web-search-discovery-plan",
             str(state / "discovery-plans" / "us-it-services-web-search-v1.json"),
+            # P9d-4b: public-web fetch of cited URLs.  Proposed record seeded
+            # by install.sh; launches are refused until the owner approves it,
+            # and nothing is queued until web search itself is connected.
+            "--web-fetch-governance",
+            str(state / "connector-governance" / "web-fetch-v1.json"),
         ] + (
             # S7d: the SEC company-facts lane stages into the same Cockpit
             # staging file and is only enabled when that file is configured.

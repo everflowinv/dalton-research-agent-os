@@ -18,15 +18,15 @@ Three pieces sit here:
   serves exactly one source; a plan for another source is refused.
 * ``MissionSourceDiscoveryCoordinator`` -- what the controller tick calls,
   one instance per plan.  It settles finished children of its own source,
-  launches at most one discovery and (AlphaEngine only, for now) at most one
-  budgeted document acquisition per call, and reports every skip with its
+  launches at most one discovery and at most one budgeted document
+  acquisition per call, and reports every skip with its
   reason (mission grant, cadence, budget, busy slot) instead of hiding it.
 
 Nothing here writes Evidence, Claims or Theses.  Discovered documents that
 Core acquires are raw connector authority; turning them into candidates is
 the existing human-reviewed path.  Web search leaves only opaque URL refs
-behind; fetching the cited page is a separate lane (P9d-4b), so discovered
-URLs stay queued as ``discovered`` until it exists.
+behind; the public-web fetch lane (P9d-4b) acquires the cited page's original
+bytes through ``PublicWebFetchLauncher`` and the same settlement path.
 """
 
 from __future__ import annotations
@@ -60,9 +60,11 @@ from .coverage_mission import (
     CoverageMissionError,
     CoverageMissionNotFound,
 )
+from .public_web_core_fetch import count_recent_public_web_fetch_calls
 from .public_web_core_search import (
     WebSearchConnectorGovernance,
     count_recent_web_search_calls,
+    public_web_urls_in_authority,
     validate_web_search_spec,
     web_search_spec_hash,
 )
@@ -728,11 +730,6 @@ class MissionSourceDiscoveryCoordinator:
         self.missions = missions
         self.plan = validate_discovery_plan(plan)
         self.source_ref = self.plan["source_ref"]
-        if acquisition_launcher is not None and self.source_ref != ALPHAENGINE_SOURCE_REF:
-            raise DiscoveryPlanError(
-                "only AlphaEngine discovery has an acquisition launcher; web search "
-                "documents wait for the public-web fetch lane"
-            )
         self.search_launcher = search_launcher
         self.acquisition_launcher = acquisition_launcher
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -792,8 +789,8 @@ class MissionSourceDiscoveryCoordinator:
                 continue
             review_status: str | None = None
             review_id: str | None = None
-            if ticket.get("status") == "succeeded" and document_in_authority(
-                self.store.connection, document["document_ref"]
+            if ticket.get("status") == "succeeded" and self._document_in_authority(
+                document["document_ref"]
             ):
                 result = self.missions.settle_discovered_document(
                     document["record_id"], status="acquired"
@@ -831,6 +828,13 @@ class MissionSourceDiscoveryCoordinator:
                     entry["review_id"] = review_id
             settled.append(entry)
         return settled
+
+    def _document_in_authority(self, document_ref: str) -> bool:
+        """Core holds the document's bytes through this source's own acquisition op."""
+
+        if self.source_ref == WEB_SEARCH_SOURCE_REF:
+            return bool(public_web_urls_in_authority(self.store.connection, [document_ref]))
+        return document_in_authority(self.store.connection, document_ref)
 
     # -- discovery launch ----------------------------------------------------
     def _cadence_block(self, mission_version_ref: str, company_ref: str, spec: Mapping[str, Any]) -> str | None:
@@ -874,7 +878,11 @@ class MissionSourceDiscoveryCoordinator:
 
         plan_cap = (self.plan.get("budget") or {}).get("max_calls_24h")
         if self.source_ref == WEB_SEARCH_SOURCE_REF:
-            spent = count_recent_web_search_calls(self.store.connection, as_of=self.clock())
+            # Searches and page fetches share the plan window, as AlphaEngine
+            # searches and document pages share the mission window.
+            spent = count_recent_web_search_calls(
+                self.store.connection, as_of=self.clock()
+            ) + count_recent_public_web_fetch_calls(self.store.connection, as_of=self.clock())
             cap = int(plan_cap)
             budget = {"spent": spent, "cap": cap, "remaining": max(0, cap - spent)}
         else:
@@ -968,15 +976,17 @@ class MissionSourceDiscoveryCoordinator:
 
     # -- document acquisition ------------------------------------------------
     def launch_acquisition(self) -> dict[str, Any]:
-        if self.source_ref == WEB_SEARCH_SOURCE_REF:
+        if self.acquisition_launcher is None:
             queued = self.missions.next_discovered_document(source_ref=self.source_ref)
             return {
                 "status": "unconfigured",
-                "reason": "public-web fetch lane is not wired; discovered URLs stay queued (P9d-4b)",
+                "reason": (
+                    "public-web fetch launcher is not configured; discovered URLs stay queued"
+                    if self.source_ref == WEB_SEARCH_SOURCE_REF
+                    else "acquisition launcher is not configured"
+                ),
                 "queued": queued is not None,
             }
-        if self.acquisition_launcher is None:
-            return {"status": "unconfigured", "reason": "acquisition launcher is not configured"}
         if self.missions.launched_discovered_documents(limit=1, source_ref=self.source_ref):
             return {"status": "busy", "reason": "a discovered-document acquisition is still open"}
         retry = False

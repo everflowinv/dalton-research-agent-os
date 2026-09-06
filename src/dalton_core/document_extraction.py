@@ -420,7 +420,12 @@ class DocumentExtractionService:
             requested_by=actor_ref, mission_version_ref=review["mission_version_ref"],
         )
         if review["source_ref"] != "source:alphaengine":
-            raise ResearchVerificationError("only acquired AlphaEngine documents are supported")
+            # P9d-4b queues fetched public-web pages; rendering their bytes as
+            # a verified extraction source is the next slice (P9d-4c).
+            raise ResearchVerificationError(
+                "only acquired AlphaEngine documents can be viewed here; fetched "
+                "public-web pages await the public-web extraction source (P9d-4c)"
+            )
         row = writer.store.connection.execute(
             "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?",
             (review["discovered_document_ref"],),

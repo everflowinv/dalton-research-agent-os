@@ -1,6 +1,21 @@
 # Dalton 项目进度
 
 更新日期：2026-09-06
+- **P9d-4b「public-web fetch lane」development candidate 已完成，未部署、0 网络调用。**
+  web search 发现的 `public-web-url:sha256:` ref 现在能像 AlphaEngine 文档一样被协调器按预算获取：新
+  `capability:dalton:connector:web-fetch`（proposed 记录已入 deploy，配额 200 页/日）、Core-hosted
+  `PublicWebCoreFetch`（通用 runner gate、wire 0.1、**每个 host 一个 operation-scoped profile**，因 adapter 要求
+  `allowed_hosts` 恰等于 authority host）、单槽 `PublicWebFetchLauncher` + `public_web_fetch_cli` 子进程、闭合
+  fetch manifest。子进程只接受 mission 账本已发现的 ref，并从 exact 原始搜索字节重建 URL authority，搜索未引用的
+  ref 在取任何字节前被拒；页面**原始字节**进 connector authority（`fetch_get` envelope），文档 `acquired` 后按 P9d-2
+  进入人工抽取队列。搜索与获取共用 web 计划 `max_calls_24h`（deploy 计划 20→40，hash 变化）。本片不渲染页面、不
+  抽取、不生成候选；Cockpit 对 web 页面的证据视图仍拒绝并指向 P9d-4c。新增专项 9/9，邻接 108/108，全仓
+  **1141/1143**（两条失败仍是既有 `test_document_extraction_preflight` 的 `/private/var` 路径断言，与本片无关）；wheel/sdist 与干净安装后 installed 专项 27/27。live Core 只读副本 canary `ok=true`（条件具名）：
+  live v2 拒绝；副本 v3 `probe_only` 下 owner 排练搜索+获取走真实子进程（fake page，1 次调用，0 正式写入），自动化
+  获取与登记均如实拒绝；副本 v4 `connected` 下 15/15 搜索、新 URL 自动 `acquired`→`awaiting_human_extraction`、
+  已持有 URL 记 `already_in_authority`，到 idle；Claim/Evidence/Thesis 与 AlphaEngine 行数不变，integrity ok。
+  激活仍需 owner 批准两条治理记录并发布 mission 新版本；真实 gateway `web_search` handle（P9d-4a 遗留）与页面
+  渲染/抽取来源（P9d-4c）未做。见 [P9d-4b 报告](reports/p9d4b-public-web-fetch-lane-v0.1-2026-09-06.md)。
 - **P9d-4a「web search 作为 mission 第二个发现来源」development candidate 已完成（shadow），未部署、无真实 host 调用。**
   live MCP 通道由单一 AlphaEngine 桥改为冻结的两条目 host bridge 注册表（AlphaEngine 的 id/hash/错误路径逐字节不变），
   新增 Core-hosted Gemini `search_web` 治理能力 `capability:dalton:connector:gemini-web-search`（proposed 记录已入

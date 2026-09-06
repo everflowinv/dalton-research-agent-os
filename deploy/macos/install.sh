@@ -89,6 +89,12 @@ if [[ ! -f "$web_search_governance_file" && -f "$repo_root/deploy/connector-gove
   cp "$repo_root/deploy/connector-governance/gemini-web-search-v1.json" "$web_search_governance_file"
   chmod 600 "$web_search_governance_file"
 fi
+# P9d-4b: public-web fetch of URLs a web search cited; same seed-once rule.
+web_fetch_governance_file="$governance_dir/web-fetch-v1.json"
+if [[ ! -f "$web_fetch_governance_file" && -f "$repo_root/deploy/connector-governance/web-fetch-v1.json" ]]; then
+  cp "$repo_root/deploy/connector-governance/web-fetch-v1.json" "$web_fetch_governance_file"
+  chmod 600 "$web_fetch_governance_file"
+fi
 web_plan_file="$plan_dir/us-it-services-web-search-v1.json"
 if [[ ! -f "$web_plan_file" && -f "$repo_root/deploy/phase9/p9d4-us-it-services-web-search-plan-v1.json" ]]; then
   cp "$repo_root/deploy/phase9/p9d4-us-it-services-web-search-plan-v1.json" "$web_plan_file"

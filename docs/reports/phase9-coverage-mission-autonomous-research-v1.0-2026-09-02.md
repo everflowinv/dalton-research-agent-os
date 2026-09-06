@@ -82,6 +82,10 @@ Core-hosted Gemini `search_web` 治理能力、DiscoveryPlan 0.2、来源表与�
 通过，未部署。真实 gateway handle 与 public-web `fetch_get` lane 留待 P9d-4b；激活需 owner 批准治理记录并发布
 mission 新版本。见 [P9d-4a 报告](p9d4a-web-search-mission-discovery-v0.1-2026-09-06.md)。
 
+进展（2026-09-06，同日）：P9d-4b 接上 public-web `fetch_get` lane——按 host 的治理 profile、单槽子进程、从 exact
+搜索字节重建 URL authority、原始字节进 authority、`acquired` 后进人工抽取队列；live Core 只读副本 canary 通过，未部署，
+0 网络调用。页面渲染为抽取来源留待 P9d-4c。见 [P9d-4b 报告](p9d4b-public-web-fetch-lane-v0.1-2026-09-06.md)。
+
 ### P9e：建模自主化（M2）
 
 - 从 XBRL 历史生成标准化三表（playbook 期间标准），套 IT services driver（headcount、utilization、bookings、book-to-bill）产出预测线；估值 fail closed 直到市场数据 connector 解冻（owner gate）。
