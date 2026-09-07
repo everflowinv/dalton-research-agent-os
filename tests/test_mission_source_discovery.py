@@ -555,14 +555,16 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(tick["discovery"]["status"], "idle")
         self.assertEqual(tick["acquisition"]["status"], "idle")
         # CTSH's search returned the same two docs; a document is one row per
-        # mission version, so nothing was queued twice.
+        # mission version, so nothing was queued twice.  P9d-12: the document
+        # Core already held settles to acquired without a fetch and owes the
+        # human queue a review like any other acquisition.
         documents = self.missions.discovered_documents(
             self.missions.active_mission("coverage-mission:us-it-services")["id"]
         )
         self.assertEqual(
             sorted((item["company_ref"], item["document_ref"], item["status"]) for item in documents),
             sorted([
-                (ACN, KNOWN_DOC, "already_in_authority"), (ACN, NEW_DOC, "acquired"),
+                (ACN, KNOWN_DOC, "acquired"), (ACN, NEW_DOC, "acquired"),
             ]),
         )
         self.assertEqual(len(self.h.handle.calls), 2)
@@ -598,10 +600,10 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(settled["review_status"], "fresh")
         mission = self.missions.active_mission("coverage-mission:us-it-services")
         reviews = self.missions.document_reviews(mission["id"])
-        self.assertEqual(len(reviews), 1)
-        review = reviews[0]
+        # Both the fetched document and the one Core already held (P9d-12).
+        self.assertEqual(sorted(r["document_ref"] for r in reviews), sorted([KNOWN_DOC, NEW_DOC]))
+        review = next(r for r in reviews if r["document_ref"] == NEW_DOC)
         self.assertEqual(review["state"], "awaiting_human_extraction")
-        self.assertEqual(review["document_ref"], NEW_DOC)
         self.assertEqual(review["registered_by"], AUTOMATION)
         self.assertEqual(self.missions.document_review(review["review_id"]), review)
         for rationale in (None, "", "  "):
@@ -637,9 +639,10 @@ class CoordinatorTests(unittest.TestCase):
             actor_ref="human:coverage-owner", rationale="not an earnings transcript",
         )
         self.assertEqual(resolved["state"], "dismissed")
+        # Only the already-held document's review (P9d-12) is still waiting.
         self.assertEqual(
-            self.missions.document_reviews(mission["id"], state="awaiting_human_extraction"),
-            [],
+            [r["document_ref"] for r in self.missions.document_reviews(mission["id"], state="awaiting_human_extraction")],
+            [KNOWN_DOC],
         )
         # Already-resolved reviews replay as duplicates and never reopen.
         again = self.missions.resolve_document_review(
@@ -666,7 +669,9 @@ class CoordinatorTests(unittest.TestCase):
         with patch.object(self.missions, "register_document_review", side_effect=CoverageMissionConflict("interrupted")):
             settled = self.coordinator.settle_documents()
         self.assertEqual(settled[0]["status"], "acquired")
-        self.assertEqual(self.missions.document_reviews(mission["id"]), [])
+        # Only the already-held document has a review so far (P9d-12); the
+        # fetched one lost its registration and is owed by the backfill.
+        self.assertEqual([r["document_ref"] for r in self.missions.document_reviews(mission["id"])], [KNOWN_DOC])
         tick = self.coordinator.dispatch_once()
         self.assertEqual([item["status"] for item in tick["review_backfill"]], ["fresh"])
         self.assertEqual(self.missions.backfill_document_reviews(self.plan["mission_ref"]), [])
@@ -707,7 +712,7 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(
             sorted((d["document_ref"], d["status"]) for d in documents),
             sorted([
-                (KNOWN_DOC, "already_in_authority"),
+                (KNOWN_DOC, "acquired"),  # P9d-12: held bytes settle without a fetch
                 (NEW_DOC, "acquired"),
             ]),
         )

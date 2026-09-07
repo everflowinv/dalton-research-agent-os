@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "MissionDiscoveryPlan",
-  "description": "P9d-1 / P9d-4a: human-authored, hash-bound list of the searches a CoverageMission may run per company against one discovery source. The Core never invents queries; every discovery record names the plan hash and spec it came from. Changing terms, windows or cadence is a new plan file (new hash). Schema 0.1 is the committed AlphaEngine plan; 0.2 adds source:web-search (Gemini search_web specs carry no document_type) and a plan-level trailing-24h call budget.",
+  "description": "P9d-1 / P9d-4a: human-authored, hash-bound list of the searches a CoverageMission may run per company against one discovery source. The Core never invents queries; every discovery record names the plan hash and spec it came from. Changing terms, windows or cadence is a new plan file (new hash). Schema 0.1 is the committed AlphaEngine plan; 0.2 adds source:web-search (Gemini search_web specs carry no document_type) and a plan-level trailing-24h call budget; 0.3 (P9d-13, web-search only) adds an acquisition policy: preferred_hosts are fetched before the rest, skip_hosts are never fetched.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "id", "created_at", "mission_ref", "source_ref", "companies", "specs", "content_hash"],
   "properties": {
-    "schema_version": {"type": "string", "enum": ["0.1", "0.2"]},
+    "schema_version": {"type": "string", "enum": ["0.1", "0.2", "0.3"]},
     "id": {"type": "string", "pattern": "^discovery-plan:"},
     "created_at": {"type": "string", "format": "date-time"},
     "mission_ref": {"type": "string", "pattern": "^coverage-mission:"},
@@ -44,6 +44,15 @@
       "required": ["max_calls_24h"],
       "properties": {"max_calls_24h": {"type": "integer", "minimum": 1, "maximum": 1000}}
     },
+    "acquisition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["preferred_hosts", "skip_hosts"],
+      "properties": {
+        "preferred_hosts": {"type": "array", "maxItems": 50, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"}},
+        "skip_hosts": {"type": "array", "maxItems": 50, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"}}
+      }
+    },
     "content_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
   },
   "allOf": [
@@ -54,6 +63,11 @@
         "not": {"required": ["budget"]}
       },
       "else": {"required": ["budget"]}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": "0.3"}}},
+      "then": {"required": ["acquisition"], "properties": {"source_ref": {"const": "source:web-search"}}},
+      "else": {"not": {"required": ["acquisition"]}}
     },
     {
       "if": {"properties": {"source_ref": {"const": "source:alphaengine"}}},

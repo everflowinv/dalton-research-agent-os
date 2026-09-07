@@ -133,6 +133,11 @@ CREATE TABLE IF NOT EXISTS coverage_mission_discovered_documents (
     failure_reason TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    -- P9d-13: the URL host for web documents, so the queue can be ordered and
+    -- read by a human without re-opening the raw search bytes.  NULL for
+    -- sources whose refs are not URLs and for rows recorded before P9d-13
+    -- (backfilled by the coordinator from the exact discovery envelope).
+    host TEXT,
     UNIQUE(mission_version_ref, document_ref)
 );
 

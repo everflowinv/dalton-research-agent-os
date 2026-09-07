@@ -1331,6 +1331,8 @@ class WriterServer:
                     plan=plan,
                     search_launcher=self._web_search_launcher,
                     acquisition_launcher=self._web_fetch_launcher,
+                    # P9d-13: read-only route from a pre-ledger row back to its host.
+                    spool_dir=self._transcript_spool_dir,
                 )
         self._backlog = ResearchQuestionBacklog(self._store)
         self._bounded_planner = BoundedPlannerAuthority(self._store)

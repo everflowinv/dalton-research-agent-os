@@ -63,12 +63,12 @@ from tests.test_public_web_core_search import CITATIONS, WebSearchHarness
 
 
 NOW = datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc)
-WEB_PLAN_PATH = ROOT / "deploy/phase9/p9d4-us-it-services-web-search-plan-v2.json"
+WEB_PLAN_PATH = ROOT / "deploy/phase9/p9d4-us-it-services-web-search-plan-v3.json"
 URL_A = public_web_url_ref("https://example.com/investors?q=ai")
 URL_B = public_web_url_ref("https://news.example.org/accenture-ai")
 
 
-def web_plan_for_tests(*, max_calls_24h: int = 20) -> dict:
+def web_plan_for_tests(*, max_calls_24h: int = 20, acquisition: dict | None = None) -> dict:
     return build_discovery_plan(
         plan_id="discovery-plan:us-it-services:web-search:test",
         created_at=NOW.isoformat(timespec="microseconds"),
@@ -76,6 +76,7 @@ def web_plan_for_tests(*, max_calls_24h: int = 20) -> dict:
         companies={ACN: "Accenture ACN", CTSH: "Cognizant CTSH"},
         source_ref=WEB_SEARCH_SOURCE_REF,
         max_calls_24h=max_calls_24h,
+        acquisition=acquisition,
         specs=[{
             "spec_ref": "management-changes",
             "query_template": "{terms} CEO CFO appointment resignation", "lookback_days": 90,
@@ -103,8 +104,8 @@ def mission_with_web_status(state: dict, *, status: str, grant: bool, version: i
 class DiscoveryPlanV2Tests(unittest.TestCase):
     def test_committed_web_plan_loads_and_binds_hash(self) -> None:
         plan = load_discovery_plan(WEB_PLAN_PATH)
-        self.assertEqual((plan["schema_version"], plan["source_ref"]), ("0.2", WEB_SEARCH_SOURCE_REF))
-        self.assertEqual(plan["id"], "discovery-plan:us-it-services:web-search:2")
+        self.assertEqual((plan["schema_version"], plan["source_ref"]), ("0.3", WEB_SEARCH_SOURCE_REF))
+        self.assertEqual(plan["id"], "discovery-plan:us-it-services:web-search:3")
         # Searches and page fetches share this window (P9d-4b); the owner
         # raised it to the contract ceiling once the provider was Gemini Flash.
         self.assertEqual(plan["budget"], {"max_calls_24h": 1000})
@@ -116,7 +117,7 @@ class DiscoveryPlanV2Tests(unittest.TestCase):
         with self.assertRaises(DiscoveryPlanError):
             validate_discovery_plan({**plan, "budget": {"max_calls_24h": 21}})
         schema = json.loads((ROOT / "contracts/mission-discovery-plan.schema.json").read_text())
-        self.assertEqual(set(plan), set(schema["required"]) | {"budget"})
+        self.assertEqual(set(plan), set(schema["required"]) | {"budget", "acquisition"})
         self.assertTrue(set(plan) <= set(schema["properties"]))
 
     def test_plan_versions_and_shapes_fail_closed(self) -> None:
@@ -163,6 +164,40 @@ class DiscoveryPlanV2Tests(unittest.TestCase):
         self.assertEqual(discovery_query_hash(plan, params), web_search_spec_hash(params))
         with self.assertRaises(DiscoveryPlanError):
             build_discovery_parameters(plan, spec_ref="management-changes", company_ref="company:other", as_of=date(2026, 9, 6))
+
+
+    def test_plan_0_3_acquisition_policy_is_closed_and_web_only(self) -> None:
+        """P9d-13: preferred / skipped hosts are plan policy, hash bound like the rest."""
+
+        plan = web_plan_for_tests(acquisition={"preferred_hosts": ["newsroom.accenture.com"], "skip_hosts": ["news.alphastreet.com"]})
+        self.assertEqual(plan["schema_version"], "0.3")
+        self.assertEqual(plan["acquisition"], {"preferred_hosts": ["newsroom.accenture.com"], "skip_hosts": ["news.alphastreet.com"]})
+        self.assertEqual(validate_discovery_plan(plan), plan)
+        for bad in (
+            {"preferred_hosts": ["a.example"], "skip_hosts": ["a.example"]},   # both
+            {"preferred_hosts": ["Newsroom.Accenture.com"], "skip_hosts": []},   # case
+            {"preferred_hosts": ["https://a.example/x"], "skip_hosts": []},     # not a host
+            {"preferred_hosts": ["a.example", "a.example"], "skip_hosts": []},  # duplicate
+        ):
+            with self.assertRaises(DiscoveryPlanError, msg=str(bad)):
+                web_plan_for_tests(acquisition=bad)
+        with self.assertRaises(DiscoveryPlanError):  # not closed
+            validate_discovery_plan({**plan, "acquisition": {**plan["acquisition"], "extra": []}})
+        # A 0.2 plan cannot smuggle a policy, and AlphaEngine plans never carry one.
+        v2 = web_plan_for_tests()
+        with self.assertRaises(DiscoveryPlanError):
+            validate_discovery_plan({**v2, "acquisition": plan["acquisition"]})
+        with self.assertRaises(DiscoveryPlanError):
+            validate_discovery_plan({**plan, "source_ref": ALPHAENGINE_SOURCE_REF})
+        with self.assertRaises(DiscoveryPlanError):
+            validate_discovery_plan({**plan, "acquisition": {"preferred_hosts": ["b.example"], "skip_hosts": []}})
+        committed = load_discovery_plan(WEB_PLAN_PATH)
+        self.assertEqual(committed["schema_version"], "0.3")
+        self.assertIn("newsroom.accenture.com", committed["acquisition"]["preferred_hosts"])
+        self.assertEqual(committed["acquisition"]["skip_hosts"], ["news.alphastreet.com", "www.spglobal.com"])
+        schema = json.loads((ROOT / "contracts/mission-discovery-plan.schema.json").read_text())
+        self.assertIn("0.3", schema["properties"]["schema_version"]["enum"])
+        self.assertEqual(set(schema["properties"]["acquisition"]["required"]), {"preferred_hosts", "skip_hosts"})
 
 
 class WebDiscoveryLedgerTests(unittest.TestCase):
@@ -271,6 +306,9 @@ class FakeWebSearchLauncher:
         self.plan = plan
         self.tickets: dict[str, dict] = {}
         self.starts: list[dict] = []
+        # P9d-13: the real child records each URL's host on the ledger row.
+        # False reproduces rows written before the ledger carried a host.
+        self.with_hosts = True
 
     def running(self) -> bool:
         return any(ticket["status"] == "running" for ticket in self.tickets.values())
@@ -290,6 +328,10 @@ class FakeWebSearchLauncher:
             source_envelope_ref=receipt["source_envelope_ref"],
             source_envelope_hash=receipt["source_envelope_hash"],
             document_refs=receipt["document_refs"], in_authority_document_refs=present,
+            document_hosts=(
+                {a["url_ref"]: a["host"] for a in self.h.search.url_authorities(receipt["source_envelope_ref"])}
+                if self.with_hosts else None
+            ),
         )
         summary = {"discovery_ref": record["id"], "new_document_count": len(record["new_document_refs"]), "failure_reason": None}
         self.tickets[ticket_id] = {"id": ticket_id, "status": "succeeded", "exit_code": 0, "summary": summary}
@@ -320,6 +362,53 @@ class WebCoordinatorTests(unittest.TestCase):
         params = mission_with_web_status(self.state, status=status, grant=grant, version=version, prior=prior)
         ref = params.pop("mission_ref")
         return self.missions.create_mission(ref, **params)
+
+    def test_documents_stranded_by_a_mission_version_change_are_carried_forward(self) -> None:
+        """P9d-12: publishing a new version must not orphan the prior version's queue.
+
+        Live, v3 -> v4 stranded ten discovered URLs because every acquisition
+        query joins the active pointer.  The tick now re-registers them under
+        the current version's own grant, and reports the ones it refuses.
+        """
+
+        v1 = self.publish(status="connected", grant=True)
+        self.coordinator.dispatch_once()
+        tick = self.coordinator.dispatch_once()
+        self.assertEqual(tick["settled_dispatches"][0]["new_document_count"], 2)
+        self.assertEqual(tick["carried_forward"], [])
+        under_v1 = self.missions.discovered_documents(v1["id"])
+        self.assertEqual([d["status"] for d in under_v1], ["discovered", "discovered"])
+        self.assertEqual(sorted(d["host"] for d in under_v1), ["example.com", "news.example.org"])
+
+        v2 = self.publish(status="connected", grant=True, version=2, prior=v1)
+        tick = self.coordinator.dispatch_once()
+        carried = tick["carried_forward"]
+        self.assertEqual(sorted((c["document_ref"], c["status"]) for c in carried),
+                         sorted([(URL_A, "discovered"), (URL_B, "discovered")]))
+        self.assertTrue(all(c["from_version_ref"] == v1["id"] for c in carried))
+        under_v2 = self.missions.discovered_documents(v2["id"])
+        self.assertEqual(len(under_v2), 2)
+        # Same ref, same discovery (the only route back to the URL), same
+        # host and timestamps, so queue order is preserved; a fresh record id.
+        by_ref = {d["document_ref"]: d for d in under_v1}
+        for doc in under_v2:
+            original = by_ref[doc["document_ref"]]
+            self.assertEqual((doc["discovery_ref"], doc["host"], doc["created_at"]),
+                             (original["discovery_ref"], original["host"], original["created_at"]))
+            self.assertNotEqual(doc["record_id"], original["record_id"])
+        self.assertEqual(self.missions.next_discovered_document(source_ref=WEB_SEARCH_SOURCE_REF)["mission_version_ref"], v2["id"])
+        # Idempotent: nothing is copied twice, and the old rows are untouched.
+        self.assertEqual(self.coordinator.dispatch_once()["carried_forward"], [])
+        self.assertEqual([d["status"] for d in self.missions.discovered_documents(v1["id"])], ["discovered", "discovered"])
+
+        # A version that no longer lets automation discover on this source
+        # refuses the carry-forward and says why, rather than moving rows the
+        # grant would not cover.
+        self.publish(status="probe_only", grant=True, version=3, prior=v2)
+        tick = self.coordinator.dispatch_once()
+        self.assertEqual({c["status"] for c in tick["carried_forward"]}, {"skipped"})
+        self.assertTrue(all("probe_only" in c["reason"] for c in tick["carried_forward"]))
+        self.assertEqual(self.missions.discovered_documents(self.missions.active_mission("coverage-mission:us-it-services")["id"]), [])
 
     def test_not_connected_then_connected_cycle_with_plan_budget(self) -> None:
         tick = self.coordinator.dispatch_once()

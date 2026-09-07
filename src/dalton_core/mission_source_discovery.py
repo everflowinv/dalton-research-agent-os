@@ -60,7 +60,8 @@ from .coverage_mission import (
     CoverageMissionError,
     CoverageMissionNotFound,
 )
-from .public_web_core_fetch import count_recent_public_web_fetch_calls
+from .public_web_core_fetch import count_recent_public_web_fetch_calls, url_authority_from_discovery
+from .raw_spool import RawSpool
 from .public_web_core_search import (
     WebSearchConnectorGovernance,
     count_recent_web_search_calls,
@@ -73,8 +74,11 @@ from .store import DaltonStore, canonical_json, content_hash
 
 DISCOVERY_PLAN_SCHEMA_VERSION = "0.1"
 DISCOVERY_PLAN_SCHEMA_VERSION_V2 = "0.2"
+# P9d-13: 0.3 adds a web-search acquisition policy (preferred / skipped hosts).
+DISCOVERY_PLAN_SCHEMA_VERSION_V3 = "0.3"
 DISCOVERY_PLAN_SCHEMA_VERSIONS: tuple[str, ...] = (
     DISCOVERY_PLAN_SCHEMA_VERSION, DISCOVERY_PLAN_SCHEMA_VERSION_V2,
+    DISCOVERY_PLAN_SCHEMA_VERSION_V3,
 )
 ALPHAENGINE_SOURCE_REF = "source:alphaengine"
 WEB_SEARCH_SOURCE_REF = "source:web-search"
@@ -97,7 +101,41 @@ _PLAN_FIELDS = frozenset({
     "content_hash",
 })
 _PLAN_FIELDS_V2 = _PLAN_FIELDS | frozenset({"budget"})
+_PLAN_FIELDS_V3 = _PLAN_FIELDS_V2 | frozenset({"acquisition"})
 _BUDGET_FIELDS = frozenset({"max_calls_24h"})
+_ACQUISITION_FIELDS = frozenset({"preferred_hosts", "skip_hosts"})
+MAX_POLICY_HOSTS = 50
+_HOST_RE = re.compile(
+    r"(?=.{1,253}\Z)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+\Z"
+)
+
+
+def _plan_hosts(value: Any, name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise DiscoveryPlanError(f"{name} must be an array of hostnames")
+    hosts: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or _HOST_RE.fullmatch(item) is None:
+            raise DiscoveryPlanError(f"{name} entries must be lowercase hostnames")
+        if item in hosts:
+            raise DiscoveryPlanError(f"{name} lists {item} twice")
+        hosts.append(item)
+    if len(hosts) > MAX_POLICY_HOSTS:
+        raise DiscoveryPlanError(f"{name} may list at most {MAX_POLICY_HOSTS} hosts")
+    return hosts
+
+
+def _plan_acquisition(value: Any) -> dict[str, list[str]]:
+    """Closed acquisition policy: which hosts the fetch lane prefers or never touches."""
+
+    if not isinstance(value, Mapping) or set(value) != _ACQUISITION_FIELDS:
+        raise DiscoveryPlanError("discovery plan acquisition must have exactly preferred_hosts and skip_hosts")
+    preferred = _plan_hosts(value["preferred_hosts"], "acquisition.preferred_hosts")
+    skipped = _plan_hosts(value["skip_hosts"], "acquisition.skip_hosts")
+    overlap = sorted(set(preferred) & set(skipped))
+    if overlap:
+        raise DiscoveryPlanError(f"acquisition hosts cannot be both preferred and skipped: {overlap}")
+    return {"preferred_hosts": preferred, "skip_hosts": skipped}
 _COMPANY_FIELDS = frozenset({"search_terms"})
 _SPEC_FIELDS = frozenset({
     "spec_ref", "document_type", "query_template", "lookback_days",
@@ -160,7 +198,11 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
     schema_version = value["schema_version"]
     if schema_version not in DISCOVERY_PLAN_SCHEMA_VERSIONS:
         raise DiscoveryPlanError("unsupported discovery plan schema_version")
-    fields = _PLAN_FIELDS if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION else _PLAN_FIELDS_V2
+    fields = {
+        DISCOVERY_PLAN_SCHEMA_VERSION: _PLAN_FIELDS,
+        DISCOVERY_PLAN_SCHEMA_VERSION_V2: _PLAN_FIELDS_V2,
+        DISCOVERY_PLAN_SCHEMA_VERSION_V3: _PLAN_FIELDS_V3,
+    }[schema_version]
     if set(value) != fields:
         raise DiscoveryPlanError("discovery plan has an invalid closed shape")
     wire = json.loads(canonical_json(value))
@@ -179,7 +221,7 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
             f"discovery plan source_ref must be one of {sorted(DISCOVERY_SOURCES)}"
         )
     budget: dict[str, int] | None = None
-    if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V2:
+    if schema_version != DISCOVERY_PLAN_SCHEMA_VERSION:
         raw_budget = wire["budget"]
         if not isinstance(raw_budget, Mapping) or set(raw_budget) != _BUDGET_FIELDS:
             raise DiscoveryPlanError("discovery plan budget must have exactly max_calls_24h")
@@ -188,6 +230,11 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
                 raw_budget["max_calls_24h"], "budget.max_calls_24h", maximum=MAX_PLAN_CALLS_24H
             ),
         }
+    acquisition: dict[str, list[str]] | None = None
+    if schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V3:
+        if source_ref != WEB_SEARCH_SOURCE_REF:
+            raise DiscoveryPlanError("discovery plan 0.3 acquisition policy is only for source:web-search")
+        acquisition = _plan_acquisition(wire["acquisition"])
     spec_fields = _SPEC_FIELDS if source_ref == ALPHAENGINE_SOURCE_REF else _WEB_SPEC_FIELDS
     companies = wire["companies"]
     if not isinstance(companies, Mapping) or not companies:
@@ -244,6 +291,8 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
     }
     if budget is not None:
         base["budget"] = budget
+    if acquisition is not None:
+        base["acquisition"] = acquisition
     expected = content_hash(base)
     if wire["content_hash"] != expected:
         raise DiscoveryPlanError("discovery plan content_hash does not bind its content")
@@ -259,12 +308,14 @@ def build_discovery_plan(
     specs: Sequence[Mapping[str, Any]],
     source_ref: str = ALPHAENGINE_SOURCE_REF,
     max_calls_24h: int | None = None,
+    acquisition: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """Author a plan (hash appended) from search terms and spec rows.
 
     Without ``max_calls_24h`` an AlphaEngine plan is authored at schema 0.1
     (byte-identical to the committed P9d-1 plan); any other source, or an
-    explicit plan budget, authors a 0.2 plan.
+    explicit plan budget, authors a 0.2 plan.  An ``acquisition`` policy
+    (``preferred_hosts`` / ``skip_hosts``) authors a 0.3 web-search plan.
     """
 
     base: dict[str, Any] = {
@@ -281,6 +332,12 @@ def build_discovery_plan(
             raise DiscoveryPlanError("a 0.2 discovery plan requires max_calls_24h")
         base["schema_version"] = DISCOVERY_PLAN_SCHEMA_VERSION_V2
         base["budget"] = {"max_calls_24h": max_calls_24h}
+    if acquisition is not None:
+        base["schema_version"] = DISCOVERY_PLAN_SCHEMA_VERSION_V3
+        base["acquisition"] = {
+            "preferred_hosts": list(acquisition.get("preferred_hosts", ())),
+            "skip_hosts": list(acquisition.get("skip_hosts", ())),
+        }
     return validate_discovery_plan({**base, "content_hash": content_hash(base)})
 
 
@@ -754,6 +811,7 @@ class MissionSourceDiscoveryCoordinator:
         acquisition_launcher: Any | None,
         clock: Callable[[], datetime] | None = None,
         owner_call_cap: int = MAX_CALLS_PER_WINDOW,
+        spool_dir: str | Path | None = None,
     ) -> None:
         self.store = store
         self.missions = missions
@@ -763,6 +821,81 @@ class MissionSourceDiscoveryCoordinator:
         self.acquisition_launcher = acquisition_launcher
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.owner_call_cap = int(owner_call_cap)
+        # P9d-13: the connector spool, read only, is the sole route from a
+        # public-web ref back to its host for rows recorded before the ledger
+        # carried one.  Optional: without it the backfill reports "no_spool".
+        self.spool_dir = None if spool_dir is None else Path(spool_dir)
+        self._spool: RawSpool | None = None
+        policy = self.plan.get("acquisition") or {}
+        self.preferred_hosts: tuple[str, ...] = tuple(policy.get("preferred_hosts", ()))
+        self.skip_hosts: tuple[str, ...] = tuple(policy.get("skip_hosts", ()))
+
+    # -- P9d-12/13 maintenance -------------------------------------------------
+    def carry_forward(self) -> list[dict[str, Any]]:
+        """Re-register this source's documents stranded under a superseded mission version."""
+
+        try:
+            return self.missions.carry_forward_superseded_documents(
+                self.plan["mission_ref"], source_ref=self.source_ref
+            )
+        except CoverageMissionError as exc:
+            return [{"status": "error", "reason": f"{type(exc).__name__}: {exc}"}]
+
+    def settle_already_held(self) -> list[dict[str, Any]]:
+        """Documents search found already in authority owe a review, not a fetch."""
+
+        settled: list[dict[str, Any]] = []
+        for document in self.missions.already_held_documents(source_ref=self.source_ref):
+            entry: dict[str, Any] = {
+                "record_id": document["record_id"], "document_ref": document["document_ref"],
+            }
+            if not self._document_in_authority(document["document_ref"]):
+                # The ledger says held but this source's authority does not
+                # agree; report it rather than queue a review for nothing.
+                settled.append({**entry, "status": "not_in_authority"})
+                continue
+            result = self.missions.settle_document_already_held(document["record_id"])
+            entry["status"] = result["status"]
+            try:
+                review = self.missions.register_document_review(
+                    document["record_id"],
+                    requested_by=self.missions.mission(
+                        document["mission_version_ref"]
+                    )["autonomy"]["automation_principal"],
+                )
+                entry["review_status"], entry["review_id"] = review["status"], review["review_id"]
+            except CoverageMissionError as exc:
+                entry["review_status"] = f"not_registered:{type(exc).__name__}"
+            settled.append(entry)
+        return settled
+
+    def backfill_hosts(self, *, limit: int = 25) -> dict[str, Any]:
+        """Fill ``host`` for pre-P9d-13 web rows from each row's exact discovery envelope."""
+
+        if self.source_ref != WEB_SEARCH_SOURCE_REF:
+            return {"status": "not_applicable"}
+        rows = self.missions.documents_without_host(source_ref=self.source_ref, limit=limit)
+        if not rows:
+            return {"status": "complete", "filled": 0}
+        if self.spool_dir is None:
+            return {"status": "no_spool", "pending": len(rows)}
+        if self._spool is None:
+            self._spool = RawSpool(str(self.spool_dir), max_total_bytes=1_000_000_000)
+        filled = 0
+        failures: list[dict[str, str]] = []
+        for document in rows:
+            try:
+                discovery = self.missions.discovery_record(document["discovery_ref"])
+                authority = url_authority_from_discovery(
+                    self.store.connection, self._spool,
+                    url_ref=document["document_ref"],
+                    source_envelope_ref=discovery["source_envelope_ref"],
+                )
+                self.missions.set_document_host(document["record_id"], authority["host"])
+                filled += 1
+            except Exception as exc:  # one bad row must not stall the rest
+                failures.append({"record_id": document["record_id"], "reason": f"{type(exc).__name__}: {exc}"})
+        return {"status": "filled" if filled else "stalled", "filled": filled, "failures": failures}
 
     # -- settlement ----------------------------------------------------------
     def settle_dispatches(self) -> list[dict[str, Any]]:
@@ -1028,7 +1161,10 @@ class MissionSourceDiscoveryCoordinator:
         if self.missions.launched_discovered_documents(limit=1, source_ref=self.source_ref):
             return {"status": "busy", "reason": "a discovered-document acquisition is still open"}
         retry = False
-        document = self.missions.next_discovered_document(source_ref=self.source_ref)
+        document = self.missions.next_discovered_document(
+            source_ref=self.source_ref,
+            preferred_hosts=self.preferred_hosts, skip_hosts=self.skip_hosts,
+        )
         if document is not None and self._document_in_authority(document["document_ref"]):
             # A human acquisition already put these bytes into authority; settle
             # the row and queue the review instead of paying for them twice.
@@ -1053,11 +1189,16 @@ class MissionSourceDiscoveryCoordinator:
             # interval has passed (e.g. a child orphaned by a deploy restart).
             document = self.missions.retryable_failed_document(
                 older_than=ACQUISITION_RETRY_INTERVAL, as_of=self.clock(),
-                source_ref=self.source_ref,
+                source_ref=self.source_ref, skip_hosts=self.skip_hosts,
             )
             retry = document is not None
         if document is None:
-            return {"status": "idle"}
+            idle: dict[str, Any] = {"status": "idle"}
+            if self.skip_hosts:
+                idle["held_by_skip_hosts"] = self.missions.discovered_documents_held_by_skip(
+                    source_ref=self.source_ref, skip_hosts=self.skip_hosts
+                )
+            return idle
         try:
             authorization = self.missions.authorize_source_discovery(
                 company_ref=document["company_ref"],
@@ -1099,6 +1240,13 @@ class MissionSourceDiscoveryCoordinator:
     def dispatch_once(self) -> dict[str, Any]:
         settled_dispatches = self.settle_dispatches()
         settled_documents = self.settle_documents()
+        # P9d-12/13 maintenance, all before any new spend: documents stranded
+        # by a mission version change come back under the current grant,
+        # pre-ledger rows learn their host, and documents already held owe a
+        # review rather than a fetch.
+        carried_forward = self.carry_forward()
+        host_backfill = self.backfill_hosts()
+        already_held = self.settle_already_held()
         review_backfill = self.missions.backfill_document_reviews(self.plan["mission_ref"])
         # Acquiring an already-discovered document comes before spending the
         # shared budget on a new search: known gaps first, then new ones.
@@ -1112,6 +1260,9 @@ class MissionSourceDiscoveryCoordinator:
             "plan_hash": self.plan["content_hash"],
             "settled_dispatches": settled_dispatches,
             "settled_documents": settled_documents,
+            "carried_forward": carried_forward,
+            "host_backfill": host_backfill,
+            "already_held": already_held,
             "review_backfill": review_backfill,
             "discovery": discovery,
             "acquisition": acquisition,
@@ -1123,6 +1274,7 @@ __all__ = [
     "AlphaEngineSearchLauncher",
     "DISCOVERY_PLAN_SCHEMA_VERSION",
     "DISCOVERY_PLAN_SCHEMA_VERSION_V2",
+    "DISCOVERY_PLAN_SCHEMA_VERSION_V3",
     "DISCOVERY_PLAN_SCHEMA_VERSIONS",
     "DiscoveryLaunchConflict",
     "DiscoveryLaunchError",

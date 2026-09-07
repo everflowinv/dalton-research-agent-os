@@ -195,6 +195,10 @@ def run_discovery(
             summary["failure_reason"] = f"search outcome {receipt['outcome']}"
             return summary
         present = public_web_urls_in_authority(core.connection, receipt["document_refs"])
+        # Human-readable canonical URLs, rebuilt from the exact raw artifact;
+        # reported for the owner and, since P9d-13, their hosts ride the
+        # ledger row so the queue can be ordered without re-opening the bytes.
+        authorities = search.url_authorities(receipt["source_envelope_ref"])
         record = missions.record_source_discovery(
             authorization=authorization,
             discovery_plan_ref=plan["id"],
@@ -208,12 +212,11 @@ def run_discovery(
             source_envelope_hash=receipt["source_envelope_hash"],
             document_refs=receipt["document_refs"],
             in_authority_document_refs=present,
+            document_hosts={item["url_ref"]: item["host"] for item in authorities},
         )
-        # Human-readable canonical URLs, rebuilt from the exact raw artifact;
-        # they are reported for the owner, never treated as page content.
         summary["discovered_urls"] = [
             {"url_ref": item["url_ref"], "canonical_url": item["canonical_url"], "host": item["host"]}
-            for item in search.url_authorities(receipt["source_envelope_ref"])
+            for item in authorities
         ]
         summary.update({
             "status": "succeeded",

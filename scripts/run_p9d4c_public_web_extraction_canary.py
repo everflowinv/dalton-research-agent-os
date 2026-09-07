@@ -61,7 +61,7 @@ from dalton_core.public_web_fetch_launcher import PublicWebFetchLauncher  # noqa
 from dalton_core.raw_spool import RawSpool  # noqa: E402
 from dalton_core.store import DaltonStore, canonical_json, content_hash  # noqa: E402
 
-PLAN_PATH = ROOT / "deploy" / "phase9" / "p9d4-us-it-services-web-search-plan-v2.json"
+PLAN_PATH = ROOT / "deploy" / "phase9" / "p9d4-us-it-services-web-search-plan-v3.json"
 COUNTED_TABLES = ("evidence_versions", "claim_versions", "thesis_versions")
 WINDOW_CHARS = 12000
 QUOTE_CHARS = 1200

@@ -325,6 +325,93 @@ class FetchCoordinatorTests(unittest.TestCase):
         p2.pop("mission_ref")
         self.mission = self.missions.create_mission(ref, **p2)
 
+    def _coordinator(self, plan: dict, *, spool_dir=None) -> MissionSourceDiscoveryCoordinator:
+        self.search_launcher.plan = plan
+        return MissionSourceDiscoveryCoordinator(
+            store=self.h.core, missions=self.missions, plan=plan,
+            search_launcher=self.search_launcher, acquisition_launcher=self.fetch_launcher,
+            clock=self.clock, spool_dir=spool_dir,
+        )
+
+    def test_document_already_in_authority_at_search_time_enters_the_review_queue(self) -> None:
+        """P9d-12: bytes a human fetched first still owe the human queue a review.
+
+        Live, the one document search marked already_in_authority (a hand
+        fetched PDF) never entered the queue, because registration required
+        ``acquired`` and nothing ever moved the row.
+        """
+
+        # A human search + fetch puts URL_A's bytes into authority before the
+        # mission's own search runs.
+        receipt = self.h.discover()
+        self.h.fetch.fetch(self.h.fetch.build_request(self.h.authority(receipt, URL_A)))
+        self.coordinator.dispatch_once()
+        tick = self.coordinator.dispatch_once()
+        self.assertEqual(tick["settled_dispatches"][0]["new_document_count"], 1)
+        held = tick["already_held"]
+        self.assertEqual([(h["document_ref"], h["status"], h["review_status"]) for h in held], [(URL_A, "acquired", "fresh")])
+        # No fetch was spent on it; the fetch that did launch is URL_B.
+        self.assertEqual([c["document_ref"] for c in self.fetch_launcher.calls], [URL_B])
+        reviews = self.missions.document_reviews(self.mission["id"], state="awaiting_human_extraction")
+        self.assertEqual([r["document_ref"] for r in reviews], [URL_A])
+        self.assertEqual(self.coordinator.dispatch_once()["already_held"], [])
+
+    def test_plan_acquisition_policy_orders_preferred_hosts_first_and_never_fetches_skipped(self) -> None:
+        """P9d-13: first-party hosts jump the queue; hosts that refuse the lane cost nothing."""
+
+        preferred = self._coordinator(web_plan_for_tests(
+            max_calls_24h=10, acquisition={"preferred_hosts": ["news.example.org"], "skip_hosts": []},
+        ))
+        preferred.dispatch_once()
+        tick = preferred.dispatch_once()
+        # URL_A is older, but URL_B's host is preferred.
+        self.assertEqual(tick["acquisition"]["document_ref"], URL_B)
+        docs = {d["document_ref"]: d for d in self.missions.discovered_documents(self.mission["id"])}
+        self.assertEqual((docs[URL_A]["host"], docs[URL_B]["host"]), ("example.com", "news.example.org"))
+        tick = preferred.dispatch_once()
+        self.assertEqual(tick["acquisition"]["document_ref"], URL_A)
+
+        # Start again with example.com skipped: URL_A is never picked, not even
+        # as a retry, and the idle tick says how many rows the skip is holding.
+        self.setUp()
+        skipping = self._coordinator(web_plan_for_tests(
+            max_calls_24h=10, acquisition={"preferred_hosts": [], "skip_hosts": ["example.com"]},
+        ))
+        skipping.dispatch_once()
+        tick = skipping.dispatch_once()
+        self.assertEqual(tick["acquisition"]["document_ref"], URL_B)
+        tick = skipping.dispatch_once()
+        self.assertEqual((tick["acquisition"]["status"], tick["acquisition"]["held_by_skip_hosts"]), ("idle", 1))
+        self.assertEqual([c["document_ref"] for c in self.fetch_launcher.calls], [URL_B])
+        self.assertIsNone(self.missions.next_discovered_document(source_ref=WEB_SEARCH_SOURCE_REF, skip_hosts=["example.com"]))
+        self.assertEqual(self.missions.next_discovered_document(source_ref=WEB_SEARCH_SOURCE_REF)["document_ref"], URL_A)
+        self.assertIsNone(self.missions.retryable_failed_document(
+            older_than=timedelta(days=1), as_of=self.clock() + timedelta(days=3),
+            source_ref=WEB_SEARCH_SOURCE_REF, skip_hosts=["example.com"],
+        ))
+
+    def test_host_backfill_fills_pre_ledger_rows_from_the_exact_discovery_envelope(self) -> None:
+        """P9d-13: rows recorded before the ledger carried a host learn it from the spool."""
+
+        self.search_launcher.with_hosts = False
+        blind = self._coordinator(self.plan)
+        blind.dispatch_once()
+        tick = blind.dispatch_once()
+        self.assertEqual(tick["host_backfill"]["status"], "no_spool")
+        self.assertEqual([d["host"] for d in self.missions.discovered_documents(self.mission["id"])], [None, None])
+        # URL_A's fetch launched on that tick; URL_B is still queued and, with
+        # no host recorded, the policy neither prefers nor skips it.
+        self.assertEqual(self.missions.next_discovered_document(
+            source_ref=WEB_SEARCH_SOURCE_REF, skip_hosts=["news.example.org"])["document_ref"], URL_B)
+        sighted = self._coordinator(self.plan, spool_dir=Path(self.temp.name) / "spool")
+        tick = sighted.dispatch_once()
+        self.assertEqual((tick["host_backfill"]["status"], tick["host_backfill"]["filled"]), ("filled", 2))
+        self.assertEqual({d["document_ref"]: d["host"] for d in self.missions.discovered_documents(self.mission["id"])},
+                         {URL_A: "example.com", URL_B: "news.example.org"})
+        self.assertEqual(sighted.dispatch_once()["host_backfill"], {"status": "complete", "filled": 0})
+        with self.assertRaises(Exception):
+            self.missions.set_document_host(self.missions.discovered_documents(self.mission["id"])[0]["record_id"], "other.example")
+
     def test_discovered_urls_are_fetched_settled_and_queued_for_human_extraction(self) -> None:
         tick = self.coordinator.dispatch_once()
         self.assertEqual(tick["discovery"]["status"], "launched")

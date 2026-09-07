@@ -52,7 +52,7 @@ from dalton_core.public_web_core_search import SEARCH_PROFILE_REF  # noqa: E402
 from dalton_core.raw_spool import RawSpool  # noqa: E402
 from dalton_core.store import DaltonStore  # noqa: E402
 
-PLAN_PATH = ROOT / "deploy" / "phase9" / "p9d4-us-it-services-web-search-plan-v2.json"
+PLAN_PATH = ROOT / "deploy" / "phase9" / "p9d4-us-it-services-web-search-plan-v3.json"
 COUNTED_TABLES = ("evidence_versions", "claim_versions", "thesis_versions")
 
 

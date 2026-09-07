@@ -29,7 +29,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from types import MappingProxyType
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -492,6 +492,36 @@ def _ref(prefix: str, identity: Mapping[str, Any]) -> str:
     return f"{prefix}:{content_hash(identity)[:32]}"
 
 
+_HOST_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
+
+
+def _host_list(value: Any, name: str) -> list[str]:
+    """Lowercase registrable hostnames, unique, in the order given."""
+
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise CoverageMissionValidationError(f"{name} must be a list of hostnames")
+    hosts: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or _HOST_RE.fullmatch(item) is None:
+            raise CoverageMissionValidationError(f"{name} entries must be lowercase hostnames")
+        if item not in hosts:
+            hosts.append(item)
+    if len(hosts) > 50:
+        raise CoverageMissionValidationError(f"{name} may list at most 50 hosts")
+    return hosts
+
+
+def _document_hosts(value: Any) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise CoverageMissionValidationError("document_hosts must map document refs to hosts")
+    return {
+        _text(ref, "document_ref"): _host_list([host], "document_hosts")[0]
+        for ref, host in value.items()
+    }
+
+
 class CoverageMissionAuthority:
     """Publish missions, record stage progress and project mission state."""
 
@@ -503,6 +533,28 @@ class CoverageMissionAuthority:
             "dalton_coverage_mission_authorized", 0, lambda: int(self._authorized)
         )
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._migrate_discovered_document_host()
+
+    def _migrate_discovered_document_host(self) -> None:
+        """P9d-13: add the nullable ``host`` column to ledgers created earlier.
+
+        Additive only; existing rows keep every value and gain ``host=NULL``,
+        which the discovery coordinator backfills from each row's exact
+        discovery envelope.  Fresh databases already carry the column.
+        """
+
+        columns = {
+            row[1] for row in self.connection.execute(
+                "PRAGMA table_info(coverage_mission_discovered_documents)"
+            ).fetchall()
+        }
+        if "host" in columns:
+            return
+        if self.connection.in_transaction:
+            raise RuntimeError("discovered document host migration requires no open transaction")
+        self.connection.execute(
+            "ALTER TABLE coverage_mission_discovered_documents ADD COLUMN host TEXT"
+        )
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:
@@ -1246,6 +1298,7 @@ class CoverageMissionAuthority:
         source_envelope_hash: str,
         document_refs: list[str],
         in_authority_document_refs: list[str],
+        document_hosts: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         """Append one discovery record and register its new documents.
 
@@ -1257,6 +1310,7 @@ class CoverageMissionAuthority:
         """
 
         authorization = self._validate_discovery_authorization(authorization)
+        hosts = _document_hosts(document_hosts)
         exact = self.authorize_source_discovery(
             company_ref=authorization["company_ref"],
             source_ref=authorization["source_ref"],
@@ -1372,12 +1426,12 @@ class CoverageMissionAuthority:
                 cur.execute(
                     "INSERT INTO coverage_mission_discovered_documents"
                     "(record_id,mission_version_ref,company_ref,source_ref,document_ref,"
-                    "discovery_ref,status,ticket_ref,failure_reason,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    "discovery_ref,status,ticket_ref,failure_reason,created_at,updated_at,host) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         document_id, exact["mission_version_ref"], exact["company_ref"],
                         exact["source_ref"], ref, record_id, status, None, None,
-                        created_at, created_at,
+                        created_at, created_at, hosts.get(ref),
                     ),
                 )
         return {**wire, "status": "fresh"}
@@ -1421,6 +1475,7 @@ class CoverageMissionAuthority:
             "failure_reason": row["failure_reason"],
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
+            "host": row["host"],
         }
 
     def discovered_documents(
@@ -1441,13 +1496,29 @@ class CoverageMissionAuthority:
         params.append(limit)
         return [self._document_row(row) for row in self.connection.execute(query, params).fetchall()]
 
-    def next_discovered_document(self, *, source_ref: str | None = None) -> dict[str, Any] | None:
-        """Oldest ``discovered`` document across active missions, or None.
+    def next_discovered_document(
+        self,
+        *,
+        source_ref: str | None = None,
+        preferred_hosts: Sequence[str] = (),
+        skip_hosts: Sequence[str] = (),
+    ) -> dict[str, Any] | None:
+        """Next ``discovered`` document across active missions, or None.
 
         ``source_ref`` narrows to one discovery source: each acquisition lane
         only ever picks documents its own connector can fetch.
+
+        P9d-13: the plan may declare an acquisition policy.  Documents on a
+        ``preferred_hosts`` host (first-party investor relations, typically)
+        come before the rest; within each group the oldest wins.  Documents on
+        a ``skip_hosts`` host are never picked: those hosts refuse the lane and
+        every attempt would only spend a governed call to learn it again.
+        Rows without a host (non-URL sources, or not yet backfilled) are
+        neither preferred nor skipped.
         """
 
+        preferred = _host_list(preferred_hosts, "preferred_hosts")
+        skipped = _host_list(skip_hosts, "skip_hosts")
         query = (
             "SELECT d.* FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
@@ -1457,13 +1528,115 @@ class CoverageMissionAuthority:
         if source_ref is not None:
             query += " AND d.source_ref=?"
             params.append(_text(source_ref, "source_ref"))
-        query += " ORDER BY d.created_at,d.record_id LIMIT 1"
+        if skipped:
+            query += " AND (d.host IS NULL OR d.host NOT IN (%s))" % ",".join("?" * len(skipped))
+            params.extend(skipped)
+        if preferred:
+            query += " ORDER BY CASE WHEN d.host IN (%s) THEN 0 ELSE 1 END," % ",".join("?" * len(preferred))
+            params.extend(preferred)
+        else:
+            query += " ORDER BY"
+        query += " d.created_at,d.record_id LIMIT 1"
         row = self.connection.execute(query, params).fetchone()
         return None if row is None else self._document_row(row)
 
+    def discovered_documents_held_by_skip(
+        self, *, source_ref: str | None = None, skip_hosts: Sequence[str] = ()
+    ) -> int:
+        """How many ``discovered`` documents the plan's ``skip_hosts`` are holding back."""
+
+        skipped = _host_list(skip_hosts, "skip_hosts")
+        if not skipped:
+            return 0
+        query = (
+            "SELECT COUNT(*) FROM coverage_mission_discovered_documents d "
+            "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
+            "WHERE d.status='discovered' AND d.host IN (%s)" % ",".join("?" * len(skipped))
+        )
+        params: list[Any] = list(skipped)
+        if source_ref is not None:
+            query += " AND d.source_ref=?"
+            params.append(_text(source_ref, "source_ref"))
+        return int(self.connection.execute(query, params).fetchone()[0])
+
+    def already_held_documents(
+        self, *, source_ref: str | None = None, limit: int = 20
+    ) -> list[dict[str, Any]]:
+        """Documents recorded ``already_in_authority`` under active missions.
+
+        P9d-12: search marks a citation this way when Core already holds its
+        bytes (a human fetched it first).  Nothing needs fetching, but the
+        document still owes the human queue a review; the coordinator settles
+        these to ``acquired`` and registers that review.
+        """
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise CoverageMissionValidationError("discovered document limit must be 1..100")
+        query = (
+            "SELECT d.* FROM coverage_mission_discovered_documents d "
+            "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
+            "WHERE d.status='already_in_authority'"
+        )
+        params: list[Any] = []
+        if source_ref is not None:
+            query += " AND d.source_ref=?"
+            params.append(_text(source_ref, "source_ref"))
+        query += " ORDER BY d.created_at,d.record_id LIMIT ?"
+        params.append(limit)
+        return [self._document_row(row) for row in self.connection.execute(query, params).fetchall()]
+
+    def documents_without_host(
+        self, *, source_ref: str, limit: int = 25
+    ) -> list[dict[str, Any]]:
+        """Rows recorded before P9d-13 whose host is still unknown, oldest first."""
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+            raise CoverageMissionValidationError("discovered document limit must be 1..100")
+        rows = self.connection.execute(
+            "SELECT d.* FROM coverage_mission_discovered_documents d "
+            "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
+            "WHERE d.host IS NULL AND d.source_ref=? ORDER BY d.created_at,d.record_id LIMIT ?",
+            (_text(source_ref, "source_ref"), limit),
+        ).fetchall()
+        return [self._document_row(row) for row in rows]
+
+    def set_document_host(self, record_id: str, host: str) -> dict[str, Any]:
+        """Backfill one row's host; only a NULL host may be written, once."""
+
+        record_id = _text(record_id, "record_id")
+        host = _host_list([host], "host")[0]
+        with self._transaction() as cur:
+            cur.execute(
+                "UPDATE coverage_mission_discovered_documents SET host=? "
+                "WHERE record_id=? AND host IS NULL",
+                (host, record_id),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("document host is already recorded or the row is missing")
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
+            ).fetchone()
+        return self._document_row(row)
+
+    def discovery_record(self, record_id: str) -> dict[str, Any]:
+        """One source discovery by id, hash-verified."""
+
+        record_id = _text(record_id, "record_id")
+        row = self.connection.execute(
+            "SELECT * FROM coverage_mission_source_discoveries WHERE record_id=?", (record_id,)
+        ).fetchone()
+        if row is None:
+            raise CoverageMissionNotFound("mission source discovery was not found")
+        wire = validate_mission_source_discovery(
+            _canonical_record(row["record_json"], "mission source discovery")
+        )
+        if wire["id"] != row["record_id"] or wire["content_hash"] != row["content_hash"]:
+            raise CoverageMissionConflict("mission source discovery authority drifted")
+        return wire
+
     def retryable_failed_document(
         self, *, older_than: timedelta, as_of: datetime | None = None,
-        source_ref: str | None = None,
+        source_ref: str | None = None, skip_hosts: Sequence[str] = (),
     ) -> dict[str, Any] | None:
         """Oldest ``acquisition_failed`` document whose last update is older
         than the retry interval, or None.  Failures (provider errors, orphaned
@@ -1485,6 +1658,11 @@ class CoverageMissionAuthority:
         if source_ref is not None:
             query += " AND d.source_ref=?"
             params.append(_text(source_ref, "source_ref"))
+        skipped = _host_list(skip_hosts, "skip_hosts")
+        if skipped:
+            # A host the plan skips is not retried either; it would only fail again.
+            query += " AND (d.host IS NULL OR d.host NOT IN (%s))" % ",".join("?" * len(skipped))
+            params.extend(skipped)
         query += " ORDER BY d.updated_at,d.record_id LIMIT 1"
         row = self.connection.execute(query, params).fetchone()
         return None if row is None else self._document_row(row)
@@ -1560,13 +1738,15 @@ class CoverageMissionAuthority:
         return self._document_row(row)
 
     def settle_document_already_held(self, record_id: str) -> dict[str, Any]:
-        """Settle a ``discovered`` document whose bytes Core already holds.
+        """Settle a document whose bytes Core already holds.
 
         A human acquisition puts original bytes into connector authority
-        without touching this ledger, so the row can still read ``discovered``
-        while the document is fully held.  The caller proves the bytes are in
-        authority for this source; this moves the row to ``acquired`` so the
-        human review queue picks it up and no second paid fetch is spent.
+        without touching this ledger, so the row can read ``discovered`` (the
+        fetch came after discovery) or ``already_in_authority`` (search found
+        the bytes already there) while the document is fully held.  The caller
+        proves the bytes are in authority for this source; this moves the row
+        to ``acquired`` so the human review queue picks it up and no second
+        paid fetch is spent.
         """
 
         record_id = _text(record_id, "record_id")
@@ -1578,12 +1758,13 @@ class CoverageMissionAuthority:
                 raise CoverageMissionNotFound("discovered document was not found")
             if row["status"] == "acquired":
                 return self._document_row(row)
-            if row["status"] != "discovered":
+            if row["status"] not in ("discovered", "already_in_authority"):
                 raise CoverageMissionConflict("document is not awaiting acquisition")
             now = _now()
             cur.execute(
                 "UPDATE coverage_mission_discovered_documents SET status='acquired',"
-                "failure_reason=NULL,updated_at=? WHERE record_id=? AND status='discovered'",
+                "failure_reason=NULL,updated_at=? WHERE record_id=? "
+                "AND status IN ('discovered','already_in_authority')",
                 (now, record_id),
             )
             if cur.rowcount != 1:
@@ -1626,6 +1807,112 @@ class CoverageMissionAuthority:
         return self._document_row(row)
 
     # -- P9d-2: human extraction queue for acquired documents -----------------
+
+    _CARRIED_STATUSES: tuple[str, ...] = (
+        "discovered", "already_in_authority", "acquisition_failed", "acquisition_launched", "acquired",
+    )
+
+    def carry_forward_superseded_documents(
+        self, mission_ref: str, *, source_ref: str | None = None, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        """Re-register documents left under a superseded version of a mission.
+
+        P9d-12: every acquisition query joins the active version pointer, so
+        publishing a new mission version silently strands whatever the prior
+        version had discovered but not finished.  Live, v3 -> v4 stranded ten
+        URLs.  This copies each unfinished row into the current version, under
+        the current version's own grant: the company must still be in the
+        universe and the source still ``connected`` for automation, exactly as
+        for a fresh discovery.  Rows the grant refuses are reported, not moved.
+
+        The copy keeps ``document_ref``, ``discovery_ref`` (the original
+        envelope is still the only route from ref to URL), ``host``, and the
+        original timestamps, so queue order and retry timing are preserved.
+        ``acquisition_launched`` becomes ``discovered``: its bytes will land in
+        authority through the old ticket and the already-held path settles the
+        copy without a second fetch.  ``acquired`` rows whose review under the
+        old version was already resolved are finished and are not copied.
+        Idempotent: a document already present under the current version is
+        never copied twice.
+        """
+
+        mission_ref = _text(mission_ref, "mission_ref")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise CoverageMissionValidationError("carry-forward limit must be 1..500")
+        pointer = self.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer WHERE mission_ref=?",
+            (mission_ref,),
+        ).fetchone()
+        if pointer is None:
+            return []
+        current_ref = pointer["mission_version_id"]
+        mission = self.mission(current_ref)
+        principal = mission["autonomy"]["automation_principal"]
+        query = (
+            "SELECT d.* FROM coverage_mission_discovered_documents d "
+            "JOIN coverage_mission_versions v ON v.mission_version_id=d.mission_version_ref "
+            "WHERE v.mission_ref=? AND d.mission_version_ref<>? AND d.status IN (%s) "
+            "AND NOT EXISTS (SELECT 1 FROM coverage_mission_discovered_documents c "
+            "WHERE c.mission_version_ref=? AND c.document_ref=d.document_ref)"
+            % ",".join("?" * len(self._CARRIED_STATUSES))
+        )
+        params: list[Any] = [mission_ref, current_ref, *self._CARRIED_STATUSES, current_ref]
+        if source_ref is not None:
+            query += " AND d.source_ref=?"
+            params.append(_text(source_ref, "source_ref"))
+        query += " ORDER BY d.created_at,d.record_id LIMIT ?"
+        params.append(limit)
+        rows = self.connection.execute(query, params).fetchall()
+        if not rows:
+            return []
+        grants: dict[tuple[str, str], dict[str, Any] | str] = {}
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            entry = {
+                "document_ref": row["document_ref"], "from_version_ref": row["mission_version_ref"],
+                "company_ref": row["company_ref"], "source_ref": row["source_ref"],
+            }
+            if row["status"] == "acquired":
+                review = self.connection.execute(
+                    "SELECT state FROM coverage_mission_document_reviews "
+                    "WHERE mission_version_ref=? AND document_ref=?",
+                    (row["mission_version_ref"], row["document_ref"]),
+                ).fetchone()
+                if review is not None and review["state"] != "awaiting_human_extraction":
+                    continue  # finished under the old version; nothing owed
+            key = (row["company_ref"], row["source_ref"])
+            if key not in grants:
+                try:
+                    grants[key] = self.authorize_source_discovery(
+                        company_ref=key[0], source_ref=key[1], requested_by=principal,
+                        mission_version_ref=current_ref,
+                    )
+                except CoverageMissionError as exc:
+                    grants[key] = f"{type(exc).__name__}: {exc}"
+            grant = grants[key]
+            if isinstance(grant, str):
+                result.append({**entry, "status": "skipped", "reason": grant})
+                continue
+            status = "discovered" if row["status"] == "acquisition_launched" else row["status"]
+            reason = row["failure_reason"] if status == "acquisition_failed" else None
+            record_id = _ref(
+                "mission-discovered-document",
+                {"mission_version_ref": current_ref, "document_ref": row["document_ref"]},
+            )
+            with self._transaction() as cur:
+                cur.execute(
+                    "INSERT INTO coverage_mission_discovered_documents"
+                    "(record_id,mission_version_ref,company_ref,source_ref,document_ref,"
+                    "discovery_ref,status,ticket_ref,failure_reason,created_at,updated_at,host) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        record_id, current_ref, row["company_ref"], row["source_ref"],
+                        row["document_ref"], row["discovery_ref"], status, None, reason,
+                        row["created_at"], row["updated_at"], row["host"],
+                    ),
+                )
+            result.append({**entry, "status": status, "record_id": record_id})
+        return result
 
     def backfill_document_reviews(self, mission_ref: str, *, limit: int = 100) -> list[dict[str, Any]]:
         """Recover acquisitions completed before queue deployment or a crash.
