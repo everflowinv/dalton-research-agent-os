@@ -1020,6 +1020,25 @@ class MissionSourceDiscoveryCoordinator:
             return {"status": "busy", "reason": "a discovered-document acquisition is still open"}
         retry = False
         document = self.missions.next_discovered_document(source_ref=self.source_ref)
+        if document is not None and self._document_in_authority(document["document_ref"]):
+            # A human acquisition already put these bytes into authority; settle
+            # the row and queue the review instead of paying for them twice.
+            result = self.missions.settle_document_already_held(document["record_id"])
+            entry: dict[str, Any] = {
+                "status": "already_in_authority", "record_id": document["record_id"],
+                "document_ref": document["document_ref"], "settled_status": result["status"],
+            }
+            try:
+                review = self.missions.register_document_review(
+                    document["record_id"],
+                    requested_by=self.missions.mission(
+                        document["mission_version_ref"]
+                    )["autonomy"]["automation_principal"],
+                )
+                entry["review_status"], entry["review_id"] = review["status"], review["review_id"]
+            except CoverageMissionError as exc:
+                entry["review_status"] = f"not_registered:{type(exc).__name__}"
+            return entry
         if document is None:
             # No fresh documents: retry the oldest acquisition failure whose
             # interval has passed (e.g. a child orphaned by a deploy restart).

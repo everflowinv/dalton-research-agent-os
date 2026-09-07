@@ -75,3 +75,32 @@ spec `industry-demand`，窗口 2026-07-09..2026-09-07）：
 - 抓到的网页目前只能"读"：`mission_document_evidence` 可渲染可核验窗口，模型起草与候选 staging 对网页
   仍关闭（P9d-4c 的边界，需另立一片并复核 ADR-0003）。
 - AlphaEngine 24h 预算当前 31/30 已满，属既有软上限边界（多页文档），非本次改动引入。
+
+## 追加：live 上的首次真实页面抓取（human-only，2026-09-07）
+
+`dalton-gov acquire_public_web_document`（actor `human:lumos`）对发现结果中**第一手**的
+`newsroom.accenture.com` 抓了一次：
+
+- ticket `public-web-fetch:6a384f54…`，transport **public-https**，退出 0，**1 次抓取**；
+- 该 URL 实为 **PDF**：`https://newsroom.accenture.com/content/3QFY24-Earnings/accenture-reports-third-quarter-fiscal-2024-results.pdf`，
+  **190,517 字节**、`application/pdf`、字节以 `%PDF-1.4` 开头，已进 Core connector authority；
+- live 现有 **1 条 `fetch_get` invocation**；`public_web_urls_in_authority` 对该 ref 返回 true；
+- `formal_authority_writes = 0`；Evidence 6 / Claim 6 / Thesis 2 不变。
+
+### 由此暴露的两件事
+
+1. **最有价值的第一手来源常常是 PDF，而抽取来源目前渲染不了 PDF。** 审阅面按设计如实拒绝：
+   "fetched page media type application/pdf cannot be rendered as text for review"。字节已在 authority、
+   可核验、可重放，但人还读不了它。**要不要支持 PDF 是 owner 的依赖决策**：本仓库运行时依赖几乎为零
+   （只有部署用的 `cos-python-sdk-v5`），本机也没有任何 PDF 库；引入 `pypdf` 之类会扩大依赖面，
+   自研 PDF 文本抽取则工作量与出错面都不小。在决定之前，PDF 会一直被如实拒绝，不会被猜着读。
+2. **human 抓取不推进 mission 账本**（与既有 `acquire_alphaengine_document` 同构）：文档行仍是 `discovered`。
+   在 `connected` 下，协调器会为这些**已在 authority 的字节再付一次抓取**。已修（见下）。
+
+## 后续修复：已持有的字节不再重复抓取（P9d-6）
+
+`MissionSourceDiscoveryCoordinator.launch_acquisition` 在启动抓取前先判断该文档的字节是否已在本来源的
+authority 中；若是，则经新的 `CoverageMissionAuthority.settle_document_already_held`
+（只允许 `discovered → acquired`）直接结算并登记人工审阅，返回 `status: already_in_authority`，
+**不花第二次抓取**。新增回归测试：human 抓取后账本仍为 `discovered`，下一 tick 结算为 `acquired`、
+登记 review，且抓取次数不变。

@@ -1559,6 +1559,40 @@ class CoverageMissionAuthority:
             ).fetchone()
         return self._document_row(row)
 
+    def settle_document_already_held(self, record_id: str) -> dict[str, Any]:
+        """Settle a ``discovered`` document whose bytes Core already holds.
+
+        A human acquisition puts original bytes into connector authority
+        without touching this ledger, so the row can still read ``discovered``
+        while the document is fully held.  The caller proves the bytes are in
+        authority for this source; this moves the row to ``acquired`` so the
+        human review queue picks it up and no second paid fetch is spent.
+        """
+
+        record_id = _text(record_id, "record_id")
+        with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
+            ).fetchone()
+            if row is None:
+                raise CoverageMissionNotFound("discovered document was not found")
+            if row["status"] == "acquired":
+                return self._document_row(row)
+            if row["status"] != "discovered":
+                raise CoverageMissionConflict("document is not awaiting acquisition")
+            now = _now()
+            cur.execute(
+                "UPDATE coverage_mission_discovered_documents SET status='acquired',"
+                "failure_reason=NULL,updated_at=? WHERE record_id=? AND status='discovered'",
+                (now, record_id),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("discovered document state changed concurrently")
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?", (record_id,)
+            ).fetchone()
+        return self._document_row(row)
+
     def settle_discovered_document(
         self, record_id: str, *, status: str, reason: str | None = None
     ) -> dict[str, Any]:

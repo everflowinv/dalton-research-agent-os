@@ -314,6 +314,38 @@ class FetchCoordinatorTests(unittest.TestCase):
         for table in ("evidence_versions", "claim_versions"):
             self.assertEqual(self.h.core.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0], 0)
 
+    def test_bytes_already_held_settle_without_a_second_paid_fetch(self) -> None:
+        """A human fetch leaves the ledger at discovered; the tick must not re-fetch."""
+
+        self.coordinator.dispatch_once()
+        tick = self.coordinator.dispatch_once()
+        self.assertEqual(tick["settled_dispatches"][0]["status"], "succeeded")
+        # That tick launched URL_A, so URL_B is the next one still queued.
+        queued = self.missions.next_discovered_document(source_ref=WEB_SEARCH_SOURCE_REF)
+        self.assertEqual(queued["document_ref"], URL_B)
+        self.assertEqual(queued["status"], "discovered")
+        # Simulate the human-only fetch op: bytes enter authority directly and
+        # the mission ledger is untouched.
+        before = len(self.fetch_launcher.calls)
+        envelope_ref = self.fetch_launcher._discovery_receipt(URL_B)
+        authority = url_authority_from_discovery(
+            self.h.core.connection, self.h.spool, url_ref=URL_B, source_envelope_ref=envelope_ref,
+        )
+        self.h.fetch.fetch(self.h.fetch.build_request(authority))
+        self.assertEqual(public_web_urls_in_authority(self.h.core.connection, [URL_B]), [URL_B])
+        self.assertEqual(
+            self.missions.next_discovered_document(source_ref=WEB_SEARCH_SOURCE_REF)["status"], "discovered"
+        )
+        tick = self.coordinator.dispatch_once()
+        acquisition = tick["acquisition"]
+        self.assertEqual(acquisition["status"], "already_in_authority")
+        self.assertEqual((acquisition["document_ref"], acquisition["settled_status"]), (URL_B, "acquired"))
+        self.assertEqual(acquisition["review_status"], "fresh")
+        # No second fetch was launched for those bytes.
+        self.assertEqual(len(self.fetch_launcher.calls), before)
+        reviews = self.missions.document_reviews(self.mission["id"], state="awaiting_human_extraction")
+        self.assertIn(URL_B, [item["document_ref"] for item in reviews])
+
     def test_failed_fetch_is_recorded_and_retried_after_interval(self) -> None:
         self.fetch_launcher.fail = True
         self.coordinator.dispatch_once()

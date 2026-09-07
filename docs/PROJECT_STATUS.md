@@ -1,6 +1,19 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
+- **live 首次真实页面抓取完成（human-only），并暴露两件事；其中一件已修（P9d-6）。**
+  `acquire_public_web_document`（`human:lumos`）对发现结果里第一手的 `newsroom.accenture.com` 抓了一次：
+  transport `public-https`、1 次抓取、**190,517 字节 `application/pdf`**（`%PDF-1.4`）进入 Core connector
+  authority；live 现有 1 条 `fetch_get` invocation，`formal_authority_writes=0`，Evidence 6 / Claim 6 /
+  Thesis 2 不变。
+  ①**最有价值的第一手来源常是 PDF，而抽取来源渲染不了 PDF**，审阅面如实拒绝（字节可核验可重放，但人还读不了）。
+  **是否支持 PDF 是 owner 的依赖决策**：本仓库运行时依赖几乎为零，本机无任何 PDF 库；引入 `pypdf` 会扩大依赖面，
+  自研抽取工作量与出错面都不小。在决定前 PDF 一律如实拒绝，绝不猜着读。
+  ②**human 抓取不推进 mission 账本**（与既有 AlphaEngine human op 同构），文档行仍 `discovered`，在
+  `connected` 下协调器会为已持有的字节**再付一次抓取**。已修：协调器启动抓取前先判断字节是否已在本来源
+  authority，是则经新的 `settle_document_already_held`（只允许 `discovered → acquired`）直接结算并登记人工
+  审阅，返回 `already_in_authority`，不花第二次抓取；新增回归测试覆盖该路径。全仓 **1163/1165**（两条既有
+  环境路径断言）。见 [P9d-5/6 记录](reports/p9d5-web-chain-deployment-and-live-rehearsal-2026-09-07.md)。
 - **web 链已部署 live，并完成 live probe_only 人工排练（P9d-5）。**
   **先纠正一处过时记述**：比对 live 已安装包与仓库 HEAD 后确认，thesis-impact 换版修复、P9d-3a、P9d-3b
   早已随 2026-09-06 08:22 的安装上线（live thesis-impact 退出码 3 / `blocked_pending_human` 正是修复后的
