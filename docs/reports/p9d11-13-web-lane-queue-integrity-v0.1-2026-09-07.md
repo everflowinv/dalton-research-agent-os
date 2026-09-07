@@ -110,3 +110,33 @@ legible failure per URL, so they stay listed; the ledger will show what they do.
 - It does not fetch anything new. Every change here is queue bookkeeping under
   the same grants and the same budget.
 - It does not change the launchers. See P9d-11 above for why.
+
+## First deploy: two things the live system said back
+
+**The drain could not converge.** It waited its full 600 s. The reason is that
+the *controller* is what launches a lane child every tick, and the installer
+stopped it only after the drain, in the same loop as the writer. With a slow
+fetch every five minutes there was rarely a two-second gap. The order is now:
+stop thesis-impact, control and controller; drain; stop the writer. The fetch
+that the timeout then interrupted was settled `orphaned`, so this deploy cost
+one more slot, the last one this defect gets.
+
+**Sixteen rows could no longer rebuild a URL authority.** The host backfill
+reported `search SourceEnvelope refs differ from exact Gemini citations` for six
+rows, and a fetch child failed the same way. Counting across the active version:
+112 rows fine, 16 not, all from the two discoveries whose citations included the
+Gemini redirect proxy. That was a regression from P9d-10. The authority rebuild
+re-normalizes the raw search bytes and compares the refs with the envelope; the
+envelope had been recorded with the proxies among its refs, the new normalizer
+drops them, so the comparison failed and every real URL in those discoveries
+became unfetchable.
+
+The fix keeps the envelope as authority over what was cited. It is re-verified
+with the normalization of its own era (the pre-P9d-10 normalization is kept
+behind `drop_redirect_proxies=False` for exactly this purpose), and the policy of
+which citations may become documents is applied only to what is emitted. A ref
+the search never cited is still refused in both eras.
+
+**What worked on the first tick.** Plan v3 active with its hash; six v3
+documents carried forward as `discovered` under v4; nineteen rows learned their
+host; the hand-fetched PDF settled `acquired` and entered the review queue.

@@ -434,6 +434,7 @@ def normalize_gemini_web_search_payload(
     *,
     expected_query: str,
     max_records: int,
+    drop_redirect_proxies: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
     """Validate the current OpenClaw Gemini provider result and derive URL refs.
 
@@ -447,7 +448,9 @@ def normalize_gemini_web_search_payload(
     ``content`` and each citation ``title`` arrive wrapped in the host's
     untrusted-content markers; only the cited URLs move forward.  Citations that
     point at the provider's own redirect proxy are dropped: see
-    ``REDIRECT_PROXY_HOSTS``.
+    ``REDIRECT_PROXY_HOSTS``.  ``drop_redirect_proxies=False`` reproduces the
+    pre-P9d-10 normalization exactly; it exists only so envelopes recorded in
+    that era can still be re-verified against their raw bytes.
     """
 
     if not isinstance(payload, Mapping):
@@ -494,7 +497,7 @@ def normalize_gemini_web_search_payload(
         title = item.get("title")
         if title is not None:
             _text(title, f"Gemini citation[{index}].title")
-        if is_search_redirect_proxy(canonical):
+        if drop_redirect_proxies and is_search_redirect_proxy(canonical):
             # Skipped before the max_records slice, so a proxy link never costs
             # a real citation its place in the admitted top slice.
             continue
@@ -766,9 +769,27 @@ def build_public_web_url_authorities(
         max_records=GEMINI_WEB_SEARCH_MAX_RECORDS,
     )
     if structured["source_record_refs"] != source.get("source_record_refs"):
-        raise PublicWebAuthorityConflict(
-            "search SourceEnvelope refs differ from exact Gemini citations"
+        # Envelopes recorded before P9d-10 name the provider's redirect
+        # proxies among their refs, because the normalizer admitted them
+        # then.  The envelope stays authority over what the search cited;
+        # it is re-verified with the normalization of its own era, and the
+        # policy of which citations may become documents is applied only to
+        # what is emitted.  Live, 16 documents from two such discoveries
+        # became unfetchable when the first check alone was applied.
+        legacy, legacy_discoveries = normalize_gemini_web_search_payload(
+            payload,
+            expected_query=payload.get("query"),
+            max_records=GEMINI_WEB_SEARCH_MAX_RECORDS,
+            drop_redirect_proxies=False,
         )
+        if legacy["source_record_refs"] != source.get("source_record_refs"):
+            raise PublicWebAuthorityConflict(
+                "search SourceEnvelope refs differ from exact Gemini citations"
+            )
+        discoveries = [
+            item for item in legacy_discoveries
+            if not is_search_redirect_proxy(item["canonical_url"])
+        ]
     created_at = source.get("retrieved_at")
     artifact_ref = source.get("raw_artifact_version_ref")
     if not isinstance(created_at, str) or not isinstance(artifact_ref, str):

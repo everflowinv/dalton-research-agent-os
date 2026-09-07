@@ -383,6 +383,42 @@ class PublicWebConnectorTests(unittest.TestCase):
         )
         self.assertEqual(len(admitted), GEMINI_WEB_SEARCH_MAX_RECORDS)
 
+    def test_envelopes_from_before_the_proxy_filter_still_rebuild_their_real_urls(self) -> None:
+        """P9d-10 regression: the envelope is authority over what was cited.
+
+        Envelopes recorded before the redirect-proxy filter name the proxy
+        among their refs.  Re-verifying them with only the new normalization
+        made 16 live documents unfetchable.  Each era verifies with its own
+        normalization; the policy applies only to what is emitted.
+        """
+
+        proxy = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQx"
+        payload = gemini_payload(citations=[
+            {"url": proxy}, {"url": "https://example.com/investors?q=ai"}, {"url": "https://news.example.org/a"},
+        ])
+        legacy = source_envelope(payload)  # refs include the proxy, as recorded then
+        self.assertEqual(len(legacy["source_record_refs"]), 3)
+        authorities = build_public_web_url_authorities(raw_result(payload), legacy)
+        self.assertEqual([a["host"] for a in authorities], ["example.com", "news.example.org"])
+        self.assertTrue(all(a["discovery_source_envelope_hash"] == legacy["content_hash"] for a in authorities))
+        # An envelope recorded after the filter names only the real URLs.
+        current = copy.deepcopy(legacy)
+        current["source_record_refs"] = [r for r in legacy["source_record_refs"] if r != public_web_url_ref(proxy)]
+        current["content_hash"] = content_hash({k: v for k, v in current.items() if k != "content_hash"})
+        self.assertEqual([a["host"] for a in build_public_web_url_authorities(raw_result(payload), current)],
+                         ["example.com", "news.example.org"])
+        # Neither era admits a ref the search never cited, or a missing one.
+        for refs in (
+            legacy["source_record_refs"] + [public_web_url_ref("https://evil.example/x")],
+            legacy["source_record_refs"][:1],
+            [legacy["source_record_refs"][0], legacy["source_record_refs"][1]],
+        ):
+            forged = copy.deepcopy(legacy)
+            forged["source_record_refs"] = refs
+            forged["content_hash"] = content_hash({k: v for k, v in forged.items() if k != "content_hash"})
+            with self.assertRaises(PublicWebAuthorityConflict):
+                build_public_web_url_authorities(raw_result(payload), forged)
+
     def test_fetch_adapter_uses_only_authorized_url_and_original_bytes(self) -> None:
         payload = gemini_payload()
         authority = build_public_web_url_authorities(

@@ -30,17 +30,22 @@ fi
 
 # P9d-11: stopping the writer terminates whatever lane child is in flight and
 # the next tick settles it as orphaned, parking that company/spec for a day.
-# Wait (bounded) for running children before bootout; on timeout say so and
-# proceed.  Read-only: it never signals a child or touches Core.
-if ! "$venv_dir/bin/python" -m dalton_core.launch_drain --state-dir "$state_dir" --timeout "${DRAIN_TIMEOUT:-600}"; then
-  print -u2 "warning: lane children still running after drain timeout; proceeding with bootout"
-fi
-
-for label in space.lumos.dalton.thesis-impact space.lumos.dalton.control space.lumos.dalton.controller space.lumos.dalton.writer; do
+# The controller is what launches a child every tick, so it goes down first;
+# then wait (bounded) for running children; then stop the writer.  On timeout
+# say so and proceed.  The drain is read-only: it never signals a child or
+# touches Core.  (First deploy with the drain after the controller waited the
+# full timeout because the controller kept launching children behind it.)
+for label in space.lumos.dalton.thesis-impact space.lumos.dalton.control space.lumos.dalton.controller; do
   if launchctl print "$domain/$label" >/dev/null 2>&1; then
     launchctl bootout "$domain/$label"
   fi
 done
+if ! "$venv_dir/bin/python" -m dalton_core.launch_drain --state-dir "$state_dir" --timeout "${DRAIN_TIMEOUT:-600}"; then
+  print -u2 "warning: lane children still running after drain timeout; proceeding with bootout"
+fi
+if launchctl print "$domain/space.lumos.dalton.writer" >/dev/null 2>&1; then
+  launchctl bootout "$domain/space.lumos.dalton.writer"
+fi
 
 "$venv_dir/bin/dalton-bootstrap" --state-dir "$state_dir" --config "$config_path"
 
