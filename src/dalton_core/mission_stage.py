@@ -83,13 +83,18 @@ SOURCE_BASE_ITEMS: tuple[dict[str, Any], ...] = (
         "spec_refs": ("earnings-call-transcripts",),
     },
     {
+        # AlphaEngine's own document-type catalogue carries calls and research
+        # only; a 10-K has to come from SEC EDGAR, where the connected lane
+        # reads XBRL facts and not filing text.  The item says exactly that
+        # instead of looking like a search that was never run.
         "item_ref": "annual_report",
-        "label": "最新年报或招股书",
+        "label": "最新年报（10-K）正文",
         "reading": "读最新年报或招股书",
         "required": 1,
         "counted_by": "acquired_documents",
-        "source_ref": "source:alphaengine",
-        "spec_refs": ("annual-reports",),
+        "source_ref": "source:sec-edgar",
+        "spec_refs": (),
+        "gap_note": "还没有获取 10-K 正文的通道；现在只从 SEC 取了财报数字",
     },
     {
         "item_ref": "broker_research",
@@ -225,8 +230,8 @@ def _item_status(
         return "complete", f"已有 {have} 份，够了"
     if not connected:
         return "source_unavailable", f"{item['source_ref']} 还没有接入，这项拿不到"
-    if not planned and item["spec_refs"]:
-        return "not_planned", "还没有对应的搜索规格，需要先加一条"
+    if item["counted_by"] == "acquired_documents" and (not item["spec_refs"] or not planned):
+        return "not_planned", item.get("gap_note") or "还没有对应的搜索规格，需要先加一条"
     if have == 0:
         return "missing", f"一份都没有，还差 {required} 份"
     return "partial", f"已有 {have} 份，还差 {required - have} 份"

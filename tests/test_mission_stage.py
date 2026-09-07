@@ -112,9 +112,13 @@ class SourceBaseTests(StageHarness):
         self.assertIn("还差 2 份", reports["note"])
         self.assertIn("排队等取", reports["note"])
         # An item with no discovery spec anywhere says so instead of looking merely missing.
+        # AlphaEngine carries no annual reports at all, so the item names the
+        # missing lane rather than pretending a search would find one.
         annual = self.item(companies, ACN, "annual_report")
-        self.assertEqual(annual["status"], "not_planned")
-        self.assertIn("搜索规格", annual["note"])
+        self.assertEqual((annual["status"], annual["source_ref"]), ("not_planned", "source:sec-edgar"))
+        self.assertIn("10-K", annual["note"])
+        self.assertNotIn((ACN, "annual_report"),
+                         [(n["company_ref"], n["item_ref"]) for n in acquisition_needs(companies)])
         # A company with nothing is missing, not complete, and the mission is not ready.
         untouched = next(c for c in companies if c["company_ref"] == EPAM)
         self.assertEqual({i["status"] for i in untouched["items"]} - {"not_planned"}, {"missing"})

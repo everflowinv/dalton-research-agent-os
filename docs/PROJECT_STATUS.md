@@ -1,6 +1,20 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
+- **P10a：任务按研究手册的阶段走，获取与阅读跟着缺口走（已部署，live 已验证）。** live 阶段账本首次非空：
+  五家公司各写入一条 `initial_screen entered`，actor 是任务自己的 automation principal（mission v7 早已授予
+  `stage_record`）。Playbook 的 Initial Screen 必读清单翻译成四项计数（季度财报数字 / 电话会纪要 / 年报正文 /
+  券商观点），一份文档算进哪一项由**找到它的发现规格**决定（发现记录里已存 spec_ref，规格自带 document_type），
+  不读正文猜类型、不新增权威。`next_discovered_document` 新增 `preferred_needs`，抽取子进程改按
+  (公司优先级, 原文类型, 时间) 读——修的是一个真实缺陷：15 份纪要全归 EPAM、18 份研报全归 CTSH，而 P0 的 ACN
+  两样都没有，每天 30 次受治理调用被先发现的公司占满。驾驶舱子任务改为"公司 × 阶段 + 清单"。
+  **部署时发现两件事**：① 排序被 `self.load_plan()`（那是 launcher 的方法）静默关掉，`except: return []` 让
+  "没有缺口"与"算缺口时崩了"无法区分——现在把原因写进 tick 报告，live 一跳即定位，修好后 8 项缺口、第一项
+  ACN 电话会纪要；② 查 AlphaEngine 文档类型目录后确认它**没有年报/10-K**，该项来源改为 `source:sec-edgar`
+  并如实写明"还没有获取 10-K 正文的通道"，这是后续切片要建的 lane。另记一次部署竞态导致的 scheduler
+  `database is locked`（此前从未出现、之后未复现，未调整全仓统一的 5 秒 busy timeout）。
+  15 项新测试；全套 1214 项通过（除两项已知 macOS 路径失败）。
+  见 [P10a 报告](reports/p10a-mission-stage-driver-v0.1-2026-09-07.md)。
 - **裁决 v1.1：下一阶段 = Phase 10「按研究手册的阶段执行任务」（2026-09-07，当前执行顺序基线）。** owner 在新 cockpit 上
   指出子任务与其理解不一致：目标是"建立 US IT services 首次覆盖"，子任务应是"建立 ACN 的 Initial Screen 和财务预测"之类，
   而不是资料计数或常驻研究问题。盘点后确认：Playbook 六阶段与 mission 七项交付物早已是合同，`stage_record` 也已授予
@@ -1933,7 +1947,7 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 ### 当前基线：Phase 10（v1.1，2026-09-07）
 
-按 [v1.1](reports/vision-and-next-phase-v1.1-2026-09-07.md) 的顺序执行：P10a 阶段账本启动与资料底座清单 →
+按 [v1.1](reports/vision-and-next-phase-v1.1-2026-09-07.md) 的顺序执行：~~P10a 阶段账本启动与资料底座清单~~（已完成）→
 P10b Claim 挑战/退役 → P10c 交付物 authority 与 Initial Screen 自动起草过门 → P10d Deep Insight Gate 人审 →
 P10e 行业框架/行业模型缺口 → P10f 公司模型与预测线 → P10g Investment Memo。新来源、通用能力、cockpit 新视图继续冻结。
 下面 P0–P2 与 Phase 7/8/9 的文字是历史顺序，保留作依据，不再是当前基线。
