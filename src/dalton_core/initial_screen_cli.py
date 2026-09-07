@@ -116,6 +116,18 @@ def _target(
         if not own:
             skipped.append({"company_ref": company_ref, "reason": "no live Claim to write from"})
             continue
+        # The Playbook reads first and writes second: a document drafted before
+        # the required readings are in hand is a document that has to be
+        # rewritten, and it spends model calls saying what is missing.
+        missing = [
+            item["label"] for item in entry["items"] if item["status"] in {"partial", "missing"}
+        ]
+        if missing:
+            skipped.append({
+                "company_ref": company_ref,
+                "reason": "资料底座还没齐：" + "、".join(missing),
+            })
+            continue
         published = deliverables.get(company_ref)
         if published is not None and published["created_at"] >= own[-1]["created_at"]:
             skipped.append({"company_ref": company_ref, "reason": "nothing new since the last version"})
