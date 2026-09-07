@@ -132,5 +132,33 @@ class AutomationDraftingTests(unittest.TestCase):
         self.assertIn("CoverageMissionConflict", refused["summary"]["skipped"][0]["reason"])
 
 
+class HostKeepaliveTests(unittest.TestCase):
+    def test_host_holds_budget_and_router_open_so_read_only_binds_work(self) -> None:
+        """Live: the context's read-only budget open refused without WAL sidecars."""
+
+        from dalton_core.document_extraction_cli import ExtractionHost
+        from dalton_core.model_router import ModelRouter
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ThesisImpactBudgetStore(str(root / "budget.sqlite")).close()
+            ModelRouter(str(root / "router.sqlite")).close()
+            # Closed stores leave no sidecars, so a read-only open refuses.
+            with self.assertRaises(Exception):
+                ThesisImpactBudgetStore(str(root / "budget.sqlite"), read_only=True)
+            config = {"routing_policy_ref": "x", "credential_slot_refs": ["s"], "model_router_db": str(root / "router.sqlite"),
+                      "broker_socket": "/s", "broker_auth_key": "/k", "broker_client_id": "client:dalton-core",
+                      "expected_agent_id": "chem", "budget_db": str(root / "budget.sqlite"), "budget_policy_ref": "b"}
+            host = ExtractionHost(state_dir=root, spool_dir=root / "spool", scheduler_db=root / "scheduler.sqlite",
+                                  connector_governance=None, web_fetch_governance=None, model_config=config)
+            try:
+                with ThesisImpactBudgetStore(str(root / "budget.sqlite"), read_only=True) as budget:
+                    self.assertIsNotNone(budget.connection)
+                with ModelRouter(str(root / "router.sqlite"), read_only=True) as router:
+                    self.assertIsNotNone(router.connection)
+            finally:
+                host.close()
+
+
 if __name__ == "__main__":
     unittest.main()

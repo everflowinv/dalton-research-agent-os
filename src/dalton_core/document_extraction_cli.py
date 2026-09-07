@@ -85,8 +85,25 @@ class ExtractionHost:
         self._document_extraction_model_config = model_config
         self._document_extraction_worker_factory = None
         self.candidate_staging = None
+        # The service opens the router and the budget ledger read-only to
+        # bind a context, and a read-only WAL open refuses when nothing
+        # holds the file (no sidecars).  The thesis-impact ledger is closed
+        # between that lane's runs, so this child keeps both open, without
+        # writing, for as long as it lives.  First live run failed exactly
+        # here: "read_only WAL requires existing WAL/SHM".
+        self._keepalive: list[Any] = []
+        if model_config is not None:
+            from .model_router import ModelRouter
+            from .thesis_impact_budget import ThesisImpactBudgetStore
+            self._keepalive.append(ThesisImpactBudgetStore(model_config["budget_db"]))
+            self._keepalive.append(ModelRouter(model_config["model_router_db"]))
 
     def close(self) -> None:
+        for handle in reversed(self._keepalive):
+            try:
+                handle.close()
+            except Exception:
+                pass
         self._scheduler.close()
         self.store.close()
 
