@@ -116,6 +116,12 @@ if [[ ! -f "$web_plan_file" && -f "$repo_root/deploy/phase9/p9d4-us-it-services-
   cp "$repo_root/deploy/phase9/p9d4-us-it-services-web-search-plan-v3.json" "$web_plan_file"
   chmod 600 "$web_plan_file"
 fi
+# ADR-0005 / P9d-17a: the writer needs an approved extraction model
+# configuration for drafting to run as mission automation.  Idempotent: appends
+# the extraction routing policy only if its filters changed, writes the closed
+# config next to the state, and points service.json at it.  No credential is
+# read; the broker key path is referenced.
+"$venv_dir/bin/python" -m dalton_core.document_extraction_setup --config "$config_path"
 "$venv_dir/bin/python" -m dalton_core.macos_launchagent \
   --launch-agents-dir "$launch_agents_dir" \
   --python-env-bin "$venv_dir/bin" \

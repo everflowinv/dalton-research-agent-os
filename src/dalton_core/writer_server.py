@@ -42,6 +42,7 @@ from .mission_source_discovery import (
     discovery_query_hash,
     load_discovery_plan,
 )
+from .document_extraction_launcher import DocumentExtractionCoordinator, DocumentExtractionLauncher
 from .public_web_fetch_launcher import (
     FetchLaunchConflict,
     FetchLaunchError,
@@ -401,6 +402,7 @@ CORE_RECONCILIATION_OPERATIONS = frozenset({
 CORE_DISCOVERY_OPERATIONS = frozenset({
     "dispatch_mission_source_discovery", "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
+    "dispatch_document_extraction",
 })
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
@@ -500,6 +502,7 @@ CORE_OPERATIONS = frozenset({
     "reconcile_forecasts", "forecast_reconciliations", "get_forecast_reconciliation",
     "dispatch_mission_source_discovery", "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
+    "dispatch_document_extraction",
     "mission_document_reviews",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
@@ -654,6 +657,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "dispatch_coverage_mission_sec_lane": frozenset(),
     "reconcile_forecasts": frozenset({"requested_by", "company_ref", "claim_version_ref"}),
     "dispatch_mission_source_discovery": frozenset(),
+    "dispatch_document_extraction": frozenset(),
     "run_mission_source_discovery": frozenset({"requested_by", "company_ref", "spec_ref", "as_of", "source_ref"}),
     "mission_source_discovery_status": frozenset({"ticket_ref"}),
     "mission_source_discoveries": frozenset({"mission_version_ref", "company_ref", "spec_ref", "limit"}),
@@ -1000,6 +1004,7 @@ class WriterServer:
         web_search_launcher: WebSearchLauncher | None = None,
         web_search_plan_path: str | Path | None = None,
         web_fetch_launcher: PublicWebFetchLauncher | None = None,
+        document_extraction_launcher: Any | None = None,
     ):
         if not principals:
             raise WriterServerError("at least one principal is required")
@@ -1033,6 +1038,8 @@ class WriterServer:
         self._web_search_plan_error: str | None = None
         # P9d-4b: out-of-process public-web fetch of URLs a web search cited.
         self._web_fetch_launcher = web_fetch_launcher
+        self._document_extraction_launcher = document_extraction_launcher
+        self._document_extraction_coordinator: DocumentExtractionCoordinator | None = None
         # S7d: out-of-process SEC company-facts lane runs (human-only ops).
         self._sec_lane_launcher = sec_lane_launcher
         # The same owner-only CandidateStaging file the Cockpit review plane
@@ -1334,6 +1341,12 @@ class WriterServer:
                     # P9d-13: read-only route from a pre-ledger row back to its host.
                     spool_dir=self._transcript_spool_dir,
                 )
+        if self._document_extraction_launcher is not None:
+            # ADR-0005 / P9d-17a: drafting is a mission automation step driven
+            # from the controller tick, out of process like the other lanes.
+            self._document_extraction_coordinator = DocumentExtractionCoordinator(
+                missions=self._coverage_mission, launcher=self._document_extraction_launcher,
+            )
         self._backlog = ResearchQuestionBacklog(self._store)
         self._bounded_planner = BoundedPlannerAuthority(self._store)
         self._intent_writer = IntentWriterAuthority(
@@ -1443,6 +1456,8 @@ class WriterServer:
             self._acquisition_launcher.close()
         if self._web_fetch_launcher is not None:
             self._web_fetch_launcher.close()
+        if self._document_extraction_launcher is not None:
+            self._document_extraction_launcher.close()
         if self._sec_lane_launcher is not None:
             self._sec_lane_launcher.close()
         if self._candidate_review is not None:
@@ -2360,6 +2375,15 @@ class WriterServer:
         else:
             result["web_search"] = self.web_source_discovery.dispatch_once()
         return result
+
+    def _op_dispatch_document_extraction(self, p: Mapping[str, Any]) -> Any:
+        # Controller tick (ADR-0005).  An unconfigured writer answers truthfully.
+        if self._document_extraction_coordinator is None:
+            return {
+                "status": "unconfigured",
+                "reason": "no approved document extraction model configuration on this writer",
+            }
+        return self._document_extraction_coordinator.dispatch_once()
 
     def _op_run_mission_source_discovery(self, p: Mapping[str, Any]) -> Any:
         # Human-requested discovery: the mission grant is resolved here with the
@@ -3325,6 +3349,16 @@ def main(argv: list[str] | None = None) -> int:
                 "broker_client_id": args.planner_broker_client_id,
                 "expected_agent_id": args.planner_expected_agent_id,
             }
+        document_extraction_launcher = None
+        if args.document_extraction_model_config is not None:
+            document_extraction_launcher = DocumentExtractionLauncher(
+                state_dir=Path(args.db).expanduser().resolve().parent,
+                model_config_path=args.document_extraction_model_config,
+                spool_dir=args.transcript_spool_dir,
+                scheduler_db=args.scheduler,
+                connector_governance=args.connector_governance,
+                web_fetch_governance=args.web_fetch_governance,
+            )
         server = WriterServer(
             args.db,
             args.socket,
@@ -3343,6 +3377,7 @@ def main(argv: list[str] | None = None) -> int:
             web_search_launcher=web_search_launcher,
             web_search_plan_path=args.web_search_discovery_plan,
             web_fetch_launcher=web_fetch_launcher,
+            document_extraction_launcher=document_extraction_launcher,
         )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:

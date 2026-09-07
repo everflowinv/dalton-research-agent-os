@@ -39,7 +39,7 @@ class LaunchDrainTests(unittest.TestCase):
         (self.root / "fetches" / ("e" * 24) / "ticket.json").write_text("{not json", encoding="utf-8")
         found = running_tickets(self.root)
         self.assertEqual([(item["lane"], item["ticket"]) for item in found], [("fetches", "fetches:" + "a" * 24)])
-        self.assertEqual(set(TICKET_DIRECTORIES), {"acquisitions", "discoveries", "fetches", "sec-lane-runs"})
+        self.assertEqual(set(TICKET_DIRECTORIES), {"acquisitions", "discoveries", "extractions", "fetches", "sec-lane-runs"})
         # Read-only: the drain never rewrites a ticket.
         before = live.read_text(encoding="utf-8")
         drain(self.root, timeout_seconds=0, poll_seconds=0.01)

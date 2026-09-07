@@ -1,0 +1,262 @@
+"""Out-of-process document extraction child (P9d-17a, ADR-0005).
+
+The writer serialises every request through one 30 s executor, so a model
+call that can take a minute cannot run inside it without stalling the
+cockpit and the controller tick.  Like search, fetch and acquisition, drafting
+therefore runs in a child the writer spawns and tracks through a ticket.
+
+One run drafts at most ``--max-windows`` windows across the reviews that are
+awaiting extraction, oldest first, under each review's own mission grant and
+budget.  It reuses ``DocumentExtractionService`` unchanged: the same context,
+prompt, output schema, budget admission and persisted, replayable results a
+human-triggered draft would produce.  A window whose result already exists is
+skipped (replay is free), so re-running only ever advances.
+
+Outputs (``--summary-dir``, owner-only): ``summary.json``.  Exit 0 when the
+run completed (even with nothing to draft), 1 on failure.  ``formal_authority_writes``
+is always 0: this child drafts suggestions; staging and admission are P9d-17b.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from .alphaengine_acquisition_launcher import AlphaEngineAcquisitionLauncher
+from .connector import ConnectorStore
+from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
+from .document_extraction import (
+    DocumentExtractionModelWorker,
+    DocumentExtractionService,
+    HermeticExtractionAdapter,
+    validate_model_config,
+)
+from .observability import ObservabilityStore
+from .public_web_fetch_launcher import PublicWebFetchLauncher
+from .raw_spool import RawSpool
+from .research_verification import ResearchVerificationConflict, ResearchVerificationError
+from .scheduler import Scheduler
+from .store import DaltonStore, canonical_json, content_hash
+
+SUMMARY_SCHEMA_VERSION = "0.1"
+DEFAULT_MAX_WINDOWS = 2
+
+
+def secure_dir(path: Path) -> Path:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    os.chmod(path, 0o700)
+    return path
+
+
+def _write_owner_only(path: Path, value: Any) -> None:
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(canonical_json(value) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+class ExtractionHost:
+    """The slice of the writer the extraction service reads; opened in this process."""
+
+    def __init__(self, *, state_dir: Path, spool_dir: Path, scheduler_db: Path,
+                 connector_governance: Path | None, web_fetch_governance: Path | None,
+                 model_config: dict[str, Any] | None) -> None:
+        self.store = DaltonStore(str(state_dir / "core.sqlite"))
+        self._connectors = ConnectorStore(self.store)
+        self.observability = ObservabilityStore(self.store)
+        self.coverage_mission = CoverageMissionAuthority(self.store)
+        self._scheduler = Scheduler(str(scheduler_db))
+        self._transcript_spool = RawSpool(str(spool_dir), max_total_bytes=1_000_000_000)
+        # Launchers are used read-only here (read_completed_manifest); they
+        # never spawn from this process.  Governance is loaded only on start.
+        self.acquisition_launcher = AlphaEngineAcquisitionLauncher(
+            state_dir=state_dir, governance_path=connector_governance or (state_dir / "unused-governance.json"),
+            spool_dir=spool_dir,
+        )
+        self.web_fetch_launcher = PublicWebFetchLauncher(
+            state_dir=state_dir, governance_path=web_fetch_governance or (state_dir / "unused-governance.json"),
+            spool_dir=spool_dir,
+        )
+        self._document_extraction_model_config = model_config
+        self._document_extraction_worker_factory = None
+        self.candidate_staging = None
+
+    def close(self) -> None:
+        self._scheduler.close()
+        self.store.close()
+
+
+def run_extraction(
+    *,
+    state_dir: Path,
+    model_config_path: Path,
+    summary_dir: Path,
+    spool_dir: Path | None,
+    scheduler_db: Path | None,
+    connector_governance: Path | None,
+    web_fetch_governance: Path | None,
+    max_windows: int,
+    requested_by: str | None,
+    hermetic_fixture: Path | None,
+) -> dict[str, Any]:
+    state = secure_dir(state_dir)
+    out = secure_dir(summary_dir)
+    spool_root = spool_dir if spool_dir is not None else state / "transcript-spool"
+    raw_config = json.loads(Path(model_config_path).read_text(encoding="utf-8"))
+    config = validate_model_config(raw_config)
+    summary: dict[str, Any] = {
+        "schema_version": SUMMARY_SCHEMA_VERSION,
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        "mode": "hermetic_fixture" if hermetic_fixture is not None else "broker",
+        "routing_policy_ref": config["routing_policy_ref"],
+        "max_windows": max_windows,
+        "requested_by": requested_by,
+        "reviews_scanned": 0,
+        "reviews_complete": 0,
+        "drafted": [],
+        "skipped": [],
+        "stop_reason": None,
+        "status": "failed",
+        "failure_reason": None,
+        "formal_authority_writes": 0,
+    }
+    host = ExtractionHost(
+        state_dir=state, spool_dir=spool_root,
+        scheduler_db=scheduler_db if scheduler_db is not None else state / "scheduler.sqlite",
+        connector_governance=connector_governance, web_fetch_governance=web_fetch_governance,
+        model_config=None if hermetic_fixture is not None else config,
+    )
+    try:
+        if hermetic_fixture is not None:
+            # Test-only: the same routed worker over a zero-cost fixture
+            # adapter; the router must already carry a fixture profile/policy.
+            from .model_router import ModelRouter
+            output = json.loads(hermetic_fixture.read_text(encoding="utf-8"))
+            router = ModelRouter(config["model_router_db"])
+            adapter = HermeticExtractionAdapter(output, created_at=datetime.now(timezone.utc).isoformat())
+
+            def factory(service: DocumentExtractionService, context: Any, actor: str) -> DocumentExtractionModelWorker:
+                return DocumentExtractionModelWorker(
+                    scheduler=host._scheduler, router=router, store=host.store, observability=host.observability,
+                    adapter=adapter, routing_policy_ref=config["routing_policy_ref"],
+                    credential_slot_refs=list(config["credential_slot_refs"]),
+                    context_resolver=lambda c: service.reread(c, actor),
+                )
+            host._document_extraction_worker_factory = factory
+        service = DocumentExtractionService(host)
+        drafted = 0
+        stop_reason: str | None = None
+        pointers = host.store.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
+        ).fetchall()
+        for pointer in pointers:
+            if stop_reason is not None:
+                break
+            mission = host.coverage_mission.mission(pointer["mission_version_id"])
+            actor = requested_by or mission["autonomy"]["automation_principal"]
+            reviews = host.coverage_mission.document_reviews(mission["id"], state="awaiting_human_extraction", limit=500)
+            for review in reviews:
+                if stop_reason is not None:
+                    break
+                summary["reviews_scanned"] += 1
+                review_hash = content_hash(review)
+                offset = 0
+                complete = True
+                while True:
+                    try:
+                        view = service.view(review_id=review["review_id"], expected_review_hash=review_hash,
+                                            offset=offset, actor_ref=actor)
+                    except (ResearchVerificationError, ResearchVerificationConflict, CoverageMissionError) as exc:
+                        summary["skipped"].append({"review_id": review["review_id"], "offset": offset,
+                                                   "reason": f"{type(exc).__name__}: {exc}"})
+                        complete = False
+                        break
+                    context = view["context"]
+                    if view["status"] == "not_generated":
+                        if not view["generation_enabled"]:
+                            stop_reason = f"gated:{view['gate_reason']}"
+                            complete = False
+                            break
+                        if drafted >= max_windows:
+                            stop_reason = "max_windows"
+                            complete = False
+                            break
+                        result = service.generate(
+                            review_id=review["review_id"], expected_review_hash=review_hash, offset=offset,
+                            expected_context_hash=context["content_hash"], actor_ref=actor,
+                        )
+                        drafted += 1
+                        entry = {"review_id": review["review_id"], "source_ref": review["source_ref"],
+                                 "document_ref": review["document_ref"], "offset": offset,
+                                 "status": result.get("status"),
+                                 "suggestions": len(result.get("suggestions", []))}
+                        budget = result.get("model_budget") or {}
+                        if isinstance(budget, dict) and budget.get("status"):
+                            entry["budget"] = budget["status"]
+                        summary["drafted"].append(entry)
+                        if result.get("status") == "gated":
+                            stop_reason = f"gated:{result.get('reason')}"
+                            complete = False
+                            break
+                        if isinstance(budget, dict) and budget.get("status") == "rejected":
+                            stop_reason = "budget_rejected"
+                            complete = False
+                            break
+                    elif view["status"] == "pending":
+                        complete = False
+                    if context["next_offset"] is None:
+                        break
+                    offset = context["next_offset"]
+                if complete:
+                    summary["reviews_complete"] += 1
+        summary["stop_reason"] = stop_reason or ("nothing_to_draft" if drafted == 0 else "drained")
+        summary["status"] = "succeeded"
+        return summary
+    except Exception as exc:  # unexpected: record for the parent, then surface it
+        summary["failure_reason"] = f"unexpected {type(exc).__name__}: {exc}"
+        raise
+    finally:
+        _write_owner_only(out / "summary.json", summary)
+        host.close()
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--model-config", type=Path, required=True)
+    parser.add_argument("--summary-dir", type=Path, help="defaults to the state dir")
+    parser.add_argument("--spool-dir", type=Path)
+    parser.add_argument("--scheduler-db", type=Path)
+    parser.add_argument("--connector-governance", type=Path)
+    parser.add_argument("--web-fetch-governance", type=Path)
+    parser.add_argument("--max-windows", type=int, default=DEFAULT_MAX_WINDOWS)
+    parser.add_argument("--requested-by", help="human: actor; default is each mission's automation principal")
+    parser.add_argument("--hermetic-fixture-file", type=Path, help="test-only fixture model output")
+    parser.add_argument("--quiet", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.max_windows < 1 or args.max_windows > 50:
+        raise SystemExit("--max-windows must be 1..50")
+    summary = run_extraction(
+        state_dir=args.state_dir, model_config_path=args.model_config,
+        summary_dir=args.summary_dir if args.summary_dir is not None else args.state_dir,
+        spool_dir=args.spool_dir, scheduler_db=args.scheduler_db,
+        connector_governance=args.connector_governance, web_fetch_governance=args.web_fetch_governance,
+        max_windows=args.max_windows, requested_by=args.requested_by,
+        hermetic_fixture=args.hermetic_fixture_file,
+    )
+    if not args.quiet:
+        print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))
+    return 0 if summary["status"] == "succeeded" else 1
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
+    sys.exit(main())

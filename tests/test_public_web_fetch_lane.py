@@ -743,6 +743,9 @@ class P9d4bWriterOpsTests(unittest.TestCase):
 
         tick = h.core.call("dispatch_mission_source_discovery", {})
         self.assertEqual(tick["status"], "unconfigured")  # no AlphaEngine plan on this writer
+        # ADR-0005: the extraction lane answers the tick truthfully when no
+        # model configuration is installed, instead of raising.
+        self.assertEqual(h.core.call("dispatch_document_extraction", {})["status"], "unconfigured")
         self.assertEqual(tick["web_search"]["discovery"]["status"], "launched")
         h.web_launcher.wait(timeout=120)
         tick = h.core.call("dispatch_mission_source_discovery", {})

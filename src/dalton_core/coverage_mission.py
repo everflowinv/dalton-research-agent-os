@@ -1895,6 +1895,10 @@ class CoverageMissionAuthority:
                 continue
             status = "discovered" if row["status"] == "acquisition_launched" else row["status"]
             reason = row["failure_reason"] if status == "acquisition_failed" else None
+            # An acquired row's ticket is how the review plane finds its
+            # manifest; a failed row's ticket is its evidence.  Only a row that
+            # is back to discovered starts without one.
+            ticket_ref = row["ticket_ref"] if status in ("acquired", "acquisition_failed") else None
             record_id = _ref(
                 "mission-discovered-document",
                 {"mission_version_ref": current_ref, "document_ref": row["document_ref"]},
@@ -1907,7 +1911,7 @@ class CoverageMissionAuthority:
                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         record_id, current_ref, row["company_ref"], row["source_ref"],
-                        row["document_ref"], row["discovery_ref"], status, None, reason,
+                        row["document_ref"], row["discovery_ref"], status, ticket_ref, reason,
                         row["created_at"], row["updated_at"], row["host"],
                     ),
                 )

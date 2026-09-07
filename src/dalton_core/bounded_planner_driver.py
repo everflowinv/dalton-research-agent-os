@@ -250,6 +250,12 @@ class BoundedPlannerDriver:
             )
         except Exception as exc:
             mission_source_discovery = {"status": f"unavailable:{type(exc).__name__}"}
+        # ADR-0005 / P9d-17a: draft awaiting documents under the mission
+        # grant and budget, out of process; the writer reports every hold.
+        try:
+            document_extraction = self.client.call("dispatch_document_extraction", {})
+        except Exception as exc:
+            document_extraction = {"status": f"unavailable:{type(exc).__name__}"}
         listing = self.client.call("bounded_planner_active_loops", {})
         loops = listing["loops"]
         executed: list[dict[str, Any]] = []
@@ -433,6 +439,7 @@ class BoundedPlannerDriver:
             "mission_sec_dispatch": mission_dispatch,
             "forecast_reconciliation": forecast_reconciliation,
             "mission_source_discovery": mission_source_discovery,
+            "document_extraction": document_extraction,
         }
 
 

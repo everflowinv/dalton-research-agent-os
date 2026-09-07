@@ -423,8 +423,14 @@ class DocumentExtractionService:
 
     def _source_context(self, review_id, expected_review_hash, offset, actor_ref):
         writer = self.writer
-        if not isinstance(actor_ref, str) or re.fullmatch(r"human:[A-Za-z0-9][A-Za-z0-9._/@:-]*", actor_ref) is None:
-            raise ResearchVerificationError("document extraction requires authenticated human request")
+        # ADR-0005: the mission's automation principal drafts as a matter of
+        # course; a human may still.  Either way the mission grant below is
+        # what authorises the actor (automation must equal the principal and
+        # the source must be connected), never the actor string alone.
+        if not isinstance(actor_ref, str) or re.fullmatch(
+            r"(human|automation):[A-Za-z0-9][A-Za-z0-9._/@:-]*", actor_ref
+        ) is None:
+            raise ResearchVerificationError("document extraction requires an authenticated human or mission automation actor")
         review = writer.coverage_mission.document_review(review_id)
         if review["state"] != "awaiting_human_extraction" or content_hash(review) != expected_review_hash:
             raise ResearchVerificationConflict("review is stale; reload the queue")
@@ -727,6 +733,10 @@ class DocumentExtractionService:
         correction/citation or staging candidate, never an acceptance. Replay of
         that request resumes the original writes; changed input is a conflict.
         """
+        if not isinstance(actor_ref, str) or not actor_ref.startswith("human:"):
+            # ADR-0005 lands staging for automation in P9d-17b; until then the
+            # candidate chain below is a human action, refused before any read.
+            raise ResearchVerificationError("candidate staging requires an authenticated human request")
         context = self.context(review_id, expected_review_hash, offset, actor_ref)
         if context["content_hash"] != expected_context_hash:
             raise ResearchVerificationConflict("source context is stale")

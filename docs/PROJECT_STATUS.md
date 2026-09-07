@@ -1,7 +1,28 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
-- **下一步裁决与实施：web 页面开放模型起草（P9d-15，已过全仓，待部署）。** 复盘 v0.1 愿景、v0.9 复盘与 ADR-0004 后的
+- **ADR-0005：文档抽取由自动化完成；P9d-17a 起草已改为 mission 自动化（待部署）。** owner 看到 cockpit 里一整页
+  「待抽取文档」和「未安装已批准的抽取模型」后明确：人不批文档——只设目标、掌舵、问答；系统变更（如写新工具）才批。
+  据此立 [ADR-0005](adr/0005-autonomous-document-extraction.md)：自动化身份在 mission 授权（live v4 已授 `evidence/claim/
+  stage_record`）与日预算内完成起草→staging→policy 准入整条链；人类检查点收敛为 mission 发布/改版、问答、系统变更；
+  ADR-0003 B 的「只经人工 accept」在 mission 文档上让位于 policy 准入（人工路径保留为纠错通道）；ADR-0001 thesis 人工准入
+  暂不动，另立 ADR。**live 缺的两件事**：writer 从未装抽取模型配置（`document_extraction_model_config_path` 缺失，人按
+  generate 也被挡）；起草只能走 writer 单线程 30s 执行器内的人工 op，真实模型调用会卡住 cockpit 与 tick。
+  **P9d-17a**：①`dalton_core.document_extraction_setup` 由 install.sh 幂等执行——追加路由 policy
+  `model-routing-policy:dalton-openclaw-extraction`（按 profile id `profile:deepseek-v4-flash`，日刷新不失效）、写闭合模型配置、
+  把 service.json 指向它；复用 planner 的 broker、thesis-impact 的日预算账本与 policy、model router；不读凭据。
+  ②起草改为子进程 `document_extraction_cli`：每次最多 `--max-windows` 个窗口，按各自 mission 的 grant（自动化身份须等于
+  principal、来源 `connected`）与预算（mission 日调用/费用，共享账本）起草；完全复用 `DocumentExtractionService`
+  （同一 context/prompt/schema/预算准入/可 replay 的持久结果）；已有结果的窗口跳过；`formal_authority_writes` 恒 0。
+  ③`DocumentExtractionLauncher/Coordinator` 与 fetch lane 同形：单槽、`extractions/` 票据、重启后采纳子进程 summary、
+  新 core op `dispatch_document_extraction` 由 planner driver 每 tick 调用；子进程"无可起草"或被闸时 hold 一小时（队列变化
+  即解除）。④`_source_context` 接受 `automation:` actor，授权仍由 mission grant 决定。⑤顺手修：carry-forward 复制
+  `acquired` 行时丢了 `ticket_ref`（审阅面靠它找 manifest）。**验证**：setup 幂等三态；真实子进程 hermetic 模式对已获取
+  AlphaEngine 文档——无 grant 时不起草并说明原因、v2 授权+carry-forward 后起草两窗（第二窗为终态无效输出、只记一次账）、
+  结果在自动化与人两种 actor 下可读回、不写正式记录、重跑只 replay、陌生自动化身份被拒；coordinator 的 launched/busy/
+  settle/held/resume/retry 全覆盖。**未做**：staging 与准入（P9d-17b AlphaEngine 链、P9d-17c web citation authority）。
+  见 [P9d-17a 报告](reports/p9d17a-autonomous-document-drafting-v0.1-2026-09-07.md)。
+- **下一步裁决与实施：web 页面开放模型起草（P9d-15，已部署）。** 复盘 v0.1 愿景、v0.9 复盘与 ADR-0004 后的
   判断：价值只看固定成本下人工接受的 Claim 数量；web lane 自 P9d-7 起搜索→抓取→核验原文→审阅队列已全自主，但到队列就
   停了——网页只能人读、翻页、驳回，模型起草被 `public_web_extraction_drafting_not_supported` 挡住；AlphaEngine 文档早有
   预算内、人触发的起草（P9d-3b）。上限提到 1000 后每天十几页进队，"每页都要人读"正是愿景说不该存在的瓶颈。路线图上的

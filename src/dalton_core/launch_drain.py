@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 # One directory per launcher; see each launcher's ``tickets_dir``.
-TICKET_DIRECTORIES: tuple[str, ...] = ("acquisitions", "discoveries", "fetches", "sec-lane-runs")
+TICKET_DIRECTORIES: tuple[str, ...] = ("acquisitions", "discoveries", "extractions", "fetches", "sec-lane-runs")
 DEFAULT_TIMEOUT_SECONDS = 600.0
 DEFAULT_POLL_SECONDS = 2.0
 
