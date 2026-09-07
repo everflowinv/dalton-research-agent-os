@@ -72,6 +72,23 @@ def render(
         )
         if service_config.control.research_review.document_extraction_model_config_path is not None:
             extraction_config_path = str(service_config.control.research_review.document_extraction_model_config_path)
+    # P9d-4d: both host brokers are OpenClaw plugin sockets in one state
+    # directory, so the web search broker is derived from the planner's
+    # configured broker path instead of a second convention.  Absent files
+    # mean a networked search is refused before spawning.
+    web_search_broker_socket: Path | None = None
+    web_search_broker_auth_key: Path | None = None
+    if (
+        service_config is not None
+        and service_config.bounded_planner is not None
+        and service_config.bounded_planner.planner_broker_socket is not None
+    ):
+        broker_dir = Path(service_config.bounded_planner.planner_broker_socket).parent
+        candidate_socket = broker_dir / "dalton-web-search-broker.sock"
+        candidate_key = broker_dir / "dalton-web-search-broker.sock.key"
+        if candidate_socket.exists() and candidate_key.exists():
+            web_search_broker_socket = candidate_socket
+            web_search_broker_auth_key = candidate_key
     common: dict[str, Any] = {
         "RunAtLoad": True,
         "KeepAlive": True,
@@ -107,11 +124,10 @@ def render(
             "--alphaengine-discovery-plan",
             str(state / "discovery-plans" / "us-it-services-alphaengine-v1.json"),
             # P9d-4a: web search discovery.  Same seed-once rule for the
-            # proposed governance record and the hash-bound plan.  Only the
-            # rehearsal transport exists in this slice: with the live mode
-            # the launcher refuses before spawning and the tick reports it;
-            # the live mission also still marks source:web-search as
-            # not_connected, so automation is refused at the grant first.
+            # proposed governance record and the hash-bound plan.  A networked
+            # search needs the host broker below; without it the launcher
+            # refuses before spawning and the tick reports the reason.  The
+            # live mission also gates automation at the grant first.
             "--web-search-governance",
             str(state / "connector-governance" / "gemini-web-search-v1.json"),
             "--web-search-discovery-plan",
@@ -122,6 +138,19 @@ def render(
             "--web-fetch-governance",
             str(state / "connector-governance" / "web-fetch-v1.json"),
         ] + (
+            # P9d-4d: the host-owned web search broker is an OpenClaw plugin
+            # socket in the same state directory as the model broker, so its
+            # paths are derived from the planner's broker wiring rather than
+            # configured twice.  They are passed only when both files exist;
+            # otherwise a networked search is refused before spawning.
+            [
+                "--web-search-broker-socket", str(web_search_broker_socket),
+                "--web-search-broker-auth-key", str(web_search_broker_auth_key),
+                "--web-search-broker-client-id",
+                service_config.bounded_planner.planner_broker_client_id,
+            ]
+            if web_search_broker_socket is not None else []
+        ) + (
             # S7d: the SEC company-facts lane stages into the same Cockpit
             # staging file and is only enabled when that file is configured.
             [
