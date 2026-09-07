@@ -63,7 +63,7 @@ from tests.test_public_web_core_search import CITATIONS, WebSearchHarness
 
 
 NOW = datetime(2026, 9, 6, 12, 0, tzinfo=timezone.utc)
-WEB_PLAN_PATH = ROOT / "deploy/phase9/p9d4-us-it-services-web-search-plan-v1.json"
+WEB_PLAN_PATH = ROOT / "deploy/phase9/p9d4-us-it-services-web-search-plan-v2.json"
 URL_A = public_web_url_ref("https://example.com/investors?q=ai")
 URL_B = public_web_url_ref("https://news.example.org/accenture-ai")
 
@@ -104,8 +104,10 @@ class DiscoveryPlanV2Tests(unittest.TestCase):
     def test_committed_web_plan_loads_and_binds_hash(self) -> None:
         plan = load_discovery_plan(WEB_PLAN_PATH)
         self.assertEqual((plan["schema_version"], plan["source_ref"]), ("0.2", WEB_SEARCH_SOURCE_REF))
-        # Searches and page fetches share this window (P9d-4b).
-        self.assertEqual(plan["budget"], {"max_calls_24h": 40})
+        self.assertEqual(plan["id"], "discovery-plan:us-it-services:web-search:2")
+        # Searches and page fetches share this window (P9d-4b); the owner
+        # raised it to the contract ceiling once the provider was Gemini Flash.
+        self.assertEqual(plan["budget"], {"max_calls_24h": 1000})
         self.assertEqual(sorted(plan["companies"]), sorted(load_discovery_plan(
             ROOT / "deploy/phase9/p9d-us-it-services-discovery-plan-v1.json")["companies"]))
         self.assertEqual([spec["spec_ref"] for spec in plan["specs"]],

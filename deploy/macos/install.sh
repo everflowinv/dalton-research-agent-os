@@ -95,9 +95,11 @@ if [[ ! -f "$web_fetch_governance_file" && -f "$repo_root/deploy/connector-gover
   cp "$repo_root/deploy/connector-governance/web-fetch-v1.json" "$web_fetch_governance_file"
   chmod 600 "$web_fetch_governance_file"
 fi
-web_plan_file="$plan_dir/us-it-services-web-search-v1.json"
-if [[ ! -f "$web_plan_file" && -f "$repo_root/deploy/phase9/p9d4-us-it-services-web-search-plan-v1.json" ]]; then
-  cp "$repo_root/deploy/phase9/p9d4-us-it-services-web-search-plan-v1.json" "$web_plan_file"
+# P9d-8: the plan is hash bound, so raising its 24h call budget is a new plan
+# version rather than an edit in place.  Seed once, same rule as v1.
+web_plan_file="$plan_dir/us-it-services-web-search-v2.json"
+if [[ ! -f "$web_plan_file" && -f "$repo_root/deploy/phase9/p9d4-us-it-services-web-search-plan-v2.json" ]]; then
+  cp "$repo_root/deploy/phase9/p9d4-us-it-services-web-search-plan-v2.json" "$web_plan_file"
   chmod 600 "$web_plan_file"
 fi
 "$venv_dir/bin/python" -m dalton_core.macos_launchagent \
