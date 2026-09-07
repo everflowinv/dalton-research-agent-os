@@ -141,24 +141,28 @@ the search never cited is still refused in both eras.
 documents carried forward as `discovered` under v4; nineteen rows learned their
 host; the hand-fetched PDF settled `acquired` and entered the review queue.
 
-## Second deploy: the drain still waited, and the reason was a bigger defect
+## Second and third deploys: the drain still waited, and the diagnosis was wrong twice
 
-The drain waited its full 600 s again, this time with the controller down. It
-was waiting on a single fetch child that had been alive for twelve minutes.
-That child had **failed and written its summary within seconds of starting**
-(an unexpected `PublicWebAuthorityConflict`, the P9d-10 regression above) and
-then simply never exited. The lane treats a live pid as "still running", so
-that one child held the single acquisition slot until the next writer restart.
-Every "orphaned" ticket that carried an unexpected-exception reason, in the
-fetch lane and the search lane alike, has this signature.
+The drain waited its full 600 s again with the controller down, on a single
+fetch child that had written its summary within seconds and then stayed "alive"
+for twelve minutes. The first reading was a child that never exits; a fix that
+forced `os._exit` after the summary went out on the third deploy. It changed
+nothing: a *new-code* child showed the same signature three minutes after the
+writer restarted.
 
-The cause could not be reproduced off the live host: the same failure injected
-into the real child, with the real transport and the approved governance
-record, exits cleanly and leaves no threads. So the fix removes the dependence
-on a clean interpreter shutdown rather than naming the cause. Each lane child's
-entry point now runs through `child_tickets.run_child`: once `main` has returned
-or raised and stdio is flushed, the process exits through `os._exit`. The child
-has closed its stores and written its summary by then; nothing is lost.
+`ps` gave the answer: state `Z`. The child had exited. The writer only reaps a
+child when it next polls the process handle, on its next tick, so for up to
+five minutes an exited child is a zombie, and `kill(pid, 0)` succeeds on a
+zombie. With the controller stopped there is no next tick at all, so the old
+writer never reaped, and the drain counted the zombie as running until its
+timeout. Every "child alive after its summary" observation, failed or
+succeeded, was this.
+
+The forced exit is reverted; it was a fix for a problem that did not exist. The
+drain now treats a zombie as exited (`/proc` on Linux, `ps` on macOS), with a
+test that spawns a child, observes it as a zombie, and checks the drain ignores
+it. The two earlier sections of this report that spoke of a hang were written
+before this was known; this section supersedes them.
 
 ## A census of the ticket directories found the larger loss
 

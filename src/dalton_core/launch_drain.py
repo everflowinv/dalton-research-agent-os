@@ -8,12 +8,16 @@ that ticket as ``orphaned``.  The lane then parks the affected company/spec
 pair for its retry interval, which is a day.  Two deploys on 2026-09-07 burned
 two slots exactly that way.
 
-The launchers keep their semantics on purpose: a dead pid is never promoted to
-success from a summary file on disk.  So the fix is to not stop the writer
-while a child is running.  ``install.sh`` calls this module after the new wheel
-is installed and before ``launchctl bootout``; it polls the ticket directories
-and returns once no ticket is both ``running`` and backed by a live pid, or
-once the timeout passes, in which case it says so and the deploy proceeds.
+So the fix is to not stop the writer while a child is running.  ``install.sh``
+stops the controller (which launches a child every tick), calls this module,
+and only then stops the writer; it polls the ticket directories and returns
+once no ticket is both ``running`` and backed by a live pid, or once the
+timeout passes, in which case it says so and the deploy proceeds.  A child
+that has exited but not yet been reaped by the writer (a zombie) counts as
+exited: the writer reaps only on its next tick, and ``kill(pid, 0)`` succeeds
+on a zombie, which is what made the first three drains wait their full
+timeout.  Work that finishes in the settlement gap is recovered by the
+launchers themselves; see ``child_tickets``.
 
 This module only reads tickets.  It never writes them, never signals a child
 and never touches Core.
@@ -24,6 +28,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -35,6 +40,32 @@ DEFAULT_TIMEOUT_SECONDS = 600.0
 DEFAULT_POLL_SECONDS = 2.0
 
 
+def _is_zombie(pid: int) -> bool:
+    """True when the process has exited but its parent has not reaped it.
+
+    The writer reaps a lane child only when it next polls the handle, on its
+    next tick, so for up to five minutes an exited child is a zombie.
+    ``kill(pid, 0)`` still succeeds on one, which made the drain wait its full
+    timeout three deploys running.  On Linux ``/proc`` says so directly; on
+    macOS ``ps`` is the only portable witness.
+    """
+
+    proc_stat = Path("/proc") / str(pid) / "stat"
+    if proc_stat.exists():
+        try:
+            fields = proc_stat.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+            return bool(fields) and fields[0] == "Z"
+        except (OSError, IndexError, ValueError):
+            return False
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=5, check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return out.startswith("Z")
+
+
 def _pid_alive(pid: Any) -> bool:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
@@ -44,7 +75,7 @@ def _pid_alive(pid: Any) -> bool:
         return False
     except PermissionError:
         return True
-    return True
+    return not _is_zombie(pid)
 
 
 def running_tickets(state_dir: str | Path) -> list[dict[str, Any]]:

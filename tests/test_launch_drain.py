@@ -8,7 +8,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dalton_core.launch_drain import TICKET_DIRECTORIES, drain, main, running_tickets
+import time
+
+from dalton_core.launch_drain import TICKET_DIRECTORIES, _pid_alive, drain, main, running_tickets
 
 
 def _ticket(root: Path, lane: str, digest: str, **fields) -> Path:
@@ -68,6 +70,27 @@ class LaunchDrainTests(unittest.TestCase):
         self.assertEqual(stuck.read_text(encoding="utf-8"), json.dumps(json.loads(stuck.read_text(encoding="utf-8"))))
         with self.assertRaises(ValueError):
             drain(self.root, timeout_seconds=-1)
+
+    def test_an_exited_but_unreaped_child_counts_as_exited(self) -> None:
+        """A zombie answers kill(pid, 0); the drain must not wait on it."""
+
+        import subprocess
+        import sys
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            out = subprocess.run(["ps", "-o", "stat=", "-p", str(child.pid)], capture_output=True, text=True).stdout.strip()
+            if out.startswith("Z"):
+                break
+            time.sleep(0.05)
+        else:
+            self.skipTest("could not observe the child as a zombie on this platform")
+        try:
+            _ticket(self.root, "fetches", "z" * 24, pid=child.pid)
+            self.assertEqual(running_tickets(self.root), [])
+            self.assertFalse(_pid_alive(child.pid))
+        finally:
+            child.wait()
 
     def test_cli_exit_code_follows_drain_result(self) -> None:
         self.assertEqual(main(["--state-dir", str(self.root), "--timeout", "0"]), 0)

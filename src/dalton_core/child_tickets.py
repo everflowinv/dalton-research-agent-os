@@ -1,16 +1,15 @@
-"""Shared rules for the out-of-process lane children (P9d-14 hardening).
+"""Shared rule for the out-of-process lane children (P9d-14).
 
 Every mission lane runs its work in a child the writer spawns and tracks
 through an owner-only ``ticket.json`` next to the child's own ``summary.json``.
-Two things went wrong with that on 2026-09-07 and both are fixed here.
 
 **A finished child was called orphaned.**  Settlement happens on the next
 tick, up to five minutes after the child exits.  If the writer restarted in
 that gap it lost the process handle, saw a ``running`` ticket with a dead pid,
 and settled it ``orphaned``, discarding work that had completed: thirteen
-tickets across three lanes in one day, each parking a company/spec pair for its
-retry interval.  :func:`adopt_finished_child` closes that gap.  When the pid
-is gone and the child left its own final ``summary.json`` with a terminal
+tickets across three lanes on 2026-09-07, each parking a company/spec pair for
+its retry interval.  :func:`adopt_finished_child` closes that gap.  When the
+pid is gone and the child left its own final ``summary.json`` with a terminal
 status, the ticket takes that status and says it did so
 (``adopted_from_summary``).  This is not guessing success from a stray file:
 the summary is the child's own record, written into a per-launch owner-only
@@ -21,24 +20,17 @@ summary without a terminal status, stays ``orphaned``.  The SEC lane launcher
 is deliberately not changed: its test that a dead pid must never be promoted
 from disk stands, because its child writes formal Claims itself.
 
-**A failed child did not exit.**  Twice a fetch child raised an unexpected
-exception, wrote its summary and traceback, and then stayed alive until the
-next writer restart, holding the lane's single acquisition slot the whole time.
-The cause could not be reproduced outside the live host.  :func:`run_child`
-removes the dependence on a clean interpreter shutdown: once ``main`` has
-returned or raised, and stdio is flushed, the process exits through
-``os._exit``.  The child has already closed its stores and written its summary
-by then; nothing is lost.  Tests call ``main`` directly and never go through
-this.
+A note on what this is *not* fixing.  Children that looked alive for minutes
+after writing their summary were not hung; they had exited and were zombies
+the writer had not yet reaped, because it only polls the handle on its next
+tick.  ``kill(pid, 0)`` succeeds on a zombie, which is why the deploy drain
+kept waiting on them.  That is handled in ``launch_drain``, not here.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import sys
-import traceback
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -69,24 +61,4 @@ def adopt_finished_child(record: dict[str, Any], summary_path: Path, *, now: str
     return True
 
 
-def run_child(main: Callable[[], int]) -> None:  # pragma: no cover - process boundary
-    """Entry point for a lane child: run ``main`` and always exit."""
-
-    code = 1
-    try:
-        code = int(main())
-    except SystemExit as exc:
-        code = exc.code if isinstance(exc.code, int) else 1
-    except BaseException:
-        traceback.print_exc()
-        code = 1
-    finally:
-        for stream in (sys.stdout, sys.stderr):
-            try:
-                stream.flush()
-            except Exception:
-                pass
-        os._exit(code)
-
-
-__all__ = ["TERMINAL_SUMMARY_STATUSES", "adopt_finished_child", "run_child"]
+__all__ = ["TERMINAL_SUMMARY_STATUSES", "adopt_finished_child"]

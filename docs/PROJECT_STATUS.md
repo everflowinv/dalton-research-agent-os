@@ -1,7 +1,7 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
-- **web lane 的队列不再漏（P9d-11/12/13/14，已部署两轮，第三轮待部署）。** 按 owner 指令修掉此前发现的四件事，
+- **web lane 的队列不再漏（P9d-11/12/13/14，已部署三轮，第四轮待部署）。** 按 owner 指令修掉此前发现的四件事，
   并顺手抓出 live 反馈的三件新事。
   ①**P9d-11 部署孤儿**：根因是 Dalton 自己——writer 停机时各 launcher 的 `close()` 会 terminate 在飞子进程，下个 tick
   记 `orphaned`，company/spec 停 park 一天。不改 launcher 语义（SEC lane 明文测试"死 pid 不能凭 summary 升为成功"），
@@ -22,10 +22,11 @@
   与 SEC。**不从失败"学"skip 表**——那是自动化写策略；每主机失败原因在账本里给 owner 看。
   ④**live 回敬的三件事**（见报告末三节）：(i) P9d-10 的回归：两次发现的 envelope 记录时含 grounding 转链 ref，新归一化把它们
   丢掉后 ref 比对失败，**16 条真实 URL 变得不可抓**。修法：envelope 是"引用了什么"的 authority，按其所属时代的归一化复核
-  （旧归一化留在 `drop_redirect_proxies=False` 后面），策略只作用于产出；两个时代都拒绝未引用的 ref。(ii) 一个抓取子进程
-  **失败并写完 summary 后 12 分钟不退出**，独占唯一抓取槽位直到 writer 重启；所有带 `unexpected …` 原因的"孤儿"票都是这个
-  签名，search lane 也有。离开 live 主机无法复现（同样的注入失败、真 transport、已批准治理记录，干净退出、无残留线程），
-  所以不猜原因：四个子进程 CLI 入口改走 `child_tickets.run_child`，main 返回或抛出、stdio flush 后 `os._exit`。
+  （旧归一化留在 `drop_redirect_proxies=False` 后面），策略只作用于产出；两个时代都拒绝未引用的 ref。(ii) drain 在 controller 已停的情况下仍等满 600s，
+  等的是一个"写完 summary 后 12 分钟仍在"的抓取子进程；先误判为子进程不退出并加了 `os._exit`（第三轮部署），新代码子进程
+  照样如此——`ps` 给出答案：状态 **Z**。子进程早已退出，只是 writer 要到下个 tick 轮询句柄时才 reap，controller 停了就
+  永远不 reap；`kill(pid,0)` 对僵尸成功，所以 drain 把它当活的。**误诊的 `os._exit` 已回退**；drain 现在把僵尸视为已退出
+  （Linux 读 `/proc`，macOS 用 `ps`），并有测试真的造一个僵尸来验证。
   (iii) **票据目录普查**：13 张票（discoveries 6 / fetches 5 / acquisitions 2）子进程**已完成并写了 summary** 却被记
   `orphaned`——结算要等下个 tick（最多 5 分钟），其间 writer 重启就丢了句柄。三个 mission launcher 现在在"pid 已死且
   summary 有终态"时采纳子进程自己的记录并标 `adopted_from_summary: true`；结算侧仍复核 authority（summary 说成功但字节
@@ -33,7 +34,7 @@
   每 tick 报错，现改经 `cited_url_hosts`（含转链）回填真实主机，coordinator 把转链主机与计划 skip 表一并 hold（物理事实，
   非策略：transport 拒绝跟随转链出站）。
   ⑤**live 验证**：v3 计划生效；6 条 v3 文档以 `discovered` 回到 v4；已回填 42 条主机；PDF 审阅入队；
-  Evidence 6 / Claim 6 / Thesis 2 不变。第三轮（ii/iii 与转链回填）已过全仓，待部署。见
+  Evidence 6 / Claim 6 / Thesis 2 不变；第三轮首 tick 已见 `adopted_from_summary: true` 把一个本会被记孤儿的成功抓取结为 `acquired` 并入队。第四轮（僵尸判定、回退误诊）已过全仓，待部署。见
   [P9d-11..14 报告](reports/p9d11-13-web-lane-queue-integrity-v0.1-2026-09-07.md)。
 - **搜索预算提到 1000/24h，抓取失败终于说得出原因，grounding 转链不再当来源（P9d-8/9/10，均已部署）。**
   ①**P9d-8 预算**：owner 指定把 web search 日上限由 40 提到 1000（provider 是便宜的 Gemini 2.5 Flash）。
