@@ -1,7 +1,7 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
-- **web lane 的队列不再漏（P9d-11/12/13/14，已部署三轮，第四轮待部署）。** 按 owner 指令修掉此前发现的四件事，
+- **web lane 的队列不再漏（P9d-11/12/13/14，已全部部署）。** 按 owner 指令修掉此前发现的四件事，
   并顺手抓出 live 反馈的三件新事。
   ①**P9d-11 部署孤儿**：根因是 Dalton 自己——writer 停机时各 launcher 的 `close()` 会 terminate 在飞子进程，下个 tick
   记 `orphaned`，company/spec 停 park 一天。不改 launcher 语义（SEC lane 明文测试"死 pid 不能凭 summary 升为成功"），
@@ -34,7 +34,7 @@
   每 tick 报错，现改经 `cited_url_hosts`（含转链）回填真实主机，coordinator 把转链主机与计划 skip 表一并 hold（物理事实，
   非策略：transport 拒绝跟随转链出站）。
   ⑤**live 验证**：v3 计划生效；6 条 v3 文档以 `discovered` 回到 v4；已回填 42 条主机；PDF 审阅入队；
-  Evidence 6 / Claim 6 / Thesis 2 不变；第三轮首 tick 已见 `adopted_from_summary: true` 把一个本会被记孤儿的成功抓取结为 `acquired` 并入队。第四轮（僵尸判定、回退误诊）已过全仓，待部署。见
+  Evidence 6 / Claim 6 / Thesis 2 不变；第三轮首 tick 已见 `adopted_from_summary: true` 把一个本会被记孤儿的成功抓取结为 `acquired` 并入队。第四轮（僵尸判定、回退误诊）部署时 drain 首次轮询 26ms 即收敛。全仓 **1183/1185**（2 例既有 macOS 路径断言）。见
   [P9d-11..14 报告](reports/p9d11-13-web-lane-queue-integrity-v0.1-2026-09-07.md)。
 - **搜索预算提到 1000/24h，抓取失败终于说得出原因，grounding 转链不再当来源（P9d-8/9/10，均已部署）。**
   ①**P9d-8 预算**：owner 指定把 web search 日上限由 40 提到 1000（provider 是便宜的 Gemini 2.5 Flash）。
