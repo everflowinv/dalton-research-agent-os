@@ -1,6 +1,22 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
+- **下一步裁决与实施：web 页面开放模型起草（P9d-15，已过全仓，待部署）。** 复盘 v0.1 愿景、v0.9 复盘与 ADR-0004 后的
+  判断：价值只看固定成本下人工接受的 Claim 数量；web lane 自 P9d-7 起搜索→抓取→核验原文→审阅队列已全自主，但到队列就
+  停了——网页只能人读、翻页、驳回，模型起草被 `public_web_extraction_drafting_not_supported` 挡住；AlphaEngine 文档早有
+  预算内、人触发的起草（P9d-3b）。上限提到 1000 后每天十几页进队，"每页都要人读"正是愿景说不该存在的瓶颈。路线图上的
+  Guidepoint 是往一个排不完的队列再加来源，08-26 复盘冻结新 bridge 直到发动机出活——这一片是发动机。
+  **改动**：`view`/`generate` 不再对 `source:web-search` 特判，网页审阅与 AlphaEngine 同一道闸（已批准的抽取模型配置 +
+  日预算）；上下文本就是核验过的确定性渲染原文，prompt、输出 schema、五条上限、拒绝数字陈述、untrusted 框定、task hash
+  全部不变，起草物是"渲染原文的精确引文 + 定性陈述"，永远不是 Claim，replay 不二次调用。**staging 仍拒绝**（新原因
+  `public_web_candidate_staging_not_supported`）：候选链发布 transcript correction set、经 transcript correction authority
+  绑定引文、经 `stage_transcript_qualitative_candidate` 带 AlphaEngine 文档血统入库；网页来源需要自己的 citation authority
+  （fetch manifest、body hash、渲染 hash 与 renderer 身份、span、人工复核）和把该血统带进 Evidence 的 staging 路径——即
+  **P9d-16**，并需 ADR-0003 B 补记（网页语义候选同样只经人工 accept）。
+  **验证**：writer-ops harness 里用 hermetic fixture worker 对真实抓取页起草——引文即渲染原文、绑定 context 内容 hash、
+  `pending_human_citation_admission`、replay 不二次调用、Claim/Evidence 计数不变；对起草物 staging 以新原因拒绝。未做任何
+  live 模型调用：起草由人触发，第一次 live 起草由 owner 在 cockpit 上按。见
+  [P9d-15 报告](reports/p9d15-public-web-extraction-drafting-v0.1-2026-09-07.md)。
 - **web lane 的队列不再漏（P9d-11/12/13/14，已全部部署）。** 按 owner 指令修掉此前发现的四件事，
   并顺手抓出 live 反馈的三件新事。
   ①**P9d-11 部署孤儿**：根因是 Dalton 自己——writer 停机时各 launcher 的 `close()` 会 terminate 在飞子进程，下个 tick

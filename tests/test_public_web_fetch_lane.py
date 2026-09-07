@@ -7,7 +7,7 @@ import json
 import tempfile
 import threading
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dalton_core.capability_catalog import CapabilityCatalog
@@ -41,7 +41,13 @@ from dalton_core.public_web_core_search import (
     public_web_urls_in_authority,
     web_search_spec_hash,
 )
-from dalton_core.document_extraction import WEB_GATE_REASON
+from dalton_core.document_extraction import (
+    DocumentExtractionModelWorker,
+    GATE_REASON,
+    HermeticExtractionAdapter,
+    WEB_STAGING_GATE_REASON,
+)
+from dalton_core.model_router import ModelRouter
 from dalton_core.public_web_fetch_cli import _fetch_failure_reason, fake_page_transport
 from dalton_core.public_web_fetch_launcher import (
     FetchLaunchRejected,
@@ -64,6 +70,7 @@ from tests.test_mission_web_search_discovery import (
 )
 from tests.test_p9a_writer_ops import AUTOMATION_TOKEN, CORE_TOKEN, GOVERNANCE_TOKEN, P9aWriterHarness
 from tests.test_public_web_core_search import WebSearchHarness
+from tests.test_transcript_polish_model_worker import policy, profile
 
 
 BODY = b"<html><body><h1>Leadership update</h1><p>original bytes, never a snippet</p></body></html>"
@@ -699,6 +706,8 @@ class P9d4bWriterHarness(P9aWriterHarness):
         self.server = WriterServer(
             root / "core.sqlite", self.socket, principals,
             transcript_spool_dir=root / "spool",
+            # P9d-15: drafting needs the writer's Scheduler as work-order authority.
+            scheduler_path=root / "scheduler.sqlite",
             web_search_launcher=self.web_launcher, web_search_plan_path=self.web_plan_path,
             web_fetch_launcher=self.fetch_launcher,
         )
@@ -766,17 +775,73 @@ class P9d4bWriterOpsTests(unittest.TestCase):
         self.assertEqual(context["quotes"][0]["raw_text"], "Leadership update\n\noriginal bytes, never a snippet")
         self.assertEqual((context["total_chars"], context["next_offset"], context["untrusted_source"]),
                          (len(context["quotes"][0]["raw_text"]), None, True))
-        # Drafting and staging stay refused: the candidate chain is bound to
-        # transcript correction authority, so no model budget is spent here.
+        # P9d-15: drafting is gated only by the model configuration, exactly
+        # as for AlphaEngine documents (this harness installs none); staging
+        # stays refused because web sources have no citation authority yet.
         self.assertEqual((evidence["generation_enabled"], evidence["gate_reason"], evidence["status"]),
-                         (False, WEB_GATE_REASON, "not_generated"))
+                         (False, GATE_REASON, "not_generated"))
         gated = h.governance.call("generate_document_extraction", {
             "review_id": review["review_id"], "expected_review_hash": review_hash, "offset": 0,
             "expected_context_hash": context["content_hash"],
         })
         self.assertEqual((gated["status"], gated["reason"], gated["formal_authority_writes"]),
-                         ("gated", WEB_GATE_REASON, 0))
-        with self.assertRaises(RemoteError):
+                         ("gated", GATE_REASON, 0))
+        # A hermetic fixture worker drafts suggestions bound to exact quotes of
+        # the deterministic rendering; nothing formal is written.
+        router_path = str(Path(root.name) / "router.sqlite")
+        pr = profile(); pr["provider"] = "hermetic-fixture"
+        pr["cost"]["input_per_million_usd"] = pr["cost"]["output_per_million_usd"] = 0
+        now = datetime.now(timezone.utc)
+        pr["availability"]["checked_at"] = now.isoformat()
+        pr["availability"]["valid_until"] = (now + timedelta(days=2)).isoformat()
+        with ModelRouter(router_path) as seed:
+            seed.register_profile(pr); seed.register_policy(policy())
+        routers = []  # opened on the writer thread; never closed from this one
+        adapter = HermeticExtractionAdapter({"schema_version": "0.1", "suggestions": [{
+            "quote_id": context["quotes"][0]["quote_id"],
+            "normalized_statement": "Fixture: the company announced a leadership update.",
+            "metric_or_aspect": "aspect:leadership", "period": "not specified in this window",
+            "basis": "fixture company announcement",
+        }]}, created_at=now.isoformat())
+        def factory(service, ctx, actor):
+            # Opened on the writer's thread: SQLite handles are thread-bound.
+            router = ModelRouter(router_path)
+            routers.append(router)
+            return DocumentExtractionModelWorker(
+                scheduler=h.server._scheduler, router=router, store=h.server.store, observability=h.server.observability,
+                adapter=adapter, routing_policy_ref=policy()["policy_version_ref"],
+                credential_slot_refs=[profile()["credential_slot_ref"]],
+                context_resolver=lambda c: service.reread(c, actor),
+            )
+        h.server._document_extraction_worker_factory = factory
+        def counts():
+            import sqlite3
+            ro = sqlite3.connect(f"file:{Path(root.name) / 'core.sqlite'}?mode=ro", uri=True)
+            try:
+                return {t: ro.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+                        for t in ("claim_versions", "evidence_versions")}
+            finally:
+                ro.close()
+        before = counts()
+        drafted = h.governance.call("generate_document_extraction", {
+            "review_id": review["review_id"], "expected_review_hash": review_hash, "offset": 0,
+            "expected_context_hash": context["content_hash"],
+        })
+        self.assertEqual(drafted["status"], "succeeded", drafted)
+        suggestion = drafted["suggestions"][0]
+        self.assertEqual(suggestion["citation"]["raw_text"], "Leadership update\n\noriginal bytes, never a snippet")
+        self.assertEqual(suggestion["source_content_hash"], context["source_content_hash"])
+        self.assertEqual(suggestion["citation_status"], "pending_human_citation_admission")
+        self.assertTrue(suggestion["hermetic_fixture"])
+        self.assertEqual(adapter.calls, 1)
+        self.assertEqual(h.governance.call("generate_document_extraction", {
+            "review_id": review["review_id"], "expected_review_hash": review_hash, "offset": 0,
+            "expected_context_hash": context["content_hash"],
+        })["suggestions"], drafted["suggestions"])
+        self.assertEqual(adapter.calls, 1)
+        self.assertEqual(counts(), before)
+        h.server._document_extraction_worker_factory = None
+        with self.assertRaises(RemoteError) as staged:
             h.governance.call("stage_document_extraction", {
                 "review_id": review["review_id"], "expected_review_hash": review_hash, "offset": 0,
                 "expected_context_hash": context["content_hash"],
@@ -786,6 +851,9 @@ class P9d4bWriterOpsTests(unittest.TestCase):
                 "raw_text": "Leade", "rationale": "checked", "confirm_citation": True,
                 "correction_set_version_ref": None, "correction_set_version_hash": None,
             })
+        # The writer maps the refusal to a generic client message; the reason
+        # itself is asserted where the service raises it (WEB_STAGING_GATE_REASON).
+        self.assertIsInstance(staged.exception, RemoteError)
         # A stale review hash still fails closed on the new lane.
         with self.assertRaises(RemoteError):
             h.governance.call("mission_document_evidence", {

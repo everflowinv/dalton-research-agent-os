@@ -33,11 +33,15 @@ WINDOW_CHARS = 12000
 QUOTE_CHARS = 1200
 MAX_DOCUMENT_CHARS = 600000
 GATE_REASON = "document_extraction_model_config_not_installed"
-# P9d-4c: a fetched public-web page can be read and cited by a human, but the
-# suggestion/staging chain below is bound to transcript correction authority
-# and AlphaEngine document lineage, so model drafting and candidate staging
-# stay refused for web pages until that chain has its own slice.
-WEB_GATE_REASON = "public_web_extraction_drafting_not_supported"
+# P9d-15: a fetched public-web page is a verified, deterministically rendered
+# original (public_web_extraction_source), so the same budgeted, human-triggered
+# drafting that AlphaEngine documents get applies to it: suggestions only,
+# bound to exact quotes of the rendering, never an accepted Claim.  Candidate
+# *staging* is still refused for web pages: that chain binds transcript
+# correction authority and AlphaEngine document lineage and needs its own
+# citation authority for public-web sources before a web suggestion can
+# become a candidate.
+WEB_STAGING_GATE_REASON = "public_web_candidate_staging_not_supported"
 ALPHAENGINE_SOURCE_REF = "source:alphaengine"
 PUBLIC_WEB_SOURCE_REF = "source:web-search"
 SUPPORTED_SOURCE_REFS = frozenset({ALPHAENGINE_SOURCE_REF, PUBLIC_WEB_SOURCE_REF})
@@ -660,11 +664,6 @@ class DocumentExtractionService:
 
     def view(self, *, review_id, expected_review_hash, offset, actor_ref):
         context = self.context(review_id, expected_review_hash, offset, actor_ref)
-        if context["source_ref"] == PUBLIC_WEB_SOURCE_REF:
-            # Read-only original: verified windows and quotes, no drafting.
-            return {"context": context, "model_budget": {"status": "not_reserved"},
-                    "model_execution": "gated", "gate_reason": WEB_GATE_REASON,
-                    "generation_enabled": False, "status": "not_generated", "suggestions": []}
         configured = bool(context.get("model_binding"))
         return {"context": context, "model_budget": self.budget_status(context), "model_execution": "broker" if configured else "gated", "gate_reason": None if configured else GATE_REASON,
                 "generation_enabled": configured or self.writer._document_extraction_worker_factory is not None,
@@ -674,10 +673,6 @@ class DocumentExtractionService:
         context = self.context(review_id, expected_review_hash, offset, actor_ref)
         if context["content_hash"] != expected_context_hash:
             raise ResearchVerificationConflict("source context changed; reload original")
-        if context["source_ref"] == PUBLIC_WEB_SOURCE_REF:
-            # Drafting would spend model budget on suggestions that cannot be
-            # staged, so it is refused before any route or reservation.
-            return {"status": "gated", "reason": WEB_GATE_REASON, "formal_authority_writes": 0}
         factory = self.writer._document_extraction_worker_factory
         config = getattr(self.writer, "_document_extraction_model_config", None)
         if factory is None and config is None:
@@ -737,10 +732,11 @@ class DocumentExtractionService:
             raise ResearchVerificationConflict("source context is stale")
         if context["source_ref"] == PUBLIC_WEB_SOURCE_REF:
             # The candidate chain below binds transcript correction authority
-            # and AlphaEngine document lineage; a fetched page cannot enter it.
+            # and AlphaEngine document lineage; a fetched page cannot enter it
+            # until public-web sources have a citation authority of their own.
             raise ResearchVerificationError(
-                "fetched public-web pages can be read and dismissed, but not staged as "
-                "candidates; that chain is bound to transcript correction authority"
+                f"{WEB_STAGING_GATE_REASON}: fetched public-web pages can be read, drafted "
+                "and dismissed, but not staged as candidates yet"
             )
         suggestions = self._suggestions(context)["suggestions"]
         suggestion = next((s for s in suggestions if s["id"] == suggestion_ref and s["content_hash"] == suggestion_hash), None)
