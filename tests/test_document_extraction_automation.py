@@ -227,6 +227,26 @@ class AutomationAdmissionTests(AutomationDraftingTests):
         self.assertEqual(self.h.counts(), after)
 
 
+class OutputContractTests(unittest.TestCase):
+    """Live: most rejected windows were fenced JSON or statements naming a period."""
+
+    def test_fence_is_stripped_periods_pass_and_values_are_refused(self) -> None:
+        from dalton_core.document_extraction import parse_suggestions, statement_asserts_a_value, unwrap_model_json
+        body = '{"schema_version": "0.1", "suggestions": []}'
+        self.assertEqual(unwrap_model_json("```json\n" + body + "\n```"), body)
+        self.assertEqual(unwrap_model_json("```\n" + body + "```"), body)
+        self.assertEqual(unwrap_model_json(body), body)
+        self.assertEqual(unwrap_model_json("```json\n" + body), "```json\n" + body)  # unclosed: untouched
+        context = {"quotes": [{"quote_id": "quote:0:10:abc"}]}
+        self.assertEqual(parse_suggestions("```json\n" + body + "\n```", context)["suggestions"], [])
+        for ok in ("Management expects bookings to improve in fiscal 2026.", "Demand softened in Q3 FY26 versus 1Q.",
+                   "The company said H2 would be stronger than H1 of 2025."):
+            self.assertFalse(statement_asserts_a_value(ok), ok)
+        for bad in ("Revenue grew 3% in Q3.", "Bookings reached $19 billion.", "Headcount rose by 4,000 in 2025.",
+                    "Margin was 15.2 in fiscal 2026."):
+            self.assertTrue(statement_asserts_a_value(bad), bad)
+
+
 class HostKeepaliveTests(unittest.TestCase):
     def test_host_holds_budget_and_router_open_so_read_only_binds_work(self) -> None:
         """Live: the context's read-only budget open refused without WAL sidecars."""

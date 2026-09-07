@@ -90,3 +90,28 @@ held with "active governance policy does not list …" and nothing is staged.
 
 Public-web pages: drafted, not staged (P9d-17c needs a citation authority for
 web sources). Thesis admission: still human (ADR-0001), pending its own ADR.
+
+## What the first eighteen live windows said
+
+Thirteen were rejected by the output contract and the five that passed were
+empty. The broker journal shows why: the model wraps its JSON in a markdown
+fence, which the strict parser refused, and when it does produce a statement it
+names the period ("by the end of 2026") or a figure ("79%"), and the contract
+refused any digit at all.
+
+Three changes, none of them to the contract's authority:
+
+- `unwrap_model_json` strips one surrounding fence before the strict parse. The
+  persisted text is untouched; anything else non-JSON is still refused.
+- `statement_asserts_a_value` replaces the bare digit ban. A year, quarter,
+  half or fiscal-year label is a period, not a value; every other digit,
+  percent or currency sign is a value and is refused. The policy evaluator uses
+  the same check.
+- The prompt asks for raw JSON, one reported view per suggestion in one or two
+  sentences, no numbers, and says period labels are allowed.
+
+A rejected window is terminal on purpose. The prompt is not part of the task
+hash, so those thirteen stay rejected under their current context ids. The
+second chain publish re-keys every context through the new mission version, so
+every window is drafted again under the new prompt, at about a tenth of a cent
+each.

@@ -190,7 +190,8 @@ def _authorize_document_qualitative(
         raise ResearchAutoCommitRejected("document qualitative rule admits only mission automation candidates")
     if any(claim_wire.get(field) is not None for field in ("value", "unit", "scale", "currency")):
         raise ResearchAutoCommitRejected("document qualitative rule admits no numeric assertion")
-    if re.search(r"[0-9%$]", claim_wire["normalized_statement"]):
+    from .document_extraction import statement_asserts_a_value
+    if statement_asserts_a_value(claim_wire["normalized_statement"]):
         raise ResearchAutoCommitRejected("document qualitative rule admits no numeric statement")
     if evidence_wire["source_type"] != TRANSCRIPT_EVIDENCE_SOURCE_TYPE or evidence_wire["source_ref"] != "source:alphaengine":
         raise ResearchAutoCommitRejected("document qualitative rule requires an acquired AlphaEngine original")
