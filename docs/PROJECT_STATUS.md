@@ -1,6 +1,18 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
+- **裁决 v1.1：下一阶段 = Phase 10「按研究手册的阶段执行任务」（2026-09-07，当前执行顺序基线）。** owner 在新 cockpit 上
+  指出子任务与其理解不一致：目标是"建立 US IT services 首次覆盖"，子任务应是"建立 ACN 的 Initial Screen 和财务预测"之类，
+  而不是资料计数或常驻研究问题。盘点后确认：Playbook 六阶段与 mission 七项交付物早已是合同，`stage_record` 也已授予
+  自动化，但 live 阶段账本 0 行——P9d 只把"搜→取→读→入库 Claim"做成全自动，没有任何 lane 把工作组织成"公司 × 阶段"，
+  没有交付物 authority，没有出口门自评。常驻研究问题只由 owner 改，不是子任务。**Phase 10 切片**：P10a 阶段账本启动
+  与资料底座清单核对（抽取按公司优先级、发现按缺项驱动；cockpit 子任务改为公司 × 阶段）→ P10b Claim 挑战/退役与按
+  公司索引（清掉约 50 条误归属 Claim）→ P10c `MissionDeliverableVersion` authority + Initial Screen 自动起草（数字必须
+  回指 quantitative Claim 否则标"缺来源"）+ 出口门四问自评过门 → P10d Deep Insight Gate 12 问草稿与人审 → P10e 行业
+  框架与行业模型缺口清单 → P10f 公司模型与预测线（M2）→ P10g Investment Memo。owner 只需发布一次 mission v8
+  （`may_write` 增加 `claim_challenge`、`deliverable`）。退出门槛：三家 `initial_screen gate_passed`、ACN 深度认知门
+  经 owner 裁决一次、五份 Initial Screen 数字零无源；止损 2026-09-28。
+  见 [愿景复盘与下一阶段裁决 v1.1](reports/vision-and-next-phase-v1.1-2026-09-07.md)。
 - **P9d-18 / ADR-0006：cockpit 按 owner 的五件事重做（已部署，live 已验证）。** owner 说旧 cockpit 太反人类：他要的是
   一处输入总研究目标并看到当前目标、系统拆出的子任务与进展；一处 steer；一页研究日志（系统在做什么）；一页临时问答；
   一页只放需要人审批的事项——清晰、fancy、不要机器语言。**改动**：同一 Tailscale/session/CSRF shell 下新页面 `/`
@@ -1919,6 +1931,13 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 ## 下一阶段顺序
 
+### 当前基线：Phase 10（v1.1，2026-09-07）
+
+按 [v1.1](reports/vision-and-next-phase-v1.1-2026-09-07.md) 的顺序执行：P10a 阶段账本启动与资料底座清单 →
+P10b Claim 挑战/退役 → P10c 交付物 authority 与 Initial Screen 自动起草过门 → P10d Deep Insight Gate 人审 →
+P10e 行业框架/行业模型缺口 → P10f 公司模型与预测线 → P10g Investment Memo。新来源、通用能力、cockpit 新视图继续冻结。
+下面 P0–P2 与 Phase 7/8/9 的文字是历史顺序，保留作依据，不再是当前基线。
+
 ### P0：Connector Protocol 与计量边界
 
 0. 已完成 P0-0：seam 敌对测试、生产数据库副本 startup backfill 演练、复核出处修正、Artifact v0.2
@@ -2081,6 +2100,7 @@ path 泄漏；authority idempotency 与数据库 integrity 全部通过。外部
 - Planner SEC public 薄闭环：`docs/reports/research-plan-thin-closure-2026-08-15.md`
 - ResearchPlan coordinator：`docs/reports/research-plan-coordinator-admission-2026-08-15.md`
 - 当前方向复审与执行计划：`docs/reports/direction-review-and-execution-plan-v0.7-2026-08-21.md`
+- 当前执行顺序基线：`docs/reports/vision-and-next-phase-v1.1-2026-09-07.md`（Phase 10）
 - 上一版愿景与执行优先级：`docs/reports/vision-and-execution-priority-v0.6-2026-08-15.md`
 - Claim → thesis 影响判断：`docs/reports/thesis-impact-verifier-2026-08-20.md`
 - ResearchPlan → thesis impact 控制面：`docs/reports/research-plan-thesis-impact-control-2026-08-21.md`
