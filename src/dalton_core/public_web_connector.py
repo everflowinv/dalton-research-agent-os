@@ -411,6 +411,24 @@ def public_web_url_ref(url: str) -> str:
     ).hexdigest()
 
 
+# P9d-10: Gemini grounding sometimes cites its own redirect proxy rather than the
+# publisher.  Those links are opaque, they expire, and they name no source a
+# human could check.  They can also never become evidence: the fetch profile
+# pins allowed_hosts to the URL's own host, so following the redirect to the
+# real publisher is refused by the transport.  Worse for the ledger, the same
+# article reached through two different tokens hashes to two different
+# documents, so dedup silently fails.  Drop them at discovery rather than spend
+# a governed fetch call learning this again.
+REDIRECT_PROXY_HOSTS = frozenset({"vertexaisearch.cloud.google.com"})
+
+
+def is_search_redirect_proxy(canonical_url: str) -> bool:
+    """True when a cited URL is a search provider's own redirect proxy."""
+
+    host = urlsplit(canonical_url).hostname or ""
+    return host.lower() in REDIRECT_PROXY_HOSTS
+
+
 def normalize_gemini_web_search_payload(
     payload: Mapping[str, Any],
     *,
@@ -427,7 +445,9 @@ def normalize_gemini_web_search_payload(
     (``kind`` instead of ``model``); Dalton never consumes that surface, and a
     payload in that shape is refused here rather than silently accepted.
     ``content`` and each citation ``title`` arrive wrapped in the host's
-    untrusted-content markers; only the cited URLs move forward.
+    untrusted-content markers; only the cited URLs move forward.  Citations that
+    point at the provider's own redirect proxy are dropped: see
+    ``REDIRECT_PROXY_HOSTS``.
     """
 
     if not isinstance(payload, Mapping):
@@ -474,6 +494,10 @@ def normalize_gemini_web_search_payload(
         title = item.get("title")
         if title is not None:
             _text(title, f"Gemini citation[{index}].title")
+        if is_search_redirect_proxy(canonical):
+            # Skipped before the max_records slice, so a proxy link never costs
+            # a real citation its place in the admitted top slice.
+            continue
         ref = public_web_url_ref(canonical)
         if ref in seen:
             continue
@@ -1025,9 +1049,11 @@ __all__ = [
     "PublicWebConnectorError",
     "PublicWebFetchAdapter",
     "PublicWebUrlAuthorityResolver",
+    "REDIRECT_PROXY_HOSTS",
     "build_public_web_url_authorities",
     "canonical_public_web_url",
     "gemini_web_search_tool_arguments",
+    "is_search_redirect_proxy",
     "normalize_gemini_web_search_payload",
     "public_web_url_ref",
     "validate_gemini_search_parameters",

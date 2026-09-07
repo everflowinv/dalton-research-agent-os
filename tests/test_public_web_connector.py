@@ -582,6 +582,42 @@ class RealHostPayloadContractTests(unittest.TestCase):
                 agent_tool_shape, expected_query=payload["query"], max_records=10,
             )
 
+    def test_grounding_redirect_proxies_never_become_documents(self) -> None:
+        """P9d-10: the provider's own redirect proxy is not a source.
+
+        Live, two such links were admitted as documents.  They are opaque, they
+        expire, and the fetch profile pins allowed_hosts to the URL's own host,
+        so the transport refuses to follow one to the real publisher.  They can
+        only ever cost a governed call and fail.
+        """
+
+        payload = self.fixture()["host_return"]["result"]
+        proxy = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEUwtb"
+        mixed = {**payload, "citations": [
+            {"url": proxy, "title": "vertexaisearch.cloud.google.com"},
+            {"url": "https://newsroom.accenture.com/news/2026/x", "title": "accenture.com"},
+        ]}
+        structured, discoveries = normalize_gemini_web_search_payload(
+            mixed, expected_query=mixed["query"], max_records=GEMINI_WEB_SEARCH_MAX_RECORDS,
+        )
+        self.assertEqual(
+            [item["canonical_url"] for item in discoveries],
+            ["https://newsroom.accenture.com/news/2026/x"],
+        )
+        self.assertNotIn("vertexaisearch", json.dumps(structured))
+        # The drop happens before the ceiling, so a proxy link cannot cost a
+        # real citation its place in the admitted top slice.
+        crowded = {**payload, "citations": (
+            [{"url": proxy, "title": "p"}]
+            + [{"url": f"https://example{index}.com/a", "title": f"t{index}"}
+               for index in range(GEMINI_WEB_SEARCH_MAX_RECORDS)]
+        )}
+        _, admitted = normalize_gemini_web_search_payload(
+            crowded, expected_query=crowded["query"], max_records=GEMINI_WEB_SEARCH_MAX_RECORDS,
+        )
+        self.assertEqual(len(admitted), GEMINI_WEB_SEARCH_MAX_RECORDS)
+        self.assertNotIn(proxy, [item["canonical_url"] for item in admitted])
+
     def test_more_citations_than_the_page_ceiling_admit_the_ranked_top_slice(self) -> None:
         """Grounding cites as many sources as it used; the ceiling still holds."""
 
