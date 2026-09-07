@@ -401,10 +401,19 @@ class WebCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.coordinator.dispatch_once()["carried_forward"], [])
         self.assertEqual([d["status"] for d in self.missions.discovered_documents(v1["id"])], ["discovered", "discovered"])
 
+        # The same document under two superseded versions is carried once,
+        # from the most recent version.  Live, the second copy hit the UNIQUE
+        # constraint and took the whole discovery tick down.
+        v3 = self.publish(status="connected", grant=True, version=3, prior=v2)
+        tick = self.coordinator.dispatch_once()
+        self.assertEqual(sorted(c["document_ref"] for c in tick["carried_forward"]), sorted([URL_A, URL_B]))
+        self.assertTrue(all(c["from_version_ref"] == v2["id"] for c in tick["carried_forward"]))
+        self.assertEqual(len(self.missions.discovered_documents(v3["id"])), 2)
+        self.assertEqual(self.coordinator.dispatch_once()["carried_forward"], [])
         # A version that no longer lets automation discover on this source
         # refuses the carry-forward and says why, rather than moving rows the
         # grant would not cover.
-        self.publish(status="probe_only", grant=True, version=3, prior=v2)
+        self.publish(status="probe_only", grant=True, version=4, prior=v3)
         tick = self.coordinator.dispatch_once()
         self.assertEqual({c["status"] for c in tick["carried_forward"]}, {"skipped"})
         self.assertTrue(all("probe_only" in c["reason"] for c in tick["carried_forward"]))

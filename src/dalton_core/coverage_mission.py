@@ -1860,14 +1860,22 @@ class CoverageMissionAuthority:
         if source_ref is not None:
             query += " AND d.source_ref=?"
             params.append(_text(source_ref, "source_ref"))
-        query += " ORDER BY d.created_at,d.record_id LIMIT ?"
+        # A document can sit under several superseded versions (v2 and v4,
+        # live).  The most recent version's row carries the latest state, so
+        # it wins; the rest are the same document and are not copied twice.
+        # Live, the second copy hit the UNIQUE constraint and took the whole
+        # discovery tick down with it.
+        query += " ORDER BY v.version_number DESC,d.created_at,d.record_id LIMIT ?"
         params.append(limit)
         rows = self.connection.execute(query, params).fetchall()
         if not rows:
             return []
         grants: dict[tuple[str, str], dict[str, Any] | str] = {}
         result: list[dict[str, Any]] = []
+        carried_refs: set[str] = set()
         for row in rows:
+            if row["document_ref"] in carried_refs:
+                continue
             entry = {
                 "document_ref": row["document_ref"], "from_version_ref": row["mission_version_ref"],
                 "company_ref": row["company_ref"], "source_ref": row["source_ref"],
@@ -1915,6 +1923,7 @@ class CoverageMissionAuthority:
                         row["created_at"], row["updated_at"], row["host"],
                     ),
                 )
+            carried_refs.add(row["document_ref"])
             result.append({**entry, "status": status, "record_id": record_id})
         return result
 

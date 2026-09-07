@@ -855,7 +855,7 @@ class MissionSourceDiscoveryCoordinator:
             return self.missions.carry_forward_superseded_documents(
                 self.plan["mission_ref"], source_ref=self.source_ref
             )
-        except CoverageMissionError as exc:
+        except Exception as exc:  # maintenance must never take the tick down
             return [{"status": "error", "reason": f"{type(exc).__name__}: {exc}"}]
 
     def settle_already_held(self) -> list[dict[str, Any]]:
