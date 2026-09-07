@@ -77,3 +77,33 @@ require qualitative candidates without cited evidence to be refused.
 The human `stage` op still refuses web pages; the automation path is the one
 ADR-0005 asks for, and a human who wants to stage by hand can do so from an
 AlphaEngine review today. Thesis admission remains human (ADR-0001).
+
+## What the first fifty automated Claims looked like
+
+Counting was not enough. A read of the admitted statements showed two things
+the chain had no way to catch:
+
+- **Disclaimers as Claims.** "J.P. Morgan states that past performance is not
+  indicative of future results." The statement is attributed, quotes an exact
+  span, asserts no number, and passes every check, because every check is
+  about provenance, not relevance.
+- **The wrong subject.** Forty-nine statements about fuel prices, EV fleets
+  and FTC litigation, admitted under Cognizant's subject ref. The AlphaEngine
+  search for Cognizant returned a broker report about a payments company, and
+  the prompt showed the model only a CIK ref, so it could not know the window
+  was about someone else.
+
+Two changes. The drafting context now carries the subject's ticker from the
+mission universe, and the prompt opens with it: extract only reported views
+about this company, its industry, customers or named competitors; if the
+window is about a different company, or is a disclaimer, boilerplate or text
+about the document itself, return empty suggestions. And a small deterministic
+boilerplate filter drops the most recognisable disclaimer phrasings at parse
+time and refuses them again in the policy evaluator.
+
+The new context field re-keys every window, so the queue is drafted again
+under the new prompt. The Claims already admitted stay in the Ledger; it is
+append-only. They carry the automation producer and the policy rule, so they
+are easy to find, and the owner can challenge or retire them from the cockpit.
+Relevance remains a model judgment; the deterministic guards only remove the
+cases no judgment is needed for.

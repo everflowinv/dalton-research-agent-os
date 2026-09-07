@@ -261,6 +261,21 @@ class OutputContractTests(unittest.TestCase):
         for bad in ("Revenue grew 3% in Q3.", "Bookings reached $19 billion.", "Headcount rose by 4,000 in 2025.",
                     "Margin was 15.2 in fiscal 2026."):
             self.assertTrue(statement_asserts_a_value(bad), bad)
+        # Live, broker disclaimers were admitted as Claims; they are dropped now.
+        from dalton_core.document_extraction import build_prompt, statement_is_boilerplate
+        for text in ("J.P. Morgan states that past performance is not indicative of future results.",
+                     "Opinions are current as of the date and subject to change without notice.",
+                     "This material is for informational purposes only."):
+            self.assertTrue(statement_is_boilerplate(text), text)
+        self.assertFalse(statement_is_boilerplate("Management described cautious client decisions."))
+        dropped = parse_suggestions(json.dumps({"schema_version": "0.1", "suggestions": [
+            {**item, "normalized_statement": "Past performance is not indicative of future results."}]}), context, tolerant=True)
+        self.assertEqual((dropped["suggestions"], dropped["dropped"][0]["reason"][:11]), ([], "boilerplate"))
+        # The prompt names the subject by ticker and tells the model what to skip.
+        prompt = build_prompt({"company_ref": "company:sec-cik:0001058290", "company_ticker": "CTSH", "document_ref": "d",
+                               "offset": 0, "end": 10, "quotes": [{"quote_id": "q", "raw_text": "t"}]})
+        self.assertIn("The subject company is CTSH.", prompt)
+        self.assertIn("legal disclaimer", prompt)
 
 
 class WebAdmissionTests(unittest.TestCase):

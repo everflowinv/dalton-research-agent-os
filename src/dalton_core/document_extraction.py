@@ -181,6 +181,24 @@ def statement_asserts_a_value(statement: str) -> bool:
     return _VALUE_RE.search(_PERIOD_TOKEN_RE.sub("", statement)) is not None
 
 
+# Live, the first day's automation admitted broker disclaimers as Claims
+# ("past performance is not indicative of future results").  A disclaimer is
+# about the document, not the company; it is dropped before it is drafted.
+_BOILERPLATE_RE = re.compile(
+    r"past performance|not indicative of future|subject to change without notice|"
+    r"no assurance that (future )?results|this (material|report|document) (is|does|should|may)|"
+    r"not (be )?construed as|investment advice|for informational purposes|"
+    r"receive back less than|conflicts? of interest|regulatory disclosures?",
+    re.IGNORECASE,
+)
+
+
+def statement_is_boilerplate(statement: str) -> bool:
+    """True for legal, disclaimer or document-about-itself text."""
+
+    return _BOILERPLATE_RE.search(statement) is not None
+
+
 def unwrap_model_json(text: str) -> str:
     """Strip one surrounding markdown code fence; the persisted text is untouched.
 
@@ -198,7 +216,12 @@ def unwrap_model_json(text: str) -> str:
 
 
 def build_prompt(context: Mapping[str, Any]) -> str:
+    subject = context.get("company_ticker") or context["company_ref"]
     return (
+        f"The subject company is {subject}. Extract only reported views about this company, its "
+        "industry, its customers or its named competitors. If this window is about a different "
+        "company, or is a legal disclaimer, boilerplate or text about the document itself, return "
+        "empty suggestions. "
         "Produce qualitative research suggestions only, never an accepted Claim. "
         "Return raw strict JSON matching OUTPUT_SCHEMA, with no markdown fence and no prose. "
         "Cite only supplied quote_id values, at most five suggestions in total; several suggestions "
@@ -278,6 +301,8 @@ def parse_suggestions(text: str, context: Mapping[str, Any], *, tolerant: bool =
                 raise ResearchVerificationError("suggestion references a foreign quote")
             if statement_asserts_a_value(item["normalized_statement"]):
                 raise ResearchVerificationError("numeric statements require a separate numeric authority")
+            if statement_is_boilerplate(item["normalized_statement"]):
+                raise ResearchVerificationError("boilerplate or disclaimer text is not a research statement")
         except ResearchVerificationError as exc:
             if not tolerant:
                 raise
@@ -549,10 +574,15 @@ class DocumentExtractionService:
             quotes.append({"quote_id": f"quote:{start}:{stop}:{_hash_text(quote)[:16]}",
                            "source_start": start, "source_end": stop, "source_sha256": _hash_text(quote),
                            "raw_text": quote})
+        # The model must know who the subject is; a CIK ref tells it nothing.
+        # Read from the mission universe the grant already bound.
+        mission = writer.coverage_mission.mission(grant["mission_version_ref"])
+        member = next((m for m in mission["universe"] if m["company_ref"] == review["company_ref"]), {})
         base = {
             "schema_version": "0.1", "review_id": review_id, "review_hash": expected_review_hash,
             "created_at": review["created_at"], "mission_version_ref": grant["mission_version_ref"],
             "mission_version_hash": grant["mission_version_hash"], "company_ref": review["company_ref"],
+            "company_ticker": member.get("ticker"),
             "source_ref": review["source_ref"], "document_ref": review["document_ref"],
             "discovered_document_hash": content_hash(dict(row)), "source_manifest_ref": manifest["id"],
             "source_manifest_hash": manifest["content_hash"], "source_content_hash": source_content_hash,
