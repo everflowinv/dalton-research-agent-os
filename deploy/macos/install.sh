@@ -26,7 +26,7 @@ if [[ ! -x "$venv_dir/bin/python" ]]; then
   "$python_source" -m venv "$venv_dir"
 fi
 "$venv_dir/bin/python" -m pip install --disable-pip-version-check --upgrade pip
-"$venv_dir/bin/python" -m pip install --disable-pip-version-check "${repo_root}[deploy]"
+"$venv_dir/bin/python" -m pip install --disable-pip-version-check "${repo_root}[deploy,pdf]"
 
 for label in space.lumos.dalton.thesis-impact space.lumos.dalton.control space.lumos.dalton.controller space.lumos.dalton.writer; do
   if launchctl print "$domain/$label" >/dev/null 2>&1; then

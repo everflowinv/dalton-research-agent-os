@@ -16,10 +16,14 @@ Two rules shape it:
   best-effort render.
 * **Rendering is deterministic and lossless about provenance.**  The same
   bytes always produce the same text, so a quote's offsets and hashes are
-  stable.  Only ``text/html``, ``application/xhtml+xml`` and ``text/plain``
-  in UTF-8 are rendered; anything else (PDF, image, unknown charset) is
-  refused with its reason rather than decoded into garbage a human might
-  quote.
+  stable.  ``text/html``, ``application/xhtml+xml`` and ``text/plain`` are
+  rendered when they are UTF-8; ``application/pdf`` is rendered through
+  ``pypdf`` when that optional extra is installed.  Anything else (an image,
+  an unknown charset, an encrypted or malformed PDF, or a PDF when the
+  extractor is not installed) is refused with its reason rather than decoded
+  into garbage a human might quote.  The renderer identity carries the
+  extractor version, so upgrading it invalidates old contexts instead of
+  silently changing the text behind a citation.
 
 The text is untrusted third-party content.  It is shown to a human for
 reading and citation; it never becomes Evidence or a Claim here.
@@ -43,9 +47,14 @@ OPERATION = "fetch_get"
 # The Cockpit control plane bounds a window offset to < 600000, so a longer
 # page would have unreachable windows; the excess is dropped and declared.
 MAX_SOURCE_CHARS = 600_000
-RENDERABLE_MEDIA_TYPES: frozenset[str] = frozenset({
+PDF_MEDIA_TYPE = "application/pdf"
+TEXT_MEDIA_TYPES: frozenset[str] = frozenset({
     "text/html", "application/xhtml+xml", "text/plain",
 })
+RENDERABLE_MEDIA_TYPES: frozenset[str] = TEXT_MEDIA_TYPES | {PDF_MEDIA_TYPE}
+# A research PDF is bounded: an earnings release is tens of pages, and a
+# document longer than this is refused rather than partly rendered.
+MAX_PDF_PAGES = 400
 _UTF8_CHARSETS: frozenset[str] = frozenset({"", "utf-8", "utf8", "us-ascii", "ascii"})
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -155,6 +164,44 @@ def normalized_media_type(raw_media_type: Any) -> tuple[str, str]:
     return parts[0], charset
 
 
+def _render_pdf(raw: bytes) -> tuple[str, str]:
+    """Extract PDF text through ``pypdf``; refuse rather than guess."""
+
+    try:
+        import pypdf
+    except ImportError as exc:  # optional extra; absence is a refusal, not a guess
+        raise PublicWebSourceError(
+            "fetched page is a PDF but the PDF extractor is not installed; "
+            "install the 'pdf' extra to render it"
+        ) from exc
+    import io
+
+    try:
+        reader = pypdf.PdfReader(io.BytesIO(raw))
+        if reader.is_encrypted:
+            raise PublicWebSourceError("fetched PDF is encrypted and is not rendered")
+        pages = reader.pages
+        if len(pages) > MAX_PDF_PAGES:
+            raise PublicWebSourceError(
+                f"fetched PDF has {len(pages)} pages, above the {MAX_PDF_PAGES} page ceiling"
+            )
+        blocks: list[str] = []
+        for page in pages:
+            for chunk in re.split(r"\n\s*\n", page.extract_text() or ""):
+                block = _normalize_inline(chunk)
+                if block:
+                    blocks.append(block)
+    except PublicWebSourceError:
+        raise
+    except Exception as exc:  # malformed PDFs are refused with their reason
+        raise PublicWebSourceError(f"fetched PDF could not be read: {type(exc).__name__}") from exc
+    if not blocks:
+        raise PublicWebSourceError("fetched PDF yielded no extractable text")
+    # The extractor version is part of the renderer identity: upgrading it
+    # changes the text, and a context bound to the old text must go stale.
+    return "\n\n".join(blocks), f"pdf-pypdf-{pypdf.__version__}:0.1"
+
+
 def render_public_web_text(raw: bytes, *, raw_media_type: str) -> dict[str, Any]:
     """Render fetched bytes as deterministic text plus how it was rendered."""
 
@@ -165,6 +212,15 @@ def render_public_web_text(raw: bytes, *, raw_media_type: str) -> dict[str, Any]
         raise PublicWebSourceError(
             f"fetched page media type {media_type} cannot be rendered as text for review"
         )
+    if media_type == PDF_MEDIA_TYPE:
+        text, renderer = _render_pdf(raw)
+        truncated = len(text) > MAX_SOURCE_CHARS
+        if truncated:
+            text = text[:MAX_SOURCE_CHARS]
+        return {
+            "text": text, "renderer": renderer, "media_type": media_type,
+            "truncated": truncated, "rendered_chars": len(text),
+        }
     if charset not in _UTF8_CHARSETS:
         raise PublicWebSourceError(
             f"fetched page declares charset {charset}; only UTF-8 is rendered for review"
@@ -343,7 +399,9 @@ def verified_public_web_source(
 
 
 __all__ = [
+    "MAX_PDF_PAGES",
     "MAX_SOURCE_CHARS",
+    "PDF_MEDIA_TYPE",
     "OPERATION",
     "PublicWebSourceConflict",
     "PublicWebSourceError",

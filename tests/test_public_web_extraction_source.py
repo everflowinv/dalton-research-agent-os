@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from dalton_core.public_web_extraction_source import (
@@ -73,7 +74,6 @@ class RenderTests(unittest.TestCase):
 
     def test_unrenderable_bytes_are_refused_not_guessed(self) -> None:
         for raw, media_type, reason in (
-            (b"%PDF-1.7", "application/pdf", "media type"),
             (b"\x89PNG\r\n", "image/png", "media type"),
             (b"\xff\xfe\x00", "text/html", "UTF-8"),
             (b"caf\xe9", "text/html; charset=iso-8859-1", "charset"),
@@ -166,3 +166,76 @@ class VerifiedSourceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def minimal_pdf(lines: list[str], *, encrypted_marker: bool = False) -> bytes:
+    """Build a tiny valid PDF with extractable text, without a PDF library."""
+
+    body = " ".join(f"BT /F1 12 Tf 72 {720 - index * 20} Td ({line}) Tj ET" for index, line in enumerate(lines))
+    objects = [
+        b"<</Type/Catalog/Pages 2 0 R>>",
+        b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 612 792]/Contents 4 0 R"
+        b"/Resources<</Font<</F1 5 0 R>>>>>>",
+        b"<</Length %d>>stream\n%s\nendstream" % (len(body), body.encode("ascii")),
+        b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>",
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for index, obj in enumerate(objects, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj" % index + obj + b"endobj\n"
+    xref_at = len(out)
+    out += b"xref\n0 %d\n" % (len(objects) + 1)
+    out += b"0000000000 65535 f \n"
+    for offset in offsets:
+        out += b"%010d 00000 n \n" % offset
+    trailer = b"<</Size %d/Root 1 0 R" % (len(objects) + 1)
+    if encrypted_marker:
+        trailer += b"/Encrypt 9 0 R"
+    trailer += b">>"
+    out += b"trailer" + trailer + b"\nstartxref\n%d\n%%%%EOF\n" % xref_at
+    return bytes(out)
+
+
+class PdfRenderTests(unittest.TestCase):
+    def test_a_pdf_renders_deterministically_and_names_its_extractor(self) -> None:
+        raw = minimal_pdf(["New bookings of $21.1 billion", "Revenues of $16.5 billion"])
+        first = render_public_web_text(raw, raw_media_type="application/pdf")
+        second = render_public_web_text(raw, raw_media_type=" Application/PDF ")
+        self.assertEqual(first["text"], second["text"])
+        self.assertIn("New bookings of $21.1 billion", first["text"])
+        self.assertIn("Revenues of $16.5 billion", first["text"])
+        self.assertEqual(first["media_type"], "application/pdf")
+        self.assertFalse(first["truncated"])
+        self.assertEqual(first["rendered_chars"], len(first["text"]))
+        # The extractor version is part of the renderer identity, so an
+        # upgrade invalidates a context instead of moving a citation.
+        import pypdf
+
+        self.assertEqual(first["renderer"], f"pdf-pypdf-{pypdf.__version__}:0.1")
+
+    def test_malformed_encrypted_and_empty_pdfs_are_refused(self) -> None:
+        for raw, reason in (
+            (b"%PDF-1.7 not really a pdf", "could not be read"),
+            (minimal_pdf([], ), "no extractable text"),
+        ):
+            with self.subTest(reason=reason), self.assertRaises(PublicWebSourceError) as ctx:
+                render_public_web_text(raw, raw_media_type="application/pdf")
+            self.assertIn(reason, str(ctx.exception))
+
+    def test_a_pdf_is_refused_when_the_extractor_is_not_installed(self) -> None:
+        raw = minimal_pdf(["Revenues of $16.5 billion"])
+        import builtins
+
+        real_import = builtins.__import__
+
+        def missing(name, *args, **kwargs):
+            if name == "pypdf":
+                raise ImportError("no pypdf")
+            return real_import(name, *args, **kwargs)
+
+        with unittest.mock.patch.object(builtins, "__import__", missing):
+            with self.assertRaises(PublicWebSourceError) as ctx:
+                render_public_web_text(raw, raw_media_type="application/pdf")
+        self.assertIn("PDF extractor is not installed", str(ctx.exception))
