@@ -732,11 +732,16 @@ def _payload_from_raw_host_response(raw_response: bytes) -> dict[str, Any]:
     return _tool_text_payload(result)
 
 
-def build_public_web_url_authorities(
+def _verified_search_discoveries(
     raw_response: bytes,
     source_envelope: Mapping[str, Any],
-) -> list[dict[str, Any]]:
-    """Rebuild fetchable URL authorities from exact ranked-search bytes."""
+) -> tuple[dict[str, Any], list[dict[str, str]], list[dict[str, str]]]:
+    """Verify raw search bytes against their envelope; split real URLs from proxies.
+
+    Returns ``(source, discoveries, proxies)``.  ``discoveries`` are the
+    citations that may become documents; ``proxies`` are the provider's own
+    redirect links an envelope recorded before P9d-10 still names.
+    """
 
     if not isinstance(source_envelope, Mapping):
         raise RunnerValidationError("search SourceEnvelope must be an object")
@@ -786,10 +791,43 @@ def build_public_web_url_authorities(
             raise PublicWebAuthorityConflict(
                 "search SourceEnvelope refs differ from exact Gemini citations"
             )
-        discoveries = [
-            item for item in legacy_discoveries
-            if not is_search_redirect_proxy(item["canonical_url"])
+        proxies = [
+            item for item in legacy_discoveries if is_search_redirect_proxy(item["canonical_url"])
         ]
+        discoveries = [
+            item for item in legacy_discoveries if not is_search_redirect_proxy(item["canonical_url"])
+        ]
+        return source, discoveries, proxies
+    return source, discoveries, []
+
+
+def cited_url_hosts(
+    raw_response: bytes,
+    source_envelope: Mapping[str, Any],
+) -> dict[str, str]:
+    """Host of every ref the envelope names, proxies included, keyed by url_ref.
+
+    P9d-14: the ledger backfills a document's host from here.  A proxy ref
+    can never become a fetchable authority, but its host is still a fact the
+    ledger can carry, and carrying it is what lets the queue hold such rows
+    instead of failing them once a day.
+    """
+
+    _, discoveries, proxies = _verified_search_discoveries(raw_response, source_envelope)
+    return {
+        item["url_ref"]: (urlsplit(item["canonical_url"]).hostname or "")
+        for item in [*discoveries, *proxies]
+    }
+
+
+def build_public_web_url_authorities(
+    raw_response: bytes,
+    source_envelope: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Rebuild fetchable URL authorities from exact ranked-search bytes."""
+
+    source, discoveries, _ = _verified_search_discoveries(raw_response, source_envelope)
+    source_hash = source["content_hash"]
     created_at = source.get("retrieved_at")
     artifact_ref = source.get("raw_artifact_version_ref")
     if not isinstance(created_at, str) or not isinstance(artifact_ref, str):
@@ -1073,6 +1111,7 @@ __all__ = [
     "REDIRECT_PROXY_HOSTS",
     "build_public_web_url_authorities",
     "canonical_public_web_url",
+    "cited_url_hosts",
     "gemini_web_search_tool_arguments",
     "is_search_redirect_proxy",
     "normalize_gemini_web_search_payload",

@@ -389,6 +389,10 @@ class FetchCoordinatorTests(unittest.TestCase):
             older_than=timedelta(days=1), as_of=self.clock() + timedelta(days=3),
             source_ref=WEB_SEARCH_SOURCE_REF, skip_hosts=["example.com"],
         ))
+        # The provider's redirect proxies are always held, plan or no plan:
+        # the transport refuses to follow one out, so a fetch could only fail.
+        self.assertIn("vertexaisearch.cloud.google.com", skipping.skip_hosts)
+        self.assertIn("vertexaisearch.cloud.google.com", self._coordinator(self.plan).skip_hosts)
 
     def test_host_backfill_fills_pre_ledger_rows_from_the_exact_discovery_envelope(self) -> None:
         """P9d-13: rows recorded before the ledger carried a host learn it from the spool."""
@@ -585,6 +589,39 @@ class FetchChildTests(unittest.TestCase):
         with self.assertRaises(FetchTicketNotFound):
             launcher.status("public-web-fetch:" + "0" * 24)
         self.assertFalse(any((self.state / "fetches").iterdir()))
+
+    def test_finished_child_is_adopted_after_a_writer_restart_not_called_orphaned(self) -> None:
+        """P9d-14: a restart between child exit and the next tick lost the work.
+
+        Live, thirteen tickets across three lanes were settled orphaned even
+        though their child had finished and written its summary.  A fresh
+        launcher (no process handle) now adopts the child's own terminal
+        summary and says so; without a summary the ticket stays orphaned.
+        """
+
+        launcher = self.launcher()
+        ticket = launcher.start(document_ref=URL_A, actor_ref=OWNER)
+        self.assertEqual(launcher.wait(timeout=120), 0)
+        self.assertEqual(launcher.status(ticket["id"])["status"], "succeeded")
+        ticket_path = self.state / "fetches" / ticket["id"].split(":", 1)[1] / "ticket.json"
+        record = json.loads(ticket_path.read_text(encoding="utf-8"))
+        record.update({"status": "running", "exit_code": None, "completed_at": None, "pid": 2**22 - 1})
+        ticket_path.write_text(json.dumps(record), encoding="utf-8")
+        fresh = self.launcher()
+        adopted = fresh.status(ticket["id"])
+        self.assertEqual((adopted["status"], adopted["exit_code"], adopted["adopted_from_summary"]), ("succeeded", 0, True))
+        self.assertIsNotNone(adopted["completed_at"])
+        self.assertEqual(adopted["summary"]["status"], "succeeded")
+        # The settle-side verification is untouched: the manifest still has to agree.
+        manifest = fresh.read_completed_manifest(ticket["id"], URL_A)
+        self.assertEqual(manifest["url_ref"], URL_A)
+        # No summary means nothing to adopt: orphaned, as before.
+        record["status"] = "running"
+        ticket_path.write_text(json.dumps(record), encoding="utf-8")
+        (ticket_path.with_name("summary.json")).unlink()
+        orphan = self.launcher().status(ticket["id"])
+        self.assertEqual(orphan["status"], "orphaned")
+        self.assertNotIn("adopted_from_summary", orphan)
 
     def test_child_fetches_under_human_request_and_refuses_automation_and_unknown_refs(self) -> None:
         launcher = self.launcher()

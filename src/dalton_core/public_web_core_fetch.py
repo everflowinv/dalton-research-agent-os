@@ -48,6 +48,7 @@ from .contracts import ExecutionInvocation, ExecutionKind, WorkOrder
 from .observability import ObservabilityStore
 from .public_http_transport import PublicHttpTransport
 from .public_web_connector import (
+    cited_url_hosts,
     PublicWebFetchAdapter,
     PublicWebUrlAuthorityResolver,
     build_public_web_url_authorities,
@@ -287,6 +288,23 @@ def url_authority_from_discovery(
         if authority["url_ref"] == url_ref:
             return authority
     raise PublicWebCoreFetchError("url_ref is not cited by the discovery envelope")
+
+
+def cited_hosts_from_discovery(
+    connection: Any, spool: RawSpool, *, source_envelope_ref: str
+) -> dict[str, str]:
+    """Host of every ref a discovery envelope names, from its exact raw bytes."""
+
+    row = connection.execute(
+        "SELECT record_json,content_hash FROM connector_source_envelopes WHERE source_envelope_id=?",
+        (source_envelope_ref,),
+    ).fetchone()
+    if row is None:
+        raise PublicWebCoreFetchError("discovery source envelope was not found")
+    envelope = json.loads(row["record_json"])
+    if envelope.get("content_hash") != row["content_hash"]:
+        raise PublicWebCoreFetchError("discovery source envelope hash drifted")
+    return cited_url_hosts(spool.read_object(envelope["raw_response_hash"]), envelope)
 
 
 def validate_public_web_fetch_manifest(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -982,6 +1000,7 @@ __all__ = [
     "build_web_fetch_governance_record",
     "count_recent_public_web_fetch_calls",
     "host_slug",
+    "cited_hosts_from_discovery",
     "url_authority_from_discovery",
     "validate_public_web_fetch_manifest",
     "web_fetch_adapter_hash",

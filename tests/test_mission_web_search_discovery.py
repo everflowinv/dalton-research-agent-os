@@ -549,6 +549,31 @@ class WebSearchChildTests(unittest.TestCase):
                          (1, "failed", NETWORK_UNAVAILABLE_REASON, 0))
         self.assertIn("broker", NETWORK_UNAVAILABLE_REASON)
 
+    def test_finished_search_child_is_adopted_after_a_writer_restart(self) -> None:
+        """P9d-14: same rule as the fetch lane; six search tickets were lost this way live."""
+
+        launcher = WebSearchLauncher(
+            state_dir=self.state, governance_path=self.governance_path, plan_path=self.plan_path,
+            mode_args=("--fake-citations-file", str(self.citations_path)),
+        )
+        ticket = launcher.start(authorization=self.authorization(), spec_ref="management-changes", as_of=date(2026, 9, 6))
+        self.assertEqual(launcher.wait(timeout=120), 0)
+        self.assertEqual(launcher.status(ticket["id"])["status"], "succeeded")
+        ticket_path = self.state / "discoveries" / ticket["id"].split(":", 1)[1] / "ticket.json"
+        record = json.loads(ticket_path.read_text(encoding="utf-8"))
+        record.update({"status": "running", "exit_code": None, "completed_at": None, "pid": 2**22 - 1})
+        ticket_path.write_text(json.dumps(record), encoding="utf-8")
+        fresh = WebSearchLauncher(
+            state_dir=self.state, governance_path=self.governance_path, plan_path=self.plan_path,
+            mode_args=("--fake-citations-file", str(self.citations_path)),
+        )
+        adopted = fresh.status(ticket["id"])
+        self.assertEqual((adopted["status"], adopted["exit_code"], adopted["adopted_from_summary"]), ("succeeded", 0, True))
+        self.assertEqual(adopted["summary"]["discovery_ref"], launcher.status(ticket["id"])["summary"]["discovery_ref"])
+        ticket_path.write_text(json.dumps(record), encoding="utf-8")
+        ticket_path.with_name("summary.json").unlink()
+        self.assertEqual(fresh.status(ticket["id"])["status"], "orphaned")
+
     def test_child_records_web_discovery_under_human_request(self) -> None:
         launcher = WebSearchLauncher(
             state_dir=self.state, governance_path=self.governance_path, plan_path=self.plan_path,

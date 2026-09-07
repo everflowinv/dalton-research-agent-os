@@ -36,6 +36,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .alphaengine_core_acquisition import StaticConnectorGovernance
+from .child_tickets import adopt_finished_child
 from .store import canonical_json
 
 
@@ -314,10 +315,14 @@ class AlphaEngineAcquisitionLauncher:
                         record["status"] = "succeeded" if code == 0 else "failed"
                         _write_owner_only(path, record)
                 elif not self._pid_alive(record.get("pid")):
-                    # The writer restarted or the child died without a ticket
-                    # update.  Do not guess success from a stray summary file.
-                    record["status"] = "orphaned"
-                    record["completed_at"] = _wire_time(self.clock())
+                    # The writer restarted (or the child died) before this
+                    # ticket was settled.  If the child left its own final
+                    # summary, take that; the settle path re-verifies
+                    # authority anyway.  Otherwise it is orphaned.
+                    now = _wire_time(self.clock())
+                    if not adopt_finished_child(record, path.with_name("summary.json"), now=now):
+                        record["status"] = "orphaned"
+                        record["completed_at"] = now
                     _write_owner_only(path, record)
         summary_path = path.with_name("summary.json")
         summary = None

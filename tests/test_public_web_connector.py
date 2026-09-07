@@ -22,6 +22,7 @@ from dalton_core.public_web_connector import (
     PublicWebFetchAdapter,
     PublicWebUrlAuthorityResolver,
     build_public_web_url_authorities,
+    cited_url_hosts,
     canonical_public_web_url,
     GEMINI_WEB_SEARCH_MAX_RECORDS,
     gemini_web_search_tool_arguments,
@@ -407,6 +408,12 @@ class PublicWebConnectorTests(unittest.TestCase):
         current["content_hash"] = content_hash({k: v for k, v in current.items() if k != "content_hash"})
         self.assertEqual([a["host"] for a in build_public_web_url_authorities(raw_result(payload), current)],
                          ["example.com", "news.example.org"])
+        # The ledger's host backfill sees every cited ref, proxies included,
+        # so a proxy row can carry its host and be held rather than retried.
+        hosts = cited_url_hosts(raw_result(payload), legacy)
+        self.assertEqual(hosts[public_web_url_ref(proxy)], "vertexaisearch.cloud.google.com")
+        self.assertEqual(sorted(hosts.values()), ["example.com", "news.example.org", "vertexaisearch.cloud.google.com"])
+        self.assertEqual(sorted(cited_url_hosts(raw_result(payload), current).values()), ["example.com", "news.example.org"])
         # Neither era admits a ref the search never cited, or a missing one.
         for refs in (
             legacy["source_record_refs"] + [public_web_url_ref("https://evil.example/x")],

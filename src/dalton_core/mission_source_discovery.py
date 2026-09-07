@@ -60,7 +60,12 @@ from .coverage_mission import (
     CoverageMissionError,
     CoverageMissionNotFound,
 )
-from .public_web_core_fetch import count_recent_public_web_fetch_calls, url_authority_from_discovery
+from .public_web_connector import REDIRECT_PROXY_HOSTS
+from .public_web_core_fetch import (
+    PublicWebCoreFetchError,
+    cited_hosts_from_discovery,
+    count_recent_public_web_fetch_calls,
+)
 from .raw_spool import RawSpool
 from .public_web_core_search import (
     WebSearchConnectorGovernance,
@@ -69,6 +74,7 @@ from .public_web_core_search import (
     validate_web_search_spec,
     web_search_spec_hash,
 )
+from .child_tickets import adopt_finished_child
 from .store import DaltonStore, canonical_json, content_hash
 
 
@@ -657,8 +663,14 @@ class _SearchLauncherBase:
                         record["status"] = "succeeded" if code == 0 else "failed"
                         _write_owner_only(path, record)
                 elif not self._pid_alive(record.get("pid")):
-                    record["status"] = "orphaned"
-                    record["completed_at"] = _wire_time(self.clock())
+                    # The writer restarted (or the child died) before this
+                    # ticket was settled.  If the child left its own final
+                    # summary, take that; the settle path re-verifies
+                    # authority anyway.  Otherwise it is orphaned.
+                    now = _wire_time(self.clock())
+                    if not adopt_finished_child(record, path.with_name("summary.json"), now=now):
+                        record["status"] = "orphaned"
+                        record["completed_at"] = now
                     _write_owner_only(path, record)
         summary_path = path.with_name("summary.json")
         summary = None
@@ -828,7 +840,12 @@ class MissionSourceDiscoveryCoordinator:
         self._spool: RawSpool | None = None
         policy = self.plan.get("acquisition") or {}
         self.preferred_hosts: tuple[str, ...] = tuple(policy.get("preferred_hosts", ()))
-        self.skip_hosts: tuple[str, ...] = tuple(policy.get("skip_hosts", ()))
+        # The provider's redirect proxies are held with the plan's skip list:
+        # not policy but a physical fact, the transport refuses to follow one
+        # out, so fetching such a row could only ever fail.
+        self.skip_hosts: tuple[str, ...] = tuple(dict.fromkeys(
+            [*policy.get("skip_hosts", ()), *sorted(REDIRECT_PROXY_HOSTS)]
+        )) if self.source_ref == WEB_SEARCH_SOURCE_REF else tuple(policy.get("skip_hosts", ()))
 
     # -- P9d-12/13 maintenance -------------------------------------------------
     def carry_forward(self) -> list[dict[str, Any]]:
@@ -883,15 +900,19 @@ class MissionSourceDiscoveryCoordinator:
             self._spool = RawSpool(str(self.spool_dir), max_total_bytes=1_000_000_000)
         filled = 0
         failures: list[dict[str, str]] = []
+        hosts_by_envelope: dict[str, dict[str, str]] = {}
         for document in rows:
             try:
                 discovery = self.missions.discovery_record(document["discovery_ref"])
-                authority = url_authority_from_discovery(
-                    self.store.connection, self._spool,
-                    url_ref=document["document_ref"],
-                    source_envelope_ref=discovery["source_envelope_ref"],
-                )
-                self.missions.set_document_host(document["record_id"], authority["host"])
+                envelope_ref = discovery["source_envelope_ref"]
+                if envelope_ref not in hosts_by_envelope:
+                    hosts_by_envelope[envelope_ref] = cited_hosts_from_discovery(
+                        self.store.connection, self._spool, source_envelope_ref=envelope_ref,
+                    )
+                host = hosts_by_envelope[envelope_ref].get(document["document_ref"])
+                if not host:
+                    raise PublicWebCoreFetchError("url_ref is not cited by the discovery envelope")
+                self.missions.set_document_host(document["record_id"], host)
                 filled += 1
             except Exception as exc:  # one bad row must not stall the rest
                 failures.append({"record_id": document["record_id"], "reason": f"{type(exc).__name__}: {exc}"})

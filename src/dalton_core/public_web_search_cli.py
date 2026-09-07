@@ -355,4 +355,5 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
-    sys.exit(main())
+    from .child_tickets import run_child
+    run_child(main)

@@ -140,3 +140,63 @@ the search never cited is still refused in both eras.
 **What worked on the first tick.** Plan v3 active with its hash; six v3
 documents carried forward as `discovered` under v4; nineteen rows learned their
 host; the hand-fetched PDF settled `acquired` and entered the review queue.
+
+## Second deploy: the drain still waited, and the reason was a bigger defect
+
+The drain waited its full 600 s again, this time with the controller down. It
+was waiting on a single fetch child that had been alive for twelve minutes.
+That child had **failed and written its summary within seconds of starting**
+(an unexpected `PublicWebAuthorityConflict`, the P9d-10 regression above) and
+then simply never exited. The lane treats a live pid as "still running", so
+that one child held the single acquisition slot until the next writer restart.
+Every "orphaned" ticket that carried an unexpected-exception reason, in the
+fetch lane and the search lane alike, has this signature.
+
+The cause could not be reproduced off the live host: the same failure injected
+into the real child, with the real transport and the approved governance
+record, exits cleanly and leaves no threads. So the fix removes the dependence
+on a clean interpreter shutdown rather than naming the cause. Each lane child's
+entry point now runs through `child_tickets.run_child`: once `main` has returned
+or raised and stdio is flushed, the process exits through `os._exit`. The child
+has closed its stores and written its summary by then; nothing is lost.
+
+## A census of the ticket directories found the larger loss
+
+Counting every ticket on disk by status and by whether a summary exists:
+
+| lane | orphaned with a summary present |
+| --- | --- |
+| discoveries | 6 |
+| fetches | 5 |
+| acquisitions | 2 |
+
+Thirteen children had **finished and written their summary** and were still
+settled `orphaned`. Settlement happens on the next tick, up to five minutes
+after the child exits; if the writer restarted in that gap it lost the process
+handle, saw `running` with a dead pid, and called the work orphaned. Each one
+parked a company/spec pair for its retry interval. The drain cannot help here,
+because the child is not running.
+
+The three mission launchers now adopt a finished child's own summary in that
+situation: when the pid is gone and `summary.json` carries a terminal status,
+the ticket takes that status and records `adopted_from_summary: true`. This is
+not guessing success from a stray file. The summary is the child's own record,
+written into a per-launch owner-only directory, and every settle path still
+re-verifies authority: a fetch or acquisition summary that says `succeeded` is
+only honoured if the bytes are in Core through this source's own connector. A
+dead pid with no summary, or a summary without a terminal status, stays
+`orphaned`. The SEC lane launcher is deliberately unchanged; its child writes
+formal Claims itself and its test that a dead pid must never be promoted from
+disk stands.
+
+## The two proxy rows
+
+The host backfill kept reporting the two documents that *are* the redirect
+proxy: no authority can be rebuilt for them, so every tick logged the same two
+failures and, once a day, a fetch child would have been spent learning it
+again. The backfill now reads hosts through `cited_url_hosts`, which sees every
+ref the envelope names, proxies included, so those rows carry their true host.
+The coordinator holds the provider's redirect-proxy hosts together with the
+plan's `skip_hosts`. That is not policy but a physical fact: the transport
+refuses to follow a redirect out of the pinned host, so fetching such a row can
+only ever fail.
