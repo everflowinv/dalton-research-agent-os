@@ -1,6 +1,19 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
+- **P10b：错的结论被挑战并退役，账本不改（已部署；等 owner 发布 mission v8 后自动退役）。** 读一遍 live 的 224 条定性
+  Claim 发现两类出处无可挑剔但内容错误的记录：50 条关于 LED 照明/电动车充电/道路产品的陈述记在 EPAM 名下（AlphaEngine
+  搜索返回了别家公司的文档），3 条 J.P. Morgan 免责声明。Ledger 是 append-only、ClaimVersion 契约冻结，因此**不编辑不删除**：
+  新增两条 append-only 记录——挑战（哪条 claim 版本、哪个确定性检测器、针对哪份精确原文）与决定（退役/保留）；读取路径
+  跳过已退役版本，历史哈希全部仍可验证。检测器 `subject_absent_from_source`（公司自己的名字在所引原文里一次都没出现，
+  名字取自发现计划的搜索词并剔除行业词）与 `boilerplate_disclaimer`（起草过滤器回溯应用），**由权威在写入时重跑**，
+  不采信调用方。写入受 `claim_challenge` 任务授权约束：没有授权时如实报告发现、零写入（live 现状：scanned 246 /
+  detected 53 / unreadable 41 / held）。人可挑战与退役任何 Claim，自动化只能依据确定性检测器且不能替人说"保留"。
+  驾驶舱"待你审批"逐条可退役/保留。链脚本新增 `--add-write-scope`（只发任务版本，不做 policy 级联）。
+  **部署时发现两件事**：① Core 里早有同名 `claim_challenges` 表（旧的数值冲突记录，语义不同），`IF NOT EXISTS` 撞名被
+  静默跳过——新表改名 `claim_retirement_*`，旧机制未动；② `pyproject.toml` 的 package-data 逐项列举，新 `.sql` 没进包，
+  装到 venv 的包有模块没有建表脚本。11 项新测试；全套 1226 项通过（除两项已知 macOS 路径失败）。
+  见 [P10b 报告](reports/p10b-claim-retirement-v0.1-2026-09-07.md)。
 - **P10a：任务按研究手册的阶段走，获取与阅读跟着缺口走（已部署，live 已验证）。** live 阶段账本首次非空：
   五家公司各写入一条 `initial_screen entered`，actor 是任务自己的 automation principal（mission v7 早已授予
   `stage_record`）。Playbook 的 Initial Screen 必读清单翻译成四项计数（季度财报数字 / 电话会纪要 / 年报正文 /
@@ -1948,7 +1961,7 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 ### 当前基线：Phase 10（v1.1，2026-09-07）
 
 按 [v1.1](reports/vision-and-next-phase-v1.1-2026-09-07.md) 的顺序执行：~~P10a 阶段账本启动与资料底座清单~~（已完成）→
-P10b Claim 挑战/退役 → P10c 交付物 authority 与 Initial Screen 自动起草过门 → P10d Deep Insight Gate 人审 →
+~~P10b Claim 挑战/退役~~（已完成，等 owner 发布 mission v8）→ P10c 交付物 authority 与 Initial Screen 自动起草过门 → P10d Deep Insight Gate 人审 →
 P10e 行业框架/行业模型缺口 → P10f 公司模型与预测线 → P10g Investment Memo。新来源、通用能力、cockpit 新视图继续冻结。
 下面 P0–P2 与 Phase 7/8/9 的文字是历史顺序，保留作依据，不再是当前基线。
 
