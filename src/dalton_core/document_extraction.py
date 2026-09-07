@@ -201,7 +201,8 @@ def build_prompt(context: Mapping[str, Any]) -> str:
     return (
         "Produce qualitative research suggestions only, never an accepted Claim. "
         "Return raw strict JSON matching OUTPUT_SCHEMA, with no markdown fence and no prose. "
-        "Use at most five supplied quote_id values; do not calculate hashes or invent quotations. "
+        "Cite only supplied quote_id values, at most five suggestions in total; several suggestions "
+        "may cite the same quote_id. Do not calculate hashes or invent quotations. "
         "Each suggestion is ONE reported view in ONE or TWO sentences, under 300 characters, with "
         "attribution, preserving negation, uncertainty and the subject. Never write a number, "
         "percentage or currency amount in normalized_statement, only direction and qualitative "
@@ -232,7 +233,19 @@ def build_work(context: Mapping[str, Any]) -> WorkOrder:
     )
 
 
-def parse_suggestions(text: str, context: Mapping[str, Any]) -> dict:
+def parse_suggestions(text: str, context: Mapping[str, Any], *, tolerant: bool = False) -> dict:
+    """Parse model output against the closed contract.
+
+    Strict (default): any invalid item refuses the whole output; the human
+    staging path validates one edited suggestion this way.  Tolerant: the
+    envelope must still be strict JSON of the closed shape, but an invalid
+    item is dropped with its reason and the valid ones are kept.  Live, one
+    window carried one admissible view next to two numeric ones and lost all
+    three.  Several suggestions may cite the same quote: one span often
+    supports more than one reported view, and every downstream key includes
+    the suggestion itself.
+    """
+
     def pairs(items):
         result = {}
         for key, value in items:
@@ -252,19 +265,26 @@ def parse_suggestions(text: str, context: Mapping[str, Any]) -> dict:
         raise ResearchVerificationError("suggestion output closed shape is invalid")
     quotes = {q["quote_id"]: q for q in context["quotes"]}
     fields = OUTPUT_SCHEMA["properties"]["suggestions"]["items"]["properties"]
-    seen = set()
-    for item in wire["suggestions"]:
-        if not isinstance(item, dict) or set(item) != set(fields):
-            raise ResearchVerificationError("suggestion fields are invalid")
-        for key, rule in fields.items():
-            if not isinstance(item[key], str) or not item[key].strip() or len(item[key]) > rule["maxLength"]:
-                raise ResearchVerificationError("suggestion field exceeds bound")
-        if item["quote_id"] not in quotes or item["quote_id"] in seen:
-            raise ResearchVerificationError("suggestion references a foreign or duplicate quote")
-        if statement_asserts_a_value(item["normalized_statement"]):
-            raise ResearchVerificationError("numeric statements require a separate numeric authority")
-        seen.add(item["quote_id"])
-    return wire
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for index, item in enumerate(wire["suggestions"]):
+        try:
+            if not isinstance(item, dict) or set(item) != set(fields):
+                raise ResearchVerificationError("suggestion fields are invalid")
+            for key, rule in fields.items():
+                if not isinstance(item[key], str) or not item[key].strip() or len(item[key]) > rule["maxLength"]:
+                    raise ResearchVerificationError("suggestion field exceeds bound")
+            if item["quote_id"] not in quotes:
+                raise ResearchVerificationError("suggestion references a foreign quote")
+            if statement_asserts_a_value(item["normalized_statement"]):
+                raise ResearchVerificationError("numeric statements require a separate numeric authority")
+        except ResearchVerificationError as exc:
+            if not tolerant:
+                raise
+            dropped.append({"index": index, "reason": str(exc)})
+            continue
+        kept.append(item)
+    return {"schema_version": wire["schema_version"], "suggestions": kept, "dropped": dropped}
 
 
 class HermeticExtractionAdapter:
@@ -417,7 +437,7 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
         return work
 
     def _parse_candidate(self, text, work):
-        parse_suggestions(text, work.metadata["context"])
+        parse_suggestions(text, work.metadata["context"], tolerant=True)
 
     def _admit_candidate(self, work, text):
         # Validate source/mission again after a model result. No staging,
@@ -676,7 +696,7 @@ class DocumentExtractionService:
                 scope = json.loads(admitted["binding_json"])
                 if scope["mission_version_ref"] != context["mission_version_ref"] or scope["mission_version_hash"] != context["mission_version_hash"]:
                     raise ResearchVerificationConflict("paid suggestion mission reservation drifted")
-        wire = parse_suggestions(result.outputs["text"], context)
+        wire = parse_suggestions(result.outputs["text"], context, tolerant=True)
         quotes = {q["quote_id"]: q for q in context["quotes"]}
         suggestions = []
         for item in wire["suggestions"]:
@@ -692,7 +712,7 @@ class DocumentExtractionService:
                     "hermetic_fixture": not bool(context.get("model_binding"))}
             suggestions.append(_record({"id": "document-extraction-suggestion:" + content_hash(base)[:32], **base}))
         return {"status": "succeeded", "suggestions": suggestions, "work_order_ref": work.id,
-                "hermetic_fixture": not bool(context.get("model_binding"))}
+                "hermetic_fixture": not bool(context.get("model_binding")), "dropped": wire["dropped"]}
 
     def budget_status(self, context):
         config = getattr(self.writer, "_document_extraction_model_config", None)

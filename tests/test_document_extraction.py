@@ -252,15 +252,27 @@ class DocumentExtractionTests(unittest.TestCase):
         self.assertEqual(parse_suggestions('{"schema_version":"0.1","suggestions":[]}', context)['suggestions'], [])
 
     def test_invalid_model_output_is_accounted_once_and_terminal_without_suggestion(self):
+        # An invalid item is dropped with its reason and never becomes a
+        # suggestion; the window itself succeeds (ADR-0005: keep the valid
+        # views).  A malformed envelope is still terminal.
         h = self.h; counts = h.counts()
         h.enable_fixture({'schema_version': '0.1', 'suggestions': [{'actor_ref':'human:owner'}]})
         result = h.generate()
-        self.assertEqual(result['status'], 'failed')
-        self.assertEqual(result['suggestions'], [])
-        self.assertEqual(result['error_code'], 'MODEL_OUTPUT_CONTRACT_REJECTED')
-        self.assertEqual(h.generate()['status'], 'failed')
+        self.assertEqual((result['status'], result['suggestions']), ('succeeded', []))
+        self.assertEqual([d['index'] for d in result['dropped']], [0])
+        self.assertIn('fields are invalid', result['dropped'][0]['reason'])
+        self.assertEqual(h.generate()['suggestions'], [])
         self.assertEqual(h.adapter.calls, 1)
         self.assertEqual(h.counts(), counts)
+        (Path(self.temp.name) / 'malformed').mkdir()
+        h2 = ExtractionHarness(Path(self.temp.name) / 'malformed'); self.addCleanup(h2.close)
+        h2.adapter = None
+        h2.enable_fixture()
+        h2.adapter.output_text = 'not json at all'
+        broken = h2.generate()
+        self.assertEqual((broken['status'], broken['suggestions'], broken['error_code']), ('failed', [], 'MODEL_OUTPUT_CONTRACT_REJECTED'))
+        self.assertEqual(h2.generate()['status'], 'failed')
+        self.assertEqual(h2.adapter.calls, 1)
 
     def test_changed_work_order_and_real_adapter_are_rejected(self):
         h = self.h; h.enable_fixture(); context = h.context()

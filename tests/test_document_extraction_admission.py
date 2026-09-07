@@ -231,7 +231,7 @@ class BrokerAdmissionTests(unittest.TestCase):
         wire={'schema_version':'0.1','suggestions':[{'quote_id':context['quotes'][0]['quote_id'],
             'normalized_statement':'Management described cautious decisions.','metric_or_aspect':'aspect:decisions',
             'period':'current commentary','basis':'management'}]}
-        if self.invalid:wire['suggestions'][0]['actor_ref']='human:forged'
+        if self.invalid:wire['suggestions']='not a list'  # malformed envelope: a forged item alone is dropped, not fatal (ADR-0005)
         fixture=HermeticExtractionAdapter(wire,created_at=self.h.h.clock().isoformat())
         fp=copy.deepcopy(pr);fp['provider']='hermetic-fixture';fp['cost']['input_per_million_usd']=fp['cost']['output_per_million_usd']=0
         inv,res=fixture.execute(work,route,fp)

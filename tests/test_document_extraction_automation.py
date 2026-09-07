@@ -118,13 +118,14 @@ class AutomationDraftingTests(unittest.TestCase):
         self.assertEqual(summary["status"], "succeeded", summary)
         self.assertEqual(summary["stop_reason"], "drained")
         # The fixture original spans two windows.  The fixture output cites a
-        # quote of the first window, so window two is a terminal invalid
-        # result: accounted once, no suggestion, never retried for money.
+        # quote of the first window, so in window two that item is dropped as
+        # foreign: the window succeeds with no suggestion, accounted once,
+        # never retried for money.
         self.assertEqual([d["offset"] for d in summary["drafted"]], [0, 12000])
         first, second = summary["drafted"]
         self.assertEqual((first["status"], first["suggestions"], first["source_ref"], first["document_ref"]),
                          ("succeeded", 1, "source:alphaengine", NEW_DOC))
-        self.assertEqual((second["status"], second["suggestions"]), ("failed", 0), second)
+        self.assertEqual((second["status"], second["suggestions"]), ("succeeded", 0), second)
         self.assertEqual((summary["reviews_scanned"], summary["reviews_complete"]), (1, 1))
         # The persisted result is what the cockpit reads back, under the automation actor or a human.
         review = next(r for r in self.h.missions.document_reviews(v2["id"]) if r["state"] == "awaiting_human_extraction")
@@ -239,6 +240,21 @@ class OutputContractTests(unittest.TestCase):
         self.assertEqual(unwrap_model_json("```json\n" + body), "```json\n" + body)  # unclosed: untouched
         context = {"quotes": [{"quote_id": "quote:0:10:abc"}]}
         self.assertEqual(parse_suggestions("```json\n" + body + "\n```", context)["suggestions"], [])
+        # Tolerant window parse: keep the admissible view, drop the numeric one
+        # and the foreign one with reasons, allow two views on one quote.
+        item = {"quote_id": "quote:0:10:abc", "normalized_statement": "Guidance was lowered, viewed as unsurprising.",
+                "metric_or_aspect": "guidance", "period": "FY26", "basis": "analyst commentary"}
+        mixed = json.dumps({"schema_version": "0.1", "suggestions": [
+            item, {**item, "normalized_statement": "Growth is now expected at 4-5%."},
+            {**item, "quote_id": "quote:foreign"}, {**item, "normalized_statement": "Margins were reiterated."},
+        ]})
+        parsed = parse_suggestions(mixed, context, tolerant=True)
+        self.assertEqual([x["normalized_statement"][:8] for x in parsed["suggestions"]], ["Guidance", "Margins "])
+        self.assertEqual([(d["index"], d["reason"].split(" ")[0]) for d in parsed["dropped"]], [(1, "numeric"), (2, "suggestion")])
+        with self.assertRaises(Exception):
+            parse_suggestions(mixed, context)  # strict: the human path still refuses the whole thing
+        with self.assertRaises(Exception):
+            parse_suggestions("not json", context, tolerant=True)  # malformed envelope stays terminal
         for ok in ("Management expects bookings to improve in fiscal 2026.", "Demand softened in Q3 FY26 versus 1Q.",
                    "The company said H2 would be stronger than H1 of 2025."):
             self.assertFalse(statement_asserts_a_value(ok), ok)
