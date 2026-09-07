@@ -1,6 +1,20 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
+- **P10c：任务开始写自己的 Initial Screen（已部署；等 owner 发布 mission v9 后开始起草）。** 新增
+  `mission_deliverable_versions`：append-only、带指针与版本链，每一版按哈希绑定所依据的任务版本与 Playbook 版本。
+  **三条规则由权威强制**：① 正文里的每个数字必须出现在该节 `numbers` 并绑定一条定量 Claim，期间标签（年/季/财年）
+  不算数字，出现无来源数字直接拒绝发布（提示要求写"缺来源"）；② 引用的 Claim 必须还活着，P10b 退役的不能引用；
+  ③ 文档绑定写作时的权威。起草子进程按任务优先级一次写一家、每节一次受预算约束可重放的模型调用；**估值一节永远不
+  起草**（五类市场数据 authority 未接入，无来源数字不如留缺口）。**出口门由结构检查判定**：资料底座来自 P10a 清单、
+  数字溯源来自发布时校验、关键 driver 与 street/风险来自"哪几节真写出来了、引用了多少条结论"，结果写进阶段账本
+  （gate_passed/gate_failed），不问模型自己写得好不好。驾驶舱公司卡可点开读全文（分节正文、缺口、依据的结论、
+  出口门判定）。**部署时发现两件事**：① 重启遗留的票据卡在 `running` 会把整条 lane 永久锁死（抽取 lane 早有认领
+  机制，这条漏了，已补）；② 治理拒绝时退出码 1 让票据记成 failed，`held` 不是失败，已改。live 实跑为
+  `held`（v8 未授予 `deliverable`），零写入零调用。12 项新测试；全套 1238 项通过（除两项已知 macOS 路径失败）。
+  **预期**：第一批文档会写出来但出口门会判 `gate_failed`——没有一家公司的资料底座齐备（缺 10-K 正文、每家只有
+  1 个季度的财报数字），这正好指出下一片要建的东西。
+  见 [P10c 报告](reports/p10c-initial-screen-v0.1-2026-09-07.md)。
 - **P10b：错的结论被挑战并退役，账本不改（已部署；等 owner 发布 mission v8 后自动退役）。** 读一遍 live 的 224 条定性
   Claim 发现两类出处无可挑剔但内容错误的记录：50 条关于 LED 照明/电动车充电/道路产品的陈述记在 EPAM 名下（AlphaEngine
   搜索返回了别家公司的文档），3 条 J.P. Morgan 免责声明。Ledger 是 append-only、ClaimVersion 契约冻结，因此**不编辑不删除**：
@@ -1961,7 +1975,8 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 ### 当前基线：Phase 10（v1.1，2026-09-07）
 
 按 [v1.1](reports/vision-and-next-phase-v1.1-2026-09-07.md) 的顺序执行：~~P10a 阶段账本启动与资料底座清单~~（已完成）→
-~~P10b Claim 挑战/退役~~（已完成，等 owner 发布 mission v8）→ P10c 交付物 authority 与 Initial Screen 自动起草过门 → P10d Deep Insight Gate 人审 →
+~~P10b Claim 挑战/退役~~（已完成，mission v8 已发布，53 条已退役）→ ~~P10c 交付物 authority 与 Initial Screen 自动起草过门~~（已完成，等 owner 发布 mission v9）→
+SEC 10-K 正文获取通道 + SEC 季度数字补齐（出口门第一问的前提）→ P10d Deep Insight Gate 人审 →
 P10e 行业框架/行业模型缺口 → P10f 公司模型与预测线 → P10g Investment Memo。新来源、通用能力、cockpit 新视图继续冻结。
 下面 P0–P2 与 Phase 7/8/9 的文字是历史顺序，保留作依据，不再是当前基线。
 
