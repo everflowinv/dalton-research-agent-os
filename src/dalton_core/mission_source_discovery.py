@@ -839,13 +839,22 @@ class MissionSourceDiscoveryCoordinator:
                 except CoverageMissionError as exc:
                     review_status = f"not_registered:{type(exc).__name__}"
             else:
+                # P9d-9: prefer the child's own failure_reason, the way
+                # settle_dispatches already does for search.  The exit code
+                # alone cannot distinguish a host that refuses every automated
+                # client from a transient fault, and that difference decides
+                # whether re-queueing the URL is worth a governed call.
+                summary = ticket.get("summary") or {}
                 reason = (
                     "acquisition succeeded but the document is not in authority"
                     if ticket.get("status") == "succeeded"
-                    else f"acquisition ended {ticket.get('status')} (exit {ticket.get('exit_code')})"
+                    else (
+                        summary.get("failure_reason")
+                        or f"acquisition ended {ticket.get('status')} (exit {ticket.get('exit_code')})"
+                    )
                 )
                 result = self.missions.settle_discovered_document(
-                    document["record_id"], status="acquisition_failed", reason=reason
+                    document["record_id"], status="acquisition_failed", reason=str(reason)[:500]
                 )
             entry = {
                 "record_id": document["record_id"], "document_ref": document["document_ref"],

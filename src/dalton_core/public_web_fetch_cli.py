@@ -33,6 +33,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 from .capability_catalog import CapabilityCatalog
@@ -116,6 +117,27 @@ def _discovery_for_url(connection: Any, url_ref: str) -> dict[str, Any]:
     if discovery is None:
         raise PublicWebCoreFetchError("discovered document lacks its discovery record")
     return {"document": dict(row), "discovery": json.loads(discovery["record_json"])}
+
+
+def _fetch_failure_reason(receipt: Mapping[str, Any]) -> str:
+    """Why a fetch failed, in the words the adapter used.
+
+    P9d-9: the old text was just ``fetch outcome failed``, which reads the same
+    whether a host refuses every automated client or a DNS lookup blipped.  The
+    ResultEnvelope already carries a closed ``{code, message, retryable}``, so
+    repeat it here.  An operator reading the mission ledger can then tell a
+    permanent host-level block from a transient fault without opening the ticket
+    directory, and decide whether re-queueing the URL is worth a governed call.
+    """
+
+    parts = [f"fetch outcome {receipt['outcome']}"]
+    error = receipt.get("error") if isinstance(receipt.get("error"), Mapping) else {}
+    detail = str(error.get("message") or error.get("code") or "").strip()
+    if detail:
+        parts.append(detail)
+    if error.get("retryable") is False:
+        parts.append("not retryable")
+    return "; ".join(parts)
 
 
 def run_fetch(
@@ -205,12 +227,12 @@ def run_fetch(
                 "request_hash", "connector_profile_ref", "connector_invocation_ref",
                 "connector_invocation_hash", "runner_response_ref", "outcome", "replayed",
                 "source_envelope_ref", "source_envelope_hash", "raw_artifact_version_ref",
-                "raw_response_hash", "source_status",
+                "raw_response_hash", "source_status", "error",
             )
         }
         summary["provider_calls"] = receipt["provider_calls"]
         if receipt["outcome"] != "succeeded" or receipt["document_ref"] is None:
-            summary["failure_reason"] = f"fetch outcome {receipt['outcome']}"
+            summary["failure_reason"] = _fetch_failure_reason(receipt)
             return summary
         manifest = fetch.manifest(receipt)
         _write_owner_only(out / "manifest.json", manifest)

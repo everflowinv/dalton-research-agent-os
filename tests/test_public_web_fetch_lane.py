@@ -42,7 +42,7 @@ from dalton_core.public_web_core_search import (
     web_search_spec_hash,
 )
 from dalton_core.document_extraction import WEB_GATE_REASON
-from dalton_core.public_web_fetch_cli import fake_page_transport
+from dalton_core.public_web_fetch_cli import _fetch_failure_reason, fake_page_transport
 from dalton_core.public_web_fetch_launcher import (
     FetchLaunchRejected,
     FetchTicketNotFound,
@@ -210,6 +210,40 @@ class FetchExecutorTests(unittest.TestCase):
         # The failed attempt is still an invocation against the shared window.
         self.assertEqual(count_recent_public_web_fetch_calls(h.core.connection, as_of=h.clock()), 1)
 
+    def test_blocked_host_receipt_names_the_status_not_just_the_outcome(self) -> None:
+        """P9d-9: a 403 from a host that refuses automated clients must say so.
+
+        Live, every fetch of news.alphastreet.com failed with nothing recorded
+        but ``exit 1``, which reads identically to a network blip.  The runner
+        wire already knew it was a 403, so the receipt now carries the provider
+        status and the closed error, and the reason string repeats them.
+        """
+
+        h = FetchHarness(self.root, transport=transport_for(b"forbidden", status=403))
+        self.addCleanup(h.close)
+        authority = h.authority(h.discover(), URL_A)
+        failed = h.fetch.fetch(h.fetch.build_request(authority))
+        self.assertEqual(failed["outcome"], "failed")
+        self.assertEqual(failed["error"]["code"], "http_status")
+        self.assertIs(failed["error"]["retryable"], False)
+        reason = _fetch_failure_reason(failed)
+        self.assertIn("403", reason)
+        self.assertIn("not retryable", reason)
+        # A retryable status is reported as such, so a caller can tell them apart.
+        (self.root / "retryable").mkdir()
+        h2 = FetchHarness(self.root / "retryable", transport=transport_for(b"busy", status=503))
+        self.addCleanup(h2.close)
+        again = h2.fetch.fetch(h2.fetch.build_request(h2.authority(h2.discover(), URL_A)))
+        self.assertIs(again["error"]["retryable"], True)
+        self.assertNotIn("not retryable", _fetch_failure_reason(again))
+        # A succeeded fetch carries no error at all.
+        (self.root / "ok").mkdir()
+        h3 = FetchHarness(self.root / "ok")
+        self.addCleanup(h3.close)
+        ok = h3.fetch.fetch(h3.fetch.build_request(h3.authority(h3.discover(), URL_A)))
+        self.assertEqual(ok["outcome"], "succeeded")
+        self.assertIsNone(ok["error"])
+
     def test_proposed_governance_refuses_before_any_fetch(self) -> None:
         proposed = WebFetchConnectorGovernance(build_web_fetch_governance_record(approved_by="human:lumos"))
         h = FetchHarness(self.root, fetch_governance=proposed)
@@ -226,6 +260,10 @@ class FakeFetchLauncher:
     def __init__(self, harness: FetchHarness, *, fail: bool = False) -> None:
         self.h = harness
         self.fail = fail
+        # P9d-9: the real child leaves a summary.json beside its ticket; when it
+        # says why the fetch failed the coordinator must prefer that over the
+        # exit code.  None reproduces a child that left no summary.
+        self.fail_summary: dict | None = None
         self.calls: list[dict] = []
         self.tickets: dict[str, dict] = {}
 
@@ -249,7 +287,12 @@ class FakeFetchLauncher:
                 source_envelope_ref=self._discovery_receipt(document_ref),
             )
             self.h.fetch.fetch(self.h.fetch.build_request(authority))
-        self.tickets[ticket] = {"id": ticket, "status": status, "exit_code": 0 if status == "succeeded" else 1, "document_ref": document_ref}
+        self.tickets[ticket] = {
+            "id": ticket, "status": status,
+            "exit_code": 0 if status == "succeeded" else 1,
+            "document_ref": document_ref,
+            "summary": None if status == "succeeded" else self.fail_summary,
+        }
         return {"id": ticket, "status": "running"}
 
     def status(self, ticket_ref):
@@ -371,6 +414,30 @@ class FetchCoordinatorTests(unittest.TestCase):
         # AlphaEngine's ledger view is untouched by any of this.
         self.assertIsNone(self.missions.next_discovered_document(source_ref=ALPHAENGINE_SOURCE_REF))
         self.assertEqual(self.missions.launched_discovered_documents(source_ref=ALPHAENGINE_SOURCE_REF), [])
+
+
+    def test_ledger_records_why_the_fetch_failed_not_just_the_exit_code(self) -> None:
+        """P9d-9: a blocked host and a network blip must not read the same.
+
+        Live, every fetch of one host failed with only ``acquisition ended
+        failed (exit 1)`` in the ledger, so nothing distinguished a permanent
+        403 from a transient fault.  The search side already preferred the
+        child's own failure_reason; the fetch side now does too.
+        """
+
+        self.fetch_launcher.fail = True
+        self.fetch_launcher.fail_summary = {
+            "failure_reason": "fetch outcome failed; public web fetch returned HTTP 403; not retryable",
+        }
+        self.coordinator.dispatch_once()
+        self.coordinator.dispatch_once()
+        tick = self.coordinator.dispatch_once()
+        self.assertEqual([item["status"] for item in tick["settled_documents"]], ["acquisition_failed"])
+        failed = self.missions.discovered_documents(self.mission["id"], status="acquisition_failed")
+        self.assertIn("HTTP 403", failed[0]["failure_reason"])
+        self.assertIn("not retryable", failed[0]["failure_reason"])
+        # The exit-code fallback for a child that left no summary stays covered
+        # by test_failed_fetch_is_recorded_and_retried_after_interval.
 
 
 class FetchChildTests(unittest.TestCase):

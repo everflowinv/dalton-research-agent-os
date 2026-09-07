@@ -855,6 +855,13 @@ class PublicWebCoreFetch:
             "connector_invocation_hash": invocation["content_hash"],
             "runner_response_ref": response["id"],
             "outcome": response["outcome"],
+            # P9d-9: a failed fetch is only actionable if the receipt says why.
+            # ConnectorRunnerResponse is a closed shape that carries no error, but
+            # it names a ResultEnvelope, and that envelope holds the closed
+            # {code, message, retryable} the adapter observed.  Carrying it lets
+            # the mission ledger tell "this host refuses automated clients" from
+            # "the network blipped" without re-reading the scheduler.
+            "error": self._result_error(response),
             "replayed": replayed,
             "provider_calls": 0 if replayed else 1,
             "source_envelope_ref": None,
@@ -896,6 +903,28 @@ class PublicWebCoreFetch:
             "source_status": source["status"],
         })
         return base
+
+    def _result_error(self, response: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Closed ``{code, message, retryable}`` the ResultEnvelope recorded, if any.
+
+        The envelope is authority, so it is only read through the hash the
+        response binds it to; a drifted envelope fails closed rather than
+        reporting a reason that no longer belongs to this call.
+        """
+
+        if response["outcome"] == "succeeded":
+            return None
+        row = self.scheduler.connection.execute(
+            "SELECT result_envelope_hash, result_envelope_json "
+            "FROM scheduler_result_envelopes WHERE result_envelope_id=?",
+            (response["result_envelope_ref"],),
+        ).fetchone()
+        if row is None or row["result_envelope_hash"] != response["result_envelope_hash"]:
+            raise PublicWebCoreFetchError("fetch result envelope authority drifted")
+        error = json.loads(row["result_envelope_json"]).get("error")
+        if not isinstance(error, Mapping):
+            return None
+        return {key: error.get(key) for key in ("code", "message", "retryable")}
 
     def _media_type(self, artifact_version_ref: str) -> str:
         """Media type the raw ``ArtifactVersion`` recorded from the response headers."""
