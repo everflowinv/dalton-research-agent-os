@@ -88,6 +88,25 @@ header.top p{margin:4px 0 0;color:var(--muted)}
 .bar i{display:block;height:100%;background:var(--grad);border-radius:999px;transition:width .6s ease}
 .kpis{display:flex;gap:14px;color:var(--muted);font-size:12.5px;flex-wrap:wrap}
 .kpis b{color:var(--text);font-weight:700}
+.doc{margin-top:10px;padding:10px 12px;border-radius:12px;background:rgba(139,124,246,.1);border:1px solid rgba(139,124,246,.25);font-size:12.5px}
+.doc b{display:block;margin-bottom:2px}
+.doc .sm{color:var(--muted);margin:4px 0 8px}
+.reader{position:fixed;inset:0;background:rgba(4,7,15,.72);backdrop-filter:blur(6px);display:none;z-index:20;overflow:auto;padding:40px 20px}
+.reader.show{display:block}
+.reader .sheet{max-width:900px;margin:0 auto;background:linear-gradient(180deg,#121a33,#0d1326);border:1px solid var(--line2);border-radius:20px;box-shadow:var(--shadow);padding:32px 36px}
+.reader h2{margin:0 0 4px;font-size:22px}
+.reader .meta{color:var(--muted);font-size:13px;margin-bottom:18px}
+.reader section{margin:22px 0;padding-top:18px;border-top:1px solid var(--line)}
+.reader section h3{margin:0 0 10px;font-size:15px;color:var(--text);text-transform:none;letter-spacing:0}
+.reader section p{margin:0 0 10px;line-height:1.75}
+.reader .gap{color:#ffe0a8;font-size:13px;background:rgba(245,182,74,.1);border:1px solid rgba(245,182,74,.28);border-radius:10px;padding:8px 12px;margin:8px 0}
+.reader .cited{margin-top:10px;font-size:12.5px;color:var(--muted)}
+.reader .cited div{padding:5px 0;border-top:1px dashed var(--line)}
+.reader .close{position:sticky;top:0;float:right}
+.gatebox{padding:12px 14px;border-radius:12px;margin:8px 0 4px;font-size:13px}
+.gatebox.pass{background:rgba(74,222,128,.1);border:1px solid rgba(74,222,128,.3)}
+.gatebox.fail{background:rgba(245,182,74,.1);border:1px solid rgba(245,182,74,.3)}
+.gatebox ul{margin:6px 0 0;padding-left:18px}
 .checks{margin:2px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:5px}
 .checks li{display:grid;grid-template-columns:18px 1fr auto;gap:8px;align-items:baseline;font-size:12.5px;color:#cfd6ea}
 .checks .ic{font-size:12px}
@@ -279,6 +298,7 @@ details{margin-top:14px}summary{cursor:pointer;color:var(--muted);font-size:13px
   </section>
 </main>
 </div>
+<div class="reader" id="reader"><div class="sheet" id="reader-sheet"></div></div>
 <div class="toast" id="toast"></div>
 <script>
 const $=id=>document.getElementById(id);
@@ -314,10 +334,14 @@ function renderOverview(o){
   $("lanes").replaceChildren(...o.activity.lanes.map(l=>{const d=node("div",null,"lane");const cls=["launched","busy","running","ready","idle"].includes(l.status)?(["launched","busy","running"].includes(l.status)?"on":""):l.status==="held"?"hold":l.status==="failed"?"err":"";d.append(node("span",null,`st ${cls}`));const c=node("div");c.append(node("b",l.label),node("small",`${laneStatus(l.status)} · ${l.note}`));d.append(c);return d}));
   const run=$("running");run.replaceChildren(...o.activity.running.map(r=>{const d=node("div",null,"r");d.append(node("span",null,"spin"),node("span",r.title+(r.detail?` — ${r.detail}`:"")));return d}));
   if(!o.activity.running.length)run.append(node("div","此刻没有正在运行的任务；调度器每 5 分钟检查一次。","hint"));
-  $("companies").replaceChildren(...o.companies.map(c=>{const d=node("div",null,"company");const h=node("div",null,"head");const l=node("div");l.append(node("span",c.ticker,"tk"),node("span",c.name,"nm"));h.append(l,node("span",`${c.stage}${c.stage_status&&c.stage_ref?" · "+c.stage_status:""}`,`stage ${c.stage_ref==="initial_screen"?"s2":c.stage_ref?"s3":"s1"}`));d.append(h,node("div",c.note,"hint"));const bar=node("div",null,"bar");const i=node("i");i.style.width=`${c.progress.percent}%`;bar.append(i);d.append(bar);if(c.checklist&&c.checklist.length)d.append(checklist(c.checklist));const k=node("div",null,"kpis");k.innerHTML=`<span>找到 <b>${c.progress.found}</b></span><span>已读 <b>${c.progress.read}</b></span><span>排队 <b>${c.progress.waiting}</b></span><span>结论 <b>${c.claims.total}</b>${c.claims.today?` <b style="color:var(--teal)">+${c.claims.today}</b>`:""}</span>`;d.append(k);if(c.claims.latest.length){const ul=node("ul",null,"latest");c.claims.latest.forEach(x=>ul.append(node("li",x.statement)));d.append(ul)}return d}));
+  $("companies").replaceChildren(...o.companies.map(c=>{const d=node("div",null,"company");const h=node("div",null,"head");const l=node("div");l.append(node("span",c.ticker,"tk"),node("span",c.name,"nm"));h.append(l,node("span",`${c.stage}${c.stage_status&&c.stage_ref?" · "+c.stage_status:""}`,`stage ${c.stage_ref==="initial_screen"?"s2":c.stage_ref?"s3":"s1"}`));d.append(h,node("div",c.note,"hint"));const bar=node("div",null,"bar");const i=node("i");i.style.width=`${c.progress.percent}%`;bar.append(i);d.append(bar);if(c.checklist&&c.checklist.length)d.append(checklist(c.checklist));if(c.document)d.append(docCard(c.document));const k=node("div",null,"kpis");k.innerHTML=`<span>找到 <b>${c.progress.found}</b></span><span>已读 <b>${c.progress.read}</b></span><span>排队 <b>${c.progress.waiting}</b></span><span>结论 <b>${c.claims.total}</b>${c.claims.today?` <b style="color:var(--teal)">+${c.claims.today}</b>`:""}</span>`;d.append(k);if(c.claims.latest.length){const ul=node("ul",null,"latest");c.claims.latest.forEach(x=>ul.append(node("li",x.statement)));d.append(ul)}return d}));
   const m=o.model_available;$("goal-submit").disabled=!m.available;$("ask-submit").disabled=!m.available;$("steer-submit").disabled=!m.available;if(!m.available){$("goal-hint").textContent=m.reason;$("ask-hint").textContent=m.reason}
   svc(o.activity.service_state,o.activity.last_tick_at);
 }
+function docCard(doc){const d=node("div",null,"doc");d.append(node("b",`初步筛选 · 第 ${doc.version} 版`),node("div",doc.summary,"sm"));const meta=node("div",`${doc.sections_written}/${doc.sections_total} 节已写 · 引用 ${doc.claims_cited} 条结论${doc.gaps?` · ${doc.gaps} 处缺口`:""} · ${fmtDate(doc.created_at)}`,"hint");const btn=node("button","阅读全文","ghost");btn.style.padding="5px 12px";btn.style.fontSize="12px";btn.style.marginTop="8px";btn.onclick=()=>openDoc(doc.version_ref);d.append(meta,btn);return d}
+async function openDoc(ref){const r=$("reader");r.classList.add("show");const sheet=$("reader-sheet");sheet.replaceChildren(node("div","正在打开…","empty"));try{const doc=await getJson(`/v1/cockpit/deliverable?ref=${encodeURIComponent(ref)}`);renderDoc(sheet,doc)}catch(e){sheet.replaceChildren(node("div",`打不开：${e.message}`,"empty"))}}
+function renderDoc(sheet,doc){sheet.replaceChildren();const close=node("button","关闭","ghost");close.className="ghost close";close.onclick=()=>$("reader").classList.remove("show");sheet.append(close,node("h2",`${doc.company} · 初步筛选`),node("div",`第 ${doc.version} 版 · ${fmtDate(doc.created_at)} · 由系统按研究手册起草`,"meta"));const last=(doc.stage_history||[]).filter(s=>s.status!=="entered").slice(-1)[0];if(last){const g=node("div",null,`gatebox ${last.status==="gate_passed"?"pass":"fail"}`);g.append(node("b",last.status==="gate_passed"?"出口门：通过":"出口门：未通过"),node("div",last.rationale||""));sheet.append(g)}
+doc.sections.forEach(s=>{const sec=node("section");sec.append(node("h3",s.title));if(s.body)renderText(sec,s.body);(s.gaps||[]).forEach(g=>sec.append(node("div",g,"gap")));if(s.cited&&s.cited.length){const c=node("div",null,"cited");c.append(node("div",`依据的 ${s.cited.length} 条结论：`));s.cited.slice(0,12).forEach(x=>c.append(node("div",x.statement)));sec.append(c)}sheet.append(sec)})}
 const CHECK={complete:["✓","ok"],partial:["◐","part"],missing:["○","no"],not_planned:["⊘","na"],source_unavailable:["⊘","na"]};
 function checklist(items){const ul=node("ul",null,"checks");items.forEach(it=>{const[icon,cls]=CHECK[it.status]||["·","na"];const li=node("li",null,cls);li.append(node("span",icon,"ic"),node("span",it.label),node("span",`${it.have}/${it.required}`,"cnt"));if(it.status!=="complete")li.append(node("span",it.note,"nt"));ul.append(li)});return ul}
 function stat(n,l,s){const d=node("div",null,"stat");d.append(node("div",String(n),"n"),node("div",l,"l"),node("div",s,"s"));return d}
@@ -355,6 +379,8 @@ async function loadAskHistory(){try{const h=await getJson("/v1/cockpit/history?k
 async function loadApprovals(){try{const r=await getJson("/v1/cockpit/approvals");const b=$("approve-badge");if(r.count){b.textContent=String(r.count);b.classList.add("show")}else b.classList.remove("show");$("approve-status").textContent=`更新于 ${clock(r.as_of)}`;const box=$("approvals");if(!r.items.length){const e=node("div",null,"empty");e.append(node("div","🎉","big"),node("div","没有需要你处理的事项。系统在预算和规则内自己推进。"));box.replaceChildren(e);return}box.replaceChildren(...r.items.map(it=>{const d=node("div",null,"it");d.append(node("h3",it.title),node("div",`${it.who} · ${fmtDate(it.at)}`,"who"));if(it.summary)d.append(node("p",it.summary,"sm"));const kv=node("div",null,"kv");Object.entries(it.details||{}).forEach(([k,v])=>{if(v==null||v==="")return;kv.append(node("b",k),node("span",Array.isArray(v)?v.join("、"):typeof v==="object"?JSON.stringify(v):String(v)))});if(kv.childNodes.length)d.append(kv);let ta=null;if(it.needs_rationale){ta=node("textarea");ta.placeholder="写一句理由（会记入正式记录）";ta.style.minHeight="64px";ta.style.marginTop="12px";d.append(ta)}const a=node("div",null,"actions"),st=node("span","","status");it.actions.forEach(ac=>{const btn=node("button",ac.label,ac.decision==="reject"||ac.decision==="discard"?"danger":"primary");if(ac.disabled){btn.disabled=true;if(ac.hint)btn.title=ac.hint}btn.onclick=async()=>{if(it.needs_rationale&&!ta.value.trim()){st.className="status err";st.textContent="请先写一句理由";return}a.querySelectorAll("button").forEach(x=>x.disabled=true);st.className="status";st.textContent="正在记录你的决定…";try{await postJson("/v1/cockpit/decide",{kind:it.kind,ref:it.ref,hash:it.hash,decision:ac.decision,rationale:ta?ta.value.trim():"",request_id:rid(),evaluation_id:it.evaluation_id||undefined});toast("已记录");loadApprovals();loadOverview()}catch(e){st.className="status err";st.textContent=e.message;a.querySelectorAll("button").forEach(x=>x.disabled=false)}};a.append(btn)});if(it.actions.some(x=>x.hint))a.append(node("span",it.actions.find(x=>x.hint).hint,"hint"));a.append(st);d.append(a);return d}))}catch(e){$("approve-status").textContent=e.message}}
 
 // ---------- boot
+document.addEventListener("keydown",e=>{if(e.key==="Escape")$("reader").classList.remove("show")});
+$("reader").onclick=e=>{if(e.target.id==="reader")$("reader").classList.remove("show")};
 loadOverview();loadLog(true);loadApprovals();
 setInterval(()=>{if(document.hidden)return;loadLog(false);if(current==="goal")loadOverview()},6000);
 setInterval(()=>{if(!document.hidden)loadApprovals()},30000);

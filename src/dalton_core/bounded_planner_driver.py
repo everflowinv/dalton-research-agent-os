@@ -270,6 +270,12 @@ class BoundedPlannerDriver:
             claim_review = self.client.call("dispatch_claim_review", {})
         except Exception as exc:
             claim_review = {"status": f"unavailable:{type(exc).__name__}"}
+        # P10c: write one company's Initial Screen from the Claims the Ledger
+        # holds, and let the Playbook's own gate decide whether it passes.
+        try:
+            initial_screen = self.client.call("dispatch_initial_screen", {})
+        except Exception as exc:
+            initial_screen = {"status": f"unavailable:{type(exc).__name__}"}
         listing = self.client.call("bounded_planner_active_loops", {})
         loops = listing["loops"]
         executed: list[dict[str, Any]] = []
@@ -456,6 +462,7 @@ class BoundedPlannerDriver:
             "document_extraction": document_extraction,
             "mission_stage": mission_stage,
             "claim_review": claim_review,
+            "initial_screen": initial_screen,
         }
 
 

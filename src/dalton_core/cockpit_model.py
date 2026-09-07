@@ -35,7 +35,9 @@ from .thesis_impact_budget import ThesisImpactBudgetError, ThesisImpactBudgetSto
 
 WORKER_REF = "worker:cockpit-model:0.1"
 SCHEMA_VERSION = "0.1"
-PURPOSES = frozenset({"ask", "goal", "steer"})
+# "draft" is P10c: one section of a mission deliverable, drafted by the lane
+# rather than by the owner, under the same route, budget and replay.
+PURPOSES = frozenset({"ask", "goal", "steer", "draft"})
 
 
 class CockpitModelError(RuntimeError):

@@ -375,6 +375,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "mission_source_discoveries", "mission_discovered_documents",
     "mission_document_reviews", "resolve_mission_document_review",
     "mission_stage_checklist", "claim_retirement_challenges", "decide_claim_retirement",
+    "mission_deliverables",
     "mission_document_evidence", "generate_document_extraction", "stage_document_extraction",
     "document_extraction_preflight",
 })
@@ -405,7 +406,7 @@ CORE_DISCOVERY_OPERATIONS = frozenset({
     "mission_source_discoveries", "mission_discovered_documents",
     "dispatch_document_extraction",
     "dispatch_mission_stage", "mission_stage_checklist",
-    "dispatch_claim_review",
+    "dispatch_claim_review", "dispatch_initial_screen", "mission_deliverables",
 })
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
@@ -508,6 +509,7 @@ CORE_OPERATIONS = frozenset({
     "dispatch_document_extraction",
     "dispatch_mission_stage", "mission_stage_checklist",
     "dispatch_claim_review", "claim_retirement_challenges",
+    "dispatch_initial_screen", "mission_deliverables",
     "mission_document_reviews",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
@@ -666,6 +668,8 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "dispatch_mission_stage": frozenset(),
     "mission_stage_checklist": frozenset(),
     "dispatch_claim_review": frozenset({"max_claims"}),
+    "dispatch_initial_screen": frozenset(),
+    "mission_deliverables": frozenset({"mission_version_ref", "kind", "subject_ref"}),
     "claim_retirement_challenges": frozenset({"open_only", "limit"}),
     "decide_claim_retirement": frozenset({
         "challenge_ref", "challenge_hash", "decision", "rationale", "actor_ref",
@@ -1018,6 +1022,7 @@ class WriterServer:
         web_search_plan_path: str | Path | None = None,
         web_fetch_launcher: PublicWebFetchLauncher | None = None,
         document_extraction_launcher: Any | None = None,
+        initial_screen_launcher: Any | None = None,
     ):
         if not principals:
             raise WriterServerError("at least one principal is required")
@@ -1053,6 +1058,9 @@ class WriterServer:
         # P9d-4b: out-of-process public-web fetch of URLs a web search cited.
         self._web_fetch_launcher = web_fetch_launcher
         self._document_extraction_launcher = document_extraction_launcher
+        self._initial_screen_launcher = initial_screen_launcher
+        self._initial_screen_coordinator: Any | None = None
+        self._mission_deliverables: Any | None = None
         self._document_extraction_coordinator: DocumentExtractionCoordinator | None = None
         # S7d: out-of-process SEC company-facts lane runs (human-only ops).
         self._sec_lane_launcher = sec_lane_launcher
@@ -1377,6 +1385,14 @@ class WriterServer:
             # from the controller tick, out of process like the other lanes.
             self._document_extraction_coordinator = DocumentExtractionCoordinator(
                 missions=self._coverage_mission, launcher=self._document_extraction_launcher,
+            )
+        if self._initial_screen_launcher is not None:
+            # P10c: the mission writes its own Initial Screen, one company per
+            # tick, out of process because each section is a model call.
+            from .initial_screen_launcher import InitialScreenCoordinator
+
+            self._initial_screen_coordinator = InitialScreenCoordinator(
+                store=self._store, launcher=self._initial_screen_launcher,
             )
         self._backlog = ResearchQuestionBacklog(self._store)
         self._bounded_planner = BoundedPlannerAuthority(self._store)
@@ -2447,6 +2463,39 @@ class WriterServer:
             needles=needles_from_plans(plans),
         )
 
+    @property
+    def mission_deliverables(self) -> Any:
+        """P10c: the mission's own documents, refused when a number has no source."""
+
+        from .mission_deliverable import MissionDeliverableAuthority
+
+        if self._mission_deliverables is None:
+            self._mission_deliverables = MissionDeliverableAuthority(self.store)
+        return self._mission_deliverables
+
+    def _op_dispatch_initial_screen(self, p: Mapping[str, Any]) -> Any:
+        # Controller tick (P10c).  One company's Initial Screen per tick.
+        if self._initial_screen_coordinator is None:
+            return {"status": "unconfigured", "reason": "no initial screen lane on this writer"}
+        return self._initial_screen_coordinator.dispatch_once()
+
+    def _op_mission_deliverables(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        mission_version_ref = values.get("mission_version_ref")
+        if mission_version_ref is None:
+            row = self.store.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return {"projection_kind": "mission_deliverables", "deliverables": []}
+            mission_version_ref = row["mission_version_id"]
+        return {
+            "projection_kind": "mission_deliverables",
+            "deliverables": self.mission_deliverables.deliverables(
+                mission_version_ref, kind=values.get("kind"), subject_ref=values.get("subject_ref"),
+            ),
+        }
+
     def _op_dispatch_claim_review(self, p: Mapping[str, Any]) -> Any:
         # Controller tick (P10b).  Reads admitted Claims back against the exact
         # originals they cite; writes only what the mission grants.
@@ -3451,6 +3500,15 @@ def main(argv: list[str] | None = None) -> int:
                 "broker_client_id": args.planner_broker_client_id,
                 "expected_agent_id": args.planner_expected_agent_id,
             }
+        initial_screen_launcher = None
+        if args.document_extraction_model_config is not None:
+            from .initial_screen_launcher import InitialScreenLauncher
+
+            initial_screen_launcher = InitialScreenLauncher(
+                state_dir=Path(args.db).expanduser().resolve().parent,
+                model_config_path=args.document_extraction_model_config,
+                scheduler_db=args.scheduler,
+            )
         document_extraction_launcher = None
         if args.document_extraction_model_config is not None:
             document_extraction_launcher = DocumentExtractionLauncher(
@@ -3481,6 +3539,7 @@ def main(argv: list[str] | None = None) -> int:
             web_search_plan_path=args.web_search_discovery_plan,
             web_fetch_launcher=web_fetch_launcher,
             document_extraction_launcher=document_extraction_launcher,
+            initial_screen_launcher=initial_screen_launcher,
         )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:

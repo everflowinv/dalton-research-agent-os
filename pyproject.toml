@@ -73,6 +73,7 @@ dalton_core = [
   "research_playbook_schema.sql",
   "coverage_mission_schema.sql",
   "claim_retirement_schema.sql",
+  "mission_deliverable_schema.sql",
   "model_forecast_schema.sql",
   "forecast_reconciliation_schema.sql",
   "statement_snapshot_schema.sql",

@@ -769,6 +769,8 @@ class AgendaControlApplication:
             return {**plane.approvals(), "enabled": True}
         if path == "/v1/cockpit/job":
             return {**plane.job(login, query.get("id", "")), "enabled": True}
+        if path == "/v1/cockpit/deliverable":
+            return {**plane.document(query.get("ref", "")), "enabled": True}
         if path == "/v1/cockpit/history":
             kind = query.get("kind", "ask")
             if kind not in {"ask", "goal", "steer"}:

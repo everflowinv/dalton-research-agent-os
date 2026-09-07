@@ -73,6 +73,9 @@ AUTOMATION_WRITE_SCOPES: tuple[str, ...] = (
     # P10b: challenge and retire a Claim the detectors prove wrong.  The Ledger
     # is never edited; the scope only lets automation append the correction.
     "claim_challenge",
+    # P10c: write the mission's own documents (Initial Screen and the rest of
+    # the Playbook's deliverables), with every figure bound to a Claim.
+    "deliverable",
     "forecast_line",
     "model_run",
     "research_question",

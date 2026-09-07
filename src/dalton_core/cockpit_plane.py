@@ -419,6 +419,7 @@ class CockpitPlane:
             theses = [json.loads(r["content_json"]) for r in core.execute(
                 "SELECT content_json FROM thesis_versions ORDER BY created_at").fetchall()]
             stages = self._stage_rows(core, mission)
+            documents = self._deliverables(core, mission)
         today = self.clock().date().isoformat()
         by_company: dict[str, list[dict[str, Any]]] = {}
         for claim in claims:
@@ -452,6 +453,7 @@ class CockpitPlane:
                 "stage": entry["stage_label"], "stage_ref": entry["stage"],
                 "stage_status": entry["stage_status_label"], "note": note,
                 "checklist": entry["items"],
+                "document": documents.get(company_ref),
                 "progress": {"found": found, "held": held, "read": read, "waiting": waiting,
                              "percent": int(round(100 * len(done) / len(countable))) if countable else 0},
                 "claims": {"total": len(own), "today": today_claims,
@@ -512,6 +514,59 @@ class CockpitPlane:
             state.setdefault(row["company_ref"], {}).setdefault(row["stage_ref"], []).append(row["status"])
         specs = planned_spec_refs_from_directory(self.config.state_dir / "discovery-plans")
         return evaluate_mission(core, mission, planned_specs=specs, stage_state=state)
+
+    def _deliverables(self, core: sqlite3.Connection, mission: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+        """P10c: each company's latest Initial Screen, as a card-sized summary."""
+
+        result: dict[str, dict[str, Any]] = {}
+        for row in self._rows(core,
+            "SELECT v.record_json AS record_json FROM mission_deliverable_pointer p "
+            "JOIN mission_deliverable_versions v ON v.version_id=p.version_id "
+            "WHERE v.mission_version_ref=? AND v.kind='initial_screen'", (mission["id"],),
+        ):
+            record = json.loads(row["record_json"])
+            written = [section for section in record["sections"] if section["body"]]
+            result[record["subject_ref"]] = {
+                "ref": record["deliverable_ref"], "version_ref": record["id"],
+                "version": record["version"], "created_at": record["created_at"],
+                "summary": record["summary"][:400],
+                "sections_written": len(written), "sections_total": len(record["sections"]),
+                "gaps": len(record["gaps"]),
+                "claims_cited": len({ref for section in record["sections"] for ref in section["claim_refs"]}),
+            }
+        return result
+
+    def document(self, version_ref: str) -> dict[str, Any]:
+        """One deliverable, in full, for reading."""
+
+        ref = _text(version_ref, "version_ref", maximum=512)
+        with self._core() as core:
+            rows = self._rows(core,
+                "SELECT record_json, content_hash FROM mission_deliverable_versions WHERE version_id=?", (ref,))
+            if not rows:
+                raise CockpitError("这份文档不存在")
+            record = json.loads(rows[0]["record_json"])
+            if record["content_hash"] != rows[0]["content_hash"]:
+                raise CockpitConflict("文档记录与哈希不符")
+            mission = self._mission(core)
+            members = self._members(mission)
+            stage = [
+                {"status": row["status"], "rationale": row["rationale"], "at": row["created_at"]}
+                for row in self._rows(core,
+                    "SELECT status, rationale, created_at FROM coverage_mission_stage_records "
+                    "WHERE mission_version_ref=? AND company_ref=? AND stage_ref='initial_screen' "
+                    "ORDER BY created_at", (record["mission_version_ref"], record["subject_ref"]))
+            ]
+            claims = {claim["ref"]: claim for claim in self._claims(core)}
+        for section in record["sections"]:
+            section["cited"] = [
+                {"statement": claims[ref]["statement"], "period": claims[ref]["period"]}
+                for ref in section["claim_refs"] if ref in claims
+            ]
+        return {
+            **record, "company": self._label(members, record["subject_ref"]),
+            "stage_history": stage, "as_of": _iso(self.clock()),
+        }
 
     def _model_calls_today(self, mission: Mapping[str, Any], today: str) -> dict[str, Any] | None:
         if self.config.model_config_path is None:
@@ -651,6 +706,18 @@ class CockpitPlane:
                 "title": ("读完并入库：" if closed else "读完，没有可用结论：") + self._document_label(row["document_ref"], urls),
                 "detail": detail, "state": "done" if closed else "skipped",
                 "company": self._label(members, row["company_ref"]),
+            })
+        for row in self._rows_from(self.config.core_db,
+            "SELECT record_json FROM mission_deliverable_versions ORDER BY created_at DESC LIMIT ?", (limit,),
+        ):
+            record = json.loads(row["record_json"])
+            written = sum(1 for section in record["sections"] if section["body"])
+            events.append({
+                "id": f"deliverable:{record['id']}", "at": record["created_at"],
+                "kind": "deliverable", "lane": "写文档",
+                "title": f"写好了初步筛选第 {record['version']} 版（{written}/{len(record['sections'])} 节）",
+                "detail": record["summary"][:200], "state": "done",
+                "company": self._label(members, record["subject_ref"]),
             })
         for row in self._rows_from(self.config.core_db,
             "SELECT record_json FROM claim_retirement_decisions ORDER BY created_at DESC LIMIT ?", (limit,),
