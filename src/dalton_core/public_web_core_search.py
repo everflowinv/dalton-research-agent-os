@@ -76,6 +76,7 @@ from .openclaw_connector_bridge import (
     HostToolInvocationResult,
 )
 from .public_web_connector import (
+    GEMINI_WEB_SEARCH_MAX_RECORDS,
     OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH,
     build_public_web_url_authorities,
     gemini_web_search_payload_from_result,
@@ -107,9 +108,10 @@ ADAPTER_PACKAGE = "openclaw-gemini-web-search-live-adapter:0.1"
 CREDENTIAL_SLOT_REF = GEMINI_WEB_SEARCH_CREDENTIAL_SLOT_REF
 CREDENTIAL_AUTHORITY_REF = "credential-authority:host:gemini-web-search"
 SIDE_EFFECT = "read:public-web-search"
-# OpenClaw's Gemini web_search returns at most 10 citations per call; one
-# call is one ranked page and there is no cursor.
-SEARCH_MAX_RECORDS = 10
+# One call is one ranked page and there is no cursor.  The ceiling is the
+# frozen inventory value shared with the URL-authority rebuild, so both admit
+# the identical ranked slice.
+SEARCH_MAX_RECORDS = GEMINI_WEB_SEARCH_MAX_RECORDS
 SEARCH_MAX_RESPONSE_BYTES = 256_000
 TRAILING_WINDOW = timedelta(hours=24)
 _SPEC_FIELDS = frozenset({"query", "date_after", "date_before"})
@@ -477,6 +479,8 @@ class FakeWebSearchHandle:
         self.calls.append({"arguments": dict(arguments), "call_ref": call_ref})
         count = int(arguments.get("count", SEARCH_MAX_RECORDS))
         payload = {
+            # The exact inner shape the host runtime helper returns (the
+            # broker unwraps {provider, result} before Dalton sees it).
             "query": arguments["query"],
             "provider": "gemini",
             "model": "gemini-2.5-flash",

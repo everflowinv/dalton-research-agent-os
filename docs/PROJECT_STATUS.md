@@ -1,6 +1,26 @@
 # Dalton 项目进度
 
 更新日期：2026-09-06
+- **web search 已在 OpenClaw 侧真实激活，并完成首次真实 Gemini 搜索（P9d-4e）；Dalton 代码栈仍未部署、live mission 未改、live Core 未写入。**
+  owner 批准治理记录后：`openclaw config patch`（先 dry-run）装入并配置 broker 插件（备份 openclaw.json，
+  模型 broker 条目原样保留），重启 gateway，插件启动、owner-only socket 与 key 就位、doctor 与 health 通过。
+  **真实调用推翻了两个推断**：①`api.runtime.webSearch.search` 返回 `{provider, result}` 包装而非 payload 本身
+  （broker 已改为校验包装并只转发内层）；②内层 payload 正是 2026-08-14 冻结的形状（含 `model`）——我早期误取
+  OpenClaw **agent 工具**表面（返回 `kind`）并据此"纠正"契约，该纠正已完全回退，并加测试确认 agent 形状在这条
+  路径上被拒。**真实调用还暴露三个缺陷并已修**：broker 未拆包装；Gemini grounding 单次返回 13 条引用而页面上限
+  为 10，旧代码当硬错误拒绝真实答案（该来源 completeness 本就是 `ranked`，改为取排名前 N 并与 URL authority 重建
+  共享同一常量，原始 artifact 保留全部引用）；复制来的 broker journal 把记录键钉死为 `^invocation:`，导致重启后
+  插件因 `journal invocation id is invalid` 启动失败、socket 变陈旧（已改为有界命名空间 ref，并补上"写入→重启→
+  重放 duplicate 且宿主零调用"的回归测试，正是这条测试此前缺失才漏掉该缺陷）。
+  **首次真实搜索**在 live Core 只读副本上 `ok=true`（条件具名全真）：真实 launcher→子进程→broker→Gemini，
+  1 次 provider 调用，返回 5 个去重 URL ref（alphastreet/morningstar/koalagains/seekingalpha/moomoo），
+  发现记录 5 条，URL authority 由 4090 字节原始 artifact 逐字重建，合成答案只留在原始 artifact 内，
+  `formal_authority_writes=0`，Claim/Evidence/Thesis 不变，integrity ok，live Core 只读、未写。
+  本轮共花 4 次真实搜索（3 次失败诊断 + 1 次成功），在计划 24h 上限 40 之内。插件 16/16、模型 broker 25/25、
+  web 专项 56/56、全仓 **1162/1164**。**仍需 owner 决定**：部署 Dalton 代码栈（一次会上线五片并重启四个
+  LaunchAgent）、把 broker socket/key 传给 writer、发布 mission 新版本把 `source:web-search` 改为
+  `probe_only` 再 `connected`；真实 fetch（抓取第三方原文）尚未跑过，应单独授权。见
+  [P9d-4e 报告](reports/p9d4e-live-web-search-activation-v0.1-2026-09-06.md)。
 - **P9d-4d「host-owned OpenClaw web search broker」development candidate 已完成；插件未安装、未部署、0 次真实搜索。**
   调查确认 P9d-4a 的真实 transport 此前**根本不存在**：本机 OpenClaw 只在 MCP 上暴露 guidepoint(8943)、
   alphaengine(8950) 与远端 firecrawl，web search 是 agent 工具与插件运行时能力。本片按模型 broker 的既有边界

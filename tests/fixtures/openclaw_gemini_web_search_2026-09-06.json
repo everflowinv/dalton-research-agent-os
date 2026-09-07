@@ -1,0 +1,35 @@
+{
+  "captured_at": "2026-09-06T00:00:00+00:00",
+  "captured_from": "api.runtime.webSearch.search via the Dalton OpenClaw web search broker (host provider gemini)",
+  "note": "Real host return, recorded from the broker journal. The helper returns {provider, result}; the broker forwards the inner result. Content truncated and citations trimmed for the fixture; the untrusted-content markers are preserved verbatim.",
+  "host_return": {
+    "provider": "gemini",
+    "result": {
+      "query": "Accenture ACN IT services demand bookings outlook",
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "tookMs": 7609,
+      "content": "\n<<<EXTERNAL_UNTRUSTED_CONTENT id=\"48cd4ba88fe8d20f\">>>\nSource: Web Search\n---\nAccenture's recent performance indicates a mixed outlook for its IT services demand and bookings. While the company is experiencing strong de …[truncated for the fixture]",
+      "citations": [
+        {
+          "title": "quartr.com",
+          "url": "https://quartr.com/companies/accenture-plc_6185"
+        },
+        {
+          "title": "morningstar.com",
+          "url": "https://www.morningstar.com/news/dow-jones/202606183301/accenture-tempers-outlook-as-3q-bookings-fall"
+        },
+        {
+          "title": "morningstar.com",
+          "url": "https://www.morningstar.com/stocks/xnys/acn/earnings"
+        }
+      ],
+      "externalContent": {
+        "provider": "gemini",
+        "source": "web_search",
+        "untrusted": true,
+        "wrapped": true
+      }
+    }
+  }
+}

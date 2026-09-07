@@ -60,6 +60,11 @@ _MEDIA_TYPE_RE = re.compile(
     r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$"
 )
 _FRESHNESS = frozenset({"day", "week", "month", "year"})
+# The frozen inventory ceiling for one ranked Gemini page.  Grounding returns
+# as many citations as the answer used and does not honour ``count`` as a
+# cap, so the ranked top slice is what enters authority; the raw artifact
+# always retains every citation the provider returned.
+GEMINI_WEB_SEARCH_MAX_RECORDS = 10
 _SENSITIVE_QUERY_KEYS = frozenset(
     {
         "access_token",
@@ -412,7 +417,18 @@ def normalize_gemini_web_search_payload(
     expected_query: str,
     max_records: int,
 ) -> tuple[dict[str, Any], list[dict[str, str]]]:
-    """Validate the current OpenClaw Gemini provider result and derive URL refs."""
+    """Validate the current OpenClaw Gemini provider result and derive URL refs.
+
+    Verified against a real host call on 2026-09-06: the plugin runtime helper
+    ``api.runtime.webSearch.search`` returns ``{provider, result}`` and this is
+    the inner ``result`` -- ``query``, ``provider``, ``model``, ``tookMs``,
+    ``content``, ``citations`` and ``externalContent``.  The broker unwraps it.
+    OpenClaw's *agent* ``web_search`` tool normalizes to a different shape
+    (``kind`` instead of ``model``); Dalton never consumes that surface, and a
+    payload in that shape is refused here rather than silently accepted.
+    ``content`` and each citation ``title`` arrive wrapped in the host's
+    untrusted-content markers; only the cited URLs move forward.
+    """
 
     if not isinstance(payload, Mapping):
         raise RunnerValidationError("Gemini web_search payload must be an object")
@@ -466,8 +482,9 @@ def normalize_gemini_web_search_payload(
         if title is not None:
             discovery["title"] = title
         discoveries.append(discovery)
-    if len(discoveries) > max_records:
-        raise RunnerValidationError("Gemini citations exceeded max_records")
+    # ``ranked`` completeness: admit the ranked top slice rather than refusing
+    # a real answer for citing more sources than the page ceiling.
+    discoveries = discoveries[:max_records]
     structured = {
         "source_record_refs": [item["url_ref"] for item in discoveries],
         "next_cursor": None,
@@ -722,7 +739,7 @@ def build_public_web_url_authorities(
     structured, discoveries = normalize_gemini_web_search_payload(
         payload,
         expected_query=payload.get("query"),
-        max_records=10,
+        max_records=GEMINI_WEB_SEARCH_MAX_RECORDS,
     )
     if structured["source_record_refs"] != source.get("source_record_refs"):
         raise PublicWebAuthorityConflict(

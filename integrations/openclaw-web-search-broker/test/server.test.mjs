@@ -30,9 +30,9 @@ const REQUEST = {
 
 function payload(query = REQUEST.query) {
   return {
+    kind: "answer",
     query,
     provider: "gemini",
-    model: "gemini-2.5-flash",
     tookMs: 4,
     externalContent: { untrusted: true, source: "web_search", provider: "gemini", wrapped: true },
     content: "UNTRUSTED synthesis",
@@ -44,7 +44,7 @@ function runtime(handler = () => payload()) {
   const calls = [];
   return {
     version: "2026.9.1",
-    webSearch: { async search(input) { calls.push(input); return handler(input); } },
+    webSearch: { async search(input) { calls.push(input); return { provider: "gemini", result: handler(input) }; } },
     calls,
   };
 }
@@ -192,5 +192,41 @@ test("the plugin source holds no Dalton authority, no provider transport and no 
   const journal = await readFile(new URL("../src/journal.mjs", import.meta.url), "utf8");
   for (const guarded of ["apiKey", "credential", "headers", "baseUrl"]) {
     assert.ok(journal.includes(guarded), `the journal must refuse ${guarded} fields`);
+  }
+});
+
+test("a populated journal reloads across a restart with this broker's keys", async () => {
+  const stateDir = await mkdtemp(path.join(os.tmpdir(), "dalton-search-journal-"));
+  try {
+    const config = { ...CONFIG, socketName: "reload.sock" };
+    const first = new WebSearchBroker(runtime(), config, { hostConfig: {} });
+    const serverA = new BrokerServer(first);
+    await serverA.start(stateDir);
+    const { secret } = await loadOrCreateSecret(stateDir, config.socketName);
+    const frame = `${JSON.stringify(signRequest(REQUEST, {
+      secret, clientId: config.clientId, timestampMs: Date.now(), nonce: randomBytes(16).toString("hex"),
+    }))}\n`;
+    const socketPath = path.join(stateDir, config.socketName);
+    assert.equal(JSON.parse(await send(socketPath, frame)).ok, true);
+    await serverA.stop();
+
+    // Restart against the same state directory: the journal written above
+    // must load, and the recorded call must replay without a host search.
+    const host = runtime();
+    const second = new WebSearchBroker(host, config, { hostConfig: {} });
+    const serverB = new BrokerServer(second);
+    await serverB.start(stateDir);
+    try {
+      const replay = JSON.parse(await send(socketPath, `${JSON.stringify(signRequest(REQUEST, {
+        secret, clientId: config.clientId, timestampMs: Date.now(), nonce: randomBytes(16).toString("hex"),
+      }))}\n`));
+      assert.equal(replay.ok, true);
+      assert.equal(replay.idempotencyStatus, "duplicate");
+      assert.equal(host.calls.length, 0, "a reloaded journal must not call the host again");
+    } finally {
+      await serverB.stop();
+    }
+  } finally {
+    await rm(stateDir, { recursive: true, force: true });
   }
 });

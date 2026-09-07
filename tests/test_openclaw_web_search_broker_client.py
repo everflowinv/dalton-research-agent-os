@@ -284,13 +284,13 @@ class NodeBrokerRoundTripTests(unittest.TestCase):
             harness.write_text(f'''
 import {{ WebSearchBroker }} from "{BROKER_DIR}/src/broker.mjs";
 import {{ BrokerServer }} from "{BROKER_DIR}/src/server.mjs";
-const payload = {{
+const inner = {{
   query: "Accenture AI demand", provider: "gemini", model: "gemini-2.5-flash", tookMs: 3,
   externalContent: {{ untrusted: true, source: "web_search", provider: "gemini", wrapped: true }},
   content: "UNTRUSTED synthesis",
   citations: [{{ url: "https://Example.com/investors?q=ai#top", title: "IR" }}],
 }};
-const runtime = {{ version: "2026.9.1", webSearch: {{ async search() {{ return payload; }} }} }};
+const runtime = {{ version: "2026.9.1", webSearch: {{ async search() {{ return {{ provider: "gemini", result: inner }}; }} }} }};
 const broker = new WebSearchBroker(runtime, {{ clientId: "client:dalton-core", expectedProvider: "gemini", socketName: "broker.sock" }}, {{ hostConfig: {{}} }});
 const server = new BrokerServer(broker);
 const socketPath = await server.start("{root}");

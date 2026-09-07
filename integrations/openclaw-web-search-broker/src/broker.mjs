@@ -14,6 +14,20 @@ const PROFILE_ID = /^profile:[A-Za-z0-9._-]+$/;
 const SOCKET_NAME = /^[A-Za-z0-9._-]+\.sock$/;
 const PROVIDER_ID = /^[a-z][a-z0-9-]{0,63}$/;
 
+/** The host helper's documented return: an object wrapping a provider payload. */
+function envelopeShape(value) {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.keys(value).length === 2
+    && typeof value.provider === "string"
+    && value.result
+    && typeof value.result === "object"
+    && !Array.isArray(value.result),
+  );
+}
+
 function integer(value, field, { min, max, fallback }) {
   const resolved = value === undefined ? fallback : value;
   if (!Number.isSafeInteger(resolved) || resolved < min || resolved > max) {
@@ -31,6 +45,11 @@ function integer(value, field, { min, max, fallback }) {
  * provider the host actually used against the configured expectation, and
  * returns the provider payload verbatim inside a tool-result envelope.
  * Nothing about the query or the results is logged.
+ *
+ * The helper returns ``{ provider, result }`` (verified against a real host
+ * call on 2026-09-06); the broker unwraps it and forwards the inner provider
+ * payload, so the client sees exactly one documented shape. Both the outer
+ * and inner provider must equal the configured one.
  */
 export class WebSearchBroker {
   constructor(runtime, rawConfig, { journal, hostConfig } = {}) {
@@ -190,10 +209,11 @@ export class WebSearchBroker {
           message.slice(0, 300),
         );
       }
-      if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-        return this.#failure(request, requestHash, "fresh", "PROVIDER_CONTRACT_DRIFT", "host web search returned a non-object payload");
+      if (!envelopeShape(payload)) {
+        return this.#failure(request, requestHash, "fresh", "PROVIDER_CONTRACT_DRIFT", "host web search did not return a { provider, result } object");
       }
-      if (payload.provider !== this.config.expectedProvider) {
+      const inner = payload.result;
+      if (payload.provider !== this.config.expectedProvider || inner.provider !== this.config.expectedProvider) {
         // A silent provider swap would change the payload contract Dalton
         // pinned; refuse instead of handing over a different shape.
         return this.#failure(
@@ -204,7 +224,7 @@ export class WebSearchBroker {
           "host web search used a provider other than the configured one",
         );
       }
-      const envelope = toolResultEnvelope(payload);
+      const envelope = toolResultEnvelope(inner);
       const body = {
         schemaVersion: PROTOCOL_VERSION,
         brokerVersion: BROKER_VERSION,

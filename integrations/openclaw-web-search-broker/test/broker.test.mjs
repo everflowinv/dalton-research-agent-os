@@ -9,9 +9,9 @@ const CONFIG = { clientId: "client:dalton-core", expectedProvider: "gemini", max
 
 function geminiPayload(query = "Accenture AI demand") {
   return {
+    kind: "answer",
     query,
     provider: "gemini",
-    model: "gemini-2.5-flash",
     tookMs: 12,
     externalContent: { untrusted: true, source: "web_search", provider: "gemini", wrapped: true },
     content: "UNTRUSTED synthesis",
@@ -19,6 +19,7 @@ function geminiPayload(query = "Accenture AI demand") {
   };
 }
 
+/** The host helper returns { provider, result }; handlers yield the inner payload. */
 function fakeRuntime(handler, { version = "2026.9.1" } = {}) {
   const calls = [];
   return {
@@ -26,7 +27,8 @@ function fakeRuntime(handler, { version = "2026.9.1" } = {}) {
     webSearch: {
       async search(input) {
         calls.push(input);
-        return handler(input, calls.length);
+        const inner = handler(input, calls.length);
+        return inner && inner.__raw ? inner.value : { provider: "gemini", result: inner };
       },
     },
     calls,
@@ -116,12 +118,30 @@ test("closed request shape, limits and unknown profiles are refused before the h
   assert.equal(runtime.calls.length, 0, "no refused request may reach the host");
 });
 
-test("a provider swap or non-object payload is contract drift, not a result", async () => {
-  for (const payload of [{ ...geminiPayload(), provider: "brave" }, "text", null, ["a"]]) {
-    const runtime = fakeRuntime(() => payload);
-    const response = await newBroker(runtime).handle(request());
-    assert.equal(response.ok, false);
-    assert.equal(response.error.code, "PROVIDER_CONTRACT_DRIFT");
+test("the host envelope is unwrapped and any drift in it is refused", async () => {
+  // Happy path: the client sees the inner provider payload, never the wrapper.
+  const runtime = fakeRuntime(() => geminiPayload());
+  const ok = await newBroker(runtime).handle(request());
+  assert.equal(ok.ok, true);
+  assert.deepEqual(JSON.parse(ok.result.content[0].text), geminiPayload());
+
+  const drifted = [
+    // The wrapper itself is wrong or missing.
+    { __raw: true, value: geminiPayload() },
+    { __raw: true, value: "text" },
+    { __raw: true, value: null },
+    { __raw: true, value: ["a"] },
+    { __raw: true, value: { provider: "gemini" } },
+    { __raw: true, value: { provider: "gemini", result: "text" } },
+    { __raw: true, value: { provider: "gemini", result: geminiPayload(), extra: 1 } },
+    // A silent provider swap, outer or inner.
+    { __raw: true, value: { provider: "brave", result: geminiPayload() } },
+    { __raw: true, value: { provider: "gemini", result: { ...geminiPayload(), provider: "brave" } } },
+  ];
+  for (const [index, value] of drifted.entries()) {
+    const response = await newBroker(fakeRuntime(() => value)).handle(request());
+    assert.equal(response.ok, false, `case ${index}`);
+    assert.equal(response.error.code, "PROVIDER_CONTRACT_DRIFT", `case ${index}`);
   }
 });
 

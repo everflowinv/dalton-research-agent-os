@@ -19,8 +19,15 @@ function validateRecord(record) {
   if (!record || typeof record !== "object" || Array.isArray(record)) throw new ProtocolError("INVALID_JOURNAL", "journal record is invalid");
   const allowed = new Set(["invocationId", "requestHash", "state", "createdAtMs", "expiresAtMs", "response"]);
   if (Object.keys(record).some((key) => !allowed.has(key))) throw new ProtocolError("INVALID_JOURNAL", "journal record shape is invalid");
-  if (typeof record.invocationId !== "string" || !/^invocation:[A-Za-z0-9._-]+$/.test(record.invocationId)) {
-    throw new ProtocolError("INVALID_JOURNAL", "journal invocation id is invalid");
+  // This broker keys the journal on the caller's credential-use ref for one
+  // physical attempt, not on the model broker's invocation id, so the key is
+  // validated as a bounded namespaced ref rather than one fixed prefix.
+  if (
+    typeof record.invocationId !== "string"
+    || record.invocationId.length > 200
+    || !/^[a-z][a-z0-9-]*:[A-Za-z0-9._:-]+$/.test(record.invocationId)
+  ) {
+    throw new ProtocolError("INVALID_JOURNAL", "journal record key is invalid");
   }
   if (!HASH.test(record.requestHash) || !["pending", "completed"].includes(record.state)) {
     throw new ProtocolError("INVALID_JOURNAL", "journal record metadata is invalid");

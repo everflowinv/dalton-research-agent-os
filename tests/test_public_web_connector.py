@@ -5,6 +5,7 @@ import hashlib
 import json
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import dalton_core.research_verification as research_verification
@@ -22,7 +23,9 @@ from dalton_core.public_web_connector import (
     PublicWebUrlAuthorityResolver,
     build_public_web_url_authorities,
     canonical_public_web_url,
+    GEMINI_WEB_SEARCH_MAX_RECORDS,
     gemini_web_search_tool_arguments,
+    normalize_gemini_web_search_payload,
     public_web_url_ref,
     validate_gemini_search_parameters,
     validate_gemini_web_search_adapter_request,
@@ -34,6 +37,8 @@ from dalton_core.research_verification import (
     build_candidate_evidence,
 )
 from dalton_core.store import canonical_json, content_hash
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 WHEN = datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
@@ -134,9 +139,11 @@ def search_request(parameters: dict | None = None) -> dict:
     return with_hash(base)
 
 
-def source_envelope(payload: dict) -> dict:
+def source_envelope(payload: dict, *, limit: int | None = None) -> dict:
     refs = [public_web_url_ref(item["url"]) for item in payload["citations"]]
     refs = list(dict.fromkeys(refs))
+    if limit is not None:
+        refs = refs[:limit]
     raw = raw_result(payload)
     base = {
         "id": "source-envelope:gemini:1",
@@ -357,18 +364,24 @@ class PublicWebConnectorTests(unittest.TestCase):
         )
         with self.assertRaises(PublicWebAuthorityConflict):
             build_public_web_url_authorities(raw_result(payload), tampered)
+        # Grounding may cite more sources than the ranked page ceiling. The
+        # admitted slice is the top N, so an envelope naming every citation
+        # disagrees with what the adapter emitted and is refused.
         oversized = gemini_payload(
             citations=[
                 {"url": f"https://example.com/source/{index}"}
                 for index in range(11)
             ]
         )
-        with self.assertRaisesRegex(
-            RunnerValidationError, "exceeded max_records"
-        ):
+        with self.assertRaises(PublicWebAuthorityConflict):
             build_public_web_url_authorities(
                 raw_result(oversized), source_envelope(oversized)
             )
+        admitted = build_public_web_url_authorities(
+            raw_result(oversized),
+            source_envelope(oversized, limit=GEMINI_WEB_SEARCH_MAX_RECORDS),
+        )
+        self.assertEqual(len(admitted), GEMINI_WEB_SEARCH_MAX_RECORDS)
 
     def test_fetch_adapter_uses_only_authorized_url_and_original_bytes(self) -> None:
         payload = gemini_payload()
@@ -530,3 +543,58 @@ class PublicWebConnectorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RealHostPayloadContractTests(unittest.TestCase):
+    """The pinned shape must be the one the host runtime helper really returns."""
+
+    def fixture(self) -> dict:
+        return json.loads(
+            (ROOT / "tests/fixtures/openclaw_gemini_web_search_2026-09-06.json").read_text()
+        )
+
+    def test_recorded_host_result_is_accepted_and_yields_only_url_refs(self) -> None:
+        recorded = self.fixture()["host_return"]
+        # The helper wraps the payload; the broker forwards the inner result.
+        self.assertEqual(sorted(recorded), ["provider", "result"])
+        payload = recorded["result"]
+        structured, discoveries = normalize_gemini_web_search_payload(
+            payload, expected_query=payload["query"], max_records=10,
+        )
+        self.assertEqual((structured["provider_status"], structured["next_cursor"]), (200, None))
+        self.assertEqual(structured["source_record_refs"], [item["url_ref"] for item in discoveries])
+        self.assertTrue(discoveries)
+        for item in discoveries:
+            self.assertTrue(item["canonical_url"].startswith("https://"))
+        # The synthesized answer and the wrapped titles never move forward.
+        forwarded = json.dumps(structured)
+        self.assertNotIn("EXTERNAL_UNTRUSTED_CONTENT", forwarded)
+        self.assertIn("EXTERNAL_UNTRUSTED_CONTENT", payload["content"])
+
+    def test_the_agent_tool_shape_is_not_accepted_on_this_path(self) -> None:
+        """OpenClaw's agent tool normalizes differently; Dalton never takes it."""
+
+        payload = self.fixture()["host_return"]["result"]
+        agent_tool_shape = {k: v for k, v in payload.items() if k != "model"}
+        agent_tool_shape["kind"] = "answer"
+        with self.assertRaises(RunnerValidationError):
+            normalize_gemini_web_search_payload(
+                agent_tool_shape, expected_query=payload["query"], max_records=10,
+            )
+
+    def test_more_citations_than_the_page_ceiling_admit_the_ranked_top_slice(self) -> None:
+        """Grounding cites as many sources as it used; the ceiling still holds."""
+
+        payload = self.fixture()["host_return"]["result"]
+        many = {**payload, "citations": [
+            {"url": f"https://example{index}.com/a", "title": f"t{index}"} for index in range(13)
+        ]}
+        structured, discoveries = normalize_gemini_web_search_payload(
+            many, expected_query=many["query"], max_records=GEMINI_WEB_SEARCH_MAX_RECORDS,
+        )
+        self.assertEqual(len(discoveries), GEMINI_WEB_SEARCH_MAX_RECORDS)
+        self.assertEqual(
+            [item["canonical_url"] for item in discoveries],
+            [f"https://example{index}.com/a" for index in range(GEMINI_WEB_SEARCH_MAX_RECORDS)],
+        )
+        self.assertEqual(structured["source_record_refs"], [item["url_ref"] for item in discoveries])
