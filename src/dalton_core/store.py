@@ -1078,13 +1078,17 @@ class DaltonStore:
         from .research_auto_commit import authorize_policy_candidate
         from .research_verification import validate_candidate_claim
 
-        if validate_candidate_claim(claim)["claim_kind"] != "quantitative":
-            # ADR-0003 option B: no policy rule exists for qualitative
-            # (transcript) candidates; reject before touching policy state.
-            raise GateRejected(
-                "qualitative candidates enter the Ledger only through explicit human review"
-            )
+        # ADR-0005: qualitative mission-document candidates are admitted by
+        # the evaluator only under the explicit document rule; every other
+        # qualitative candidate still requires human review (ADR-0003 B), and
+        # that refusal happens here, before any policy state is touched.
         policy = self.active_policy()
+        if validate_candidate_claim(claim)["claim_kind"] != "quantitative":
+            from .research_auto_commit import policy_lists_document_rule
+            if not policy_lists_document_rule(policy):
+                raise GateRejected(
+                    "qualitative candidates enter the Ledger only through explicit human review"
+                )
         decision_wire = authorize_policy_candidate(
             connection=self.connection,
             policy_version=policy,
@@ -1136,9 +1140,17 @@ class DaltonStore:
         if decision_wire["verdict"] != "accept":
             raise GateRejected("only an accepted authorization can enter the Ledger")
         if claim_wire["claim_kind"] == "qualitative":
-            # ADR-0003 option B: a semantic transcript candidate never enters
-            # the Ledger through a policy path, and only as transcript evidence.
-            if (
+            # ADR-0003 option B, narrowed by ADR-0005: a semantic candidate
+            # enters the Ledger through explicit human review, or through the
+            # policy path only under the mission document qualitative rule;
+            # either way only as transcript evidence.
+            from .research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
+            policy_admitted = (
+                active_policy_binding is not None
+                and decision_wire.get("authorization") == "versioned_governance_policy"
+                and decision_wire.get("rule_ref") == DOCUMENT_QUALITATIVE_RULE_REF
+            )
+            if not policy_admitted and (
                 active_policy_binding is not None
                 or decision_wire.get("authorization") != "explicit_human_review"
             ):

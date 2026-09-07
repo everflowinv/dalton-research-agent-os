@@ -11,7 +11,9 @@ from datetime import timedelta
 from pathlib import Path
 
 from dalton_core.document_extraction import DocumentExtractionService
+from dalton_core.research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
 from dalton_core.store import content_hash
+from dalton_core.transcript_correction import TranscriptCorrectionConflict, TranscriptCorrectionValidationError
 from tests.p9a_fixtures import mission_params
 from tests.test_document_extraction import ExtractionHarness, NEW_DOC, OWNER
 from tests.test_mission_source_discovery import AUTOMATION
@@ -65,15 +67,28 @@ class AutomationDraftingTests(unittest.TestCase):
             review_id=review["review_id"], expected_review_hash=content_hash(review), offset=0, actor_ref=OWNER,
         )["context"]
 
+    def _policy_with_document_rule(self) -> None:
+        core = self.h.h.core
+        core.create_policy(
+            {**core.active_policy_version().policy,
+             "research_candidate_auto_commit": {"enabled": True, "max_records": 20, "rules": [DOCUMENT_QUALITATIVE_RULE_REF]}},
+            policy_version_id="policy:synthetic-document-qualitative:2", actor_ref=OWNER,
+            change_reason="ADR-0005 fixture: list the mission document qualitative rule",
+        )
+
     def _run_child(self, *extra: str) -> dict:
         fixture = self.root / "fixture.json"
-        context = self._active_context()
-        fixture.write_text(json.dumps({"schema_version": "0.1", "suggestions": [{
-            "quote_id": context["quotes"][0]["quote_id"],
-            "normalized_statement": "Fixture management described cautious client decisions.",
-            "metric_or_aspect": "aspect:client-decisions", "period": "not specified in this window",
-            "basis": "fixture management commentary",
-        }]}), encoding="utf-8")
+        try:
+            context = self._active_context()
+        except StopIteration:
+            context = None  # queue already drained: the fixture output is irrelevant
+        if context is not None:
+            fixture.write_text(json.dumps({"schema_version": "0.1", "suggestions": [{
+                "quote_id": context["quotes"][0]["quote_id"],
+                "normalized_statement": "Fixture management described cautious client decisions.",
+                "metric_or_aspect": "aspect:client-decisions", "period": "not specified in this window",
+                "basis": "fixture management commentary",
+            }]}), encoding="utf-8")
         self._runs = getattr(self, "_runs", 0) + 1
         summary_dir = self.root / "extractions" / f"run-{self._runs}"; summary_dir.mkdir(parents=True)
         command = [sys.executable, "-m", "dalton_core.document_extraction_cli",
@@ -130,6 +145,86 @@ class AutomationDraftingTests(unittest.TestCase):
         refused = self._run_child("--requested-by", "automation:someone-else")
         self.assertEqual(refused["summary"]["drafted"], [])
         self.assertIn("CoverageMissionConflict", refused["summary"]["skipped"][0]["reason"])
+
+
+class AutomationAdmissionTests(AutomationDraftingTests):
+    """ADR-0005 / P9d-17b: drafts become Claims under the mission document rule."""
+
+    def test_correction_scope_for_automation_is_the_mirror_of_the_human_one(self) -> None:
+        authority, manifest = self.h.writer._transcript_corrections(self.h.manifest)
+        context = self._active_context()
+        quote = context["quotes"][0]
+        raw = {"source_start": quote["source_start"], "source_end": quote["source_end"],
+               "source_sha256": quote["source_sha256"], "rationale": "model draft invocation:x via route:y"}
+        common = dict(source_manifest_ref=context["source_manifest_ref"], source_manifest_hash=context["source_manifest_hash"],
+                      source_content_hash=context["source_content_hash"], corrections=[], raw_review=raw)
+        # The automation scope needs an automation actor; the human scope still needs a person.
+        with self.assertRaises(TranscriptCorrectionValidationError):
+            authority.publish("transcript-correction-set:auto:t1", review_scope="automation_verified_raw_span", actor_ref=OWNER, **common)
+        with self.assertRaises(TranscriptCorrectionValidationError):
+            authority.publish("transcript-correction-set:auto:t2", review_scope="verified_raw_span", actor_ref=AUTOMATION, **common)
+        published = authority.publish("transcript-correction-set:auto:t3", review_scope="automation_verified_raw_span",
+                                      actor_ref=AUTOMATION, **common)
+        self.assertEqual((published["review_scope"], published["actor_ref"], published["corrections"]),
+                         ("automation_verified_raw_span", AUTOMATION, []))
+        citation = authority.bind_claim_citation(published["id"], published["content_hash"],
+                                                 source_start=quote["source_start"], source_end=quote["source_start"] + 20)
+        self.assertTrue(citation["claim_eligible"])
+        with self.assertRaises(TranscriptCorrectionConflict):
+            authority.bind_claim_citation(published["id"], published["content_hash"],
+                                          source_start=quote["source_start"], source_end=quote["source_end"] + 1)
+
+    def test_child_admits_drafts_into_formal_claims_and_replays(self) -> None:
+        v2 = self._grant_automation()
+        staging = str(self.root / "staging.sqlite")
+        # Without the policy rule the window is held: nothing staged, the review stays open.
+        held = self._run_child("--candidate-staging", staging)
+        self.assertEqual(held["code"], 0, held["stderr"])
+        self.assertEqual(held["summary"]["admitted"], [])
+        self.assertEqual([(r["status"], "does not list" in r["reason"]) for r in held["summary"]["resolved_reviews"]], [("held", True)])
+        self.assertEqual(held["summary"]["formal_authority_writes"], 0)
+        review = next(r for r in self.h.missions.document_reviews(v2["id"]) if r["state"] == "awaiting_human_extraction")
+        before = self.h.counts()
+
+        self._policy_with_document_rule()
+        run = self._run_child("--candidate-staging", staging)
+        self.assertEqual(run["code"], 0, run["stderr"])
+        summary = run["summary"]
+        admitted = summary["admitted"]
+        self.assertEqual([(a["offset"], a["status"]) for a in admitted], [(0, "admitted")], admitted)
+        self.assertTrue(admitted[0]["claim_version_ref"].startswith("claim-version:"))
+        self.assertEqual(admitted[0]["policy_rule_ref"], DOCUMENT_QUALITATIVE_RULE_REF)
+        self.assertEqual(summary["formal_authority_writes"], 2)
+        self.assertEqual([(r["status"], r["admitted"], r["rejected"]) for r in summary["resolved_reviews"]], [("extraction_staged", 1, 0)])
+        after = self.h.counts()
+        self.assertEqual((after["claim_versions"] - before["claim_versions"], after["evidence_versions"] - before["evidence_versions"]), (1, 1))
+        self.assertEqual(after["transcript_correction_set_versions"] - before["transcript_correction_set_versions"], 1)
+        formal = self.h.h.core.get_claim(admitted[0]["claim_version_ref"])
+        claim = formal["claim"]
+        # The formal actor is the policy reviewer, as for every policy-committed
+        # Claim; the mission automation remains the candidate's producer.
+        self.assertEqual((claim["claim_kind"], claim["value"], claim["unit"], claim["actor_ref"]),
+                         ("qualitative", None, None, "system:research-auto-commit"))
+        self.assertEqual(claim["candidate_producer_ref"] if "candidate_producer_ref" in claim else AUTOMATION, AUTOMATION)
+        self.assertEqual(claim["normalized_statement"], "Fixture management described cautious client decisions.")
+        self.assertEqual(len(formal["evidence_relations"]), 1)
+        resolved = self.h.missions.document_review(review["review_id"])
+        self.assertEqual((resolved["state"], resolved["candidate_claim_version_ref"]), ("extraction_staged", admitted[0]["candidate_claim_ref"]))
+        self.assertIn("ADR-0005 policy admission", resolved["rationale"])
+        # A re-run finds no awaiting review and writes nothing.
+        again = self._run_child("--candidate-staging", staging)
+        self.assertEqual((again["summary"]["reviews_scanned"], again["summary"]["admitted"], again["summary"]["formal_authority_writes"]), (0, [], 0))
+        self.assertEqual(self.h.counts(), after)
+        # Admission itself is idempotent: the same window admitted again is a duplicate.
+        service = DocumentExtractionService(self.h.writer)
+        self.h.writer._candidate_staging = __import__("dalton_core.research_verification", fromlist=["CandidateStagingStore"]).CandidateStagingStore(staging)
+        self.h.writer._candidate_review = __import__("dalton_core.research_review", fromlist=["HumanReviewAuthority"]).HumanReviewAuthority(staging)
+        self.addCleanup(self.h.writer._candidate_staging.close)
+        replay_review = self.h.missions.document_review(review["review_id"])
+        # The review is resolved now, so the context refuses; that is the intended closure.
+        with self.assertRaises(Exception):
+            service.admit_suggestions(review_id=review["review_id"], expected_review_hash=content_hash(replay_review), offset=0, actor_ref=AUTOMATION)
+        self.assertEqual(self.h.counts(), after)
 
 
 class HostKeepaliveTests(unittest.TestCase):

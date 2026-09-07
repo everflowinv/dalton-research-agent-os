@@ -24,6 +24,12 @@ an expansion.  Everything else in every record is byte-identical to its prior.
 ``--live``          applies the chain through the writer with the governance
                     CLI's ephemeral ``human:lumos`` principal, one op at a time,
                     each later step bound to the hash the writer returned.
+
+Second run (P9d-17b): ``--add-auto-commit-rule`` lists the mission document
+qualitative rule (``research-auto-commit:mission-document-qualitative:v1``) in
+``research_candidate_auto_commit.rules`` so policy may admit automation
+drafts as Claims.  Same cascade: policy, constitution, mission, each rebinding
+only what changed; the mandate is republished only if it lacks the budget.
 """
 
 from __future__ import annotations
@@ -88,7 +94,7 @@ def _read_current(connection: sqlite3.Connection) -> dict[str, Any]:
             "policy_id": policy_row["policy_version_id"], "policy": json.loads(policy_row["policy_json"])}
 
 
-def build_chain(current: dict[str, Any], *, now: str) -> dict[str, Any]:
+def build_chain(current: dict[str, Any], *, now: str, add_rules: list[str] | None = None) -> dict[str, Any]:
     mission = current["mission"]
     budget = dict(mission["budget"])
     research_budget = {
@@ -98,8 +104,20 @@ def build_chain(current: dict[str, Any], *, now: str) -> dict[str, Any]:
     }
     policy_wire = current["policy"]
     policy_body = dict(policy_wire["policy"] if "policy" in policy_wire else policy_wire)
-    if "research_budget" in policy_body:
-        raise SystemExit("active policy already carries research_budget; nothing to do")
+    changed = False
+    if "research_budget" not in policy_body:
+        policy_body["research_budget"] = research_budget
+        changed = True
+    auto = dict(policy_body.get("research_candidate_auto_commit") or {})
+    rules = list(auto.get("rules") or [])
+    for rule in add_rules or []:
+        if rule not in rules:
+            rules.append(rule)
+            changed = True
+    if add_rules:
+        policy_body["research_candidate_auto_commit"] = {**auto, "rules": rules}
+    if not changed:
+        raise SystemExit("active policy already carries everything requested; nothing to do")
     version = int(current["policy_id"].rsplit("-", 1)[1]) + 1
     mandate = current["mandate"]
     mandate_version = int(mandate["version"]) + 1
@@ -108,12 +126,16 @@ def build_chain(current: dict[str, Any], *, now: str) -> dict[str, Any]:
     mission_version = int(mission["version"]) + 1
     return {
         "research_budget": research_budget,
+        "mandate_needed": "research_budget" not in mandate["constraints"],
         "policy": {
-            "policy": {**policy_body, "research_budget": research_budget},
+            "policy": policy_body,
             "policy_version_id": f"policy-{version}", "version_number": version, "activate": True,
             "policy_ref": policy_wire.get("policy_ref", "commit-gate"), "effective_from": now,
             "effective_until": None, "prior_version_ref": current["policy_id"],
-            "change_reason": CHANGE_REASON, "content_hash_value": None,
+            "change_reason": CHANGE_REASON if not add_rules else (
+                "ADR-0005 / P9d-17b: list the mission document qualitative rule so policy may admit "
+                "automation-drafted qualitative Claims bound to exact raw spans; every other rule unchanged"),
+            "content_hash_value": None,
         },
         "mandate": {
             "mandate_ref": MANDATE_REF, "objective": mandate["objective"],
@@ -149,9 +171,14 @@ def apply_chain(chain: dict[str, Any], apply: Callable[[str, dict[str, Any]], di
     policy = apply("create_policy", chain["policy"])
     policy_ref, policy_hash = _ref_hash(policy, chain["policy"]["policy_version_id"])
     out["policy"] = {"ref": policy_ref, "hash": policy_hash}
-    mandate = apply("create_mandate", chain["mandate"])
-    mandate_ref, mandate_hash = _ref_hash(mandate, chain["mandate"]["version_id"])
-    out["mandate"] = {"ref": mandate_ref, "hash": mandate_hash}
+    if chain["mandate_needed"]:
+        mandate = apply("create_mandate", chain["mandate"])
+        mandate_ref, mandate_hash = _ref_hash(mandate, chain["mandate"]["version_id"])
+        out["mandate"] = {"ref": mandate_ref, "hash": mandate_hash}
+    else:
+        current_mandate = chain["mission"]["bindings"]["mandate_version"]
+        mandate_ref, mandate_hash = current_mandate["ref"], current_mandate["hash"]
+        out["mandate"] = {"ref": mandate_ref, "hash": mandate_hash, "status": "unchanged"}
     constitution_params = json.loads(json.dumps(chain["constitution"]))
     constitution_params["bindings"]["governance_policy_version"] = {"ref": policy_ref, "hash": policy_hash}
     constitution_params["bindings"]["mandate_version"] = {"ref": mandate_ref, "hash": mandate_hash}
@@ -178,7 +205,7 @@ def _ref_hash(record: dict[str, Any], expected_ref: str) -> tuple[str, str]:
     return ref, digest
 
 
-def rehearse(state_dir: Path, target: Path) -> dict[str, Any]:
+def rehearse(state_dir: Path, target: Path, *, add_rules: list[str] | None = None) -> dict[str, Any]:
     target.mkdir(parents=True, exist_ok=True)
     for name in ("core.sqlite", "core.sqlite-wal", "core.sqlite-shm"):
         source = state_dir / name
@@ -187,7 +214,7 @@ def rehearse(state_dir: Path, target: Path) -> dict[str, Any]:
     store = DaltonStore(str(target / "core.sqlite"))
     try:
         current = _read_current(store.connection)
-        chain = build_chain(current, now=datetime.now(timezone.utc).isoformat(timespec="microseconds"))
+        chain = build_chain(current, now=datetime.now(timezone.utc).isoformat(timespec="microseconds"), add_rules=add_rules)
         agenda = AgendaStore(store)
         constitutions = ResearchConstitutionAuthority(store)
         missions = CoverageMissionAuthority(store)
@@ -225,19 +252,21 @@ def rehearse(state_dir: Path, target: Path) -> dict[str, Any]:
                 grants[source] = "granted"
             except Exception as exc:
                 grants[source] = f"{type(exc).__name__}: {exc}"
-        return {"chain": result, "research_budget": chain["research_budget"], "outer_budget": outer, "automation_grants": grants}
+        policy_rules = store.active_policy_version().to_dict()["policy"].get("research_candidate_auto_commit", {}).get("rules")
+        return {"chain": result, "research_budget": chain["research_budget"], "outer_budget": outer,
+                "automation_grants": grants, "auto_commit_rules": policy_rules}
     finally:
         store.close()
 
 
-def live(state_dir: Path) -> dict[str, Any]:
+def live(state_dir: Path, *, add_rules: list[str] | None = None) -> dict[str, Any]:
     from dalton_core.governance_cli import ephemeral_call
     read = sqlite3.connect(f"file:{state_dir / 'core.sqlite'}?mode=ro", uri=True)
     try:
         current = _read_current(read)
     finally:
         read.close()
-    chain = build_chain(current, now=datetime.now(timezone.utc).isoformat(timespec="microseconds"))
+    chain = build_chain(current, now=datetime.now(timezone.utc).isoformat(timespec="microseconds"), add_rules=add_rules)
     token_config = state_dir / "writer-tokens.json"
     socket = state_dir / "run" / "writer.sock"
 
@@ -254,8 +283,12 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--rehearse", type=Path, help="copy the Core here and apply the chain on the copy")
     mode.add_argument("--live", action="store_true", help="apply through the live writer as human:lumos")
+    parser.add_argument("--add-auto-commit-rule", action="append", default=[],
+                        help="list this research auto-commit rule in the policy (P9d-17b)")
     args = parser.parse_args(argv)
-    result = rehearse(args.state_dir, args.rehearse) if args.rehearse is not None else live(args.state_dir)
+    rules = list(args.add_auto_commit_rule)
+    result = (rehearse(args.state_dir, args.rehearse, add_rules=rules) if args.rehearse is not None
+              else live(args.state_dir, add_rules=rules))
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=1))
     return 0
 

@@ -734,6 +734,100 @@ class DocumentExtractionService:
         return self.view(review_id=context["review_id"], expected_review_hash=context["review_hash"],
                          offset=context["offset"], actor_ref=actor_ref)
 
+    ADMISSION_GRANTS = frozenset({"claim", "evidence", "stage_record"})
+
+    def admit_suggestions(self, *, review_id, expected_review_hash, offset, actor_ref):
+        """ADR-0005 / P9d-17b: stage and policy-admit one window's drafted suggestions.
+
+        Mission automation only.  For each persisted suggestion of the exact
+        window: publish (or reuse) an ``automation_verified_raw_span``
+        correction set for the suggestion's quote, bind the claim citation,
+        stage the qualitative candidate, and promote it through
+        ``commit_policy_candidate`` under the mission document qualitative
+        rule.  Every step is idempotent, so a re-run reports duplicates and
+        writes nothing new.  A suggestion the policy refuses is reported with
+        its reason and never retried for money.  Public-web sources are gated
+        until they have a citation authority of their own (P9d-17c).
+        """
+
+        if not isinstance(actor_ref, str) or not actor_ref.startswith("automation:"):
+            raise ResearchVerificationError("suggestion admission is a mission automation action")
+        context = self.context(review_id, expected_review_hash, offset, actor_ref)
+        mission = self.writer.coverage_mission.mission(context["mission_version_ref"])
+        missing = sorted(self.ADMISSION_GRANTS - set(mission["autonomy"]["may_write"]))
+        if missing:
+            return {"status": "gated", "reason": f"mission does not grant {missing}", "admitted": []}
+        if context["source_ref"] == PUBLIC_WEB_SOURCE_REF:
+            return {"status": "gated", "reason": WEB_STAGING_GATE_REASON, "admitted": []}
+        from .research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
+        policy = self.writer.store.active_policy_version().to_dict()["policy"]
+        rule = policy.get("research_candidate_auto_commit") or {}
+        if rule.get("enabled") is not True or DOCUMENT_QUALITATIVE_RULE_REF not in (rule.get("rules") or []):
+            # A missing policy rule is a gate on the mission, not a judgment on
+            # the suggestions: hold the window rather than refuse each one.
+            return {"status": "gated", "reason": "active governance policy does not list "
+                    + DOCUMENT_QUALITATIVE_RULE_REF, "admitted": []}
+        drafted = self._suggestions(context)
+        if drafted["status"] != "succeeded":
+            return {"status": drafted["status"], "admitted": []}
+        staging = self.writer.candidate_staging
+        reviewer = self.writer.candidate_review
+        row = self.writer.store.connection.execute(
+            "SELECT ticket_ref FROM coverage_mission_discovered_documents WHERE record_id=?",
+            (self.writer.coverage_mission.document_review(review_id)["discovered_document_ref"],),
+        ).fetchone()
+        launcher = self.writer.acquisition_launcher
+        manifest = (launcher.read_completed_manifest(row["ticket_ref"], context["document_ref"])
+                    if row["ticket_ref"] else launcher.locate_completed_manifest(context["document_ref"]))
+        authority, _ = self.writer._transcript_corrections(manifest)
+        from .transcript_candidate_staging import stage_transcript_qualitative_candidate
+        results = []
+        for suggestion in drafted["suggestions"]:
+            quote = suggestion["citation"]
+            start, end = quote["source_start"], quote["source_end"]
+            entry = {"suggestion_ref": suggestion["id"], "source_start": start, "source_end": end}
+            try:
+                set_ref = "transcript-correction-set:auto:" + content_hash({
+                    "source_manifest_hash": context["source_manifest_hash"], "start": start, "end": end})[:32]
+                latest = self.writer.store.connection.execute(
+                    "SELECT version_id,content_hash FROM transcript_correction_set_versions "
+                    "WHERE correction_set_ref=? ORDER BY version_number DESC LIMIT 1", (set_ref,),
+                ).fetchone()
+                if latest is None:
+                    correction = authority.publish(
+                        set_ref, source_manifest_ref=context["source_manifest_ref"],
+                        source_manifest_hash=context["source_manifest_hash"],
+                        source_content_hash=context["source_content_hash"],
+                        review_scope="automation_verified_raw_span", corrections=[], actor_ref=actor_ref,
+                        raw_review={"source_start": start, "source_end": end, "source_sha256": quote["source_sha256"],
+                                    "rationale": (f"ADR-0005 mission automation: model draft {suggestion['invocation_ref']} "
+                                                  f"via {suggestion['route_ref']}; suggestion {suggestion['id']}")},
+                    )
+                else:
+                    correction = authority.resolve(latest["version_id"], latest["content_hash"])["correction_set"]
+                citation = authority.bind_claim_citation(
+                    correction["id"], correction["content_hash"], source_start=start, source_end=end)
+                key = "document-admission:" + content_hash({"suggestion": suggestion["id"], "context": context["content_hash"]})
+                staged = stage_transcript_qualitative_candidate(
+                    self.writer.store, staging, correction_set_ref=correction["id"], citation_ref=citation["id"],
+                    subject_ref=context["company_ref"], metric_or_aspect=suggestion["metric_or_aspect"],
+                    period=suggestion["period"], basis=suggestion["basis"],
+                    normalized_statement=suggestion["normalized_statement"], actor_ref=actor_ref,
+                    idempotency_key=key, artifact_reader=self.writer._read_transcript_artifact)
+                bundle = reviewer.candidate_authority_bundle(staged["claim"]["id"])
+                promotion = self.writer.store.commit_policy_candidate(**bundle, idempotency_key="policy-ledger:" + key)
+                entry.update({"status": "duplicate" if promotion.get("status") == "duplicate" else "admitted",
+                              "candidate_claim_ref": staged["claim"]["id"],
+                              "claim_version_ref": promotion.get("claim_version_ref"),
+                              "evidence_version_ref": promotion.get("evidence_version_ref"),
+                              "policy_rule_ref": (promotion.get("authorization") or {}).get("rule_ref")})
+            except Exception as exc:  # one refused suggestion must not block the rest; the reason is the record
+                entry.update({"status": "rejected", "reason": f"{type(exc).__name__}: {exc}"})
+            results.append(entry)
+        status = "admitted" if any(r["status"] in ("admitted", "duplicate") for r in results) else (
+            "rejected" if results else "nothing_to_admit")
+        return {"status": status, "admitted": results, "suggestion_count": len(results)}
+
     def stage(self, *, review_id, expected_review_hash, offset, expected_context_hash,
               suggestion_ref, suggestion_hash, request_id, normalized_statement, metric_or_aspect,
               period, basis, source_start, source_end, raw_text, rationale, confirm_citation,

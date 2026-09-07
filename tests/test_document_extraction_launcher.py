@@ -85,8 +85,8 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(self.coordinator.dispatch_once(), {"awaiting": 0, "status": "idle"})
         self._awaiting_review()
         tick = self.coordinator.dispatch_once()
-        self.assertEqual((tick["status"], tick["awaiting"], tick["max_windows"]), ("launched", 1, 2))
-        self.assertEqual(self.launcher.starts, [{"requested_by": None, "max_windows": 2}])
+        self.assertEqual((tick["status"], tick["awaiting"], tick["max_windows"]), ("launched", 1, 4))
+        self.assertEqual(self.launcher.starts, [{"requested_by": None, "max_windows": 4}])
         self.assertEqual(self.coordinator.dispatch_once()["status"], "busy")
         # A child that drafted something is followed by another child next tick.
         self.launcher.finish({"status": "succeeded", "drafted": [{"offset": 0}], "stop_reason": "max_windows",
@@ -128,6 +128,10 @@ class LauncherTests(unittest.TestCase):
                 launcher.status("document-extraction:" + "0" * 24)
             with self.assertRaises(ExtractionLaunchRejected):
                 launcher.status("public-web-fetch:" + "0" * 24)
+            staged = DocumentExtractionLauncher(state_dir=root, model_config_path=root / "cfg.json", candidate_staging=root / "s.sqlite")
+            command = staged._command(requested_by=None, max_windows=3, ticket_dir=root)
+            self.assertIn("--candidate-staging", command)
+            self.assertEqual(command[command.index("--max-windows") + 1], "3")
             missing = DocumentExtractionLauncher(state_dir=root, model_config_path=root / "absent.json")
             with self.assertRaises(ExtractionLaunchRejected):
                 missing.start()

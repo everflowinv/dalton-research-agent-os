@@ -2025,18 +2025,32 @@ class CoverageMissionAuthority:
         rationale: str | None = None,
         expected_review_hash: str | None = None,
     ) -> dict[str, Any]:
-        """Human-only close of an extraction review.
+        """Close an extraction review.
 
-        ``extraction_staged`` binds the transcript candidate the human staged
-        through the existing ADR-0003 B path; ``dismissed`` records why the
-        document is not worth extracting.  Automation cannot resolve reviews.
+        ``extraction_staged`` binds the candidate that was staged, by a person
+        through the ADR-0003 B path or by the mission's automation through the
+        ADR-0005 policy path; ``dismissed`` records why the document is not
+        worth extracting.  An automation actor must be the review's mission
+        principal; anything else is refused.
         """
 
         review_id = _text(review_id, "review_id")
         resolution = _vocabulary(
             resolution, ("extraction_staged", "dismissed"), "resolution"
         )
-        actor_ref = _human(actor_ref, "actor_ref")
+        actor_ref = _actor(actor_ref, "actor_ref")
+        if _HUMAN_RE.fullmatch(actor_ref) is None:
+            owner = self.connection.execute(
+                "SELECT mission_version_ref FROM coverage_mission_document_reviews WHERE review_id=?",
+                (review_id,),
+            ).fetchone()
+            if owner is None:
+                raise CoverageMissionNotFound("document review was not found")
+            principal = self.mission(owner["mission_version_ref"])["autonomy"]["automation_principal"]
+            if actor_ref != principal:
+                raise CoverageMissionValidationError(
+                    "document review resolution requires a human or the review's mission principal"
+                )
         if expected_review_hash is not None:
             expected_review_hash = _sha256(expected_review_hash, "expected_review_hash")
         if resolution == "extraction_staged":

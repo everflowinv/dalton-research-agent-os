@@ -25,7 +25,7 @@
     "source_event_ref":{"type":"string","pattern":"^governance-policy:"},
     "policy_version_ref":{"type":"string","minLength":1},
     "policy_version_hash":{"$ref":"#/$defs/hash"},
-    "rule_ref":{"enum":["research-auto-commit:sec-public-filing-count:v1","research-auto-commit:sec-public-company-facts-growth:v1"]},
+    "rule_ref":{"enum":["research-auto-commit:sec-public-filing-count:v1","research-auto-commit:sec-public-company-facts-growth:v1","research-auto-commit:sec-public-company-facts-growth-annual:v1","research-auto-commit:mission-document-qualitative:v1"]},
     "content_hash":{"$ref":"#/$defs/hash"}
   },
   "$defs":{

@@ -44,7 +44,15 @@ _UTTERANCE_EVIDENCE_KINDS = frozenset({
 _UTTERANCE_LEVEL_CORRECTIONS = frozenset({
     "numeric", "negation", "semantic", "speaker_label",
 })
-_REVIEW_SCOPES = frozenset({"targeted_flags", "full_document", "verified_raw_span"})
+# ADR-0005 / P9d-17b: ``automation_verified_raw_span`` is the mission
+# automation's counterpart of ``verified_raw_span``: the span is verified
+# byte-exact against the original the same way, the actor is the mission's
+# automation principal rather than a person, and the rationale names the
+# model draft (invocation and route) the span came from.  Everything a
+# citation binding checks is identical for the two scopes.
+_REVIEW_SCOPES = frozenset({"targeted_flags", "full_document", "verified_raw_span", "automation_verified_raw_span"})
+RAW_SPAN_SCOPES = frozenset({"verified_raw_span", "automation_verified_raw_span"})
+_AUTOMATION_RE = re.compile(r"^automation:[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _CITATION_FIELDS = {
     "schema_version", "id", "created_at", "source_manifest_ref",
     "source_manifest_hash", "source_content_hash", "source_start",
@@ -85,6 +93,15 @@ def _hash(value: Any, name: str) -> str:
     value = _text(value, name)
     if _HASH_RE.fullmatch(value) is None:
         raise TranscriptCorrectionValidationError(f"{name} must be lowercase SHA-256")
+    return value
+
+
+def _automation(value: Any) -> str:
+    value = _text(value, "actor_ref")
+    if _AUTOMATION_RE.fullmatch(value) is None:
+        raise TranscriptCorrectionValidationError(
+            "automation raw-span admission requires an automation: actor"
+        )
     return value
 
 
@@ -319,7 +336,7 @@ def validate_persisted_transcript_claim_citation(
         )
     accepted: list[int] = []
     unresolved: list[int] = []
-    if correction_set.get("review_scope") == "verified_raw_span":
+    if correction_set.get("review_scope") in RAW_SPAN_SCOPES:
         reviewed = correction_set.get("raw_review", {})
         if not reviewed.get("source_start", -1) <= binding["source_start"] < binding["source_end"] <= reviewed.get("source_end", -1):
             raise TranscriptCorrectionConflict("citation exceeds human-reviewed raw span")
@@ -717,15 +734,16 @@ class TranscriptCorrectionAuthority:
         source_manifest_ref = _text(source_manifest_ref, "source_manifest_ref")
         source_manifest_hash = _hash(source_manifest_hash, "source_manifest_hash")
         source_content_hash = _hash(source_content_hash, "source_content_hash")
-        actor_ref = _human(actor_ref)
         if review_scope not in _REVIEW_SCOPES:
             raise TranscriptCorrectionValidationError("review_scope is unsupported")
+        actor_ref = _automation(actor_ref) if review_scope == "automation_verified_raw_span" else _human(actor_ref)
         manifest, original = self._source(
             source_manifest_ref, source_manifest_hash, source_content_hash
         )
-        if review_scope == "verified_raw_span":
-            # Separate explicit human no-correction admission. Existing ASR
-            # correction scopes still require at least one evidence-bound entry.
+        if review_scope in RAW_SPAN_SCOPES:
+            # Separate explicit no-correction admission of one bounded span,
+            # by a person or by the mission automation (ADR-0005).  Existing
+            # ASR correction scopes still require at least one evidence-bound entry.
             raw_review = _closed(raw_review, {"source_start", "source_end", "source_sha256", "rationale"}, "raw_review")
             start, end = raw_review["source_start"], raw_review["source_end"]
             if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(original) or end-start > 1200:
@@ -831,7 +849,7 @@ class TranscriptCorrectionAuthority:
             correction_set["source_manifest_hash"],
             correction_set["source_content_hash"],
         )
-        if correction_set.get("review_scope") == "verified_raw_span":
+        if correction_set.get("review_scope") in RAW_SPAN_SCOPES:
             reviewed = correction_set["raw_review"]
             start, end = reviewed["source_start"], reviewed["source_end"]
             if (type(start) is not int or type(end) is not int or not 0 <= start < end <= len(original)
@@ -924,7 +942,7 @@ class TranscriptCorrectionAuthority:
                 "claim citation source span is invalid"
             )
         correction_set = resolved["correction_set"]
-        if correction_set.get("review_scope") == "verified_raw_span":
+        if correction_set.get("review_scope") in RAW_SPAN_SCOPES:
             reviewed = correction_set["raw_review"]
             if not reviewed["source_start"] <= source_start < source_end <= reviewed["source_end"]:
                 raise TranscriptCorrectionConflict("citation exceeds human-reviewed raw span")

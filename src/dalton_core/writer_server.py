@@ -3358,6 +3358,7 @@ def main(argv: list[str] | None = None) -> int:
                 scheduler_db=args.scheduler,
                 connector_governance=args.connector_governance,
                 web_fetch_governance=args.web_fetch_governance,
+                candidate_staging=args.candidate_staging,
             )
         server = WriterServer(
             args.db,

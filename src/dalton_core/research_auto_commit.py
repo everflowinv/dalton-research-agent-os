@@ -39,9 +39,19 @@ COMPANY_FACTS_RULE_REFS: dict[str, str] = {
     "10-Q": COMPANY_FACTS_RULE_REF,
     "10-K": COMPANY_FACTS_ANNUAL_RULE_REF,
 }
-KNOWN_RULE_REFS: frozenset[str] = frozenset({RULE_REF, *COMPANY_FACTS_RULE_REFS.values()})
+# ADR-0005 / P9d-17b: a qualitative candidate drafted by the mission's own
+# automation from an acquired, verified original, bound to an exact raw span
+# through an automation_verified_raw_span correction set, may enter the Ledger
+# under the active policy when this rule is listed.  No number is asserted
+# (value/unit/scale are null); the SEC lanes keep numeric authority.
+DOCUMENT_QUALITATIVE_RULE_REF = "research-auto-commit:mission-document-qualitative:v1"
+KNOWN_RULE_REFS: frozenset[str] = frozenset({RULE_REF, *COMPANY_FACTS_RULE_REFS.values(), DOCUMENT_QUALITATIVE_RULE_REF})
 _RULE_FINDINGS: dict[str, str] = {
     RULE_REF: "matched exact deterministic SEC filing-count rule",
+    DOCUMENT_QUALITATIVE_RULE_REF: (
+        "matched the mission document qualitative admission rule: automation draft, "
+        "exact raw-span citation, verified original, no numeric assertion"
+    ),
     COMPANY_FACTS_RULE_REF: "matched exact deterministic SEC company-facts growth rule",
     COMPANY_FACTS_ANNUAL_RULE_REF: (
         "matched exact deterministic SEC company-facts annual-filing quarterly growth rule"
@@ -111,7 +121,118 @@ def _policy_rule(policy_version: Mapping[str, Any]) -> dict[str, Any]:
     max_records = rule["max_records"]
     if isinstance(max_records, bool) or not isinstance(max_records, int) or not 1 <= max_records <= 100:
         raise ResearchAutoCommitRejected("research auto-commit max_records is invalid")
-    return {**dict(rule), "selected_rule": rules[0]}
+    return {**dict(rule), "selected_rule": rules[0], "rules": rules}
+
+
+def policy_lists_document_rule(policy_version: Mapping[str, Any]) -> bool:
+    """True only for a well-formed active policy that lists the document rule."""
+
+    try:
+        return DOCUMENT_QUALITATIVE_RULE_REF in _policy_rule(policy_version)["rules"]
+    except ResearchAutoCommitRejected:
+        return False
+
+
+def _decision(policy_version: Mapping[str, Any], *, claim_wire: Mapping[str, Any],
+              evidence_wire: Mapping[str, Any], rule_ref: str, rationale: str) -> dict[str, Any]:
+    semantics = {
+        field: claim_wire[field]
+        for field in ("subject_ref", "metric_or_aspect", "period", "basis", "normalized_statement")
+    }
+    policy_ref = policy_version.get("policy_version_id")
+    policy_hash = policy_version.get("content_hash")
+    if not isinstance(policy_ref, str) or not isinstance(policy_hash, str):
+        raise ResearchAutoCommitRejected("active policy version binding is unavailable")
+    created_at = max(claim_wire["created_at"], str(policy_version.get("created_at", "")))
+    base = {
+        "schema_version": SCHEMA_VERSION,
+        "id": "policy-commit:" + content_hash({
+            "candidate_claim_ref": claim_wire["id"], "candidate_claim_hash": claim_wire["content_hash"],
+            "policy_version_ref": policy_ref, "policy_version_hash": policy_hash, "rule_ref": rule_ref,
+        }),
+        "created_at": created_at,
+        "candidate_claim_ref": claim_wire["id"], "candidate_claim_hash": claim_wire["content_hash"],
+        "candidate_evidence_ref": evidence_wire["id"], "candidate_evidence_hash": evidence_wire["content_hash"],
+        "verdict": "accept", "reviewed_semantics": semantics, "proposed_revisions": None, "relation": "supports",
+        "rationale": rationale, "findings": [_RULE_FINDINGS[rule_ref]],
+        "reviewer_ref": ACTOR_REF, "authorization": "versioned_governance_policy", "source": "governance_policy",
+        "source_event_ref": f"governance-policy:{policy_ref}:{policy_hash}",
+        "policy_version_ref": policy_ref, "policy_version_hash": policy_hash, "rule_ref": rule_ref,
+    }
+    base["content_hash"] = content_hash(base)
+    return validate_policy_commit_decision(base)
+
+
+def _authorize_document_qualitative(
+    *, connection: sqlite3.Connection, policy_version: Mapping[str, Any],
+    evidence_wire: Mapping[str, Any], claim_wire: Mapping[str, Any],
+) -> dict[str, Any]:
+    """ADR-0005: admit one automation-drafted qualitative candidate from a verified original."""
+
+    from .transcript_correction import (
+        TRANSCRIPT_EVIDENCE_SOURCE_TYPE, TranscriptCorrectionError,
+        validate_persisted_transcript_claim_citation,
+    )
+    if (
+        evidence_wire["version"] != 1 or evidence_wire["prior_version_ref"] is not None
+        or claim_wire["version"] != 1 or claim_wire["prior_version_ref"] is not None
+    ):
+        raise ResearchAutoCommitRejected("revised or chained candidates require escalation")
+    if claim_wire["candidate_evidence_refs"] != [{"ref": evidence_wire["id"], "hash": evidence_wire["content_hash"]}]:
+        raise ResearchAutoCommitRejected("candidate claim does not bind the exact evidence")
+    if (
+        evidence_wire["source_verification_ref"] != claim_wire["source_verification_ref"]
+        or evidence_wire["source_verification_hash"] != claim_wire["source_verification_hash"]
+    ):
+        raise ResearchAutoCommitRejected("candidate verification bindings disagree")
+    actor = claim_wire["actor_ref"]
+    if not isinstance(actor, str) or not actor.startswith("automation:") or evidence_wire["actor_ref"] != actor:
+        raise ResearchAutoCommitRejected("document qualitative rule admits only mission automation candidates")
+    if any(claim_wire.get(field) is not None for field in ("value", "unit", "scale", "currency")):
+        raise ResearchAutoCommitRejected("document qualitative rule admits no numeric assertion")
+    if re.search(r"[0-9%$]", claim_wire["normalized_statement"]):
+        raise ResearchAutoCommitRejected("document qualitative rule admits no numeric statement")
+    if evidence_wire["source_type"] != TRANSCRIPT_EVIDENCE_SOURCE_TYPE or evidence_wire["source_ref"] != "source:alphaengine":
+        raise ResearchAutoCommitRejected("document qualitative rule requires an acquired AlphaEngine original")
+    refs = evidence_wire["artifact_refs"]
+    if len(refs) != 2 or not refs[1]["ref"].startswith("transcript-claim-citation-binding:"):
+        raise ResearchAutoCommitRejected("document candidate is missing its exact citation binding")
+    try:
+        citation = validate_persisted_transcript_claim_citation(connection, refs[1]["ref"], refs[1]["hash"])
+    except (TranscriptCorrectionError, sqlite3.Error) as exc:
+        raise ResearchAutoCommitRejected("document candidate citation authority is unavailable") from exc
+    if not citation.get("claim_eligible"):
+        raise ResearchAutoCommitRejected("document candidate citation is not claim eligible")
+    row = connection.execute(
+        "SELECT record_json,content_hash FROM transcript_correction_set_versions WHERE version_id=?",
+        (citation["correction_set_version_ref"],),
+    ).fetchone()
+    if row is None or row["content_hash"] != citation["correction_set_version_hash"]:
+        raise ResearchAutoCommitRejected("document candidate correction set is not exact")
+    correction_set = json.loads(row["record_json"])
+    if correction_set.get("review_scope") != "automation_verified_raw_span" or correction_set.get("actor_ref") != actor:
+        raise ResearchAutoCommitRejected(
+            "document qualitative rule requires an automation-verified raw span by the same principal"
+        )
+    source_row = connection.execute(
+        "SELECT record_json,content_hash FROM connector_source_envelopes WHERE source_envelope_id=?",
+        (evidence_wire["source_envelope_ref"],),
+    ).fetchone()
+    source = _record(source_row, "SourceEnvelope")
+    # A multi-page acquisition binds its page SourceEnvelope (status partial
+    # with a cursor); the Ledger writer re-verifies that the citation's raw
+    # bytes are exactly that envelope's artifact.  Here: right source, right
+    # operation, exact hash.
+    if (
+        source["content_hash"] != evidence_wire["source_envelope_hash"]
+        or source.get("source") != "source:alphaengine" or source.get("operation") != "get_document"
+    ):
+        raise ResearchAutoCommitRejected("document candidate source is not an acquired AlphaEngine original")
+    return _decision(
+        policy_version, claim_wire=claim_wire, evidence_wire=evidence_wire,
+        rule_ref=DOCUMENT_QUALITATIVE_RULE_REF,
+        rationale="Mission automation draft bound to an exact verified raw span of an acquired original (ADR-0005).",
+    )
 
 
 def validate_policy_commit_decision(value: Mapping[str, Any]) -> dict[str, Any]:
@@ -174,10 +295,18 @@ def authorize_policy_candidate(
     evidence_wire = validate_candidate_evidence(evidence)
     claim_wire = validate_candidate_claim(claim)
     if claim_wire["claim_kind"] != "quantitative":
-        # ADR-0003 option B: qualitative (transcript) candidates are never
-        # policy-authorized; they require explicit human review.
-        raise ResearchAutoCommitRejected(
-            "qualitative candidates require explicit human review; no policy rule admits them"
+        # ADR-0005: a qualitative mission-document candidate is policy
+        # authorized only under the explicit document rule; otherwise, and
+        # whenever the policy is absent or malformed, it still requires human
+        # review (ADR-0003 B).
+        if not policy_lists_document_rule(policy_version):
+            raise ResearchAutoCommitRejected(
+                "qualitative candidates require explicit human review; the active policy "
+                "does not list the mission document qualitative rule"
+            )
+        return _authorize_document_qualitative(
+            connection=connection, policy_version=policy_version,
+            evidence_wire=evidence_wire, claim_wire=claim_wire,
         )
     rule = _policy_rule(policy_version)
     selected_rule = rule["selected_rule"]
@@ -481,5 +610,7 @@ __all__ = [
     "ResearchAutoCommitError",
     "ResearchAutoCommitRejected",
     "authorize_policy_candidate",
+    "DOCUMENT_QUALITATIVE_RULE_REF",
+    "policy_lists_document_rule",
     "validate_policy_commit_decision",
 ]

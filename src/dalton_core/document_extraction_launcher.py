@@ -30,7 +30,7 @@ from .store import canonical_json
 
 TICKET_SCHEMA_VERSION = "0.1"
 TICKET_PREFIX = "document-extraction"
-DEFAULT_MAX_WINDOWS_PER_TICK = 2
+DEFAULT_MAX_WINDOWS_PER_TICK = 4
 IDLE_HOLD = timedelta(hours=1)
 _TICKET_RE = re.compile(r"document-extraction:[0-9a-f]{24}\Z")
 _AUTOMATION_RE = re.compile(r"automation:[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
@@ -80,6 +80,7 @@ class DocumentExtractionLauncher:
         scheduler_db: str | Path | None = None,
         connector_governance: str | Path | None = None,
         web_fetch_governance: str | Path | None = None,
+        candidate_staging: str | Path | None = None,
         mode_args: Sequence[str] = (),
         python_executable: str | None = None,
         clock: Callable[[], datetime] | None = None,
@@ -90,6 +91,7 @@ class DocumentExtractionLauncher:
         self.scheduler_db = None if scheduler_db is None else Path(scheduler_db).expanduser().resolve()
         self.connector_governance = None if connector_governance is None else Path(connector_governance).expanduser().resolve()
         self.web_fetch_governance = None if web_fetch_governance is None else Path(web_fetch_governance).expanduser().resolve()
+        self.candidate_staging = None if candidate_staging is None else Path(candidate_staging).expanduser().resolve()
         self.mode_args = tuple(mode_args)
         self.python_executable = python_executable or sys.executable
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -117,6 +119,8 @@ class DocumentExtractionLauncher:
             command += ["--connector-governance", str(self.connector_governance)]
         if self.web_fetch_governance is not None:
             command += ["--web-fetch-governance", str(self.web_fetch_governance)]
+        if self.candidate_staging is not None:
+            command += ["--candidate-staging", str(self.candidate_staging)]
         if requested_by is not None:
             command += ["--requested-by", requested_by]
         command += list(self.mode_args)

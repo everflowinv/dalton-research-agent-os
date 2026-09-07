@@ -64,7 +64,7 @@ class ExtractionHost:
 
     def __init__(self, *, state_dir: Path, spool_dir: Path, scheduler_db: Path,
                  connector_governance: Path | None, web_fetch_governance: Path | None,
-                 model_config: dict[str, Any] | None) -> None:
+                 model_config: dict[str, Any] | None, candidate_staging: Path | None = None) -> None:
         self.store = DaltonStore(str(state_dir / "core.sqlite"))
         self._connectors = ConnectorStore(self.store)
         self.observability = ObservabilityStore(self.store)
@@ -83,7 +83,15 @@ class ExtractionHost:
         )
         self._document_extraction_model_config = model_config
         self._document_extraction_worker_factory = None
-        self.candidate_staging = None
+        # ADR-0005 / P9d-17b: staging and admission need the shared candidate
+        # staging authority the cockpit review plane also opens.
+        self._candidate_staging = None
+        self._candidate_review = None
+        if candidate_staging is not None:
+            from .research_review import HumanReviewAuthority
+            from .research_verification import CandidateStagingStore
+            self._candidate_staging = CandidateStagingStore(str(candidate_staging))
+            self._candidate_review = HumanReviewAuthority(str(candidate_staging))
         # The service opens the router and the budget ledger read-only to
         # bind a context, and a read-only WAL open refuses when nothing
         # holds the file (no sidecars).  The thesis-impact ledger is closed
@@ -96,6 +104,53 @@ class ExtractionHost:
             from .thesis_impact_budget import ThesisImpactBudgetStore
             self._keepalive.append(ThesisImpactBudgetStore(model_config["budget_db"]))
             self._keepalive.append(ModelRouter(model_config["model_router_db"]))
+
+    @property
+    def candidate_staging(self) -> Any:
+        if self._candidate_staging is None:
+            raise RuntimeError("candidate staging is not configured for this child")
+        return self._candidate_staging
+
+    @property
+    def candidate_review(self) -> Any:
+        if self._candidate_review is None:
+            raise RuntimeError("candidate staging is not configured for this child")
+        return self._candidate_review
+
+    def _read_transcript_artifact(self, artifact: Any) -> bytes:
+        return self._transcript_spool.read_object(artifact["artifact_content_hash"])
+
+    def _transcript_support_authority(self, authority_ref: str) -> dict[str, Any]:
+        # Mirrors WriterServer._transcript_support_authority.
+        from .observability import ObservabilityNotFound
+        from .transcript_correction import TranscriptCorrectionNotFound
+        evidence = self.store.connection.execute(
+            "SELECT evidence_json FROM evidence_versions WHERE evidence_version_id=?", (authority_ref,),
+        ).fetchone()
+        if evidence is not None:
+            return json.loads(evidence["evidence_json"])
+        try:
+            return self.observability.get_artifact_version_v2(authority_ref)
+        except ObservabilityNotFound:
+            pass
+        source = self.store.connection.execute(
+            "SELECT record_json FROM connector_source_envelopes WHERE source_envelope_id=?", (authority_ref,),
+        ).fetchone()
+        if source is not None:
+            return json.loads(source["record_json"])
+        raise TranscriptCorrectionNotFound(authority_ref)
+
+    def _transcript_corrections(self, source_manifest: Any) -> tuple[Any, dict[str, Any]]:
+        # Mirrors WriterServer._transcript_corrections.
+        from .alphaengine_document_acquisition import validate_alphaengine_document_acquisition_manifest
+        from .transcript_correction import TranscriptCorrectionAuthority
+        manifest = validate_alphaengine_document_acquisition_manifest(source_manifest)
+        authority = TranscriptCorrectionAuthority(
+            self.store, spool=self._transcript_spool,
+            manifest_resolver=lambda ref: manifest if ref == manifest["id"] else None,
+            evidence_resolver=self._transcript_support_authority,
+        )
+        return authority, manifest
 
     def close(self) -> None:
         for handle in reversed(self._keepalive):
@@ -119,6 +174,7 @@ def run_extraction(
     max_windows: int,
     requested_by: str | None,
     hermetic_fixture: Path | None,
+    candidate_staging: Path | None = None,
 ) -> dict[str, Any]:
     state = secure_dir(state_dir)
     out = secure_dir(summary_dir)
@@ -136,6 +192,8 @@ def run_extraction(
         "reviews_complete": 0,
         "drafted": [],
         "skipped": [],
+        "admitted": [],
+        "resolved_reviews": [],
         "stop_reason": None,
         "status": "failed",
         "failure_reason": None,
@@ -146,6 +204,7 @@ def run_extraction(
         scheduler_db=scheduler_db if scheduler_db is not None else state / "scheduler.sqlite",
         connector_governance=connector_governance, web_fetch_governance=web_fetch_governance,
         model_config=None if hermetic_fixture is not None else config,
+        candidate_staging=candidate_staging,
     )
     try:
         if hermetic_fixture is not None:
@@ -167,6 +226,7 @@ def run_extraction(
         service = DocumentExtractionService(host)
         drafted = 0
         stop_reason: str | None = None
+        complete_reviews: list[tuple[dict[str, Any], str, str, list[int]]] = []
         pointers = host.store.connection.execute(
             "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
         ).fetchall()
@@ -183,6 +243,7 @@ def run_extraction(
                 review_hash = content_hash(review)
                 offset = 0
                 complete = True
+                offsets: list[int] = []
                 while True:
                     try:
                         view = service.view(review_id=review["review_id"], expected_review_hash=review_hash,
@@ -197,6 +258,7 @@ def run_extraction(
                         complete = False
                         break
                     context = view["context"]
+                    offsets.append(offset)
                     if view["status"] == "not_generated":
                         if not view["generation_enabled"]:
                             stop_reason = f"gated:{view['gate_reason']}"
@@ -234,6 +296,12 @@ def run_extraction(
                     offset = context["next_offset"]
                 if complete:
                     summary["reviews_complete"] += 1
+                    complete_reviews.append((review, review_hash, actor, offsets))
+        # ADR-0005 / P9d-17b: every fully drafted review is staged and
+        # policy-admitted, then closed.  Idempotent: a re-run reports
+        # duplicates and writes nothing new.
+        if candidate_staging is not None:
+            _admit_complete_reviews(host, service, complete_reviews, summary)
         summary["stop_reason"] = stop_reason or ("nothing_to_draft" if drafted == 0 else "drained")
         summary["status"] = "succeeded"
         return summary
@@ -243,6 +311,58 @@ def run_extraction(
     finally:
         _write_owner_only(out / "summary.json", summary)
         host.close()
+
+
+def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionService,
+                            reviews: list[tuple[dict[str, Any], str, str, list[int]]],
+                            summary: dict[str, Any]) -> None:
+    for review, review_hash, actor, offsets in reviews:
+        if not actor.startswith("automation:"):
+            continue  # a human-requested run drafts only; admission is the mission's
+        outcomes: list[dict[str, Any]] = []
+        gated: str | None = None
+        for offset in offsets:
+            try:
+                result = service.admit_suggestions(
+                    review_id=review["review_id"], expected_review_hash=review_hash, offset=offset, actor_ref=actor,
+                )
+            except Exception as exc:
+                gated = f"{type(exc).__name__}: {exc}"
+                break
+            if result["status"] == "gated":
+                gated = str(result.get("reason"))
+                break
+            for item in result.get("admitted", []):
+                outcomes.append({"review_id": review["review_id"], "offset": offset, **item})
+        summary["admitted"].extend(outcomes)
+        if gated is not None:
+            summary["resolved_reviews"].append({"review_id": review["review_id"], "status": "held", "reason": gated})
+            continue
+        fresh = [o for o in outcomes if o["status"] == "admitted"]
+        carried = [o for o in outcomes if o["status"] in ("admitted", "duplicate")]
+        summary["formal_authority_writes"] += 2 * len(fresh)  # one Evidence and one Claim version each
+        rejected = [o for o in outcomes if o["status"] == "rejected"]
+        try:
+            if carried:
+                resolution = host.coverage_mission.resolve_document_review(
+                    review["review_id"], resolution="extraction_staged", actor_ref=actor,
+                    candidate_claim_version_ref=carried[0]["candidate_claim_ref"],
+                    rationale=(f"ADR-0005 policy admission: {len(carried)} qualitative claim(s) admitted, "
+                               f"{len(rejected)} suggestion(s) refused"),
+                    expected_review_hash=review_hash,
+                )
+            else:
+                resolution = host.coverage_mission.resolve_document_review(
+                    review["review_id"], resolution="dismissed", actor_ref=actor,
+                    rationale=(f"ADR-0005: mission automation found no admissible qualitative statement in "
+                               f"{len(offsets)} window(s); {len(rejected)} suggestion(s) refused by policy"),
+                    expected_review_hash=review_hash,
+                )
+            summary["resolved_reviews"].append({"review_id": review["review_id"], "status": resolution["state"],
+                                                "admitted": len(carried), "rejected": len(rejected)})
+        except Exception as exc:
+            summary["resolved_reviews"].append({"review_id": review["review_id"], "status": "unresolved",
+                                                "reason": f"{type(exc).__name__}: {exc}"})
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -257,6 +377,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-windows", type=int, default=DEFAULT_MAX_WINDOWS)
     parser.add_argument("--requested-by", help="human: actor; default is each mission's automation principal")
     parser.add_argument("--hermetic-fixture-file", type=Path, help="test-only fixture model output")
+    parser.add_argument("--candidate-staging", type=Path, help="shared CandidateStaging database; enables admission")
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -271,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
         spool_dir=args.spool_dir, scheduler_db=args.scheduler_db,
         connector_governance=args.connector_governance, web_fetch_governance=args.web_fetch_governance,
         max_windows=args.max_windows, requested_by=args.requested_by,
-        hermetic_fixture=args.hermetic_fixture_file,
+        hermetic_fixture=args.hermetic_fixture_file, candidate_staging=args.candidate_staging,
     )
     if not args.quiet:
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))

@@ -1,7 +1,37 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
-- **ADR-0005：文档抽取由自动化完成；P9d-17a 起草已改为 mission 自动化（待部署）。** owner 看到 cockpit 里一整页
+- **P9d-17b：起草物由 policy 自动准入为正式 Claim（已过全仓，待部署；需 owner 再跑一次 chain 脚本）。**
+  P9d-17a 上线经过：live writer 从未装抽取模型配置 → 装上；首个子进程因"read-only WAL 无 sidecar"失败 → 子进程持有
+  预算账本与 router 的写句柄；34 条 acquired 行没有 ticket_ref（9/4 获取的 33 条 AlphaEngine + 1 条 already-held web）→
+  两个 launcher 新增 `locate_completed_manifest(document_ref)`，审阅面按 document ref 从票据目录找 manifest，这也意味着
+  那 33 篇 AlphaEngine 文档此前在 cockpit 里从未可读；62 条审阅全被"mission constitution does not bind current governance
+  policy"拒绝——constitution v2 绑 policy-3 而 policy-4 已激活，且 policy-4 与 mandate 都没有 ADR-0004 §7 要求的闭合
+  `research_budget`，**live 上付费抽取从来就不可能**。`scripts/publish_extraction_authority_chain.py` 依次重发 policy-5 /
+  mandate p8a:2 / constitution v3 / mission v5，各自只重绑必须变的字段，research_budget 等于 mission 已发布的预算（不扩）；
+  副本排练通过后由 owner 亲自执行（权限闸正确地拦下了我）。发布后再遇 carry-forward 在 v2 与 v4 同有一篇文档时撞
+  UNIQUE 把整个发现 tick 打死 → 每篇只从最新版本搬一次、维护步骤异常只报告不抛。随后 **真实起草跑通**：deepseek-v4-flash
+  经 broker 调用，每窗约 0.001 USD，按 mission 日预算结算，起草物在 cockpit 可读。
+  **P9d-17b**：①`TranscriptCorrectionAuthority` 新增 `automation_verified_raw_span`——人版 `verified_raw_span` 的镜像：
+  span 同样逐字节核验，actor 必须是 `automation:`（人不能发它、自动化不能发人版），rationale 记模型 invocation 与 route；
+  引文绑定与 resolve 对两者一视同仁；契约 enum 与 actor pattern 同步。②policy 规则
+  `research-auto-commit:mission-document-qualitative:v1`：仅当 producer 与 evidence actor 为同一 `automation:` 身份、
+  不断言任何数字（value/unit/scale/currency 为 null，陈述无数字/%/$）、evidence 为 `source:alphaengine` 的
+  authenticated transcript、引文绑定持久且 claim-eligible、其 correction set 为同一身份的自动化 scope、SourceEnvelope
+  为精确的 get_document envelope 时准入；修订/链式候选仍 escalate；共享 Ledger writer 只在该规则下接受 policy 路径的
+  定性候选，ADR-0003 B 的人工路径不动。③`resolve_document_review` 接受该审阅所属 mission 的 principal：全部窗口起草完且
+  有准入 → `extraction_staged` 绑第一条候选并记准入/拒绝数；无可准入建议 → `dismissed` 记原因；被闸（缺 grant/缺规则/
+  web 来源）→ 保持 awaiting。④子进程起草后对"全窗已起草"的审阅做准入：发布或复用 correction set → 绑引文 → staging →
+  `commit_policy_candidate`；每步幂等，重跑只报 duplicate；`formal_authority_writes` 如实计数；`--candidate-staging`
+  由 launcher 从 writer 配置传入。⑤每 tick 4 窗。**验证**：自动化 scope 的双向拒绝；hermetic 子进程端到端——无规则时
+  窗口被 hold、审阅仍开；有规则时 fixture 起草物成为 1 条 Evidence + 1 条 Claim（qualitative、无数值、正式 actor 为
+  policy reviewer、候选 producer 为 mission 自动化）、审阅自动关闭并绑候选、重跑零扫描零写入、对已关闭审阅准入被拒；
+  多页获取的 partial page envelope 可准入（精确绑定由 Ledger writer 把关，不看 envelope status）。
+  **待 owner**：policy 需列出该规则，且 policy 变更经 hash 级联到 constitution 与 mission，同一脚本
+  `--add-auto-commit-rule research-auto-commit:mission-document-qualitative:v1` 发布 policy-6 / constitution v4 /
+  mission v6（mandate 已有预算不动）；副本排练通过。未跑之前所有准入以"policy 未列规则"hold，不 staging。
+  见 [P9d-17b 报告](reports/p9d17b-autonomous-document-admission-v0.1-2026-09-07.md)。
+- **ADR-0005：文档抽取由自动化完成；P9d-17a 起草已改为 mission 自动化（已部署，live 真实起草中）。** owner 看到 cockpit 里一整页
   「待抽取文档」和「未安装已批准的抽取模型」后明确：人不批文档——只设目标、掌舵、问答；系统变更（如写新工具）才批。
   据此立 [ADR-0005](adr/0005-autonomous-document-extraction.md)：自动化身份在 mission 授权（live v4 已授 `evidence/claim/
   stage_record`）与日预算内完成起草→staging→policy 准入整条链；人类检查点收敛为 mission 发布/改版、问答、系统变更；

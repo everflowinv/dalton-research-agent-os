@@ -51,7 +51,7 @@
         "rationale": {"type": "string", "minLength": 1, "maxLength": 4000}
       }
     },
-    "review_scope": {"enum": ["targeted_flags", "full_document", "verified_raw_span"]},
+    "review_scope": {"enum": ["targeted_flags", "full_document", "verified_raw_span", "automation_verified_raw_span"]},
     "corrections": {
       "type": "array",
       "minItems": 0,
@@ -126,12 +126,12 @@
     "unresolved_count": {"type": "integer", "minimum": 0},
     "actor_ref": {
       "type": "string",
-      "pattern": "^human:[A-Za-z0-9][A-Za-z0-9._/@:-]*$"
+      "pattern": "^(human|automation):[A-Za-z0-9][A-Za-z0-9._/@:-]*$"
     },
     "content_hash": {
       "type": "string",
       "pattern": "^[0-9a-f]{64}$"
     }
   },
-  "allOf": [{"if": {"properties": {"review_scope": {"const": "verified_raw_span"}}}, "then": {"required": ["raw_review"], "properties": {"corrections": {"maxItems": 0}}}, "else": {"not": {"required": ["raw_review"]}, "properties": {"corrections": {"minItems": 1}}}}]
+  "allOf": [{"if": {"properties": {"review_scope": {"enum": ["verified_raw_span", "automation_verified_raw_span"]}}}, "then": {"required": ["raw_review"], "properties": {"corrections": {"maxItems": 0}}}, "else": {"not": {"required": ["raw_review"]}, "properties": {"corrections": {"minItems": 1}}}}, {"if": {"properties": {"review_scope": {"const": "automation_verified_raw_span"}}}, "then": {"properties": {"actor_ref": {"pattern": "^automation:"}}}, "else": {"properties": {"actor_ref": {"pattern": "^human:"}}}}]
 }
