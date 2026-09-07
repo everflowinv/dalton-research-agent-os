@@ -1,6 +1,28 @@
 # Dalton 项目进度
 
-更新日期：2026-09-06
+更新日期：2026-09-07
+- **web 链已部署 live，并完成 live probe_only 人工排练（P9d-5）。**
+  **先纠正一处过时记述**：比对 live 已安装包与仓库 HEAD 后确认，thesis-impact 换版修复、P9d-3a、P9d-3b
+  早已随 2026-09-06 08:22 的安装上线（live thesis-impact 退出码 3 / `blocked_pending_human` 正是修复后的
+  停泊行为，不是失败循环）；本次部署的差集**只有** web 链的 7 个新模块。
+  部署前在 live Core 只读副本上以新代码跑既有 AlphaEngine canary：真实子进程完成 human 发现、写入正常、
+  integrity ok（该 canary 报 `ok=false` 是其预期过时——写它时 mission 还是 v1 `probe_only`——以及
+  AlphaEngine 24h 预算已满 31/30，非回归）。备份快照 `pre-p9d4-web-chain-20260907`（core 与 scheduler 带
+  sha256）。LaunchAgent 的 web search broker socket/key **由 planner 已配置的 broker 路径派生**且仅在文件存在
+  时传入，未新增配置项。`install.sh` 重装并重启四个服务后 `dalton-health` `ok: true`，controller tick 同时驱动
+  AlphaEngine 与 web search 两条 lane。
+  随后发布 live mission **v3**（hash `caae3a13…`）：只把 `source:web-search` 由 `not_connected` 改为
+  `probe_only`，其余原样继承。以 `human:lumos` 身份在 live 上跑通**首次真实 Gemini 搜索**：transport
+  `openclaw-search-broker`、1 次 provider 调用、**10 个去重 URL ref**（spglobal/morningstar/staffingindustry/
+  tikr/grounding 重定向/investor.accenture.com/newsroom.accenture.com/alphastreet/livemint/quartr），
+  live 新增 1 条 dispatch、1 条 discovery（`requested_by: human:lumos`）、10 行 `discovered` 文档；
+  `formal_authority_writes=0`，**Evidence 6 / Claim 6 / Thesis 2 不变**，integrity ok，web fetch 调用 **0**。
+  部署后 fresh tick 确认稳定状态：web discovery 与 web acquisition 均 `not_authorized`
+  （"probe_only; automation discovery requires connected"），即**只对人开放、自动化被合同拒绝、页面一次都没抓**。
+  本轮共花 5 次真实 Gemini 搜索（4 次在副本，1 次在 live）。**下一步由 owner 决定**：改 `connected` 会让
+  automation 每 tick 自动搜索**并自动抓取**那 10 个 URL；真实页面抓取至今一次未跑，建议先用 human-only
+  `acquire_public_web_document` 对单个 URL 小步验证。见
+  [P9d-5 部署与排练记录](reports/p9d5-web-chain-deployment-and-live-rehearsal-2026-09-07.md)。
 - **web search 已在 OpenClaw 侧真实激活，并完成首次真实 Gemini 搜索（P9d-4e）；Dalton 代码栈仍未部署、live mission 未改、live Core 未写入。**
   owner 批准治理记录后：`openclaw config patch`（先 dry-run）装入并配置 broker 插件（备份 openclaw.json，
   模型 broker 条目原样保留），重启 gateway，插件启动、owner-only socket 与 key 就位、doctor 与 health 通过。
