@@ -456,13 +456,24 @@ class DocumentExtractionService:
         reader = ConnectorCompletionReceiptReader(connectors=writer._connectors, observability=writer.observability)
         web_fields: dict[str, Any] = {}
         if review["source_ref"] == ALPHAENGINE_SOURCE_REF:
-            manifest = writer.acquisition_launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
+            # A row acquired before ticket refs were recorded, or settled as
+            # already held, names no ticket; the ticket directory still knows
+            # which launch produced the bytes (ADR-0005 / P9d-17a).
+            manifest = (
+                writer.acquisition_launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
+                if row["ticket_ref"] else
+                writer.acquisition_launcher.locate_completed_manifest(review["document_ref"])
+            )
             manifest, text = verified_source(writer.store, writer._transcript_spool, manifest, reader)
             source_content_hash = manifest["declared_content_sha256"]
         else:
             # The review names the URL ref; the manifest names the fetched
             # record (url hash + body hash).  The launcher cross-checks both.
-            manifest = writer.web_fetch_launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
+            manifest = (
+                writer.web_fetch_launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
+                if row["ticket_ref"] else
+                writer.web_fetch_launcher.locate_completed_manifest(review["document_ref"])
+            )
             manifest, rendering = verified_public_web_source(
                 writer.store, writer._transcript_spool, manifest, reader
             )

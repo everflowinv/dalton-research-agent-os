@@ -622,6 +622,11 @@ class FetchChildTests(unittest.TestCase):
         # The settle-side verification is untouched: the manifest still has to agree.
         manifest = fresh.read_completed_manifest(ticket["id"], URL_A)
         self.assertEqual(manifest["url_ref"], URL_A)
+        # ADR-0005: a row that names no ticket is still readable through the
+        # ticket directory, by document ref, via the same verified reader.
+        self.assertEqual(fresh.locate_completed_manifest(URL_A)["id"], manifest["id"])
+        with self.assertRaises(FetchLaunchRejected):
+            fresh.locate_completed_manifest(URL_B)
         # No summary means nothing to adopt: orphaned, as before.
         record["status"] = "running"
         ticket_path.write_text(json.dumps(record), encoding="utf-8")

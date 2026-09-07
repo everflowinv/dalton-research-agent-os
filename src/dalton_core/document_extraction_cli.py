@@ -29,7 +29,7 @@ from typing import Any
 
 from .alphaengine_acquisition_launcher import AlphaEngineAcquisitionLauncher
 from .connector import ConnectorStore
-from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
+from .coverage_mission import CoverageMissionAuthority
 from .document_extraction import (
     DocumentExtractionModelWorker,
     DocumentExtractionService,
@@ -39,7 +39,6 @@ from .document_extraction import (
 from .observability import ObservabilityStore
 from .public_web_fetch_launcher import PublicWebFetchLauncher
 from .raw_spool import RawSpool
-from .research_verification import ResearchVerificationConflict, ResearchVerificationError
 from .scheduler import Scheduler
 from .store import DaltonStore, canonical_json, content_hash
 
@@ -188,7 +187,11 @@ def run_extraction(
                     try:
                         view = service.view(review_id=review["review_id"], expected_review_hash=review_hash,
                                             offset=offset, actor_ref=actor)
-                    except (ResearchVerificationError, ResearchVerificationConflict, CoverageMissionError) as exc:
+                    except Exception as exc:
+                        # One review that cannot be bound (stale grant, missing
+                        # manifest, unreadable original) must not end the run
+                        # for the rest; it is reported with its reason.  Live,
+                        # one such review aborted a whole run.
                         summary["skipped"].append({"review_id": review["review_id"], "offset": offset,
                                                    "reason": f"{type(exc).__name__}: {exc}"})
                         complete = False

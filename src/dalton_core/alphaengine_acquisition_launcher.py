@@ -369,6 +369,33 @@ class AlphaEngineAcquisitionLauncher:
             raise AcquisitionLaunchRejected("ticket, summary and manifest disagree")
         return manifest
 
+    def locate_completed_manifest(self, document_ref: str) -> dict[str, Any]:
+        """Find the latest succeeded ticket for ``document_ref`` and read its manifest.
+
+        ADR-0005 / P9d-17a: rows acquired before the ledger recorded ticket
+        refs, and rows settled as already held, carry no ticket.  The ticket
+        directory is the durable record of which launch produced the bytes;
+        the manifest is then read through the same verified path.
+        """
+
+        if not isinstance(document_ref, str) or not document_ref:
+            raise AcquisitionLaunchRejected("document_ref is required")
+        best: tuple[str, str] | None = None
+        for ticket_path in self.tickets_dir.glob("*/ticket.json"):
+            try:
+                record = json.loads(ticket_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(record, dict) or record.get("status") != "succeeded" \
+                    or record.get("document_ref") != document_ref:
+                continue
+            key = (str(record.get("started_at", "")), str(record.get("id", "")))
+            if best is None or key > best:
+                best = key
+        if best is None:
+            raise AcquisitionLaunchRejected("no completed acquisition ticket for this document")
+        return self.read_completed_manifest(best[1], document_ref)
+
     @staticmethod
     def _pid_alive(pid: Any) -> bool:
         if not isinstance(pid, int) or pid <= 0:

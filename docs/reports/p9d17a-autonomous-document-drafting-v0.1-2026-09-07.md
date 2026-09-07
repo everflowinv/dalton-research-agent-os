@@ -80,3 +80,49 @@ Suggestions are drafted; they are not yet staged or admitted as Claims. That is
 P9d-17b (AlphaEngine chain) and P9d-17c (public-web citation authority). Until
 then the cockpit shows the drafts and a person may still stage one by hand, but
 nothing requires them to.
+
+## First live runs: what the host said back
+
+**Read-only WAL.** The first child failed before any model call: the context
+binds the budget ledger read-only, and a read-only WAL open refuses when
+nothing holds the file. The thesis-impact ledger is closed between that lane's
+runs. The child now holds a write-mode handle on the ledger and the router,
+without writing, for its lifetime.
+
+**Thirty-four acquired rows name no ticket.** Every AlphaEngine document acquired
+on 2026-09-04, and the one web document settled as already held, carries
+`ticket_ref = NULL`, so the review context could not find its manifest and the
+first such review crashed the run. Two fixes: the child now survives any single
+unbindable review and reports its reason; and both launchers gained
+`locate_completed_manifest(document_ref)`, which finds the latest succeeded
+ticket for the document in the ticket directory and reads the manifest through
+the same verified path. The review context uses it when the row names no
+ticket. This also means those thirty-three AlphaEngine reviews were never
+readable in the cockpit either.
+
+**The mission cannot spend.** Ten reviews were refused with "mission
+constitution does not bind current governance policy". Live, constitution v2
+binds `policy-3` while `policy-4` is active, and neither policy-4 nor mandate
+`us-it-services-constitution-p8a:1` carries the closed `research_budget` that
+ADR-0004 section 7 (as enforced in `outer_budget`) requires before a mission
+may spend on models. Paid extraction has therefore never been possible on live.
+
+`scripts/publish_extraction_authority_chain.py` republishes the four records in
+order, each derived from its prior and rebinding only what must change:
+`policy-5` (policy-4 plus `research_budget`), mandate p8a:2 (v1 plus
+`research_budget`, activated), constitution v3 (v2 rebinding policy-5 and
+mandate v2), mission v5 (v4 rebinding constitution v3 and mandate v2).
+`research_budget` equals the mission v4 budget the owner already published
+(40 paid calls a day, 5 USD a day, 30 AlphaEngine calls per 24 h): a
+formalisation, not an expansion. Rehearsed on a copy of the live Core: the
+outer-budget check binds policy-5 and mandate v2, and automation is granted on
+both sources under v5.
+
+Applying it live is a governance publish as the owner's principal, and the
+session's permission gate stopped it there. It is the owner's to run:
+
+```
+.venv/bin/python scripts/publish_extraction_authority_chain.py --live
+```
+
+Until then every automated draft is held with that reason, spending nothing.
