@@ -1215,6 +1215,23 @@ class WriterServer:
         )
         return authority, manifest
 
+    def _public_web_corrections(
+        self, source_manifest: Mapping[str, Any]
+    ) -> tuple[TranscriptCorrectionAuthority, dict[str, Any]]:
+        """ADR-0005 / P9d-17c: the correction authority over a fetched page."""
+
+        from .public_web_core_fetch import validate_public_web_fetch_manifest
+        if self._transcript_spool is None:
+            raise WriterServerError("transcript correction spool is unavailable")
+        manifest = validate_public_web_fetch_manifest(source_manifest)
+        authority = TranscriptCorrectionAuthority(
+            self.store,
+            spool=self._transcript_spool,
+            manifest_resolver=(lambda ref: manifest if ref == manifest["id"] else None),
+            evidence_resolver=self._transcript_support_authority,
+        )
+        return authority, manifest
+
     @property
     def thesis_impact_control(self) -> ResearchPlanThesisImpactCoordinator:
         if self._thesis_impact_control is None:

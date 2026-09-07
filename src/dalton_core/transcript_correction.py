@@ -27,6 +27,13 @@ from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
 TRANSCRIPT_EVIDENCE_SOURCE_TYPE = "authenticated_transcript"
+# ADR-0005 / P9d-17c: a fetched public-web page cited the same way.  The
+# citable original is the deterministic rendering of the exact fetched bytes
+# (public_web_extraction_source), so ``source_content_hash`` is the rendering
+# hash and the renderer identity is part of what re-verification binds.
+PUBLIC_WEB_EVIDENCE_SOURCE_TYPE = "public_web"
+PUBLIC_WEB_MANIFEST_PREFIX = "public-web-fetch-manifest:"
+CITED_EVIDENCE_SOURCE_TYPES = frozenset({TRANSCRIPT_EVIDENCE_SOURCE_TYPE, PUBLIC_WEB_EVIDENCE_SOURCE_TYPE})
 _SCHEMA_PATH = Path(__file__).with_name("transcript_correction_schema.sql")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _HUMAN_RE = re.compile(r"^human:[A-Za-z0-9][A-Za-z0-9._/@:-]*$")
@@ -386,20 +393,29 @@ def validate_persisted_transcript_claim_citation(
 def bind_candidate_evidence_to_transcript_citation(
     evidence: Mapping[str, Any],
     citation_binding: Mapping[str, Any],
+    *,
+    source_type: str = TRANSCRIPT_EVIDENCE_SOURCE_TYPE,
 ) -> dict[str, Any]:
-    """Add one exact eligible transcript citation to candidate Evidence."""
+    """Add one exact eligible citation to candidate Evidence.
+
+    ``source_type`` names what the cited original is: an authenticated
+    transcript or a fetched public-web page (ADR-0005 / P9d-17c).
+    """
 
     from .research_verification import validate_candidate_evidence
 
+    if source_type not in CITED_EVIDENCE_SOURCE_TYPES:
+        raise TranscriptCorrectionValidationError("cited evidence source type is closed")
     evidence_wire = validate_candidate_evidence(evidence)
     binding = validate_transcript_claim_citation_binding(citation_binding)
     if not binding["claim_eligible"]:
         raise TranscriptCorrectionConflict(
             "unresolved transcript citation cannot bind candidate Evidence"
         )
-    if evidence_wire["source_type"] in {
-        "recorded_fixture", TRANSCRIPT_EVIDENCE_SOURCE_TYPE,
-    }:
+    if evidence_wire["source_type"] in {"recorded_fixture", TRANSCRIPT_EVIDENCE_SOURCE_TYPE} or (
+        source_type == PUBLIC_WEB_EVIDENCE_SOURCE_TYPE
+        and evidence_wire["source_type"] != PUBLIC_WEB_EVIDENCE_SOURCE_TYPE
+    ):
         raise TranscriptCorrectionValidationError(
             "candidate Evidence source type cannot be rebound as transcript"
         )
@@ -414,7 +430,7 @@ def bind_candidate_evidence_to_transcript_citation(
     base = {
         key: value for key, value in evidence_wire.items() if key != "content_hash"
     }
-    base["source_type"] = TRANSCRIPT_EVIDENCE_SOURCE_TYPE
+    base["source_type"] = source_type
     base["artifact_refs"] = [
         *evidence_wire["artifact_refs"],
         {"ref": binding["id"], "hash": binding["content_hash"]},
@@ -555,6 +571,8 @@ class TranscriptCorrectionAuthority:
         source_manifest_hash: str,
         source_content_hash: str,
     ) -> tuple[dict[str, Any], str]:
+        if source_manifest_ref.startswith(PUBLIC_WEB_MANIFEST_PREFIX):
+            return self._web_source(source_manifest_ref, source_manifest_hash, source_content_hash)
         try:
             manifest = validate_alphaengine_document_acquisition_manifest(
                 self.manifest_resolver(source_manifest_ref)
@@ -590,6 +608,42 @@ class TranscriptCorrectionAuthority:
             ) from exc
         if not original or manifest["content_chars"] != len(original):
             raise TranscriptCorrectionConflict("correction source character count drifted")
+        return manifest, original
+
+    def _web_source(
+        self,
+        source_manifest_ref: str,
+        source_manifest_hash: str,
+        source_content_hash: str,
+    ) -> tuple[dict[str, Any], str]:
+        """A fetched page: the original is the verified rendering of its exact bytes."""
+
+        from .connector import ConnectorStore
+        from .connector_authority_port import ConnectorCompletionReceiptReader
+        from .observability import ObservabilityStore
+        from .public_web_core_fetch import validate_public_web_fetch_manifest
+        from .public_web_extraction_source import verified_public_web_source
+
+        try:
+            manifest = validate_public_web_fetch_manifest(self.manifest_resolver(source_manifest_ref))
+        except Exception as exc:
+            raise TranscriptCorrectionNotFound(
+                f"source manifest {source_manifest_ref} is unavailable or invalid"
+            ) from exc
+        if manifest["id"] != source_manifest_ref or manifest["content_hash"] != source_manifest_hash:
+            raise TranscriptCorrectionConflict("correction source is not exact complete authority")
+        reader = ConnectorCompletionReceiptReader(
+            connectors=ConnectorStore(self.store), observability=ObservabilityStore(self.store)
+        )
+        try:
+            manifest, rendering = verified_public_web_source(self.store, self.spool, manifest, reader)
+        except Exception as exc:
+            raise TranscriptCorrectionConflict(f"fetched page could not be re-verified: {exc}") from exc
+        original = rendering["text"]
+        if not original or hashlib.sha256(original.encode("utf-8")).hexdigest() != source_content_hash:
+            # A renderer change or drifted bytes changes the hash: fail closed
+            # rather than cite text the reviewer never saw.
+            raise TranscriptCorrectionConflict("correction source rendering drifted")
         return manifest, original
 
     def _evidence_binding(self, value: Any, name: str) -> dict[str, str]:

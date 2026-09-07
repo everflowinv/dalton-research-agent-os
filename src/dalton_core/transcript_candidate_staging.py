@@ -30,6 +30,9 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from .research_verification import (
+    PUBLIC_WEB_CORE_AUTHORITY_MODE,
+    PUBLIC_WEB_SOURCE_VERIFIER_HASH,
+    PUBLIC_WEB_SOURCE_VERIFIER_REF,
     TRANSCRIPT_CORE_AUTHORITY_MODE,
     TRANSCRIPT_SOURCE_VERIFIER_HASH,
     TRANSCRIPT_SOURCE_VERIFIER_REF,
@@ -46,6 +49,8 @@ from .research_verification import (
 )
 from .store import canonical_json, content_hash
 from .transcript_correction import (
+    CITED_EVIDENCE_SOURCE_TYPES,
+    PUBLIC_WEB_EVIDENCE_SOURCE_TYPE,
     TRANSCRIPT_EVIDENCE_SOURCE_TYPE,
     TranscriptCorrectionError,
     _persisted_citation_row,
@@ -56,6 +61,26 @@ from .transcript_correction import (
 ALPHAENGINE_SOURCE_REF = "source:alphaengine"
 ALPHAENGINE_DOCUMENT_OPERATION = "get_document"
 _DOCUMENT_REF_PREFIX = "alphaengine-doc:"
+# ADR-0005 / P9d-17c: the same resolver over a fetched public-web page.  The
+# fetch SourceEnvelope names one record, the page itself; the cited original
+# is its verified rendering, bound through the correction authority.
+PUBLIC_WEB_SOURCE_REF = "source:public-web"
+PUBLIC_WEB_FETCH_OPERATION = "fetch_get"
+_WEB_DOCUMENT_REF_PREFIX = "public-web-document:"
+SOURCE_KINDS: dict[str, dict[str, Any]] = {
+    "alphaengine": {
+        "document_prefix": _DOCUMENT_REF_PREFIX, "source_ref": ALPHAENGINE_SOURCE_REF,
+        "operation": ALPHAENGINE_DOCUMENT_OPERATION, "material_prefix": "source-material:transcript-core:",
+        "bundle_prefix": "verification-bundle:transcript-core-source:",
+        "candidate_prefix": "transcript", "evidence_source_type": TRANSCRIPT_EVIDENCE_SOURCE_TYPE,
+    },
+    "public_web": {
+        "document_prefix": _WEB_DOCUMENT_REF_PREFIX, "source_ref": PUBLIC_WEB_SOURCE_REF,
+        "operation": PUBLIC_WEB_FETCH_OPERATION, "material_prefix": "source-material:public-web-core:",
+        "bundle_prefix": "verification-bundle:public-web-core-source:",
+        "candidate_prefix": "public-web", "evidence_source_type": PUBLIC_WEB_EVIDENCE_SOURCE_TYPE,
+    },
+}
 
 
 class TranscriptCoreAuthorityError(ResearchVerificationError):
@@ -112,14 +137,26 @@ class TranscriptCoreAuthorityResolver:
         core: Any,
         *,
         artifact_reader: Callable[[Mapping[str, Any]], bytes] | None = None,
+        source_kind: str = "alphaengine",
     ) -> None:
         connection = getattr(core, "connection", None)
         if not isinstance(connection, sqlite3.Connection):
             raise TypeError("TranscriptCoreAuthorityResolver requires a Core with a sqlite3 connection")
         if artifact_reader is not None and not callable(artifact_reader):
             raise TypeError("artifact_reader must be callable")
+        if source_kind not in SOURCE_KINDS:
+            raise TypeError("source_kind must be alphaengine or public_web")
         self.connection = connection
         self.artifact_reader = artifact_reader
+        self.source_kind = source_kind
+        self.kind = SOURCE_KINDS[source_kind]
+        self.provenance_mode = (
+            TRANSCRIPT_CORE_AUTHORITY_MODE if source_kind == "alphaengine" else PUBLIC_WEB_CORE_AUTHORITY_MODE
+        )
+        self.verifier = (
+            (TRANSCRIPT_SOURCE_VERIFIER_REF, TRANSCRIPT_SOURCE_VERIFIER_HASH) if source_kind == "alphaengine"
+            else (PUBLIC_WEB_SOURCE_VERIFIER_REF, PUBLIC_WEB_SOURCE_VERIFIER_HASH)
+        )
 
     # -- Core reads -------------------------------------------------------
 
@@ -144,9 +181,9 @@ class TranscriptCoreAuthorityResolver:
             raise TranscriptCoreAuthorityError("transcript correction set is unavailable")
         correction_set = json.loads(row["record_json"])
         document_ref = correction_set.get("document_ref")
-        if not isinstance(document_ref, str) or not document_ref.startswith(_DOCUMENT_REF_PREFIX):
+        if not isinstance(document_ref, str) or not document_ref.startswith(self.kind["document_prefix"]):
             raise TranscriptCoreAuthorityError(
-                "transcript correction set is not bound to an AlphaEngine document"
+                f"correction set is not bound to a {self.source_kind} document"
             )
         return binding, correction_set
 
@@ -235,6 +272,8 @@ class TranscriptCoreAuthorityResolver:
 
         binding, correction_set = self.citation(citation_ref)
         if source_envelope_ref is None:
+            if self.source_kind != "alphaengine":
+                raise TranscriptCoreAuthorityError("a fetched page's SourceEnvelope must be named explicitly")
             source_envelope_ref = self.locate_source_envelope(
                 correction_set["document_ref"], binding["source_content_hash"]
             )
@@ -245,7 +284,7 @@ class TranscriptCoreAuthorityResolver:
         payload = _citation_projection(binding, correction_set, source, artifact)
         base = {
             "schema_version": "0.2",
-            "id": "source-material:transcript-core:" + content_hash({
+            "id": self.kind["material_prefix"] + content_hash({
                 "source_envelope_hash": source["content_hash"],
                 "citation_hash": binding["content_hash"],
             }),
@@ -257,7 +296,7 @@ class TranscriptCoreAuthorityResolver:
             "source_ref": source["source"],
             "source_type": profile["source_identity"]["source_type"],
             "operation": source["operation"],
-            "provenance_mode": TRANSCRIPT_CORE_AUTHORITY_MODE,
+            "provenance_mode": self.provenance_mode,
             "authority_resolution_ref": binding["id"],
             "authority_resolution_hash": binding["content_hash"],
             "source_record_refs": list(source["source_record_refs"]),
@@ -292,8 +331,8 @@ class TranscriptCoreAuthorityResolver:
         """
 
         material_wire = validate_source_verification_material(material)
-        if material_wire.get("provenance_mode") != TRANSCRIPT_CORE_AUTHORITY_MODE:
-            raise VerificationRejected("transcript Core verifier requires transcript_core_authority material")
+        if material_wire.get("provenance_mode") != self.provenance_mode:
+            raise VerificationRejected(f"{self.source_kind} Core verifier requires {self.provenance_mode} material")
         findings: list[dict[str, Any]] = []
 
         def check(code: str, observed: Any, expected: Any, path: str, message: str) -> None:
@@ -322,13 +361,20 @@ class TranscriptCoreAuthorityResolver:
             check("source_envelope_hash", material_wire["source_envelope_hash"],
                   authority["source_row"]["content_hash"], "material.source_envelope_hash",
                   "SourceEnvelope hash is exact Core authority")
-            check("source_is_alphaengine_get_document", (source["source"], source["operation"]),
-                  (ALPHAENGINE_SOURCE_REF, ALPHAENGINE_DOCUMENT_OPERATION), "source.operation",
-                  "SourceEnvelope is an AlphaEngine get_document page")
-            check("source_record_binds_document_digest", source["source_record_refs"],
-                  [f"{document_ref}:sha256:{binding['source_content_hash']}"],
-                  "source.source_record_refs",
-                  "page-1 SourceEnvelope binds the cited whole-document digest")
+            check("source_is_cited_original", (source["source"], source["operation"]),
+                  (self.kind["source_ref"], self.kind["operation"]), "source.operation",
+                  f"SourceEnvelope is a {self.source_kind} original")
+            if self.source_kind == "alphaengine":
+                check("source_record_binds_document_digest", source["source_record_refs"],
+                      [f"{document_ref}:sha256:{binding['source_content_hash']}"],
+                      "source.source_record_refs",
+                      "page-1 SourceEnvelope binds the cited whole-document digest")
+            else:
+                # A fetch names exactly one record: the page (url hash + body
+                # hash).  The rendering hash the citation binds was verified
+                # against those bytes by the correction authority.
+                check("source_record_binds_fetched_page", source["source_record_refs"], [document_ref],
+                      "source.source_record_refs", "fetch SourceEnvelope binds the cited page")
             check("artifact_ref", material_wire["artifact_ref"], artifact["id"],
                   "material.artifact_ref", "raw ArtifactVersion ref is exact")
             check("artifact_hash", material_wire["artifact_hash"], artifact["content_hash"],
@@ -375,7 +421,7 @@ class TranscriptCoreAuthorityResolver:
         except Exception as exc:  # fail closed as a finding, never as a crash
             findings.append(_finding_wire(
                 "transcript_core_resolution", "error", "fail", "core_authority",
-                "exact passing transcript authority", "unavailable", str(exc),
+                f"exact passing {self.source_kind} authority", "unavailable", str(exc),
             ))
         for code, before, after in (
             ("published_before_retrieved", material_wire["published_at"], material_wire["retrieved_at"]),
@@ -393,7 +439,7 @@ class TranscriptCoreAuthorityResolver:
         ) else "reject"
         base = {
             "schema_version": "0.1",
-            "id": "verification-bundle:transcript-core-source:" + content_hash({
+            "id": self.kind["bundle_prefix"] + content_hash({
                 "subject": material_wire["id"],
                 "citation": material_wire["authority_resolution_hash"],
                 "findings": [item["content_hash"] for item in findings],
@@ -407,8 +453,8 @@ class TranscriptCoreAuthorityResolver:
             "checkpoint_ref": material_wire["authority_resolution_ref"],
             "checkpoint_hash": material_wire["authority_resolution_hash"],
             "findings": findings,
-            "verifier_ref": TRANSCRIPT_SOURCE_VERIFIER_REF,
-            "verifier_hash": TRANSCRIPT_SOURCE_VERIFIER_HASH,
+            "verifier_ref": self.verifier[0],
+            "verifier_hash": self.verifier[1],
         }
         base["content_hash"] = content_hash(base)
         return validate_verification_bundle(base)
@@ -444,12 +490,12 @@ def build_transcript_qualitative_candidate(
     ):
         raise VerificationRejected("qualitative candidate evidence does not bind this source verification")
     if (
-        evidence_wire["source_type"] != TRANSCRIPT_EVIDENCE_SOURCE_TYPE
+        evidence_wire["source_type"] not in CITED_EVIDENCE_SOURCE_TYPES
         or len(evidence_wire["artifact_refs"]) != 2
         or not evidence_wire["artifact_refs"][1]["ref"].startswith("transcript-claim-citation-binding:")
     ):
         raise VerificationRejected(
-            "qualitative candidate requires authenticated transcript evidence with an exact citation binding"
+            "qualitative candidate requires cited original evidence with an exact citation binding"
         )
     base = {
         "schema_version": "0.1",
@@ -504,6 +550,7 @@ def stage_transcript_qualitative_candidate(
     candidate_claim_ref: str | None = None,
     source_envelope_ref: str | None = None,
     artifact_reader: Callable[[Mapping[str, Any]], bytes] | None = None,
+    source_kind: str = "alphaengine",
 ) -> dict[str, Any]:
     """Read Core, build the qualitative candidate pair and stage it.
 
@@ -514,7 +561,8 @@ def stage_transcript_qualitative_candidate(
     them to the Cockpit without re-reading.
     """
 
-    resolver = TranscriptCoreAuthorityResolver(core, artifact_reader=artifact_reader)
+    resolver = TranscriptCoreAuthorityResolver(core, artifact_reader=artifact_reader, source_kind=source_kind)
+    kind = SOURCE_KINDS[source_kind]
     binding, _correction_set = resolver.citation(citation_ref)
     if binding["correction_set_version_ref"] != _text(correction_set_ref, "correction_set_ref"):
         raise TranscriptCoreAuthorityError(
@@ -532,11 +580,11 @@ def stage_transcript_qualitative_candidate(
         )
     when = material["retrieved_at"] if created_at is None else _text(created_at, "created_at")
     evidence_ref = (
-        "candidate-evidence:transcript:" + binding["content_hash"][:32]
+        f"candidate-evidence:{kind['candidate_prefix']}:" + binding["content_hash"][:32]
         if candidate_evidence_ref is None else _text(candidate_evidence_ref, "candidate_evidence_ref")
     )
     claim_ref = (
-        "candidate-claim:transcript:" + content_hash({
+        f"candidate-claim:{kind['candidate_prefix']}:" + content_hash({
             "citation": binding["id"], "subject_ref": subject_ref,
             "metric_or_aspect": metric_or_aspect, "period": period, "basis": basis,
         })[:32]
@@ -545,9 +593,10 @@ def stage_transcript_qualitative_candidate(
     evidence = build_candidate_evidence(
         material, source_verification,
         candidate_evidence_ref=evidence_ref, actor_ref=actor_ref, created_at=when,
-        verification_mode=TRANSCRIPT_CORE_AUTHORITY_MODE,
+        verification_mode=resolver.provenance_mode,
     )
-    evidence = bind_candidate_evidence_to_transcript_citation(evidence, binding)
+    evidence = bind_candidate_evidence_to_transcript_citation(
+        evidence, binding, source_type=kind["evidence_source_type"])
     claim = build_transcript_qualitative_candidate(
         evidence, source_verification,
         candidate_claim_ref=claim_ref, subject_ref=subject_ref,
@@ -560,7 +609,7 @@ def stage_transcript_qualitative_candidate(
         evidence=evidence,
         claim=claim,
         idempotency_key=idempotency_key,
-        verification_mode=TRANSCRIPT_CORE_AUTHORITY_MODE,
+        verification_mode=resolver.provenance_mode,
         authority_resolver=resolver,
     )
     return {

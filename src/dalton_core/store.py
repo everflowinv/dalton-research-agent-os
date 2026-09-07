@@ -1157,9 +1157,10 @@ class DaltonStore:
                 raise GateRejected(
                     "qualitative candidates enter the Ledger only through explicit human review"
                 )
-            if evidence_wire["source_type"] != TRANSCRIPT_EVIDENCE_SOURCE_TYPE:
+            from .transcript_correction import CITED_EVIDENCE_SOURCE_TYPES
+            if evidence_wire["source_type"] not in CITED_EVIDENCE_SOURCE_TYPES:
                 raise GateRejected(
-                    "qualitative candidates require authenticated transcript evidence"
+                    "qualitative candidates require cited original evidence"
                 )
         if not isinstance(idempotency_key, str) or not idempotency_key:
             raise ValidationError("idempotency_key is required")
@@ -1292,7 +1293,8 @@ class DaltonStore:
                 validate_persisted_transcript_claim_citation,
             )
 
-            if evidence_wire["source_type"] == TRANSCRIPT_EVIDENCE_SOURCE_TYPE:
+            from .transcript_correction import CITED_EVIDENCE_SOURCE_TYPES as _CITED
+            if evidence_wire["source_type"] in _CITED:
                 if (
                     len(evidence_wire["artifact_refs"]) != 2
                     or not evidence_wire["artifact_refs"][1]["ref"].startswith(
@@ -1345,7 +1347,21 @@ class DaltonStore:
                     and source_doc.get("raw_response_hash")
                     == citation["source_content_hash"]
                 )
-                if not (alphaengine_document_binding or direct_raw_binding):
+                # ADR-0005 / P9d-17c: a fetched page cites its verified
+                # rendering, not its bytes; the fetch envelope names exactly
+                # the page record and the raw artifact is the fetched body.
+                # The rendering hash was verified against those bytes by the
+                # correction authority when the span was admitted.
+                public_web_binding = (
+                    evidence_wire["source_type"] == "public_web"
+                    and source_doc.get("source") == "source:public-web"
+                    and source_doc.get("operation") == "fetch_get"
+                    and isinstance(document_ref, str)
+                    and document_ref.startswith("public-web-document:")
+                    and source_doc.get("source_record_refs") == [document_ref]
+                    and source_doc.get("raw_response_hash") == artifact["artifact_content_hash"]
+                )
+                if not (alphaengine_document_binding or direct_raw_binding or public_web_binding):
                     raise GateRejected(
                         "transcript citation does not bind the exact raw ArtifactVersion"
                     )

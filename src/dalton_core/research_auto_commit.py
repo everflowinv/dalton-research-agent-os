@@ -193,8 +193,14 @@ def _authorize_document_qualitative(
     from .document_extraction import statement_asserts_a_value
     if statement_asserts_a_value(claim_wire["normalized_statement"]):
         raise ResearchAutoCommitRejected("document qualitative rule admits no numeric statement")
-    if evidence_wire["source_type"] != TRANSCRIPT_EVIDENCE_SOURCE_TYPE or evidence_wire["source_ref"] != "source:alphaengine":
-        raise ResearchAutoCommitRejected("document qualitative rule requires an acquired AlphaEngine original")
+    expected_operation = {
+        (TRANSCRIPT_EVIDENCE_SOURCE_TYPE, "source:alphaengine"): "get_document",
+        ("public_web", "source:public-web"): "fetch_get",
+    }.get((evidence_wire["source_type"], evidence_wire["source_ref"]))
+    if expected_operation is None:
+        raise ResearchAutoCommitRejected(
+            "document qualitative rule requires an acquired AlphaEngine original or a fetched public-web page"
+        )
     refs = evidence_wire["artifact_refs"]
     if len(refs) != 2 or not refs[1]["ref"].startswith("transcript-claim-citation-binding:"):
         raise ResearchAutoCommitRejected("document candidate is missing its exact citation binding")
@@ -226,9 +232,9 @@ def _authorize_document_qualitative(
     # operation, exact hash.
     if (
         source["content_hash"] != evidence_wire["source_envelope_hash"]
-        or source.get("source") != "source:alphaengine" or source.get("operation") != "get_document"
+        or source.get("source") != evidence_wire["source_ref"] or source.get("operation") != expected_operation
     ):
-        raise ResearchAutoCommitRejected("document candidate source is not an acquired AlphaEngine original")
+        raise ResearchAutoCommitRejected("document candidate source is not the acquired original")
     return _decision(
         policy_version, claim_wire=claim_wire, evidence_wire=evidence_wire,
         rule_ref=DOCUMENT_QUALITATIVE_RULE_REF,

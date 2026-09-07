@@ -31,7 +31,7 @@
     "correction_set_ref": {"type": "string", "minLength": 1},
     "version": {"type": "integer", "minimum": 1},
     "prior_version_ref": {"type": ["string", "null"]},
-    "document_ref": {"type": "string", "pattern": "^alphaengine-doc:"},
+    "document_ref": {"type": "string", "pattern": "^(alphaengine-doc:|public-web-document:)"},
     "source_manifest_ref": {"type": "string", "minLength": 1},
     "source_manifest_hash": {
       "type": "string",

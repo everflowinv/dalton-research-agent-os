@@ -152,6 +152,19 @@ class ExtractionHost:
         )
         return authority, manifest
 
+    def _public_web_corrections(self, source_manifest: Any) -> tuple[Any, dict[str, Any]]:
+        """ADR-0005 / P9d-17c: the correction authority over a fetched page."""
+
+        from .public_web_core_fetch import validate_public_web_fetch_manifest
+        from .transcript_correction import TranscriptCorrectionAuthority
+        manifest = validate_public_web_fetch_manifest(source_manifest)
+        authority = TranscriptCorrectionAuthority(
+            self.store, spool=self._transcript_spool,
+            manifest_resolver=lambda ref: manifest if ref == manifest["id"] else None,
+            evidence_resolver=self._transcript_support_authority,
+        )
+        return authority, manifest
+
     def close(self) -> None:
         for handle in reversed(self._keepalive):
             try:
@@ -342,6 +355,16 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
         carried = [o for o in outcomes if o["status"] in ("admitted", "duplicate")]
         summary["formal_authority_writes"] += 2 * len(fresh)  # one Evidence and one Claim version each
         rejected = [o for o in outcomes if o["status"] == "rejected"]
+        # A refusal is a judgment only when the policy or a validator said no
+        # to the suggestion itself.  A conflict or an unexpected error is the
+        # system's problem: hold the review open rather than dismiss it.
+        judged = ("ResearchAutoCommitRejected", "VerificationRejected", "TranscriptCorrectionValidationError",
+                  "ResearchVerificationError")
+        conflicts = [o for o in rejected if not str(o.get("reason", "")).startswith(judged)]
+        if conflicts and not carried:
+            summary["resolved_reviews"].append({"review_id": review["review_id"], "status": "held",
+                                                "reason": conflicts[0]["reason"]})
+            continue
         try:
             if carried:
                 resolution = host.coverage_mission.resolve_document_review(

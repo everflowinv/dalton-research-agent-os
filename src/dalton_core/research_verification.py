@@ -69,10 +69,24 @@ _AUTHORITY_SOURCE_VERIFIER_HASH = content_hash({
 # Core-held AlphaEngine authority have no ResearchCheckpoint and no numeric
 # authority.  Their source verification is a separate closed verifier.
 TRANSCRIPT_CORE_AUTHORITY_MODE = "transcript_core_authority"
-_AUTHORITY_PROVENANCE_MODES = frozenset({"connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE})
+# ADR-0005 / P9d-17c: the same chain for a fetched public-web page, whose
+# citable original is the verified rendering of its exact bytes.
+PUBLIC_WEB_CORE_AUTHORITY_MODE = "public_web_core_authority"
+CITED_CORE_AUTHORITY_MODES = frozenset({TRANSCRIPT_CORE_AUTHORITY_MODE, PUBLIC_WEB_CORE_AUTHORITY_MODE})
+_AUTHORITY_PROVENANCE_MODES = frozenset({"connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE, PUBLIC_WEB_CORE_AUTHORITY_MODE})
+PUBLIC_WEB_SOURCE_VERIFIER_REF = "verifier:public-web-core-authority-source:0.1"
 TRANSCRIPT_SOURCE_VERIFIER_REF = "verifier:transcript-core-authority-source:0.1"
 TRANSCRIPT_SOURCE_VERIFIER_HASH = content_hash({
     "ref": TRANSCRIPT_SOURCE_VERIFIER_REF,
+    "rules": [
+        "persisted-citation-eligibility", "correction-set-lineage",
+        "core-source-envelope", "core-invocation-execution", "core-raw-artifact",
+        "alphaengine-document-digest-binding", "profile-source-type", "schema",
+        "citation-projection", "time-order",
+    ],
+})
+PUBLIC_WEB_SOURCE_VERIFIER_HASH = content_hash({
+    "ref": PUBLIC_WEB_SOURCE_VERIFIER_REF,
     "rules": [
         "persisted-citation-eligibility", "correction-set-lineage",
         "core-source-envelope", "core-invocation-execution", "core-raw-artifact",
@@ -483,6 +497,7 @@ def validate_verification_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
             (_SOURCE_VERIFIER_REF, _SOURCE_VERIFIER_HASH),
             (_AUTHORITY_SOURCE_VERIFIER_REF, _AUTHORITY_SOURCE_VERIFIER_HASH),
             (TRANSCRIPT_SOURCE_VERIFIER_REF, TRANSCRIPT_SOURCE_VERIFIER_HASH),
+            (PUBLIC_WEB_SOURCE_VERIFIER_REF, PUBLIC_WEB_SOURCE_VERIFIER_HASH),
         }
         if wire["kind"] == "source"
         else {(_NUMERIC_VERIFIER_REF, _NUMERIC_VERIFIER_HASH)}
@@ -1180,24 +1195,26 @@ def build_candidate_evidence(
         # This value came from the validated connector profile when the
         # material was built; it is not accepted as a caller label.
         expected_source_type = material_wire["source_type"]
-    elif verification_mode == TRANSCRIPT_CORE_AUTHORITY_MODE:
+    elif verification_mode in CITED_CORE_AUTHORITY_MODES:
+        expected_verifier = (
+            (TRANSCRIPT_SOURCE_VERIFIER_REF, TRANSCRIPT_SOURCE_VERIFIER_HASH)
+            if verification_mode == TRANSCRIPT_CORE_AUTHORITY_MODE
+            else (PUBLIC_WEB_SOURCE_VERIFIER_REF, PUBLIC_WEB_SOURCE_VERIFIER_HASH)
+        )
         if (
             material_wire["schema_version"] != "0.2"
-            or material_wire.get("provenance_mode") != TRANSCRIPT_CORE_AUTHORITY_MODE
+            or material_wire.get("provenance_mode") != verification_mode
         ):
             raise VerificationRejected(
-                "transcript_core_authority evidence requires transcript Core authority material"
+                f"{verification_mode} evidence requires matching Core authority material"
             )
-        if (
-            verification["verifier_ref"] != TRANSCRIPT_SOURCE_VERIFIER_REF
-            or verification["verifier_hash"] != TRANSCRIPT_SOURCE_VERIFIER_HASH
-        ):
+        if (verification["verifier_ref"], verification["verifier_hash"]) != expected_verifier:
             raise VerificationRejected(
-                "transcript_core_authority evidence requires the transcript Core source verifier"
+                f"{verification_mode} evidence requires its own Core source verifier"
             )
-        # The profile source type is read from Core by the transcript Core
-        # resolver; the citation binder later relabels the evidence as
-        # authenticated_transcript.
+        # The profile source type is read from Core by the resolver; the
+        # citation binder later relabels the evidence (authenticated
+        # transcript, or public web page).
         expected_source_type = material_wire["source_type"]
     else:
         raise VerificationRejected("verification_mode is not a closed value")
@@ -1408,9 +1425,9 @@ class CandidateStagingStore:
         key = _text(idempotency_key, "idempotency_key")
         verification_mode = _text(verification_mode, "verification_mode")
         qualitative = claim_wire["claim_kind"] == "qualitative"
-        transcript_evidence = (
-            evidence_wire["source_type"] == TRANSCRIPT_EVIDENCE_SOURCE_TYPE
-        )
+        # ADR-0005 / P9d-17c: a fetched public-web page cited through the
+        # same correction authority is cited evidence too.
+        transcript_evidence = evidence_wire["source_type"] in (TRANSCRIPT_EVIDENCE_SOURCE_TYPE, "public_web")
 
         spec_wire: dict[str, Any] | None
         numeric_wire: dict[str, Any] | None
@@ -1422,7 +1439,7 @@ class CandidateStagingStore:
             if not transcript_evidence:
                 raise VerificationRejected(
                     "qualitative candidate requires authenticated transcript evidence "
-                    "with an exact citation binding"
+                    "or a fetched public-web page with an exact citation binding"
                 )
             spec_wire = None
             numeric_wire = None
@@ -1434,21 +1451,21 @@ class CandidateStagingStore:
             spec_wire = validate_numeric_verification_spec(numeric_spec)
             numeric_wire = self._require_clean_pass(numeric_verification, "numeric")
 
-        if verification_mode == TRANSCRIPT_CORE_AUTHORITY_MODE:
+        if verification_mode in CITED_CORE_AUTHORITY_MODES:
             if not qualitative:
                 raise VerificationRejected(
-                    "transcript_core_authority staging admits qualitative candidates only; "
-                    "a transcript is not a numeric authority"
+                    f"{verification_mode} staging admits qualitative candidates only; "
+                    "a cited original is not a numeric authority"
                 )
             if authority_resolver is None or not callable(
                 getattr(authority_resolver, "verify_source_material", None)
             ):
                 raise VerificationRejected(
-                    "transcript_core_authority staging requires a transcript Core authority resolver"
+                    f"{verification_mode} staging requires a Core authority resolver"
                 )
-            if material_wire.get("provenance_mode") != TRANSCRIPT_CORE_AUTHORITY_MODE:
+            if material_wire.get("provenance_mode") != verification_mode:
                 raise VerificationRejected(
-                    "transcript_core_authority staging requires transcript Core authority material"
+                    f"{verification_mode} staging requires matching Core authority material"
                 )
             recomputed_source = authority_resolver.verify_source_material(material_wire)
         else:
@@ -1515,7 +1532,7 @@ class CandidateStagingStore:
         }]
         if transcript_evidence:
             transcript_shape = (
-                verification_mode in {"connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE}
+                verification_mode in {"connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE, PUBLIC_WEB_CORE_AUTHORITY_MODE}
                 and material_wire["source_type"] != "recorded_fixture"
                 and len(evidence_wire["artifact_refs"]) == 2
                 and evidence_wire["artifact_refs"][:1] == expected_artifacts

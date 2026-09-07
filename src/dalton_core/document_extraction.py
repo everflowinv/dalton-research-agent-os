@@ -809,8 +809,6 @@ class DocumentExtractionService:
         missing = sorted(self.ADMISSION_GRANTS - set(mission["autonomy"]["may_write"]))
         if missing:
             return {"status": "gated", "reason": f"mission does not grant {missing}", "admitted": []}
-        if context["source_ref"] == PUBLIC_WEB_SOURCE_REF:
-            return {"status": "gated", "reason": WEB_STAGING_GATE_REASON, "admitted": []}
         from .research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
         policy = self.writer.store.active_policy_version().to_dict()["policy"]
         rule = policy.get("research_candidate_auto_commit") or {}
@@ -828,10 +826,18 @@ class DocumentExtractionService:
             "SELECT ticket_ref FROM coverage_mission_discovered_documents WHERE record_id=?",
             (self.writer.coverage_mission.document_review(review_id)["discovered_document_ref"],),
         ).fetchone()
-        launcher = self.writer.acquisition_launcher
+        web = context["source_ref"] == PUBLIC_WEB_SOURCE_REF
+        launcher = self.writer.web_fetch_launcher if web else self.writer.acquisition_launcher
         manifest = (launcher.read_completed_manifest(row["ticket_ref"], context["document_ref"])
                     if row["ticket_ref"] else launcher.locate_completed_manifest(context["document_ref"]))
-        authority, _ = self.writer._transcript_corrections(manifest)
+        if web:
+            # ADR-0005 / P9d-17c: the same correction authority over the
+            # fetched page; its original is the verified rendering.
+            authority, _ = self.writer._public_web_corrections(manifest)
+            source_kind, source_envelope_ref = "public_web", manifest["source_envelope_ref"]
+        else:
+            authority, _ = self.writer._transcript_corrections(manifest)
+            source_kind, source_envelope_ref = "alphaengine", None
         from .transcript_candidate_staging import stage_transcript_qualitative_candidate
         results = []
         for suggestion in drafted["suggestions"]:
@@ -871,8 +877,9 @@ class DocumentExtractionService:
                     period=suggestion["period"], basis=suggestion["basis"],
                     normalized_statement=suggestion["normalized_statement"], actor_ref=actor_ref,
                     idempotency_key=key, artifact_reader=self.writer._read_transcript_artifact,
-                    candidate_evidence_ref="candidate-evidence:transcript:" + pair_key,
-                    candidate_claim_ref="candidate-claim:transcript:" + pair_key)
+                    candidate_evidence_ref=f"candidate-evidence:{source_kind}:" + pair_key,
+                    candidate_claim_ref=f"candidate-claim:{source_kind}:" + pair_key,
+                    source_kind=source_kind, source_envelope_ref=source_envelope_ref)
                 bundle = reviewer.candidate_authority_bundle(staged["claim"]["id"])
                 promotion = self.writer.store.commit_policy_candidate(**bundle, idempotency_key="policy-ledger:" + key)
                 entry.update({"status": "duplicate" if promotion.get("status") == "duplicate" else "admitted",

@@ -1,7 +1,24 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
-- **P9d-17b：起草物由 policy 自动准入为正式 Claim（已过全仓，待部署；需 owner 再跑一次 chain 脚本）。**
+- **P9d-17c：网页经同一条链自动准入为 Claim（已过专项，全仓中，待部署）。** owner 已跑第二次 chain（policy-7 /
+  constitution v5 / mission v7：列出文档定性规则、`max_daily_paid_calls` 提到 1000）。**live 首批自动 Claim 已产生**：
+  一篇文档一 tick 内准入 9 条定性 Claim、审阅自动关闭，Ledger 由 6 条到 15 条；4 条同引文同 aspect 的建议因候选身份未含
+  陈述而撞车，已改为以建议 id 键定候选对。网页不是逐字稿：原文是精确字节的确定性渲染，链上处处默认"原文=原始字节"。
+  两条路：并行再建一条链，或一条链两种来源——选后者：①`TranscriptCorrectionAuthority._source` 按 manifest id 分派，
+  `public-web-fetch-manifest:` 走 `verified_public_web_source` 得渲染文本，`source_content_hash` 即渲染 hash，渲染器变或
+  字节漂移即 fail closed；correction set 的 `document_ref` 记页面 record ref（契约放宽到 `public-web-document:`）。
+  ②resolver/binder/builders/staging 函数增加 `source_kind`：web 走 `source:public-web`+`fetch_get`、单条 record、
+  `public_web_core_authority` 溯源模式与自己的 verifier 身份、显式 envelope；evidence 标为 `public_web`（契约对称扩展）。
+  ③staging store 与 Ledger writer 接受 web 种类，writer 新增 `public_web_binding`（envelope 恰好命名该页、raw artifact
+  即抓取体；渲染 hash 由 correction authority 在准入时对字节核验，与 AlphaEngine 信任文档摘要同理）。④policy 规则接受
+  两种来源。⑤子进程只在 policy/validator 拒绝建议本身时算"判定"，冲突或意外错误一律 hold 审阅不 dismiss（构建中发现
+  一次基础设施冲突把审阅误 dismiss）。**验证**：真实抓取子进程（假页面、connected+grant）+ 真实抽取子进程（hermetic、
+  带 staging）端到端——网页起草物成为 1 Evidence + 1 Claim（`public_web`/`source:public-web`、两条 artifact ref），
+  correction set 为自动化 scope、页面 ref、抓取 manifest，审阅关闭；既有 transcript/qualitative/review/admission 与
+  对抗测试全部通过。人工 `stage` 对网页仍拒绝（自动化路径才是 ADR-0005 要的）。见
+  [P9d-17c 报告](reports/p9d17c-public-web-admission-v0.1-2026-09-07.md)。
+- **P9d-17b：起草物由 policy 自动准入为正式 Claim（已部署；owner 已发布规则，live 已产出自动 Claim）。**
   P9d-17a 上线经过：live writer 从未装抽取模型配置 → 装上；首个子进程因"read-only WAL 无 sidecar"失败 → 子进程持有
   预算账本与 router 的写句柄；34 条 acquired 行没有 ticket_ref（9/4 获取的 33 条 AlphaEngine + 1 条 already-held web）→
   两个 launcher 新增 `locate_completed_manifest(document_ref)`，审阅面按 document ref 从票据目录找 manifest，这也意味着

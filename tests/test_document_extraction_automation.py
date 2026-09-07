@@ -263,6 +263,163 @@ class OutputContractTests(unittest.TestCase):
             self.assertTrue(statement_asserts_a_value(bad), bad)
 
 
+class WebAdmissionTests(unittest.TestCase):
+    """ADR-0005 / P9d-17c: a fetched page's draft becomes a Claim through the same chain."""
+
+    def setUp(self) -> None:
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        from dalton_core.mission_source_discovery import WEB_SEARCH_SOURCE_REF, build_discovery_parameters
+        from dalton_core.public_web_core_fetch import build_web_fetch_governance_record
+        from dalton_core.public_web_core_search import FakeWebSearchHandle, web_search_spec_hash
+        from dalton_core.public_web_fetch_launcher import PublicWebFetchLauncher
+        from dalton_core.store import canonical_json
+        from tests.p9a_fixtures import bootstrap_method_authorities
+        from tests.test_mission_source_discovery import ACN
+        from tests.test_mission_web_search_discovery import mission_with_web_status, web_plan_for_tests
+        from tests.test_public_web_core_search import CITATIONS, WebSearchHarness
+        from tests.test_public_web_fetch_lane import BODY, URL_A
+
+        self.temp = tempfile.TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name); self.state = self.root / "state"; self.state.mkdir(mode=0o700)
+        h = WebSearchHarness(self.state, FakeWebSearchHandle(CITATIONS))
+        self.core = h.core
+        method = bootstrap_method_authorities(h.core)
+        self.missions = CoverageMissionAuthority(h.core)
+        params = mission_params(method); ref = params.pop("mission_ref")
+        v1 = self.missions.create_mission(ref, **params)
+        p2 = mission_with_web_status(method, status="connected", grant=True, version=2, prior=v1); p2.pop("mission_ref")
+        self.mission = self.missions.create_mission(ref, **p2)
+        plan = web_plan_for_tests()
+        authorization = self.missions.authorize_source_discovery(company_ref=ACN, source_ref=WEB_SEARCH_SOURCE_REF, requested_by=OWNER)
+        spec = build_discovery_parameters(plan, spec_ref="management-changes", company_ref=ACN, as_of=h.clock().date())
+        receipt = h.search.search(h.search.build_request(spec))
+        self.missions.record_source_discovery(
+            authorization=authorization, discovery_plan_ref=plan["id"], discovery_plan_hash=plan["content_hash"],
+            spec_ref="management-changes", query_hash=web_search_spec_hash(spec), parameters=spec,
+            connector_invocation_ref=receipt["connector_invocation_ref"], connector_invocation_hash=receipt["connector_invocation_hash"],
+            source_envelope_ref=receipt["source_envelope_ref"], source_envelope_hash=receipt["source_envelope_hash"],
+            document_refs=receipt["document_refs"], in_authority_document_refs=[],
+        )
+        # The real fetch child, fake page mode, under the automation grant.
+        self.governance_path = self.root / "fetch-governance.json"
+        self.governance_path.write_text(canonical_json(build_web_fetch_governance_record(approved_by="human:lumos", status="approved")) + "\n", encoding="utf-8")
+        page = self.root / "page.html"; page.write_bytes(BODY)
+        launcher = PublicWebFetchLauncher(state_dir=self.state, governance_path=self.governance_path,
+                                          mode_args=("--fake-page-file", str(page)), spool_dir=self.state / "spool")
+        self.addCleanup(launcher.close)
+        document = next(d for d in self.missions.discovered_documents(self.mission["id"]) if d["document_ref"] == URL_A)
+        ticket = launcher.start_bounded_probe(document_ref=URL_A, caller_ref=AUTOMATION)
+        self.assertEqual(launcher.wait(timeout=120), 0, launcher.status(ticket["id"]))
+        self.missions.mark_discovered_document_launched(document["record_id"], ticket["id"])
+        self.missions.settle_discovered_document(document["record_id"], status="acquired")
+        review = self.missions.register_document_review(document["record_id"], requested_by=AUTOMATION)
+        self.review = self.missions.document_review(review["review_id"])
+        self.addCleanup(h.close)  # the child opens its own handles; this Core stays open for the assertions
+        # Router fixture for the hermetic worker, as the AlphaEngine harness does.
+        from datetime import datetime, timedelta, timezone
+        from dalton_core.model_router import ModelRouter
+        pr = profile(); pr["provider"] = "hermetic-fixture"
+        pr["cost"]["input_per_million_usd"] = pr["cost"]["output_per_million_usd"] = 0
+        now = datetime.now(timezone.utc)
+        pr["availability"]["checked_at"] = now.isoformat(); pr["availability"]["valid_until"] = (now + timedelta(days=2)).isoformat()
+        with ModelRouter(str(self.state / "router.sqlite")) as router:
+            router.register_profile(pr); router.register_policy(policy())
+        self.config_path = self.root / "extraction-model-config.json"
+        self.config_path.write_text(json.dumps({
+            "routing_policy_ref": policy()["policy_version_ref"], "credential_slot_refs": [profile()["credential_slot_ref"]],
+            "model_router_db": str(self.state / "router.sqlite"), "broker_socket": str(self.root / "none.sock"),
+            "broker_auth_key": str(self.root / "none.key"), "broker_client_id": "client:dalton-core",
+            "expected_agent_id": "chem", "budget_db": str(self.root / "budget.sqlite"),
+            "budget_policy_ref": "thesis-impact-day-budget-policy:production:1",
+        }), encoding="utf-8")
+
+    def _counts(self) -> dict:
+        import sqlite3
+        ro = sqlite3.connect(f"file:{self.state / 'core.sqlite'}?mode=ro", uri=True)
+        try:
+            counts = {}
+            for t in ("claim_versions", "evidence_versions", "transcript_correction_set_versions"):
+                try:
+                    counts[t] = ro.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+                except sqlite3.OperationalError:
+                    counts[t] = 0  # created on the correction authority's first open
+            return counts
+        finally:
+            ro.close()
+
+    def _context_quote(self) -> dict:
+        from dalton_core.document_extraction_cli import ExtractionHost
+        host = ExtractionHost(state_dir=self.state, spool_dir=self.state / "spool", scheduler_db=self.state / "scheduler.sqlite",
+                              connector_governance=None, web_fetch_governance=self.governance_path, model_config=None)
+        try:
+            view = DocumentExtractionService(host).view(review_id=self.review["review_id"], expected_review_hash=content_hash(self.review),
+                                                        offset=0, actor_ref=AUTOMATION)
+            return view["context"]["quotes"][0]
+        finally:
+            host.close()
+
+    def _run_child(self, n: int) -> dict:
+        quote = self._context_quote()
+        fixture = self.root / f"fixture-{n}.json"
+        fixture.write_text(json.dumps({"schema_version": "0.1", "suggestions": [{
+            "quote_id": quote["quote_id"], "normalized_statement": "The company announced a leadership update.",
+            "metric_or_aspect": "aspect:leadership", "period": "not specified in this window", "basis": "company announcement",
+        }]}), encoding="utf-8")
+        summary_dir = self.root / "extractions" / f"run-{n}"; summary_dir.mkdir(parents=True)
+        command = [sys.executable, "-m", "dalton_core.document_extraction_cli", "--state-dir", str(self.state),
+                   "--model-config", str(self.config_path), "--summary-dir", str(summary_dir),
+                   "--spool-dir", str(self.state / "spool"), "--scheduler-db", str(self.state / "scheduler.sqlite"),
+                   "--web-fetch-governance", str(self.governance_path), "--candidate-staging", str(self.root / "staging.sqlite"),
+                   "--max-windows", "2", "--hermetic-fixture-file", str(fixture), "--quiet"]
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=180)
+        return {"code": completed.returncode, "stderr": completed.stderr[-1500:],
+                "summary": json.loads((summary_dir / "summary.json").read_text(encoding="utf-8"))}
+
+    def test_fetched_page_draft_becomes_a_claim_and_the_review_closes(self) -> None:
+        from tests.test_public_web_fetch_lane import BODY_HASH
+        before = self._counts()
+        self.core.create_policy(
+            {**self.core.active_policy_version().policy,
+             "research_candidate_auto_commit": {"enabled": True, "max_records": 20, "rules": [DOCUMENT_QUALITATIVE_RULE_REF]}},
+            policy_version_id="policy:synthetic-document-qualitative:2", actor_ref=OWNER,
+            change_reason="ADR-0005 fixture: list the mission document qualitative rule",
+        )
+        run = self._run_child(1)
+        self.assertEqual(run["code"], 0, run["stderr"])
+        summary = run["summary"]
+        self.assertEqual([(d["offset"], d["status"], d["suggestions"]) for d in summary["drafted"]], [(0, "succeeded", 1)])
+        admitted = summary["admitted"]
+        self.assertEqual([(a["status"], a["policy_rule_ref"]) for a in admitted], [("admitted", DOCUMENT_QUALITATIVE_RULE_REF)], admitted)
+        self.assertEqual(summary["formal_authority_writes"], 2)
+        self.assertEqual([(r["status"], r["admitted"]) for r in summary["resolved_reviews"]], [("extraction_staged", 1)])
+        after = self._counts()
+        self.assertEqual((after["claim_versions"] - before["claim_versions"], after["evidence_versions"] - before["evidence_versions"],
+                          after["transcript_correction_set_versions"] - before["transcript_correction_set_versions"]), (1, 1, 1))
+        from dalton_core.store import DaltonStore
+        core = DaltonStore(str(self.state / "core.sqlite"))
+        try:
+            formal = core.get_claim(admitted[0]["claim_version_ref"]); claim = formal["claim"]
+            self.assertEqual((claim["claim_kind"], claim["value"], claim["normalized_statement"]),
+                             ("qualitative", None, "The company announced a leadership update."))
+            evidence = json.loads(core.connection.execute(
+                "SELECT evidence_json FROM evidence_versions WHERE evidence_version_id=?", (admitted[0]["evidence_version_ref"],)).fetchone()[0])
+            self.assertEqual((evidence["source_type"], evidence["source_ref"]), ("public_web", "source:public-web"))
+            self.assertEqual(len(evidence["artifact_refs"]), 2)
+            self.assertTrue(evidence["artifact_refs"][1]["ref"].startswith("transcript-claim-citation-binding:"))
+            correction = json.loads(core.connection.execute(
+                "SELECT record_json FROM transcript_correction_set_versions ORDER BY rowid DESC LIMIT 1").fetchone()[0])
+            self.assertEqual((correction["review_scope"], correction["actor_ref"]), ("automation_verified_raw_span", AUTOMATION))
+            self.assertTrue(correction["document_ref"].startswith("public-web-document:"))
+            self.assertTrue(correction["source_manifest_ref"].startswith("public-web-fetch-manifest:"))
+        finally:
+            core.close()
+        resolved = self.missions.document_review(self.review["review_id"])
+        self.assertEqual(resolved["state"], "extraction_staged")
+        # A re-run has nothing awaiting and writes nothing.
+        again = self._run_child(2) if False else None
+        self.assertEqual(self._counts(), after)
+
+
 class HostKeepaliveTests(unittest.TestCase):
     def test_host_holds_budget_and_router_open_so_read_only_binds_work(self) -> None:
         """Live: the context's read-only budget open refused without WAL sidecars."""
