@@ -112,6 +112,21 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(filings[0]["filed"], "2026-06-18")
         self.assertEqual(quarterly_filings({}), [])
 
+    def test_only_the_recent_filings_are_candidates(self) -> None:
+        """Company facts carry every filing ever; live the lane walked into 2023."""
+
+        rows = [
+            {"form": "10-Q", "start": f"20{year:02d}-03-01", "end": f"20{year:02d}-05-31",
+             "accn": f"0001467373-{year:02d}-000001", "filed": f"20{year:02d}-06-18", "val": 1}
+            for year in range(18, 27)
+        ]
+        payload = {"facts": {"us-gaap": {"Revenues": {"units": {"USD": rows}}}}}
+        filings = quarterly_filings(payload)
+        self.assertEqual(len(filings), 6)
+        self.assertEqual(filings[0]["end"], "2026-05-31")
+        self.assertEqual(filings[-1]["end"], "2021-05-31")
+        self.assertEqual(len(quarterly_filings(payload, limit=2)), 2)
+
     def test_the_artifact_is_read_by_its_own_hash_or_not_at_all(self) -> None:
         temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
         root = Path(temp.name)

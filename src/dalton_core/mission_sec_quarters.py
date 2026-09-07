@@ -37,6 +37,10 @@ MIN_QUARTER_DAYS = 80
 MAX_QUARTER_DAYS = 100
 FILING_WINDOW_DAYS = 2
 MAX_ATTEMPTS_PER_FILING = 3
+# How far back a "past four quarters" search may reach.  Six leaves room for a
+# filing whose comparative the lane cannot resolve without wandering into old
+# filings that use different concepts.
+RECENT_FILINGS = 6
 SPOOL_ROOTS = ("transcript-spool", "connector-spool", "raw-spool")
 
 
@@ -49,8 +53,16 @@ def _parse_date(value: Any) -> date | None:
         return None
 
 
-def quarterly_filings(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Distinct quarterly 10-Q periods in a company-facts payload, newest first."""
+def quarterly_filings(
+    payload: Mapping[str, Any], *, limit: int = RECENT_FILINGS
+) -> list[dict[str, Any]]:
+    """The most recent quarterly 10-Q periods in a company-facts payload.
+
+    Company facts carry every filing the issuer ever made.  The Playbook asks
+    for the *past* four quarters, so only the newest few are candidates; live,
+    without this bound the lane walked back into 2023 filings whose revenue
+    concepts no longer resolve.
+    """
 
     facts = (payload.get("facts") or {}).get("us-gaap") or {}
     seen: dict[tuple[str, str], dict[str, Any]] = {}
@@ -77,7 +89,8 @@ def quarterly_filings(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "start": start.isoformat(), "end": end.isoformat(),
                     "accession": accession, "filed": filed.isoformat(),
                 }
-    return sorted(seen.values(), key=lambda item: item["end"], reverse=True)
+    ordered = sorted(seen.values(), key=lambda item: item["end"], reverse=True)
+    return ordered[: max(1, int(limit))]
 
 
 def read_artifact(state_dir: Path, content_sha256: str) -> Mapping[str, Any] | None:
@@ -303,6 +316,7 @@ class MissionSecQuartersCoordinator:
 __all__ = [
     "MAX_ATTEMPTS_PER_FILING",
     "MAX_QUEUED_PER_RUN",
+    "RECENT_FILINGS",
     "MissionSecQuartersCoordinator",
     "REQUIRED_QUARTERS",
     "quarterly_filings",
