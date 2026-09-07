@@ -15,7 +15,11 @@
 *{box-sizing:border-box}
 html,body{margin:0;height:100%}
 body{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Helvetica Neue",Arial,"Noto Sans SC",sans-serif;
-  background:radial-gradient(1200px 800px at 10% -10%,#1a2350 0%,transparent 60%),radial-gradient(900px 700px at 110% 10%,#123a44 0%,transparent 55%),linear-gradient(180deg,var(--bg0),var(--bg1) 40%,var(--bg2));
+  /* Fixed to the viewport and never repeated: the radial layers carry explicit
+     pixel sizes, so on a long page they tiled and showed seams. */
+  background-color:var(--bg1);
+  background-image:radial-gradient(1200px 800px at 10% -10%,#1a2350 0%,transparent 60%),radial-gradient(900px 700px at 110% 10%,#123a44 0%,transparent 55%),linear-gradient(180deg,var(--bg0) 0%,var(--bg1) 45%,var(--bg2) 100%);
+  background-repeat:no-repeat;background-attachment:fixed;background-position:center;
   color:var(--text);min-height:100vh;-webkit-font-smoothing:antialiased;line-height:1.55}
 a{color:var(--sky)}
 button{font:inherit;cursor:pointer;border:0;border-radius:12px;padding:10px 16px;background:var(--panel2);color:var(--text);transition:.15s transform,.15s background}
