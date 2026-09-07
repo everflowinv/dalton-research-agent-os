@@ -374,6 +374,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "run_mission_source_discovery", "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
     "mission_document_reviews", "resolve_mission_document_review",
+    "mission_stage_checklist",
     "mission_document_evidence", "generate_document_extraction", "stage_document_extraction",
     "document_extraction_preflight",
 })
@@ -403,6 +404,7 @@ CORE_DISCOVERY_OPERATIONS = frozenset({
     "dispatch_mission_source_discovery", "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
     "dispatch_document_extraction",
+    "dispatch_mission_stage", "mission_stage_checklist",
 })
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
@@ -503,6 +505,7 @@ CORE_OPERATIONS = frozenset({
     "dispatch_mission_source_discovery", "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
     "dispatch_document_extraction",
+    "dispatch_mission_stage", "mission_stage_checklist",
     "mission_document_reviews",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
@@ -658,6 +661,8 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "reconcile_forecasts": frozenset({"requested_by", "company_ref", "claim_version_ref"}),
     "dispatch_mission_source_discovery": frozenset(),
     "dispatch_document_extraction": frozenset(),
+    "dispatch_mission_stage": frozenset(),
+    "mission_stage_checklist": frozenset(),
     "run_mission_source_discovery": frozenset({"requested_by", "company_ref", "spec_ref", "as_of", "source_ref"}),
     "mission_source_discovery_status": frozenset({"ticket_ref"}),
     "mission_source_discoveries": frozenset({"mission_version_ref", "company_ref", "spec_ref", "limit"}),
@@ -2392,6 +2397,31 @@ class WriterServer:
         else:
             result["web_search"] = self.web_source_discovery.dispatch_once()
         return result
+
+    def _mission_stage_driver(self) -> Any:
+        """P10a: the stage driver, told which discovery specs actually exist."""
+
+        from .mission_stage import MissionStageDriver, planned_spec_refs
+
+        plans = []
+        for coordinator in (self._source_discovery, self._web_source_discovery):
+            if coordinator is None:
+                continue
+            try:
+                plans.append(coordinator.load_plan())
+            except Exception:  # noqa: BLE001 - a missing plan only narrows the checklist
+                continue
+        return MissionStageDriver(
+            self.coverage_mission, planned_specs=planned_spec_refs(plans)
+        )
+
+    def _op_dispatch_mission_stage(self, p: Mapping[str, Any]) -> Any:
+        # Controller tick (P10a).  Enters the Playbook's first stage for any
+        # company that has none, and reports the source base per company.
+        return self._mission_stage_driver().run_once()
+
+    def _op_mission_stage_checklist(self, p: Mapping[str, Any]) -> Any:
+        return self._mission_stage_driver().evaluate()
 
     def _op_dispatch_document_extraction(self, p: Mapping[str, Any]) -> Any:
         # Controller tick (ADR-0005).  An unconfigured writer answers truthfully.

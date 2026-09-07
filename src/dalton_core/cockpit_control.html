@@ -84,6 +84,13 @@ header.top p{margin:4px 0 0;color:var(--muted)}
 .bar i{display:block;height:100%;background:var(--grad);border-radius:999px;transition:width .6s ease}
 .kpis{display:flex;gap:14px;color:var(--muted);font-size:12.5px;flex-wrap:wrap}
 .kpis b{color:var(--text);font-weight:700}
+.checks{margin:2px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:5px}
+.checks li{display:grid;grid-template-columns:18px 1fr auto;gap:8px;align-items:baseline;font-size:12.5px;color:#cfd6ea}
+.checks .ic{font-size:12px}
+.checks .ok .ic{color:var(--green)}.checks .part .ic{color:var(--amber)}.checks .no .ic{color:var(--rose)}.checks .na .ic{color:var(--dim)}
+.checks .na{color:var(--dim)}
+.checks .cnt{color:var(--muted);font-variant-numeric:tabular-nums}
+.checks .nt{grid-column:2/4;color:var(--dim);font-size:11.5px}
 .latest{margin:4px 0 0;padding:0;list-style:none;font-size:13px;color:#cfd6ea}
 .latest li{padding:6px 0;border-top:1px dashed var(--line)}
 .lanes{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
@@ -197,7 +204,7 @@ details{margin-top:14px}summary{cursor:pointer;color:var(--muted);font-size:13px
 
     <div class="card">
       <h2>每家公司的子任务</h2>
-      <p class="sub">系统把总目标拆成了每家公司一条线：搜集资料 → 阅读提炼 → 持续跟踪。</p>
+      <p class="sub">按团队研究手册，每家公司走同一条路：初步筛选 → 深度认知门 → 行业模型 → 公司模型 → 投资备忘录 → 持续覆盖。下面是每家现在走到哪、手册要求的资料还差什么。</p>
       <div class="grid c3" id="companies"></div>
     </div>
 
@@ -303,10 +310,12 @@ function renderOverview(o){
   $("lanes").replaceChildren(...o.activity.lanes.map(l=>{const d=node("div",null,"lane");const cls=["launched","busy","running","ready","idle"].includes(l.status)?(["launched","busy","running"].includes(l.status)?"on":""):l.status==="held"?"hold":l.status==="failed"?"err":"";d.append(node("span",null,`st ${cls}`));const c=node("div");c.append(node("b",l.label),node("small",`${laneStatus(l.status)} · ${l.note}`));d.append(c);return d}));
   const run=$("running");run.replaceChildren(...o.activity.running.map(r=>{const d=node("div",null,"r");d.append(node("span",null,"spin"),node("span",r.title+(r.detail?` — ${r.detail}`:"")));return d}));
   if(!o.activity.running.length)run.append(node("div","此刻没有正在运行的任务；调度器每 5 分钟检查一次。","hint"));
-  $("companies").replaceChildren(...o.companies.map(c=>{const d=node("div",null,"company");const h=node("div",null,"head");const l=node("div");l.append(node("span",c.ticker,"tk"),node("span",c.name,"nm"));h.append(l,node("span",c.stage,`stage ${c.stage==="搜集资料"?"s1":c.stage==="阅读中"?"s2":c.stage==="持续跟踪"?"s3":""}`));d.append(h,node("div",c.note,"hint"));const bar=node("div",null,"bar");const i=node("i");i.style.width=`${c.progress.percent}%`;bar.append(i);d.append(bar);const k=node("div",null,"kpis");k.innerHTML=`<span>找到 <b>${c.progress.found}</b></span><span>已读 <b>${c.progress.read}</b></span><span>排队 <b>${c.progress.waiting}</b></span><span>结论 <b>${c.claims.total}</b>${c.claims.today?` <b style="color:var(--teal)">+${c.claims.today}</b>`:""}</span>`;d.append(k);if(c.claims.latest.length){const ul=node("ul",null,"latest");c.claims.latest.forEach(x=>ul.append(node("li",x.statement)));d.append(ul)}return d}));
+  $("companies").replaceChildren(...o.companies.map(c=>{const d=node("div",null,"company");const h=node("div",null,"head");const l=node("div");l.append(node("span",c.ticker,"tk"),node("span",c.name,"nm"));h.append(l,node("span",`${c.stage}${c.stage_status&&c.stage_ref?" · "+c.stage_status:""}`,`stage ${c.stage_ref==="initial_screen"?"s2":c.stage_ref?"s3":"s1"}`));d.append(h,node("div",c.note,"hint"));const bar=node("div",null,"bar");const i=node("i");i.style.width=`${c.progress.percent}%`;bar.append(i);d.append(bar);if(c.checklist&&c.checklist.length)d.append(checklist(c.checklist));const k=node("div",null,"kpis");k.innerHTML=`<span>找到 <b>${c.progress.found}</b></span><span>已读 <b>${c.progress.read}</b></span><span>排队 <b>${c.progress.waiting}</b></span><span>结论 <b>${c.claims.total}</b>${c.claims.today?` <b style="color:var(--teal)">+${c.claims.today}</b>`:""}</span>`;d.append(k);if(c.claims.latest.length){const ul=node("ul",null,"latest");c.claims.latest.forEach(x=>ul.append(node("li",x.statement)));d.append(ul)}return d}));
   const m=o.model_available;$("goal-submit").disabled=!m.available;$("ask-submit").disabled=!m.available;$("steer-submit").disabled=!m.available;if(!m.available){$("goal-hint").textContent=m.reason;$("ask-hint").textContent=m.reason}
   svc(o.activity.service_state,o.activity.last_tick_at);
 }
+const CHECK={complete:["✓","ok"],partial:["◐","part"],missing:["○","no"],not_planned:["⊘","na"],source_unavailable:["⊘","na"]};
+function checklist(items){const ul=node("ul",null,"checks");items.forEach(it=>{const[icon,cls]=CHECK[it.status]||["·","na"];const li=node("li",null,cls);li.append(node("span",icon,"ic"),node("span",it.label),node("span",`${it.have}/${it.required}`,"cnt"));if(it.status!=="complete")li.append(node("span",it.note,"nt"));ul.append(li)});return ul}
 function stat(n,l,s){const d=node("div",null,"stat");d.append(node("div",String(n),"n"),node("div",l,"l"),node("div",s,"s"));return d}
 function laneStatus(s){return{launched:"运行中",busy:"运行中",running:"运行中",idle:"待命",ready:"就绪",held:"暂停等待",failed:"出错",budget_exhausted:"今日额度用完",paused:"已暂停"}[s]||s||"待命"}
 function svc(state,tick){const d=$("svc-dot"),t=$("svc-text");const stale=tick&&(Date.now()-new Date(tick).getTime())>10*60*1000;if(state==="running"&&!stale){d.className="dot";t.textContent=`系统运行中 · 最近活动 ${ago(tick)}`}else if(state){d.className="dot warn";t.textContent=`系统${stale?"可能停了":state} · 最近活动 ${ago(tick)}`}else{d.className="dot off";t.textContent="读不到系统状态"}}

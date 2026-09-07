@@ -495,6 +495,24 @@ def _ref(prefix: str, identity: Mapping[str, Any]) -> str:
 _HOST_RE = re.compile(r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$")
 
 
+def _needs(value: Any, name: str) -> list[dict[str, str]]:
+    """Closed ordered list of ``{company_ref, spec_ref}`` stage needs."""
+
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise CoverageMissionValidationError(f"{name} must be a sequence")
+    result: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, Mapping) or set(item) != {"company_ref", "spec_ref"}:
+            raise CoverageMissionValidationError(f"{name} items need exactly company_ref and spec_ref")
+        result.append({
+            "company_ref": _text(item["company_ref"], f"{name}.company_ref"),
+            "spec_ref": _text(item["spec_ref"], f"{name}.spec_ref"),
+        })
+    if len(result) > 50:
+        raise CoverageMissionValidationError(f"{name} is limited to 50 entries")
+    return result
+
+
 def _host_list(value: Any, name: str) -> list[str]:
     """Lowercase registrable hostnames, unique, in the order given."""
 
@@ -1502,6 +1520,7 @@ class CoverageMissionAuthority:
         source_ref: str | None = None,
         preferred_hosts: Sequence[str] = (),
         skip_hosts: Sequence[str] = (),
+        preferred_needs: Sequence[Mapping[str, str]] = (),
     ) -> dict[str, Any] | None:
         """Next ``discovered`` document across active missions, or None.
 
@@ -1515,13 +1534,21 @@ class CoverageMissionAuthority:
         every attempt would only spend a governed call to learn it again.
         Rows without a host (non-URL sources, or not yet backfilled) are
         neither preferred nor skipped.
+
+        P10a: ``preferred_needs`` is an ordered list of ``{company_ref,
+        spec_ref}`` the mission still needs for its current stage.  A document
+        matching the first need comes before one matching the second, and both
+        before a document no stage needs.  Without it the oldest row wins,
+        which on live spent a whole day of governed calls on one company.
         """
 
         preferred = _host_list(preferred_hosts, "preferred_hosts")
         skipped = _host_list(skip_hosts, "skip_hosts")
+        needs = _needs(preferred_needs, "preferred_needs")
         query = (
             "SELECT d.* FROM coverage_mission_discovered_documents d "
             "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
+            "LEFT JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
             "WHERE d.status='discovered'"
         )
         params: list[Any] = []
@@ -1531,14 +1558,33 @@ class CoverageMissionAuthority:
         if skipped:
             query += " AND (d.host IS NULL OR d.host NOT IN (%s))" % ",".join("?" * len(skipped))
             params.extend(skipped)
+        query += " ORDER BY"
+        if needs:
+            clauses = " ".join(
+                "WHEN d.company_ref=? AND s.spec_ref=? THEN %d" % index
+                for index in range(len(needs))
+            )
+            query += " CASE %s ELSE %d END," % (clauses, len(needs))
+            for need in needs:
+                params.extend((need["company_ref"], need["spec_ref"]))
         if preferred:
-            query += " ORDER BY CASE WHEN d.host IN (%s) THEN 0 ELSE 1 END," % ",".join("?" * len(preferred))
+            query += " CASE WHEN d.host IN (%s) THEN 0 ELSE 1 END," % ",".join("?" * len(preferred))
             params.extend(preferred)
-        else:
-            query += " ORDER BY"
         query += " d.created_at,d.record_id LIMIT 1"
         row = self.connection.execute(query, params).fetchone()
         return None if row is None else self._document_row(row)
+
+    def document_spec_refs(self, mission_version_ref: str) -> dict[str, str]:
+        """document_ref → the discovery spec that found it (P10a reading order)."""
+
+        rows = self.connection.execute(
+            "SELECT d.document_ref AS document_ref, s.spec_ref AS spec_ref "
+            "FROM coverage_mission_discovered_documents d "
+            "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
+            "WHERE d.mission_version_ref=?",
+            (_text(mission_version_ref, "mission_version_ref"),),
+        ).fetchall()
+        return {row["document_ref"]: row["spec_ref"] for row in rows}
 
     def discovered_documents_held_by_skip(
         self, *, source_ref: str | None = None, skip_hosts: Sequence[str] = ()

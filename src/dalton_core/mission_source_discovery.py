@@ -1167,6 +1167,28 @@ class MissionSourceDiscoveryCoordinator:
         return {"status": "idle", "skipped": skipped}
 
     # -- document acquisition ------------------------------------------------
+    def _stage_needs(self) -> tuple[list[dict[str, str]], str | None]:
+        """P10a: what the missions still need from this source, most important first.
+
+        A governed call should buy the P0 company's missing transcript before
+        the P2 company's twentieth broker report.  A failure here costs only
+        the ordering, never the acquisition, but it is reported rather than
+        swallowed: a silently empty order looks exactly like no gaps at all.
+        """
+
+        try:
+            from .mission_stage import MissionStageDriver, planned_spec_refs
+
+            driver = MissionStageDriver(
+                self.missions, planned_specs=planned_spec_refs([self.plan])
+            )
+            return ([
+                {"company_ref": need["company_ref"], "spec_ref": need["spec_ref"]}
+                for need in driver.needs(source_ref=self.source_ref)
+            ], None)
+        except Exception as exc:  # noqa: BLE001 - ordering is an optimisation, not a gate
+            return ([], f"{type(exc).__name__}: {exc}")
+
     def launch_acquisition(self) -> dict[str, Any]:
         if self.acquisition_launcher is None:
             queued = self.missions.next_discovered_document(source_ref=self.source_ref)
@@ -1182,9 +1204,15 @@ class MissionSourceDiscoveryCoordinator:
         if self.missions.launched_discovered_documents(limit=1, source_ref=self.source_ref):
             return {"status": "busy", "reason": "a discovered-document acquisition is still open"}
         retry = False
+        needs, needs_error = self._stage_needs()
+        stage_order = {
+            "count": len(needs), "error": needs_error,
+            "first": needs[0] if needs else None,
+        }
         document = self.missions.next_discovered_document(
             source_ref=self.source_ref,
             preferred_hosts=self.preferred_hosts, skip_hosts=self.skip_hosts,
+            preferred_needs=needs,
         )
         if document is not None and self._document_in_authority(document["document_ref"]):
             # A human acquisition already put these bytes into authority; settle
@@ -1214,7 +1242,7 @@ class MissionSourceDiscoveryCoordinator:
             )
             retry = document is not None
         if document is None:
-            idle: dict[str, Any] = {"status": "idle"}
+            idle: dict[str, Any] = {"status": "idle", "stage_order": stage_order}
             if self.skip_hosts:
                 idle["held_by_skip_hosts"] = self.missions.discovered_documents_held_by_skip(
                     source_ref=self.source_ref, skip_hosts=self.skip_hosts
@@ -1235,7 +1263,8 @@ class MissionSourceDiscoveryCoordinator:
             }
         budget = self._budget(authorization["max_alphaengine_calls_24h"])
         if budget["remaining"] < 1:
-            return {"status": "budget_exhausted", "budget": budget, "document_ref": document["document_ref"]}
+            return {"status": "budget_exhausted", "budget": budget,
+                    "document_ref": document["document_ref"], "stage_order": stage_order}
         try:
             ticket = self.acquisition_launcher.start_bounded_probe(
                 document_ref=document["document_ref"],

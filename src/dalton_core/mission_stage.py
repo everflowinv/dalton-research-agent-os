@@ -1,0 +1,511 @@
+"""P10a (vision v1.1): drive the mission by the Playbook's stages.
+
+Phase 9 wrote the team's methodology into a contract: every company walks
+Initial Screen → Deep Insight Gate → industry model → company model →
+Investment Memo → active coverage, and each stage carries required readings,
+required outputs and an exit gate.  P9d then made "search → acquire → read →
+admit a Claim" fully autonomous.  Nothing joined the two: the live stage
+ledger was empty, and the lanes picked their next document by age alone, so
+the AlphaEngine day budget went to whichever company was discovered first
+(live: every transcript belonged to EPAM, every broker report to Cognizant,
+while the P0 company had neither).
+
+This module is the join.  It does three things, all deterministic:
+
+- **Enters the first stage.**  A company with no stage record gets
+  ``initial_screen entered`` under the mission's own automation principal.
+  Nothing here passes a gate; passing needs the deliverable (P10c).
+- **Scores the source base.**  The Playbook's Initial Screen required
+  readings ("过去 4 个季度财报与电话会、最新年报或招股书、近 6 个月多空券商观点")
+  become four counted items.  A document counts for an item when the
+  discovery spec that found it declares that document type, which the
+  discovery record already stores; nothing is inferred from the text.
+- **Orders the lanes by gap.**  ``acquisition_needs`` ranks (company, spec)
+  pairs by the mission's own bootstrap priority and by what each company is
+  still missing, so the governed daily calls buy the missing readings of the
+  most important company first.
+
+No authority is invented: the counts are a projection over the mission's own
+tables, and the only write is the stage record the mission already grants.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections.abc import Mapping, Sequence
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable
+
+from .coverage_mission import CoverageMissionError, STAGE_ORDER
+
+SCHEMA_VERSION = "0.1"
+FIRST_STAGE = "initial_screen"
+ACQUIRED_STATUSES = ("acquired", "already_in_authority")
+READ_REVIEW_STATE = "extraction_staged"
+
+STAGE_LABELS: dict[str, str] = {
+    "initial_screen": "初步筛选",
+    "deep_insight_gate": "深度认知门",
+    "industry_model": "行业模型",
+    "company_model": "公司模型",
+    "investment_memo": "投资备忘录",
+    "active_coverage": "持续覆盖",
+}
+STAGE_STATUS_LABELS: dict[str, str] = {
+    "entered": "进行中",
+    "gate_passed": "已通过",
+    "gate_failed": "未通过，正在补",
+}
+
+# The Playbook's Initial Screen required_readings, translated into items a
+# machine can count.  ``spec_refs`` names the discovery specs whose declared
+# document type satisfies the item; an item with no planned spec is reported
+# as ``not_planned`` rather than silently missing.
+SOURCE_BASE_ITEMS: tuple[dict[str, Any], ...] = (
+    {
+        "item_ref": "quarterly_financials",
+        "label": "过去 4 个季度的财报数字",
+        "reading": "读过去 4 个季度财报",
+        "required": 4,
+        "counted_by": "quantitative_claim_periods",
+        "source_ref": "source:sec-edgar",
+        "spec_refs": (),
+    },
+    {
+        "item_ref": "earnings_calls",
+        "label": "过去 4 个季度的电话会纪要",
+        "reading": "读过去 4 个季度电话会",
+        "required": 4,
+        "counted_by": "acquired_documents",
+        "source_ref": "source:alphaengine",
+        "spec_refs": ("earnings-call-transcripts",),
+    },
+    {
+        "item_ref": "annual_report",
+        "label": "最新年报或招股书",
+        "reading": "读最新年报或招股书",
+        "required": 1,
+        "counted_by": "acquired_documents",
+        "source_ref": "source:alphaengine",
+        "spec_refs": ("annual-reports",),
+    },
+    {
+        "item_ref": "broker_research",
+        "label": "近 6 个月的多空券商观点",
+        "reading": "读近 6 个月多空券商观点",
+        "required": 3,
+        "counted_by": "acquired_documents",
+        "source_ref": "source:alphaengine",
+        "spec_refs": ("sell-side-reports",),
+    },
+)
+_ITEM_ORDER = {item["item_ref"]: index for index, item in enumerate(SOURCE_BASE_ITEMS)}
+# Reading order inside one company, used by the extraction lane: an original
+# that carries management's own words before someone else's summary of them.
+SPEC_READING_RANK: dict[str, int] = {
+    "earnings-call-transcripts": 0,
+    "annual-reports": 1,
+    "sell-side-reports": 2,
+}
+DEFAULT_SPEC_RANK = 3
+PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2, "P3": 3}
+
+
+class MissionStageError(RuntimeError):
+    """A stage driver refusal; the message is safe to show."""
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def company_priority_order(mission: Mapping[str, Any]) -> list[str]:
+    """Company refs ordered by the mission's own bootstrap priority, then universe order."""
+
+    indexed = list(enumerate(mission["universe"]))
+    indexed.sort(key=lambda pair: (PRIORITY_ORDER.get(pair[1].get("bootstrap_priority"), 9), pair[0]))
+    return [member["company_ref"] for _, member in indexed]
+
+
+def planned_spec_refs(plans: Sequence[Mapping[str, Any]]) -> set[str]:
+    """Every spec ref the given discovery plans declare."""
+
+    result: set[str] = set()
+    for plan in plans:
+        for spec in (plan or {}).get("specs") or ():
+            ref = spec.get("spec_ref") if isinstance(spec, Mapping) else None
+            if isinstance(ref, str) and ref:
+                result.add(ref)
+    return result
+
+
+def planned_spec_refs_from_directory(directory: Path) -> set[str]:
+    """Spec refs from every readable discovery plan in a directory (best effort)."""
+
+    plans: list[Mapping[str, Any]] = []
+    try:
+        entries = sorted(directory.glob("*.json"))
+    except OSError:
+        return set()
+    for path in entries:
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(value, Mapping):
+            plans.append(value)
+    return planned_spec_refs(plans)
+
+
+def _document_counts(
+    connection: sqlite3.Connection, mission_version_ref: str
+) -> dict[tuple[str, str], dict[str, int]]:
+    """(company_ref, spec_ref) → acquired / pending / failed / read counts."""
+
+    counts: dict[tuple[str, str], dict[str, int]] = {}
+
+    def bucket(company: str, spec: str) -> dict[str, int]:
+        return counts.setdefault(
+            (company, spec), {"acquired": 0, "pending": 0, "failed": 0, "read": 0}
+        )
+
+    rows = connection.execute(
+        "SELECT d.company_ref AS company_ref, s.spec_ref AS spec_ref, d.status AS status, "
+        "COUNT(*) AS n FROM coverage_mission_discovered_documents d "
+        "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
+        "WHERE d.mission_version_ref=? GROUP BY 1,2,3",
+        (mission_version_ref,),
+    ).fetchall()
+    for row in rows:
+        entry = bucket(row["company_ref"], row["spec_ref"])
+        status = row["status"]
+        if status in ACQUIRED_STATUSES:
+            entry["acquired"] += row["n"]
+        elif status in ("discovered", "acquisition_launched"):
+            entry["pending"] += row["n"]
+        elif status == "acquisition_failed":
+            entry["failed"] += row["n"]
+    read_rows = connection.execute(
+        "SELECT d.company_ref AS company_ref, s.spec_ref AS spec_ref, COUNT(*) AS n "
+        "FROM coverage_mission_document_reviews r "
+        "JOIN coverage_mission_discovered_documents d ON d.record_id=r.discovered_document_ref "
+        "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
+        "WHERE r.mission_version_ref=? AND r.state=? GROUP BY 1,2",
+        (mission_version_ref, READ_REVIEW_STATE),
+    ).fetchall()
+    for row in read_rows:
+        bucket(row["company_ref"], row["spec_ref"])["read"] += row["n"]
+    return counts
+
+
+def _claim_periods(connection: sqlite3.Connection) -> dict[str, set[str]]:
+    """company_ref → distinct periods asserted by a quantitative Claim."""
+
+    periods: dict[str, set[str]] = {}
+    rows = connection.execute(
+        "SELECT json_extract(claim_json,'$.subject_ref') AS subject_ref, "
+        "json_extract(claim_json,'$.period') AS period FROM claim_versions "
+        "WHERE json_extract(claim_json,'$.value') IS NOT NULL "
+        "AND json_extract(claim_json,'$.status') IS NOT 'retired'"
+    ).fetchall()
+    for row in rows:
+        subject, period = row["subject_ref"], row["period"]
+        if isinstance(subject, str) and isinstance(period, str) and period:
+            periods.setdefault(subject, set()).add(period)
+    return periods
+
+
+def _item_status(
+    item: Mapping[str, Any], have: int, *, connected: bool, planned: bool
+) -> tuple[str, str]:
+    required = int(item["required"])
+    if have >= required:
+        return "complete", f"已有 {have} 份，够了"
+    if not connected:
+        return "source_unavailable", f"{item['source_ref']} 还没有接入，这项拿不到"
+    if not planned and item["spec_refs"]:
+        return "not_planned", "还没有对应的搜索规格，需要先加一条"
+    if have == 0:
+        return "missing", f"一份都没有，还差 {required} 份"
+    return "partial", f"已有 {have} 份，还差 {required - have} 份"
+
+
+def evaluate_mission(
+    connection: sqlite3.Connection,
+    mission: Mapping[str, Any],
+    *,
+    planned_specs: set[str] | None = None,
+    stage_state: Mapping[str, Mapping[str, Sequence[str]]] | None = None,
+) -> list[dict[str, Any]]:
+    """The Initial Screen source base, per company, as plain counted items."""
+
+    planned = set(planned_specs or set())
+    counts = _document_counts(connection, mission["id"])
+    periods = _claim_periods(connection)
+    connected = {
+        entry["source_ref"]
+        for entry in mission["source_plan"]
+        if entry.get("status") == "connected"
+    }
+    order = company_priority_order(mission)
+    members = {member["company_ref"]: member for member in mission["universe"]}
+    result: list[dict[str, Any]] = []
+    for company_ref in order:
+        member = members[company_ref]
+        history = (stage_state or {}).get(company_ref) or {}
+        entered = [stage for stage in STAGE_ORDER if history.get(stage)]
+        stage = entered[-1] if entered else None
+        status = None
+        if stage is not None:
+            statuses = list(history.get(stage) or ())
+            status = "gate_passed" if "gate_passed" in statuses else (statuses[-1] if statuses else None)
+        items = []
+        for item in SOURCE_BASE_ITEMS:
+            if item["counted_by"] == "quantitative_claim_periods":
+                have = len(periods.get(company_ref, set()))
+                read = have
+                pending = failed = 0
+            else:
+                have = read = pending = failed = 0
+                for spec in item["spec_refs"]:
+                    entry = counts.get((company_ref, spec))
+                    if entry is None:
+                        continue
+                    have += entry["acquired"]
+                    read += entry["read"]
+                    pending += entry["pending"]
+                    failed += entry["failed"]
+            item_status, note = _item_status(
+                item,
+                have,
+                connected=item["source_ref"] in connected,
+                planned=all(spec in planned for spec in item["spec_refs"]) if item["spec_refs"] else True,
+            )
+            if item_status in {"partial", "missing"} and pending:
+                note += f"；还有 {pending} 份已找到、排队等取"
+            items.append({
+                "item_ref": item["item_ref"], "label": item["label"], "reading": item["reading"],
+                "required": int(item["required"]), "have": have, "read": read, "pending": pending,
+                "failed": failed, "status": item_status, "note": note,
+                "source_ref": item["source_ref"], "spec_refs": list(item["spec_refs"]),
+            })
+        blocking = [i for i in items if i["status"] in {"partial", "missing"}]
+        result.append({
+            "company_ref": company_ref, "ticker": member.get("ticker"),
+            "priority": member.get("bootstrap_priority"), "tier": member.get("coverage_tier"),
+            "stage": stage, "stage_label": STAGE_LABELS.get(stage or "", "还没开始"),
+            "stage_status": status, "stage_status_label": STAGE_STATUS_LABELS.get(status or "", "还没开始"),
+            "items": items,
+            "source_base_ready": not blocking,
+            "gaps": [i["item_ref"] for i in blocking],
+            "blocked_on": [i["item_ref"] for i in items if i["status"] in {"not_planned", "source_unavailable"}],
+        })
+    return result
+
+
+def acquisition_needs(
+    companies: Sequence[Mapping[str, Any]], *, source_ref: str | None = None
+) -> list[dict[str, Any]]:
+    """(company, spec) pairs still missing readings, most important first.
+
+    One pass per company in mission priority order, then by the Playbook's own
+    reading order: the P0 company's missing transcripts outrank the P2
+    company's fourth broker report.
+    """
+
+    needs: list[dict[str, Any]] = []
+    for rank, company in enumerate(companies):
+        for item in company["items"]:
+            if item["status"] not in {"partial", "missing"} or not item["spec_refs"]:
+                continue
+            if source_ref is not None and item["source_ref"] != source_ref:
+                continue
+            if not item["pending"]:
+                continue  # nothing discovered to acquire; discovery must find it first
+            for spec in item["spec_refs"]:
+                needs.append({
+                    "company_ref": company["company_ref"], "spec_ref": spec,
+                    "item_ref": item["item_ref"], "deficit": item["required"] - item["have"],
+                    "company_rank": rank, "item_rank": _ITEM_ORDER[item["item_ref"]],
+                })
+    needs.sort(key=lambda need: (need["company_rank"], need["item_rank"], need["spec_ref"]))
+    return needs
+
+
+def discovery_needs(
+    companies: Sequence[Mapping[str, Any]], *, source_ref: str | None = None
+) -> list[dict[str, Any]]:
+    """(company, spec) pairs whose gap cannot be closed by what is already found."""
+
+    needs: list[dict[str, Any]] = []
+    for rank, company in enumerate(companies):
+        for item in company["items"]:
+            if item["status"] not in {"partial", "missing"} or not item["spec_refs"]:
+                continue
+            if source_ref is not None and item["source_ref"] != source_ref:
+                continue
+            if item["pending"] >= item["required"] - item["have"]:
+                continue  # enough already discovered; the acquisition lane will close it
+            for spec in item["spec_refs"]:
+                needs.append({
+                    "company_ref": company["company_ref"], "spec_ref": spec,
+                    "item_ref": item["item_ref"],
+                    "deficit": item["required"] - item["have"] - item["pending"],
+                    "company_rank": rank, "item_rank": _ITEM_ORDER[item["item_ref"]],
+                })
+    needs.sort(key=lambda need: (need["company_rank"], need["item_rank"], need["spec_ref"]))
+    return needs
+
+
+def review_sort_key(
+    review: Mapping[str, Any],
+    *,
+    company_rank: Mapping[str, int],
+    spec_by_document: Mapping[str, str],
+) -> tuple[int, int, str, str]:
+    """Reading order for the extraction lane: priority company, then original kind."""
+
+    spec = spec_by_document.get(review.get("document_ref") or "", "")
+    return (
+        company_rank.get(review.get("company_ref") or "", len(company_rank)),
+        SPEC_READING_RANK.get(spec, DEFAULT_SPEC_RANK),
+        str(review.get("created_at") or ""),
+        str(review.get("review_id") or ""),
+    )
+
+
+class MissionStageDriver:
+    """Enter the first stage and report the source base for every active mission."""
+
+    def __init__(
+        self,
+        missions: Any,
+        *,
+        planned_specs: set[str] | None = None,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.missions = missions
+        self.planned_specs = set(planned_specs or set())
+        self.clock = clock or _now
+
+    def _active_missions(self) -> list[dict[str, Any]]:
+        rows = self.missions.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer ORDER BY mission_ref"
+        ).fetchall()
+        return [self.missions.mission(row["mission_version_id"]) for row in rows]
+
+    def _stage_state(self, mission: Mapping[str, Any]) -> dict[str, dict[str, list[str]]]:
+        state: dict[str, dict[str, list[str]]] = {}
+        for record in self.missions.stage_records(mission["id"]):
+            state.setdefault(record["company_ref"], {}).setdefault(record["stage_ref"], []).append(
+                record["status"]
+            )
+        return state
+
+    def evaluate(self) -> dict[str, Any]:
+        missions = []
+        for mission in self._active_missions():
+            companies = evaluate_mission(
+                self.missions.connection, mission,
+                planned_specs=self.planned_specs, stage_state=self._stage_state(mission),
+            )
+            missions.append({
+                "mission_ref": mission["mission_ref"], "mission_version_ref": mission["id"],
+                "title": mission["title"], "companies": companies,
+                "stage_order": [
+                    {"stage_ref": stage, "label": STAGE_LABELS.get(stage, stage)}
+                    for stage in STAGE_ORDER
+                ],
+            })
+        return {
+            "projection_kind": "mission_stage_checklist", "schema_version": SCHEMA_VERSION,
+            "as_of": self.clock().isoformat(timespec="seconds"), "missions": missions,
+        }
+
+    def needs(self, *, source_ref: str | None = None) -> list[dict[str, Any]]:
+        """Acquisition needs across active missions, most important first."""
+
+        result: list[dict[str, Any]] = []
+        for mission in self._active_missions():
+            companies = evaluate_mission(
+                self.missions.connection, mission,
+                planned_specs=self.planned_specs, stage_state=self._stage_state(mission),
+            )
+            result.extend(acquisition_needs(companies, source_ref=source_ref))
+        return result
+
+    def run_once(self) -> dict[str, Any]:
+        """Enter ``initial_screen`` for every company that has no stage record yet."""
+
+        entered: list[dict[str, Any]] = []
+        skipped: list[dict[str, Any]] = []
+        missions = []
+        for mission in self._active_missions():
+            state = self._stage_state(mission)
+            automation = mission["autonomy"]["automation_principal"]
+            for company_ref in company_priority_order(mission):
+                if state.get(company_ref):
+                    continue
+                try:
+                    record = self.missions.record_stage(
+                        mission_version_ref=mission["id"],
+                        mission_version_hash=mission["content_hash"],
+                        company_ref=company_ref, stage_ref=FIRST_STAGE, status="entered",
+                        evidence_refs=[mission["id"]],
+                        rationale=(
+                            "P10a：按研究手册进入 Initial Screen，开始核对资料底座"
+                            "（4 季财报、4 次电话会、最新年报、近 6 个月券商观点）。"
+                        ),
+                        actor_ref=automation,
+                        idempotency_key=f"{mission['id']}:{company_ref}:{FIRST_STAGE}:entered",
+                    )
+                    entered.append({
+                        "company_ref": company_ref, "mission_version_ref": mission["id"],
+                        "stage_ref": FIRST_STAGE, "status": record.get("status", "recorded"),
+                    })
+                    state.setdefault(company_ref, {}).setdefault(FIRST_STAGE, []).append("entered")
+                except CoverageMissionError as exc:
+                    skipped.append({
+                        "company_ref": company_ref, "mission_version_ref": mission["id"],
+                        "reason": f"{type(exc).__name__}: {exc}",
+                    })
+            companies = evaluate_mission(
+                self.missions.connection, mission,
+                planned_specs=self.planned_specs, stage_state=state,
+            )
+            missions.append({
+                "mission_ref": mission["mission_ref"], "mission_version_ref": mission["id"],
+                "companies": [
+                    {
+                        "company_ref": company["company_ref"], "ticker": company["ticker"],
+                        "stage": company["stage"], "stage_status": company["stage_status"],
+                        "gaps": company["gaps"], "blocked_on": company["blocked_on"],
+                    }
+                    for company in companies
+                ],
+                "acquisition_needs": acquisition_needs(companies),
+                "discovery_needs": discovery_needs(companies),
+            })
+        return {
+            "status": "entered" if entered else "idle", "schema_version": SCHEMA_VERSION,
+            "entered": entered, "skipped": skipped, "missions": missions,
+        }
+
+
+__all__ = [
+    "FIRST_STAGE",
+    "MissionStageDriver",
+    "MissionStageError",
+    "SOURCE_BASE_ITEMS",
+    "SPEC_READING_RANK",
+    "STAGE_LABELS",
+    "acquisition_needs",
+    "company_priority_order",
+    "discovery_needs",
+    "evaluate_mission",
+    "planned_spec_refs",
+    "planned_spec_refs_from_directory",
+    "review_sort_key",
+]

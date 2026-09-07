@@ -6,7 +6,7 @@ cockpit and the controller tick.  Like search, fetch and acquisition, drafting
 therefore runs in a child the writer spawns and tracks through a ticket.
 
 One run drafts at most ``--max-windows`` windows across the reviews that are
-awaiting extraction, oldest first, under each review's own mission grant and
+awaiting extraction, in the mission's own priority order, under each review's grant and
 budget.  It reuses ``DocumentExtractionService`` unchanged: the same context,
 prompt, output schema, budget admission and persisted, replayable results a
 human-triggered draft would produce.  A window whose result already exists is
@@ -30,6 +30,7 @@ from typing import Any
 from .alphaengine_acquisition_launcher import AlphaEngineAcquisitionLauncher
 from .connector import ConnectorStore
 from .coverage_mission import CoverageMissionAuthority
+from .mission_stage import company_priority_order, review_sort_key
 from .document_extraction import (
     DocumentExtractionModelWorker,
     DocumentExtractionService,
@@ -249,6 +250,16 @@ def run_extraction(
             mission = host.coverage_mission.mission(pointer["mission_version_id"])
             actor = requested_by or mission["autonomy"]["automation_principal"]
             reviews = host.coverage_mission.document_reviews(mission["id"], state="awaiting_human_extraction", limit=500)
+            # P10a: read in the mission's own order — the P0 company before the
+            # P2 one, and management's own words before someone else's summary
+            # of them.  Age only breaks ties.
+            try:
+                rank = {ref: index for index, ref in enumerate(company_priority_order(mission))}
+                specs = host.coverage_mission.document_spec_refs(mission["id"])
+                reviews = sorted(reviews, key=lambda review: review_sort_key(
+                    review, company_rank=rank, spec_by_document=specs))
+            except Exception:  # noqa: BLE001 - ordering is not a gate
+                pass
             for review in reviews:
                 if stop_reason is not None:
                     break

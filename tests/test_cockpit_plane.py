@@ -109,8 +109,20 @@ class CockpitPlaneTests(unittest.TestCase):
         self.assertEqual(goal["mission_ref"], "coverage-mission:us-it-services")
         self.assertTrue(goal["title"] and goal["objective"] and goal["research_questions"])
         self.assertEqual([c["ticker"] for c in view["companies"]], [m["ticker"] for m in self.c.h.mission["universe"]])
+        # P10a: the sub-task is the Playbook stage, and under it the source
+        # base the Playbook's Initial Screen requires, counted per company.
         company = next(c for c in view["companies"] if c["progress"]["found"])
-        self.assertIn(company["stage"], {"搜集资料", "阅读中", "持续跟踪"})
+        self.assertEqual(company["stage"], "还没开始")
+        self.assertEqual([i["item_ref"] for i in company["checklist"]],
+                         ["quarterly_financials", "earnings_calls", "annual_report", "broker_research"])
+        self.assertTrue(all(i["status"] in {"complete", "partial", "missing", "not_planned", "source_unavailable"}
+                            for i in company["checklist"]))
+        self.assertTrue(company["note"])
+        from dalton_core.mission_stage import MissionStageDriver
+        MissionStageDriver(self.c.h.missions).run_once()
+        after = next(c for c in self.c.plane.overview()["companies"] if c["company_ref"] == company["company_ref"])
+        self.assertEqual((after["stage"], after["stage_status"], after["stage_ref"]),
+                         ("初步筛选", "进行中", "initial_screen"))
         self.assertEqual(view["totals"]["found"], sum(c["progress"]["found"] for c in view["companies"]))
         self.assertEqual(view["activity"]["service_state"], "running")
         self.assertEqual([l["key"] for l in view["activity"]["lanes"]], ["web", "alphaengine", "extraction", "weekly"])

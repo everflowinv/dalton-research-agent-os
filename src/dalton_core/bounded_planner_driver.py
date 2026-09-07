@@ -256,6 +256,13 @@ class BoundedPlannerDriver:
             document_extraction = self.client.call("dispatch_document_extraction", {})
         except Exception as exc:
             document_extraction = {"status": f"unavailable:{type(exc).__name__}"}
+        # P10a: enter the Playbook's first stage for any company that has none
+        # and report each company's source base, so the lanes above can be
+        # ordered by what the mission still needs.
+        try:
+            mission_stage = self.client.call("dispatch_mission_stage", {})
+        except Exception as exc:
+            mission_stage = {"status": f"unavailable:{type(exc).__name__}"}
         listing = self.client.call("bounded_planner_active_loops", {})
         loops = listing["loops"]
         executed: list[dict[str, Any]] = []
@@ -440,6 +447,7 @@ class BoundedPlannerDriver:
             "forecast_reconciliation": forecast_reconciliation,
             "mission_source_discovery": mission_source_discovery,
             "document_extraction": document_extraction,
+            "mission_stage": mission_stage,
         }
 
 

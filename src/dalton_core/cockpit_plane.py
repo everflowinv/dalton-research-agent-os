@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .cockpit_model import CockpitModel, CockpitModelError, unwrap_json_object
+from .mission_stage import evaluate_mission, planned_spec_refs_from_directory
 from .governance_cli import GovernanceCliError, ephemeral_call
 from .store import content_hash
 from .writer_protocol import RemoteError
@@ -408,12 +409,15 @@ class CockpitPlane:
                 reviews.setdefault(row["company_ref"], {})[row["state"]] = row["n"]
             theses = [json.loads(r["content_json"]) for r in core.execute(
                 "SELECT content_json FROM thesis_versions ORDER BY created_at").fetchall()]
+            stages = self._stage_rows(core, mission)
         today = self.clock().date().isoformat()
         by_company: dict[str, list[dict[str, Any]]] = {}
         for claim in claims:
             by_company.setdefault(claim["subject_ref"], []).append(claim)
         companies = []
-        for company_ref, member in members.items():
+        for entry in stages:
+            company_ref = entry["company_ref"]
+            member = members.get(company_ref, {})
             d, r = docs.get(company_ref, {}), reviews.get(company_ref, {})
             found = sum(d.values())
             held = d.get("acquired", 0) + d.get("already_in_authority", 0)
@@ -421,21 +425,26 @@ class CockpitPlane:
             waiting = r.get("awaiting_human_extraction", 0)
             own = by_company.get(company_ref, [])
             today_claims = sum(1 for c in own if c["created_at"][:10] == today)
-            if not found:
-                stage, note = "待开始", "还没有开始搜集资料"
-            elif not read and not own:
-                stage, note = "搜集资料", f"已找到 {found} 份资料，正在获取和阅读"
-            elif waiting:
-                stage, note = "阅读中", f"已读 {read} 份，还有 {waiting} 份排队"
+            countable = [i for i in entry["items"] if i["status"] not in {"not_planned", "source_unavailable"}]
+            done = [i for i in countable if i["status"] == "complete"]
+            missing = [i for i in entry["items"] if i["status"] in {"partial", "missing"}]
+            blocked = [i for i in entry["items"] if i["status"] in {"not_planned", "source_unavailable"}]
+            if entry["stage"] is None:
+                note = "还没有开始"
+            elif missing:
+                note = "还差：" + "、".join(f"{i['label']}（{i['have']}/{i['required']}）" for i in missing[:3])
+            elif blocked:
+                note = "能拿到的资料齐了；" + blocked[0]["note"]
             else:
-                stage, note = "持续跟踪", f"已读完 {read} 份资料，继续搜集新资料"
-            total = read + waiting
+                note = "资料底座齐了，等着写初步筛选"
             companies.append({
-                "company_ref": company_ref, "ticker": member["ticker"], "name": COMPANY_NAMES.get(member["ticker"], ""),
+                "company_ref": company_ref, "ticker": member.get("ticker"), "name": COMPANY_NAMES.get(member.get("ticker", ""), ""),
                 "priority": member.get("bootstrap_priority"), "tier": member.get("coverage_tier"),
-                "stage": stage, "note": note,
+                "stage": entry["stage_label"], "stage_ref": entry["stage"],
+                "stage_status": entry["stage_status_label"], "note": note,
+                "checklist": entry["items"],
                 "progress": {"found": found, "held": held, "read": read, "waiting": waiting,
-                             "percent": int(round(100 * read / total)) if total else 0},
+                             "percent": int(round(100 * len(done) / len(countable))) if countable else 0},
                 "claims": {"total": len(own), "today": today_claims,
                            "latest": [{"statement": c["statement"], "at": c["created_at"], "ref": c["ref"]}
                                       for c in own[-3:][::-1]]},
@@ -482,6 +491,18 @@ class CockpitPlane:
             "budgets": budgets,
             "model_available": self._model_status(),
         }
+
+    def _stage_rows(self, core: sqlite3.Connection, mission: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """P10a:每家公司的阶段与资料底座清单，全部从任务自己的表里数出来。"""
+
+        state: dict[str, dict[str, list[str]]] = {}
+        for row in self._rows(core,
+            "SELECT company_ref, stage_ref, status FROM coverage_mission_stage_records "
+            "WHERE mission_version_ref=? ORDER BY created_at", (mission["id"],),
+        ):
+            state.setdefault(row["company_ref"], {}).setdefault(row["stage_ref"], []).append(row["status"])
+        specs = planned_spec_refs_from_directory(self.config.state_dir / "discovery-plans")
+        return evaluate_mission(core, mission, planned_specs=specs, stage_state=state)
 
     def _model_calls_today(self, mission: Mapping[str, Any], today: str) -> dict[str, Any] | None:
         if self.config.model_config_path is None:
