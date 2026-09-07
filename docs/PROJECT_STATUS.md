@@ -1,6 +1,36 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
+- **搜索预算提到 1000/24h，抓取失败终于说得出原因，grounding 转链不再当来源（P9d-8/9/10，均已部署）。**
+  ①**P9d-8 预算**：owner 指定把 web search 日上限由 40 提到 1000（provider 是便宜的 Gemini 2.5 Flash）。
+  计划文件是 hash 绑定的，契约写明"改条款/窗口/节奏就是新文件新 hash"，所以发**新版本**而不是原地改：
+  `discovery-plan:us-it-services:web-search:2`（hash `7cc168b4…`），companies 与 specs 与 v1 逐字节相同，
+  重发现节奏不断档；v1 保留在树内，因为 live 记录引用它的 hash。1000 正好等于 `gemini-web-search`
+  connector 早已持有的 governed 日配额，计划不再低估它所花的 connector。**注意**：`web-fetch` 自己的
+  200/24h governed 配额仍独立约束抓取；且每 tick 只发一次调用，真正的限速器是 tick 频率不是预算。
+  ②**P9d-9 失败诊断**：live 上同一台主机连续 5 次抓取失败，ledger 里只有 `acquisition ended failed
+  (exit 1)`——与网络抖动读起来完全一样。手工探测发现 `news.alphastreet.com` 对本 lane 的 user agent
+  一律回 **HTTP 403**。信息其实一直都在：adapter 观测到了 403 并写进 `ResultEnvelope` 的闭合
+  `{code, message, retryable}`，是 fetch receipt 把它丢了。`ConnectorRunnerResponse` 是闭合形状不带
+  error，但它按 hash 绑定了 `ResultEnvelope`，所以让这一个事实多走三层：receipt 按绑定 hash 读取
+  （envelope 漂移则 fail closed）→ CLI 组成具体 `failure_reason` → `settle_documents` 优先采用它，
+  与 search 侧 `settle_dispatches` 早就一致（这个不对称正是 bug）。未加宽任何契约。**06:45 live 验证**：
+  `fetch outcome failed; public web fetch returned HTTP 403; not retryable`。
+  ③**P9d-10 转链不是来源**：把 spool 里的发现 URL 还原后按主机分组，发现两条"文档"根本不是文章，而是
+  `vertexaisearch.cloud.google.com/grounding-api-redirect/…`。收录它四重错误：不指名出版方，人无法核验；
+  token 会过期，"持久可复核来源"的保证断裂；同一文章经两个 token 得到两个 document ref，去重静默失效；
+  而且它永远取不到字节——fetch profile 把 `allowed_hosts` 钉死为 URL 自身主机，transport 拒绝跟随转链
+  出站。归一化现在在 `max_records` 截断**之前**丢弃它们，使转链不会挤掉真实引文的名额。live ledger 里
+  已有的两条不动：账本只增不改，删除不是自动化该做的事。
+  ④**backlog 形状**（供后续接手）：103 条发现文档散在约 50 台主机，多数每台 1–5 条，所以"主机级封禁记忆"
+  的价值低于失败模式初看的样子。已确认封禁：`seekingalpha.com`、`news.alphastreet.com`、`www.spglobal.com`、
+  `stockanalysis.com`、`www.reddit.com`；已成功：`quartr.com`、`www.tikr.com`、`news.futunn.com`。更有价值的
+  缺口是**排序**：第一手 IR 主机（`newsroom.accenture.com`、`investor.accenture.com`、`investors.epam.com`）
+  正躺在 `discovered` 里排队，而 coordinator 每 tick 只取一条，没有任何东西优先它们。
+  ⑤**一个运维后果**：每次部署 `bootout` writer 都会孤立在飞的 discovery/fetch 子进程，该失败又让那对
+  company/spec 按"失败后 1 天重试"停park一天；今天两次部署各烧掉一个槽位。bootout 前先排空在飞子进程可修。
+  全仓 **1169/1171**（2 例既有 macOS `/var` 与 `/private/var` 路径断言失败，与本次无关，baseline 可复现）。见
+  [P9d-9/10 报告](reports/p9d9-fetch-failure-diagnosis-v0.1-2026-09-07.md)。
 - **PDF 抽取来源已上线，web search/fetch 已开闸自主运行（P9d-7）。**
   ①**PDF**：`application/pdf` 经 **pypdf**（可选 extra `pdf`，核心依赖面仍为零；`install.sh` 改装
   `[deploy,pdf]`）渲染为可核验抽取来源；extractor 缺失/加密/畸形/超 400 页/无文本一律带原因拒绝，
@@ -15,7 +45,7 @@
   ④**两个既有设计后果（未修，待 owner 定）**：发布新 mission 版本会孤立上一版本发现的文档
   （v3 下人工发现的 10 个 URL 现为孤儿，自动化不会去取；自动化会在 v4 下重新发现同样 URL）；
   搜索时已在 authority 的文档记为 `already_in_authority`，永不进人工队列（我手工抓的那份 PDF 即如此）。
-  ⑤用量：40 次/24h 由搜索与抓取共用，满负荷约一小时用尽后 lane idle 至窗口滚动；抓取走无凭据公网
+  ⑤用量：当时 40 次/24h 由搜索与抓取共用（**已由 P9d-8 提到 1000**）；抓取走无凭据公网
   HTTPS，**transport 不读 robots.txt**。见
   [P9d-7 报告](reports/p9d7-pdf-rendering-and-autonomous-web-research-2026-09-07.md)。
 - **live 首次真实页面抓取完成（human-only），并暴露两件事；其中一件已修（P9d-6）。**
