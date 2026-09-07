@@ -407,6 +407,7 @@ CORE_DISCOVERY_OPERATIONS = frozenset({
     "dispatch_document_extraction",
     "dispatch_mission_stage", "mission_stage_checklist",
     "dispatch_claim_review", "dispatch_initial_screen", "mission_deliverables",
+    "dispatch_mission_sec_quarters",
 })
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
@@ -510,6 +511,7 @@ CORE_OPERATIONS = frozenset({
     "dispatch_mission_stage", "mission_stage_checklist",
     "dispatch_claim_review", "claim_retirement_challenges",
     "dispatch_initial_screen", "mission_deliverables",
+    "dispatch_mission_sec_quarters",
     "mission_document_reviews",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
@@ -669,6 +671,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "mission_stage_checklist": frozenset(),
     "dispatch_claim_review": frozenset({"max_claims"}),
     "dispatch_initial_screen": frozenset(),
+    "dispatch_mission_sec_quarters": frozenset(),
     "mission_deliverables": frozenset({"mission_version_ref", "kind", "subject_ref"}),
     "claim_retirement_challenges": frozenset({"open_only", "limit"}),
     "decide_claim_retirement": frozenset({
@@ -2472,6 +2475,24 @@ class WriterServer:
         if self._mission_deliverables is None:
             self._mission_deliverables = MissionDeliverableAuthority(self.store)
         return self._mission_deliverables
+
+    def _op_dispatch_mission_sec_quarters(self, p: Mapping[str, Any]) -> Any:
+        # Controller tick (P10d).  Queue the filings a company still needs, read
+        # out of the company-facts artifact authority already holds.  The
+        # existing SEC lane dispatcher drains the queue.
+        from .mission_sec_quarters import MissionSecQuartersCoordinator
+
+        driver = self._mission_stage_driver()
+
+        def checklist() -> list[Any]:
+            missions = driver.evaluate()["missions"]
+            return missions[0]["companies"] if missions else []
+
+        return MissionSecQuartersCoordinator(
+            store=self.store, missions=self.coverage_mission,
+            state_dir=Path(self.db_path).expanduser().resolve().parent,
+            checklist=checklist,
+        ).dispatch_once()
 
     def _op_dispatch_initial_screen(self, p: Mapping[str, Any]) -> Any:
         # Controller tick (P10c).  One company's Initial Screen per tick.

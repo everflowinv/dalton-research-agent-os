@@ -272,6 +272,12 @@ class BoundedPlannerDriver:
             claim_review = {"status": f"unavailable:{type(exc).__name__}"}
         # P10c: write one company's Initial Screen from the Claims the Ledger
         # holds, and let the Playbook's own gate decide whether it passes.
+        # P10d: queue the SEC filings a company still needs for its four quarters,
+        # from the company-facts artifact Core already holds.
+        try:
+            sec_quarters = self.client.call("dispatch_mission_sec_quarters", {})
+        except Exception as exc:
+            sec_quarters = {"status": f"unavailable:{type(exc).__name__}"}
         try:
             initial_screen = self.client.call("dispatch_initial_screen", {})
         except Exception as exc:
@@ -463,6 +469,7 @@ class BoundedPlannerDriver:
             "mission_stage": mission_stage,
             "claim_review": claim_review,
             "initial_screen": initial_screen,
+            "mission_sec_quarters": sec_quarters,
         }
 
 
