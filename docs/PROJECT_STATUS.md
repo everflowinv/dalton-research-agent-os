@@ -1,6 +1,23 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
+- **PDF 抽取来源已上线，web search/fetch 已开闸自主运行（P9d-7）。**
+  ①**PDF**：`application/pdf` 经 **pypdf**（可选 extra `pdf`，核心依赖面仍为零；`install.sh` 改装
+  `[deploy,pdf]`）渲染为可核验抽取来源；extractor 缺失/加密/畸形/超 400 页/无文本一律带原因拒绝，
+  渲染器身份带抽取器版本（`pdf-pypdf-6.17.0:0.1`）使升级让旧 context 失效而非悄悄改变引文文本。
+  对 live 里那份 **14 页 Accenture 业绩发布 PDF 抽出 35,471 字**、两次逐字一致。全仓 **1166/1168**。
+  ②**开闸**：重装（含 pypdf）+ 健康检查 ok + 备份 `pre-web-connected-20260907` 后，发布 mission
+  **v4**（hash `ef242f1a…`）把 `source:web-search` 由 `probe_only` 改为 **`connected`**。
+  ③**live 自主闭环已跑通**：约 20 分钟内 **4 次真实搜索、3 次真实抓取**（24h 合计 7/40），文档
+  `discovered→acquisition_launched→acquired`，**1 条审阅入队**，人工审阅面成功渲染自动抓取的
+  `quartr.com` 页面（9,579 字、8 段引文、renderer `html-visible-blocks:0.1`）；模型起草仍 gated、
+  候选 staging 仍拒绝；**Evidence 6 / Claim 6 / Thesis 2 全程不变**，integrity ok。
+  ④**两个既有设计后果（未修，待 owner 定）**：发布新 mission 版本会孤立上一版本发现的文档
+  （v3 下人工发现的 10 个 URL 现为孤儿，自动化不会去取；自动化会在 v4 下重新发现同样 URL）；
+  搜索时已在 authority 的文档记为 `already_in_authority`，永不进人工队列（我手工抓的那份 PDF 即如此）。
+  ⑤用量：40 次/24h 由搜索与抓取共用，满负荷约一小时用尽后 lane idle 至窗口滚动；抓取走无凭据公网
+  HTTPS，**transport 不读 robots.txt**。见
+  [P9d-7 报告](reports/p9d7-pdf-rendering-and-autonomous-web-research-2026-09-07.md)。
 - **live 首次真实页面抓取完成（human-only），并暴露两件事；其中一件已修（P9d-6）。**
   `acquire_public_web_document`（`human:lumos`）对发现结果里第一手的 `newsroom.accenture.com` 抓了一次：
   transport `public-https`、1 次抓取、**190,517 字节 `application/pdf`**（`%PDF-1.4`）进入 Core connector
