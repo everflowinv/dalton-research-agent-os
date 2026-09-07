@@ -94,9 +94,14 @@ def _read_current(connection: sqlite3.Connection) -> dict[str, Any]:
             "policy_id": policy_row["policy_version_id"], "policy": json.loads(policy_row["policy_json"])}
 
 
-def build_chain(current: dict[str, Any], *, now: str, add_rules: list[str] | None = None) -> dict[str, Any]:
+def build_chain(current: dict[str, Any], *, now: str, add_rules: list[str] | None = None,
+                max_daily_paid_calls: int | None = None) -> dict[str, Any]:
     mission = current["mission"]
     budget = dict(mission["budget"])
+    if max_daily_paid_calls is not None:
+        if not 1 <= max_daily_paid_calls <= 100000:
+            raise SystemExit("--max-daily-paid-calls must be 1..100000")
+        budget["max_daily_paid_calls"] = int(max_daily_paid_calls)
     research_budget = {
         "max_daily_paid_calls": int(budget["max_daily_paid_calls"]),
         "max_daily_cost_usd": float(budget["max_daily_cost_usd"]),
@@ -105,7 +110,7 @@ def build_chain(current: dict[str, Any], *, now: str, add_rules: list[str] | Non
     policy_wire = current["policy"]
     policy_body = dict(policy_wire["policy"] if "policy" in policy_wire else policy_wire)
     changed = False
-    if "research_budget" not in policy_body:
+    if policy_body.get("research_budget") != research_budget:
         policy_body["research_budget"] = research_budget
         changed = True
     auto = dict(policy_body.get("research_candidate_auto_commit") or {})
@@ -126,15 +131,20 @@ def build_chain(current: dict[str, Any], *, now: str, add_rules: list[str] | Non
     mission_version = int(mission["version"]) + 1
     return {
         "research_budget": research_budget,
-        "mandate_needed": "research_budget" not in mandate["constraints"],
+        "mandate_needed": mandate["constraints"].get("research_budget") != research_budget,
         "policy": {
             "policy": policy_body,
             "policy_version_id": f"policy-{version}", "version_number": version, "activate": True,
             "policy_ref": policy_wire.get("policy_ref", "commit-gate"), "effective_from": now,
             "effective_until": None, "prior_version_ref": current["policy_id"],
-            "change_reason": CHANGE_REASON if not add_rules else (
-                "ADR-0005 / P9d-17b: list the mission document qualitative rule so policy may admit "
-                "automation-drafted qualitative Claims bound to exact raw spans; every other rule unchanged"),
+            "change_reason": (
+                CHANGE_REASON if not add_rules and max_daily_paid_calls is None else
+                "ADR-0005 / P9d-17b: " + "; ".join(filter(None, [
+                    "list the mission document qualitative rule so policy may admit automation-drafted "
+                    "qualitative Claims bound to exact raw spans" if add_rules else None,
+                    f"owner raised max_daily_paid_calls to {max_daily_paid_calls} (model calls; cost cap unchanged)"
+                    if max_daily_paid_calls is not None else None,
+                ])) + "; every other rule unchanged"),
             "content_hash_value": None,
         },
         "mandate": {
@@ -157,6 +167,7 @@ def build_chain(current: dict[str, Any], *, now: str, add_rules: list[str] | Non
         "mission": {
             "mission_ref": MISSION_REF,
             **{field: json.loads(json.dumps(mission[field])) for field in BODY_FIELDS},
+            "budget": budget,
             "version_id": f"coverage-mission-version:us-it-services:{mission_version}",
             "prior_version_ref": mission["id"],
             "idempotency_key": f"{MISSION_REF}:{mission_version}:research-budget",
@@ -205,7 +216,8 @@ def _ref_hash(record: dict[str, Any], expected_ref: str) -> tuple[str, str]:
     return ref, digest
 
 
-def rehearse(state_dir: Path, target: Path, *, add_rules: list[str] | None = None) -> dict[str, Any]:
+def rehearse(state_dir: Path, target: Path, *, add_rules: list[str] | None = None,
+             max_daily_paid_calls: int | None = None) -> dict[str, Any]:
     target.mkdir(parents=True, exist_ok=True)
     for name in ("core.sqlite", "core.sqlite-wal", "core.sqlite-shm"):
         source = state_dir / name
@@ -214,7 +226,8 @@ def rehearse(state_dir: Path, target: Path, *, add_rules: list[str] | None = Non
     store = DaltonStore(str(target / "core.sqlite"))
     try:
         current = _read_current(store.connection)
-        chain = build_chain(current, now=datetime.now(timezone.utc).isoformat(timespec="microseconds"), add_rules=add_rules)
+        chain = build_chain(current, now=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+                            add_rules=add_rules, max_daily_paid_calls=max_daily_paid_calls)
         agenda = AgendaStore(store)
         constitutions = ResearchConstitutionAuthority(store)
         missions = CoverageMissionAuthority(store)
@@ -259,14 +272,15 @@ def rehearse(state_dir: Path, target: Path, *, add_rules: list[str] | None = Non
         store.close()
 
 
-def live(state_dir: Path, *, add_rules: list[str] | None = None) -> dict[str, Any]:
+def live(state_dir: Path, *, add_rules: list[str] | None = None, max_daily_paid_calls: int | None = None) -> dict[str, Any]:
     from dalton_core.governance_cli import ephemeral_call
     read = sqlite3.connect(f"file:{state_dir / 'core.sqlite'}?mode=ro", uri=True)
     try:
         current = _read_current(read)
     finally:
         read.close()
-    chain = build_chain(current, now=datetime.now(timezone.utc).isoformat(timespec="microseconds"), add_rules=add_rules)
+    chain = build_chain(current, now=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+                        add_rules=add_rules, max_daily_paid_calls=max_daily_paid_calls)
     token_config = state_dir / "writer-tokens.json"
     socket = state_dir / "run" / "writer.sock"
 
@@ -285,10 +299,13 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--live", action="store_true", help="apply through the live writer as human:lumos")
     parser.add_argument("--add-auto-commit-rule", action="append", default=[],
                         help="list this research auto-commit rule in the policy (P9d-17b)")
+    parser.add_argument("--max-daily-paid-calls", type=int, default=None,
+                        help="owner decision: raise the mission's daily paid model-call cap (ADR-0004 budget expansion)")
     args = parser.parse_args(argv)
     rules = list(args.add_auto_commit_rule)
-    result = (rehearse(args.state_dir, args.rehearse, add_rules=rules) if args.rehearse is not None
-              else live(args.state_dir, add_rules=rules))
+    result = (rehearse(args.state_dir, args.rehearse, add_rules=rules, max_daily_paid_calls=args.max_daily_paid_calls)
+              if args.rehearse is not None
+              else live(args.state_dir, add_rules=rules, max_daily_paid_calls=args.max_daily_paid_calls))
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=1))
     return 0
 
