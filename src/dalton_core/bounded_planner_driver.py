@@ -263,6 +263,13 @@ class BoundedPlannerDriver:
             mission_stage = self.client.call("dispatch_mission_stage", {})
         except Exception as exc:
             mission_stage = {"status": f"unavailable:{type(exc).__name__}"}
+        # P10b: read admitted Claims back against the exact originals they cite;
+        # a wrong subject or a disclaimer is challenged and, under the mission's
+        # grant, retired.  The Ledger itself is never edited.
+        try:
+            claim_review = self.client.call("dispatch_claim_review", {})
+        except Exception as exc:
+            claim_review = {"status": f"unavailable:{type(exc).__name__}"}
         listing = self.client.call("bounded_planner_active_loops", {})
         loops = listing["loops"]
         executed: list[dict[str, Any]] = []
@@ -448,6 +455,7 @@ class BoundedPlannerDriver:
             "mission_source_discovery": mission_source_discovery,
             "document_extraction": document_extraction,
             "mission_stage": mission_stage,
+            "claim_review": claim_review,
         }
 
 

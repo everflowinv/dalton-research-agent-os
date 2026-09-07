@@ -38,7 +38,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .cockpit_model import CockpitModel, CockpitModelError, unwrap_json_object
-from .mission_stage import evaluate_mission, planned_spec_refs_from_directory
+from .claim_retirement import REASON_LABELS as CLAIM_REASON_LABELS
+from .mission_stage import evaluate_mission, planned_spec_refs_from_directory, retired_claim_refs
 from .governance_cli import GovernanceCliError, ephemeral_call
 from .store import content_hash
 from .writer_protocol import RemoteError
@@ -247,6 +248,8 @@ def _host(url: str) -> str:
 
 
 class CockpitPlane:
+    _claims_cache: tuple[tuple[int, str | None, int], list[dict[str, Any]]] | None
+
     def __init__(self, config: CockpitConfig, *, writer_socket: Path, token_config: Path,
                  governance_call: Callable[..., Any] = ephemeral_call, model: CockpitModel | None = None,
                  model_factory: Callable[[Mapping[str, Any]], CockpitModel] | None = None,
@@ -313,11 +316,17 @@ class CockpitPlane:
 
     def _claims(self, core: sqlite3.Connection) -> list[dict[str, Any]]:
         row = core.execute("SELECT COUNT(*) AS n, MAX(created_at) AS latest FROM claim_versions").fetchone()
-        key = (row["n"], row["latest"])
+        # P10b: a retired Claim never reaches an answer, a count or a deliverable.
+        retired = retired_claim_refs(core)
+        key = (row["n"], row["latest"], len(retired))
         if self._claims_cache is not None and self._claims_cache[0] == key:
             return self._claims_cache[1]
         claims = []
-        for record in core.execute("SELECT claim_json, created_at FROM claim_versions ORDER BY created_at").fetchall():
+        for record in core.execute(
+            "SELECT claim_version_id, claim_json, created_at FROM claim_versions ORDER BY created_at"
+        ).fetchall():
+            if record["claim_version_id"] in retired:
+                continue
             claim = json.loads(record["claim_json"])
             subject = claim.get("subject_ref") or claim.get("company_ref") or ""
             claims.append({
@@ -643,6 +652,19 @@ class CockpitPlane:
                 "detail": detail, "state": "done" if closed else "skipped",
                 "company": self._label(members, row["company_ref"]),
             })
+        for row in self._rows_from(self.config.core_db,
+            "SELECT record_json FROM claim_retirement_decisions ORDER BY created_at DESC LIMIT ?", (limit,),
+        ):
+            record = json.loads(row["record_json"])
+            retired = record["decision"] == "retired"
+            events.append({
+                "id": f"claim-decision:{record['id']}", "at": record["created_at"],
+                "kind": "claim_decision", "lane": "账本更正",
+                "title": ("退役了一条结论：" if retired else "保留了一条被标记的结论：") + (
+                    CLAIM_REASON_LABELS.get(record["reason_code"], record["reason_code"])),
+                "detail": record["rationale"], "state": "done" if retired else "skipped",
+                "company": None,
+            })
         for row in self.journal.rows("SELECT * FROM cockpit_events ORDER BY event_id DESC LIMIT ?", (limit,)):
             events.append({"id": f"cockpit:{row['event_id']}", "at": row["at"], "kind": row["kind"], "lane": "你",
                            "title": row["title"], "detail": row["detail"], "state": "done", "company": None})
@@ -663,6 +685,10 @@ class CockpitPlane:
                 "last_tick_at": heartbeat.get("last_tick_at")}
 
     # -- approvals -------------------------------------------------------------------
+
+    def _rows_from(self, path: Path, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
+        with self._core() as core:
+            return self._rows(core, sql, params)
 
     @staticmethod
     def _rows(core: sqlite3.Connection, sql: str, params: tuple = ()) -> list[sqlite3.Row]:
@@ -745,6 +771,29 @@ class CockpitPlane:
                     "actions": [{"decision": "keep_forecast", "label": "维持预测"}, {"decision": "revise_forecast", "label": "修订预测"}],
                     "needs_rationale": True,
                 })
+        with self._core() as core:
+            # P10b: a Claim the detectors flagged, waiting for you to retire or keep it.
+            for row in self._rows(core,
+                "SELECT c.record_json AS record_json, c.content_hash AS hash, "
+                "v.claim_json AS claim_json FROM claim_retirement_challenges c "
+                "LEFT JOIN claim_retirement_decisions d ON d.challenge_ref=c.challenge_id "
+                "JOIN claim_versions v ON v.claim_version_id=c.claim_version_ref "
+                "WHERE d.decision_id IS NULL ORDER BY c.created_at",
+            ):
+                record = json.loads(row["record_json"])
+                claim = json.loads(row["claim_json"])
+                items.append({
+                    "kind": "claim", "ref": record["id"], "hash": row["hash"],
+                    "at": record["created_at"],
+                    "title": "这条结论可能不该留在账本里",
+                    "who": self._label(members, record["subject_ref"]),
+                    "summary": claim["normalized_statement"],
+                    "details": {"发现的问题": CLAIM_REASON_LABELS.get(record["reason_code"], record["reason_code"]),
+                                "依据": record["rationale"]},
+                    "actions": [{"decision": "retired", "label": "退役这条结论"},
+                                {"decision": "kept", "label": "保留"}],
+                    "needs_rationale": False,
+                })
         for row in self.journal.rows("SELECT * FROM cockpit_drafts WHERE status='open' ORDER BY created_at"):
             draft = json.loads(row["draft_json"])
             items.append({
@@ -796,6 +845,13 @@ class CockpitPlane:
                 raise CockpitError("planner proposals can only be accepted here")
             operation, params = "bounded_planner_admit_proposal", {"proposal_ref": ref}
             title = "允许了研究调度的下一步"
+        elif kind == "claim":
+            if decision not in {"retired", "kept"}:
+                raise CockpitError("decision must be retired or kept")
+            operation, params = "decide_claim_retirement", {
+                "challenge_ref": ref, "challenge_hash": digest, "decision": decision,
+                "rationale": rationale.strip() or ("你确认退役这条结论" if decision == "retired" else "你确认保留这条结论")}
+            title = ("退役了一条结论" if decision == "retired" else "保留了一条被标记的结论")
         elif kind == "forecast":
             if decision not in {"keep_forecast", "revise_forecast"}:
                 raise CockpitError("decision must be keep_forecast or revise_forecast")

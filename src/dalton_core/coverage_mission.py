@@ -70,6 +70,9 @@ SOURCE_STATUSES: tuple[str, ...] = ("connected", "probe_only", "not_connected")
 AUTOMATION_WRITE_SCOPES: tuple[str, ...] = (
     "evidence",
     "claim",
+    # P10b: challenge and retire a Claim the detectors prove wrong.  The Ledger
+    # is never edited; the scope only lets automation append the correction.
+    "claim_challenge",
     "forecast_line",
     "model_run",
     "research_question",

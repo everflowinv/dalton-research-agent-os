@@ -175,6 +175,41 @@ def build_chain(current: dict[str, Any], *, now: str, add_rules: list[str] | Non
     }
 
 
+def build_mission_scope_change(current: dict[str, Any], scopes: list[str]) -> dict[str, Any]:
+    """P10b: one new mission version that widens ``autonomy.may_write``.
+
+    A write scope is a mission-level grant (ADR-0004), not a policy rule, so
+    nothing cascades: the policy, mandate and constitution are untouched and
+    the mission simply derives from its current version.
+    """
+
+    from dalton_core.coverage_mission import AUTOMATION_WRITE_SCOPES
+
+    mission = current["mission"]
+    unknown = [scope for scope in scopes if scope not in AUTOMATION_WRITE_SCOPES]
+    if unknown:
+        raise SystemExit(f"unknown write scope(s): {unknown}; vocabulary is {list(AUTOMATION_WRITE_SCOPES)}")
+    autonomy = json.loads(json.dumps(mission["autonomy"]))
+    may_write = list(autonomy["may_write"])
+    added = [scope for scope in scopes if scope not in may_write]
+    if not added:
+        raise SystemExit("the active mission already grants every requested write scope; nothing to do")
+    autonomy["may_write"] = may_write + added
+    version = int(mission["version"]) + 1
+    slug = MISSION_REF.split(":", 1)[1]
+    return {
+        "added": added,
+        "mission": {
+            "mission_ref": MISSION_REF,
+            **{field: json.loads(json.dumps(mission[field])) for field in BODY_FIELDS},
+            "autonomy": autonomy,
+            "version_id": f"coverage-mission-version:{slug}:{version}",
+            "prior_version_ref": mission["id"],
+            "idempotency_key": f"{MISSION_REF}:{version}:write-scope:{'+'.join(added)}",
+        },
+    }
+
+
 def apply_chain(chain: dict[str, Any], apply: Callable[[str, dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
     """Run the four publishes in order, binding each later step to returned hashes."""
 
@@ -291,6 +326,53 @@ def live(state_dir: Path, *, add_rules: list[str] | None = None, max_daily_paid_
     return {"chain": apply_chain(chain, apply), "research_budget": chain["research_budget"]}
 
 
+def write_scope(state_dir: Path, scopes: list[str], *, rehearse_into: Path | None = None) -> dict[str, Any]:
+    """Publish (or rehearse) one mission version that grants the given scopes."""
+
+    read = sqlite3.connect(f"file:{state_dir / 'core.sqlite'}?mode=ro", uri=True)
+    try:
+        current = _read_current(read)
+    finally:
+        read.close()
+    change = build_mission_scope_change(current, scopes)
+    if rehearse_into is not None:
+        rehearse_into.mkdir(parents=True, exist_ok=True)
+        target = rehearse_into / "core.sqlite"
+        source = sqlite3.connect(f"file:{state_dir / 'core.sqlite'}?mode=ro", uri=True)
+        destination = sqlite3.connect(str(target))
+        try:
+            source.backup(destination)
+        finally:
+            destination.close()
+            source.close()
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        from dalton_core.store import DaltonStore
+
+        store = DaltonStore(str(target))
+        try:
+            missions = CoverageMissionAuthority(store)
+            params = dict(change["mission"])
+            ref = params.pop("mission_ref")
+            published = missions.create_mission(ref, actor_ref=ACTOR, **params)
+            active = missions.active_mission(ref)
+            return {
+                "mode": "rehearsal", "added": change["added"],
+                "mission_version_ref": published["id"],
+                "active_version_ref": active["id"],
+                "may_write": active["autonomy"]["may_write"],
+            }
+        finally:
+            store.close()
+    from dalton_core.governance_cli import ephemeral_call
+
+    token_config = state_dir / "writer-tokens.json"
+    socket = state_dir / "run" / "writer.sock"
+    result = ephemeral_call(token_config, socket, actor_ref=ACTOR,
+                            operation="create_coverage_mission", params=change["mission"])
+    return {"mode": "live", "added": change["added"],
+            "mission_version_ref": (result or {}).get("id"), "result": result}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--state-dir", type=Path, default=_live_state())
@@ -301,8 +383,18 @@ def main(argv: list[str] | None = None) -> int:
                         help="list this research auto-commit rule in the policy (P9d-17b)")
     parser.add_argument("--max-daily-paid-calls", type=int, default=None,
                         help="owner decision: raise the mission's daily paid model-call cap (ADR-0004 budget expansion)")
+    parser.add_argument("--add-write-scope", action="append", default=[],
+                        help="grant this automation write scope in a new mission version (P10b); "
+                             "publishes the mission alone, no policy cascade")
     args = parser.parse_args(argv)
     rules = list(args.add_auto_commit_rule)
+    if args.add_write_scope:
+        if rules or args.max_daily_paid_calls is not None:
+            raise SystemExit("--add-write-scope publishes the mission alone; run the other changes separately")
+        result = write_scope(args.state_dir, list(args.add_write_scope),
+                             rehearse_into=args.rehearse if args.rehearse is not None else None)
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=1))
+        return 0
     result = (rehearse(args.state_dir, args.rehearse, add_rules=rules, max_daily_paid_calls=args.max_daily_paid_calls)
               if args.rehearse is not None
               else live(args.state_dir, add_rules=rules, max_daily_paid_calls=args.max_daily_paid_calls))

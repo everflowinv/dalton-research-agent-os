@@ -374,7 +374,7 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "run_mission_source_discovery", "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
     "mission_document_reviews", "resolve_mission_document_review",
-    "mission_stage_checklist",
+    "mission_stage_checklist", "claim_retirement_challenges", "decide_claim_retirement",
     "mission_document_evidence", "generate_document_extraction", "stage_document_extraction",
     "document_extraction_preflight",
 })
@@ -405,6 +405,7 @@ CORE_DISCOVERY_OPERATIONS = frozenset({
     "mission_source_discoveries", "mission_discovered_documents",
     "dispatch_document_extraction",
     "dispatch_mission_stage", "mission_stage_checklist",
+    "dispatch_claim_review",
 })
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
@@ -506,6 +507,7 @@ CORE_OPERATIONS = frozenset({
     "mission_source_discoveries", "mission_discovered_documents",
     "dispatch_document_extraction",
     "dispatch_mission_stage", "mission_stage_checklist",
+    "dispatch_claim_review", "claim_retirement_challenges",
     "mission_document_reviews",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
@@ -663,6 +665,11 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "dispatch_document_extraction": frozenset(),
     "dispatch_mission_stage": frozenset(),
     "mission_stage_checklist": frozenset(),
+    "dispatch_claim_review": frozenset({"max_claims"}),
+    "claim_retirement_challenges": frozenset({"open_only", "limit"}),
+    "decide_claim_retirement": frozenset({
+        "challenge_ref", "challenge_hash", "decision", "rationale", "actor_ref",
+    }),
     "run_mission_source_discovery": frozenset({"requested_by", "company_ref", "spec_ref", "as_of", "source_ref"}),
     "mission_source_discovery_status": frozenset({"ticket_ref"}),
     "mission_source_discoveries": frozenset({"mission_version_ref", "company_ref", "spec_ref", "limit"}),
@@ -845,6 +852,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "reconcile_forecasts": "requested_by",
     "decide_forecast_overturn": "actor_ref",
     "run_mission_source_discovery": "requested_by",
+    "decide_claim_retirement": "actor_ref",
 }
 
 
@@ -1030,6 +1038,7 @@ class WriterServer:
             None if discovery_plan_path is None
             else str(Path(discovery_plan_path).expanduser().resolve())
         )
+        self._claim_retirement_challenges: Any | None = None
         self._source_discovery: MissionSourceDiscoveryCoordinator | None = None
         self._discovery_plan_error: str | None = None
         # P9d-4a: web search is a second discovery source with its own plan,
@@ -2414,6 +2423,52 @@ class WriterServer:
         return MissionStageDriver(
             self.coverage_mission, planned_specs=planned_spec_refs(plans)
         )
+
+    @property
+    def claim_retirement_challenges(self) -> Any:
+        """P10b: the challenge / retirement authority over an untouched Ledger."""
+
+        from .claim_retirement import ClaimRetirementAuthority
+
+        if getattr(self, "_claim_retirement_challenges", None) is None:
+            self._claim_retirement_challenges = ClaimRetirementAuthority(self.store)
+        return self._claim_retirement_challenges
+
+    def _claim_review_driver(self) -> Any:
+        from .claim_review import ClaimReviewDriver, needles_from_plans
+
+        plans = []
+        for coordinator in (self._source_discovery, self._web_source_discovery):
+            if coordinator is not None:
+                plans.append(coordinator.plan)
+        return ClaimReviewDriver(
+            store=self.store, missions=self.coverage_mission,
+            challenges=self.claim_retirement_challenges, spool=self._transcript_spool,
+            needles=needles_from_plans(plans),
+        )
+
+    def _op_dispatch_claim_review(self, p: Mapping[str, Any]) -> Any:
+        # Controller tick (P10b).  Reads admitted Claims back against the exact
+        # originals they cite; writes only what the mission grants.
+        if self._transcript_spool is None:
+            return {"status": "unconfigured", "reason": "no transcript spool on this writer"}
+        values = dict(p)
+        return self._claim_review_driver().run_once(
+            **({"max_claims": int(values["max_claims"])} if "max_claims" in values else {})
+        )
+
+    def _op_claim_retirement_challenges(self, p: Mapping[str, Any]) -> Any:
+        values = dict(p)
+        return {
+            "projection_kind": "claim_retirement_challenges",
+            "challenges": self.claim_retirement_challenges.challenges(
+                open_only=bool(values.get("open_only", False)),
+                limit=int(values.get("limit", 200)),
+            ),
+        }
+
+    def _op_decide_claim_retirement(self, p: Mapping[str, Any]) -> Any:
+        return self.claim_retirement_challenges.decide(**dict(p))
 
     def _op_dispatch_mission_stage(self, p: Mapping[str, Any]) -> Any:
         # Controller tick (P10a).  Enters the Playbook's first stage for any

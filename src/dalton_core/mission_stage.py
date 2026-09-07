@@ -205,17 +205,33 @@ def _document_counts(
     return counts
 
 
+def retired_claim_refs(connection: sqlite3.Connection) -> set[str]:
+    """P10b: claim versions a challenge decision retired, or none on an older Core."""
+
+    try:
+        rows = connection.execute(
+            "SELECT claim_version_ref FROM claim_retirement_decisions WHERE decision='retired'"
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return set()
+        raise
+    return {row["claim_version_ref"] for row in rows}
+
+
 def _claim_periods(connection: sqlite3.Connection) -> dict[str, set[str]]:
-    """company_ref → distinct periods asserted by a quantitative Claim."""
+    """company_ref → distinct periods asserted by a live quantitative Claim."""
 
     periods: dict[str, set[str]] = {}
+    retired = retired_claim_refs(connection)
     rows = connection.execute(
-        "SELECT json_extract(claim_json,'$.subject_ref') AS subject_ref, "
+        "SELECT claim_version_id AS id, json_extract(claim_json,'$.subject_ref') AS subject_ref, "
         "json_extract(claim_json,'$.period') AS period FROM claim_versions "
-        "WHERE json_extract(claim_json,'$.value') IS NOT NULL "
-        "AND json_extract(claim_json,'$.status') IS NOT 'retired'"
+        "WHERE json_extract(claim_json,'$.value') IS NOT NULL"
     ).fetchall()
     for row in rows:
+        if row["id"] in retired:
+            continue
         subject, period = row["subject_ref"], row["period"]
         if isinstance(subject, str) and isinstance(period, str) and period:
             periods.setdefault(subject, set()).add(period)
@@ -512,5 +528,6 @@ __all__ = [
     "evaluate_mission",
     "planned_spec_refs",
     "planned_spec_refs_from_directory",
+    "retired_claim_refs",
     "review_sort_key",
 ]
