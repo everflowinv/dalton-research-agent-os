@@ -122,6 +122,10 @@ fi
 # config next to the state, and points service.json at it.  No credential is
 # read; the broker key path is referenced.
 "$venv_dir/bin/python" -m dalton_core.document_extraction_setup --config "$config_path"
+# P9d-18 / ADR-0006: point the cockpit at the Core (read-only), the state
+# directory, the heartbeat, the scheduler and the extraction model config so
+# the owner's page can show progress, answer questions and draft goals.
+"$venv_dir/bin/python" -m dalton_core.cockpit_setup --config "$config_path"
 "$venv_dir/bin/python" -m dalton_core.macos_launchagent \
   --launch-agents-dir "$launch_agents_dir" \
   --python-env-bin "$venv_dir/bin" \

@@ -24,8 +24,9 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterable, Mapping
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
+from .cockpit_plane import CockpitConfig, CockpitConflict, CockpitError, CockpitPlane
 from .governance_cli import GovernanceCliError, ephemeral_call
 from .human_intent import (
     HumanIntentError,
@@ -46,6 +47,7 @@ from .writer_server import load_principals
 
 
 _HTML_PATH = Path(__file__).with_name("cockpit_control.html")
+_LEGACY_HTML_PATH = Path(__file__).with_name("cockpit_control_legacy.html")
 MAX_BODY_BYTES = 16384
 SESSION_TTL_SECONDS = 3600
 AUTOMATION_SUBJECT = "automation:timeout"
@@ -107,6 +109,7 @@ class AgendaControlConfig:
     sweep_interval_seconds: int
     research_review: ResearchReviewControlConfig | None = None
     intent_composer: IntentComposerConfig | None = None
+    cockpit: CockpitConfig | None = None
 
     @property
     def public_url(self) -> str:
@@ -119,7 +122,7 @@ class AgendaControlConfig:
             "writer_socket", "token_config", "endpoint_ref",
             "feedback_timeout_seconds", "sweep_interval_seconds",
         }
-        optional = {"research_review", "intent_composer"}
+        optional = {"research_review", "intent_composer", "cockpit"}
         if set(raw) - expected - optional or not expected.issubset(raw):
             raise AgendaControlError("Agenda control config has an invalid closed shape")
         host = _string(raw["host"], "host")
@@ -153,6 +156,15 @@ class AgendaControlConfig:
                 intent_config = IntentComposerConfig.from_mapping(intent_raw)
             except HumanIntentError as exc:
                 raise AgendaControlError("embedded intent composer config is invalid") from exc
+        cockpit_config = None
+        cockpit_raw = raw.get("cockpit")
+        if cockpit_raw is not None:
+            if not isinstance(cockpit_raw, Mapping):
+                raise AgendaControlError("cockpit must be an object or null")
+            try:
+                cockpit_config = CockpitConfig.from_mapping(cockpit_raw)
+            except CockpitError as exc:
+                raise AgendaControlError("embedded cockpit config is invalid") from exc
         return cls(
             host=host,
             port=_positive_int(raw["port"], "port", 65535),
@@ -170,6 +182,7 @@ class AgendaControlConfig:
             ),
             research_review=review_config,
             intent_composer=intent_config,
+            cockpit=cockpit_config,
         )
 
     @classmethod
@@ -608,11 +621,13 @@ class AgendaControlApplication:
         plane: AgendaControlPlane,
         review_plane: ResearchReviewControlPlane | None = None,
         intent_plane: NaturalLanguageComposerPlane | None = None,
+        cockpit_plane: CockpitPlane | None = None,
     ) -> None:
         self.config = config
         self.plane = plane
         self.review_plane = review_plane
         self.intent_plane = intent_plane
+        self.cockpit_plane = cockpit_plane
         self._sessions: dict[str, _Session] = {}
         self._lock = threading.Lock()
 
@@ -714,6 +729,53 @@ class AgendaControlApplication:
         if not isinstance(value, Mapping):
             raise AgendaControlError("request body must be an object")
         return self.intent_plane.compose(login, value)
+
+    def post_cockpit(
+        self, action: str, login: str, session: _Session, csrf: str | None, body: bytes
+    ) -> dict[str, Any]:
+        if self.cockpit_plane is None:
+            raise CockpitError("the cockpit is not configured on this host")
+        if not isinstance(csrf, str) or not secrets.compare_digest(csrf, session.csrf):
+            raise PermissionError("invalid CSRF token")
+        try:
+            value = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise CockpitError("request body is invalid") from exc
+        if not isinstance(value, Mapping):
+            raise CockpitError("request body must be an object")
+        plane = self.cockpit_plane
+        if action == "ask":
+            return plane.ask(login, value)
+        if action == "goal":
+            return plane.draft(login, "goal", value)
+        if action == "steer":
+            return plane.draft(login, "steer", value)
+        if action == "publish":
+            return plane.publish_draft(login, value)
+        if action == "decide":
+            return plane.decide(login, value)
+        raise CockpitError("unknown cockpit action")
+
+    def cockpit_view(self, path: str, login: str, query: Mapping[str, str]) -> dict[str, Any]:
+        if self.cockpit_plane is None:
+            return {"enabled": False, "reason": "the cockpit is not configured on this host"}
+        plane = self.cockpit_plane
+        if path == "/v1/cockpit/overview":
+            return {**plane.overview(), "enabled": True}
+        if path == "/v1/cockpit/log":
+            limit = query.get("limit", "150")
+            return {**plane.log(since=query.get("since") or None, limit=int(limit) if limit.isdigit() else 150), "enabled": True}
+        if path == "/v1/cockpit/approvals":
+            return {**plane.approvals(), "enabled": True}
+        if path == "/v1/cockpit/job":
+            return {**plane.job(login, query.get("id", "")), "enabled": True}
+        if path == "/v1/cockpit/history":
+            kind = query.get("kind", "ask")
+            if kind not in {"ask", "goal", "steer"}:
+                raise CockpitError("unknown history kind")
+            return {"kind": kind, "items": plane.history(login, kind), "drafts": plane.drafts(login, None if kind == "ask" else kind),
+                    "enabled": True}
+        raise CockpitError("unknown cockpit view")
 
     def post_intent_confirm(
         self, login: str, session: _Session, csrf: str | None, body: bytes
@@ -835,6 +897,20 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 if path == "/":
                     body = _HTML_PATH.read_bytes()
                     content_type = "text/html; charset=utf-8"
+                elif path == "/legacy":
+                    body = _LEGACY_HTML_PATH.read_bytes()
+                    content_type = "text/html; charset=utf-8"
+                elif path.startswith("/v1/cockpit/"):
+                    query = {k: v[-1] for k, v in parse_qs(urlparse(self.path).query).items()}
+                    try:
+                        value = application.cockpit_view(path, login, query)
+                    except CockpitError as exc:
+                        self._send(HTTPStatus.BAD_REQUEST, "application/json; charset=utf-8",
+                                   json.dumps({"error": "cockpit", "message": str(exc)}, ensure_ascii=False).encode())
+                        return
+                    value["csrf_token"] = session.csrf
+                    body = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+                    content_type = "application/json; charset=utf-8"
                 elif path == "/v1/agenda":
                     value = application.plane.view(login)
                     value["csrf_token"] = session.csrf
@@ -934,6 +1010,9 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 "/v1/answer/route": application.post_answer,
                 "/v1/answer/refresh/dispatch": application.post_answer_refresh,
             }
+            if path.startswith("/v1/cockpit/"):
+                name = path.rsplit("/", 1)[1]
+                actions[path] = lambda *args, _name=name: application.post_cockpit(_name, *args)
             action = actions.get(path)
             if action is None:
                 self._send(HTTPStatus.NOT_FOUND, "application/json", b'{"error":"not_found"}')
@@ -951,6 +1030,14 @@ def _handler(application: AgendaControlApplication) -> type[BaseHTTPRequestHandl
                 )
             except PermissionError:
                 self._send(HTTPStatus.FORBIDDEN, "application/json", b'{"error":"csrf"}')
+                return
+            except CockpitConflict as exc:
+                self._send(HTTPStatus.CONFLICT, "application/json; charset=utf-8",
+                           json.dumps({"error": "conflict", "message": str(exc)}, ensure_ascii=False).encode())
+                return
+            except CockpitError as exc:
+                self._send(HTTPStatus.BAD_REQUEST, "application/json; charset=utf-8",
+                           json.dumps({"error": "cockpit", "message": str(exc)}, ensure_ascii=False).encode())
                 return
             except (
                 AgendaControlError, HumanIntentError,
@@ -1016,8 +1103,13 @@ def serve(config: AgendaControlConfig) -> None:
                 config, plane, review_plane
             ),
         )
+    cockpit_plane = None
+    if config.cockpit is not None:
+        cockpit_plane = CockpitPlane(
+            config.cockpit, writer_socket=config.writer_socket, token_config=config.token_config
+        )
     application = AgendaControlApplication(
-        config, plane, review_plane, intent_plane
+        config, plane, review_plane, intent_plane, cockpit_plane
     )
     stop = threading.Event()
 
@@ -1058,6 +1150,8 @@ def serve(config: AgendaControlConfig) -> None:
             reconciler.join(timeout=5)
         if review_plane is not None:
             review_plane.close()
+        if cockpit_plane is not None:
+            cockpit_plane.close()
         if intent_plane is not None:
             intent_plane.close()
 

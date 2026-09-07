@@ -1,6 +1,23 @@
 # Dalton 项目进度
 
 更新日期：2026-09-07
+- **P9d-18 / ADR-0006：cockpit 按 owner 的五件事重做（已部署，live 已验证）。** owner 说旧 cockpit 太反人类：他要的是
+  一处输入总研究目标并看到当前目标、系统拆出的子任务与进展；一处 steer；一页研究日志（系统在做什么）；一页临时问答；
+  一页只放需要人审批的事项——清晰、fancy、不要机器语言。**改动**：同一 Tailscale/session/CSRF shell 下新页面 `/`
+  五个视图（研究目标 / 调整方向 / 研究日志 / 随时提问 / 待你审批），旧审阅页与全部旧路由保留在 `/legacy`；新
+  `cockpit_plane`（`/v1/cockpit/*`）只读 Core、读 lane ticket、heartbeat 与日预算账本，写入一律经 writer 以 owner 的
+  human principal 执行。目标=active CoverageMission（标题/目标/问题/交付/来源），子任务=每家公司一条线（搜集→阅读→持续
+  跟踪）与每个来源一条 lane，进展全部是计数；日志由 ticket、心跳、新 Claim、关闭的审阅与 owner 自己的操作拼成一句句人话；
+  审批聚合未决 thesis admission、capability promotion、活 loop 的 planner proposal、forecast overturn 与 owner 自己的
+  草稿。**模型调用**（`cockpit_model`）走抽取 routing policy + 同一 broker + 日账本按 mission 上限准入 + scheduler
+  WorkOrder replay，不写 Core：问答只从正式 Claim 作答并列依据、把握与缺口；输入目标→起草标题/目标/问题/子任务，确认后
+  才发布新 mission 版本（覆盖名单、bindings、autonomy、预算不变，草稿绑定所基于的 mission 版本）；steer→增删研究问题
+  （必要时改写目标），做不到的明说。mission 的目标与问题进入抽取上下文与 prompt，新版本重键全部窗口，steer 因此真正改变
+  提炼方向。`cockpit_setup` 写 `control.config.cockpit`，installer 调用。**验证**：8 项测试；live 部署后以 owner 身份读
+  到 mission v7、五家公司计数、两条 lane 运行中、当日 161 次模型调用 $0.14；一次真实提问经 broker 回答（$0.0013），Ledger
+  无相关 Claim 时如实说没有。**不做**：改覆盖名单、接来源、提预算、加工具不是 cockpit 的杠杆（steer 草稿会明说），各需
+  自己的 authority 切片。见 [P9d-18 报告](reports/p9d18-owner-cockpit-v0.1-2026-09-07.md)、
+  [ADR-0006](adr/0006-owner-cockpit.md)。
 - **P9d-17c：网页经同一条链自动准入为 Claim（已过专项，全仓中，待部署）。** owner 已跑第二次 chain（policy-7 /
   constitution v5 / mission v7：列出文档定性规则、`max_daily_paid_calls` 提到 1000）。**live 首批自动 Claim 已产生**：
   一篇文档一 tick 内准入 9 条定性 Claim、审阅自动关闭，Ledger 由 6 条到 15 条；4 条同引文同 aspect 的建议因候选身份未含

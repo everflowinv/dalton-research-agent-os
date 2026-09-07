@@ -447,9 +447,14 @@ class AgendaControlTests(unittest.TestCase):
             html = response.read().decode("utf-8")
             cookie = response.getheader("Set-Cookie").split(";", 1)[0]
             self.assertEqual(response.status, 200)
-            self.assertIn("Dalton Cockpit", html)
-            self.assertIn("Promise.allSettled", html)
-            self.assertNotIn("async function load(){try{", html)
+            self.assertIn("Dalton 研究台", html)
+            self.assertIn("/v1/cockpit/overview", html)
+            # The review-oriented page stays reachable for operators at /legacy.
+            connection.request("GET", "/legacy", headers=headers)
+            legacy = connection.getresponse().read().decode("utf-8")
+            self.assertIn("Dalton Cockpit", legacy)
+            self.assertIn("Promise.allSettled", legacy)
+            self.assertNotIn("async function load(){try{", legacy)
             connection.request(
                 "GET", "/v1/research-review",
                 headers={**headers, "Cookie": cookie},

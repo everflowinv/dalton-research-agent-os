@@ -217,11 +217,17 @@ def unwrap_model_json(text: str) -> str:
 
 def build_prompt(context: Mapping[str, Any]) -> str:
     subject = context.get("company_ticker") or context["company_ref"]
+    focus = context.get("mission_focus") or {}
+    questions = focus.get("research_questions") or []
+    focus_text = ""
+    if questions:
+        focus_text = ("The owner's research questions, in priority order, decide what is worth extracting: "
+                      + " | ".join(str(q) for q in questions[:8]) + ". Prefer views that bear on them. ")
     return (
         f"The subject company is {subject}. Extract only reported views about this company, its "
         "industry, its customers or its named competitors. If this window is about a different "
         "company, or is a legal disclaimer, boilerplate or text about the document itself, return "
-        "empty suggestions. "
+        "empty suggestions. " + focus_text +
         "Produce qualitative research suggestions only, never an accepted Claim. "
         "Return raw strict JSON matching OUTPUT_SCHEMA, with no markdown fence and no prose. "
         "Cite only supplied quote_id values, at most five suggestions in total; several suggestions "
@@ -583,6 +589,10 @@ class DocumentExtractionService:
             "created_at": review["created_at"], "mission_version_ref": grant["mission_version_ref"],
             "mission_version_hash": grant["mission_version_hash"], "company_ref": review["company_ref"],
             "company_ticker": member.get("ticker"),
+            # ADR-0006: the owner's goal and questions steer what is worth extracting.
+            # Part of the context, so a new mission version re-keys every window.
+            "mission_focus": {"objective": mission["objective"],
+                              "research_questions": list(mission["research_questions"])},
             "source_ref": review["source_ref"], "document_ref": review["document_ref"],
             "discovered_document_hash": content_hash(dict(row)), "source_manifest_ref": manifest["id"],
             "source_manifest_hash": manifest["content_hash"], "source_content_hash": source_content_hash,

@@ -89,6 +89,7 @@ dalton_core = [
   "thesis-impact-verifier-decision-provider-output-v0.1.schema.json",
   "dashboard.html",
   "cockpit_control.html",
+  "cockpit_control_legacy.html",
 ]
 
 [tool.setuptools.data-files]

@@ -264,7 +264,7 @@ class QualitativeTranscriptEndToEndTests(unittest.TestCase):
         self.assertIsNone(projection["value"])
         self.assertIsNone(projection["unit"])
         cockpit = (
-            Path(__file__).parents[1] / "src" / "dalton_core" / "cockpit_control.html"
+            Path(__file__).parents[1] / "src" / "dalton_core" / "cockpit_control_legacy.html"
         ).read_text(encoding="utf-8")
         self.assertIn('item.claim_kind==="qualitative"', cockpit)
         self.assertIn("语义候选（无数值）", cockpit)
