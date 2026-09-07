@@ -42,9 +42,11 @@ from .initial_screen import (
     section_titles,
 )
 from .mission_deliverable import (
+    GAP_MARKER,
     MissionDeliverableAuthority,
     MissionDeliverableError,
     WRITE_SCOPE,
+    unsourced_numbers,
 )
 from .mission_stage import evaluate_mission, planned_spec_refs_from_directory
 from .store import DaltonStore
@@ -218,11 +220,48 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 summary["sections"].append({"title": title, "status": "failed", "reason": str(exc)})
                 continue
             section = parse_section_output(call["text"], context=context, title=title)
-            sections.append(section)
             if call.get("invocation_ref"):
                 invocations.append(call["invocation_ref"])
+            # The authority refuses the whole document for one unsourced figure.
+            # Give the section one corrective attempt with the figures named,
+            # then drop its body to a gap so the rest can still be published.
+            stray = unsourced_numbers(section["body"], section["numbers"])
+            retried = False
+            if stray:
+                retried = True
+                try:
+                    correction = model.call(
+                        purpose="draft",
+                        request_id=f"{mission['id']}:{company_ref}:{KIND}:{index}:"
+                                   f"{len(claims.get(company_ref) or [])}:retry",
+                        prompt=prompt + (
+                            "\n\nYour previous draft wrote figures no N tag carries: "
+                            + "、".join(stray[:8])
+                            + f"。Rewrite the section without them: copy a figure verbatim from an N tag "
+                              f"or write {GAP_MARKER}. Do not convert units or scales."
+                        ),
+                        mission=mission,
+                    )
+                    candidate = parse_section_output(correction["text"], context=context, title=title)
+                    if correction.get("invocation_ref"):
+                        invocations.append(correction["invocation_ref"])
+                    if candidate["body"] and not unsourced_numbers(candidate["body"], candidate["numbers"]):
+                        section = candidate
+                        stray = []
+                    else:
+                        stray = unsourced_numbers(candidate["body"], candidate["numbers"]) or stray
+                except CockpitModelError as exc:
+                    summary["sections"].append({"title": title, "status": "retry_failed", "reason": str(exc)})
+            if stray:
+                section = {
+                    "title": title, "body": "", "claim_refs": [], "numbers": [],
+                    "gaps": [f"这一节写了没有来源的数字（{'、'.join(stray[:5])}），已丢弃；"
+                             f"需要的数字还没有进入账本"],
+                }
+            sections.append(section)
             summary["sections"].append({
-                "title": title, "status": "drafted" if section["body"] else "empty",
+                "title": title, "status": "drafted" if section["body"] else "dropped_unsourced",
+                "retried": retried,
                 "chars": len(section["body"]), "claims": len(section["claim_refs"]),
                 "numbers": len(section["numbers"]), "replayed": call["replayed"],
                 "cost_usd": round(call["cost_micros"] / 1_000_000, 6),

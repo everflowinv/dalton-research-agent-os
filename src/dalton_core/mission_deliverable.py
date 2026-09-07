@@ -52,7 +52,11 @@ GAP_MARKER = "缺来源"
 # A year, quarter, half or fiscal-year label is a period, not a figure.  Same
 # rule the extraction contract uses, so the two paths agree on what a number is.
 _PERIOD_TOKEN_RE = re.compile(
-    r"(?:FY\s?)?(?:19|20)\d{2}(?:\s?[-–/]\s?(?:19|20)?\d{2})?(?:\s?(?:年|财年))?"
+    # ISO dates and the ".." ranges the Ledger prints for a reporting period,
+    # which live were being read apart into "01" and "31".
+    r"(?:19|20)\d{2}-\d{2}-\d{2}(?:\s*\.\.\s*(?:19|20)?\d{2}-\d{2}-\d{2})?"
+    r"|(?:FY\s?)?(?:19|20)\d{2}(?:\s?[-–/]\s?(?:19|20)?\d{2})?(?:\s?(?:年|财年))?"
+    r"|FY\s?\d{2}(?![0-9])"
     r"|Q[1-4]\s?(?:FY\s?)?(?:19|20)?\d{0,4}"
     r"|(?:19|20)\d{2}\s?Q[1-4]"
     r"|[1-4]Q(?:19|20)?\d{2}"
@@ -60,6 +64,12 @@ _PERIOD_TOKEN_RE = re.compile(
     r"|第?[一二三四1-4]季度",
     re.IGNORECASE,
 )
+# The Playbook's rule is about *timely numbers*: a measurement that has to come
+# from a filing or a tool result.  A bare small integer with no unit, percent,
+# currency or separator is a threshold, a count or an ordinal ("book-to-bill
+# 跌破 1", "两条线"), not a measurement, and requiring a Claim for it would
+# empty the document without making it truer.
+_BARE_SMALL_INTEGER = 12
 _VALUE_TOKEN_RE = re.compile(r"[$€£¥]\s?\d[\d,.]*|\d[\d,.]*\s?%|\d[\d,.]*")
 
 
@@ -95,11 +105,24 @@ def _sha256(value: Any, name: str) -> str:
     return value
 
 
-def value_tokens(text: str) -> list[str]:
-    """Every figure the text asserts, with period labels removed first."""
+# A drafted body may still carry a "C7" / "N1" citation tag; its digits are a
+# reference, not a figure.  Live, they were the first thing the check flagged.
+_CITATION_TAG_RE = re.compile(r"(?<![A-Za-z0-9])[CN]\d{1,3}(?![A-Za-z0-9])")
 
-    without_periods = _PERIOD_TOKEN_RE.sub(" ", text or "")
-    return [match.group(0).strip() for match in _VALUE_TOKEN_RE.finditer(without_periods)]
+
+def value_tokens(text: str) -> list[str]:
+    """Every figure the text asserts, with period labels and citation tags removed."""
+
+    without_tags = _CITATION_TAG_RE.sub(" ", text or "")
+    without_periods = _PERIOD_TOKEN_RE.sub(" ", without_tags)
+    tokens = []
+    for match in _VALUE_TOKEN_RE.finditer(without_periods):
+        token = match.group(0).strip()
+        plain = token.rstrip(".")
+        if plain.isdigit() and int(plain) <= _BARE_SMALL_INTEGER:
+            continue
+        tokens.append(token)
+    return tokens
 
 
 def _normalise_number(token: str) -> str:

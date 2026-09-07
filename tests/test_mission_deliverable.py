@@ -93,6 +93,18 @@ class NumberDisciplineTests(unittest.TestCase):
         self.assertEqual(value_tokens("收入增长 5.6%"), ["5.6%"])
         self.assertEqual(value_tokens("目标价 $312.50"), ["$312.50"])
 
+    def test_iso_dates_ranges_and_thresholds_are_not_figures(self) -> None:
+        """All three read as figures live and emptied most of the first document."""
+
+        self.assertEqual(value_tokens("期间 2026-03-01..2026-05-31 的收入"), [])
+        self.assertEqual(value_tokens("Q3 FY26 新签下滑"), [])
+        self.assertEqual(value_tokens("book-to-bill 跌破 1 并延续"), [])
+        self.assertEqual(value_tokens("覆盖 5 家公司"), [])
+        # A measurement is still a measurement.
+        self.assertEqual(value_tokens("利润率 14.2%"), ["14.2%"])
+        self.assertEqual(value_tokens("新增 250 个席位"), ["250"])
+        self.assertEqual(value_tokens("citation C7 和 N1 不是数字"), [])
+
     def test_only_figures_a_cited_claim_carries_are_allowed(self) -> None:
         numbers = [{"text": "Accenture reported Revenues of USD 18,718,144,000 for 2026Q3, up 5.59%",
                     "claim_version_ref": "claim-version:x"}]

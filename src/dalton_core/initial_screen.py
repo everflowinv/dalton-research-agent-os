@@ -55,6 +55,23 @@ VALUATION_GAP = (
 GATE_QUESTION_CHECKS = ("source_base", "number_provenance", "key_driver", "street_and_risk")
 
 
+# The drafter asks the model to cite C/N tags inline.  They are scaffolding the
+# prompt introduced, not reader-facing provenance (the section's claim list is),
+# and their digits would otherwise read as figures.  Stripped at parse time.
+_TAG_GROUP_RE = re.compile(r"[（(\[]\s*(?:[CN]\d+\s*[、,，/;；\s]*)+\s*[)）\]]")
+_BARE_TAG_RE = re.compile(r"(?<![A-Za-z0-9])[CN]\d{1,3}(?![A-Za-z0-9])")
+
+
+def strip_citation_tags(text: str) -> str:
+    """Remove the C/N citation scaffolding from a drafted body."""
+
+    without_groups = _TAG_GROUP_RE.sub("", text or "")
+    cleaned = _BARE_TAG_RE.sub("", without_groups)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([，。、；：）)])", r"\1", cleaned)
+    return cleaned.strip()
+
+
 def section_titles(playbook: Mapping[str, Any]) -> list[str]:
     titles = (playbook.get("deliverable_templates") or {}).get(TEMPLATE_KEY) or []
     if not isinstance(titles, list) or not titles:
@@ -111,7 +128,10 @@ def build_section_prompt(
         "Hard rules:",
         "- Use ONLY the tagged material below.  Cite the C tags you rely on.",
         "- You may write a figure ONLY by citing the N tag that carries it, and the figure must appear",
-        f"  in that N tag's text verbatim.  If you need a number you do not have, write {GAP_MARKER}.",
+        f"  in that N tag's text VERBATIM.  Do not convert units or scales (no 亿/万 rewriting, no",
+        f"  rounding, no percentage recomputation): copy the digits exactly as the N tag prints them.",
+        f"  If you need a number you do not have, write {GAP_MARKER}.",
+        "- Do not number your paragraphs or write ordered lists; write prose.",
         "- Do not invent company names, products, dates or numbers.  Do not repeat the section title.",
         "- If the material cannot support this section, say so in one sentence and list what is missing.",
         "",
@@ -147,6 +167,8 @@ def parse_section_output(
 
     parsed = unwrap_json_object(text) or {}
     body = parsed.get("body")
+    if isinstance(body, str):
+        body = strip_citation_tags(body)
     if not isinstance(body, str) or not body.strip():
         return {"title": title, "body": "", "claim_refs": [], "numbers": [],
                 "gaps": ["模型没有写出这一节的正文"]}
@@ -252,6 +274,7 @@ def assess_exit_gate(
 
 __all__ = [
     "KIND",
+    "strip_citation_tags",
     "SECTION_GUIDANCE",
     "TEMPLATE_KEY",
     "VALUATION_GAP",
