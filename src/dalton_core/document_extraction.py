@@ -860,12 +860,19 @@ class DocumentExtractionService:
                 citation = authority.bind_claim_citation(
                     correction["id"], correction["content_hash"], source_start=start, source_end=end)
                 key = "document-admission:" + content_hash({"suggestion": suggestion["id"], "context": context["content_hash"]})
+                # Two views on one quote may share aspect, period and basis, so
+                # the candidate pair is keyed by the suggestion itself; the
+                # default identity ignores the statement and the second view
+                # collided ("candidate version chain mismatch", live).
+                pair_key = content_hash({"citation": citation["id"], "suggestion": suggestion["id"]})[:32]
                 staged = stage_transcript_qualitative_candidate(
                     self.writer.store, staging, correction_set_ref=correction["id"], citation_ref=citation["id"],
                     subject_ref=context["company_ref"], metric_or_aspect=suggestion["metric_or_aspect"],
                     period=suggestion["period"], basis=suggestion["basis"],
                     normalized_statement=suggestion["normalized_statement"], actor_ref=actor_ref,
-                    idempotency_key=key, artifact_reader=self.writer._read_transcript_artifact)
+                    idempotency_key=key, artifact_reader=self.writer._read_transcript_artifact,
+                    candidate_evidence_ref="candidate-evidence:transcript:" + pair_key,
+                    candidate_claim_ref="candidate-claim:transcript:" + pair_key)
                 bundle = reviewer.candidate_authority_bundle(staged["claim"]["id"])
                 promotion = self.writer.store.commit_policy_candidate(**bundle, idempotency_key="policy-ledger:" + key)
                 entry.update({"status": "duplicate" if promotion.get("status") == "duplicate" else "admitted",
