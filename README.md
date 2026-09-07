@@ -6,10 +6,13 @@ Dalton 是面向投研团队的独立研究控制内核。它把任务调度、�
 
 ## 仓库边界
 
-- `src/dalton_core/`：Core 契约、Research Ledger、Scheduler、模型路由、Capability Registry、writer service 和只读 dashboard。
+- `src/dalton_core/`：Core 契约、Research Ledger、Scheduler、模型路由、Capability Registry、writer service 和只读 dashboard；
+  以及任务层——ResearchPlaybook 与 CoverageMission authority、来源发现与获取 lane、文档抽取与准入、
+  Claim 挑战/退役、任务交付物（Initial Screen）、以及 owner cockpit 的控制面。
 - `deploy/macos/`：owner-only runtime bootstrap、LaunchAgent 安装、卸载和健康检查。
 - `contracts/`：跨进程 JSON Schema。
 - `integrations/openclaw-model-broker/`：复用 OpenClaw 已管理模型认证的受限 broker。
+- `integrations/openclaw-web-search-broker/`：同样形状的网页搜索 broker，凭据留在 host，Dalton 只拿结果。
 - `spikes/`：候选 runtime 的隔离实验，不属于生产执行面。
 - `docs/reports/`：架构与实现记录。报告描述当时状态，不自动转化为当前约束。
 - `tests/`：契约、隔离、幂等、账本、调度和适配层测试。
@@ -120,37 +123,27 @@ controller 常驻，LLM worker 不常驻。空闲时 controller 只做 lease 回
 
 ## 开发状态
 
-截至 2026-08-27，Phase 7 已收口，Phase 8 的首批 authority 已在 live：
+截至 2026-09-07，系统在 live 上按任务自主运行，人只在检查点介入。当前阶段是
+**Phase 10「按研究手册的阶段执行任务」**（基线：[愿景与下一阶段 v1.1](docs/reports/vision-and-next-phase-v1.1-2026-09-07.md)）。
 
-- live Core 有 6 条正式 Claim / 6 条 Evidence：5 条 SEC policy 自动提交（ACN、CTSH、EPAM、IBM、DXC），1 条 transcript 经 owner 人工确认；
-  Phase 7「≥5 条 policy 自动提交 SEC Claim」严格退出门槛已达成；
-- 五家公司 live evidence pack v2 与 overlay 已注册，lane-only brief v2 可重放；
-- ResearchConstitution v1、行业 Thesis 与 ACN Thesis 已经 owner 人工准入进入 live，ACN 的 company→thesis 映射已激活；
-- policy-controlled Weekly Brief coordinator 已部署并激活：schedule plan v3 绑定五家公司 pack 与 ACN 映射，
-  首个自动窗口 2026-09-03 07:00 America/New_York，同窗口重放不重复投递；
-- thesis-impact 已产生首条真实 assessment（裁决 insufficient，不把单一收入指标过度解释成投资结论），
-  独立 verifier pass；当日定位并修复了 Gemini host 路径故障（broker 把 thinkingLevel 合并进
-  providerControls 与 proof 形状两处脱节），ACN 链路全链闭环；
-- P8b CompanyResearchView 与结构化知识查询已完成 development candidate：纯投影 + writer 只读 ops +
-  ContextMaterializer 接手，live 副本 canary 5 家公司全通过；
-- P8c-1 已把 Tier 1 Bounded Planner 准入面接进 live：常驻研究问题「美国 IT 服务需求是否见底」、
-  SEC revenue-growth ProbeTemplate 与五家公司循环 v1 已人工准入；
-- P8c-2 controller 驱动已上线并完成首次全自主循环：daltond 每 300 秒唤醒停泊循环，确定性 planner
-  提案 → Core 准入 → 真实 SEC probe → 源级 outcome → 终态，五轮探测无人干预；
-- P8c-3 概念回退与新观察注意力已上线：EPAM 概念缺口关闭，探测到新 10-Q 源时自动登记 backlog
-  开放问题并进入研究视图与 brief；
-- Agenda Shadow 最新 live cycle 正常交付，controller、writer、projection 和 dashboard health 均为 running；
-- Doctrine（writer ops）、Bounded Planner、LLM Planner、Answer Router 和 DocumentIndex 仍是 development candidate，
-  尚未接入同一条 live 认知循环。
+live 现状：
 
-当前阶段是 **Phase 8「单主题自主认知闭环」**。首个主题固定为「美国 IT 服务需求是否见底」，近期顺序是：
+- 一个生效中的 CoverageMission（`us-it-services:8`，五家公司：ACN、CTSH、EPAM、IBM、DXC），
+  三条来源已接入：SEC EDGAR、AlphaEngine、公开网页搜索；
+- 账本有 330 条 Claim / 330 条 Evidence，其中 60 条已按 P10b 的确定性检测器退役（错误归属与免责声明），
+  2 条 Thesis 由人准入；1745 份文档进入过任务队列，90 份已读完并关闭；
+- **搜集 → 获取 → 阅读 → 入库 Claim 全自动**（ADR-0005）：抽取子进程按公司优先级与原文类型读，
+  policy 规则准入定性 Claim，逐条绑定精确引文；付费模型调用受任务日预算约束（1000 次 / 5 USD）；
+- **五家公司都在研究手册的第一个阶段**（Initial Screen），每家有一份按手册必读清单算出的资料底座
+  清单（4 季财报 / 4 次电话会 / 最新年报 / 多空券商观点），缺口驱动获取与阅读的顺序；
+- **owner cockpit**（ADR-0006）在 tailnet 上：设定研究目标、调整方向、看研究日志、临时问答、
+  审批需要人裁决的事项；问答只从已入库结论作答并列出依据。
 
-1. 关闭 Phase 7 剩余门槛：第五家 SEC issuer；审核并单独批准 Weekly Brief coordinator 的 live activation；（两者已于 2026-08-27 完成）
-2. 建立最小 Research Constitution、行业 Thesis 和 ACN Thesis（已于 2026-08-27 进入 live）；
-3. 增加可重建的 CompanyResearchView 和结构化知识查询；
-4. 把 Tier 1 Bounded Planner 接进 live，只能选择已批准的 probe；
-5. 用 Weekly Brief、Agenda 和 Claim review 的真实反馈建立冻结评测集；
-6. 连续四周通过后，才开放 Tier 2 Planner 和语义检索。
+需要人的只有这些：研究论点准入、新工具启用、深度认知门与投资备忘录、与预测的偏离裁决、
+扩范围/扩预算/扩写入范围（发布新的任务版本）。逐条审批文档、逐条审批 Claim 都已经不需要。
 
-当前状态和历史实现记录见 [PROJECT_STATUS](docs/PROJECT_STATUS.md)。Phase 8 的裁决、切片和退出门槛见
-[单主题自主认知闭环 v1.0](docs/reports/phase8-single-topic-autonomous-cognition-loop-v1.0-2026-08-27.md)。
+下一步顺序见 [PROJECT_STATUS](docs/PROJECT_STATUS.md) 的「下一阶段顺序」：SEC 10-K 正文获取通道
+与季度数字补齐（Initial Screen 出口门第一问的前提）→ 深度认知门人审 → 行业框架与行业模型 →
+公司模型与预测线 → 投资备忘录。
+
+历史阶段的裁决与实现记录见 [PROJECT_STATUS](docs/PROJECT_STATUS.md) 与 `docs/reports/`。

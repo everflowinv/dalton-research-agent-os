@@ -327,6 +327,37 @@ Dalton 发现同一种 source/operation 重复出现或现有 connector 缺能�
 可信 Runner 不得从 proposal path 动态 `import`、`exec` 或加载任意 entrypoint。独立 OS/container identity
 上线前，自生成 adapter 只能 offline replay；networked canary 只运行 operator-reviewed immutable package。
 
+## P9d：两条网页 connector（已在 live）
+
+到 P9d 为止，协议上实际接了五条 connector：`alphaengine-search-library`、
+`alphaengine-get-document`、`sec-company-facts`，以及本节的两条。它们与前三条走同一条
+authority 链（profile → call spec → invocation → SourceEnvelope → artifact → quota/settlement），
+只在传输和完整性声明上不同。
+
+**`gemini-web-search`（发现）**
+
+- 凭据留在 host：Dalton 不持有搜索 API key，调用经
+  `integrations/openclaw-web-search-broker` 的 UDS broker，形状与 model broker 相同
+  （client id + auth key 文件 + 期望 agent id + 冻结的 request hash）；
+- 完整性声明恒为 `ranked`：搜索结果只是排序后的部分结果，永远不能当作 enumerated；
+- 归一化把每条结果落成 `public-web-url:sha256:<canonical url>` 文档 ref。重定向代理主机
+  （搜索引擎自己的跳转域）在归一化时丢弃：它们不是原始来源，抓取它们只会浪费一次受治理调用；
+- 每条 spec 的查询模板与 lookback 由任务的 DiscoveryPlan 冻结，不由模型自由造句。
+
+**`web-fetch`（获取）**
+
+- 只做无凭据的公开 HTTPS GET，走 P0 已冻结的 public transport 组件（DNS/IP/pinned socket/TLS/
+  redirect/size 复核），响应上限 4 MB；
+- 文档 ref 是 `public-web-document:url-sha256:<...>:body-sha256:<...>`，同时绑定 URL 与字节；
+- **原文是确定性渲染，不是原始字节**：HTML/PDF 的可读文本由 `verified_public_web_source`
+  重新渲染得到，渲染器身份与渲染 hash 一起进入引文权威。渲染器变了或字节漂移了，hash 就变，
+  链上后续一律 fail closed；
+- 获取策略由 DiscoveryPlan 0.3 的 `acquisition{preferred_hosts, skip_hosts}` 冻结：优先第一方
+  投资者关系站点，永久跳过明确拒绝本 lane 的主机（重复尝试只是重新花钱确认一次被拒）。
+
+两条 connector 的 governance 记录在 `deploy/connector-governance/`，与其它 connector 一样
+需要 owner 批准后才能从 `probe_only` 变为 `connected`。
+
 ## 完整性声明
 
 - `enumerated`：在明确 bounded window 和分页终点内可对 ID/revision chain 对账；

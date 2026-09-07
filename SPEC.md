@@ -1,4 +1,4 @@
-# Dalton Core slices 1–7：契约规格
+# Dalton Core：契约规格（slices 1–7 与 Phase 8–10 增量）
 
 本仓库是独立于 OpenClaw 的 Dalton Core 原型。它冻结可迁移的语义和 interchange contract，
 并可通过受限 broker 接入 OpenClaw 模型。只读导入器能归档 `workspace-chem`、Coverage OS
@@ -629,6 +629,87 @@ checkpoint chain 精确绑定 run attempt、plan、context、step 和连续 conn
 但 checkpoint 前时，恢复复用相同 idempotency key；checkpoint 已落盘后不会再调用该 step。retryable 结果
 立即把控制权交回调用方，不 sleep；达到 `max_attempts` 后 run 终结为 failed。
 
+### Phase 8–10 增量：任务层与自主研究
+
+slices 1–7 冻结的是执行与账本的底座。Phase 8–10 在其上加了「任务」这一层，以及让任务
+自己走完研究流程所需的记录。下面只列新增的冻结形状；上面所有规则（append-only、版本链、
+hash 绑定、closed shape、fail closed）原样适用。
+
+**方法论与任务（P9a，ADR-0004）**
+
+- `ResearchPlaybookVersion 0.1`：团队分析师手册的合同化。冻结六个阶段（`initial_screen` →
+  `deep_insight_gate` → `industry_model` → `company_model` → `investment_memo` →
+  `active_coverage`），每阶段带 `objective`、`required_readings`、`required_outputs`、
+  `exit_gate{questions, pass_rule}` 与 `human_checkpoint`；另有 `key_questions`、
+  `deliverable_templates`、`decision_vocabulary`（五词，逐字冻结）、`analyst_levels`、
+  `tracker_classes`、`risk_reward_standards`、`model_discipline`、`evidence_discipline`。
+- `CoverageMissionVersion 0.1`：任务对象。`universe`（company_ref + ticker + 优先级 + 覆盖档）、
+  `research_questions`、`deliverables`、`source_plan`（每条来源 `connected`/`probe_only`/
+  `not_connected`）、`bindings`（playbook / constitution / mandate 三个版本按 hash 绑定）、
+  `autonomy{automation_principal, human_checkpoints, may_write}`、`budget`。
+  `may_write` 是自动化的写入范围词表：`evidence`、`claim`、`claim_challenge`、`deliverable`、
+  `forecast_line`、`model_run`、`research_question`、`observation`、`stage_record`、
+  `forecast_reconciliation`、`source_discovery`。
+- 阶段账本：`coverage_mission_stage_records`（append-only，`entered` / `gate_passed` /
+  `gate_failed`）。阶段顺序冻结：进入第 k 阶段必须先 `gate_passed` 第 k−1 阶段；
+  `human_checkpoint=true` 的阶段，`gate_passed` 只接受 `human:` actor。
+- 预算外沿（ADR-0004 §7）：任务能花钱的前提是 mandate 与 governance policy **都**显式带
+  closed `research_budget`；缺省不等于无限授权。
+
+**来源发现与获取（P9d）**
+
+- `DiscoveryPlan 0.1–0.3`：每条来源一份计划，`companies{company_ref: {search_terms}}` 与
+  `specs[{spec_ref, document_type, query_template, lookback_days, rediscovery_interval_days,
+  retry_interval_days}]`；0.3 增加 `acquisition{preferred_hosts, skip_hosts}`（只对
+  `source:web-search`）。计划按内容 hash 绑定，发现记录逐条引用它。
+- `MissionSourceDiscovery 0.1`：一次搜索的记录，绑定 connector invocation 与 SourceEnvelope
+  的 ref+hash、`spec_ref`、`document_refs` 与 `new_document_refs`。
+- `coverage_mission_discovered_documents`：每（任务版本，文档）一行，状态
+  `discovered` → `acquisition_launched` → `acquired` | `acquisition_failed` | `already_in_authority`，
+  带 `host` 与 `ticket_ref`。
+- `coverage_mission_document_reviews`：每份已获取文档一条审阅记录，
+  `awaiting_human_extraction` → `extraction_staged` | `dismissed`。
+
+**文档抽取与自动准入（ADR-0005）**
+
+- `document-extraction-suggestions 0.1`（`contracts/`）：模型输出的冻结形状，每条建议只引用
+  已给出的 `quote_id`，`normalized_statement` **不得断言数字**（期间标签除外），最多五条。
+- `TranscriptCorrectionSetVersion`：`review_scope` 增加 `automation_verified_raw_span`
+  （与人类的 `verified_raw_span` 对称，actor 必须是 `automation:`）；`document_ref` 允许
+  `alphaengine-doc:` 与 `public-web-document:` 两种血统；网页的 `source_content_hash` 是
+  确定性渲染的 hash，不是原始字节。
+- policy 规则 `research-auto-commit:mission-document-qualitative:v1`：定性候选自动准入的
+  唯一路径，要求同一 `automation:` 主体、无数字断言、非套话、引文精确且 claim-eligible、
+  SourceEnvelope 与来源种类匹配。规则必须由生效中的 governance policy 显式列出。
+
+**Claim 挑战与退役（P10b）**
+
+- `claim_retirement_challenges`：append-only。`reason_code ∈ {subject_absent_from_source,
+  boilerplate_disclaimer, human_judgment}`，确定性检测器带 `detector_ref`；
+  自动化不得提 `human_judgment`。
+- `claim_retirement_decisions`：每条被挑战的 Claim 一条决定，`retired` | `kept`；
+  自动化只能 `retired`，且权威在写入时**重跑检测器**；人可两者皆可。
+- ClaimVersion 契约不变、账本不改写：所有读取路径（问答、清单、交付物）跳过已退役版本，
+  历史 hash 全部仍然可验证。
+
+**任务交付物（P10c）**
+
+- `mission_deliverable_versions` + pointer：每个交付物一条版本链，按 hash 绑定写作时的任务版本
+  与 playbook 版本；`kind` 取自任务 `deliverables` 词表。
+- 章节形状 closed：`{title, body, claim_refs, numbers[{text, claim_version_ref, period}], gaps}`。
+  **数字纪律由权威强制**：正文里的每个数字必须出现在该节 `numbers` 并绑定一条定量 Claim；
+  期间标签不算数字；引用的 Claim 必须未退役；全空文档（空壳）拒绝发布。
+- 出口门自评由结构检查产生（资料底座清单、发布时的数字校验、实际写出的章节与引用数），
+  结果写入阶段账本，不向模型询问它自己的作品。
+
+**Owner cockpit（ADR-0006）**
+
+- 单一 tailnet HTTP 面，Tailscale 身份 + session + CSRF；五个视图（目标 / 方向 / 日志 /
+  问答 / 审批）。控制进程**不持有 Core 写句柄**：读 Core 只读，写一律经 writer 以 owner 的
+  human principal 执行。
+- cockpit 的模型调用（问答、目标与方向草稿、交付物起草）走与抽取同一条 routing policy、
+  同一个 broker、同一本日预算账本（按任务上限准入），并且是 scheduler WorkOrder，可重放。
+
 ## 占位契约（本 slice 不冻结）
 
 以下对象只在架构文档中定义方向，暂不伪装成已实现契约：Model IR
@@ -677,6 +758,13 @@ Pi、DeepSeek Harness 等）。本 walking skeleton 可使用 SQLite，但不把
 | SourceEnvelope/Artifact 只读 authority join、SEC public normalizer、真实请求双绑定与 candidate staging | E1/E2 | `tests/test_authority_resolver.py`、`tests/test_sec_public_adapter.py` |
 | authority → read-only dashboard projection 与敏感字段隔离 | E1 | `tests/test_dashboard_projector.py` |
 | dashboard 固定 GET API、只读连接与页面资源 | E2 | `tests/test_dashboard.py` |
+| ResearchPlaybook / CoverageMission 版本链、阶段顺序、人类检查点与 `may_write` 范围 | E1/E2 | `tests/test_coverage_mission.py`、`tests/test_research_playbook.py` |
+| 任务来源发现、发现计划 0.3、获取 lane、队列完整性与主机策略 | E1/E2 | `tests/test_mission_source_discovery.py`、`tests/test_mission_web_search_discovery.py`、`tests/test_public_web_fetch_lane.py` |
+| 文档抽取输出契约、自动化 raw-span 范围、policy 自动准入与网页血统 | E1/E2 | `tests/test_document_extraction*.py`、`tests/test_transcript_qualitative_candidate.py` |
+| 阶段驱动、资料底座清单与按缺口排序的获取/阅读顺序 | E1 | `tests/test_mission_stage.py` |
+| Claim 挑战/退役：检测器、写入时重跑、账本不变与读取路径过滤 | E1 | `tests/test_claim_retirement.py` |
+| 交付物数字纪律、退役 Claim 不可引用、版本链与出口门结构自评 | E1 | `tests/test_mission_deliverable.py` |
+| cockpit 五视图、只读 Core、经 writer 写入与受预算约束的模型调用 | E1/E2 | `tests/test_cockpit_plane.py`、`tests/test_agenda_control.py` |
 | 实际 hostile-code sandbox backend 与自动 monitoring | E1 | 本 slice 排除 |
 
 本目录不会通过 schema 或 `from_dict` 冒充实际 sandbox backend；Scheduler 和 commit service 的
