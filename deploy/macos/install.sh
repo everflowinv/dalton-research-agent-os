@@ -28,6 +28,14 @@ fi
 "$venv_dir/bin/python" -m pip install --disable-pip-version-check --upgrade pip
 "$venv_dir/bin/python" -m pip install --disable-pip-version-check "${repo_root}[deploy,pdf]"
 
+# P9d-11: stopping the writer terminates whatever lane child is in flight and
+# the next tick settles it as orphaned, parking that company/spec for a day.
+# Wait (bounded) for running children before bootout; on timeout say so and
+# proceed.  Read-only: it never signals a child or touches Core.
+if ! "$venv_dir/bin/python" -m dalton_core.launch_drain --state-dir "$state_dir" --timeout "${DRAIN_TIMEOUT:-600}"; then
+  print -u2 "warning: lane children still running after drain timeout; proceeding with bootout"
+fi
+
 for label in space.lumos.dalton.thesis-impact space.lumos.dalton.control space.lumos.dalton.controller space.lumos.dalton.writer; do
   if launchctl print "$domain/$label" >/dev/null 2>&1; then
     launchctl bootout "$domain/$label"
