@@ -2496,13 +2496,21 @@ class WriterServer:
         # raising so the driver's tick summary shows the reason.  The
         # AlphaEngine tick keeps its P9d-1 shape; the web search tick rides
         # along under ``web_search``.
+        # P12f: one deadline for the whole op, shared by every lane below.
+        # Each lane had its own budget, so three lanes at twenty seconds each
+        # was sixty inside a request this server abandons after thirty -- and
+        # the controller then reported every lane as unavailable however much
+        # work they had actually done.
+        from .mission_source_discovery import _monotonic, TICK_BUDGET_SECONDS
+
+        deadline = _monotonic() + TICK_BUDGET_SECONDS
         if self._source_discovery is None:
             result: dict[str, Any] = {
                 "status": "unconfigured",
                 "reason": self._discovery_plan_error or "no discovery plan on this writer",
             }
         else:
-            result = self.source_discovery.dispatch_once()
+            result = self.source_discovery.dispatch_once(deadline)
         # P10v: the filings index goes before web search, because the two share
         # one fetch slot and web search almost always has something queued.
         # Live, five 10-Ks sat discovered while web search held the slot tick
@@ -2517,14 +2525,14 @@ class WriterServer:
                 "reason": self._sec_filings_plan_error or "no SEC filings plan on this writer",
             }
         else:
-            result["sec_filings_index"] = self._sec_filings_source_discovery.dispatch_once()
+            result["sec_filings_index"] = self._sec_filings_source_discovery.dispatch_once(deadline)
         if self._web_source_discovery is None:
             result["web_search"] = {
                 "status": "unconfigured",
                 "reason": self._web_search_plan_error or "no web search discovery plan on this writer",
             }
         else:
-            result["web_search"] = self.web_source_discovery.dispatch_once()
+            result["web_search"] = self.web_source_discovery.dispatch_once(deadline)
         return result
 
     def _mission_stage_driver(self) -> Any:

@@ -55,7 +55,8 @@ class TickBudgetTests(unittest.TestCase):
         coordinator.launch_acquisition = launch_acquisition
         coordinator.settle_documents = lambda: ["settled"]
         with patch.object(m, "_monotonic", clock):
-            acquisitions, out_of_time, settled = coordinator._acquire_within_budget([])
+            acquisitions, out_of_time, settled = coordinator._acquire_within_budget(
+                [], getattr(self, "shared_deadline", None))
         self.settled = settled
         return acquisitions, out_of_time
 
@@ -107,6 +108,30 @@ class TickBudgetTests(unittest.TestCase):
         acquisitions, out_of_time = self.run_loop(c, clock, launches=99)
         self.assertEqual(len(acquisitions), 1)
         self.assertFalse(out_of_time)
+
+    def test_a_shared_deadline_overrides_this_lane_own_budget(self):
+        # One writer op runs every lane in turn; three lanes at twenty seconds
+        # each is sixty inside a thirty-second request.
+        c, clock, waits = self.coordinator(budget=20.0, wait_cost=1.0)
+        self.shared_deadline = 3.0
+        acquisitions, out_of_time = self.run_loop(c, clock, launches=99)
+        self.assertTrue(out_of_time)
+        self.assertEqual(len(acquisitions), 3)
+        self.assertLessEqual(max(waits), 3.0)
+
+    def test_a_lane_own_budget_still_binds_when_it_is_tighter(self):
+        c, clock, _ = self.coordinator(budget=2.0, wait_cost=1.0)
+        self.shared_deadline = 100.0
+        acquisitions, out_of_time = self.run_loop(c, clock, launches=99)
+        self.assertTrue(out_of_time)
+        self.assertEqual(len(acquisitions), 2)
+
+    def test_three_lanes_together_fit_inside_the_writer_timeout(self):
+        from dalton_core.writer_server import STORE_REQUEST_TIMEOUT
+
+        # The op sets one deadline, so the bound is the budget itself rather
+        # than the budget times the number of lanes.
+        self.assertLess(m.TICK_BUDGET_SECONDS, STORE_REQUEST_TIMEOUT)
 
 
 if __name__ == "__main__":

@@ -1475,7 +1475,7 @@ class MissionSourceDiscoveryCoordinator:
         }
 
     def _acquire_within_budget(
-        self, settled_documents: list[Any]
+        self, settled_documents: list[Any], deadline: float | None = None,
     ) -> tuple[list[dict[str, Any]], bool, list[Any]]:
         """Acquire queued documents until the queue empties or time runs out.
 
@@ -1492,7 +1492,12 @@ class MissionSourceDiscoveryCoordinator:
         """
 
         acquisitions: list[dict[str, Any]] = []
-        deadline = _monotonic() + max(0.0, self.tick_budget_seconds)
+        own = _monotonic() + max(0.0, self.tick_budget_seconds)
+        # P12f: one writer op runs every coordinator in turn, so the budget
+        # that matters is the op's, not this coordinator's. Three lanes at
+        # twenty seconds each is sixty inside a thirty-second request, which
+        # is the same failure one layer up.
+        deadline = own if deadline is None else min(own, deadline)
         out_of_time = False
         for _ in range(max(1, int(self.acquisitions_per_tick))):
             if _monotonic() >= deadline:
@@ -1521,7 +1526,14 @@ class MissionSourceDiscoveryCoordinator:
             settled_documents = settled_documents + self.settle_documents()
         return acquisitions, out_of_time, settled_documents
 
-    def dispatch_once(self) -> dict[str, Any]:
+    def dispatch_once(self, deadline: float | None = None) -> dict[str, Any]:
+        """One discovery tick, bounded by ``deadline`` when the caller sets one.
+
+        The caller's deadline wins because one writer op runs every lane in
+        turn: a per-lane budget multiplies by the number of lanes and blows the
+        request the whole op rides in.
+        """
+
         retried_after_restart = self._retry_failures_now
         settled_dispatches = self.settle_dispatches()
         settled_documents = self.settle_documents()
@@ -1548,7 +1560,7 @@ class MissionSourceDiscoveryCoordinator:
         # deadline is on the loop, not on each acquisition, because the
         # writer's patience is spent by the whole request.
         acquisitions, out_of_time, settled_documents = self._acquire_within_budget(
-            settled_documents)
+            settled_documents, deadline)
         discovery = self.launch_discovery()
         launched = [item for item in acquisitions if item.get("status") == "launched"]
         launched_documents = len(launched)
