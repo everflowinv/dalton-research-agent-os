@@ -25,6 +25,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 from .alphaengine_acquisition_launcher import AlphaEngineAcquisitionLauncher
@@ -176,6 +177,22 @@ class ExtractionHost:
         self.store.close()
 
 
+# P11o: the sources that state reported figures. A filing and a call
+# transcript say "revenue was X"; a news article about the industry almost never
+# does, and spending the figures allowance on one costs a paid call to be told
+# nothing. This is a spending rule, not a claim that news is worthless -- the
+# prose pass still reads all of it.
+NUMERIC_SOURCE_REFS: frozenset[str] = frozenset({
+    "source:sec-edgar", "source:alphaengine",
+})
+
+
+def numeric_worthy(review: Mapping[str, Any]) -> bool:
+    """Whether a window from this source is worth a figures call."""
+
+    return review.get("source_ref") in NUMERIC_SOURCE_REFS
+
+
 def run_extraction(
     *,
     state_dir: Path,
@@ -319,7 +336,7 @@ def run_extraction(
                         # nothing; before the gate checks below, because a
                         # gated or rejected qualitative call means this window
                         # is done either way.
-                        if numeric_read < max_numeric_windows:
+                        if numeric_read < max_numeric_windows and numeric_worthy(review):
                             try:
                                 figures = service.generate_numeric(
                                     review_id=review["review_id"],
