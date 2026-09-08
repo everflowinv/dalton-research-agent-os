@@ -287,3 +287,48 @@ class SecFilingUrlAuthorityTests(unittest.TestCase):
         ):
             with self.assertRaises(SecFilingsIndexError):
                 filing_document_url(issuer, accession, document)
+
+
+class FilingsIndexSeamTests(unittest.TestCase):
+    """P10k: the P0 list_filings plan and the P10h URL builder must agree.
+
+    The executor builds the adapter parameters and the URL builder consumes
+    them, but they were written a long way apart. If either side renames a
+    key the annual report lane goes quiet rather than loud, so pin the seam.
+    """
+
+    def test_executor_parameters_are_exactly_what_the_url_builder_consumes(self) -> None:
+        from dalton_core.research_plan_executor import sec_adapter_parameters
+
+        plan_wire = {
+            "execution_scope": {
+                "operation": "list_filings",
+                "budget": {"max_pages": 10},
+                "parameters": {
+                    "issuer_cik": "0001467373", "form": "10-K",
+                    "filing_date_from": "2024-01-01", "filing_date_to": "2026-09-08",
+                },
+            },
+        }
+        parameters = sec_adapter_parameters(plan_wire)
+        self.assertEqual(
+            set(parameters), {"issuer", "form", "date_from", "date_to", "limit"}
+        )
+
+        # The same mapping the normalizer and the URL builder both validate.
+        rows = [("0001467373-25-000217", "10-K", "2025-10-10", "acn-20250831.htm", None)]
+        raw = json.dumps({"cik": "0001467373", "filings": {"recent": {
+            "accessionNumber": [r[0] for r in rows], "form": [r[1] for r in rows],
+            "filingDate": [r[2] for r in rows], "primaryDocument": [r[3] for r in rows],
+            "amendmentOf": [r[4] for r in rows],
+        }}}).encode()
+        from dalton_core.sec_filings_index import build_filing_url_authorities
+
+        authorities = build_filing_url_authorities(
+            raw, {**parameters, "date_from": "2025-10-10", "date_to": "2025-10-10"}
+        )
+        self.assertEqual(
+            authorities[0]["canonical_url"],
+            "https://www.sec.gov/Archives/edgar/data/1467373/"
+            "000146737325000217/acn-20250831.htm",
+        )
