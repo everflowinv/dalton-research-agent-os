@@ -45,7 +45,10 @@ _DAILY_QUOTAS = MappingProxyType(
         ("web-fetch", "fetch_get"): MappingProxyType(
             {
                 "quota_unit": "document",
-                "daily_unit_limit": 200,
+                # P10x: raised from 200. These are free public HTTPS reads and
+                # the allowance is per host now, so this is a politeness bound
+                # on one site rather than a shared budget sources compete for.
+                "daily_unit_limit": 1_000,
                 "max_physical_calls_per_unit": 1,
             }
         ),
@@ -60,7 +63,9 @@ _DAILY_QUOTAS = MappingProxyType(
         ("sec", "list_filings"): MappingProxyType(
             {
                 "quota_unit": "search",
-                "daily_unit_limit": 50,
+                # P10x: raised from 50. Free, and one index read per issuer per
+                # form is cheap; data.sec.gov's own rate limit is the real bound.
+                "daily_unit_limit": 200,
                 "max_physical_calls_per_unit": 1,
             }
         ),

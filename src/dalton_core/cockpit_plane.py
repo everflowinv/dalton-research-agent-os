@@ -68,6 +68,35 @@ MAX_CLAIMS_IN_PROMPT = 400
 MAX_PROMPT_CHARS = 90_000
 
 
+def _ticket_still_running(ticket: Mapping[str, Any]) -> bool:
+    """A ticket is running only while its child actually is.
+
+    A launcher settles a ticket when something asks about that exact ticket, so
+    children killed by a restart stay ``running`` on disk until someone does.
+    Live, 35 SEC lane tickets from before a reboot filled the owner's page with
+    "reading SEC financials" for thirteen hours while nothing was running.
+    Reporting a dead pid as busy is not a display quirk -- it is the page
+    saying work is happening when none is.
+    """
+
+    if ticket.get("status") != "running":
+        return False
+    pid = ticket.get("pid")
+    if not isinstance(pid, int) or pid <= 0:
+        # No pid recorded: nothing to check, so believe the ticket rather than
+        # hide work that may be real.
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
+
+
 class CockpitError(RuntimeError):
     """A cockpit request was refused; the message is safe to show."""
 
@@ -471,7 +500,7 @@ class CockpitPlane:
             "mission": mission["budget"],
         }
         running = [self._ticket_event(t, members, self._url_map()) for t in self.tickets.tickets()
-                   if t["ticket"].get("status") == "running"]
+                   if _ticket_still_running(t["ticket"])]
         return {
             "schema_version": SCHEMA_VERSION, "as_of": _iso(self.clock()),
             "goal": {

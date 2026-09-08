@@ -94,6 +94,12 @@ ALPHAENGINE_SOURCE_REF = "source:alphaengine"
 WEB_SEARCH_SOURCE_REF = "source:web-search"
 SEC_SOURCE_REF = "source:sec-edgar"
 SEC_FILINGS_TICKET_PREFIX = "sec-filings-index"
+# P10x: how many queued documents one tick may acquire, and how long to
+# wait for each child. The children finish in well under a second; the
+# wait only has to cover a slow host, and the per-source daily quota is
+# what actually bounds the work.
+ACQUISITIONS_PER_TICK = 12
+ACQUISITION_WAIT_SECONDS = 90.0
 # A 10-K window holds a couple of filings; the ceiling only has to be
 # above that, and the adapter fails closed if the source exceeds it.
 SEC_INDEX_LIMIT = 100
@@ -889,7 +895,7 @@ class SecFilingsIndexLauncher(_SearchLauncherBase):
 
 
 class MissionSourceDiscoveryCoordinator:
-    """Advance one plan's source discovery by at most one search + one acquisition.
+    """Advance one plan's source discovery by one search and a run of acquisitions.
 
     The coordinator only ever touches dispatches and documents of its own
     plan's source, so an AlphaEngine coordinator never settles a web search
@@ -908,9 +914,13 @@ class MissionSourceDiscoveryCoordinator:
         clock: Callable[[], datetime] | None = None,
         owner_call_cap: int = MAX_CALLS_PER_WINDOW,
         spool_dir: str | Path | None = None,
+        acquisitions_per_tick: int = ACQUISITIONS_PER_TICK,
+        acquisition_wait_seconds: float = ACQUISITION_WAIT_SECONDS,
     ) -> None:
         self.store = store
         self.missions = missions
+        self.acquisitions_per_tick = acquisitions_per_tick
+        self.acquisition_wait_seconds = acquisition_wait_seconds
         self.plan = validate_discovery_plan(plan)
         self.source_ref = self.plan["source_ref"]
         self.search_launcher = search_launcher
@@ -1398,9 +1408,41 @@ class MissionSourceDiscoveryCoordinator:
         review_backfill = self.missions.backfill_document_reviews(self.plan["mission_ref"])
         # Acquiring an already-discovered document comes before spending the
         # shared budget on a new search: known gaps first, then new ones.
-        acquisition = self.launch_acquisition()
+        #
+        # P10x: keep acquiring while there is queued work and budget for it.
+        # One document per tick was not a throughput choice, it was an
+        # accident of settlement: the child fetches in about 0.1s and then the
+        # ticket waits for the next 300s tick to notice, so a queue of 130
+        # documents took eleven hours to move about thirteen seconds of work.
+        # Waiting for the child here costs a fraction of a second and settles
+        # it immediately, so the next one can start inside the same tick.
+        acquisitions: list[dict[str, Any]] = []
+        for _ in range(max(1, int(self.acquisitions_per_tick))):
+            acquisition = self.launch_acquisition()
+            acquisitions.append(acquisition)
+            if acquisition.get("status") != "launched":
+                break
+            wait = getattr(self.acquisition_launcher, "wait", None)
+            if wait is None:
+                # A launcher that cannot be waited on keeps the old one-per-tick
+                # behaviour rather than spinning against a child it cannot see.
+                break
+            if wait(timeout=self.acquisition_wait_seconds) is None:
+                break
+            # Settle the child that just finished, or the next launch sees a
+            # document still marked launched and reports itself busy.
+            settled_documents = settled_documents + self.settle_documents()
         discovery = self.launch_discovery()
-        active = discovery.get("status") == "launched" or acquisition.get("status") == "launched"
+        launched = [item for item in acquisitions if item.get("status") == "launched"]
+        launched_documents = len(launched)
+        # Report the first document this tick actually took, not the attempt
+        # that found the queue empty afterwards: "what did the tick do" is the
+        # useful answer, and the count below says how many followed it.
+        acquisition = (
+            launched[0] if launched
+            else (acquisitions[-1] if acquisitions else {"status": "idle"})
+        )
+        active = discovery.get("status") == "launched" or launched_documents > 0
         return {
             "status": "launched" if active else "idle",
             "source_ref": self.source_ref,
@@ -1414,6 +1456,7 @@ class MissionSourceDiscoveryCoordinator:
             "review_backfill": review_backfill,
             "discovery": discovery,
             "acquisition": acquisition,
+            "acquisitions_launched": launched_documents,
         }
 
 

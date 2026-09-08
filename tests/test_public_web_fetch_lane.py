@@ -762,11 +762,23 @@ class P9d4bWriterOpsTests(unittest.TestCase):
         status = h.governance.call("public_web_fetch_status", {"ticket_ref": ticket_ref})
         self.assertEqual(status["status"], "succeeded", status)
         self.assertEqual(status["summary"]["body_bytes"], len(BODY))
-        tick = h.core.call("dispatch_mission_source_discovery", {})
+        # P10x: the tick that fetches also settles. Settlement used to wait for
+        # the next tick 300s later, which is why one document moved per tick;
+        # the page is acquired and queued for review inside the same pass now.
         settled = tick["web_search"]["settled_documents"]
-        self.assertEqual([(item["document_ref"], item["status"], item["review_status"]) for item in settled], [(URL_A, "acquired", "fresh")])
+        # Both queued URLs move in this one tick, not one per tick.
+        self.assertEqual(
+            [(item["document_ref"], item["status"], item["review_status"]) for item in settled],
+            [(URL_A, "acquired", "fresh"), (URL_B, "acquired", "fresh")],
+        )
+        self.assertEqual(tick["web_search"]["acquisitions_launched"], 2)
+        idle_tick = h.core.call("dispatch_mission_source_discovery", {})
+        self.assertEqual(idle_tick["web_search"]["settled_documents"], [])
         reviews = h.governance.call("mission_document_reviews", {"state": "awaiting_human_extraction"})
-        self.assertEqual([item["document_ref"] for item in reviews["reviews"]], [URL_A])
+        # Both pages the tick fetched are waiting to be read.
+        self.assertEqual(
+            [item["document_ref"] for item in reviews["reviews"]], [URL_A, URL_B]
+        )
         review = reviews["reviews"][0]
         # P9d-4c: the fetched page is a verified read-only original. The human
         # sees the URL it came from and bounded quotes of its exact bytes.
@@ -868,15 +880,19 @@ class P9d4bWriterOpsTests(unittest.TestCase):
                 "review_id": review["review_id"], "expected_review_hash": "0" * 64, "offset": 0,
             })
         self.assertEqual(h.governance.call("mission_document_reviews", {"state": "awaiting_human_extraction"})["reviews"][0]["review_id"], review["review_id"])
-        # The same tick already launched the second URL; a human request while
-        # the single slot is busy is a conflict, never a second process.
-        self.assertEqual(tick["web_search"]["acquisition"]["document_ref"], URL_B)
+        # P10x: the tick took both URLs, so ``acquisition`` names the first one
+        # it started and the queue is already empty behind it.
+        self.assertEqual(tick["web_search"]["acquisition"]["document_ref"], URL_A)
+        # A human request while the single slot is busy is a conflict, never a
+        # second process. The slot is free now that the tick drained, so hold
+        # it open explicitly rather than relying on a leftover child.
+        h.fetch_launcher.start_bounded_probe(
+            document_ref=URL_B, caller_ref="automation:coverage-mission"
+        )
         with self.assertRaises(RemoteError) as ctx:
             h.governance.call("acquire_public_web_document", {"document_ref": URL_B})
         self.assertEqual(ctx.exception.code, "conflict")
         h.fetch_launcher.wait(timeout=120)
-        tick = h.core.call("dispatch_mission_source_discovery", {})
-        self.assertEqual([item["status"] for item in tick["web_search"]["settled_documents"]], ["acquired"])
         documents = h.governance.call("mission_discovered_documents", {"mission_version_ref": mission["id"]})
         self.assertEqual(sorted((d["document_ref"], d["status"]) for d in documents["documents"]),
                          sorted([(URL_A, "acquired"), (URL_B, "acquired")]))
