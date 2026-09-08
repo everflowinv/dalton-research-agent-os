@@ -129,13 +129,20 @@ fi
 # P10f: DALTON_EXTRACTION_MAX_WINDOWS raises reading throughput. Each window is
 # one paid model call against the mission's max_daily_paid_calls, so raise the
 # mission budget first; unset keeps the writer's own conservative default.
+# An array, not ${VAR:+...}: this script runs under zsh, which does not word
+# split an unquoted expansion, so the flag and its value would arrive as one
+# argument and argparse would refuse the install.
+extraction_window_args=()
+if [[ -n "${DALTON_EXTRACTION_MAX_WINDOWS:-}" ]]; then
+  extraction_window_args=(--extraction-max-windows "$DALTON_EXTRACTION_MAX_WINDOWS")
+fi
 "$venv_dir/bin/python" -m dalton_core.macos_launchagent \
   --launch-agents-dir "$launch_agents_dir" \
   --python-env-bin "$venv_dir/bin" \
   --state-dir "$state_dir" \
   --config "$config_path" \
   --log-dir "$log_dir" \
-  ${DALTON_EXTRACTION_MAX_WINDOWS:+--extraction-max-windows "$DALTON_EXTRACTION_MAX_WINDOWS"}
+  "${extraction_window_args[@]}"
 
 for label in space.lumos.dalton.writer space.lumos.dalton.controller space.lumos.dalton.control space.lumos.dalton.thesis-impact; do
   plist="$launch_agents_dir/$label.plist"
