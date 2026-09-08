@@ -41,7 +41,7 @@ def review(review_id, source_ref="source:alphaengine", document_ref=None):
 
 
 def summary():
-    return {"numeric": [], "figures": 0}
+    return {"numeric": [], "figures": 0, "numeric_fresh": 0}
 
 
 COUNTS = {"verified": "verified", "refused": "refused"}
@@ -51,7 +51,7 @@ def sweep(service, reviews, out, *, limit, wanted=lambda r, s: True, specs=None)
     _secondary_sweep(
         service, [("automation:x", reviews, specs or {})], out,
         limit=limit, entries="numeric", wanted=wanted, call="generate_numeric",
-        counts=COUNTS, total=("figures", "verified"),
+        counts=COUNTS, total=("figures", "verified"), spent_key="numeric_fresh",
     )
 
 
@@ -149,6 +149,47 @@ class SweepTests(unittest.TestCase):
         sweep(service, [review("r1")], out, limit=5)
         self.assertEqual(out["figures"], 3)
         self.assertEqual([e["verified"] for e in out["numeric"]], [2, 1])
+
+
+class SpendReportingTests(unittest.TestCase):
+    """P11z: the lane holds for an hour on this number, so it has to be right."""
+
+    def test_it_reports_the_windows_it_newly_paid_for(self):
+        service = FakeService({"r1": {0: 100, 100: 200, 200: None}}, {})
+        out = summary()
+        sweep(service, [review("r1")], out, limit=5)
+        self.assertEqual(out["numeric_fresh"], 3)
+
+    def test_replayed_windows_are_not_reported_as_spend(self):
+        # This is what tells "nothing left to read" from "the prose queue is
+        # empty"; counting replays would keep the lane launching forever.
+        service = FakeService(
+            {"r1": {0: 100, 100: None}},
+            {("r1", 0): {"replayed": True}, ("r1", 100): {"replayed": True}},
+        )
+        out = summary()
+        sweep(service, [review("r1")], out, limit=5)
+        self.assertEqual(out["numeric_fresh"], 0)
+
+    def test_spend_is_reported_when_the_allowance_runs_out(self):
+        service = FakeService({"r1": {0: 100, 100: 200, 200: None}, "r2": {0: None}}, {})
+        out = summary()
+        sweep(service, [review("r1"), review("r2")], out, limit=2)
+        self.assertEqual(out["numeric_fresh"], 2)
+
+    def test_spend_is_reported_when_a_gate_ends_the_sweep(self):
+        service = FakeService(
+            {"r1": {0: 100, 100: None}, "r2": {0: None}},
+            {("r1", 100): {"status": "gated"}},
+        )
+        out = summary()
+        sweep(service, [review("r1"), review("r2")], out, limit=5)
+        self.assertEqual(out["numeric_fresh"], 1)
+
+    def test_an_allowance_of_zero_reports_nothing_rather_than_crashing(self):
+        out = summary()
+        sweep(FakeService({"r1": {0: None}}, {}), [review("r1")], out, limit=0)
+        self.assertEqual(out["numeric_fresh"], 0)
 
 
 if __name__ == "__main__":

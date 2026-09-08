@@ -250,6 +250,11 @@ def run_extraction(
         "numeric": [],
         "figures": 0,
         "max_numeric_windows": max_numeric_windows,
+        # Windows each secondary pass newly paid for. A replayed window is not
+        # counted, so zero means "this pass has nothing left to read", which is
+        # a different thing from "the prose queue is empty".
+        "numeric_fresh": 0,
+        "discovery_fresh": 0,
         # P11r: the pass that learns what to ask for. ``metrics_observed``
         # counts journal entries, not requirements: a requirement needs two
         # distinct documents and is derived when it is read.
@@ -405,6 +410,7 @@ def run_extraction(
             counts={"verified": "verified", "refused": "refused",
                     "recorded": "recorded"},
             total=("figures", "recorded"),
+            spent_key="numeric_fresh",
             require_open=False,
         )
         _secondary_sweep(
@@ -414,6 +420,7 @@ def run_extraction(
             call="generate_metric_discovery",
             counts={"proposals": "proposals", "refused": "refused", "recorded": "recorded"},
             total=("metrics_observed", "recorded"),
+            spent_key="discovery_fresh",
             require_open=False,
         )
         # ADR-0005 / P9d-17b: every fully drafted review is staged and
@@ -443,6 +450,7 @@ def _secondary_sweep(
     call: str,
     counts: Mapping[str, str],
     total: tuple[str, str],
+    spent_key: str,
     require_open: bool = True,
 ) -> None:
     """Spend one secondary allowance on the documents that pass its own gate.
@@ -457,11 +465,17 @@ def _secondary_sweep(
     if limit <= 0:
         return
     spent = 0
+
+    def done() -> None:
+        # What this pass actually paid for, so the coordinator can tell a lane
+        # with nothing left to read from one whose prose queue merely drained.
+        summary[spent_key] = summary.get(spent_key, 0) + spent
+
     method = getattr(service, call)
     for actor, reviews, specs in lanes:
         for review in reviews:
             if spent >= limit:
-                return
+                return done()
             if not wanted(review, specs.get(review["document_ref"])):
                 continue
             review_hash = content_hash(review)
@@ -485,7 +499,8 @@ def _secondary_sweep(
                     break
                 status = result.get("status")
                 if status == "gated":
-                    return  # no model is configured; every other window is gated too
+                    # No model is configured; every other window is gated too.
+                    return done()
                 # A window that was never asked anything costs no allowance:
                 # nothing was owed, or its document kind is not one a figure
                 # may be taken from at all.
@@ -500,6 +515,7 @@ def _secondary_sweep(
                 if context["next_offset"] is None:
                     break
                 offset = context["next_offset"]
+    done()
 
 
 def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionService,

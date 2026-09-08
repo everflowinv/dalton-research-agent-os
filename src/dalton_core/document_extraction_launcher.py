@@ -304,18 +304,29 @@ class DocumentExtractionCoordinator:
                     "failure_reason": summary.get("failure_reason"),
                     "reviews_complete": summary.get("reviews_complete"),
                 }
+                # P11z: what the two secondary passes newly paid for. The hold
+                # below used to be decided by the prose queue alone, so a
+                # drained prose queue idled the whole lane for an hour while
+                # the figures and discovery passes still had documents to read
+                # -- which is exactly the state the queue reaches once the
+                # prose pass has drafted everything open.
+                secondary = (int(summary.get("numeric_fresh") or 0)
+                             + int(summary.get("discovery_fresh") or 0))
+                result["last"]["secondary_fresh"] = secondary
                 if latest.get("settled") is not True:
                     latest = {**latest, "settled": True, "status": ticket["status"],
                               "drafted": result["last"]["drafted"], "stop_reason": summary.get("stop_reason"),
+                              "secondary_fresh": secondary,
                               "completed_at": ticket.get("completed_at"), "awaiting_at_launch": latest.get("awaiting_at_launch")}
                     _write_owner_only(self._latest_path, latest)
         if result["awaiting"] == 0:
             return {**result, "status": "idle"}
         if latest is not None and latest.get("settled") and latest.get("stop_reason") in ("nothing_to_draft",) \
-                and latest.get("awaiting_at_launch") == result["awaiting"]:
+                and latest.get("awaiting_at_launch") == result["awaiting"] \
+                and not latest.get("secondary_fresh"):
             completed = latest.get("completed_at")
             if completed and self.clock() - datetime.fromisoformat(completed) < IDLE_HOLD:
-                return {**result, "status": "held", "reason": "nothing to draft since the last run; queue unchanged"}
+                return {**result, "status": "held", "reason": "nothing to draft or read since the last run; queue unchanged"}
         if latest is not None and latest.get("settled") and str(latest.get("stop_reason", "")).startswith("gated"):
             completed = latest.get("completed_at")
             if completed and self.clock() - datetime.fromisoformat(completed) < IDLE_HOLD:

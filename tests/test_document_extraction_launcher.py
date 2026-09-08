@@ -145,3 +145,77 @@ class LauncherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _OneAwaiting:
+    """A mission store with exactly one review awaiting, always."""
+
+    class connection:
+        @staticmethod
+        def execute(*_args):
+            class Row:
+                @staticmethod
+                def fetchone():
+                    return [1]
+            return Row()
+
+
+class SecondaryWorkHoldTests(unittest.TestCase):
+    """P11z: a drained prose queue is not an idle lane.
+
+    Live, the prose pass drafted everything open, reported nothing_to_draft,
+    and the coordinator held the whole lane for an hour -- while the figures
+    and discovery passes still had held documents to read and had been reading
+    them. The hold has to mean "nothing left to do", not "nothing left to
+    draft".
+    """
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.now = datetime(2026, 9, 8, 16, 0, tzinfo=timezone.utc)
+        self.launcher = FakeLauncher(self.root)
+        self.coordinator = DocumentExtractionCoordinator(
+            missions=_OneAwaiting(), launcher=self.launcher, clock=lambda: self.now,
+        )
+
+    def settle(self, summary: dict) -> None:
+        # Launch and finish one child; the next dispatch both settles it and
+        # decides, which is the decision under test.
+        self.coordinator.dispatch_once()
+        self.launcher.finish(summary, completed_at=self.now.isoformat())
+
+    def test_a_lane_whose_secondary_passes_are_reading_is_launched_again(self):
+        self.settle({"status": "succeeded", "drafted": [], "stop_reason": "nothing_to_draft",
+                     "reviews_complete": 0, "numeric_fresh": 4, "discovery_fresh": 0})
+        self.now += timedelta(minutes=5)
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
+
+    def test_a_lane_with_nothing_left_anywhere_still_holds(self):
+        self.settle({"status": "succeeded", "drafted": [], "stop_reason": "nothing_to_draft",
+                     "reviews_complete": 0, "numeric_fresh": 0, "discovery_fresh": 0})
+        self.now += timedelta(minutes=5)
+        held = self.coordinator.dispatch_once()
+        self.assertEqual(held["status"], "held")
+        self.assertIn("nothing to draft or read", held["reason"])
+
+    def test_discovery_work_alone_is_enough_to_keep_going(self):
+        self.settle({"status": "succeeded", "drafted": [], "stop_reason": "nothing_to_draft",
+                     "reviews_complete": 0, "numeric_fresh": 0, "discovery_fresh": 2})
+        self.now += timedelta(minutes=5)
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
+
+    def test_a_summary_from_before_this_existed_holds_as_it_used_to(self):
+        # An older child writes no counts; absent must read as "no secondary
+        # work", not as "unknown, keep launching forever".
+        self.settle({"status": "succeeded", "drafted": [], "stop_reason": "nothing_to_draft",
+                     "reviews_complete": 0})
+        self.now += timedelta(minutes=5)
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
+
+    def test_the_hold_lapses_after_an_idle_hour_either_way(self):
+        self.settle({"status": "succeeded", "drafted": [], "stop_reason": "nothing_to_draft",
+                     "reviews_complete": 0, "numeric_fresh": 0, "discovery_fresh": 0})
+        self.now += timedelta(hours=2)
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
