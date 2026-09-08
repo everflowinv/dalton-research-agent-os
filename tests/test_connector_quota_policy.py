@@ -42,6 +42,16 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # P10p: the SEC filings index. Sorted before web-fetch.
+                    "connector_slug": "sec",
+                    "operation": "list_filings",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
                     "connector_slug": "web-fetch",
                     "operation": "fetch_get",
                     "quota_unit": "document",

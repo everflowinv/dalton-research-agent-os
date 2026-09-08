@@ -49,6 +49,21 @@ _DAILY_QUOTAS = MappingProxyType(
                 "max_physical_calls_per_unit": 1,
             }
         ),
+        # P10p: one issuer's filing index per unit. A "search" unit rather than
+        # a new word for it: one query in, a list of filings out, which is the
+        # same shape the other search quotas already describe.
+        #
+        # Small on purpose -- an annual report changes once a year, so the
+        # mission needs a handful of these a day, not a stream. data.sec.gov is
+        # free but rate limited, and this ceiling is what stands between a retry
+        # loop and being throttled off the source the whole SEC lane depends on.
+        ("sec", "list_filings"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
     }
 )
 
