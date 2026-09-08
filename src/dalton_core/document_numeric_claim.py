@@ -54,7 +54,54 @@ _SCALE_WORDS: Mapping[str, Decimal] = {
     "trillion": Decimal(10) ** 12,
 }
 _NUMBER_RE = re.compile(r"[-+]?\d[\d,\s]*(?:\.\d+)?")
+# P13j: a label has to name a line, and a period has to name a time.
+#
+# Live, a transcript sentence -- "$5 billion, about 40% of DXC, has the muscle
+# to grow" -- was stored as DXC revenue with as_reported_label "$5 billion" and
+# period "current". Both checks passed and both were vacuous: the label was the
+# figure itself, so "the label appears in the quote" was trivially true, and
+# "current" placed the number nowhere.
+#
+# Words that are part of writing an amount, not part of naming a line.
+_AMOUNT_WORDS = frozenset({
+    "usd", "eur", "gbp", "rmb", "cny", "aud", "jpy", "hkd",
+    "thousand", "million", "billion", "trillion", "bn", "mn", "m", "k",
+    "approximately", "about", "roughly", "around", "some", "over", "under",
+    "a", "an", "the", "of", "and", "or", "to", "in", "at", "per", "cent",
+    "percent", "pct", "dollars", "dollar",
+})
+_LETTERS_RE = re.compile(r"[a-z]+")
+# A period is comparable only if it says which one: a four-digit year, or a
+# quarter/half marker. "current" and "the period" name nothing.
+_PERIOD_YEAR_RE = re.compile(r"(?<!\d)\d{4}(?!\d)")
+# The trailing \d{0,2} is the two-digit year filers write inline: 1H25, Q325.
+# The trailing \d{0,2} is the two-digit year filers write inline (1H25, Q325);
+# a bare "fy" names no year and is not a period.
+_PERIOD_MARKER_RE = re.compile(r"\b(?:(?:q[1-4]|[1-4]q|h[12]|[12]h)\d{0,2}|fy\d{2})\b")
 _METRIC_REF_RE = re.compile(r"metric:[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+
+
+def _names_a_line(label: str) -> str | bool:
+    """Whether this label names a line item rather than restating the amount.
+
+    "Net revenues" names a line; "$5 billion" is the figure wearing the label's
+    clothes, and it makes the label check vacuous -- of course the amount
+    appears in the quote the amount came from.
+    """
+
+    words = [w for w in _LETTERS_RE.findall(label.lower()) if w not in _AMOUNT_WORDS]
+    return sum(len(w) for w in words) >= 3
+
+
+def _names_a_period(period: str) -> bool:
+    """Whether this period says which one.
+
+    A figure whose period is "current" cannot join a series, cannot be compared
+    with last year's, and cannot be checked by anyone later.
+    """
+
+    lowered = period.lower()
+    return bool(_PERIOD_YEAR_RE.search(lowered) or _PERIOD_MARKER_RE.search(lowered))
 
 
 def _fold_words(text: str) -> str:
@@ -119,6 +166,17 @@ def validate_numeric_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
     metric_ref = _text(value["metric_ref"], "metric_ref", maximum=120)
     if _METRIC_REF_RE.fullmatch(metric_ref) is None:
         raise NumericCandidateError("metric_ref must be the slot that was requested")
+    label = _text(value["as_reported_label"], "as_reported_label", maximum=MAX_METRIC_CHARS)
+    if not _names_a_line(label):
+        raise NumericCandidateError(
+            "as_reported_label must name the line, not restate the amount: "
+            f"{label!r} carries no line name"
+        )
+    period = _text(value["period"], "period", maximum=MAX_PERIOD_CHARS)
+    if not _names_a_period(period):
+        raise NumericCandidateError(
+            f"period must say which period: {period!r} places the figure nowhere"
+        )
     return {
         "quote_id": _text(value["quote_id"], "quote_id", maximum=100),
         # The slot that was asked for, and what this document happens to call
@@ -135,13 +193,11 @@ def validate_numeric_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
         "subject_as_named": _text(
             value["subject_as_named"], "subject_as_named", maximum=MAX_METRIC_CHARS
         ),
-        "as_reported_label": _text(
-            value["as_reported_label"], "as_reported_label", maximum=MAX_METRIC_CHARS
-        ),
+        "as_reported_label": label,
         "value": str(_decimal(value["value"], "value")),
         "unit": unit,
         "currency": currency,
-        "period": _text(value["period"], "period", maximum=MAX_PERIOD_CHARS),
+        "period": period,
         "basis": basis,
         "scale": scale,
     }

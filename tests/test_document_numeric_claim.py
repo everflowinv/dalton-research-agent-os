@@ -183,3 +183,50 @@ class NumberScanningTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LineAndPeriodTests(unittest.TestCase):
+    """P13j: a label must name a line, a period must name a time.
+
+    Live, a transcript sentence -- "$5 billion, about 40% of DXC, has the
+    muscle to grow very, very quickly" -- was stored as DXC revenue with
+    as_reported_label "$5 billion" and period "current". Both checks passed
+    and both were vacuous: the label was the figure itself, so "the label
+    appears in the quote" was trivially true, and "current" placed the number
+    nowhere.
+    """
+
+    def test_a_label_that_only_restates_the_amount_is_refused(self):
+        for label in ("$5 billion", "5 billion", "USD 169 million",
+                      "approximately $1.2bn", "about 40"):
+            with self.assertRaises(NumericCandidateError, msg=label):
+                validate_numeric_candidate(candidate(as_reported_label=label))
+
+    def test_a_real_line_name_is_kept_however_short(self):
+        for label in ("Net revenues", "EPS", "Revenues", "free cash flow",
+                      "$69.7B in revenues"):
+            wire = validate_numeric_candidate(candidate(as_reported_label=label))
+            self.assertEqual(wire["as_reported_label"], label)
+
+    def test_a_period_that_places_the_figure_nowhere_is_refused(self):
+        for period in ("current", "the period", "this quarter", "first half",
+                       "recent", "latest"):
+            with self.assertRaises(NumericCandidateError, msg=period):
+                validate_numeric_candidate(candidate(period=period))
+
+    def test_a_period_that_says_which_one_is_kept(self):
+        for period in ("Fiscal 2025", "FY2026Q3", "2025-07-01..2025-09-30",
+                       "Fiscal Year Ended March 31, 2026", "Q3 2026", "1H25"):
+            wire = validate_numeric_candidate(candidate(period=period))
+            self.assertEqual(wire["period"], period)
+
+    def test_the_live_figure_that_prompted_this_would_be_refused(self):
+        with self.assertRaises(NumericCandidateError):
+            validate_numeric_candidate(candidate(
+                as_reported_label="$5 billion", period="current", value="5",
+                unit="currency", currency="USD", scale="billion"))
+
+    def test_a_bare_marker_with_no_year_is_not_a_period(self):
+        for period in ("fy", "fiscal", "quarter"):
+            with self.assertRaises(NumericCandidateError, msg=period):
+                validate_numeric_candidate(candidate(period=period))
