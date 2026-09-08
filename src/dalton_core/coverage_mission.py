@@ -109,6 +109,15 @@ DISCOVERY_SOURCES: Mapping[str, Mapping[str, str]] = MappingProxyType({
         "operation": "search_web",
         "document_ref_prefix": "public-web-url:sha256:",
     }),
+    # P10r: the SEC filings index. It discovers documents rather than facts --
+    # the index says which filings exist and where, and the filing itself only
+    # enters authority through the ordinary fetch lane, which is why its
+    # documents carry the same public-web URL refs a web search produces.
+    "source:sec-edgar": MappingProxyType({
+        "connector_source_ref": "source:sec-edgar",
+        "operation": "list_filings",
+        "document_ref_prefix": "public-web-url:sha256:",
+    }),
 })
 DISCOVERED_DOCUMENT_STATUSES: tuple[str, ...] = (
     "discovered", "already_in_authority", "acquisition_launched", "acquired",

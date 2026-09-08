@@ -213,7 +213,10 @@ class WebDiscoveryLedgerTests(unittest.TestCase):
         self.plan = web_plan_for_tests()
 
     def test_source_table_and_grant_rules(self) -> None:
-        self.assertEqual(set(DISCOVERY_SOURCES), {ALPHAENGINE_SOURCE_REF, WEB_SEARCH_SOURCE_REF})
+        self.assertEqual(
+            set(DISCOVERY_SOURCES),
+            {ALPHAENGINE_SOURCE_REF, WEB_SEARCH_SOURCE_REF, "source:sec-edgar"},
+        )
         params = mission_params(self.state)
         ref = params.pop("mission_ref")
         v1 = self.missions.create_mission(ref, **params)
@@ -222,8 +225,16 @@ class WebDiscoveryLedgerTests(unittest.TestCase):
             with self.subTest(requester=requester), self.assertRaises(CoverageMissionConflict):
                 self.missions.authorize_source_discovery(company_ref=ACN, source_ref=WEB_SEARCH_SOURCE_REF, requested_by=requester)
         # A source outside the discovery table is never a discovery source.
+        # P10r used to make this point with source:sec-edgar, which was in the
+        # mission's source plan and connected but not a discovery source. The
+        # filings index made it one, and every other connected source is now in
+        # the table too, so the point is made with a source the mission never
+        # declared -- which is the same rule, and unambiguous about why it is
+        # refused.
         with self.assertRaises(CoverageMissionConflict):
-            self.missions.authorize_source_discovery(company_ref=ACN, source_ref="source:sec-edgar", requested_by=OWNER)
+            self.missions.authorize_source_discovery(
+                company_ref=ACN, source_ref="source:bloomberg", requested_by=OWNER
+            )
         # probe_only: human rehearsal allowed, automation refused.
         p2 = mission_with_web_status(self.state, status="probe_only", grant=True, version=2, prior=v1)
         p2.pop("mission_ref")
@@ -751,3 +762,80 @@ class P9d4WriterOpsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SecFilingsDiscoveryPlanTests(unittest.TestCase):
+    """P10r: the SEC index plan is asked for a form, not a phrase."""
+
+    def plan(self, **overrides) -> dict:
+        from dalton_core.store import content_hash
+
+        body = {
+            "schema_version": "0.4",
+            "id": "discovery-plan:us-it-services:sec-filings:1",
+            "created_at": "2026-09-08T00:00:00.000000+00:00",
+            "mission_ref": "coverage-mission:us-it-services",
+            "source_ref": "source:sec-edgar",
+            "budget": {"max_calls_24h": 50},
+            "companies": {"company:sec-cik:0001467373": {"cik": "0001467373"}},
+            "specs": [{
+                "spec_ref": "annual-report-10k", "form": "10-K",
+                "lookback_days": 800, "rediscovery_interval_days": 30,
+                "retry_interval_days": 2,
+            }],
+            **overrides,
+        }
+        body["content_hash"] = content_hash(
+            {k: v for k, v in body.items() if k != "content_hash"}
+        )
+        return body
+
+    def test_a_sec_plan_round_trips(self) -> None:
+        from dalton_core.mission_source_discovery import validate_discovery_plan
+
+        cleaned = validate_discovery_plan(self.plan())
+        self.assertEqual(cleaned["source_ref"], "source:sec-edgar")
+        self.assertEqual(cleaned["specs"][0]["form"], "10-K")
+        self.assertNotIn("query_template", cleaned["specs"][0])
+        self.assertEqual(
+            cleaned["companies"]["company:sec-cik:0001467373"], {"cik": "0001467373"}
+        )
+
+    def test_the_shape_and_the_source_must_agree(self) -> None:
+        from dalton_core.mission_source_discovery import (
+            DiscoveryPlanError, validate_discovery_plan,
+        )
+
+        # A SEC source on a web-shaped plan, and a web source on the SEC shape,
+        # are both refused: the version is what says which spec fields apply,
+        # so letting them drift apart would silently validate the wrong shape.
+        with self.assertRaises(DiscoveryPlanError):
+            validate_discovery_plan(self.plan(schema_version="0.2"))
+        with self.assertRaises(DiscoveryPlanError):
+            validate_discovery_plan(self.plan(source_ref="source:web-search"))
+
+    def test_a_cik_that_is_not_ten_digits_is_refused(self) -> None:
+        from dalton_core.mission_source_discovery import (
+            DiscoveryPlanError, validate_discovery_plan,
+        )
+
+        # The SEC endpoint takes the padded form; a hand-shortened number would
+        # quietly index the wrong issuer.
+        for cik in ("1467373", "00014673731", "000146737a"):
+            with self.assertRaises(DiscoveryPlanError):
+                validate_discovery_plan(
+                    self.plan(companies={"company:sec-cik:0001467373": {"cik": cik}})
+                )
+
+    def test_a_sec_spec_cannot_smuggle_a_query_template(self) -> None:
+        from dalton_core.mission_source_discovery import (
+            DiscoveryPlanError, validate_discovery_plan,
+        )
+
+        with self.assertRaises(DiscoveryPlanError):
+            validate_discovery_plan(self.plan(specs=[{
+                "spec_ref": "annual-report-10k", "form": "10-K",
+                "query_template": "{terms} annual report",
+                "lookback_days": 800, "rediscovery_interval_days": 30,
+                "retry_interval_days": 2,
+            }]))

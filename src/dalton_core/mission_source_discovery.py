@@ -82,12 +82,17 @@ DISCOVERY_PLAN_SCHEMA_VERSION = "0.1"
 DISCOVERY_PLAN_SCHEMA_VERSION_V2 = "0.2"
 # P9d-13: 0.3 adds a web-search acquisition policy (preferred / skipped hosts).
 DISCOVERY_PLAN_SCHEMA_VERSION_V3 = "0.3"
+# P10r: SEC filings index. Its "query" is an issuer and a form, not free
+# text, so it carries its own spec shape rather than a query_template nobody
+# would fill in.
+DISCOVERY_PLAN_SCHEMA_VERSION_V4 = "0.4"
 DISCOVERY_PLAN_SCHEMA_VERSIONS: tuple[str, ...] = (
     DISCOVERY_PLAN_SCHEMA_VERSION, DISCOVERY_PLAN_SCHEMA_VERSION_V2,
-    DISCOVERY_PLAN_SCHEMA_VERSION_V3,
+    DISCOVERY_PLAN_SCHEMA_VERSION_V3, DISCOVERY_PLAN_SCHEMA_VERSION_V4,
 )
 ALPHAENGINE_SOURCE_REF = "source:alphaengine"
 WEB_SEARCH_SOURCE_REF = "source:web-search"
+SEC_SOURCE_REF = "source:sec-edgar"
 TICKET_SCHEMA_VERSION = "0.1"
 TICKET_PREFIX = "alphaengine-discovery"
 WEB_SEARCH_TICKET_PREFIX = "web-search-discovery"
@@ -108,6 +113,7 @@ _PLAN_FIELDS = frozenset({
 })
 _PLAN_FIELDS_V2 = _PLAN_FIELDS | frozenset({"budget"})
 _PLAN_FIELDS_V3 = _PLAN_FIELDS_V2 | frozenset({"acquisition"})
+_PLAN_FIELDS_V4 = _PLAN_FIELDS_V2
 _BUDGET_FIELDS = frozenset({"max_calls_24h"})
 _ACQUISITION_FIELDS = frozenset({"preferred_hosts", "skip_hosts"})
 MAX_POLICY_HOSTS = 50
@@ -149,6 +155,13 @@ _SPEC_FIELDS = frozenset({
 })
 # Web search has no library document type: one ranked page per query.
 _WEB_SPEC_FIELDS = _SPEC_FIELDS - frozenset({"document_type"})
+# The SEC index is asked for a form, not a phrase.
+_SEC_SPEC_FIELDS = frozenset({
+    "spec_ref", "form", "lookback_days", "rediscovery_interval_days",
+    "retry_interval_days",
+})
+_SEC_COMPANY_FIELDS = frozenset({"cik"})
+_CIK_RE = re.compile(r"[0-9]{10}\Z")
 
 
 class DiscoveryPlanError(ValueError):
@@ -208,6 +221,7 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
         DISCOVERY_PLAN_SCHEMA_VERSION: _PLAN_FIELDS,
         DISCOVERY_PLAN_SCHEMA_VERSION_V2: _PLAN_FIELDS_V2,
         DISCOVERY_PLAN_SCHEMA_VERSION_V3: _PLAN_FIELDS_V3,
+        DISCOVERY_PLAN_SCHEMA_VERSION_V4: _PLAN_FIELDS_V4,
     }[schema_version]
     if set(value) != fields:
         raise DiscoveryPlanError("discovery plan has an invalid closed shape")
@@ -241,15 +255,37 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
         if source_ref != WEB_SEARCH_SOURCE_REF:
             raise DiscoveryPlanError("discovery plan 0.3 acquisition policy is only for source:web-search")
         acquisition = _plan_acquisition(wire["acquisition"])
-    spec_fields = _SPEC_FIELDS if source_ref == ALPHAENGINE_SOURCE_REF else _WEB_SPEC_FIELDS
+    if (schema_version == DISCOVERY_PLAN_SCHEMA_VERSION_V4) != (source_ref == SEC_SOURCE_REF):
+        raise DiscoveryPlanError(
+            "discovery plan 0.4 is the SEC filings index shape and source:sec-edgar requires it"
+        )
+    if source_ref == SEC_SOURCE_REF:
+        spec_fields = _SEC_SPEC_FIELDS
+    elif source_ref == ALPHAENGINE_SOURCE_REF:
+        spec_fields = _SPEC_FIELDS
+    else:
+        spec_fields = _WEB_SPEC_FIELDS
     companies = wire["companies"]
     if not isinstance(companies, Mapping) or not companies:
         raise DiscoveryPlanError("discovery plan companies must be a non-empty object")
     cleaned_companies: dict[str, dict[str, str]] = {}
+    company_fields = (
+        _SEC_COMPANY_FIELDS if source_ref == SEC_SOURCE_REF else _COMPANY_FIELDS
+    )
     for company_ref in sorted(companies):
         entry = companies[company_ref]
-        if not isinstance(entry, Mapping) or set(entry) != _COMPANY_FIELDS:
+        if not isinstance(entry, Mapping) or set(entry) != company_fields:
             raise DiscoveryPlanError(f"discovery plan company {company_ref} has an invalid shape")
+        if source_ref == SEC_SOURCE_REF:
+            # The index is asked for a CIK, and it must be the padded form the
+            # SEC endpoint takes, not a number someone shortened by hand.
+            cik = _plan_text(entry["cik"], "cik", maximum=10)
+            if _CIK_RE.fullmatch(cik) is None:
+                raise DiscoveryPlanError(
+                    f"discovery plan company {company_ref} cik must be 10 digits"
+                )
+            cleaned_companies[_plan_text(company_ref, "company_ref")] = {"cik": cik}
+            continue
         cleaned_companies[_plan_text(company_ref, "company_ref")] = {
             "search_terms": _plan_text(entry["search_terms"], "search_terms", maximum=120),
         }
@@ -267,14 +303,17 @@ def validate_discovery_plan(value: Mapping[str, Any]) -> dict[str, Any]:
         seen.add(spec_ref)
         if "document_type" in spec_fields and raw["document_type"] not in SEARCH_DOCUMENT_TYPES:
             raise DiscoveryPlanError(f"discovery plan spec {spec_ref} document_type is not mapped")
-        template = _plan_text(raw["query_template"], "query_template")
-        if "{terms}" not in template or template.count("{") != 1 or template.count("}") != 1:
-            raise DiscoveryPlanError(
-                f"discovery plan spec {spec_ref} query_template must contain exactly one {{terms}}"
-            )
-        cleaned = {
-            "spec_ref": spec_ref,
-            "query_template": template,
+        if "form" in spec_fields:
+            form = _plan_text(raw["form"], "form", maximum=16)
+            cleaned = {"spec_ref": spec_ref, "form": form}
+        else:
+            template = _plan_text(raw["query_template"], "query_template")
+            if "{terms}" not in template or template.count("{") != 1 or template.count("}") != 1:
+                raise DiscoveryPlanError(
+                    f"discovery plan spec {spec_ref} query_template must contain exactly one {{terms}}"
+                )
+            cleaned = {"spec_ref": spec_ref, "query_template": template}
+        cleaned |= {
             "lookback_days": _positive_int(raw["lookback_days"], "lookback_days", maximum=3650),
             "rediscovery_interval_days": _positive_int(
                 raw["rediscovery_interval_days"], "rediscovery_interval_days", maximum=365
