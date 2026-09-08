@@ -1976,8 +1976,20 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 按 [v1.1](reports/vision-and-next-phase-v1.1-2026-09-07.md) 的顺序执行：~~P10a 阶段账本启动与资料底座清单~~（已完成）→
 ~~P10b Claim 挑战/退役~~（已完成，mission v8 已发布，53 条已退役）→ ~~P10c 交付物 authority 与 Initial Screen 自动起草过门~~（已完成，等 owner 发布 mission v9）→
-SEC 10-K 正文获取通道 + SEC 季度数字补齐（出口门第一问的前提）→ P10d Deep Insight Gate 人审 →
-P10e 行业框架/行业模型缺口 → P10f 公司模型与预测线 → P10g Investment Memo。新来源、通用能力、cockpit 新视图继续冻结。
+~~SEC 季度数字补齐~~（已完成，见下）+ SEC 10-K 正文获取通道（governance 已提案，**等 owner 签批**）（出口门第一问的前提）→
+P10d Deep Insight Gate 人审 → P10e 行业框架/行业模型缺口 → P10f 公司模型与预测线 → P10g Investment Memo。新来源、通用能力、cockpit 新视图继续冻结。
+
+**SEC 季度数字补齐（提交名 P10d，2026-09-08 完成）**：SEC 只给"最新一份报某期间的 filing"分配 calendar frame，
+历史 filing 的 frame 会被后来者顶掉，于是旧季度取不出数。改为不依赖 frame 直接按期间读取后，定量 Claim 从 5 条涨到 14 条，
+五家公司各自排入 3–23 份 filing（ACN 23 份），抽取队列按每 tick 4 个窗口消化中。
+
+**SEC 10-K 正文获取通道（提交名 P10e，2026-09-08）**：年报是五家公司唯一全部 `not_planned` 的来源。
+AlphaEngine 只有电话会与研报，company-facts 只有数字没有文档，10-K 正文的 URL 只有 SEC submissions index 报得出，
+所以先要把 `list_filings` 治理成一个独立 capability。`sec_connector_identity` 按整个已批准操作集算 schema hash，
+传 `list_filings` 拿回的仍是 company-facts 的哈希，新记录一出生就是旧记录的副本；照 P9d-1 拆 AlphaEngine `search_library`
+的先例把 filings-index 的 schema hash 收敛到自己这一个操作，并且**不动** `sec_connector_identity`——线上已批的
+`sec-company-facts-v2` 就绑在那个哈希上。source hash 仍共享（来源确实是同一个 SEC），schema hash 不共享，
+两份批准互不扩权。记录以 `proposed` 生成，只有 owner 能签。
 下面 P0–P2 与 Phase 7/8/9 的文字是历史顺序，保留作依据，不再是当前基线。
 
 ### P0：Connector Protocol 与计量边界
