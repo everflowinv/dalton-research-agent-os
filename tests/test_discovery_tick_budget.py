@@ -16,6 +16,9 @@ from unittest.mock import patch
 from dalton_core import mission_source_discovery as m
 
 
+import subprocess
+
+
 class FakeClock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -30,9 +33,13 @@ class TickBudgetTests(unittest.TestCase):
         waits: list[float] = []
 
         class Launcher:
+            raises = False
+
             def wait(self_inner, timeout=None):
                 waits.append(timeout)
                 clock.now += wait_cost
+                if self_inner.raises:
+                    raise subprocess.TimeoutExpired(["child"], timeout)
                 return 0
 
         coordinator = object.__new__(m.MissionSourceDiscoveryCoordinator)
@@ -132,6 +139,17 @@ class TickBudgetTests(unittest.TestCase):
         # The op sets one deadline, so the bound is the budget itself rather
         # than the budget times the number of lanes.
         self.assertLess(m.TICK_BUDGET_SECONDS, STORE_REQUEST_TIMEOUT)
+
+    def test_a_child_that_has_not_finished_stops_the_tick_rather_than_killing_it(self):
+        # Both launchers raise TimeoutExpired rather than returning. Before the
+        # deadline existed the wait was ninety seconds and this practically
+        # never fired; the moment short waits became normal, every tick died
+        # here and the controller reported the whole lane unavailable.
+        c, clock, _ = self.coordinator(budget=20.0, wait_cost=1.0)
+        c.acquisition_launcher.raises = True
+        acquisitions, out_of_time = self.run_loop(c, clock, launches=99)
+        self.assertTrue(out_of_time)
+        self.assertEqual(len(acquisitions), 1)
 
 
 if __name__ == "__main__":

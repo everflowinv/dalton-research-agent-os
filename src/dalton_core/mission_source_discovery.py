@@ -1518,7 +1518,18 @@ class MissionSourceDiscoveryCoordinator:
                 # must not happen is this request outliving the writer.
                 out_of_time = True
                 break
-            if wait(timeout=min(self.acquisition_wait_seconds, remaining)) is None:
+            try:
+                finished = wait(timeout=min(self.acquisition_wait_seconds, remaining))
+            except subprocess.TimeoutExpired:
+                # Both launchers raise rather than return on timeout. Before
+                # the deadline existed the wait was ninety seconds and this
+                # practically never fired; the moment short waits became
+                # normal, every tick died here and the controller reported the
+                # whole lane unavailable. A child that has not finished is not
+                # an error: it keeps running and the next tick settles it.
+                out_of_time = True
+                break
+            if finished is None:
                 out_of_time = _monotonic() >= deadline
                 break
             # Settle the child that just finished, or the next launch sees a
