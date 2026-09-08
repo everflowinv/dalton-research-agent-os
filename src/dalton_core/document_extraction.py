@@ -546,7 +546,8 @@ class DocumentExtractionService:
             raise ResearchVerificationConflict("extraction routing policy was superseded")
         return policy
 
-    def _source_context(self, review_id, expected_review_hash, offset, actor_ref):
+    def _source_context(self, review_id, expected_review_hash, offset, actor_ref,
+                        require_open=True):
         writer = self.writer
         # ADR-0005: the mission's automation principal drafts as a matter of
         # course; a human may still.  Either way the mission grant below is
@@ -557,7 +558,19 @@ class DocumentExtractionService:
         ) is None:
             raise ResearchVerificationError("document extraction requires an authenticated human or mission automation actor")
         review = writer.coverage_mission.document_review(review_id)
-        if review["state"] != "awaiting_human_extraction" or content_hash(review) != expected_review_hash:
+        if content_hash(review) != expected_review_hash:
+            raise ResearchVerificationConflict("review is stale; reload the queue")
+        # P11u: the hash above already pins the review row exactly, state
+        # included, so this is a separate rule rather than an integrity check:
+        # only outstanding work is drafted, staged or admitted.
+        #
+        # Reading a document for the *names* of the figures the market judges
+        # this company on is none of those -- it takes no value, drafts no
+        # suggestion and writes no claim -- and every sell-side note and
+        # transcript held so far was read and closed before that pass existed.
+        # Requiring an open review there would leave it with nothing to read
+        # until the acquisition queue drained, days later.
+        if require_open and review["state"] != "awaiting_human_extraction":
             raise ResearchVerificationConflict("review is stale; reload the queue")
         grant = writer.coverage_mission.authorize_source_discovery(
             company_ref=review["company_ref"], source_ref=review["source_ref"],
@@ -645,8 +658,10 @@ class DocumentExtractionService:
         }
         return base
 
-    def context(self, review_id, expected_review_hash, offset, actor_ref):
-        base = self._source_context(review_id, expected_review_hash, offset, actor_ref)
+    def context(self, review_id, expected_review_hash, offset, actor_ref,
+                require_open=True):
+        base = self._source_context(review_id, expected_review_hash, offset, actor_ref,
+                                    require_open=require_open)
         config = getattr(self.writer, "_document_extraction_model_config", None)
         if config is not None:
             from .model_router import ModelRouter
@@ -723,7 +738,18 @@ class DocumentExtractionService:
                 "max_daily_cost_micros": int(min(Decimal(str(c["max_daily_cost_usd"])) for c in caps) * 1000000)}
 
     def reread(self, context, actor_ref):
-        return self.context(context["review_id"], context["review_hash"], context["offset"], actor_ref)
+        """Re-derive a context to prove it has not drifted.
+
+        The queue rule is not applied again here.  It belongs to the operation
+        that built this context -- drafting and staging need open work, reading
+        for metric names does not -- and re-applying it would make the drift
+        check refuse the very contexts the caller was entitled to build. What
+        this must catch is the review *changing*, and ``review_hash`` pins the
+        row exactly, its state included.
+        """
+
+        return self.context(context["review_id"], context["review_hash"], context["offset"],
+                            actor_ref, require_open=False)
 
     def _suggestions(self, context):
         work = build_work(context)
@@ -813,8 +839,10 @@ class DocumentExtractionService:
             row = budget.connection.execute("SELECT record_json FROM thesis_impact_day_rejections WHERE work_order_ref=?", (work.id,)).fetchone()
             return {"status": "not_reserved"} if row is None else {"status": "rejected", "rejection": json.loads(row["record_json"])}
 
-    def view(self, *, review_id, expected_review_hash, offset, actor_ref):
-        context = self.context(review_id, expected_review_hash, offset, actor_ref)
+    def view(self, *, review_id, expected_review_hash, offset, actor_ref,
+             require_open=True):
+        context = self.context(review_id, expected_review_hash, offset, actor_ref,
+                               require_open=require_open)
         configured = bool(context.get("model_binding"))
         return {"context": context, "model_budget": self.budget_status(context), "model_execution": "broker" if configured else "gated", "gate_reason": None if configured else GATE_REASON,
                 "generation_enabled": configured or self.writer._document_extraction_worker_factory is not None,
@@ -955,7 +983,8 @@ class DocumentExtractionService:
         from .metric_discovery_extraction import build_work as build_discovery_work
         from .metric_discovery_extraction import proposals_from_window
 
-        context = self.context(review_id, expected_review_hash, offset, actor_ref)
+        context = self.context(review_id, expected_review_hash, offset, actor_ref,
+                               require_open=False)
         if context["content_hash"] != expected_context_hash:
             raise ResearchVerificationConflict("source context changed; reload original")
         config = getattr(self.writer, "_document_extraction_model_config", None)

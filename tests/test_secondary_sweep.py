@@ -23,7 +23,8 @@ class FakeService:
         self.answers = answers
         self.asked: list[tuple[str, int]] = []
 
-    def view(self, *, review_id, expected_review_hash, offset, actor_ref):
+    def view(self, *, review_id, expected_review_hash, offset, actor_ref,
+             require_open=True):
         next_offset = self.windows[review_id][offset]
         return {"context": {"content_hash": f"{review_id}:{offset}",
                             "next_offset": next_offset}}

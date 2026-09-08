@@ -16,6 +16,7 @@ from pathlib import Path
 
 from dalton_core.document_extraction_cli import discovery_worthy
 from dalton_core.metric_discovery_extraction import TASK_REF, build_work
+from dalton_core.store import content_hash
 from tests.test_document_extraction import ExtractionHarness, OWNER
 
 
@@ -131,6 +132,64 @@ class MetricDiscoveryLaneTests(unittest.TestCase):
         self.assertTrue(discovery_worthy("sell-side-reports"))
         self.assertFalse(discovery_worthy("annual-report-10k"))
         self.assertFalse(discovery_worthy(None))
+
+
+class ClosedReviewTests(unittest.TestCase):
+    """P11u: reading for names is not drafting, and does not need open work.
+
+    Live, the discovery pass had nothing to read: every sell-side note and
+    transcript held on the current mission version had already been drafted and
+    closed by the prose pass before this pass existed, and the next 123 were
+    still in the acquisition queue.  Waiting for that queue would have left the
+    pass idle for days over documents already on disk.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.h = ExtractionHarness(Path(self.temp.name))
+        self.addCleanup(self.h.close)
+        self.h.missions.resolve_document_review(
+            self.h.review["review_id"], resolution="dismissed", actor_ref=OWNER,
+            rationale="fixture: closed before the discovery pass existed",
+        )
+        self.review = self.h.missions.document_review(self.h.review["review_id"])
+        self.params = {**self.h.params, "expected_review_hash": content_hash(self.review)}
+
+    def context(self):
+        return self.h.service.view(**self.params, require_open=False)["context"]
+
+    def fixture(self, output):
+        self.h.enable_fixture(
+            output, expected_review_hash=self.params["expected_review_hash"],
+            require_open=False,
+        )
+
+    def test_a_closed_review_is_still_read_for_what_it_names(self):
+        self.assertEqual(self.review["state"], "dismissed")
+        self.fixture(response(metric(self.context()["quotes"][0]["quote_id"])))
+        result = self.h.service.generate_metric_discovery(
+            **self.params, expected_context_hash=self.context()["content_hash"],
+        )
+        self.assertEqual(result["status"], "read")
+        self.assertEqual(result["recorded"], ["metric:client-decisions"])
+
+    def test_a_closed_review_is_not_drafted_staged_or_admitted(self):
+        # The queue rule still holds everywhere it is about outstanding work.
+        self.fixture(response())
+        for call in ("generate", "generate_numeric"):
+            with self.assertRaises(Exception):
+                getattr(self.h.service, call)(
+                    **self.params, expected_context_hash=self.context()["content_hash"],
+                )
+        with self.assertRaises(Exception):
+            self.h.service.admit_suggestions(**self.params)
+
+    def test_a_review_hash_that_does_not_match_is_still_stale(self):
+        # The relaxation is about state alone; the row is still pinned exactly.
+        with self.assertRaises(Exception):
+            self.h.service.view(**{**self.params, "expected_review_hash": "0" * 64},
+                                require_open=False)
 
 
 if __name__ == "__main__":

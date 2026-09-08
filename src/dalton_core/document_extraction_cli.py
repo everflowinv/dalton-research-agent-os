@@ -284,6 +284,7 @@ def run_extraction(
         service = DocumentExtractionService(host)
         drafted = 0
         lanes: list[tuple[str, list[dict[str, Any]], dict[str, str]]] = []
+        discovery_lanes: list[tuple[str, list[dict[str, Any]], dict[str, str]]] = []
         stop_reason: str | None = None
         complete_reviews: list[tuple[dict[str, Any], str, str, list[int]]] = []
         pointers = host.store.connection.execute(
@@ -295,10 +296,16 @@ def run_extraction(
             mission = host.coverage_mission.mission(pointer["mission_version_id"])
             actor = requested_by or mission["autonomy"]["automation_principal"]
             reviews = host.coverage_mission.document_reviews(mission["id"], state="awaiting_human_extraction", limit=500)
+            # P11u: the discovery pass reads documents the queue has already
+            # closed, so it gets its own list. Every sell-side note and
+            # transcript held today was read and closed before that pass
+            # existed; on the open queue alone it would have nothing to read.
+            held = host.coverage_mission.document_reviews(mission["id"], limit=500)
             # P10a: read in the mission's own order — the P0 company before the
             # P2 one, and management's own words before someone else's summary
             # of them.  Age only breaks ties.
             specs: dict[str, str] = {}
+            rank: dict[str, int] = {}
             try:
                 rank = {ref: index for index, ref in enumerate(company_priority_order(mission))}
                 specs = host.coverage_mission.document_spec_refs(mission["id"])
@@ -307,6 +314,12 @@ def run_extraction(
             except Exception:  # noqa: BLE001 - ordering is not a gate
                 pass
             lanes.append((actor, reviews, specs))
+            try:
+                held = sorted(held, key=lambda review: review_sort_key(
+                    review, company_rank=rank, spec_by_document=specs))
+            except Exception:  # noqa: BLE001 - ordering is not a gate
+                pass
+            discovery_lanes.append((actor, held, specs))
             for review in reviews:
                 if stop_reason is not None:
                     break
@@ -385,12 +398,13 @@ def run_extraction(
             total=("figures", "verified"),
         )
         _secondary_sweep(
-            service, lanes, summary,
+            service, discovery_lanes, summary,
             limit=max_discovery_windows, entries="discovery",
             wanted=lambda review, spec: discovery_worthy(spec),
             call="generate_metric_discovery",
             counts={"proposals": "proposals", "refused": "refused", "recorded": "recorded"},
             total=("metrics_observed", "recorded"),
+            require_open=False,
         )
         # ADR-0005 / P9d-17b: every fully drafted review is staged and
         # policy-admitted, then closed.  Idempotent: a re-run reports
@@ -419,6 +433,7 @@ def _secondary_sweep(
     call: str,
     counts: Mapping[str, str],
     total: tuple[str, str],
+    require_open: bool = True,
 ) -> None:
     """Spend one secondary allowance on the documents that pass its own gate.
 
@@ -445,7 +460,7 @@ def _secondary_sweep(
                 try:
                     context = service.view(
                         review_id=review["review_id"], expected_review_hash=review_hash,
-                        offset=offset, actor_ref=actor,
+                        offset=offset, actor_ref=actor, require_open=require_open,
                     )["context"]
                     result = method(
                         review_id=review["review_id"], expected_review_hash=review_hash,

@@ -105,11 +105,13 @@ class ExtractionHarness:
             p = self.ticket_dir / name
             p.write_text(canonical_json(value)); p.chmod(0o600)
 
-    def context(self):
-        return self.service.view(**self.params)['context']
+    def context(self, **overrides):
+        params = {**self.params, **overrides}
+        require_open = params.pop('require_open', True)
+        return self.service.view(**params, require_open=require_open)['context']
 
-    def enable_fixture(self, output=None):
-        context = self.context()
+    def enable_fixture(self, output=None, **context_overrides):
+        context = self.context(**context_overrides)
         if output is None:
             output = {'schema_version': '0.1', 'suggestions': [{
                 'quote_id': context['quotes'][0]['quote_id'],
