@@ -868,11 +868,23 @@ def alphaengine_calls_remaining(
     connection: Any, *, mission_cap: int, owner_cap: int = MAX_CALLS_PER_WINDOW,
     as_of: datetime | None = None,
 ) -> dict[str, int]:
-    """Trailing-24h AlphaEngine calls (search + document pages) against the tighter cap."""
+    """Trailing-24h AlphaEngine calls (search + document pages) against the tighter cap.
+
+    P12d: the budget says *which* cap bound it. The owner raised the mission
+    budget to 130 and the effective cap stayed 30, because a constant in this
+    codebase is tighter -- and nothing said so. A cap that silently overrides
+    the owner's own signed budget has to be visible, or the next person to
+    raise a budget will believe they raised it too.
+    """
 
     spent = count_recent_alphaengine_calls(connection, as_of=as_of)
-    cap = min(int(mission_cap), int(owner_cap))
-    return {"spent": spent, "cap": cap, "remaining": max(0, cap - spent)}
+    mission_cap, owner_cap = int(mission_cap), int(owner_cap)
+    cap = min(mission_cap, owner_cap)
+    return {
+        "spent": spent, "cap": cap, "remaining": max(0, cap - spent),
+        "mission_cap": mission_cap, "owner_cap": owner_cap,
+        "bound_by": "owner" if owner_cap < mission_cap else "mission",
+    }
 
 
 def _parse_wire_time(value: str) -> datetime:

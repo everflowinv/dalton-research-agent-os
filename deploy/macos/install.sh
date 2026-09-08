@@ -142,6 +142,20 @@ fi
 # the owner's number instead of silently restoring the built-in default -- the
 # first install after this knob existed did exactly that and put reading back
 # to 4 without saying so.
+if [[ -n "${DALTON_ALPHAENGINE_OWNER_CALL_CAP:-}" ]]; then
+  "$venv_dir/bin/python" - "$config_path" "$DALTON_ALPHAENGINE_OWNER_CALL_CAP" <<'PYCAP'
+import json, sys
+from pathlib import Path
+
+path, cap = Path(sys.argv[1]), sys.argv[2]
+if not cap.isdigit() or not 1 <= int(cap) <= 2000:
+    raise SystemExit("DALTON_ALPHAENGINE_OWNER_CALL_CAP must be an integer 1..2000")
+config = json.loads(path.read_text(encoding="utf-8"))
+config["alphaengine_owner_call_cap"] = int(cap)
+path.write_text(json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+print("alphaengine_owner_call_cap=" + cap)
+PYCAP
+fi
 if [[ -n "${DALTON_EXTRACTION_MAX_WINDOWS:-}" || -n "${DALTON_EXTRACTION_NUMERIC_WINDOWS:-}" \
    || -n "${DALTON_EXTRACTION_DISCOVERY_WINDOWS:-}" ]]; then
   "$venv_dir/bin/python" - "$config_path" "${DALTON_EXTRACTION_MAX_WINDOWS:-}" \

@@ -48,6 +48,7 @@ def render(
     extraction_max_windows: int | None = None,
     extraction_numeric_windows: int | None = None,
     extraction_discovery_windows: int | None = None,
+    alphaengine_owner_call_cap: int | None = None,
 ) -> dict[str, str]:
     destination = Path(launch_agents_dir).expanduser().resolve()
     bin_dir = Path(python_env_bin).expanduser().resolve()
@@ -83,6 +84,8 @@ def render(
         extraction_numeric_windows = service_config.document_extraction_numeric_windows
     if extraction_discovery_windows is None and service_config is not None:
         extraction_discovery_windows = service_config.document_extraction_discovery_windows
+    if alphaengine_owner_call_cap is None and service_config is not None:
+        alphaengine_owner_call_cap = service_config.alphaengine_owner_call_cap
     # P9d-4d: both host brokers are OpenClaw plugin sockets in one state
     # directory, so the web search broker is derived from the planner's
     # configured broker path instead of a second convention.  Absent files
@@ -228,6 +231,10 @@ def render(
             writer["ProgramArguments"].extend(
                 ["--document-extraction-discovery-windows",
                  str(int(extraction_discovery_windows))]
+            )
+        if alphaengine_owner_call_cap is not None:
+            writer["ProgramArguments"].extend(
+                ["--alphaengine-owner-call-cap", str(int(alphaengine_owner_call_cap))]
             )
     controller = common | {
         "Label": CONTROLLER_LABEL,

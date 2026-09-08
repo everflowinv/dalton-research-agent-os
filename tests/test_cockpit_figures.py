@@ -130,16 +130,39 @@ class PageTests(unittest.TestCase):
 class SourceCapTests(unittest.TestCase):
     """P12c: the cap on the owner's page is the cap the system is running."""
 
-    def lanes(self, budget):
+    def lanes(self, budget, discovery=None):
         from dalton_core.cockpit_plane import CockpitPlane
 
-        return {l["key"]: l for l in CockpitPlane._lane_states({}, {}, {}, budget)}
+        return {l["key"]: l
+                for l in CockpitPlane._lane_states({}, {}, discovery or {}, budget)}
 
     def test_the_alphaengine_note_reads_the_live_budget(self):
         # It was the literal "每 24 小时最多 30 次", so the page said 30 for days
         # after the owner raised the cap to 130.
         self.assertIn("130", self.lanes({"max_alphaengine_calls_24h": 130})["alphaengine"]["note"])
         self.assertIn("50", self.lanes({"max_alphaengine_calls_24h": 50})["alphaengine"]["note"])
+
+    def test_the_effective_cap_wins_over_the_requested_one(self):
+        # The owner raised the mission budget to 130 and the effective cap
+        # stayed 30, because a constant in this codebase is tighter. Showing
+        # 130 would be the old bug in the other direction.
+        measured = {"discovery": {"budget": {"cap": 30, "mission_cap": 130,
+                                             "owner_cap": 30, "bound_by": "owner"}}}
+        note = self.lanes({"max_alphaengine_calls_24h": 130}, measured)["alphaengine"]["note"]
+        self.assertIn("30", note)
+        self.assertIn("130", note)
+        self.assertIn("owner", note)
+
+    def test_a_cap_the_mission_itself_sets_is_not_explained_away(self):
+        measured = {"discovery": {"budget": {"cap": 130, "mission_cap": 130,
+                                             "owner_cap": 500, "bound_by": "mission"}}}
+        note = self.lanes({"max_alphaengine_calls_24h": 130}, measured)["alphaengine"]["note"]
+        self.assertEqual(note, "每 24 小时最多 130 次")
+
+    def test_the_acquisition_budget_is_used_when_discovery_has_none(self):
+        measured = {"acquisition": {"budget": {"cap": 30, "mission_cap": 130,
+                                               "owner_cap": 30, "bound_by": "owner"}}}
+        self.assertIn("30", self.lanes({}, measured)["alphaengine"]["note"])
 
     def test_a_missing_cap_says_so_rather_than_inventing_one(self):
         self.assertEqual(self.lanes({})["alphaengine"]["note"], "上限未设置")
@@ -159,6 +182,34 @@ class SourceCapTests(unittest.TestCase):
         self.assertEqual(_source_daily_cap("source:alphaengine", budget), 130)
         self.assertIsNone(_source_daily_cap("source:web-search", budget))
         self.assertIsNone(_source_daily_cap("source:alphaengine", {"max_alphaengine_calls_24h": True}))
+
+
+class BudgetBindingTests(unittest.TestCase):
+    """P12d: a cap that overrides the owner's budget has to say it did."""
+
+    def remaining(self, *, mission_cap, owner_cap):
+        from unittest.mock import patch
+
+        from dalton_core import mission_source_discovery as m
+
+        # The trailing-window count is not what is under test; which cap binds
+        # and whether it says so is.
+        with patch.object(m, "count_recent_alphaengine_calls", return_value=0):
+            return m.alphaengine_calls_remaining(
+                None, mission_cap=mission_cap, owner_cap=owner_cap)
+
+    def test_the_tighter_cap_wins_and_names_itself(self):
+        tight = self.remaining(mission_cap=130, owner_cap=30)
+        self.assertEqual((tight["cap"], tight["bound_by"]), (30, "owner"))
+        self.assertEqual((tight["mission_cap"], tight["owner_cap"]), (130, 30))
+
+    def test_a_mission_that_asks_for_less_binds_itself(self):
+        loose = self.remaining(mission_cap=10, owner_cap=30)
+        self.assertEqual((loose["cap"], loose["bound_by"]), (10, "mission"))
+
+    def test_equal_caps_are_attributed_to_the_mission(self):
+        same = self.remaining(mission_cap=30, owner_cap=30)
+        self.assertEqual((same["cap"], same["bound_by"]), (30, "mission"))
 
 
 if __name__ == "__main__":

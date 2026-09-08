@@ -1031,6 +1031,7 @@ class WriterServer:
         document_extraction_max_windows: int | None = None,
         document_extraction_numeric_windows: int | None = None,
         document_extraction_discovery_windows: int | None = None,
+        alphaengine_owner_call_cap: int | None = None,
         sec_filings_launcher: Any | None = None,
         sec_filings_plan_path: str | Path | None = None,
         initial_screen_launcher: Any | None = None,
@@ -1096,6 +1097,14 @@ class WriterServer:
                 "document_extraction_discovery_windows must be 0..50"
             )
         self._document_extraction_discovery_windows = document_extraction_discovery_windows
+        # P12d: the safety cap on AlphaEngine calls per 24h. It was a constant
+        # tighter than the owner's own signed mission budget, so raising that
+        # budget to 130 changed nothing and said nothing.
+        if alphaengine_owner_call_cap is not None and not (
+            1 <= int(alphaengine_owner_call_cap) <= 2000
+        ):
+            raise WriterServerError("alphaengine_owner_call_cap must be 1..2000")
+        self._alphaengine_owner_call_cap = alphaengine_owner_call_cap
         self._initial_screen_launcher = initial_screen_launcher
         self._initial_screen_coordinator: Any | None = None
         self._mission_deliverables: Any | None = None
@@ -1399,6 +1408,8 @@ class WriterServer:
                     plan=plan,
                     search_launcher=self._search_launcher,
                     acquisition_launcher=self._acquisition_launcher,
+                    **({} if self._alphaengine_owner_call_cap is None
+                       else {"owner_call_cap": self._alphaengine_owner_call_cap}),
                 )
         if self._web_search_plan_path is not None:
             try:
@@ -3556,6 +3567,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     # P11r: the pass that learns what to ask the figures pass for.
     parser.add_argument(
+        "--alphaengine-owner-call-cap", type=int, default=None,
+        help="Safety cap on AlphaEngine calls per 24h (1..2000). The effective cap "
+             "is the tighter of this and the mission budget; omit to keep the built-in "
+             "default, which is tighter than most mission budgets.",
+    )
+    parser.add_argument(
         "--document-extraction-discovery-windows", type=int, default=None,
         help="Windows per tick that may also be read for the measures the market "
              "judges a company on (0..50; 0 disables). Each is a paid model call.",
@@ -3760,6 +3777,7 @@ def main(argv: list[str] | None = None) -> int:
             document_extraction_max_windows=args.document_extraction_max_windows,
             document_extraction_numeric_windows=args.document_extraction_numeric_windows,
             document_extraction_discovery_windows=args.document_extraction_discovery_windows,
+            alphaengine_owner_call_cap=args.alphaengine_owner_call_cap,
             sec_filings_launcher=sec_filings_launcher,
             sec_filings_plan_path=args.sec_filings_discovery_plan,
             search_launcher=search_launcher,

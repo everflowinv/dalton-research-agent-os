@@ -130,6 +130,30 @@ def _source_daily_cap(source_ref: str, budget) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def _effective_alphaengine_cap(discovery, budget) -> Mapping[str, Any] | None:
+    """The cap actually in force, preferring what the lane last measured."""
+
+    if isinstance(discovery, Mapping):
+        for key in ("discovery", "acquisition"):
+            lane = discovery.get(key)
+            measured = lane.get("budget") if isinstance(lane, Mapping) else None
+            if isinstance(measured, Mapping) and isinstance(measured.get("cap"), int):
+                return measured
+    requested = _source_daily_cap("source:alphaengine", budget)
+    return None if requested is None else {"cap": requested, "bound_by": "mission"}
+
+
+def _alphaengine_cap_note(cap: Mapping[str, Any] | None) -> str:
+    if cap is None:
+        return "上限未设置"
+    note = f"每 24 小时最多 {cap['cap']} 次"
+    if cap.get("bound_by") == "owner" and cap.get("mission_cap"):
+        # Say it plainly: the owner raised a budget and something else is
+        # holding it down. Silence here is how 30 looked like 130 for days.
+        note += f"（任务预算 {cap['mission_cap']}，被程序内置的 owner 安全上限压到 {cap['cap']}）"
+    return note
+
+
 def _table_exists(connection, name: str) -> bool:
     """Whether this Core has the table yet; a fresh deploy may not."""
 
@@ -706,7 +730,13 @@ class CockpitPlane:
         web = discovery.get("web_search") or {}
         web_status = (web.get("discovery") or {}).get("status") or (web.get("acquisition") or {}).get("status")
         ae_status = (discovery.get("discovery") or {}).get("status") or (discovery.get("acquisition") or {}).get("status")
-        ae_cap = _source_daily_cap("source:alphaengine", budget)
+        # P12d: the *effective* cap, which is the tighter of the mission
+        # budget and this codebase's own owner cap. Showing the mission's
+        # requested number would be the same mistake as the old literal, just
+        # in the other direction: a number on the page that is not the number
+        # the system is running.
+        ae_cap = _effective_alphaengine_cap(discovery, budget)
+        ae_note = _alphaengine_cap_note(ae_cap)
         awaiting = extraction.get("awaiting")
         last = extraction.get("last") or {}
         return [
@@ -715,8 +745,7 @@ class CockpitPlane:
             # "每 24 小时最多 30 次" here, so the page went on saying 30 for days
             # after the owner raised it to 130 -- a number on the owner's own
             # dashboard that no longer described the system.
-            one("alphaengine", "获取研报与电话会", ae_status,
-                f"每 24 小时最多 {ae_cap} 次" if ae_cap is not None else "上限未设置"),
+            one("alphaengine", "获取研报与电话会", ae_status, ae_note),
             one("extraction", "阅读并提炼结论", extraction.get("status"),
                 f"排队 {awaiting} 份" + (f"，上一轮读了 {len(last.get('drafted') or []) if isinstance(last.get('drafted'), list) else last.get('drafted', 0)} 段" if last else "")),
             one("weekly", "每周简报", (heartbeat.get("weekly_brief") or {}).get("state"), "每周四早上发到 Discord"),

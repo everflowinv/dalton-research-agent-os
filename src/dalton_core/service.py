@@ -105,6 +105,9 @@ class ServiceConfig:
     # judges a company on. A third setting because it is a third spend, and
     # because it reads a different set of documents than the figures pass does.
     document_extraction_discovery_windows: int | None = None
+    # P12d: the AlphaEngine safety cap. In the config so a plain re-install
+    # keeps the owner's number, exactly as the window settings are.
+    alphaengine_owner_call_cap: int | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ServiceConfig":
@@ -287,6 +290,12 @@ class ServiceConfig:
         extraction_max_windows = None
         extraction_numeric_windows = None
         extraction_discovery_windows = None
+        owner_call_cap = raw.get("alphaengine_owner_call_cap")
+        if owner_call_cap is not None and (
+            isinstance(owner_call_cap, bool) or not isinstance(owner_call_cap, int)
+            or not 1 <= owner_call_cap <= 2000
+        ):
+            raise ServiceConfigError("alphaengine_owner_call_cap must be an integer 1..2000")
         extraction_raw = raw.get("document_extraction")
         if extraction_raw is not None:
             if not isinstance(extraction_raw, Mapping) or not set(extraction_raw) <= {
@@ -318,6 +327,7 @@ class ServiceConfig:
             document_extraction_max_windows=extraction_max_windows,
             document_extraction_numeric_windows=extraction_numeric_windows,
             document_extraction_discovery_windows=extraction_discovery_windows,
+            alphaengine_owner_call_cap=owner_call_cap,
             core_db=_absolute_path(raw["core_db"], "core_db"),
             scheduler_db=_absolute_path(raw["scheduler_db"], "scheduler_db"),
             projection_db=_absolute_path(raw["projection_db"], "projection_db"),

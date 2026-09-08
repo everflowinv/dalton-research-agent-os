@@ -530,7 +530,11 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(tick["discovery"]["company_ref"], ACN)
         # The seeded (real, fake-handle) acquisition of the known document is
         # one AlphaEngine call inside the trailing window.
-        self.assertEqual(tick["discovery"]["budget"], {"spent": 1, "cap": 30, "remaining": 29, "reserved": 0})
+        # P12d: the budget also names which cap bound it, so a cap tighter
+        # than the owner's own mission budget cannot bind in silence.
+        self.assertEqual(tick["discovery"]["budget"],
+                         {"spent": 1, "cap": 30, "remaining": 29, "reserved": 0,
+                          "mission_cap": 30, "owner_cap": 30, "bound_by": "mission"})
         self.assertEqual(self.search_launcher.starts[0]["authorization"]["requested_by"], AUTOMATION)
         # Acquisition runs before discovery in a tick, so the document the
         # (fake, synchronous) child just discovered is queued on the next tick.
@@ -724,7 +728,8 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(tick["discovery"]["status"], "launched")
         self.assertEqual(
             alphaengine_calls_remaining(self.h.core.connection, mission_cap=1, as_of=self.clock()),
-            {"spent": 1, "cap": 1, "remaining": 0},
+            {"spent": 1, "cap": 1, "remaining": 0,
+             "mission_cap": 1, "owner_cap": 30, "bound_by": "mission"},
         )
         tick = self.coordinator.dispatch_once()
         self.assertEqual(tick["acquisition"]["status"], "budget_exhausted")
