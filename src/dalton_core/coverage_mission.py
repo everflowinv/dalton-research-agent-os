@@ -1614,6 +1614,79 @@ class CoverageMissionAuthority:
         row = self.connection.execute(query, params).fetchone()
         return None if row is None else self._document_row(row)
 
+    def record_research_plan(
+        self, plan: Mapping[str, Any], *, decided_by: str,
+        model_profile_ref: str | None = None, work_order_ref: str | None = None,
+    ) -> dict[str, Any]:
+        """Store one verified plan, bound to the state it was decided from.
+
+        A plan is a proposal about the system's own work, not a claim about the
+        world, so it lives here rather than in the Ledger. Keyed by (mission
+        version, state hash): deciding twice against an unchanged state is the
+        same decision, and re-deciding costs nothing.
+        """
+
+        for field in ("state_hash", "assessment", "directives", "inquiries", "content_hash"):
+            if field not in plan:
+                raise CoverageMissionValidationError(f"plan is missing {field}")
+        mission_version_ref = _text(
+            plan.get("mission_version_ref") or "", "mission_version_ref")
+        state_hash = _text(plan["state_hash"], "state_hash")
+        decided_by = _text(decided_by, "decided_by")
+        plan_id = _ref("mission-research-plan", {
+            "mission_version_ref": mission_version_ref, "state_hash": state_hash,
+        })
+        existing = self.connection.execute(
+            "SELECT * FROM coverage_mission_research_plans WHERE plan_id=?", (plan_id,)
+        ).fetchone()
+        if existing is not None:
+            return {**self._plan_row(existing), "status": "duplicate"}
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_research_plans("
+                "plan_id,mission_version_ref,state_hash,assessment,directives_json,"
+                "inquiries_json,model_profile_ref,work_order_ref,decided_by,created_at,"
+                "content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                (plan_id, mission_version_ref, state_hash, plan["assessment"],
+                 canonical_json(plan["directives"]), canonical_json(plan["inquiries"]),
+                 model_profile_ref, work_order_ref, decided_by, now, plan["content_hash"]),
+            )
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_research_plans WHERE plan_id=?", (plan_id,)
+            ).fetchone()
+        return {**self._plan_row(row), "status": "fresh"}
+
+    @staticmethod
+    def _plan_row(row: Any) -> dict[str, Any]:
+        wire = dict(row)
+        wire["directives"] = json.loads(wire.pop("directives_json"))
+        wire["inquiries"] = json.loads(wire.pop("inquiries_json"))
+        return wire
+
+    def latest_research_plan(self, mission_version_ref: str) -> dict[str, Any] | None:
+        """The most recent plan for this mission version, or None."""
+
+        row = self.connection.execute(
+            "SELECT * FROM coverage_mission_research_plans WHERE mission_version_ref=? "
+            "ORDER BY created_at DESC, plan_id DESC LIMIT 1",
+            (_text(mission_version_ref, "mission_version_ref"),),
+        ).fetchone()
+        return None if row is None else self._plan_row(row)
+
+    def research_plan_for_state(
+        self, mission_version_ref: str, state_hash: str
+    ) -> dict[str, Any] | None:
+        """The plan decided from exactly this state, if one was."""
+
+        row = self.connection.execute(
+            "SELECT * FROM coverage_mission_research_plans "
+            "WHERE mission_version_ref=? AND state_hash=?",
+            (_text(mission_version_ref, "mission_version_ref"),
+             _text(state_hash, "state_hash")),
+        ).fetchone()
+        return None if row is None else self._plan_row(row)
+
     def record_metric_observations(
         self, *, company_ref: str, proposals: Sequence[Mapping[str, Any]], observed_by: str
     ) -> dict[str, Any]:

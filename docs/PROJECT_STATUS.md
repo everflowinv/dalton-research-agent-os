@@ -4,21 +4,27 @@
 
 ## 下一步（按顺序）
 
-1. **对齐模型目录，再把大脑接到 tick 上。** `reconcile_openclaw_model_catalog` 现在报 `catalog_in_sync: false`：
-   Dalton 有 5 个 broker 已经不提供的静态 profile（`gemini-3-7-flash` / `gemini-flash-latest` / `glm-5-2` /
-   `gpt-5-5` / `openrouter-ox-alpha`），broker 有 5 个 Dalton 没有静态 profile 的（含 `gpt-6-astra`）。
-   顺序是：① 对齐目录；② 给 `gpt-6-astra` 注册静态 profile 并按 `smoke_required_profile_ids` 冒烟；
-   ③ **给 planner 单独发一条路由策略**——抽取策略按设计只钉一个模型，planner 不能共用（这一步动治理，需 owner 签）；
-   ④ 各 lane 改成读计划，cadence 退化成上限而不是理由。
-2. **让计划真正调度。** `research_planner` 已经能产出 directives（在固化清单之内排序）与 inquiries（清单覆盖不到的
-   追问），但还没有任何东西执行它。`wanted_specs()` 是接口：计划没点名的 spec 就不搜，无论隔了多久。
-3. **把已核验的数字接进 Ledger。** `CandidateStagingStore.stage` 明确拒绝 cited-original 的定量候选
+1. **把大脑接到 tick 上（唯一还缺的一段）。** 路由已经通了：`profile:gpt-6-astra` 已注册，
+   `model-routing-policy:dalton-openclaw-planner-decisions:1` 已钉，`research-planner-model-config.json` 已写。
+   计划的存放也有了（`coverage_mission_research_plans`，append-only，按"任务版本 + 状态哈希"去重）。
+   **还缺一个跑它的子进程**：planner 单次调用最长 300s，超过 writer 30s 的请求上限，所以必须像抽取那样出进程跑
+   （CLI child + launcher + coordinator），然后把计划写进上面那张表。
+2. **让计划真正调度。** `research_planner` 能产出 directives（在固化清单之内排序）与 inquiries（清单覆盖不到的
+   追问）。`wanted_specs()` 是接口：计划没点名的 spec 就不搜，无论隔了多久。P13h 的"超额即停"是确定性下限，
+   计划应当能在两个方向上覆盖它。
+3. **模型目录仍未对齐（与大脑无关，但会误导）。** `catalog_in_sync: false`：Dalton 有 5 个 broker 已不提供的静态
+   profile（`gemini-3-7-flash` / `gemini-flash-latest` / `glm-5-2` / `gpt-5-5` / `openrouter-ox-alpha`），
+   broker 有 4 个 Dalton 没有静态 profile 的。P13l 让部署会补齐"缺的"，但不会清理"多的"——删旧 profile 会改动
+   历史版本链，值得单独做。
+4. **把已核验的数字接进 Ledger。** `CandidateStagingStore.stage` 明确拒绝 cited-original 的定量候选
    （"a cited original is not a numeric authority"）。这是 ADR-0003 一脉的有意规则，要改得走 ADR + 重签策略。
    在那之前数字停在 `coverage_mission_document_figures`，驾驶舱直接读这张表。
-4. **接 Guidepoint。** 模板在，运行 lane 与两条 owner 签名的治理记录都还没有。
-5. **修 discovery 的公司归属。** 自由文本检索把别家公司的电话会归到了 EPAM 名下；抽取侧已经拦住了数字，
+5. **接 Guidepoint。** 模板在，运行 lane 与两条 owner 签名的治理记录都还没有。
+6. **修 discovery 的公司归属（检索侧）。** 自由文本检索把别家公司的电话会归到了 EPAM 名下；抽取侧已经拦住了数字，
    但**定性 Claim 仍在从这些文档里产生**（那两份文档还有 18 条 review，EPAM 名下共 739 条 Claim）。
-   根因在检索侧，AlphaEngine 有 `company` 过滤器而计划没用——改查询形状要发新的签名发现计划。
+   **抽取侧已经堵住**（P13i：文档没点到公司名就不准入，并直接 dismiss），但检索仍会把别家公司的文档放进队列，
+   白花获取预算。owner 的判断是不该按 `company` 过滤——行业报告本来就没有公司标签；所以这一条是"怎么让检索更准"
+   的开放问题，不是"加个过滤器"。
 
 ## 2026-09-08：数字、大脑与一天的事故
 

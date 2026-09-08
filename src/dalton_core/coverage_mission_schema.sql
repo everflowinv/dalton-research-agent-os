@@ -430,3 +430,39 @@ CREATE TRIGGER IF NOT EXISTS coverage_mission_document_figure_retractions_no_upd
 BEFORE UPDATE ON coverage_mission_document_figure_retractions BEGIN SELECT RAISE(ABORT, 'figure retractions are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS coverage_mission_document_figure_retractions_no_delete
 BEFORE DELETE ON coverage_mission_document_figure_retractions BEGIN SELECT RAISE(ABORT, 'figure retractions are append-only'); END;
+
+-- P13m: a plan the research system made about its own work.
+--
+-- Append-only, and bound to the state it was decided from. Two plans made an
+-- hour apart against the same state are the same plan; a plan made against a
+-- state that has since moved on is history rather than instruction, and the
+-- state hash is what tells them apart.
+--
+-- The assessment and the directives are stored as the model returned them,
+-- after verification: a plan that named work outside its own state was refused
+-- whole and never reached here.
+CREATE TABLE IF NOT EXISTS coverage_mission_research_plans (
+    plan_id TEXT PRIMARY KEY,
+    mission_version_ref TEXT NOT NULL,
+    state_hash TEXT NOT NULL,
+    assessment TEXT NOT NULL,
+    directives_json TEXT NOT NULL,
+    inquiries_json TEXT NOT NULL,
+    model_profile_ref TEXT,
+    work_order_ref TEXT,
+    decided_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    UNIQUE(mission_version_ref, state_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_coverage_mission_research_plans_mission
+ON coverage_mission_research_plans(mission_version_ref, created_at);
+
+CREATE TRIGGER IF NOT EXISTS coverage_mission_research_plans_authorized_insert
+BEFORE INSERT ON coverage_mission_research_plans WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'research plan insert requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_research_plans_no_update
+BEFORE UPDATE ON coverage_mission_research_plans BEGIN SELECT RAISE(ABORT, 'research plans are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_research_plans_no_delete
+BEFORE DELETE ON coverage_mission_research_plans BEGIN SELECT RAISE(ABORT, 'research plans are append-only'); END;
