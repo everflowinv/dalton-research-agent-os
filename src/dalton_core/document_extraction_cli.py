@@ -186,6 +186,7 @@ def run_extraction(
     connector_governance: Path | None,
     web_fetch_governance: Path | None,
     max_windows: int,
+    max_numeric_windows: int = 0,
     requested_by: str | None,
     hermetic_fixture: Path | None,
     candidate_staging: Path | None = None,
@@ -205,6 +206,12 @@ def run_extraction(
         "reviews_scanned": 0,
         "reviews_complete": 0,
         "drafted": [],
+        # P11m: the figures pass, counted separately from the prose pass. A
+        # window that owes nothing appears here as nothing_owed and costs no
+        # model call, so the two counts are not interchangeable.
+        "numeric": [],
+        "figures": 0,
+        "max_numeric_windows": max_numeric_windows,
         "skipped": [],
         "admitted": [],
         "resolved_reviews": [],
@@ -239,6 +246,7 @@ def run_extraction(
             host._document_extraction_worker_factory = factory
         service = DocumentExtractionService(host)
         drafted = 0
+        numeric_read = 0
         stop_reason: str | None = None
         complete_reviews: list[tuple[dict[str, Any], str, str, list[int]]] = []
         pointers = host.store.connection.execute(
@@ -305,6 +313,39 @@ def run_extraction(
                         if isinstance(budget, dict) and budget.get("status"):
                             entry["budget"] = budget["status"]
                         summary["drafted"].append(entry)
+                        # P11m: the same window, asked for the figures this
+                        # company owes. After the prose pass, because the
+                        # window is already bound and re-reading it costs
+                        # nothing; before the gate checks below, because a
+                        # gated or rejected qualitative call means this window
+                        # is done either way.
+                        if numeric_read < max_numeric_windows:
+                            try:
+                                figures = service.generate_numeric(
+                                    review_id=review["review_id"],
+                                    expected_review_hash=review_hash, offset=offset,
+                                    expected_context_hash=context["content_hash"],
+                                    actor_ref=actor,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                # A window that cannot be read for figures must
+                                # not lose the prose that was just drafted from
+                                # it, so this is reported and not raised.
+                                summary["numeric"].append({
+                                    "review_id": review["review_id"], "offset": offset,
+                                    "status": "failed",
+                                    "reason": f"{type(exc).__name__}: {exc}",
+                                })
+                            else:
+                                if figures.get("status") != "nothing_owed":
+                                    numeric_read += 1
+                                summary["numeric"].append({
+                                    "review_id": review["review_id"], "offset": offset,
+                                    "status": figures.get("status"),
+                                    "verified": len(figures.get("verified", [])),
+                                    "refused": len(figures.get("refused", [])),
+                                })
+                                summary["figures"] += len(figures.get("verified", []))
                         if result.get("status") == "gated":
                             stop_reason = f"gated:{result.get('reason')}"
                             complete = False
@@ -409,6 +450,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--connector-governance", type=Path)
     parser.add_argument("--web-fetch-governance", type=Path)
     parser.add_argument("--max-windows", type=int, default=DEFAULT_MAX_WINDOWS)
+    # P11m: off unless asked for. The figures pass is a second model call per
+    # window, so switching it on is a decision about spend, not a default.
+    parser.add_argument(
+        "--max-numeric-windows", type=int, default=0,
+        help="windows per run that may also be read for the figures a company "
+             "owes (0 disables the figures pass)",
+    )
     parser.add_argument("--requested-by", help="human: actor; default is each mission's automation principal")
     parser.add_argument("--hermetic-fixture-file", type=Path, help="test-only fixture model output")
     parser.add_argument("--candidate-staging", type=Path, help="shared CandidateStaging database; enables admission")
@@ -418,6 +466,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.max_numeric_windows < 0 or args.max_numeric_windows > 50:
+        raise SystemExit("--max-numeric-windows must be 0..50")
     if args.max_windows < 1 or args.max_windows > 50:
         raise SystemExit("--max-windows must be 1..50")
     summary = run_extraction(
@@ -425,7 +475,9 @@ def main(argv: list[str] | None = None) -> int:
         summary_dir=args.summary_dir if args.summary_dir is not None else args.state_dir,
         spool_dir=args.spool_dir, scheduler_db=args.scheduler_db,
         connector_governance=args.connector_governance, web_fetch_governance=args.web_fetch_governance,
-        max_windows=args.max_windows, requested_by=args.requested_by,
+        max_windows=args.max_windows,
+        max_numeric_windows=args.max_numeric_windows,
+        requested_by=args.requested_by,
         hermetic_fixture=args.hermetic_fixture_file, candidate_staging=args.candidate_staging,
     )
     if not args.quiet:
