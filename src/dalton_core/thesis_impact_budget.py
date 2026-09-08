@@ -49,11 +49,22 @@ class ThesisImpactDayBudgetExceeded(ThesisImpactBudgetError):
     """The exact admission would exceed the immutable day cap."""
 
     def __init__(self, rejection: Mapping[str, Any]) -> None:
-        super().__init__(
-            "thesis-impact day budget exceeded: committed "
-            f"{rejection['day_committed_micros']} + reserved "
-            f"{rejection['reserved_micros']} > cap {rejection['day_cap_micros']}"
+        # P13n: say which cap refused it. Three different caps can raise this --
+        # the day policy, the mission budget, the outer cascade -- and the
+        # message only ever printed the day policy's numbers. A planner call
+        # refused by a $5 mission cap reported "5684316 > 25000000", which is
+        # arithmetic that does not support its own conclusion and sends the
+        # reader looking in the wrong place.
+        reason = rejection.get("reason") or "day_budget_exceeded"
+        detail = (
+            f"committed {rejection['day_committed_micros']} + reserved "
+            f"{rejection['reserved_micros']} against day cap "
+            f"{rejection['day_cap_micros']}"
         )
+        binding = rejection.get("mission_binding")
+        if isinstance(binding, Mapping) and binding.get("mission_ref"):
+            detail += f"; mission {binding['mission_ref']}"
+        super().__init__(f"thesis-impact budget refused the call ({reason}): {detail}")
         self.rejection = dict(rejection)
 
 

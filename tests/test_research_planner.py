@@ -398,5 +398,28 @@ class IndustryTests(unittest.TestCase):
         self.assertTrue(state_digest(self.state()).startswith(INDUSTRY))
 
 
+class StateHashTests(unittest.TestCase):
+    """The hash is what makes an expensive planner affordable on a tick."""
+
+    def test_reading_the_same_world_twice_is_the_same_state(self):
+        # as_of is when the state was read, not anything about the world.
+        # Hashing it made every read a different state, which would have paid
+        # for a fresh plan on every tick while nothing had changed.
+        early = state(as_of="2026-09-08T00:00:00+00:00")
+        later = state(as_of="2026-09-08T23:59:00+00:00")
+        self.assertNotEqual(early["as_of"], later["as_of"])
+        self.assertEqual(early["content_hash"], later["content_hash"])
+
+    def test_a_world_that_moved_is_a_different_state(self):
+        moved = state(figures_by_company={ACN: {"total": 42, "by_grade": {}}})
+        self.assertNotEqual(state()["content_hash"], moved["content_hash"])
+
+    def test_the_read_time_is_still_reported(self):
+        # Excluded from the hash, not from the object: a reader still needs to
+        # know how stale the picture is.
+        self.assertEqual(state(as_of="2026-09-08T12:00:00+00:00")["as_of"],
+                         "2026-09-08T12:00:00+00:00")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -37,7 +37,11 @@ WORKER_REF = "worker:cockpit-model:0.1"
 SCHEMA_VERSION = "0.1"
 # "draft" is P10c: one section of a mission deliverable, drafted by the lane
 # rather than by the owner, under the same route, budget and replay.
-PURPOSES = frozenset({"ask", "goal", "steer", "draft"})
+# P13n: "plan" is the research planner deciding what to work on next. It is a
+# cockpit-shaped call -- one bounded, budgeted, replayable model call against
+# the mission -- but it is not the cockpit answering the owner, so it is named
+# rather than folded into "ask".
+PURPOSES = frozenset({"ask", "goal", "steer", "draft", "plan"})
 
 
 class CockpitModelError(RuntimeError):

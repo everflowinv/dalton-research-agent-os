@@ -202,7 +202,13 @@ def build_research_state(
     }
     # The hash is what a plan binds to, so a plan can be told apart from the
     # state it was made against once that state has moved on.
-    state["content_hash"] = content_hash(state)
+    #
+    # ``as_of`` is excluded on purpose. It is when the state was *read*, not
+    # anything about the world, and hashing it made every read a different
+    # state -- which would have paid an expensive model for a fresh plan on
+    # every tick while nothing had changed. A test caught it; live it would
+    # have looked like the planner simply being costly.
+    state["content_hash"] = content_hash({k: v for k, v in state.items() if k != "as_of"})
     return state
 
 
