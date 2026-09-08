@@ -327,7 +327,13 @@ class SecAuthorityHarness:
     def _build_control_plane(self) -> None:
         template = self.template
         op = next(item for item in template["operations"] if item["operation"] == "list_filings")
-        self.capability_id = "capability:dalton:connector:sec-edgar"
+        # P10n: this harness rehearses list_filings, so it must rehearse it
+        # under the capability list_filings actually runs under. Naming the
+        # shared SEC capability here would have it prove the public path works
+        # for an approval that is not the one production presents.
+        from .research_plan import sec_capability_for_operation
+
+        self.capability_id = sec_capability_for_operation("list_filings")
         descriptor = _descriptor_spec(self.capability_id, name="sec-public-filings", side_effects=["read:public-http"])
         descriptor.update({
             "kind": "connector",
