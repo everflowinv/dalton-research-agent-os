@@ -1598,6 +1598,89 @@ class CoverageMissionAuthority:
         row = self.connection.execute(query, params).fetchone()
         return None if row is None else self._document_row(row)
 
+    def record_metric_observations(
+        self, *, company_ref: str, proposals: Sequence[Mapping[str, Any]], observed_by: str
+    ) -> dict[str, Any]:
+        """Journal verified metric proposals for one company.
+
+        Every proposal must already have been verified against its own quote by
+        ``verify_metric_proposal``; this stores what was seen, it does not judge
+        it.  Storing is idempotent per (company, metric, document), so the same
+        document read again adds nothing and cannot corroborate itself.
+        """
+
+        from .metric_discovery import validate_metric_proposal
+
+        company_ref = _text(company_ref, "company_ref")
+        observed_by = _text(observed_by, "observed_by")
+        if not isinstance(proposals, Sequence) or isinstance(proposals, (str, bytes)):
+            raise CoverageMissionValidationError("proposals must be a sequence")
+        wires = []
+        for item in proposals:
+            if not isinstance(item, Mapping):
+                raise CoverageMissionValidationError("each proposal must be an object")
+            wire = validate_metric_proposal({key: item.get(key) for key in (
+                "metric_ref", "label", "unit", "evidence_phrase", "quote_id", "document_ref",
+            )})
+            citation = item.get("citation_text")
+            if not isinstance(citation, str) or not citation.strip():
+                raise CoverageMissionValidationError(
+                    "a metric observation must carry the quote that proposed it"
+                )
+            wires.append((wire, citation))
+        now = _now()
+        recorded, duplicates = [], []
+        with self._transaction() as cur:
+            for wire, citation in wires:
+                observation_id = _ref("mission-metric-observation", {
+                    "company_ref": company_ref,
+                    "metric_ref": wire["metric_ref"],
+                    "document_ref": wire["document_ref"],
+                })
+                existing = cur.execute(
+                    "SELECT observation_id FROM coverage_mission_metric_observations "
+                    "WHERE observation_id=?", (observation_id,),
+                ).fetchone()
+                if existing is not None:
+                    duplicates.append(wire["metric_ref"])
+                    continue
+                cur.execute(
+                    "INSERT INTO coverage_mission_metric_observations("
+                    "observation_id,company_ref,document_ref,metric_ref,label,unit,"
+                    "evidence_phrase,quote_id,citation_text,observed_by,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        observation_id, company_ref, wire["document_ref"], wire["metric_ref"],
+                        wire["label"], wire["unit"], wire["evidence_phrase"], wire["quote_id"],
+                        citation, observed_by, now,
+                    ),
+                )
+                recorded.append(wire["metric_ref"])
+        return {"recorded": recorded, "duplicates": duplicates}
+
+    def metric_observations(self, company_ref: str) -> list[dict[str, Any]]:
+        """Every measure this company has been seen judged on, as proposals."""
+
+        rows = self.connection.execute(
+            "SELECT metric_ref,label,unit,evidence_phrase,quote_id,document_ref "
+            "FROM coverage_mission_metric_observations WHERE company_ref=? "
+            "ORDER BY created_at, observation_id",
+            (_text(company_ref, "company_ref"),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def metric_requirements(self, company_ref: str) -> list[dict[str, Any]]:
+        """The corroborated requirements derived from those observations.
+
+        Derived on read rather than stored: the corroboration threshold is one
+        rule in one place, and a company that gains its second citation today
+        becomes owed the figure today without anything being rewritten.
+        """
+
+        from .metric_discovery import establish_requirements
+
+        return establish_requirements(self.metric_observations(company_ref))
+
     def document_spec_refs(self, mission_version_ref: str) -> dict[str, str]:
         """document_ref → the discovery spec that found it (P10a reading order)."""
 

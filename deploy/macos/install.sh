@@ -142,12 +142,14 @@ fi
 # the owner's number instead of silently restoring the built-in default -- the
 # first install after this knob existed did exactly that and put reading back
 # to 4 without saying so.
-if [[ -n "${DALTON_EXTRACTION_MAX_WINDOWS:-}" || -n "${DALTON_EXTRACTION_NUMERIC_WINDOWS:-}" ]]; then
-  "$venv_dir/bin/python" - "$config_path" "${DALTON_EXTRACTION_MAX_WINDOWS:-}" "${DALTON_EXTRACTION_NUMERIC_WINDOWS:-}" <<'PYSETUP'
+if [[ -n "${DALTON_EXTRACTION_MAX_WINDOWS:-}" || -n "${DALTON_EXTRACTION_NUMERIC_WINDOWS:-}" \
+   || -n "${DALTON_EXTRACTION_DISCOVERY_WINDOWS:-}" ]]; then
+  "$venv_dir/bin/python" - "$config_path" "${DALTON_EXTRACTION_MAX_WINDOWS:-}" \
+    "${DALTON_EXTRACTION_NUMERIC_WINDOWS:-}" "${DALTON_EXTRACTION_DISCOVERY_WINDOWS:-}" <<'PYSETUP'
 import json, sys
 from pathlib import Path
 
-path, prose, numeric = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
+path, prose, numeric, discovery = Path(sys.argv[1]), sys.argv[2], sys.argv[3], sys.argv[4]
 config = json.loads(path.read_text(encoding="utf-8"))
 block = dict(config.get("document_extraction") or {})
 if prose:
@@ -158,8 +160,12 @@ if numeric:
     if not numeric.isdigit() or not 0 <= int(numeric) <= 50:
         raise SystemExit("DALTON_EXTRACTION_NUMERIC_WINDOWS must be an integer 0..50")
     block["numeric_windows_per_tick"] = int(numeric)
+if discovery:
+    if not discovery.isdigit() or not 0 <= int(discovery) <= 50:
+        raise SystemExit("DALTON_EXTRACTION_DISCOVERY_WINDOWS must be an integer 0..50")
+    block["discovery_windows_per_tick"] = int(discovery)
 if "max_windows_per_tick" not in block:
-    raise SystemExit("set DALTON_EXTRACTION_MAX_WINDOWS before the numeric one")
+    raise SystemExit("set DALTON_EXTRACTION_MAX_WINDOWS before the secondary passes")
 config["document_extraction"] = block
 path.write_text(json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 print("document_extraction=" + json.dumps(block, sort_keys=True))

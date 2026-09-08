@@ -281,3 +281,40 @@ CREATE TRIGGER IF NOT EXISTS mission_document_staging_request_no_update
 BEFORE UPDATE ON coverage_mission_document_staging_requests BEGIN SELECT RAISE(ABORT, 'human staging requests are immutable'); END;
 CREATE TRIGGER IF NOT EXISTS mission_document_staging_request_no_delete
 BEFORE DELETE ON coverage_mission_document_staging_requests BEGIN SELECT RAISE(ABORT, 'human staging requests are immutable'); END;
+
+-- P11q: what the market was seen calling a company's figures.
+--
+-- One row is one document naming one measure, verified against the quote that
+-- proposed it.  A requirement is not stored: it is derived from these rows by
+-- ``establish_requirements``, so the corroboration rule stays a single piece of
+-- logic and raising or lowering it does not need a migration.
+--
+-- The UNIQUE key is (company, metric, document) rather than a row id, so a
+-- document read twice contributes once.  That is the corroboration rule
+-- enforced by the storage itself: counting mentions would let one verbose note
+-- create a requirement on its own.
+CREATE TABLE IF NOT EXISTS coverage_mission_metric_observations (
+    observation_id TEXT PRIMARY KEY,
+    company_ref TEXT NOT NULL,
+    document_ref TEXT NOT NULL,
+    metric_ref TEXT NOT NULL,
+    label TEXT NOT NULL,
+    unit TEXT NOT NULL,
+    evidence_phrase TEXT NOT NULL,
+    quote_id TEXT NOT NULL,
+    citation_text TEXT NOT NULL,
+    observed_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(company_ref, metric_ref, document_ref)
+);
+
+CREATE INDEX IF NOT EXISTS idx_coverage_mission_metric_observations_company
+ON coverage_mission_metric_observations(company_ref, metric_ref);
+
+CREATE TRIGGER IF NOT EXISTS coverage_mission_metric_observations_authorized_insert
+BEFORE INSERT ON coverage_mission_metric_observations WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'metric observation insert requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_metric_observations_no_update
+BEFORE UPDATE ON coverage_mission_metric_observations BEGIN SELECT RAISE(ABORT, 'metric observations are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_metric_observations_no_delete
+BEFORE DELETE ON coverage_mission_metric_observations BEGIN SELECT RAISE(ABORT, 'metric observations are append-only'); END;

@@ -193,6 +193,19 @@ def numeric_worthy(review: Mapping[str, Any]) -> bool:
     return review.get("source_ref") in NUMERIC_SOURCE_REFS
 
 
+def discovery_worthy(spec_ref: Any) -> bool:
+    """Whether this document kind says what the market judges a company on.
+
+    The mirror image of ``numeric_worthy``: the figures pass wants filings,
+    which report; this pass wants the notes and releases that react, which is
+    where the names of the measures that matter actually appear.
+    """
+
+    from .metric_discovery_extraction import worthy_spec
+
+    return worthy_spec(spec_ref)
+
+
 def run_extraction(
     *,
     state_dir: Path,
@@ -204,6 +217,7 @@ def run_extraction(
     web_fetch_governance: Path | None,
     max_windows: int,
     max_numeric_windows: int = 0,
+    max_discovery_windows: int = 0,
     requested_by: str | None,
     hermetic_fixture: Path | None,
     candidate_staging: Path | None = None,
@@ -229,6 +243,12 @@ def run_extraction(
         "numeric": [],
         "figures": 0,
         "max_numeric_windows": max_numeric_windows,
+        # P11r: the pass that learns what to ask for. ``metrics_observed``
+        # counts journal entries, not requirements: a requirement needs two
+        # distinct documents and is derived when it is read.
+        "discovery": [],
+        "metrics_observed": 0,
+        "max_discovery_windows": max_discovery_windows,
         "skipped": [],
         "admitted": [],
         "resolved_reviews": [],
@@ -264,6 +284,7 @@ def run_extraction(
         service = DocumentExtractionService(host)
         drafted = 0
         numeric_read = 0
+        discovery_read = 0
         stop_reason: str | None = None
         complete_reviews: list[tuple[dict[str, Any], str, str, list[int]]] = []
         pointers = host.store.connection.execute(
@@ -278,6 +299,7 @@ def run_extraction(
             # P10a: read in the mission's own order — the P0 company before the
             # P2 one, and management's own words before someone else's summary
             # of them.  Age only breaks ties.
+            specs: dict[str, str] = {}
             try:
                 rank = {ref: index for index, ref in enumerate(company_priority_order(mission))}
                 specs = host.coverage_mission.document_spec_refs(mission["id"])
@@ -363,6 +385,37 @@ def run_extraction(
                                     "refused": len(figures.get("refused", [])),
                                 })
                                 summary["figures"] += len(figures.get("verified", []))
+                        # P11r: the same window, asked what the market judges
+                        # this company on. Its own allowance and its own source
+                        # gate: the pass that learns what to ask for reads the
+                        # documents that react to results, not the ones that
+                        # report them, so it never competes with the figures
+                        # pass for the same windows.
+                        if (discovery_read < max_discovery_windows
+                                and discovery_worthy(specs.get(review["document_ref"]))):
+                            discovery_read += 1
+                            try:
+                                learned = service.generate_metric_discovery(
+                                    review_id=review["review_id"],
+                                    expected_review_hash=review_hash, offset=offset,
+                                    expected_context_hash=context["content_hash"],
+                                    actor_ref=actor,
+                                )
+                            except Exception as exc:  # noqa: BLE001
+                                summary["discovery"].append({
+                                    "review_id": review["review_id"], "offset": offset,
+                                    "status": "failed",
+                                    "reason": f"{type(exc).__name__}: {exc}",
+                                })
+                            else:
+                                summary["discovery"].append({
+                                    "review_id": review["review_id"], "offset": offset,
+                                    "status": learned.get("status"),
+                                    "proposals": len(learned.get("proposals", [])),
+                                    "refused": len(learned.get("refused", [])),
+                                    "recorded": len(learned.get("recorded", [])),
+                                })
+                                summary["metrics_observed"] += len(learned.get("recorded", []))
                         if result.get("status") == "gated":
                             stop_reason = f"gated:{result.get('reason')}"
                             complete = False
@@ -474,6 +527,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="windows per run that may also be read for the figures a company "
              "owes (0 disables the figures pass)",
     )
+    # P11r: also off unless asked for, and for the same reason.
+    parser.add_argument(
+        "--max-discovery-windows", type=int, default=0,
+        help="windows per run that may also be read for the measures the "
+             "market judges a company on (0 disables the discovery pass)",
+    )
     parser.add_argument("--requested-by", help="human: actor; default is each mission's automation principal")
     parser.add_argument("--hermetic-fixture-file", type=Path, help="test-only fixture model output")
     parser.add_argument("--candidate-staging", type=Path, help="shared CandidateStaging database; enables admission")
@@ -485,6 +544,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.max_numeric_windows < 0 or args.max_numeric_windows > 50:
         raise SystemExit("--max-numeric-windows must be 0..50")
+    if args.max_discovery_windows < 0 or args.max_discovery_windows > 50:
+        raise SystemExit("--max-discovery-windows must be 0..50")
     if args.max_windows < 1 or args.max_windows > 50:
         raise SystemExit("--max-windows must be 1..50")
     summary = run_extraction(
@@ -494,6 +555,7 @@ def main(argv: list[str] | None = None) -> int:
         connector_governance=args.connector_governance, web_fetch_governance=args.web_fetch_governance,
         max_windows=args.max_windows,
         max_numeric_windows=args.max_numeric_windows,
+        max_discovery_windows=args.max_discovery_windows,
         requested_by=args.requested_by,
         hermetic_fixture=args.hermetic_fixture_file, candidate_staging=args.candidate_staging,
     )

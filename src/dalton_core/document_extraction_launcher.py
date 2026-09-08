@@ -103,7 +103,8 @@ class DocumentExtractionLauncher:
         return self.tickets_dir / ticket_id.split(":", 1)[1] / "ticket.json"
 
     def _command(self, *, requested_by: str | None, max_windows: int,
-                 ticket_dir: Path, max_numeric_windows: int = 0) -> list[str]:
+                 ticket_dir: Path, max_numeric_windows: int = 0,
+                 max_discovery_windows: int = 0) -> list[str]:
         command = [
             self.python_executable, "-m", "dalton_core.document_extraction_cli",
             "--state-dir", str(self.state_dir),
@@ -113,6 +114,9 @@ class DocumentExtractionLauncher:
             # P11n: the figures pass. Zero keeps it off, which is what an
             # install that has not asked for it should get.
             "--max-numeric-windows", str(max_numeric_windows),
+            # P11r: the pass that learns what to ask for. Off the same way and
+            # for the same reason: it is a second paid call per window.
+            "--max-discovery-windows", str(max_discovery_windows),
             "--quiet",
         ]
         if self.spool_dir is not None:
@@ -132,7 +136,8 @@ class DocumentExtractionLauncher:
 
     def start(self, *, requested_by: str | None = None,
               max_windows: int = DEFAULT_MAX_WINDOWS_PER_TICK,
-              max_numeric_windows: int = 0) -> dict[str, Any]:
+              max_numeric_windows: int = 0,
+              max_discovery_windows: int = 0) -> dict[str, Any]:
         if requested_by is not None and _HUMAN_RE.fullmatch(requested_by) is None \
                 and _AUTOMATION_RE.fullmatch(requested_by) is None:
             raise ExtractionLaunchRejected("requested_by must be a human: or automation: principal")
@@ -141,6 +146,9 @@ class DocumentExtractionLauncher:
         if (not isinstance(max_numeric_windows, int) or isinstance(max_numeric_windows, bool)
                 or not 0 <= max_numeric_windows <= 50):
             raise ExtractionLaunchRejected("max_numeric_windows must be 0..50")
+        if (not isinstance(max_discovery_windows, int) or isinstance(max_discovery_windows, bool)
+                or not 0 <= max_discovery_windows <= 50):
+            raise ExtractionLaunchRejected("max_discovery_windows must be 0..50")
         if not self.model_config_path.is_file():
             raise ExtractionLaunchRejected("document extraction model configuration is missing")
         with self._lock:
@@ -149,13 +157,15 @@ class DocumentExtractionLauncher:
             started_at = _wire_time(self.clock())
             digest = hashlib.sha256(canonical_json({
                 "requested_by": requested_by, "max_windows": max_windows,
-                "max_numeric_windows": max_numeric_windows, "started_at": started_at,
+                "max_numeric_windows": max_numeric_windows,
+                "max_discovery_windows": max_discovery_windows, "started_at": started_at,
                 "model_config": str(self.model_config_path),
             }).encode("utf-8")).hexdigest()[:24]
             ticket_id = f"{TICKET_PREFIX}:{digest}"
             ticket_dir = _secure_dir(self.tickets_dir / digest)
             command = self._command(requested_by=requested_by, max_windows=max_windows,
                                     max_numeric_windows=max_numeric_windows,
+                                    max_discovery_windows=max_discovery_windows,
                                     ticket_dir=ticket_dir)
             log_fd = os.open(str(ticket_dir / "run.log"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
@@ -252,12 +262,14 @@ class DocumentExtractionCoordinator:
         launcher: Any,
         max_windows_per_tick: int = DEFAULT_MAX_WINDOWS_PER_TICK,
         numeric_windows_per_tick: int = 0,
+        discovery_windows_per_tick: int = 0,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.missions = missions
         self.launcher = launcher
         self.max_windows_per_tick = int(max_windows_per_tick)
         self.numeric_windows_per_tick = int(numeric_windows_per_tick)
+        self.discovery_windows_per_tick = int(discovery_windows_per_tick)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._latest_path = Path(launcher.tickets_dir) / "latest.json"
 
@@ -312,6 +324,7 @@ class DocumentExtractionCoordinator:
             ticket = self.launcher.start(
                 max_windows=self.max_windows_per_tick,
                 max_numeric_windows=self.numeric_windows_per_tick,
+                max_discovery_windows=self.discovery_windows_per_tick,
             )
         except Exception as exc:
             name = type(exc).__name__
@@ -320,7 +333,8 @@ class DocumentExtractionCoordinator:
                                               "awaiting_at_launch": result["awaiting"]})
         return {**result, "status": "launched", "ticket_ref": ticket["id"],
                 "max_windows": self.max_windows_per_tick,
-                "max_numeric_windows": self.numeric_windows_per_tick}
+                "max_numeric_windows": self.numeric_windows_per_tick,
+                "max_discovery_windows": self.discovery_windows_per_tick}
 
 
 __all__ = [

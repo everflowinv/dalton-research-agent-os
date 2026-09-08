@@ -213,6 +213,10 @@ def build_work(
             # drift, and it can only do that if it has the same input.
             "request": request,
             "requests": [dict(item) for item in requests],
+            # The same fixture guard the prose pass carries: a fixture
+            # adapter may only run an order that declared itself one, so a
+            # test model cannot answer where the broker was expected.
+            "execution_mode": "broker" if context.get("model_binding") else "hermetic_fixture",
             "candidate_only": True,
         },
     )

@@ -101,6 +101,10 @@ class ServiceConfig:
     # because it is a separate spend, and zero because an install that has not
     # asked for the figures pass should not get it.
     document_extraction_numeric_windows: int | None = None
+    # P11r: and how many may be read for the *names* of the measures the market
+    # judges a company on. A third setting because it is a third spend, and
+    # because it reads a different set of documents than the figures pass does.
+    document_extraction_discovery_windows: int | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ServiceConfig":
@@ -282,10 +286,12 @@ class ServiceConfig:
                 )
         extraction_max_windows = None
         extraction_numeric_windows = None
+        extraction_discovery_windows = None
         extraction_raw = raw.get("document_extraction")
         if extraction_raw is not None:
             if not isinstance(extraction_raw, Mapping) or not set(extraction_raw) <= {
                 "max_windows_per_tick", "numeric_windows_per_tick",
+                "discovery_windows_per_tick",
             } or "max_windows_per_tick" not in extraction_raw:
                 raise ServiceConfigError("document_extraction service config is invalid")
             value = extraction_raw["max_windows_per_tick"]
@@ -301,9 +307,17 @@ class ServiceConfig:
                         "document_extraction.numeric_windows_per_tick must be an integer 0..50"
                     )
                 extraction_numeric_windows = numeric
+            discovery = extraction_raw.get("discovery_windows_per_tick")
+            if discovery is not None:
+                if isinstance(discovery, bool) or not isinstance(discovery, int) or not 0 <= discovery <= 50:
+                    raise ServiceConfigError(
+                        "document_extraction.discovery_windows_per_tick must be an integer 0..50"
+                    )
+                extraction_discovery_windows = discovery
         return cls(
             document_extraction_max_windows=extraction_max_windows,
             document_extraction_numeric_windows=extraction_numeric_windows,
+            document_extraction_discovery_windows=extraction_discovery_windows,
             core_db=_absolute_path(raw["core_db"], "core_db"),
             scheduler_db=_absolute_path(raw["scheduler_db"], "scheduler_db"),
             projection_db=_absolute_path(raw["projection_db"], "projection_db"),

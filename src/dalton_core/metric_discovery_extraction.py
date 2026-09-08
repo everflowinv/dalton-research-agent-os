@@ -164,6 +164,10 @@ def build_work(context: Mapping[str, Any]) -> Any:
             "control_plane": "mission-document-extraction",
             "task_ref": TASK_REF, "task_hash": TASK_HASH,
             "context": dict(context), "request": request,
+            # The same fixture guard the prose pass carries: a fixture
+            # adapter may only run an order that declared itself one, so a
+            # test model cannot answer where the broker was expected.
+            "execution_mode": "broker" if context.get("model_binding") else "hermetic_fixture",
             "candidate_only": True,
         },
     )

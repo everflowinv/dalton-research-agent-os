@@ -476,15 +476,26 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
     def _rebuild(work, current):
         from .document_numeric_extraction import TASK_REF as NUMERIC_TASK_REF
         from .document_numeric_extraction import build_work as build_numeric_work
+        from .metric_discovery_extraction import TASK_REF as DISCOVERY_TASK_REF
+        from .metric_discovery_extraction import build_work as build_discovery_work
 
         if work.metadata.get("task_ref") == NUMERIC_TASK_REF:
             return build_numeric_work(current, work.metadata.get("requests") or ())
+        if work.metadata.get("task_ref") == DISCOVERY_TASK_REF:
+            return build_discovery_work(current)
         return build_work(current)
 
     def _parse_candidate(self, text, work):
         from .document_numeric_extraction import TASK_REF as NUMERIC_TASK_REF
         from .document_numeric_extraction import extract_from_window
+        from .metric_discovery_extraction import TASK_REF as DISCOVERY_TASK_REF
+        from .metric_discovery_extraction import parse_response as parse_discovery
 
+        if work.metadata.get("task_ref") == DISCOVERY_TASK_REF:
+            # Same rule as the figures pass: unreadable is a broken call, a
+            # proposal that fails its own citation is a refusal in the result.
+            parse_discovery(text)
+            return
         if work.metadata.get("task_ref") == NUMERIC_TASK_REF:
             # Verification lives in the numeric module; this only has to fail
             # when the answer cannot be read at all, exactly as the
@@ -881,6 +892,9 @@ class DocumentExtractionService:
 
         reader = getattr(self.writer, "metric_requirements", None)
         if reader is None:
+            mission = getattr(self.writer, "coverage_mission", None)
+            reader = getattr(mission, "metric_requirements", None)
+        if reader is None:
             return ()
         try:
             return reader(company_ref)
@@ -912,15 +926,49 @@ class DocumentExtractionService:
         if factory is None and config is None:
             return {"status": "gated", "reason": GATE_REASON, "formal_authority_writes": 0}
         work = build_numeric_work(context, slots)
-        text = self._run_numeric(work, context, actor_ref, config, factory)
+        text = self._run_secondary(work, context, actor_ref, config, factory, "numeric")
         if text is None:
             return {"status": "no_result", "verified": [], "refused": [],
                     "formal_authority_writes": 0}
         result = extract_from_window(work.metadata["request"], text)
         return {"status": "read", "formal_authority_writes": 0, **result}
 
-    def _run_numeric(self, work, context, actor_ref, config, factory):
-        """Run the numeric order, or recover the answer of one already run."""
+    def generate_metric_discovery(self, *, review_id, expected_review_hash, offset,
+                                  expected_context_hash, actor_ref):
+        """Read one window for the measures the market judges this company on.
+
+        Takes no values and writes no claim.  What it produces is an
+        observation journal entry per verified proposal; a *requirement* only
+        exists once two distinct documents have named the same measure, and
+        that is derived on read rather than decided here.
+        """
+
+        from .metric_discovery_extraction import build_work as build_discovery_work
+        from .metric_discovery_extraction import proposals_from_window
+
+        context = self.context(review_id, expected_review_hash, offset, actor_ref)
+        if context["content_hash"] != expected_context_hash:
+            raise ResearchVerificationConflict("source context changed; reload original")
+        config = getattr(self.writer, "_document_extraction_model_config", None)
+        factory = self.writer._document_extraction_worker_factory
+        if factory is None and config is None:
+            return {"status": "gated", "reason": GATE_REASON, "formal_authority_writes": 0}
+        work = build_discovery_work(context)
+        text = self._run_secondary(work, context, actor_ref, config, factory, "metric discovery")
+        if text is None:
+            return {"status": "no_result", "proposals": [], "refused": [],
+                    "recorded": [], "formal_authority_writes": 0}
+        result = proposals_from_window(work.metadata["request"], text)
+        journal = {"recorded": [], "duplicates": []}
+        if result["proposals"]:
+            journal = self.writer.coverage_mission.record_metric_observations(
+                company_ref=context["company_ref"],
+                proposals=result["proposals"], observed_by=actor_ref,
+            )
+        return {"status": "read", "formal_authority_writes": 0, **result, **journal}
+
+    def _run_secondary(self, work, context, actor_ref, config, factory, label):
+        """Run a secondary order over an already-bound window, or recover it."""
 
         scheduler = self.writer._scheduler
         if scheduler is None:
@@ -938,10 +986,10 @@ class DocumentExtractionService:
                     )
                 worker.scheduler.enqueue(work)
                 worker.run_once(work)
-        return self._numeric_text(work)
+        return self._secondary_text(work, label)
 
-    def _numeric_text(self, work):
-        """The model's exact answer for one numeric order, or None.
+    def _secondary_text(self, work, label):
+        """The model's exact answer for one secondary order, or None.
 
         The same provenance checks the qualitative recovery makes: a result
         whose envelope does not bind its own work order, or whose text does not
@@ -954,16 +1002,16 @@ class DocumentExtractionService:
             return None
         authority = scheduler.work_order_authority(work.id)
         if authority["work_order_hash"] != content_hash(work.to_dict()):
-            raise ResearchVerificationConflict("saved numeric work drifted")
+            raise ResearchVerificationConflict(f"saved {label} work drifted")
         result = ResultEnvelope.from_dict(formal["result_envelope"])
         if (content_hash(formal["result_envelope"]) != formal["result_envelope_hash"]
                 or result.work_order_ref != work.id):
-            raise ResearchVerificationConflict("saved numeric result drifted")
+            raise ResearchVerificationConflict(f"saved {label} result drifted")
         if formal["terminal_state"] != "succeeded" or result.status != "succeeded":
             return None
         if (set(result.outputs) != {"text", "content_hash"}
                 or _hash_text(result.outputs["text"]) != result.outputs["content_hash"]):
-            raise ResearchVerificationConflict("numeric result provenance drifted")
+            raise ResearchVerificationConflict(f"{label} result provenance drifted")
         return result.outputs["text"]
 
     def _generate_broker(self, context, actor_ref):
