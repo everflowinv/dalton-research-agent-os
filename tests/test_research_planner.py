@@ -172,7 +172,7 @@ class PlanTests(unittest.TestCase):
             plan_from_response(
                 state(), response(directive(), directive(company_ref="company:sec-cik:9")),
                 created_at=NOW)
-        self.assertIn("not a company under coverage", str(caught.exception))
+        self.assertIn("neither a company under coverage nor the industry", str(caught.exception))
 
     def test_a_plan_naming_an_item_that_company_does_not_have_is_refused(self):
         with self.assertRaises(ResearchPlanError):
@@ -333,6 +333,69 @@ class InquiryTests(unittest.TestCase):
         self.assertIn("fixed standard", prompt)
         self.assertIn("you may not decide a lower count is enough", prompt)
         self.assertIn("inquiries", prompt)
+
+
+INDUSTRY = "industry:us-it-services"
+
+
+def industry_entry(*items, gaps=()):
+    return {"industry_ref": INDUSTRY, "items": list(items), "gaps": list(gaps),
+            "blocked_on": [], "source_base_ready": not gaps}
+
+
+class IndustryTests(unittest.TestCase):
+    """P13f: an industry screen rests on facts that belong to no company."""
+
+    def state(self, **overrides):
+        kwargs = {"industry": industry_entry(
+            item("industry_demand", required=3, have=91, status="complete"),
+            item("competitive_landscape", required=3, have=132, status="complete"))}
+        kwargs.update(overrides)
+        return state(**kwargs)
+
+    def test_the_industry_is_a_subject_of_its_own(self):
+        built = self.state()
+        self.assertEqual(built["industry"]["industry_ref"], INDUSTRY)
+        self.assertEqual(len(built["industry"]["items"]), 2)
+
+    def test_a_directive_may_tell_the_industry_to_stop(self):
+        # 91 documents against a requirement of 3, and 48 more queued: this is
+        # the directive the calendar could never issue.
+        plan = plan_from_response(
+            self.state(),
+            response(directive(company_ref=INDUSTRY, item_ref="industry_demand",
+                               action="stop",
+                               reason="91 held against 3 required; more adds nothing")),
+            created_at=NOW)
+        [stop] = directives_for(plan, action="stop")
+        self.assertEqual(stop["company_ref"], INDUSTRY)
+
+    def test_an_item_the_industry_does_not_have_is_still_refused(self):
+        with self.assertRaises(ResearchPlanError):
+            plan_from_response(
+                self.state(),
+                response(directive(company_ref=INDUSTRY, item_ref="quarterly_financials")),
+                created_at=NOW)
+
+    def test_a_company_item_is_not_addressable_on_the_industry_and_vice_versa(self):
+        with self.assertRaises(ResearchPlanError):
+            plan_from_response(
+                self.state(), response(directive(item_ref="industry_demand")),
+                created_at=NOW)
+
+    def test_industry_gaps_count_toward_the_open_total(self):
+        built = self.state(industry=industry_entry(
+            item("industry_demand", required=3, have=0, status="missing"),
+            gaps=["industry_demand"]))
+        self.assertIn("industry_demand", built["industry"]["gaps"])
+        self.assertGreater(built["totals"]["open_gaps"], 1)
+
+    def test_a_mission_with_no_industry_block_still_builds(self):
+        built = state()
+        self.assertIsNone(built["industry"])
+
+    def test_the_digest_names_the_industry_first(self):
+        self.assertTrue(state_digest(self.state()).startswith(INDUSTRY))
 
 
 if __name__ == "__main__":

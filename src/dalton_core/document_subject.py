@@ -47,6 +47,18 @@ COMPANY_NAMES: Mapping[str, tuple[str, ...]] = {
     "IBM": ("IBM", "International Business Machines"),
     "DXC": ("DXC Technology", "DXC"),
 }
+# What each covered industry is called, for the same check. An industry screen
+# rests on facts about the market -- how demand is moving, how the field is
+# arranged -- and those belong to no company, so the industry is a subject in
+# its own right and its documents have to be attributed too. A market report
+# about European white goods is no more this industry's than the Haier call
+# was EPAM's.
+INDUSTRY_NAMES: Mapping[str, tuple[str, ...]] = {
+    "industry:us-it-services": (
+        "IT services", "IT service", "information technology services",
+        "technology consulting", "IT consulting", "IT 服务",
+    ),
+}
 # A ticker shorter than this is too easy to hit by accident inside ordinary
 # prose, so it is not used as evidence on its own.
 MIN_TICKER_CHARS = 3
@@ -58,10 +70,16 @@ def _fold(text: str) -> str:
 
 
 def subject_names(ticker: Any) -> tuple[str, ...]:
-    """Every name this company is called, best first, for a text check."""
+    """Every name this subject is called, best first, for a text check.
+
+    Takes a ticker or an ``industry:`` ref: both are subjects a figure can
+    belong to, and both have to be recognised in a document's own words.
+    """
 
     if not isinstance(ticker, str) or not ticker.strip():
         return ()
+    if ticker.startswith("industry:"):
+        return tuple(INDUSTRY_NAMES.get(ticker, ()))
     key = ticker.strip().upper()
     names = tuple(COMPANY_NAMES.get(key, ()))
     if len(key) >= MIN_TICKER_CHARS and key not in {n.upper() for n in names}:
@@ -96,15 +114,15 @@ def _mentions(text: str, names: Sequence[str]) -> list[str]:
     return found
 
 
-def document_names_subject(text: Any, ticker: Any) -> dict[str, Any]:
-    """Whether this document names the company, and which name it used.
+def document_names_subject(text: Any, subject: Any) -> dict[str, Any]:
+    """Whether this document names the subject, and which name it used.
 
-    The answer is a floor: a document that never names the company is not about
+    The answer is a floor: a document that never names the subject is not about
     it, and a document that does may still be an industry report where only
     some figures are that company's. The second half is the model's job.
     """
 
-    names = subject_names(ticker)
+    names = subject_names(subject)
     if not names:
         # Nothing to check against. Refusing here would block every company
         # nobody has named, which is a configuration gap, not evidence.
@@ -122,6 +140,7 @@ def document_names_subject(text: Any, ticker: Any) -> dict[str, Any]:
 
 __all__ = [
     "COMPANY_NAMES",
+    "INDUSTRY_NAMES",
     "MIN_TICKER_CHARS",
     "SCHEMA_VERSION",
     "document_names_subject",

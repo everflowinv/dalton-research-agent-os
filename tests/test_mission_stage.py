@@ -408,3 +408,41 @@ class ExtractionThroughputConfigTests(unittest.TestCase):
             ServiceConfig.from_mapping(
                 {**self._base(), "document_extraction": {"max_windows_per_tick": 12, "extra": 1}}
             )
+
+
+class IndustryChecklistTests(unittest.TestCase):
+    """P13f: facts about the market belong to the market, not to a company.
+
+    The discovery plan asks the industry questions per company -- "{terms} IT
+    services demand bookings outlook" runs once for each of five companies --
+    so every market-sizing document is filed under whichever company's search
+    returned it, and nothing counts them against the industry. Live that is 91
+    demand documents and 132 landscape documents against a requirement of
+    three each, with 83 more still queued.
+    """
+
+    def test_the_industry_has_a_checklist_of_its_own(self):
+        from dalton_core.mission_stage import INDUSTRY_BASE_ITEMS, SOURCE_BASE_ITEMS
+
+        industry = {i["item_ref"] for i in INDUSTRY_BASE_ITEMS}
+        company = {i["item_ref"] for i in SOURCE_BASE_ITEMS}
+        self.assertEqual(industry & company, set())
+        self.assertIn("industry_demand", industry)
+        self.assertIn("competitive_landscape", industry)
+
+    def test_the_industry_items_use_specs_the_plan_already_asks_for(self):
+        # Nothing new is fetched: the documents exist, they were just filed
+        # under companies. What changes is where they are counted.
+        from dalton_core.mission_stage import INDUSTRY_BASE_ITEMS
+
+        specs = {s for item in INDUSTRY_BASE_ITEMS for s in item["spec_refs"]}
+        self.assertEqual(specs, {"industry-demand", "competitive-landscape"})
+
+    def test_no_industry_spec_is_also_a_company_item_spec(self):
+        # Otherwise one document would satisfy two different requirements and
+        # the counts would both be wrong.
+        from dalton_core.mission_stage import INDUSTRY_BASE_ITEMS, SOURCE_BASE_ITEMS
+
+        industry = {s for i in INDUSTRY_BASE_ITEMS for s in i["spec_refs"]}
+        company = {s for i in SOURCE_BASE_ITEMS for s in i["spec_refs"]}
+        self.assertEqual(industry & company, set())

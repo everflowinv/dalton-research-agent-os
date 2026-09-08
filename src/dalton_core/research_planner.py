@@ -96,7 +96,10 @@ OUTPUT_SCHEMA = {
                 "additionalProperties": False,
                 "required": ["company_ref", "item_ref", "action", "reason"],
                 "properties": {
-                    "company_ref": {"type": "string", "minLength": 1, "maxLength": 120},
+                    "company_ref": {
+                        "type": "string", "minLength": 1, "maxLength": 120,
+                        "description": "A company under coverage, or the industry_ref.",
+                    },
                     "item_ref": {"type": "string", "minLength": 1, "maxLength": 80},
                     "action": {"enum": list(ACTIONS)},
                     "reason": {"type": "string", "minLength": 1, "maxLength": 400},
@@ -148,7 +151,9 @@ class ResearchPlanError(ValueError):
 def build_prompt(state: Mapping[str, Any]) -> str:
     return (
         "You decide what a research system works on next.\n\n"
-        "RESEARCH_STATE below is the whole picture: the standing goal, every company "
+        "RESEARCH_STATE below is the whole picture: the standing goal, the industry "
+        "itself -- which has its own checklist, because facts about the market belong "
+        "to no company -- every company "
         "under coverage, each company's checklist items with how many readings are "
         "required and how many are held, which items are blocked and why, what figures "
         "have been collected, which measures the market has been seen judging each "
@@ -255,6 +260,14 @@ def parse_response(text: Any) -> dict[str, Any]:
 
 def _known_work(state: Mapping[str, Any]) -> dict[str, set[str]]:
     known: dict[str, set[str]] = {}
+    # P13f: the industry is addressable too. A directive may say "stop
+    # collecting industry demand", which is not any company's item.
+    industry = state.get("industry")
+    if industry and isinstance(industry.get("industry_ref"), str):
+        known[industry["industry_ref"]] = {
+            item.get("item_ref") for item in industry.get("items", ())
+            if isinstance(item.get("item_ref"), str)
+        }
     for company in state.get("companies", ()):
         ref = company.get("company_ref")
         if isinstance(ref, str):
@@ -286,7 +299,8 @@ def plan_from_response(
         company_ref, item_ref = directive["company_ref"], directive["item_ref"]
         if company_ref not in known:
             raise ResearchPlanError(
-                f"plan names {company_ref!r}, which is not a company under coverage"
+                f"plan names {company_ref!r}, which is neither a company under "
+                "coverage nor the industry"
             )
         if item_ref not in known[company_ref]:
             raise ResearchPlanError(

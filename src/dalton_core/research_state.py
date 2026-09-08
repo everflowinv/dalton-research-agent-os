@@ -99,10 +99,50 @@ def company_state(
     }
 
 
+def industry_state(
+    entry: Mapping[str, Any] | None,
+    *,
+    figures: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """The industry's own position, which belongs to no company.
+
+    An industry screen rests on facts about the market -- how demand is moving,
+    how the field is arranged -- and those are nobody's company file. Without
+    this the planner cannot see industry work at all, and the industry queries
+    run per company on a calendar: live, 91 demand documents and 132 landscape
+    documents against a requirement of three each, with 83 more queued.
+    """
+
+    if entry is None:
+        return None
+    held = dict(figures or {})
+    return {
+        "industry_ref": entry.get("industry_ref"),
+        "items": [
+            {"item_ref": item.get("item_ref"),
+             "required": _int(item.get("required")),
+             "have": _int(item.get("have")),
+             "deficit": max(0, _int(item.get("required")) - _int(item.get("have"))),
+             "read": _int(item.get("read")),
+             "queued": _int(item.get("pending")),
+             "status": item.get("status"),
+             "source_ref": item.get("source_ref"),
+             "note": item.get("note")}
+            for item in entry.get("items", ())
+        ],
+        "gaps": list(entry.get("gaps") or ()),
+        "blocked_on": list(entry.get("blocked_on") or ()),
+        "source_base_ready": bool(entry.get("source_base_ready")),
+        "figures": {"total": _int(held.get("total")),
+                    "by_grade": dict(held.get("by_grade") or {})},
+    }
+
+
 def build_research_state(
     *,
     mission: Mapping[str, Any],
     checklist: Sequence[Mapping[str, Any]],
+    industry: Mapping[str, Any] | None = None,
     figures_by_company: Mapping[str, Any] | None = None,
     metrics_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     budget: Mapping[str, Any] | None = None,
@@ -126,7 +166,12 @@ def build_research_state(
         )
         for entry in checklist
     ]
+    industry_block = industry_state(
+        industry, figures=(figures_by_company or {}).get(
+            (industry or {}).get("industry_ref")))
     open_gaps = sum(len(c["gaps"]) for c in companies)
+    if industry_block:
+        open_gaps += len(industry_block["gaps"])
     state = {
         "schema_version": SCHEMA_VERSION,
         "as_of": as_of,
@@ -142,6 +187,9 @@ def build_research_state(
              "connected": s.get("status") == "connected"}
             for s in mission.get("source_plan") or ()
         ],
+        # The industry is a subject in its own right, not a company with no
+        # ticker. A directive may name it, and a figure may belong to it.
+        "industry": industry_block,
         "companies": companies,
         "totals": {
             "companies": len(companies),
@@ -166,6 +214,12 @@ def state_digest(state: Mapping[str, Any]) -> str:
     """
 
     lines = []
+    industry = state.get("industry")
+    if industry:
+        lines.append(
+            f"{industry.get('industry_ref')}: gaps="
+            f"{','.join(industry['gaps']) or 'none'}"
+        )
     for company in state.get("companies", ()):
         gaps = ",".join(company["gaps"]) or "none"
         lines.append(
@@ -181,5 +235,6 @@ __all__ = [
     "SCHEMA_VERSION",
     "build_research_state",
     "company_state",
+    "industry_state",
     "state_digest",
 ]

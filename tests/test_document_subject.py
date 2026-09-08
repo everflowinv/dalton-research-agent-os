@@ -98,3 +98,33 @@ class RecordableTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IndustrySubjectTests(unittest.TestCase):
+    """P13f: the industry is a subject a figure can belong to."""
+
+    IT = "industry:us-it-services"
+    MARKET = ("Global IT services spending is forecast to grow 4.2% in 2026, "
+              "with consulting demand stabilising.")
+    APPLIANCES = ("The European white goods market saw price pressure across "
+                  "refrigeration and HVAC.")
+
+    def test_the_industry_is_named_the_way_a_company_is(self):
+        self.assertIn("IT services", subject_names(self.IT))
+        self.assertIn("IT services", subject_label(self.IT))
+
+    def test_a_market_report_about_this_industry_is_attributed(self):
+        self.assertTrue(document_names_subject(self.MARKET, self.IT)["names_subject"])
+
+    def test_a_market_report_about_another_industry_is_not(self):
+        # The same failure as the Haier call, one level up: a real market
+        # report about the wrong market.
+        self.assertFalse(document_names_subject(self.APPLIANCES, self.IT)["names_subject"])
+
+    def test_an_industry_nobody_has_named_is_unchecked_rather_than_refused(self):
+        out = document_names_subject(self.MARKET, "industry:not-configured")
+        self.assertFalse(out["checked"])
+
+    def test_a_company_document_is_still_checked_against_the_company(self):
+        self.assertTrue(document_names_subject(EPAM_CALL, "EPAM")["names_subject"])
+        self.assertFalse(document_names_subject(EPAM_CALL, self.IT)["names_subject"])

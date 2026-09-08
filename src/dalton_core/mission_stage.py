@@ -110,6 +110,40 @@ SOURCE_BASE_ITEMS: tuple[dict[str, Any], ...] = (
         "spec_refs": ("sell-side-reports",),
     },
 )
+# P13f: what the screen needs that belongs to no company.
+#
+# An industry Initial Screen rests on facts about the market -- how demand is
+# moving, how the field is arranged -- and those are not any one company's.
+# The discovery plan already asks both questions, but it asks them *per
+# company*: "{terms} IT services demand bookings outlook" runs five times with
+# five different companies' names, and every market-sizing document it finds is
+# filed under whichever company's search happened to return it.
+#
+# So the same documents are counted here against the industry, where they
+# actually belong. Nothing new is fetched; what changes is that the industry
+# has a checklist of its own, its gaps are visible, and a fact about the market
+# has somewhere to live that is not a company's file.
+INDUSTRY_BASE_ITEMS: tuple[dict[str, Any], ...] = (
+    {
+        "item_ref": "industry_demand",
+        "label": "行业需求与支出趋势",
+        "reading": "读行业需求与支出趋势",
+        "required": 3,
+        "counted_by": "acquired_documents",
+        "source_ref": "source:web-search",
+        "spec_refs": ("industry-demand",),
+    },
+    {
+        "item_ref": "competitive_landscape",
+        "label": "行业竞争格局",
+        "reading": "读行业竞争格局",
+        "required": 3,
+        "counted_by": "acquired_documents",
+        "source_ref": "source:web-search",
+        "spec_refs": ("competitive-landscape",),
+    },
+)
+
 _ITEM_ORDER = {item["item_ref"]: index for index, item in enumerate(SOURCE_BASE_ITEMS)}
 # Reading order inside one company, used by the extraction lane: an original
 # that carries management's own words before someone else's summary of them.
@@ -385,6 +419,63 @@ def evaluate_mission(
             "blocked_on": [i["item_ref"] for i in items if i["status"] in {"not_planned", "source_unavailable"}],
         })
     return result
+
+
+def evaluate_industry(
+    connection: sqlite3.Connection,
+    mission: Mapping[str, Any],
+    *,
+    planned_specs: set[str] | None = None,
+) -> dict[str, Any]:
+    """The industry's own source base, counted across the whole mission.
+
+    The per-company checklist cannot hold these: a market-demand report is not
+    Accenture's, and filing it under Accenture is how five copies of the same
+    industry research end up looking like five companies' progress.
+
+    Counted across every company because that is how the documents were found
+    -- the plan runs the industry queries once per company -- while the subject
+    of what they say is the industry.
+    """
+
+    planned = set(planned_specs or set())
+    counts = _document_counts(connection, mission["id"])
+    connected = {
+        entry["source_ref"] for entry in mission.get("source_plan", ())
+        if entry.get("status") == "connected"
+    }
+    items = []
+    for item in INDUSTRY_BASE_ITEMS:
+        have = read = pending = failed = 0
+        wanted = set(item["spec_refs"])
+        for (_company_ref, spec_ref), entry in counts.items():
+            if spec_ref not in wanted:
+                continue
+            have += entry["acquired"]
+            read += entry["read"]
+            pending += entry["pending"]
+            failed += entry["failed"]
+        status, note = _item_status(
+            item, have,
+            connected=item["source_ref"] in connected,
+            planned=all(spec in planned for spec in item["spec_refs"]),
+        )
+        items.append({
+            "item_ref": item["item_ref"], "label": item["label"],
+            "reading": item["reading"], "required": int(item["required"]),
+            "have": have, "read": read, "pending": pending, "failed": failed,
+            "status": status, "note": note, "source_ref": item["source_ref"],
+            "spec_refs": list(item["spec_refs"]),
+        })
+    blocking = [i for i in items if i["status"] in {"partial", "missing"}]
+    return {
+        "industry_ref": mission.get("industry_ref"),
+        "items": items,
+        "gaps": [i["item_ref"] for i in blocking],
+        "blocked_on": [i["item_ref"] for i in items
+                       if i["status"] in {"not_planned", "source_unavailable"}],
+        "source_base_ready": not blocking,
+    }
 
 
 def acquisition_needs(
