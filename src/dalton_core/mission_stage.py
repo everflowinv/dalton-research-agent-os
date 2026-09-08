@@ -164,10 +164,37 @@ def planned_spec_refs_from_directory(directory: Path) -> set[str]:
     return planned_spec_refs(plans)
 
 
+# P10f: how far a document got, worst to best.  A document can appear under
+# several mission versions with different statuses, because carry-forward
+# re-registers unfinished rows under the new version; the mission holds
+# whatever the *best* of those rows reached.
+_STATUS_RANK = {
+    "acquisition_failed": 1,
+    "discovered": 2,
+    "acquisition_launched": 2,
+    "acquired": 3,
+    "already_in_authority": 3,
+}
+
+
 def _document_counts(
     connection: sqlite3.Connection, mission_version_ref: str
 ) -> dict[tuple[str, str], dict[str, int]]:
-    """(company_ref, spec_ref) → acquired / pending / failed / read counts."""
+    """(company_ref, spec_ref) → acquired / pending / failed / read counts.
+
+    The checklist asks an *inventory* question — does the mission hold four
+    transcripts for ACN — but ``coverage_mission_discovered_documents`` is
+    maintained as an outstanding-work queue: ``carry_forward_superseded_documents``
+    deliberately does not copy a document whose review was already resolved,
+    because nothing is owed on it.  Counting only the current version therefore
+    made the checklist *fall* when work finished: live, five ACN transcripts
+    read under v8 left the count at v9 and 纪要 went 20 → 15.
+
+    So count every version of the same mission and deduplicate by
+    ``document_ref``, keeping the furthest each document ever got.  A document
+    the mission acquired under v8 is still a document the mission holds under
+    v9, whether or not v9 has any work left to do on it.
+    """
 
     counts: dict[tuple[str, str], dict[str, int]] = {}
 
@@ -176,32 +203,62 @@ def _document_counts(
             (company, spec), {"acquired": 0, "pending": 0, "failed": 0, "read": 0}
         )
 
-    rows = connection.execute(
-        "SELECT d.company_ref AS company_ref, s.spec_ref AS spec_ref, d.status AS status, "
-        "COUNT(*) AS n FROM coverage_mission_discovered_documents d "
-        "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
-        "WHERE d.mission_version_ref=? GROUP BY 1,2,3",
+    row = connection.execute(
+        "SELECT mission_ref FROM coverage_mission_versions WHERE mission_version_id=?",
         (mission_version_ref,),
-    ).fetchall()
-    for row in rows:
-        entry = bucket(row["company_ref"], row["spec_ref"])
-        status = row["status"]
+    ).fetchone()
+    if row is None:
+        # No version row to resolve a mission from; count the one version we
+        # were handed rather than silently counting nothing.
+        scope, params = "d.mission_version_ref=?", (mission_version_ref,)
+        review_scope, review_params = "r.mission_version_ref=?", (mission_version_ref,)
+    else:
+        scope = (
+            "d.mission_version_ref IN (SELECT mission_version_id "
+            "FROM coverage_mission_versions WHERE mission_ref=?)"
+        )
+        params = (row["mission_ref"],)
+        review_scope = (
+            "r.mission_version_ref IN (SELECT mission_version_id "
+            "FROM coverage_mission_versions WHERE mission_ref=?)"
+        )
+        review_params = (row["mission_ref"],)
+
+    best: dict[str, tuple[str, str, str]] = {}
+    for entry in connection.execute(
+        "SELECT d.document_ref AS document_ref, d.company_ref AS company_ref, "
+        "s.spec_ref AS spec_ref, d.status AS status "
+        "FROM coverage_mission_discovered_documents d "
+        "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
+        f"WHERE {scope}",
+        params,
+    ).fetchall():
+        document_ref, status = entry["document_ref"], entry["status"]
+        rank = _STATUS_RANK.get(status, 0)
+        current = best.get(document_ref)
+        if current is None or rank > _STATUS_RANK.get(current[2], 0):
+            best[document_ref] = (entry["company_ref"], entry["spec_ref"], status)
+    for company_ref, spec_ref, status in best.values():
+        entry_counts = bucket(company_ref, spec_ref)
         if status in ACQUIRED_STATUSES:
-            entry["acquired"] += row["n"]
+            entry_counts["acquired"] += 1
         elif status in ("discovered", "acquisition_launched"):
-            entry["pending"] += row["n"]
+            entry_counts["pending"] += 1
         elif status == "acquisition_failed":
-            entry["failed"] += row["n"]
-    read_rows = connection.execute(
-        "SELECT d.company_ref AS company_ref, s.spec_ref AS spec_ref, COUNT(*) AS n "
-        "FROM coverage_mission_document_reviews r "
+            entry_counts["failed"] += 1
+
+    read_docs: dict[str, tuple[str, str]] = {}
+    for entry in connection.execute(
+        "SELECT d.document_ref AS document_ref, d.company_ref AS company_ref, "
+        "s.spec_ref AS spec_ref FROM coverage_mission_document_reviews r "
         "JOIN coverage_mission_discovered_documents d ON d.record_id=r.discovered_document_ref "
         "JOIN coverage_mission_source_discoveries s ON s.record_id=d.discovery_ref "
-        "WHERE r.mission_version_ref=? AND r.state=? GROUP BY 1,2",
-        (mission_version_ref, READ_REVIEW_STATE),
-    ).fetchall()
-    for row in read_rows:
-        bucket(row["company_ref"], row["spec_ref"])["read"] += row["n"]
+        f"WHERE {review_scope} AND r.state=?",
+        (*review_params, READ_REVIEW_STATE),
+    ).fetchall():
+        read_docs[entry["document_ref"]] = (entry["company_ref"], entry["spec_ref"])
+    for company_ref, spec_ref in read_docs.values():
+        bucket(company_ref, spec_ref)["read"] += 1
     return counts
 
 

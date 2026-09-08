@@ -1025,6 +1025,7 @@ class WriterServer:
         web_search_plan_path: str | Path | None = None,
         web_fetch_launcher: PublicWebFetchLauncher | None = None,
         document_extraction_launcher: Any | None = None,
+        document_extraction_max_windows: int | None = None,
         initial_screen_launcher: Any | None = None,
     ):
         if not principals:
@@ -1061,6 +1062,13 @@ class WriterServer:
         # P9d-4b: out-of-process public-web fetch of URLs a web search cited.
         self._web_fetch_launcher = web_fetch_launcher
         self._document_extraction_launcher = document_extraction_launcher
+        if document_extraction_max_windows is not None and not (
+            1 <= int(document_extraction_max_windows) <= 50
+        ):
+            raise WriterServerError(
+                "document_extraction_max_windows must be 1..50"
+            )
+        self._document_extraction_max_windows = document_extraction_max_windows
         self._initial_screen_launcher = initial_screen_launcher
         self._initial_screen_coordinator: Any | None = None
         self._mission_deliverables: Any | None = None
@@ -1388,6 +1396,8 @@ class WriterServer:
             # from the controller tick, out of process like the other lanes.
             self._document_extraction_coordinator = DocumentExtractionCoordinator(
                 missions=self._coverage_mission, launcher=self._document_extraction_launcher,
+                **({} if self._document_extraction_max_windows is None
+                   else {"max_windows_per_tick": self._document_extraction_max_windows}),
             )
         if self._initial_screen_launcher is not None:
             # P10c: the mission writes its own Initial Screen, one company per
@@ -3373,6 +3383,15 @@ def main(argv: list[str] | None = None) -> int:
         help="rehearsal only: in-memory approved fetch governance principal (tests)",
     )
     parser.add_argument("--document-extraction-model-config", help="Explicit approved broker/router and existing shared budget authority JSON; no secrets inline")
+    # P10f: reading speed is one window per model call, and the controller tick
+    # is 300s, so this number times twelve is the most documents an hour the
+    # machine can read. It was pinned at 4 in code with no way to say otherwise.
+    parser.add_argument(
+        "--document-extraction-max-windows", type=int, default=None,
+        help="Extraction windows drafted per controller tick (1..50; default 4). "
+             "Each window is one paid model call against the mission's "
+             "max_daily_paid_calls, so raise the mission budget with it.",
+    )
     parser.add_argument("--planner-routing-policy")
     parser.add_argument("--planner-credential-slots")
     parser.add_argument("--planner-model-router-db")
@@ -3554,6 +3573,7 @@ def main(argv: list[str] | None = None) -> int:
             planner_model_config=planner_model_config,
             document_extraction_model_config=(None if args.document_extraction_model_config is None
                 else json.loads(Path(args.document_extraction_model_config).read_text(encoding="utf-8"))),
+            document_extraction_max_windows=args.document_extraction_max_windows,
             search_launcher=search_launcher,
             discovery_plan_path=args.alphaengine_discovery_plan,
             web_search_launcher=web_search_launcher,

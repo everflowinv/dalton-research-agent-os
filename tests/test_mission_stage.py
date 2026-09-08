@@ -316,3 +316,56 @@ class LaneOrderTests(StageHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChecklistSurvivesARepublishTests(StageHarness):
+    """P10f: the checklist is an inventory, not a queue of outstanding work."""
+
+    def _publish_next_version(self) -> dict:
+        params = dict(self.params)
+        params.pop("mission_ref", None)
+        prior = self.mission["id"]
+        number = int(prior.rsplit(":", 1)[-1]) if prior.rsplit(":", 1)[-1].isdigit() else 1
+        params["version_id"] = f"{prior.rsplit(':', 1)[0]}:{number + 1}"
+        params["prior_version_ref"] = prior
+        params["idempotency_key"] = f"republish-{number + 1}"
+        self.mission = self.missions.create_mission(self.mission_ref, **params)
+        return self.mission
+
+    def test_a_document_read_under_the_old_version_still_counts_under_the_new_one(self) -> None:
+        company = self.params["universe"][0]["company_ref"]
+        for _ in range(4):
+            self.document(company, "earnings-call-transcripts", "acquired", read=True)
+        before = self.item(self.evaluate(), company, "earnings_calls")
+        self.assertEqual(before["have"], 4)
+
+        # Publishing a new version is what carry-forward reacts to: a document
+        # whose review is already resolved is deliberately not copied, because
+        # nothing is owed on it. The checklist must not read that as a loss.
+        self._publish_next_version()
+        after = self.item(self.evaluate(), company, "earnings_calls")
+        self.assertEqual(after["have"], 4, "a held transcript stopped counting after a republish")
+        self.assertEqual(after["read"], 4)
+        self.assertEqual(after["status"], before["status"])
+
+    def test_a_document_carried_into_the_new_version_is_not_counted_twice(self) -> None:
+        company = self.params["universe"][0]["company_ref"]
+        document_ref = self.document(company, "earnings-call-transcripts", "acquired")
+        self.assertEqual(self.item(self.evaluate(), company, "earnings_calls")["have"], 1)
+        new_version = self._publish_next_version()
+        # Carry-forward re-registers the same document_ref under the new
+        # version; counting every version naively would say two.
+        with self.missions._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_discovered_documents(record_id,mission_version_ref,company_ref,"
+                "source_ref,document_ref,discovery_ref,status,created_at,updated_at) "
+                "SELECT 'mission-discovered-document:carried',?,company_ref,source_ref,document_ref,"
+                "discovery_ref,'discovered',created_at,updated_at "
+                "FROM coverage_mission_discovered_documents WHERE document_ref=?",
+                (new_version["id"], document_ref),
+            )
+        item = self.item(self.evaluate(), company, "earnings_calls")
+        self.assertEqual(item["have"], 1, "the same document was counted under two versions")
+        # The copy is 'discovered', but the mission really did acquire it, so
+        # the furthest status wins rather than the newest row.
+        self.assertEqual(item["pending"], 0)

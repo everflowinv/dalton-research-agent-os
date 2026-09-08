@@ -45,6 +45,7 @@ def render(
     state_dir: str | Path,
     config_path: str | Path,
     log_dir: str | Path,
+    extraction_max_windows: int | None = None,
 ) -> dict[str, str]:
     destination = Path(launch_agents_dir).expanduser().resolve()
     bin_dir = Path(python_env_bin).expanduser().resolve()
@@ -195,6 +196,13 @@ def render(
     }
     if extraction_config_path is not None:
         writer["ProgramArguments"].extend(["--document-extraction-model-config", extraction_config_path])
+        # P10f: reading throughput is windows-per-tick times ticks-per-hour.
+        # Left unset the writer keeps its own default; every window is a paid
+        # model call, so this rises with the mission budget, not on its own.
+        if extraction_max_windows is not None:
+            writer["ProgramArguments"].extend(
+                ["--document-extraction-max-windows", str(int(extraction_max_windows))]
+            )
     controller = common | {
         "Label": CONTROLLER_LABEL,
         "ProgramArguments": [str(bin_dir / "daltond"), "--config", str(config)],
@@ -247,13 +255,20 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--log-dir", type=Path, required=True)
+    parser.add_argument(
+        "--extraction-max-windows", type=int, default=None,
+        help="Extraction windows per controller tick (1..50); omit to keep the writer default",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
+    if args.extraction_max_windows is not None and not 1 <= args.extraction_max_windows <= 50:
+        raise SystemExit("--extraction-max-windows must be 1..50")
     paths = render(
         args.launch_agents_dir,
         args.python_env_bin,
         args.state_dir,
         args.config,
         args.log_dir,
+        extraction_max_windows=args.extraction_max_windows,
     )
     for name, path in paths.items():
         print(f"{name}={path}")
