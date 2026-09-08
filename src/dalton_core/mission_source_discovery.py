@@ -121,6 +121,9 @@ MAX_PLAN_CALLS_24H = 1000
 # Retrying is cheap and the per-source daily quota is what bounds it; a host
 # that genuinely refuses us costs a handful of requests a day, not a flood.
 ACQUISITION_RETRY_INTERVAL = timedelta(hours=1)
+# The smallest positive interval the authority accepts: "anything already
+# recorded as failed", used for the one catch-up pass after a restart.
+_IMMEDIATE_RETRY = timedelta(microseconds=1)
 _HUMAN_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
 _AUTOMATION_RE = re.compile(r"automation:[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _SPEC_REF_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
@@ -928,6 +931,12 @@ class MissionSourceDiscoveryCoordinator:
         self.missions = missions
         self.acquisitions_per_tick = acquisitions_per_tick
         self.acquisition_wait_seconds = acquisition_wait_seconds
+        # P11b: a restart means new code, so the most likely cause of an
+        # earlier failure is the thing that just changed. Waiting an hour to
+        # find out whether a fix worked is a bad loop for the operator and a
+        # bad one for the mission; the first tick after start retries failures
+        # immediately, and the interval applies from then on.
+        self._retry_failures_now = True
         self.plan = validate_discovery_plan(plan)
         self.source_ref = self.plan["source_ref"]
         self.search_launcher = search_launcher
@@ -1352,7 +1361,11 @@ class MissionSourceDiscoveryCoordinator:
             # No fresh documents: retry the oldest acquisition failure whose
             # interval has passed (e.g. a child orphaned by a deploy restart).
             document = self.missions.retryable_failed_document(
-                older_than=ACQUISITION_RETRY_INTERVAL, as_of=self.clock(),
+                older_than=(
+                    _IMMEDIATE_RETRY if self._retry_failures_now
+                    else ACQUISITION_RETRY_INTERVAL
+                ),
+                as_of=self.clock(),
                 source_ref=self.source_ref, skip_hosts=self.skip_hosts,
             )
             retry = document is not None
@@ -1403,6 +1416,7 @@ class MissionSourceDiscoveryCoordinator:
         }
 
     def dispatch_once(self) -> dict[str, Any]:
+        retried_after_restart = self._retry_failures_now
         settled_dispatches = self.settle_dispatches()
         settled_documents = self.settle_documents()
         # P9d-12/13 maintenance, all before any new spend: documents stranded
@@ -1449,6 +1463,9 @@ class MissionSourceDiscoveryCoordinator:
             launched[0] if launched
             else (acquisitions[-1] if acquisitions else {"status": "idle"})
         )
+        # One pass of immediate retries per start, then back to the interval,
+        # so a document that fails for a permanent reason is not hot-looped.
+        self._retry_failures_now = False
         active = discovery.get("status") == "launched" or launched_documents > 0
         return {
             "status": "launched" if active else "idle",
@@ -1464,6 +1481,7 @@ class MissionSourceDiscoveryCoordinator:
             "discovery": discovery,
             "acquisition": acquisition,
             "acquisitions_launched": launched_documents,
+            "retried_after_restart": retried_after_restart,
         }
 
 

@@ -515,6 +515,44 @@ class FetchCoordinatorTests(unittest.TestCase):
         self.assertEqual(self.missions.launched_discovered_documents(source_ref=ALPHAENGINE_SOURCE_REF), [])
 
 
+    def test_a_restart_retries_earlier_failures_without_waiting_the_interval(self) -> None:
+        """P11b: a restart means new code, so retry what failed under the old.
+
+        Waiting the full interval to learn whether a fix worked is a bad loop:
+        live, five filings failed on bugs that were corrected within the hour
+        and would have sat until the interval passed, which also kept the fix
+        itself unverified.
+        """
+
+        self.fetch_launcher.fail = True
+        self.coordinator.dispatch_once()
+        self.coordinator.dispatch_once()
+        self.coordinator.dispatch_once()
+        failed = self.missions.discovered_documents(
+            self.mission["id"], status="acquisition_failed"
+        )
+        self.assertTrue(failed)
+        # Same coordinator, interval not elapsed: nothing is retried.
+        tick = self.coordinator.dispatch_once()
+        self.assertEqual(tick["acquisition"]["status"], "idle")
+        self.assertFalse(tick["retried_after_restart"])
+
+        # A restart builds a fresh coordinator, which takes one catch-up pass.
+        # Time passes across a restart, which is what makes a failure recorded
+        # before it eligible at all.
+        self.clock.advance(minutes=1)
+        self.fetch_launcher.fail = False
+        restarted = MissionSourceDiscoveryCoordinator(
+            store=self.h.core, missions=self.missions, plan=self.plan,
+            search_launcher=self.search_launcher,
+            acquisition_launcher=self.fetch_launcher, clock=self.clock,
+        )
+        tick = restarted.dispatch_once()
+        self.assertTrue(tick["retried_after_restart"])
+        self.assertEqual((tick["acquisition"]["status"], tick["acquisition"]["retry"]), ("launched", True))
+        # Only one such pass, so a permanently failing document is not hot-looped.
+        self.assertFalse(restarted.dispatch_once()["retried_after_restart"])
+
     def test_ledger_records_why_the_fetch_failed_not_just_the_exit_code(self) -> None:
         """P9d-9: a blocked host and a network blip must not read the same.
 

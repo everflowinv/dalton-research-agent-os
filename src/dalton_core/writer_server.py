@@ -20,7 +20,9 @@ import re
 import signal
 import socket
 import stat
+import sys
 import threading
+import traceback
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -1609,6 +1611,13 @@ class WriterServer:
                 except PermissionError:
                     conn.sendall(error_frame(request_id, "forbidden", "operation is not permitted"))
                 except Exception as exc:  # all exceptions are intentionally sanitized
+                    # P11b: the caller's message stays sanitized -- it must not
+                    # leak internals -- but the writer records the real one for
+                    # itself. Without this an unmapped exception reaches the
+                    # owner as "writer service failed to complete the request"
+                    # and nothing anywhere says what it was, so a transient
+                    # lock and a governance refusal look identical.
+                    self._log_unhandled(request_id, exc)
                     conn.sendall(error_frame(request_id, self._error_code(exc), self._error_message(exc)))
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
@@ -3300,6 +3309,32 @@ class WriterServer:
         if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, WeeklyBriefError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError, ResearchConstitutionError, ResearchPlaybookError, CoverageMissionError, CompanyResearchViewError, ResearchDoctrineError, LLMResearchPlannerError, ModelForecastError, ForecastReconciliationError)):
             return "store_error"
         return "internal_error"
+
+    def _log_unhandled(self, request_id: Any, exc: BaseException) -> None:
+        """Record an operation failure on the writer's own side.
+
+        Only the unmapped ones carry a traceback: a mapped exception is an
+        answer the protocol already gives properly, while an unmapped one is
+        either a bug or an environment problem and is the case where the
+        sanitized message tells nobody anything.
+        """
+
+        mapped = self._error_message(exc) != "writer service failed to complete the request"
+        try:
+            if mapped:
+                print(
+                    f"writer op failed request={request_id} "
+                    f"error={type(exc).__name__}: {exc}",
+                    file=sys.stderr, flush=True,
+                )
+            else:
+                print(
+                    f"writer op failed (unmapped) request={request_id}",
+                    file=sys.stderr, flush=True,
+                )
+                traceback.print_exc()
+        except Exception:  # logging must never take the writer down
+            pass
 
     @staticmethod
     def _error_message(exc: Exception) -> str:
