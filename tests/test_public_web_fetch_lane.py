@@ -74,7 +74,12 @@ from tests.test_public_web_core_search import WebSearchHarness
 from tests.test_transcript_polish_model_worker import policy, profile
 
 
-BODY = b"<html><body><h1>Leadership update</h1><p>original bytes, never a snippet</p></body></html>"
+# The page names the company it is about. A page found by the query "Accenture
+# AI demand" whose body never says Accenture is not an Accenture page, and
+# admitting a claim from one is what put another company's earnings call into
+# EPAM's file (P13i).
+BODY = (b"<html><body><h1>Accenture leadership update</h1>"
+        b"<p>original bytes, never a snippet</p></body></html>")
 BODY_HASH = hashlib.sha256(BODY).hexdigest()
 SPEC = {"query": "Accenture AI demand", "date_after": "2026-08-01", "date_before": "2026-09-06"}
 
@@ -830,8 +835,8 @@ class P9d4bWriterOpsTests(unittest.TestCase):
         self.assertEqual((context["canonical_url"], context["host"]), ("https://example.com/investors?q=ai", "example.com"))
         self.assertEqual((context["source_renderer"], context["body_sha256"]), ("html-visible-blocks:0.1", BODY_HASH))
         self.assertEqual(context["source_content_hash"], hashlib.sha256(
-            "Leadership update\n\noriginal bytes, never a snippet".encode("utf-8")).hexdigest())
-        self.assertEqual(context["quotes"][0]["raw_text"], "Leadership update\n\noriginal bytes, never a snippet")
+            "Accenture leadership update\n\noriginal bytes, never a snippet".encode("utf-8")).hexdigest())
+        self.assertEqual(context["quotes"][0]["raw_text"], "Accenture leadership update\n\noriginal bytes, never a snippet")
         self.assertEqual((context["total_chars"], context["next_offset"], context["untrusted_source"]),
                          (len(context["quotes"][0]["raw_text"]), None, True))
         # P9d-15: drafting is gated only by the model configuration, exactly
@@ -888,7 +893,7 @@ class P9d4bWriterOpsTests(unittest.TestCase):
         })
         self.assertEqual(drafted["status"], "succeeded", drafted)
         suggestion = drafted["suggestions"][0]
-        self.assertEqual(suggestion["citation"]["raw_text"], "Leadership update\n\noriginal bytes, never a snippet")
+        self.assertEqual(suggestion["citation"]["raw_text"], "Accenture leadership update\n\noriginal bytes, never a snippet")
         self.assertEqual(suggestion["source_content_hash"], context["source_content_hash"])
         self.assertEqual(suggestion["citation_status"], "pending_human_citation_admission")
         self.assertTrue(suggestion["hermetic_fixture"])

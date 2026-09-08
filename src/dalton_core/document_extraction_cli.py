@@ -530,6 +530,7 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
             continue  # a human-requested run drafts only; admission is the mission's
         outcomes: list[dict[str, Any]] = []
         gated: str | None = None
+        unattributed: str | None = None
         for offset in offsets:
             try:
                 result = service.admit_suggestions(
@@ -538,12 +539,31 @@ def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionSer
             except Exception as exc:
                 gated = f"{type(exc).__name__}: {exc}"
                 break
+            if result["status"] == "not_attributed":
+                # Not a hold: this document will never be about this company,
+                # so leaving the review open would retry it forever.
+                unattributed = str(result.get("reason"))
+                break
             if result["status"] == "gated":
                 gated = str(result.get("reason"))
                 break
             for item in result.get("admitted", []):
                 outcomes.append({"review_id": review["review_id"], "offset": offset, **item})
         summary["admitted"].extend(outcomes)
+        if unattributed is not None:
+            try:
+                host.coverage_mission.resolve_document_review(
+                    review["review_id"], resolution="dismissed", actor_ref=actor,
+                    rationale=f"P13i: {unattributed}", expected_review_hash=review_hash,
+                )
+                status = "dismissed"
+            except Exception as exc:  # noqa: BLE001
+                status = f"unresolved: {type(exc).__name__}"
+            summary["resolved_reviews"].append({
+                "review_id": review["review_id"], "status": status,
+                "reason": unattributed,
+            })
+            continue
         if gated is not None:
             summary["resolved_reviews"].append({"review_id": review["review_id"], "status": "held", "reason": gated})
             continue

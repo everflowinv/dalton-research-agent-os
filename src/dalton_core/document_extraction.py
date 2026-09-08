@@ -1228,6 +1228,24 @@ class DocumentExtractionService:
         missing = sorted(self.ADMISSION_GRANTS - set(mission["autonomy"]["may_write"]))
         if missing:
             return {"status": "gated", "reason": f"mission does not grant {missing}", "admitted": []}
+        # P13i: the same question the figures pass asks, asked before a
+        # statement is admitted against a company. A free-text search filed a
+        # Haier earnings call and an EOS call under EPAM; the figures pass now
+        # refuses them, but qualitative claims were still being minted from
+        # them and then retired afterwards by claim_retirement -- 69 already
+        # retired for exactly this. Retiring after the fact is a worse version
+        # of not admitting in the first place.
+        #
+        # A filing is attributed by its accession and needs no text check; an
+        # AlphaEngine or web result is attributed by naming the company.
+        from .document_figure_grade import attribution_for
+
+        if attribution_for(self._document_spec_ref(context)) is None:
+            subject = self.document_names_subject(context)
+            if subject.get("checked") and not subject.get("names_subject"):
+                return {"status": "not_attributed", "admitted": [],
+                        "reason": "document never names this company; it is not about it",
+                        "subject": subject}
         from .research_auto_commit import DOCUMENT_QUALITATIVE_RULE_REF
         policy = self.writer.store.active_policy_version().to_dict()["policy"]
         rule = policy.get("research_candidate_auto_commit") or {}
