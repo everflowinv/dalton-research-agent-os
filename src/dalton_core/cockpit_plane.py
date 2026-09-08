@@ -488,11 +488,22 @@ class CockpitPlane:
         if not _table_exists(core, "coverage_mission_document_figures"):
             return {}
         out: dict[str, dict[str, Any]] = {}
-        for row in core.execute(
-            "SELECT company_ref,metric_ref,as_reported_label,period,value,unit,currency,"
-            "scale,source_grade,document_ref,created_at FROM coverage_mission_document_figures "
-            "ORDER BY created_at, figure_id"
-        ).fetchall():
+        retracted = _table_exists(
+            core, "coverage_mission_document_figure_retractions")
+        query = (
+            "SELECT f.company_ref,f.metric_ref,f.as_reported_label,f.period,f.value,"
+            "f.unit,f.currency,f.scale,f.source_grade,f.document_ref,f.created_at "
+            "FROM coverage_mission_document_figures f "
+        )
+        if retracted:
+            # A withdrawn figure is not shown: the owner asked for the wrong
+            # ones gone, and a wrong number on the page is worse than none.
+            query += (
+                "LEFT JOIN coverage_mission_document_figure_retractions r "
+                "ON r.figure_id=f.figure_id WHERE r.figure_id IS NULL "
+            )
+        query += "ORDER BY f.created_at, f.figure_id"
+        for row in core.execute(query).fetchall():
             entry = out.setdefault(row["company_ref"], {
                 "total": 0, "by_grade": {}, "latest": [],
             })

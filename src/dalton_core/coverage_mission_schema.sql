@@ -404,3 +404,29 @@ CREATE TRIGGER IF NOT EXISTS coverage_mission_sec_dispatch_settlements_no_update
 BEFORE UPDATE ON coverage_mission_sec_dispatch_settlements BEGIN SELECT RAISE(ABORT, 'SEC dispatch settlements are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS coverage_mission_sec_dispatch_settlements_no_delete
 BEFORE DELETE ON coverage_mission_sec_dispatch_settlements BEGIN SELECT RAISE(ABORT, 'SEC dispatch settlements are append-only'); END;
+
+-- P12i: a figure that should never have been recorded.
+--
+-- Retraction rather than deletion, and the reason is the point. Two of the
+-- first figures this system stored were "EPAM revenue = 14.3 billion RMB"
+-- (a Haier call) and "revenue of AUD 169 million" (an EOS call): the digits
+-- were verified against the bytes they cited, and the bytes were about another
+-- company. Deleting the rows would leave nothing to say that happened, and the
+-- next person to trust a figure deserves to know which ones were wrong and
+-- why. A retracted figure is excluded from every read; it is not data any more,
+-- it is a record of a mistake.
+CREATE TABLE IF NOT EXISTS coverage_mission_document_figure_retractions (
+    figure_id TEXT PRIMARY KEY
+        REFERENCES coverage_mission_document_figures(figure_id),
+    reason TEXT NOT NULL,
+    retracted_by TEXT NOT NULL,
+    retracted_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS coverage_mission_document_figure_retractions_authorized_insert
+BEFORE INSERT ON coverage_mission_document_figure_retractions WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'figure retraction requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_document_figure_retractions_no_update
+BEFORE UPDATE ON coverage_mission_document_figure_retractions BEGIN SELECT RAISE(ABORT, 'figure retractions are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_document_figure_retractions_no_delete
+BEFORE DELETE ON coverage_mission_document_figure_retractions BEGIN SELECT RAISE(ABORT, 'figure retractions are append-only'); END;

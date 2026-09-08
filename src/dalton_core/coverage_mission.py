@@ -183,6 +183,17 @@ _DISCOVERY_AUTHORIZATION_FIELDS = frozenset({
 DOCUMENT_FIGURE_VERIFIER_REF = "verifier:document-figure-citation-digits:0.1"
 
 
+def _period_key(value: Any) -> str:
+    """The period as an identity, not as the document happened to spell it.
+
+    "Fiscal 2025" and "fiscal 2025" are the same period, and treating them as
+    two let one 10-K record the same $69.7B of revenue twice. Case and spacing
+    are presentation; the period is what it says.
+    """
+
+    return re.sub(r"[^a-z0-9]+", "-", str(value).lower()).strip("-")
+
+
 class CoverageMissionError(RuntimeError):
     """Base error for the coverage mission authority."""
 
@@ -1721,21 +1732,36 @@ class CoverageMissionAuthority:
                     f"figure is not supported by the quote it cites: {exc}"
                 ) from exc
         now = _now()
-        recorded, duplicates = [], []
+        recorded, duplicates, retracted = [], [], []
         with self._transaction() as cur:
             for wire in wires:
+                # P12i: what makes two figures the same fact is the company,
+                # the measure, the period and the document -- not which window
+                # happened to find it. ACN's first two figures were one fact:
+                # $69.7B of fiscal 2025 revenue, read at offset 40,800 and
+                # again at 186,000, kept apart only by "Fiscal 2025" against
+                # "fiscal 2025". The quote is data, not identity.
                 figure_id = _ref("mission-document-figure", {
                     "company_ref": company_ref,
                     "metric_ref": wire["metric_ref"],
-                    "period": wire["period"],
+                    "period": _period_key(wire["period"]),
                     "document_ref": document_ref,
-                    "quote_id": wire["quote_id"],
                 })
                 if cur.execute(
                     "SELECT 1 FROM coverage_mission_document_figures WHERE figure_id=?",
                     (figure_id,),
                 ).fetchone() is not None:
-                    duplicates.append(wire["metric_ref"])
+                    # A withdrawn figure keeps its identity, so re-reading the
+                    # same fact from the same document cannot quietly reinstate
+                    # it. Reported separately: "we already have this" and "we
+                    # decided this one was wrong" are different answers.
+                    if cur.execute(
+                        "SELECT 1 FROM coverage_mission_document_figure_retractions "
+                        "WHERE figure_id=?", (figure_id,),
+                    ).fetchone() is not None:
+                        retracted.append(wire["metric_ref"])
+                    else:
+                        duplicates.append(wire["metric_ref"])
                     continue
                 record = {
                     "figure_id": figure_id, "company_ref": company_ref,
@@ -1769,7 +1795,47 @@ class CoverageMissionAuthority:
                 )
                 recorded.append(wire["metric_ref"])
         return {"recorded": recorded, "duplicates": duplicates,
-                "source_grade": source_grade}
+                "retracted": retracted, "source_grade": source_grade}
+
+    def retract_document_figure(
+        self, figure_id: str, *, reason: str, retracted_by: str
+    ) -> dict[str, Any]:
+        """Withdraw a figure that should never have been recorded."""
+
+        figure_id = _text(figure_id, "figure_id")
+        reason = _text(reason, "reason")
+        retracted_by = _text(retracted_by, "retracted_by")
+        row = self.connection.execute(
+            "SELECT 1 FROM coverage_mission_document_figures WHERE figure_id=?",
+            (figure_id,),
+        ).fetchone()
+        if row is None:
+            raise CoverageMissionNotFound("document figure was not found")
+        existing = self.connection.execute(
+            "SELECT * FROM coverage_mission_document_figure_retractions WHERE figure_id=?",
+            (figure_id,),
+        ).fetchone()
+        if existing is not None:
+            return {**dict(existing), "status_marker": "duplicate"}
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_document_figure_retractions("
+                "figure_id,reason,retracted_by,retracted_at) VALUES(?,?,?,?)",
+                (figure_id, reason, retracted_by, now),
+            )
+        return {"figure_id": figure_id, "reason": reason, "retracted_by": retracted_by,
+                "retracted_at": now, "status_marker": "fresh"}
+
+    def retracted_document_figures(self) -> list[dict[str, Any]]:
+        """Every withdrawn figure and why, so the mistake stays legible."""
+
+        return [dict(row) for row in self.connection.execute(
+            "SELECT r.*, f.company_ref, f.metric_ref, f.value, f.unit, f.currency, "
+            "f.document_ref FROM coverage_mission_document_figure_retractions r "
+            "JOIN coverage_mission_document_figures f ON f.figure_id=r.figure_id "
+            "ORDER BY r.retracted_at, r.figure_id"
+        ).fetchall()]
 
     def document_figures(
         self,
@@ -1786,7 +1852,13 @@ class CoverageMissionAuthority:
         exactly those, without the spoken ones having been discarded.
         """
 
-        query = "SELECT * FROM coverage_mission_document_figures WHERE company_ref=?"
+        # A retracted figure is not data any more; no read returns it.
+        query = (
+            "SELECT f.* FROM coverage_mission_document_figures f "
+            "LEFT JOIN coverage_mission_document_figure_retractions r "
+            "ON r.figure_id=f.figure_id "
+            "WHERE r.figure_id IS NULL AND f.company_ref=?"
+        )
         params: list[Any] = [_text(company_ref, "company_ref")]
         if source_grade is not None:
             from .document_figure_grade import GRADES
@@ -1795,14 +1867,14 @@ class CoverageMissionAuthority:
                 raise CoverageMissionValidationError(
                     f"source_grade must be one of {sorted(GRADES)}"
                 )
-            query += " AND source_grade=?"
+            query += " AND f.source_grade=?"
             params.append(source_grade)
         if metric_ref is not None:
-            query += " AND metric_ref=?"
+            query += " AND f.metric_ref=?"
             params.append(_text(metric_ref, "metric_ref"))
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 2000:
             raise CoverageMissionValidationError("document figure limit must be 1..2000")
-        query += " ORDER BY created_at, figure_id LIMIT ?"
+        query += " ORDER BY f.created_at, f.figure_id LIMIT ?"
         params.append(limit)
         return [dict(row) for row in self.connection.execute(query, params).fetchall()]
 
