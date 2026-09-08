@@ -1972,6 +1972,26 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 ## 下一阶段顺序
 
+### thesis-impact 定时任务已按 owner 决定停泊（2026-09-08）
+
+**没有废弃，是先停下来。** `space.lumos.dalton.thesis-impact` 评估的是"新证据对 ACN thesis 的影响"，
+它真干过活（成功 1641 次，ACN 第一条真实链就是它闭的）。但它从 2026-09-02 起一直挂着：
+先是 policy-3 → policy-4 换版把 `eligible_assessment` 永久拒掉（1228 次 exit 2）；
+[停泊修复](reports/thesis-impact-policy-rollover-park-v0.1-2026-09-06.md)上线后确实生效了
+（261 次 `blocked_pending_human`）；随后 ACN 新的 research plan 进来，assessment 连续失败，
+再之后每 5 分钟一次 `conflict: request conflicts with existing immutable data`（121 次，根因未查）。
+
+thesis 层（`deep_insight_gate` / `thesis_admission`）在 Phase 10 里本来就是靠后的切片，
+当前重点还是 Initial Screen 的资料底座，所以 owner 决定先停、到 thesis 切片再一次性修好并重开。
+
+**停的方式**：`service.json` 的 `thesis_impact.enabled` 改成 `false`。
+`ServiceConfig` 在 `enabled=false` 时把 `thesis_impact` 解析成 `None`，
+LaunchAgent 渲染器于是不写 plist 并删掉旧的，`install.sh` 的 `[[ -f "$plist" ]]` 自然跳过——
+**重装不会把它带回来**。`config` 整块原样保留，重开只需把 `enabled` 改回 `true` 再跑一次安装。
+
+**没有动到别的**：`thesis-impact-budget.sqlite` 是抽取车道的日预算账本，和这个定时任务同名但不同用途。
+当天 332 次预算 admission 全部来自 `document-extraction`，这个任务一次都没有——停它不影响抽取。
+
 ### 当前基线：Phase 10（v1.1，2026-09-07）
 
 按 [v1.1](reports/vision-and-next-phase-v1.1-2026-09-07.md) 的顺序执行：~~P10a 阶段账本启动与资料底座清单~~（已完成）→
