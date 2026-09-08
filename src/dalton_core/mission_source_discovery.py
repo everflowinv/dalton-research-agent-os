@@ -110,6 +110,20 @@ ACQUISITION_WAIT_SECONDS = 90.0
 # unavailable:RemoteError -- the acquisitions were real work, but the tick's
 # budget and status never reached the cockpit, so the lane looked dead.
 TICK_BUDGET_SECONDS = 20.0
+# P13h: how far past a checklist requirement a spec may keep collecting.
+#
+# The cadence says how *often* a search may be repeated. It never said whether
+# there was any reason to, so a spec whose requirement was met years of ticks
+# ago went on searching every seven or fourteen days forever. Live that is 91
+# industry-demand documents against a requirement of three, and 132
+# competitive-landscape against three -- 223 documents for a need of six, with
+# 83 more queued.
+#
+# Not a hard stop at the requirement, because the checklist counts documents
+# and not their age: an item holding four transcripts from last year is
+# "complete" and still wants this quarter's. Twice the requirement leaves room
+# for that while ending a thirty-fold overshoot.
+SATISFIED_OVERSHOOT = 2
 
 
 def _monotonic() -> float:
@@ -1196,6 +1210,46 @@ class MissionSourceDiscoveryCoordinator:
         return document_in_authority(self.store.connection, document_ref)
 
     # -- discovery launch ----------------------------------------------------
+    def _satisfied_block(self, mission: Mapping[str, Any], company_ref: str,
+                         spec_ref: str) -> str | None:
+        """Whether the checklist item this spec feeds already has more than enough.
+
+        Cadence is a ceiling on how often a search may be repeated; this is the
+        question nobody was asking -- whether there is any reason to.
+        """
+
+        from .mission_stage import INDUSTRY_BASE_ITEMS, SOURCE_BASE_ITEMS
+
+        item = next(
+            (i for i in (*SOURCE_BASE_ITEMS, *INDUSTRY_BASE_ITEMS)
+             if spec_ref in i["spec_refs"]),
+            None,
+        )
+        if item is None:
+            # A spec no checklist item feeds has no requirement to be past;
+            # the cadence remains its only bound.
+            return None
+        try:
+            from .mission_stage import evaluate_industry, evaluate_mission
+
+            if item in INDUSTRY_BASE_ITEMS:
+                entry = evaluate_industry(self.store.connection, mission)
+                items = entry["items"]
+            else:
+                rows = evaluate_mission(self.store.connection, mission)
+                row = next((r for r in rows if r["company_ref"] == company_ref), None)
+                items = row["items"] if row else []
+        except Exception:  # noqa: BLE001 - an unreadable checklist is not a block
+            return None
+        held = next((i for i in items if i["item_ref"] == item["item_ref"]), None)
+        if held is None:
+            return None
+        ceiling = int(held["required"]) * SATISFIED_OVERSHOOT
+        if held["have"] >= ceiling:
+            return (f"{item['item_ref']} already holds {held['have']} of "
+                    f"{held['required']} required; not searching past {ceiling}")
+        return None
+
     def _cadence_block(self, mission_version_ref: str, company_ref: str, spec: Mapping[str, Any]) -> str | None:
         latest = self.missions.discovery_dispatches(
             mission_version_ref, company_ref=company_ref, spec_ref=spec["spec_ref"], limit=1
@@ -1285,7 +1339,9 @@ class MissionSourceDiscoveryCoordinator:
                 skipped.append({"company_ref": company_ref, "reason": "not in discovery plan"})
                 continue
             for spec in self.plan["specs"]:
-                block = self._cadence_block(mission["id"], company_ref, spec)
+                block = self._satisfied_block(mission, company_ref, spec["spec_ref"])
+                if block is None:
+                    block = self._cadence_block(mission["id"], company_ref, spec)
                 if block is not None:
                     skipped.append({
                         "company_ref": company_ref, "spec_ref": spec["spec_ref"], "reason": block,
