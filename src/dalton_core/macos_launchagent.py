@@ -142,6 +142,12 @@ def render(
             # and nothing is queued until web search itself is connected.
             "--web-fetch-governance",
             str(state / "connector-governance" / "web-fetch-v1.json"),
+            # P10u: the SEC filings index runs under the record the owner
+            # signed; its plan is the 0.4 shape seeded by install.sh.
+            "--sec-filings-governance",
+            str(state / "connector-governance" / "sec-filings-index-v1.json"),
+            "--sec-filings-discovery-plan",
+            str(state / "discovery-plans" / "us-it-services-sec-filings-v1.json"),
         ] + (
             # P9d-4d: the host-owned web search broker is an OpenClaw plugin
             # socket in the same state directory as the model broker, so its

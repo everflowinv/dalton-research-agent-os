@@ -317,7 +317,15 @@ def cited_hosts_from_discovery(
     envelope = json.loads(row["record_json"])
     if envelope.get("content_hash") != row["content_hash"]:
         raise PublicWebCoreFetchError("discovery source envelope hash drifted")
-    return cited_url_hosts(spool.read_object(envelope["raw_response_hash"]), envelope)
+    raw = spool.read_object(envelope["raw_response_hash"])
+    if envelope.get("operation") == SEC_FILINGS_INDEX_OPERATION:
+        from .sec_filings_index import build_sec_filing_url_authorities
+
+        return {
+            record_ref: authority["host"]
+            for record_ref, authority in build_sec_filing_url_authorities(raw, envelope).items()
+        }
+    return cited_url_hosts(raw, envelope)
 
 
 def validate_public_web_fetch_manifest(value: Mapping[str, Any]) -> dict[str, Any]:

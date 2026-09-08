@@ -39,7 +39,7 @@ from typing import Any
 from .capability_catalog import CapabilityCatalog
 from .connector import ConnectorStore
 from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
-from .mission_source_discovery import WEB_SEARCH_SOURCE_REF
+from .mission_source_discovery import SEC_SOURCE_REF, WEB_SEARCH_SOURCE_REF
 from .observability import ObservabilityStore
 from .public_http_transport import PublicHttpTransport
 from .public_web_core_fetch import (
@@ -105,8 +105,11 @@ def _discovery_for_url(connection: Any, url_ref: str) -> dict[str, Any]:
     row = connection.execute(
         "SELECT d.* FROM coverage_mission_discovered_documents d "
         "JOIN coverage_mission_pointer p ON p.mission_version_id=d.mission_version_ref "
-        "WHERE d.document_ref=? AND d.source_ref=? ORDER BY d.created_at DESC,d.record_id DESC LIMIT 1",
-        (url_ref, WEB_SEARCH_SOURCE_REF),
+        "WHERE d.document_ref=? AND d.source_ref IN (?,?) "
+        "ORDER BY d.created_at DESC,d.record_id DESC LIMIT 1",
+        # P10u: a filing is discovered by the SEC index and fetched by this
+        # same lane, so the row it came from may belong to either source.
+        (url_ref, WEB_SEARCH_SOURCE_REF, SEC_SOURCE_REF),
     ).fetchone()
     if row is None:
         raise PublicWebCoreFetchError("url_ref is not a discovered document of an active mission")

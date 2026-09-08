@@ -93,7 +93,11 @@ SOURCE_BASE_ITEMS: tuple[dict[str, Any], ...] = (
         "required": 1,
         "counted_by": "acquired_documents",
         "source_ref": "source:sec-edgar",
-        "spec_refs": (),
+        # P10u: the channel exists now -- the filings index names the 10-K and
+        # the public-web fetch lane retrieves it. The note below is still the
+        # honest answer on an install whose discovery plans do not carry this
+        # spec, because there the item genuinely has no route.
+        "spec_refs": ("annual-report-10k",),
         "gap_note": "还没有获取 10-K 正文的通道；现在只从 SEC 取了财报数字",
     },
     {

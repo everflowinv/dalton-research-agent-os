@@ -93,6 +93,7 @@ DISCOVERY_PLAN_SCHEMA_VERSIONS: tuple[str, ...] = (
 ALPHAENGINE_SOURCE_REF = "source:alphaengine"
 WEB_SEARCH_SOURCE_REF = "source:web-search"
 SEC_SOURCE_REF = "source:sec-edgar"
+SEC_FILINGS_TICKET_PREFIX = "sec-filings-index"
 # A 10-K window holds a couple of filings; the ceiling only has to be
 # above that, and the adapter fails closed if the source exceeds it.
 SEC_INDEX_LIMIT = 100
@@ -861,6 +862,32 @@ def _parse_wire_time(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
+class SecFilingsIndexLauncher(_SearchLauncherBase):
+    """Launch the SEC ``list_filings`` discovery child (P10u).
+
+    The index is plain public HTTPS with no broker and no credential, so the
+    shared launch protocol needs nothing added: only the source, the child
+    module and how the approval is loaded differ.
+    """
+
+    SOURCE_REF = SEC_SOURCE_REF
+    TICKET_PREFIX = SEC_FILINGS_TICKET_PREFIX
+    CHILD_MODULE = "dalton_core.sec_filings_index_cli"
+    LIVE_TRANSPORT_LABEL = "data.sec.gov"
+
+    def __init__(self, *, user_agent: str | None = None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.user_agent = user_agent
+
+    def _load_governance_record(self) -> Any:
+        from .connector_governance import load_connector_governance
+
+        return load_connector_governance(self.governance_path)
+
+    def _extra_command_args(self) -> list[str]:
+        return [] if self.user_agent is None else ["--user-agent", self.user_agent]
+
+
 class MissionSourceDiscoveryCoordinator:
     """Advance one plan's source discovery by at most one search + one acquisition.
 
@@ -1118,6 +1145,9 @@ class MissionSourceDiscoveryCoordinator:
     def _budget(self, mission_cap: int) -> dict[str, int]:
         """Remaining trailing-24h calls for this plan's source.
 
+        SEC filings index: the plan budget alone, because the reads are free
+        public HTTPS against a rate-limited endpoint rather than metered calls.
+
         AlphaEngine: the tighter of the mission grant and the owner cap
         (search + document pages share one window), further tightened by a
         0.2 plan budget.  Web search: the plan budget alone bounds Gemini
@@ -1126,7 +1156,18 @@ class MissionSourceDiscoveryCoordinator:
         """
 
         plan_cap = (self.plan.get("budget") or {}).get("max_calls_24h")
-        if self.source_ref == WEB_SEARCH_SOURCE_REF:
+        if self.source_ref == SEC_SOURCE_REF:
+            # P10u: SEC index reads are free public HTTPS and are not
+            # AlphaEngine calls. Falling through to the AlphaEngine window
+            # gated them behind an unrelated source's exhausted quota, which
+            # is what the first live tick reported. The plan's own budget is
+            # the cap, as it is for web search.
+            from .sec_filings_index_core import count_recent_index_calls
+
+            spent = count_recent_index_calls(self.store.connection, as_of=self.clock())
+            cap = int(plan_cap)
+            budget = {"spent": spent, "cap": cap, "remaining": max(0, cap - spent)}
+        elif self.source_ref == WEB_SEARCH_SOURCE_REF:
             # Searches and page fetches share the plan window, as AlphaEngine
             # searches and document pages share the mission window.
             spent = count_recent_web_search_calls(

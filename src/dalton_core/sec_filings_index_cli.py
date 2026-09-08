@@ -221,7 +221,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--governance", type=Path, required=True)
-    parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--discovery-plan", type=Path, required=True)
     parser.add_argument("--company-ref", required=True)
     parser.add_argument("--spec-ref", required=True)
     parser.add_argument("--requested-by", required=True)
@@ -248,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
         print("--as-of must be YYYY-MM-DD", file=sys.stderr)
         return 1
     governance = load_connector_governance(args.governance)
-    plan = load_discovery_plan(args.plan)
+    plan = load_discovery_plan(args.discovery_plan)
     summary = run_discovery(
         state_dir=args.state_dir,
         governance=governance,

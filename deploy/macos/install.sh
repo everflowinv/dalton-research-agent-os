@@ -116,6 +116,14 @@ if [[ ! -f "$web_plan_file" && -f "$repo_root/deploy/phase9/p9d4-us-it-services-
   cp "$repo_root/deploy/phase9/p9d4-us-it-services-web-search-plan-v3.json" "$web_plan_file"
   chmod 600 "$web_plan_file"
 fi
+# P10u: the SEC filings index asks for a form per issuer rather than a phrase,
+# so it is a 0.4 plan. Seeded once and hash bound like the others; the approval
+# it runs under is the one the owner already signed.
+sec_plan_file="$plan_dir/us-it-services-sec-filings-v1.json"
+if [[ ! -f "$sec_plan_file" && -f "$repo_root/deploy/phase10/p10-us-it-services-sec-filings-plan-v1.json" ]]; then
+  cp "$repo_root/deploy/phase10/p10-us-it-services-sec-filings-plan-v1.json" "$sec_plan_file"
+  chmod 600 "$sec_plan_file"
+fi
 # ADR-0005 / P9d-17a: the writer needs an approved extraction model
 # configuration for drafting to run as mission automation.  Idempotent: appends
 # the extraction routing policy only if its filters changed, writes the closed

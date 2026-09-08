@@ -43,6 +43,9 @@ TICKET_PREFIX = "public-web-fetch"
 DEFAULT_CATALOG_NAME = "catalog-web-fetch.sqlite"
 LIVE_MODE_ARGS = ("--allow-network",)
 _URL_REF_RE = re.compile(r"public-web-url:sha256:[0-9a-f]{64}\Z")
+# P10u: the SEC index queues the filing, and the fetch child turns it
+# back into a URL from the discovery envelope.
+_FILING_REF_RE = re.compile(r"sec:filing:[0-9]{10}-[0-9]{2}-[0-9]{6}\Z")
 _TICKET_RE = re.compile(r"public-web-fetch:[0-9a-f]{24}\Z")
 _HUMAN_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
 _AUTOMATION_RE = re.compile(r"automation:[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
@@ -167,8 +170,13 @@ class PublicWebFetchLauncher:
         return self._launch(document_ref=document_ref, requested_by=caller_ref)
 
     def _launch(self, *, document_ref: str, requested_by: str) -> dict[str, Any]:
-        if not isinstance(document_ref, str) or _URL_REF_RE.fullmatch(document_ref) is None:
-            raise FetchLaunchRejected("document_ref must be public-web-url:sha256:<hash>")
+        if not isinstance(document_ref, str) or (
+            _URL_REF_RE.fullmatch(document_ref) is None
+            and _FILING_REF_RE.fullmatch(document_ref) is None
+        ):
+            raise FetchLaunchRejected(
+                "document_ref must be public-web-url:sha256:<hash> or sec:filing:<accession>"
+            )
         governance = self.load_governance()
         with self._lock:
             if self._current is not None and self._current[1].poll() is None:

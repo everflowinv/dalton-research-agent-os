@@ -35,6 +35,7 @@ from .mission_source_discovery import (
     DiscoveryPlanError,
     DiscoveryTicketNotFound,
     MissionSourceDiscoveryCoordinator,
+    SEC_SOURCE_REF,
     WEB_SEARCH_SOURCE_REF,
     WEB_SEARCH_TICKET_PREFIX,
     WebSearchLauncher,
@@ -1026,6 +1027,8 @@ class WriterServer:
         web_fetch_launcher: PublicWebFetchLauncher | None = None,
         document_extraction_launcher: Any | None = None,
         document_extraction_max_windows: int | None = None,
+        sec_filings_launcher: Any | None = None,
+        sec_filings_plan_path: str | Path | None = None,
         initial_screen_launcher: Any | None = None,
     ):
         if not principals:
@@ -1058,9 +1061,15 @@ class WriterServer:
             else str(Path(web_search_plan_path).expanduser().resolve())
         )
         self._web_source_discovery: MissionSourceDiscoveryCoordinator | None = None
+        self._sec_filings_source_discovery: MissionSourceDiscoveryCoordinator | None = None
+        self._sec_filings_plan_error: str | None = None
         self._web_search_plan_error: str | None = None
         # P9d-4b: out-of-process public-web fetch of URLs a web search cited.
         self._web_fetch_launcher = web_fetch_launcher
+        self._sec_filings_launcher = sec_filings_launcher
+        self._sec_filings_plan_path = (
+            None if sec_filings_plan_path is None else Path(sec_filings_plan_path)
+        )
         self._document_extraction_launcher = document_extraction_launcher
         if document_extraction_max_windows is not None and not (
             1 <= int(document_extraction_max_windows) <= 50
@@ -1389,6 +1398,26 @@ class WriterServer:
                     search_launcher=self._web_search_launcher,
                     acquisition_launcher=self._web_fetch_launcher,
                     # P9d-13: read-only route from a pre-ledger row back to its host.
+                    spool_dir=self._transcript_spool_dir,
+                )
+        if self._sec_filings_plan_path is not None:
+            try:
+                plan = load_discovery_plan(self._sec_filings_plan_path)
+                if plan["source_ref"] != SEC_SOURCE_REF:
+                    raise DiscoveryPlanError("SEC filings plan source_ref is not source:sec-edgar")
+            except (OSError, ValueError) as exc:
+                self._sec_filings_plan_error = f"SEC filings discovery plan is unusable: {exc}"
+            else:
+                self._sec_filings_plan_error = None
+                # P10u: the filing is fetched by the same public-web lane that
+                # fetches a cited page, so this coordinator shares that
+                # launcher rather than standing up a second one.
+                self._sec_filings_source_discovery = MissionSourceDiscoveryCoordinator(
+                    store=self._store,
+                    missions=self._coverage_mission,
+                    plan=plan,
+                    search_launcher=self._sec_filings_launcher,
+                    acquisition_launcher=self._web_fetch_launcher,
                     spool_dir=self._transcript_spool_dir,
                 )
         if self._document_extraction_launcher is not None:
@@ -2413,6 +2442,13 @@ class WriterServer:
             return self.source_discovery, self.search_launcher
         if source_ref == WEB_SEARCH_SOURCE_REF:
             return self.web_source_discovery, self.web_search_launcher
+        if source_ref == SEC_SOURCE_REF:
+            if self._sec_filings_source_discovery is None or self._sec_filings_launcher is None:
+                raise DiscoveryLaunchRejected(
+                    self._sec_filings_plan_error
+                    or "SEC filings index is not configured on this writer"
+                )
+            return self._sec_filings_source_discovery, self._sec_filings_launcher
         raise DiscoveryLaunchRejected(f"{source_ref} is not a search-driven discovery source")
 
     def _op_dispatch_mission_source_discovery(self, p: Mapping[str, Any]) -> Any:
@@ -2434,6 +2470,13 @@ class WriterServer:
             }
         else:
             result["web_search"] = self.web_source_discovery.dispatch_once()
+        if self._sec_filings_source_discovery is None:
+            result["sec_filings_index"] = {
+                "status": "unconfigured",
+                "reason": self._sec_filings_plan_error or "no SEC filings plan on this writer",
+            }
+        else:
+            result["sec_filings_index"] = self._sec_filings_source_discovery.dispatch_once()
         return result
 
     def _mission_stage_driver(self) -> Any:
@@ -2442,7 +2485,11 @@ class WriterServer:
         from .mission_stage import MissionStageDriver, planned_spec_refs
 
         plans = []
-        for coordinator in (self._source_discovery, self._web_source_discovery):
+        for coordinator in (
+            self._source_discovery,
+            self._web_source_discovery,
+            self._sec_filings_source_discovery,
+        ):
             if coordinator is None:
                 continue
             try:
@@ -2467,7 +2514,11 @@ class WriterServer:
         from .claim_review import ClaimReviewDriver, needles_from_plans
 
         plans = []
-        for coordinator in (self._source_discovery, self._web_source_discovery):
+        for coordinator in (
+            self._source_discovery,
+            self._web_source_discovery,
+            self._sec_filings_source_discovery,
+        ):
             if coordinator is not None:
                 plans.append(coordinator.plan)
         return ClaimReviewDriver(
@@ -3366,6 +3417,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--web-search-broker-client-id", default="client:dalton-core")
     parser.add_argument("--web-search-broker-profile-id", default="profile:web-search")
     parser.add_argument(
+        "--sec-filings-governance",
+        help="owner-approved SEC filings-index capability record (P10u); enables "
+             "discovering an issuer's filings and queueing them for the fetch lane",
+    )
+    parser.add_argument(
+        "--sec-filings-discovery-plan",
+        help="hash-bound 0.4 SEC filings discovery plan (issuer + form per company)",
+    )
+    parser.add_argument(
         "--web-fetch-governance",
         help="public-web fetch_get governance record (P9d-4b); enables fetching URLs a "
              "web search cited (credential-free public HTTPS)",
@@ -3549,6 +3609,16 @@ def main(argv: list[str] | None = None) -> int:
                 model_config_path=args.document_extraction_model_config,
                 scheduler_db=args.scheduler,
             )
+        sec_filings_launcher = None
+        if args.sec_filings_governance is not None and args.sec_filings_discovery_plan is not None:
+            from .mission_source_discovery import SecFilingsIndexLauncher
+
+            sec_filings_launcher = SecFilingsIndexLauncher(
+                state_dir=Path(args.db).expanduser().resolve().parent,
+                governance_path=args.sec_filings_governance,
+                plan_path=args.sec_filings_discovery_plan,
+                spool_dir=args.transcript_spool_dir,
+            )
         document_extraction_launcher = None
         if args.document_extraction_model_config is not None:
             document_extraction_launcher = DocumentExtractionLauncher(
@@ -3574,6 +3644,8 @@ def main(argv: list[str] | None = None) -> int:
             document_extraction_model_config=(None if args.document_extraction_model_config is None
                 else json.loads(Path(args.document_extraction_model_config).read_text(encoding="utf-8"))),
             document_extraction_max_windows=args.document_extraction_max_windows,
+            sec_filings_launcher=sec_filings_launcher,
+            sec_filings_plan_path=args.sec_filings_discovery_plan,
             search_launcher=search_launcher,
             discovery_plan_path=args.alphaengine_discovery_plan,
             web_search_launcher=web_search_launcher,

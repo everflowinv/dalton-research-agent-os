@@ -86,6 +86,26 @@ TIMEOUT_MS = 60_000
 DEFAULT_USER_AGENT = "Dalton Research Agent OS SEC filings-index lane (owner: lumos)"
 
 
+TRAILING_WINDOW_HOURS = 24
+
+
+def count_recent_index_calls(connection: Any, *, as_of: datetime | None = None) -> int:
+    """Trailing-24h ``list_filings`` invocations against the Core profile."""
+
+    from datetime import timedelta
+
+    now = as_of or datetime.now(timezone.utc)
+    window_start = (now - timedelta(hours=TRAILING_WINDOW_HOURS)).isoformat(
+        timespec="microseconds"
+    )
+    row = connection.execute(
+        "SELECT COUNT(*) FROM connector_invocations "
+        "WHERE connector_profile_ref=? AND created_at >= ?",
+        (f"{PROFILE_PREFIX}:v1", window_start),
+    ).fetchone()
+    return int(row[0])
+
+
 class SecFilingsIndexCoreError(RuntimeError):
     """The governed filings-index call could not be run or bound."""
 
