@@ -240,3 +240,65 @@ class WorkerDriftTests(unittest.TestCase):
             DocumentExtractionModelWorker._rebuild(work, moved).to_dict(),
             work.to_dict(),
         )
+
+
+class PromptFitsItsBudgetTests(unittest.TestCase):
+    """P13c: a prompt that outgrows its own budget makes the pass go dark.
+
+    Live, adding one instruction pushed estimated_input_tokens to 16,081
+    against a 16,000 bound. Every profile was rejected with
+    work_order_budget_input_exceeded, and the figures pass reported nothing
+    worse than "no_result" for it -- so the whole pass was silently dead.
+    """
+
+    def full_window(self):
+        from dalton_core.document_extraction import QUOTE_CHARS, WINDOW_CHARS
+
+        return {
+            "company_ref": "company:sec-cik:0001467373",
+            "company_ticker": "ACN",
+            "document_ref": "sec:filing:0001467373-25-000217",
+            "content_hash": "0" * 64,
+            "created_at": "2026-09-08T00:00:00.000000+00:00",
+            "id": "extraction-context:1", "source_manifest_ref": "manifest:1",
+            "offset": 0, "end": WINDOW_CHARS,
+            "quotes": [
+                {"quote_id": f"quote:{start}:{start + QUOTE_CHARS}:{'a' * 16}",
+                 "raw_text": "x" * QUOTE_CHARS}
+                for start in range(0, WINDOW_CHARS, QUOTE_CHARS)
+            ],
+        }
+
+    def slots(self, count):
+        return [{"metric_ref": f"metric:m-{i}", "label": f"measure {i}",
+                 "unit": "currency",
+                 "prompt": f"the measure {i} for the period as reported by the company"}
+                for i in range(count)]
+
+    def test_a_full_window_prompt_fits_the_budget_it_declares(self):
+        from dalton_core.document_numeric_extraction import build_work
+
+        context = self.full_window()
+        for count in (1, 6):
+            work = build_work(context, self.slots(count))
+            # The worker bounds the prompt in bytes against max_input_tokens,
+            # and the router rejects every profile when the estimate exceeds
+            # it, so this is the number that matters.
+            self.assertLess(len(work.question.encode("utf-8")),
+                            work.budget["max_input_tokens"], f"{count} slots")
+
+    def test_there_is_real_headroom_not_a_hair(self):
+        # 81 tokens of headroom is how this broke. A future sentence must not
+        # be able to silently kill the pass.
+        from dalton_core.document_numeric_extraction import build_work
+
+        work = build_work(self.full_window(), self.slots(6))
+        spare = work.budget["max_input_tokens"] - len(work.question.encode("utf-8"))
+        self.assertGreater(spare, 4000)
+
+    def test_the_discovery_prompt_fits_its_budget_too(self):
+        from dalton_core.metric_discovery_extraction import build_work as discovery_work
+
+        work = discovery_work(self.full_window())
+        self.assertLess(len(work.question.encode("utf-8")),
+                        work.budget["max_input_tokens"])

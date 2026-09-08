@@ -216,8 +216,16 @@ def build_work(
         # Smaller than the qualitative window's budget: this answer is a short
         # list of figures or nothing, not prose.
         budget={
-            "max_input_tokens": 16000, "max_output_tokens": 1500,
-            "max_total_tokens": 17500, "max_cost_usd": 0.03, "max_seconds": 60,
+            # P13c: headroom, because the prompt is not fixed. Adding the
+            # subject instruction grew it by ~1.5 KB and put the estimate 81
+            # tokens over a 16,000 bound; the router then rejected every
+            # profile with work_order_budget_input_exceeded and the figures
+            # pass went dark, reported as nothing worse than "no_result".
+            # The worst case is a full 12,000-char window with the maximum six
+            # slots, about 16.5 KB. This fits it with room for the next
+            # sentence somebody adds.
+            "max_input_tokens": 32000, "max_output_tokens": 1500,
+            "max_total_tokens": 33500, "max_cost_usd": 0.03, "max_seconds": 60,
         },
         idempotency_key="document-numeric:" + digest,
         declared_side_effects=(),
