@@ -167,8 +167,19 @@ class AdapterTests(unittest.TestCase):
         result = normalize_sec_submissions(payload(), PARAMETERS, provider_status=200)
         self.assertEqual(len(result["records"]), 3)
         self.assertIn("sec:filing:0000000003-25-000003", result["source_record_refs"])
+        # P10g: a window that starts before ``recent`` does would miss the
+        # filings on the ``files`` pages, so it stays refused.
         with self.assertRaises(SecPublicAdapterError):
-            normalize_sec_submissions(payload(), {**PARAMETERS, "date_to": "2027-01-01"}, provider_status=200)
+            normalize_sec_submissions(payload(), {**PARAMETERS, "date_from": "2019-01-01"}, provider_status=200)
+        # Running past the newest filing is a different question: there is
+        # nothing after the newest filing to miss, and refusing it made "every
+        # 10-K up to today" unaskable for a company still filing 8-Ks.
+        beyond = normalize_sec_submissions(
+            payload(), {**PARAMETERS, "date_to": "2027-01-01"}, provider_status=200
+        )
+        self.assertEqual(
+            beyond["source_record_refs"], result["source_record_refs"]
+        )
         duplicate = json.loads(json.dumps(payload()))
         duplicate["filings"]["recent"]["accessionNumber"][1] = duplicate["filings"]["recent"]["accessionNumber"][0]
         with self.assertRaises(SecPublicAdapterError):

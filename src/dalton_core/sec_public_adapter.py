@@ -200,10 +200,18 @@ def normalize_sec_submissions(
     recent_dates = [
         _date(item, "filingDate") for item in columns["filingDate"]
     ]
-    if not recent_dates or date_from < min(recent_dates) or date_to > max(recent_dates):
+    if not recent_dates or date_from < min(recent_dates):
         # ``filings.files`` points at additional provider documents, but this
-        # minimal public WorkOrder has no second fetch authority.  Refusing a
-        # window outside recent avoids claiming enumerated completeness.
+        # minimal public WorkOrder has no second fetch authority.  Asking for a
+        # window that starts before ``recent`` begins would silently miss the
+        # filings on those pages, so it is refused rather than answered.
+        #
+        # P10g: the far end is not the same question.  A window that runs past
+        # the newest filing is still enumerated completely — there is nothing
+        # after the newest filing to miss — and refusing it made the ordinary
+        # query unaskable: ACN's ``recent`` ends at its last 8-K, so "10-K
+        # filings up to today" was rejected for a company whose 10-K is sitting
+        # in the block. Only the near end can hide a filing.
         raise SecPublicAdapterError("requested date window is outside SEC recent coverage")
     if len(records) > limit:
         # A bounded page cannot claim enumerated completeness when it silently
