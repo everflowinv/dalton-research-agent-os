@@ -2463,13 +2463,14 @@ class WriterServer:
             }
         else:
             result = self.source_discovery.dispatch_once()
-        if self._web_source_discovery is None:
-            result["web_search"] = {
-                "status": "unconfigured",
-                "reason": self._web_search_plan_error or "no web search discovery plan on this writer",
-            }
-        else:
-            result["web_search"] = self.web_source_discovery.dispatch_once()
+        # P10v: the filings index goes before web search, because the two share
+        # one fetch slot and web search almost always has something queued.
+        # Live, five 10-Ks sat discovered while web search held the slot tick
+        # after tick -- not a deadlock, but a queue that refills faster than it
+        # drains starves the one behind it indefinitely. Serving the index
+        # first costs web search almost nothing: it wants one filing per
+        # company and rediscovers monthly, so it empties and yields, while web
+        # search is a continuous stream.
         if self._sec_filings_source_discovery is None:
             result["sec_filings_index"] = {
                 "status": "unconfigured",
@@ -2477,6 +2478,13 @@ class WriterServer:
             }
         else:
             result["sec_filings_index"] = self._sec_filings_source_discovery.dispatch_once()
+        if self._web_source_discovery is None:
+            result["web_search"] = {
+                "status": "unconfigured",
+                "reason": self._web_search_plan_error or "no web search discovery plan on this writer",
+            }
+        else:
+            result["web_search"] = self.web_source_discovery.dispatch_once()
         return result
 
     def _mission_stage_driver(self) -> Any:
