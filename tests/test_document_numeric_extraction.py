@@ -145,5 +145,48 @@ class ResponseTests(unittest.TestCase):
             parse_response(too_many)
 
 
+class WorkOrderTests(unittest.TestCase):
+    def context(self) -> dict:
+        return {
+            **CONTEXT,
+            "content_hash": "0" * 64,
+            "created_at": "2026-09-08T00:00:00.000000+00:00",
+            "id": "extraction-context:1",
+            "source_manifest_ref": "manifest:1",
+            "offset": 0,
+            "end": 200,
+        }
+
+    def test_the_same_ask_replays_as_the_same_call(self) -> None:
+        from dalton_core.document_numeric_extraction import build_work
+
+        first = build_work(self.context(), SLOTS)
+        self.assertEqual(first.id, build_work(self.context(), SLOTS).id)
+
+    def test_asking_for_different_figures_is_a_different_call(self) -> None:
+        from dalton_core.document_numeric_extraction import build_work
+
+        # Otherwise a window asked for revenue would replay its old answer
+        # when later asked for free cash flow, and the second ask would
+        # silently return the first ask's figures.
+        one = build_work(self.context(), [SLOTS[0]])
+        both = build_work(self.context(), SLOTS)
+        self.assertNotEqual(one.id, both.id)
+
+    def test_it_is_its_own_work_order_not_the_qualitative_one(self) -> None:
+        from dalton_core.document_extraction import build_work as qualitative
+        from dalton_core.document_numeric_extraction import build_work
+
+        numeric = build_work(self.context(), SLOTS)
+        self.assertTrue(numeric.id.startswith("work:document-numeric-"))
+        self.assertNotEqual(numeric.id, qualitative(self.context()).id)
+        # The answer is a short list of figures or nothing, not prose.
+        self.assertLess(
+            numeric.budget["max_output_tokens"],
+            qualitative(self.context()).budget["max_output_tokens"],
+        )
+        self.assertTrue(numeric.metadata["candidate_only"])
+
+
 if __name__ == "__main__":
     unittest.main()

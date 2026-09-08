@@ -164,6 +164,55 @@ def build_prompt(request: Mapping[str, Any]) -> str:
     )
 
 
+def build_work(
+    context: Mapping[str, Any], requests: Sequence[Mapping[str, Any]]
+) -> Any:
+    """One routed model call for one window's numeric slots.
+
+    A separate WorkOrder from the qualitative pass rather than a bigger one:
+    the two ask different questions, fail differently, and are worth different
+    amounts. Merging them would also make a window that owes no figures pay for
+    a numeric prompt it does not need.
+
+    The identity includes the slots, so asking the same window for different
+    figures is a different call and a replay of the same ask is the same call.
+    """
+
+    from .contracts import WorkOrder
+
+    request = build_request(context, requests)
+    digest = content_hash({
+        "task": TASK_HASH,
+        "context": context["content_hash"],
+        "slots": [slot["metric_ref"] for slot in request["slots"]],
+    })
+    return WorkOrder(
+        schema_version="0.1",
+        id="work:document-numeric-" + digest[:32],
+        created_at=context["created_at"],
+        updated_at=context["created_at"],
+        question=build_prompt(request),
+        requested_capabilities=("research",),
+        runtime_profile_ref="runtime-profile:dalton-model-broker:0.1",
+        # Smaller than the qualitative window's budget: this answer is a short
+        # list of figures or nothing, not prose.
+        budget={
+            "max_input_tokens": 16000, "max_output_tokens": 1500,
+            "max_total_tokens": 17500, "max_cost_usd": 0.03, "max_seconds": 60,
+        },
+        idempotency_key="document-numeric:" + digest,
+        declared_side_effects=(),
+        status="ready",
+        input_refs=(context["id"], context["source_manifest_ref"]),
+        metadata={
+            "control_plane": "mission-document-extraction",
+            "task_ref": TASK_REF, "task_hash": TASK_HASH,
+            "context": dict(context), "request": request,
+            "candidate_only": True,
+        },
+    )
+
+
 def parse_response(text: Any) -> list[dict[str, Any]]:
     """The figures a model returned, or a refusal naming what was wrong."""
 
@@ -227,6 +276,7 @@ def extract_from_window(
 
 __all__ = [
     "MAX_FIGURES_PER_WINDOW",
+    "build_work",
     "NumericExtractionError",
     "OUTPUT_SCHEMA",
     "TASK_HASH",
