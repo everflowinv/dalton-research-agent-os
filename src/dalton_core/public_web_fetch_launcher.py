@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .public_web_connector import public_web_url_ref
 from .public_web_core_fetch import (
     DEFAULT_USER_AGENT,
     WebFetchConnectorGovernance,
@@ -259,6 +260,29 @@ class PublicWebFetchLauncher:
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
         return {**record, "summary": summary}
 
+    @staticmethod
+    def _fetched_url_ref(summary: Mapping[str, Any], document_ref: str) -> str:
+        """The url_ref the manifest must carry for this queued document.
+
+        For a page found by search the two are the same ref.  A SEC filing is
+        queued by accession (``sec:filing:...``) and fetched by the URL derived
+        from it, so its manifest is keyed by that URL and can never equal the
+        queued ref.  Requiring equality made every acquired annual report
+        unreadable: the bytes were on disk and the queue refused to open them.
+
+        So the manifest is required to carry the url_ref of the URL this fetch
+        says it canonicalised, which is the same check for both cases -- for a
+        searched page ``canonical_url`` re-derives the queued ref itself.
+        """
+
+        canonical = summary.get("canonical_url")
+        if not isinstance(canonical, str) or not canonical:
+            raise FetchLaunchRejected("completed fetch summary names no canonical URL")
+        try:
+            return public_web_url_ref(canonical)
+        except Exception as exc:  # noqa: BLE001 - an unusable URL is a disagreement
+            raise FetchLaunchRejected("completed fetch summary URL is unusable") from exc
+
     def read_completed_manifest(self, ticket_ref: str, document_ref: str) -> dict[str, Any]:
         """Read a settled fetch without polling, spawning or mutating it."""
 
@@ -287,7 +311,7 @@ class PublicWebFetchLauncher:
         if (ticket.get("id") != ticket_ref or ticket.get("status") != "succeeded"
                 or ticket.get("document_ref") != document_ref
                 or summary.get("url_ref") != document_ref
-                or manifest.get("url_ref") != document_ref
+                or manifest.get("url_ref") != self._fetched_url_ref(summary, document_ref)
                 or summary.get("manifest_ref") != manifest.get("id")
                 or summary.get("manifest_hash") != manifest.get("content_hash")
                 or summary.get("status") != "succeeded"):

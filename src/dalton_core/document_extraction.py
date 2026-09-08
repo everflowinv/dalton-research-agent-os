@@ -44,7 +44,14 @@ GATE_REASON = "document_extraction_model_config_not_installed"
 WEB_STAGING_GATE_REASON = "public_web_candidate_staging_not_supported"
 ALPHAENGINE_SOURCE_REF = "source:alphaengine"
 PUBLIC_WEB_SOURCE_REF = "source:web-search"
-SUPPORTED_SOURCE_REFS = frozenset({ALPHAENGINE_SOURCE_REF, PUBLIC_WEB_SOURCE_REF})
+SEC_EDGAR_SOURCE_REF = "source:sec-edgar"
+# P11t: sources whose bytes the public-web fetch child put in the spool. A SEC
+# filing is queued by accession and fetched over the same public HTTPS path as
+# a searched page, so it reads, cites and corrects identically. Until this
+# existed, every acquired annual report was refused at the door -- the bytes
+# were on disk and the queue would not open them.
+FETCHED_SOURCE_REFS = frozenset({PUBLIC_WEB_SOURCE_REF, SEC_EDGAR_SOURCE_REF})
+SUPPORTED_SOURCE_REFS = frozenset({ALPHAENGINE_SOURCE_REF}) | FETCHED_SOURCE_REFS
 OUTPUT_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "title": "DocumentExtractionSuggestionsV0.1",
@@ -1096,7 +1103,7 @@ class DocumentExtractionService:
             "SELECT ticket_ref FROM coverage_mission_discovered_documents WHERE record_id=?",
             (self.writer.coverage_mission.document_review(review_id)["discovered_document_ref"],),
         ).fetchone()
-        web = context["source_ref"] == PUBLIC_WEB_SOURCE_REF
+        web = context["source_ref"] in FETCHED_SOURCE_REFS
         launcher = self.writer.web_fetch_launcher if web else self.writer.acquisition_launcher
         manifest = (launcher.read_completed_manifest(row["ticket_ref"], context["document_ref"])
                     if row["ticket_ref"] else launcher.locate_completed_manifest(context["document_ref"]))
@@ -1181,7 +1188,7 @@ class DocumentExtractionService:
         context = self.context(review_id, expected_review_hash, offset, actor_ref)
         if context["content_hash"] != expected_context_hash:
             raise ResearchVerificationConflict("source context is stale")
-        if context["source_ref"] == PUBLIC_WEB_SOURCE_REF:
+        if context["source_ref"] in FETCHED_SOURCE_REFS:
             # The candidate chain below binds transcript correction authority
             # and AlphaEngine document lineage; a fetched page cannot enter it
             # until public-web sources have a citation authority of their own.
