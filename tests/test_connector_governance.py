@@ -154,3 +154,70 @@ class ConnectorGovernanceTests(unittest.TestCase):
                     ]),
                     1,
                 )
+
+
+class SecFilingsIndexGovernanceTests(unittest.TestCase):
+    """P10e: list_filings is its own capability, split like P9d-1 split alpha."""
+
+    def test_schema_hash_binds_one_operation_and_does_not_widen(self) -> None:
+        from dalton_core.connector_governance import (
+            _sec_schema_hash,
+            _sec_source_hash,
+        )
+        from dalton_core.sec_filings_index import (
+            OPERATION,
+            filings_index_identity,
+            filings_index_schema_hash,
+            filings_index_source_hash,
+        )
+
+        # The source really is the same SEC, so the source hash is shared.
+        self.assertEqual(filings_index_source_hash(), _sec_source_hash())
+        # The schema hash is not, or holding one approval would grant the other.
+        self.assertNotEqual(filings_index_schema_hash(), _sec_schema_hash())
+
+        identity = filings_index_identity()
+        self.assertEqual(identity["allowed_operations"], [OPERATION])
+        self.assertEqual(
+            identity["capability_id"], "capability:dalton:connector:sec-filings-index"
+        )
+
+    def test_live_company_facts_identity_is_untouched(self) -> None:
+        # sec_connector_identity is what the deployed sec-company-facts-v2
+        # record is bound to. P10e must not have moved it.
+        inventory = load_packaged_connector_inventory()
+        identity = sec_connector_identity(inventory["templates"]["sec"], "get_company_facts")
+        self.assertEqual(
+            identity["schema_hash"],
+            "6ce86d8a4b9764f2651406bf9d628f24b6b4452bcdbd406bc983e380133a4be6",
+        )
+
+    def test_record_is_proposed_and_requires_a_human_principal(self) -> None:
+        from dalton_core.sec_filings_index import (
+            SecFilingsIndexError,
+            build_filings_index_governance_record,
+            filings_index_schema_hash,
+        )
+
+        record = build_governance_record("sec-filings-index", approved_by=OWNER)
+        self.assertEqual(record["status"], "proposed")
+        self.assertEqual(record["expected_schema_hash"], filings_index_schema_hash())
+        self.assertEqual(record["allowed_permissions"], PUBLIC_PERMISSIONS)
+        self.assertEqual(record["content_hash"], content_hash(
+            {k: v for k, v in record.items() if k != "content_hash"}
+        ))
+        with self.assertRaises(SecFilingsIndexError):
+            build_filings_index_governance_record(approved_by="automation:dalton")
+
+    def test_record_round_trips_through_the_loader(self) -> None:
+        record = build_governance_record(
+            "sec-filings-index", approved_by=OWNER, status="approved"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sec-filings-index-v1.json"
+            path.write_text(canonical_json(record))
+            governance = load_connector_governance(path)
+            self.assertEqual(
+                governance.capability_id,
+                "capability:dalton:connector:sec-filings-index",
+            )

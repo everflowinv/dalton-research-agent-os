@@ -36,6 +36,7 @@ ALPHAENGINE_SEARCH_KIND = "alphaengine-search-library"
 SEC_COMPANY_FACTS_KIND = "sec-company-facts"
 GEMINI_WEB_SEARCH_KIND = "gemini-web-search"
 WEB_FETCH_KIND = "web-fetch"
+SEC_FILINGS_INDEX_KIND = "sec-filings-index"
 ALPHAENGINE_CAPABILITY_ID = (
     "capability:dalton:connector:alphaengine-get-document"
 )
@@ -45,6 +46,7 @@ ALPHAENGINE_SEARCH_CAPABILITY_ID = (
 SEC_CAPABILITY_ID = "capability:dalton:connector:sec-edgar"
 GEMINI_WEB_SEARCH_CAPABILITY_ID = "capability:dalton:connector:gemini-web-search"
 WEB_FETCH_CAPABILITY_ID = "capability:dalton:connector:web-fetch"
+SEC_FILINGS_INDEX_CAPABILITY_ID = "capability:dalton:connector:sec-filings-index"
 
 
 class ConnectorGovernanceError(RuntimeError):
@@ -119,6 +121,12 @@ def _sec_source_hash() -> str:
 
 def _sec_schema_hash() -> str:
     return _sec_identity()["schema_hash"]
+
+
+def _sec_filings_index_schema_hash() -> str:
+    from .sec_filings_index import filings_index_schema_hash
+
+    return filings_index_schema_hash()
 
 
 def _sec_permissions() -> dict[str, Any]:
@@ -204,6 +212,18 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         schema_hash=_alpha_search_schema_hash,
         permissions=_alpha_permissions,
         fixture_hash=_alpha_fixture_hash,
+    ),
+    # P10e: the same SEC template's ``list_filings`` operation is a separate
+    # capability with its own approval, exactly as P9d-1 split AlphaEngine.
+    # The source hash is shared because the source is the same SEC; the schema
+    # hash binds one operation only, so neither approval widens into the other.
+    SEC_FILINGS_INDEX_KIND: _KindSpec(
+        capability_id=SEC_FILINGS_INDEX_CAPABILITY_ID,
+        template_key="sec",
+        source_hash=_sec_source_hash,
+        schema_hash=_sec_filings_index_schema_hash,
+        permissions=_sec_permissions,
+        fixture_hash=_sec_fixture_hash,
     ),
     SEC_COMPANY_FACTS_KIND: _KindSpec(
         capability_id=SEC_CAPABILITY_ID,
@@ -322,6 +342,17 @@ def build_governance_record(
         from .public_web_core_search import build_web_search_governance_record
 
         return build_web_search_governance_record(
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind == SEC_FILINGS_INDEX_KIND:
+        from .sec_filings_index import build_filings_index_governance_record
+
+        return build_filings_index_governance_record(
             approved_by=approved_by,
             status=status,
             effective_from=effective_from,
