@@ -72,7 +72,11 @@ class NumericLaneTests(unittest.TestCase):
             **self.h.params, expected_context_hash=self.h.context()["content_hash"],
         )
         self.assertEqual(self.h.adapter.calls, calls)
-        self.assertEqual(again, first)
+        # The answer is identical; only the flag that says it cost nothing
+        # differs, and the lane spends its allowance on that flag.
+        self.assertFalse(first["replayed"])
+        self.assertTrue(again["replayed"])
+        self.assertEqual({**again, "replayed": False}, first)
 
     def test_a_company_that_owes_nothing_costs_no_model_call(self):
         self.h.enable_fixture(response())

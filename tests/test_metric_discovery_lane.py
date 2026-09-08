@@ -78,6 +78,8 @@ class MetricDiscoveryLaneTests(unittest.TestCase):
         # journal cannot grow from it.
         self.assertEqual(self.h.adapter.calls, calls)
         self.assertEqual(again["proposals"], first["proposals"])
+        self.assertFalse(first["replayed"])
+        self.assertTrue(again["replayed"])
         self.assertEqual(again["recorded"], [])
         self.assertEqual(len(self.h.missions.metric_observations(company)), 1)
 

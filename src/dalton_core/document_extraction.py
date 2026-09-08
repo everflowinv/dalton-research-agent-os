@@ -926,12 +926,14 @@ class DocumentExtractionService:
         if factory is None and config is None:
             return {"status": "gated", "reason": GATE_REASON, "formal_authority_writes": 0}
         work = build_numeric_work(context, slots)
-        text = self._run_secondary(work, context, actor_ref, config, factory, "numeric")
+        text, replayed = self._run_secondary(
+            work, context, actor_ref, config, factory, "numeric")
         if text is None:
             return {"status": "no_result", "verified": [], "refused": [],
-                    "formal_authority_writes": 0}
+                    "replayed": replayed, "formal_authority_writes": 0}
         result = extract_from_window(work.metadata["request"], text)
-        return {"status": "read", "formal_authority_writes": 0, **result}
+        return {"status": "read", "replayed": replayed,
+                "formal_authority_writes": 0, **result}
 
     def generate_metric_discovery(self, *, review_id, expected_review_hash, offset,
                                   expected_context_hash, actor_ref):
@@ -954,10 +956,11 @@ class DocumentExtractionService:
         if factory is None and config is None:
             return {"status": "gated", "reason": GATE_REASON, "formal_authority_writes": 0}
         work = build_discovery_work(context)
-        text = self._run_secondary(work, context, actor_ref, config, factory, "metric discovery")
+        text, replayed = self._run_secondary(
+            work, context, actor_ref, config, factory, "metric discovery")
         if text is None:
             return {"status": "no_result", "proposals": [], "refused": [],
-                    "recorded": [], "formal_authority_writes": 0}
+                    "recorded": [], "replayed": replayed, "formal_authority_writes": 0}
         result = proposals_from_window(work.metadata["request"], text)
         journal = {"recorded": [], "duplicates": []}
         if result["proposals"]:
@@ -965,15 +968,23 @@ class DocumentExtractionService:
                 company_ref=context["company_ref"],
                 proposals=result["proposals"], observed_by=actor_ref,
             )
-        return {"status": "read", "formal_authority_writes": 0, **result, **journal}
+        return {"status": "read", "replayed": replayed,
+                "formal_authority_writes": 0, **result, **journal}
 
     def _run_secondary(self, work, context, actor_ref, config, factory, label):
-        """Run a secondary order over an already-bound window, or recover it."""
+        """Run a secondary order over a bound window, or recover one already run.
+
+        Returns the answer and whether it was recovered rather than paid for.
+        The caller spends its allowance on new reads only: a replay costs
+        nothing, and counting it would leave the allowance spent on windows
+        that had already been read.
+        """
 
         scheduler = self.writer._scheduler
         if scheduler is None:
-            return None
-        if scheduler.formal_result(work.id) is None:
+            return None, False
+        replayed = scheduler.formal_result(work.id) is not None
+        if not replayed:
             if config is not None:
                 self._run_broker_work(work, context, actor_ref)
             else:
@@ -986,7 +997,7 @@ class DocumentExtractionService:
                     )
                 worker.scheduler.enqueue(work)
                 worker.run_once(work)
-        return self._secondary_text(work, label)
+        return self._secondary_text(work, label), replayed
 
     def _secondary_text(self, work, label):
         """The model's exact answer for one secondary order, or None.

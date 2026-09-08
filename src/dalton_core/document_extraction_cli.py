@@ -283,8 +283,7 @@ def run_extraction(
             host._document_extraction_worker_factory = factory
         service = DocumentExtractionService(host)
         drafted = 0
-        numeric_read = 0
-        discovery_read = 0
+        lanes: list[tuple[str, list[dict[str, Any]], dict[str, str]]] = []
         stop_reason: str | None = None
         complete_reviews: list[tuple[dict[str, Any], str, str, list[int]]] = []
         pointers = host.store.connection.execute(
@@ -307,6 +306,7 @@ def run_extraction(
                     review, company_rank=rank, spec_by_document=specs))
             except Exception:  # noqa: BLE001 - ordering is not a gate
                 pass
+            lanes.append((actor, reviews, specs))
             for review in reviews:
                 if stop_reason is not None:
                     break
@@ -352,70 +352,6 @@ def run_extraction(
                         if isinstance(budget, dict) and budget.get("status"):
                             entry["budget"] = budget["status"]
                         summary["drafted"].append(entry)
-                        # P11m: the same window, asked for the figures this
-                        # company owes. After the prose pass, because the
-                        # window is already bound and re-reading it costs
-                        # nothing; before the gate checks below, because a
-                        # gated or rejected qualitative call means this window
-                        # is done either way.
-                        if numeric_read < max_numeric_windows and numeric_worthy(review):
-                            try:
-                                figures = service.generate_numeric(
-                                    review_id=review["review_id"],
-                                    expected_review_hash=review_hash, offset=offset,
-                                    expected_context_hash=context["content_hash"],
-                                    actor_ref=actor,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                # A window that cannot be read for figures must
-                                # not lose the prose that was just drafted from
-                                # it, so this is reported and not raised.
-                                summary["numeric"].append({
-                                    "review_id": review["review_id"], "offset": offset,
-                                    "status": "failed",
-                                    "reason": f"{type(exc).__name__}: {exc}",
-                                })
-                            else:
-                                if figures.get("status") != "nothing_owed":
-                                    numeric_read += 1
-                                summary["numeric"].append({
-                                    "review_id": review["review_id"], "offset": offset,
-                                    "status": figures.get("status"),
-                                    "verified": len(figures.get("verified", [])),
-                                    "refused": len(figures.get("refused", [])),
-                                })
-                                summary["figures"] += len(figures.get("verified", []))
-                        # P11r: the same window, asked what the market judges
-                        # this company on. Its own allowance and its own source
-                        # gate: the pass that learns what to ask for reads the
-                        # documents that react to results, not the ones that
-                        # report them, so it never competes with the figures
-                        # pass for the same windows.
-                        if (discovery_read < max_discovery_windows
-                                and discovery_worthy(specs.get(review["document_ref"]))):
-                            discovery_read += 1
-                            try:
-                                learned = service.generate_metric_discovery(
-                                    review_id=review["review_id"],
-                                    expected_review_hash=review_hash, offset=offset,
-                                    expected_context_hash=context["content_hash"],
-                                    actor_ref=actor,
-                                )
-                            except Exception as exc:  # noqa: BLE001
-                                summary["discovery"].append({
-                                    "review_id": review["review_id"], "offset": offset,
-                                    "status": "failed",
-                                    "reason": f"{type(exc).__name__}: {exc}",
-                                })
-                            else:
-                                summary["discovery"].append({
-                                    "review_id": review["review_id"], "offset": offset,
-                                    "status": learned.get("status"),
-                                    "proposals": len(learned.get("proposals", [])),
-                                    "refused": len(learned.get("refused", [])),
-                                    "recorded": len(learned.get("recorded", [])),
-                                })
-                                summary["metrics_observed"] += len(learned.get("recorded", []))
                         if result.get("status") == "gated":
                             stop_reason = f"gated:{result.get('reason')}"
                             complete = False
@@ -432,6 +368,30 @@ def run_extraction(
                 if complete:
                     summary["reviews_complete"] += 1
                     complete_reviews.append((review, review_hash, actor, offsets))
+        # P11s: the two secondary passes choose their own documents.
+        #
+        # They used to ride along on whatever the prose pass had just drafted,
+        # which meant their allowances could not be spent at all: the prose
+        # pass drains its 30 windows on the top-priority company's largest web
+        # pages, so three consecutive live runs read 30 news windows and never
+        # reached a single filing or transcript.  Both passes therefore sweep
+        # the reviews they want, before admission closes any of them.
+        _secondary_sweep(
+            service, lanes, summary,
+            limit=max_numeric_windows, entries="numeric",
+            wanted=lambda review, spec: numeric_worthy(review),
+            call="generate_numeric",
+            counts={"verified": "verified", "refused": "refused"},
+            total=("figures", "verified"),
+        )
+        _secondary_sweep(
+            service, lanes, summary,
+            limit=max_discovery_windows, entries="discovery",
+            wanted=lambda review, spec: discovery_worthy(spec),
+            call="generate_metric_discovery",
+            counts={"proposals": "proposals", "refused": "refused", "recorded": "recorded"},
+            total=("metrics_observed", "recorded"),
+        )
         # ADR-0005 / P9d-17b: every fully drafted review is staged and
         # policy-admitted, then closed.  Idempotent: a re-run reports
         # duplicates and writes nothing new.
@@ -446,6 +406,72 @@ def run_extraction(
     finally:
         _write_owner_only(out / "summary.json", summary)
         host.close()
+
+
+def _secondary_sweep(
+    service: DocumentExtractionService,
+    lanes: list[tuple[str, list[dict[str, Any]], dict[str, str]]],
+    summary: dict[str, Any],
+    *,
+    limit: int,
+    entries: str,
+    wanted: Any,
+    call: str,
+    counts: Mapping[str, str],
+    total: tuple[str, str],
+) -> None:
+    """Spend one secondary allowance on the documents that pass its own gate.
+
+    Reads windows in the mission's order, skipping the reviews this pass has no
+    use for.  A window whose answer already exists is recovered rather than
+    paid for, and does not consume the allowance: replay is free, so an
+    allowance spent on it would be an allowance not spent on a window nobody
+    has read yet.
+    """
+
+    if limit <= 0:
+        return
+    spent = 0
+    method = getattr(service, call)
+    for actor, reviews, specs in lanes:
+        for review in reviews:
+            if spent >= limit:
+                return
+            if not wanted(review, specs.get(review["document_ref"])):
+                continue
+            review_hash = content_hash(review)
+            offset = 0
+            while spent < limit:
+                try:
+                    context = service.view(
+                        review_id=review["review_id"], expected_review_hash=review_hash,
+                        offset=offset, actor_ref=actor,
+                    )["context"]
+                    result = method(
+                        review_id=review["review_id"], expected_review_hash=review_hash,
+                        offset=offset, expected_context_hash=context["content_hash"],
+                        actor_ref=actor,
+                    )
+                except Exception as exc:  # noqa: BLE001 - one window, not the run
+                    summary[entries].append({
+                        "review_id": review["review_id"], "offset": offset,
+                        "status": "failed", "reason": f"{type(exc).__name__}: {exc}",
+                    })
+                    break
+                status = result.get("status")
+                if status == "gated":
+                    return  # no model is configured; every other window is gated too
+                if not result.get("replayed") and status != "nothing_owed":
+                    spent += 1
+                entry = {"review_id": review["review_id"], "source_ref": review["source_ref"],
+                         "offset": offset, "status": status,
+                         "replayed": bool(result.get("replayed"))}
+                entry.update({name: len(result.get(key, [])) for name, key in counts.items()})
+                summary[entries].append(entry)
+                summary[total[0]] += len(result.get(total[1], []))
+                if context["next_offset"] is None:
+                    break
+                offset = context["next_offset"]
 
 
 def _admit_complete_reviews(host: ExtractionHost, service: DocumentExtractionService,
