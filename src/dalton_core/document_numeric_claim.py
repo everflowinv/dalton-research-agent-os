@@ -54,6 +54,15 @@ _SCALE_WORDS: Mapping[str, Decimal] = {
     "trillion": Decimal(10) ** 12,
 }
 _NUMBER_RE = re.compile(r"[-+]?\d[\d,\s]*(?:\.\d+)?")
+_METRIC_REF_RE = re.compile(r"metric:[a-z0-9]+(?:-[a-z0-9]+)*\Z")
+
+
+def _fold_words(text: str) -> str:
+    """Compare wording the way a reader would, not byte for byte."""
+
+    folded = unicodedata.normalize("NFKC", text).lower()
+    folded = folded.replace("-", " ").replace("\u2014", " ").replace("\u2013", " ")
+    return re.sub(r"[^a-z0-9 ]", " ", re.sub(r"\s+", " ", folded)).strip()
 
 
 class NumericCandidateError(ValueError):
@@ -85,11 +94,12 @@ def validate_numeric_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
     """The closed shape a numeric suggestion must have before verification."""
 
     if not isinstance(value, Mapping) or set(value) != {
-        "quote_id", "metric", "value", "unit", "currency", "period", "basis", "scale",
+        "quote_id", "metric_ref", "as_reported_label", "value", "unit", "currency",
+        "period", "basis", "scale",
     }:
         raise NumericCandidateError(
-            "numeric candidate must be exactly quote_id/metric/value/unit/currency/"
-            "period/basis/scale"
+            "numeric candidate must be exactly quote_id/metric_ref/as_reported_label/"
+            "value/unit/currency/period/basis/scale"
         )
     unit = value["unit"]
     if unit not in ALLOWED_UNITS:
@@ -106,9 +116,19 @@ def validate_numeric_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
     scale = value["scale"]
     if scale is not None and scale not in _SCALE_WORDS:
         raise NumericCandidateError(f"scale must be null or one of {sorted(_SCALE_WORDS)}")
+    metric_ref = _text(value["metric_ref"], "metric_ref", maximum=120)
+    if _METRIC_REF_RE.fullmatch(metric_ref) is None:
+        raise NumericCandidateError("metric_ref must be the slot that was requested")
     return {
         "quote_id": _text(value["quote_id"], "quote_id", maximum=100),
-        "metric": _text(value["metric"], "metric", maximum=MAX_METRIC_CHARS),
+        # The slot that was asked for, and what this document happens to call
+        # it. Filers write "Net revenues", "Total revenue", "Revenues" for the
+        # same line; the slot is what makes a series, and the label is what
+        # lets a reader check the mapping instead of trusting it.
+        "metric_ref": metric_ref,
+        "as_reported_label": _text(
+            value["as_reported_label"], "as_reported_label", maximum=MAX_METRIC_CHARS
+        ),
         "value": str(_decimal(value["value"], "value")),
         "unit": unit,
         "currency": currency,
@@ -185,6 +205,12 @@ def verify_numeric_candidate(
         raise NumericCandidateError(
             "numeric candidate asserts a value its citation does not contain"
         )
+    # The wording is checked the same way the digits are: a model may report
+    # what this filer calls the line, never invent that it called it that.
+    if _fold_words(wire["as_reported_label"]) not in _fold_words(quote):
+        raise NumericCandidateError(
+            "numeric candidate reports a label its citation does not contain"
+        )
     verified = {
         **wire,
         "schema_version": SCHEMA_VERSION,
@@ -218,7 +244,7 @@ def verify_numeric_candidates(
             refused.append({
                 "reason": str(exc),
                 "quote_id": item.get("quote_id") if isinstance(item, Mapping) else None,
-                "metric": item.get("metric") if isinstance(item, Mapping) else None,
+                "metric_ref": item.get("metric_ref") if isinstance(item, Mapping) else None,
             })
     return verified, refused
 
