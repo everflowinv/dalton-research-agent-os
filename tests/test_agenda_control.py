@@ -179,11 +179,20 @@ class AgendaControlTests(unittest.TestCase):
         )
         self.agenda.add_candidates(
             cycle["cycle_id"], actor_ref="core", idempotency_key="candidates:control",
+            # Two candidates, because a shadow card is only emitted for a
+            # cycle that actually weighed alternatives (P13g). One candidate
+            # always selected is bookkeeping, not a decision, and carding it
+            # is what filled the owner's Discord.
             candidates=[{
                 "candidate_id": "candidate:control", "company_ref": "wanhua",
                 "question": "盈利是否改变？", "answer_criteria": "核对价格和成本",
                 "features": {"mandate_relevance": 3, "catalyst_urgency": 2, "evidence_staleness": 1, "decision_impact": 3},
                 "rationale": "重要", "source_refs": ["evidence:1"],
+            }, {
+                "candidate_id": "candidate:control-2", "company_ref": "wanhua",
+                "question": "产能是否投放？", "answer_criteria": "核对开工率",
+                "features": {"mandate_relevance": 1, "catalyst_urgency": 1, "evidence_staleness": 1, "decision_impact": 1},
+                "rationale": "次要", "source_refs": ["evidence:1"],
             }],
         )
         self.decision = self.agenda.decide_cycle(

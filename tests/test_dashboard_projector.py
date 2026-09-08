@@ -731,7 +731,13 @@ class DashboardProjectorTests(unittest.TestCase):
                     "question": "价格变化是否影响盈利？", "answer_criteria": "核对价格和成本",
                     "features": {"mandate_relevance": 3, "catalyst_urgency": 2, "evidence_staleness": 1, "decision_impact": 3},
                     "rationale": "重要", "source_refs": ["evidence:test"],
-                }],
+            },
+            {
+                "candidate_id": "agenda-candidate:test-alt", "company_ref": "wanhua",
+                "question": "备选问题？", "answer_criteria": "备选判据",
+                "features": {"mandate_relevance": 1, "catalyst_urgency": 1, "evidence_staleness": 1, "decision_impact": 1},
+                "rationale": "次要", "source_refs": ["evidence:test"],
+            }],
             )
             decision = agenda.decide_cycle(
                 cycle["cycle_id"], actor_ref="core", decision_id="agenda-decision:test",

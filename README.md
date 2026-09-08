@@ -4,11 +4,18 @@ Dalton 是面向投研团队的独立研究控制内核。它把任务调度、�
 
 项目已有本机常驻控制服务，但仍是原型，尚未达到生产部署标准。OpenClaw 只是可选适配层，不是 Dalton 的运行时、数据库或事实来源。
 
+**当前进度与下一步见 [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) 顶部的"下一步"。**
+
 ## 仓库边界
 
 - `src/dalton_core/`：Core 契约、Research Ledger、Scheduler、模型路由、Capability Registry、writer service 和只读 dashboard；
   以及任务层——ResearchPlaybook 与 CoverageMission authority、来源发现与获取 lane、文档抽取与准入、
   Claim 挑战/退役、任务交付物（Initial Screen）、以及 owner cockpit 的控制面。
+  数字侧：`document_numeric_extraction`（按名字问数字）、`document_numeric_claim`（数位与口径逐字核对所引原文）、
+  `metric_discovery`/`metric_discovery_extraction`（从市场在引用什么学出该收哪些指标）、
+  `document_figure_grade` 与 `document_subject`（这个数字出自什么文档、属于哪个主体）。
+  决策侧：`research_state`（把"做了什么/缺什么/被什么挡住/花了多少"拼成一个可读的小对象）与
+  `research_planner`（读它产出带理由的排序；固化清单由代码定义，模型只能在其之内排序、在其之上追问）。
 - `deploy/macos/`：owner-only runtime bootstrap、LaunchAgent 安装、卸载和健康检查。
 - `contracts/`：跨进程 JSON Schema。
 - `integrations/openclaw-model-broker/`：复用 OpenClaw 已管理模型认证的受限 broker。

@@ -1041,11 +1041,25 @@ class AgendaStore:
             cur.execute("INSERT INTO agenda_decisions(decision_id,cycle_id,selected_candidate_refs_json,deferred_candidate_refs_json,rejected_candidate_refs_json,score_breakdown_json,policy_version_ref,actor_ref,created_at,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?)", (decision_id, cycle_id, canonical_json(selected), canonical_json(deferred), canonical_json(rejected), canonical_json(breakdown), policy_wire["id"], actor_ref, created_at, wire["content_hash"]))
             event = self._cycle_event(cur, cycle_id, "decided", "deterministic_selection_completed", {"decision_ref": decision_id}, actor_ref)
             selected_payload = [{"candidate_ref": row["candidate_id"], "question": row["proposed_question"], "answer_criteria": row["answer_criteria"], "rationale": row["rationale"], "score": breakdown[row["candidate_id"]]["total"]} for row in selected_rows]
+            # P13g: a shadow card shows a human what the agenda *chose*. A
+            # cycle with one candidate and nothing set aside made no choice,
+            # so there is nothing to shadow.
+            #
+            # The SEC lane opens one such cycle per filing dispatch, and when
+            # that lane was unblocked it put twenty-five identical cards --
+            # "How did reported quarterly revenue change year over year?" --
+            # into the owner's Discord in two hours. Machine bookkeeping is not
+            # a decision, and a channel that carries it stops being read.
+            weighed = bool(deferred) or bool(rejected) or len(valid) > 1
             message_id = f"agenda-message:{content_hash({'decision_id': decision_id})[:32]}"
             payload = {"schema_version": SCHEMA_VERSION, "kind": "agenda_shadow_card", "cycle_ref": cycle_id, "decision_ref": decision_id, "company_ref": cycle["company_ref"], "selected": selected_payload, "deferred_count": len(deferred), "rejected_count": len(rejected), "created_at": created_at}
             payload_hash = content_hash(payload)
-            cur.execute("INSERT INTO agenda_outbox_messages(message_id,idempotency_key,topic,payload_json,payload_hash,created_at) VALUES(?,?,?,?,?,?)", (message_id, f"agenda-card:{decision_id}", "agenda.shadow.decision", canonical_json(payload), payload_hash, created_at))
-            outbox_event = self._outbox_event(cur, message_id, "pending", actor_ref=actor_ref)
+            outbox_event = None
+            if weighed:
+                cur.execute("INSERT INTO agenda_outbox_messages(message_id,idempotency_key,topic,payload_json,payload_hash,created_at) VALUES(?,?,?,?,?,?)", (message_id, f"agenda-card:{decision_id}", "agenda.shadow.decision", canonical_json(payload), payload_hash, created_at))
+                outbox_event = self._outbox_event(cur, message_id, "pending", actor_ref=actor_ref)
+            else:
+                message_id = None
             self._event(cur, "agenda_cycle_decided", cycle_id, {"decision_ref": decision_id, "outbox_message_ref": message_id}, actor_ref)
             result = {"status": "fresh", **wire, "event": event, "outbox_message_ref": message_id, "outbox_event": outbox_event}
             self._save_idem(cur, idempotency_key, "decide_agenda_cycle", request_hash, result)

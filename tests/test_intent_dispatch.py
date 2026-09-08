@@ -153,6 +153,12 @@ class IntentWriterAuthorityTests(unittest.TestCase):
                 },
                 "rationale": "Decision useful",
                 "source_refs": ["source:agenda"],
+            },
+            {
+                "candidate_id": "candidate:intent-dispatch-alt", "company_ref": "acn",
+                "question": "备选问题？", "answer_criteria": "备选判据",
+                "features": {"mandate_relevance": 1, "catalyst_urgency": 1, "evidence_staleness": 1, "decision_impact": 1},
+                "rationale": "次要", "source_refs": ["source:agenda"],
             }],
         )
         self.agenda.decide_cycle(

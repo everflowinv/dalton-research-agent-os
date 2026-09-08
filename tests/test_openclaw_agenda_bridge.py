@@ -130,6 +130,12 @@ class OpenClawAgendaBridgeTests(unittest.TestCase):
                 "answer_criteria": "核对价格、成本和销量",
                 "features": {"mandate_relevance": 3, "catalyst_urgency": 2, "evidence_staleness": 1, "decision_impact": 3},
                 "rationale": "重要", "source_refs": ["evidence:1"],
+            },
+            {
+                "candidate_id": "candidate:1-alt", "company_ref": "wanhua",
+                "question": "备选问题？", "answer_criteria": "备选判据",
+                "features": {"mandate_relevance": 1, "catalyst_urgency": 1, "evidence_staleness": 1, "decision_impact": 1},
+                "rationale": "次要", "source_refs": ["evidence:1"],
             }],
         )
         self.decision = self.agenda.decide_cycle(

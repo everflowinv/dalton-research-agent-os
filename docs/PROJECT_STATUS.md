@@ -1,6 +1,70 @@
 # Dalton 项目进度
 
-更新日期：2026-09-07
+更新日期：2026-09-08
+
+## 下一步（按顺序）
+
+1. **对齐模型目录，再把大脑接到 tick 上。** `reconcile_openclaw_model_catalog` 现在报 `catalog_in_sync: false`：
+   Dalton 有 5 个 broker 已经不提供的静态 profile（`gemini-3-7-flash` / `gemini-flash-latest` / `glm-5-2` /
+   `gpt-5-5` / `openrouter-ox-alpha`），broker 有 5 个 Dalton 没有静态 profile 的（含 `gpt-6-astra`）。
+   顺序是：① 对齐目录；② 给 `gpt-6-astra` 注册静态 profile 并按 `smoke_required_profile_ids` 冒烟；
+   ③ **给 planner 单独发一条路由策略**——抽取策略按设计只钉一个模型，planner 不能共用（这一步动治理，需 owner 签）；
+   ④ 各 lane 改成读计划，cadence 退化成上限而不是理由。
+2. **让计划真正调度。** `research_planner` 已经能产出 directives（在固化清单之内排序）与 inquiries（清单覆盖不到的
+   追问），但还没有任何东西执行它。`wanted_specs()` 是接口：计划没点名的 spec 就不搜，无论隔了多久。
+3. **把已核验的数字接进 Ledger。** `CandidateStagingStore.stage` 明确拒绝 cited-original 的定量候选
+   （"a cited original is not a numeric authority"）。这是 ADR-0003 一脉的有意规则，要改得走 ADR + 重签策略。
+   在那之前数字停在 `coverage_mission_document_figures`，驾驶舱直接读这张表。
+4. **接 Guidepoint。** 模板在，运行 lane 与两条 owner 签名的治理记录都还没有。
+5. **修 discovery 的公司归属。** 自由文本检索把别家公司的电话会归到了 EPAM 名下；抽取侧已经拦住了数字，
+   但**定性 Claim 仍在从这些文档里产生**（那两份文档还有 18 条 review，EPAM 名下共 739 条 Claim）。
+   根因在检索侧，AlphaEngine 有 `company` 过滤器而计划没用——改查询形状要发新的签名发现计划。
+
+## 2026-09-08：数字、大脑与一天的事故
+
+**能力上：**
+- **P11q–P11u 数字抽取成链。** 指标发现（读卖方研报/电话会只取**名字**不取值，两份不同文档互证才成立需求）→
+  按名字问数字 → 数位与口径逐字核对所引原文。live 已学到 99 个指标（Adjusted EBITDA、Rule of 40、
+  Banking Solutions revenue growth (FXN)、Square US GPV growth……都不是谁事先列的）。
+- **P11v/P11w 每个数字带出处等级。** `company-filed-document`（公司自己披露）与 `earnings-call-transcript`
+  （电话会口述）**都留**，但不等价；等级由文档类型推导，不问模型"你有多确定"。落在 append-only 的
+  `coverage_mission_document_figures`，连同所引原文与 manifest 哈希，任何人可复算。
+- **P11x 驾驶舱直接读这张表**，不等 Ledger 接纳；口述数字在页面上带另一种标记。
+- **P13a/P13b/P13f 大脑的"看得见"与"能决定"。** `research_state` 把目标、每家公司每个清单项的
+  required/held/deficit/blocked 与原因、已有数字、市场在引用的指标、预算与花费拼成一个 ~2,400 token 的对象并哈希；
+  `research_planner` 读它产出带理由的排序。**固化工作流不可被模型改写**：Initial Screen 要几个季度写在代码里，
+  planner 只能在其之内排序（directives）与在其之上追问（inquiries）。
+- **P13f 行业成为独立主体。** 发现计划本来就问行业问题，但**是按公司各问一遍**，所以每份市场报告都被记在某家公司名下。
+  按行业口径数：`industry_demand` 91 份 / 需要 3 份，`competitive_landscape` 132 份 / 需要 3 份，另有 83 份在排队——
+  223 份文档满足 6 份的需求。这就是"为什么一直在取网页"的一大半，而且此前没有任何地方在数它。
+
+**修的事故（多数是自己造成的）：**
+- **P12a Core 不是 WAL。** 任何读事务都挡住写，writer 30s 请求超时，controller 把整条 lane 报成
+  `unavailable:RemoteError`——抽取与发现两条 lane 暗了几个小时。
+- **P12b SEC dispatch 没有终态。** `status` 的 CHECK 只有 `pending/launched/rejected`，跑完的 dispatch 永远停在
+  `launched`，而季度调度器"有未完成 dispatch 就不排队"——五家公司 35 条 dispatch 卡了一天，**所有公司财报数字差一期**。
+- **P12c/P12d 页面上的上限不是真的上限。** 先是硬编码字符串 "每 24 小时最多 30 次"；改成读任务预算后又变成显示 130，
+  而**真实生效上限仍是 30**——`MAX_CALLS_PER_WINDOW` 这个常量比 owner 签的预算更紧，且一直沉默。现在显示生效上限
+  并说明是谁压的，且该常量可配（`--alphaengine-owner-call-cap`）。
+- **P12e–P12g discovery tick 活得比 writer 久。** 采集循环按"每次采集"限时而不是整体限时（12×90s 在 30s 的请求里），
+  且一个 writer op 串行跑三条 lane（各 20s = 60s），最后真正的凶手是两个 launcher 在超时时**抛异常**而不是返回 None。
+  我在读 traceback 之前猜了两次。
+- **P12h/P13c 抽错公司的数字。** 自由文本检索把海尔欧洲业务电话会与 EOS 电话会归到 EPAM 名下，抽取忠实地记下
+  "EPAM revenue = 14.3 billion RMB"——每一位数字都对得上所引字节，字节讲的是别人。**不按公司过滤检索**（行业报告
+  本来就没有公司标签），改为在取数处判断：文档必须点到这家公司的名字（对 live 字节验证：那两份文档从没出现过
+  EPAM），且 prompt 明确告诉模型主体是谁（此前只传了 CIK ref，模型无从察觉自己在读别家公司）。
+- **P12i 错的数字已撤回。** 7 条里 6 条是错的（4 条主体错、2 条同一事实重复）。撤回而非删除，理由留档。
+  重复的根因是"同一事实"此前把 quote 算进身份，且 "Fiscal 2025" 与 "fiscal 2025" 被当成两个期间。
+- **P13e 一句话把整条 pass 弄死。** 加了主体说明后 prompt 长了 1.5KB，估算 16,081 tokens 撞上 16,000 上限，
+  路由把 29 个 profile 全判不合格，而 pass 只报 `no_result`——看起来像"没找到"，实际是"完全没跑"。
+- **P13g Discord 被 agenda shadow 刷屏。** P12b 解开 SEC 调度后，每条 filing dispatch 都发一张 shadow 卡，
+  两小时 25 张同一句话。规则改为：**只有真正权衡过备选的 cycle 才发卡**——lane cycle 永远只有 1 个候选，
+  没有选择可言（live 数据：lane cycle 63 个都是 1 个候选，研究 cycle 是 5–6 个）。
+
+**我造成的一次停机**：`alphaengine_owner_call_cap` 加进了配置读取但没加进允许键集合，安装脚本写出了一份配置加载器
+自己会拒绝的文件，而安装在**卸载服务之后**中止——writer 与 controller 都下线。现在有测试断言"安装脚本能写的每个键
+都是配置能接受的键"。
+
 - **P10c：任务开始写自己的 Initial Screen（已部署；等 owner 发布 mission v9 后开始起草）。** 新增
   `mission_deliverable_versions`：append-only、带指针与版本链，每一版按哈希绑定所依据的任务版本与 Playbook 版本。
   **三条规则由权威强制**：① 正文里的每个数字必须出现在该节 `numbers` 并绑定一条定量 Claim，期间标签（年/季/财年）

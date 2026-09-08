@@ -233,11 +233,19 @@ class AgendaTests(unittest.TestCase):
         )
         self.agenda.add_candidates(
             started["cycle_id"],
+            # Two candidates, because a card is only emitted for a cycle that
+            # actually weighed alternatives (P13g): a cycle with one candidate
+            # made no choice and has nothing to shadow.
             candidates=[{
                 "candidate_id": "candidate:recovery", "company_ref": "wanhua",
                 "question": "Recovery question?", "answer_criteria": "Recovery answer",
                 "features": {"mandate_relevance": 3, "catalyst_urgency": 2, "evidence_staleness": 1, "decision_impact": 3},
                 "rationale": "recovery", "source_refs": ["evidence:recovery"],
+            }, {
+                "candidate_id": "candidate:recovery-2", "company_ref": "wanhua",
+                "question": "Second recovery question?", "answer_criteria": "Recovery answer",
+                "features": {"mandate_relevance": 1, "catalyst_urgency": 1, "evidence_staleness": 1, "decision_impact": 1},
+                "rationale": "recovery alternative", "source_refs": ["evidence:recovery"],
             }],
             actor_ref="core", idempotency_key="candidates:recovery",
         )
@@ -306,3 +314,61 @@ class AgendaTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShadowCardTests(AgendaTests):
+    """P13g: a shadow card shows what the agenda chose, not that it ran.
+
+    The SEC lane opens one cycle per filing dispatch with exactly one
+    candidate, always selected. When that lane was unblocked it put
+    twenty-five identical cards -- "How did reported quarterly revenue change
+    year over year?" -- into the owner's Discord in two hours. A channel that
+    carries machine bookkeeping stops being read.
+    """
+
+    def cycle(self, suffix, count):
+        self.govern()
+        snapshot = self.perception(f"perception:{suffix}")
+        started = self.agenda.start_cycle(
+            f"agenda:2026-08-14:wanhua:{suffix}",
+            perception_snapshot_ref=snapshot["snapshot_id"],
+            perception_snapshot_hash=snapshot["content_hash"],
+            mandate_version_ref="mandate-version:1",
+            policy_version_ref="agenda-policy-version:1",
+            company_ref="wanhua", actor_ref="core",
+            cycle_id=f"agenda-cycle:{suffix}", idempotency_key=f"cycle:{suffix}",
+        )
+        self.agenda.add_candidates(
+            started["cycle_id"],
+            candidates=[{
+                "candidate_id": f"candidate:{suffix}:{i}", "company_ref": "wanhua",
+                "question": f"Question {i}?", "answer_criteria": "criteria",
+                "features": {"mandate_relevance": 3, "catalyst_urgency": 2,
+                             "evidence_staleness": 1, "decision_impact": 3},
+                "rationale": "r", "source_refs": ["evidence:x"],
+            } for i in range(count)],
+            actor_ref="core", idempotency_key=f"candidates:{suffix}",
+        )
+        return self.agenda.decide_cycle(
+            started["cycle_id"], actor_ref="core", decision_id=f"decision:{suffix}",
+            idempotency_key=f"decision:{suffix}",
+        )
+
+    def test_a_cycle_with_one_candidate_sends_nothing(self):
+        decision = self.cycle("lane", 1)
+        self.assertIsNone(decision["outbox_message_ref"])
+        self.assertIsNone(decision["outbox_event"])
+        self.assertEqual(self.agenda.pending_outbox(), [])
+
+    def test_a_cycle_that_weighed_alternatives_still_sends(self):
+        decision = self.cycle("research", 4)
+        self.assertIsNotNone(decision["outbox_message_ref"])
+        self.assertIsNotNone(decision["outbox_event"])
+        self.assertEqual(len(self.agenda.pending_outbox()), 1)
+
+    def test_the_decision_is_recorded_either_way(self):
+        # Suppressing the card must not suppress the decision: the agenda
+        # still ran, and its record is what the Ledger stands on.
+        decision = self.cycle("lane", 1)
+        self.assertEqual(len(decision["selected_candidate_refs"]), 1)
+        self.assertTrue(decision["content_hash"])
