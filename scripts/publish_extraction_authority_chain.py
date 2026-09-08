@@ -95,9 +95,17 @@ def _read_current(connection: sqlite3.Connection) -> dict[str, Any]:
 
 
 def build_chain(current: dict[str, Any], *, now: str, add_rules: list[str] | None = None,
-                max_daily_paid_calls: int | None = None) -> dict[str, Any]:
+                max_daily_paid_calls: int | None = None,
+                max_alphaengine_calls_24h: int | None = None) -> dict[str, Any]:
     mission = current["mission"]
     budget = dict(mission["budget"])
+    if max_alphaengine_calls_24h is not None:
+        # P11d: one combined 24h window covers search_library and get_document,
+        # so this number has to be at least the sum of the two per-operation
+        # quotas or whichever runs first starves the other.
+        if not 1 <= max_alphaengine_calls_24h <= 10000:
+            raise SystemExit("--max-alphaengine-calls-24h must be 1..10000")
+        budget["max_alphaengine_calls_24h"] = int(max_alphaengine_calls_24h)
     if max_daily_paid_calls is not None:
         if not 1 <= max_daily_paid_calls <= 100000:
             raise SystemExit("--max-daily-paid-calls must be 1..100000")
@@ -138,12 +146,15 @@ def build_chain(current: dict[str, Any], *, now: str, add_rules: list[str] | Non
             "policy_ref": policy_wire.get("policy_ref", "commit-gate"), "effective_from": now,
             "effective_until": None, "prior_version_ref": current["policy_id"],
             "change_reason": (
-                CHANGE_REASON if not add_rules and max_daily_paid_calls is None else
+                CHANGE_REASON if not add_rules and max_daily_paid_calls is None
+            and max_alphaengine_calls_24h is None else
                 "ADR-0005 / P9d-17b: " + "; ".join(filter(None, [
                     "list the mission document qualitative rule so policy may admit automation-drafted "
                     "qualitative Claims bound to exact raw spans" if add_rules else None,
                     f"owner raised max_daily_paid_calls to {max_daily_paid_calls} (model calls; cost cap unchanged)"
                     if max_daily_paid_calls is not None else None,
+                    f"owner raised max_alphaengine_calls_24h to {max_alphaengine_calls_24h}"
+                    if max_alphaengine_calls_24h is not None else None,
                 ])) + "; every other rule unchanged"),
             "content_hash_value": None,
         },
@@ -252,7 +263,8 @@ def _ref_hash(record: dict[str, Any], expected_ref: str) -> tuple[str, str]:
 
 
 def rehearse(state_dir: Path, target: Path, *, add_rules: list[str] | None = None,
-             max_daily_paid_calls: int | None = None) -> dict[str, Any]:
+             max_daily_paid_calls: int | None = None,
+             max_alphaengine_calls_24h: int | None = None) -> dict[str, Any]:
     target.mkdir(parents=True, exist_ok=True)
     for name in ("core.sqlite", "core.sqlite-wal", "core.sqlite-shm"):
         source = state_dir / name
@@ -262,7 +274,8 @@ def rehearse(state_dir: Path, target: Path, *, add_rules: list[str] | None = Non
     try:
         current = _read_current(store.connection)
         chain = build_chain(current, now=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
-                            add_rules=add_rules, max_daily_paid_calls=max_daily_paid_calls)
+                            add_rules=add_rules, max_daily_paid_calls=max_daily_paid_calls,
+                            max_alphaengine_calls_24h=max_alphaengine_calls_24h)
         agenda = AgendaStore(store)
         constitutions = ResearchConstitutionAuthority(store)
         missions = CoverageMissionAuthority(store)
@@ -307,7 +320,8 @@ def rehearse(state_dir: Path, target: Path, *, add_rules: list[str] | None = Non
         store.close()
 
 
-def live(state_dir: Path, *, add_rules: list[str] | None = None, max_daily_paid_calls: int | None = None) -> dict[str, Any]:
+def live(state_dir: Path, *, add_rules: list[str] | None = None, max_daily_paid_calls: int | None = None,
+         max_alphaengine_calls_24h: int | None = None) -> dict[str, Any]:
     from dalton_core.governance_cli import ephemeral_call
     read = sqlite3.connect(f"file:{state_dir / 'core.sqlite'}?mode=ro", uri=True)
     try:
@@ -315,7 +329,8 @@ def live(state_dir: Path, *, add_rules: list[str] | None = None, max_daily_paid_
     finally:
         read.close()
     chain = build_chain(current, now=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
-                        add_rules=add_rules, max_daily_paid_calls=max_daily_paid_calls)
+                        add_rules=add_rules, max_daily_paid_calls=max_daily_paid_calls,
+                            max_alphaengine_calls_24h=max_alphaengine_calls_24h)
     token_config = state_dir / "writer-tokens.json"
     socket = state_dir / "run" / "writer.sock"
 
@@ -383,6 +398,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="list this research auto-commit rule in the policy (P9d-17b)")
     parser.add_argument("--max-daily-paid-calls", type=int, default=None,
                         help="owner decision: raise the mission's daily paid model-call cap (ADR-0004 budget expansion)")
+    parser.add_argument("--max-alphaengine-calls-24h", type=int, default=None,
+                        help="owner decision: raise the mission's combined AlphaEngine 24h call "
+                             "cap (search_library and get_document share this one window)")
     parser.add_argument("--add-write-scope", action="append", default=[],
                         help="grant this automation write scope in a new mission version (P10b); "
                              "publishes the mission alone, no policy cascade")
@@ -395,9 +413,11 @@ def main(argv: list[str] | None = None) -> int:
                              rehearse_into=args.rehearse if args.rehearse is not None else None)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=1))
         return 0
-    result = (rehearse(args.state_dir, args.rehearse, add_rules=rules, max_daily_paid_calls=args.max_daily_paid_calls)
+    result = (rehearse(args.state_dir, args.rehearse, add_rules=rules, max_daily_paid_calls=args.max_daily_paid_calls,
+            max_alphaengine_calls_24h=args.max_alphaengine_calls_24h)
               if args.rehearse is not None
-              else live(args.state_dir, add_rules=rules, max_daily_paid_calls=args.max_daily_paid_calls))
+              else live(args.state_dir, add_rules=rules, max_daily_paid_calls=args.max_daily_paid_calls,
+            max_alphaengine_calls_24h=args.max_alphaengine_calls_24h))
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=1))
     return 0
 
