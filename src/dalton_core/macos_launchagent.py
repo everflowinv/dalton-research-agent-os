@@ -73,6 +73,10 @@ def render(
         )
         if service_config.control.research_review.document_extraction_model_config_path is not None:
             extraction_config_path = str(service_config.control.research_review.document_extraction_model_config_path)
+    # P10h: an explicit argument wins, but the config is what makes the setting
+    # survive the next plain re-install.
+    if extraction_max_windows is None and service_config is not None:
+        extraction_max_windows = service_config.document_extraction_max_windows
     # P9d-4d: both host brokers are OpenClaw plugin sockets in one state
     # directory, so the web search broker is derived from the planner's
     # configured broker path instead of a second convention.  Absent files

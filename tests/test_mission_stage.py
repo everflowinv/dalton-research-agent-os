@@ -369,3 +369,42 @@ class ChecklistSurvivesARepublishTests(StageHarness):
         # The copy is 'discovered', but the mission really did acquire it, so
         # the furthest status wins rather than the newest row.
         self.assertEqual(item["pending"], 0)
+
+
+from dalton_core.service import SCHEMA_VERSION as SERVICE_SCHEMA_VERSION, ServiceConfig, ServiceConfigError
+
+
+class ExtractionThroughputConfigTests(unittest.TestCase):
+    """P10h: the owner's reading speed must survive a plain re-install."""
+
+    def _base(self) -> dict:
+        return {
+            "schema_version": SERVICE_SCHEMA_VERSION,
+            "core_db": "/tmp/core.sqlite", "scheduler_db": "/tmp/s.sqlite",
+            "projection_db": "/tmp/p.sqlite", "model_router_db": None,
+            "capability_catalog_db": None, "heartbeat_path": "/tmp/hb.json",
+            "writer_socket": "/tmp/w.sock", "tick_seconds": 5,
+            "projection_min_interval_seconds": 2, "plugin_retry_seconds": 5,
+            "plugins": [],
+        }
+
+    def test_absent_means_the_writer_keeps_its_own_default(self) -> None:
+        config = ServiceConfig.from_mapping(self._base())
+        self.assertIsNone(config.document_extraction_max_windows)
+
+    def test_a_configured_cap_is_read_back(self) -> None:
+        config = ServiceConfig.from_mapping(
+            {**self._base(), "document_extraction": {"max_windows_per_tick": 12}}
+        )
+        self.assertEqual(config.document_extraction_max_windows, 12)
+
+    def test_an_unusable_cap_is_refused_rather_than_clamped(self) -> None:
+        for value in (0, 51, True, 4.5, "12"):
+            with self.assertRaises(ServiceConfigError):
+                ServiceConfig.from_mapping(
+                    {**self._base(), "document_extraction": {"max_windows_per_tick": value}}
+                )
+        with self.assertRaises(ServiceConfigError):
+            ServiceConfig.from_mapping(
+                {**self._base(), "document_extraction": {"max_windows_per_tick": 12, "extra": 1}}
+            )

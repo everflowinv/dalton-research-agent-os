@@ -92,6 +92,11 @@ class ServiceConfig:
     backup_interval_seconds: float | None
     thesis_impact: ThesisImpactProductionConfig | None
     thesis_impact_interval_seconds: float | None
+    # P10h: reading throughput. It lives in the config rather than in the
+    # installer's environment because a plain re-install must not quietly put
+    # it back to the built-in default -- which is exactly what happened the
+    # first time it was set.
+    document_extraction_max_windows: int | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ServiceConfig":
@@ -103,7 +108,7 @@ class ServiceConfig:
         }
         optional = {
             "agenda", "weekly_brief", "bounded_planner", "outbox", "control",
-            "backup", "thesis_impact",
+            "backup", "thesis_impact", "document_extraction",
         }
         if not required.issubset(raw) or set(raw) - required - optional or raw.get("schema_version") != SCHEMA_VERSION:
             raise ServiceConfigError("service config has an invalid shape or schema version")
@@ -271,7 +276,21 @@ class ServiceConfig:
                     thesis_impact_raw["interval_seconds"],
                     "thesis_impact.interval_seconds",
                 )
+        extraction_max_windows = None
+        extraction_raw = raw.get("document_extraction")
+        if extraction_raw is not None:
+            if not isinstance(extraction_raw, Mapping) or set(extraction_raw) != {
+                "max_windows_per_tick",
+            }:
+                raise ServiceConfigError("document_extraction service config is invalid")
+            value = extraction_raw["max_windows_per_tick"]
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 50:
+                raise ServiceConfigError(
+                    "document_extraction.max_windows_per_tick must be an integer 1..50"
+                )
+            extraction_max_windows = value
         return cls(
+            document_extraction_max_windows=extraction_max_windows,
             core_db=_absolute_path(raw["core_db"], "core_db"),
             scheduler_db=_absolute_path(raw["scheduler_db"], "scheduler_db"),
             projection_db=_absolute_path(raw["projection_db"], "projection_db"),

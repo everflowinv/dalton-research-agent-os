@@ -126,9 +126,28 @@ fi
 # directory, the heartbeat, the scheduler and the extraction model config so
 # the owner's page can show progress, answer questions and draft goals.
 "$venv_dir/bin/python" -m dalton_core.cockpit_setup --config "$config_path"
-# P10f: DALTON_EXTRACTION_MAX_WINDOWS raises reading throughput. Each window is
-# one paid model call against the mission's max_daily_paid_calls, so raise the
-# mission budget first; unset keeps the writer's own conservative default.
+# P10f/P10h: DALTON_EXTRACTION_MAX_WINDOWS raises reading throughput. Each
+# window is one paid model call against the mission's max_daily_paid_calls, so
+# raise the mission budget first.
+#
+# Setting it persists it into service.json, so a later plain re-install keeps
+# the owner's number instead of silently restoring the built-in default -- the
+# first install after this knob existed did exactly that and put reading back
+# to 4 without saying so.
+if [[ -n "${DALTON_EXTRACTION_MAX_WINDOWS:-}" ]]; then
+  "$venv_dir/bin/python" - "$config_path" "$DALTON_EXTRACTION_MAX_WINDOWS" <<'PYEOF'
+import json, sys
+from pathlib import Path
+
+path, raw = Path(sys.argv[1]), sys.argv[2]
+if not raw.isdigit() or not 1 <= int(raw) <= 50:
+    raise SystemExit("DALTON_EXTRACTION_MAX_WINDOWS must be an integer 1..50")
+config = json.loads(path.read_text(encoding="utf-8"))
+config["document_extraction"] = {"max_windows_per_tick": int(raw)}
+path.write_text(json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+print(f"document_extraction.max_windows_per_tick={int(raw)}")
+PYEOF
+fi
 # An array, not ${VAR:+...}: this script runs under zsh, which does not word
 # split an unquoted expansion, so the flag and its value would arrive as one
 # argument and argparse would refuse the install.
@@ -144,10 +163,30 @@ fi
   --log-dir "$log_dir" \
   "${extraction_window_args[@]}"
 
+# P10h: ``launchctl bootout`` returns before the job is gone.  Bootstrapping
+# into a domain that still holds the old job fails with "Input/output error",
+# and under ``set -e`` that aborted the install *after* the bootout -- leaving
+# every service down.  Seen live: a second install run seconds after the first
+# took the whole system offline and said only "Bootstrap failed: 5".
+# So wait for the unload, and treat an already-loaded job as success.
 for label in space.lumos.dalton.writer space.lumos.dalton.controller space.lumos.dalton.control space.lumos.dalton.thesis-impact; do
   plist="$launch_agents_dir/$label.plist"
   if [[ -f "$plist" ]]; then
-    launchctl bootstrap "$domain" "$plist"
+    if launchctl print "$domain/$label" >/dev/null 2>&1; then
+      launchctl bootout "$domain/$label" 2>/dev/null || true
+    fi
+    for _ in {1..50}; do
+      launchctl print "$domain/$label" >/dev/null 2>&1 || break
+      sleep 0.2
+    done
+    if ! launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
+      # Only a job that is genuinely absent is a failure worth stopping for.
+      if ! launchctl print "$domain/$label" >/dev/null 2>&1; then
+        print -u2 "error: $label did not bootstrap and is not loaded"
+        exit 1
+      fi
+      print -u2 "note: $label was already loaded; kickstarting it instead"
+    fi
     launchctl enable "$domain/$label"
     launchctl kickstart -k "$domain/$label"
   fi
