@@ -184,6 +184,13 @@ details{margin-top:14px}summary{cursor:pointer;color:var(--muted);font-size:13px
 .mono{font-family:var(--mono);font-size:12px;color:var(--dim)}
 .toast{position:fixed;right:24px;bottom:24px;padding:12px 16px;border-radius:12px;background:#1b2340;border:1px solid var(--line2);box-shadow:var(--shadow);color:var(--text);opacity:0;transform:translateY(10px);transition:.2s;pointer-events:none;max-width:420px}
 .toast.show{opacity:1;transform:none}
+.figs{margin-top:8px}
+.figs .latest li{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap}
+.figv{font-weight:600}
+.figp{opacity:.6;font-size:11px}
+.tag{font-size:10px;padding:1px 6px;border-radius:8px;white-space:nowrap}
+.tag.filed{background:rgba(45,160,120,.16);color:var(--teal,#2da078)}
+.tag.spoken{background:rgba(200,150,40,.16);color:#b8860b}
 </style>
 </head>
 <body>
@@ -301,6 +308,7 @@ details{margin-top:14px}summary{cursor:pointer;color:var(--muted);font-size:13px
 <div class="reader" id="reader"><div class="sheet" id="reader-sheet"></div></div>
 <div class="toast" id="toast"></div>
 <script>
+const GRADE_LABEL={"company-filed-document":"公司文件披露","earnings-call-transcript":"电话会口述"};
 const $=id=>document.getElementById(id);
 const node=(tag,text,cls)=>{const n=document.createElement(tag);if(text!=null)n.textContent=text;if(cls)n.className=cls;return n};
 let csrf="";
@@ -334,7 +342,17 @@ function renderOverview(o){
   $("lanes").replaceChildren(...o.activity.lanes.map(l=>{const d=node("div",null,"lane");const cls=["launched","busy","running","ready","idle"].includes(l.status)?(["launched","busy","running"].includes(l.status)?"on":""):l.status==="held"?"hold":l.status==="failed"?"err":"";d.append(node("span",null,`st ${cls}`));const c=node("div");c.append(node("b",l.label),node("small",`${laneStatus(l.status)} · ${l.note}`));d.append(c);return d}));
   const run=$("running");run.replaceChildren(...o.activity.running.map(r=>{const d=node("div",null,"r");d.append(node("span",null,"spin"),node("span",r.title+(r.detail?` — ${r.detail}`:"")));return d}));
   if(!o.activity.running.length)run.append(node("div","此刻没有正在运行的任务；调度器每 5 分钟检查一次。","hint"));
-  $("companies").replaceChildren(...o.companies.map(c=>{const d=node("div",null,"company");const h=node("div",null,"head");const l=node("div");l.append(node("span",c.ticker,"tk"),node("span",c.name,"nm"));h.append(l,node("span",`${c.stage}${c.stage_status&&c.stage_ref?" · "+c.stage_status:""}`,`stage ${c.stage_ref==="initial_screen"?"s2":c.stage_ref?"s3":"s1"}`));d.append(h,node("div",c.note,"hint"));const bar=node("div",null,"bar");const i=node("i");i.style.width=`${c.progress.percent}%`;bar.append(i);d.append(bar);if(c.checklist&&c.checklist.length)d.append(checklist(c.checklist));if(c.document)d.append(docCard(c.document));const k=node("div",null,"kpis");k.innerHTML=`<span>找到 <b>${c.progress.found}</b></span><span>已读 <b>${c.progress.read}</b></span><span>排队 <b>${c.progress.waiting}</b></span><span>结论 <b>${c.claims.total}</b>${c.claims.today?` <b style="color:var(--teal)">+${c.claims.today}</b>`:""}</span>`;d.append(k);if(c.claims.latest.length){const ul=node("ul",null,"latest");c.claims.latest.forEach(x=>ul.append(node("li",x.statement)));d.append(ul)}return d}));
+  // P11x: figures read out of a company's own documents. Every one was checked
+  // against the bytes it cited; the grade says what those bytes were, because a
+  // number the company filed and a number said on a call are not worth the same.
+  function figures(f){const w=node("div",null,"figs");const head=node("div",null,"hint");
+    head.textContent="已抓取数字："+Object.entries(f.by_grade||{}).map(([g,n])=>`${GRADE_LABEL[g]||g} ${n}`).join(" · ");
+    w.append(head);const ul=node("ul",null,"latest");
+    f.latest.forEach(x=>{const li=node("li");const amount=[x.value,x.scale&&x.scale!=="one"?x.scale:"",x.currency||""].filter(Boolean).join(" ");
+      li.append(node("span",`${x.label}：${amount}`,"figv"),node("span",` ${x.period}`,"figp"),
+        node("span",x.grade_label||"","tag "+(x.grade==="company-filed-document"?"filed":"spoken")));ul.append(li)});
+    w.append(ul);return w}
+  $("companies").replaceChildren(...o.companies.map(c=>{const d=node("div",null,"company");const h=node("div",null,"head");const l=node("div");l.append(node("span",c.ticker,"tk"),node("span",c.name,"nm"));h.append(l,node("span",`${c.stage}${c.stage_status&&c.stage_ref?" · "+c.stage_status:""}`,`stage ${c.stage_ref==="initial_screen"?"s2":c.stage_ref?"s3":"s1"}`));d.append(h,node("div",c.note,"hint"));const bar=node("div",null,"bar");const i=node("i");i.style.width=`${c.progress.percent}%`;bar.append(i);d.append(bar);if(c.checklist&&c.checklist.length)d.append(checklist(c.checklist));if(c.document)d.append(docCard(c.document));const k=node("div",null,"kpis");k.innerHTML=`<span>找到 <b>${c.progress.found}</b></span><span>已读 <b>${c.progress.read}</b></span><span>排队 <b>${c.progress.waiting}</b></span><span>结论 <b>${c.claims.total}</b>${c.claims.today?` <b style="color:var(--teal)">+${c.claims.today}</b>`:""}</span><span>数字 <b>${(c.figures&&c.figures.total)||0}</b></span>`;d.append(k);if(c.claims.latest.length){const ul=node("ul",null,"latest");c.claims.latest.forEach(x=>ul.append(node("li",x.statement)));d.append(ul)}if(c.figures&&c.figures.latest&&c.figures.latest.length)d.append(figures(c.figures));return d}));
   const m=o.model_available;$("goal-submit").disabled=!m.available;$("ask-submit").disabled=!m.available;$("steer-submit").disabled=!m.available;if(!m.available){$("goal-hint").textContent=m.reason;$("ask-hint").textContent=m.reason}
   svc(o.activity.service_state,o.activity.last_tick_at);
 }

@@ -57,6 +57,14 @@ SOURCE_LABELS = {
     "source:sec-edgar": "SEC 财报数据", "source:alphaengine": "卖方研报与电话会",
     "source:company-ir": "公司投资者关系", "source:guidepoint": "专家访谈", "source:web-search": "公开网页搜索",
 }
+# P11x: what a figure is worth, in the owner's language. A number the company
+# filed is its published figure; a number said on a call is a record of the
+# saying. Both are kept; the label is how the difference stays visible.
+_EMPTY_FIGURES: dict = {"total": 0, "by_grade": {}, "latest": []}
+FIGURE_GRADE_LABELS = {
+    "company-filed-document": "公司文件披露",
+    "earnings-call-transcript": "电话会口述（未经财报核对）",
+}
 STAGE_LABELS = {
     "industry_framework": "行业框架", "initial_screen": "初步筛选", "industry_model": "行业模型",
     "company_model": "公司模型", "forecast_lines": "预测线", "investment_memo": "投资备忘录",
@@ -107,6 +115,14 @@ class CockpitConflict(CockpitError):
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _table_exists(connection, name: str) -> bool:
+    """Whether this Core has the table yet; a fresh deploy may not."""
+
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,),
+    ).fetchone() is not None
 
 
 def _iso(value: datetime) -> str:
@@ -424,6 +440,39 @@ class CockpitPlane:
             return "一个公开网页"
         return "一份文档"
 
+    def _figures(self, core: Any) -> dict[str, dict[str, Any]]:
+        """Verified figures per company, counted by grade with a few examples.
+
+        Read straight from the figure journal rather than from claims: these
+        are held and citable now, and waiting for the Ledger admission path
+        before showing them to the owner would hide work already done.
+        """
+
+        if not _table_exists(core, "coverage_mission_document_figures"):
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for row in core.execute(
+            "SELECT company_ref,metric_ref,as_reported_label,period,value,unit,currency,"
+            "scale,source_grade,document_ref,created_at FROM coverage_mission_document_figures "
+            "ORDER BY created_at, figure_id"
+        ).fetchall():
+            entry = out.setdefault(row["company_ref"], {
+                "total": 0, "by_grade": {}, "latest": [],
+            })
+            entry["total"] += 1
+            grade = row["source_grade"]
+            entry["by_grade"][grade] = entry["by_grade"].get(grade, 0) + 1
+            entry["latest"].append({
+                "metric_ref": row["metric_ref"], "label": row["as_reported_label"],
+                "period": row["period"], "value": row["value"], "unit": row["unit"],
+                "currency": row["currency"], "scale": row["scale"],
+                "grade": grade, "grade_label": FIGURE_GRADE_LABELS.get(grade, grade),
+                "document_ref": row["document_ref"], "at": row["created_at"],
+            })
+        for entry in out.values():
+            entry["latest"] = entry["latest"][-6:][::-1]
+        return out
+
     # -- overview ------------------------------------------------------------------
 
     def overview(self) -> dict[str, Any]:
@@ -447,6 +496,7 @@ class CockpitPlane:
                 reviews.setdefault(row["company_ref"], {})[row["state"]] = row["n"]
             theses = [json.loads(r["content_json"]) for r in core.execute(
                 "SELECT content_json FROM thesis_versions ORDER BY created_at").fetchall()]
+            figures = self._figures(core)
             stages = self._stage_rows(core, mission)
             documents = self._deliverables(core, mission)
         today = self.clock().date().isoformat()
@@ -488,6 +538,11 @@ class CockpitPlane:
                 "claims": {"total": len(own), "today": today_claims,
                            "latest": [{"statement": c["statement"], "at": c["created_at"], "ref": c["ref"]}
                                       for c in own[-3:][::-1]]},
+                # P11x: figures read out of this company's own documents, each
+                # verified against the bytes it cited. Shown by grade, because
+                # a number the company filed and a number someone said on a
+                # call are both worth having and are not worth the same.
+                "figures": figures.get(company_ref, _EMPTY_FIGURES),
             })
         planner = (heartbeat.get("bounded_planner") or {}).get("last_result") or {}
         discovery = planner.get("mission_source_discovery") or {}
