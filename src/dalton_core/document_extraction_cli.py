@@ -46,6 +46,8 @@ from .store import DaltonStore, canonical_json, content_hash
 
 SUMMARY_SCHEMA_VERSION = "0.1"
 DEFAULT_MAX_WINDOWS = 2
+# Answers that cost no model call, so they cost no allowance either.
+FREE_STATUSES = frozenset({"nothing_owed", "not_graded"})
 
 
 def secure_dir(path: Path) -> Path:
@@ -177,20 +179,20 @@ class ExtractionHost:
         self.store.close()
 
 
-# P11o: the sources that state reported figures. A filing and a call
-# transcript say "revenue was X"; a news article about the industry almost never
-# does, and spending the figures allowance on one costs a paid call to be told
-# nothing. This is a spending rule, not a claim that news is worthless -- the
-# prose pass still reads all of it.
-NUMERIC_SOURCE_REFS: frozenset[str] = frozenset({
-    "source:sec-edgar", "source:alphaengine",
-})
+def numeric_worthy(spec_ref: Any) -> bool:
+    """Whether a figure may be read out of this kind of document at all.
 
+    P11o gated this by source, which was too coarse to be safe: AlphaEngine
+    holds both earnings-call transcripts and sell-side research, and a note
+    saying "we model revenue of $17.9bn" passes a digit check perfectly while
+    being the analyst's estimate rather than the company's result. The gate is
+    therefore the document kind, and it is the same list that decides a
+    figure's grade -- a kind with no grade is not read for figures.
+    """
 
-def numeric_worthy(review: Mapping[str, Any]) -> bool:
-    """Whether a window from this source is worth a figures call."""
+    from .document_figure_grade import figure_worthy
 
-    return review.get("source_ref") in NUMERIC_SOURCE_REFS
+    return figure_worthy(spec_ref)
 
 
 def discovery_worthy(spec_ref: Any) -> bool:
@@ -240,6 +242,11 @@ def run_extraction(
         # P11m: the figures pass, counted separately from the prose pass. A
         # window that owes nothing appears here as nothing_owed and costs no
         # model call, so the two counts are not interchangeable.
+        #
+        # P11w: ``figures`` counts figures *stored* -- verified against their
+        # own citation and graded by their document -- not figures a model
+        # returned. A verified figure already held is a duplicate, not a
+        # second figure.
         "numeric": [],
         "figures": 0,
         "max_numeric_windows": max_numeric_windows,
@@ -392,10 +399,11 @@ def run_extraction(
         _secondary_sweep(
             service, lanes, summary,
             limit=max_numeric_windows, entries="numeric",
-            wanted=lambda review, spec: numeric_worthy(review),
+            wanted=lambda review, spec: numeric_worthy(spec),
             call="generate_numeric",
-            counts={"verified": "verified", "refused": "refused"},
-            total=("figures", "verified"),
+            counts={"verified": "verified", "refused": "refused",
+                    "recorded": "recorded"},
+            total=("figures", "recorded"),
         )
         _secondary_sweep(
             service, discovery_lanes, summary,
@@ -476,7 +484,10 @@ def _secondary_sweep(
                 status = result.get("status")
                 if status == "gated":
                     return  # no model is configured; every other window is gated too
-                if not result.get("replayed") and status != "nothing_owed":
+                # A window that was never asked anything costs no allowance:
+                # nothing was owed, or its document kind is not one a figure
+                # may be taken from at all.
+                if not result.get("replayed") and status not in FREE_STATUSES:
                     spent += 1
                 entry = {"review_id": review["review_id"], "source_ref": review["source_ref"],
                          "offset": offset, "status": status,

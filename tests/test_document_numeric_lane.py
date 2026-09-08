@@ -13,6 +13,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
+from dalton_core.document_figure_grade import FILED, SPOKEN
 from tests.test_document_extraction import ExtractionHarness
 
 # The harness document says this, over and over.
@@ -119,6 +120,77 @@ class NumericLaneTests(unittest.TestCase):
             with self.assertRaises(ResearchVerificationError) as caught:
                 worker._before_model_call(claiming_broker, None, None, False)
             self.assertIn("impersonate broker", str(caught.exception))
+
+
+class GradedFigureTests(unittest.TestCase):
+    """P11v/P11w: what a figure is worth depends on what it was read out of."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.h = ExtractionHarness(Path(self.temp.name))
+        self.addCleanup(self.h.close)
+
+    def quote(self):
+        return self.h.context()["quotes"][0]
+
+    def figure(self, **overrides):
+        # The harness document contains "client decisions" and, in the XSS
+        # payload it fences, the digit 1 -- so both halves of the check pass
+        # against text that is really there.
+        base = {
+            "quote_id": self.quote()["quote_id"],
+            "metric_ref": "metric:revenue",
+            "as_reported_label": "client decisions",
+            "value": "1", "unit": "count", "currency": None,
+            "period": "FY2026Q3", "basis": "management-reported", "scale": None,
+        }
+        base.update(overrides)
+        return base
+
+    def read(self, output, **kwargs):
+        self.h.enable_fixture(output)
+        return self.h.service.generate_numeric(
+            **self.h.params, expected_context_hash=self.h.context()["content_hash"],
+            **kwargs,
+        )
+
+    def test_a_transcript_figure_is_stored_and_says_it_was_spoken(self):
+        # The harness document is an earnings-call transcript, so this is the
+        # grade the lane derives without being told.
+        result = self.read(response(self.figure()))
+        self.assertEqual(result["status"], "read")
+        self.assertEqual(result["source_grade"], SPOKEN)
+        self.assertEqual(result["recorded"], ["metric:revenue"])
+        [held] = self.h.missions.document_figures(self.h.review["company_ref"])
+        self.assertEqual(held["source_grade"], SPOKEN)
+        self.assertEqual(held["value"], "1")
+
+    def test_a_filed_figure_is_stored_under_the_other_grade(self):
+        result = self.read(response(self.figure()), source_grade=FILED)
+        self.assertEqual(result["source_grade"], FILED)
+        [held] = self.h.missions.document_figures(
+            self.h.review["company_ref"], source_grade=FILED)
+        self.assertEqual(held["metric_ref"], "metric:revenue")
+
+    def test_a_figure_the_window_does_not_contain_is_never_stored(self):
+        result = self.read(response(self.figure(value="999999")))
+        self.assertEqual(result["verified"], [])
+        self.assertEqual(result["recorded"], [])
+        self.assertEqual(self.h.missions.document_figures(self.h.review["company_ref"]), [])
+
+    def test_a_document_kind_with_no_grade_is_not_read_for_figures_at_all(self):
+        # Sell-side research quotes numbers constantly and some of them are the
+        # analyst's estimate; the pass must not spend a call on one.
+        self.h.enable_fixture(response())
+        with unittest.mock.patch.object(
+            type(self.h.service), "_document_spec_ref", return_value="sell-side-reports",
+        ):
+            result = self.h.service.generate_numeric(
+                **self.h.params, expected_context_hash=self.h.context()["content_hash"],
+            )
+        self.assertEqual(result["status"], "not_graded")
+        self.assertEqual(self.h.adapter.calls, 0)
 
 
 if __name__ == "__main__":

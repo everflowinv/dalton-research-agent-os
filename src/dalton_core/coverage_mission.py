@@ -178,6 +178,11 @@ _DISCOVERY_AUTHORIZATION_FIELDS = frozenset({
 })
 
 
+# P11w: the check every stored figure has passed -- its digits and its
+# as-reported label were both found in the exact quote it cites.
+DOCUMENT_FIGURE_VERIFIER_REF = "verifier:document-figure-citation-digits:0.1"
+
+
 class CoverageMissionError(RuntimeError):
     """Base error for the coverage mission authority."""
 
@@ -1657,6 +1662,149 @@ class CoverageMissionAuthority:
                 )
                 recorded.append(wire["metric_ref"])
         return {"recorded": recorded, "duplicates": duplicates}
+
+    def record_document_figures(
+        self,
+        *,
+        company_ref: str,
+        review_ref: str,
+        document_ref: str,
+        source_manifest_hash: str,
+        source_grade: str,
+        figures: Sequence[Mapping[str, Any]],
+        observed_by: str,
+    ) -> dict[str, Any]:
+        """Journal figures read out of one document's window.
+
+        The digit and label check is re-run *here*, against the citation text
+        each figure carries, rather than trusted from the caller.  It is the
+        one thing that separates a figure from a number a model produced, so it
+        belongs at the boundary that writes rather than in the code that asks:
+        a future caller that forgets to verify cannot write an unverified row.
+        """
+
+        from .document_figure_grade import GRADES
+        from .document_numeric_claim import (
+            NumericCandidateError,
+            verify_numeric_candidate,
+        )
+
+        company_ref = _text(company_ref, "company_ref")
+        review_ref = _text(review_ref, "review_ref")
+        document_ref = _text(document_ref, "document_ref")
+        source_manifest_hash = _text(source_manifest_hash, "source_manifest_hash")
+        observed_by = _text(observed_by, "observed_by")
+        if source_grade not in GRADES:
+            raise CoverageMissionValidationError(
+                f"source_grade must be one of {sorted(GRADES)}"
+            )
+        if not isinstance(figures, Sequence) or isinstance(figures, (str, bytes)):
+            raise CoverageMissionValidationError("figures must be a sequence")
+        wires: list[dict[str, Any]] = []
+        for item in figures:
+            if not isinstance(item, Mapping):
+                raise CoverageMissionValidationError("each figure must be an object")
+            citation = item.get("citation_text")
+            if not isinstance(citation, str) or not citation.strip():
+                raise CoverageMissionValidationError(
+                    "a figure must carry the exact quote it was read from"
+                )
+            candidate = {key: item.get(key) for key in (
+                "quote_id", "metric_ref", "as_reported_label", "value", "unit",
+                "currency", "period", "basis", "scale",
+            )}
+            try:
+                wires.append(verify_numeric_candidate(
+                    candidate, {candidate["quote_id"]: citation}))
+            except NumericCandidateError as exc:
+                raise CoverageMissionValidationError(
+                    f"figure is not supported by the quote it cites: {exc}"
+                ) from exc
+        now = _now()
+        recorded, duplicates = [], []
+        with self._transaction() as cur:
+            for wire in wires:
+                figure_id = _ref("mission-document-figure", {
+                    "company_ref": company_ref,
+                    "metric_ref": wire["metric_ref"],
+                    "period": wire["period"],
+                    "document_ref": document_ref,
+                    "quote_id": wire["quote_id"],
+                })
+                if cur.execute(
+                    "SELECT 1 FROM coverage_mission_document_figures WHERE figure_id=?",
+                    (figure_id,),
+                ).fetchone() is not None:
+                    duplicates.append(wire["metric_ref"])
+                    continue
+                record = {
+                    "figure_id": figure_id, "company_ref": company_ref,
+                    "review_ref": review_ref, "document_ref": document_ref,
+                    "source_manifest_hash": source_manifest_hash,
+                    "quote_id": wire["quote_id"],
+                    "citation_text": wire["citation_text"],
+                    "metric_ref": wire["metric_ref"],
+                    "as_reported_label": wire["as_reported_label"],
+                    "period": wire["period"], "value": wire["value"],
+                    "unit": wire["unit"], "currency": wire["currency"],
+                    "scale": wire["scale"], "basis": wire["basis"],
+                    "source_grade": source_grade,
+                    "verified_by": DOCUMENT_FIGURE_VERIFIER_REF,
+                    "observed_by": observed_by, "created_at": now,
+                }
+                record["content_hash"] = content_hash(record)
+                cur.execute(
+                    "INSERT INTO coverage_mission_document_figures("
+                    "figure_id,company_ref,review_ref,document_ref,source_manifest_hash,"
+                    "quote_id,citation_text,metric_ref,as_reported_label,period,value,"
+                    "unit,currency,scale,basis,source_grade,verified_by,observed_by,"
+                    "created_at,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    tuple(record[key] for key in (
+                        "figure_id", "company_ref", "review_ref", "document_ref",
+                        "source_manifest_hash", "quote_id", "citation_text", "metric_ref",
+                        "as_reported_label", "period", "value", "unit", "currency",
+                        "scale", "basis", "source_grade", "verified_by", "observed_by",
+                        "created_at", "content_hash",
+                    )),
+                )
+                recorded.append(wire["metric_ref"])
+        return {"recorded": recorded, "duplicates": duplicates,
+                "source_grade": source_grade}
+
+    def document_figures(
+        self,
+        company_ref: str,
+        *,
+        source_grade: str | None = None,
+        metric_ref: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Figures held for one company, newest last, filterable by grade.
+
+        The grade filter is the point of storing it: a model that should only
+        stand on published figures asks for ``company-filed-document`` and gets
+        exactly those, without the spoken ones having been discarded.
+        """
+
+        query = "SELECT * FROM coverage_mission_document_figures WHERE company_ref=?"
+        params: list[Any] = [_text(company_ref, "company_ref")]
+        if source_grade is not None:
+            from .document_figure_grade import GRADES
+
+            if source_grade not in GRADES:
+                raise CoverageMissionValidationError(
+                    f"source_grade must be one of {sorted(GRADES)}"
+                )
+            query += " AND source_grade=?"
+            params.append(source_grade)
+        if metric_ref is not None:
+            query += " AND metric_ref=?"
+            params.append(_text(metric_ref, "metric_ref"))
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 2000:
+            raise CoverageMissionValidationError("document figure limit must be 1..2000")
+        query += " ORDER BY created_at, figure_id LIMIT ?"
+        params.append(limit)
+        return [dict(row) for row in self.connection.execute(query, params).fetchall()]
 
     def metric_observations(self, company_ref: str) -> list[dict[str, Any]]:
         """Every measure this company has been seen judged on, as proposals."""

@@ -318,3 +318,59 @@ CREATE TRIGGER IF NOT EXISTS coverage_mission_metric_observations_no_update
 BEFORE UPDATE ON coverage_mission_metric_observations BEGIN SELECT RAISE(ABORT, 'metric observations are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS coverage_mission_metric_observations_no_delete
 BEFORE DELETE ON coverage_mission_metric_observations BEGIN SELECT RAISE(ABORT, 'metric observations are append-only'); END;
+
+-- P11w: figures read out of a document, each verified against the bytes it
+-- cited and graded by the kind of document it came from.
+--
+-- Two things make a row here different from a number a model produced:
+--
+--   * the digits and the as-reported label were both found in the exact quote
+--     the figure cites, checked deterministically before the row was written,
+--     and the quote and the manifest hash are stored so the check can be run
+--     again by anyone;
+--   * ``source_grade`` says what the citation is a citation *of*. A figure in
+--     a 10-K is the company's published number; the same figure in a call
+--     transcript is a record that someone said it. Both are kept. Storing them
+--     identically would throw the difference away at the one moment it was
+--     free to record.
+--
+-- The UNIQUE key is the citation, so the same document read twice contributes
+-- one row, and the same figure filed and spoken is two rows -- which is the
+-- point.
+CREATE TABLE IF NOT EXISTS coverage_mission_document_figures (
+    figure_id TEXT PRIMARY KEY,
+    company_ref TEXT NOT NULL,
+    review_ref TEXT NOT NULL,
+    document_ref TEXT NOT NULL,
+    source_manifest_hash TEXT NOT NULL,
+    quote_id TEXT NOT NULL,
+    citation_text TEXT NOT NULL,
+    metric_ref TEXT NOT NULL,
+    as_reported_label TEXT NOT NULL,
+    period TEXT NOT NULL,
+    value TEXT NOT NULL,
+    unit TEXT NOT NULL,
+    currency TEXT,
+    scale TEXT,
+    basis TEXT NOT NULL,
+    source_grade TEXT NOT NULL CHECK(
+        source_grade IN ('company-filed-document','earnings-call-transcript')),
+    verified_by TEXT NOT NULL,
+    observed_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    UNIQUE(company_ref, metric_ref, period, document_ref, quote_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_coverage_mission_document_figures_company
+ON coverage_mission_document_figures(company_ref, metric_ref, period);
+CREATE INDEX IF NOT EXISTS idx_coverage_mission_document_figures_grade
+ON coverage_mission_document_figures(source_grade, company_ref);
+
+CREATE TRIGGER IF NOT EXISTS coverage_mission_document_figures_authorized_insert
+BEFORE INSERT ON coverage_mission_document_figures WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'document figure insert requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_document_figures_no_update
+BEFORE UPDATE ON coverage_mission_document_figures BEGIN SELECT RAISE(ABORT, 'document figures are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_document_figures_no_delete
+BEFORE DELETE ON coverage_mission_document_figures BEGIN SELECT RAISE(ABORT, 'document figures are append-only'); END;

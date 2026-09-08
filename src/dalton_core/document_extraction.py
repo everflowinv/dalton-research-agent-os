@@ -936,8 +936,22 @@ class DocumentExtractionService:
         except Exception:  # noqa: BLE001 - a missing requirement list is not a gate
             return ()
 
+    def _document_spec_ref(self, context):
+        """The kind of document this window is a window of, or None.
+
+        The grade a figure carries comes from here, so a window whose document
+        kind cannot be resolved yields no figures rather than ungraded ones.
+        """
+
+        try:
+            specs = self.writer.coverage_mission.document_spec_refs(
+                context["mission_version_ref"])
+        except Exception:  # noqa: BLE001 - an unresolvable kind is not a crash
+            return None
+        return specs.get(context["document_ref"])
+
     def generate_numeric(self, *, review_id, expected_review_hash, offset,
-                         expected_context_hash, actor_ref):
+                         expected_context_hash, actor_ref, source_grade=None):
         """Read one window for the figures this company owes.
 
         Returns without a model call when nothing is owed. That is the common
@@ -949,26 +963,46 @@ class DocumentExtractionService:
         from .document_numeric_extraction import build_work as build_numeric_work
         from .document_numeric_extraction import extract_from_window
 
+        from .document_figure_grade import grade_for
+
         context = self.context(review_id, expected_review_hash, offset, actor_ref)
         if context["content_hash"] != expected_context_hash:
             raise ResearchVerificationConflict("source context changed; reload original")
+        # P11v: a figure with no grade is a figure whose provenance nobody
+        # decided, so the window is not read rather than read ungraded.
+        grade = source_grade or grade_for(self._document_spec_ref(context))
+        if grade is None:
+            return {"status": "not_graded", "verified": [], "refused": [],
+                    "recorded": [], "formal_authority_writes": 0}
         slots = self.numeric_slots(context)
         if not slots:
             return {"status": "nothing_owed", "verified": [], "refused": [],
-                    "formal_authority_writes": 0}
+                    "recorded": [], "formal_authority_writes": 0}
         config = getattr(self.writer, "_document_extraction_model_config", None)
         factory = self.writer._document_extraction_worker_factory
         if factory is None and config is None:
             return {"status": "gated", "reason": GATE_REASON, "formal_authority_writes": 0}
+        quotes = {item["quote_id"]: item["raw_text"] for item in context["quotes"]}
         work = build_numeric_work(context, slots)
         text, replayed = self._run_secondary(
             work, context, actor_ref, config, factory, "numeric")
         if text is None:
             return {"status": "no_result", "verified": [], "refused": [],
-                    "replayed": replayed, "formal_authority_writes": 0}
+                    "recorded": [], "replayed": replayed, "formal_authority_writes": 0}
         result = extract_from_window(work.metadata["request"], text)
-        return {"status": "read", "replayed": replayed,
-                "formal_authority_writes": 0, **result}
+        journal = {"recorded": [], "duplicates": []}
+        if result["verified"]:
+            journal = self.writer.coverage_mission.record_document_figures(
+                company_ref=context["company_ref"], review_ref=review_id,
+                document_ref=context["document_ref"],
+                source_manifest_hash=context["source_manifest_hash"],
+                source_grade=grade,
+                figures=[{**item, "citation_text": quotes[item["quote_id"]]}
+                         for item in result["verified"]],
+                observed_by=actor_ref,
+            )
+        return {"status": "read", "replayed": replayed, "source_grade": grade,
+                "formal_authority_writes": 0, **result, **journal}
 
     def generate_metric_discovery(self, *, review_id, expected_review_hash, offset,
                                   expected_context_hash, actor_ref):
