@@ -64,6 +64,7 @@ from .public_web_connector import REDIRECT_PROXY_HOSTS
 from .public_web_core_fetch import (
     PublicWebCoreFetchError,
     cited_hosts_from_discovery,
+    url_authority_from_discovery,
     count_recent_public_web_fetch_calls,
 )
 from .raw_spool import RawSpool
@@ -976,7 +977,9 @@ class MissionSourceDiscoveryCoordinator:
             entry: dict[str, Any] = {
                 "record_id": document["record_id"], "document_ref": document["document_ref"],
             }
-            if not self._document_in_authority(document["document_ref"]):
+            if not self._document_in_authority(
+                document["document_ref"], document.get("discovery_ref")
+            ):
                 # The ledger says held but this source's authority does not
                 # agree; report it rather than queue a review for nothing.
                 settled.append({**entry, "status": "not_in_authority"})
@@ -1083,7 +1086,7 @@ class MissionSourceDiscoveryCoordinator:
             review_status: str | None = None
             review_id: str | None = None
             if ticket.get("status") == "succeeded" and self._document_in_authority(
-                document["document_ref"]
+                document["document_ref"], document.get("discovery_ref")
             ):
                 result = self.missions.settle_discovered_document(
                     document["record_id"], status="acquired"
@@ -1131,8 +1134,33 @@ class MissionSourceDiscoveryCoordinator:
             settled.append(entry)
         return settled
 
-    def _document_in_authority(self, document_ref: str) -> bool:
-        """Core holds the document's bytes through this source's own acquisition op."""
+    def _document_in_authority(
+        self, document_ref: str, discovery_ref: str | None = None
+    ) -> bool:
+        if self.source_ref == WEB_SEARCH_SOURCE_REF:
+            return bool(public_web_urls_in_authority(self.store.connection, [document_ref]))
+        if self.source_ref == SEC_SOURCE_REF:
+            # P11c: the queue is keyed by the filing and the bytes by the URL,
+            # so "is this filing in authority" is answered by resolving it to
+            # the URL its own discovery envelope names and asking about that.
+            # Without this a fetch that genuinely succeeded settled as
+            # "acquisition succeeded but the document is not in authority".
+            if discovery_ref is None or self.spool_dir is None:
+                return False
+            try:
+                discovery = self.missions.discovery_record(discovery_ref)
+                if self._spool is None:
+                    self._spool = RawSpool(str(self.spool_dir), max_total_bytes=1_000_000_000)
+                authority = url_authority_from_discovery(
+                    self.store.connection, self._spool, url_ref=document_ref,
+                    source_envelope_ref=discovery["source_envelope_ref"],
+                )
+            except Exception:
+                return False
+            return bool(
+                public_web_urls_in_authority(self.store.connection, [authority["url_ref"]])
+            )
+        return document_in_authority(self.store.connection, document_ref)
 
         if self.source_ref == WEB_SEARCH_SOURCE_REF:
             return bool(public_web_urls_in_authority(self.store.connection, [document_ref]))
@@ -1338,7 +1366,9 @@ class MissionSourceDiscoveryCoordinator:
             preferred_hosts=self.preferred_hosts, skip_hosts=self.skip_hosts,
             preferred_needs=needs,
         )
-        if document is not None and self._document_in_authority(document["document_ref"]):
+        if document is not None and self._document_in_authority(
+            document["document_ref"], document.get("discovery_ref")
+        ):
             # A human acquisition already put these bytes into authority; settle
             # the row and queue the review instead of paying for them twice.
             result = self.missions.settle_document_already_held(document["record_id"])
