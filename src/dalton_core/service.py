@@ -120,6 +120,7 @@ class ServiceConfig:
         optional = {
             "agenda", "weekly_brief", "bounded_planner", "outbox", "control",
             "backup", "thesis_impact", "document_extraction",
+            "alphaengine_owner_call_cap",
         }
         if not required.issubset(raw) or set(raw) - required - optional or raw.get("schema_version") != SCHEMA_VERSION:
             raise ServiceConfigError("service config has an invalid shape or schema version")

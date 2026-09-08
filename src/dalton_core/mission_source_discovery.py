@@ -38,6 +38,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from collections.abc import Callable, Mapping
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -101,6 +102,20 @@ SEC_FILINGS_TICKET_PREFIX = "sec-filings-index"
 # what actually bounds the work.
 ACQUISITIONS_PER_TICK = 12
 ACQUISITION_WAIT_SECONDS = 90.0
+# P12e: the whole acquisition loop has to return before the writer gives up on
+# the request carrying it. The writer abandons a request after 30 s
+# (STORE_REQUEST_TIMEOUT), and this loop was bounded per acquisition rather
+# than in total: twelve waits of ninety seconds is eighteen minutes inside a
+# thirty-second window. Live, that reported the whole discovery lane as
+# unavailable:RemoteError -- the acquisitions were real work, but the tick's
+# budget and status never reached the cockpit, so the lane looked dead.
+TICK_BUDGET_SECONDS = 20.0
+
+
+def _monotonic() -> float:
+    """Elapsed time for the tick deadline; injectable in tests."""
+
+    return time.monotonic()
 # A 10-K window holds a couple of filings; the ceiling only has to be
 # above that, and the adapter fails closed if the source exceeds it.
 SEC_INDEX_LIMIT = 100
@@ -939,11 +954,13 @@ class MissionSourceDiscoveryCoordinator:
         spool_dir: str | Path | None = None,
         acquisitions_per_tick: int = ACQUISITIONS_PER_TICK,
         acquisition_wait_seconds: float = ACQUISITION_WAIT_SECONDS,
+        tick_budget_seconds: float = TICK_BUDGET_SECONDS,
     ) -> None:
         self.store = store
         self.missions = missions
         self.acquisitions_per_tick = acquisitions_per_tick
         self.acquisition_wait_seconds = acquisition_wait_seconds
+        self.tick_budget_seconds = float(tick_budget_seconds)
         # P11b: a restart means new code, so the most likely cause of an
         # earlier failure is the thing that just changed. Waiting an hour to
         # find out whether a fix worked is a bad loop for the operator and a
@@ -1457,6 +1474,53 @@ class MissionSourceDiscoveryCoordinator:
             "retry": retry, "budget": budget,
         }
 
+    def _acquire_within_budget(
+        self, settled_documents: list[Any]
+    ) -> tuple[list[dict[str, Any]], bool, list[Any]]:
+        """Acquire queued documents until the queue empties or time runs out.
+
+        P10x put the wait inside the tick: the child fetches in about 0.1 s and
+        then the ticket waited for the next 300 s tick to notice, so a queue of
+        130 documents took eleven hours to move thirteen seconds of work.
+
+        P12e put a deadline on the loop. The bound was per acquisition, not in
+        total -- twelve waits of ninety seconds is eighteen minutes inside a
+        request the writer abandons after thirty. The deadline belongs to the
+        whole loop because the writer's patience is spent by the whole request,
+        and a tick that outlives it reports the entire lane as unavailable
+        however much real work it did.
+        """
+
+        acquisitions: list[dict[str, Any]] = []
+        deadline = _monotonic() + max(0.0, self.tick_budget_seconds)
+        out_of_time = False
+        for _ in range(max(1, int(self.acquisitions_per_tick))):
+            if _monotonic() >= deadline:
+                out_of_time = True
+                break
+            acquisition = self.launch_acquisition()
+            acquisitions.append(acquisition)
+            if acquisition.get("status") != "launched":
+                break
+            wait = getattr(self.acquisition_launcher, "wait", None)
+            if wait is None:
+                # A launcher that cannot be waited on keeps the old one-per-tick
+                # behaviour rather than spinning against a child it cannot see.
+                break
+            remaining = deadline - _monotonic()
+            if remaining <= 0:
+                # The child keeps running and the next tick settles it; what
+                # must not happen is this request outliving the writer.
+                out_of_time = True
+                break
+            if wait(timeout=min(self.acquisition_wait_seconds, remaining)) is None:
+                out_of_time = _monotonic() >= deadline
+                break
+            # Settle the child that just finished, or the next launch sees a
+            # document still marked launched and reports itself busy.
+            settled_documents = settled_documents + self.settle_documents()
+        return acquisitions, out_of_time, settled_documents
+
     def dispatch_once(self) -> dict[str, Any]:
         retried_after_restart = self._retry_failures_now
         settled_dispatches = self.settle_dispatches()
@@ -1479,22 +1543,12 @@ class MissionSourceDiscoveryCoordinator:
         # documents took eleven hours to move about thirteen seconds of work.
         # Waiting for the child here costs a fraction of a second and settles
         # it immediately, so the next one can start inside the same tick.
-        acquisitions: list[dict[str, Any]] = []
-        for _ in range(max(1, int(self.acquisitions_per_tick))):
-            acquisition = self.launch_acquisition()
-            acquisitions.append(acquisition)
-            if acquisition.get("status") != "launched":
-                break
-            wait = getattr(self.acquisition_launcher, "wait", None)
-            if wait is None:
-                # A launcher that cannot be waited on keeps the old one-per-tick
-                # behaviour rather than spinning against a child it cannot see.
-                break
-            if wait(timeout=self.acquisition_wait_seconds) is None:
-                break
-            # Settle the child that just finished, or the next launch sees a
-            # document still marked launched and reports itself busy.
-            settled_documents = settled_documents + self.settle_documents()
+        #
+        # P12e: and it keeps going only while the tick still has time. The
+        # deadline is on the loop, not on each acquisition, because the
+        # writer's patience is spent by the whole request.
+        acquisitions, out_of_time, settled_documents = self._acquire_within_budget(
+            settled_documents)
         discovery = self.launch_discovery()
         launched = [item for item in acquisitions if item.get("status") == "launched"]
         launched_documents = len(launched)
@@ -1523,6 +1577,10 @@ class MissionSourceDiscoveryCoordinator:
             "discovery": discovery,
             "acquisition": acquisition,
             "acquisitions_launched": launched_documents,
+            # Visible rather than silent: a tick that ran out of its budget did
+            # real work and stopped early, which is a different thing from a
+            # tick that found nothing to do.
+            "tick_budget_exhausted": out_of_time,
             "retried_after_restart": retried_after_restart,
         }
 
@@ -1531,6 +1589,7 @@ __all__ = [
     "ALPHAENGINE_SOURCE_REF",
     "AlphaEngineSearchLauncher",
     "DISCOVERY_PLAN_SCHEMA_VERSION",
+    "TICK_BUDGET_SECONDS",
     "DISCOVERY_PLAN_SCHEMA_VERSION_V2",
     "DISCOVERY_PLAN_SCHEMA_VERSION_V3",
     "DISCOVERY_PLAN_SCHEMA_VERSIONS",

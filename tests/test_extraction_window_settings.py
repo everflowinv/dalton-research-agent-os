@@ -141,5 +141,64 @@ class ServiceConfigTests(unittest.TestCase):
             self.assertIsInstance(result, ServiceConfigError, value)
 
 
+class ConfigKeyTests(unittest.TestCase):
+    """Every setting the installer writes must be a setting the config accepts.
+
+    The owner-cap knob was added to the reader and not to the accepted key set,
+    so the installer wrote a config that ServiceConfig then rejected -- and the
+    install aborted after unloading the services, taking Dalton down.
+    """
+
+    def base(self, root: Path) -> dict:
+        return {
+            "schema_version": "0.1",
+            "core_db": str(root / "core.sqlite"),
+            "scheduler_db": str(root / "scheduler.sqlite"),
+            "projection_db": str(root / "projection.sqlite"),
+            "model_router_db": None, "capability_catalog_db": None,
+            "heartbeat_path": str(root / "run" / "heartbeat.json"),
+            "writer_socket": str(root / "run" / "writer.sock"),
+            "tick_seconds": 1, "projection_min_interval_seconds": 1,
+            "plugin_retry_seconds": 1, "plugins": [],
+        }
+
+    def load(self, extra):
+        from dalton_core.service import ServiceConfig
+
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            return ServiceConfig.from_mapping({**self.base(root), **extra})
+
+    def test_the_owner_cap_the_installer_writes_is_accepted(self):
+        self.assertEqual(self.load({"alphaengine_owner_call_cap": 130})
+                         .alphaengine_owner_call_cap, 130)
+
+    def test_it_is_absent_when_unset(self):
+        self.assertIsNone(self.load({}).alphaengine_owner_call_cap)
+
+    def test_a_nonsense_cap_is_refused(self):
+        from dalton_core.service import ServiceConfigError
+
+        for value in (0, 2001, True, "130", -1):
+            with self.assertRaises(ServiceConfigError, msg=repr(value)):
+                self.load({"alphaengine_owner_call_cap": value})
+
+    def test_every_key_the_installer_can_write_is_accepted(self):
+        # The installer and the config schema have to agree, and the way they
+        # stop agreeing is a key added to one and not the other.
+        import re
+        from pathlib import Path as _P
+
+        script = (_P(__file__).resolve().parents[1] / "deploy" / "macos"
+                  / "install.sh").read_text(encoding="utf-8")
+        written = set(re.findall(r'config\["([a-z_]+)"\]\s*=', script))
+        written |= set(re.findall(r'block\["([a-z_]+)"\]', script))
+        self.assertIn("alphaengine_owner_call_cap", written)
+        top_level = written - {"max_windows_per_tick", "numeric_windows_per_tick",
+                               "discovery_windows_per_tick", "document_extraction"}
+        for key in top_level:
+            self.load({key: 130})  # must not raise
+
+
 if __name__ == "__main__":
     unittest.main()
