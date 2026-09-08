@@ -130,6 +130,18 @@ fi
 # config next to the state, and points service.json at it.  No credential is
 # read; the broker key path is referenced.
 "$venv_dir/bin/python" -m dalton_core.document_extraction_setup --config "$config_path"
+# P13k: the planner's model, only when the owner names one. It decides what the
+# research works on next, so it routes through its own policy rather than
+# sharing extraction's -- which pins a single profile by design. Left unset
+# nothing is installed and the planner stays dark: its model costs fifty times
+# the extraction model's, which is affordable for a few small calls a day and
+# is not something anyone should acquire by upgrading.
+#
+#   DALTON_PLANNER_MODEL_PROFILE=profile:gpt-6-astra
+if [[ -n "${DALTON_PLANNER_MODEL_PROFILE:-}" ]]; then
+  "$venv_dir/bin/python" -m dalton_core.research_planner_setup \
+    --config "$config_path" --profile-ids "$DALTON_PLANNER_MODEL_PROFILE"
+fi
 # P9d-18 / ADR-0006: point the cockpit at the Core (read-only), the state
 # directory, the heartbeat, the scheduler and the extraction model config so
 # the owner's page can show progress, answer questions and draft goals.

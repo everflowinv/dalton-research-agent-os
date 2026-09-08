@@ -50,12 +50,20 @@ def _config() -> dict:
     }
 
 
+from dalton_core.model_deployment import _ENDPOINTS
+
+_ENDPOINT_COUNT = len(_ENDPOINTS)
+
+
 class OpenClawCatalogReconcileTests(unittest.TestCase):
     def test_static_catalog_is_in_sync_and_report_contains_no_secrets(self):
         report = reconcile_openclaw_model_catalog(_config(), checked_at=NOW)
         self.assertTrue(report["catalog_in_sync"])
-        self.assertEqual(report["provider_model_count"], 23)
-        self.assertEqual(report["broker_profile_count"], 23)
+        # Derived: the fixture config is built from the static catalog, so a
+        # written-down count fails every time a model is added rather than
+        # saying anything about sync.
+        self.assertEqual(report["provider_model_count"], _ENDPOINT_COUNT)
+        self.assertEqual(report["broker_profile_count"], _ENDPOINT_COUNT)
         serialized = json.dumps(report)
         self.assertNotIn("must-not-leak", serialized)
         self.assertNotIn("also-secret", serialized)

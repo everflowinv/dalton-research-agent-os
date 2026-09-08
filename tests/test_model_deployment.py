@@ -32,6 +32,12 @@ from dalton_core.model_deployment import (
     openclaw_profiles,
 )
 from dalton_core.model_router import ModelRouter
+
+from dalton_core.model_deployment import _ENDPOINTS
+
+# Derived, not written down: adding a model to the catalog is a normal
+# change and should not need four counts edited to match.
+_ENDPOINT_COUNT = len(_ENDPOINTS)
 from tests.test_openclaw_catalog_reconcile import _config
 
 
@@ -41,13 +47,17 @@ WHEN = datetime(2026, 8, 14, 8, 0, tzinfo=timezone.utc)
 class ModelDeploymentTests(unittest.TestCase):
     def test_all_configured_routes_and_independent_verification_policy(self) -> None:
         profiles = openclaw_profiles(checked_at=WHEN)
-        self.assertEqual(len(profiles), 23)
+        self.assertEqual(len(profiles), _ENDPOINT_COUNT)
         self.assertEqual(
             {(item["provider"], item["model"]) for item in profiles},
             {
                 ("deepseek", "deepseek-v4-flash"),
                 ("openai", "gpt-5.6-sol"),
                 ("openai", "gpt-5.6-terra"),
+                # P13k: the planner's model. Curated rather than derived,
+                # because a profile built from the provider catalog alone comes
+                # out verify-only and the planner asks for research.
+                ("openai", "gpt-6-astra"),
                 ("openai", "gpt-5.6-luna"),
                 ("claude-cli-gateway", "claude-fable-5"),
                 ("claude-cli-gateway", "claude-opus-5"),
@@ -93,7 +103,7 @@ class ModelDeploymentTests(unittest.TestCase):
                 policy_count = router.connection.execute(
                     "SELECT COUNT(*) FROM model_routing_policy_versions"
                 ).fetchone()[0]
-                self.assertEqual(profile_count, 23)
+                self.assertEqual(profile_count, _ENDPOINT_COUNT)
                 self.assertEqual(policy_count, 1)
 
     def test_v2_profiles_use_ids_accepted_by_broker_protocol(self) -> None:
@@ -105,7 +115,7 @@ class ModelDeploymentTests(unittest.TestCase):
             upgraded = upgrade_openclaw_broker_catalog(path, checked_at=WHEN)
             self.assertEqual(upgraded["policy"]["policy"]["policy_version_ref"], BROKER_POLICY_REF)
             with ModelRouter(path) as router:
-                self.assertEqual(len(router.get_policy(BROKER_POLICY_REF)["filters"]["allowed_profile_ids"]), 23)
+                self.assertEqual(len(router.get_policy(BROKER_POLICY_REF)["filters"]["allowed_profile_ids"]), _ENDPOINT_COUNT)
 
     def test_v2_profile_version_can_advance_without_changing_entity_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

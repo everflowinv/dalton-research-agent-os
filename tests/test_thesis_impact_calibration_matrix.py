@@ -20,6 +20,12 @@ from dalton_core.thesis_impact_calibration_matrix import (
 from dalton_core.thesis_impact_calibration_runner import (
     ThesisImpactCalibrationRunError,
 )
+from dalton_core.model_deployment import _ENDPOINTS
+
+# Derived, not written down: adding a model to the catalog is a normal
+# change and should not need four counts edited to match.
+_ENDPOINT_COUNT = len(_ENDPOINTS)
+
 
 
 NOW = datetime(2026, 8, 22, 6, 0, tzinfo=timezone.utc)
@@ -36,7 +42,10 @@ class ThesisImpactCalibrationMatrixTests(unittest.TestCase):
             repo_commit="b" * 40,
             created_at=NOW,
             case_refs=[self.case_ref],
-            total_cap_usd=Decimal("4.60"),
+            # Derived from the catalog: the cap check is
+            # profiles x cases x per_case_cap <= total_cap, so a written-down
+            # total silently forbids the next model added to the catalog.
+            total_cap_usd=Decimal("0.20") * _ENDPOINT_COUNT,
             per_case_cap_usd=Decimal("0.20"),
             max_input_tokens=3000,
             max_output_tokens=1000,
@@ -45,7 +54,7 @@ class ThesisImpactCalibrationMatrixTests(unittest.TestCase):
 
     def test_manifest_freezes_all_profiles_and_posthoc_tier(self):
         parsed = validate_calibration_matrix_manifest(self.manifest)
-        self.assertEqual(len(parsed["profile_ids"]), 23)
+        self.assertEqual(len(parsed["profile_ids"]), _ENDPOINT_COUNT)
         self.assertEqual(parsed["case_refs"], [self.case_ref])
         self.assertEqual(
             parsed["execution_tier"],

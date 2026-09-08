@@ -82,6 +82,30 @@ _ENDPOINTS: tuple[dict[str, Any], ...] = (
         "output_cost": 30.0,
     },
     {
+        # P13k: the planner's model. Curated rather than derived, because a
+        # profile built from the provider catalog alone comes out verify-only
+        # -- deliberately, so a new broker model cannot quietly start doing
+        # research. Naming it here is the statement that this model is trusted
+        # to decide what the research works on next.
+        #
+        # It is fifty times the unit cost of the extraction model, which is why
+        # nothing routes to it unless the owner turns it on: the planner reads
+        # a ~2,400-token state a few times a day, the extraction lane reads
+        # thousands of large windows, and putting this model on the second
+        # would be a different order of spend entirely.
+        "name": "gpt-6-astra",
+        "provider": "openai",
+        "model": "gpt-6-astra",
+        "family": "openai-gpt-6",
+        "credential_slot_ref": "credential-slot:openclaw:openai",
+        "capabilities": ["research", "research-hard", "adjudicate", "verify"],
+        "max_context_tokens": 872_000,
+        "max_output_tokens": 128_000,
+        "max_input_tokens": 744_000,
+        "input_cost": 10.0,
+        "output_cost": 50.0,
+    },
+    {
         "name": "gpt-5-6-terra",
         "provider": "openai",
         "model": "gpt-5.6-terra",
