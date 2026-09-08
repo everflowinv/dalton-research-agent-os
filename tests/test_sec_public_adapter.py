@@ -232,6 +232,73 @@ class AdapterTests(unittest.TestCase):
         )
         self.assertEqual(amended_result["current"]["value"], "70066000000")
 
+
+    def test_a_filing_whose_frames_migrated_still_pairs_on_its_own_periods(self) -> None:
+        """SEC moves a calendar frame to the newest filing that reports a period.
+
+        Live, every historical 10-Q had therefore lost its frame to a later
+        filing and could not be read at all.  The pair is established by the
+        accession, the fiscal period label and the dates; the frame only
+        corroborates when SEC left one.
+        """
+
+        payload = json.loads(json.dumps(company_facts_payload()))
+        for concept in payload["facts"]["us-gaap"].values():
+            for row in concept["units"]["USD"]:
+                if row["accn"] == "0000789019-25-000063":
+                    row["frame"] = None
+        result = normalize_sec_company_facts(
+            payload,
+            {**COMPANY_FACTS_PARAMETERS, "filed_from": "2025-04-29", "filed_to": "2025-05-01"},
+            provider_status=200,
+        )
+        self.assertEqual(result["current"]["end"], "2025-03-31")
+        self.assertEqual(result["prior"]["end"], "2024-03-31")
+        self.assertIsNone(result["current"]["frame"])
+        # A frameless row is identified by its own period, not by a frame it lost.
+        self.assertTrue(result["source_record_refs"][0].endswith("2025-01-01..2025-03-31"))
+        self.assertEqual(result["growth_percent"], "21.29")
+
+    def test_frames_that_disagree_still_refuse_when_sec_assigned_both(self) -> None:
+        payload = json.loads(json.dumps(company_facts_payload()))
+        for concept in payload["facts"]["us-gaap"].values():
+            for row in concept["units"]["USD"]:
+                if row["accn"] == "0000789019-25-000063" and row["end"] == "2024-03-31":
+                    row["frame"] = "CY2023Q1"
+        with self.assertRaises(SecPublicAdapterError):
+            normalize_sec_company_facts(
+                payload,
+                {**COMPANY_FACTS_PARAMETERS, "filed_from": "2025-04-29", "filed_to": "2025-05-01"},
+                provider_status=200,
+            )
+
+    def test_dropping_the_frame_does_not_pair_across_filings_or_wrong_years(self) -> None:
+        payload = json.loads(json.dumps(company_facts_payload()))
+        for concept in payload["facts"]["us-gaap"].values():
+            for row in concept["units"]["USD"]:
+                row["frame"] = None
+                if row["end"] == "2024-03-31":
+                    # The comparative now belongs to a different filing.
+                    row["accn"] = "0000789019-24-000001"
+        with self.assertRaises(SecPublicAdapterError):
+            normalize_sec_company_facts(
+                payload,
+                {**COMPANY_FACTS_PARAMETERS, "filed_from": "2025-04-29", "filed_to": "2025-05-01"},
+                provider_status=200,
+            )
+        two_years = json.loads(json.dumps(company_facts_payload()))
+        for concept in two_years["facts"]["us-gaap"].values():
+            for row in concept["units"]["USD"]:
+                row["frame"] = None
+                if row["end"] == "2024-03-31":
+                    row["start"], row["end"] = "2023-01-01", "2023-03-31"
+        with self.assertRaises(SecPublicAdapterError):
+            normalize_sec_company_facts(
+                two_years,
+                {**COMPANY_FACTS_PARAMETERS, "filed_from": "2025-04-29", "filed_to": "2025-05-01"},
+                provider_status=200,
+            )
+
     def test_company_concept_fails_closed_on_ambiguous_or_mixed_context(self):
         ambiguous = concept_payload()
         ambiguous["units"]["USD"].append(

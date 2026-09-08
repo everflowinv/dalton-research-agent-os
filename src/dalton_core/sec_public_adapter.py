@@ -273,8 +273,13 @@ def _quarterly_fact(
     form = _text(value.get("form"), f"units.row[{index}].form")
     if form != expected_form:
         return None
+    # SEC assigns a calendar ``frame`` to only the newest filing that reports a
+    # period; when a later 10-Q repeats the prior-year quarter, the frame moves
+    # to that filing and the original row loses it.  Requiring one therefore
+    # made every historical filing unusable.  The frame is kept when present
+    # and is never what establishes the pair: the period conditions below do.
     frame = value.get("frame")
-    if not isinstance(frame, str) or _FRAME_RE.fullmatch(frame) is None:
+    if frame is not None and (not isinstance(frame, str) or _FRAME_RE.fullmatch(frame) is None):
         return None
     accession = _text(value.get("accn"), f"units.row[{index}].accn")
     if _ACCESSION_RE.fullmatch(accession) is None:
@@ -307,6 +312,21 @@ def _quarterly_fact(
     }
     record["record_hash"] = content_hash(record)
     return record
+
+
+def _is_prior_year_frame(current: str | None, prior: str | None) -> bool:
+    """Frames must agree when SEC assigned both; otherwise the dates decide.
+
+    Two rows only reach this check when they share an accession, a fiscal
+    period label, a quarter-length duration within seven days of each other,
+    and end dates 350..380 days apart.  That is already "the same quarter a
+    year earlier, as reported by this filing"; the frame is a corroboration
+    when SEC left one, not the thing that establishes it.
+    """
+
+    if current is None or prior is None:
+        return True
+    return prior == _prior_frame(current)
 
 
 def _prior_frame(frame: str) -> str:
@@ -403,7 +423,7 @@ def normalize_sec_company_concept(
             item
             for item in facts
             if item["accession"] == candidate["accession"]
-            and item["frame"] == _prior_frame(candidate["frame"])
+            and _is_prior_year_frame(candidate["frame"], item["frame"])
             and item["fp"] == candidate["fp"]
             and 350
             <= (
@@ -447,7 +467,12 @@ def normalize_sec_company_concept(
     if growth_text == "-0.00":
         growth_text = "0.00"
     record_refs = [
-        f"sec:company-concept:{item['accession']}:{taxonomy}:{concept}:{item['frame']}"
+        "sec:company-concept:{accession}:{taxonomy}:{concept}:{label}".format(
+            accession=item["accession"], taxonomy=taxonomy, concept=concept,
+            # A frameless row is identified by its own period, which never
+            # migrates between filings the way SEC's calendar frame does.
+            label=item["frame"] or f"{item['start']}..{item['end']}",
+        )
         for item in (current, prior)
     ]
     normalized = {
