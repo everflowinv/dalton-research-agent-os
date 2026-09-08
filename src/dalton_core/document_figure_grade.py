@@ -71,6 +71,46 @@ QUALIFIER_BY_GRADE: Mapping[str, str] = {
 
 GRADES: tuple[str, ...] = (FILED, SPOKEN)
 
+# P12h: whether the document is *known to be about the company* it was filed
+# under, and how.
+#
+# A SEC filing is attributed by construction: its accession belongs to one
+# CIK, and the lane derived the document from that company's own filing index.
+# An AlphaEngine document is attributed by a free-text search -- "EPAM Systems
+# EPAM earnings call transcript" -- and nothing checks the result. Live, that
+# put a Haier European-business call (RMB, refrigerators) and an EOS call (AUD)
+# into EPAM's queue, and the figures pass dutifully recorded "EPAM revenue =
+# 14.3 billion RMB". Every digit was verified against the bytes it cited. The
+# bytes were about another company.
+#
+# So a figure needs a grade *and* an attribution. Until the search side can
+# show the document is about the company, spoken figures are held rather than
+# recorded: a number attributed to the wrong company is worse than no number,
+# because it looks exactly like a good one.
+ATTRIBUTED_BY_SPEC: Mapping[str, str] = {
+    "annual-report-10k": "sec-accession",
+    "quarterly-report-10q": "sec-accession",
+}
+
+
+def attribution_for(spec_ref: Any) -> str | None:
+    """How this document kind is bound to the company, or None if nothing does."""
+
+    if not isinstance(spec_ref, str):
+        return None
+    return ATTRIBUTED_BY_SPEC.get(spec_ref)
+
+
+def figure_recordable(spec_ref: Any) -> bool:
+    """Whether a figure from this kind of document may be recorded at all.
+
+    Reading is still worth doing -- the refusal is about *storing a number
+    against a company*, which is the part that is wrong when the document
+    turns out to be about someone else.
+    """
+
+    return figure_worthy(spec_ref) and attribution_for(spec_ref) is not None
+
 
 class FigureGradeError(ValueError):
     """A figure was graded against a document kind that carries no grade."""
@@ -129,6 +169,7 @@ def qualify(statement: str, grade: str) -> str:
 
 
 __all__ = [
+    "ATTRIBUTED_BY_SPEC",
     "BASIS_BY_GRADE",
     "FILED",
     "GRADES",
@@ -136,7 +177,9 @@ __all__ = [
     "QUALIFIER_BY_GRADE",
     "SPOKEN",
     "FigureGradeError",
+    "attribution_for",
     "basis_for",
+    "figure_recordable",
     "figure_worthy",
     "grade_for",
     "qualify",

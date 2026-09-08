@@ -190,9 +190,12 @@ def numeric_worthy(spec_ref: Any) -> bool:
     figure's grade -- a kind with no grade is not read for figures.
     """
 
-    from .document_figure_grade import figure_worthy
+    from .document_figure_grade import figure_recordable
 
-    return figure_worthy(spec_ref)
+    # P12h: and only where the document is known to be about the company it
+    # was filed under. A free-text search put another company's earnings call
+    # in EPAM's queue and the pass recorded its revenue as EPAM's.
+    return figure_recordable(spec_ref)
 
 
 def discovery_worthy(spec_ref: Any) -> bool:

@@ -80,5 +80,49 @@ class StatementTests(unittest.TestCase):
             basis_for("invented-grade")
 
 
+class AttributionTests(unittest.TestCase):
+    """P12h: a number is worthless if it is filed under the wrong company.
+
+    Live, "EPAM Systems EPAM earnings call transcript" returned a Haier
+    European-business call (RMB, refrigerators) and an EOS call (AUD). Both
+    were acquired under EPAM, both were read, and the figures pass recorded
+    "EPAM revenue = 14.3 billion RMB". Every digit was verified against the
+    bytes it cited; the bytes were about another company.
+    """
+
+    def test_a_sec_filing_is_attributed_by_its_own_accession(self):
+        from dalton_core.document_figure_grade import attribution_for, figure_recordable
+
+        self.assertEqual(attribution_for("annual-report-10k"), "sec-accession")
+        self.assertTrue(figure_recordable("annual-report-10k"))
+        self.assertTrue(figure_recordable("quarterly-report-10q"))
+
+    def test_a_free_text_search_result_is_not_attributed_to_anything(self):
+        from dalton_core.document_figure_grade import attribution_for, figure_recordable
+
+        self.assertIsNone(attribution_for("earnings-call-transcripts"))
+        self.assertFalse(figure_recordable("earnings-call-transcripts"))
+
+    def test_reading_is_still_allowed_where_recording_is_not(self):
+        # The refusal is about storing a number against a company, not about
+        # reading the document -- the prose and discovery passes still use it.
+        from dalton_core.document_figure_grade import figure_recordable, figure_worthy
+
+        self.assertTrue(figure_worthy("earnings-call-transcripts"))
+        self.assertFalse(figure_recordable("earnings-call-transcripts"))
+
+    def test_nothing_unrecognised_is_recordable(self):
+        from dalton_core.document_figure_grade import figure_recordable
+
+        for spec in (None, "", "sell-side-reports", "invented", 7):
+            self.assertFalse(figure_recordable(spec), spec)
+
+    def test_the_lane_gate_is_the_recordable_one(self):
+        from dalton_core.document_extraction_cli import numeric_worthy
+
+        self.assertTrue(numeric_worthy("annual-report-10k"))
+        self.assertFalse(numeric_worthy("earnings-call-transcripts"))
+
+
 if __name__ == "__main__":
     unittest.main()
