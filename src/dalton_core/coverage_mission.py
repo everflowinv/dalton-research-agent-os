@@ -109,14 +109,17 @@ DISCOVERY_SOURCES: Mapping[str, Mapping[str, str]] = MappingProxyType({
         "operation": "search_web",
         "document_ref_prefix": "public-web-url:sha256:",
     }),
-    # P10r: the SEC filings index. It discovers documents rather than facts --
-    # the index says which filings exist and where, and the filing itself only
-    # enters authority through the ordinary fetch lane, which is why its
-    # documents carry the same public-web URL refs a web search produces.
+    # P10s: the SEC filings index. A discovered document is the filing the
+    # envelope actually returned, so it carries the filing's own ref. The URL
+    # is a derived locator, rebuilt from the same raw bytes when the filing is
+    # fetched -- the same way a web search document recovers its URL from the
+    # envelope that cited it. Naming the queue rows by URL instead would have
+    # broken the binding that every queued document is one record the source
+    # returned, in order.
     "source:sec-edgar": MappingProxyType({
         "connector_source_ref": "source:sec-edgar",
         "operation": "list_filings",
-        "document_ref_prefix": "public-web-url:sha256:",
+        "document_ref_prefix": "sec:filing:",
     }),
 })
 DISCOVERED_DOCUMENT_STATUSES: tuple[str, ...] = (
@@ -473,6 +476,12 @@ def validate_mission_source_discovery(value: Mapping[str, Any]) -> dict[str, Any
     if source["operation"] == "search_library":
         if set(wire["parameters"]) != {"query", "filters", "cursor"}:
             raise CoverageMissionValidationError("search_library discovery parameters have an invalid shape")
+    elif source["operation"] == "list_filings":
+        # P10s: the filings index is asked for an issuer and a form, so it has
+        # no query to record. Pinned here as well as in the plan so a malformed
+        # parameter set cannot reach the ledger through a hand-made call.
+        if set(wire["parameters"]) != {"issuer", "form", "date_from", "date_to", "limit"}:
+            raise CoverageMissionValidationError("list_filings discovery parameters have an invalid shape")
     elif set(wire["parameters"]) != {"query", "date_after", "date_before"}:
         raise CoverageMissionValidationError("search_web discovery parameters have an invalid shape")
     wire["document_refs"] = refs

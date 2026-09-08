@@ -93,6 +93,9 @@ DISCOVERY_PLAN_SCHEMA_VERSIONS: tuple[str, ...] = (
 ALPHAENGINE_SOURCE_REF = "source:alphaengine"
 WEB_SEARCH_SOURCE_REF = "source:web-search"
 SEC_SOURCE_REF = "source:sec-edgar"
+# A 10-K window holds a couple of filings; the ceiling only has to be
+# above that, and the adapter fails closed if the source exceeds it.
+SEC_INDEX_LIMIT = 100
 TICKET_SCHEMA_VERSION = "0.1"
 TICKET_PREFIX = "alphaengine-discovery"
 WEB_SEARCH_TICKET_PREFIX = "web-search-discovery"
@@ -412,8 +415,21 @@ def build_discovery_parameters(
         raise DiscoveryPlanError(f"discovery plan does not cover {company_ref}")
     if not isinstance(as_of, date) or isinstance(as_of, datetime):
         raise DiscoveryPlanError("as_of must be a calendar date")
-    query = spec["query_template"].replace("{terms}", company["search_terms"])
     window_start = (as_of - timedelta(days=spec["lookback_days"])).isoformat()
+    if plan["source_ref"] == SEC_SOURCE_REF:
+        # P10s: the index takes an issuer and a form, so there is no phrase to
+        # compile. The window is still the plan's, because the SEC submissions
+        # feed refuses a window starting before the block it can answer from.
+        from .sec_filings_index_core import validate_filings_index_spec
+
+        return validate_filings_index_spec({
+            "issuer": company["cik"],
+            "form": spec["form"],
+            "date_from": window_start,
+            "date_to": as_of.isoformat(),
+            "limit": SEC_INDEX_LIMIT,
+        })
+    query = spec["query_template"].replace("{terms}", company["search_terms"])
     if plan["source_ref"] == WEB_SEARCH_SOURCE_REF:
         return validate_web_search_spec({
             "query": query,
@@ -434,6 +450,8 @@ def build_discovery_parameters(
 def discovery_query_hash(plan: Mapping[str, Any], parameters: Mapping[str, Any]) -> str:
     """Query hash of compiled parameters under the plan's source operation."""
 
+    if plan["source_ref"] == SEC_SOURCE_REF:
+        return content_hash({"operation": "list_filings", "parameters": dict(parameters)})
     if plan["source_ref"] == WEB_SEARCH_SOURCE_REF:
         return web_search_spec_hash(parameters)
     return search_spec_hash(parameters)
