@@ -1,12 +1,12 @@
-"""P11f: the figures a stage needs are declared, counted and asked for."""
+"""P11f/P11g: the figures a stage needs -- a floor plus what the market cites."""
 
 from __future__ import annotations
 
 import unittest
 
 from dalton_core.metric_base import (
-    METRIC_BASE,
     METRIC_UNITS,
+    STAGE_SPINE,
     MetricBaseError,
     extraction_requests,
     metric_spec,
@@ -25,7 +25,7 @@ def claim(metric_ref: str, period: str) -> dict:
 class MetricBaseDeclarationTests(unittest.TestCase):
     def test_every_declared_metric_is_well_formed(self) -> None:
         seen = set()
-        for stage in METRIC_BASE:
+        for stage in STAGE_SPINE:
             for item in metrics_for(stage, ACN):
                 self.assertEqual(
                     set(item), {"metric_ref", "label", "unit", "periods", "prompt"}
@@ -35,16 +35,40 @@ class MetricBaseDeclarationTests(unittest.TestCase):
                 self.assertNotIn((stage, item["metric_ref"]), seen)
                 seen.add((stage, item["metric_ref"]))
 
-    def test_operating_metrics_are_per_company(self) -> None:
-        # Bookings decide an IT services company and would be meaningless for a
-        # bank, so the operating figures are declared per company rather than
-        # left to whatever a document happens to emphasise.
-        acn = {item["metric_ref"] for item in metrics_for("initial_screen", ACN)}
-        ibm = {item["metric_ref"] for item in metrics_for("initial_screen", IBM)}
-        self.assertIn("metric:new-bookings", acn)
-        self.assertNotIn("metric:new-bookings", ibm)
-        # The shared financial spine is the same for both.
-        self.assertTrue({"metric:revenue", "metric:free-cash-flow"} <= acn & ibm)
+    def test_the_spine_is_only_what_is_true_of_any_company(self) -> None:
+        # P11g: the screen-wide list P11f hardcoded is gone. What is left is a
+        # floor that holds for anything with an income statement; everything
+        # else is discovered from what the market cites.
+        refs = {item["metric_ref"] for item in metrics_for("initial_screen", ACN)}
+        self.assertEqual(refs, {"metric:revenue", "metric:net-income"})
+
+    def test_a_discovered_metric_becomes_a_requirement(self) -> None:
+        discovered = [{
+            "metric_ref": "metric:new-bookings", "label": "new bookings",
+            "unit": "currency", "periods": 4,
+            "prompt": "new bookings for the period",
+        }]
+        refs = [item["metric_ref"] for item in
+                metrics_for("initial_screen", ACN, discovered)]
+        self.assertIn("metric:new-bookings", refs)
+        # And it is per company: IBM was told nothing, so it asks for nothing.
+        self.assertNotIn(
+            "metric:new-bookings",
+            [item["metric_ref"] for item in metrics_for("initial_screen", IBM)],
+        )
+
+    def test_discovering_a_spine_metric_does_not_duplicate_it(self) -> None:
+        discovered = [{
+            "metric_ref": "metric:revenue", "label": "revenue", "unit": "currency",
+            "periods": 8, "prompt": "revenue",
+        }]
+        refs = [item["metric_ref"] for item in
+                metrics_for("initial_screen", ACN, discovered)]
+        self.assertEqual(refs.count("metric:revenue"), 1)
+
+    def test_a_malformed_discovered_metric_is_refused(self) -> None:
+        with self.assertRaises(MetricBaseError):
+            metrics_for("initial_screen", ACN, [{"metric_ref": "metric:x"}])
 
     def test_an_undeclared_stage_or_metric_is_refused_not_invented(self) -> None:
         with self.assertRaises(MetricBaseError):
@@ -54,8 +78,12 @@ class MetricBaseDeclarationTests(unittest.TestCase):
 
     def test_deeper_stages_declare_nothing_until_they_are_built(self) -> None:
         # An unbuilt stage asking for figures nobody serves would put a
-        # permanent gap on the cockpit.
+        # permanent gap on the cockpit, and discovery answers the screen's
+        # question rather than a deeper stage's.
         self.assertEqual(metrics_for("company_model", ACN), [])
+        discovered = [{"metric_ref": "metric:new-bookings", "label": "b",
+                       "unit": "currency", "periods": 4, "prompt": "b"}]
+        self.assertEqual(metrics_for("company_model", ACN, discovered), [])
 
 
 class MissingMetricTests(unittest.TestCase):
@@ -72,7 +100,7 @@ class MissingMetricTests(unittest.TestCase):
         refs = {item["metric_ref"] for item in
                 missing_metrics(held, stage="initial_screen", company_ref=ACN)}
         self.assertNotIn("metric:revenue", refs)
-        self.assertIn("metric:free-cash-flow", refs)
+        self.assertIn("metric:net-income", refs)
 
     def test_nothing_held_means_everything_is_owed(self) -> None:
         missing = missing_metrics([], stage="initial_screen", company_ref=ACN)
@@ -80,9 +108,19 @@ class MissingMetricTests(unittest.TestCase):
         self.assertTrue(all(item["have"] == 0 for item in missing))
 
 
+DISCOVERED = [
+    {"metric_ref": "metric:new-bookings", "label": "new bookings", "unit": "currency",
+     "periods": 4, "prompt": "new bookings for the period"},
+    {"metric_ref": "metric:free-cash-flow", "label": "free cash flow", "unit": "currency",
+     "periods": 4, "prompt": "free cash flow for the period"},
+]
+
+
 class ExtractionRequestTests(unittest.TestCase):
     def test_requests_name_the_metric_so_the_model_fills_a_slot(self) -> None:
-        requests = extraction_requests([], stage="initial_screen", company_ref=ACN, limit=3)
+        requests = extraction_requests(
+            [], stage="initial_screen", company_ref=ACN, discovered=DISCOVERED, limit=3
+        )
         self.assertEqual(len(requests), 3)
         for item in requests:
             self.assertEqual(
@@ -92,7 +130,9 @@ class ExtractionRequestTests(unittest.TestCase):
     def test_the_most_owed_metric_is_asked_for_first(self) -> None:
         # One quarter short must not wait behind something with nothing at all.
         held = [claim("metric:revenue", f"FY2026Q{n}") for n in range(1, 4)]
-        requests = extraction_requests(held, stage="initial_screen", company_ref=ACN, limit=2)
+        requests = extraction_requests(
+            held, stage="initial_screen", company_ref=ACN, discovered=DISCOVERED, limit=2
+        )
         self.assertTrue(all(item["still_needed"] == 4 for item in requests))
         self.assertNotIn("metric:revenue", [item["metric_ref"] for item in requests])
 
@@ -105,11 +145,14 @@ class ExtractionRequestTests(unittest.TestCase):
     def test_a_company_that_owes_nothing_is_asked_for_nothing(self) -> None:
         held = [
             claim(item["metric_ref"], f"FY2026Q{n}")
-            for item in metrics_for("initial_screen", ACN)
+            for item in metrics_for("initial_screen", ACN, DISCOVERED)
             for n in range(1, item["periods"] + 1)
         ]
         self.assertEqual(
-            extraction_requests(held, stage="initial_screen", company_ref=ACN), []
+            extraction_requests(
+                held, stage="initial_screen", company_ref=ACN, discovered=DISCOVERED
+            ),
+            [],
         )
 
 
