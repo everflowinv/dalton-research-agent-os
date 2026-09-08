@@ -113,7 +113,14 @@ MAX_PLAN_CALLS_24H = 1000
 # An acquisition child that failed (provider error, or orphaned by a deploy
 # restart) is retried once this interval has passed; fresh documents are
 # always acquired first.
-ACQUISITION_RETRY_INTERVAL = timedelta(days=1)
+#
+# P10y: an hour, not a day. Most failures here are transient or are ours -- a
+# deploy killed the child, or a bug we then fixed -- and a day meant a fix
+# landed and nothing retried until tomorrow. Live, five 10-Ks failed on bugs
+# that were corrected within the hour and would have sat until the next day.
+# Retrying is cheap and the per-source daily quota is what bounds it; a host
+# that genuinely refuses us costs a handful of requests a day, not a flood.
+ACQUISITION_RETRY_INTERVAL = timedelta(hours=1)
 _HUMAN_RE = re.compile(r"human:[A-Za-z0-9._-]+\Z")
 _AUTOMATION_RE = re.compile(r"automation:[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 _SPEC_REF_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
