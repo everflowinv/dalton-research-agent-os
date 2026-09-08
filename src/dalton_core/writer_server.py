@@ -2934,10 +2934,50 @@ class WriterServer:
             result["lane_ticket_ref"] = dispatched["ticket_ref"]
         return result
 
+    def _settle_finished_sec_dispatches(self) -> list[dict[str, Any]]:
+        """Close out launched dispatches whose lane ticket has finished.
+
+        Nothing did this, so a dispatch that ran perfectly stayed 'launched'
+        forever and the quarterly dispatcher -- which refuses to queue while a
+        company has an open dispatch -- skipped every company for good. A
+        ticket the launcher no longer knows about is settled as orphaned:
+        it is equally over, and treating "gone" as "still running" is exactly
+        what left thirty-five dispatches stuck for a day.
+        """
+
+        settled: list[dict[str, Any]] = []
+        try:
+            open_dispatches = self.coverage_mission.unsettled_sec_dispatches(limit=50)
+        except Exception:  # noqa: BLE001 - never break the tick over bookkeeping
+            return settled
+        for dispatch in open_dispatches:
+            ticket_ref = dispatch.get("ticket_ref")
+            outcome, detail = "orphaned", "dispatch carries no lane ticket"
+            if ticket_ref:
+                try:
+                    ticket = self.sec_lane_launcher.status(ticket_ref)
+                except LaneTicketNotFound:
+                    detail = "lane ticket is no longer on disk"
+                except Exception as exc:  # noqa: BLE001
+                    continue  # unreadable now; try again next tick
+                else:
+                    if ticket.get("status") == "running":
+                        continue
+                    outcome, detail = "finished", str(ticket.get("status"))
+            try:
+                settled.append(self.coverage_mission.settle_sec_dispatch(
+                    dispatch["dispatch_id"], outcome=outcome,
+                    ticket_ref=ticket_ref, detail=detail,
+                ))
+            except Exception:  # noqa: BLE001
+                continue
+        return settled
+
     def _dispatch_one_coverage_mission_sec_lane(self) -> dict[str, Any]:
+        settled = self._settle_finished_sec_dispatches()
         pending = self.coverage_mission.pending_sec_dispatches(limit=1)
         if not pending:
-            return {"status": "idle"}
+            return {"status": "idle", "settled": len(settled)}
         dispatch = pending[0]
         authorization = dispatch["authorization"]
         try:

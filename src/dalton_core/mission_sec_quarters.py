@@ -186,8 +186,16 @@ class MissionSecQuartersCoordinator:
 
         try:
             row = self.connection.execute(
-                "SELECT COUNT(*) AS n FROM coverage_mission_sec_dispatches "
-                "WHERE company_ref=? AND status IN ('pending','launched')", (company_ref,),
+                # P12b: "not yet finished" has to mean it. 'launched' was
+                # terminal in practice -- nothing ever moved a dispatch out of
+                # it -- so after the first batch every company looked
+                # permanently busy and no new quarter was ever dispatched. The
+                # settlement journal is what says a run is over.
+                "SELECT COUNT(*) AS n FROM coverage_mission_sec_dispatches d "
+                "LEFT JOIN coverage_mission_sec_dispatch_settlements s "
+                "ON s.dispatch_id=d.dispatch_id "
+                "WHERE d.company_ref=? AND d.status IN ('pending','launched') "
+                "AND s.dispatch_id IS NULL", (company_ref,),
             ).fetchone()
         except Exception:  # noqa: BLE001
             return 0

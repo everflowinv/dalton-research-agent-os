@@ -123,7 +123,27 @@ class DaltonStore:
             os.chmod(self.path, 0o600)
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys = ON")
-        self.connection.execute("PRAGMA busy_timeout = 5000")
+        # P12a: WAL, so a reader does not block the writer.
+        #
+        # Core was in rollback-journal mode, where any open read transaction
+        # blocks every write and vice versa. With one long-lived writer process
+        # and out-of-process children reading the same 169 MB database, that is
+        # a lock storm: the writer's request executor gives up after 30 s, and
+        # the controller then reports whole lanes as unavailable:RemoteError.
+        # Live, both the extraction and the source-discovery lanes were dark
+        # for hours and the cockpit was showing hours-old budgets because of
+        # exactly this, and roughly one extraction run in sixty aborted with
+        # "database is locked".
+        #
+        # The mode is stored in the database header, so this converts an
+        # existing Core once and every later connection inherits it. An
+        # in-memory Core has no journal to speak of and is left alone.
+        if self.path != ":memory:":
+            self.connection.execute("PRAGMA journal_mode = WAL")
+        # Long enough to ride out a checkpoint or a competing write, short
+        # enough to stay inside the writer's own 30 s request timeout, so a
+        # genuinely stuck lock is still reported rather than hidden.
+        self.connection.execute("PRAGMA busy_timeout = 15000")
         self.connection.create_function("dalton_authorized", 0, lambda: int(self._authorized))
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._migrate_thesis_authority_columns()

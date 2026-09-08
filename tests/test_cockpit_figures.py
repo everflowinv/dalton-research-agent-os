@@ -127,5 +127,39 @@ class PageTests(unittest.TestCase):
             self.assertIn(grade, html)
 
 
+class SourceCapTests(unittest.TestCase):
+    """P12c: the cap on the owner's page is the cap the system is running."""
+
+    def lanes(self, budget):
+        from dalton_core.cockpit_plane import CockpitPlane
+
+        return {l["key"]: l for l in CockpitPlane._lane_states({}, {}, {}, budget)}
+
+    def test_the_alphaengine_note_reads_the_live_budget(self):
+        # It was the literal "每 24 小时最多 30 次", so the page said 30 for days
+        # after the owner raised the cap to 130.
+        self.assertIn("130", self.lanes({"max_alphaengine_calls_24h": 130})["alphaengine"]["note"])
+        self.assertIn("50", self.lanes({"max_alphaengine_calls_24h": 50})["alphaengine"]["note"])
+
+    def test_a_missing_cap_says_so_rather_than_inventing_one(self):
+        self.assertEqual(self.lanes({})["alphaengine"]["note"], "上限未设置")
+        self.assertEqual(self.lanes(None)["alphaengine"]["note"], "上限未设置")
+
+    def test_the_note_is_not_a_constant(self):
+        # The bug was a literal, so what matters is that the note moves with
+        # the budget rather than that any particular wording is absent.
+        notes = {self.lanes({"max_alphaengine_calls_24h": n})["alphaengine"]["note"]
+                 for n in (30, 50, 130)}
+        self.assertEqual(len(notes), 3)
+
+    def test_a_source_with_no_cap_of_its_own_reports_none(self):
+        from dalton_core.cockpit_plane import _source_daily_cap
+
+        budget = {"max_alphaengine_calls_24h": 130}
+        self.assertEqual(_source_daily_cap("source:alphaengine", budget), 130)
+        self.assertIsNone(_source_daily_cap("source:web-search", budget))
+        self.assertIsNone(_source_daily_cap("source:alphaengine", {"max_alphaengine_calls_24h": True}))
+
+
 if __name__ == "__main__":
     unittest.main()

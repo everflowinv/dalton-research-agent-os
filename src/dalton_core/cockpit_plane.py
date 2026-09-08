@@ -117,6 +117,19 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Which mission budget line caps each source's own calls. A source with no
+# entry has no cap of its own; it spends the mission's shared paid-call budget.
+SOURCE_DAILY_CAP_KEYS = {"source:alphaengine": "max_alphaengine_calls_24h"}
+
+
+def _source_daily_cap(source_ref: str, budget) -> int | None:
+    key = SOURCE_DAILY_CAP_KEYS.get(source_ref)
+    if key is None or not isinstance(budget, Mapping):
+        return None
+    value = budget.get(key)
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _table_exists(connection, name: str) -> bool:
     """Whether this Core has the table yet; a fresh deploy may not."""
 
@@ -564,8 +577,15 @@ class CockpitPlane:
                 "research_questions": list(mission["research_questions"]),
                 "deliverables": [STAGE_LABELS.get(d, d) for d in mission["deliverables"]],
                 "industry_ref": mission["industry_ref"], "published_at": mission["created_at"],
+                # P12c: the cap comes from the mission budget, not from the
+                # role text. The role is prose the owner wrote once; live it
+                # still said "24h/30 次上限" long after the cap became 130, and
+                # the page was faithfully showing a number that had been wrong
+                # for days. Prose describes the source; the budget is the cap.
                 "sources": [{"source_ref": s["source_ref"], "label": SOURCE_LABELS.get(s["source_ref"], s["source_ref"]),
-                             "role": s["role"], "connected": s["status"] == "connected"} for s in mission["source_plan"]],
+                             "role": s["role"], "connected": s["status"] == "connected",
+                             "daily_cap": _source_daily_cap(s["source_ref"], mission["budget"])}
+                            for s in mission["source_plan"]],
                 "history": versions,
             },
             "companies": companies,
@@ -581,7 +601,7 @@ class CockpitPlane:
                         "summary": t.get("summary") or t.get("statement") or t.get("change_reason")} for t in theses],
             "activity": {
                 "service_state": heartbeat.get("state"), "last_tick_at": heartbeat.get("last_tick_at"),
-                "lanes": self._lane_states(heartbeat, extraction, discovery), "running": running,
+                "lanes": self._lane_states(heartbeat, extraction, discovery, mission["budget"]), "running": running,
             },
             "budgets": budgets,
             "model_available": self._model_status(),
@@ -678,17 +698,25 @@ class CockpitPlane:
                 "cost_usd": round(micros / 1_000_000, 4), "cost_cap_usd": mission["budget"]["max_daily_cost_usd"]}
 
     @staticmethod
-    def _lane_states(heartbeat: Mapping[str, Any], extraction: Mapping[str, Any], discovery: Mapping[str, Any]) -> list[dict[str, Any]]:
+    def _lane_states(heartbeat: Mapping[str, Any], extraction: Mapping[str, Any],
+                     discovery: Mapping[str, Any],
+                     budget: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
         def one(key: str, label: str, status: str | None, note: str) -> dict[str, Any]:
             return {"key": key, "label": label, "status": status or "idle", "note": note}
         web = discovery.get("web_search") or {}
         web_status = (web.get("discovery") or {}).get("status") or (web.get("acquisition") or {}).get("status")
         ae_status = (discovery.get("discovery") or {}).get("status") or (discovery.get("acquisition") or {}).get("status")
+        ae_cap = _source_daily_cap("source:alphaengine", budget)
         awaiting = extraction.get("awaiting")
         last = extraction.get("last") or {}
         return [
             one("web", "搜索公开网页", web_status, "按公司轮流搜索并获取网页"),
-            one("alphaengine", "获取研报与电话会", ae_status, "每 24 小时最多 30 次"),
+            # P12c: the cap is read from the mission budget. It was a literal
+            # "每 24 小时最多 30 次" here, so the page went on saying 30 for days
+            # after the owner raised it to 130 -- a number on the owner's own
+            # dashboard that no longer described the system.
+            one("alphaengine", "获取研报与电话会", ae_status,
+                f"每 24 小时最多 {ae_cap} 次" if ae_cap is not None else "上限未设置"),
             one("extraction", "阅读并提炼结论", extraction.get("status"),
                 f"排队 {awaiting} 份" + (f"，上一轮读了 {len(last.get('drafted') or []) if isinstance(last.get('drafted'), list) else last.get('drafted', 0)} 段" if last else "")),
             one("weekly", "每周简报", (heartbeat.get("weekly_brief") or {}).get("state"), "每周四早上发到 Discord"),

@@ -374,3 +374,33 @@ CREATE TRIGGER IF NOT EXISTS coverage_mission_document_figures_no_update
 BEFORE UPDATE ON coverage_mission_document_figures BEGIN SELECT RAISE(ABORT, 'document figures are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS coverage_mission_document_figures_no_delete
 BEFORE DELETE ON coverage_mission_document_figures BEGIN SELECT RAISE(ABORT, 'document figures are append-only'); END;
+
+-- P12b: a SEC dispatch that has finished running.
+--
+-- ``coverage_mission_sec_dispatches.status`` has no terminal success state --
+-- its CHECK is ('pending','launched','rejected') -- so a dispatch that ran
+-- perfectly stayed 'launched' forever. ``_open_dispatches`` counts launched
+-- rows to avoid queueing faster than the lane can run, which meant that after
+-- the first batch every company looked permanently busy and the quarterly
+-- financials froze: five companies, thirty-five dispatches, none settled, no
+-- new quarter dispatched for a day.
+--
+-- Settlement is journalled rather than written back onto the row, because
+-- widening the CHECK would mean rebuilding a live table for a fact that is
+-- append-only anyway: this dispatch's run is over, and here is how it ended.
+CREATE TABLE IF NOT EXISTS coverage_mission_sec_dispatch_settlements (
+    dispatch_id TEXT PRIMARY KEY
+        REFERENCES coverage_mission_sec_dispatches(dispatch_id),
+    ticket_ref TEXT,
+    outcome TEXT NOT NULL CHECK(outcome IN ('finished','orphaned')),
+    detail TEXT,
+    settled_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS coverage_mission_sec_dispatch_settlements_authorized_insert
+BEFORE INSERT ON coverage_mission_sec_dispatch_settlements WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'SEC dispatch settlement insert requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_sec_dispatch_settlements_no_update
+BEFORE UPDATE ON coverage_mission_sec_dispatch_settlements BEGIN SELECT RAISE(ABORT, 'SEC dispatch settlements are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_sec_dispatch_settlements_no_delete
+BEFORE DELETE ON coverage_mission_sec_dispatch_settlements BEGIN SELECT RAISE(ABORT, 'SEC dispatch settlements are append-only'); END;

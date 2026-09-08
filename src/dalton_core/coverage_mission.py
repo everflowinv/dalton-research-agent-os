@@ -2566,6 +2566,62 @@ class CoverageMissionAuthority:
             "created_at": now, "updated_at": now, "status_marker": "fresh",
         }
 
+    def settle_sec_dispatch(
+        self, dispatch_id: str, *, outcome: str, ticket_ref: str | None = None,
+        detail: str | None = None,
+    ) -> dict[str, Any]:
+        """Record that a launched dispatch's run is over.
+
+        ``finished`` means its lane ticket reached a terminal state.
+        ``orphaned`` means the ticket is gone -- a restart, a pruned ticket
+        directory -- which is still over, and leaving those unsettled is what
+        froze the quarterly lane.
+        """
+
+        dispatch_id = _text(dispatch_id, "dispatch_id")
+        if outcome not in ("finished", "orphaned"):
+            raise CoverageMissionValidationError(
+                "SEC dispatch settlement outcome must be finished or orphaned"
+            )
+        row = self.connection.execute(
+            "SELECT status FROM coverage_mission_sec_dispatches WHERE dispatch_id=?",
+            (dispatch_id,),
+        ).fetchone()
+        if row is None:
+            raise CoverageMissionNotFound("mission SEC dispatch was not found")
+        if row["status"] != "launched":
+            raise CoverageMissionConflict("only a launched SEC dispatch settles")
+        existing = self.connection.execute(
+            "SELECT * FROM coverage_mission_sec_dispatch_settlements WHERE dispatch_id=?",
+            (dispatch_id,),
+        ).fetchone()
+        if existing is not None:
+            return {**dict(existing), "status_marker": "duplicate"}
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_sec_dispatch_settlements("
+                "dispatch_id,ticket_ref,outcome,detail,settled_at) VALUES(?,?,?,?,?)",
+                (dispatch_id, ticket_ref, outcome,
+                 None if detail is None else str(detail)[:500], now),
+            )
+        return {"dispatch_id": dispatch_id, "ticket_ref": ticket_ref, "outcome": outcome,
+                "detail": detail, "settled_at": now, "status_marker": "fresh"}
+
+    def unsettled_sec_dispatches(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Launched dispatches whose run has not been recorded as over."""
+
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise CoverageMissionValidationError("SEC dispatch limit must be 1..500")
+        rows = self.connection.execute(
+            "SELECT d.* FROM coverage_mission_sec_dispatches d "
+            "LEFT JOIN coverage_mission_sec_dispatch_settlements s "
+            "ON s.dispatch_id=d.dispatch_id "
+            "WHERE d.status='launched' AND s.dispatch_id IS NULL "
+            "ORDER BY d.created_at,d.dispatch_id LIMIT ?", (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def pending_sec_dispatches(self, *, limit: int = 1) -> list[dict[str, Any]]:
         if type(limit) is not int or not 1 <= limit <= 20:
             raise CoverageMissionValidationError("SEC dispatch limit must be 1..20")
