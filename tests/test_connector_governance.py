@@ -21,7 +21,7 @@ from dalton_core.connector_governance_cli import (
     approve_governance_record,
     main as governance_main,
 )
-from dalton_core.research_plan_executor import sec_connector_identity
+from dalton_core.research_plan_executor import sec_connector_identity, sec_descriptor_spec
 from dalton_core.sec_authority_harness import PUBLIC_PERMISSIONS
 from dalton_core.store import canonical_json, content_hash
 from dalton_core.connector_inventory import load_packaged_connector_inventory
@@ -335,52 +335,62 @@ class FilingsIndexSeamTests(unittest.TestCase):
 
 
 class FilingsIndexDescriptorTests(unittest.TestCase):
-    """P10l: the signed approval must fit the descriptor the executor reads."""
+    """P10n: the shared descriptor builder now fits the signed approval."""
 
-    def _spec(self):
-        from dalton_core.sec_filings_index import filings_index_descriptor_spec
-
-        record = build_governance_record(
-            "sec-filings-index", approved_by=OWNER, status="approved"
+    def _governance(self):
+        return ConnectorGovernance(
+            build_governance_record(
+                "sec-filings-index", approved_by=OWNER, status="approved"
+            )
         )
-        governance = ConnectorGovernance(record)
-        spec = filings_index_descriptor_spec(
+
+    def _spec(self, operation: str, governance):
+        return sec_descriptor_spec(
+            load_packaged_connector_inventory()["templates"]["sec"],
             PUBLIC_PERMISSIONS, "2026-09-08T00:00:00+00:00",
             capability_policy_ref=governance.policy_ref,
+            operation_name=operation,
         )
-        return governance, spec
 
-    def test_the_descriptor_carries_the_signed_records_identity(self) -> None:
-        governance, spec = self._spec()
+    def test_the_shared_builder_carries_the_signed_records_identity(self) -> None:
+        governance = self._governance()
+        spec = self._spec("list_filings", governance)
+        # No hand-built parallel descriptor any more: asking the ordinary
+        # builder for this operation produces exactly what the owner signed.
         self.assertEqual(spec["id"], governance.capability_id)
         self.assertEqual(spec["schema_hash"], governance.wire["expected_schema_hash"])
         self.assertEqual(spec["source_hash"], governance.wire["expected_source_hash"])
         self.assertEqual(spec["eligibility"]["policy_ref"], governance.policy_ref)
-        self.assertEqual(spec["permissions"], PUBLIC_PERMISSIONS)
 
-    def test_it_is_a_different_capability_from_the_shared_sec_descriptor(self) -> None:
-        from dalton_core.research_plan_executor import sec_descriptor_spec
+    def test_the_two_operations_are_two_capabilities(self) -> None:
+        governance = self._governance()
+        filings = self._spec("list_filings", governance)
+        facts = self._spec("get_company_facts", governance)
+        self.assertNotEqual(filings["id"], facts["id"])
+        self.assertNotEqual(filings["schema_hash"], facts["schema_hash"])
 
-        _, spec = self._spec()
-        shared = sec_descriptor_spec(
-            load_packaged_connector_inventory()["templates"]["sec"],
-            PUBLIC_PERMISSIONS, "2026-09-08T00:00:00+00:00",
-            operation_name="list_filings",
-        )
-        # The shared descriptor publishes the whole SEC connector under one id
-        # whose schema hash spans every approved operation. If these two ever
-        # collapsed into one, the narrow approval would silently start
-        # authorising company facts as well.
-        self.assertNotEqual(spec["id"], shared["id"])
-        self.assertNotEqual(spec["schema_hash"], shared["schema_hash"])
-
-    def test_the_contract_names_list_filings_only(self) -> None:
-        _, spec = self._spec()
-        self.assertEqual(
-            spec["contract"]["input_schema_ref"],
-            "schema:connector-inventory:sec:list_filings:input:0.1",
+    def test_company_facts_identity_did_not_move(self) -> None:
+        # The live sec-company-facts-v2 approval is bound to this hash. P10n
+        # split list_filings out without touching it.
+        identity = sec_connector_identity(
+            load_packaged_connector_inventory()["templates"]["sec"], "get_company_facts"
         )
         self.assertEqual(
-            spec["contract"]["output_schema_ref"],
-            "schema:connector-inventory:sec:list_filings:output:0.1",
+            identity["capability_id"], "capability:dalton:connector:sec-edgar"
+        )
+        self.assertEqual(
+            identity["schema_hash"],
+            "6ce86d8a4b9764f2651406bf9d628f24b6b4452bcdbd406bc983e380133a4be6",
+        )
+
+    def test_a_plan_asks_for_the_capability_matching_its_operation(self) -> None:
+        from dalton_core.research_plan import sec_capability_for_operation
+
+        self.assertEqual(
+            sec_capability_for_operation("list_filings"),
+            "capability:dalton:connector:sec-filings-index",
+        )
+        self.assertEqual(
+            sec_capability_for_operation("get_company_facts"),
+            "capability:dalton:connector:sec-edgar",
         )

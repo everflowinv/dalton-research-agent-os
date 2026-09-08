@@ -743,13 +743,29 @@ _DOWNSTREAM_STEP_SPECS: tuple[dict[str, Any], ...] = (
 )
 
 
+def sec_capability_for_operation(operation: str) -> str:
+    """Which permission slip one SEC operation runs under.
+
+    P10n: the SEC connector does two jobs and now carries two approvals, so a
+    plan has to ask for the one that matches its operation. Asking for the
+    shared capability regardless is what made ``list_filings`` unable to run
+    under the approval signed for it.
+    """
+
+    if operation == SEC_OPERATION:
+        from .sec_filings_index import CAPABILITY_ID
+
+        return CAPABILITY_ID
+    return SEC_CAPABILITY
+
+
 def _step_specs(operation: str) -> tuple[dict[str, Any], ...]:
     operation_wire = _sec_operation(_sec_template(), operation)
     return (
         {
             "stage": "connector",
             "operation": operation,
-            "requested_capabilities": [SEC_CAPABILITY],
+            "requested_capabilities": [sec_capability_for_operation(operation)],
             "runtime_profile_ref": SEC_RUNTIME_PROFILE_REF,
             "declared_side_effects": ["read:public-http"],
             "output_contract_ref": operation_wire["output_schema_ref"],

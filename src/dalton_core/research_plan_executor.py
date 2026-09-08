@@ -282,7 +282,7 @@ def sec_connector_identity(
             name: operations[name]["output_schema_hash"] for name in approved_operations
         },
     })
-    return {
+    identity: dict[str, Any] = {
         "capability_id": SEC_CAPABILITY,
         "source_identity": source_identity,
         "source_hash": source_hash,
@@ -321,6 +321,36 @@ def sec_connector_identity(
         },
         "allowed_hosts": sorted(template["transport"]["allowed_hosts"]),
     }
+    if operation_name == SEC_OPERATION:
+        # P10n: one connector, two jobs, two permission slips.
+        #
+        # Everything above already varies per operation except the two fields
+        # that decide *which approval applies*: the capability id and the
+        # schema hash.  Leaving those shared is the historical wart -- it made
+        # ``list_filings`` present itself as the whole SEC connector, so the
+        # narrow P10e approval fitted nothing and had to be carried by a
+        # parallel descriptor built by hand.  Take the narrow identity from the
+        # single place that defines it instead, and that parallel path is not
+        # needed at all.
+        #
+        # ``get_company_facts`` deliberately keeps the shared identity: the
+        # live sec-company-facts-v2 approval is bound to that hash, and moving
+        # it here would revoke a production authority mid-flight.  Narrowing
+        # that one needs a re-signed record and is the owner's call.
+        from .sec_filings_index import filings_index_identity
+
+        narrow = filings_index_identity()
+        identity.update({
+            "capability_id": narrow["capability_id"],
+            "schema_hash": narrow["schema_hash"],
+            "allowed_operations": list(narrow["allowed_operations"]),
+            "input_schema_refs": dict(narrow["input_schema_refs"]),
+            "input_schema_hashes": dict(narrow["input_schema_hashes"]),
+            "output_schema_refs": dict(narrow["output_schema_refs"]),
+            "output_schema_hashes": dict(narrow["output_schema_hashes"]),
+            "completeness": {SEC_OPERATION: operation["completeness_ceiling"]},
+        })
+    return identity
 
 
 def sec_adapter_parameters(plan_wire: Mapping[str, Any]) -> dict[str, Any]:
