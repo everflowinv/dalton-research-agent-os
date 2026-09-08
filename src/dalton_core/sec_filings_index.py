@@ -212,6 +212,103 @@ def build_filing_url_authorities(
     return authorities
 
 
+def filings_by_record_ref(raw_response: bytes) -> tuple[str, dict[str, dict[str, Any]]]:
+    """The issuer and every filing in the raw block, keyed by its record ref."""
+
+    try:
+        payload = json.loads(raw_response.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SecFilingsIndexError("submissions artifact is not JSON") from exc
+    issuer = payload.get("cik")
+    if not isinstance(issuer, str) or not issuer.isdigit():
+        raise SecFilingsIndexError("submissions artifact does not name its issuer")
+    try:
+        recent = payload["filings"]["recent"]
+        accessions = recent["accessionNumber"]
+        revisions = recent.get("amendmentOf") or [None] * len(accessions)
+        return issuer, {
+            f"sec:filing:{accession}": {
+                "accession": accession,
+                "form": recent["form"][index],
+                "filing_date": recent["filingDate"][index],
+                "primary_document": recent["primaryDocument"][index],
+                "revision_of": revisions[index],
+            }
+            for index, accession in enumerate(accessions)
+        }
+    except (KeyError, IndexError, TypeError) as exc:
+        raise SecFilingsIndexError("submissions artifact is malformed") from exc
+
+
+def build_sec_filing_url_authorities(
+    raw_response: bytes, source_envelope: Mapping[str, Any]
+) -> dict[str, dict[str, Any]]:
+    """Fetchable URL authorities for one completed filings-index envelope.
+
+    Keyed by the filing's record ref, because that is what the mission queued
+    and what the fetch lane will be holding when it needs a URL.
+
+    The authority itself is an ordinary ``PublicWebUrlAuthority``: its
+    ``search_record_ref`` has to equal its ``url_ref``, which the validator
+    enforces, so it cannot carry the accession.  It does not need to -- the
+    link from filing to URL lives in the mission's discovered-document row and
+    in this mapping, and putting a second copy inside the authority would only
+    create somewhere for the two to disagree.
+
+    Derived from the envelope's own ``source_record_refs`` rather than by
+    re-running the form and date filter.  The envelope does not carry the
+    request parameters, and reconstructing them would risk naming URLs for a
+    different window than the one that was actually read; the records it does
+    carry are exactly the filings the call returned.
+    """
+
+    from .public_web_connector import (
+        public_web_url_ref, validate_public_web_url_authority,
+    )
+
+    if not isinstance(source_envelope, Mapping):
+        raise SecFilingsIndexError("source envelope must be an object")
+    if source_envelope.get("operation") != OPERATION:
+        raise SecFilingsIndexError("source envelope is not a filings-index envelope")
+    record_refs = source_envelope.get("source_record_refs")
+    if not isinstance(record_refs, list):
+        raise SecFilingsIndexError("filings-index envelope lacks its source records")
+    issuer, filings_by_ref = filings_by_record_ref(raw_response)
+    created_at = source_envelope.get("retrieved_at")
+    artifact_ref = source_envelope.get("raw_artifact_version_ref")
+    envelope_hash = source_envelope.get("content_hash")
+    if not isinstance(created_at, str) or not isinstance(artifact_ref, str):
+        raise SecFilingsIndexError("filings-index envelope lacks retrieval/artifact authority")
+    authorities: dict[str, dict[str, Any]] = {}
+    for record_ref in record_refs:
+        entry = filings_by_ref.get(record_ref)
+        if entry is None:
+            raise SecFilingsIndexError(
+                "filings-index envelope names a record absent from its raw artifact"
+            )
+        url = filing_document_url(issuer, entry["accession"], entry["primary_document"])
+        url_ref = public_web_url_ref(url)
+        base = {
+            "schema_version": "0.1",
+            "id": "public-web-url-authority:" + content_hash({
+                "url_ref": url_ref, "source_envelope_hash": envelope_hash,
+            }),
+            "created_at": created_at,
+            "url_ref": url_ref,
+            "canonical_url": url,
+            "url_hash": url_ref.removeprefix("public-web-url:sha256:"),
+            "host": FILING_ARCHIVE_HOST,
+            "discovery_source_envelope_ref": source_envelope["id"],
+            "discovery_source_envelope_hash": envelope_hash,
+            "discovery_raw_artifact_version_ref": artifact_ref,
+            "search_record_ref": url_ref,
+        }
+        authorities[record_ref] = validate_public_web_url_authority(
+            {**base, "content_hash": content_hash(base)}
+        )
+    return authorities
+
+
 def _wire_time(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 

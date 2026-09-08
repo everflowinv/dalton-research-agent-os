@@ -221,3 +221,46 @@ class SecFilingsIndexCoreTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FilingUrlAuthorityFromEnvelopeTests(unittest.TestCase):
+    """P10t: a queued filing resolves to a fetchable URL from its envelope."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.harness = Harness(Path(self.tmp.name))
+        self.addCleanup(self.harness.close)
+        index = self.harness.index
+        self.receipt = index.list_filings(index.build_request(SPEC))
+        self.assertEqual(self.receipt["outcome"], "succeeded")
+
+    def test_the_filing_ref_resolves_through_the_shared_fetch_path(self) -> None:
+        from dalton_core.public_web_core_fetch import url_authority_from_discovery
+
+        record_ref = self.receipt["source_record_refs"][0]
+        authority = url_authority_from_discovery(
+            self.harness.core.connection, self.harness.spool,
+            url_ref=record_ref,
+            source_envelope_ref=self.receipt["source_envelope_ref"],
+        )
+        self.assertEqual(authority["host"], "www.sec.gov")
+        self.assertIn("/Archives/edgar/data/1467373/", authority["canonical_url"])
+        self.assertEqual(
+            authority["discovery_source_envelope_ref"], self.receipt["source_envelope_ref"]
+        )
+
+    def test_a_filing_the_envelope_never_named_is_refused(self) -> None:
+        from dalton_core.public_web_core_fetch import (
+            PublicWebCoreFetchError, url_authority_from_discovery,
+        )
+
+        # The 8-K sits in the same raw block, so it is reachable in the bytes
+        # but was not part of what this call returned. Deriving a URL for it
+        # would let the fetch lane spend on a document nobody discovered.
+        with self.assertRaises(PublicWebCoreFetchError):
+            url_authority_from_discovery(
+                self.harness.core.connection, self.harness.spool,
+                url_ref="sec:filing:0001467373-25-000100",
+                source_envelope_ref=self.receipt["source_envelope_ref"],
+            )

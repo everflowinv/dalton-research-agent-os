@@ -73,6 +73,7 @@ FETCH_QUOTA_SCOPE_REF = "connector-quota-scope:web-fetch:fetch_get"
 ADAPTER_REF = "transport:public-http:0.1"
 ADAPTER_PACKAGE = "dalton-public-web-fetch-adapter:0.1"
 SIDE_EFFECT = "read:public-http"
+SEC_FILINGS_INDEX_OPERATION = "list_filings"
 DEFAULT_USER_AGENT = "Dalton Research Agent OS public-web fetch lane (owner: lumos)"
 # One page per call; a bigger page is a new profile version.
 FETCH_MAX_RESPONSE_BYTES = 4_000_000
@@ -272,8 +273,8 @@ def url_authority_from_discovery(
     bound to that envelope; a ref the envelope never cited is refused.
     """
 
-    if not isinstance(url_ref, str) or _URL_REF_RE.fullmatch(url_ref) is None:
-        raise PublicWebCoreFetchError("url_ref must be a public-web-url:sha256 ref")
+    if not isinstance(url_ref, str) or not url_ref:
+        raise PublicWebCoreFetchError("document ref must be a non-empty string")
     row = connection.execute(
         "SELECT record_json,content_hash FROM connector_source_envelopes WHERE source_envelope_id=?",
         (source_envelope_ref,),
@@ -284,6 +285,18 @@ def url_authority_from_discovery(
     if envelope.get("content_hash") != row["content_hash"]:
         raise PublicWebCoreFetchError("discovery source envelope hash drifted")
     raw = spool.read_object(envelope["raw_response_hash"])
+    if envelope.get("operation") == SEC_FILINGS_INDEX_OPERATION:
+        # P10t: a filings-index discovery queues the filing, not the URL, so
+        # the ref being resolved is an accession. The URL is derived from the
+        # same bytes the envelope is bound to, exactly as it is for a search.
+        from .sec_filings_index import build_sec_filing_url_authorities
+
+        authority = build_sec_filing_url_authorities(raw, envelope).get(url_ref)
+        if authority is None:
+            raise PublicWebCoreFetchError("filing is not named by the discovery envelope")
+        return authority
+    if _URL_REF_RE.fullmatch(url_ref) is None:
+        raise PublicWebCoreFetchError("url_ref must be a public-web-url:sha256 ref")
     for authority in build_public_web_url_authorities(raw, envelope):
         if authority["url_ref"] == url_ref:
             return authority
