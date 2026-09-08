@@ -1972,6 +1972,43 @@ canary attestation，不能冒充 offline attestation。未来若要让低风险
 
 ## 下一阶段顺序
 
+### 年报（10-K）通道：已建好的部分与剩下的一片（2026-09-08）
+
+owner 已签批 `sec-filings-index-v1`（`capability:dalton:connector:sec-filings-index`）。已经就位的：
+
+- **枚举**：`SecPublicHttpAdapter` 早在 P0 就实现了 live `list_filings`（`data.sec.gov/submissions/CIK*.json`）。
+  P10g 放宽了 window 远端的判断后，"截止今天的全部 10-K"才是个能问出口的问题（近端仍然拒绝，
+  因为比 `recent` 更早的 filing 在取不到的 `files` 分页上）。live 验证：ACN FY2025/FY2024 两份 10-K。
+- **定位**：P10h `build_filing_url_authorities` 从原始字节里重建 10-K 的 URL——冻结的 `list_filings`
+  output schema 只带 record ref 和 hash，**故意不带** `primaryDocument`，而那正是唯一能指出文件在哪的字段。
+  ref 用 `public_web_url_ref` 铸造，形状和 web fetch lane 已经认识的一致，所以 10-K 直接并入现有
+  fetch→抽取流水线，不需要自己的一条。live 验证：顺着这个 URL 取回 ACN 年报正文 2.8 MB。
+- **凭据**：P10l `filings_index_descriptor_spec`。**这一条是排查出来的坑**：`sec_descriptor_spec` 把整个 SEC
+  connector 发布在 `capability:dalton:connector:sec-edgar` 一个 id 下、schema hash 覆盖全部已批操作，
+  而签批记录认的是自己的 capability、只绑 `list_filings`——id 和 schema hash **两个都对不上**，
+  owner 签下的授权当时没有任何地方能接。现在并列发布一个更窄的 descriptor，四项（capability id /
+  schema hash / source hash / policy ref）与签批记录逐一核对通过。
+
+**剩下的一片：`SecFilingsIndexCore`**——一个受治理的调用引擎，照 `PublicWebCoreFetch` /
+`PublicWebCoreSearch` 的样子写（profile / price / rate policy / runner manifest → WorkOrder →
+compiled plan → `StaticAdapterResolver` + `ConnectorRunnerAdmissionGate` + `ConnectorTransportExecutor`
+→ receipt），然后把 receipt 交给 `record_source_discovery`。
+
+**为什么不能直接走 P0 的 ResearchPlan 那条路**（这点别再重新推导一遍）：`create_plan` 不带
+`company_facts_request` 确实生成 `list_filings` 计划，执行器也确实会持久化 invocation/envelope/原始件；
+但 `research_plan.py` 里 `requested_capabilities` 硬绑 `SEC_CAPABILITY`（sec-edgar），
+执行器也按 `sec_connector_identity()` 解析 descriptor——两处都是共享 capability。
+要让那条路承载这份窄授权，就得改冻结的计划形状，**计划 hash 会动**，而线上 company-facts 车道正绑在上面。
+所以新引擎是为了不动生产授权，不是为了好看。
+
+**顺带记一个还没解决的不对称**：窄的是 filings-index 这一份；`sec-company-facts-v2` 仍然绑的是覆盖
+两个操作的共享 schema hash，也就是说**持有 company-facts 批准在技术上仍然涵盖 `list_filings`**。
+P10e 说的"互不扩权"目前只成立了一半。收窄它需要给 company-facts 换版签批，是 owner 的事，先记在这里。
+
+**接上去之后**才动 `SOURCE_BASE_ITEMS` 里 `annual_report` 的 `spec_refs`（现在是空的，所以恒为
+`not_planned`）和对应的 discovery plan。顺序是故意的：引擎没通之前就把清单项改成 `missing`，
+只会让 cockpit 显示一个没人服务的 0/1，看着像进展其实不是。
+
 ### thesis-impact 定时任务已按 owner 决定停泊（2026-09-08）
 
 **没有废弃，是先停下来。** `space.lumos.dalton.thesis-impact` 评估的是"新证据对 ACN thesis 的影响"，
