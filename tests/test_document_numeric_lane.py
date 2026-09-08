@@ -139,7 +139,7 @@ class GradedFigureTests(unittest.TestCase):
         # payload it fences, the digit 1 -- so both halves of the check pass
         # against text that is really there.
         base = {
-            "quote_id": self.quote()["quote_id"],
+            "quote_id": overrides.pop("quote_id", None) or self.quote()["quote_id"],
             "metric_ref": "metric:revenue",
             "as_reported_label": "client decisions",
             "value": "1", "unit": "count", "currency": None,
@@ -178,6 +178,32 @@ class GradedFigureTests(unittest.TestCase):
         self.assertEqual(result["verified"], [])
         self.assertEqual(result["recorded"], [])
         self.assertEqual(self.h.missions.document_figures(self.h.review["company_ref"]), [])
+
+    def test_a_closed_review_is_still_read_for_figures(self):
+        # The prose pass drafts 30 windows a tick and closes the review; this
+        # pass reads 10. On the open queue alone it is lapped and locked out of
+        # every document before it has finished one -- which is what happened
+        # to a live 10-K, closed after two ticks with 32 windows never read.
+        from dalton_core.store import content_hash
+
+        self.h.missions.resolve_document_review(
+            self.h.review["review_id"], resolution="dismissed",
+            actor_ref=self.h.params["actor_ref"],
+            rationale="fixture: prose found nothing admissible, as in a table-heavy filing",
+        )
+        closed = self.h.missions.document_review(self.h.review["review_id"])
+        self.assertEqual(closed["state"], "dismissed")
+        params = {**self.h.params, "expected_review_hash": content_hash(closed)}
+        context = self.h.service.view(**params, require_open=False)["context"]
+        self.h.enable_fixture(
+            response(self.figure(quote_id=context["quotes"][0]["quote_id"])),
+            expected_review_hash=params["expected_review_hash"], require_open=False,
+        )
+        result = self.h.service.generate_numeric(
+            **params, expected_context_hash=context["content_hash"],
+        )
+        self.assertEqual(result["status"], "read")
+        self.assertEqual(result["recorded"], ["metric:revenue"])
 
     def test_a_document_kind_with_no_grade_is_not_read_for_figures_at_all(self):
         # Sell-side research quotes numbers constantly and some of them are the

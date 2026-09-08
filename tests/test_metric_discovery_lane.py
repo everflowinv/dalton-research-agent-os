@@ -176,12 +176,13 @@ class ClosedReviewTests(unittest.TestCase):
 
     def test_a_closed_review_is_not_drafted_staged_or_admitted(self):
         # The queue rule still holds everywhere it is about outstanding work.
+        # Reading is not: P11y extends the same relaxation to the figures pass,
+        # which lands its answers in a journal rather than on the review.
         self.fixture(response())
-        for call in ("generate", "generate_numeric"):
-            with self.assertRaises(Exception):
-                getattr(self.h.service, call)(
-                    **self.params, expected_context_hash=self.context()["content_hash"],
-                )
+        with self.assertRaises(Exception):
+            self.h.service.generate(
+                **self.params, expected_context_hash=self.context()["content_hash"],
+            )
         with self.assertRaises(Exception):
             self.h.service.admit_suggestions(**self.params)
 

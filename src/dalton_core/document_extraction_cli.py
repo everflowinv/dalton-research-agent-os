@@ -291,7 +291,7 @@ def run_extraction(
         service = DocumentExtractionService(host)
         drafted = 0
         lanes: list[tuple[str, list[dict[str, Any]], dict[str, str]]] = []
-        discovery_lanes: list[tuple[str, list[dict[str, Any]], dict[str, str]]] = []
+        held_lanes: list[tuple[str, list[dict[str, Any]], dict[str, str]]] = []
         stop_reason: str | None = None
         complete_reviews: list[tuple[dict[str, Any], str, str, list[int]]] = []
         pointers = host.store.connection.execute(
@@ -303,10 +303,11 @@ def run_extraction(
             mission = host.coverage_mission.mission(pointer["mission_version_id"])
             actor = requested_by or mission["autonomy"]["automation_principal"]
             reviews = host.coverage_mission.document_reviews(mission["id"], state="awaiting_human_extraction", limit=500)
-            # P11u: the discovery pass reads documents the queue has already
-            # closed, so it gets its own list. Every sell-side note and
-            # transcript held today was read and closed before that pass
-            # existed; on the open queue alone it would have nothing to read.
+            # P11u/P11y: both secondary passes read documents the queue has
+            # already closed, so they share a list of everything held. The
+            # prose pass laps them -- 30 windows a tick against their 10 -- and
+            # on the open queue alone they are locked out of a document before
+            # they have finished reading it.
             held = host.coverage_mission.document_reviews(mission["id"], limit=500)
             # P10a: read in the mission's own order — the P0 company before the
             # P2 one, and management's own words before someone else's summary
@@ -326,7 +327,7 @@ def run_extraction(
                     review, company_rank=rank, spec_by_document=specs))
             except Exception:  # noqa: BLE001 - ordering is not a gate
                 pass
-            discovery_lanes.append((actor, held, specs))
+            held_lanes.append((actor, held, specs))
             for review in reviews:
                 if stop_reason is not None:
                     break
@@ -397,16 +398,17 @@ def run_extraction(
         # reached a single filing or transcript.  Both passes therefore sweep
         # the reviews they want, before admission closes any of them.
         _secondary_sweep(
-            service, lanes, summary,
+            service, held_lanes, summary,
             limit=max_numeric_windows, entries="numeric",
             wanted=lambda review, spec: numeric_worthy(spec),
             call="generate_numeric",
             counts={"verified": "verified", "refused": "refused",
                     "recorded": "recorded"},
             total=("figures", "recorded"),
+            require_open=False,
         )
         _secondary_sweep(
-            service, discovery_lanes, summary,
+            service, held_lanes, summary,
             limit=max_discovery_windows, entries="discovery",
             wanted=lambda review, spec: discovery_worthy(spec),
             call="generate_metric_discovery",

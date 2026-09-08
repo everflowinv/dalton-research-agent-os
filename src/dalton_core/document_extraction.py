@@ -965,7 +965,19 @@ class DocumentExtractionService:
 
         from .document_figure_grade import grade_for
 
-        context = self.context(review_id, expected_review_hash, offset, actor_ref)
+        # P11y: like the discovery pass, and for the same reason. The prose
+        # pass drafts 30 windows a tick and closes the review; this pass reads
+        # 10, so on the open queue alone it is lapped and locked out of every
+        # document before it has finished reading one. Live, a 10-K was closed
+        # after two ticks with 32 of its windows never read for figures.
+        #
+        # A verified figure lands in its own append-only journal, not as a
+        # suggestion on the review, so nothing here depends on the review being
+        # open. And "dismissed" means the *prose* pass found no admissible
+        # statement, which says nothing about the figures: a filing full of
+        # tables is exactly the document where that happens.
+        context = self.context(review_id, expected_review_hash, offset, actor_ref,
+                               require_open=False)
         if context["content_hash"] != expected_context_hash:
             raise ResearchVerificationConflict("source context changed; reload original")
         # P11v: a figure with no grade is a figure whose provenance nobody
