@@ -29,7 +29,8 @@ CITATION = "Revenues of $69.7 billion for fiscal 2025, and 270 clients."
 def figure(**overrides):
     base = {
         "quote_id": "quote:0:1200:aaaaaaaaaaaaaaaa",
-        "metric_ref": "metric:revenue", "as_reported_label": "Revenues",
+        "metric_ref": "metric:revenue", "subject_as_named": "Accenture",
+        "as_reported_label": "Revenues",
         "value": "69.7", "unit": "currency", "currency": "USD",
         "period": "fiscal 2025", "basis": "gaap-reported", "scale": "billion",
         "citation_text": CITATION,

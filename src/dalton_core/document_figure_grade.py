@@ -83,10 +83,15 @@ GRADES: tuple[str, ...] = (FILED, SPOKEN)
 # 14.3 billion RMB". Every digit was verified against the bytes it cited. The
 # bytes were about another company.
 #
-# So a figure needs a grade *and* an attribution. Until the search side can
-# show the document is about the company, spoken figures are held rather than
-# recorded: a number attributed to the wrong company is worse than no number,
-# because it looks exactly like a good one.
+# So a figure needs a grade *and* an attribution. Some document kinds are
+# attributed by construction: a filing's accession belongs to one CIK, and the
+# lane derived the document from that company's own index. Everything else has
+# to earn it by naming the company -- see ``document_subject``.
+#
+# Filtering the search by company was the tempting repair and the wrong one: an
+# industry report worth reading often carries no company tag, and a note
+# comparing five vendors belongs to none of them. The check belongs where the
+# number is taken, not where the document is found.
 ATTRIBUTED_BY_SPEC: Mapping[str, str] = {
     "annual-report-10k": "sec-accession",
     "quarterly-report-10q": "sec-accession",
@@ -94,22 +99,24 @@ ATTRIBUTED_BY_SPEC: Mapping[str, str] = {
 
 
 def attribution_for(spec_ref: Any) -> str | None:
-    """How this document kind is bound to the company, or None if nothing does."""
+    """How this document kind is bound to the company by construction, if it is."""
 
     if not isinstance(spec_ref, str):
         return None
     return ATTRIBUTED_BY_SPEC.get(spec_ref)
 
 
-def figure_recordable(spec_ref: Any) -> bool:
-    """Whether a figure from this kind of document may be recorded at all.
+def figure_recordable(spec_ref: Any, *, document_names_subject: bool = False) -> bool:
+    """Whether a figure from this document may be recorded against this company.
 
-    Reading is still worth doing -- the refusal is about *storing a number
-    against a company*, which is the part that is wrong when the document
-    turns out to be about someone else.
+    Either the kind attributes it by construction, or the document itself named
+    the company. A document that never names the company is not about it, and
+    that is exactly the case that put a Haier earnings call into EPAM's file.
     """
 
-    return figure_worthy(spec_ref) and attribution_for(spec_ref) is not None
+    if not figure_worthy(spec_ref):
+        return False
+    return attribution_for(spec_ref) is not None or bool(document_names_subject)
 
 
 class FigureGradeError(ValueError):

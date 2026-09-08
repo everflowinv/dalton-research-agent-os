@@ -19,6 +19,7 @@ def candidate(**overrides):
     base = {
         "quote_id": QUOTE_ID,
         "metric_ref": "metric:new-bookings",
+        "subject_as_named": "Accenture",
         "as_reported_label": "new bookings",
         "value": "21.3",
         "unit": "currency",

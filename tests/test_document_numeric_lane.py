@@ -52,6 +52,7 @@ class NumericLaneTests(unittest.TestCase):
         # rather than believed.
         result = self.read(response({
             "quote_id": self.quote_id(), "metric_ref": "metric:revenue",
+        "subject_as_named": "Accenture",
             "as_reported_label": "Net revenues", "value": "17.7", "unit": "currency",
             "currency": "USD", "period": "FY2026Q3", "basis": "gaap-reported",
             "scale": "billion",
@@ -141,6 +142,7 @@ class GradedFigureTests(unittest.TestCase):
         base = {
             "quote_id": overrides.pop("quote_id", None) or self.quote()["quote_id"],
             "metric_ref": "metric:revenue",
+            "subject_as_named": "Accenture",
             "as_reported_label": "client decisions",
             "value": "1", "unit": "count", "currency": None,
             "period": "FY2026Q3", "basis": "management-reported", "scale": None,

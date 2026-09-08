@@ -1721,7 +1721,8 @@ class CoverageMissionAuthority:
                     "a figure must carry the exact quote it was read from"
                 )
             candidate = {key: item.get(key) for key in (
-                "quote_id", "metric_ref", "as_reported_label", "value", "unit",
+                "quote_id", "metric_ref", "subject_as_named", "as_reported_label", "value",
+                "unit",
                 "currency", "period", "basis", "scale",
             )}
             try:

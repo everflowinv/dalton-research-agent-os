@@ -8,6 +8,7 @@ import unittest
 from dalton_core.research_planner import (
     ACTIONS,
     MAX_DIRECTIVES,
+    MAX_INQUIRIES,
     ResearchPlanError,
     build_prompt,
     build_work,
@@ -73,9 +74,18 @@ def state(**overrides):
     return build_research_state(**kwargs)
 
 
-def response(*directives, assessment="ACN needs one more quarter."):
+def response(*directives, assessment="ACN needs one more quarter.", inquiries=()):
     return json.dumps({"schema_version": "0.1", "assessment": assessment,
-                       "directives": list(directives)})
+                       "directives": list(directives), "inquiries": list(inquiries)})
+
+
+def inquiry(**overrides):
+    base = {"company_ref": ACN,
+            "question": "Does utilisation contradict the headcount commentary?",
+            "wants": "the next two earnings calls",
+            "because": "new bookings is cited by the market and nobody has collected it"}
+    base.update(overrides)
+    return base
 
 
 def directive(**overrides):
@@ -270,6 +280,59 @@ class WorkOrderTests(unittest.TestCase):
                   "unit": "currency", "prompt": "revenue"}]
         self.assertGreater(plan.budget["max_cost_usd"],
                            extraction_work(context, slots).budget["max_cost_usd"])
+
+
+class InquiryTests(unittest.TestCase):
+    """The part the codified checklist cannot anticipate."""
+
+    def test_the_planner_may_raise_work_no_checklist_item_covers(self):
+        plan = plan_from_response(state(), response(directive(), inquiries=[inquiry()]),
+                                  created_at=NOW)
+        [raised] = plan["inquiries"]
+        self.assertEqual(raised["company_ref"], ACN)
+        self.assertIn("utilisation", raised["question"])
+        self.assertTrue(raised["wants"])
+        self.assertTrue(raised["because"])
+
+    def test_an_inquiry_may_be_industry_wide(self):
+        plan = plan_from_response(
+            state(), response(inquiries=[inquiry(company_ref=None)]), created_at=NOW)
+        self.assertIsNone(plan["inquiries"][0]["company_ref"])
+
+    def test_an_inquiry_naming_a_company_nobody_covers_is_refused(self):
+        with self.assertRaises(ResearchPlanError):
+            plan_from_response(state(),
+                               response(inquiries=[inquiry(company_ref="company:sec-cik:9")]),
+                               created_at=NOW)
+
+    def test_an_inquiry_must_say_what_would_answer_it_and_why(self):
+        for field in ("question", "wants", "because"):
+            with self.assertRaises(ResearchPlanError, msg=field):
+                plan_from_response(state(), response(inquiries=[inquiry(**{field: "  "})]),
+                                   created_at=NOW)
+
+    def test_inquiries_cannot_be_unboundedly_many(self):
+        with self.assertRaises(ResearchPlanError):
+            parse_response(response(inquiries=[inquiry() for _ in range(MAX_INQUIRIES + 1)]))
+
+    def test_no_inquiries_is_the_normal_answer(self):
+        plan = plan_from_response(state(), response(directive()), created_at=NOW)
+        self.assertEqual(plan["inquiries"], [])
+
+    def test_an_inquiry_is_not_a_directive_and_dispatches_nothing(self):
+        # Additive work never substitutes for the standard: an inquiry cannot
+        # make the dispatcher search a spec, only a directive can.
+        plan = plan_from_response(state(), response(inquiries=[inquiry()]), created_at=NOW)
+        self.assertEqual(plan["directives"], [])
+        self.assertEqual(
+            wanted_specs(plan, item_specs={"earnings_calls": ["earnings-call-transcripts"]}),
+            set())
+
+    def test_the_prompt_says_the_standard_is_not_the_planner_to_change(self):
+        prompt = build_prompt(state())
+        self.assertIn("fixed standard", prompt)
+        self.assertIn("you may not decide a lower count is enough", prompt)
+        self.assertIn("inquiries", prompt)
 
 
 if __name__ == "__main__":

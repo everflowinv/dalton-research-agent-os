@@ -23,6 +23,7 @@ def figure(**overrides):
     base = {
         "quote_id": QUOTE,
         "metric_ref": "metric:revenue",
+        "subject_as_named": "Accenture",
         "as_reported_label": "Net revenues",
         "value": "17.7",
         "unit": "currency",

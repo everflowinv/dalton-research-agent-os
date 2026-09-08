@@ -94,12 +94,12 @@ def validate_numeric_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
     """The closed shape a numeric suggestion must have before verification."""
 
     if not isinstance(value, Mapping) or set(value) != {
-        "quote_id", "metric_ref", "as_reported_label", "value", "unit", "currency",
-        "period", "basis", "scale",
+        "quote_id", "metric_ref", "subject_as_named", "as_reported_label", "value",
+        "unit", "currency", "period", "basis", "scale",
     }:
         raise NumericCandidateError(
-            "numeric candidate must be exactly quote_id/metric_ref/as_reported_label/"
-            "value/unit/currency/period/basis/scale"
+            "numeric candidate must be exactly quote_id/metric_ref/subject_as_named/"
+            "as_reported_label/value/unit/currency/period/basis/scale"
         )
     unit = value["unit"]
     if unit not in ALLOWED_UNITS:
@@ -126,6 +126,15 @@ def validate_numeric_candidate(value: Mapping[str, Any]) -> dict[str, Any]:
         # same line; the slot is what makes a series, and the label is what
         # lets a reader check the mapping instead of trusting it.
         "metric_ref": metric_ref,
+        # P13c: whose figure this is, in the document's own words. A document
+        # may discuss several companies -- an industry report, a note comparing
+        # vendors -- and the digits being real says nothing about whose they
+        # are. Recorded rather than verified against the quote: the subject is
+        # often named a paragraph away from the number, and demanding it in the
+        # same span would refuse most true figures.
+        "subject_as_named": _text(
+            value["subject_as_named"], "subject_as_named", maximum=MAX_METRIC_CHARS
+        ),
         "as_reported_label": _text(
             value["as_reported_label"], "as_reported_label", maximum=MAX_METRIC_CHARS
         ),

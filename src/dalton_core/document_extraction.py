@@ -950,6 +950,57 @@ class DocumentExtractionService:
             return None
         return specs.get(context["document_ref"])
 
+    def document_names_subject(self, context):
+        """Whether this document names the company it was filed under.
+
+        P13c: the deterministic half of attribution. The discovery search is
+        free text and returned another company's earnings call under EPAM; the
+        transcript never says EPAM, and an industry report that genuinely
+        covers EPAM does. Memoised per document because it re-reads the source,
+        and the answer cannot change for a document whose bytes are pinned.
+        """
+
+        from .document_subject import document_names_subject as names_subject
+
+        key = (context.get("document_ref"), context.get("company_ref"))
+        cached = getattr(self, "_subject_cache", None)
+        if cached is None:
+            cached = self._subject_cache = {}
+        if key not in cached:
+            try:
+                text = self._document_text(context)
+            except Exception:  # noqa: BLE001 - unreadable is not attributed
+                cached[key] = {"checked": False, "names_subject": False, "matched": []}
+            else:
+                cached[key] = names_subject(text, context.get("company_ticker"))
+        return cached[key]
+
+    def _document_text(self, context):
+        """The whole document this window came from, from the same bytes."""
+
+        review = self.writer.coverage_mission.document_review(context["review_id"])
+        row = self.writer.store.connection.execute(
+            "SELECT * FROM coverage_mission_discovered_documents WHERE record_id=?",
+            (review["discovered_document_ref"],),
+        ).fetchone()
+        reader = ConnectorCompletionReceiptReader(
+            connectors=self.writer._connectors, observability=self.writer.observability)
+        if review["source_ref"] == ALPHAENGINE_SOURCE_REF:
+            launcher = self.writer.acquisition_launcher
+            manifest = (launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
+                        if row["ticket_ref"] else
+                        launcher.locate_completed_manifest(review["document_ref"]))
+            _, text = verified_source(
+                self.writer.store, self.writer._transcript_spool, manifest, reader)
+            return text
+        launcher = self.writer.web_fetch_launcher
+        manifest = (launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
+                    if row["ticket_ref"] else
+                    launcher.locate_completed_manifest(review["document_ref"]))
+        _, rendering = verified_public_web_source(
+            self.writer.store, self.writer._transcript_spool, manifest, reader)
+        return rendering["text"]
+
     def generate_numeric(self, *, review_id, expected_review_hash, offset,
                          expected_context_hash, actor_ref, source_grade=None):
         """Read one window for the figures this company owes.
@@ -982,10 +1033,24 @@ class DocumentExtractionService:
             raise ResearchVerificationConflict("source context changed; reload original")
         # P11v: a figure with no grade is a figure whose provenance nobody
         # decided, so the window is not read rather than read ungraded.
-        grade = source_grade or grade_for(self._document_spec_ref(context))
+        from .document_figure_grade import attribution_for
+
+        spec_ref = self._document_spec_ref(context)
+        grade = source_grade or grade_for(spec_ref)
         if grade is None:
             return {"status": "not_graded", "verified": [], "refused": [],
                     "recorded": [], "formal_authority_writes": 0}
+        # P13c: a document that never names the company is not about it. Not a
+        # search filter -- an industry report with no company tag still counts,
+        # because it will name the companies it discusses.
+        attribution = attribution_for(spec_ref)
+        subject = {"checked": False, "names_subject": False, "matched": []}
+        if attribution is None:
+            subject = self.document_names_subject(context)
+            if not subject.get("names_subject"):
+                return {"status": "not_attributed", "verified": [], "refused": [],
+                        "recorded": [], "subject": subject,
+                        "formal_authority_writes": 0}
         slots = self.numeric_slots(context)
         if not slots:
             return {"status": "nothing_owed", "verified": [], "refused": [],
@@ -1014,6 +1079,8 @@ class DocumentExtractionService:
                 observed_by=actor_ref,
             )
         return {"status": "read", "replayed": replayed, "source_grade": grade,
+                "attributed_by": attribution or "document-names-company",
+                "subject_matched": list(subject.get("matched") or ()),
                 "formal_authority_writes": 0, **result, **journal}
 
     def generate_metric_discovery(self, *, review_id, expected_review_hash, offset,

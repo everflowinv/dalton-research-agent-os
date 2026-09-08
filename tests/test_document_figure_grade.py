@@ -97,11 +97,15 @@ class AttributionTests(unittest.TestCase):
         self.assertTrue(figure_recordable("annual-report-10k"))
         self.assertTrue(figure_recordable("quarterly-report-10q"))
 
-    def test_a_free_text_search_result_is_not_attributed_to_anything(self):
+    def test_a_free_text_search_result_is_attributed_by_nothing_on_its_own(self):
         from dalton_core.document_figure_grade import attribution_for, figure_recordable
 
         self.assertIsNone(attribution_for("earnings-call-transcripts"))
         self.assertFalse(figure_recordable("earnings-call-transcripts"))
+        # ...but it earns attribution by naming the company, which is what
+        # separates a real EPAM call from the Haier one that was filed as one.
+        self.assertTrue(figure_recordable("earnings-call-transcripts",
+                                          document_names_subject=True))
 
     def test_reading_is_still_allowed_where_recording_is_not(self):
         # The refusal is about storing a number against a company, not about
@@ -117,11 +121,17 @@ class AttributionTests(unittest.TestCase):
         for spec in (None, "", "sell-side-reports", "invented", 7):
             self.assertFalse(figure_recordable(spec), spec)
 
-    def test_the_lane_gate_is_the_recordable_one(self):
+    def test_the_lane_reads_transcripts_and_decides_attribution_per_document(self):
+        # Filtering them out of the lane was the blunt fix. A transcript that
+        # names the company is a good figure source; one that does not is
+        # another company's call, and only the document's text can tell them
+        # apart -- so the lane reads both and the pass refuses one.
         from dalton_core.document_extraction_cli import numeric_worthy
 
         self.assertTrue(numeric_worthy("annual-report-10k"))
-        self.assertFalse(numeric_worthy("earnings-call-transcripts"))
+        self.assertTrue(numeric_worthy("earnings-call-transcripts"))
+        self.assertFalse(numeric_worthy("sell-side-reports"))
+        self.assertFalse(numeric_worthy("competitive-landscape"))
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ def figure(**overrides):
     base = {
         "quote_id": "quote:0:200:aaaaaaaaaaaaaaaa",
         "metric_ref": "metric:revenue",
+        "subject_as_named": "Accenture",
         "as_reported_label": "Net revenues",
         "value": "17.7", "unit": "currency", "currency": "USD",
         "period": "FY2026Q3", "basis": "gaap-reported", "scale": "billion",

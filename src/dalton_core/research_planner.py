@@ -26,6 +26,26 @@ other model call here obeys:
 The model does the judging; the ranking it returns is the product.  What this
 module does *not* do is execute anything: a plan is a proposal, and the
 dispatcher decides separately whether it is within the bounds the owner set.
+
+**The planner does not get to redefine the work.**  What an Initial Screen
+requires is codified -- four quarters of financials, the annual report, the
+calls, the broker research -- and that standard is deliberately in code, not in
+a prompt, because it is the thing a reader is entitled to hold the output to.
+A model that could quietly decide three quarters was enough would make the
+checklist meaningless.
+
+So the planner works *within and on top of* that standard, in two ways:
+
+* ``directives`` rank the codified items -- which company's gap to close
+  first, what to stop spending on.  It cannot invent an item or lower a bar.
+* ``inquiries`` are the part the standard cannot anticipate: having read the
+  material, "EPAM's utilisation commentary contradicts the headcount number,
+  get the next two calls" is real research direction and belongs to no
+  checklist item.  They are additive work, they name what would answer them,
+  and they never substitute for the standard.
+
+That division is the point.  The fixed workflow says what "done" means; the
+planner decides what to do next and what is worth going deeper on.
 """
 
 from __future__ import annotations
@@ -38,6 +58,7 @@ from .store import canonical_json, content_hash
 SCHEMA_VERSION = "0.1"
 TASK_REF = "task:research-plan-directives:0.1"
 MAX_DIRECTIVES = 12
+MAX_INQUIRIES = 6
 
 # What the dispatcher can actually do. A plan may only ask for these, because
 # a directive nobody can execute is a plan that looks like work and is not.
@@ -60,7 +81,7 @@ OUTPUT_SCHEMA = {
     "title": "ResearchPlanDirectivesV0.1",
     "type": "object",
     "additionalProperties": False,
-    "required": ["schema_version", "assessment", "directives"],
+    "required": ["schema_version", "assessment", "directives", "inquiries"],
     "properties": {
         "schema_version": {"const": "0.1"},
         "assessment": {
@@ -79,6 +100,35 @@ OUTPUT_SCHEMA = {
                     "item_ref": {"type": "string", "minLength": 1, "maxLength": 80},
                     "action": {"enum": list(ACTIONS)},
                     "reason": {"type": "string", "minLength": 1, "maxLength": 400},
+                },
+            },
+        },
+        "inquiries": {
+            "type": "array",
+            "maxItems": MAX_INQUIRIES,
+            "description": (
+                "Work the codified checklist cannot anticipate: a specific question "
+                "raised by what has been read. Additive; never a substitute for a "
+                "checklist item."
+            ),
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["question", "wants", "because"],
+                "properties": {
+                    "company_ref": {
+                        "type": ["string", "null"], "maxLength": 120,
+                        "description": "The company this is about, or null if industry-wide.",
+                    },
+                    "question": {"type": "string", "minLength": 1, "maxLength": 300},
+                    "wants": {
+                        "type": "string", "minLength": 1, "maxLength": 300,
+                        "description": "What material would answer it.",
+                    },
+                    "because": {
+                        "type": "string", "minLength": 1, "maxLength": 400,
+                        "description": "What in the state prompted it.",
+                    },
                 },
             },
         },
@@ -118,6 +168,15 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "- Spend is real. If a source is near its cap, say what the remaining calls "
         "should be spent on rather than ordering everything.\n"
         "- Figures a company owes matter more than another news article about it.\n\n"
+        "The checklist is the fixed standard for the deliverable and you cannot change "
+        "it: you may not invent an item, and you may not decide a lower count is enough. "
+        "What you decide is what to do next and what is worth going deeper on.\n\n"
+        "Separately from the directives, return `inquiries`: specific questions raised by "
+        "what has actually been read, that no checklist item covers -- a contradiction "
+        "between two numbers, a measure the market keeps citing that nobody has "
+        "collected, a company whose situation warrants more than the standard. Each names "
+        "what material would answer it and what in the state prompted it. Return an empty "
+        "list when nothing has raised one; padding this is worse than leaving it empty.\n\n"
         "You may only name a company_ref and item_ref that appear in RESEARCH_STATE. "
         "Inventing either voids the whole plan. Return fewer directives rather than "
         "padding: a short plan that is right beats a long one that is thorough.\n"
@@ -173,7 +232,7 @@ def parse_response(text: Any) -> dict[str, Any]:
     except json.JSONDecodeError as exc:
         raise ResearchPlanError("model response is not JSON") from exc
     if not isinstance(payload, Mapping) or set(payload) != {
-        "schema_version", "assessment", "directives",
+        "schema_version", "assessment", "directives", "inquiries",
     }:
         raise ResearchPlanError("plan has an invalid closed shape")
     if payload["schema_version"] != SCHEMA_VERSION:
@@ -185,7 +244,13 @@ def parse_response(text: Any) -> dict[str, Any]:
         raise ResearchPlanError("directives must be a list")
     if len(directives) > MAX_DIRECTIVES:
         raise ResearchPlanError(f"a plan may hold at most {MAX_DIRECTIVES} directives")
-    return {"assessment": payload["assessment"].strip(), "directives": list(directives)}
+    inquiries = payload["inquiries"]
+    if not isinstance(inquiries, list):
+        raise ResearchPlanError("inquiries must be a list")
+    if len(inquiries) > MAX_INQUIRIES:
+        raise ResearchPlanError(f"a plan may hold at most {MAX_INQUIRIES} inquiries")
+    return {"assessment": payload["assessment"].strip(),
+            "directives": list(directives), "inquiries": list(inquiries)}
 
 
 def _known_work(state: Mapping[str, Any]) -> dict[str, set[str]]:
@@ -231,6 +296,30 @@ def plan_from_response(
             raise ResearchPlanError(f"directive {index} asks for an action nobody can take")
         if not isinstance(directive["reason"], str) or not directive["reason"].strip():
             raise ResearchPlanError(f"directive {index} gives no reason")
+    inquiries = []
+    for index, inquiry in enumerate(parsed["inquiries"]):
+        if not isinstance(inquiry, Mapping) or not {
+            "question", "wants", "because",
+        } <= set(inquiry) or set(inquiry) - {
+            "company_ref", "question", "wants", "because",
+        }:
+            raise ResearchPlanError(f"inquiry {index} has an invalid closed shape")
+        company_ref = inquiry.get("company_ref")
+        # An inquiry may be industry-wide, but a company it names must exist:
+        # the same rule as a directive, for the same reason.
+        if company_ref is not None and company_ref not in known:
+            raise ResearchPlanError(
+                f"inquiry names {company_ref!r}, which is not a company under coverage"
+            )
+        for field in ("question", "wants", "because"):
+            if not isinstance(inquiry[field], str) or not inquiry[field].strip():
+                raise ResearchPlanError(f"inquiry {index} has an empty {field}")
+        inquiries.append({
+            "rank": index, "company_ref": company_ref,
+            "question": inquiry["question"].strip(),
+            "wants": inquiry["wants"].strip(),
+            "because": inquiry["because"].strip(),
+        })
     plan = {
         "schema_version": SCHEMA_VERSION,
         "task_ref": TASK_REF,
@@ -245,6 +334,9 @@ def plan_from_response(
              "action": d["action"], "reason": d["reason"].strip()}
             for index, d in enumerate(parsed["directives"])
         ],
+        # Additive work the codified checklist cannot anticipate. It never
+        # substitutes for a checklist item, and it does not lower a bar.
+        "inquiries": inquiries,
     }
     plan["content_hash"] = content_hash(plan)
     return plan
@@ -277,6 +369,7 @@ def wanted_specs(plan: Mapping[str, Any], *, item_specs: Mapping[str, Sequence[s
 __all__ = [
     "ACTIONS",
     "MAX_DIRECTIVES",
+    "MAX_INQUIRIES",
     "OUTPUT_SCHEMA",
     "TASK_HASH",
     "TASK_REF",

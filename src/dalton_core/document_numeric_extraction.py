@@ -34,6 +34,7 @@ from .document_numeric_claim import (
     NumericCandidateError,
     verify_numeric_candidates,
 )
+from .document_subject import subject_label
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -55,13 +56,19 @@ OUTPUT_SCHEMA = {
                 "type": "object",
                 "additionalProperties": False,
                 "required": [
-                    "quote_id", "metric_ref", "as_reported_label", "value",
+                    "quote_id", "metric_ref", "subject_as_named",
+                    "as_reported_label", "value",
                     "unit", "currency", "period", "basis", "scale",
                 ],
                 "properties": {
                     "quote_id": {"type": "string", "minLength": 1, "maxLength": 100},
                     "metric_ref": {"type": "string", "minLength": 1, "maxLength": 120},
-                    "as_reported_label": {"type": "string", "minLength": 1, "maxLength": 200},
+                        # Whose figure this is, in the document's own words. A
+                    # document may discuss several companies -- an industry
+                    # report, a note comparing vendors -- and the digits being
+                    # real says nothing about whose they are.
+                "subject_as_named": {"type": "string", "minLength": 1, "maxLength": 200},
+                "as_reported_label": {"type": "string", "minLength": 1, "maxLength": 200},
                     "value": {"type": "string", "minLength": 1, "maxLength": 40},
                     "unit": {"enum": list(ALLOWED_UNITS)},
                     "currency": {"type": ["string", "null"], "maxLength": 3},
@@ -120,6 +127,10 @@ def build_request(
         "task_ref": TASK_REF,
         "task_hash": TASK_HASH,
         "company_ref": context["company_ref"],
+        # P13c: the subject by name. The prompt said "this company" and passed
+        # only a CIK ref, which tells a model nothing -- so it had no way to
+        # notice it was reading a different company's earnings call.
+        "subject_label": subject_label(context.get("company_ticker")),
         "document_ref": context["document_ref"],
         "slots": slots,
         "quotes": [
@@ -138,10 +149,18 @@ def build_prompt(request: Mapping[str, Any]) -> str:
     """
 
     return (
-        "You are reading one window of a filing or transcript for an equity research file. "
-        "For each requested slot, return the figure ONLY if this window states it for this "
-        "company. Return an empty figures list when the window does not state it: a missing "
-        "figure is expected and correct, an invented one is not. "
+        "You are reading one window of a filing, transcript or research note for an equity "
+        f"research file. The company being asked about is {request['subject_label']}.\n"
+        "For each requested slot, return the figure ONLY if this window states it "
+        f"for {request['subject_label']}. Return an empty figures list when the window does "
+        "not state it: a missing figure is expected and correct, an invented one is not.\n"
+        "This is the check that matters most here. A document may discuss several companies "
+        "-- an industry report, a note comparing vendors, a call that mentions a customer or "
+        "a competitor -- and a number being real says nothing about whose it is. If the "
+        f"figures in this window belong to anyone other than {request['subject_label']}, "
+        "return nothing. `subject_as_named` must say whose figure you reported, in the "
+        "document's own words; if the window does not make clear whose it is, that is a "
+        "reason to return nothing rather than to guess. "
         "Report the number exactly as the document writes it, with `scale` naming the word "
         "the document uses (billion, million) rather than expanding it yourself. "
         "`as_reported_label` must be the wording this document uses for the line, copied from "

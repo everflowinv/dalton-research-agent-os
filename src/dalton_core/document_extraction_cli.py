@@ -47,7 +47,7 @@ from .store import DaltonStore, canonical_json, content_hash
 SUMMARY_SCHEMA_VERSION = "0.1"
 DEFAULT_MAX_WINDOWS = 2
 # Answers that cost no model call, so they cost no allowance either.
-FREE_STATUSES = frozenset({"nothing_owed", "not_graded"})
+FREE_STATUSES = frozenset({"nothing_owed", "not_graded", "not_attributed"})
 
 
 def secure_dir(path: Path) -> Path:
@@ -190,12 +190,13 @@ def numeric_worthy(spec_ref: Any) -> bool:
     figure's grade -- a kind with no grade is not read for figures.
     """
 
-    from .document_figure_grade import figure_recordable
+    from .document_figure_grade import figure_worthy
 
-    # P12h: and only where the document is known to be about the company it
-    # was filed under. A free-text search put another company's earnings call
-    # in EPAM's queue and the pass recorded its revenue as EPAM's.
-    return figure_recordable(spec_ref)
+    # P13c: whether the *document* is about this company is decided per
+    # document, inside the pass, because it needs the document's text -- an
+    # industry report with no company tag is still worth reading, and a
+    # transcript of another company's call is not.
+    return figure_worthy(spec_ref)
 
 
 def discovery_worthy(spec_ref: Any) -> bool:
