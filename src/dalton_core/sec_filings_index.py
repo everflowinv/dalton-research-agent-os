@@ -128,6 +128,64 @@ def filings_index_permissions() -> dict[str, Any]:
     return copy.deepcopy(PUBLIC_PERMISSIONS)
 
 
+def filings_index_descriptor_spec(
+    permissions: Mapping[str, Any],
+    created_at: str,
+    *,
+    capability_policy_ref: str,
+) -> dict[str, Any]:
+    """The closed capability descriptor for the filings-index operation.
+
+    ``sec_descriptor_spec`` publishes the whole SEC connector under one id,
+    ``capability:dalton:connector:sec-edgar``, whose schema hash covers every
+    approved operation.  A descriptor published that way cannot carry the
+    P10e approval: the signed record names its own capability and binds
+    ``list_filings`` alone, so both the id and the schema hash differ.
+
+    Publishing this narrower descriptor beside the shared one is what lets the
+    executor run the filings index under the approval the owner actually
+    signed, rather than under the company-facts one.
+    """
+
+    template, contract = filings_index_contract()
+    identity = filings_index_identity()
+    return {
+        "schema_version": "0.1",
+        "id": CAPABILITY_ID,
+        "version": 1,
+        "created_at": created_at,
+        "kind": "connector",
+        "name": "sec-filings-index",
+        "label": "SEC filings index",
+        "summary": "List an issuer's public SEC filings of one form",
+        "aliases": ["SEC filings index", "SEC submissions"],
+        "tags": ["connector", "public", "SEC"],
+        "intent_examples": ["list the latest 10-K filings for an issuer"],
+        "source": {
+            "type": CAPABILITY_ID.split(":")[1],
+            "namespace": CAPABILITY_ID.split(":")[2],
+            "source_ref": "artifact:sec-public-source",
+            "source_version": "1",
+        },
+        "contract": {
+            "mode": "typed_call",
+            "input_schema_ref": contract["input_schema_ref"],
+            "output_schema_ref": contract["output_schema_ref"],
+            "instruction_ref": None,
+            "adapter_ref": template["transport"]["target_ref"],
+        },
+        "permissions": dict(permissions),
+        "eligibility": {
+            "state": "ready",
+            "visibility_scopes": ["research"],
+            "policy_ref": capability_policy_ref,
+            "valid_until": None,
+        },
+        "source_hash": identity["source_hash"],
+        "schema_hash": identity["schema_hash"],
+    }
+
+
 def filing_document_url(issuer: str, accession: str, primary_document: str) -> str:
     """The canonical EDGAR archive URL of one filing's primary document.
 
@@ -262,6 +320,7 @@ __all__ = [
     "build_filing_url_authorities",
     "build_filings_index_governance_record",
     "filing_document_url",
+    "filings_index_descriptor_spec",
     "filings_index_adapter_hash",
     "filings_index_contract",
     "filings_index_identity",

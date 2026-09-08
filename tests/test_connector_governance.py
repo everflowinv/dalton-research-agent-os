@@ -332,3 +332,55 @@ class FilingsIndexSeamTests(unittest.TestCase):
             "https://www.sec.gov/Archives/edgar/data/1467373/"
             "000146737325000217/acn-20250831.htm",
         )
+
+
+class FilingsIndexDescriptorTests(unittest.TestCase):
+    """P10l: the signed approval must fit the descriptor the executor reads."""
+
+    def _spec(self):
+        from dalton_core.sec_filings_index import filings_index_descriptor_spec
+
+        record = build_governance_record(
+            "sec-filings-index", approved_by=OWNER, status="approved"
+        )
+        governance = ConnectorGovernance(record)
+        spec = filings_index_descriptor_spec(
+            PUBLIC_PERMISSIONS, "2026-09-08T00:00:00+00:00",
+            capability_policy_ref=governance.policy_ref,
+        )
+        return governance, spec
+
+    def test_the_descriptor_carries_the_signed_records_identity(self) -> None:
+        governance, spec = self._spec()
+        self.assertEqual(spec["id"], governance.capability_id)
+        self.assertEqual(spec["schema_hash"], governance.wire["expected_schema_hash"])
+        self.assertEqual(spec["source_hash"], governance.wire["expected_source_hash"])
+        self.assertEqual(spec["eligibility"]["policy_ref"], governance.policy_ref)
+        self.assertEqual(spec["permissions"], PUBLIC_PERMISSIONS)
+
+    def test_it_is_a_different_capability_from_the_shared_sec_descriptor(self) -> None:
+        from dalton_core.research_plan_executor import sec_descriptor_spec
+
+        _, spec = self._spec()
+        shared = sec_descriptor_spec(
+            load_packaged_connector_inventory()["templates"]["sec"],
+            PUBLIC_PERMISSIONS, "2026-09-08T00:00:00+00:00",
+            operation_name="list_filings",
+        )
+        # The shared descriptor publishes the whole SEC connector under one id
+        # whose schema hash spans every approved operation. If these two ever
+        # collapsed into one, the narrow approval would silently start
+        # authorising company facts as well.
+        self.assertNotEqual(spec["id"], shared["id"])
+        self.assertNotEqual(spec["schema_hash"], shared["schema_hash"])
+
+    def test_the_contract_names_list_filings_only(self) -> None:
+        _, spec = self._spec()
+        self.assertEqual(
+            spec["contract"]["input_schema_ref"],
+            "schema:connector-inventory:sec:list_filings:input:0.1",
+        )
+        self.assertEqual(
+            spec["contract"]["output_schema_ref"],
+            "schema:connector-inventory:sec:list_filings:output:0.1",
+        )
