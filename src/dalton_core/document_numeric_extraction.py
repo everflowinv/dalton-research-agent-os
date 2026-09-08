@@ -207,7 +207,12 @@ def build_work(
         metadata={
             "control_plane": "mission-document-extraction",
             "task_ref": TASK_REF, "task_hash": TASK_HASH,
-            "context": dict(context), "request": request,
+            "context": dict(context),
+            # The request as sent, and the slots as asked for. The worker
+            # rebuilds this order from the live context to prove it did not
+            # drift, and it can only do that if it has the same input.
+            "request": request,
+            "requests": [dict(item) for item in requests],
             "candidate_only": True,
         },
     )

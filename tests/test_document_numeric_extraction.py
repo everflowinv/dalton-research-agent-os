@@ -190,3 +190,52 @@ class WorkOrderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WorkerDriftTests(unittest.TestCase):
+    """P11k: the drift check must hold for both questions, not just prose."""
+
+    def context(self) -> dict:
+        return {
+            **CONTEXT,
+            "content_hash": "0" * 64,
+            "created_at": "2026-09-08T00:00:00.000000+00:00",
+            "id": "extraction-context:1",
+            "source_manifest_ref": "manifest:1",
+            "offset": 0,
+            "end": 200,
+        }
+
+    def test_a_numeric_order_rebuilds_as_itself(self) -> None:
+        from dalton_core.document_extraction import DocumentExtractionModelWorker
+        from dalton_core.document_numeric_extraction import build_work
+
+        context = self.context()
+        work = build_work(context, SLOTS)
+        rebuilt = DocumentExtractionModelWorker._rebuild(work, context)
+        # Rebuilding a numeric order with the qualitative builder would call
+        # every numeric call drift and the pass would never run at all.
+        self.assertEqual(rebuilt.to_dict(), work.to_dict())
+
+    def test_a_qualitative_order_still_rebuilds_as_itself(self) -> None:
+        from dalton_core.document_extraction import (
+            DocumentExtractionModelWorker, build_work as qualitative,
+        )
+
+        context = self.context()
+        work = qualitative(context)
+        self.assertEqual(
+            DocumentExtractionModelWorker._rebuild(work, context).to_dict(),
+            work.to_dict(),
+        )
+
+    def test_a_changed_window_is_still_drift(self) -> None:
+        from dalton_core.document_extraction import DocumentExtractionModelWorker
+        from dalton_core.document_numeric_extraction import build_work
+
+        work = build_work(self.context(), SLOTS)
+        moved = {**self.context(), "content_hash": "1" * 64}
+        self.assertNotEqual(
+            DocumentExtractionModelWorker._rebuild(work, moved).to_dict(),
+            work.to_dict(),
+        )

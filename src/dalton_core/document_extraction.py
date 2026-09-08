@@ -463,11 +463,35 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
         work = value if isinstance(value, WorkOrder) else WorkOrder.from_dict(value)
         context = work.metadata.get("context", {})
         current = self.context_resolver(context)
-        if current != context or build_work(current).to_dict() != work.to_dict():
+        # P11k: the same drift check, against whichever order this task builds.
+        # A window can be read twice for different questions -- prose, then the
+        # figures it owes -- and rebuilding a numeric order with the
+        # qualitative builder would call every numeric call drift.
+        rebuilt = self._rebuild(work, current)
+        if current != context or rebuilt.to_dict() != work.to_dict():
             raise ResearchVerificationConflict("extraction WorkOrder or source context drifted")
         return work
 
+    @staticmethod
+    def _rebuild(work, current):
+        from .document_numeric_extraction import TASK_REF as NUMERIC_TASK_REF
+        from .document_numeric_extraction import build_work as build_numeric_work
+
+        if work.metadata.get("task_ref") == NUMERIC_TASK_REF:
+            return build_numeric_work(current, work.metadata.get("requests") or ())
+        return build_work(current)
+
     def _parse_candidate(self, text, work):
+        from .document_numeric_extraction import TASK_REF as NUMERIC_TASK_REF
+        from .document_numeric_extraction import extract_from_window
+
+        if work.metadata.get("task_ref") == NUMERIC_TASK_REF:
+            # Verification lives in the numeric module; this only has to fail
+            # when the answer cannot be read at all, exactly as the
+            # qualitative parse does. A figure that fails its own citation is
+            # a refusal inside the result, not a broken call.
+            extract_from_window(work.metadata["request"], text)
+            return
         parse_suggestions(text, work.metadata["context"], tolerant=True)
 
     def _admit_candidate(self, work, text):
