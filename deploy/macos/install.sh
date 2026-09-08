@@ -142,19 +142,28 @@ fi
 # the owner's number instead of silently restoring the built-in default -- the
 # first install after this knob existed did exactly that and put reading back
 # to 4 without saying so.
-if [[ -n "${DALTON_EXTRACTION_MAX_WINDOWS:-}" ]]; then
-  "$venv_dir/bin/python" - "$config_path" "$DALTON_EXTRACTION_MAX_WINDOWS" <<'PYEOF'
+if [[ -n "${DALTON_EXTRACTION_MAX_WINDOWS:-}" || -n "${DALTON_EXTRACTION_NUMERIC_WINDOWS:-}" ]]; then
+  "$venv_dir/bin/python" - "$config_path" "${DALTON_EXTRACTION_MAX_WINDOWS:-}" "${DALTON_EXTRACTION_NUMERIC_WINDOWS:-}" <<'PYSETUP'
 import json, sys
 from pathlib import Path
 
-path, raw = Path(sys.argv[1]), sys.argv[2]
-if not raw.isdigit() or not 1 <= int(raw) <= 50:
-    raise SystemExit("DALTON_EXTRACTION_MAX_WINDOWS must be an integer 1..50")
+path, prose, numeric = Path(sys.argv[1]), sys.argv[2], sys.argv[3]
 config = json.loads(path.read_text(encoding="utf-8"))
-config["document_extraction"] = {"max_windows_per_tick": int(raw)}
+block = dict(config.get("document_extraction") or {})
+if prose:
+    if not prose.isdigit() or not 1 <= int(prose) <= 50:
+        raise SystemExit("DALTON_EXTRACTION_MAX_WINDOWS must be an integer 1..50")
+    block["max_windows_per_tick"] = int(prose)
+if numeric:
+    if not numeric.isdigit() or not 0 <= int(numeric) <= 50:
+        raise SystemExit("DALTON_EXTRACTION_NUMERIC_WINDOWS must be an integer 0..50")
+    block["numeric_windows_per_tick"] = int(numeric)
+if "max_windows_per_tick" not in block:
+    raise SystemExit("set DALTON_EXTRACTION_MAX_WINDOWS before the numeric one")
+config["document_extraction"] = block
 path.write_text(json.dumps(config, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-print(f"document_extraction.max_windows_per_tick={int(raw)}")
-PYEOF
+print("document_extraction=" + json.dumps(block, sort_keys=True))
+PYSETUP
 fi
 # An array, not ${VAR:+...}: this script runs under zsh, which does not word
 # split an unquoted expansion, so the flag and its value would arrive as one

@@ -1029,6 +1029,7 @@ class WriterServer:
         web_fetch_launcher: PublicWebFetchLauncher | None = None,
         document_extraction_launcher: Any | None = None,
         document_extraction_max_windows: int | None = None,
+        document_extraction_numeric_windows: int | None = None,
         sec_filings_launcher: Any | None = None,
         sec_filings_plan_path: str | Path | None = None,
         initial_screen_launcher: Any | None = None,
@@ -1080,6 +1081,13 @@ class WriterServer:
                 "document_extraction_max_windows must be 1..50"
             )
         self._document_extraction_max_windows = document_extraction_max_windows
+        if document_extraction_numeric_windows is not None and not (
+            0 <= int(document_extraction_numeric_windows) <= 50
+        ):
+            raise WriterServerError(
+                "document_extraction_numeric_windows must be 0..50"
+            )
+        self._document_extraction_numeric_windows = document_extraction_numeric_windows
         self._initial_screen_launcher = initial_screen_launcher
         self._initial_screen_coordinator: Any | None = None
         self._mission_deliverables: Any | None = None
@@ -1429,6 +1437,8 @@ class WriterServer:
                 missions=self._coverage_mission, launcher=self._document_extraction_launcher,
                 **({} if self._document_extraction_max_windows is None
                    else {"max_windows_per_tick": self._document_extraction_max_windows}),
+                **({} if self._document_extraction_numeric_windows is None
+                   else {"numeric_windows_per_tick": self._document_extraction_numeric_windows}),
             )
         if self._initial_screen_launcher is not None:
             # P10c: the mission writes its own Initial Screen, one company per
@@ -3490,6 +3500,11 @@ def main(argv: list[str] | None = None) -> int:
     # is 300s, so this number times twelve is the most documents an hour the
     # machine can read. It was pinned at 4 in code with no way to say otherwise.
     parser.add_argument(
+        "--document-extraction-numeric-windows", type=int, default=None,
+        help="Windows per tick that may also be read for the figures a company owes "
+             "(0..50; 0 disables). Each is a second paid model call.",
+    )
+    parser.add_argument(
         "--document-extraction-max-windows", type=int, default=None,
         help="Extraction windows drafted per controller tick (1..50; default 4). "
              "Each window is one paid model call against the mission's "
@@ -3687,6 +3702,7 @@ def main(argv: list[str] | None = None) -> int:
             document_extraction_model_config=(None if args.document_extraction_model_config is None
                 else json.loads(Path(args.document_extraction_model_config).read_text(encoding="utf-8"))),
             document_extraction_max_windows=args.document_extraction_max_windows,
+            document_extraction_numeric_windows=args.document_extraction_numeric_windows,
             sec_filings_launcher=sec_filings_launcher,
             sec_filings_plan_path=args.sec_filings_discovery_plan,
             search_launcher=search_launcher,

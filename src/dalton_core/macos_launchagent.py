@@ -46,6 +46,7 @@ def render(
     config_path: str | Path,
     log_dir: str | Path,
     extraction_max_windows: int | None = None,
+    extraction_numeric_windows: int | None = None,
 ) -> dict[str, str]:
     destination = Path(launch_agents_dir).expanduser().resolve()
     bin_dir = Path(python_env_bin).expanduser().resolve()
@@ -77,6 +78,8 @@ def render(
     # survive the next plain re-install.
     if extraction_max_windows is None and service_config is not None:
         extraction_max_windows = service_config.document_extraction_max_windows
+    if extraction_numeric_windows is None and service_config is not None:
+        extraction_numeric_windows = service_config.document_extraction_numeric_windows
     # P9d-4d: both host brokers are OpenClaw plugin sockets in one state
     # directory, so the web search broker is derived from the planner's
     # configured broker path instead of a second convention.  Absent files
@@ -213,6 +216,11 @@ def render(
             writer["ProgramArguments"].extend(
                 ["--document-extraction-max-windows", str(int(extraction_max_windows))]
             )
+        if extraction_numeric_windows is not None:
+            writer["ProgramArguments"].extend(
+                ["--document-extraction-numeric-windows",
+                 str(int(extraction_numeric_windows))]
+            )
     controller = common | {
         "Label": CONTROLLER_LABEL,
         "ProgramArguments": [str(bin_dir / "daltond"), "--config", str(config)],
@@ -266,12 +274,18 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--log-dir", type=Path, required=True)
     parser.add_argument(
+        "--extraction-numeric-windows", type=int, default=None,
+        help="Windows per tick also read for figures (0..50); omit to keep the config value",
+    )
+    parser.add_argument(
         "--extraction-max-windows", type=int, default=None,
         help="Extraction windows per controller tick (1..50); omit to keep the writer default",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.extraction_max_windows is not None and not 1 <= args.extraction_max_windows <= 50:
         raise SystemExit("--extraction-max-windows must be 1..50")
+    if args.extraction_numeric_windows is not None and not 0 <= args.extraction_numeric_windows <= 50:
+        raise SystemExit("--extraction-numeric-windows must be 0..50")
     paths = render(
         args.launch_agents_dir,
         args.python_env_bin,
@@ -279,6 +293,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         args.config,
         args.log_dir,
         extraction_max_windows=args.extraction_max_windows,
+        extraction_numeric_windows=args.extraction_numeric_windows,
     )
     for name, path in paths.items():
         print(f"{name}={path}")

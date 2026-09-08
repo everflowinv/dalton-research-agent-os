@@ -28,9 +28,10 @@ class FakeLauncher:
         self.tickets: dict[str, dict] = {}
         self.next_summary: dict | None = None
 
-    def start(self, *, requested_by=None, max_windows=2):
+    def start(self, *, requested_by=None, max_windows=2, max_numeric_windows=0):
         ticket = f"document-extraction:{len(self.starts) + 1:024x}"
-        self.starts.append({"requested_by": requested_by, "max_windows": max_windows})
+        self.starts.append({"requested_by": requested_by, "max_windows": max_windows,
+                            "max_numeric_windows": max_numeric_windows})
         self.tickets[ticket] = {"id": ticket, "status": "running", "summary": None, "completed_at": None}
         return {"id": ticket, "status": "running"}
 
@@ -86,7 +87,7 @@ class CoordinatorTests(unittest.TestCase):
         self._awaiting_review()
         tick = self.coordinator.dispatch_once()
         self.assertEqual((tick["status"], tick["awaiting"], tick["max_windows"]), ("launched", 1, 4))
-        self.assertEqual(self.launcher.starts, [{"requested_by": None, "max_windows": 4}])
+        self.assertEqual(self.launcher.starts, [{"requested_by": None, "max_windows": 4, "max_numeric_windows": 0}])
         self.assertEqual(self.coordinator.dispatch_once()["status"], "busy")
         # A child that drafted something is followed by another child next tick.
         self.launcher.finish({"status": "succeeded", "drafted": [{"offset": 0}], "stop_reason": "max_windows",

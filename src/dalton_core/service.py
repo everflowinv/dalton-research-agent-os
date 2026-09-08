@@ -97,6 +97,10 @@ class ServiceConfig:
     # it back to the built-in default -- which is exactly what happened the
     # first time it was set.
     document_extraction_max_windows: int | None = None
+    # P11n: how many of those windows may also be read for figures. Separate
+    # because it is a separate spend, and zero because an install that has not
+    # asked for the figures pass should not get it.
+    document_extraction_numeric_windows: int | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ServiceConfig":
@@ -277,11 +281,12 @@ class ServiceConfig:
                     "thesis_impact.interval_seconds",
                 )
         extraction_max_windows = None
+        extraction_numeric_windows = None
         extraction_raw = raw.get("document_extraction")
         if extraction_raw is not None:
-            if not isinstance(extraction_raw, Mapping) or set(extraction_raw) != {
-                "max_windows_per_tick",
-            }:
+            if not isinstance(extraction_raw, Mapping) or not set(extraction_raw) <= {
+                "max_windows_per_tick", "numeric_windows_per_tick",
+            } or "max_windows_per_tick" not in extraction_raw:
                 raise ServiceConfigError("document_extraction service config is invalid")
             value = extraction_raw["max_windows_per_tick"]
             if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 50:
@@ -289,8 +294,16 @@ class ServiceConfig:
                     "document_extraction.max_windows_per_tick must be an integer 1..50"
                 )
             extraction_max_windows = value
+            numeric = extraction_raw.get("numeric_windows_per_tick")
+            if numeric is not None:
+                if isinstance(numeric, bool) or not isinstance(numeric, int) or not 0 <= numeric <= 50:
+                    raise ServiceConfigError(
+                        "document_extraction.numeric_windows_per_tick must be an integer 0..50"
+                    )
+                extraction_numeric_windows = numeric
         return cls(
             document_extraction_max_windows=extraction_max_windows,
+            document_extraction_numeric_windows=extraction_numeric_windows,
             core_db=_absolute_path(raw["core_db"], "core_db"),
             scheduler_db=_absolute_path(raw["scheduler_db"], "scheduler_db"),
             projection_db=_absolute_path(raw["projection_db"], "projection_db"),
