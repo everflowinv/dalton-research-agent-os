@@ -509,6 +509,40 @@ def openclaw_broker_profiles(
     return profiles
 
 
+def ensure_broker_profiles(
+    router: Any, *, checked_at: datetime,
+    availability_ttl: timedelta = timedelta(days=7),
+) -> dict[str, Any]:
+    """Register catalog profiles the router has never seen. Nothing else.
+
+    Nothing in the deploy ever did this: the live router's profiles arrived
+    from canary scripts, which is why the catalog drifted -- five profiles the
+    broker no longer offers, five the broker offers with no static profile at
+    all. A model nobody can route to is a model that silently is not there.
+
+    Only *missing* ids are registered, deliberately. A profile carries an
+    availability timestamp, so re-registering every deploy would append a new
+    version each time and say nothing: the live deepseek profile is at version
+    eleven for exactly that reason. Changing a profile's substance stays an
+    explicit act.
+    """
+
+    known = {
+        row["profile_id"] for row in router.connection.execute(
+            "SELECT DISTINCT profile_id FROM model_endpoint_profile_versions"
+        ).fetchall()
+    }
+    added = []
+    for profile in openclaw_broker_profiles(
+        checked_at=checked_at, availability_ttl=availability_ttl
+    ):
+        if profile["id"] in known:
+            continue
+        router.register_profile(profile)
+        added.append(profile["id"])
+    return {"added": added, "already_present": sorted(known)}
+
+
 def openclaw_broker_policy(*, created_at: datetime) -> dict[str, Any]:
     """Version 3 routes to every configured profile accepted by the UDS broker."""
 
@@ -904,6 +938,7 @@ __all__ = [
     "LEGACY_TRANSCRIPT_POLISH_DEVELOPMENT_POLICY_REF",
     "TRANSCRIPT_POLISH_DEVELOPMENT_PROFILE_ID",
     "TRANSCRIPT_POLISH_DEVELOPMENT_POLICY_REF",
+    "ensure_broker_profiles",
     "install_openclaw_catalog",
     "openclaw_policy",
     "openclaw_profiles",

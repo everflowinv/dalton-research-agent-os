@@ -111,3 +111,57 @@ class AstraProfileTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CatalogTests(unittest.TestCase):
+    """P13k: nothing in the deploy ever registered profiles, so the catalog drifted."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.router = ModelRouter(str(Path(self.temp.name) / "router.sqlite"))
+        self.addCleanup(self.router.close)
+
+    def test_an_empty_router_gets_the_whole_catalog(self):
+        from dalton_core.model_deployment import _ENDPOINTS, ensure_broker_profiles
+
+        result = ensure_broker_profiles(self.router, checked_at=NOW)
+        self.assertEqual(len(result["added"]), len(_ENDPOINTS))
+        self.assertIn(ASTRA, result["added"])
+
+    def test_a_second_run_adds_nothing(self):
+        from dalton_core.model_deployment import ensure_broker_profiles
+
+        ensure_broker_profiles(self.router, checked_at=NOW)
+        again = ensure_broker_profiles(self.router, checked_at=NOW + timedelta(days=1))
+        self.assertEqual(again["added"], [])
+
+    def test_re_registering_would_churn_versions_which_is_why_it_does_not(self):
+        # A profile carries an availability timestamp, so registering it again
+        # appends a version that says nothing: the live deepseek profile is at
+        # version eleven for exactly that reason.
+        from dalton_core.model_deployment import ensure_broker_profiles
+
+        ensure_broker_profiles(self.router, checked_at=NOW)
+        ensure_broker_profiles(self.router, checked_at=NOW + timedelta(days=1))
+        versions = self.router.connection.execute(
+            "SELECT COUNT(*) FROM model_endpoint_profile_versions WHERE profile_id=?",
+            (ASTRA,),
+        ).fetchone()[0]
+        self.assertEqual(versions, 1)
+
+    def test_only_the_missing_one_is_added(self):
+        from dalton_core.model_deployment import ensure_broker_profiles, openclaw_broker_profiles
+
+        for profile in openclaw_broker_profiles(checked_at=NOW):
+            if profile["id"] != ASTRA:
+                self.router.register_profile(profile)
+        result = ensure_broker_profiles(self.router, checked_at=NOW)
+        self.assertEqual(result["added"], [ASTRA])
+
+    def test_pinning_now_succeeds_because_the_profile_exists(self):
+        from dalton_core.model_deployment import ensure_broker_profiles
+
+        ensure_broker_profiles(self.router, checked_at=NOW)
+        self.assertEqual(credential_slots_for(self.router, [ASTRA]),
+                         ["credential-slot:openclaw:openai"])
