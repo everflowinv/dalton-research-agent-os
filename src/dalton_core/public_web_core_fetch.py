@@ -509,7 +509,8 @@ class PublicWebCoreFetch:
             return cached
         descriptor = self.ensure_descriptor()
         slug = host_slug(host)
-        rate_policy_ref = f"{FETCH_RATE_POLICY_PREFIX}:{slug}"
+        # ":host" marks the chain whose quota scope is this host alone.
+        rate_policy_ref = f"{FETCH_RATE_POLICY_PREFIX}:{slug}:host"
         binding = {
             "binding_ref": f"runner-binding:web-fetch:{slug}:0.1",
             "descriptor_revision_ref": descriptor.revision_ref,
@@ -612,13 +613,24 @@ class PublicWebCoreFetch:
         )
         quota = governed_daily_quota(TEMPLATE_KEY, OPERATION)
         price_book = {"price_rate_refs": [price["id"]], "required_price_meters": ["calls"]}
+        # P10w: the daily fetch allowance is per host, not shared across all of
+        # them. The lane already publishes a profile, a price and a rate policy
+        # per host; only the quota scope was global, so one busy host could
+        # spend every other host's allowance. Live, page fetching used 297 of
+        # 200 and a queued 10-K could not be retrieved at all.
+        #
+        # A policy's quota scope is immutable across its versions -- rightly, or
+        # past accounting would be reinterpreted under it -- so this is a new
+        # policy chain per host rather than a new version of the old one. The
+        # globally scoped policies stay as history and stop being referenced.
+        scoped_quota_ref = f"{FETCH_QUOTA_SCOPE_REF}:{slug}"
         rate_policy = self.connectors.register_rate_policy(
             {
                 "schema_version": "0.1",
                 "id": f"{rate_policy_ref}:v1",
                 "created_at": self.governance.effective_from,
                 "policy_ref": rate_policy_ref,
-                "quota_scope_ref": FETCH_QUOTA_SCOPE_REF,
+                "quota_scope_ref": scoped_quota_ref,
                 "version": 1,
                 "prior_version_ref": None,
                 "connector_profile_ref": profile["id"],
@@ -635,7 +647,7 @@ class PublicWebCoreFetch:
                 "effective_until": None,
                 "actor_ref": self.governance.approved_by,
             },
-            idempotency_key=f"web-fetch:rate-policy:{slug}:v1",
+            idempotency_key=f"web-fetch:rate-policy:{slug}:host-scoped:v1",
         )
         authorities = {
             "descriptor": descriptor, "binding": binding, "manifest": manifest,
