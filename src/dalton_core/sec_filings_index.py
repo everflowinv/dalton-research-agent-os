@@ -32,8 +32,9 @@ and only the owner can be that person.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from .connector_inventory import load_packaged_connector_inventory
 from .store import content_hash
@@ -43,6 +44,8 @@ CAPABILITY_ID = "capability:dalton:connector:sec-filings-index"
 OPERATION = "list_filings"
 GOVERNANCE_SCHEMA_VERSION = "0.1"
 SIDE_EFFECT = "read:public-http"
+# The index lives on data.sec.gov; the filing itself lives on the archive host.
+FILING_ARCHIVE_HOST = "www.sec.gov"
 
 
 class SecFilingsIndexError(RuntimeError):
@@ -125,6 +128,90 @@ def filings_index_permissions() -> dict[str, Any]:
     return copy.deepcopy(PUBLIC_PERMISSIONS)
 
 
+def filing_document_url(issuer: str, accession: str, primary_document: str) -> str:
+    """The canonical EDGAR archive URL of one filing's primary document.
+
+    EDGAR paths carry the CIK without its leading zeros and the accession
+    without its dashes.  Verified live against ACN's FY2025 10-K.
+    """
+
+    if not isinstance(issuer, str) or not issuer.strip("0").isdigit():
+        raise SecFilingsIndexError("issuer must be a numeric CIK")
+    if not isinstance(accession, str) or len(accession.replace("-", "")) != 18:
+        raise SecFilingsIndexError("accession must be an 18-digit EDGAR accession")
+    if not isinstance(primary_document, str) or not primary_document:
+        raise SecFilingsIndexError("filing lacks a primary document path")
+    return (
+        f"https://{FILING_ARCHIVE_HOST}/Archives/edgar/data/{int(issuer)}/"
+        f"{accession.replace('-', '')}/{primary_document}"
+    )
+
+
+def build_filing_url_authorities(
+    raw_response: bytes, parameters: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    """Rebuild the fetchable filing URLs from the exact submissions bytes.
+
+    Nothing is stored here.  The frozen ``list_filings`` output schema carries
+    record refs and hashes only — it deliberately does not carry the primary
+    document path, which is the one field that names the filing's URL — so the
+    path comes back out of the raw artifact, exactly the way the web search
+    lane rebuilds its URLs from the bytes it ranked.
+
+    Only filings the normalizer enumerated get a URL, so the caller's form and
+    date filter governs here too and an unrelated filing in the same block can
+    never be handed to the fetch lane.
+
+    The record hash is recomputed as an invariant, not as a tamper boundary:
+    the normalizer and the lookup below read the same bytes, so it can only
+    fire if the two ever disagree about how a filing record is shaped. That is
+    worth catching loudly — it would silently misname a URL — but it is not a
+    check against an edited artifact, which is the envelope's job.
+    """
+
+    from .public_web_connector import public_web_url_ref
+    from .sec_public_adapter import normalize_sec_submissions
+
+    try:
+        payload = json.loads(raw_response.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SecFilingsIndexError("submissions artifact is not JSON") from exc
+    normalized = normalize_sec_submissions(payload, parameters, provider_status=200)
+    issuer = str(parameters["issuer"])
+    recent = payload["filings"]["recent"]
+    accessions = recent["accessionNumber"]
+    revisions = recent.get("amendmentOf") or [None] * len(accessions)
+    by_accession = {
+        accession: {
+            "accession": accession,
+            "form": recent["form"][index],
+            "filing_date": recent["filingDate"][index],
+            "primary_document": recent["primaryDocument"][index],
+            "revision_of": revisions[index],
+        }
+        for index, accession in enumerate(accessions)
+    }
+    authorities: list[dict[str, Any]] = []
+    for record in normalized["records"]:
+        accession = record["record_ref"].removeprefix("sec:filing:")
+        entry = by_accession.get(accession)
+        if entry is None:
+            raise SecFilingsIndexError("normalized filing is absent from the raw artifact")
+        if content_hash(entry) != record["record_hash"]:
+            raise SecFilingsIndexError("filing record hash does not bind the raw artifact")
+        url = filing_document_url(issuer, accession, entry["primary_document"])
+        authorities.append({
+            "record_ref": record["record_ref"],
+            "accession": accession,
+            "form": entry["form"],
+            "filing_date": entry["filing_date"],
+            "canonical_url": url,
+            "url_ref": public_web_url_ref(url),
+            "host": FILING_ARCHIVE_HOST,
+        })
+    return authorities
+
+
 def _wire_time(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
@@ -168,10 +255,13 @@ def build_filings_index_governance_record(
 
 __all__ = [
     "CAPABILITY_ID",
+    "FILING_ARCHIVE_HOST",
     "KIND",
     "OPERATION",
     "SecFilingsIndexError",
+    "build_filing_url_authorities",
     "build_filings_index_governance_record",
+    "filing_document_url",
     "filings_index_adapter_hash",
     "filings_index_contract",
     "filings_index_identity",

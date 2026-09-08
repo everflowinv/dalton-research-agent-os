@@ -221,3 +221,69 @@ class SecFilingsIndexGovernanceTests(unittest.TestCase):
                 governance.capability_id,
                 "capability:dalton:connector:sec-filings-index",
             )
+
+
+class SecFilingUrlAuthorityTests(unittest.TestCase):
+    """P10h: the filing's URL comes back out of the raw artifact."""
+
+    # date_from sits on the oldest filing in the block: anything earlier is
+    # refused, because filings before ``recent`` live on pages this WorkOrder
+    # cannot fetch.
+    PARAMETERS = {
+        "issuer": "0000789019", "form": "10-K",
+        "date_from": "2025-02-14", "date_to": "2025-12-31", "limit": 10,
+    }
+
+    def payload(self) -> dict:
+        rows = [
+            ("0000000001-25-000001", "10-K", "2025-02-14", "annual.htm", None),
+            ("0000000002-25-000002", "8-K", "2025-06-30", "event.htm", None),
+            ("0000000003-25-000003", "10-K", "2025-11-20", "annual2.htm", None),
+        ]
+        return {"cik": "0000789019", "filings": {"recent": {
+            "accessionNumber": [r[0] for r in rows], "form": [r[1] for r in rows],
+            "filingDate": [r[2] for r in rows], "primaryDocument": [r[3] for r in rows],
+            "amendmentOf": [r[4] for r in rows],
+        }}}
+
+    def _raw(self) -> bytes:
+        return json.dumps(self.payload()).encode()
+
+    def test_the_archive_url_drops_leading_zeros_and_accession_dashes(self) -> None:
+        from dalton_core.sec_filings_index import filing_document_url
+
+        self.assertEqual(
+            filing_document_url("0001467373", "0001467373-25-000217", "acn-20250831.htm"),
+            "https://www.sec.gov/Archives/edgar/data/1467373/"
+            "000146737325000217/acn-20250831.htm",
+        )
+
+    def test_only_the_matching_form_gets_a_url_and_it_is_fetch_lane_shaped(self) -> None:
+        from dalton_core.public_web_connector import public_web_url_ref
+        from dalton_core.sec_filings_index import build_filing_url_authorities
+
+        authorities = build_filing_url_authorities(self._raw(), self.PARAMETERS)
+        self.assertEqual([a["accession"] for a in authorities],
+                         ["0000000001-25-000001", "0000000003-25-000003"])
+        self.assertTrue(all(a["form"] == "10-K" for a in authorities))
+        self.assertTrue(all(a["host"] == "www.sec.gov" for a in authorities))
+        # The ref must be the same shape the public web fetch lane resolves,
+        # or the 10-K could be named but never retrieved.
+        for authority in authorities:
+            self.assertEqual(
+                authority["url_ref"], public_web_url_ref(authority["canonical_url"])
+            )
+            self.assertTrue(authority["url_ref"].startswith("public-web-url:sha256:"))
+
+    def test_a_filing_without_a_usable_path_is_refused_not_guessed(self) -> None:
+        from dalton_core.sec_filings_index import (
+            SecFilingsIndexError, filing_document_url,
+        )
+
+        for issuer, accession, document in (
+            ("not-a-cik", "0000000001-25-000001", "annual.htm"),
+            ("0000789019", "0000000001-25-1", "annual.htm"),
+            ("0000789019", "0000000001-25-000001", ""),
+        ):
+            with self.assertRaises(SecFilingsIndexError):
+                filing_document_url(issuer, accession, document)
