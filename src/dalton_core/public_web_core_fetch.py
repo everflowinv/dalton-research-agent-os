@@ -547,7 +547,13 @@ class PublicWebCoreFetch:
         manifest = validate_runner_environment_manifest(_with_hash(manifest_base))
         profile_wire = {
             "schema_version": "0.1",
-            "id": f"{FETCH_PROFILE_PREFIX}:{slug}:v1",
+            # P10z: ":host" is the generation whose rate policy is scoped to
+            # this host alone. The binding names that policy, so the runner
+            # environment hash changes with it, and a profile is immutable
+            # once registered -- reusing the old id left the recorded hash
+            # disagreeing with the manifest the gate is handed, which is
+            # exactly the AdapterNotResolved the live fetch reported.
+            "id": f"{FETCH_PROFILE_PREFIX}:{slug}:host:v1",
             "created_at": self.governance.effective_from,
             "connector_ref": self.template["connector_ref"],
             "version": None,
@@ -587,7 +593,7 @@ class PublicWebCoreFetch:
             "network_policy": dict(self.network_policy),
         }
         profile = register_chained_profile(
-            self.connectors, profile_wire, idempotency_key=f"web-fetch:profile:{slug}:v1"
+            self.connectors, profile_wire, idempotency_key=f"web-fetch:profile:{slug}:host:v1"
         )
         price_ref = f"{FETCH_PRICE_RATE_PREFIX}:{slug}:calls"
         price = self.connectors.register_price_rate(
