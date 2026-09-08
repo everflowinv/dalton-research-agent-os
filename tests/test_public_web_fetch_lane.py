@@ -25,6 +25,7 @@ from dalton_core.public_http_transport import PublicHttpTransport
 from dalton_core.public_web_core_fetch import (
     FETCH_CAPABILITY_ID,
     FETCH_PROFILE_PREFIX,
+    HOST_SCOPED_GENERATION,
     PublicWebCoreFetch,
     PublicWebCoreFetchError,
     WebFetchConnectorGovernance,
@@ -171,7 +172,7 @@ class FetchExecutorTests(unittest.TestCase):
         self.assertEqual(fetched["outcome"], "succeeded")
         self.assertEqual(fetched["document_ref"], f"public-web-document:url-sha256:{hashlib.sha256(authority['canonical_url'].encode()).hexdigest()}:body-sha256:{BODY_HASH}")
         self.assertEqual((fetched["body_bytes"], fetched["raw_media_type"], fetched["source_status"]), (len(BODY), "text/html", "complete"))
-        self.assertEqual(fetched["connector_profile_ref"], f"{FETCH_PROFILE_PREFIX}:{host_slug('example.com')}:host:v1")
+        self.assertEqual(fetched["connector_profile_ref"], f"{FETCH_PROFILE_PREFIX}:{host_slug('example.com')}:{HOST_SCOPED_GENERATION}:v1")
         self.assertEqual(h.spool.read_object(fetched["raw_response_hash"]), BODY)
         envelope = h.fetch.receipts.get_source_envelope(fetched["source_envelope_ref"])
         self.assertEqual((envelope["source"], envelope["operation"], envelope["completeness"]), ("source:public-web", "fetch_get", "partial"))
@@ -188,7 +189,7 @@ class FetchExecutorTests(unittest.TestCase):
         # A second host gets its own profile on the same connector chain.
         second = h.fetch.fetch(h.fetch.build_request(h.authority(receipt, URL_B)))
         self.assertEqual(second["outcome"], "succeeded")
-        self.assertEqual(second["connector_profile_ref"], f"{FETCH_PROFILE_PREFIX}:{host_slug('news.example.org')}:host:v1")
+        self.assertEqual(second["connector_profile_ref"], f"{FETCH_PROFILE_PREFIX}:{host_slug('news.example.org')}:{HOST_SCOPED_GENERATION}:v1")
         versions = h.core.connection.execute(
             "SELECT profile_version_id,version_number FROM connector_profile_versions WHERE connector_ref='connector:web-fetch' ORDER BY version_number"
         ).fetchall()

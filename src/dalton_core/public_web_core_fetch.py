@@ -74,6 +74,12 @@ ADAPTER_REF = "transport:public-http:0.1"
 ADAPTER_PACKAGE = "dalton-public-web-fetch-adapter:0.1"
 SIDE_EFFECT = "read:public-http"
 SEC_FILINGS_INDEX_OPERATION = "list_filings"
+# P10z: the generation whose daily allowance is scoped to one host. Profile,
+# price, rate policy and their idempotency keys all carry it, because they are
+# registered as one set: a record bound to a previous generation and a key
+# reused from it are the same conflict, and moving them separately is what
+# produced a run of them.
+HOST_SCOPED_GENERATION = "h1"
 DEFAULT_USER_AGENT = "Dalton Research Agent OS public-web fetch lane (owner: lumos)"
 # One page per call; a bigger page is a new profile version.
 FETCH_MAX_RESPONSE_BYTES = 4_000_000
@@ -510,7 +516,7 @@ class PublicWebCoreFetch:
         descriptor = self.ensure_descriptor()
         slug = host_slug(host)
         # ":host" marks the chain whose quota scope is this host alone.
-        rate_policy_ref = f"{FETCH_RATE_POLICY_PREFIX}:{slug}:host"
+        rate_policy_ref = f"{FETCH_RATE_POLICY_PREFIX}:{slug}:{HOST_SCOPED_GENERATION}"
         binding = {
             "binding_ref": f"runner-binding:web-fetch:{slug}:0.1",
             "descriptor_revision_ref": descriptor.revision_ref,
@@ -553,7 +559,7 @@ class PublicWebCoreFetch:
             # once registered -- reusing the old id left the recorded hash
             # disagreeing with the manifest the gate is handed, which is
             # exactly the AdapterNotResolved the live fetch reported.
-            "id": f"{FETCH_PROFILE_PREFIX}:{slug}:host:v1",
+            "id": f"{FETCH_PROFILE_PREFIX}:{slug}:{HOST_SCOPED_GENERATION}:v1",
             "created_at": self.governance.effective_from,
             "connector_ref": self.template["connector_ref"],
             "version": None,
@@ -593,9 +599,9 @@ class PublicWebCoreFetch:
             "network_policy": dict(self.network_policy),
         }
         profile = register_chained_profile(
-            self.connectors, profile_wire, idempotency_key=f"web-fetch:profile:{slug}:host:v1"
+            self.connectors, profile_wire, idempotency_key=f"web-fetch:profile:{slug}:{HOST_SCOPED_GENERATION}:v1"
         )
-        price_ref = f"{FETCH_PRICE_RATE_PREFIX}:{slug}:calls"
+        price_ref = f"{FETCH_PRICE_RATE_PREFIX}:{slug}:{HOST_SCOPED_GENERATION}:calls"
         price = self.connectors.register_price_rate(
             {
                 "schema_version": "0.1",
@@ -615,7 +621,7 @@ class PublicWebCoreFetch:
                 "source_ref": "pricing:public-web:free",
                 "actor_ref": self.governance.approved_by,
             },
-            idempotency_key=f"web-fetch:price:{slug}:v1",
+            idempotency_key=f"web-fetch:price:{slug}:{HOST_SCOPED_GENERATION}:v1",
         )
         quota = governed_daily_quota(TEMPLATE_KEY, OPERATION)
         price_book = {"price_rate_refs": [price["id"]], "required_price_meters": ["calls"]}
@@ -653,7 +659,7 @@ class PublicWebCoreFetch:
                 "effective_until": None,
                 "actor_ref": self.governance.approved_by,
             },
-            idempotency_key=f"web-fetch:rate-policy:{slug}:host-scoped:v1",
+            idempotency_key=f"web-fetch:rate-policy:{slug}:{HOST_SCOPED_GENERATION}:v1",
         )
         authorities = {
             "descriptor": descriptor, "binding": binding, "manifest": manifest,
