@@ -278,6 +278,17 @@ class NodeBrokerRoundTripTests(unittest.TestCase):
     """Sign in Python, verify and answer in the real Node broker."""
 
     def test_python_client_and_node_broker_agree_on_the_wire(self) -> None:
+        # The deadline is taken now, not at import. The client sends
+        # timeoutMs = min(deadline - now, 240s) and the broker hashes it as
+        # part of the request, so a replay is only byte-identical while the
+        # clamp is what decides that number. Module-level FUTURE was five
+        # minutes out: fine when this test ran first, but in the full suite it
+        # ran ~180s later, the remaining time fell under the clamp, and the two
+        # calls sent timeouts milliseconds apart -- a genuinely different
+        # request, which the broker rightly refused as an idempotency conflict.
+        deadline = (
+            datetime.now(timezone.utc) + timedelta(hours=1)
+        ).isoformat(timespec="microseconds")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             harness = root / "harness.mjs"
@@ -307,7 +318,7 @@ process.on("SIGTERM", async () => {{ await server.stop(); process.exit(0); }});
                 handle = WebSearchBrokerHandle(socket_path=socket_path, auth_key_path=key_path)
                 result = handle.invoke(
                     "web_search", {"query": "Accenture AI demand", "count": 3},
-                    call_ref="credential-use:web-search:node", deadline_at=FUTURE, max_response_bytes=1_000_000,
+                    call_ref="credential-use:web-search:node", deadline_at=deadline, max_response_bytes=1_000_000,
                 )
                 body = json.loads(result.raw_response.decode("utf-8"))
                 self.assertEqual((body["ok"], body["idempotencyStatus"], body["callRef"]),
@@ -316,14 +327,14 @@ process.on("SIGTERM", async () => {{ await server.stop(); process.exit(0); }});
                 # The same call ref replays without a second host search.
                 replay = handle.invoke(
                     "web_search", {"query": "Accenture AI demand", "count": 3},
-                    call_ref="credential-use:web-search:node", deadline_at=FUTURE, max_response_bytes=1_000_000,
+                    call_ref="credential-use:web-search:node", deadline_at=deadline, max_response_bytes=1_000_000,
                 )
                 self.assertEqual(json.loads(replay.raw_response.decode("utf-8"))["idempotencyStatus"], "duplicate")
                 # A different query under that ref is an idempotency conflict.
                 with self.assertRaises(BridgeRequestRejected):
                     handle.invoke(
                         "web_search", {"query": "another", "count": 3},
-                        call_ref="credential-use:web-search:node", deadline_at=FUTURE, max_response_bytes=1_000_000,
+                        call_ref="credential-use:web-search:node", deadline_at=deadline, max_response_bytes=1_000_000,
                     )
             finally:
                 process.terminate()

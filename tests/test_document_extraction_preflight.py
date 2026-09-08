@@ -71,7 +71,17 @@ class ReadOnlyModelAuthorityTests(unittest.TestCase):
                      patch.object(Path, 'mkdir', side_effect=AssertionError('readonly mkdir')), \
                      cls(path, read_only=True) as reader:
                     self.assertEqual(reader.connection.execute('PRAGMA query_only').fetchone()[0], 1)
-                    self.assertEqual(reader.connection.execute('PRAGMA database_list').fetchone()[2], str(path))
+                    # Compare resolved paths: on macOS /var is a symlink to
+                    # /private/var, and SQLite reports the resolved file while
+                    # tempfile hands back the unresolved one. The claim being
+                    # made is "the reader opened exactly this file", which
+                    # survives resolution; string equality did not.
+                    self.assertEqual(
+                        Path(
+                            reader.connection.execute('PRAGMA database_list').fetchone()[2]
+                        ).resolve(),
+                        path.resolve(),
+                    )
                     self.assertEqual(reader.connection.total_changes, 0)
                     if cls is ModelRouter:
                         self.assertEqual(reader.get_policy(policy()['policy_version_ref'])['id'], policy()['id'])
