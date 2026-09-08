@@ -824,7 +824,157 @@ class DocumentExtractionService:
             raise ResearchVerificationConflict("source changed during extraction")
         return self.view(review_id=review_id, expected_review_hash=expected_review_hash, offset=offset, actor_ref=actor_ref)
 
+    def numeric_slots(self, context, *, limit=6):
+        """The figures this company still owes, most-owed first.
+
+        Held figures are read from the company's own quantitative claims, so a
+        metric already covered for enough periods is not asked for again: the
+        second pass is demand-driven or it is just a more expensive first pass.
+
+        Discovered requirements are folded in beside the universal floor. A
+        company nobody has learned anything about yet is still asked for
+        revenue and earnings, which is the floor's whole purpose.
+        """
+
+        from .metric_base import extraction_requests
+
+        company_ref = context["company_ref"]
+        held = self._held_figures(company_ref)
+        discovered = self._discovered_metrics(company_ref)
+        return extraction_requests(
+            held, stage="initial_screen", company_ref=company_ref,
+            discovered=discovered, limit=limit,
+        )
+
+    def _held_figures(self, company_ref):
+        """Quantitative claims this company already has, as metric/period pairs."""
+
+        rows = self.writer.store.connection.execute(
+            "SELECT claim_json FROM claim_versions WHERE "
+            "json_extract(claim_json,'$.subject_ref')=?",
+            (company_ref,),
+        ).fetchall()
+        held = []
+        for row in rows:
+            try:
+                claim = json.loads(row["claim_json"])
+            except (TypeError, ValueError):
+                continue
+            if claim.get("claim_kind") != "quantitative":
+                continue
+            period = claim.get("period")
+            if isinstance(period, Mapping):
+                period = period.get("label") or period.get("start")
+            held.append({
+                "metric_ref": claim.get("metric_ref") or claim.get("metric_or_aspect"),
+                "period": period if isinstance(period, str) else None,
+            })
+        return held
+
+    def _discovered_metrics(self, company_ref):
+        """Requirements learned for this company, or none yet.
+
+        Absent rather than fatal: discovery has not run for most companies, and
+        a company with no learned requirements should still be asked for the
+        floor rather than skipped.
+        """
+
+        reader = getattr(self.writer, "metric_requirements", None)
+        if reader is None:
+            return ()
+        try:
+            return reader(company_ref)
+        except Exception:  # noqa: BLE001 - a missing requirement list is not a gate
+            return ()
+
+    def generate_numeric(self, *, review_id, expected_review_hash, offset,
+                         expected_context_hash, actor_ref):
+        """Read one window for the figures this company owes.
+
+        Returns without a model call when nothing is owed. That is the common
+        case once a company is covered, and paying for a prompt whose correct
+        answer is "nothing" would make the second pass cost the most exactly
+        where it is worth the least.
+        """
+
+        from .document_numeric_extraction import build_work as build_numeric_work
+        from .document_numeric_extraction import extract_from_window
+
+        context = self.context(review_id, expected_review_hash, offset, actor_ref)
+        if context["content_hash"] != expected_context_hash:
+            raise ResearchVerificationConflict("source context changed; reload original")
+        slots = self.numeric_slots(context)
+        if not slots:
+            return {"status": "nothing_owed", "verified": [], "refused": [],
+                    "formal_authority_writes": 0}
+        config = getattr(self.writer, "_document_extraction_model_config", None)
+        factory = self.writer._document_extraction_worker_factory
+        if factory is None and config is None:
+            return {"status": "gated", "reason": GATE_REASON, "formal_authority_writes": 0}
+        work = build_numeric_work(context, slots)
+        text = self._run_numeric(work, context, actor_ref, config, factory)
+        if text is None:
+            return {"status": "no_result", "verified": [], "refused": [],
+                    "formal_authority_writes": 0}
+        result = extract_from_window(work.metadata["request"], text)
+        return {"status": "read", "formal_authority_writes": 0, **result}
+
+    def _run_numeric(self, work, context, actor_ref, config, factory):
+        """Run the numeric order, or recover the answer of one already run."""
+
+        scheduler = self.writer._scheduler
+        if scheduler is None:
+            return None
+        if scheduler.formal_result(work.id) is None:
+            if config is not None:
+                self._run_broker_work(work, context, actor_ref)
+            else:
+                worker = factory(self, context, actor_ref)
+                if (type(worker) is not DocumentExtractionModelWorker
+                        or worker.store is not self.writer.store
+                        or worker.scheduler is not self.writer._scheduler):
+                    raise ResearchVerificationError(
+                        "extraction requires the existing Core routed worker"
+                    )
+                worker.scheduler.enqueue(work)
+                worker.run_once(work)
+        return self._numeric_text(work)
+
+    def _numeric_text(self, work):
+        """The model's exact answer for one numeric order, or None.
+
+        The same provenance checks the qualitative recovery makes: a result
+        whose envelope does not bind its own work order, or whose text does not
+        match its own hash, is a drift rather than an answer.
+        """
+
+        scheduler = self.writer._scheduler
+        formal = scheduler.formal_result(work.id)
+        if formal is None:
+            return None
+        authority = scheduler.work_order_authority(work.id)
+        if authority["work_order_hash"] != content_hash(work.to_dict()):
+            raise ResearchVerificationConflict("saved numeric work drifted")
+        result = ResultEnvelope.from_dict(formal["result_envelope"])
+        if (content_hash(formal["result_envelope"]) != formal["result_envelope_hash"]
+                or result.work_order_ref != work.id):
+            raise ResearchVerificationConflict("saved numeric result drifted")
+        if formal["terminal_state"] != "succeeded" or result.status != "succeeded":
+            return None
+        if (set(result.outputs) != {"text", "content_hash"}
+                or _hash_text(result.outputs["text"]) != result.outputs["content_hash"]):
+            raise ResearchVerificationConflict("numeric result provenance drifted")
+        return result.outputs["text"]
+
     def _generate_broker(self, context, actor_ref):
+        self._run_broker_work(build_work(context), context, actor_ref)
+        return self.view(review_id=context["review_id"],
+                         expected_review_hash=context["review_hash"],
+                         offset=context["offset"], actor_ref=actor_ref)
+
+    def _run_broker_work(self, work, context, actor_ref):
+        """Run one already-built order through the routed broker worker."""
+
         from .model_router import ModelRouter
         from .openclaw_model_adapter import OpenClawModelAdapter
         from .thesis_impact_budget import ThesisImpactBudgetStore
@@ -842,13 +992,10 @@ class DocumentExtractionService:
                 budget_store=budget, budget_policy_ref=config["budget_policy_ref"],
                 routing_policy_ref=config["routing_policy_ref"], credential_slot_refs=config["credential_slot_refs"],
                 token_counter=lambda text: len(text.encode("utf-8")))
-            work = build_work(context)
             saved = worker.scheduler.enqueue(work)
             if saved["status"] == "conflict":
                 raise ResearchVerificationConflict("extraction enqueue conflict")
             worker.run_once(work)
-        return self.view(review_id=context["review_id"], expected_review_hash=context["review_hash"],
-                         offset=context["offset"], actor_ref=actor_ref)
 
     ADMISSION_GRANTS = frozenset({"claim", "evidence", "stage_record"})
 
