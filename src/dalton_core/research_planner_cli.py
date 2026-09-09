@@ -152,8 +152,10 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
     figures: dict[str, Any] = {}
     metrics: dict[str, Any] = {}
     disputed: dict[str, Any] = {}
+    acquisition: dict[str, Any] = {}
     for entry in checklist:
         company_ref = entry["company_ref"]
+        acquisition[company_ref] = missions.sec_dispatch_outcomes(company_ref)
         held = missions.document_figures(company_ref)
         figures[company_ref] = {
             "total": len(held),
@@ -173,7 +175,7 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
     return build_research_state(
         mission=mission, checklist=checklist, industry=industry,
         figures_by_company=figures, metrics_by_company=metrics,
-        contested_by_company=disputed,
+        contested_by_company=disputed, acquisition_by_company=acquisition,
         budget=mission["budget"],
         spend=read_spend(store, mission, budget_db=budget_db,
                          as_of=datetime.fromisoformat(as_of)),

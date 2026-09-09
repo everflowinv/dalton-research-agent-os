@@ -619,6 +619,54 @@ class ResearchPlanExecutorTests(unittest.TestCase):
         )
         self.assertEqual(harness.staging_counts()["candidate_claim_versions"], 2)
 
+    def test_a_sibling_profile_on_the_same_connector_does_not_fork_this_one(self) -> None:
+        """P13z: the question is "do I exist", not "am I the latest".
+
+        ``connector-profile:sec-filings-index:v1`` registered itself against
+        ``connector:sec-edgar`` and became that connector's latest profile
+        version. The company-facts lane read "the latest is not me" as "I must
+        chain a new version", and wrote that new version under an idempotency
+        key that already pinned the old one. Every SEC run after that died with
+        ConnectorConflict, and five companies stopped receiving filings for a
+        day while every dispatch settled as 'finished'.
+        """
+
+        harness = self.harness(suffix="sibling-profile-a")
+        harness.run_to_complete()
+        core = harness.connectors.connection
+        before = core.execute("SELECT COUNT(*) FROM connector_profile_versions").fetchone()[0]
+        # A different capability chains its own profile onto the same connector,
+        # exactly as the filings index did.
+        latest = core.execute(
+            "SELECT record_json, version_number, profile_version_id "
+            "FROM connector_profile_versions ORDER BY version_number DESC LIMIT 1"
+        ).fetchone()
+        sibling = json.loads(latest["record_json"])
+        sibling = {k: v for k, v in sibling.items() if k != "content_hash"}
+        sibling["id"] = "connector-profile:sec-sibling-capability:v1"
+        sibling["version"] = int(latest["version_number"]) + 1
+        sibling["prior_version_ref"] = latest["profile_version_id"]
+        harness.connectors.register_profile(
+            sibling, idempotency_key="connector-profile:sec-sibling-capability:v1")
+
+        harness.clock.advance(60)
+        created = harness.planner._create_plan(suffix="sibling-profile-b")
+        harness.planner._approve(created, suffix="sibling-profile-b")
+        harness.planner._start(created, suffix="sibling-profile-b")
+        statuses: list[str] = []
+        while True:
+            outcome = harness.executor.run_once(plan_version_ref=created["plan_version_ref"])
+            statuses.append(outcome["status"])
+            if outcome["status"] in {"complete", "blocked"}:
+                break
+        self.assertEqual(statuses, ["admitted", "admitted", "admitted", "complete"])
+        # The sibling is the only profile added: the company-facts profile was
+        # replayed, not forked into a version its idempotency key cannot hold.
+        self.assertEqual(
+            core.execute("SELECT COUNT(*) FROM connector_profile_versions").fetchone()[0],
+            before + 1,
+        )
+
     def test_caller_fabricated_stage_payload_cannot_admit_downstream(self) -> None:
         harness = self.harness(suffix="fabricated")
         first = harness.executor.run_once(plan_version_ref=harness.plan_wire["id"])

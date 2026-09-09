@@ -47,6 +47,10 @@ from .store import DaltonStore, canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
 _SCHEMA_PATH = Path(__file__).with_name("coverage_mission_schema.sql")
+# The lane ticket status that means the run did what it was dispatched to do.
+# Every other terminal status -- failed, orphaned, anything new -- is a run
+# that produced nothing, and is counted as such rather than assumed benign.
+SEC_RUN_SUCCEEDED = "succeeded"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _HUMAN_RE = re.compile(r"^human:[A-Za-z0-9][A-Za-z0-9._/@:-]*$")
 _AUTOMATION_RE = re.compile(r"^automation:[A-Za-z0-9][A-Za-z0-9._/@:-]*$")
@@ -2811,6 +2815,51 @@ class CoverageMissionAuthority:
             )
         return {"dispatch_id": dispatch_id, "ticket_ref": ticket_ref, "outcome": outcome,
                 "detail": detail, "settled_at": now, "status_marker": "fresh"}
+
+    def sec_dispatch_outcomes(self, company_ref: str | None = None) -> dict[str, Any]:
+        """How the settled SEC runs actually went, per outcome.
+
+        P13z: ``outcome`` answers "is the run over", which is what unblocked the
+        quarterly dispatcher.  It does not answer "did it work", and nothing
+        else did either: 73 dispatches settled ``finished`` while every one of
+        their runs had failed with the same connector conflict, and the only
+        trace was a ``detail`` column no read returned.  Five companies went a
+        day without a single filing arriving and the ledger looked healthy.
+
+        The breakdown is kept rather than collapsed to a pass/fail count: a
+        run whose ticket was pruned is a different problem from one that ran
+        and failed, and treating them alike hides whichever is rarer.
+        """
+
+        query = (
+            "SELECT s.detail AS detail, COUNT(*) AS n, MAX(s.settled_at) AS last_at "
+            "FROM coverage_mission_sec_dispatch_settlements s "
+            "JOIN coverage_mission_sec_dispatches d ON d.dispatch_id=s.dispatch_id"
+        )
+        params: list[Any] = []
+        if company_ref is not None:
+            query += " WHERE d.company_ref=?"
+            params.append(_text(company_ref, "company_ref"))
+        query += " GROUP BY s.detail"
+        by_detail: dict[str, int] = {}
+        last_failure_at: str | None = None
+        last_failure_detail: str | None = None
+        for row in self.connection.execute(query, params).fetchall():
+            detail = row["detail"] or "unknown"
+            by_detail[detail] = int(row["n"])
+            if detail != SEC_RUN_SUCCEEDED and (
+                last_failure_at is None or (row["last_at"] or "") > last_failure_at
+            ):
+                last_failure_at, last_failure_detail = row["last_at"], detail
+        succeeded = by_detail.get(SEC_RUN_SUCCEEDED, 0)
+        return {
+            "settled": sum(by_detail.values()),
+            "succeeded": succeeded,
+            "unsuccessful": sum(by_detail.values()) - succeeded,
+            "by_detail": by_detail,
+            "last_failure_detail": last_failure_detail,
+            "last_failure_at": last_failure_at,
+        }
 
     def unsettled_sec_dispatches(self, *, limit: int = 50) -> list[dict[str, Any]]:
         """Launched dispatches whose run has not been recorded as over."""

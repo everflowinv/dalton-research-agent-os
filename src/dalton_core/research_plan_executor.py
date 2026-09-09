@@ -813,9 +813,31 @@ class ResearchPlanExecutor:
         # it is a new immutable profile version anchored to whatever profile
         # version this Core already holds, with its own idempotency key and
         # sibling price / rate-policy refs.
-        template_tag = sec_template_registry_tag()
-        template_suffix = "" if template_tag == "v1" else f":template-{template_tag}"
-        if template_tag != "v1":
+        def _held_profile(profile_version_id: str):
+            """This exact profile version, if this Core already holds it.
+
+            P13z: the question is "do I exist", not "am I the latest".  Another
+            capability that shares the connector ref chains its own profile
+            onto the same connector, and that is not a reason to write a new
+            version of this one -- but the idempotency key is fixed per profile
+            id, so trying to writes a *different* request under a key that
+            already pinned the old one.
+
+            Live, ``connector-profile:sec-filings-index:v1`` chained onto
+            ``connector:sec-edgar`` and became its latest version.  Every SEC
+            company-facts run after that failed with ConnectorConflict, and
+            every company's quarterly filings stopped arriving.
+            """
+
+            return self.connectors.connection.execute(
+                "SELECT version_number, prior_version_ref FROM connector_profile_versions "
+                "WHERE profile_version_id=?",
+                (profile_version_id,),
+            ).fetchone()
+
+        def _chain_onto_latest() -> tuple[str, int]:
+            """The profile version a new one should anchor to, seeding v1 first."""
+
             latest_profile = self.connectors.connection.execute(
                 "SELECT profile_version_id, version_number FROM connector_profile_versions "
                 "WHERE connector_ref=? ORDER BY version_number DESC LIMIT 1",
@@ -828,32 +850,34 @@ class ResearchPlanExecutor:
                     ),
                     idempotency_key=legacy_profile_key,
                 )
-                prior_id, prior_version = seeded["id"], 1
-            else:
-                prior_id = latest_profile["profile_version_id"]
-                prior_version = int(latest_profile["version_number"])
+                return seeded["id"], 1
+            return (latest_profile["profile_version_id"],
+                    int(latest_profile["version_number"]))
+
+        template_tag = sec_template_registry_tag()
+        template_suffix = "" if template_tag == "v1" else f":template-{template_tag}"
+        if template_tag != "v1":
             profile_id = f"{template['id']}:budget-{budget_tag}{template_suffix}"
-            if prior_id == profile_id:
-                # This Core already holds the template-tagged profile as its
-                # latest version: replay it rather than chaining a new one.
+            profile_key = f"connector-profile:sec-public:budget-{budget_tag}{template_suffix}"
+            held = _held_profile(profile_id)
+            if held is not None:
+                # Already registered: replay it exactly as it stands, so the
+                # request matches the one the idempotency key already holds.
                 profile = self.connectors.register_profile(
                     _profile_spec(
-                        profile_id, prior_version,
-                        self.connectors.connection.execute(
-                            "SELECT prior_version_ref FROM connector_profile_versions "
-                            "WHERE profile_version_id=?", (profile_id,),
-                        ).fetchone()[0],
-                        budget["max_response_bytes"],
+                        profile_id, int(held["version_number"]),
+                        held["prior_version_ref"], budget["max_response_bytes"],
                     ),
-                    idempotency_key=f"connector-profile:sec-public:budget-{budget_tag}{template_suffix}",
+                    idempotency_key=profile_key,
                 )
             else:
+                prior_id, prior_version = _chain_onto_latest()
                 profile = self.connectors.register_profile(
                     _profile_spec(
                         profile_id, prior_version + 1, prior_id,
                         budget["max_response_bytes"],
                     ),
-                    idempotency_key=f"connector-profile:sec-public:budget-{budget_tag}{template_suffix}",
+                    idempotency_key=profile_key,
                 )
         elif budget_tag == "v1":
             # Historical plans replay the original single version-1 profile.
@@ -864,32 +888,31 @@ class ResearchPlanExecutor:
                 idempotency_key=legacy_profile_key,
             )
         else:
-            # A larger bound needs profile version 2 under the same connector
-            # ref.  Seed the historical version-1 row first when this Core has
-            # no SEC profile yet (idempotent on Cores that already have it);
-            # version 2 then anchors to it with a budget-tag-suffixed ref and
-            # idempotency key, so replays at later clock values stay stable.
-            latest_profile = self.connectors.connection.execute(
-                "SELECT profile_version_id FROM connector_profile_versions "
-                "WHERE connector_ref=? ORDER BY version_number DESC LIMIT 1",
-                (template["connector_ref"],),
-            ).fetchone()
-            if latest_profile is None:
-                self.connectors.register_profile(
+            # A larger bound needs its own profile version under the same
+            # connector ref.  Seed the historical version-1 row first when this
+            # Core has no SEC profile yet (idempotent on Cores that already have
+            # it); the budget-tagged version then anchors to whatever this Core
+            # holds, so replays at later clock values stay stable.
+            profile_id = f"{template['id']}:budget-{budget_tag}"
+            profile_key = f"connector-profile:sec-public:budget-{budget_tag}"
+            held = _held_profile(profile_id)
+            if held is not None:
+                profile = self.connectors.register_profile(
                     _profile_spec(
-                        template["id"], 1, None, sec_response_budget_bytes("v1")
-                ),
-                idempotency_key=legacy_profile_key,
-            )
-            profile = self.connectors.register_profile(
-                _profile_spec(
-                    f"{template['id']}:budget-{budget_tag}",
-                    2,
-                    template["id"],
-                    budget["max_response_bytes"],
-                ),
-                idempotency_key=f"connector-profile:sec-public:budget-{budget_tag}",
-            )
+                        profile_id, int(held["version_number"]),
+                        held["prior_version_ref"], budget["max_response_bytes"],
+                    ),
+                    idempotency_key=profile_key,
+                )
+            else:
+                prior_id, prior_version = _chain_onto_latest()
+                profile = self.connectors.register_profile(
+                    _profile_spec(
+                        profile_id, prior_version + 1, prior_id,
+                        budget["max_response_bytes"],
+                    ),
+                    idempotency_key=profile_key,
+                )
 
         parameters = sec_adapter_parameters(plan_wire)
         call_spec = self.connectors.register_call_spec({

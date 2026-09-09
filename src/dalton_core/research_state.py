@@ -46,6 +46,7 @@ def company_state(
     figures: Mapping[str, Any] | None = None,
     metrics: Sequence[Mapping[str, Any]] = (),
     contested: Sequence[Mapping[str, Any]] = (),
+    acquisition: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """One company's position, as a planner needs to see it.
 
@@ -108,6 +109,16 @@ def company_state(
              "units": list(m.get("units") or ())}
             for m in list(contested or ())[:MAX_EXAMPLES]
         ],
+        # P13z: whether the filings this company is owed have actually been
+        # arriving. A deficit says what is missing; it does not say that 25
+        # runs were dispatched to fetch it and every one of them failed. A
+        # planner that cannot tell those apart orders the same acquisition
+        # again, which is exactly what it did, for a day.
+        "filing_runs": {
+            "succeeded": _int((acquisition or {}).get("succeeded")),
+            "unsuccessful": _int((acquisition or {}).get("unsuccessful")),
+            "last_failure": (acquisition or {}).get("last_failure_detail"),
+        },
     }
 
 
@@ -158,6 +169,7 @@ def build_research_state(
     figures_by_company: Mapping[str, Any] | None = None,
     metrics_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     contested_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    acquisition_by_company: Mapping[str, Mapping[str, Any]] | None = None,
     budget: Mapping[str, Any] | None = None,
     spend: Mapping[str, Any] | None = None,
     as_of: str,
@@ -172,12 +184,14 @@ def build_research_state(
     figures_by_company = figures_by_company or {}
     metrics_by_company = metrics_by_company or {}
     contested_by_company = contested_by_company or {}
+    acquisition_by_company = acquisition_by_company or {}
     companies = [
         company_state(
             entry,
             figures=figures_by_company.get(entry.get("company_ref")),
             metrics=metrics_by_company.get(entry.get("company_ref"), ()),
             contested=contested_by_company.get(entry.get("company_ref"), ()),
+            acquisition=acquisition_by_company.get(entry.get("company_ref")),
         )
         for entry in checklist
     ]

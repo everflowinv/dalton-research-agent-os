@@ -141,6 +141,31 @@ class StateTests(unittest.TestCase):
         watched = built["companies"][0]["metrics_watched"]
         self.assertEqual([m["documents"] for m in watched], [7, 6, 5, 4, 3])
 
+    def test_the_planner_can_see_that_the_filings_are_not_arriving(self):
+        # P13z: a deficit says what is missing. It does not say that 25 runs
+        # were dispatched to fetch it and every one failed, so the planner
+        # ordered the same acquisition again, for a day.
+        built = state(acquisition_by_company={ACN: {
+            "succeeded": 0, "unsuccessful": 25, "last_failure_detail": "failed"}})
+        self.assertEqual(built["companies"][0]["filing_runs"],
+                         {"succeeded": 0, "unsuccessful": 25, "last_failure": "failed"})
+
+    def test_a_company_whose_runs_all_worked_reports_no_failures(self):
+        built = state(acquisition_by_company={ACN: {
+            "succeeded": 4, "unsuccessful": 0, "last_failure_detail": None}})
+        self.assertEqual(built["companies"][0]["filing_runs"]["last_failure"], None)
+        # A company nobody has dispatched for still projects.
+        self.assertEqual(built["companies"][1]["filing_runs"],
+                         {"succeeded": 0, "unsuccessful": 0, "last_failure": None})
+
+    def test_a_run_that_starts_failing_is_worth_a_new_plan(self):
+        # The state is hashed, and the hash is what decides whether to think
+        # again. Acquisition breaking has to move it or the planner keeps
+        # replaying the plan it made when acquisition worked.
+        working = state(acquisition_by_company={ACN: {"succeeded": 4, "unsuccessful": 0}})
+        broken = state(acquisition_by_company={ACN: {"succeeded": 4, "unsuccessful": 9}})
+        self.assertNotEqual(working["content_hash"], broken["content_hash"])
+
     def test_a_contested_measure_is_shown_rather_than_merely_absent(self):
         built = state(contested_by_company={ACN: [
             {"metric_ref": "metric:net-retention-rate", "label": "net retention rate",
