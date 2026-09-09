@@ -862,7 +862,18 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "fy": {"type": "integer", "minimum": 1900, "maximum": 2200},
                 "fp": _string(),
                 "form": {"type": "string", "enum": ["10-Q", "10-K"]},
-                "frame": {"type": "string", "pattern": "^CY[0-9]{4}Q[1-4]$"},
+                # P13z: SEC assigns a calendar frame to only the newest filing
+                # that reports a period, so when a later 10-Q repeats the
+                # prior-year quarter the frame moves and the original row loses
+                # it. The adapter was widened to keep such rows -- requiring a
+                # frame made every historical filing unusable -- but this
+                # contract was not, so the adapter emitted a null the resolver
+                # then refused: "output.current.frame does not match schema
+                # type", on live Accenture data, on the first run that got far
+                # enough to try. Still required, because the key is always
+                # present; it is the value that may be absent.
+                "frame": {"type": ["string", "null"],
+                          "pattern": "^CY[0-9]{4}Q[1-4]$"},
                 "value": decimal,
                 "record_hash": sha256,
             },

@@ -178,7 +178,10 @@ def render(
                 "--sec-lane-governance",
                 # P9b-1: the company-facts template hash moved, so the lane runs
                 # against the v2 record (approved in place by the owner).
-                str(state / "connector-governance" / "sec-company-facts-v2.json"),
+                # P13z: it moved again -- the output contract now admits a
+                # filing whose calendar frame passed to a later one -- so the
+                # lane runs against v3, approved the same way.
+                str(state / "connector-governance" / "sec-company-facts-v3.json"),
                 "--sec-lane-user-agent", SEC_LANE_USER_AGENT,
             ]
             if candidate_staging_path is not None else []

@@ -28,6 +28,27 @@ from dalton_core.connector_inventory import load_packaged_connector_inventory
 
 
 OWNER = "human:lumos"
+GOVERNANCE_DIR = Path(__file__).resolve().parents[1] / "deploy" / "connector-governance"
+
+
+def approved_company_facts_schema_hash() -> str:
+    """The contract hash the newest shipped company-facts record is bound to.
+
+    P13z: the guards below used to pin a bare constant. That is a weaker check
+    than it looks, because the constant only means anything while it equals a
+    hash an owner actually approved -- and when the contract moves, editing the
+    constant is the quickest way to make the test quiet again. Reading the
+    governance record instead makes the real invariant the one under test: the
+    packaged contract must be the contract somebody governs. Widening the
+    output schema without shipping a record for it now fails here, which is
+    where it should fail.
+    """
+
+    records = sorted(GOVERNANCE_DIR.glob("sec-company-facts-v*.json"),
+                     key=lambda path: int(path.stem.rsplit("v", 1)[1]))
+    if not records:
+        raise AssertionError("no shipped sec-company-facts governance record")
+    return json.loads(records[-1].read_text(encoding="utf-8"))["expected_schema_hash"]
 
 
 class ConnectorGovernanceTests(unittest.TestCase):
@@ -183,14 +204,19 @@ class SecFilingsIndexGovernanceTests(unittest.TestCase):
         )
 
     def test_live_company_facts_identity_is_untouched(self) -> None:
-        # sec_connector_identity is what the deployed sec-company-facts-v2
-        # record is bound to. P10e must not have moved it.
+        # sec_connector_identity is what the deployed sec-company-facts record
+        # is bound to. P10e must not have moved it.
+        #
+        # P13z: this pinned a bare constant, which is a weaker guard than it
+        # looks -- the constant is only meaningful while it equals the hash an
+        # owner actually approved, and updating it is the easiest way to make
+        # this test go quiet. Widening the company-facts output contract moved
+        # the identity, and the honest reading is not "the constant is stale"
+        # but "the approval no longer covers the contract". So the assertion is
+        # against the governance record itself.
         inventory = load_packaged_connector_inventory()
         identity = sec_connector_identity(inventory["templates"]["sec"], "get_company_facts")
-        self.assertEqual(
-            identity["schema_hash"],
-            "6ce86d8a4b9764f2651406bf9d628f24b6b4452bcdbd406bc983e380133a4be6",
-        )
+        self.assertEqual(identity["schema_hash"], approved_company_facts_schema_hash())
 
     def test_record_is_proposed_and_requires_a_human_principal(self) -> None:
         from dalton_core.sec_filings_index import (
@@ -370,18 +396,17 @@ class FilingsIndexDescriptorTests(unittest.TestCase):
         self.assertNotEqual(filings["schema_hash"], facts["schema_hash"])
 
     def test_company_facts_identity_did_not_move(self) -> None:
-        # The live sec-company-facts-v2 approval is bound to this hash. P10n
-        # split list_filings out without touching it.
+        # The live sec-company-facts approval is bound to this hash. P10n split
+        # list_filings out without touching it; P13z widened the output
+        # contract, which does move it, and therefore needs an approval that
+        # covers the new contract rather than an edited constant here.
         identity = sec_connector_identity(
             load_packaged_connector_inventory()["templates"]["sec"], "get_company_facts"
         )
         self.assertEqual(
             identity["capability_id"], "capability:dalton:connector:sec-edgar"
         )
-        self.assertEqual(
-            identity["schema_hash"],
-            "6ce86d8a4b9764f2651406bf9d628f24b6b4452bcdbd406bc983e380133a4be6",
-        )
+        self.assertEqual(identity["schema_hash"], approved_company_facts_schema_hash())
 
     def test_a_plan_asks_for_the_capability_matching_its_operation(self) -> None:
         from dalton_core.research_plan import sec_capability_for_operation

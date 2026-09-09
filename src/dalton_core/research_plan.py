@@ -189,6 +189,27 @@ SEC_TEMPLATE_REGISTRY: tuple[tuple[str, dict[str, Any]], ...] = (
             },
         },
     ),
+    (
+        # P13z: company-facts ``frame`` admits null. SEC moves the calendar
+        # frame to the newest filing reporting a period, so the prior-year row
+        # a later 10-Q repeats has none. The adapter already kept those rows;
+        # this contract refused them, and every live run that got as far as the
+        # adapter died on "output.current.frame does not match schema type".
+        "v3",
+        {
+            "connector_profile_hash": (
+                "c52642b31ee9625f9cc34ffd6dd3c56236761e6ca274485e30046b0d9fb4b063"
+            ),
+            "output_contract_hashes": {
+                "list_filings": (
+                    "d832b00d9df34a53a22d54470112af1d9a0646ed1057d747a75ace4aa2f2d979"
+                ),
+                "get_company_facts": (
+                    "7e1dbb47227a27d5326685e1f304e43b7f018dd6d5118257cc73e2d5a2ed147c"
+                ),
+            },
+        },
+    ),
 )
 DEFAULT_REVENUE_CONCEPT_CANDIDATES = (
     "Revenues",

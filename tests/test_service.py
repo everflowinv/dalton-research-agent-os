@@ -404,7 +404,7 @@ class ServiceTests(unittest.TestCase):
             self.assertIn("--sec-lane-governance", writer_args)
             self.assertEqual(
                 writer_args[writer_args.index("--sec-lane-governance") + 1],
-                str((root / "state").resolve() / "connector-governance" / "sec-company-facts-v2.json"),
+                str((root / "state").resolve() / "connector-governance" / "sec-company-facts-v3.json"),
             )
             self.assertIn("--sec-lane-user-agent", writer_args)
             self.assertEqual(

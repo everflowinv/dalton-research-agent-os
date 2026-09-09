@@ -40,7 +40,38 @@ from dalton_core.coverage_mission import (  # noqa: E402
 from dalton_core.store import DaltonStore  # noqa: E402
 
 
-def candidates(store: DaltonStore, *, match: str | None) -> list[dict[str, Any]]:
+def run_error(state_dir: Path | None, ticket_ref: str | None) -> str | None:
+    """What the lane run itself said went wrong, from its summary on disk.
+
+    Settlements written before P13z have no ``failure_reason`` -- the column
+    did not exist -- and backfilling an append-only ledger is not on offer. The
+    evidence is still where the run left it, so it is read from there rather
+    than invented, the same way the unattributed-metric audit reads the
+    extraction summaries.
+
+    A summary that reports ``ok`` is not an error, even when its ticket was
+    marked orphaned: nine live runs did their work and lost their ticket to a
+    restart, and calling those failures would excuse attempts that succeeded.
+    """
+
+    if state_dir is None or not isinstance(ticket_ref, str) or ":" not in ticket_ref:
+        return None
+    path = state_dir / "sec-lane-runs" / ticket_ref.split(":", 1)[1] / "summary.json"
+    try:
+        summary = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(summary, dict) or summary.get("ok") is True:
+        return None
+    for issuer in summary.get("issuers") or ():
+        if isinstance(issuer, dict) and isinstance(issuer.get("error"), str):
+            return issuer["error"].strip()
+    return None
+
+
+def candidates(
+    store: DaltonStore, *, match: str | None, state_dir: Path | None = None
+) -> list[dict[str, Any]]:
     """Settled dispatches whose runs did not succeed, newest last.
 
     A run that succeeded is never a candidate: its attempt tested the filing
@@ -49,7 +80,7 @@ def candidates(store: DaltonStore, *, match: str | None) -> list[dict[str, Any]]
 
     rows = store.connection.execute(
         "SELECT d.dispatch_id, d.company_ref, d.ticker, d.expected_accession, "
-        "s.detail, s.failure_reason, s.settled_at "
+        "d.ticket_ref, s.detail, s.failure_reason, s.settled_at "
         "FROM coverage_mission_sec_dispatches d "
         "JOIN coverage_mission_sec_dispatch_settlements s ON s.dispatch_id=d.dispatch_id "
         "LEFT JOIN coverage_mission_sec_dispatch_attempt_voids v "
@@ -61,8 +92,10 @@ def candidates(store: DaltonStore, *, match: str | None) -> list[dict[str, Any]]
     selected = []
     for row in rows:
         item = dict(row)
+        item["run_error"] = item.get("failure_reason") or run_error(
+            state_dir, item.get("ticket_ref"))
         if match is not None:
-            haystack = f"{item.get('detail') or ''} {item.get('failure_reason') or ''}"
+            haystack = f"{item.get('detail') or ''} {item.get('run_error') or ''}"
             if match.lower() not in haystack.lower():
                 continue
         selected.append(item)
@@ -97,10 +130,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     service = json.loads(args.config.expanduser().resolve().read_text(encoding="utf-8"))
-    store = DaltonStore(str(Path(service["core_db"])))
+    core_db = Path(service["core_db"])
+    store = DaltonStore(str(core_db))
     try:
         authority = CoverageMissionAuthority(store)
-        selected = candidates(store, match=args.match)
+        selected = candidates(store, match=args.match, state_dir=core_db.parent)
         result: dict[str, Any] = {
             "status": "applied" if args.apply else "planned",
             "reason": args.reason,
@@ -108,6 +142,10 @@ def main(argv: list[str] | None = None) -> int:
             "attempts_to_void": len(selected),
             "by_ticker": dict(Counter(item["ticker"] for item in selected)),
             "by_detail": dict(Counter(item["detail"] for item in selected)),
+            # What the runs themselves said, so the reason given on the command
+            # line can be checked against the evidence rather than trusted.
+            "by_run_error": dict(Counter(
+                (item.get("run_error") or "<none recorded>")[:70] for item in selected)),
             "accessions_affected": len({item["expected_accession"] for item in selected}),
             "attempts_before": attempts_by_accession(store),
         }

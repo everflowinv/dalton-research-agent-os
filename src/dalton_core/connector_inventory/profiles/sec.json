@@ -6,7 +6,7 @@
     "use_time_authority": "none"
   },
   "connector_ref": "connector:sec-edgar",
-  "content_hash": "0193636e575471507fdfb94e52bd8c940174757103bab6f784908f7f8e536dd4",
+  "content_hash": "c52642b31ee9625f9cc34ffd6dd3c56236761e6ca274485e30046b0d9fb4b063",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "fixture_manifest_hash": "8f88e64939d4f2140189337e323ea11479a86fbf459ca3f0afe501f3aa099957",
   "fixture_manifest_ref": "connector-fixture-manifest:sec:0.1",
@@ -89,7 +89,7 @@
       "input_schema_hash": "9391711e60bd62794d66623d67d3788b4f22f0e90d4d3e38aa610eb7d00ac232",
       "input_schema_ref": "schema:connector-inventory:sec:get_company_facts:input:0.1",
       "operation": "get_company_facts",
-      "output_schema_hash": "0b25854ce835ad66e57cfc71c487831d7d1b72fe652a2dd598b1c780eda13167",
+      "output_schema_hash": "7e1dbb47227a27d5326685e1f304e43b7f018dd6d5118257cc73e2d5a2ed147c",
       "output_schema_ref": "schema:connector-inventory:sec:get_company_facts:output:0.1",
       "pagination": {
         "bounded_window_required": true,
@@ -502,7 +502,10 @@
               },
               "frame": {
                 "pattern": "^CY[0-9]{4}Q[1-4]$",
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "fy": {
                 "maximum": 2200,
@@ -611,7 +614,10 @@
               },
               "frame": {
                 "pattern": "^CY[0-9]{4}Q[1-4]$",
-                "type": "string"
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "fy": {
                 "maximum": 2200,
@@ -710,7 +716,7 @@
         ],
         "type": "object"
       },
-      "schema_hash": "0b25854ce835ad66e57cfc71c487831d7d1b72fe652a2dd598b1c780eda13167",
+      "schema_hash": "7e1dbb47227a27d5326685e1f304e43b7f018dd6d5118257cc73e2d5a2ed147c",
       "schema_ref": "schema:connector-inventory:sec:get_company_facts:output:0.1"
     }
   ],

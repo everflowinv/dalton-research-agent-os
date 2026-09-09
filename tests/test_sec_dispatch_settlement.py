@@ -9,6 +9,7 @@ permanently busy and the financials froze one quarter back.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -361,6 +362,56 @@ class AttemptVoidTests(unittest.TestCase):
         self.authority.void_sec_dispatch_attempt(
             dispatch_id, reason="x", voided_by="agent:dalton-core")
         self.assertEqual(candidates(self.store, match=None), [])
+
+
+class RunErrorOnDiskTests(unittest.TestCase):
+    """Settlements written before P13z have no reason; the run still has one.
+
+    Backfilling an append-only ledger is not on offer, so the audit reads the
+    summary the run left behind -- the same way the unattributed-metric audit
+    reads the extraction summaries.
+    """
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.root = Path(self._dir.name)
+
+    def write(self, ticket: str, summary) -> None:
+        directory = self.root / "sec-lane-runs" / ticket
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+
+    def test_the_issuer_error_is_read_from_the_run(self):
+        from scripts.void_sec_dispatch_attempts import run_error
+
+        self.write("abc", {"ok": False, "issuers": [{"error": "ConnectorConflict: boom"}]})
+        self.assertEqual(run_error(self.root, "sec-lane-run:abc"), "ConnectorConflict: boom")
+
+    def test_a_run_that_worked_is_never_an_error(self):
+        # Nine live runs did their work and lost their ticket to a restart.
+        # Calling those failures would excuse attempts that succeeded.
+        from scripts.void_sec_dispatch_attempts import run_error
+
+        self.write("abc", {"ok": True, "issuers": [{"status": "ok"}]})
+        self.assertIsNone(run_error(self.root, "sec-lane-run:abc"))
+
+    def test_a_failure_with_no_error_string_is_not_invented(self):
+        from scripts.void_sec_dispatch_attempts import run_error
+
+        self.write("abc", {"ok": False, "issuers": [{"failure": {"status": "failed"}}]})
+        self.assertIsNone(run_error(self.root, "sec-lane-run:abc"))
+
+    def test_a_missing_or_unreadable_run_is_not_a_crash(self):
+        from scripts.void_sec_dispatch_attempts import run_error
+
+        self.assertIsNone(run_error(self.root, "sec-lane-run:nothing"))
+        self.assertIsNone(run_error(self.root, None))
+        self.assertIsNone(run_error(None, "sec-lane-run:abc"))
+        directory = self.root / "sec-lane-runs" / "torn"
+        directory.mkdir(parents=True)
+        (directory / "summary.json").write_text("{not json", encoding="utf-8")
+        self.assertIsNone(run_error(self.root, "sec-lane-run:torn"))
 
 
 if __name__ == "__main__":

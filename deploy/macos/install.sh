@@ -75,6 +75,18 @@ if [[ ! -f "$sec_governance_v2_file" && -f "$repo_root/deploy/connector-governan
   cp "$repo_root/deploy/connector-governance/sec-company-facts-v2.json" "$sec_governance_v2_file"
   chmod 600 "$sec_governance_v2_file"
 fi
+# P13z: the company-facts output contract now admits a filing whose calendar
+# frame passed to a later one -- SEC moves the frame to the newest filing that
+# reports a period, so the prior-year quarter a later 10-Q repeats has none,
+# and refusing those made every historical filing unusable. That moves the
+# schema hash, so the v2 approval no longer covers it. Same seed-once rule:
+# copied in as *proposed*, and the owner approves in place with
+# `dalton-connector-governance approve`. Until then the lane fails closed.
+sec_governance_v3_file="$governance_dir/sec-company-facts-v3.json"
+if [[ ! -f "$sec_governance_v3_file" && -f "$repo_root/deploy/connector-governance/sec-company-facts-v3.json" ]]; then
+  cp "$repo_root/deploy/connector-governance/sec-company-facts-v3.json" "$sec_governance_v3_file"
+  chmod 600 "$sec_governance_v3_file"
+fi
 # P9d-1: AlphaEngine search_library is a separate governed capability.  Seed
 # the committed *proposed* record once; the owner approves in place with
 # dalton-connector-governance approve.  The discovery plan is a hash-bound

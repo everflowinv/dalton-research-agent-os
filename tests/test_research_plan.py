@@ -489,7 +489,7 @@ class ResearchPlanTests(unittest.TestCase):
     def test_sec_template_registry_keeps_historical_bindings(self) -> None:
         """P9b: the v1 (10-Q-only) template pair still revalidates; unknown pairs fail."""
         registry = sec_template_registry()
-        self.assertEqual([tag for tag, _entry in registry], ["v1", "v2"])
+        self.assertEqual([tag for tag, _entry in registry], ["v1", "v2", "v3"])
         v1 = registry[0][1]
         self.assertEqual(
             v1["connector_profile_hash"],

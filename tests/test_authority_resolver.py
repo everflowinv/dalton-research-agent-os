@@ -273,5 +273,65 @@ class AuthorityResolverTests(unittest.TestCase):
             connection.execute("DELETE FROM research_completion_receipts")
 
 
+class CompanyFactsFrameContractTests(unittest.TestCase):
+    """P13z: a repeated prior-year quarter has no calendar frame.
+
+    SEC assigns the frame to only the newest filing that reports a period, so
+    when a later 10-Q repeats the prior-year quarter the frame moves and the
+    original row loses it. The adapter was widened to keep those rows -- a
+    frame requirement made every historical filing unusable -- but the frozen
+    output contract still said ``"type": "string"``, so the adapter emitted a
+    null the resolver refused. Live, on Accenture, on the first run that got
+    far enough to reach the adapter at all.
+    """
+
+    def facts_schema(self):
+        from dalton_core.connector_inventory import load_packaged_connector_inventory
+
+        template = load_packaged_connector_inventory()["templates"]["sec"]
+        ref = "schema:connector-inventory:sec:get_company_facts:output:0.1"
+        for document in template["schema_documents"]:
+            if document["schema_ref"] == ref:
+                return document["document"]
+        raise AssertionError("packaged SEC template has no company-facts output schema")
+
+    def fact(self, **overrides):
+        base = {
+            "accession": "0001467373-25-000100", "start": "2024-12-01",
+            "end": "2025-02-28", "filed": "2025-03-20", "fy": 2025, "fp": "Q2",
+            "form": "10-Q", "frame": "CY2024Q4", "value": "16656000000",
+            "record_hash": "a" * 64,
+        }
+        base.update(overrides)
+        return base
+
+    def check(self, fact):
+        from dalton_core.authority_resolver import _schema_matches
+
+        schema = self.facts_schema()["properties"]["current"]
+        _schema_matches(fact, schema, "output.current")
+
+    def test_a_row_that_kept_its_frame_still_validates(self):
+        self.check(self.fact())
+
+    def test_a_row_whose_frame_moved_to_a_later_filing_is_accepted(self):
+        self.check(self.fact(frame=None))
+
+    def test_the_frame_pattern_still_binds_when_there_is_one(self):
+        from dalton_core.authority_resolver import AuthorityResolutionConflict
+
+        with self.assertRaises(AuthorityResolutionConflict):
+            self.check(self.fact(frame="2024Q4"))
+
+    def test_the_key_is_still_required(self):
+        # Absent and null are different: the adapter always writes the key.
+        from dalton_core.authority_resolver import AuthorityResolutionError
+
+        missing = self.fact()
+        del missing["frame"]
+        with self.assertRaises((AuthorityResolutionError, Exception)):
+            self.check(missing)
+
+
 if __name__ == "__main__":
     unittest.main()
