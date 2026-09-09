@@ -38,20 +38,28 @@ from .lane_child_launcher import (
 MAX_QUEUED_PER_RUN = 4
 # Three failed or rejected runs is a company this lane cannot serve today.
 MAX_FAILURES_PER_COMPANY = 3
-# A run that never reached SEC failed because of how this Core is set up, not
-# because of the company. The first live tick proved why this distinction is
-# needed: every child died on a malformed EDGAR identity, and counted the way
-# an ordinary failure counts, three ticks would have exhausted all five
-# companies and left the lane permanently idle once the identity was fixed.
-CONFIGURATION_FAILURE_MARKERS = (
-    "SECIdentityError",
-    "governance record is not approved",
-    "governance source hash differs",
-    "governance schema hash differs",
-    "governance record covers a different capability",
-    "parser is not installed",
-    "LaneChildRejected",
+# P13am: which failures are the *company's*, listed positively.
+#
+# The first version listed the failures that were this Core's fault and charged
+# everything else to the company. That is the wrong way round, and it showed:
+# an AttributeError in this codebase's own adapter -- asking a collection of
+# filings for the XBRL only a single filing has -- looked exactly like a
+# company the lane could not serve, and spent IBM's whole retry budget in three
+# ticks on a bug that had nothing to do with IBM.
+#
+# The set of things that are genuinely the company's fault is short and
+# knowable: it did not file, or what it filed has no XBRL. Everything else --
+# a malformed EDGAR identity, an unapproved record, a crash in our own code --
+# is ours, and a failure nobody can attribute is not evidence against the
+# company either.
+COMPANY_FAILURE_MARKERS = (
+    "filing found for this company",
+    "returned no filing with XBRL",
+    "carries no lane ticket",
 )
+# Ours are held rather than charged, but not retried without end: a fault that
+# survives this many attempts is not going to be fixed by another one.
+MAX_ATTEMPTS_PER_COMPANY = 8
 # While a configuration is broken it is broken for every company, so the lane
 # holds instead of asking SEC the same doomed question once a tick.
 CONFIGURATION_HOLD_SECONDS = 1800
@@ -61,11 +69,17 @@ MAX_FAILURE_DETAIL_CHARS = 500
 
 
 def _is_configuration_failure(reason: Any) -> bool:
-    """Did this run fail before it ever reached the source?"""
+    """Was this failure ours rather than the company's?
 
-    if not isinstance(reason, str):
-        return False
-    return any(marker in reason for marker in CONFIGURATION_FAILURE_MARKERS)
+    Everything that is not recognisably about the company's own filings is
+    ours, including a failure with no reason recorded at all. Charging an
+    unattributed failure to the company is how a bug in this codebase spends
+    a company's retry budget.
+    """
+
+    if not isinstance(reason, str) or not reason.strip():
+        return True
+    return not any(marker in reason for marker in COMPANY_FAILURE_MARKERS)
 
 
 def _failure_reason(summary: Any) -> str | None:
@@ -253,6 +267,13 @@ class MissionStatementLaneCoordinator:
                        if not _is_configuration_failure(item.get("reason"))]
             if len(charged) >= MAX_FAILURES_PER_COMPANY:
                 continue
+            if len(failures) >= MAX_ATTEMPTS_PER_COMPANY:
+                queued.append({
+                    "company_ref": company_ref, "status": "held",
+                    "reason": f"{len(failures)} runs have failed for this company; "
+                              "not trying again without a change",
+                })
+                continue
             retry_salt = None
             if failures and _is_configuration_failure(failures[-1].get("reason")):
                 held_for = self._seconds_since(failures[-1].get("at"))
@@ -332,8 +353,10 @@ class MissionStatementLaneCoordinator:
 
 
 __all__ = [
+    "COMPANY_FAILURE_MARKERS",
     "DEFAULT_FILING_LIMIT",
     "DEFAULT_FORM",
+    "MAX_ATTEMPTS_PER_COMPANY",
     "MAX_FAILURES_PER_COMPANY",
     "MAX_QUEUED_PER_RUN",
     "MissionStatementLaneCoordinator",

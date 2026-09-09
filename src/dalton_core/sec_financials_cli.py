@@ -118,8 +118,17 @@ def parse_live(ticker: str | None, cik: str | None, *, form: str, limit: int,
     filings = company.get_filings(form=form).latest(limit)
     if filings is None:
         raise SecFinancialsRunError(f"no {form} filing found for this company")
-    if not isinstance(filings, list):
-        filings = [filings]
+    # P13am: ``latest(1)`` returns one Filing and ``latest(n)`` returns a
+    # collection, and the collection is not a list -- so testing for ``list``
+    # wrapped the whole collection in a one-element list and then asked it for
+    # its XBRL. The lane ran at depth one for a day without noticing, and
+    # failed on every company the moment a model asked for history.
+    #
+    # A single filing is the thing that can answer ``xbrl``; anything else is
+    # something to iterate.
+    filings = [filings] if hasattr(filings, "xbrl") else list(filings)
+    if not filings:
+        raise SecFinancialsRunError(f"no {form} filing found for this company")
     parsed: list[dict[str, Any]] = []
     for filing in filings:
         xbrl = filing.xbrl()

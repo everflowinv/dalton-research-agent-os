@@ -23,6 +23,7 @@ from dalton_core.lane_child_launcher import (
 )
 from dalton_core.mission_statement_lane import (
     CONFIGURATION_HOLD_SECONDS,
+    MAX_ATTEMPTS_PER_COMPANY,
     MAX_FAILURES_PER_COMPANY,
     MissionStatementLaneCoordinator,
 )
@@ -254,15 +255,58 @@ class StatementLaneTests(unittest.TestCase):
             [ACCESSION])
 
     def test_a_company_that_keeps_failing_stops_consuming_the_slot(self):
+        # A failure that is genuinely about this company's filings: it did not
+        # file, or what it filed carries no XBRL.
         for _ in range(MAX_FAILURES_PER_COMPANY):
             launched = self.lane.dispatch_once()
             self.assertEqual(launched["status"], "launched")
-            self.launcher.finish(launched["ticket_ref"], status="failed",
-                                 summary={"failure_reason": "parser broke"})
+            self.launcher.finish(launched["ticket_ref"], status="failed", summary={
+                "failure_reason":
+                    "SecFinancialsRunError: the parser returned no filing with XBRL"})
         exhausted = self.lane.dispatch_once()
         self.assertEqual(exhausted["queued"], [])
         self.assertEqual(exhausted["status"], "idle")
         self.assertEqual(len(self.launcher.started), MAX_FAILURES_PER_COMPANY)
+
+    def test_a_bug_in_our_own_adapter_is_not_charged_to_the_company(self):
+        # Live: an AttributeError in this codebase -- asking a collection of
+        # filings for the XBRL only a single filing has -- spent IBM's entire
+        # retry budget in three ticks on something that had nothing to do with
+        # IBM. A failure this system cannot attribute to the company is ours.
+        for _ in range(MAX_FAILURES_PER_COMPANY + 2):
+            launched = self.lane.dispatch_once()
+            self.assertEqual(launched["status"], "launched")
+            self.launcher.finish(launched["ticket_ref"], status="failed", summary={
+                "failure_reason":
+                    "AttributeError: 'EntityFilings' object has no attribute 'xbrl'"})
+            self.lane.dispatch_once()
+            self.now += timedelta(seconds=CONFIGURATION_HOLD_SECONDS + 1)
+        # Fixed. The company still has its budget and the next run works.
+        launched = self.lane.dispatch_once()
+        self.launcher.finish(launched["ticket_ref"], summary=self.succeeded_summary())
+        self.lane.dispatch_once()
+        self.assertEqual(
+            [item["accession"] for item in self.missions.statement_filings(ACN)],
+            [ACCESSION])
+
+    def test_a_fault_that_survives_every_attempt_is_finally_left_alone(self):
+        for _ in range(MAX_ATTEMPTS_PER_COMPANY):
+            launched = self.lane.dispatch_once()
+            self.assertEqual(launched["status"], "launched")
+            self.launcher.finish(launched["ticket_ref"], status="failed",
+                                 summary={"failure_reason": "OSError: something odd"})
+            self.lane.dispatch_once()
+            self.now += timedelta(seconds=CONFIGURATION_HOLD_SECONDS + 1)
+        done = self.lane.dispatch_once()
+        self.assertEqual(done["status"], "idle")
+        self.assertIn("not trying again", done["queued"][0]["reason"])
+        self.assertEqual(len(self.launcher.started), MAX_ATTEMPTS_PER_COMPANY)
+
+    def test_a_failure_with_no_reason_is_not_evidence_against_the_company(self):
+        launched = self.lane.dispatch_once()
+        self.launcher.finish(launched["ticket_ref"], status="failed", summary=None)
+        held = self.lane.dispatch_once()
+        self.assertEqual(held["queued"][0]["status"], "held")
 
     def test_a_busy_launcher_defers_rather_than_losing_the_dispatch(self):
         self.launcher.raise_on_start = LaneChildConflict("a child is already running")
