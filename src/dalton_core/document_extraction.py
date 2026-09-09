@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from .alphaengine_document_acquisition import validate_alphaengine_document_acquisition_manifest
+from .budget_pools import POOL_EXHAUSTED_STATUS, mission_pool_scope
 from .contracts import WorkOrder, ResultEnvelope, ModelInvocation, InvocationGranularity
 from .connector_authority_port import ConnectorCompletionReceiptReader
 from .live_mcp_connector import alphaengine_document_page_from_raw_response
@@ -421,7 +422,14 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
                      "mission_version_hash": mission["content_hash"],
                      "max_daily_paid_calls": mission["budget"]["max_daily_paid_calls"],
                      "max_daily_cost_micros": int(Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1000000),
-                     "outer_budget": binding["outer_budget"]}
+                     "outer_budget": binding["outer_budget"],
+                     # C2: extraction is the coverage pool, and it is the
+                     # lane that spends most of the day. Until it declared
+                     # its pool the ledger reported its whole spend as
+                     # unpooled, which is honest but means the coverage cap
+                     # bound nothing.
+                     **mission_pool_scope(
+                         mission, operation="dispatch_document_extraction")}
             prior = self.budget_store.connection.execute(
                 "SELECT record_json FROM thesis_impact_day_admissions WHERE work_order_ref=? AND attempt_number=? AND phase='assessment'",
                 (work.id, route["attempt_number"]),
@@ -433,6 +441,15 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
                 policy_version_id=self.budget_policy_ref, day=day, work_order_ref=work.id,
                 attempt_number=route["attempt_number"], phase="assessment", route_decision_ref=route["id"],
                 reserved_micros=int(Decimal(str(work.budget["max_cost_usd"])) * 1000000), mission_binding=scope)
+            if self.admission.get("status") == "rejected":
+                # The coverage pool is spent for today. Refused before the
+                # call, like every other budget refusal on this path, but
+                # named so the summary says which kind of no it was.
+                raise ResearchVerificationConflict(
+                    f"{POOL_EXHAUSTED_STATUS}: the {self.admission['pool']} pool "
+                    f"is spent for {self.admission['day']} "
+                    f"({self.admission['spent']} of {self.admission['cap']} micros)"
+                )
         except Exception as exc:
             raise OpenClawModelAdapterError("document extraction budget/source admission rejected") from exc
 

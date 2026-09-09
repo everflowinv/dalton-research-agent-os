@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from .claim_retirement import ClaimRetirementAuthority
-from .cockpit_model import CockpitModel, CockpitModelError
+from .cockpit_model import CockpitModel, CockpitModelError, lane_status_for
 from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
 from .initial_screen import (
     KIND,
@@ -336,7 +336,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             except CockpitModelError as exc:
                 sections.append({"title": title, "body": "", "claim_refs": [], "numbers": [],
                                  "gaps": [f"这一节没能起草：{exc}"]})
-                summary["sections"].append({"title": title, "status": "failed", "reason": str(exc)})
+                # C2: a spent pool is a budget decision, not a failure.
+                summary["sections"].append({
+                    "title": title, "status": lane_status_for(exc, "failed"),
+                    "reason": str(exc)})
                 continue
             section = parse_section_output(call["text"], context=context, title=title)
             if call.get("invocation_ref"):
@@ -375,7 +378,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                         stray = candidate_stray or stray
                         residue = candidate_residue or residue
                 except CockpitModelError as exc:
-                    summary["sections"].append({"title": title, "status": "retry_failed", "reason": str(exc)})
+                    summary["sections"].append({
+                        "title": title,
+                        "status": lane_status_for(exc, "retry_failed"),
+                        "reason": str(exc)})
             if stray or residue:
                 section = _dropped_section(title, stray, residue)
             sections.append(section)

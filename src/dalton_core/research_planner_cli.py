@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
-from .cockpit_model import CockpitModel, CockpitModelError
+from .cockpit_model import CockpitModel, CockpitModelError, lane_status_for
 from .scheduler import SchedulerError
 from .coverage_mission import CoverageMissionAuthority
 from .mission_stage import (
@@ -269,8 +269,11 @@ def run_planner(
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         except CockpitModelError as exc:
-            summary.update({"status": "succeeded", "plan_status": "model_unavailable",
-                            "failure_reason": f"{type(exc).__name__}: {exc}"})
+            summary.update({
+                "status": "succeeded",
+                # C2: a spent pool is a budget decision, not an outage.
+                "plan_status": lane_status_for(exc, "model_unavailable"),
+                "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         summary["replayed"] = bool(call.get("replayed"))
         summary["cost_micros"] = int(call.get("cost_micros") or 0)
