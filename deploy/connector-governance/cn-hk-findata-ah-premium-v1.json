@@ -1,0 +1,32 @@
+{
+  "allowed_permissions": {
+    "core_db": false,
+    "credential_slot_refs": [],
+    "filesystem_read": [],
+    "filesystem_write": [
+      "runner:raw-sink"
+    ],
+    "network": true,
+    "risk_class": "low",
+    "side_effects": [
+      "read:public-http"
+    ]
+  },
+  "approval_ref": "approval:connector-governance:cn-hk-findata-ah-premium:v1",
+  "approved_by": "human:lumos",
+  "attestation_ref": "attestation:connector-governance:cn-hk-findata-ah-premium:v1",
+  "capability_id": "capability:dalton:connector:cn-hk-findata-ah-premium",
+  "content_hash": "bb991362819063844844d1b25b556b54307292626867cdc7b2fb8f1a99e3b05e",
+  "decision_ref": "capability-decision:connector-governance:cn-hk-findata-ah-premium:v1",
+  "effective_from": "2026-09-09T00:00:00.000000+00:00",
+  "effective_until": null,
+  "expected_schema_hash": "bac83b64d39c2b78dd858c39be7d32d87980792ca59228134b30dfe773239e46",
+  "expected_source_hash": "8208919759b70c8e934c540c560e23b0d0d0c53103419e7e1811d5178be036f0",
+  "id": "connector-governance:cn-hk-findata-ah-premium:v1",
+  "max_lease_seconds": 300,
+  "policy_ref": "policy:dalton:connector-governance:cn-hk-findata-ah-premium:v1",
+  "principal_ref": "principal:dalton-core-trusted-runner",
+  "registry_revision_ref": "capability:dalton:connector:cn-hk-findata-ah-premium@v1",
+  "schema_version": "0.1",
+  "status": "proposed"
+}
