@@ -55,12 +55,23 @@ def work(purpose: str):
 
 
 class ModelPurposeRegistryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Restored to what was found, not to the seed. Q1 registers "quality"
+        # from research_quality_score at import, which is what the registry is
+        # for; a teardown that reset to the seed would delete a live lane's
+        # purpose for every test that ran afterwards, and this class only
+        # passed because its own alphabetical order hid it.
+        self._registered = set(cockpit_model._PURPOSES)
+
     def tearDown(self) -> None:
         cockpit_model._PURPOSES.clear()
-        cockpit_model._PURPOSES.update(SEED_PURPOSES)
+        cockpit_model._PURPOSES.update(self._registered)
 
     def test_the_seed_is_what_the_literal_said(self) -> None:
-        self.assertEqual(purposes(), SEED_PURPOSES)
+        # The seed is pinned; the live registry is the seed plus whatever the
+        # lanes have registered, so it is a superset and not an equality.
+        self.assertEqual(frozenset(cockpit_model._SEED_PURPOSES), SEED_PURPOSES)
+        self.assertLessEqual(SEED_PURPOSES, purposes())
 
     def test_there_is_no_module_constant_to_go_stale(self) -> None:
         # A rebound frozenset is a snapshot: whoever imported it before a lane

@@ -72,6 +72,29 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "window_seconds": 86_400,
                     "reset_timezone": "Asia/Shanghai",
                 },
+                {
+                    # P11a: Yahoo is an unofficial free source that never
+                    # agreed to serve us. There is no published rate limit to
+                    # stay under and nobody to appeal to, so these ceilings are
+                    # politeness rather than arithmetic -- five covered
+                    # companies ticking daily need five price units.
+                    "connector_slug": "yfinance",
+                    "operation": "analyst_estimates",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 4,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "yfinance",
+                    "operation": "daily_prices",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 200,
+                    "max_physical_calls_per_unit": 2,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
             ],
         )
 

@@ -1,0 +1,154 @@
+{
+ "artefact": {
+  "artefact_kind": "company_dossier",
+  "cited_tags": [],
+  "confidence": null,
+  "expected_sections": [
+   "业务与收入构成",
+   "行业特性与周期位置",
+   "长期与短期驱动因素",
+   "竞争位置与壁垒",
+   "管理层与资本配置",
+   "财务画像与质量",
+   "历史股价与估值驱动",
+   "多空辩论焦点",
+   "叙事演绎与催化剂",
+   "跟踪指标与证伪条件"
+  ],
+  "gaps": [
+   "缺重组后的分部收入口径映射表，无法把 FY2025 之前的分部历史接到新结构上",
+   "缺行业级的支出增速第三方序列，现在的周期判断只能靠公司自己的描述",
+   "缺 AI 相关收入的绝对规模与占比，无法给这条替代赛跑记分",
+   "缺 GCC 渗透率的量化数据，也缺 ACN 在具体客户上被内部化的案例"
+  ],
+  "hash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "prior": null,
+  "question": null,
+  "ref": "company-dossier-version:golden-partial",
+  "sections": [
+   {
+    "body": "Accenture 把自己描述为帮助企业「建数字核心、释放 AI」的全球专业服务公司，2025 年 9 月 1 日起把原先的分部整合进 Reinvention Services，理由是大部分大单本来就跨多个能力域，新模式是为了把 AI 与数据更深地嵌进销售与交付。收入与利润的责任落在地理市场上，由它们负责营收与盈利目标并销售全部服务线。最近一个季度收入为 USD 18718144000。档案层面要记住的是：重组之后，任何按旧分部读出来的历史序列都不再可比。",
+    "claim_refs": [
+     "claim-version:4286c7fd67",
+     "claim-version:3f4910118a",
+     "claim-version:aeff36320a"
+    ],
+    "gaps": [
+     "缺重组后的分部收入口径映射表，无法把 FY2025 之前的分部历史接到新结构上"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter."
+     }
+    ],
+    "title": "业务与收入构成"
+   },
+   {
+    "body": "美国 IT 服务是一个高度分散、竞争激烈的行业，参与者包括大型跨国厂商、印度等低成本离岸供应商、会计师事务所与咨询公司。它不是商品周期行业，但对客户的自由裁量支出高度敏感：公司自己说宏观与地缘波动让预测客户需求变得更难，尤其在咨询侧。把它归到「结构成长 + 支出周期」这一类比归到 compounder 更接近现实。",
+    "claim_refs": [
+     "claim-version:4bebce9419",
+     "claim-version:67a3924c91"
+    ],
+    "gaps": [
+     "缺行业级的支出增速第三方序列，现在的周期判断只能靠公司自己的描述"
+    ],
+    "numbers": [],
+    "title": "行业特性与周期位置"
+   },
+   {
+    "body": "长期驱动是企业把 AI 能力从试点推到生产所需要的重构工作，公司称其 fiscal 2023 的生成式 AI 投入让它有位置去接这部分新增支出。短期驱动则是相反方向的：技术进步已经减少并替代了它一部分历史服务，并可能让客户推迟既有合同下的支出。两个方向同时成立，所以这家公司的关键问题不是「AI 是不是机会」，而是「AI 带来的收入能不能比它替掉的收入来得快」。",
+    "claim_refs": [
+     "claim-version:b71c7cfef9",
+     "claim-version:9b3bb8b300"
+    ],
+    "gaps": [
+     "缺 AI 相关收入的绝对规模与占比，无法给这条替代赛跑记分"
+    ],
+    "numbers": [],
+    "title": "长期与短期驱动因素"
+   },
+   {
+    "body": "公司认为没有第二家能以同等规模提供全谱系服务，这是它对自身壁垒的表述。被侵蚀的方向有两个明确来源：大企业自建的全球能力中心让客户可以用自己的资源，以及客户与生态伙伴自己建 AI 能力、加上 AI 原生公司的出现。这两条都不是价格战，而是需求被内部化——对壁垒的威胁比低价竞争更难逆转。",
+    "claim_refs": [
+     "claim-version:e4fc381438",
+     "claim-version:ec52d36d94",
+     "claim-version:c585fe0ed8"
+    ],
+    "gaps": [
+     "缺 GCC 渗透率的量化数据，也缺 ACN 在具体客户上被内部化的案例"
+    ],
+    "numbers": [],
+    "title": "竞争位置与壁垒"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "company:sec-cik:0001467373",
+  "title": "company-dossier:0001467373"
+ },
+ "case_ref": "missing-half-the-structure",
+ "expected": {
+  "deterministic": {
+   "claim_refs_resolve": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "every_section_cites": {
+    "count": 0,
+    "status": "pass"
+   },
+   "new_version_cites_new_refs": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "numbers_without_refs": {
+    "count": 0,
+    "status": "pass"
+   },
+   "required_sections_present": {
+    "count": 6,
+    "status": "fail"
+   },
+   "restatement_drift": {
+    "count": 0,
+    "status": "skipped"
+   }
+  },
+  "rationale": "section_coverage 必须是 0。gaps_honest 给 0–1：写出来的四节各自列了缺口，但整份档案对「六节没写」只字未提，这正是不诚实的缺口清单。",
+  "score_ranges": {
+   "contradictions_surfaced": [
+    0,
+    2
+   ],
+   "every_section_cites": [
+    3,
+    4
+   ],
+   "gaps_honest": [
+    0,
+    1
+   ],
+   "new_version_new_evidence": [
+    2,
+    4
+   ],
+   "no_restatement_drift": [
+    2,
+    4
+   ],
+   "numbers_traced": [
+    3,
+    4
+   ],
+   "section_coverage": [
+    0,
+    0
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "反例：只有前四节，管理层、财务画像、估值驱动、多空辩论、叙事与跟踪六节完全没有，也没有任何一句说明它们为什么没有。一份缺一半结构的档案不会自己承认缺，因为缺的那部分本来就是承认缺口的地方。",
+ "rubric": "company_dossier",
+ "source": "手写；十节结构取自 research_quality_rubrics.DOSSIER_SECTIONS，每一节的论断都指向 live Core 只读副本 2026-09-09 里的真实 ACN Claim"
+}

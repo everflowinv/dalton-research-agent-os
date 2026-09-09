@@ -43,6 +43,46 @@ FORMULA_HASH = content_hash({
 })
 AUTOMATION_ACTOR = "automation:forecast-extender"
 
+# P13-M2: the second frozen formula this authority accepts. A driver-model line
+# is not extended from one admitted actual by one growth assumption; it falls
+# out of a whole ForecastModelVersion -- drivers, assumptions and the income
+# chain computed from them -- and the thing it has to bind is that version.
+#
+# So a driver-model line binds no Model Input Ledger rows at all, and its
+# *scenario* is the model version: ``scenario_version_ref`` names the exact
+# ``forecast-model-version:`` id and ``scenario_version_hash`` its content
+# hash, which is what makes the line replayable. Reusing the scenario pair
+# rather than adding two fields keeps the record shape closed and keeps every
+# line already written -- and every line the reconciler has already read --
+# hashing exactly as it did.
+DRIVER_FORMULA_REF = "formula:driver-model:1"
+DRIVER_MODEL_VERSION_PREFIX = "forecast-model-version:"
+DRIVER_FORMULA_HASH = content_hash({
+    "formula_ref": DRIVER_FORMULA_REF,
+    "semantics": (
+        "one line of a ForecastModelVersion's results: each revenue driver is "
+        "carried forward from its last filed quarter by a trailing quarterly "
+        "growth assumption; each expense driver is a share of forecast "
+        "revenue; gross_profit = revenue - cost_of_revenue; operating_income = "
+        "gross_profit - sum(operating expenses); net_income = operating_income "
+        "- income tax when a tax driver exists, else operating_income * the "
+        "net-income share; free_cash_flow = operating_cash_flow - capital "
+        "expenditure; every result cell names the assumptions and filed cells "
+        "it used, and a driver with no filed history produces no assumption "
+        "and leaves the results that depend on it unavailable"
+    ),
+    "binding": (
+        "scenario_version_ref is the forecast-model-version id and "
+        "scenario_version_hash its content hash; no Model Input Ledger "
+        "bindings and no model run"
+    ),
+    "value_kind": "derived_deterministic",
+})
+DERIVED_FORMULA_HASHES: dict[str, str] = {
+    FORMULA_REF: FORMULA_HASH,
+    DRIVER_FORMULA_REF: DRIVER_FORMULA_HASH,
+}
+
 _SCHEMA_PATH = Path(__file__).with_name("model_forecast_schema.sql")
 _QUANT = Decimal("0.00000001")
 
@@ -111,6 +151,17 @@ def _quarter_after(period: Mapping[str, Any]) -> dict[str, str]:
         "calendar": str(period.get("calendar", "company:fiscal")),
         "kind": "quarter",
     }
+
+
+def quarter_after(period: Mapping[str, Any]) -> dict[str, str]:
+    """The quarter that starts the day after this one ends.
+
+    Public because the driver model has to lay out its forecast columns the
+    same way an extension does; two implementations of "the next quarter"
+    would eventually disagree about a fiscal year end.
+    """
+
+    return _quarter_after(period)
 
 
 def _quarter_period(value: Any, name: str) -> dict[str, str]:
@@ -182,15 +233,33 @@ def _normalize_line(value: Mapping[str, Any]) -> dict[str, Any]:
     wire["scenario_version_ref"] = _text(wire["scenario_version_ref"], "scenario_version_ref")
     wire["scenario_version_hash"] = _hash(wire["scenario_version_hash"], "scenario_version_hash")
     if wire["value_kind"] == "derived_deterministic":
-        wire["base_input_version_ref"] = _text(wire["base_input_version_ref"], "base_input_version_ref")
-        wire["base_input_version_hash"] = _hash(wire["base_input_version_hash"], "base_input_version_hash")
-        wire["growth_input_version_ref"] = _text(wire["growth_input_version_ref"], "growth_input_version_ref")
-        wire["growth_input_version_hash"] = _hash(wire["growth_input_version_hash"], "growth_input_version_hash")
         wire["formula_ref"] = _text(wire["formula_ref"], "formula_ref")
         wire["formula_hash"] = _hash(wire["formula_hash"], "formula_hash")
-        wire["model_run_version_ref"] = _text(wire["model_run_version_ref"], "model_run_version_ref")
-        if wire["formula_ref"] != FORMULA_REF or wire["formula_hash"] != FORMULA_HASH:
-            raise ModelForecastValidationError("derived line must use the frozen growth-extend formula")
+        expected_hash = DERIVED_FORMULA_HASHES.get(wire["formula_ref"])
+        if expected_hash is None or wire["formula_hash"] != expected_hash:
+            raise ModelForecastValidationError("derived line must use a frozen formula")
+        if wire["formula_ref"] == FORMULA_REF:
+            wire["base_input_version_ref"] = _text(wire["base_input_version_ref"], "base_input_version_ref")
+            wire["base_input_version_hash"] = _hash(wire["base_input_version_hash"], "base_input_version_hash")
+            wire["growth_input_version_ref"] = _text(wire["growth_input_version_ref"], "growth_input_version_ref")
+            wire["growth_input_version_hash"] = _hash(wire["growth_input_version_hash"], "growth_input_version_hash")
+            wire["model_run_version_ref"] = _text(wire["model_run_version_ref"], "model_run_version_ref")
+        else:
+            # A driver-model line binds a ForecastModelVersion and nothing
+            # else. Leaving the ledger fields populated would say it rested on
+            # an admitted actual and an admitted growth assumption, which is
+            # exactly what it does not do.
+            for field in (
+                "base_input_version_ref", "base_input_version_hash",
+                "growth_input_version_ref", "growth_input_version_hash",
+                "model_run_version_ref",
+            ):
+                if wire[field] is not None:
+                    raise ModelForecastValidationError(
+                        f"{field} is reserved for growth-extend lines")
+            if not wire["scenario_version_ref"].startswith(DRIVER_MODEL_VERSION_PREFIX):
+                raise ModelForecastValidationError(
+                    "a driver-model line must bind a forecast-model-version scenario")
         if wire["rationale"] is not None:
             raise ModelForecastValidationError("derived lines carry no human rationale")
     else:
@@ -571,11 +640,30 @@ def extend_growth(
     return result
 
 
+def driver_model_version_ref(line: Mapping[str, Any]) -> str | None:
+    """The ForecastModelVersion a line came out of, or nothing.
+
+    The reconciler holds a validated line and needs to be able to answer "which
+    model said this?" without knowing how driver-model lines bind their model.
+    """
+
+    if line.get("formula_ref") != DRIVER_FORMULA_REF:
+        return None
+    ref = line.get("scenario_version_ref")
+    return ref if isinstance(ref, str) and ref else None
+
+
 __all__ = [
     "AUTOMATION_ACTOR",
+    "DERIVED_FORMULA_HASHES",
+    "DRIVER_FORMULA_HASH",
+    "DRIVER_FORMULA_REF",
+    "DRIVER_MODEL_VERSION_PREFIX",
     "FORMULA_HASH",
     "FORMULA_REF",
     "FORECAST_VALUE_KINDS",
+    "driver_model_version_ref",
+    "quarter_after",
     "ModelForecastAuthority",
     "ModelForecastConflict",
     "ModelForecastError",

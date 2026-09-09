@@ -1,0 +1,339 @@
+{
+ "artefact": {
+  "artefact_kind": "initial_screen",
+  "cited_tags": [],
+  "confidence": null,
+  "expected_sections": [
+   "Key Information + Executive Summary",
+   "S1 公司概览（同 IM，无 ESOP 分析）",
+   "S2 行业概览（简版）",
+   "S3 核心 Thesis（简版）",
+   "S4 风险与 Anti-thesis（简版）",
+   "S5 Relevance to Universe（对 universe 内其他标的的多空含义，含跨区域）",
+   "S6 估值（street 预期、框架、event pathway、IRR）",
+   "S7 数据跟踪"
+  ],
+  "gaps": [
+   "这一节没能起草：the model call did not succeed",
+   "缺少按业务分部（GIS、CES、保险软件等）拆分的最新一期收入与利润具体数字或占比数据；缺少管理层对最近报告期经营重点的更完整描述中涉及的订单额、utilization、margin等量化指标；缺少最近报告期之前几个季度的分部收入趋势（仅有总量收入数字）。",
+   "行业整体规模、增长速度、主要竞争对手（如Accenture、Cognizant等）的市场份额数据缺失；IT服务行业需求见底的宏观领先指标或同行对比数据缺失。",
+   "Oasis平台及Anthropic合作对订单和收入贡献的量化时间表",
+   "GIS分部利润下滑中价格与成本因素的具体拆分",
+   "赢单率改善与宏观逆风相对强度的实证数据",
+   "FY2027下半年收入企稳的可见先行指标",
+   "缺少关于Oasis/AgenixSOC收入贡献的具体量化数据或客户数量变化；缺少GIS segment profit下滑幅度的量化数据；缺少bookings同比增长幅度的量化数据；缺少FY2027指引中对AI增量收入的具体假设数字。",
+   "缺乏对同业公司相关数据的直接引用以进行对比分析，缺少 DXC 分部层面的收入与订单具体数字（如 GIS 订单增长幅度、GLS 订单下滑幅度）来量化分化程度，缺少关于美国境外区域（如欧洲、亚太）IT 服务需求的具体数据或案例来支持跨区域含义。",
+   "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与 consensus 五类正式 authority 尚未接入，写任何倍数或目标价都会是无来源的数字。",
+   "缺乏GIS与GLS分部的定期收入数据、订单金额或book-to-bill比率、utilization率、分部利润率等可引用的具体数字来源。"
+  ],
+  "hash": "e6025b3abad8da1ee3041b363d3df528c3f3f578261d25723e6dab0cd17edcae",
+  "prior": null,
+  "question": null,
+  "ref": "mission-deliverable-version:cc6d2b1855c4e3fc74e0ef0a7c9f1f5a",
+  "sections": [
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "这一节没能起草：the model call did not succeed"
+    ],
+    "numbers": [],
+    "title": "Key Information + Executive Summary"
+   },
+   {
+    "body": "DXC Technology（DXC）是一家面向全球企业提供关键任务系统运维、IT现代化、数据架构优化及跨云环境安全服务的IT服务公司，其业务重点在于帮助客户在运行传统遗留系统的同时推进数字化转型，并在AI驱动的架构重塑中寻找新的增长点。从收入与利润来源看，公司业务大体可分为全球基础设施服务（GIS）、全球应用服务与咨询/工程（CES）以及保险软件等板块，其中GIS作为最大分部贡献主要收入，但其收入受项目制服务需求疲软以及宏观 discretionary spending 走弱影响出现下滑；CES则因更大型战略性交易占比提升、交付周期拉长而暂未见收入改善，但管理层认为其基础要素强、backlog 充足，重点在于无泄漏地将 backlog 转化为收入。在最近报告期（2026年4-6月，即FY2027第一财季），公司报告营业收入为2999000000美元，同比下滑，管理层在电话会上强调了几项经营重点：一是AI驱动的Oasis平台以及与Anthropic的合作是公司战略转向的核心，管理层观察到客户的积极需求信号，认为Oasis和AgenixSOC的部署能大幅缩短网络与安全运维的时间和成本，从而改变与CEO层面的对话方式；二是公司将重点放在将Oasis平台推向新客户和既有客户群，所有面向新客户的提案均基于Oasis，且管理层对长期大型交易管线持乐观态度，认为其中相当比例来自新客户；三是公司对AI相关需求转化为收入的节奏保持审慎，承认当前指引并未计入Oasis订阅与消费模式的收入，同时指出客户董事会层面因技术方案、agentic内容与解决方案使用寿命等问题出现决策延迟，但管理层预期随着证据积累这一情况会消散；四是公司明确对并购持谨慎态度，更倾向于通过自建、有机增长以及与合作伙伴（如Anthropic）的协作来构建能力，这也反映了管理层对行业从劳动力套利模式向基于agent的交付模式转变的判断。在财务表现上，公司最近一个季度收入同比下滑，且之前一个财季（FY2026 Q4）收入也低于内部预期，管理层将该差距部分归因于执行而非单纯的需求问题。管理层对GIS分部的中期展望是随着全年收入改善以及成本削减路线图的推进，毛利率有望回升至同比持平或略有改善的水平，并预计GIS收入在FY2027将出现中个位数下滑，但下半年表现会好于上半年。",
+    "claim_refs": [
+     "claim-version:7e52f11efdf059f2ea758566279bacdb47ca331b146f38f6d331f788163f92c3",
+     "claim-version:652448552f0cbfcdb9fbd043c4f7bc8a6ea2448db2b36d40ef80088b9eb2bfc6",
+     "claim-version:cba7c6c35d968b0d1c5a31e24d3dd2f97b14b64aa2dd5a158f6592b39da019e4",
+     "claim-version:dfccb0006f78265e7d529771a2fc77b93fdc001f5e2a295a89c28d05ff939159",
+     "claim-version:6bab654fa0946a37569c92f8a0349b21c6421a0d3365363528cb79d18dcfdfbc",
+     "claim-version:bc74ff1ad4a7075bdf9d1f5bb33cb5ad9d7671e7a8a65a51f71f74e352d6f2f9",
+     "claim-version:320df5d2b659069d6ee99047352885c7e766d36b525ec38582a31308c4a33740",
+     "claim-version:cc085bb47e83761853bc0b30eac2d36c2e8f2338b7d3bfb7da7e5445d9afb623",
+     "claim-version:2fe51a277ce64401810becee1a5c9b8c2712b6f8f1d029b746472c47a47b83b3",
+     "claim-version:93549ea200709aa5ab4650b3be05e10cf4ec30050cdad1e71def6686056a4d9c",
+     "claim-version:b612256e50db1e92e42f8c2a6e8ffc23935383c71d2b225139e1233fa6b81a6d",
+     "claim-version:ff86ba5374e80815fd9be4f8c57b9c844e1117c66df4079d508dcb2a29fd4414",
+     "claim-version:6718277cf0def9a30548be77ba8d6e698a33635f2181bf8cab164ca2597cf3d5",
+     "claim-version:53e4a847a61b9aaeb29cc27ae7fdb2889b648d034cee9424455c113b34dbcdd7",
+     "claim-version:d491695623abcf871e07a8b8a9c6440a8c55ef8ab8083a0dd9a8a1e0dce64d85",
+     "claim-version:b3a8c8ac97f958c842f343dd3c941e8692787afbe0fe1a9868b410e7844c3d45",
+     "claim-version:158c2d896ba5e673b4a6758bf93b0ed221ac12d4a5457578f6768ac8cfd3b092",
+     "claim-version:146fdcbf3fcf00af350157abaf4dfc127a9387e05845bcc3cce53fb099abc28c"
+    ],
+    "gaps": [
+     "缺少按业务分部（GIS、CES、保险软件等）拆分的最新一期收入与利润具体数字或占比数据；缺少管理层对最近报告期经营重点的更完整描述中涉及的订单额、utilization、margin等量化指标；缺少最近报告期之前几个季度的分部收入趋势（仅有总量收入数字）。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:a4d5fb26cbdf5725ff2b12e99fa09af363c9e2d975d2287d54040af485c80b14",
+      "period": "2026-04-01..2026-06-30",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 2999000000 for 2026-04-01..2026-06-30, down 5.06% year over year from USD 3159000000 in the comparable quarter."
+     }
+    ],
+    "title": "S1 公司概览（同 IM，无 ESOP 分析）"
+   },
+   {
+    "body": "US IT services 行业的需求当前呈现分化态势：一方面，管理层观察到Oasis和AgenicSOC部署的客户需求信号积极，认为这些平台在常规网络与安全运维上大幅缩短时间和降低成本，有助于开启与CEO层面的不同对话；同时，GIS基础设施服务领域存在强劲的大型交易管道，且其中新客户占比可观。另一方面， discretionary consulting 需求持续疲软，DXC在最近报告季度（2026-04-01至2026-06-30）收入为USD 2999000000，同比下降5.06%，而上季度（2025-10-01至2025-12-31）收入为USD 3194000000，同比下降0.96%，显示下降幅度并未收窄。管理层明确表示，整体IT服务需求尚未见底，指引继续为有机收入下滑。竞争格局方面，行业正从劳动套利模式向基于代理的模式转变，传统企业软件公司将快速融入原生Agentic解决方案，成为重要竞争者；而定制化程度低、复杂度低、易被替代的公司受冲击最大，具备复杂工作流和行业知识的公司则拥有优势。DXC在该行业中的位置，是作为拥有数十年复杂系统运行经验和行业知识的在位者，管理层相信AI提供了一个重置机会，使公司从行业中游跃升至特定行业细分和平台服务的前沿，且竞争对手难以复制，但公司也面临传统服务被AI替代的长期结构性风险，以及销售组织分散、管道可见度有限等执行层面挑战。",
+    "claim_refs": [
+     "claim-version:320df5d2b659069d6ee99047352885c7e766d36b525ec38582a31308c4a33740",
+     "claim-version:2fe51a277ce64401810becee1a5c9b8c2712b6f8f1d029b746472c47a47b83b3",
+     "claim-version:a2e9c73e240076f049c1fbd66a140c2839bbfa558705b4339677923efeac72ea",
+     "claim-version:53e4a847a61b9aaeb29cc27ae7fdb2889b648d034cee9424455c113b34dbcdd7",
+     "claim-version:423804c0457a8dd32c30a431e213fd614a19afa516dbbceb5dcc67f7b4f7df9f",
+     "claim-version:5b16a5f1bf94f9555c660c332a08b6f07c62f80f458dea42af7ee78747242c04",
+     "claim-version:1c641da9123228d5c4ee88ee4a6a7daf0efaee95c75eef876be914dbbbbab7c2",
+     "claim-version:fe11b96994188d1409c866cbf6a73c76bfae922749bbd29bd6027a33142aef4d",
+     "claim-version:60ac796b3f3865e3c93c88d92a2b0ce1c7ab0d71f51f76ed4398043d43ec1601"
+    ],
+    "gaps": [
+     "行业整体规模、增长速度、主要竞争对手（如Accenture、Cognizant等）的市场份额数据缺失；IT服务行业需求见底的宏观领先指标或同行对比数据缺失。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:a4d5fb26cbdf5725ff2b12e99fa09af363c9e2d975d2287d54040af485c80b14",
+      "period": "2026-04-01..2026-06-30",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 2999000000 for 2026-04-01..2026-06-30, down 5.06% year over year from USD 3159000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:ea40467e493963936cebb5bf6f9e43543a48f08598f2fd7307b64d3935c798dd",
+      "period": "2025-10-01..2025-12-31",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 3194000000 for 2025-10-01..2025-12-31, down 0.96% year over year from USD 3225000000 in the comparable quarter."
+     }
+    ],
+    "title": "S2 行业概览（简版）"
+   },
+   {
+    "body": "DXC的核心矛盾在于收入仍未见底，但管理层正押注于AI驱动的Oasis平台及与Anthropic的合作能够在中期改变增长轨迹。从近期数据看，公司收入同比降幅在FY2026内曾收窄（显示2025-10-01..2025-12-31收入同比下降0.96%），但FY2027第一财季收入降幅重新扩大至5.06%，且管理层指引全年有机收入继续下滑，表明需求端尚未出现拐点。关键的价值创造驱动在于GIS业务：管理层观察到Oasis和AgenixSOC客户需求信号积极，能够大幅缩短常规网络与安全运营的时间和成本，从而改变与CEO的对话方式，同时GIS的大单管道强劲且包含相当比例的新客户。但这一乐观信号与财务表现存在张力——GIS在报告季度收入下滑且利润大幅下降，尽管订单同比显著增长，暗示定价压力或成本问题，且第一财季GIS利润下滑主因是收入表现，管理层预期全年收入改善加上成本削减将使年末利润率与去年相近。市场的未反映之处可能在于：管理层认为早期Oasis客户讨论比传统外包进展更快，长期合同的赢单率有望加速，但这尚未纳入指引；同时，基于Oasis部署至现有客户群在当前合同条款下对近期收入和现金流中性，但所有面向新客户的提案均基于Oasis，有望提升差异化与赢单率。反方证据同样充分：客户董事会因技术路径和代理内容等提出额外问题，导致决策延迟，行业受到支出向基础设施转移的宏观冲击；公司自身风险因素也承认AI可能替代传统服务并导致客户延迟支出。因此，Thesis的成立依赖于两个前提：其一，AI平台带来的订单增长能够克服离散咨询的持续疲软（显示GLS订单同比大幅下降），并在未来2至4个季度转化为收入；其二，市场对FY2027收入持续下滑的预期已充分定价，而管理层所述的下半年改善和成本削减带来的利润率稳定尚未被反映。当前证据不足以确认这一Thesis，主要缺口在于缺乏Oasis相关订单转化为收入的量化时间表、GIS利润下滑的具体价格与成本拆分，以及管理层的赢单率改善能否抵消宏观逆风的实证支撑。",
+    "claim_refs": [
+     "claim-version:320df5d2b659069d6ee99047352885c7e766d36b525ec38582a31308c4a33740",
+     "claim-version:2fe51a277ce64401810becee1a5c9b8c2712b6f8f1d029b746472c47a47b83b3",
+     "claim-version:2010d6a4973ffe1010793fd44711cfe04243cd92f5f31cc251f9d57d0d56e73b",
+     "claim-version:b612256e50db1e92e42f8c2a6e8ffc23935383c71d2b225139e1233fa6b81a6d",
+     "claim-version:d7c0731f39f82ed4ff76acedd99ddfca076f4b2f732b0e28656fbb04f4ffb3ef",
+     "claim-version:864832aa0b88b2bfa86db790caca8afb728ecbbc7280f55058540687337d11d8",
+     "claim-version:b0f01b7d1387408f3c897a5de85a8860650ba0fc641f41a99186bbe44b70ff30",
+     "claim-version:7429d26979c548850e94e6dcc41b870005047ad27be5c5c2a62298fab07a2ccf",
+     "claim-version:a2e9c73e240076f049c1fbd66a140c2839bbfa558705b4339677923efeac72ea",
+     "claim-version:7b168500d95746bf3e9e1ff1b3a583e0251a89292658e72e3eef801e853a87f5",
+     "claim-version:44d1fdb8924894379e7bc08b60059eb0aeb5877adee6f6f759d74dbaf9edb5d8",
+     "claim-version:93549ea200709aa5ab4650b3be05e10cf4ec30050cdad1e71def6686056a4d9c"
+    ],
+    "gaps": [
+     "Oasis平台及Anthropic合作对订单和收入贡献的量化时间表",
+     "GIS分部利润下滑中价格与成本因素的具体拆分",
+     "赢单率改善与宏观逆风相对强度的实证数据",
+     "FY2027下半年收入企稳的可见先行指标"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:a4d5fb26cbdf5725ff2b12e99fa09af363c9e2d975d2287d54040af485c80b14",
+      "period": "2026-04-01..2026-06-30",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 2999000000 for 2026-04-01..2026-06-30, down 5.06% year over year from USD 3159000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:ea40467e493963936cebb5bf6f9e43543a48f08598f2fd7307b64d3935c798dd",
+      "period": "2025-10-01..2025-12-31",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 3194000000 for 2025-10-01..2025-12-31, down 0.96% year over year from USD 3225000000 in the comparable quarter."
+     }
+    ],
+    "title": "S3 核心 Thesis（简版）"
+   },
+   {
+    "body": "多头叙事的核心是Oasis与AgenixSOC在客户部署中展现出积极需求信号，并显著缩短常规网络与安全运维的时间和成本，管理层甚至认为Oasis在GIS基础设施服务中带来了强劲的大型交易管道，且新客户占比可观。但反向观点认为，这一叙事尚未在收入端得到验证：截至2026年6月当季，DXC收入同比下滑5.06%，而此前2025年7-9月、2025年10-12月及2025年4-6月三个季度的同比降幅分别为2.47%、0.96%与2.38%，收入降幅在最近一个季度反而扩大，显示需求尚未见底。若反向观点成立，需要Oasis和AgenixSOC的部署仍停留在试点或小范围客户层面，无法转化为可规模化的收入；管理层虽称早期讨论比传统外包进展更快，但并未将这种加速计入指引，且客户董事会因技术路径、agentic内容及方案使用寿命等问题而推迟决策，这为收入转化不及预期提供了机制。反向观点进一步要求，GIS的bookings增长虽属积极，但可能伴随定价压力或成本问题——同期segment profit大幅下滑，且管理层承认一季度GIS利润率下降由收入表现驱动，若收入持续疲软，利润率改善难以兑现。此外，若宏观环境未发生松动，FY2027指引本身未假设宏观变化，而较小规模可自由支配项目的持续疲软已被计入，这意味着只要客户对AI相关新内容的采用速度不够快，收入下滑可能延续。反向观点还需要证明，GenAI等新技术对传统服务的替代效应大于增量效应：公司自己承认AI已经减少并取代了部分传统服务，并可能导致客户延迟既有合同支出及新合同签订，且若AI市场未如预期发展，增长战略执行将受损。同时，来自传统企业软件公司快速将原生agentic解决方案融入产品的竞争，以及竞争对手更有效部署AI能力，都可能削弱DXC的差异化主张。若这些条件同时成立，收入下滑将难以在未来2-4个季度内被AI/reinvention需求抵消，margin稳定甚至改善的指引也会落空，从而构成对DXC盈利与估值持续下修的基础。",
+    "claim_refs": [
+     "claim-version:320df5d2b659069d6ee99047352885c7e766d36b525ec38582a31308c4a33740",
+     "claim-version:2fe51a277ce64401810becee1a5c9b8c2712b6f8f1d029b746472c47a47b83b3",
+     "claim-version:2010d6a4973ffe1010793fd44711cfe04243cd92f5f31cc251f9d57d0d56e73b",
+     "claim-version:b612256e50db1e92e42f8c2a6e8ffc23935383c71d2b225139e1233fa6b81a6d",
+     "claim-version:d7c0731f39f82ed4ff76acedd99ddfca076f4b2f732b0e28656fbb04f4ffb3ef",
+     "claim-version:7429d26979c548850e94e6dcc41b870005047ad27be5c5c2a62298fab07a2ccf",
+     "claim-version:a2e9c73e240076f049c1fbd66a140c2839bbfa558705b4339677923efeac72ea",
+     "claim-version:7b168500d95746bf3e9e1ff1b3a583e0251a89292658e72e3eef801e853a87f5",
+     "claim-version:eddc085ac06b05c1e6df4132be4f71f2b474f098f7ba97b545eecea461a27c89",
+     "claim-version:e3028ed6f0a036566d065c5f4c1191c3d88e7dd42aa5466be87ed2b331605516",
+     "claim-version:423804c0457a8dd32c30a431e213fd614a19afa516dbbceb5dcc67f7b4f7df9f",
+     "claim-version:017dc5f9ebb69039b7133fcc8304b7bd43a771e7943253f4a52e5512611c5b8e"
+    ],
+    "gaps": [
+     "缺少关于Oasis/AgenixSOC收入贡献的具体量化数据或客户数量变化；缺少GIS segment profit下滑幅度的量化数据；缺少bookings同比增长幅度的量化数据；缺少FY2027指引中对AI增量收入的具体假设数字。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:a4d5fb26cbdf5725ff2b12e99fa09af363c9e2d975d2287d54040af485c80b14",
+      "period": "2026-04-01..2026-06-30",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 2999000000 for 2026-04-01..2026-06-30, down 5.06% year over year from USD 3159000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:4b57baaffa2a673842368522db848527430d9a9e70a30e4f37f7b0ea51a75d8d",
+      "period": "2025-07-01..2025-09-30",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 3161000000 for 2025-07-01..2025-09-30, down 2.47% year over year from USD 3241000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:ea40467e493963936cebb5bf6f9e43543a48f08598f2fd7307b64d3935c798dd",
+      "period": "2025-10-01..2025-12-31",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 3194000000 for 2025-10-01..2025-12-31, down 0.96% year over year from USD 3225000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:efaa37941fe2640b767ddd0c5f5f1736d83f8112dba342e4c843c9eea85be7ab",
+      "period": "2025-04-01..2025-06-30",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 3159000000 for 2025-04-01..2025-06-30, down 2.38% year over year from USD 3236000000 in the comparable quarter."
+     }
+    ],
+    "title": "S4 风险与 Anti-thesis（简版）"
+   },
+   {
+    "body": "DXC 的财报与指引显示，其 GIS 业务在 2026 财年第四季度已出现收入低于内部预期、 discretionary 支出走弱并首次波及转售类项目的情况，而 2026 年 4–6 月当季（即 2027 财年第一季度）收入同比仍下降 5.06%，且 GIS 分部订单同比显著增长但分部利润大幅下滑，同时 GLS 订单同比大幅下降。管理层仍预计 GIS 全年收入将下降中个位数，但下半年表现改善，且不对 AI 驱动的 Oasis 等新内容带来的增量收入计入当前指引，意味着对行业需求的判断仍是“尚未见底、但有结构性机会”。DXC 管理层的观点对覆盖范围内的美国 IT 服务公司具有明确的多空含义。在空头方面，DXC 承认持续存在的 discretionary consulting 疲软以及客户董事会因技术方案、agentic 内容和方案使用寿命等问题而延迟决策，这预示市场整体对咨询类 discretionary 需求可能仍未见底，尤其是对以短期项目为主的公司构成压力。管理层还明确指出，定制化低、复杂度低、易被替代的公司受 AI 冲击最大，这与对 CES 业务订单显著下滑的观察互为印证，提示对依赖低复杂度劳动套利模式的同业应持谨慎态度。同时，DXC 观察到宏观支出向基础设施转移，而公司自身 GIS 业务虽有大额订单管道但短期增量有限，说明基础设施服务领域的需求回暖可能更多来自长期合同而非短期项目，这利好具备大规模基础设施交付能力的同业，而对以短期外包为主的公司则不利。在多头的方向上，DXC 认为 AI 是行业层面的洗牌，公司因嵌入客户工作流与数据而拥有护城河，并看到客户对 AI 内容的再接触是增量性的而非替代性的，这与 Anthropic 等合作伙伴对受监管行业 AI 落地的乐观看法一致，对拥有强监管行业客户关系和领域知识的服务商构成上行。DXC 还观察到客户参与周期从数月压缩至数天或数周，这可能利好能快速交付、拥有平台化能力的同业。但需注意，DXC 自身尚未将相关增量收入纳入指引，且 FY2027 指引假设宏观逆风持续，因此上述多头信号更多是中期结构性判断，而非近期已证实的需求拐点。对于覆盖范围内的公司而言，DXC 的订单与利润数据可作为衡量行业竞争格局的参考：其 GIS 订单增长但利润下滑暗示价格压力加剧，可能与同业在基础设施服务上的竞争相关；而 GLS 订单下滑则印证高端咨询与工程服务的需求仍未见底。",
+    "claim_refs": [
+     "claim-version:b612256e50db1e92e42f8c2a6e8ffc23935383c71d2b225139e1233fa6b81a6d",
+     "claim-version:652448552f0cbfcdb9fbd043c4f7bc8a6ea2448db2b36d40ef80088b9eb2bfc6",
+     "claim-version:b0f01b7d1387408f3c897a5de85a8860650ba0fc641f41a99186bbe44b70ff30",
+     "claim-version:7429d26979c548850e94e6dcc41b870005047ad27be5c5c2a62298fab07a2ccf",
+     "claim-version:b630799a6ceebd6ecc194c96b7cd70db915e6349d00cbea80dfa1322b1fa4e77",
+     "claim-version:7dbeb93c5089091ad51fc8d3e95009f95c702dea6f689a8f5f4c176817692be9",
+     "claim-version:383f21102b646fbcac023ad9fd66f4ad758a8338200fe60ca41f27914c8bc425",
+     "claim-version:146fdcbf3fcf00af350157abaf4dfc127a9387e05845bcc3cce53fb099abc28c",
+     "claim-version:ff86ba5374e80815fd9be4f8c57b9c844e1117c66df4079d508dcb2a29fd4414",
+     "claim-version:5b16a5f1bf94f9555c660c332a08b6f07c62f80f458dea42af7ee78747242c04",
+     "claim-version:44d1fdb8924894379e7bc08b60059eb0aeb5877adee6f6f759d74dbaf9edb5d8",
+     "claim-version:f30b6e77276947c69744d002d219d9bc0b2a97c7dbbef1a6f9a76211feaf3c52"
+    ],
+    "gaps": [
+     "缺乏对同业公司相关数据的直接引用以进行对比分析，缺少 DXC 分部层面的收入与订单具体数字（如 GIS 订单增长幅度、GLS 订单下滑幅度）来量化分化程度，缺少关于美国境外区域（如欧洲、亚太）IT 服务需求的具体数据或案例来支持跨区域含义。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:a4d5fb26cbdf5725ff2b12e99fa09af363c9e2d975d2287d54040af485c80b14",
+      "period": "2026-04-01..2026-06-30",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 2999000000 for 2026-04-01..2026-06-30, down 5.06% year over year from USD 3159000000 in the comparable quarter."
+     }
+    ],
+    "title": "S5 Relevance to Universe（对 universe 内其他标的的多空含义，含跨区域）"
+   },
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与 consensus 五类正式 authority 尚未接入，写任何倍数或目标价都会是无来源的数字。"
+    ],
+    "numbers": [],
+    "title": "S6 估值（street 预期、框架、event pathway、IRR）"
+   },
+   {
+    "body": "为验证上述判断，数据跟踪应聚焦于季度收入增速与订单动量的背离是否持续。DXC TECHNOLOGY COMPANY 在2025-04-01..2025-06-30报告收入为USD 3159000000，同比下降2.38%，随后在2025-07-01..2025-09-30收入为USD 3161000000，同比下降2.47%，降幅略有扩大；2025-10-01..2025-12-31收入为USD 3194000000，同比下降0.96%，降幅收窄；而最近一期2026-04-01..2026-06-30收入为USD 2999000000，同比下降5.06%，降幅显著扩大。这一序列本身即可用来检验管理层关于GIS分部收入随全年改善而反弹的预期是否兑现，以及需求是否如所示尚未见底。更关键的是要盯住分部层面的订单数据：GIS分部订单在报告季度同比显著增长而分部利润大幅下滑，GLS分部订单则同比大幅下降，这种分化需要逐季确认其持续性——若GIS订单增长不能转化为收入增速收窄，则说明Oasis驱动的订单可能停留在意向层面而未进入收入确认。此外，管理层声称的AI平台（Oasis和AgenixSOC）正在推动与CEO层面的新对话，以及大单管道增强，这些应通过公开的book-to-bill或签约公告来验证，但目前缺少可引用的具体数据来源。还需跟踪管理层关于客户决策周期拉长是否随证据积累而消散，这可通过后续季报中关于赢单率和管线转化速度的表述来观察。最后，鉴于提到财政2027展望未假设宏观变化，若离散项目支出进一步松动或新内容（如Anthropic）产生更快收益则会推向高端，需跟踪每季度管理层对discretionary spending的描述是否从\"疲弱\"转向\"稳定\"，以及GIS收入指引中的降幅是否如所言在下半年改善。当前可验证的公开数字仅限于整体收入序列，缺乏分部收入、订单金额、utilization率或利润率等更细颗粒度的定期披露，这是撰写本部分的主要缺口。",
+    "claim_refs": [
+     "claim-version:158c2d896ba5e673b4a6758bf93b0ed221ac12d4a5457578f6768ac8cfd3b092",
+     "claim-version:d7c0731f39f82ed4ff76acedd99ddfca076f4b2f732b0e28656fbb04f4ffb3ef",
+     "claim-version:a2e9c73e240076f049c1fbd66a140c2839bbfa558705b4339677923efeac72ea",
+     "claim-version:7429d26979c548850e94e6dcc41b870005047ad27be5c5c2a62298fab07a2ccf",
+     "claim-version:b0f01b7d1387408f3c897a5de85a8860650ba0fc641f41a99186bbe44b70ff30",
+     "claim-version:320df5d2b659069d6ee99047352885c7e766d36b525ec38582a31308c4a33740",
+     "claim-version:2fe51a277ce64401810becee1a5c9b8c2712b6f8f1d029b746472c47a47b83b3",
+     "claim-version:b612256e50db1e92e42f8c2a6e8ffc23935383c71d2b225139e1233fa6b81a6d",
+     "claim-version:ecec2ed003914375b0415086a556c259eb8a2aac327c271edbf753b8c9045a0d",
+     "claim-version:146fdcbf3fcf00af350157abaf4dfc127a9387e05845bcc3cce53fb099abc28c",
+     "claim-version:62db74aa9bf83a893fe3ef6d28bc4fd39a1b2a667174804b7b64b8936ec64a4e",
+     "claim-version:7b4c33dbc28124e0a45342a33055bb59dd4fe3904b750c221c3da576b66a901a"
+    ],
+    "gaps": [
+     "缺乏GIS与GLS分部的定期收入数据、订单金额或book-to-bill比率、utilization率、分部利润率等可引用的具体数字来源。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:efaa37941fe2640b767ddd0c5f5f1736d83f8112dba342e4c843c9eea85be7ab",
+      "period": "2025-04-01..2025-06-30",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 3159000000 for 2025-04-01..2025-06-30, down 2.38% year over year from USD 3236000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:4b57baaffa2a673842368522db848527430d9a9e70a30e4f37f7b0ea51a75d8d",
+      "period": "2025-07-01..2025-09-30",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 3161000000 for 2025-07-01..2025-09-30, down 2.47% year over year from USD 3241000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:ea40467e493963936cebb5bf6f9e43543a48f08598f2fd7307b64d3935c798dd",
+      "period": "2025-10-01..2025-12-31",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 3194000000 for 2025-10-01..2025-12-31, down 0.96% year over year from USD 3225000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:a4d5fb26cbdf5725ff2b12e99fa09af363c9e2d975d2287d54040af485c80b14",
+      "period": "2026-04-01..2026-06-30",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 2999000000 for 2026-04-01..2026-06-30, down 5.06% year over year from USD 3159000000 in the comparable quarter."
+     }
+    ],
+    "title": "S7 数据跟踪"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "company:sec-cik:001688568",
+  "title": "mission-deliverable:initial_screen:001688568"
+ },
+ "case_ref": "live-dxc-v1",
+ "expected": {
+  "deterministic": {
+   "claim_refs_resolve": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "duplicate_parallel_citations": {
+    "count": 0,
+    "status": "pass"
+   },
+   "numbers_without_refs": {
+    "count": 0,
+    "status": "pass"
+   },
+   "required_sections_present": {
+    "count": 0,
+    "status": "pass"
+   },
+   "residual_citation_artefacts": {
+    "count": 0,
+    "status": "pass"
+   }
+  },
+  "rationale": "确定性四项全过，所以前四条标准都在 3–4。判断类标准留在中段：DXC 的证据底座薄（27 份研报、两家券商），文档做得到的判断有限。",
+  "score_ranges": {
+   "anti_thesis": [
+    2,
+    3
+   ],
+   "citation_dedupe": [
+    3,
+    4
+   ],
+   "citation_hygiene": [
+    3,
+    4
+   ],
+   "falsifiers_and_tracking": [
+    2,
+    3
+   ],
+   "gaps_honest": [
+    3,
+    4
+   ],
+   "key_driver_thesis": [
+    2,
+    3
+   ],
+   "number_provenance": [
+    3,
+    4
+   ],
+   "required_sections": [
+    3,
+    4
+   ],
+   "source_discipline": [
+    0,
+    2
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "DXC Initial Screen v1，五份里唯一确定性检查全过的一份：没有残迹、没有重复并列引用、章节齐备。它是 golden 集里的正例基线——同一条流水线在同一天可以写出干净的文档。",
+ "rubric": "initial_screen",
+ "source": "live Core 只读副本 2026-09-09；mission-deliverable-version:cc6d2b1855c4e3fc74e0ef0a7c9f1f5a（DXC v1，发布于 2026-09-09T10:29:56）"
+}
