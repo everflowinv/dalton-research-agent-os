@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sqlite3
+import time
 import uuid
 from collections.abc import Mapping
 from contextlib import contextmanager
@@ -45,6 +46,10 @@ from .policy import DEFAULT_POLICY, canonical_policy, evaluate_gate
 
 
 _SCHEMA_PATH = Path(__file__).with_name("schema.sql")
+# How long to keep trying to convert a database to WAL while another connection
+# holds it. Well inside the writer's 30 s request timeout: losing this race is
+# momentary, and a database that stays unconvertible is worth reporting.
+_WAL_CONVERSION_SECONDS = 10.0
 _THESIS_FIELDS = frozenset({"statement", "mechanism", "confidence", "implied_expectation", "claim_refs", "catalyst_refs", "falsifier_refs", "change_reason"})
 _THESIS_CONFIDENCE_LEVELS = frozenset({"low", "medium", "high"})
 _CLAIM_FIELDS = frozenset({"subject_ref", "metric_or_aspect", "period", "basis", "normalized_statement", "claim_kind", "value", "unit", "producer_invocation_refs", "actor_ref"})
@@ -126,11 +131,6 @@ class DaltonStore:
         # Long enough to ride out a checkpoint or a competing write, short
         # enough to stay inside the writer's own 30 s request timeout, so a
         # genuinely stuck lock is still reported rather than hidden.
-        #
-        # Set *before* the journal-mode pragma below, not after: converting to
-        # WAL takes a brief exclusive lock, and two connections opening the
-        # same database at once would otherwise race and one would fail
-        # outright instead of waiting. A concurrency test caught exactly that.
         self.connection.execute("PRAGMA busy_timeout = 15000")
         # P12a: WAL, so a reader does not block the writer.
         #
@@ -146,12 +146,45 @@ class DaltonStore:
         # existing Core once and every later connection inherits it. An
         # in-memory Core has no journal to speak of and is left alone.
         if self.path != ":memory:":
-            self.connection.execute("PRAGMA journal_mode = WAL")
+            self._ensure_wal()
         self.connection.create_function("dalton_authorized", 0, lambda: int(self._authorized))
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._migrate_thesis_authority_columns()
         self._backfill_model_execution_links()
         self._ensure_default_policy()
+
+    def _ensure_wal(self) -> None:
+        """Put the database in WAL, tolerating another process opening it.
+
+        P13ab: ``busy_timeout`` does not cover ``PRAGMA journal_mode``. SQLite
+        refuses the mode change immediately when another connection holds a
+        lock rather than calling the busy handler, so setting the timeout first
+        -- which this used to rely on, with a comment saying so -- does not
+        help at all. Opening the store then failed outright with "database is
+        locked", before any of the work it was opened for.
+
+        That is one process losing a race to another, which is ordinary: the
+        writer holds core.sqlite continuously and every lane subprocess opens
+        it. So a database already in WAL needs nothing, and a conversion that
+        loses the race is retried briefly and then re-checked -- if the winner
+        converted it, this connection is already where it wanted to be.
+        """
+
+        row = self.connection.execute("PRAGMA journal_mode").fetchone()
+        if row is not None and str(row[0]).lower() == "wal":
+            return
+        deadline = time.monotonic() + _WAL_CONVERSION_SECONDS
+        while True:
+            try:
+                self.connection.execute("PRAGMA journal_mode = WAL")
+                return
+            except sqlite3.OperationalError:
+                row = self.connection.execute("PRAGMA journal_mode").fetchone()
+                if row is not None and str(row[0]).lower() == "wal":
+                    return
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
 
     def _migrate_thesis_authority_columns(self) -> None:
         """Upgrade the legacy model-verification-only thesis table in place.

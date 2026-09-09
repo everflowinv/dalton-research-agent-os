@@ -315,6 +315,71 @@ class LauncherTests(unittest.TestCase):
         }), encoding="utf-8")
         self.assertEqual(launcher.status("initial-screen:" + "b" * 24)["status"], "orphaned")
 
+    def test_a_hold_says_whether_the_last_run_broke_or_had_nothing_to_write(self) -> None:
+        """P13aa: those are different facts and read as the same one.
+
+        Live, eight Initial Screen sections had been failing on a scheduler
+        conflict for two days while the hold reported that the ledger simply
+        had not moved -- which sends the reader to the ledger, where nothing is
+        wrong. The hold itself is right either way; the reason has to say which
+        case it is.
+        """
+
+        import json as _json
+        import tempfile
+        from datetime import datetime, timezone
+        from pathlib import Path as _Path
+
+        from dalton_core.initial_screen_launcher import (
+            InitialScreenCoordinator,
+            InitialScreenLauncher,
+        )
+
+        temp = tempfile.TemporaryDirectory(); self.addCleanup(temp.cleanup)
+        root = _Path(temp.name)
+        config = root / "model.json"; config.write_text("{}", encoding="utf-8")
+        launcher = InitialScreenLauncher(state_dir=root, model_config_path=config)
+        now = datetime(2026, 9, 9, 10, 0, tzinfo=timezone.utc)
+
+        def ticket(name: str, summary_status: str) -> str:
+            ref = "initial-screen:" + name * 24
+            directory = launcher.tickets_dir / (name * 24)
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "ticket.json").write_text(_json.dumps({
+                "schema_version": "0.1", "id": ref, "status": summary_status,
+                "pid": 1, "started_at": "2026-09-09T09:00:00+00:00",
+                "exit_code": 0, "completed_at": "2026-09-09T09:01:00+00:00",
+            }), encoding="utf-8")
+            (directory / "summary.json").write_text(_json.dumps({
+                "status": summary_status, "drafted": {"ticker": "EPAM"},
+                "failure_reason": None if summary_status == "succeeded" else "没有任何一节写出来",
+            }), encoding="utf-8")
+            return ref
+
+        class _Store:
+            def __init__(self, connection): self.connection = connection
+
+        import sqlite3
+
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        coordinator = InitialScreenCoordinator(
+            store=_Store(connection), launcher=launcher, clock=lambda: now)
+        signature = coordinator._signature()
+        for name, status, expected in (
+            ("c", "failed", "上一轮跑失败了"),
+            ("d", "succeeded", "账本也没有变化"),
+        ):
+            ref = ticket(name, status)
+            (root / "initial-screens").mkdir(exist_ok=True)
+            coordinator._latest_path().write_text(_json.dumps({
+                "ticket_ref": ref, "started_at": "2026-09-09T09:00:00+00:00",
+                "idle_signature": signature, "idle_at": "2026-09-09T09:30:00+00:00",
+            }), encoding="utf-8")
+            result = coordinator.dispatch_once()
+            self.assertEqual(result["status"], "held", result)
+            self.assertIn(expected, result["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()

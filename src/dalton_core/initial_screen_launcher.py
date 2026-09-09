@@ -236,8 +236,19 @@ class InitialScreenCoordinator:
                 except ValueError:
                     moment = None
                 if moment is not None and self.clock() - moment < IDLE_HOLD:
-                    return {**result, "status": "held",
-                            "reason": "上一轮没有可写的内容，账本也没有变化", "signature": signature}
+                    # P13aa: "nothing to write" and "the last attempt broke"
+                    # are different facts and were reported as the same one.
+                    # Live, eight sections had been failing on a scheduler
+                    # conflict for two days while this said the ledger simply
+                    # had not moved -- which sent the reader looking at the
+                    # ledger, where nothing was wrong. The hold is right either
+                    # way (an hour, then it retries); the reason has to say
+                    # which case it is.
+                    failed = (result.get("last") or {}).get("status") == "failed"
+                    return {**result, "status": "held", "signature": signature,
+                            "reason": ("上一轮跑失败了，等一轮再重试"
+                                       if failed else
+                                       "上一轮没有可写的内容，账本也没有变化")}
         try:
             ticket = self.launcher.start()
         except InitialScreenLaunchConflict as exc:

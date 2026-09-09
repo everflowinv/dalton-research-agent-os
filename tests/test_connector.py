@@ -870,7 +870,14 @@ class ConnectorStoreTests(unittest.TestCase):
                 core = DaltonStore(path)
                 authority = ConnectorStore(core, clock=self.clock)
                 try:
-                    barrier.wait(timeout=5)
+                    # The barrier is here to force the two reservations to
+                    # collide, not to bound how long the test may take. Five
+                    # seconds is generous alone and not always enough under a
+                    # full-suite load, and a barrier timeout raised out of this
+                    # thread before any outcome was recorded -- so the failure
+                    # arrived as "[] != ['admitted', 'quota_exceeded']", which
+                    # says nothing about a barrier.
+                    barrier.wait(timeout=60)
                     authority.reserve_quota(
                         self.invocation["id"], self.policy["id"], attempt_number,
                         {"calls": 1, "bytes": 1, "records": 0, "cost_micros": 0},
@@ -890,7 +897,10 @@ class ConnectorStoreTests(unittest.TestCase):
             for thread in threads:
                 thread.start()
             for thread in threads:
-                thread.join(timeout=10)
+                thread.join(timeout=60)
+            # A thread that never finished is its own failure, and saying so
+            # here keeps it from being reported as a missing outcome.
+            self.assertEqual([t for t in threads if t.is_alive()], [])
             self.assertEqual(sorted(outcomes), ["admitted", "quota_exceeded"])
 
     def test_settlement_is_exact_attempt_latest_usage_and_actual(self) -> None:
