@@ -21,7 +21,14 @@ from dalton_core.lane_child_launcher import (
     LaneChildRejected,
     LaneChildTicketNotFound,
 )
-from dalton_core.mission_model_forecast_lane import MissionModelForecastLaneCoordinator
+from dalton_core.lane_registry import LaunchAgentContext, lane_for_operation
+from dalton_core.mission_model_forecast_lane import (
+    LANE,
+    LAUNCHER_KWARG,
+    MissionModelForecastLaneCoordinator,
+    argv_fragment,
+    build_launcher,
+)
 from dalton_core.model_forecast_driver import ForecastModelAuthority, build_forecast_model
 from dalton_core.model_forecast_launcher import ModelForecastLauncher
 from dalton_core.store import DaltonStore
@@ -295,6 +302,49 @@ class LauncherTests(unittest.TestCase):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(LaneChildRejected):
                     launcher.start(**kwargs)
+
+
+class RegistrationTests(unittest.TestCase):
+    """The lane says itself once, and the shared machinery derives the rest."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.state = Path(self._dir.name)
+
+    def test_the_spec_is_registered_and_runs_after_the_specification_lane(self):
+        spec_lane = lane_for_operation("dispatch_company_model_spec")
+        self.assertIs(lane_for_operation("dispatch_company_model_forecast"), LANE)
+        # The specification decides the drivers this model rests on, so it has
+        # to have run first on the tick that produces both.
+        self.assertGreater(LANE.order, spec_lane.order)
+        self.assertEqual(LANE.driver_key, "company_model_forecast")
+        self.assertEqual(LANE.init_kwarg, LAUNCHER_KWARG)
+        self.assertEqual(LANE.param_fields, frozenset())
+        self.assertTrue(LANE.core_discovery)
+
+    def test_the_lane_is_off_until_there_is_a_core_to_read(self):
+        # Every lane's LaunchAgent fragment is gated on the thing it needs.
+        # This one needs nothing installed -- no connector, no model
+        # configuration -- so what it is gated on is the only thing it does
+        # need, and the invariant that a lane is off until its prerequisite
+        # exists holds here too.
+        self.assertEqual(argv_fragment(LaunchAgentContext(state=self.state)), [])
+        (self.state / "core.sqlite").write_bytes(b"")
+        self.assertEqual(argv_fragment(LaunchAgentContext(state=self.state)),
+                         ["--model-forecast-lane"])
+
+    def test_the_launcher_is_built_from_the_flag_and_nothing_else(self):
+        class Args:
+            db = str(self.state / "core.sqlite")
+            model_forecast_lane = False
+
+        self.assertIsNone(build_launcher(Args()))
+        Args.model_forecast_lane = True
+        launcher = build_launcher(Args())
+        self.addCleanup(launcher.close)
+        self.assertIsInstance(launcher, ModelForecastLauncher)
+        self.assertEqual(launcher.state_dir, self.state.resolve())
 
 
 if __name__ == "__main__":

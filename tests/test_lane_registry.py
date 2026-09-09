@@ -85,6 +85,26 @@ TICK_ORDER = (
 LANE_PARAM_FIELDS = {
     "dispatch_claim_review": frozenset({"max_claims"}),
 }
+# Lanes registered after the migration. Kept apart from the literals above so
+# those stay a record of what the writer used to spell out, and so a new lane
+# shows up here as a deliberate line rather than by quietly editing history.
+POST_MIGRATION_LANES = frozenset({"dispatch_company_model_forecast"})
+POST_MIGRATION_TICK_ORDER = {
+    # P13-M2: after the specification lane, whose judgement it rests on.
+    "dispatch_company_model_spec": ("dispatch_company_model_forecast",
+                                    "company_model_forecast"),
+}
+POST_MIGRATION_LAUNCHER_KWARGS = frozenset({"model_forecast_launcher"})
+
+
+def expected_tick_order() -> tuple[tuple[str, str | None], ...]:
+    out: list[tuple[str, str | None]] = []
+    for entry in TICK_ORDER:
+        out.append(entry)
+        after = POST_MIGRATION_TICK_ORDER.get(entry[0])
+        if after is not None:
+            out.append(after)
+    return tuple(out)
 
 
 class FakeLaneLauncher:
@@ -370,15 +390,17 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
     def test_every_lane_the_writer_used_to_spell_out_is_registered(self) -> None:
         self.assertEqual(
             frozenset(spec.operation for spec in registered_lanes()),
-            LANE_OPERATIONS,
+            LANE_OPERATIONS | POST_MIGRATION_LANES,
         )
 
     def test_the_writer_operation_sets_are_what_they_were(self) -> None:
         self.assertEqual(
-            writer_server.CORE_DISCOVERY_OPERATIONS, CORE_DISCOVERY_OPERATIONS
+            writer_server.CORE_DISCOVERY_OPERATIONS,
+            CORE_DISCOVERY_OPERATIONS | POST_MIGRATION_LANES,
         )
-        self.assertTrue(LANE_OPERATIONS <= writer_server.CORE_OPERATIONS)
-        for operation in LANE_OPERATIONS:
+        self.assertTrue(
+            LANE_OPERATIONS | POST_MIGRATION_LANES <= writer_server.CORE_OPERATIONS)
+        for operation in LANE_OPERATIONS | POST_MIGRATION_LANES:
             self.assertEqual(
                 writer_server.OPERATION_FIELDS[operation],
                 LANE_PARAM_FIELDS.get(operation, frozenset()),
@@ -387,7 +409,7 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
     def test_the_tick_order_and_keys_are_what_they_were(self) -> None:
         self.assertEqual(
             tuple((spec.operation, spec.driver_key) for spec in tick_lanes()),
-            TICK_ORDER,
+            expected_tick_order(),
         )
 
     def test_every_lane_is_either_handled_here_or_by_the_writer(self) -> None:
@@ -410,7 +432,8 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
             {spec.init_kwarg for spec in registered_lanes()
              if spec.init_kwarg is not None},
             {"statement_lane_launcher", "model_spec_launcher",
-             "initial_screen_launcher", "research_planner_launcher"},
+             "initial_screen_launcher", "research_planner_launcher"}
+            | POST_MIGRATION_LAUNCHER_KWARGS,
         )
 
     def test_an_unknown_launcher_keyword_is_refused(self) -> None:
@@ -522,7 +545,7 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
                 result["mission_statements"], {"status": "unavailable:RuntimeError"}
             )
             self.assertEqual(result["initial_screen"]["status"], "idle")
-            for _operation, key in TICK_ORDER:
+            for _operation, key in expected_tick_order():
                 self.assertIn(key, result)
             self.assertIn("mission_sec_dispatch", result)
             self.assertIn("forecast_reconciliation", result)
