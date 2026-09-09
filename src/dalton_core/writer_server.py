@@ -28,6 +28,17 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from .lane_registry import (
+    LaneRegistryError,
+    build_lane_launchers,
+    core_discovery_operations,
+    lane_for_operation,
+    lane_init_kwargs,
+    lane_operation_fields,
+    lane_operations,
+    add_lane_arguments,
+    registered_lanes,
+)
 from .mission_source_discovery import (
     ALPHAENGINE_SOURCE_REF,
     AlphaEngineSearchLauncher,
@@ -406,16 +417,15 @@ CORE_RECONCILIATION_OPERATIONS = frozenset({
 # P9d-1: the controller tick (core principal) advances mission source
 # discovery and reads its ledgers; launching a discovery on request stays a
 # human governance op.
+# P14-0: the lane dispatches come from the lane registry, which is the one
+# place a lane says what it is; the reads beside them stay literal because
+# they are projections, not lanes.
 CORE_DISCOVERY_OPERATIONS = frozenset({
-    "dispatch_mission_source_discovery", "mission_source_discovery_status",
+    "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
-    "dispatch_document_extraction",
-    "dispatch_mission_stage", "mission_stage_checklist",
-    "dispatch_claim_review", "dispatch_initial_screen", "dispatch_research_plan",
+    "mission_stage_checklist",
     "mission_deliverables",
-    "dispatch_mission_sec_quarters", "dispatch_mission_statements",
-    "dispatch_company_model_spec",
-})
+}) | core_discovery_operations()
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
     "weekly_brief_feedback", "weekly_brief_integrity_report",
@@ -512,14 +522,11 @@ CORE_OPERATIONS = frozenset({
     "bounded_planner_record_outcome", "bounded_planner_record_observation",
     "dispatch_coverage_mission_sec_lane",
     "reconcile_forecasts", "forecast_reconciliations", "get_forecast_reconciliation",
-    "dispatch_mission_source_discovery", "mission_source_discovery_status",
+    "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
-    "dispatch_document_extraction",
-    "dispatch_mission_stage", "mission_stage_checklist",
-    "dispatch_claim_review", "claim_retirement_challenges",
-    "dispatch_initial_screen", "dispatch_research_plan", "mission_deliverables",
-    "dispatch_mission_sec_quarters", "dispatch_mission_statements",
-    "dispatch_company_model_spec",
+    "mission_stage_checklist",
+    "claim_retirement_challenges",
+    "mission_deliverables",
     "mission_document_reviews",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
@@ -529,7 +536,7 @@ CORE_OPERATIONS = frozenset({
     "intent_context_bindings", "admit_intent_question", "issue_intent_directive",
     "publish_answer_sufficiency_policy", "answer_subjects", "route_answer",
     "dispatch_answer_refresh",
-})
+}) | lane_operations()
 
 
 # Explicit operation parameter contracts.  The server must reject unknown
@@ -673,16 +680,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "bounded_planner_record_observation": frozenset({"round_ref", "mandate_version_ref"}),
     "dispatch_coverage_mission_sec_lane": frozenset(),
     "reconcile_forecasts": frozenset({"requested_by", "company_ref", "claim_version_ref"}),
-    "dispatch_mission_source_discovery": frozenset(),
-    "dispatch_document_extraction": frozenset(),
-    "dispatch_mission_stage": frozenset(),
     "mission_stage_checklist": frozenset(),
-    "dispatch_claim_review": frozenset({"max_claims"}),
-    "dispatch_initial_screen": frozenset(),
-    "dispatch_research_plan": frozenset(),
-    "dispatch_mission_sec_quarters": frozenset(),
-    "dispatch_mission_statements": frozenset(),
-    "dispatch_company_model_spec": frozenset(),
     "mission_deliverables": frozenset({"mission_version_ref", "kind", "subject_ref"}),
     "claim_retirement_challenges": frozenset({"open_only", "limit"}),
     "decide_claim_retirement": frozenset({
@@ -798,6 +796,16 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "thesis_impact_invocation": frozenset({"invocation_ref"}),
     "thesis_impact_find_invocation": frozenset({"invocation_ref"}),
 }
+# P14-0: each registered lane owns its own parameter contract. A lane that
+# names an operation this file already spells out is a mistake worth failing
+# at import rather than a silent override.
+for _lane_operation, _lane_fields in lane_operation_fields().items():
+    if _lane_operation in OPERATION_FIELDS:
+        raise LaneRegistryError(
+            f"{_lane_operation} is both a registered lane and a literal operation"
+        )
+    OPERATION_FIELDS[_lane_operation] = _lane_fields
+del _lane_operation, _lane_fields
 
 
 OPERATION_ACTOR_FIELDS: dict[str, str] = {
@@ -1028,8 +1036,6 @@ class WriterServer:
         acquisition_launcher: AlphaEngineAcquisitionLauncher | None = None,
         candidate_staging_path: str | Path | None = None,
         sec_lane_launcher: SecLaneLauncher | None = None,
-        statement_lane_launcher: Any | None = None,
-        model_spec_launcher: Any | None = None,
         planner_model_config: Mapping[str, Any] | None = None,
         document_extraction_model_config: Mapping[str, Any] | None = None,
         search_launcher: AlphaEngineSearchLauncher | None = None,
@@ -1044,9 +1050,26 @@ class WriterServer:
         alphaengine_owner_call_cap: int | None = None,
         sec_filings_launcher: Any | None = None,
         sec_filings_plan_path: str | Path | None = None,
-        initial_screen_launcher: Any | None = None,
-        research_planner_launcher: Any | None = None,
+        **lane_launchers: Any,
     ):
+        # P14-0: a registered lane's launcher arrives on the keyword its
+        # LaneSpec named, and is kept by that name.  Adding a lane used to
+        # mean a new keyword here, a new instance attribute, a line in
+        # ``close()`` and a line in ``main()``; now it means none of them.  An
+        # unrecognised keyword is refused rather than ignored, because a
+        # misspelled launcher is a lane that silently never runs.
+        unknown = set(lane_launchers) - lane_init_kwargs()
+        if unknown:
+            raise WriterServerError(
+                "unknown lane launcher: " + ", ".join(sorted(unknown))
+            )
+        self._lane_launchers: dict[str, Any] = {
+            name: value for name, value in lane_launchers.items() if value is not None
+        }
+        # What a lane builds once per writer run and reuses -- a coordinator,
+        # usually.  Cleared when the store closes, so nothing outlives the
+        # handle it was built against.
+        self.lane_state: dict[str, Any] = {}
         if not principals:
             raise WriterServerError("at least one principal is required")
         # Explicit local installation only; never derive authority from an
@@ -1116,19 +1139,10 @@ class WriterServer:
         ):
             raise WriterServerError("alphaengine_owner_call_cap must be 1..2000")
         self._alphaengine_owner_call_cap = alphaengine_owner_call_cap
-        self._initial_screen_launcher = initial_screen_launcher
-        self._initial_screen_coordinator: Any | None = None
-        # P13o: the planner lane. Absent unless the owner pointed the install
-        # at a planner model, and then the whole lane simply is not there.
-        self._research_planner_launcher = research_planner_launcher
-        self._research_planner_coordinator: Any | None = None
         self._mission_deliverables: Any | None = None
         self._document_extraction_coordinator: DocumentExtractionCoordinator | None = None
         # S7d: out-of-process SEC company-facts lane runs (human-only ops).
         self._sec_lane_launcher = sec_lane_launcher
-        self._statement_lane_launcher = statement_lane_launcher
-        self._model_spec_launcher = model_spec_launcher
-        self._model_spec_coordinator = None
         # The same owner-only CandidateStaging file the Cockpit review plane
         # opens as ``research_review.candidate_staging_path``; the writer
         # stages transcript candidates into it and reads status back from it.
@@ -1191,6 +1205,33 @@ class WriterServer:
         if self._store is None:
             raise WriterServerError("writer server is not started")
         return self._store
+
+    @property
+    def state_dir(self) -> Path:
+        """The live state directory: where lanes write tickets and artifacts."""
+
+        return Path(self.db_path).expanduser().resolve().parent
+
+    def lane_launcher(self, init_kwarg: str) -> Any | None:
+        """This lane's launcher, or ``None`` when the lane is not installed."""
+
+        return self._lane_launchers.get(init_kwarg)
+
+    def lane_company_checklist(self) -> Any:
+        """A callable giving the mission's per-company stage checklist.
+
+        Two lanes queue by what the checklist says a company still owes.  The
+        stage driver is built once and evaluated on demand, so a tick that
+        never asks pays nothing.
+        """
+
+        driver = self._mission_stage_driver()
+
+        def checklist() -> list[Any]:
+            missions = driver.evaluate()["missions"]
+            return missions[0]["companies"] if missions else []
+
+        return checklist
 
     @property
     def registry(self) -> CapabilityRegistry:
@@ -1479,20 +1520,6 @@ class WriterServer:
                 **({} if self._document_extraction_discovery_windows is None
                    else {"discovery_windows_per_tick": self._document_extraction_discovery_windows}),
             )
-        if self._research_planner_launcher is not None:
-            from .research_planner_launcher import ResearchPlannerCoordinator
-
-            self._research_planner_coordinator = ResearchPlannerCoordinator(
-                store=self._store, launcher=self._research_planner_launcher,
-            )
-        if self._initial_screen_launcher is not None:
-            # P10c: the mission writes its own Initial Screen, one company per
-            # tick, out of process because each section is a model call.
-            from .initial_screen_launcher import InitialScreenCoordinator
-
-            self._initial_screen_coordinator = InitialScreenCoordinator(
-                store=self._store, launcher=self._initial_screen_launcher,
-            )
         self._backlog = ResearchQuestionBacklog(self._store)
         self._bounded_planner = BoundedPlannerAuthority(self._store)
         self._intent_writer = IntentWriterAuthority(
@@ -1606,10 +1633,16 @@ class WriterServer:
             self._document_extraction_launcher.close()
         if self._sec_lane_launcher is not None:
             self._sec_lane_launcher.close()
-        if self._statement_lane_launcher is not None:
-            self._statement_lane_launcher.close()
-        if self._model_spec_launcher is not None:
-            self._model_spec_launcher.close()
+        # P14-0: every registered lane's launcher, whether or not this file
+        # has ever heard of it.
+        for spec in registered_lanes():
+            if spec.init_kwarg is None:
+                continue
+            launcher = self._lane_launchers.get(spec.init_kwarg)
+            if launcher is not None:
+                launcher.close()
+        # A lane's cached coordinator holds the store handle being closed.
+        self.lane_state.clear()
         if self._candidate_review is not None:
             self._candidate_review.close()
             self._candidate_review = None
@@ -1704,7 +1737,16 @@ class WriterServer:
         if unknown:
             raise ProtocolError("unknown operation parameter")
         params = self._authorized_params(principal, operation, request.params)
-        method = getattr(self, f"_op_{operation}")
+        method = getattr(self, f"_op_{operation}", None)
+        if method is None:
+            # P14-0: a registered lane brings its own handler, so a new lane
+            # adds no method here.  The operation is already known -- it
+            # passed OPERATION_FIELDS above -- so a missing handler is a
+            # registration bug, not a caller's.
+            lane = lane_for_operation(operation)
+            if lane is None or lane.handler is None:
+                raise WriterServerError(f"{operation} has no handler")
+            return lane.handler(self, params)
         return method(params)
 
     def _authorized_params(self, principal: Principal, operation: str, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -2621,85 +2663,11 @@ class WriterServer:
             self._mission_deliverables = MissionDeliverableAuthority(self.store)
         return self._mission_deliverables
 
-    def _op_dispatch_mission_sec_quarters(self, p: Mapping[str, Any]) -> Any:
-        # Controller tick (P10d).  Queue the filings a company still needs, read
-        # out of the company-facts artifact authority already holds.  The
-        # existing SEC lane dispatcher drains the queue.
-        from .mission_sec_quarters import MissionSecQuartersCoordinator
-
-        driver = self._mission_stage_driver()
-
-        def checklist() -> list[Any]:
-            missions = driver.evaluate()["missions"]
-            return missions[0]["companies"] if missions else []
-
-        return MissionSecQuartersCoordinator(
-            store=self.store, missions=self.coverage_mission,
-            state_dir=Path(self.db_path).expanduser().resolve().parent,
-            checklist=checklist,
-        ).dispatch_once()
-
-    def _op_dispatch_company_model_spec(self, p: Mapping[str, Any]) -> Any:
-        # Controller tick (P13am). One company's model specification at a time.
-        # The lane has no queue: what needs deciding is derived from the ledger
-        # every tick, so its resting state is silence and there is nothing to
-        # leave stuck.
-        if self._model_spec_launcher is None:
-            return {"status": "unconfigured",
-                    "reason": "no company model lane on this writer"}
-        if self._model_spec_coordinator is None:
-            from .mission_model_spec_lane import MissionModelSpecLaneCoordinator
-
-            def mission() -> Any:
-                pointer = self.store.connection.execute(
-                    "SELECT mission_version_id FROM coverage_mission_pointer "
-                    "ORDER BY mission_ref LIMIT 1"
-                ).fetchone()
-                return (None if pointer is None
-                        else self.coverage_mission.mission(pointer["mission_version_id"]))
-
-            self._model_spec_coordinator = MissionModelSpecLaneCoordinator(
-                missions=self.coverage_mission,
-                launcher=self._model_spec_launcher,
-                mission=mission,
-            )
-        return self._model_spec_coordinator.dispatch_once()
-
-    def _op_dispatch_mission_statements(self, p: Mapping[str, Any]) -> Any:
-        # Controller tick (P13ak). One financial-statements child at a time:
-        # queue the companies the checklist covers, launch one, and record a
-        # finished child's lines into the ledger.
-        if self._statement_lane_launcher is None:
-            return {"status": "unconfigured",
-                    "reason": "no statements lane on this writer"}
-        from .mission_statement_lane import MissionStatementLaneCoordinator
-
-        driver = self._mission_stage_driver()
-
-        def checklist() -> list[Any]:
-            missions = driver.evaluate()["missions"]
-            return missions[0]["companies"] if missions else []
-
-        return MissionStatementLaneCoordinator(
-            missions=self.coverage_mission,
-            launcher=self._statement_lane_launcher,
-            checklist=checklist,
-        ).dispatch_once()
-
-    def _op_dispatch_initial_screen(self, p: Mapping[str, Any]) -> Any:
-        # Controller tick (P10c).  One company's Initial Screen per tick.
-        if self._initial_screen_coordinator is None:
-            return {"status": "unconfigured", "reason": "no initial screen lane on this writer"}
-        return self._initial_screen_coordinator.dispatch_once()
-
-    def _op_dispatch_research_plan(self, p: Mapping[str, Any]) -> Any:
-        # Controller tick (P13o). One planner child at a time; the coordinator
-        # holds when the state has not moved, and the child itself refuses to
-        # pay twice for the same world.
-        if self._research_planner_coordinator is None:
-            return {"status": "unconfigured",
-                    "reason": "no research planner lane on this writer"}
-        return self._research_planner_coordinator.dispatch_once()
+    # P14-0: dispatch_mission_sec_quarters, dispatch_mission_statements,
+    # dispatch_company_model_spec, dispatch_research_plan and
+    # dispatch_initial_screen used to live here as five near-identical
+    # methods.  Each now lives in its own lane module and reaches this server
+    # through the lane registry; ``_handle`` falls through to it.
 
     def _op_mission_deliverables(self, p: Mapping[str, Any]) -> Any:
         values = dict(p)
@@ -3665,22 +3633,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Windows per tick that may also be read for the figures a company owes "
              "(0..50; 0 disables). Each is a second paid model call.",
     )
-    # P11r: the pass that learns what to ask the figures pass for.
-    parser.add_argument(
-        "--research-planner-model-config", type=Path, default=None,
-        help="Planner model configuration written by research_planner_setup. Omit and "
-             "the planner lane is absent: it decides what the research works on next, "
-             "and its model is far more expensive than the extraction model.",
-    )
-    # P13ad: the deliverable is written, not extracted, and may want its own
-    # model. Omit and it keeps being written by the extraction model, which is
-    # what it was doing before anyone chose.
-    parser.add_argument(
-        "--initial-screen-model-config", type=Path, default=None,
-        help="Deliverable drafting model configuration written by "
-             "deliverable_model_setup. Omit and the Initial Screen is drafted "
-             "with the extraction model configuration.",
-    )
     parser.add_argument(
         "--alphaengine-owner-call-cap", type=int, default=None,
         help="Safety cap on AlphaEngine calls per 24h (1..2000). The effective cap "
@@ -3709,21 +3661,9 @@ def main(argv: list[str] | None = None) -> int:
         "--sec-lane-rehearsal-approved-by",
         help="rehearsal only: in-memory approved SEC governance principal (tests)",
     )
-    # P13ak: the financial-statements lane. Off unless an approved governance
-    # record is named, like every other connector on this writer.
-    parser.add_argument(
-        "--statement-lane-governance",
-        help="approved sec-financial-statements governance record",
-    )
-    parser.add_argument(
-        "--statement-lane-fixture",
-        help="rehearsal only: replay a captured parse instead of reaching SEC",
-    )
-    parser.add_argument("--statement-lane-user-agent", default=None)
-    # P13am: the company model specification lane. Needs a model, because
-    # the judgement is the whole product; without one the child answers
-    # "gated" and nothing is written.
-    parser.add_argument("--model-spec-model-config")
+    # P14-0: every registered lane adds its own arguments. A new lane adds
+    # none here.
+    add_lane_arguments(parser)
     args = parser.parse_args(argv)
     try:
         principals = load_principals(args.token_config)
@@ -3751,29 +3691,9 @@ def main(argv: list[str] | None = None) -> int:
                 mode_args=lane_mode_args,
                 user_agent=args.sec_lane_user_agent,
             )
-        statement_lane_launcher = None
-        if args.statement_lane_governance is not None:
-            from .sec_financials_launcher import SecFinancialsLauncher
-
-            statement_mode_args = (
-                ("--fixture-file", args.statement_lane_fixture)
-                if args.statement_lane_fixture is not None else ("--allow-network",)
-            )
-            statement_lane_launcher = SecFinancialsLauncher(
-                state_dir=Path(args.db).expanduser().resolve().parent,
-                governance_path=args.statement_lane_governance,
-                mode_args=statement_mode_args,
-                user_agent=args.statement_lane_user_agent,
-            )
-        model_spec_launcher = None
-        if args.model_spec_model_config is not None:
-            from .company_model_launcher import CompanyModelSpecLauncher
-
-            model_spec_launcher = CompanyModelSpecLauncher(
-                state_dir=Path(args.db).expanduser().resolve().parent,
-                model_config_path=args.model_spec_model_config,
-                scheduler_db=args.scheduler,
-            )
+        # P14-0: every registered lane builds its own launcher from the
+        # arguments it declared, or answers None and is simply absent.
+        lane_launchers = build_lane_launchers(args)
         if args.connector_governance is not None:
             if args.acquisition_rehearsal_document is not None:
                 mode_args: tuple[str, ...] = (
@@ -3884,27 +3804,6 @@ def main(argv: list[str] | None = None) -> int:
                 "broker_client_id": args.planner_broker_client_id,
                 "expected_agent_id": args.planner_expected_agent_id,
             }
-        initial_screen_launcher = None
-        if args.document_extraction_model_config is not None:
-            from .initial_screen_launcher import InitialScreenLauncher
-
-            # P13ad: the deliverable's own model when the owner has chosen one,
-            # otherwise the extraction model it has always used.
-            initial_screen_launcher = InitialScreenLauncher(
-                state_dir=Path(args.db).expanduser().resolve().parent,
-                model_config_path=(args.initial_screen_model_config
-                                   or args.document_extraction_model_config),
-                scheduler_db=args.scheduler,
-            )
-        research_planner_launcher = None
-        if args.research_planner_model_config is not None:
-            from .research_planner_launcher import ResearchPlannerLauncher
-
-            research_planner_launcher = ResearchPlannerLauncher(
-                state_dir=Path(args.db).expanduser().resolve().parent,
-                model_config_path=args.research_planner_model_config,
-                scheduler_db=args.scheduler,
-            )
         sec_filings_launcher = None
         if args.sec_filings_governance is not None and args.sec_filings_discovery_plan is not None:
             from .mission_source_discovery import SecFilingsIndexLauncher
@@ -3936,8 +3835,6 @@ def main(argv: list[str] | None = None) -> int:
             acquisition_launcher=launcher,
             candidate_staging_path=args.candidate_staging,
             sec_lane_launcher=sec_lane_launcher,
-            statement_lane_launcher=statement_lane_launcher,
-            model_spec_launcher=model_spec_launcher,
             planner_model_config=planner_model_config,
             document_extraction_model_config=(None if args.document_extraction_model_config is None
                 else json.loads(Path(args.document_extraction_model_config).read_text(encoding="utf-8"))),
@@ -3953,8 +3850,7 @@ def main(argv: list[str] | None = None) -> int:
             web_search_plan_path=args.web_search_discovery_plan,
             web_fetch_launcher=web_fetch_launcher,
             document_extraction_launcher=document_extraction_launcher,
-            initial_screen_launcher=initial_screen_launcher,
-            research_planner_launcher=research_planner_launcher,
+            **lane_launchers,
         )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:
