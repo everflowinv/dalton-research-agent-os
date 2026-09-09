@@ -106,6 +106,13 @@ def pending_companies(
         for item in (mission.get("universe") or []) if isinstance(item, dict)
     }
     if company_ref is not None:
+        # Named companies go through the universe too. The mission is what
+        # says which companies this automation may work on at all, and a hand
+        # run that could reach past it would be a way to write a model for a
+        # company nobody admitted -- with the mission's own principal on it.
+        if company_ref not in universe:
+            raise ForecastModelUnavailable(
+                f"{company_ref} is not in this mission's universe")
         refs = [company_ref]
     else:
         refs = sorted({str(item["company_ref"])
@@ -187,8 +194,13 @@ def run_model_forecast(
             summary.update({"status": "idle", "forecast_status": "no_mission"})
             return summary
         mission = missions.mission(pointer["mission_version_id"])
-        chosen, spec, table = choose_company(
-            missions, models, mission, company_ref=company_ref)
+        try:
+            chosen, spec, table = choose_company(
+                missions, models, mission, company_ref=company_ref)
+        except ForecastModelUnavailable as exc:
+            summary.update({"status": "succeeded",
+                            "forecast_status": f"refused:{exc}"})
+            return summary
         if chosen is None:
             summary.update({"status": "idle",
                             "forecast_status": "nothing_to_model"})

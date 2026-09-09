@@ -88,6 +88,11 @@ QUARTER_GAP_MIN_DAYS = 80
 QUARTER_GAP_MAX_DAYS = 100
 MAX_FORECAST_PERIODS = 12
 
+# Not a record field: the key a caller stamps on a body to say which version
+# it was computed from. ``publish`` reads it, checks it against the head of the
+# chain and drops it before the record is hashed.
+SOURCE_VERSION_KEY = "source_version_ref"
+
 _SCHEMA_PATH = Path(__file__).with_name("forecast_driver_schema.sql")
 _VALUE_QUANT = Decimal("0.00000001")
 _RATE_QUANT = Decimal("0.000000000001")
@@ -245,6 +250,9 @@ _PERIOD_FIELDS = frozenset({"start", "end", "calendar", "kind"})
 _RESULT_REF_FIELDS = frozenset({"ref", "period_end"})
 
 
+_UNSET = object()
+
+
 class ForecastModelError(RuntimeError):
     """Base error for the driver model."""
 
@@ -323,6 +331,19 @@ def _iso_date(value: Any, name: str) -> str:
     except ValueError as exc:
         raise ForecastModelValidationError(f"{name} must be YYYY-MM-DD") from exc
     return value
+
+
+def company_slug(company_ref: str) -> str:
+    """A stable, collision-free name for one company inside a ref.
+
+    Not the last colon-separated segment. Live already holds
+    ``company:sec-cik:001688568`` beside ``company:sec-cik:0001467373`` -- one
+    of them is missing a digit -- and a ref shape that is not a CIK at all is a
+    matter of time. Two companies whose refs ended in the same segment would
+    write into each other's version chain, and the damage would be invisible.
+    """
+
+    return content_hash({"company_ref": _text(company_ref, "company_ref")})[:32]
 
 
 def _plain(value: Decimal) -> str:
@@ -550,7 +571,11 @@ def trailing_growth(cells: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None
     return {
         "value": mean.quantize(_RATE_QUANT, ROUND_HALF_UP),
         "count": len(used),
-        "first_period": str(used[0][2]["period_end"]),
+        # The window is the whole span the changes were measured across, which
+        # starts at the *earlier* quarter of the first pair. Naming only the
+        # later one would describe a window a quarter shorter than the one that
+        # was actually averaged.
+        "first_period": str(used[0][1]["period_end"]),
         "last_period": str(used[-1][2]["period_end"]),
         "refs": refs,
     }
@@ -559,7 +584,16 @@ def trailing_growth(cells: Sequence[Mapping[str, Any]]) -> dict[str, Any] | None
 def trailing_share(
     cells: Sequence[Mapping[str, Any]], base_cells: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any] | None:
-    """The average share of the base line over the trailing quarters."""
+    """The average share of the base line over the trailing quarters.
+
+    Refused outright when the base changes sign inside the window. A company
+    that lost money in one quarter and made money in the next has a tax rate of
+    minus something and plus something, and their average is a number with no
+    meaning at all -- it is not "the tax rate", it is an artefact of how far
+    apart the loss and the profit happened to be. The quarters come back
+    unassumed and the lines that needed them say they are unavailable, which is
+    a hole a person can look at rather than a rate nobody can defend.
+    """
 
     base_by_period = {str(cell["period_end"]): cell for cell in base_cells}
     shares: list[tuple[Decimal, Mapping[str, Any], Mapping[str, Any]]] = []
@@ -575,6 +609,9 @@ def trailing_share(
     if not shares:
         return None
     used = shares[-TRAILING_QUARTERS:]
+    signs = {_decimal(base["value"], "history value") > 0 for _, _, base in used}
+    if len(signs) > 1:
+        return None
     mean = (sum((item[0] for item in used), Decimal(0)) / Decimal(len(used)))
     refs: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
@@ -667,9 +704,12 @@ def default_assumptions(
                 if trailing is None:
                     continue
                 because = (
-                    f"the average quarter-on-quarter change over the "
-                    f"{trailing['count']} quarters filed to {trailing['last_period']} "
-                    f"({_percent(trailing['value'])}%), carried forward unchanged"
+                    f"the average of the {trailing['count']} quarter-on-quarter "
+                    f"changes filed between {trailing['first_period']} and "
+                    f"{trailing['last_period']} ({_percent(trailing['value'])}%), "
+                    "carried forward unchanged; an average of quarters carries "
+                    "no seasonality, so a quarter unlike the ones averaged will "
+                    "be wrong by however much it is unlike them"
                 )
                 for period in periods:
                     out.append(_assumption(
@@ -696,8 +736,9 @@ def default_assumptions(
                 continue
             because = (
                 f"the average share of {base_name} over the {trailing['count']} "
-                f"quarters filed to {trailing['last_period']} "
-                f"({_percent(trailing['value'])}%), carried forward unchanged"
+                f"quarters filed between {trailing['first_period']} and "
+                f"{trailing['last_period']} ({_percent(trailing['value'])}%), "
+                "carried forward unchanged"
             )
             for period in periods:
                 out.append(_assumption(
@@ -996,9 +1037,14 @@ def compute_results(
                 assumption = driver_assumptions.get(end)
                 base = base_values.get(end)
                 if assumption is None:
+                    # Two ways to get here and the reader should look at the
+                    # same place for both: too little filed history to average,
+                    # or a base that changed sign inside the window, whose mean
+                    # would be an artefact rather than a rate.
                     line["cells"].append(_unavailable_cell(
                         ref, period,
-                        f"no share assumption for {driver['concept']} in this quarter"))
+                        f"no share assumption for {driver['concept']} in this "
+                        "quarter; its trailing history gives no usable rate"))
                     continue
                 if base is None:
                     line["cells"].append(_unavailable_cell(
@@ -1273,6 +1319,9 @@ def build_forecast_model(
     if evidence_refs is None:
         evidence_refs = filing_refs(drivers, table.get("periods"))
     return {
+        # A first model expects to be the first: publishing it against a
+        # company that already has one is a lost update, not a first model.
+        SOURCE_VERSION_KEY: None,
         "schema_version": SCHEMA_VERSION,
         "model_ref": f"forecast-model:{company_ref}",
         "company_ref": company_ref,
@@ -1506,6 +1555,10 @@ def actualize_model(
     if evidence_refs is None:
         evidence_refs = filing_refs(drivers, ends)
     body = {
+        # The version this was derived from, checked at publish time. Without
+        # it, actualising an old version after someone revised a newer one
+        # would append a version silently reverting the revision.
+        SOURCE_VERSION_KEY: str(prior["id"]),
         **{key: value for key, value in prior.items()
            if key in _RECORD_FIELDS and key not in _BODY_EXCLUDED},
         "history_periods": [str(item) for item in (table.get("periods") or [])],
@@ -1605,10 +1658,15 @@ def revise_assumptions(
          if str(item["period"]["end"]) in periods_by_end],
         forecast, statements=prior.get("statements") or {},
         base=chain_base(revenue_anchor(drivers), prior, str(forecast[0]["end"])))
+    # Everything that is not a quarter being recomputed, not merely the
+    # quarters still listed as realised. The realised list is capped, and a
+    # cell whose quarter has aged out of it is still a cell: dropping it would
+    # delete the estimate and the actual beside it, which is the one pair the
+    # whole layer exists to keep.
     carried: dict[str, list[dict[str, Any]]] = {}
     for line in prior.get("results") or []:
         kept = [dict(cell) for cell in (line.get("cells") or [])
-                if str(cell["period"]["end"]) in realised]
+                if str(cell["period"]["end"]) not in periods_by_end]
         if kept:
             carried[str(line["ref"])] = kept
     results = []
@@ -1617,8 +1675,16 @@ def revise_assumptions(
         line["cells"] = sorted(cells, key=lambda cell: (
             str(cell["period"]["end"]), 0 if cell["kind"] == "estimate" else 1))
         results.append(_finish(line))
+    # A line the recomputation no longer produces but which holds settled
+    # quarters keeps them. Dropping it would lose an estimate and the actual
+    # beside it because the forecast ahead of it stopped being computable.
+    for line in prior.get("results") or []:
+        kept = carried.pop(str(line["ref"]), None)
+        if kept:
+            results.append(_finish({**dict(line), "cells": kept}))
 
     return {
+        SOURCE_VERSION_KEY: str(prior["id"]),
         **{key: value for key, value in prior.items()
            if key in _RECORD_FIELDS and key not in _BODY_EXCLUDED},
         "assumptions": sorted(assumptions, key=lambda item: (
@@ -2057,6 +2123,7 @@ class ForecastModelAuthority:
         """
 
         body = dict(body)
+        source = body.pop(SOURCE_VERSION_KEY, _UNSET)
         for field in _BODY_EXCLUDED - {"mission_version_ref", "change_reason",
                                        "evidence_refs", "decision"}:
             body.pop(field, None)
@@ -2074,9 +2141,19 @@ class ForecastModelAuthority:
         ).fetchone()
         if latest is not None and latest["body_hash"] == digest:
             return {**self.model(latest["version_id"]), "status": "duplicate"}
+        # Lost update. A caller computed this from some version; if the chain
+        # has moved since, appending it would quietly undo whatever moved it --
+        # and the record would carry the *caller's* change_reason for a change
+        # nobody made. The caller has to recompute against the new head.
+        head = None if latest is None else str(latest["version_id"])
+        if source is not _UNSET and source != head:
+            raise ForecastModelConflict(
+                f"this model is now at {head or 'no version'}, and this body was "
+                f"computed from {source or 'no version'}"
+            )
         version = 1 if latest is None else int(latest["version_number"]) + 1
         prior = None if latest is None else latest["version_id"]
-        version_id = f"{DRIVER_MODEL_VERSION_PREFIX}{company_ref.split(':')[-1]}:{version}"
+        version_id = f"{DRIVER_MODEL_VERSION_PREFIX}{company_slug(company_ref)}:{version}"
         record = {
             **body,
             "id": version_id,
@@ -2186,8 +2263,10 @@ __all__ = [
     "ForecastModelNotFound",
     "ForecastModelUnavailable",
     "ForecastModelValidationError",
+    "SOURCE_VERSION_KEY",
     "body_hash",
     "build_drivers",
+    "company_slug",
     "build_forecast_model",
     "compute_results",
     "default_assumptions",

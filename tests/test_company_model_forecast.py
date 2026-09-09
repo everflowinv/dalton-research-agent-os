@@ -144,8 +144,9 @@ class ReconciliationTests(unittest.TestCase):
 
     def test_the_reconciler_finds_and_grades_the_driver_model_line(self):
         # Accenture's quarter to 2026-08-31 comes in at 1,500.0m against the
-        # 1,464.1m this model estimated: 2.45% above, which is an overturn
-        # candidate and therefore a human checkpoint.
+        # 1,464.1m this model estimated: 2.45% above, which is the notable
+        # band -- past the 1% that is worth reading and short of the 3% that
+        # would name the forecast_overturn checkpoint.
         claim = self.fixture.claim(current="1500000000", prior="1331000000")
         pairs = self.fixture.reconciler.pending_pairs()
         self.assertEqual(len(pairs), 1)
@@ -357,6 +358,18 @@ class LaneStateTests(unittest.TestCase):
         # Worth asserting rather than assuming: if it did not, this lane would
         # need a new mission version signed by the owner before it could write.
         self.assertIsNone(missing_write_scope(self.mission))
+
+    def test_a_named_company_outside_the_universe_is_refused(self):
+        # The mission is what says which companies this automation may work on
+        # at all. A hand run that could reach past it would be a way to write a
+        # model for a company nobody admitted, with the mission's own principal
+        # on the record.
+        summary = self.child(company_ref="company:sec-cik:0000320193")
+        self.assertEqual(summary["status"], "succeeded")
+        self.assertEqual(
+            summary["forecast_status"],
+            "refused:company:sec-cik:0000320193 is not in this mission's universe")
+        self.assertEqual(ForecastModelAuthority(self.store).versions(ACN), [])
 
     def test_a_dry_run_chooses_and_stops(self):
         summary = self.child(dry_run=True)

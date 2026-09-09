@@ -22,9 +22,13 @@ from decimal import Decimal
 
 from dalton_core.company_model_inputs import build_model_inputs
 from dalton_core.company_model_report import render_forecast_model
+from dalton_core.model_forecast import DRIVER_FORMULA_HASH, DRIVER_FORMULA_REF
 from dalton_core.model_forecast_driver import (
+    CHANGE_REASONS,
     CONCEPT_ROLES,
     GENERATOR_REF,
+    MAX_REALISED_PERIODS,
+    SOURCE_VERSION_KEY,
     AssumptionRefused,
     ForecastModelAuthority,
     ForecastModelUnavailable,
@@ -32,15 +36,18 @@ from dalton_core.model_forecast_driver import (
     actualize_model,
     build_drivers,
     build_forecast_model,
+    company_slug,
     default_assumptions,
     draft_assumptions,
     forecast_periods,
+    ForecastModelConflict,
     model_readiness,
     replay_cell,
     revenue_anchor,
     revise_assumptions,
     validate_forecast_model,
 )
+from dalton_core import model_forecast_driver
 from dalton_core.store import DaltonStore, canonical_json
 from tests.test_company_model_inputs import ACN, FakeMissions, _line
 
@@ -798,6 +805,204 @@ class RevisionTests(unittest.TestCase):
 def cells_all(record, ref):
     result = next(item for item in record["results"] if item["ref"] == ref)
     return list(result["cells"])
+
+
+class FrozenContractTests(unittest.TestCase):
+    """The things a later version of this module may not quietly change.
+
+    A formula hash is what a stored line binds; a change to the semantics text
+    that nobody noticed would make every line already written unreadable, and
+    the failure would show up as "derived line must use a frozen formula" long
+    after the change. So the hash is written down here in full.
+    """
+
+    def test_the_driver_formula_is_frozen(self):
+        self.assertEqual(DRIVER_FORMULA_REF, "formula:driver-model:1")
+        self.assertEqual(
+            DRIVER_FORMULA_HASH,
+            "908b13eede153e0fe64717249f01f24ac008a7d7fe8b412c0b6a1425b368fa25")
+
+    def test_the_change_reasons_are_the_owner_s_five(self):
+        self.assertEqual(CHANGE_REASONS, (
+            "filing_actual", "driver_event", "assumption_review",
+            "evidence_thicker", "human_revision"))
+
+    def test_a_company_is_named_by_its_whole_ref(self):
+        # Not the last colon-separated segment. Live already holds
+        # company:sec-cik:001688568 beside company:sec-cik:0001467373 -- one of
+        # them is missing a digit -- and two companies whose refs ended in the
+        # same segment would write into each other's version chain.
+        self.assertEqual(company_slug(ACN), "ff98fb9b6accc2576b2bfe8fa89a38d5")
+        self.assertNotEqual(company_slug("company:sec-cik:1"),
+                            company_slug("company:other:1"))
+        self.assertEqual(len(company_slug(ACN)), 32)
+
+
+class LostUpdateTests(unittest.TestCase):
+    """Two callers, one chain, and the version each of them started from.
+
+    The scenario is ordinary: something revises the first forecast quarter,
+    and a caller still holding the version before that revises the second one.
+    Publishing the second body would append a version that silently reverts the
+    first revision -- and it would carry the second caller's ``change_reason``,
+    so the record would say ``assumption_review`` for a change nobody made.
+    """
+
+    def setUp(self) -> None:
+        self.store = DaltonStore(":memory:")
+        self.addCleanup(self.store.close)
+        self.authority = ForecastModelAuthority(self.store)
+        self.first = self.authority.publish(model())
+        self.claim = {"kind": "claim", "ref": "claim-version:x", "concept": None,
+                      "period_end": None, "accession": None}
+
+    def revision(self, prior, period, value, reason="assumption_review"):
+        return revise_assumptions(
+            prior, [{"driver": f"concept:{REVENUE_CONCEPT}", "period": period,
+                     "value": value, "because": "A view was taken.",
+                     "refs": [self.claim]}],
+            change_reason=reason, evidence_refs=[self.claim],
+            actor_ref="human:analyst")
+
+    def test_a_body_computed_from_a_version_that_has_moved_is_refused(self):
+        stale = self.revision(self.first, "2026-11-30", "0.05")
+        self.authority.publish(self.revision(self.first, "2026-08-31", "0.20"))
+        with self.assertRaises(ForecastModelConflict) as caught:
+            self.authority.publish(stale)
+        self.assertIn("computed from", str(caught.exception))
+        # And the revision that did land is still what the chain says.
+        latest = self.authority.latest(ACN)
+        self.assertEqual(latest["version"], 2)
+        self.assertEqual(
+            Decimal(cells_of(latest, "result:revenue")["2026-08-31"]["value"]),
+            Decimal("1597200000"))
+
+    def test_recomputing_against_the_new_head_lands(self):
+        second = self.authority.publish(self.revision(self.first, "2026-08-31", "0.20"))
+        third = self.authority.publish(self.revision(second, "2026-11-30", "0.05"))
+        self.assertEqual(third["version"], 3)
+        # Both revisions are in it: the first quarter kept its 20%.
+        self.assertEqual(
+            Decimal(cells_of(third, "result:revenue")["2026-08-31"]["value"]),
+            Decimal("1597200000"))
+        self.assertEqual(
+            Decimal(cells_of(third, "result:revenue")["2026-11-30"]["value"]),
+            Decimal("1677060000"))
+
+    def test_a_first_model_against_a_company_that_already_has_one_is_refused(self):
+        self.authority.publish(self.revision(self.first, "2026-08-31", "0.20"))
+        body = model(specification=spec(quarters=6))
+        self.assertIsNone(body[SOURCE_VERSION_KEY])
+        with self.assertRaises(ForecastModelConflict):
+            self.authority.publish(body)
+
+    def test_an_actualisation_of_a_version_that_has_moved_is_refused(self):
+        table = build_model_inputs(filed_quarter(ledger()), spec())
+        stale = actualize_model(self.first, table)
+        self.authority.publish(self.revision(self.first, "2026-11-30", "0.05"))
+        with self.assertRaises(ForecastModelConflict):
+            self.authority.publish(stale)
+
+
+class AgedOutRealisedTests(unittest.TestCase):
+    """A quarter that falls off the realised list is still a quarter that happened."""
+
+    def test_a_revision_does_not_delete_settled_quarters_it_no_longer_lists(self):
+        store = DaltonStore(":memory:")
+        self.addCleanup(store.close)
+        authority = ForecastModelAuthority(store)
+        record = authority.publish(model())
+        table = build_model_inputs(filed_quarter(ledger()), spec())
+        record = authority.publish(actualize_model(record, table))
+        self.assertEqual([item["end"] for item in record["realised_periods"]],
+                         ["2026-08-31"])
+        # The cap is one, so the next filing pushes this quarter off the list.
+        original = model_forecast_driver.MAX_REALISED_PERIODS
+        model_forecast_driver.MAX_REALISED_PERIODS = 1
+        self.addCleanup(setattr, model_forecast_driver,
+                        "MAX_REALISED_PERIODS", original)
+        second = filed_quarter(
+            filed_quarter(ledger()), end="2026-11-30", start="2026-09-01",
+            values={REVENUE_CONCEPT: "1600000000", COST_CONCEPT: "1280000000",
+                    SGA_CONCEPT: "160000000", TAX_CONCEPT: "40000000"},
+            accession="0001467373-26-000100")
+        record = authority.publish(
+            actualize_model(record, build_model_inputs(second, spec())))
+        self.assertEqual([item["end"] for item in record["realised_periods"]],
+                         ["2026-11-30"])
+        revised = authority.publish(revise_assumptions(
+            record, [{"driver": f"concept:{REVENUE_CONCEPT}", "period": "2027-02-28",
+                      "value": "0.05", "because": "A view was taken.",
+                      "refs": [{"kind": "claim", "ref": "claim-version:x",
+                                "concept": None, "period_end": None,
+                                "accession": None}]}],
+            change_reason="assumption_review",
+            evidence_refs=[{"kind": "claim", "ref": "claim-version:x",
+                            "concept": None, "period_end": None,
+                            "accession": None}],
+            actor_ref="human:analyst"))
+        cells = {(cell["period"]["end"], cell["kind"]): cell
+                 for cell in cells_all(revised, "result:revenue")}
+        # Both settled quarters survive, estimate and actual, even though only
+        # the later one is still on the realised list.
+        self.assertEqual(Decimal(cells[("2026-08-31", "actual")]["value"]),
+                         Decimal("1500000000"))
+        self.assertEqual(Decimal(cells[("2026-08-31", "estimate")]["value"]),
+                         Decimal("1464100000"))
+        self.assertTrue(cells[("2026-08-31", "estimate")]["superseded_by"])
+        self.assertEqual(Decimal(cells[("2026-11-30", "actual")]["value"]),
+                         Decimal("1600000000"))
+
+
+class SignFlipTests(unittest.TestCase):
+    """An average share of a base that changed sign is not a rate.
+
+    A company that lost money in one quarter and made money in the next has a
+    tax rate of minus something and plus something; their mean is an artefact
+    of how far apart the loss and the profit were. The quarters come back
+    unassumed and the lines that needed them say so.
+    """
+
+    def test_a_base_that_changes_sign_gets_no_share_assumption(self):
+        losing = dict(SERIES)
+        # Cost above revenue in the first two quarters: operating income is
+        # negative, then positive.
+        losing[COST_CONCEPT] = ("1100000000", "1210000000", "968000000", "1064800000")
+        record = model(ledger(losing))
+        self.assertEqual(
+            [item for item in record["assumptions"]
+             if item["driver_ref"] == f"concept:{TAX_CONCEPT}"], [])
+        tax = next(item for item in record["results"]
+                   if item["ref"] == "result:income_tax_expense")
+        self.assertEqual(tax["status"], "unavailable")
+        self.assertIn("no usable rate", tax["reason"])
+        net = next(item for item in record["results"]
+                   if item["ref"] == "result:net_income")
+        self.assertEqual(net["status"], "unavailable")
+        self.assertIn("income tax is not available", net["reason"])
+        # Everything above the sign flip still stands.
+        self.assertEqual(next(item for item in record["results"]
+                              if item["ref"] == "result:operating_income")["status"],
+                         "computed")
+
+
+class BecauseTests(unittest.TestCase):
+    def test_the_window_names_both_of_its_ends(self):
+        growth = next(item for item in model()["assumptions"]
+                      if item["driver_ref"] == f"concept:{REVENUE_CONCEPT}")
+        # Three changes across four filed quarters: the window starts at the
+        # first of them, not at the second.
+        self.assertIn("between 2025-08-31 and 2026-05-31", growth["because"])
+        self.assertIn("3 quarter-on-quarter changes", growth["because"])
+
+    def test_the_growth_assumption_admits_it_is_blind_to_seasonality(self):
+        # A reader of the record has to see this where the number is, not in a
+        # report they may never open. Accenture's fiscal fourth quarter is
+        # never in a 10-Q, so an average of the quarters that are will be wrong
+        # for it by however unlike them it is.
+        growth = next(item for item in model()["assumptions"]
+                      if item["driver_ref"] == f"concept:{REVENUE_CONCEPT}")
+        self.assertIn("no seasonality", growth["because"])
 
 
 if __name__ == "__main__":
