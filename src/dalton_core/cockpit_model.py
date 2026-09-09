@@ -46,7 +46,13 @@ SCHEMA_VERSION = "0.1"
 # operating metrics the market watches. Named rather than folded into "plan"
 # because it is a judgement about a company, not about this system's own work,
 # and the two are routed and budgeted separately.
-PURPOSES = frozenset({"ask", "goal", "steer", "draft", "plan", "model_spec"})
+# P12b: "claim_index" is filing existing Claims into the dossier's sections.
+# It reasons about nothing new -- the claims are already in the Ledger -- so it
+# is the cheapest call here and the only one that runs a table of forty rows
+# through one request.
+PURPOSES = frozenset({
+    "ask", "goal", "steer", "draft", "plan", "model_spec", "claim_index",
+})
 # Room for the completion write after the model answers, so a call that
 # finishes right on its timeout still has a live lease to complete against.
 _LEASE_GRACE_SECONDS = 30.0
