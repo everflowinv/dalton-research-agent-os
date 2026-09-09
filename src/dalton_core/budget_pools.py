@@ -149,6 +149,8 @@ LANE_POOLS: dict[str, str] = {
     "dispatch_event_judgement": "event_response",
     # P14e.
     "dispatch_research_task": "adhoc",
+    # P12c: drafting the debate map is coverage work, like the dossier.
+    "dispatch_debate_map": "coverage",
     # Keeping the shelves tidy.
     "dispatch_claim_review": "maintenance",
     "dispatch_claim_index": "maintenance",
