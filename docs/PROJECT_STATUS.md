@@ -4,29 +4,201 @@
 
 ## 下一步（按顺序）
 
-1. **Guidepoint lane：先解开 host-bridge 的 operation 命名冲突。** `live_mcp_connector` 按 operation 名解析该走哪个 host tool，且断言 operation 全局唯一；AlphaEngine 与 Guidepoint 都有 `search_library`。改成按 `bridge_ref` 解析、再校验 operation 属于该 bridge，断言改为 (bridge, operation) 唯一。三个调用点，安全相关，单独一轮做。之后是 child CLI、discovery plan、launcher、接线，以及 owner 发新 mission 版本把 `source:guidepoint` 置为 connected。
-2. **gate_passed 是终态，所以四家公司的 Initial Screen 永远不会重写。** ACN / EPAM / IBM / DXC 已过闸，
-   selection 第一条规则就把它们跳过（"initial screen already passed"），无论后来多了多少证据、换了多强的模型。
-   CTSH 不受此限（它没过闸），它在等 earnings_calls 补齐（1/4，卡在 AlphaEngine 上限），补齐后会用新模型重写。
-   **要决定的是**：一份在较弱模型、较薄证据下过了闸的 screen，值不值得在证据变厚之后重出一版？
-   重出要花钱、也会给 append-only 的交付物加一个版本；不重出则今天换的模型对这四家永远不起作用。
-3. **ACN 还有 2 份 filing 卡在 3 次上限**（`0001467373-25-000169` / `-25-000222`）。今天撤回的是能归因到三次
-   基础设施故障的 20 次尝试；这两份的失败是 plan 执行层的（带 result envelope），归因不到那三次，所以没有撤回。
-   要单独查它们的 result envelope 说了什么，再决定是不是也该豁免。
-4. **模型目录仍未对齐（与大脑无关，但会误导）。** `catalog_in_sync: false`：Dalton 有 5 个 broker 已不提供的静态
-   profile（`gemini-3-7-flash` / `gemini-flash-latest` / `glm-5-2` / `gpt-5-5` / `openrouter-ox-alpha`），
-   broker 有 4 个 Dalton 没有静态 profile 的。P13l 让部署会补齐"缺的"，但不会清理"多的"——删旧 profile 会改动
-   历史版本链，值得单独做。
-5. **把已核验的数字接进 Ledger。** `CandidateStagingStore.stage` 明确拒绝 cited-original 的定量候选
-   （"a cited original is not a numeric authority"）。这是 ADR-0003 一脉的有意规则，要改得走 ADR + 重签策略。
-   在那之前数字停在 `coverage_mission_document_figures`，驾驶舱直接读这张表。
-6. **修 discovery 的公司归属（检索侧）。** 自由文本检索把别家公司的电话会归到了 EPAM 名下；抽取侧现在**三条
-   pass 都堵住了**（P13c 数字、P13i 定性、P13y 指标发现），但检索仍会把别家公司的文档放进队列，白花获取预算。
-   owner 的判断是不该按 `company` 过滤——行业报告本来就没有公司标签；所以这一条是"怎么让检索更准"的开放问题，
-   不是"加个过滤器"。
-7. **contested 指标要能在驾驶舱上看见。** P13y 之后，单位打架的指标不再成立需求，但也不再报错——
-   `metric_discovery.contested()` 能说出是谁在哪个单位上分歧（live 5 条，都是 percent/ratio），页面还没读它。
-8. **AlphaEngine 滚动 24h 用量贴着上限**（131/130），是 CTSH 缺电话会的直接约束。
+1. **把建模规格接到序列上（建模第四段）。** 规格说"这家公司靠什么驱动"，序列说"这条科目的历史是什么"，
+   中间的 join 还没写：规格每一行的 `basis_concept` 就是 join key，而它本来就是**逐公司**的——
+   Accenture 报 `us-gaap:Revenues`，EPAM 报 `us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax`，
+   规格里各自写对了。做完这一步，一家公司的"模型输入表"就是真的了：每行一个科目、每列一个季度、
+   每格标明是报出来的还是推出来的、以及来自哪份 filing。
+2. **预测行，然后才是 Excel。** 顺序是 owner 定的也是对的：建模阶段不进 Excel，模型是结构与推理；
+   要交付时再连公式导出（`xlsx` skill）。所以先有预测行的存储形状（驱动因子 → 假设 → 结果），
+   再谈导出。**导出时的关键约束**：导出的是**公式**不是数值，否则收到的人无法追问"这个数是怎么来的"。
+3. **`gate_passed` 是终态，所以四家公司的 Initial Screen 永远不会重写。** ACN / EPAM / IBM / DXC 已过闸，
+   selection 第一条规则就把它们跳过，无论后来多了多少证据、换了多强的模型。CTSH 不受此限（它没过闸），
+   它在等 earnings_calls 补齐。**要决定的是**：一份在较弱模型、较薄证据下过了闸的 screen，
+   值不值得在证据变厚之后重出一版？现在四家都有了季报和建模规格，这个问题比之前更实在了。
+4. **roic 接不通，两条治理记录悬着（等 owner 判断）。** 见下方 2026-09-09 的 roic 条目：整站 403。
+   要么撤回这两条批准，要么改走抓取服务（那是换 transport，得发新版本重新批准）。
+5. **ACN 还有 2 份 filing 卡在 3 次上限**（`0001467373-25-000169` / `-25-000222`）。它们的失败是
+   plan 执行层的（带 result envelope），归因不到那三次基础设施故障，所以当时没有撤回。
+   要单独查 result envelope 说了什么，再决定是不是也该豁免。
+6. **把已核验的数字接进 Ledger。** `CandidateStagingStore.stage` 明确拒绝 cited-original 的定量候选。
+   这是 ADR-0003 一脉的有意规则，要改得走 ADR + 重签策略。在那之前数字停在
+   `coverage_mission_document_figures`，驾驶舱直接读这张表。
+   **注意**：季报的数字走的是另一条路（`coverage_mission_statement_lines`），它有 accession 与原始产物哈希，
+   provenance 比 figures 强；这两条路要不要合并，是和第 1、2 步同一个设计问题。
+7. **模型目录仍未对齐（与大脑无关，但会误导）。** `catalog_in_sync: false`：Dalton 有 5 个 broker 已不提供的
+   静态 profile，broker 有 4 个 Dalton 没有静态 profile 的。P13l 让部署会补齐"缺的"，但不会清理"多的"——
+   删旧 profile 会改动历史版本链，值得单独做。
+8. **修 discovery 的公司归属（检索侧）。** 抽取侧三条 pass 都堵住了，但检索仍会把别家公司的文档放进队列，
+   白花获取预算。owner 的判断是不该按 `company` 过滤——行业报告本来就没有公司标签；
+   所以这是"怎么让检索更准"的开放问题，不是"加个过滤器"。
+9. **contested 指标要能在驾驶舱上看见。** `metric_discovery.contested()` 能说出谁在哪个单位上分歧
+   （live 5 条，都是 percent/ratio），页面还没读它。
+10. **Guidepoint lane 仍未建。** host-bridge 的命名冲突已在 P13ae 解决（按 (source_ref, operation) 解析），
+    身份与两条治理记录也已 owner 批准；还缺 child CLI、discovery plan、launcher、writer/installer 接线，
+    以及 owner 发新 mission 版本把 `source:guidepoint` 置为 connected。
+11. **三个连接器身份模块长得几乎一样**（guidepoint / sec-financials / roic），到第三个就该抽公共描述符了。
+    当时没做是因为其中两个已经在 owner 批准的哈希后面，重构必须把那些哈希钉成测试——值得单独一轮。
+
+**owner 已定的**：AlphaEngine 先维持 130/24h（owner cap 也已改回 130，配置与实际一致）。
+这仍是 CTSH 缺电话会的直接约束，但不再是待办。
+
+
+## 当前状态速览（2026-09-09 收盘）
+
+**跑在 tick 上的 lane**（controller 每轮依次调用，各自一次一个 child）：
+source discovery（AlphaEngine / web search / SEC filings index）、document extraction、mission stage、
+claim review、SEC quarters、**statements（P13ak，新）**、**company model spec（P13am，新）**、
+research plan、initial screen。
+
+**账本里现在有什么**：
+- 2,170 条 Claim、3,501 份文档、326 条有效指标观测（另有 170 条今日撤回，归属错公司）；
+- **26 份季报、10,023 行报表行**（EPAM / ACN / DXC 各 8 份，CTSH / IBM 各 1 份，会随各自规格的 horizon 变深）；
+- **9 份建模规格，覆盖 5 家公司**（多出来的 4 份是同一家公司在披露结构变化后重新决定的，见建模第二段末尾）；
+- 5 份 Initial Screen 全部发布、gate 全过（ACN / EPAM / IBM / DXC 已 `gate_passed`，CTSH 仍 `entered`）。
+
+**连接器**：12 个打包模板 —— `alphaengine`、`sec`、`sec-financials`、`cninfo`、`web-fetch`、
+`gemini-web-search`、`guidepoint`、`roic-transcript`、`x-xreach`、`x-x-search`、`reddit-last30days`、
+`xueqiu`。治理记录是**按 operation** 发的（一个 schema hash 只绑定一个 operation，所以一条批准不可能
+被复用去放宽另一个），owner 均已就地批准。其中 `guidepoint` 身份已批准但 lane 未建；
+`roic-transcript` 两条已批准但**来源接不通**（见下）；x / reddit / xueqiu 仍是 shadow。
+
+**今日模型开销**：$7.14 / $100 日上限；其中建模规格 lane 约 $2。
+
+**测试**：1,995 通过（1 skip）。已部署，health `ok`。
+
+**owner 已定的边界**：AlphaEngine 维持 130 次/24h；建模阶段不进 Excel，导出时才连公式。
+
+## 2026-09-09（建模第三段）：报表行变成能用的季度序列
+
+**P13an。** 报表里报的东西和模型要的东西不是一个形状，两者之间的距离正是表格出错最多的地方。
+
+**第一件事是不要把一个季度加到它自己的累计上。** 一份 10-Q 同时报单季和年初至今，两者**同一个截止日**：
+EPAM 2026 Q2 收入 14.15 亿、上半年 28.15 亿，wire 上唯一能分开它们的是 `period_start`。加起来就是把半年记了两遍。
+
+**第二件事是做 filing 不替你做的算术。** 只报累计的公司会给你九个月和六个月，但从不给第三个季度——
+它是两者之差，是**推出来的**数，必须标明，并且要写清它靠哪两份 filing 算出来的。
+第一版推不出**第二**季度：只把长期间喂进了减法，六个月的数字没有东西可减。
+一年的第一个季度**同时就是**年初至今，所以每一个 duration 都是候选。
+
+**第三件事是重述。** 同一个季度会在多份 filing 里出现（先作为当期，再作为一年后的对比期），数字不总是一样，
+所以取**最近报出的那一版**，且每个值都记着它来自哪份 filing。
+
+**两件它拒绝做的事。**
+- **不猜日历**：第一版的缺口报告自己造了一张网格（往回退三个月、保留日号），然后宣布 EPAM 缺
+  `2026-03-30`——那不是任何人的季度末。现在缺口是**从数据里读出来的**：相邻两个季度之间差了多少天。
+  对一个历史全部来自 10-Q 的公司，它正确地报出"每年一个洞"，因为 10-Q 从不覆盖第四季度。
+- **不发明数字**：既没报出、也推不出来的季度就是没有。有洞的模型能修，有假数的模型找不出来。
+
+**实测（live 账本）**：EPAM 与 Accenture 各 11 个报出的季度，Accenture 的**财年日历**（9–11 月、12–2 月、
+3–5 月）不用告诉它也读对了，缺口正好落在只有 10-K 才有的第四季度上。
+
+**顺带修掉了下面一层的一个缺陷。** parser 把一部分**带维度**的行的 breakdown 标志报成了 0——live 里
+Accenture 的 Consulting / Managed Services 拆分带着 `srt:ProductOrServiceAxis` 却被当成合计，
+于是同一个季度有三行都自称合计，任何序列都会把合计和它自己的组成部分加在一起。
+**带维度的行按定义就是 breakdown**：写入时修好，读出时也派生一次——账本是 append-only 的，
+已经落库的行改不了。
+
+## 2026-09-09（建模第二段）：每家公司自己的建模规格，以及它决定要多少历史
+
+**P13al + P13am。** 通用三表模板不是模型。Accenture 的关键是 bookings 与 utilisation，
+IBM 是软件结构与现金，DXC 是一本在缩的合同簿被管着做利润——同一个行业、三个不同的问题，
+一视同仁的模板一个都答不上。
+
+**所以框架钉死在代码里，内容交给判断。** 四个问题：什么驱动收入（量/价/结构/分部/合同簿/外部变量）；
+成本有哪些、**行为**是什么（跟收入走的和跟人头走的是模型里的两行，哪怕 filing 里是一行）；
+这家公司**哪几张表**需要预测；市场真正盯着而 GAAP 不报的**运营指标**是哪些（new bookings、book-to-bill、
+utilisation、attrition）。
+
+**两条规则不在提示词里，在代码里**：
+- **一行只能落在这家公司真的报过的 concept 上**。差一点也直接拒绝、不修补——把 `us-gaap:Revenue`
+  悄悄映射到 `us-gaap:Revenues` 正是模型开始引用不存在的行的方式。
+- **每一条都要有理由**，而且要是关于这家公司的。没有理由的规格是穿着判断外衣的模板，没法跟它争论——
+  而"能被争论"正是它要被 review 的全部意义。
+
+**有一条判断不归模型**：损益表永远是 required。资产负债表要不要预测是关于这家公司的判断，
+能不能预测收入和利润率不是。
+
+**实测（IBM，483 行 10-Q，最强路由模型，$0.24）**：三个经营引擎（软件/咨询/基础设施），**融资单列**，
+为 Confluent 收购建**并购收入桥**，恒定汇率与有机增长分开，咨询 signings 与 book-to-bill，主机产能，
+以及明确写出"全集团软件净留存率**未披露**、必须估计"。最后这一条正是 `disclosed` 是必填字段的原因。
+
+**深度由规格决定。** 统计报表 lane 原本每家取一个季度，因为它只会想要一个季度。IBM 的规格要 20 个季度
+（把主机换代周期和底层业务分开）；一家合同簿平稳的咨询公司要得少得多。现在
+`horizon.historical_quarters` 决定取几份 filing，上限是一个 child 一次能解析的量，下限一个季度——
+那正好够拿来定一份规格。
+
+**预算：真正卡住的是每次调用的预留，不是日上限。** router 按**允许的输出**和 **prompt 字节数**（不是 token）
+估价，所以预留是实际花费的好几倍：IBM 那次实花 $0.24、估价 $0.46，按旧的 $0.60 上限**在发出前就会被拒**。
+产生那些旧数字的 $5 日上限现在是 $100，留着只会在状态变大的那天买到拒绝。已上调，并且把过时的理由
+**换掉**而不是留着误导下一个读的人。（另外发现 `raise_day_budget_cap.py` 只改了三个模型配置里的两个，
+漏掉的正是规格 lane 也在用的那个。）
+
+**上了 tick。** 这条 lane 和这里所有获取型 lane 都不一样：**它没有队列**——"该决定什么"是每个 tick
+从账本里**算出来**的（有报表、且没有针对当前披露结构的规格），所以没有东西会卡住，
+静默才是它的常态。五家公司拿到五份规格之后它就不动了，直到某家公司报了新东西、结构哈希变了，
+才**只**重新决定那一家。
+
+**上线第一个心跳就抓到一个 bug。** 选公司时用的投影**不带 ticker**，而 run 存规格时用的投影**带**——
+ticker 是 state 的一部分因而也是哈希的一部分，于是选择器永远看不见它刚刚产出的答案。
+**代价不是钱**（child 重建带 ticker 的 state、找到已存的规格、免费重放，live summary 是
+`spec_status: unchanged, cost_micros: 0`），**代价是进度**：IBM 每个 tick 被重启一次，另外四家永远排在后面。
+修法是 `choose_company` 直接返回它选中的那个投影。所有测试都从这个 bug 里穿了过去，因为每个测试只有投影的一边，
+所以回归测试是端到端而且直白的：**决定、存下、就没有什么可决定了**。
+
+**一个值得记下来的性质**：state hash 绑定的是**我们对披露的读法**，不只是披露本身。
+今天改了 breakdown 标志的派生（见建模第三段），五家公司的结构哈希全都变了，于是全部重新决定了一遍
+（约 $1.25）。这是对的行为，但意味着**改投影 = 重决定所有公司**，改之前值得知道这一点。
+
+## 2026-09-09（findata 收尾）：统计报表 lane 上了 tick，五家公司的季报入库
+
+**P13ak。** 连接器、治理、child 都能手工跑通了，但没有任何东西去调度它们。这一段是让它们跑起来的部分。
+
+**账本这一层是新的**：`coverage_mission_statement_filings` + `coverage_mission_statement_lines`，
+append-only，每行一个科目一个期间，带着公司自己披露的**结构**——层级、父科目、是不是分部拆分。
+那个结构正是模型建立在其上的东西，也正是"一次问一个 concept"的 company-facts lane 给不出的。
+一份 filing 每家公司只入一次，所以重解析同一份 10-Q 是同一份 filing，不是第二套行。
+
+**协调器里的三条规则，每一条都是这套代码已经付过学费的**：一次一个 child、已有在途的公司不再排队；
+**先记录再结算**，中间崩了就重放成 no-op；反复失败的公司不再占用那唯一的槽位。
+dispatch 的状态从一开始就带**终态成功**——SEC filings 那张表当初没有，缺一个 `succeeded` 把那条 lane 冻了一整天。
+
+**重试需要 attempt 号**：没有它，请求本身就是身份，一条因为治理还没批准而被拒的 dispatch 会永远被拒，
+事后批准了也不会有任何变化。
+
+**四个 launcher 各抄一份的 ticket 机制现在共用了**（`lane_child_launcher`）。值得共用的不是"怎么起进程"，
+而是**重启之后 `status()` 该说什么**：进程没了而 ticket 还写着 `running` 的，是 **orphaned**——
+不是失败也不是成功，而且**绝不能**从旁边那个 summary 文件读成成功，因为 summary 可以是一个写完就死掉的 run 写的。
+
+**上线后连着掉了三个坑，都修了**：
+- **EDGAR identity**：`edgartools` 拒绝没有联系方式的 identity。已改成本 Core 对外请求一贯公布的地址。
+- **归因方向反了**（更要紧的一个）：分类器列的是"哪些是我们自己的错"，其余全算公司的——于是我们自己
+  adapter 里的一个 `AttributeError` 看起来和"这家公司没法服务"一模一样，三个 tick 就把 IBM 的重试预算
+  花在了跟 IBM 毫无关系的事情上。**真正能归给公司的失败是短而可枚举的**（它没报、或者报的东西没有 XBRL），
+  所以列出这些，其余（包括**没有记录原因**的失败）都算我们的。无法归因的失败不是指控公司的证据。
+- **parser 其实只在"深度 1"下工作过**：`latest(1)` 返回一份 Filing，`latest(n)` 返回一个集合，
+  而集合不是 list——于是整个集合被塞进一个单元素 list，然后被问它只有单份 filing 才有的 XBRL。
+  第一次有模型要历史，它就在每家公司上失败。已按"这个对象能做什么"而不是"它是什么类型"来判断，
+  并用一次真实的 IBM 八季度抓取验证过。
+
+**当前 live**：26 份 filing、10,023 行；EPAM / ACN / DXC 各 8 份，CTSH / IBM 各 1 份（会随各自规格的
+horizon 自己变深）。
+
+## 2026-09-09：roic 接不通——整站在 Cloudflare 后面
+
+**结论先说：这条连接器不能用，没有写 launcher。** 前一天签的身份和两条治理记录建立在一个**未经验证的**
+前提上——"一份纪要就是 roic.ai 上的一个页面"。今天实测：`www.roic.ai` 上的每一条路径，
+行情页、纪要页、JSON 接口，**连 `robots.txt` 本身**，对普通客户端都返回 403 与 Cloudflare 人机校验。
+
+所以无凭据的 HTTPS 客户端读不到这个来源。**绕过那道门不是该建的东西**——那是站方有意放的；
+而且 `robots.txt` 都读不到，连它自己的抓取政策都无从查证。
+
+**这条是我的错**：先签了治理才去验来源。已把这个结论写进 `roic_transcript_core` 的模块文档，
+不是留着让下一个人重新踩。**撤回那两条批准、还是改走抓取服务（换 transport，得发新版本重新批准），
+是 owner 的判断。**
+
+（这条连接器当初的动机是"AlphaEngine 130/天 用满时 CTSH 就卡住"。那个约束仍然在，
+owner 已决定先维持 130。）
 
 ## 2026-09-09（findata 第一段）：连接器身份已签，child 还没写
 
@@ -100,6 +272,8 @@ owner 问：现有 82 个 skill 里还有哪些值得做成 connector；以及�
 model_discipline 明确"不以残差或比例分摊冒充披露值"。要接的是 `financials` / `facts` 这些披露值。
 
 ## 2026-09-09（Guidepoint 第一段）：身份与治理已签，lane 卡在一个命名冲突上
+
+> **后续（同日）**：下面描述的命名冲突已在 P13ae 解决——host bridge 改成按 `(source_ref, operation)` 解析，歧义直接拒绝。本节保留当时的判断作为记录；lane 本身（child CLI / discovery plan / launcher / 接线）仍未建，见「下一步」第 10 条。
 
 **已完成并部署**：Guidepoint 的 identity + 两条 owner 已批准的治理记录。
 
