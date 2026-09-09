@@ -237,7 +237,10 @@ class TemplateSubsetTests(ResearchTaskFixture):
             set(bindable), {"probe-template:adhoc-sec-filings-index:v1"},
         )
         for template in bindable.values():
-            self.assertIn(template["operation"], rt.executable_probe_operations())
+            self.assertIn(
+                (template["operation"], template["permission_scope"]),
+                rt.executable_probe_contracts(),
+            )
 
     def test_a_task_binds_only_the_adhoc_catalogue(self) -> None:
         # A template outside the ad-hoc catalogue, published and executable.
@@ -279,6 +282,183 @@ class TemplateSubsetTests(ResearchTaskFixture):
         for template in manifest["templates"]:
             self.assertTrue(template["allowed_hosts"])
             self.assertTrue(template["cost"]["max_attempts"] >= 1)
+
+
+class ExecutorContractTests(ResearchTaskFixture):
+    """A template is bindable only if the executor would accept its WorkOrder."""
+
+    def test_a_mistyped_permission_scope_is_not_bindable(self) -> None:
+        template = self.templates["probe-template:adhoc-sec-filings-index:v1"]
+        spec = rt.ADHOC_PROBE_TEMPLATES[0]
+        arguments = rt.publication_arguments(spec)
+        # A republication with a hyphen where the executor wants an underscore.
+        # It matches on operation and would be refused at execution.
+        arguments["permission_scope"] = "public-sec-read"
+        self.authority.publish_probe_template(
+            spec["template_ref"], actor_ref="human:p14e-test-owner",
+            prior_version_ref=template["id"], **arguments,
+        )
+        self.assertIn(
+            spec["template_ref"], rt.admitted_adhoc_templates(self.authority),
+        )
+        self.assertEqual(rt.bindable_templates(self.authority), {})
+        self.assertEqual(
+            rt.grant(self.mission, rt.bindable_templates(self.authority))["reasons"],
+            ["no_executable_adhoc_template_published"],
+        )
+
+    def test_the_contract_is_the_pair_both_executors_gate_on(self) -> None:
+        from dalton_core.bounded_alphaengine_probe import (
+            PROBE_OPERATION as AE_OPERATION,
+            PROBE_PERMISSION_SCOPE as AE_SCOPE,
+        )
+        from dalton_core.bounded_probe_executor import (
+            PROBE_OPERATION as SEC_OPERATION,
+            PROBE_PERMISSION_SCOPE as SEC_SCOPE,
+        )
+
+        self.assertEqual(
+            rt.executable_probe_contracts(),
+            frozenset({(SEC_OPERATION, SEC_SCOPE), (AE_OPERATION, AE_SCOPE)}),
+        )
+
+
+class RetirementTests(ResearchTaskFixture):
+    def test_this_deployment_may_withdraw_a_published_template(self) -> None:
+        retired = ["probe-template:adhoc-sec-filings-index:v1"]
+        self.assertEqual(rt.bindable_templates(self.authority, retired=retired), {})
+        self.assertEqual(
+            rt.read_grant(self.store, retired=retired)["reasons"],
+            ["no_executable_adhoc_template_published"],
+        )
+        # And the catalogue may withdraw one for everybody.
+        from unittest.mock import patch
+
+        withdrawn = tuple(
+            {**spec, "status": rt.RETIRED_STATUS} if index == 0 else spec
+            for index, spec in enumerate(rt.ADHOC_PROBE_TEMPLATES)
+        )
+        with patch.object(rt, "ADHOC_PROBE_TEMPLATES", withdrawn):
+            self.assertEqual(rt.bindable_templates(self.authority), {})
+
+    def test_a_retired_template_stops_the_lane_before_it_spawns(self) -> None:
+        from dalton_core.mission_research_task_lane import (
+            ResearchTaskCoordinator,
+            lane_configuration,
+        )
+
+        config = self.state_dir / "research-task-lane.json"
+        config.write_text(json.dumps({
+            "max_admissions_per_tick": 2,
+            "retired_templates": ["probe-template:adhoc-sec-filings-index:v1"],
+        }), encoding="utf-8")
+        settings = lane_configuration(config)
+        self.assertEqual(settings["max_admissions_per_tick"], 2)
+
+        class Launcher:
+            tickets_dir = self.state_dir / "research-tasks"
+            retired_templates = settings["retired_templates"]
+            started: list = []
+
+            def start(self, **_kwargs):
+                self.started.append(_kwargs)
+                raise AssertionError("a retired catalogue must not spawn a child")
+
+        self.record_plan([inquiry(question="Do ACN's margins reconcile?")])
+        Launcher.tickets_dir.mkdir(parents=True, exist_ok=True)
+        result = ResearchTaskCoordinator(
+            store=self.store, launcher=Launcher(),
+        ).dispatch_once()
+        self.assertEqual(result["status"], "not_granted")
+
+
+class IdentityNormalisationTests(ResearchTaskFixture):
+    def test_a_rewrapped_question_is_the_same_question(self) -> None:
+        wrapped = inquiry(question="Do ACN's three adjusted\n  margin definitions\treconcile?")
+        flat = inquiry(question="Do ACN's three adjusted margin definitions reconcile?")
+        self.assertEqual(
+            rt.inquiry_content_hash(wrapped), rt.inquiry_content_hash(flat),
+        )
+        plan = self.record_plan([wrapped, {**flat, "rank": 1}])
+        entries = self.admissions(plan)
+        self.assertEqual(
+            [entry["reason"] for entry in entries], [None, "already_admitted"],
+        )
+
+    def test_a_different_question_is_still_a_different_hash(self) -> None:
+        self.assertNotEqual(
+            rt.inquiry_content_hash(inquiry(question="Do ACN's margins reconcile?")),
+            rt.inquiry_content_hash(inquiry(question="Do ACN's margins reconcile now?")),
+        )
+
+
+class RevisionTests(ResearchTaskFixture):
+    daily_cost_usd = 20.0
+
+    def test_an_admitted_task_can_be_revised_without_becoming_a_new_one(self) -> None:
+        wire = inquiry(question="Do ACN's margins reconcile?")
+        plan = self.record_plan([wire])
+        entry = self.admissions(plan)[0]
+        first = self.admit(plan, entry, wire)
+        head = self.authority.loop(first["loop_version_ref"])
+        second = self.authority.create_loop(
+            head["loop_ref"],
+            question_version_ref=head["question_version_ref"],
+            template_bindings=entry["bindings"],
+            required_coverage_items=[b["coverage_item_ref"] for b in entry["bindings"]],
+            budget={**head["budget"], "max_rounds": head["budget"]["max_rounds"] + 1},
+            actor_ref="automation:coverage-mission",
+            admission=head["admission"],
+            prior_version_ref=head["id"],
+        )
+        self.assertEqual(second["status"], "fresh")
+        self.assertEqual(second["version"], 2)
+        self.assertEqual(second["admission"], head["admission"])
+        # The head is now v2, so the next plain admission still refuses -- and
+        # refuses against the version a caller would have to continue.
+        again = self.authority.loop_for_admission(head["admission"]["content_hash"])
+        self.assertEqual(again["id"], second["id"])
+        self.assertEqual(self.admissions(plan)[0]["reason"], "already_admitted")
+
+
+class DeferralTests(ResearchTaskFixture):
+    daily_cost_usd = 20.0
+
+    def test_only_what_this_pass_admits_spends_the_day(self) -> None:
+        plan = self.record_plan([
+            inquiry(question="Do ACN's margins reconcile?"),
+            inquiry(question="What drove ACN's bookings mix?", rank=1),
+        ])
+        entries = self.admissions(plan)
+        self.assertEqual([entry["admissible"] for entry in entries], [True, True])
+        limited = rt.plan_admissions(
+            self.authority, mission=self.mission, plan=plan, day=DAY, limit=1,
+        )
+        self.assertEqual(
+            [(entry["admissible"], entry["reason"]) for entry in limited],
+            [(True, None), (False, "deferred_to_a_later_tick")],
+        )
+
+    def test_entries_name_their_own_inquiry(self) -> None:
+        plan = self.record_plan([
+            inquiry(question="What is Apple's services margin?", company_ref=OUTSIDE),
+            inquiry(question="Do ACN's margins reconcile?", rank=1),
+        ])
+        entries = self.admissions(plan)
+        self.assertEqual([entry["ordinal"] for entry in entries], [0, 1])
+        # The admissible one is second; indexing by position would admit the
+        # refused Apple inquiry's text under the Accenture entry.
+        admissible = [entry for entry in entries if entry["admissible"]]
+        self.assertEqual(len(admissible), 1)
+        record = self.admit(
+            plan, admissible[0], plan["inquiries"][admissible[0]["ordinal"]],
+        )
+        view = rt.research_task_view(self.store, day=DAY, mission=self.mission)
+        self.assertEqual(
+            view["companies"][0]["tasks"][0]["question"],
+            "Do ACN's margins reconcile?",
+        )
+        self.assertEqual(record["subject_ref"], ACN)
 
 
 class SwitchTests(ResearchTaskFixture):

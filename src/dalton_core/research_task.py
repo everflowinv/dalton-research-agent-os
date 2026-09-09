@@ -65,15 +65,25 @@ POOL_SHARE = Decimal("0.25")
 
 # What one round of a task is assumed to cost before it runs.  The loop's
 # planner call is the only paid model call a task makes, and the bounded
-# planner driver reserves ``planner_max_cost_usd`` for it (its own default is
-# $0.50).  The pool is reserved against this estimate at admission, because a
-# pool that only counted settled spend would admit a day's worth of tasks
-# before the first one had billed anything.
-DEFAULT_PLANNER_COST_USD = Decimal("0.50")
+# planner driver reserves ``planner_max_cost_usd`` for it.  That number is read
+# from the driver rather than repeated here: two copies of a price drift, and
+# the one that drifts is always the one nobody is looking at.  The pool is
+# reserved against this estimate at admission, because a pool that only counted
+# settled spend would admit a day's worth of tasks before the first one had
+# billed anything.
+def default_planner_cost_usd() -> Decimal:
+    """The per-round reservation, as the driver is configured to spend it."""
+
+    from .bounded_planner_driver import DEFAULT_PLANNER_MAX_COST_USD
+
+    return Decimal(str(DEFAULT_PLANNER_MAX_COST_USD))
 
 # A task is a question, not a project.  Four rounds is three probes and one
 # retry; past that the honest terminal is "not answerable within budget".
 MAX_ROUNDS_PER_TASK = 4
+
+ACTIVE_STATUS = "active"
+RETIRED_STATUS = "retired"
 
 _INQUIRY_IDENTITY_SCHEMA = "research-task-inquiry-v1"
 _CIK_RE = re.compile(r"^company:sec-cik:(\d+)$")
@@ -89,6 +99,7 @@ _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 ADHOC_PROBE_TEMPLATES: tuple[dict[str, Any], ...] = (
     {
         "template_ref": "probe-template:adhoc-sec-filings-index:v1",
+        "status": ACTIVE_STATUS,
         "capability_ref": "capability:dalton:connector:sec-filings-index",
         # bounded_probe_executor's one executable operation: it reads the
         # company-facts index and answers with the accession of the latest
@@ -113,6 +124,7 @@ ADHOC_PROBE_TEMPLATES: tuple[dict[str, Any], ...] = (
     },
     {
         "template_ref": "probe-template:adhoc-alphaengine-search-library:v1",
+        "status": ACTIVE_STATUS,
         "capability_ref": "capability:dalton:connector:alphaengine-search-library",
         "operation": "alphaengine_search_library",
         "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
@@ -134,6 +146,7 @@ ADHOC_PROBE_TEMPLATES: tuple[dict[str, Any], ...] = (
     },
     {
         "template_ref": "probe-template:adhoc-web-search:v1",
+        "status": ACTIVE_STATUS,
         "capability_ref": "capability:dalton:connector:gemini-web-search",
         "operation": "public_web_search",
         "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
@@ -172,21 +185,42 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
 
 
-def executable_probe_operations() -> frozenset[str]:
-    """The probe operations the controller tick can actually run today.
+def executable_probe_contracts() -> frozenset[tuple[str, str]]:
+    """The ``(operation, permission_scope)`` pairs the tick can actually run.
 
     Read from the two executors rather than written down, because the failure
-    it prevents is severe and silent-looking: ``run_once`` executes an admitted
-    probe outside a try, so admitting a loop bound to an operation nothing can
-    execute would raise out of the tick and take every other lane with it.  A
-    template may be in the catalogue and still not be bindable; that is a
-    published capability waiting for its executor, not a lie.
+    it prevents is severe: an admitted probe is executed by the driver, and a
+    WorkOrder the executor refuses raises rather than returning a failed
+    envelope.  The B2 change below catches that, but a template nothing can run
+    should never be bound in the first place.
+
+    The pair, not the operation.  Both executors gate on the scope *first*
+    (``bounded_probe_executor`` line 129, ``bounded_alphaengine_probe`` line
+    89) and ``permission_scope`` is free text copied out of the template, so a
+    republished template with ``public-sec-read`` instead of ``public_sec_read``
+    matches on operation, binds, and is then refused at execution.  Checking
+    the pair is what makes the catalogue's promise the executor's promise.
     """
 
-    from .bounded_alphaengine_probe import PROBE_OPERATION as ALPHAENGINE_OPERATION
-    from .bounded_probe_executor import PROBE_OPERATION as SEC_OPERATION
+    from .bounded_alphaengine_probe import (
+        PROBE_OPERATION as ALPHAENGINE_OPERATION,
+        PROBE_PERMISSION_SCOPE as ALPHAENGINE_SCOPE,
+    )
+    from .bounded_probe_executor import (
+        PROBE_OPERATION as SEC_OPERATION,
+        PROBE_PERMISSION_SCOPE as SEC_SCOPE,
+    )
 
-    return frozenset({SEC_OPERATION, ALPHAENGINE_OPERATION})
+    return frozenset({
+        (SEC_OPERATION, SEC_SCOPE),
+        (ALPHAENGINE_OPERATION, ALPHAENGINE_SCOPE),
+    })
+
+
+def executable_probe_operations() -> frozenset[str]:
+    """The operations of :func:`executable_probe_contracts`, for reading."""
+
+    return frozenset(operation for operation, _ in executable_probe_contracts())
 
 
 def publication_arguments(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -217,6 +251,10 @@ def deploy_manifest() -> dict[str, Any]:
 
 # -- the inquiry's identity -------------------------------------------------
 
+def _collapse(value: str) -> str:
+    return " ".join(value.split())
+
+
 def inquiry_content_hash(inquiry: Mapping[str, Any]) -> str:
     """The idempotency key for one inquiry.
 
@@ -225,6 +263,11 @@ def inquiry_content_hash(inquiry: Mapping[str, Any]) -> str:
     admits nothing.  ``because`` and ``rank`` are excluded because they are the
     planner's commentary and its ordering, not the question -- re-ranking the
     same question must not buy a second task.
+
+    Internal whitespace is normalised before hashing.  A model that wraps the
+    same sentence differently, or emits a newline where it emitted a space
+    yesterday, has not asked a new question, and paying for one again because
+    of a line break is exactly the kind of duplicate this rule exists to stop.
     """
 
     for field in ("question", "wants"):
@@ -238,9 +281,9 @@ def inquiry_content_hash(inquiry: Mapping[str, Any]) -> str:
         raise ResearchTaskError("inquiry company_ref must be text or null")
     return content_hash({
         "identity_schema": _INQUIRY_IDENTITY_SCHEMA,
-        "company_ref": None if company_ref is None else company_ref.strip(),
-        "question": inquiry["question"].strip(),
-        "wants": inquiry["wants"].strip(),
+        "company_ref": None if company_ref is None else _collapse(company_ref),
+        "question": _collapse(inquiry["question"]),
+        "wants": _collapse(inquiry["wants"]),
     })
 
 
@@ -277,14 +320,32 @@ def admitted_adhoc_templates(
 
 def bindable_templates(
     authority: BoundedPlannerAuthority,
+    *,
+    retired: Sequence[str] = (),
 ) -> dict[str, dict[str, Any]]:
-    """The admitted ad-hoc templates a loop may actually bind."""
+    """The admitted ad-hoc templates a loop may actually bind.
 
-    executable = executable_probe_operations()
+    Three ways a template stops being bindable, and the owner needs all three
+    because the Core template record is append-only and has no status column:
+
+    * its ``(operation, permission_scope)`` pair is not one an executor
+      accepts -- which is also how *republishing* a template with a retired
+      contract revokes it in the authority itself;
+    * the catalogue declares it ``retired`` here and in the deploy manifest;
+    * this deployment's lane configuration names it in ``retired_templates``,
+      which is the one an owner can use tonight without a release.
+    """
+
+    executable = executable_probe_contracts()
+    withdrawn = {
+        spec["template_ref"] for spec in ADHOC_PROBE_TEMPLATES
+        if spec.get("status") == RETIRED_STATUS
+    } | {str(item) for item in retired}
     return {
         ref: template
         for ref, template in admitted_adhoc_templates(authority).items()
-        if template["operation"] in executable
+        if ref not in withdrawn
+        and (template["operation"], template["permission_scope"]) in executable
     }
 
 
@@ -337,7 +398,7 @@ def grant(
     }
 
 
-def read_grant(store: Any) -> dict[str, Any]:
+def read_grant(store: Any, *, retired: Sequence[str] = ()) -> dict[str, Any]:
     """The grant as the live Core states it, without a model or a network call."""
 
     from .coverage_mission import CoverageMissionAuthority
@@ -349,16 +410,21 @@ def read_grant(store: Any) -> dict[str, Any]:
     ).fetchone()
     mission = None if pointer is None else missions.mission(pointer["mission_version_id"])
     authority = BoundedPlannerAuthority(store)
-    return {**grant(mission, bindable_templates(authority)), "mission": mission}
+    return {
+        **grant(mission, bindable_templates(authority, retired=retired)),
+        "mission": mission,
+    }
 
 
 # -- the pool ---------------------------------------------------------------
 
 def task_estimate_micros(
-    budget: Mapping[str, Any], *, planner_cost_usd: Decimal = DEFAULT_PLANNER_COST_USD
+    budget: Mapping[str, Any], *, planner_cost_usd: Decimal | None = None
 ) -> int:
     """What one task reserves from the pool: its rounds times a planner call."""
 
+    if planner_cost_usd is None:
+        planner_cost_usd = default_planner_cost_usd()
     return int(Decimal(int(budget["max_rounds"])) * planner_cost_usd * 1_000_000)
 
 
@@ -366,7 +432,7 @@ def day_reserved_micros(
     authority: BoundedPlannerAuthority,
     *,
     day: str,
-    planner_cost_usd: Decimal = DEFAULT_PLANNER_COST_USD,
+    planner_cost_usd: Decimal | None = None,
 ) -> int:
     """What today's admitted tasks have already reserved from the pool.
 
@@ -390,7 +456,7 @@ def pool_state(
     mission: Mapping[str, Any],
     *,
     day: str,
-    planner_cost_usd: Decimal = DEFAULT_PLANNER_COST_USD,
+    planner_cost_usd: Decimal | None = None,
 ) -> dict[str, Any]:
     wire = pool(mission)
     reserved = day_reserved_micros(
@@ -528,18 +594,26 @@ def plan_admissions(
     plan: Mapping[str, Any],
     templates: Mapping[str, Mapping[str, Any]] | None = None,
     day: str | None = None,
-    planner_cost_usd: Decimal = DEFAULT_PLANNER_COST_USD,
+    planner_cost_usd: Decimal | None = None,
     scope: frozenset[str] | None = None,
+    limit: int | None = None,
+    retired: Sequence[str] = (),
 ) -> list[dict[str, Any]]:
     """What this plan's inquiries would become, in the plan's own order.
 
     Read-only and deterministic: every entry says either that it is admissible
     and what it would cost, or exactly why it is not.  The lane admits from
     this list; the smoke script prints it.
+
+    ``limit`` is how many the caller will actually admit this pass.  Only those
+    spend the pool here: charging the day for tasks that will not be created
+    until tomorrow would report a pool as exhausted when it is merely busy, and
+    the reason a later entry gives ("deferred", not "exhausted") is the
+    difference between "come back next tick" and "come back next day".
     """
 
     if templates is None:
-        templates = bindable_templates(authority)
+        templates = bindable_templates(authority, retired=retired)
     day = day or datetime.now(timezone.utc).date().isoformat()
     state = pool_state(
         authority, mission, day=day, planner_cost_usd=planner_cost_usd
@@ -548,9 +622,14 @@ def plan_admissions(
         scope = mandate_scope_refs(authority, mission)
     remaining = state["remaining_micros"]
     seen: set[str] = set()
+    admissible_so_far = 0
     results: list[dict[str, Any]] = []
-    for inquiry in plan.get("inquiries", ()):
+    for ordinal, inquiry in enumerate(plan.get("inquiries", ())):
         entry: dict[str, Any] = {
+            # The inquiry's position in this plan's list, which is how the
+            # caller finds it again.  ``rank`` is the planner's own number and
+            # is not required to be an index.
+            "ordinal": ordinal,
             "rank": inquiry.get("rank"),
             "question": inquiry.get("question"),
             "company_ref": inquiry.get("company_ref"),
@@ -579,6 +658,12 @@ def plan_admissions(
             continue
         budget = task_budget(bindings, templates)
         estimate = task_estimate_micros(budget, planner_cost_usd=planner_cost_usd)
+        if limit is not None and admissible_so_far >= limit:
+            results.append({
+                **entry, "admissible": False, "reason": "deferred_to_a_later_tick",
+                "estimated_micros": estimate,
+            })
+            continue
         if estimate > remaining:
             results.append({
                 **entry, "admissible": False, "reason": "pool_exhausted",
@@ -586,6 +671,7 @@ def plan_admissions(
             })
             continue
         remaining -= estimate
+        admissible_so_far += 1
         seen.add(digest)
         results.append({
             **entry,
@@ -672,7 +758,11 @@ _TERMINAL_LABELS = {
 
 
 def research_task_view(
-    store: Any, *, day: str | None = None, mission: Mapping[str, Any] | None = None
+    store: Any,
+    *,
+    day: str | None = None,
+    mission: Mapping[str, Any] | None = None,
+    retired: Sequence[str] = (),
 ) -> dict[str, Any]:
     """"正在专项研究 X / 预算用了多少 / 结论或缺口", per company.
 
@@ -701,9 +791,8 @@ def research_task_view(
         terminal = authority.terminal(loop["id"])
         citations: list[str] = []
         for outcome in outcomes:
-            manifest = authority._one(
-                "bounded_coverage_manifests", "manifest_id",
-                outcome["coverage_manifest_ref"], "CoverageManifest",
+            manifest = authority.coverage_manifest(
+                outcome["coverage_manifest_ref"]
             )
             for row in manifest["entries"]:
                 citations.extend(row.get("matched_source_locations") or [])
@@ -743,7 +832,7 @@ def research_task_view(
     }
     if mission is not None:
         view["pool"] = pool_state(authority, mission, day=day)
-        view["grant"] = grant(mission, bindable_templates(authority))
+        view["grant"] = grant(mission, bindable_templates(authority, retired=retired))
     return view
 
 
@@ -769,7 +858,7 @@ def _question_of(
 __all__ = [
     "ADHOC_PROBE_TEMPLATES",
     "ADHOC_TEMPLATE_REFS",
-    "DEFAULT_PLANNER_COST_USD",
+    "RETIRED_STATUS",
     "GRANT_WORD",
     "MAX_ROUNDS_PER_TASK",
     "POOL_NAME",
@@ -780,6 +869,8 @@ __all__ = [
     "bindable_templates",
     "coverage_item_ref",
     "day_reserved_micros",
+    "default_planner_cost_usd",
+    "executable_probe_contracts",
     "deploy_manifest",
     "executable_probe_operations",
     "grant",

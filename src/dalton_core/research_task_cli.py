@@ -60,6 +60,7 @@ def run_admissions(
     state_dir: Path,
     summary_dir: Path,
     max_admissions: int = DEFAULT_MAX_ADMISSIONS,
+    retired_templates: tuple[str, ...] = (),
     dry_run: bool = False,
 ) -> dict[str, Any]:
     state_dir = state_dir.expanduser().resolve()
@@ -94,7 +95,7 @@ def run_admissions(
             return summary
         mission = missions.mission(pointer["mission_version_id"])
         authority = BoundedPlannerAuthority(store)
-        templates = bindable_templates(authority)
+        templates = bindable_templates(authority, retired=retired_templates)
         decision = grant(mission, templates)
         summary["grant"] = decision
         day = now.date().isoformat()
@@ -110,7 +111,9 @@ def run_admissions(
             return summary
         summary["plan_ref"] = plan["plan_id"]
         entries = plan_admissions(
-            authority, mission=mission, plan=plan, templates=templates, day=day
+            authority, mission=mission, plan=plan, templates=templates, day=day,
+            # Only what this pass will actually create spends the day's pool.
+            limit=max_admissions,
         )
         summary["considered"] = len(entries)
         summary["refused"] = [
@@ -139,11 +142,15 @@ def run_admissions(
             return summary
         backlog = ResearchQuestionBacklog(store)
         admitted: list[dict[str, Any]] = []
-        for entry, inquiry in zip(entries, plan["inquiries"]):
+        for entry in entries:
             if len(admitted) >= max_admissions:
                 break
             if not entry["admissible"]:
                 continue
+            # By ordinal, not by position: the refused entries are in this list
+            # too, and zipping the two lists would hand the wrong inquiry to an
+            # entry the moment one is refused.
+            inquiry = plan["inquiries"][entry["ordinal"]]
             try:
                 admitted.append(admit_inquiry(
                     authority, backlog, mission=mission,
@@ -180,6 +187,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--summary-dir", type=Path, help="defaults to the state dir")
     parser.add_argument("--max-admissions", type=int, default=DEFAULT_MAX_ADMISSIONS)
+    parser.add_argument(
+        "--retired-template", action="append", default=[], dest="retired_templates",
+        help="An ad-hoc ProbeTemplate this deployment has withdrawn. Repeatable.",
+    )
     parser.add_argument("--dry-run", action="store_true",
                         help="decide and stop; no authority writes")
     parser.add_argument("--quiet", action="store_true")
@@ -192,6 +203,7 @@ def main(argv: list[str] | None = None) -> int:
         state_dir=args.state_dir,
         summary_dir=args.summary_dir if args.summary_dir is not None else args.state_dir,
         max_admissions=max(int(args.max_admissions), 1),
+        retired_templates=tuple(args.retired_templates or ()),
         dry_run=args.dry_run,
     )
     if not args.quiet:

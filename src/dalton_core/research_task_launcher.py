@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
 from .store import canonical_json
@@ -34,8 +34,15 @@ class ResearchTaskLauncher(LaneChildLauncher):
     TICKETS_DIRNAME = TICKETS_DIRNAME
     CHILD_MODULE = "dalton_core.research_task_cli"
 
-    def __init__(self, *, max_admissions_per_tick: int = 1, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        *,
+        max_admissions_per_tick: int = 1,
+        retired_templates: Sequence[str] = (),
+        **kwargs: Any,
+    ) -> None:
         super().__init__(**kwargs)
+        self.retired_templates = tuple(str(item) for item in retired_templates)
         if (
             isinstance(max_admissions_per_tick, bool)
             or not isinstance(max_admissions_per_tick, int)
@@ -51,6 +58,10 @@ class ResearchTaskLauncher(LaneChildLauncher):
             "--summary-dir", str(ticket_dir),
             "--max-admissions", str(self.max_admissions_per_tick),
             "--quiet",
+        ] + [
+            argument
+            for template_ref in self.retired_templates
+            for argument in ("--retired-template", template_ref)
         ]
 
     def start(self, *, plan_ref: str, signature: str) -> dict[str, Any]:
@@ -62,7 +73,10 @@ class ResearchTaskLauncher(LaneChildLauncher):
         """
 
         digest = hashlib.sha256(
-            canonical_json({"plan_ref": plan_ref, "signature": signature}).encode("utf-8")
+            canonical_json({
+                "plan_ref": plan_ref, "signature": signature,
+                "retired": list(self.retired_templates),
+            }).encode("utf-8")
         ).hexdigest()[:24]
         return self.spawn(
             digest=digest,

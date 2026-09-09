@@ -152,7 +152,8 @@ class ResearchTaskCoordinator:
         if mission is None:
             return {"status": "idle", "reason": "no active mission"}
         authority = BoundedPlannerAuthority(self.store)
-        decision = grant(mission, bindable_templates(authority))
+        retired = getattr(self.launcher, "retired_templates", ())
+        decision = grant(mission, bindable_templates(authority, retired=retired))
         settled = self.settle()
         if not decision["granted"]:
             # The switch, stated rather than hidden: the reasons are the two
@@ -180,9 +181,21 @@ class ResearchTaskCoordinator:
                     "failure_reason": summary.get("failure_reason"),
                 }
                 if ticket["status"] in {"failed", "orphaned"}:
-                    held = self._held_since(latest, FAILURE_HOLD)
-                    if held is not None:
-                        return {**result, "status": "held", "reason": held}
+                    # The hold starts when the failure was seen, not when the
+                    # child was launched: a run that took fifty minutes to
+                    # fail would otherwise be retried ten minutes later, and a
+                    # run that failed instantly would be held for an hour from
+                    # a timestamp that meant something else.
+                    failed_at = latest.get("failed_at")
+                    if failed_at is None:
+                        failed_at = wire_time(self.clock())
+                        write_owner_only(self._latest_path(), {
+                            **latest, "failed_at": failed_at,
+                        })
+                    if self._within(failed_at, FAILURE_HOLD):
+                        return {**result, "status": "held",
+                                "reason": "上一轮准入失败了，等一轮再重试",
+                                "failed_at": failed_at}
         from .coverage_mission import CoverageMissionAuthority
 
         plan = CoverageMissionAuthority(self.store).latest_research_plan(mission["id"])
@@ -194,11 +207,13 @@ class ResearchTaskCoordinator:
             return {**result, "status": "skipped:pool_exhausted",
                     "reason": "今天的专项研究预算已经用完"}
         signature = self._signature(plan["plan_id"])
-        if latest is not None and latest.get("idle_signature") == signature:
-            held = self._held_since(latest, IDLE_HOLD)
-            if held is not None:
-                return {**result, "status": "held", "signature": signature,
-                        "reason": "计划和已派发的专项研究都没有变化"}
+        if (
+            latest is not None
+            and latest.get("idle_signature") == signature
+            and self._within(latest.get("idle_at"), IDLE_HOLD)
+        ):
+            return {**result, "status": "held", "signature": signature,
+                    "reason": "计划和已派发的专项研究都没有变化"}
         try:
             ticket = self.launcher.start(
                 plan_ref=plan["plan_id"], signature=str(signature["tasks"]),
@@ -213,19 +228,16 @@ class ResearchTaskCoordinator:
         })
         return {**result, "status": "launched", "ticket_ref": ticket["id"]}
 
-    def _held_since(
-        self, latest: Mapping[str, Any], window: timedelta
-    ) -> str | None:
-        held_since = latest.get("idle_at")
-        if not held_since:
-            return None
+    def _within(self, moment: Any, window: timedelta) -> bool:
+        """Whether ``moment`` is recent enough that the hold still stands."""
+
+        if not moment:
+            return False
         try:
-            moment = datetime.fromisoformat(held_since)
-        except ValueError:
-            return None
-        if self.clock() - moment >= window:
-            return None
-        return held_since
+            since = datetime.fromisoformat(moment)
+        except (TypeError, ValueError):
+            return False
+        return self.clock() - since < window
 
 
 def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -251,15 +263,32 @@ def add_arguments(parser: Any) -> None:
     )
 
 
-def _max_admissions(path: Path) -> int:
+def lane_configuration(path: Path) -> dict[str, Any]:
+    """This deployment's two knobs, defaulted rather than demanded.
+
+    ``retired_templates`` is the revocation lever the Core cannot offer: a
+    probe template version is append-only and has no status column, so an owner
+    who wants an admitted template to stop being bound tonight names it here.
+    """
+
     try:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return 1
+        value = {}
+    if not isinstance(value, dict):
+        value = {}
     requested = value.get("max_admissions_per_tick", 1)
     if isinstance(requested, bool) or not isinstance(requested, int) or requested < 1:
-        return 1
-    return min(requested, 3)
+        requested = 1
+    retired = value.get("retired_templates") or []
+    if not isinstance(retired, list):
+        retired = []
+    return {
+        "max_admissions_per_tick": min(requested, 3),
+        "retired_templates": tuple(
+            item for item in retired if isinstance(item, str) and item
+        ),
+    }
 
 
 def build_launcher(args: Any) -> Any | None:
@@ -267,9 +296,11 @@ def build_launcher(args: Any) -> Any | None:
         return None
     from .research_task_launcher import ResearchTaskLauncher
 
+    configuration = lane_configuration(args.research_task_lane)
     return ResearchTaskLauncher(
         state_dir=Path(args.db).expanduser().resolve().parent,
-        max_admissions_per_tick=_max_admissions(args.research_task_lane),
+        max_admissions_per_tick=configuration["max_admissions_per_tick"],
+        retired_templates=configuration["retired_templates"],
     )
 
 
@@ -305,4 +336,5 @@ __all__ = [
     "argv_fragment",
     "build_launcher",
     "dispatch",
+    "lane_configuration",
 ]

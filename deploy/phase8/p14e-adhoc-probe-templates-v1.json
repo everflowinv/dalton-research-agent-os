@@ -38,6 +38,7 @@
       "permission_scope": "public_sec_read",
       "runtime_profile_ref": "runner-runtime:sec-public:v1",
       "source_ref": "source:sec-edgar",
+      "status": "active",
       "template_ref": "probe-template:adhoc-sec-filings-index:v1",
       "verifier_ref": "verifier:source-level-coverage:0.1"
     },
@@ -77,6 +78,7 @@
       "permission_scope": "alphaengine_read",
       "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
       "source_ref": "source:alphaengine",
+      "status": "active",
       "template_ref": "probe-template:adhoc-alphaengine-search-library:v1",
       "verifier_ref": "verifier:source-level-coverage:0.1"
     },
@@ -115,6 +117,7 @@
       "permission_scope": "public_web_read",
       "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
       "source_ref": "source:public-web",
+      "status": "active",
       "template_ref": "probe-template:adhoc-web-search:v1",
       "verifier_ref": "verifier:source-level-coverage:0.1"
     }

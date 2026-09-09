@@ -348,15 +348,29 @@ class BoundedPlannerAuthority:
         return None if row is None else _decode_record(row, "BoundedPlannerTerminalEvent")
 
     def loop_for_admission(self, admission_content_hash: str) -> dict[str, Any] | None:
-        """The loop already admitted for this admission hash, if there is one."""
+        """The *head* loop version already admitted for this admission hash.
+
+        The head rather than the first, because an admitted loop may be
+        revised: ADR-0008's rule is that no produced thing has a terminal
+        state, only a version does, and a caller that wants to continue the
+        chain needs the version it must name as its prior.
+        """
 
         row = self.connection.execute(
             "SELECT * FROM bounded_planner_loop_versions "
             "WHERE json_extract(record_json,'$.admission.content_hash')=? "
-            "ORDER BY created_at, version_id LIMIT 1",
+            "ORDER BY version_number DESC, created_at DESC LIMIT 1",
             (_sha256(admission_content_hash, "admission_content_hash"),),
         ).fetchone()
         return None if row is None else _decode_record(row, "BoundedPlannerLoopVersion")
+
+    def coverage_manifest(self, manifest_ref: str) -> dict[str, Any]:
+        """One coverage manifest, re-verified like every other record here."""
+
+        return self._one(
+            "bounded_coverage_manifests", "manifest_id",
+            _text(manifest_ref, "manifest_ref"), "CoverageManifest",
+        )
 
     def admitted_loops(self, source: str) -> list[dict[str, Any]]:
         """Every loop admitted from one source, oldest first."""
@@ -494,7 +508,15 @@ class BoundedPlannerAuthority:
             # the mission that granted the word.
             actor_ref = _automation(actor_ref)
             existing_admission = self.loop_for_admission(admission_wire["content_hash"])
-            if existing_admission is not None:
+            if (
+                existing_admission is not None
+                and prior_version_ref != existing_admission["id"]
+            ):
+                # Admitting the same inquiry a second time is refused;
+                # *revising* the loop it already became is not.  A caller that
+                # names the head as its prior is continuing one chain, which is
+                # the only way a task can get a wider template set or a bigger
+                # budget without pretending to be a new question.
                 return {"status": "duplicate_admission", **existing_admission}
         question = read_exact_backlog_question_version(
             self.connection.cursor(), _text(question_version_ref, "question_version_ref")
