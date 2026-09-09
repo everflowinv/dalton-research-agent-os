@@ -87,6 +87,19 @@ if [[ ! -f "$sec_governance_v3_file" && -f "$repo_root/deploy/connector-governan
   cp "$repo_root/deploy/connector-governance/sec-company-facts-v3.json" "$sec_governance_v3_file"
   chmod 600 "$sec_governance_v3_file"
 fi
+# P13ae: Guidepoint is the expert-network library the Deep Insight Gate asks
+# for -- filings say what a company reported, operators say why. Two records,
+# because reading the index and reading a transcript are different permissions
+# and a schema hash binds one operation. Same seed-once rule: copied in as
+# *proposed*, and the owner approves each in place with
+# `dalton-connector-governance approve`. Until then the lane cannot run.
+for guidepoint_kind in guidepoint-search-library guidepoint-get-transcript; do
+  guidepoint_file="$governance_dir/${guidepoint_kind}-v1.json"
+  if [[ ! -f "$guidepoint_file" && -f "$repo_root/deploy/connector-governance/${guidepoint_kind}-v1.json" ]]; then
+    cp "$repo_root/deploy/connector-governance/${guidepoint_kind}-v1.json" "$guidepoint_file"
+    chmod 600 "$guidepoint_file"
+  fi
+done
 # P9d-1: AlphaEngine search_library is a separate governed capability.  Seed
 # the committed *proposed* record once; the owner approves in place with
 # dalton-connector-governance approve.  The discovery plan is a hash-bound

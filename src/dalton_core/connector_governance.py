@@ -47,6 +47,17 @@ SEC_CAPABILITY_ID = "capability:dalton:connector:sec-edgar"
 GEMINI_WEB_SEARCH_CAPABILITY_ID = "capability:dalton:connector:gemini-web-search"
 WEB_FETCH_CAPABILITY_ID = "capability:dalton:connector:web-fetch"
 SEC_FILINGS_INDEX_CAPABILITY_ID = "capability:dalton:connector:sec-filings-index"
+# P13ae: Guidepoint is two capabilities for the same reason AlphaEngine is --
+# reading an index and reading a document are different permissions, and a
+# schema hash binds one operation, so one record cannot cover both.
+GUIDEPOINT_SEARCH_KIND = "guidepoint-search-library"
+GUIDEPOINT_TRANSCRIPT_KIND = "guidepoint-get-transcript"
+GUIDEPOINT_SEARCH_CAPABILITY_ID = (
+    "capability:dalton:connector:guidepoint-search-library"
+)
+GUIDEPOINT_TRANSCRIPT_CAPABILITY_ID = (
+    "capability:dalton:connector:guidepoint-get-transcript"
+)
 
 
 class ConnectorGovernanceError(RuntimeError):
@@ -106,6 +117,36 @@ def _alpha_search_schema_hash() -> str:
     from .alphaengine_core_search import alphaengine_search_schema_hash
 
     return alphaengine_search_schema_hash()
+
+
+def _guidepoint_source_hash() -> str:
+    from .guidepoint_core import guidepoint_source_hash
+
+    return guidepoint_source_hash()
+
+
+def _guidepoint_permissions() -> dict[str, Any]:
+    from .guidepoint_core import guidepoint_permissions
+
+    return copy.deepcopy(guidepoint_permissions())
+
+
+def _guidepoint_fixture_hash() -> str:
+    from .guidepoint_core import guidepoint_fixture_hash
+
+    return guidepoint_fixture_hash()
+
+
+def _guidepoint_search_schema_hash() -> str:
+    from .guidepoint_core import SEARCH_OPERATION, guidepoint_schema_hash
+
+    return guidepoint_schema_hash(SEARCH_OPERATION)
+
+
+def _guidepoint_transcript_schema_hash() -> str:
+    from .guidepoint_core import TRANSCRIPT_OPERATION, guidepoint_schema_hash
+
+    return guidepoint_schema_hash(TRANSCRIPT_OPERATION)
 
 
 def _sec_identity() -> dict[str, Any]:
@@ -252,6 +293,25 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         permissions=_web_fetch_permissions,
         fixture_hash=_web_fetch_fixture_hash,
     ),
+    # P13ae: the expert-network library, split the way AlphaEngine is. Reading
+    # the index and reading a transcript are different permissions; approving
+    # the search is not approving the reading.
+    GUIDEPOINT_SEARCH_KIND: _KindSpec(
+        capability_id=GUIDEPOINT_SEARCH_CAPABILITY_ID,
+        template_key="guidepoint",
+        source_hash=_guidepoint_source_hash,
+        schema_hash=_guidepoint_search_schema_hash,
+        permissions=_guidepoint_permissions,
+        fixture_hash=_guidepoint_fixture_hash,
+    ),
+    GUIDEPOINT_TRANSCRIPT_KIND: _KindSpec(
+        capability_id=GUIDEPOINT_TRANSCRIPT_CAPABILITY_ID,
+        template_key="guidepoint",
+        source_hash=_guidepoint_source_hash,
+        schema_hash=_guidepoint_transcript_schema_hash,
+        permissions=_guidepoint_permissions,
+        fixture_hash=_guidepoint_fixture_hash,
+    ),
 }
 # Public aliases make the registry discoverable without exposing mutable
 # implementation details of a spec.  The old name is useful to callers that
@@ -364,6 +424,22 @@ def build_governance_record(
         from .public_web_core_fetch import build_web_fetch_governance_record
 
         return build_web_fetch_governance_record(
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in (GUIDEPOINT_SEARCH_KIND, GUIDEPOINT_TRANSCRIPT_KIND):
+        from .guidepoint_core import (
+            KIND_BY_OPERATION,
+            build_guidepoint_governance_record,
+        )
+
+        operation = next(op for op, name in KIND_BY_OPERATION.items() if name == kind)
+        return build_guidepoint_governance_record(
+            operation=operation,
             approved_by=approved_by,
             status=status,
             effective_from=effective_from,
