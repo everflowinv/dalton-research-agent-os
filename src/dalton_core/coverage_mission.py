@@ -3076,7 +3076,7 @@ class CoverageMissionAuthority:
 
     def queue_statement_dispatch(
         self, *, authorization: Mapping[str, Any], form: str = "10-Q",
-        filing_limit: int = 1, attempt: int = 0,
+        filing_limit: int = 1, attempt: int = 0, retry_salt: str | None = None,
     ) -> dict[str, Any]:
         """Queue one financial-statements run for a company, idempotently.
 
@@ -3089,6 +3089,15 @@ class CoverageMissionAuthority:
         approving the record afterwards would change nothing. The caller passes
         how many runs this company has already spent; the cap on those lives
         with the dispatcher, which is what knows when a company has had enough.
+
+        ``retry_salt`` is for the other kind of failure: the ones that were
+        never about this company. A malformed EDGAR identity fails every run
+        the same way, and it does not spend a company's attempts, so without a
+        second thing in the identity those retries would all collapse onto one
+        dispatch that already failed. The dispatcher passes a value that moves
+        with time rather than with the company, which is what makes the lane
+        both stop hammering a broken configuration and pick itself up once the
+        configuration is fixed.
         """
 
         authorization = dict(authorization)
@@ -3118,6 +3127,8 @@ class CoverageMissionAuthority:
             "actor_ref": exact["actor_ref"], "form": form,
             "filing_limit": filing_limit, "attempt": attempt,
         }
+        if retry_salt is not None:
+            request["retry_salt"] = _text(retry_salt, "retry_salt")[:64]
         request_hash = content_hash(request)
         dispatch_id = f"mission-statement-dispatch:{request_hash[:32]}"
         existing = self.connection.execute(
@@ -3421,8 +3432,23 @@ class CoverageMissionAuthority:
             "WHERE company_ref=? GROUP BY status", (company_ref,),
         ).fetchall()
         by_status = {str(row["status"]): int(row["n"]) for row in open_rows}
+        # P13ak: why the failures happened, not just how many. A run that died
+        # before it reached SEC -- a misconfigured identity, an unapproved
+        # record -- says nothing about this company, and spending its retry
+        # budget on our own fault would leave the lane permanently idle for
+        # everyone once the fault was fixed.
+        failures = [
+            {"reason": row["failure_reason"], "at": row["updated_at"],
+             "status": row["status"]}
+            for row in self.connection.execute(
+                "SELECT status,failure_reason,updated_at "
+                "FROM coverage_mission_statement_dispatches "
+                "WHERE company_ref=? AND status IN ('failed','rejected') "
+                "ORDER BY updated_at,dispatch_id", (company_ref,),
+            ).fetchall()
+        ]
         return {
-            "company_ref": company_ref,
+            "company_ref": company_ref, "failures": failures,
             "accessions": [item["accession"] for item in held],
             "forms": sorted({item["form"] for item in held}),
             "latest_report_date": max((item["report_date"] for item in held), default=None),

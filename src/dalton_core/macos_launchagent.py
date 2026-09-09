@@ -16,11 +16,13 @@ WRITER_LABEL = "space.lumos.dalton.writer"
 # Operator-visible SEC User-Agent for lane runs (SEC fair-access policy asks
 # for a contact string; no credentials are involved).
 SEC_LANE_USER_AGENT = "Dalton Research Agent OS SEC company-facts lane (owner: lumos)"
-# P13ak: SEC asks a client to say who it is and what it is doing. The
-# statements lane is a different lane hitting different endpoints, so it
-# says so rather than borrowing the facts lane's name.
+# P13ak: SEC asks a client to say who it is and how to reach it. The statements
+# lane says so in its own name rather than borrowing the facts lane's, and it
+# carries the same contact address this Core already publishes on its outbound
+# public requests -- the parser refuses an identity without one, which is how
+# the first live tick failed.
 STATEMENT_LANE_USER_AGENT = (
-    "Dalton Research Agent OS SEC financial-statements lane (owner: lumos)"
+    "Dalton Research Agent OS SEC financial-statements lane everflow@lumos.space"
 )
 CONTROLLER_LABEL = "space.lumos.dalton.controller"
 CONTROL_LABEL = "space.lumos.dalton.control"

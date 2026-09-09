@@ -25,13 +25,10 @@ this is where that judgement will attach.
 
 from __future__ import annotations
 
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
-from .coverage_mission import (
-    CoverageMissionError,
-    MAX_STATEMENT_FILINGS,
-)
+from .coverage_mission import CoverageMissionError, MAX_STATEMENT_FILINGS
 from .lane_child_launcher import (
     LaneChildConflict,
     LaneChildRejected,
@@ -41,9 +38,34 @@ from .lane_child_launcher import (
 MAX_QUEUED_PER_RUN = 4
 # Three failed or rejected runs is a company this lane cannot serve today.
 MAX_FAILURES_PER_COMPANY = 3
+# A run that never reached SEC failed because of how this Core is set up, not
+# because of the company. The first live tick proved why this distinction is
+# needed: every child died on a malformed EDGAR identity, and counted the way
+# an ordinary failure counts, three ticks would have exhausted all five
+# companies and left the lane permanently idle once the identity was fixed.
+CONFIGURATION_FAILURE_MARKERS = (
+    "SECIdentityError",
+    "governance record is not approved",
+    "governance source hash differs",
+    "governance schema hash differs",
+    "governance record covers a different capability",
+    "parser is not installed",
+    "LaneChildRejected",
+)
+# While a configuration is broken it is broken for every company, so the lane
+# holds instead of asking SEC the same doomed question once a tick.
+CONFIGURATION_HOLD_SECONDS = 1800
 DEFAULT_FORM = "10-Q"
 DEFAULT_FILING_LIMIT = 1
 MAX_FAILURE_DETAIL_CHARS = 500
+
+
+def _is_configuration_failure(reason: Any) -> bool:
+    """Did this run fail before it ever reached the source?"""
+
+    if not isinstance(reason, str):
+        return False
+    return any(marker in reason for marker in CONFIGURATION_FAILURE_MARKERS)
 
 
 def _failure_reason(summary: Any) -> str | None:
@@ -69,6 +91,7 @@ class MissionStatementLaneCoordinator:
         form: str = DEFAULT_FORM,
         filing_limit: int = DEFAULT_FILING_LIMIT,
         actor_ref: str = "automation:coverage-mission",
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.missions = missions
         self.launcher = launcher
@@ -78,6 +101,30 @@ class MissionStatementLaneCoordinator:
             raise ValueError(f"filing_limit must be 1..{MAX_STATEMENT_FILINGS}")
         self.filing_limit = int(filing_limit)
         self.actor_ref = actor_ref
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    # -- configuration failures --------------------------------------------
+
+    def _seconds_since(self, when: Any) -> float | None:
+        if not isinstance(when, str) or not when:
+            return None
+        try:
+            moment = datetime.fromisoformat(when)
+        except ValueError:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        return (self.clock() - moment).total_seconds()
+
+    def _retry_salt(self) -> str:
+        """A value that moves with the clock, not with the company.
+
+        One retry of a broken configuration per hold window: enough to notice
+        that it was fixed, not enough to keep asking SEC a doomed question.
+        """
+
+        window = int(self.clock().timestamp()) // CONFIGURATION_HOLD_SECONDS
+        return f"configuration-retry:{window}"
 
     # -- settling ----------------------------------------------------------
 
@@ -171,10 +218,24 @@ class MissionStatementLaneCoordinator:
                 continue
             if coverage["open_dispatches"]:
                 continue
-            spent = (coverage["dispatches"].get("failed", 0)
-                     + coverage["dispatches"].get("rejected", 0))
-            if spent >= MAX_FAILURES_PER_COMPANY:
+            failures = coverage.get("failures") or []
+            # Only the failures this company is actually responsible for spend
+            # its budget, and only those number its attempts.
+            charged = [item for item in failures
+                       if not _is_configuration_failure(item.get("reason"))]
+            if len(charged) >= MAX_FAILURES_PER_COMPANY:
                 continue
+            retry_salt = None
+            if failures and _is_configuration_failure(failures[-1].get("reason")):
+                held_for = self._seconds_since(failures[-1].get("at"))
+                if held_for is not None and held_for < CONFIGURATION_HOLD_SECONDS:
+                    queued.append({
+                        "company_ref": company_ref, "status": "held",
+                        "reason": "this Core's own configuration failed the last "
+                                  "run; holding rather than asking SEC again",
+                    })
+                    continue
+                retry_salt = self._retry_salt()
             # Whatever this company already has of this form is enough for now.
             # Depth beyond the newest quarter is the planner's call, not a
             # default this lane takes on its own.
@@ -184,7 +245,8 @@ class MissionStatementLaneCoordinator:
                 authorization = self.missions.sec_lane_authorization_for_company(company_ref)
                 dispatch = self.missions.queue_statement_dispatch(
                     authorization=authorization, form=self.form,
-                    filing_limit=self.filing_limit, attempt=spent,
+                    filing_limit=self.filing_limit, attempt=len(charged),
+                    retry_salt=retry_salt,
                 )
             except CoverageMissionError as exc:
                 queued.append({"company_ref": company_ref, "status": "refused",

@@ -9,6 +9,7 @@ slot, and that a rejection is not permanent.
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.lane_child_launcher import (
@@ -17,6 +18,7 @@ from dalton_core.lane_child_launcher import (
     LaneChildTicketNotFound,
 )
 from dalton_core.mission_statement_lane import (
+    CONFIGURATION_HOLD_SECONDS,
     MAX_FAILURES_PER_COMPANY,
     MissionStatementLaneCoordinator,
 )
@@ -90,9 +92,12 @@ class StatementLaneTests(unittest.TestCase):
         self.mission = self.missions.create_mission(params.pop("mission_ref"), **params)
         self.launcher = FakeLauncher()
         self.companies = [{"company_ref": ACN, "ticker": "ACN"}]
+        # The ledger stamps rows from the real clock, so the lane's clock
+        # starts there and the test moves it forward.
+        self.now = datetime.now(timezone.utc)
         self.lane = MissionStatementLaneCoordinator(
             missions=self.missions, launcher=self.launcher,
-            checklist=lambda: self.companies,
+            checklist=lambda: self.companies, clock=lambda: self.now,
         )
 
     def succeeded_summary(self, observation=None):
@@ -176,14 +181,40 @@ class StatementLaneTests(unittest.TestCase):
         self.assertEqual(len(self.missions.launched_statement_dispatches()), 1)
 
     def test_a_rejected_launch_can_be_retried_once_governance_lands(self):
-        self.launcher.raise_on_start = LaneChildRejected("governance is not approved")
+        self.launcher.raise_on_start = LaneChildRejected(
+            "SEC governance record is not approved")
         first = self.lane.dispatch_once()
         self.assertEqual(first["status"], "rejected")
         self.launcher.raise_on_start = None
-        # A retry is a distinct dispatch, so the earlier rejection does not
-        # freeze this company out forever.
-        second = self.lane.dispatch_once()
-        self.assertEqual(second["status"], "launched")
+        # The fault was this Core's, not the company's, so the lane holds
+        # rather than asking again on the very next tick.
+        held = self.lane.dispatch_once()
+        self.assertEqual(held["status"], "idle")
+        self.assertEqual(held["queued"][0]["status"], "held")
+        # And once the window is over it picks itself up: a retry is a distinct
+        # dispatch, so the earlier rejection does not freeze this company out.
+        self.now += timedelta(seconds=CONFIGURATION_HOLD_SECONDS + 1)
+        self.assertEqual(self.lane.dispatch_once()["status"], "launched")
+
+    def test_our_own_misconfiguration_does_not_spend_a_company_budget(self):
+        # The live first tick: every child died on a malformed EDGAR identity.
+        # Counted as ordinary failures, three ticks would have exhausted every
+        # company and left the lane idle for good once the identity was fixed.
+        for _ in range(MAX_FAILURES_PER_COMPANY + 2):
+            launched = self.lane.dispatch_once()
+            self.assertEqual(launched["status"], "launched")
+            self.launcher.finish(
+                launched["ticket_ref"], status="failed",
+                summary={"failure_reason": "SECIdentityError: missing EDGAR_IDENTITY"})
+            self.lane.dispatch_once()
+            self.now += timedelta(seconds=CONFIGURATION_HOLD_SECONDS + 1)
+        # Fixed. The company still has its full budget, and the next run works.
+        launched = self.lane.dispatch_once()
+        self.launcher.finish(launched["ticket_ref"], summary=self.succeeded_summary())
+        self.lane.dispatch_once()
+        self.assertEqual(
+            [item["accession"] for item in self.missions.statement_filings(ACN)],
+            [ACCESSION])
 
     def test_a_company_that_keeps_failing_stops_consuming_the_slot(self):
         for _ in range(MAX_FAILURES_PER_COMPANY):
