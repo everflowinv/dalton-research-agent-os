@@ -184,6 +184,12 @@ def add_arguments(parser: Any) -> None:
         help="P12a policy: the causal-chain section map and the Constitution's "
              "output_rubric bindings.",
     )
+    parser.add_argument(
+        "--company-dossier-verifier-model-config", type=_Path, default=None,
+        help="The configuration the independent verifier runs on. Without it "
+             "the child holds: one configuration routes both calls the same "
+             "way, so the verdict could never be shown to be independent.",
+    )
 
 
 def build_launcher(args: Any) -> Any | None:
@@ -196,28 +202,39 @@ def build_launcher(args: Any) -> Any | None:
     return CompanyDossierLauncher(
         state_dir=_Path(args.db).expanduser().resolve().parent,
         model_config_path=args.company_dossier_model_config,
+        verifier_model_config_path=getattr(
+            args, "company_dossier_verifier_model_config", None),
         scheduler_db=getattr(args, "scheduler", None),
         policy_path=getattr(args, "company_dossier_policy", None),
     )
 
 
-# The drafting configuration this lane uses when the installer has written
-# one; the same file the Initial Screen drafts with, because it is the same
-# route, broker and day ledger.
+# What this lane needs on disk before it is worth turning on: the drafting
+# configuration (the same file the Initial Screen drafts with -- same route,
+# same broker, same day ledger), the policy that maps the constitution's causal
+# chain to two of the sections, and the verifier's own configuration, without
+# which nothing can be published.
 DOSSIER_MODEL_CONFIG = "initial-screen-model-config.json"
+DOSSIER_VERIFIER_MODEL_CONFIG = "dossier-verifier-model-config.json"
+DOSSIER_POLICY = "p12a-dossier-policy-v1.json"
 
 
 def argv_fragment(context: Any) -> list[str]:
-    # Every lane's fragment is gated on the thing that lane needs being on
-    # disk. This one needs a drafting model: without it the child can plan and
-    # nothing else, and a lane that can only report "gated" every tick is a
-    # lane that should be off.
-    if context.extraction_model_config_path is None:
-        return []
+    # Gated on what this lane itself needs, not on the extraction model: the
+    # dossier does not extract anything, and an installation with an extraction
+    # model and no dossier policy would have had the lane on and holding every
+    # tick. Both files must be present, and the policy path is passed through:
+    # its default only resolves inside a source checkout.
     config = context.state / DOSSIER_MODEL_CONFIG
-    if not config.is_file():
+    policy = context.state / DOSSIER_POLICY
+    if not config.is_file() or not policy.is_file():
         return []
-    return ["--company-dossier-model-config", str(config)]
+    argv = ["--company-dossier-model-config", str(config),
+            "--company-dossier-policy", str(policy)]
+    verifier = context.state / DOSSIER_VERIFIER_MODEL_CONFIG
+    if verifier.is_file():
+        argv += ["--company-dossier-verifier-model-config", str(verifier)]
+    return argv
 
 
 LANE = register_lane(LaneSpec(
@@ -237,6 +254,8 @@ LANE = register_lane(LaneSpec(
 
 __all__ = [
     "DOSSIER_MODEL_CONFIG",
+    "DOSSIER_POLICY",
+    "DOSSIER_VERIFIER_MODEL_CONFIG",
     "LANE",
     "LAUNCHER_KWARG",
     "MAX_FAILURE_DETAIL_CHARS",

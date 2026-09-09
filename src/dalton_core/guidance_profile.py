@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Any
@@ -41,11 +42,16 @@ from .store import content_hash
 
 SCHEMA_VERSION = "0.1"
 
-# The words a style can be.  ``insufficient_data`` covers both "too few rows"
-# and "the rows show no pattern above its threshold"; ``basis`` says which,
-# because they are different facts about the company.
+# The words a style can be.  ``insufficient_data`` means the table is too thin
+# to say; ``mixed`` means the table is thick enough and says no single thing.
 GUIDANCE_STYLES: tuple[str, ...] = (
-    "conservative", "beat_and_raise", "aggressive", "insufficient_data",
+    "conservative", "beat_and_raise", "aggressive",
+    # Owner decision, 2026-09-09: the fifth word. Without it "we have two rows"
+    # and "we have twelve rows and they show nothing" share a name, and those
+    # are opposite facts about a management team -- the first is a gap in our
+    # evidence, the second is a finding about them.
+    "mixed",
+    "insufficient_data",
 )
 
 # What a guide and an actual have to be about before they can be compared.
@@ -73,6 +79,42 @@ _PERCENT_UNITS = frozenset({"percent", "%", "percentage", "pct", "percentage_poi
 
 DEVIATIONS: tuple[str, ...] = ("beat", "miss", "inline", "unknown")
 
+_SPAN_RE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})\s*\.\.\s*(\d{4}-\d{2}-\d{2})\s*$")
+_DATE_RE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})\s*$")
+
+
+def period_bounds(value: Any) -> tuple[str | None, str | None]:
+    """``(start, end)`` for the two period shapes this system writes.
+
+    A Claim's period is a span (``2026-03-01..2026-05-31``) or a bare date; a
+    statement line has a start and an end. A fiscal label (``Q2 FY2026``) is
+    neither, and this deliberately does not resolve one: P12b refused to guess
+    a company's fiscal calendar for exactly this reason, and a guide paired
+    against the wrong quarter is worse than a guide paired against nothing.
+    """
+
+    text = str(value or "").strip()
+    span = _SPAN_RE.match(text)
+    if span:
+        return span.group(1), span.group(2)
+    date = _DATE_RE.match(text)
+    if date:
+        return None, date.group(1)
+    return None, None
+
+
+def period_key(value: Any) -> str:
+    """What a guide and an actual have to agree on before they are compared.
+
+    The period *end*, when the shape yields one, so that a Claim's span and a
+    filed line's end join; otherwise the label itself, so that two labels can
+    still meet each other and nothing else can.
+    """
+
+    text = str(value or "").strip()
+    _, end = period_bounds(text)
+    return end or text
+
 # The rule, in words, stored beside every classification it produced.  A
 # classification whose rule is only in the code cannot be argued with.
 GUIDANCE_STYLE_RULE = (
@@ -81,7 +123,7 @@ GUIDANCE_STYLE_RULE = (
     "Otherwise: beats >= 75% of settled and at least half of the consecutive "
     "guide pairs were revised upward -> beat_and_raise; beats >= 75% without "
     "those raises -> conservative; misses >= 50% -> aggressive; anything else "
-    "-> insufficient_data, because no pattern reached its threshold."
+    "-> mixed, which is a finding about them rather than a gap in our evidence."
 )
 MIN_SETTLED_EVENTS = 4
 BEAT_SHARE = Decimal("0.75")
@@ -134,9 +176,14 @@ _RANGE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
         r"between\s+(-?\d+(?:\.\d+)?)\s*%?\s+and\s+(-?\d+(?:\.\d+)?)\s*%?",
         re.IGNORECASE)),
     ("x_to_y", re.compile(
-        r"(-?\d+(?:\.\d+)?)\s*%?\s*(?:to|-|–|—|~|至|到)\s*(-?\d+(?:\.\d+)?)\s*%")),
+        r"(?<![\d-])(-?\d+(?:\.\d+)?)\s*%?\s*(?:to|-|–|—|~|至|到)\s*"
+        r"(-?\d+(?:\.\d+)?)\s*%")),
+    # Anchored to a unit word on purpose. Unanchored, "2025-09-01..2026-05-31"
+    # reads as a range from 9 to 2026 and every dated span in the ledger
+    # becomes a guidance range.
     ("x_dash_y", re.compile(
-        r"(-?\d+(?:\.\d+)?)\s*(?:-|–|—|~|至|到)\s*(-?\d+(?:\.\d+)?)")),
+        r"(?<![\d-])(\d+(?:\.\d+)?)\s*(?:-|–|—|~|至|到)\s*(\d+(?:\.\d+)?)\s*"
+        r"(?:%|percent|pct|个百分点)")),
     ("point", re.compile(r"(-?\d+(?:\.\d+)?)\s*%")),
 )
 
@@ -163,6 +210,64 @@ def read_range(text: str) -> dict[str, Any] | None:
     return None
 
 
+def _span_days(start: str | None, end: str | None) -> int:
+    """How long a measured period is, for preferring a quarter over a year."""
+
+    if not start or not end:
+        return 10 ** 6
+    try:
+        return (date.fromisoformat(end) - date.fromisoformat(start)).days
+    except ValueError:
+        return 10 ** 6
+
+
+def _index_actuals(
+    actuals: Sequence[Mapping[str, Any]]
+) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    """Settled numbers by (period key, measure), several per key on purpose.
+
+    A quarter is filed twice -- in the 10-Q and again in the 10-K -- and the
+    year-to-date figure carries the same period end as the quarter inside it.
+    Keeping the candidates and choosing at pairing time is what stops a guide
+    for one quarter from being marked a beat against nine months of revenue.
+    """
+
+    index: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in actuals:
+        measure = row.get("measure") or measure_of(
+            str(row.get("label") or row.get("text") or ""))
+        value = _decimal(row.get("value"))
+        raw_period = row.get("period")
+        span_start, span_end = period_bounds(raw_period)
+        span_start = row.get("period_start") or span_start
+        span_end = row.get("period_end") or span_end
+        key = period_key(span_end or raw_period)
+        if measure not in MEASURES or value is None or not key:
+            continue
+        index.setdefault((key, measure), []).append({
+            "value": value, "unit": row.get("unit"), "refs": [str(row["ref"])],
+            "start": span_start, "end": span_end,
+            "span_days": _span_days(span_start, span_end),
+        })
+    return index
+
+
+def _choose_actual(
+    rows: Sequence[Mapping[str, Any]], guide_start: str | None
+) -> dict[str, Any]:
+    """The candidate a guide is actually about.
+
+    An exact span match wins; failing that the shortest measured period, so a
+    quarterly guide meets the quarter rather than the year to date.
+    """
+
+    if guide_start:
+        exact = [row for row in rows if row.get("start") == guide_start]
+        if exact:
+            return dict(exact[0])
+    return dict(min(rows, key=lambda row: (row["span_days"], row["refs"][0])))
+
+
 def guidance_events(
     guides: Sequence[Mapping[str, Any]],
     actuals: Sequence[Mapping[str, Any]],
@@ -171,48 +276,37 @@ def guidance_events(
 
     ``guides`` are Claim rows the index filed under ``guidance_style``;
     ``actuals`` are rows from anywhere that reports a settled number for a
-    period -- quantitative Claims, a forecast model's ``actual`` cells, a
-    statement line.  Neither is fetched here: this function is arithmetic over
+    period -- quantitative Claims, a filed statement line, a forecast model's
+    ``actual`` cells. Neither is fetched here: this function is arithmetic over
     what it was handed, so it can be replayed and tested without a Core.
     """
 
-    by_key: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in actuals:
-        measure = row.get("measure") or measure_of(str(row.get("label") or row.get("text") or ""))
-        value = _decimal(row.get("value"))
-        period = str(row.get("period") or "")
-        if measure not in MEASURES or value is None or not period:
-            continue
-        key = (period, measure)
-        # First writer wins, and the callers hand these in importance order
-        # (filing before transcript before sell side), so the strongest source
-        # for a period is the one the deviation is measured against.
-        by_key.setdefault(key, {
-            "value": value, "unit": row.get("unit"), "refs": [str(row["ref"])],
-        })
-
+    by_key = _index_actuals(actuals)
     events: list[dict[str, Any]] = []
     unparsed: list[dict[str, Any]] = []
     for row in guides:
         text = str(row.get("text") or row.get("normalized_statement") or "")
-        period = str(row.get("period") or "")
+        raw_period = row.get("period")
+        key = period_key(raw_period)
+        guide_start, _ = period_bounds(raw_period)
         measure = row.get("measure") or measure_of(
             f"{row.get('label') or row.get('metric_or_aspect') or ''} {text}")
         parsed = read_range(text)
-        if not period or measure not in MEASURES or parsed is None:
+        if not key or measure not in MEASURES or parsed is None:
             unparsed.append({
                 "ref": str(row.get("ref") or ""),
-                "reason": ("no period" if not period else
+                "reason": ("no period" if not key else
                            "no closed measure" if measure not in MEASURES else
                            "no rule read a range from the statement"),
             })
             continue
         guide_unit = row.get("unit") or ("percent" if "%" in text else None)
-        actual = by_key.get((period, measure))
+        candidates = by_key.get((key, measure))
         deviation = {"verdict": "unknown", "distance": None,
                      "reason": "no actual for this period and measure"}
         actual_wire = None
-        if actual is not None:
+        if candidates:
+            actual = _choose_actual(candidates, guide_start)
             actual_wire = {
                 "value": _format(actual["value"]), "unit": actual["unit"],
                 "refs": list(actual["refs"]),
@@ -236,7 +330,7 @@ def guidance_events(
                     deviation = {"verdict": "inline", "distance": "0",
                                  "reason": "inside the guided range"}
         events.append({
-            "period": period,
+            "period": key,
             "measure": measure,
             "guide": {
                 "low": _format(parsed["low"]), "high": _format(parsed["high"]),
@@ -278,9 +372,10 @@ def classify(events: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     if misses >= MISS_SHARE:
         return {"classification": "aggressive", "counts": counts, "settled": total,
                 "basis": f"{counts['miss']}/{total} misses"}
-    return {"classification": "insufficient_data", "counts": counts, "settled": total,
-            "basis": (f"{total} settled events, but no pattern reached its "
-                      "threshold (beats <75%, misses <50%)")}
+    return {"classification": "mixed", "counts": counts, "settled": total,
+            "basis": (f"{total} settled events and no pattern reached its "
+                      "threshold (beats <75%, misses <50%): the table is thick "
+                      "enough to read and says no single thing")}
 
 
 def _raise_share(settled: Sequence[Mapping[str, Any]]) -> Decimal | None:
@@ -392,6 +487,8 @@ def render_profile_table(profile: Mapping[str, Any]) -> str:
 
 __all__ = [
     "BEAT_SHARE",
+    "period_bounds",
+    "period_key",
     "DEVIATIONS",
     "GUIDANCE_STYLES",
     "GUIDANCE_STYLE_RULE",

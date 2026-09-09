@@ -89,6 +89,12 @@ MAX_NUMBER_ROWS = 30
 MAX_ROW_CHARS = 400
 MAX_PRIOR_CHARS = 2_000
 
+# What may stand behind a sentence about *the market's* view. A filing and a
+# management statement are the company talking; quoting them as evidence of
+# what the street thinks is how a variant view becomes a restatement of the
+# company's own case with the disagreement invented.
+MARKET_VIEW_GRADES: frozenset[str] = frozenset({"sell_side", "news"})
+
 VERIFIER_VERDICTS: tuple[str, ...] = ("pass", "reject")
 # Closed, and short: a verifier with an open vocabulary writes essays.
 VERIFIER_FINDING_CODES: tuple[str, ...] = (
@@ -351,12 +357,23 @@ def parse_unit_output(
             f"{sorted(expected)}")
     slots, sources = _resolve_tags(value["slots"], material, unit=unit)
     gaps = value.get("gaps") or []
+    if unit == VARIANT_UNIT:
+        grades = {row["ref"]: row.get("importance") for row in material}
+        for slot in slots:
+            if slot["slot_id"] != "market_view":
+                continue
+            for row in slot.get("sentences") or ():
+                for ref in row["refs"]:
+                    if grades.get(ref) not in MARKET_VIEW_GRADES:
+                        raise DossierDraftRefused(
+                            f"{unit}: market_view cites {ref} ({grades.get(ref)}), "
+                            "which is the company talking rather than the market")
     ids = [slot["slot_id"] for slot in structure]
     try:
         if unit == CLASSIFICATION_UNIT:
             return validate_classification({
                 "classification": value["classification"],
-                "slots": slots, "sources": sources,
+                "slots": slots, "sources": sources, "gaps": gaps,
             })
         if unit == VARIANT_UNIT:
             return validate_variant_view({
@@ -366,6 +383,7 @@ def parse_unit_output(
                                        "no consensus, rating, sales note or crowd "
                                        "narrative material was found for this company"),
                 "structure": ids, "slots": slots, "sources": sources,
+                "gaps": gaps,
             })
         return validate_section({
             "aspect": unit, "status": "drafted", "reason": None,
@@ -559,6 +577,29 @@ def independence(
             "draft_families": draft_families}
 
 
+def independence_precheck(
+    *, draft_routes: Sequence[str | None], resolve: Callable[[str | None], str | None],
+) -> dict[str, Any] | None:
+    """Refuse a verification that could not have been independent, before paying.
+
+    The family that served is a fact about the route decision, and the drafting
+    routes are already recorded by the time this runs. If any of them cannot be
+    resolved, no verdict from any second call could be shown to be independent,
+    so the call is not worth making. Returning ``None`` means it is.
+    """
+
+    families = [resolve(ref) for ref in draft_routes]
+    if not families or any(family is None for family in families):
+        return {
+            "independent": False,
+            "reason": ("a drafting call's model family could not be resolved from "
+                       "its route decision, so no verification could be shown to "
+                       "be independent"),
+            "verifier_family": None, "draft_families": families,
+        }
+    return None
+
+
 def verify(
     model: Any,
     blocks: Mapping[str, Any],
@@ -621,6 +662,7 @@ __all__ = [
     "MAX_OUTPUT_TOKENS",
     "MAX_RUN_COST_USD",
     "MAX_UNITS_PER_RUN",
+    "MARKET_VIEW_GRADES",
     "MODEL_CONFIG_NAME",
     "TIMEOUT_SECONDS",
     "VERIFIER_FINDING_CODES",
@@ -632,6 +674,7 @@ __all__ = [
     "draft_hash",
     "draft_unit",
     "independence",
+    "independence_precheck",
     "material_rows",
     "parse_unit_output",
     "render_material",

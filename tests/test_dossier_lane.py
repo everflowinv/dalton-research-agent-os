@@ -149,16 +149,28 @@ class Harness:
             )
 
     def tag(self, ref, aspect, *, statement, metric="demand environment",
-            kind="qualitative", value=None, unit=None, group=None):
+            kind="qualitative", value=None, unit=None, group=None,
+            period="2026-03-01..2026-05-31"):
         claim = self.fixture.add_claim(
             ref, kind=kind, value=value, unit=unit, metric=metric,
-            statement=statement)
+            statement=statement, period=period)
         self.index.record_entry(**entry_args(
-            claim, aspect=aspect, metric_or_aspect=metric,
+            claim, aspect=aspect, metric_or_aspect=metric, period_key=period,
             dedupe_group_key=group or f"qual|{ACN}|{ref}",
             claim_kind=kind, importance="filing",
             importance_basis="document_spec:sec-10q"))
         return claim
+
+    def add_guidance_pair(self, period="2026-03-01..2026-05-31", actual=8.0):
+        """A guide and the settled number that answered it, both as Claims."""
+
+        self.tag("g-%s" % period, "guidance_style",
+                 statement=("管理层指引本季 revenue growth of 5% to 7%。"),
+                 metric="revenue growth guidance", period=period)
+        self.tag("a-%s" % period, "segments_and_mix",
+                 statement=("Revenue growth for the quarter was %s percent." % actual),
+                 metric="quarterly_revenue_yoy_growth", kind="quantitative",
+                 value=actual, unit="percent", period=period)
 
     def add_material(self):
         self.tag("d-1", "business_model",
@@ -304,6 +316,37 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(section["profile"]["classification"], "insufficient_data")
         self.assertEqual(section["profile"]["events"][0]["guide"]["low"], "5")
 
+    def test_the_units_a_bounded_tick_left_out_are_drafted_on_the_next_one(self):
+        # Five units have material and a tick drafts three. Against the head of
+        # the chain the two left over would look current the moment the first
+        # version landed -- nothing has arrived since -- and the file would
+        # stop at three sections for ever. Staleness is per unit: a unit
+        # nobody has written is stale whatever else was published.
+        first = self.harness.run(max_units=3)
+        self.assertEqual(first["dossier_status"], "published")
+        self.assertEqual(len(first["units_drafted"]), 3)
+        second = self.harness.run(max_units=3)
+        self.assertEqual(second["dossier_status"], "published")
+        self.assertEqual(len(second["units_drafted"]), 2)
+        self.assertFalse(set(first["units_drafted"]) & set(second["units_drafted"]))
+        third = self.harness.run(max_units=3)
+        self.assertEqual(third["dossier_status"], "nothing_new")
+        record = self.authority.latest(ACN)
+        self.assertEqual(record["version"], 2)
+        self.assertEqual(sorted(record["drafted_at"]),
+                         sorted(first["units_drafted"] + second["units_drafted"]))
+        self.assertEqual(
+            len([item for item in record["sections"] if item["status"] == "drafted"]),
+            4)
+
+    def test_a_carried_forward_unit_keeps_the_time_it_was_written(self):
+        self.harness.run(max_units=3)
+        stamps = self.authority.latest(ACN)["drafted_at"]
+        self.harness.run(max_units=3)
+        after = self.authority.latest(ACN)["drafted_at"]
+        for unit, when in stamps.items():
+            self.assertEqual(after[unit], when, unit)
+
     def test_the_classification_is_one_of_the_gates_five_words(self):
         self.harness.run(max_units=12)
         record = self.authority.latest(ACN)
@@ -346,13 +389,11 @@ class PublishTests(unittest.TestCase):
                          "nothing_new")
         asked = self.harness.run(max_units=12, revise_units=("business_model",))
         # Nothing new arrived, so the redraft cites what the current version
-        # already cites and it is refused -- by the rubric's
-        # ``new_version_cites_new_refs``, which is ADR-0008's rule stated as a
-        # quality check and which fires one step before the authority's own.
-        # The request is honoured; the rule is not suspended.
+        # already cites and it is refused before a record is even assembled.
+        # The request is honoured; ADR-0008 is not suspended by it.
         self.assertEqual(asked["units_drafted"], ["business_model"])
-        self.assertEqual(asked["dossier_status"], "rubric_refused")
-        self.assertIn("new_version_cites_new_refs", asked["rubric"]["hard_failed"])
+        self.assertEqual(asked["dossier_status"], "no_new_evidence")
+        self.assertIsNone(asked["version_ref"])
         self.assertEqual(len(self.authority.versions(ACN)), 1)
 
     def test_a_verifier_on_the_drafters_family_publishes_nothing(self):
@@ -400,6 +441,235 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(self.authority.versions(ACN), [])
 
 
+class GuidanceThroughTheCoreTests(unittest.TestCase):
+    """P12f end to end: the rows the Core hands over must actually settle.
+
+    The first version of this path built its actuals with a null value and a
+    span for a period while the guides carried a Claim's own period key, so
+    the join could not match and every event was ``unknown``. A profile that
+    can never settle an event is a profile that can only ever say
+    ``insufficient_data``, which reads exactly like an honest answer.
+    """
+
+    QUARTERS = (("2025-03-01..2025-05-31", 8.0), ("2025-06-01..2025-08-31", 9.0),
+                ("2025-09-01..2025-11-30", 4.0), ("2025-12-01..2026-02-28", 6.0))
+
+    def setUp(self):
+        self.harness = Harness()
+        self.addCleanup(self.harness.close)
+
+    def profile(self):
+        from dalton_core.company_dossier_cli import guidance_material
+        from dalton_core.guidance_profile import build_profile
+
+        guides, actuals = guidance_material(self.harness.store, ACN)
+        return build_profile(company_ref=ACN, guides=guides, actuals=actuals)
+
+    def test_a_guide_and_a_quantitative_claim_settle_into_beat_miss_inline(self):
+        for period, actual in self.QUARTERS:
+            self.harness.add_guidance_pair(period=period, actual=actual)
+        profile = self.profile()
+        settled = [event["deviation"]["verdict"] for event in profile["events"]
+                   if event["actual"] is not None]
+        self.assertEqual(settled, ["beat", "beat", "miss", "inline"])
+        self.assertEqual(profile["settled"], 4)
+        self.assertEqual(profile["classification"], "mixed")
+
+    def test_beating_every_quarter_is_read_as_conservative(self):
+        for period, _ in self.QUARTERS:
+            self.harness.add_guidance_pair(period=period, actual=9.0)
+        self.assertEqual(self.profile()["classification"], "conservative")
+
+    def test_a_guide_with_no_settled_number_stays_unknown_rather_than_dropped(self):
+        profile = self.profile()
+        self.assertEqual([event["deviation"]["verdict"] for event in profile["events"]],
+                         ["unknown"])
+        self.assertEqual(profile["classification"], "insufficient_data")
+
+    def test_the_published_section_carries_the_settled_table(self):
+        for period, actual in self.QUARTERS:
+            self.harness.add_guidance_pair(period=period, actual=actual)
+        summary = self.harness.run(max_units=12)
+        self.assertEqual(summary["dossier_status"], "published")
+        record = CompanyDossierAuthority(self.harness.store).latest(ACN)
+        section = next(item for item in record["sections"]
+                       if item["aspect"] == "guidance_style")
+        self.assertEqual(section["profile"]["classification"], "mixed")
+        self.assertEqual(section["profile"]["settled"], 4)
+
+
+class GateTests(unittest.TestCase):
+    """The five ways a draft fails to become a version, and one that no longer is."""
+
+    def setUp(self):
+        self.harness = Harness()
+        self.addCleanup(self.harness.close)
+        self.authority = CompanyDossierAuthority(self.harness.store)
+
+    def test_without_a_verifier_configuration_nothing_is_drafted_at_all(self):
+        # One configuration routes both calls the same way, so the verdict
+        # could never be shown to be independent. Refusing after twelve
+        # drafting calls would be the same answer at twelve times the price.
+        drafter = FakeModel()
+        summary = self.harness.run(model_factory=lambda: drafter,
+                                   verifier_model_factory=None)
+        self.assertEqual((summary["status"], summary["dossier_status"]),
+                         ("held", "no_verifier"))
+        self.assertEqual(drafter.prompts, [])
+        self.assertEqual(summary["cost_micros"], 0)
+
+    def test_an_unresolvable_drafting_family_skips_the_verifier_call(self):
+        verifier = FakeModel(route="route:verify")
+        summary = self.harness.run(
+            model_factory=lambda: FakeModel(route="route:unknown"),
+            verifier_model_factory=lambda: verifier)
+        self.assertEqual(summary["dossier_status"], "not_independent")
+        self.assertEqual(summary["verification"]["status"], "skipped")
+        self.assertEqual(verifier.prompts, [])
+
+    def test_a_run_that_cannot_afford_the_verifier_publishes_nothing(self):
+        from unittest.mock import patch
+
+        with patch("dalton_core.company_dossier_cli.MAX_RUN_COST_USD", 0.001):
+            summary = self.harness.run()
+        self.assertEqual(summary["dossier_status"], "unverified")
+        self.assertIn("cost bound", summary["verification"]["reason"])
+        self.assertEqual(self.authority.versions(ACN), [])
+
+    def test_a_carried_section_whose_claim_was_retired_is_dropped_not_deadlocked(self):
+        from dalton_core.claim_retirement import ClaimRetirementAuthority
+
+        self.harness.run(max_units=12)
+        record = self.authority.latest(ACN)
+        section = next(item for item in record["sections"]
+                       if item["aspect"] == "business_model")
+        cited = section["sources"][0]["ref"]
+        row = self.harness.store.connection.execute(
+            "SELECT content_hash FROM claim_versions WHERE claim_version_id=?",
+            (cited,)).fetchone()
+        retirement = ClaimRetirementAuthority(self.harness.store)
+        challenge = retirement.challenge(
+            claim_version_ref=cited, claim_version_hash=row["content_hash"],
+            reason_code="human_judgment", rationale="fixture",
+            actor_ref="human:coverage-owner")
+        retirement.decide(challenge_ref=challenge["id"],
+                          challenge_hash=challenge["content_hash"],
+                          decision="retired", actor_ref="human:coverage-owner",
+                          rationale="fixture")
+        # Something new to write, so the run has a reason to exist at all.
+        self.harness.tag("d-7", "competitive_position",
+                         statement="公司在两个客户群里替换了原有供应商。")
+        summary = self.harness.run(max_units=12)
+        # The chain moves. Refusing the version because a section written last
+        # week rests on a Claim retired since would freeze the file for ever on
+        # the one section nobody can fix without publishing.
+        self.assertEqual(summary["dossier_status"], "published")
+        # The classification drew on the same Claim, so it goes too: a ref
+        # that stopped resolving is a defect in every part that cites it.
+        self.assertEqual(summary["dropped_units"],
+                         ["business_model", "industry_classification"])
+        after = self.authority.latest(ACN)
+        dropped = next(item for item in after["sections"]
+                       if item["aspect"] == "business_model")
+        self.assertEqual((dropped["status"], dropped["reason"]),
+                         ("unavailable", "refused_by_verification"))
+        # And the old version still says what it said.
+        before = self.authority.versions(ACN)[0]
+        kept = next(item for item in before["sections"]
+                    if item["aspect"] == "business_model")
+        self.assertEqual(kept["status"], "drafted")
+
+    def test_a_freshly_drafted_unresolvable_ref_still_refuses_the_run(self):
+        from dalton_core.company_dossier_cli import unresolved_refs
+
+        record = {"sections": [{"aspect": "business_model", "sources": [
+            {"kind": "claim", "ref": "claim-version:nope", "text": "x", "period": None}]}]}
+        missing = unresolved_refs(self.harness.store.connection, record,
+                                  forecast_cells=set())
+        self.assertEqual(missing, [{"ref": "claim-version:nope",
+                                    "reason": "no such claim version"}])
+
+    def test_a_new_figure_ref_counts_as_new_evidence_for_the_hard_check(self):
+        # Q1's check reads Claim refs; a dossier also rests on filed lines and
+        # forecast cells. Where the two disagree the broader rule wins, and the
+        # summary records that it did.
+        from dalton_core.company_dossier_cli import rubric_gate
+
+        prior = {"sections": [{"aspect": "business_model", "status": "drafted",
+                               "reason": None, "structure": ["business_model"],
+                               "slots": [{"slot_id": "business_model", "sentences": [
+                                   {"text": "上一版。", "refs": ["claim-version:a"]}]}],
+                               "sources": [{"kind": "claim", "ref": "claim-version:a",
+                                            "text": "收入", "period": None}],
+                               "gaps": [], "profile": None}],
+                 "industry_classification": {"classification": "insufficient_evidence",
+                                             "slots": [], "sources": [], "gaps": []},
+                 "variant_view": {"status": "unavailable", "sources": []}}
+        record = {"sections": [{"aspect": "business_model", "status": "drafted",
+                                "reason": None, "structure": ["business_model"],
+                                "slots": [{"slot_id": "business_model", "sentences": [
+                                    {"text": "这一版换了说法。", "refs": ["claim-version:a"]}]}],
+                                "sources": [
+                                    {"kind": "claim", "ref": "claim-version:a",
+                                     "text": "收入", "period": None},
+                                    {"kind": "figure", "ref": "statement-line:new",
+                                     "text": "filed", "period": None}],
+                                "gaps": [], "profile": None}],
+                  "industry_classification": {"classification": "insufficient_evidence",
+                                              "slots": [], "sources": [], "gaps": []},
+                  "variant_view": {"status": "unavailable", "sources": []},
+                  "company_ref": ACN}
+        gate = rubric_gate(None, record, prior=prior)
+        self.assertIn("new_version_cites_new_refs", gate["summary"]["failed_checks"])
+        self.assertEqual(gate["failed"], [])
+        self.assertEqual(gate["summary"]["overridden_checks"],
+                         ["new_version_cites_new_refs"])
+
+
+def _no_core():
+    """A store stand-in for the tests that patch both row readers."""
+
+    import types
+
+    return types.SimpleNamespace(connection=None)
+
+
+class FigureQuotaTests(unittest.TestCase):
+    def test_filed_lines_do_not_starve_the_forecast_cells(self):
+        from unittest.mock import patch
+
+        from dalton_core.company_dossier_cli import number_material
+
+        filed = [{"kind": "figure", "ref": f"statement-line:{n}", "text": "x",
+                  "period": "p"} for n in range(60)]
+        cells = [{"kind": "forecast_cell", "ref": f"cell:{n}", "text": "y",
+                  "period": "p"} for n in range(20)]
+        with patch("dalton_core.company_dossier_cli._statement_line_rows",
+                   return_value=filed), \
+             patch("dalton_core.company_dossier_cli._forecast_cell_rows",
+                   return_value=cells):
+            rows = number_material(_no_core(), ACN, limit=30)
+        kinds = [row["kind"] for row in rows]
+        self.assertEqual(len(rows), 30)
+        self.assertEqual(kinds.count("forecast_cell"), 10)
+        self.assertEqual(kinds.count("figure"), 20)
+
+    def test_the_quota_is_a_floor_and_not_a_ceiling(self):
+        from unittest.mock import patch
+
+        from dalton_core.company_dossier_cli import number_material
+
+        filed = [{"kind": "figure", "ref": f"statement-line:{n}", "text": "x",
+                  "period": "p"} for n in range(60)]
+        with patch("dalton_core.company_dossier_cli._statement_line_rows",
+                   return_value=filed), \
+             patch("dalton_core.company_dossier_cli._forecast_cell_rows",
+                   return_value=[]):
+            rows = number_material(_no_core(), ACN, limit=30)
+        self.assertEqual(len(rows), 30)
+        self.assertTrue(all(row["kind"] == "figure" for row in rows))
+
+
 class LaneWiringTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -415,35 +685,63 @@ class LaneWiringTests(unittest.TestCase):
         keys = [spec.driver_key for spec in registered_lanes()]
         self.assertEqual(len(keys), len(set(keys)))
 
+    def context(self):
+        state = self.state
+
+        class Context:
+            candidate_staging_path = None
+            extraction_model_config_path = None
+
+        Context.state = state
+        return Context()
+
     def test_the_lane_is_absent_until_a_drafting_model_is_installed(self):
         class Args:
             db = str(self.state / "core.sqlite")
             company_dossier_model_config = None
             company_dossier_policy = None
+            company_dossier_verifier_model_config = None
             scheduler = None
 
         self.assertIsNone(build_launcher(Args()))
+        self.assertEqual(LANE.argv_fragment(self.context()), [])
 
-        class Context:
-            state = self.state
-            extraction_model_config_path = None
-            candidate_staging_path = None
+    def test_the_lane_stays_off_until_the_policy_is_on_disk_too(self):
+        from dalton_core.mission_dossier_lane import DOSSIER_MODEL_CONFIG, DOSSIER_POLICY
 
-        self.assertEqual(LANE.argv_fragment(Context()), [])
+        (self.state / DOSSIER_MODEL_CONFIG).write_text("{}", encoding="utf-8")
+        # A model and no policy: the two constitution-shaped sections have no
+        # structure, so the lane would hold every tick. It stays off instead.
+        self.assertEqual(LANE.argv_fragment(self.context()), [])
+        (self.state / DOSSIER_POLICY).write_text("{}", encoding="utf-8")
+        self.assertEqual(
+            LANE.argv_fragment(self.context()),
+            ["--company-dossier-model-config", str(self.state / DOSSIER_MODEL_CONFIG),
+             "--company-dossier-policy", str(self.state / DOSSIER_POLICY)])
 
-    def test_the_argv_fragment_appears_once_the_configuration_is_on_disk(self):
-        from dalton_core.mission_dossier_lane import DOSSIER_MODEL_CONFIG
+    def test_the_argv_carries_the_verifier_configuration_when_it_exists(self):
+        from dalton_core.mission_dossier_lane import (
+            DOSSIER_MODEL_CONFIG, DOSSIER_POLICY, DOSSIER_VERIFIER_MODEL_CONFIG,
+        )
 
-        config = self.state / DOSSIER_MODEL_CONFIG
-        config.write_text("{}", encoding="utf-8")
+        for name in (DOSSIER_MODEL_CONFIG, DOSSIER_POLICY,
+                     DOSSIER_VERIFIER_MODEL_CONFIG):
+            (self.state / name).write_text("{}", encoding="utf-8")
+        argv = LANE.argv_fragment(self.context())
+        self.assertIn("--company-dossier-verifier-model-config", argv)
+        self.assertEqual(argv[-1], str(self.state / DOSSIER_VERIFIER_MODEL_CONFIG))
 
-        class Context:
-            state = self.state
-            extraction_model_config_path = "/somewhere/extraction.json"
-            candidate_staging_path = None
+    def test_the_lane_does_not_read_the_extraction_configuration(self):
+        # It extracts nothing. Gating on the extraction model meant an
+        # installation with one and no dossier policy had this lane on and
+        # holding on every tick.
+        from dalton_core.mission_dossier_lane import DOSSIER_MODEL_CONFIG, DOSSIER_POLICY
 
-        self.assertEqual(LANE.argv_fragment(Context()),
-                         ["--company-dossier-model-config", str(config)])
+        for name in (DOSSIER_MODEL_CONFIG, DOSSIER_POLICY):
+            (self.state / name).write_text("{}", encoding="utf-8")
+        context = self.context()
+        context.extraction_model_config_path = None
+        self.assertTrue(LANE.argv_fragment(context))
 
     def test_the_writer_without_this_lane_says_so_rather_than_failing(self):
         class Server:
@@ -460,11 +758,13 @@ class LaneWiringTests(unittest.TestCase):
         state = self.state.resolve()
         launcher = CompanyDossierLauncher(
             state_dir=state, model_config_path=state / "m.json",
+            verifier_model_config_path=state / "v.json",
             policy_path=state / "p.json")
         command = launcher._command(ticket_dir=state, company_ref=ACN)
         args = build_parser().parse_args(command[3:])
         self.assertEqual(args.company_ref, ACN)
         self.assertEqual(args.model_config, state / "m.json")
+        self.assertEqual(args.verifier_model_config, state / "v.json")
         self.assertEqual(args.dossier_policy, state / "p.json")
 
     def test_the_ticket_is_named_by_the_evidence_the_run_is_about(self):

@@ -123,13 +123,14 @@ def classification(ref=None, word="contract_compounder"):
         return {"classification": "insufficient_evidence",
                 "slots": [{"slot_id": slot, "unknown": "未起草"}
                           for slot in CLASSIFICATION_SLOTS],
-                "sources": []}
+                "sources": [], "gaps": []}
     return {
         "classification": word,
         "slots": [{"slot_id": slot,
                    "sentences": [{"text": f"{slot} 的理由。", "refs": [ref]}]}
                   for slot in CLASSIFICATION_SLOTS],
         "sources": [source(ref, "合同期限为五年")],
+        "gaps": [],
     }
 
 
@@ -137,7 +138,7 @@ def variant(ref=None, available=False):
     if ref is None:
         return {"status": "unavailable", "reason": "not_drafted_this_run",
                 "market_view_available": False, "market_view_reason": None,
-                "structure": [], "slots": [], "sources": []}
+                "structure": [], "slots": [], "sources": [], "gaps": []}
     ids = [slot for slot in VARIANT_SLOTS if available or slot != "market_view"]
     return {
         "status": "drafted", "reason": None, "market_view_available": available,
@@ -147,6 +148,7 @@ def variant(ref=None, available=False):
                    "sentences": [{"text": f"{slot} 的一句话。", "refs": [ref]}]}
                   for slot in ids],
         "sources": [source(ref, "卖方给出的目标区间")],
+        "gaps": [],
     }
 
 
@@ -312,6 +314,38 @@ class SectionContractTests(unittest.TestCase):
         self.assertIn("unavailable, not drafted", str(caught.exception))
 
 
+class ProseTests(unittest.TestCase):
+    def test_a_citation_tag_in_the_prose_is_refused_by_the_authority(self):
+        from dalton_core.company_dossier import validate_section
+
+        # The rule the drafting prompt states, enforced where it cannot be
+        # skipped: a rule that lives only in a prompt is a rule the next
+        # drafter will not have read, and the published Initial Screens are
+        # what happens then.
+        for text in ("C3显示公司通过两类合同赚钱。", "见 N12。", "两类合同（C7）。"):
+            section = drafted("business_model", "claim-version:a", text)
+            with self.assertRaises(CompanyDossierValidationError) as caught:
+                validate_section(section, "sections[0]")
+            self.assertIn("into the prose", str(caught.exception))
+
+    def test_ordinary_prose_that_merely_contains_a_letter_and_a_digit_is_fine(self):
+        from dalton_core.company_dossier import validate_section
+
+        for text in ("公司的 CN2 专线业务在扩张。", "毛利率为 C 类合同拖累。",
+                     "the ACN3000 platform was retired."):
+            validate_section(drafted("business_model", "claim-version:a", text),
+                             "sections[0]")
+
+    def test_chinese_sentences_run_together_and_english_ones_do_not(self):
+        chinese = {"slots": [{"slot_id": "s", "sentences": [
+            {"text": "第一句。", "refs": ["r"]}, {"text": "第二句。", "refs": ["r"]}]}]}
+        english = {"slots": [{"slot_id": "s", "sentences": [
+            {"text": "The first.", "refs": ["r"]},
+            {"text": "The second.", "refs": ["r"]}]}]}
+        self.assertEqual(section_body(chinese), "第一句。第二句。")
+        self.assertEqual(section_body(english), "The first. The second.")
+
+
 class AuthorityTests(unittest.TestCase):
     def setUp(self):
         self.fixture = LedgerFixture()
@@ -451,6 +485,36 @@ class OutputRubricTests(unittest.TestCase):
         self.assertEqual(
             output_rubric_findings(record, constitution=constitution(), policy=policy()),
             [])
+
+    def test_the_variant_view_is_read_by_the_output_rubric_too(self):
+        # 目标价 and 低估 live in our_view if they live anywhere, and a standard
+        # applied to nine tenths of a document is not applied.
+        criteria = CRITERIA + ["outputs never auto-generate investment conclusions"]
+        mapped = validate_policy({
+            **policy(),
+            "output_rubric_bindings": policy()["output_rubric_bindings"] + [{
+                "criterion_hash": content_hash(criteria[2]),
+                "check": "no_investment_conclusion", "reason": ""}],
+        })
+        block = variant("claim-version:v")
+        block["slots"][0]["sentences"][0]["text"] = "我们认为市场给的目标价太低。"
+        record = body(
+            drafted_sections={"business_model": drafted("business_model", "claim-version:a")},
+            variant_block=block)
+        findings = output_rubric_findings(
+            record, constitution=constitution(criteria=criteria), policy=mapped)
+        self.assertEqual([item["section"] for item in findings], ["variant_view"])
+
+    def test_a_number_in_the_classification_is_traced_like_any_other(self):
+        block = classification("claim-version:c")
+        block["slots"][0]["sentences"][0]["text"] = "合同期限中位数为 7.5 年。"
+        record = body(
+            drafted_sections={"business_model": drafted("business_model", "claim-version:a")},
+            classification_block=block)
+        findings = output_rubric_findings(record, constitution=constitution(),
+                                          policy=policy())
+        self.assertEqual([item["section"] for item in findings],
+                         ["industry_classification"])
 
     def test_an_investment_conclusion_is_a_finding(self):
         criteria = CRITERIA + ["outputs never auto-generate investment conclusions"]

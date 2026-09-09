@@ -57,6 +57,7 @@ from .company_dossier import (
 )
 from .company_dossier_draft import (
     MAX_CLAIM_ROWS,
+    independence_precheck,
     MAX_COST_USD,
     MAX_INPUT_TOKENS,
     MAX_NUMBER_ROWS,
@@ -87,6 +88,8 @@ MAX_STATEMENT_PERIODS = 8
 FIGURE_SECTIONS: tuple[str, ...] = (
     "business_model", "segments_and_mix", "demand_drivers", "supply_and_cost",
 )
+# The share of the figure bound reserved for the driver model's cells.
+MAX_FORECAST_ROWS = 10
 
 
 def _now() -> str:
@@ -176,6 +179,13 @@ def claim_material(
             # things undone, and treating it as stale would redraft it every
             # tick for ever and publish a duplicate each time.
             "created_at": row.get("created_at"),
+            # Carried for P12f, which compares magnitudes rather than reading
+            # them back out of prose. Ignored by the prompt builder, which
+            # shows a statement and its tag and nothing else.
+            "claim_kind": row.get("claim_kind"),
+            "metric_or_aspect": row.get("metric_or_aspect"),
+            "value": row.get("value"),
+            "unit": row.get("unit"),
         })
     return material
 
@@ -189,87 +199,135 @@ def number_material(
     that projection is derived on demand and stored nowhere, so a ref into it
     would name something that does not exist. The filed line it was built from
     does exist, and it is what the number is actually evidence of.
+
+    Each kind has its own quota. Filed lines are plentiful and forecast cells
+    are few, so a single bound spent in filing order leaves no room for the
+    quarters this system has an opinion about -- which are the ones a section
+    on demand or margin most needs beside the history.
+
+    Every row carries its ``value``, ``unit`` and period bounds as well as its
+    text, because P12f pairs guidance against these rows and cannot parse a
+    number back out of a sentence it wrote itself.
     """
 
-    rows: list[dict[str, Any]] = []
     connection = store.connection
-    if table_exists(connection, "coverage_mission_statement_lines"):
-        periods = [
-            str(row["period_end"]) for row in connection.execute(
-                "SELECT DISTINCT l.period_end AS period_end "
-                "FROM coverage_mission_statement_lines l "
-                "JOIN coverage_mission_statement_filings f ON f.ingest_id=l.ingest_id "
-                "WHERE f.company_ref=? ORDER BY l.period_end DESC LIMIT ?",
-                (company_ref, MAX_STATEMENT_PERIODS),
-            ).fetchall()
-        ]
-        if periods:
-            placeholders = ",".join("?" * len(periods))
-            seen: set[tuple[str, str, str]] = set()
-            for row in connection.execute(
-                "SELECT l.line_id AS line_id, l.label AS label, l.concept AS concept, "
-                "l.value AS value, l.unit AS unit, l.period_start AS period_start, "
-                "l.period_end AS period_end, l.statement AS statement, "
-                "f.accession AS accession "
-                "FROM coverage_mission_statement_lines l "
-                "JOIN coverage_mission_statement_filings f ON f.ingest_id=l.ingest_id "
-                f"WHERE f.company_ref=? AND l.period_end IN ({placeholders}) "
-                # The top of each statement, not its breakdowns: a dossier
-                # section cites what the company reported, and the segment
-                # detail below it is what the Claims are for. There is no
-                # level 0 in this ledger -- the roots are levels one to three.
-                "AND l.value IS NOT NULL AND l.level<=3 AND l.is_breakdown=0 "
-                # Newest first, and the income statement before the cash flow
-                # before the balance sheet. Without the statement order the
-                # bound is spent on the tail of whichever statement happens to
-                # be filed last, and a section about the business model is
-                # offered the closing cash balance instead of revenue.
-                "ORDER BY l.period_end DESC, CASE l.statement WHEN 'income' THEN 0 "
-                "WHEN 'cash' THEN 1 ELSE 2 END, l.ordinal LIMIT ?",
-                (company_ref, *periods, limit * 4),
-            ).fetchall():
-                # One row per measurement. The same quarter is filed twice --
-                # once in the 10-Q and again in the 10-K -- and a year-to-date
-                # figure sits beside the quarter under the same label and the
-                # same period_end. Both are why the span is in the key and in
-                # the text: "18.7bn for the quarter" and "37.7bn year to date"
-                # are different facts, and a reader who cannot tell them apart
-                # will read the second as a restatement of the first.
-                key = (str(row["concept"]), str(row["period_start"] or "-"),
-                       str(row["period_end"]))
-                if key in seen:
-                    continue
-                seen.add(key)
-                span = (f"{row['period_start']}..{row['period_end']}"
-                        if row["period_start"] else f"as at {row['period_end']}")
-                rows.append({
-                    "kind": "figure",
-                    "ref": f"statement-line:{row['line_id']}",
-                    "text": (f"{row['label']} ({row['concept']}) for {span} was "
-                             f"{row['value']} {row['unit']}, as filed in "
-                             f"{row['accession']}"),
-                    "period": span,
-                    "importance": "filing",
-                })
-                if len(rows) >= limit:
-                    break
-    if table_exists(connection, "forecast_model_versions"):
-        from .model_forecast_driver import ForecastModelAuthority, cell_ref
+    forecast_quota = min(MAX_FORECAST_ROWS, max(0, limit // 3))
+    filed = _statement_line_rows(connection, company_ref, limit=limit)
+    cells = _forecast_cell_rows(store, company_ref, limit=max(forecast_quota, 0))
+    # The quota is a floor, not a ceiling: whatever one kind does not use, the
+    # other may have.
+    room_for_filed = limit - min(len(cells), forecast_quota)
+    rows = filed[:max(room_for_filed, 0)]
+    rows += cells[:limit - len(rows)]
+    return rows
 
-        model = ForecastModelAuthority(store).latest(company_ref)
-        for line in (model or {}).get("results") or []:
-            for cell in line.get("cells") or []:
-                if cell.get("value") is None:
-                    continue
-                end = str(cell["period"]["end"])
-                rows.append({
-                    "kind": "forecast_cell",
-                    "ref": cell_ref(str(line["ref"]), end, str(cell["kind"])),
-                    "text": (f"{line['label']} for the quarter ending {end} is "
-                             f"{cell['value']} {line['unit']} ({cell['kind']})"),
-                    "period": end,
-                    "importance": "filing" if cell["kind"] == "actual" else "other",
-                })
+
+def _statement_line_rows(
+    connection: Any, company_ref: str, *, limit: int
+) -> list[dict[str, Any]]:
+    if not table_exists(connection, "coverage_mission_statement_lines"):
+        return []
+    periods = [
+        str(row["period_end"]) for row in connection.execute(
+            "SELECT DISTINCT l.period_end AS period_end "
+            "FROM coverage_mission_statement_lines l "
+            "JOIN coverage_mission_statement_filings f ON f.ingest_id=l.ingest_id "
+            "WHERE f.company_ref=? ORDER BY l.period_end DESC LIMIT ?",
+            (company_ref, MAX_STATEMENT_PERIODS),
+        ).fetchall()
+    ]
+    if not periods:
+        return []
+    placeholders = ",".join("?" * len(periods))
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for row in connection.execute(
+        "SELECT l.line_id AS line_id, l.label AS label, l.concept AS concept, "
+        "l.value AS value, l.unit AS unit, l.period_start AS period_start, "
+        "l.period_end AS period_end, l.statement AS statement, "
+        "f.accession AS accession "
+        "FROM coverage_mission_statement_lines l "
+        "JOIN coverage_mission_statement_filings f ON f.ingest_id=l.ingest_id "
+        f"WHERE f.company_ref=? AND l.period_end IN ({placeholders}) "
+        # The top of each statement, not its breakdowns: a dossier section
+        # cites what the company reported, and the segment detail below it is
+        # what the Claims are for. There is no level 0 in this ledger -- the
+        # roots are levels one to three.
+        "AND l.value IS NOT NULL AND l.level<=3 AND l.is_breakdown=0 "
+        # Newest first, and the income statement before the cash flow before
+        # the balance sheet. Without the statement order the bound is spent on
+        # the tail of whichever statement happens to be filed last, and a
+        # section about the business model is offered the closing cash balance
+        # instead of revenue.
+        "ORDER BY l.period_end DESC, CASE l.statement WHEN 'income' THEN 0 "
+        "WHEN 'cash' THEN 1 ELSE 2 END, l.ordinal LIMIT ?",
+        (company_ref, *periods, limit * 4),
+    ).fetchall():
+        # One row per measurement. The same quarter is filed twice -- once in
+        # the 10-Q and again in the 10-K -- and a year-to-date figure sits
+        # beside the quarter under the same label and the same period_end.
+        # Both are why the span is in the key and in the text: "18.7bn for the
+        # quarter" and "37.7bn year to date" are different facts, and a reader
+        # who cannot tell them apart will read the second as a restatement of
+        # the first.
+        key = (str(row["concept"]), str(row["period_start"] or "-"),
+               str(row["period_end"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        span = (f"{row['period_start']}..{row['period_end']}"
+                if row["period_start"] else f"{row['period_end']}")
+        rows.append({
+            "kind": "figure",
+            "ref": f"statement-line:{row['line_id']}",
+            "text": (f"{row['label']} ({row['concept']}) for {span} was "
+                     f"{row['value']} {row['unit']}, as filed in "
+                     f"{row['accession']}"),
+            "period": span,
+            "period_start": row["period_start"],
+            "period_end": row["period_end"],
+            "label": row["label"],
+            "value": row["value"],
+            "unit": row["unit"],
+            "importance": "filing",
+        })
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _forecast_cell_rows(
+    store: DaltonStore, company_ref: str, *, limit: int
+) -> list[dict[str, Any]]:
+    if limit <= 0 or not table_exists(store.connection, "forecast_model_versions"):
+        return []
+    from .model_forecast_driver import ForecastModelAuthority, cell_ref
+
+    model = ForecastModelAuthority(store).latest(company_ref)
+    rows: list[dict[str, Any]] = []
+    for line in (model or {}).get("results") or []:
+        for cell in line.get("cells") or []:
+            if cell.get("value") is None:
+                continue
+            period = cell["period"]
+            end = str(period["end"])
+            rows.append({
+                "kind": "forecast_cell",
+                "ref": cell_ref(str(line["ref"]), end, str(cell["kind"])),
+                "text": (f"{line['label']} for the quarter ending {end} is "
+                         f"{cell['value']} {line['unit']} ({cell['kind']})"),
+                "period": (f"{period['start']}..{end}" if period.get("start") else end),
+                "period_start": period.get("start"),
+                "period_end": end,
+                "label": line["label"],
+                "value": cell["value"],
+                "unit": line["unit"],
+                # A filed actual is a filing; an estimate is ours, and the
+                # importance ladder has no rung for our own opinion.
+                "importance": "filing" if cell["kind"] == "actual" else "other",
+            })
+    # Newest first, so the quota buys the quarters nearest the present.
+    rows.sort(key=lambda row: (str(row["period_end"]), row["ref"]), reverse=True)
     return rows[:limit]
 
 
@@ -305,12 +363,36 @@ def guidance_material(
          "label": row.get("text")}
         for row in claim_material(store, company_ref, "guidance_style")
     ]
-    actuals = []
-    for row in number_material(store, company_ref, limit=MAX_NUMBER_ROWS):
-        actuals.append({
-            "ref": row["ref"], "text": row["text"], "label": row["text"],
-            "period": row.get("period"), "value": None, "unit": None,
-        })
+    # A settled number can be a quantitative Claim as easily as a filed line:
+    # "revenue grew 5.95% in the quarter" is exactly what a guidance range is
+    # answered by, and on this Core it is the only settled growth figure that
+    # exists. Claims come first because they carry the measure the guide was
+    # about, and the index has already put filings ahead of news among them.
+    actuals: list[dict[str, Any]] = []
+    for aspect in SECTIONS:
+        for row in claim_material(store, company_ref, aspect):
+            if row.get("claim_kind") != "quantitative" or row.get("value") is None:
+                continue
+            actuals.append({
+                "ref": row["ref"],
+                "label": f"{row.get('metric_or_aspect') or ''} {row['text']}",
+                "text": row["text"], "period": row.get("period"),
+                "value": row.get("value"), "unit": row.get("unit"),
+            })
+    # The numbers, not the sentences about them. P12f compares magnitudes, so
+    # it needs the value, the unit and the period bounds -- handing it prose
+    # and a null value is handing it a row it must skip, which is how this
+    # pairing came to be unable to settle a single event.
+    actuals += [
+        {
+            "ref": row["ref"], "label": row.get("label") or row["text"],
+            "text": row["text"], "period": row.get("period"),
+            "period_start": row.get("period_start"),
+            "period_end": row.get("period_end"),
+            "value": row.get("value"), "unit": row.get("unit"),
+        }
+        for row in number_material(store, company_ref, limit=MAX_NUMBER_ROWS)
+    ]
     return guides, actuals
 
 
@@ -375,6 +457,40 @@ def unresolved_refs(
 # ---------------------------------------------------------------------------
 
 
+def fresh_evidence(
+    blocks: Mapping[str, Any], prior: Mapping[str, Any] | None
+) -> list[dict[str, Any]]:
+    """The rows this draft cites that the current version does not.
+
+    ADR-0008's question, asked before a record is assembled rather than after,
+    so that "there is nothing new here" is a status the run reports instead of
+    a record it builds and the authority then refuses.
+    """
+
+    known = set() if prior is None else set(evidence_scope(prior))
+    rows: dict[str, dict[str, Any]] = {}
+    for block in blocks.values():
+        for row in block.get("sources") or []:
+            if row["ref"] not in known:
+                rows.setdefault(row["ref"], row)
+    return list(rows.values())
+
+
+def units_citing(record: Mapping[str, Any], refs: set[str]) -> set[str]:
+    """Which units of a record cite any of these refs."""
+
+    out: set[str] = set()
+    for section in record.get("sections") or []:
+        if any(row["ref"] in refs for row in section.get("sources") or []):
+            out.add(section["aspect"])
+    for unit, key in ((CLASSIFICATION_UNIT, "industry_classification"),
+                      (VARIANT_UNIT, "variant_view")):
+        block = record.get(key) or {}
+        if any(row["ref"] in refs for row in block.get("sources") or []):
+            out.add(unit)
+    return out
+
+
 def unavailable_section(aspect: str, reason: str, structure: Sequence[str] = ()) -> dict[str, Any]:
     return {"aspect": aspect, "status": "unavailable", "reason": reason,
             "structure": list(structure), "slots": [], "sources": [], "gaps": [],
@@ -388,13 +504,14 @@ def undrafted_classification() -> dict[str, Any]:
         "classification": "insufficient_evidence",
         "slots": [{"slot_id": slot, "unknown": "not drafted on this run"}
                   for slot in CLASSIFICATION_SLOTS],
-        "sources": [],
+        "sources": [], "gaps": [],
     }
 
 
 def undrafted_variant(reason: str = "not_drafted_this_run") -> dict[str, Any]:
     return {"status": "unavailable", "reason": reason, "market_view_available": False,
-            "market_view_reason": None, "structure": [], "slots": [], "sources": []}
+            "market_view_reason": None, "structure": [], "slots": [], "sources": [],
+            "gaps": []}
 
 
 def plan_units(
@@ -465,13 +582,16 @@ def plan_units(
         cited = {row["ref"] for row in (held or {}).get("sources") or []}
         entry["new_refs"] = len({row["ref"] for row in material} - cited)
         drafted_before = held is not None and held.get("status") != "unavailable"
-        entry["last_drafted"] = (prior or {}).get("version") if drafted_before else None
+        # When *this* unit was last written, not when the chain last moved.
+        # Against the chain head, a unit nobody has ever drafted looks current
+        # the moment any other unit is published, and with three units a tick
+        # over twelve units most of the file would never be written.
+        written_at = str(((prior or {}).get("drafted_at") or {}).get(unit) or "")
+        entry["last_drafted"] = written_at or None
         newest = max((str(row.get("created_at") or "") for row in material),
                      default="")
         entry["stale"] = (
-            not drafted_before
-            or prior is None
-            or newest > str(prior.get("created_at") or ""))
+            not drafted_before or not written_at or newest > written_at)
         plan[unit] = entry
     return plan
 
@@ -519,6 +639,7 @@ def run_dossier(
     revise_units: Sequence[str] = (),
     max_units: int = MAX_UNITS_PER_RUN,
     dry_run: bool = False,
+    verifier_model_config_path: Path | None = None,
     model_factory: Callable[..., Any] | None = None,
     verifier_model_factory: Callable[..., Any] | None = None,
     family_resolver: Callable[[str | None], str | None] | None = None,
@@ -539,6 +660,7 @@ def run_dossier(
         "verification": None,
         "rubric": None,
         "output_rubric_findings": [],
+        "dropped_units": [],
         "version_ref": None,
         "version_status": None,
         "new_refs": 0,
@@ -653,11 +775,31 @@ def run_dossier(
             return summary
 
         config = json.loads(Path(model_config_path).expanduser().read_text(encoding="utf-8"))
-        factory = model_factory or (lambda: CockpitModel(
-            config, scheduler_db=str(scheduler_db or (state_dir / "scheduler.sqlite")),
-            max_input_tokens=MAX_INPUT_TOKENS, max_output_tokens=MAX_OUTPUT_TOKENS,
-            max_cost_usd=MAX_COST_USD, timeout_seconds=TIMEOUT_SECONDS,
-        ))
+
+        def build(settings: Mapping[str, Any]) -> Any:
+            return CockpitModel(
+                settings,
+                scheduler_db=str(scheduler_db or (state_dir / "scheduler.sqlite")),
+                max_input_tokens=MAX_INPUT_TOKENS, max_output_tokens=MAX_OUTPUT_TOKENS,
+                max_cost_usd=MAX_COST_USD, timeout_seconds=TIMEOUT_SECONDS)
+
+        factory = model_factory or (lambda: build(config))
+        verifier_factory = verifier_model_factory
+        if verifier_factory is None and verifier_model_config_path is not None:
+            verifier_config = json.loads(
+                Path(verifier_model_config_path).expanduser().read_text(encoding="utf-8"))
+            verifier_factory = lambda: build(verifier_config)  # noqa: E731
+        if verifier_factory is None:
+            # Held before a single drafting call. One configuration routes both
+            # calls the same way, so the verifier would land on the family that
+            # drafted and the run would refuse to publish after paying for
+            # twelve calls. The cheapest correct answer is to say so first.
+            summary.update({
+                "status": "held", "dossier_status": "no_verifier",
+                "failure_reason": ("no separate verifier model configuration is "
+                                   "wired; a dossier is published only on a verdict "
+                                   "from a different model family (D2)")})
+            return summary
         model = factory()
         company = {"company_ref": chosen, "ticker": next(
             (member.get("ticker") for member in mission["universe"]
@@ -708,11 +850,36 @@ def run_dossier(
             summary.update({"status": "succeeded", "dossier_status": "nothing_drafted"})
             return summary
 
-        verifier = (verifier_model_factory or factory)()
+        resolve = family_resolver or router_family_resolver(config)
+        # D2, decided before anyone pays for it. A drafting family that cannot
+        # be read back from its route decision makes every possible verdict
+        # unverifiable, so the second call is not worth making.
+        early = independence_precheck(draft_routes=draft_routes, resolve=resolve)
+        if early is not None:
+            summary["verification"] = {
+                "status": "skipped", "verdict": None, "findings": [],
+                "reason": "not attempted", "independent": False,
+                "independence_reason": early["reason"],
+                "verifier_family": None,
+            }
+            summary.update({"status": "succeeded",
+                            "dossier_status": "not_independent"})
+            return summary
+        if spent + int(MAX_COST_USD * 1_000_000) > int(MAX_RUN_COST_USD * 1_000_000):
+            # The verification is not optional, so a run that cannot afford it
+            # publishes nothing rather than publishing unverified.
+            summary["verification"] = {
+                "status": "skipped", "verdict": None, "findings": [],
+                "reason": "the run's cost bound leaves no room for the verifier",
+                "independent": False, "independence_reason": None,
+                "verifier_family": None,
+            }
+            summary.update({"status": "succeeded", "dossier_status": "unverified"})
+            return summary
+        verifier = verifier_factory()
         verdict = verify(verifier, blocks, company=company, mission=mission)
         spent += int((verdict.get("model") or {}).get("cost_micros") or 0)
         summary["cost_micros"] = spent
-        resolve = family_resolver or router_family_resolver(config)
         check = independence(
             draft_routes=draft_routes,
             verifier_route=(verdict.get("model") or {}).get("route_decision_ref"),
@@ -733,18 +900,59 @@ def run_dossier(
             summary.update({"status": "succeeded", "dossier_status": "not_independent"})
             return summary
 
+        # ADR-0008, asked before a record exists. A draft that cites nothing
+        # the current version does not is not a version, and saying so here
+        # costs nothing; assembling one and having the authority refuse it
+        # would leave the summary describing a record nobody can read.
+        fresh = fresh_evidence(blocks, prior)
+        if not fresh:
+            summary.update({"status": "succeeded", "dossier_status": "no_new_evidence",
+                            "failure_reason": ("this draft cites nothing the current "
+                                               "version does not")})
+            return summary
+        stamped = _now()
         record = assemble(
             company_ref=chosen, blocks=blocks, plan=plan, prior=prior,
             profile=profile, constitution=constitution, policy=policy,
             mission=mission, actor_ref=actor_ref, change_reason=change_reason,
+            drafted_at=stamped, evidence_refs=fresh,
         )
         forecast_cells = {row["ref"] for row in number_material(store, chosen)
                           if row["kind"] == "forecast_cell"}
         missing = unresolved_refs(store.connection, record, forecast_cells=forecast_cells)
         if missing:
-            summary.update({"status": "succeeded", "dossier_status": "unresolvable_refs",
-                            "failure_reason": json.dumps(missing[:5], ensure_ascii=False)})
-            return summary
+            # A ref that stopped resolving is a defect in whichever part cites
+            # it. In a part drafted just now that is a bad draft and the run is
+            # refused. In a part carried forward from an earlier version -- a
+            # Claim retired since it was written -- refusing would freeze the
+            # whole chain on one stale section for ever, so that section drops
+            # to unavailable and the lane redrafts it. The old version keeps
+            # what it said; nothing is edited.
+            drafted_refs = {row["ref"] for block in blocks.values()
+                            for row in block.get("sources") or []}
+            broken = {item["ref"] for item in missing}
+            if broken & drafted_refs:
+                summary.update({
+                    "status": "succeeded", "dossier_status": "unresolvable_refs",
+                    "failure_reason": json.dumps(
+                        [item for item in missing if item["ref"] in drafted_refs][:5],
+                        ensure_ascii=False)})
+                return summary
+            dropped = units_citing(record, broken) - set(blocks)
+            summary["dropped_units"] = sorted(dropped)
+            record = assemble(
+                company_ref=chosen, blocks=blocks, plan=plan, prior=prior,
+                profile=profile, constitution=constitution, policy=policy,
+                mission=mission, actor_ref=actor_ref, change_reason=change_reason,
+                drafted_at=stamped, evidence_refs=fresh, drop_units=dropped,
+            )
+            still = unresolved_refs(store.connection, record,
+                                    forecast_cells=forecast_cells)
+            if still:
+                summary.update({
+                    "status": "succeeded", "dossier_status": "unresolvable_refs",
+                    "failure_reason": json.dumps(still[:5], ensure_ascii=False)})
+                return summary
         gate = rubric_gate(store.connection, record, prior=prior)
         summary["rubric"] = gate["summary"]
         if gate["failed"]:
@@ -796,6 +1004,9 @@ def assemble(
     mission: Mapping[str, Any],
     actor_ref: str,
     change_reason: str,
+    drafted_at: str,
+    evidence_refs: Sequence[Mapping[str, Any]],
+    drop_units: frozenset[str] | set[str] = frozenset(),
 ) -> dict[str, Any]:
     """Freshly drafted parts, carried-forward parts, and the bindings."""
 
@@ -805,6 +1016,9 @@ def assemble(
     prior_sections = {item["aspect"]: item for item in (prior or {}).get("sections") or []}
     sections = []
     for aspect in SECTIONS:
+        if aspect in drop_units and aspect not in blocks:
+            sections.append(unavailable_section(aspect, "refused_by_verification"))
+            continue
         if aspect in blocks:
             section = dict(blocks[aspect])
             if aspect == "guidance_style" and profile is not None:
@@ -822,24 +1036,25 @@ def assemble(
             [slot["slot_id"] for slot in entry.get("structure") or []],
         ))
     classification = blocks.get(CLASSIFICATION_UNIT) or (
-        (prior or {}).get("industry_classification") or undrafted_classification())
+        undrafted_classification() if CLASSIFICATION_UNIT in drop_units
+        else (prior or {}).get("industry_classification") or undrafted_classification())
     variant = blocks.get(VARIANT_UNIT)
-    if variant is None:
+    if variant is not None:
+        pass
+    elif VARIANT_UNIT in drop_units:
+        variant = undrafted_variant("refused_by_verification")
+    else:
         variant = (prior or {}).get("variant_view") or undrafted_variant(
             (plan.get(VARIANT_UNIT) or {}).get("reason") or "not_drafted_this_run")
     chain = list((constitution.get("method") or {}).get("causal_chain") or [])
     rubric = get_rubric("company_dossier")
-    fresh = [
-        row
-        for block in blocks.values()
-        for row in block.get("sources") or []
-    ]
-    known = set() if prior is None else set(evidence_scope(prior))
-    evidence_refs = [row for row in {row["ref"]: row for row in fresh}.values()
-                     if row["ref"] not in known] or fresh[:1]
     return {
         SOURCE_VERSION_KEY: None if prior is None else prior["id"],
         "company_ref": company_ref,
+        "drafted_at": {
+            **((prior or {}).get("drafted_at") or {}),
+            **{unit: drafted_at for unit in blocks},
+        },
         "sections": sections,
         "industry_classification": classification,
         "variant_view": variant,
@@ -858,7 +1073,7 @@ def assemble(
         },
         "actor_ref": actor_ref,
         "change_reason": change_reason,
-        "evidence_refs": evidence_refs,
+        "evidence_refs": [dict(row) for row in evidence_refs],
         "decision": None,
     }
 
@@ -866,7 +1081,16 @@ def assemble(
 def rubric_gate(
     connection: Any, record: Mapping[str, Any], *, prior: Mapping[str, Any] | None
 ) -> dict[str, Any]:
-    """Q1's deterministic layer, run on the draft before it can be a version."""
+    """Q1's deterministic layer, run on the draft before it can be a version.
+
+    One override, and it is about a difference in what the two layers can see.
+    Q1's ``new_version_cites_new_refs`` reads Claim refs, because that is what
+    every artefact it grades cites. A dossier also rests on filed statement
+    lines and forecast cells, and a version whose new evidence is a newly filed
+    line has learned something -- ADR-0008 says so, and ``new_refs`` counts all
+    three kinds. Where the two disagree the broader one wins, and the summary
+    records that it did.
+    """
 
     from .company_dossier import body_hash
     from .research_quality_rubrics import rubric as get_rubric
@@ -880,12 +1104,17 @@ def rubric_gate(
     )
     result = run_deterministic(art, get_rubric("company_dossier"), core=connection)
     failed = [name for name in result["failed_checks"] if name in HARD_CHECKS]
+    overridden = []
+    if "new_version_cites_new_refs" in failed and new_refs(record, prior):
+        failed = [name for name in failed if name != "new_version_cites_new_refs"]
+        overridden.append("new_version_cites_new_refs")
     return {
         "failed": failed,
         "summary": {
             "passed": result["passed"],
             "failed_checks": result["failed_checks"],
             "hard_failed": failed,
+            "overridden_checks": overridden,
             "checks": {item["check"]: {"status": item["status"], "count": item["count"]}
                        for item in result["checks"]},
         },
@@ -896,6 +1125,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--model-config", type=Path)
+    parser.add_argument("--verifier-model-config", type=Path,
+                        help="the configuration the independent verifier runs on. "
+                             "Without it the run is held: one configuration routes "
+                             "both calls the same way (D2).")
     parser.add_argument("--summary-dir", type=Path, help="defaults to the state dir")
     parser.add_argument("--scheduler-db", type=Path)
     parser.add_argument("--dossier-policy", type=Path,
@@ -917,6 +1150,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     summary = run_dossier(
         state_dir=args.state_dir, model_config_path=args.model_config,
+        verifier_model_config_path=args.verifier_model_config,
         summary_dir=args.summary_dir if args.summary_dir is not None else args.state_dir,
         scheduler_db=args.scheduler_db, policy_path=args.dossier_policy,
         company_ref=args.company_ref, change_reason=args.change_reason,

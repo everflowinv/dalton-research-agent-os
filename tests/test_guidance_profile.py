@@ -18,6 +18,8 @@ import unittest
 
 from dalton_core.guidance_profile import (
     GUIDANCE_STYLE_RULE,
+    period_bounds,
+    period_key,
     MIN_SETTLED_EVENTS,
     GuidanceProfileError,
     build_profile,
@@ -59,6 +61,30 @@ class ReadingTests(unittest.TestCase):
     def test_a_sentence_no_rule_reads_is_not_guessed_at(self):
         self.assertIsNone(read_range("management expects modest improvement"))
 
+    def test_a_dated_span_is_not_a_guidance_range(self):
+        # Unanchored, the dash rule read "2025-09-01..2026-05-31" as a range
+        # from 9 to 2026, and every period label in the ledger became a guide.
+        for text in ("for the period 2025-09-01..2026-05-31",
+                     "the quarter ended 2026-05-31",
+                     "revenue of 18718144000 in Q2 2026"):
+            self.assertIsNone(read_range(text), text)
+
+    def test_a_dashed_range_still_reads_when_it_names_its_unit(self):
+        parsed = read_range("我们预计收入增速为 5-7 个百分点")
+        self.assertEqual((str(parsed["low"]), str(parsed["high"])), ("5", "7"))
+        self.assertEqual(parsed["guide_basis"], "x_dash_y")
+
+    def test_a_span_and_a_date_meet_on_the_period_end(self):
+        self.assertEqual(period_key("2026-03-01..2026-05-31"), "2026-05-31")
+        self.assertEqual(period_key("2026-05-31"), "2026-05-31")
+        self.assertEqual(period_bounds("2026-03-01..2026-05-31"),
+                         ("2026-03-01", "2026-05-31"))
+        # A fiscal label is not resolved to a date: P12b refused to guess a
+        # company's fiscal calendar, and a guide paired against the wrong
+        # quarter is worse than a guide paired against nothing.
+        self.assertEqual(period_key("Q2 FY2026"), "Q2 FY2026")
+        self.assertEqual(period_bounds("Q2 FY2026"), (None, None))
+
     def test_the_measure_is_a_closed_word_or_nothing(self):
         self.assertEqual(measure_of("local-currency revenue growth"), "revenue_growth")
         self.assertEqual(measure_of("adjusted EPS for the year"), "eps")
@@ -95,6 +121,23 @@ class EventTests(unittest.TestCase):
         deviation = table["events"][0]["deviation"]
         self.assertEqual(deviation["verdict"], "unknown")
         self.assertIn("unit class", deviation["reason"])
+
+    def test_a_quarterly_guide_meets_the_quarter_not_the_year_to_date(self):
+        # Both rows end on the same day; only one of them is the three months
+        # the guide was about.
+        table = guidance_events(
+            [{"ref": "claim-version:g", "period": "2026-03-01..2026-05-31",
+              "text": "revenue growth of 5% to 7%", "unit": "percent"}],
+            [{"ref": "statement-line:ytd", "measure": "revenue_growth",
+              "period_start": "2025-09-01", "period_end": "2026-05-31",
+              "value": 20, "unit": "percent"},
+             {"ref": "statement-line:q", "measure": "revenue_growth",
+              "period_start": "2026-03-01", "period_end": "2026-05-31",
+              "value": 6, "unit": "percent"}],
+        )
+        event = table["events"][0]
+        self.assertEqual(event["actual"]["refs"], ["statement-line:q"])
+        self.assertEqual(event["deviation"]["verdict"], "inline")
 
     def test_an_unreadable_guide_is_counted_rather_than_invented(self):
         table = guidance_events(
@@ -143,11 +186,20 @@ class ClassificationTests(unittest.TestCase):
         self.assertEqual(verdict["classification"], "aggressive")
 
     def test_a_mixed_record_says_so_rather_than_choosing(self):
+        # The fifth word (owner, 2026-09-09). Four settled events that show no
+        # pattern is a finding about this management team; two settled events
+        # is a gap in our evidence. Sharing one word for both would have lost
+        # the difference.
         table = self.events([("2025Q1", 8), ("2025Q2", 6), ("2025Q3", 6),
                              ("2025Q4", 6)])
         verdict = classify(table["events"])
-        self.assertEqual(verdict["classification"], "insufficient_data")
+        self.assertEqual(verdict["classification"], "mixed")
         self.assertIn("no pattern reached its threshold", verdict["basis"])
+
+    def test_mixed_and_insufficient_data_are_not_the_same_answer(self):
+        thin = classify(self.events([("2025Q1", 8), ("2025Q2", 6)])["events"])
+        self.assertEqual(thin["classification"], "insufficient_data")
+        self.assertIn("the rule needs", thin["basis"])
 
 
 class ProfileTests(unittest.TestCase):

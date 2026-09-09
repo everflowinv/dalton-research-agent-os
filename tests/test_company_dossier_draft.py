@@ -29,6 +29,7 @@ from dalton_core.company_dossier_draft import (
     draft_hash,
     draft_unit,
     independence,
+    independence_precheck,
     material_rows,
     parse_unit_output,
     render_material,
@@ -211,6 +212,36 @@ class ReplyContractTests(unittest.TestCase):
                 unit="industry_classification", structure=structure, material=material())
 
 
+class MarketViewTests(unittest.TestCase):
+    """Only the market may speak for the market."""
+
+    def structure(self):
+        return [{"slot_id": slot, "prompt": slot} for slot in VARIANT_SLOTS]
+
+    def parse(self, tag):
+        slots = [one_sentence(slot) if slot != "market_view"
+                 else one_sentence("market_view", [tag], "市场付的是这个价。")
+                 for slot in VARIANT_SLOTS]
+        return parse_unit_output(reply(slots), unit="variant_view",
+                                 structure=self.structure(), material=material())
+
+    def test_a_sell_side_claim_may_fill_the_market_view(self):
+        block = self.parse("C2")
+        self.assertTrue(block["market_view_available"])
+
+    def test_a_management_statement_may_not(self):
+        # The company talking is not the street talking, and citing it as the
+        # market's view turns a variant view into the company's own case with
+        # the disagreement invented.
+        with self.assertRaises(DossierDraftRefused) as caught:
+            self.parse("C1")
+        self.assertIn("the company talking", str(caught.exception))
+
+    def test_a_filed_figure_may_not_either(self):
+        with self.assertRaises(DossierDraftRefused):
+            self.parse("N1")
+
+
 class DraftCallTests(unittest.TestCase):
     def test_one_bounded_call_per_unit_on_the_dossier_purpose(self):
         model = FakeModel(reply([one_sentence("causal_chain:0"),
@@ -305,6 +336,18 @@ class IndependenceTests(unittest.TestCase):
         check = independence(draft_routes=["route:other", "route:draft"],
                              verifier_route="route:other", resolve=self.resolve)
         self.assertFalse(check["independent"])
+
+    def test_the_precheck_refuses_before_the_second_call_is_paid_for(self):
+        # The drafting families are already knowable when the draft is done,
+        # so a verification that could not be independent is not worth making.
+        self.assertIsNone(independence_precheck(draft_routes=["route:draft"],
+                                                resolve=self.resolve))
+        early = independence_precheck(draft_routes=["route:draft", "route:missing"],
+                                      resolve=self.resolve)
+        self.assertFalse(early["independent"])
+        self.assertIn("could not be resolved", early["reason"])
+        self.assertFalse(independence_precheck(draft_routes=[],
+                                               resolve=self.resolve)["independent"])
 
 
 if __name__ == "__main__":

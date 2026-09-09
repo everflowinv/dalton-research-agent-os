@@ -36,6 +36,7 @@ class CompanyDossierLauncher(LaneChildLauncher):
         *,
         state_dir: str | Path,
         model_config_path: str | Path | None = None,
+        verifier_model_config_path: str | Path | None = None,
         scheduler_db: str | Path | None = None,
         policy_path: str | Path | None = None,
         max_units: int | None = None,
@@ -45,6 +46,9 @@ class CompanyDossierLauncher(LaneChildLauncher):
         self.model_config_path = (
             None if model_config_path is None
             else Path(model_config_path).expanduser().resolve())
+        self.verifier_model_config_path = (
+            None if verifier_model_config_path is None
+            else Path(verifier_model_config_path).expanduser().resolve())
         self.scheduler_db = (
             None if scheduler_db is None
             else Path(scheduler_db).expanduser().resolve())
@@ -74,6 +78,9 @@ class CompanyDossierLauncher(LaneChildLauncher):
             command += ["--company-ref", company_ref]
         if self.model_config_path is not None:
             command += ["--model-config", str(self.model_config_path)]
+        if self.verifier_model_config_path is not None:
+            command += ["--verifier-model-config",
+                        str(self.verifier_model_config_path)]
         if self.scheduler_db is not None:
             command += ["--scheduler-db", str(self.scheduler_db)]
         if self.policy_path is not None:

@@ -175,6 +175,14 @@ CLASSIFICATION_SLOT_PROMPTS: Mapping[str, str] = MappingProxyType({
 })
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+# The citation scaffolding, as it appears when it leaks into prose. The
+# drafting prompt forbids it; the authority refuses it, because a rule that
+# lives only in a prompt is a rule the next drafter will not have read. This
+# is the exact shape ``research_quality_score`` finds in the published Initial
+# Screens, and the whole point of carrying refs per sentence is that a body
+# can be free of it.
+_PROSE_TAG_RE = re.compile(r"(?<![A-Za-z0-9])[CN]\d{1,3}(?![A-Za-z0-9])")
+_CJK_TERMINATORS = "。！？；」』）"
 _PRINCIPALS = ("human:", "automation:")
 
 
@@ -430,14 +438,19 @@ def unit_slots(
 _RECORD_FIELDS = frozenset({
     "schema_version", "id", "created_at", "dossier_ref", "company_ref", "version",
     "prior_version_ref", "change_reason", "evidence_refs", "decision",
-    "sections", "industry_classification", "variant_view", "bindings",
-    "generator_ref", "actor_ref", "body_hash", "content_hash",
+    "sections", "industry_classification", "variant_view", "drafted_at",
+    "bindings", "generator_ref", "actor_ref", "body_hash", "content_hash",
 })
 # What the chain is *about*.  Not the reason it exists, not who asked, not
 # when: two records with the same body say the same thing about the company.
 _BODY_EXCLUDED = frozenset({
     "id", "created_at", "version", "prior_version_ref", "change_reason",
     "evidence_refs", "decision", "body_hash", "content_hash",
+    # When each part was last written is not part of what the file says about
+    # the company. It has to be outside the body or a redraft producing the
+    # same prose would count as a different dossier purely because the clock
+    # moved -- and the identical-body duplicate rule would never fire again.
+    "drafted_at",
 })
 _BINDING_FIELDS = frozenset({
     "constitution_version", "playbook_version", "mission_version_ref",
@@ -470,6 +483,12 @@ def _sentence(value: Any, name: str, allowed_refs: set[str]) -> dict[str, Any]:
         raise CompanyDossierValidationError(
             f"{name} must be exactly text and refs")
     text = _text(value["text"], f"{name}.text", maximum=MAX_SENTENCE_CHARS)
+    tag = _PROSE_TAG_RE.search(text)
+    if tag is not None:
+        raise CompanyDossierValidationError(
+            f"{name}.text writes the citation tag {tag.group(0)!r} into the prose; "
+            "tags travel in refs, and a sentence whose subject is a tag becomes "
+            "a sentence with no subject once the tag is gone")
     refs = value["refs"]
     if not isinstance(refs, list) or not refs:
         raise CompanyDossierValidationError(
@@ -616,7 +635,7 @@ def validate_classification(value: Any, name: str = "industry_classification") -
     if not isinstance(value, Mapping):
         raise CompanyDossierValidationError(f"{name} must be an object")
     wire = dict(value)
-    if set(wire) != {"classification", "slots", "sources"}:
+    if set(wire) != {"classification", "slots", "sources", "gaps"}:
         raise CompanyDossierValidationError(f"{name} has an invalid closed shape")
     classification = _one_of(
         wire["classification"], INDUSTRY_CLASSIFICATIONS, f"{name}.classification")
@@ -635,7 +654,8 @@ def validate_classification(value: Any, name: str = "industry_classification") -
     if classification != "insufficient_evidence" and not refs:
         raise CompanyDossierValidationError(
             f"{name} classifies the company and cites nothing")
-    return {"classification": classification, "slots": checked, "sources": sources}
+    return {"classification": classification, "slots": checked, "sources": sources,
+            "gaps": _gaps(wire["gaps"], f"{name}.gaps")}
 
 
 def validate_variant_view(value: Any, name: str = "variant_view") -> dict[str, Any]:
@@ -643,7 +663,7 @@ def validate_variant_view(value: Any, name: str = "variant_view") -> dict[str, A
         raise CompanyDossierValidationError(f"{name} must be an object")
     wire = dict(value)
     if set(wire) != {"status", "reason", "market_view_available",
-                     "market_view_reason", "structure", "slots", "sources"}:
+                     "market_view_reason", "structure", "slots", "sources", "gaps"}:
         raise CompanyDossierValidationError(f"{name} has an invalid closed shape")
     status = _one_of(wire["status"], ("drafted", "unavailable"), f"{name}.status")
     available = wire["market_view_available"]
@@ -661,6 +681,7 @@ def validate_variant_view(value: Any, name: str = "variant_view") -> dict[str, A
                                    else _text(wire["market_view_reason"],
                                               f"{name}.market_view_reason")),
             "structure": [], "slots": [], "sources": [],
+            "gaps": _gaps(wire["gaps"], f"{name}.gaps"),
         }
     expected = [slot for slot in VARIANT_SLOTS if available or slot != "market_view"]
     structure = list(wire["structure"] or [])
@@ -694,6 +715,30 @@ def validate_variant_view(value: Any, name: str = "variant_view") -> dict[str, A
                                           f"{name}.market_view_reason")),
         "structure": structure, "slots": checked, "sources": sources,
     }
+
+
+def _drafted_at(value: Any, name: str = "drafted_at") -> dict[str, str]:
+    """When each unit was last written, by unit.
+
+    Carried forward unchanged for the units a version did not touch, which is
+    what makes "has anything arrived since *this part* was written" answerable.
+    Comparing against the head of the chain instead would mean that once any
+    part was redrafted, every part that had never been drafted looked current
+    -- and with three units a tick and twelve units, most of the file would
+    never be written at all.
+    """
+
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping):
+        raise CompanyDossierValidationError(f"{name} must be an object")
+    out: dict[str, str] = {}
+    for unit, when in value.items():
+        if unit not in UNITS:
+            raise CompanyDossierValidationError(
+                f"{name} names {unit!r}, which is not a dossier unit")
+        out[unit] = _text(when, f"{name}[{unit}]", maximum=64)
+    return dict(sorted(out.items()))
 
 
 def _bindings(value: Any, name: str = "bindings") -> dict[str, Any]:
@@ -767,6 +812,7 @@ def validate_dossier_version(value: Mapping[str, Any]) -> dict[str, Any]:
     wire["sections"] = checked
     wire["industry_classification"] = validate_classification(wire["industry_classification"])
     wire["variant_view"] = validate_variant_view(wire["variant_view"])
+    wire["drafted_at"] = _drafted_at(wire["drafted_at"])
     wire["bindings"] = _bindings(wire["bindings"])
     wire["body_hash"] = _sha256(wire["body_hash"], "body_hash")
     wire["content_hash"] = _sha256(wire["content_hash"], "content_hash")
@@ -820,11 +866,16 @@ def section_body(section: Mapping[str, Any]) -> str:
     never in it.
     """
 
-    out: list[str] = []
+    body = ""
     for slot in section.get("slots") or []:
         for row in slot.get("sentences") or ():
-            out.append(row["text"])
-    return "".join(out)
+            text = row["text"]
+            if body and body[-1] not in _CJK_TERMINATORS:
+                # Chinese sentences carry their own full stop and need no
+                # space; anything else runs together into one long word.
+                body += " "
+            body += text
+    return body
 
 
 def _artefact_sections(record: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -947,13 +998,16 @@ def output_rubric_findings(
         check = binding["check"]
         if check is None:
             continue
+        # The whole document, which is the ten sections *and* the two blocks:
+        # "低估" and a target price live in ``our_view`` if they live anywhere,
+        # and a standard applied to nine tenths of a document is not applied.
+        parts = _artefact_sections(record)
         if check == "numbers_trace_to_refs":
-            for section in record.get("sections") or []:
-                numbers = [{"text": row["text"]} for row in section.get("sources") or []]
-                for token in unsourced_numbers(section_body(section), numbers):
+            for part in parts:
+                for token in unsourced_numbers(part["body"], part["numbers"]):
                     findings.append({
                         "code": "number_without_source", "criterion_index": index,
-                        "section": section["aspect"], "figure": token,
+                        "section": part["title"], "figure": token,
                     })
         elif check == "not_a_restatement":
             if prior is not None and not new_refs(record, prior):
@@ -961,13 +1015,12 @@ def output_rubric_findings(
                     "code": "no_new_evidence", "criterion_index": index,
                 })
         elif check == "no_investment_conclusion":
-            for section in record.get("sections") or []:
-                body = section_body(section)
+            for part in parts:
                 for pattern in _CONCLUSION_PATTERNS:
-                    if pattern in body:
+                    if pattern in part["body"]:
                         findings.append({
                             "code": "investment_conclusion", "criterion_index": index,
-                            "section": section["aspect"], "phrase": pattern,
+                            "section": part["title"], "phrase": pattern,
                         })
     return findings
 
@@ -1021,7 +1074,8 @@ class CompanyDossierAuthority:
 
         body = dict(body)
         source = body.pop(SOURCE_VERSION_KEY, _UNSET)
-        for field in _BODY_EXCLUDED - {"change_reason", "evidence_refs", "decision"}:
+        for field in _BODY_EXCLUDED - {"change_reason", "evidence_refs",
+                                       "decision", "drafted_at"}:
             body.pop(field, None)
         company_ref = _text(body.get("company_ref"), "company_ref", maximum=512)
         dossier_ref = dossier_ref_for(company_ref)
@@ -1064,6 +1118,7 @@ class CompanyDossierAuthority:
             "body_hash": digest,
         }
         record.setdefault("decision", None)
+        record["drafted_at"] = _drafted_at(record.get("drafted_at"))
         record["content_hash"] = content_hash(record)
         wire = validate_dossier_version(record)
         scope_hash = content_hash(evidence_scope(wire))
