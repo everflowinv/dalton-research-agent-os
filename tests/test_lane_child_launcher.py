@@ -22,6 +22,7 @@ from dalton_core.lane_child_launcher import (
     LaneChildLauncher,
     LaneChildRejected,
     LaneChildTicketNotFound,
+    write_owner_only,
 )
 
 
@@ -129,6 +130,33 @@ class LauncherTests(unittest.TestCase):
         log = launcher._ticket_path(ticket["id"]).with_name("run.log")
         self.assertIn("hello from the child", log.read_text(encoding="utf-8"))
         self.assertEqual(log.stat().st_mode & 0o777, 0o600)
+
+
+class OwnerOnlyWriteTests(unittest.TestCase):
+    """INT1 / S3: a child writing its refusal must not die writing it."""
+
+    def test_the_parent_directory_is_made_rather_than_assumed(self):
+        # A child that refuses before it has done anything else writes its
+        # summary through this function, into a directory the run never got
+        # far enough to create. S3 found those children dying on
+        # FileNotFoundError, which loses the sentence explaining the refusal
+        # and leaves a lane that looks crashed rather than refused.
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "runs" / "never-made" / "summary.json"
+            write_owner_only(target, {"status": "refused", "reason": "no grant"})
+            self.assertEqual(
+                json.loads(target.read_text(encoding="utf-8"))["reason"], "no grant")
+            self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+
+    def test_writing_twice_still_replaces_in_place(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "deep" / "ticket.json"
+            write_owner_only(target, {"status": "running"})
+            write_owner_only(target, {"status": "failed"})
+            self.assertEqual(
+                json.loads(target.read_text(encoding="utf-8"))["status"], "failed")
+            self.assertEqual(sorted(p.name for p in target.parent.iterdir()),
+                             ["ticket.json"])
 
 
 if __name__ == "__main__":

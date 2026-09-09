@@ -195,6 +195,32 @@ details{margin-top:14px}summary{cursor:pointer;color:var(--muted);font-size:13px
 .plan .dir{padding:6px 0;border-top:1px solid rgba(128,128,128,.18)}
 .plan .dir:first-child{border-top:0}
 .plan .dir .hint{margin-top:2px}
+/* INT1: what the Wave 1 lanes put on a company card. */
+.mkt{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;margin-top:2px;font-size:13px}
+.mkt .px{font-size:19px;font-weight:800;font-variant-numeric:tabular-nums}
+.mkt .up{color:var(--green)}.mkt .dn{color:var(--rose)}
+.mkt .prov{color:#ffe0a8;background:rgba(245,182,74,.12);border:1px solid rgba(245,182,74,.32);border-radius:8px;padding:1px 8px;font-size:11.5px}
+.val{margin:6px 0 0;padding:0;list-style:none;font-size:12.5px}
+.val li{display:grid;grid-template-columns:1fr auto auto;gap:8px;padding:5px 0;border-top:1px dashed var(--line);align-items:baseline}
+.val li.na{grid-template-columns:1fr;color:var(--dim)}
+.val .v{font-variant-numeric:tabular-nums;font-weight:700}
+.val .pc{color:var(--muted);font-variant-numeric:tabular-nums}
+.val .basis{grid-column:1/4;color:var(--dim);font-size:11.5px}
+.mdl{margin-top:10px;padding:10px 12px;border-radius:12px;background:rgba(92,200,255,.08);border:1px solid rgba(92,200,255,.22);font-size:12.5px}
+.mdl b{display:block;margin-bottom:2px}
+.qs{margin-top:8px;padding:8px 12px;border-radius:12px;background:rgba(74,222,128,.09);border:1px solid rgba(74,222,128,.24);font-size:12.5px}
+.qs.low{background:rgba(245,182,74,.1);border-color:rgba(245,182,74,.32)}
+.qs ul{margin:6px 0 0;padding-left:18px}
+.fb{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;align-items:center}
+.fb button{padding:4px 10px;font-size:12px;border:1px solid var(--line2);background:transparent;border-radius:10px}
+.fb button.on{background:rgba(62,224,200,.16);border-color:rgba(62,224,200,.45)}
+.fb .status{min-height:0;flex-basis:100%}
+.filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:12px 0 4px}
+.filters select{font:inherit;color:var(--text);background:rgba(0,0,0,.35);border:1px solid var(--line2);border-radius:10px;padding:7px 10px}
+.claimrow{padding:9px 0;border-top:1px dashed var(--line);font-size:13.5px}
+.claimrow .meta{display:flex;gap:8px;flex-wrap:wrap;color:var(--muted);font-size:12px;margin-top:3px}
+pre.table{overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.45;background:rgba(0,0,0,.3);border:1px solid var(--line);border-radius:12px;padding:14px;white-space:pre}
+.lane .st.wait{background:var(--amber);box-shadow:0 0 0 3px rgba(245,182,74,.15)}
 </style>
 </head>
 <body>
@@ -375,7 +401,7 @@ function renderOverview(o){
   $("totals").replaceChildren(stat(t.found,"找到的资料","网页、研报、电话会"),stat(t.read,"已读完的资料",`还有 ${t.waiting} 份排队`),stat(t.claims,"入库的结论",t.claims_today?`今天新增 ${t.claims_today} 条`:"今天还没有新增"),
     stat(b.model_calls?`${b.model_calls.used}/${b.model_calls.cap}`:"—","今天的模型调用",b.model_calls?`已花 $${b.model_calls.cost_usd}，上限 $${b.model_calls.cost_cap_usd}`:"未接入"));
   $("totals-sub").textContent=`截至 ${fmtDate(o.as_of)}`+(b.web?` · 网页搜索今日 ${b.web.spent}/${b.web.cap}`:"")+(b.alphaengine?` · 研报获取 24 小时 ${b.alphaengine.spent}/${b.alphaengine.cap}`:"");
-  $("lanes").replaceChildren(...o.activity.lanes.map(l=>{const d=node("div",null,"lane");const cls=["launched","busy","running","ready","idle"].includes(l.status)?(["launched","busy","running"].includes(l.status)?"on":""):l.status==="held"?"hold":l.status==="failed"?"err":"";d.append(node("span",null,`st ${cls}`));const c=node("div");c.append(node("b",l.label),node("small",`${laneStatus(l.status)} · ${l.note}`));d.append(c);return d}));
+  $("lanes").replaceChildren(...o.activity.lanes.map(l=>{const d=node("div",null,"lane");const cls=laneClassOf(l.status);d.append(node("span",null,`st ${cls}`));const c=node("div");c.append(node("b",l.label),node("small",`${laneStatus(l.status)} · ${l.note}`));d.append(c);return d}));
   const run=$("running");run.replaceChildren(...o.activity.running.map(r=>{const d=node("div",null,"r");d.append(node("span",null,"spin"),node("span",r.title+(r.detail?` — ${r.detail}`:"")));return d}));
   if(!o.activity.running.length)run.append(node("div","此刻没有正在运行的任务；调度器每 5 分钟检查一次。","hint"));
   // P11x: figures read out of a company's own documents. Every one was checked
@@ -388,18 +414,126 @@ function renderOverview(o){
       li.append(node("span",`${x.label}：${amount}`,"figv"),node("span",` ${x.period}`,"figp"),
         node("span",x.grade_label||"","tag "+(x.grade==="company-filed-document"?"filed":"spoken")));ul.append(li)});
     w.append(ul);return w}
-  $("companies").replaceChildren(...o.companies.map(c=>{const d=node("div",null,"company");const h=node("div",null,"head");const l=node("div");l.append(node("span",c.ticker,"tk"),node("span",c.name,"nm"));h.append(l,node("span",`${c.stage}${c.stage_status&&c.stage_ref?" · "+c.stage_status:""}`,`stage ${c.stage_ref==="initial_screen"?"s2":c.stage_ref?"s3":"s1"}`));d.append(h,node("div",c.note,"hint"));const bar=node("div",null,"bar");const i=node("i");i.style.width=`${c.progress.percent}%`;bar.append(i);d.append(bar);if(c.checklist&&c.checklist.length)d.append(checklist(c.checklist));if(c.document)d.append(docCard(c.document));const k=node("div",null,"kpis");k.innerHTML=`<span>找到 <b>${c.progress.found}</b></span><span>已读 <b>${c.progress.read}</b></span><span>排队 <b>${c.progress.waiting}</b></span><span>结论 <b>${c.claims.total}</b>${c.claims.today?` <b style="color:var(--teal)">+${c.claims.today}</b>`:""}</span><span>数字 <b>${(c.figures&&c.figures.total)||0}</b></span>`;d.append(k);if(c.claims.latest.length){const ul=node("ul",null,"latest");c.claims.latest.forEach(x=>ul.append(node("li",x.statement)));d.append(ul)}if(c.figures&&c.figures.latest&&c.figures.latest.length)d.append(figures(c.figures));return d}));
+  $("companies").replaceChildren(...o.companies.map(c=>{const d=node("div",null,"company");const h=node("div",null,"head");const l=node("div");l.append(node("span",c.ticker,"tk"),node("span",c.name,"nm"));h.append(l,node("span",`${c.stage}${c.stage_status&&c.stage_ref?" · "+c.stage_status:""}`,`stage ${c.stage_ref==="initial_screen"?"s2":c.stage_ref?"s3":"s1"}`));d.append(h);if(c.market)d.append(marketLine(c.market));d.append(node("div",c.note,"hint"));const bar=node("div",null,"bar");const i=node("i");i.style.width=`${c.progress.percent}%`;bar.append(i);d.append(bar);if(c.checklist&&c.checklist.length)d.append(checklist(c.checklist));if(c.document)d.append(docCard(c.document));const k=node("div",null,"kpis");k.innerHTML=`<span>找到 <b>${c.progress.found}</b></span><span>已读 <b>${c.progress.read}</b></span><span>排队 <b>${c.progress.waiting}</b></span><span>结论 <b>${c.claims.total}</b>${c.claims.today?` <b style="color:var(--teal)">+${c.claims.today}</b>`:""}</span><span>数字 <b>${(c.figures&&c.figures.total)||0}</b></span>`;d.append(k);if(c.claims.latest.length){const ul=node("ul",null,"latest");c.claims.latest.forEach(x=>ul.append(node("li",x.statement)));d.append(ul)}if(c.figures&&c.figures.latest&&c.figures.latest.length)d.append(figures(c.figures));if(c.valuation)d.append(valuationBlock(c.valuation));if(c.model)d.append(modelBlock(c));if(c.feedback&&c.feedback.total)d.append(node("div",`你给过 ${c.feedback.total} 条反馈${c.feedback.outstanding?`，其中 ${c.feedback.outstanding} 条还没被满足`:""}`,"hint"));d.append(cardActions(c));return d}));
   const m=o.model_available;$("goal-submit").disabled=!m.available;$("ask-submit").disabled=!m.available;$("steer-submit").disabled=!m.available;if(!m.available){$("goal-hint").textContent=m.reason;$("ask-hint").textContent=m.reason}
   svc(o.activity.service_state,o.activity.last_tick_at);
 }
-function docCard(doc){const d=node("div",null,"doc");d.append(node("b",`初步筛选 · 第 ${doc.version} 版`),node("div",doc.summary,"sm"));const meta=node("div",`${doc.sections_written}/${doc.sections_total} 节已写 · 引用 ${doc.claims_cited} 条结论${doc.gaps?` · ${doc.gaps} 处缺口`:""} · ${fmtDate(doc.created_at)}`,"hint");const btn=node("button","阅读全文","ghost");btn.style.padding="5px 12px";btn.style.fontSize="12px";btn.style.marginTop="8px";btn.onclick=()=>openDoc(doc.version_ref);d.append(meta,btn);return d}
+/* INT1: the four Wave 1 lanes, on the card and in the reader. */
+function marketLine(m){const d=node("div",null,"mkt");d.append(node("span",`${m.close}${m.currency?" "+m.currency:""}`,"px"));
+  if(m.change_percent!=null)d.append(node("span",`${m.change_percent>0?"+":""}${m.change_percent}%`,m.change_percent>=0?"up":"dn"));
+  if(m.change_since)d.append(node("span",`自 ${m.change_since}`,"hint"));
+  d.append(node("span",`${m.as_of}`,"hint"));
+  /* A mid-session price has the same shape as a close and is not one. */
+  if(m.provisional)d.append(node("span","盘中价，当天还没收盘","prov"));
+  return d}
+function valuationBlock(v){const w=node("div");w.append(node("div",`估值 · ${v.as_of}`,"hint"));const ul=node("ul",null,"val");
+  (v.metrics||[]).forEach(m=>{if(m.status!=="available"){const li=node("li",null,"na");li.append(node("span",`${m.label}：${m.reason||"算不出来"}`));ul.append(li);return}
+    const li=node("li");li.append(node("span",m.label),node("span",String(m.value),"v"),node("span",m.percentile!=null?`历史分位 ${m.percentile}`:"历史不够，没有分位","pc"));
+    /* The basis travels with the percentile: a percentile computed while the
+       fundamentals never moved is the price's own percentile. */
+    const basis=m.percentile!=null?m.percentile_basis_label:m.percentile_reason;if(basis)li.append(node("span",basis,"basis"));ul.append(li)});
+  w.append(ul);if(v.basis&&v.basis.shares_note)w.append(node("div",v.basis.shares_note,"hint"));return w}
+function modelBlock(c){const m=c.model,r=m.readiness||{},d=node("div",null,"mdl");
+  d.append(node("b",`公司模型 · 第 ${m.version} 版`),node("div",m.note||""));
+  const parts=[];if(r.results_computed&&r.results_computed.length)parts.push(`算出 ${r.results_computed.length} 条结果行`);
+  if(r.realised_quarters)parts.push(`${r.realised_quarters} 个季度已兑现`);
+  if(r.actual_cells)parts.push(`${r.actual_cells} 格换成了实际数`);
+  if(r.superseded_estimates)parts.push(`${r.superseded_estimates} 格估计被取代但保留着`);
+  if(parts.length)d.append(node("div",parts.join(" · "),"hint"));
+  if(m.change_reason_label)d.append(node("div",`这一版为什么存在：${m.change_reason_label}`,"hint"));
+  const b=node("button","看模型表","ghost");b.style.cssText="padding:4px 10px;font-size:12px;margin-top:8px";b.onclick=()=>openModel(c.company_ref);d.append(b);return d}
+function qualityBlock(q){if(!q)return null;const low=(q.below_passing&&q.below_passing.length)||q.checks_passed===false;
+  const d=node("div",null,`qs${low?" low":""}`);d.append(node("b",`质量评分 · ${q.rubric}`));
+  const bits=[];if(q.mean!=null)bits.push(`平均 ${q.mean} / 4`);if(q.minimum!=null)bits.push(`最低 ${q.minimum}`);
+  bits.push(q.checks_passed===false?"有机器检查没通过":"机器检查全通过");if(q.verified)bits.push("另有一位独立复核确认过");
+  d.append(node("div",bits.join(" · ")));
+  const bad=(q.checks||[]).filter(x=>x.status==="fail");
+  if(bad.length){const ul=node("ul");bad.forEach(x=>ul.append(node("li",`${x.label}：${x.count} 处`)));d.append(ul)}
+  if(q.below_passing&&q.below_passing.length){const ul=node("ul");q.below_passing.forEach(x=>ul.append(node("li",x)));d.append(ul)}
+  return d}
+const FB_LABELS={read:"读过",useful:"有用",needs_more_evidence:"证据不够",disagree:"不同意",revise:"要重写"};
+const FB_ORDER=["read","useful","needs_more_evidence","disagree","revise"];
+function feedbackBar(binding){const wrap=node("div");const bar=node("div",null,"fb");const st=node("span","","status");
+  const note=document.createElement("input");note.placeholder="想补一句吗？（可以留空）";note.style.cssText="margin-top:8px;font-size:12.5px;padding:8px 12px";
+  const given=new Set((binding.entries||[]).map(e=>e.verdict));
+  FB_ORDER.forEach(v=>{const b=node("button",FB_LABELS[v]);if(given.has(v))b.classList.add("on");
+    b.onclick=async()=>{bar.querySelectorAll("button").forEach(x=>x.disabled=true);st.className="status";st.textContent="正在记下…";
+      try{const r=await postJson("/v1/cockpit/feedback",{target_ref:binding.target_ref,target_hash:binding.target_hash,
+            target_kind:binding.target_kind,company_ref:binding.company_ref||undefined,verdict:v,note:note.value.trim()||undefined});
+        st.className="status ok";st.textContent=r.duplicate?"这条反馈之前已经记过了":"已记下";b.classList.add("on");note.value="";toast("已记下你的反馈")}
+      catch(e){st.className="status err";st.textContent=e.message}
+      finally{bar.querySelectorAll("button").forEach(x=>x.disabled=false)}};
+    bar.append(b)});
+  bar.append(st);wrap.append(bar,note);
+  if(given.size)wrap.append(node("div",`你之前说过：${[...given].map(v=>FB_LABELS[v]).join("、")}`,"hint"));
+  return wrap}
+function cardActions(c){const a=node("div",null,"fb");const b=node("button","看这家的结论","ghost");
+  b.style.cssText="padding:4px 10px;font-size:12px";b.onclick=()=>openClaims(c.company_ref);a.append(b);return a}
+let claimFilters={company:"",aspect:"",importance:"",canonical:"1"};
+function openClaims(company){claimFilters={company:company||"",aspect:"",importance:"",canonical:"1"};$("reader").classList.add("show");loadClaims()}
+async function loadClaims(){const sheet=$("reader-sheet");const q=new URLSearchParams();
+  if(claimFilters.company)q.set("company",claimFilters.company);
+  if(claimFilters.aspect)q.set("aspect",claimFilters.aspect);
+  if(claimFilters.importance)q.set("importance",claimFilters.importance);
+  q.set("canonical",claimFilters.canonical);
+  sheet.replaceChildren(node("div","正在读结论…","empty"));
+  try{renderClaims(sheet,await getJson(`/v1/cockpit/claims?${q.toString()}`))}
+  catch(e){renderClaimsError(sheet,e.message)}}
+function readerClose(){const b=node("button","关闭","ghost");b.className="ghost close";b.onclick=()=>$("reader").classList.remove("show");return b}
+function renderClaimsError(sheet,message){sheet.replaceChildren(readerClose(),node("h2","已核实的结论"),node("div",message,"empty"))}
+function renderClaims(sheet,r){sheet.replaceChildren(readerClose(),node("h2","已核实的结论"));
+  const filters=node("div",null,"filters");
+  const pick=(label,value,options,onChange)=>{const s=document.createElement("select");
+    const first=document.createElement("option");first.value="";first.textContent=label;s.append(first);
+    options.forEach(o=>{const e=document.createElement("option");e.value=o.value;e.textContent=o.label;if(o.value===value)e.selected=true;s.append(e)});
+    s.onchange=()=>{onChange(s.value);loadClaims()};return s};
+  filters.append(pick("全部公司",r.filters.company_ref||"",(r.companies||[]).map(c=>({value:c.company_ref,label:c.label})),v=>claimFilters.company=v));
+  filters.append(pick("全部主题",r.filters.aspect||"",(r.vocabulary.aspects||[]),v=>claimFilters.aspect=v));
+  filters.append(pick("全部来源层级",r.filters.importance||"",(r.vocabulary.importance||[]),v=>claimFilters.importance=v));
+  const dedupe=node("button",r.filters.canonical_only?"已合并重复（点击展开全部）":"正在显示全部（点击合并重复）","ghost");
+  dedupe.onclick=()=>{claimFilters.canonical=r.filters.canonical_only?"0":"1";loadClaims()};
+  filters.append(dedupe);sheet.append(filters);
+  /* "There is no index here" and "nothing matched" are different answers. */
+  sheet.append(node("div",r.indexed?`共 ${r.total} 条${r.filters.canonical_only?"（同一件事只留一条）":""}`:
+    `共 ${r.total} 条。这个 Core 还没有给结论建索引，所以没有主题和来源层级。`,"meta"));
+  if(!r.items.length){sheet.append(node("div","这个条件下没有结论","empty"));return}
+  const box=node("div");r.items.forEach(x=>{const d=node("div",null,"claimrow");d.append(node("div",x.statement));
+    const meta=node("div",null,"meta");meta.append(node("span",x.company));
+    if(x.period)meta.append(node("span",x.period));
+    if(x.aspect_label)meta.append(node("span",x.aspect_label,"lanetag"));
+    if(x.importance_label)meta.append(node("span",x.importance_label,"lanetag"));
+    if(x.as_of)meta.append(node("span",`时点 ${x.as_of}`));
+    if(!x.indexed)meta.append(node("span","还没标注","lanetag"));
+    meta.append(node("span",`入库 ${fmtDate(x.at)}`));d.append(meta);box.append(d)});
+  sheet.append(box)}
+async function openModel(company){$("reader").classList.add("show");const sheet=$("reader-sheet");
+  sheet.replaceChildren(node("div","正在打开模型…","empty"));
+  try{renderModel(sheet,await getJson(`/v1/cockpit/model?company=${encodeURIComponent(company)}`))}
+  catch(e){sheet.replaceChildren(readerClose(),node("div",e.message,"empty"))}}
+function renderModel(sheet,m){sheet.replaceChildren(readerClose(),node("h2",`${m.company} · 公司模型`),
+  node("div",`第 ${m.version} 版 · ${fmtDate(m.created_at)}${m.change_reason_label?" · "+m.change_reason_label:""}`,"meta"));
+  sheet.append(node("div",m.note||"","hint"));
+  const r=m.readiness||{};
+  if(r.drivers_without_history&&r.drivers_without_history.length)
+    sheet.append(node("div",`没有历史可依的驱动因素：${r.drivers_without_history.join("、")}`,"gap"));
+  if(r.results_unavailable&&r.results_unavailable.length)
+    sheet.append(node("div",`这一版算不出来的行：${r.results_unavailable.join("、")}`,"gap"));
+  sheet.append(node("pre",m.table,"table"));
+  if(m.history&&m.history.length>1){sheet.append(node("h3","这个模型的版本链"));const h=node("div",null,"hist");
+    m.history.forEach(x=>h.append(node("div",`第 ${x.version} 版 · ${fmtDate(x.created_at)}${x.change_reason_label?" · "+x.change_reason_label:""}`)));
+    sheet.append(h)}}
+function laneClassOf(s){if(["launched","busy","running"].includes(s))return"on";
+  /* Waiting on the owner is not idling, and the dot says so. */
+  if(["ungranted","unapproved","unconfigured","unstarted"].includes(s))return"wait";
+  if(s==="held")return"hold";if(["failed","rejected","unavailable"].includes(s))return"err";return""}
+function docCard(doc){const d=node("div",null,"doc");d.append(node("b",`初步筛选 · 第 ${doc.version} 版`),node("div",doc.summary,"sm"));const meta=node("div",`${doc.sections_written}/${doc.sections_total} 节已写 · 引用 ${doc.claims_cited} 条结论${doc.gaps?` · ${doc.gaps} 处缺口`:""} · ${fmtDate(doc.created_at)}`,"hint");const btn=node("button","阅读全文","ghost");btn.style.padding="5px 12px";btn.style.fontSize="12px";btn.style.marginTop="8px";btn.onclick=()=>openDoc(doc.version_ref);d.append(meta,btn);const q=qualityBlock(doc.quality);if(q)d.append(q);if(doc.feedback)d.append(feedbackBar(doc.feedback));return d}
 async function openDoc(ref){const r=$("reader");r.classList.add("show");const sheet=$("reader-sheet");sheet.replaceChildren(node("div","正在打开…","empty"));try{const doc=await getJson(`/v1/cockpit/deliverable?ref=${encodeURIComponent(ref)}`);renderDoc(sheet,doc)}catch(e){sheet.replaceChildren(node("div",`打不开：${e.message}`,"empty"))}}
 function renderDoc(sheet,doc){sheet.replaceChildren();const close=node("button","关闭","ghost");close.className="ghost close";close.onclick=()=>$("reader").classList.remove("show");sheet.append(close,node("h2",`${doc.company} · 初步筛选`),node("div",`第 ${doc.version} 版 · ${fmtDate(doc.created_at)} · 由系统按研究手册起草`,"meta"));const last=(doc.stage_history||[]).filter(s=>s.status!=="entered").slice(-1)[0];if(last){const g=node("div",null,`gatebox ${last.status==="gate_passed"?"pass":"fail"}`);g.append(node("b",last.status==="gate_passed"?"出口门：通过":"出口门：未通过"),node("div",last.rationale||""));sheet.append(g)}
-doc.sections.forEach(s=>{const sec=node("section");sec.append(node("h3",s.title));if(s.body)renderText(sec,s.body);(s.gaps||[]).forEach(g=>sec.append(node("div",g,"gap")));if(s.cited&&s.cited.length){const c=node("div",null,"cited");c.append(node("div",`依据的 ${s.cited.length} 条结论：`));s.cited.slice(0,12).forEach(x=>c.append(node("div",x.statement)));sec.append(c)}sheet.append(sec)})}
+doc.sections.forEach(s=>{const sec=node("section");sec.append(node("h3",s.title));if(s.body)renderText(sec,s.body);(s.gaps||[]).forEach(g=>sec.append(node("div",g,"gap")));if(s.cited&&s.cited.length){const c=node("div",null,"cited");c.append(node("div",`依据的 ${s.cited.length} 条结论：`));s.cited.slice(0,12).forEach(x=>c.append(node("div",x.statement)));sec.append(c)}sheet.append(sec)});const q=qualityBlock(doc.quality);if(q)sheet.append(q);if(doc.feedback&&doc.feedback.enabled!==false)sheet.append(node("h3","读完之后"),feedbackBar(doc.feedback))}
 const CHECK={complete:["✓","ok"],partial:["◐","part"],missing:["○","no"],not_planned:["⊘","na"],source_unavailable:["⊘","na"]};
 function checklist(items){const ul=node("ul",null,"checks");items.forEach(it=>{const[icon,cls]=CHECK[it.status]||["·","na"];const li=node("li",null,cls);li.append(node("span",icon,"ic"),node("span",it.label),node("span",`${it.have}/${it.required}`,"cnt"));if(it.status!=="complete")li.append(node("span",it.note,"nt"));ul.append(li)});return ul}
 function stat(n,l,s){const d=node("div",null,"stat");d.append(node("div",String(n),"n"),node("div",l,"l"),node("div",s,"s"));return d}
-function laneStatus(s){return{launched:"运行中",busy:"运行中",running:"运行中",idle:"待命",ready:"就绪",held:"暂停等待",failed:"出错",budget_exhausted:"今日额度用完",paused:"已暂停"}[s]||s||"待命"}
+function laneStatus(s){return{launched:"运行中",busy:"运行中",running:"运行中",idle:"待命",ready:"就绪",held:"暂停等待",failed:"出错",budget_exhausted:"今日额度用完",paused:"已暂停",ungranted:"缺授权，一次也没跑",unconfigured:"还没装上",unapproved:"等你批准数据源",unstarted:"这台机器上还没跑过",rejected:"被拒绝",unavailable:"暂时读不到",current:"已经是最新"}[s]||s||"待命"}
 function svc(state,tick){const d=$("svc-dot"),t=$("svc-text");const stale=tick&&(Date.now()-new Date(tick).getTime())>10*60*1000;if(state==="running"&&!stale){d.className="dot";t.textContent=`系统运行中 · 最近活动 ${ago(tick)}`}else if(state){d.className="dot warn";t.textContent=`系统${stale?"可能停了":state} · 最近活动 ${ago(tick)}`}else{d.className="dot off";t.textContent="读不到系统状态"}}
 async function loadOverview(){try{renderOverview(await getJson("/v1/cockpit/overview"))}catch(e){$("goal-title").textContent="读取失败";$("goal-objective").textContent=e.message;$("svc-dot").className="dot off";$("svc-text").textContent="连接失败"}}
 
@@ -425,7 +559,7 @@ async function loadLog(full){try{const r=await getJson(`/v1/cockpit/log?limit=20
 
 // ---------- ask
 $("ask-submit").onclick=async()=>{const q=$("ask-input").value.trim();if(!q){$("ask-status").textContent="先写下问题";return}const b=$("ask-submit"),s=$("ask-status");b.disabled=true;s.className="status";s.textContent="";const chat=$("chat");if(chat.querySelector(".empty"))chat.replaceChildren();const qa=node("div",null,"qa");qa.append(node("div",q,"q"));const a=node("div",null,"a");const th=node("div",null,"thinking");th.append(document.createTextNode("正在翻阅已入库的结论 "),node("i"),node("i"),node("i"));a.append(th);qa.append(a);chat.prepend(qa);$("ask-input").value="";try{const job=await postJson("/v1/cockpit/ask",{question:q,request_id:rid()});const r=await waitJob(job.job_id);renderAnswer(a,r)}catch(e){a.replaceChildren(node("p",`没能回答：${e.message}`));a.style.borderColor="rgba(255,107,138,.4)"}finally{b.disabled=false}};
-function renderAnswer(a,r){a.replaceChildren();renderText(a,r.answer);if(r.gaps&&r.gaps.length)a.append(node("div","还缺什么："+r.gaps.join("；"),"gaps"));const foot=node("div",null,"foot");foot.append(node("span",`依据 ${r.citations.length} 条结论（共翻阅 ${r.claims_considered} 条）`),node("span",r.confidence?{high:"把握较大",medium:"把握一般",low:"把握不大"}[r.confidence]:""),node("span",r.replayed?"沿用上次结果":`费用 $${r.cost_usd}`));if(r.citations.length){const btn=node("button","查看依据","ghost");btn.style.padding="4px 10px";btn.style.fontSize="12px";const c=node("div",null,"cites");r.citations.forEach(x=>{const d=node("div",null,"cite");d.append(document.createTextNode(x.statement),node("small",`${x.company} · ${x.period||""} · 入库于 ${fmtDate(x.at)}`));c.append(d)});btn.onclick=()=>{c.classList.toggle("show");btn.textContent=c.classList.contains("show")?"收起依据":"查看依据"};foot.append(btn);a.append(foot,c)}else a.append(foot)}
+function renderAnswer(a,r){a.replaceChildren();renderText(a,r.answer);if(r.gaps&&r.gaps.length)a.append(node("div","还缺什么："+r.gaps.join("；"),"gaps"));const foot=node("div",null,"foot");foot.append(node("span",`依据 ${r.citations.length} 条结论（共翻阅 ${r.claims_considered} 条${r.duplicates_dropped?`，重复的 ${r.duplicates_dropped} 条已合并`:""}）`),node("span",r.confidence?{high:"把握较大",medium:"把握一般",low:"把握不大"}[r.confidence]:""),node("span",r.replayed?"沿用上次结果":`费用 $${r.cost_usd}`));if(r.citations.length){const btn=node("button","查看依据","ghost");btn.style.padding="4px 10px";btn.style.fontSize="12px";const c=node("div",null,"cites");r.citations.forEach(x=>{const d=node("div",null,"cite");d.append(document.createTextNode(x.statement),node("small",`${x.company} · ${x.period||""} · 入库于 ${fmtDate(x.at)}`));c.append(d)});btn.onclick=()=>{c.classList.toggle("show");btn.textContent=c.classList.contains("show")?"收起依据":"查看依据"};foot.append(btn);a.append(foot,c)}else a.append(foot);/* Q1: an answer is a deliverable too, and the PM reads it here. */if(r.feedback)a.append(feedbackBar(r.feedback))}
 function renderText(el,text){let ul=null;(text||"").split(/\r?\n/).forEach(line=>{const t=line.trim();if(!t){ul=null;return}if(/^[-•*]\s+/.test(t)){if(!ul){ul=node("ul");el.append(ul)}ul.append(node("li",t.replace(/^[-•*]\s+/,"")))}else{ul=null;el.append(node("p",t.replace(/^#+\s*/,"")))}})}
 async function loadAskHistory(){try{const h=await getJson("/v1/cockpit/history?kind=ask");const chat=$("chat");if(!h.items.length)return;chat.replaceChildren(...h.items.map(x=>{const qa=node("div",null,"qa");qa.append(node("div",x.request.question,"q"));const a=node("div",null,"a");if(x.status==="done"&&x.result)renderAnswer(a,x.result);else if(x.status==="failed")a.append(node("p",`没能回答：${x.error}`));else a.append(node("p","还在处理…"));qa.append(a);return qa}))}catch(e){}}
 

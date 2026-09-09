@@ -59,6 +59,13 @@ def secure_dir(path: Path) -> Path:
 
 
 def write_owner_only(path: Path, value: Any) -> None:
+    # The directory is made here rather than assumed. A child that refuses
+    # before it has done anything else writes its refusal summary through this
+    # function, and S3 found those children dying on FileNotFoundError instead:
+    # the run directory is created when a ticket is started, and a child that
+    # never got that far had nowhere to put the sentence explaining why.
+    # Losing the explanation is worse than the refusal it explains.
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n",
                    encoding="utf-8")

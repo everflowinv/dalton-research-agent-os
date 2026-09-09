@@ -135,7 +135,7 @@ class SourceCapTests(unittest.TestCase):
         from dalton_core.cockpit_plane import CockpitPlane
 
         return {l["key"]: l
-                for l in CockpitPlane._lane_states({}, {}, discovery or {}, budget)}
+                for l in CockpitPlane._base_lane_states({}, {}, discovery or {}, budget)}
 
     def test_the_alphaengine_note_reads_the_live_budget(self):
         # It was the literal "每 24 小时最多 30 次", so the page said 30 for days
