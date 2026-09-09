@@ -118,6 +118,14 @@ DEBATE_POLICY: Mapping[str, Any] = {
     # be called open.  One broker saying it twice is one opinion.
     "min_claims_per_side": 1,
     "min_independent_sources_per_side": 2,
+    # Which rungs of the source ladder are allowed to *count*.  ``document`` is
+    # deliberately absent.  It says something true -- one note is one source --
+    # but on the live Core it is where every broker note lands, because no
+    # title reaches the Ledger and so no publisher can be matched.  Counting it
+    # would mean two TD Cowen notes open a debate, which is the precise failure
+    # this whole section exists to prevent.  A basis outside this list is
+    # listed on the debate and counted as unattributed.
+    "counting_bases": ["publisher", "issuer", "host"],
     # Strongest first.  The tier is a label on the input table the drafter
     # reads, so that "management says demand is fine" and "a message board
     # says demand is fine" never look like the same evidence.
@@ -305,13 +313,41 @@ def _publisher_patterns(policy: Mapping[str, Any]) -> list[tuple[str, str, str]]
     return rows
 
 
-def publisher_of(text: Any, policy: Mapping[str, Any] = DEBATE_POLICY) -> str | None:
-    """The house that published a document, from its title and ref.
+def publisher_slug(value: Any) -> str | None:
+    """A publisher name recorded upstream, folded to a stable slug.
 
-    Longest pattern wins, so ``Morgan Stanley`` is not read as ``jp morgan``
-    because one of them happens to be a substring of a longer name.
+    Whoever attributed the document said the name; this only makes two
+    spellings of it the same key.  It is not matched against the frozen table,
+    because an attribution the acquisition layer made from the document's own
+    metadata is better evidence than a substring of a title.
     """
 
+    folded = fold(value)
+    if not folded:
+        return None
+    return "-".join(folded.split())
+
+
+def publisher_of(
+    text: Any,
+    policy: Mapping[str, Any] = DEBATE_POLICY,
+    *,
+    attributed: Any = None,
+) -> str | None:
+    """The house that published a document.
+
+    Two sources, in order.  ``attributed`` is a publisher the acquisition layer
+    recorded from the document's own metadata -- AlphaEngine's ``authors`` and
+    ``sources`` fields, or the broker prefix its titles carry -- and it wins,
+    because it was read off the document rather than guessed from a string.
+    The frozen pattern table is the fallback for documents nothing attributed,
+    and there longest pattern wins, so ``Morgan Stanley`` is not read as
+    ``jp morgan`` because one name contains the other.
+    """
+
+    slug = publisher_slug(attributed)
+    if slug is not None:
+        return slug
     folded = fold(text)
     if not folded:
         return None
@@ -345,9 +381,10 @@ def source_identity(
     tier = tier_of(row, policy)
     title = " ".join(
         str(row.get(field) or "")
-        for field in ("document_title", "document_ref", "source_ref")
+        for field in ("document_title", "document_authors", "document_sources",
+                      "document_ref", "source_ref")
     )
-    publisher = publisher_of(title, policy)
+    publisher = publisher_of(title, policy, attributed=row.get("document_publisher"))
     if publisher is not None:
         return {"key": f"publisher:{publisher}", "basis": "publisher",
                 "publisher": publisher, "tier": tier}
@@ -405,14 +442,23 @@ def index_claims(
 def count_independent_sources(
     claim_refs: Iterable[str],
     claims: Mapping[str, Mapping[str, Any]],
+    policy: Mapping[str, Any] = DEBATE_POLICY,
 ) -> dict[str, Any]:
     """How many distinct voices a side has, and which they are.
 
-    Unattributed claims are counted separately and never as sources.  This is
-    the conservative direction on purpose: the failure it prevents is a debate
-    promoted to ``open`` because one broker was quoted twice.
+    Only the bases in ``policy["counting_bases"]`` count.  Everything else --
+    a claim identified only by the document it came from, or by nothing at all
+    -- is listed as unattributed and contributes nothing.
+
+    This is the conservative direction on purpose, and the live Core is why it
+    has to be.  There, *every* broker note falls to the ``document`` basis: no
+    title reaches the Ledger, so no publisher matches, and the issuer rung does
+    not apply to sell-side.  Counting documents would therefore have meant two
+    notes from one house opening a debate on 100% of the sell-side evidence we
+    hold -- the precise failure the independence rule exists to prevent.
     """
 
+    counting = set(policy.get("counting_bases") or ())
     keys: list[str] = []
     unattributed = 0
     for ref in claim_refs:
@@ -420,7 +466,7 @@ def count_independent_sources(
         if row is None:
             continue
         key = row.get("key")
-        if not isinstance(key, str) or not key:
+        if not isinstance(key, str) or not key or row.get("basis") not in counting:
             unattributed += 1
             continue
         if key not in keys:
@@ -480,8 +526,8 @@ def contested_aspects(
         sides = groups[aspect]
         if len(sides["bull"]) < minimum or len(sides["bear"]) < minimum:
             continue
-        bull = count_independent_sources(sorted(sides["bull"]), claims)
-        bear = count_independent_sources(sorted(sides["bear"]), claims)
+        bull = count_independent_sources(sorted(sides["bull"]), claims, policy)
+        bear = count_independent_sources(sorted(sides["bear"]), claims, policy)
         result.append({
             "aspect": aspect,
             "bull_claim_refs": sorted(sides["bull"]),
@@ -518,6 +564,7 @@ def screen_candidate(
     driver_refs: Iterable[str],
     claims: Mapping[str, Mapping[str, Any]],
     known_debate_refs: Iterable[str] = (),
+    prior_refs: Iterable[str] = (),
     policy: Mapping[str, Any] = DEBATE_POLICY,
 ) -> dict[str, Any]:
     """Decide whether one candidate debate may be published, and as what.
@@ -535,6 +582,7 @@ def screen_candidate(
     reasons: set[str] = set()
     known_drivers = {str(ref) for ref in driver_refs}
     known = {str(ref) for ref in known_debate_refs}
+    prior_refs = {str(ref) for ref in prior_refs}
 
     question = candidate.get("question")
     if not isinstance(question, str) or not question.strip():
@@ -578,8 +626,8 @@ def screen_candidate(
         elif not 0 <= value < len(table):
             reasons.add(unknown_reason)
 
-    bull = count_independent_sources(sides.get("bull", []), claims)
-    bear = count_independent_sources(sides.get("bear", []), claims)
+    bull = count_independent_sources(sides.get("bull", []), claims, policy)
+    bear = count_independent_sources(sides.get("bear", []), claims, policy)
     independence = {
         "bull_sources": bull["count"], "bear_sources": bear["count"],
         "bull_source_keys": bull["keys"], "bear_source_keys": bear["keys"],
@@ -598,20 +646,49 @@ def screen_candidate(
         and isinstance(resolution.get("refs"), list)
         and any(isinstance(item, str) and item.strip() for item in resolution["refs"])
     )
-    if resolved:
+    grounded = bull["count"] >= minimum and bear["count"] >= minimum
+    if not grounded:
+        # The independence floor applies to *every* status above candidate,
+        # including ``resolved``.  A question one broker asked and one filing
+        # answered was never a debate, and letting it resolve would put a
+        # settled argument in the record that nobody was having.
+        status = "candidate"
+    elif resolved:
         status = "resolved"
-    elif bull["count"] >= minimum and bear["count"] >= minimum:
+    else:
         gaining = candidate.get("gaining")
+        moved = _shift_is_new(candidate, gaining, prior_refs)
         status = (
             "shifting"
             if gaining in ("bull", "bear")
             and str(candidate.get("debate_ref") or "") in known
+            and moved
             else "open"
         )
-    else:
-        status = "candidate"
     return {"admitted": True, "reasons": [], "status": status,
             "source_independence": independence}
+
+
+def _shift_is_new(
+    candidate: Mapping[str, Any], gaining: Any, prior_refs: Iterable[str]
+) -> bool:
+    """Whether the gaining side is standing on evidence the last version lacked.
+
+    ``shifting`` is the one status that asserts something about *time*: this
+    argument has moved since you last read it.  An assertion of movement whose
+    every reference the previous version already cited is a restatement wearing
+    a status word, and it would drive a version chain in which the reader is
+    told something changed and cannot see what.  So the gaining side must cite
+    at least one reference the previous version did not.
+    """
+
+    if gaining not in ("bull", "bear"):
+        return False
+    side = candidate.get(gaining)
+    refs = side.get("claim_refs") if isinstance(side, Mapping) else None
+    if not isinstance(refs, list):
+        return False
+    return bool({item for item in refs if isinstance(item, str)} - set(prior_refs))
 
 
 def screen_candidates(
@@ -621,6 +698,7 @@ def screen_candidates(
     driver_refs: Iterable[str],
     claims: Mapping[str, Mapping[str, Any]],
     known_debate_refs: Iterable[str] = (),
+    prior_refs: Iterable[str] = (),
     policy: Mapping[str, Any] = DEBATE_POLICY,
     observed_at: str,
 ) -> dict[str, list[dict[str, Any]]]:
@@ -628,12 +706,13 @@ def screen_candidates(
 
     drivers = list(driver_refs)
     known = list(known_debate_refs)
+    prior = list(prior_refs)
     admitted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for candidate in candidates:
         verdict = screen_candidate(
             candidate, method=method, driver_refs=drivers, claims=claims,
-            known_debate_refs=known, policy=policy,
+            known_debate_refs=known, prior_refs=prior, policy=policy,
         )
         if verdict["admitted"]:
             admitted.append({"candidate": dict(candidate), "verdict": verdict})
@@ -662,9 +741,10 @@ _OURS_FIELDS = {"state", "side", "statement", "refs"}
 _SHIFT_FIELDS = {"reason", "refs"}
 _INDEPENDENCE_FIELDS = {"bull_sources", "bear_sources"}
 _DEBATE_FIELDS = {
-    "debate_ref", "question", "driver_refs", "bull_position", "bear_position",
-    "market_position", "our_position", "status", "last_shift_reason",
-    "first_seen_at", "source_independence",
+    "debate_ref", "question", "driver_refs", "admission_index",
+    "causal_link_index", "bull_position", "bear_position", "market_position",
+    "our_position", "status", "last_shift_reason", "first_seen_at",
+    "source_independence",
 }
 _REJECTION_FIELDS = {
     "candidate_ref", "question", "driver_refs", "reasons", "observed_at",
@@ -746,6 +826,16 @@ def _debate(value: Any, name: str) -> dict[str, Any]:
     wire["debate_ref"] = _text(wire["debate_ref"], f"{name}.debate_ref")
     wire["question"] = _text(wire["question"], f"{name}.question")
     wire["driver_refs"] = _refs(wire["driver_refs"], f"{name}.driver_refs", nonempty=True)
+    for field in ("admission_index", "causal_link_index"):
+        # The gate checked these were in range against the constitution this
+        # version binds; storing them is what makes that check re-checkable and
+        # what lets the verifier be shown the placement the drafter asserted.
+        # A debate whose placement is not on the record was placed by nobody.
+        value = wire[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise DebateMapValidationError(
+                f"{name}.{field} must be the row number the drafter named"
+            )
     wire["bull_position"] = _position(wire["bull_position"], f"{name}.bull_position")
     wire["bear_position"] = _position(wire["bear_position"], f"{name}.bear_position")
     wire["market_position"] = _market_position(
@@ -1239,13 +1329,20 @@ def novelty(
     for debate in candidate["debates"]:
         if prior_status.get(debate["debate_ref"]) != debate["status"]:
             return {"new": True, "reason": "status_change:" + debate["debate_ref"]}
+    dropped = sorted(prior_refs - {item["debate_ref"] for item in candidate["debates"]})
+    if dropped:
+        # Dropping a debate is a change of mind and has to be publishable as
+        # one.  Without this rule a map that removed a stale argument and added
+        # nothing would be refused as a duplicate, and the only way to retire a
+        # debate would be to never draw it again -- which the chain cannot show.
+        return {"new": True, "reason": "dropped_debate:" + dropped[0]}
     new_refs = sorted(cited_refs(candidate) - cited_refs(prior))
     if new_refs:
         return {"new": True, "reason": "new_ref:" + new_refs[0]}
     return {
         "new": False,
-        "reason": "no new debate, no status change and no reference the "
-                  "current version does not already cite",
+        "reason": "no debate added or dropped, no status change and no "
+                  "reference the current version does not already cite",
     }
 
 
@@ -1279,6 +1376,7 @@ __all__ = [
     "novelty",
     "polarity",
     "publisher_of",
+    "publisher_slug",
     "screen_candidate",
     "screen_candidates",
     "source_identity",

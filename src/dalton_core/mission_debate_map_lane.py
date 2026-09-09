@@ -33,12 +33,15 @@ from .lane_child_launcher import (
 from .lane_registry import LaneSpec, register_lane
 
 MAX_FAILURE_DETAIL_CHARS = 500
-# Outcomes that say something about this moment rather than about this subject,
-# so the subject is not held back for them.
+# Outcomes that say something about this moment rather than about this
+# evidence, so the subject is not held back for them: the scheduler had the
+# request in flight, or there was no route just then. The very next tick can
+# do the work.
 TRANSIENT_STATUSES: frozenset[str] = frozenset({"busy", "model_unavailable"})
-# Outcomes that mean the run worked and there was simply nothing to publish.
-# Holding a subject back for these would be right for an hour and wrong forever.
-SETTLED_STATUSES: frozenset[str] = frozenset({"duplicate", "gated", "dry_run"})
+# The one outcome that changes what the next tick sees. After it the stored
+# version's fingerprint equals the evidence's, so the selector skips the
+# subject on its own and no hold is needed.
+PUBLISHED_STATUS = "fresh"
 
 LAUNCHER_KWARG = "debate_map_launcher"
 DEBATE_MAP_MODEL_CONFIG = "initial-screen-model-config.json"
@@ -103,17 +106,28 @@ class MissionDebateMapLaneCoordinator:
             return settled
         self._open = None
         map_status = settled.get("map_status")
-        failed = (
-            map_status not in TRANSIENT_STATUSES
-            and map_status not in SETTLED_STATUSES
-            and (settled.get("status") != "succeeded"
-                 or map_status in ("refused", "unverified", "verifier_rejected",
-                                   "not_independent", "no_admitted_debates",
-                                   "not_authorized", "failed"))
+        published = (
+            settled.get("status") == "succeeded" and map_status == PUBLISHED_STATUS
         )
+        # Hold on *every* other outcome, not only the ones that look like
+        # failures. A run that reasoned over this exact evidence and published
+        # nothing -- refused, rejected, duplicate, gated -- has answered the
+        # question for this evidence, and asking it again next tick would let
+        # one subject take the slot forever while subjects two through five
+        # never get a turn. This was the shape of the bug: ``duplicate`` was
+        # treated as "not a failure, so do not hold", the fingerprint never
+        # moved because nothing was published, and the lane re-asked about the
+        # same company every five minutes.
+        #
+        # The hold is keyed on (subject, fingerprint) and therefore releases
+        # itself the moment one Claim arrives, which is exactly when the
+        # question is worth asking again. It is process-local as well, so a
+        # deploy -- the most likely thing to have fixed a ``gated`` or a
+        # ``not_authorized`` -- clears it too.
+        hold = not published and map_status not in TRANSIENT_STATUSES
         subject_ref = settled.get("subject_ref")
         fingerprint = settled.get("evidence_fingerprint")
-        if failed and subject_ref and fingerprint:
+        if hold and subject_ref and fingerprint:
             self._failed[f"{subject_ref}|{fingerprint}"] = (
                 settled.get("failure_reason")
                 or f"last run: {map_status or settled.get('status')}"
@@ -132,25 +146,45 @@ class MissionDebateMapLaneCoordinator:
             subjects.append(industry)
         return subjects
 
-    def _choose(self, mission: Any) -> tuple[str | None, str | None]:
-        """The first subject whose evidence has moved since its current map."""
+    def _choose(self, mission: Any) -> tuple[str | None, str | None, str | None]:
+        """The first subject whose evidence has moved and is not held.
+
+        The held check belongs *inside* the loop, not after it.  A held subject
+        left in front of the queue is not a subject that waits its turn -- it
+        is a subject that takes the slot every tick and reports ``held``, and
+        the four behind it are never looked at.  That is the same starvation
+        the hold was added to cure, one step further along.
+
+        The last held subject is returned when nothing else qualifies, so a
+        tick that does nothing still says which subject it would have run and
+        why it did not.
+        """
 
         from .debate_map import DebateMapAuthority, evidence_fingerprint
-        from .debate_map_draft import subject_claim_rows
+        from .debate_map_draft import subject_claim_refs
 
         authority = DebateMapAuthority(self.store)
+        blocked: tuple[str, str, str] | None = None
         for subject_ref in self._subjects(mission):
-            rows = subject_claim_rows(self.store, subject_ref)
-            if not rows:
+            # Refs only. The full drafting rows walk evidence per claim and
+            # build a title map; doing that for five subjects on every tick is
+            # work spent learning nothing on the overwhelmingly common tick
+            # where the answer is "nothing moved".
+            refs = subject_claim_refs(self.store, subject_ref)
+            if not refs:
                 continue
-            fingerprint = evidence_fingerprint(
-                row["claim_version_ref"] for row in rows
-            )
+            fingerprint = evidence_fingerprint(refs)
             current = authority.current(subject_ref)
             if current is not None and current["evidence_fingerprint"] == fingerprint:
                 continue
-            return subject_ref, fingerprint
-        return None, None
+            held = self._failed.get(f"{subject_ref}|{fingerprint}")
+            if held is not None:
+                blocked = blocked or (subject_ref, fingerprint, held)
+                continue
+            return subject_ref, fingerprint, None
+        if blocked is not None:
+            return blocked
+        return None, None, None
 
     def dispatch_once(self) -> dict[str, Any]:
         settled = self._settle_open()
@@ -158,7 +192,7 @@ class MissionDebateMapLaneCoordinator:
         if mission is None:
             return {"status": "unconfigured", "reason": "no mission", "settled": settled}
         try:
-            subject_ref, fingerprint = self._choose(mission)
+            subject_ref, fingerprint, held = self._choose(mission)
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
             return {"status": "unavailable", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
@@ -166,7 +200,6 @@ class MissionDebateMapLaneCoordinator:
             return {"status": "idle", "settled": settled,
                     "reason": "every subject's map was drawn from the evidence "
                               "we currently hold"}
-        held = self._failed.get(f"{subject_ref}|{fingerprint}")
         if held is not None:
             return {"status": "held", "subject_ref": subject_ref,
                     "settled": settled, "reason": held}
@@ -264,7 +297,7 @@ __all__ = [
     "LANE",
     "LAUNCHER_KWARG",
     "MAX_FAILURE_DETAIL_CHARS",
-    "SETTLED_STATUSES",
+    "PUBLISHED_STATUS",
     "TRANSIENT_STATUSES",
     "MissionDebateMapLaneCoordinator",
     "add_arguments",

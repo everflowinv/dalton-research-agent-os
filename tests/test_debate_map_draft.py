@@ -9,6 +9,8 @@ from dalton_core.cockpit_model import CockpitModelError, purposes
 from dalton_core.debate_map import index_claims
 from dalton_core.debate_map_draft import (
     MAX_CLAIM_ROWS,
+    MAX_DEBATES,
+    MAX_PROMPT_BYTES,
     PURPOSE,
     DebateDraftRefused,
     assemble_debates,
@@ -27,8 +29,10 @@ from dalton_core.debate_map_draft import (
 
 SUBJECT = "company:sec-cik:0001467373"
 METHOD = {
-    "question_admission": ["A question must change a thesis or a driver view."],
-    "causal_chain": ["Bookings lead revenue by two to four quarters."],
+    "question_admission": ["A question must change a thesis or a driver view.",
+                           "A question must be answerable within the quarter."],
+    "causal_chain": ["Bookings lead revenue by two to four quarters.",
+                     "Utilisation leads margin by one quarter."],
 }
 DRIVERS = [
     {"driver_ref": "driver:bookings", "label": "Bookings", "mechanism": "leads revenue"},
@@ -95,6 +99,10 @@ class FakeModel:
         self.families = list(families)
         self.raises = raises or {}
         self.calls: list[dict] = []
+
+    @property
+    def prompts(self):
+        return [call["prompt"] for call in self.calls]
 
     def call(self, *, purpose, request_id, prompt, mission):
         index = len(self.calls)
@@ -218,6 +226,17 @@ class ParseDraftTests(unittest.TestCase):
         parsed = parse_draft(draft_reply(debate_ref="debate:known"), table(previous))
         self.assertEqual(parsed[0]["debate_ref"], "debate:known")
 
+    def test_more_debates_than_the_bound_refuses_the_whole_draft(self) -> None:
+        reply = json.loads(draft_reply())
+        one = reply["debates"][0]
+        reply["debates"] = [
+            dict(one, debate_ref=f"new-{index}",
+                 question=f"Question number {index}?")
+            for index in range(1, MAX_DEBATES + 2)
+        ]
+        with self.assertRaises(DebateDraftRefused):
+            parse_draft(json.dumps(reply), self.table)
+
     def test_the_same_debate_twice_is_refused(self) -> None:
         reply = json.loads(draft_reply())
         reply["debates"].append(dict(reply["debates"][0], debate_ref="new-2"))
@@ -245,6 +264,21 @@ class VerifierTests(unittest.TestCase):
         self.assertIn("[C1 C4]", prompt)
         self.assertIn("market (bear)", prompt)
         self.assertIn("ours: none yet", prompt)
+
+    def test_the_prompt_prints_the_placement_the_drafter_named(self) -> None:
+        prompt = build_verifier_prompt(self.table, self.debates)
+        self.assertIn("QUESTION ADMISSION rules:", prompt)
+        self.assertIn("admission [0] / link [0]", prompt)
+        self.assertIn("question_not_on_the_named_causal_link", prompt)
+
+    def test_the_placement_is_carried_into_the_stored_debate(self) -> None:
+        self.assertEqual(self.debates[0]["admission_index"], 0)
+        self.assertEqual(self.debates[0]["causal_link_index"], 0)
+
+    def test_a_verifier_prompt_over_the_byte_bound_is_refused(self) -> None:
+        huge = dict(self.table, causal_chain=["x" * (MAX_PROMPT_BYTES + 1)])
+        with self.assertRaises(DebateDraftRefused):
+            build_verifier_prompt(huge, self.debates)
 
     def test_a_pass_verdict_carrying_findings_is_refused(self) -> None:
         with self.assertRaises(DebateDraftRefused):
@@ -368,6 +402,39 @@ class DraftRunTests(unittest.TestCase):
         self.assertEqual(result["status"], "verifier_rejected")
         self.assertEqual(result["debates"], [])
         self.assertIn("sides_are_not_actually_opposed", result["reason"])
+
+    def test_the_gate_cannot_tell_a_lazy_placement_but_the_verifier_can(self) -> None:
+        # Every debate claims admission rule 0 and causal link 0, which are
+        # both valid numbers, so the gate -- which only checks the numbers
+        # exist -- admits all three. Whether a question about utilisation
+        # really sits on the bookings link is a reading, and the reader is the
+        # verifier, which is why the numbers are printed to it.
+        reply = json.loads(draft_reply())
+        one = reply["debates"][0]
+        reply["debates"] = [
+            dict(one, debate_ref=f"new-{index}", question=q,
+                 question_admission_index=0, causal_chain_index=0)
+            for index, q in enumerate(
+                ["Will bookings growth hold?", "Will utilisation roll over?",
+                 "Will pricing hold?"], start=1)
+        ]
+        refs = [debate_ref_for(SUBJECT, ["driver:bookings"], question)
+                for question in ("Will bookings growth hold?",
+                                 "Will utilisation roll over?",
+                                 "Will pricing hold?")]
+        reject = json.dumps({"verdict": "reject", "findings": [{
+            "debate_ref": ref,
+            "code": "question_not_on_the_named_causal_link",
+            "detail": "Utilisation is link 1; this debate named link 0.",
+        } for ref in refs[1:]]})
+        model = FakeModel([json.dumps(reply), reject])
+        result = self.run_draft(model)
+        self.assertEqual(result["rejected"], [])
+        self.assertEqual(result["status"], "verifier_rejected")
+        self.assertIn("question_not_on_the_named_causal_link", result["reason"])
+        self.assertEqual(result["debates"], [])
+        # The verifier was shown the placement it is being asked to judge.
+        self.assertEqual(model.prompts[1].count("admission [0] / link [0]"), 3)
 
     def test_an_unparseable_verdict_leaves_the_draft_unverified(self) -> None:
         result = self.run_draft(FakeModel([draft_reply(), "looks fine to me"]))

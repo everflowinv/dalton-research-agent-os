@@ -10,6 +10,7 @@ invariant a lane keyed on anything other than the evidence itself would break.
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,7 +21,9 @@ from dalton_core.debate_map import DebateMapAuthority, evidence_fingerprint
 from dalton_core.debate_map_cli import (
     WRITE_SCOPE, build_parser, granted, run_debate_map, subject_kind_for,
 )
-from dalton_core.debate_map_draft import subject_claim_rows, subject_driver_rows
+from dalton_core.debate_map_draft import (
+    document_attribution, subject_claim_refs, subject_claim_rows, subject_driver_rows,
+)
 from dalton_core.debate_map_launcher import DebateMapLauncher, run_digest
 from dalton_core.lane_child_launcher import LaneChildConflict, LaneChildRejected
 from dalton_core.lane_registry import (
@@ -223,6 +226,16 @@ class ChildRunTests(unittest.TestCase):
         self.assertEqual(summary["map_status"], "not_independent")
         self.assertIsNone(DebateMapAuthority(self.harness.store).current(ACN))
 
+    def test_the_cheap_reader_agrees_with_the_expensive_one(self):
+        # The lane asks every subject every tick; it must get the same answer
+        # the drafting rows would give without building them.
+        self.harness.add_claims()
+        self.assertEqual(
+            subject_claim_refs(self.harness.store, ACN),
+            [row["claim_version_ref"]
+             for row in subject_claim_rows(self.harness.store, ACN)],
+        )
+
     def test_the_industry_is_a_subject_too(self):
         self.assertEqual(subject_kind_for("industry:us-it-services"), "industry")
         self.assertEqual(subject_kind_for(ACN), "company")
@@ -240,6 +253,65 @@ class ChildRunTests(unittest.TestCase):
             ["--state-dir", "/s", "--subject-ref", ACN, "--summary-dir", "/d"])
         self.assertEqual(args.subject_ref, ACN)
         self.assertIsNone(args.model_config)
+
+
+class DocumentAttributionTests(unittest.TestCase):
+    """The seam the extraction-throughput slice fills, read defensively.
+
+    Broker attribution is being persisted onto the discovered-document row on
+    another branch, additively and under a name that is not settled.  This
+    module must work on a Core that has none of those columns -- which is
+    today's live one -- and light up on one that has them, without being
+    taught a migration.
+    """
+
+    def core(self, columns: str) -> sqlite3.Connection:
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TABLE coverage_mission_discovered_documents "
+            f"(document_ref TEXT PRIMARY KEY{columns})"
+        )
+        self.addCleanup(connection.close)
+        return connection
+
+    def test_a_core_without_the_table_answers_nothing_rather_than_raising(self):
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        self.assertEqual(document_attribution(connection), {})
+
+    def test_todays_live_shape_yields_only_the_host(self):
+        connection = self.core(", host TEXT")
+        connection.execute(
+            "INSERT INTO coverage_mission_discovered_documents VALUES(?,?)",
+            ("public-web-url:sha256:a", "reuters.com"))
+        connection.execute(
+            "INSERT INTO coverage_mission_discovered_documents VALUES(?,?)",
+            ("alphaengine-doc:1", None))
+        found = document_attribution(connection)
+        self.assertEqual(found, {"public-web-url:sha256:a": {"host": "reuters.com"}})
+
+    def test_an_added_attribution_column_is_picked_up_under_any_of_its_names(self):
+        for column in ("publisher", "broker", "attributed_publisher"):
+            with self.subTest(column=column):
+                connection = self.core(f", {column} TEXT, title TEXT")
+                connection.execute(
+                    "INSERT INTO coverage_mission_discovered_documents VALUES(?,?,?)",
+                    ("alphaengine-doc:1", "TD Cowen", "ACN: bookings review"))
+                found = document_attribution(connection)
+                self.assertEqual(found["alphaengine-doc:1"]["publisher"], "TD Cowen")
+                self.assertEqual(found["alphaengine-doc:1"]["title"],
+                                 "ACN: bookings review")
+
+    def test_metadata_columns_are_read_when_no_publisher_was_attributed(self):
+        connection = self.core(", authors TEXT, sources TEXT")
+        connection.execute(
+            "INSERT INTO coverage_mission_discovered_documents VALUES(?,?,?)",
+            ("alphaengine-doc:1", "Bryan Bergin", "TD Cowen Equity Research"))
+        found = document_attribution(connection)["alphaengine-doc:1"]
+        self.assertEqual(found["authors"], "Bryan Bergin")
+        self.assertEqual(found["sources"], "TD Cowen Equity Research")
+        self.assertNotIn("publisher", found)
 
 
 class FakeLauncher:
@@ -306,6 +378,7 @@ class LaneCoordinatorTests(unittest.TestCase):
             debates=[{
                 "debate_ref": "debate:x", "question": "q?",
                 "driver_refs": [DRIVER],
+                "admission_index": 0, "causal_link_index": 0,
                 "bull_position": {"statement": "up",
                                   "claim_refs": [rows[0]["claim_version_ref"]]},
                 "bear_position": {"statement": "down",
@@ -338,12 +411,43 @@ class LaneCoordinatorTests(unittest.TestCase):
             statement="A third view arrives.", source_type="public_web")
         self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
 
-    def test_a_duplicate_is_not_a_failure_and_is_not_held(self):
+    def test_a_duplicate_holds_the_slot_open_for_the_next_subject(self):
+        # A duplicate publishes nothing, so the stored fingerprint never moves
+        # and this subject would be chosen again on every tick forever. The
+        # hold is what lets subjects two through N have a turn; it releases
+        # itself the moment a Claim about this one arrives.
         self.harness.add_claims()
         launched = self.coordinator.dispatch_once()
         self.launcher.settle(launched["ticket_ref"], {"map_status": "duplicate"})
         again = self.coordinator.dispatch_once()
-        self.assertEqual(again["status"], "launched")
+        self.assertEqual(again["status"], "held")
+        self.assertIn("duplicate", again["reason"])
+        self.harness.fixture.add_claim(
+            "debate-after-duplicate", kind="qualitative", value=None, unit=None,
+            metric="demand environment", period="current",
+            statement="Something new arrives.", source_type="public_web")
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
+
+    def test_every_subject_gets_a_turn_when_none_of_them_publishes(self):
+        # The starvation this lane had to be taught about: five companies, one
+        # slot, and a first company whose run publishes nothing. Without the
+        # hold it takes the slot on every tick and the other four are never
+        # looked at.
+        for subject in ("company:sec-cik:0001352010", "company:sec-cik:0001058290"):
+            self.harness.fixture.add_claim(
+                "debate-" + subject[-4:], subject_ref=subject, kind="qualitative",
+                value=None, unit=None, metric="demand environment", period="current",
+                statement="A view about this company.", source_type="public_web")
+        self.harness.add_claims()
+        seen = []
+        for _ in range(4):
+            result = self.coordinator.dispatch_once()
+            if result["status"] != "launched":
+                continue
+            seen.append(result["subject_ref"])
+            self.launcher.settle(result["ticket_ref"], {"map_status": "duplicate"})
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertGreaterEqual(len(seen), 3)
 
     def test_a_busy_launcher_is_reported_not_raised(self):
         self.harness.add_claims()

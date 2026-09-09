@@ -58,11 +58,15 @@ def debate(
     question: str = "Will bookings growth hold above ten per cent?",
     drivers=("driver:bookings",),
     first_seen_at: str = "2026-09-09T00:00:00+00:00",
+    admission_index: int = 0,
+    causal_link_index: int = 0,
 ) -> dict:
     return {
         "debate_ref": ref,
         "question": question,
         "driver_refs": list(drivers),
+        "admission_index": admission_index,
+        "causal_link_index": causal_link_index,
         "bull_position": position("Bookings are accelerating.", bull_refs),
         "bear_position": position("Bookings are decelerating.", bear_refs),
         "market_position": market or {
@@ -142,16 +146,51 @@ class SourceIndependenceTests(unittest.TestCase):
         ])
         self.assertEqual(count_independent_sources(["cv-1", "cv-2"], claims)["count"], 2)
 
-    def test_two_claims_out_of_one_document_are_one_source(self) -> None:
+    def test_a_claim_known_only_by_its_document_does_not_count(self) -> None:
+        # Live, this is 100% of the sell-side evidence: no title reaches the
+        # Ledger, so no publisher matches and the issuer rung does not apply.
+        # If ``document`` counted, two notes out of one house would open a
+        # debate, which is the failure the whole rule exists to prevent.
         claims = index_claims([
             self.row("cv-1", importance="sell_side", document_ref="alphaengine-doc:1"),
-            self.row("cv-2", importance="sell_side", document_ref="alphaengine-doc:1"),
-            self.row("cv-3", importance="sell_side", document_ref="alphaengine-doc:2"),
+            self.row("cv-2", importance="sell_side", document_ref="alphaengine-doc:2"),
         ])
         self.assertEqual(claims["cv-1"]["basis"], "document")
+        counted = count_independent_sources(["cv-1", "cv-2"], claims)
+        self.assertEqual(counted["count"], 0)
+        self.assertEqual(counted["unattributed"], 2)
+        self.assertEqual(DEBATE_POLICY["counting_bases"],
+                         ["publisher", "issuer", "host"])
+
+    def test_an_upstream_attribution_is_taken_at_its_word(self) -> None:
+        # The seam the extraction-throughput slice fills: a broker name read
+        # off the document's own metadata beats any title matching, and two
+        # notes from that house fold into one voice.
+        claims = index_claims([
+            self.row("cv-1", importance="sell_side", document_ref="alphaengine-doc:1",
+                     document_publisher="TD Cowen"),
+            self.row("cv-2", importance="sell_side", document_ref="alphaengine-doc:2",
+                     document_publisher="td cowen"),
+            self.row("cv-3", importance="sell_side", document_ref="alphaengine-doc:3",
+                     document_publisher="Redburn Atlantic"),
+        ])
+        self.assertEqual(claims["cv-1"]["basis"], "publisher")
+        self.assertEqual(claims["cv-1"]["key"], "publisher:td-cowen")
         self.assertEqual(count_independent_sources(["cv-1", "cv-2"], claims)["count"], 1)
+        # A house the frozen table has never heard of is still a house.
+        self.assertEqual(claims["cv-3"]["key"], "publisher:redburn-atlantic")
         self.assertEqual(
             count_independent_sources(["cv-1", "cv-2", "cv-3"], claims)["count"], 2)
+
+    def test_document_metadata_is_matched_when_nothing_attributed_it(self) -> None:
+        claims = index_claims([
+            self.row("cv-1", importance="sell_side", document_ref="alphaengine-doc:1",
+                     document_authors="Bryan Bergin, TD Cowen"),
+            self.row("cv-2", importance="sell_side", document_ref="alphaengine-doc:2",
+                     document_sources="TD Cowen Equity Research"),
+        ])
+        self.assertEqual(count_independent_sources(["cv-1", "cv-2"], claims)["count"], 1)
+        self.assertEqual(claims["cv-1"]["publisher"], "td")
 
     def test_the_recorded_host_beats_the_document_ref(self) -> None:
         claims = index_claims([
@@ -292,12 +331,44 @@ class ConstitutionGateTests(unittest.TestCase):
             self.screen(wire, known_debate_refs=["debate:known"])["status"], "shifting"
         )
 
+    def test_a_shift_standing_on_nothing_new_is_only_open(self) -> None:
+        # "This argument has moved since you last read it" is an assertion
+        # about time. If every reference the gaining side cites was already in
+        # the previous version, nothing moved and the reader would be told it
+        # had without being able to see what.
+        wire = candidate(
+            debate_ref="debate:known", gaining="bull",
+            bull=position("up", ["cv-1", "cv-2"]),
+            bear=position("down", ["cv-3", "cv-4"]),
+        )
+        self.assertEqual(
+            self.screen(wire, known_debate_refs=["debate:known"],
+                        prior_refs=["cv-1", "cv-2", "cv-3", "cv-4"])["status"],
+            "open",
+        )
+        self.assertEqual(
+            self.screen(wire, known_debate_refs=["debate:known"],
+                        prior_refs=["cv-2", "cv-3", "cv-4"])["status"],
+            "shifting",
+        )
+
     def test_a_resolution_with_refs_resolves_and_one_without_does_not(self) -> None:
+        grounded = {"bull": position("up", ["cv-1", "cv-2"]),
+                    "bear": position("down", ["cv-3", "cv-4"])}
         with_refs = candidate(resolution={"reason": "the filing settled it",
-                                          "refs": ["cv-3"]})
+                                          "refs": ["cv-3"]}, **grounded)
         self.assertEqual(self.screen(with_refs)["status"], "resolved")
-        without = candidate(resolution={"reason": "we feel it is settled", "refs": []})
-        self.assertEqual(self.screen(without)["status"], "candidate")
+        without = candidate(resolution={"reason": "we feel it is settled", "refs": []},
+                            **grounded)
+        self.assertEqual(self.screen(without)["status"], "open")
+
+    def test_a_debate_nobody_independent_was_having_cannot_resolve(self) -> None:
+        # One broker asked and one filing answered: never a debate, so there is
+        # nothing to settle. It stays a candidate rather than entering the
+        # record as a resolved argument.
+        thin = candidate(resolution={"reason": "the filing settled it",
+                                     "refs": ["cv-3"]})
+        self.assertEqual(self.screen(thin)["status"], "candidate")
 
     def test_screening_keeps_the_refusals(self) -> None:
         screened = screen_candidates(
@@ -351,6 +422,19 @@ class DebateMapContractTests(unittest.TestCase):
         validate_version(self.version(debates=[valid_debate(
             status="resolved", shift={"reason": "the filing settled it", "refs": ["cv-a"]},
         )]))
+
+    def test_the_placement_the_drafter_named_is_on_the_record(self) -> None:
+        stored = validate_version(self.version())
+        self.assertEqual(stored["debates"][0]["admission_index"], 0)
+        self.assertEqual(stored["debates"][0]["causal_link_index"], 0)
+        for field in ("admission_index", "causal_link_index"):
+            with self.subTest(field=field):
+                with self.assertRaises(DebateMapValidationError):
+                    validate_version(self.version(
+                        debates=[valid_debate(**{field: -1})]))
+                with self.assertRaises(DebateMapValidationError):
+                    validate_version(self.version(
+                        debates=[valid_debate(**{field: "first"})]))
 
     def test_an_unavailable_market_position_cannot_also_take_a_lean(self) -> None:
         wire = valid_debate()
@@ -428,6 +512,22 @@ class DebateMapAuthorityTests(unittest.TestCase):
         )
         self.assertEqual(moved["status"], "fresh")
         self.assertTrue(moved["reason"].startswith("status_change:"))
+
+    def test_dropping_a_stale_debate_is_a_new_version(self) -> None:
+        self.publish(
+            [valid_debate(), valid_debate(ref="debate:stale",
+                                          question="Is this still argued about?")],
+            refs=["cv-a"],
+        )
+        # Nothing added, nothing re-stated: the only change is that one debate
+        # is gone. Retiring an argument is a change of mind and has to be
+        # publishable as one.
+        dropped = self.publish([valid_debate()], refs=["cv-a"],
+                               created_at="2026-09-10T00:00:00+00:00")
+        self.assertEqual(dropped["status"], "fresh")
+        self.assertEqual(dropped["reason"], "dropped_debate:debate:stale")
+        self.assertEqual(
+            [item["debate_ref"] for item in dropped["debates"]], ["debate:bookings"])
 
     def test_the_authority_refuses_a_version_whose_reason_names_nothing_new(self) -> None:
         self.publish([valid_debate()], refs=["cv-a"])

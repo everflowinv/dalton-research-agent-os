@@ -1,5 +1,10 @@
 {
- "content_hash": "5381b92e7287e3d8bbac65959396b7f5496e495137e8ac7b49c22ed8d3346a2e",
+ "content_hash": "03eecd28911cbb5d4d844a6393443b76079c584fb38b59e135ad5253a6b5c79b",
+ "counting_bases": [
+  "publisher",
+  "issuer",
+  "host"
+ ],
  "importance_tier": {
   "filing": "filing",
   "management_statement": "management",

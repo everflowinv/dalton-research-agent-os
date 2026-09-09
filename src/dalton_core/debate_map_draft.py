@@ -61,6 +61,12 @@ PURPOSE = register_purpose("debate_map")
 MAX_CLAIM_ROWS = 60
 MAX_STATEMENT_CHARS = 320
 MAX_PREVIOUS_DEBATES = 12
+# How many debates one draft may carry.  A map is a short list by nature -- the
+# blueprint's acceptance bar is three for Accenture -- and a reply with forty is
+# not a thorough analyst, it is a model that stopped choosing.  Bounded here
+# rather than trimmed, because trimming would keep whichever ones happened to
+# come first out of a reply that was already not answering the question.
+MAX_DEBATES = 12
 MAX_PROMPT_BYTES = 48_000
 MAX_COST_USD = 0.80
 MAX_INPUT_TOKENS = 80_000
@@ -371,6 +377,10 @@ def parse_draft(text: Any, table: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows = parsed["debates"]
     if not isinstance(rows, list) or not rows:
         raise DebateDraftRefused("the draft carries no debates")
+    if len(rows) > MAX_DEBATES:
+        raise DebateDraftRefused(
+            f"the draft carries {len(rows)} debates, over the {MAX_DEBATES} bound"
+        )
     citable = dict(table["citable"])
     known_drivers = {row["driver_ref"] for row in table["drivers"]}
     previous_refs = {row["debate_ref"] for row in table["previous_debates"]}
@@ -546,6 +556,8 @@ def assemble_debates(
             "debate_ref": ref,
             "question": candidate["question"],
             "driver_refs": list(candidate["driver_refs"]),
+            "admission_index": candidate["question_admission_index"],
+            "causal_link_index": candidate["causal_chain_index"],
             "bull_position": dict(candidate["bull"]),
             "bear_position": dict(candidate["bear"]),
             "market_position": dict(candidate["market"]),
@@ -579,10 +591,14 @@ def build_verifier_prompt(
     lines = [
         "You are an independent verifier. Another model drew up a map of what is",
         "contested about one research subject from the table below. You do not",
-        "redraw it and you do not improve it. You answer one question: is each",
-        "debate supported by the rows it cites?",
+        "redraw it and you do not improve it. You answer two questions: is each",
+        "debate supported by the rows it cites, and does it sit on the causal",
+        "link and satisfy the admission rule it named?",
         "",
         f"SUBJECT: {table['subject_ref']}",
+        "",
+        "QUESTION ADMISSION rules:",
+        _numbered(table["question_admission"]),
         "",
         "CAUSAL CHAIN:",
         _numbered(table["causal_chain"]),
@@ -595,6 +611,13 @@ def build_verifier_prompt(
     for debate in debates:
         lines.append(f"- {debate['debate_ref']} [{debate['status']}] {debate['question']}")
         lines.append(f"    drivers: {', '.join(debate['driver_refs'])}")
+        # The placement the drafter asserted, as the numbers it named. The gate
+        # could only check the numbers exist; whether the question really sits
+        # there is a reading, and this is the reader.
+        lines.append(
+            f"    admission [{debate['admission_index']}] / "
+            f"link [{debate['causal_link_index']}]"
+        )
         for side, key in (("bull", "bull_position"), ("bear", "bear_position")):
             cited = " ".join(by_ref.get(ref, ref) for ref in debate[key]["claim_refs"])
             lines.append(f"    {side}: {debate[key]['statement']}  [{cited}]")
@@ -619,8 +642,20 @@ def build_verifier_prompt(
         '{"verdict": "pass|reject", "findings": [{"debate_ref": "<ref>",',
         '   "code": "' + "|".join(VERIFIER_FINDING_CODES) + '", "detail": "<one sentence>"}]}',
         "A pass verdict has no findings; a reject verdict has at least one.",
+        "Use question_not_on_the_named_causal_link when a debate's admission",
+        "rule or causal link does not actually cover the question it asks.",
     ]
-    return "\n".join(lines)
+    prompt = "\n".join(lines)
+    if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+        # The verifier's prompt carries the drafter's claims table plus every
+        # debate written out, so it is the larger of the two and the one that
+        # can cross the router's reservation.  Refusing here is better than a
+        # route rejection: it says which call was too big and why.
+        raise DebateDraftRefused(
+            f"the verifier prompt is {len(prompt.encode('utf-8'))} bytes, "
+            f"over the {MAX_PROMPT_BYTES} bound"
+        )
+    return prompt
 
 
 def parse_verdict(text: Any, debates: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -794,12 +829,15 @@ def draft_debate_map(
         result.update({"status": "refused", "reason": f"{type(exc).__name__}: {exc}"})
         return result
 
+    from .debate_map import cited_refs
+
     known = {row["debate_ref"] for row in table["previous_debates"]}
     screened = screen_candidates(
         candidates, method=method,
         driver_refs=[row["driver_ref"] for row in table["drivers"]],
         claims=table["claim_index"], known_debate_refs=known,
-        policy=policy, observed_at=created_at,
+        prior_refs=cited_refs(previous or {}), policy=policy,
+        observed_at=created_at,
     )
     result["rejected"] = screened["rejected"]
     if not screened["admitted"]:
@@ -809,7 +847,11 @@ def draft_debate_map(
         })
         return result
     debates = assemble_debates(screened["admitted"], previous=previous, created_at=created_at)
-    verifier_prompt = build_verifier_prompt(table, debates)
+    try:
+        verifier_prompt = build_verifier_prompt(table, debates)
+    except DebateDraftError as exc:
+        result.update({"status": "unverified", "reason": f"{type(exc).__name__}: {exc}"})
+        return result
     try:
         check = model.call(
             purpose=PURPOSE,
@@ -903,21 +945,43 @@ def subject_claim_rows(store: Any, subject_ref: str) -> list[dict[str, Any]]:
     rows = query_company_research(store, company_ref=subject_ref, limit=1000)
     provenance = ProvenanceResolver(store.connection)
     titles = _document_titles(store.connection)
-    hosts = _document_hosts(store.connection)
+    attribution = document_attribution(store.connection)
     enriched: list[dict[str, Any]] = []
     for row in rows:
         ref = row["claim_version_ref"]
         origin = provenance.resolve(ref)
         document_ref = origin.get("document_ref")
+        attributed = attribution.get(document_ref or "", {})
         enriched.append({
             **row,
             "importance": row.get("importance") or origin.get("importance"),
             "spec_ref": origin.get("spec_ref"),
             "document_ref": document_ref,
-            "document_title": titles.get(document_ref or ""),
-            "host": hosts.get(document_ref or ""),
+            "document_title": attributed.get("title") or titles.get(document_ref or ""),
+            "document_authors": attributed.get("authors"),
+            "document_sources": attributed.get("sources"),
+            "document_publisher": attributed.get("publisher"),
+            "host": attributed.get("host"),
         })
     return enriched
+
+
+def subject_claim_refs(store: Any, subject_ref: str) -> list[str]:
+    """Just the canonical claim version refs for one subject.
+
+    The lane asks every subject every tick whether its evidence moved, and the
+    answer is a hash of this list.  Building the full drafting rows to get it
+    -- a provenance resolver, a title map and a per-claim evidence walk for
+    five companies, five times a minute -- was work done to learn nothing on
+    the overwhelmingly common tick where nothing changed.
+    """
+
+    from .company_research_view import query_company_research
+
+    return [
+        row["claim_version_ref"]
+        for row in query_company_research(store, company_ref=subject_ref, limit=1000)
+    ]
 
 
 def _document_titles(connection: Any) -> dict[str, str]:
@@ -950,26 +1014,73 @@ def _document_titles(connection: Any) -> dict[str, str]:
     return titles
 
 
-def _document_hosts(connection: Any) -> dict[str, str]:
-    """Document ref -> URL host, which the discovery queue already records.
+# What a discovered-document row may be able to tell us about who published it.
+# ``host`` is P9d-13's and has been there since; the rest are the columns the
+# extraction-throughput slice is adding additively as it persists broker
+# attribution read from AlphaEngine's document metadata. The names are not
+# settled yet and this must not break on a Core that has none of them, so the
+# reader takes whichever exist and ignores the rest -- an additive column is a
+# capability that appears, never a migration this module has to be taught.
+_ATTRIBUTION_COLUMNS: Mapping[str, tuple[str, ...]] = {
+    "publisher": ("publisher", "broker", "publisher_ref", "attributed_publisher",
+                  "source_publisher"),
+    "authors": ("authors", "document_authors", "author"),
+    "sources": ("sources", "document_sources", "source_name"),
+    "title": ("title", "document_title"),
+    "host": ("host",),
+}
 
-    P9d-13 put the host on the discovered-document row so an operator could
-    read the queue without re-opening the raw search bytes; it turns out to be
-    the only publisher identity a web document has inside the Core, so the
-    source ladder uses it.
+
+def document_attribution(connection: Any) -> dict[str, dict[str, Any]]:
+    """Document ref -> whatever the Core can say about who published it.
+
+    Three things feed the source ladder from here.  ``publisher`` is an
+    attribution the acquisition layer read off the document itself and is
+    taken at its word.  ``authors``, ``sources`` and ``title`` are text the
+    frozen publisher table is matched against -- AlphaEngine titles carry the
+    house as a prefix.  ``host`` is the URL host P9d-13 records for web
+    documents, and is the only publisher identity a web page has in the Core.
+
+    None of these columns is required.  On today's live Core only ``host``
+    exists, so every broker note falls to the ``document`` basis, which
+    ``counting_bases`` refuses to count -- which is why this seam matters more
+    than it looks: it is the difference between "no sell-side debate can ever
+    open" and "TD and Wolfe are two voices".
     """
 
     try:
+        present = {
+            row[1] for row in connection.execute(
+                "PRAGMA table_info(coverage_mission_discovered_documents)"
+            )
+        }
+    except sqlite3.Error:
+        return {}
+    if not present:
+        return {}
+    chosen = {
+        field: next((name for name in names if name in present), None)
+        for field, names in _ATTRIBUTION_COLUMNS.items()
+    }
+    selected = {field: name for field, name in chosen.items() if name}
+    if not selected:
+        return {}
+    columns = ", ".join(f"{name} AS {field}" for field, name in selected.items())
+    try:
         rows = connection.execute(
-            "SELECT document_ref, host FROM coverage_mission_discovered_documents "
-            "WHERE host IS NOT NULL"
+            f"SELECT document_ref, {columns} FROM coverage_mission_discovered_documents"
         ).fetchall()
     except sqlite3.Error:
         return {}
-    return {
-        row["document_ref"]: row["host"] for row in rows
-        if isinstance(row["host"], str) and row["host"]
-    }
+    found: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        values = {
+            field: row[field] for field in selected
+            if isinstance(row[field], str) and row[field].strip()
+        }
+        if values:
+            found[row["document_ref"]] = values
+    return found
 
 
 def subject_driver_rows(
@@ -1039,6 +1150,7 @@ def subject_driver_rows(
 __all__ = [
     "MAX_CLAIM_ROWS",
     "MAX_COST_USD",
+    "MAX_DEBATES",
     "MAX_INPUT_TOKENS",
     "MAX_OUTPUT_TOKENS",
     "MAX_PROMPT_BYTES",
@@ -1065,6 +1177,8 @@ __all__ = [
     "parse_verdict",
     "prompt_drafter",
     "route_family",
+    "document_attribution",
+    "subject_claim_refs",
     "subject_claim_rows",
     "subject_driver_rows",
 ]
