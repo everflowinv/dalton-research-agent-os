@@ -265,6 +265,52 @@ class CockpitPlaneTests(unittest.TestCase):
         self.assertTrue(model.call(purpose="ask", request_id="two", prompt="second", mission=mission)["replayed"])
         self.assertEqual(adapter.calls, 1)
 
+    def test_the_same_question_asked_later_replays_instead_of_conflicting(self) -> None:
+        """P13aa: the WorkOrder id excludes the clock; its hash did not.
+
+        The id is content-addressed on (purpose, request_id, mission version,
+        prompt) precisely so the same question is the same work. But the
+        scheduler hashes the whole wire, which carried a wall-clock created_at,
+        so asking again a second later produced the same idempotency key with a
+        different hash -- the scheduler's definition of a conflict. "this
+        request is bound to different content; ask again", and asking again
+        could never help.
+
+        Live, every Initial Screen section failed this way for two days, on a
+        deliverable whose inputs had by then been completed. The existing
+        replay test could not catch it because it froze the clock, which is the
+        one condition under which the bug does not appear.
+        """
+
+        mission = self.c.h.missions.active_mission("coverage-mission:us-it-services")
+        adapter = _ScriptedAdapter("{}", created_at=self.c.h.h.clock().isoformat())
+        model = CockpitModel(self.c.model_config, scheduler_db=self.c.config.scheduler_db,
+                             adapter_factory=lambda router: adapter, clock=self.c.h.h.clock)
+        first = model.call(purpose="ask", request_id="same", prompt="the same question",
+                           mission=mission)
+        self.assertFalse(first["replayed"])
+        # Time passes, as it does between two ticks of a lane.
+        self.c.h.h.clock.advance(seconds=3600)
+        second = model.call(purpose="ask", request_id="same", prompt="the same question",
+                            mission=mission)
+        self.assertTrue(second["replayed"])
+        self.assertEqual(second["work_order_ref"], first["work_order_ref"])
+        self.assertEqual(adapter.calls, 1)
+
+    def test_a_different_question_is_still_different_work(self) -> None:
+        # The identity must not have become so loose that two questions share
+        # one answer.
+        mission = self.c.h.missions.active_mission("coverage-mission:us-it-services")
+        adapter = _ScriptedAdapter("{}", created_at=self.c.h.h.clock().isoformat())
+        model = CockpitModel(self.c.model_config, scheduler_db=self.c.config.scheduler_db,
+                             adapter_factory=lambda router: adapter, clock=self.c.h.h.clock)
+        first = model.call(purpose="ask", request_id="a", prompt="one", mission=mission)
+        self.c.h.h.clock.advance(seconds=3600)
+        second = model.call(purpose="ask", request_id="a", prompt="two", mission=mission)
+        self.assertNotEqual(second["work_order_ref"], first["work_order_ref"])
+        self.assertFalse(second["replayed"])
+        self.assertEqual(adapter.calls, 2)
+
     def test_setup_points_the_service_config_at_the_state(self) -> None:
         root = (self.c.root / "svc").resolve(); root.mkdir()
         config = root / "service.json"

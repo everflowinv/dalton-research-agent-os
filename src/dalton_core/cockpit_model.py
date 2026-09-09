@@ -130,10 +130,28 @@ class CockpitModel:
 
     def call(self, *, purpose: str, request_id: str, prompt: str, mission: Mapping[str, Any]) -> dict[str, Any]:
         """Return ``{text, replayed, cost_micros, cost_status, work_order_ref, ...}`` or raise."""
+        # P13aa: the WorkOrder id is content-addressed on (purpose, request_id,
+        # mission version, prompt) and deliberately excludes the clock -- but
+        # the scheduler hashes the whole wire, which carried a wall-clock
+        # created_at. So asking the identical question a second time produced
+        # the same idempotency key with a different hash, which is the
+        # scheduler's definition of a conflict: "this request is bound to
+        # different content; ask again". Asking again could never help.
+        #
+        # Live, every Initial Screen section had been failing that way since
+        # 2026-09-07 -- eight sections, every run, for two days, on a
+        # deliverable whose inputs were by then complete.
+        #
+        # The timestamp is therefore derived from the same thing the id is: the
+        # mission version this work belongs to. The scheduler still records its
+        # own insertion time, so nothing loses the real clock; what goes into
+        # the identity now agrees with the identity. (The SEC lane froze its
+        # perception snapshot's generated_at for exactly this reason.)
+        created_at = mission.get("created_at") or self.clock().isoformat(timespec="microseconds")
         work = build_work(purpose=purpose, request_id=request_id, prompt=prompt, mission_version_ref=mission["id"],
                           max_input_tokens=self.max_input_tokens, max_output_tokens=self.max_output_tokens,
                           max_cost_usd=self.max_cost_usd, max_seconds=self.timeout_seconds,
-                          created_at=self.clock().isoformat(timespec="microseconds"))
+                          created_at=created_at)
         scope = {"mission_ref": mission["mission_ref"], "mission_version_ref": mission["id"],
                  "mission_version_hash": mission["content_hash"],
                  "max_daily_paid_calls": int(mission["budget"]["max_daily_paid_calls"]),
