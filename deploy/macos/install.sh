@@ -26,7 +26,7 @@ if [[ ! -x "$venv_dir/bin/python" ]]; then
   "$python_source" -m venv "$venv_dir"
 fi
 "$venv_dir/bin/python" -m pip install --disable-pip-version-check --upgrade pip
-"$venv_dir/bin/python" -m pip install --disable-pip-version-check "${repo_root}[deploy,pdf,sec-financials]"
+"$venv_dir/bin/python" -m pip install --disable-pip-version-check "${repo_root}[deploy,pdf,sec-financials,market-data]"
 
 # P9d-11: stopping the writer terminates whatever lane child is in flight and
 # the next tick settles it as orphaned, parking that company/spec for a day.
@@ -129,6 +129,30 @@ for sec_financials_version in v1 v2; do
     chmod 600 "$sec_financials_file"
   fi
 done
+# P11a: yfinance daily prices and analyst estimates. Same seed-once rule as
+# every connector above: the committed record is copied in as *proposed* and
+# the owner approves it in place with `dalton-connector-governance approve`.
+# Two records because reading a price series and reading what the street
+# thinks are different permissions, and a schema hash binds one operation.
+# The daily-prices record is the switch for the whole price lane: without it
+# on disk the writer's plist carries no --market-price-governance, the lane
+# is not installed, and the Core runs exactly as it did. The estimates record
+# has no consumer until Wave 2 and can stay proposed.
+for yfinance_kind in yfinance-daily-prices yfinance-analyst-estimates; do
+  yfinance_file="$governance_dir/${yfinance_kind}-v1.json"
+  if [[ ! -f "$yfinance_file" && -f "$repo_root/deploy/connector-governance/${yfinance_kind}-v1.json" ]]; then
+    cp "$repo_root/deploy/connector-governance/${yfinance_kind}-v1.json" "$yfinance_file"
+    chmod 600 "$yfinance_file"
+  fi
+done
+# Not seeded here: the S1 feed connectors (sales-notes, company-wiki) and the
+# Guidepoint lane's own record. Their governance records are in the repo now,
+# but a record alone does not turn any of them on -- the feed lanes also want
+# a feed plan and an OpenClaw workspace directory, and the Guidepoint lane
+# wants a discovery plan this repo does not ship. Copying half of what a lane
+# needs gives the owner an approval to make and a lane that starts and refuses
+# every tick, which reads like a fault rather than an absence. Seeding them is
+# one block each, once whoever owns those lanes says what the other half is.
 # P9d-1: AlphaEngine search_library is a separate governed capability.  Seed
 # the committed *proposed* record once; the owner approves in place with
 # dalton-connector-governance approve.  The discovery plan is a hash-bound

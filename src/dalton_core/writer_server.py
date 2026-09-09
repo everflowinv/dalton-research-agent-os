@@ -91,6 +91,12 @@ from .research_verification import (
     ResearchVerificationError,
     VerificationRejected,
 )
+from .analyst_journal import (
+    AnalystJournalAuthority,
+    AnalystJournalConflict,
+    AnalystJournalError,
+    AnalystJournalValidationError,
+)
 from .document_extraction import DocumentExtractionService, validate_model_config
 from .transcript_candidate_staging import (
     stage_transcript_qualitative_candidate, TranscriptCoreAuthorityResolver,
@@ -395,6 +401,13 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "mission_deliverables",
     "mission_document_evidence", "generate_document_extraction", "stage_document_extraction",
     "document_extraction_preflight",
+    # Q1 / INT1: the PM's own verdict on something they have just read. The
+    # cockpit process holds no Core write handle (ADR-0006), so the feedback
+    # buttons come back through the writer as the owner's Tailscale-derived
+    # principal, which is also what makes the ``human:`` rule enforceable:
+    # the authority refuses anything else and the actor is bound here rather
+    # than supplied by the caller.
+    "record_analyst_journal_entry",
 })
 # Mission stage bookkeeping is human-governed but must also be reachable by
 # the mission's declared ``automation:`` principal; the CoverageMission
@@ -659,7 +672,18 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "get_active_research_constitution": frozenset({"constitution_ref"}),
     "research_constitution_report": frozenset(),
     "company_research_view": frozenset({"company_ref"}),
-    "company_research_query": frozenset({"company_ref", "aspect", "period", "status", "limit"}),
+    # P12b: ``aspect`` still filters the Ledger's free-text metric_or_aspect;
+    # ``index_aspect`` is the closed vocabulary. Two names because they are two
+    # fields -- and without these five here the index is unreachable from
+    # outside the process, which is where every caller of this operation is.
+    "company_research_query": frozenset({
+        "company_ref", "aspect", "period", "status", "limit",
+        "index_aspect", "as_of_from", "as_of_to", "importance", "canonical_only",
+    }),
+    "record_analyst_journal_entry": frozenset({
+        "target_ref", "target_hash", "target_kind", "verdict", "company_ref",
+        "note", "score_override", "idempotency_key", "actor_ref",
+    }),
     "record_backlog_question": frozenset({"mandate_version_ref", "company_ref", "question", "answer_criteria", "source_refs", "actor_ref", "idempotency_key"}),
     "publish_probe_template": frozenset({"template_ref", "capability_ref", "operation", "runtime_profile_ref", "parameter_contract", "output_contract_ref", "verifier_ref", "permission_scope", "declared_side_effects", "cost", "actor_ref", "prior_version_ref"}),
     "create_bounded_planner_loop": frozenset({"loop_ref", "question_version_ref", "template_bindings", "required_coverage_items", "budget", "actor_ref", "prior_version_ref"}),
@@ -911,6 +935,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "generate_document_extraction": "actor_ref",
     "stage_document_extraction": "actor_ref",
     "record_mission_stage": "actor_ref",
+    "record_analyst_journal_entry": "actor_ref",
     "publish_forecast_line": "actor_ref",
     "publish_probe_template": "actor_ref",
     "create_bounded_planner_loop": "actor_ref",
@@ -1225,6 +1250,7 @@ class WriterServer:
         self._industry_research: IndustryResearchAuthority | None = None
         self._weekly_brief: WeeklyBriefAuthority | None = None
         self._research_doctrine: ResearchDoctrineAuthority | None = None
+        self._analyst_journal: AnalystJournalAuthority | None = None
         self._model_forecast: ModelForecastAuthority | None = None
         self._forecast_reconciliation: ForecastReconciliationAuthority | None = None
         self._research_constitution: ResearchConstitutionAuthority | None = None
@@ -1499,6 +1525,10 @@ class WriterServer:
         # constitution can bind a doctrine pack; nothing here admits
         # doctrine or context on its own.
         self._research_doctrine = ResearchDoctrineAuthority(self._store)
+        # Q1: the analyst journal. Opening it installs its append-only schema
+        # and nothing else; an entry only ever arrives from a human principal
+        # through record_analyst_journal_entry.
+        self._analyst_journal = AnalystJournalAuthority(self._store)
         self._model_forecast = ModelForecastAuthority(self._store)
         self._forecast_reconciliation = ForecastReconciliationAuthority(self._store)
         self._research_constitution = ResearchConstitutionAuthority(self._store)
@@ -1719,6 +1749,7 @@ class WriterServer:
         self._thesis_impact_control = None
         self._weekly_brief = None
         self._research_doctrine = None
+        self._analyst_journal = None
         self._model_forecast = None
         self._forecast_reconciliation = None
         self._research_constitution = None
@@ -2382,6 +2413,21 @@ class WriterServer:
             "projection_kind": "company_research_query",
             "claims": query_company_research(self.store, **values),
         }
+
+    def _op_record_analyst_journal_entry(self, p: Mapping[str, Any]) -> Any:
+        """Q1: one PM verdict on one artefact, bound to what was read.
+
+        The cockpit has no Core write handle, so its five feedback buttons
+        arrive here. ``actor_ref`` has already been replaced by the
+        authenticated principal's, and the operation is human-governance only,
+        so an automation principal is refused before this runs; the authority
+        refuses a non-``human:`` actor a second time, because the one place
+        that carries a person's judgement should not depend on one gate.
+        """
+
+        if self._analyst_journal is None:
+            raise WriterServerError("analyst-journal authority is unavailable")
+        return self._analyst_journal.add(**dict(p))
 
     def _op_publish_doctrine_pack(self, p: Mapping[str, Any]) -> Any:
         if self._research_doctrine is None:
@@ -3468,11 +3514,11 @@ class WriterServer:
             return "forbidden"
         if isinstance(exc, ProtocolError):
             return "protocol_error"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, ResearchPlaybookValidationError, CoverageMissionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError, ForecastReconciliationValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, ResearchPlaybookValidationError, CoverageMissionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError, ForecastReconciliationValidationError, AnalystJournalValidationError)):
             return "rejected"
         if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchPlaybookNotFound, CoverageMissionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending, ModelForecastNotFound, ForecastReconciliationNotFound)):
             return "not_found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchPlaybookConflict, CoverageMissionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected, ModelForecastConflict, ForecastReconciliationConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchPlaybookConflict, CoverageMissionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected, ModelForecastConflict, ForecastReconciliationConflict, AnalystJournalConflict)):
             return "conflict"
         if isinstance(exc, (ContextMaterializerUnsupported, ContextMaterializerError, PerceptionError)):
             return "rejected"
@@ -3500,7 +3546,7 @@ class WriterServer:
             return "rejected"
         if isinstance(exc, CapabilityRegistryError):
             return "store_error"
-        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, WeeklyBriefError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError, ResearchConstitutionError, ResearchPlaybookError, CoverageMissionError, CompanyResearchViewError, ResearchDoctrineError, LLMResearchPlannerError, ModelForecastError, ForecastReconciliationError)):
+        if isinstance(exc, (DaltonStoreError, AgendaError, ObservabilityError, CoverageAdmissionError, ModelInputLedgerError, IndustryResearchError, WeeklyBriefError, TranscriptCorrectionError, BoundedPlannerError, ResearchQuestionError, IntentDispatchError, AnswerRoutingError, ResearchConstitutionError, ResearchPlaybookError, CoverageMissionError, CompanyResearchViewError, ResearchDoctrineError, LLMResearchPlannerError, ModelForecastError, ForecastReconciliationError, AnalystJournalError)):
             return "store_error"
         return "internal_error"
 
@@ -3536,11 +3582,11 @@ class WriterServer:
             return "operation is not permitted"
         if isinstance(exc, ProtocolError):
             return "malformed request"
-        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, ResearchPlaybookValidationError, CoverageMissionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError, ForecastReconciliationValidationError)):
+        if isinstance(exc, (ValidationError, BadVerdict, VerificationRequired, IndependenceViolation, GateRejected, AgendaValidationError, ObservabilityValidationError, ThesisImpactValidationError, ResearchPlanThesisImpactPending, CoverageAdmissionValidationError, ModelInputValidationError, IndustryResearchValidationError, WeeklyBriefValidationError, WeeklyBriefCoordinatorError, TranscriptCorrectionValidationError, BoundedPlannerValidationError, BoundedPlannerPending, ResearchQuestionValidationError, IntentDispatchValidationError, AnswerRoutingValidationError, ResearchConstitutionValidationError, ResearchPlaybookValidationError, CoverageMissionValidationError, CompanyResearchViewValidationError, ResearchDoctrineValidationError, LLMResearchPlannerValidationError, BoundedAlphaEngineProbeError, ModelForecastValidationError, ForecastReconciliationValidationError, AnalystJournalValidationError)):
             return "request rejected by contract or gate"
         if isinstance(exc, (NotFound, AgendaNotFound, ObservabilityNotFound, ThesisImpactNotFound, ResearchPlanNotFound, CoverageAdmissionNotFound, ModelInputNotFound, IndustryResearchNotFound, WeeklyBriefNotFound, TranscriptCorrectionNotFound, BoundedPlannerNotFound, ResearchQuestionNotFound, IntentDispatchNotFound, AnswerRoutingNotFound, ResearchConstitutionNotFound, ResearchPlaybookNotFound, CoverageMissionNotFound, ResearchDoctrineNotFound, LLMResearchPlannerPending, ModelForecastNotFound, ForecastReconciliationNotFound)):
             return "requested object was not found"
-        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchPlaybookConflict, CoverageMissionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected, ModelForecastConflict, ForecastReconciliationConflict)):
+        if isinstance(exc, (IdempotencyConflict, InvocationConflict, AgendaConflict, ObservabilityConflict, ContextMaterializerConflict, ThesisImpactConflict, ResearchPlanConflict, ResearchPlanThesisImpactConflict, CoverageAdmissionConflict, ModelInputConflict, IndustryResearchConflict, WeeklyBriefConflict, TranscriptCorrectionConflict, BoundedPlannerConflict, ResearchQuestionConflict, IntentDispatchConflict, AnswerRoutingConflict, ResearchConstitutionConflict, ResearchPlaybookConflict, CoverageMissionConflict, ResearchDoctrineConflict, LLMResearchPlannerRejected, ModelForecastConflict, ForecastReconciliationConflict, AnalystJournalConflict)):
             return "request conflicts with existing immutable data"
         if isinstance(exc, (ContextMaterializerError, PerceptionError)):
             return "request rejected by contract or gate"
