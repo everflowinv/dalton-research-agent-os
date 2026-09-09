@@ -1,0 +1,321 @@
+{
+ "artefact": {
+  "artefact_kind": "initial_screen",
+  "cited_tags": [],
+  "confidence": null,
+  "expected_sections": [
+   "Key Information + Executive Summary",
+   "S1 公司概览（同 IM，无 ESOP 分析）",
+   "S2 行业概览（简版）",
+   "S3 核心 Thesis（简版）",
+   "S4 风险与 Anti-thesis（简版）",
+   "S5 Relevance to Universe（对 universe 内其他标的的多空含义，含跨区域）",
+   "S6 估值（street 预期、框架、event pathway、IRR）",
+   "S7 数据跟踪"
+  ],
+  "gaps": [
+   "过去4个季度的完整财报及分部业绩数据",
+   "过去4个季度的电话会纪要详细内容",
+   "最新年报（10-K）中的业务描述与风险因素",
+   "管理层对2026年全年收入与利润指引的具体数值",
+   "合同重新定价与Project Leap节约金额的量化数据",
+   "缺少分部收入与利润的详细构成数据",
+   "缺少最近报告期电话会纪要中关于分部业绩和经营优先级的更多细节",
+   "缺少过去4个季度的财报数字与电话会纪要，无法量化行业整体增速与Cognizant相对同行的具体营收差异；缺少最新年报（10-K）正文，无法确认公司各业务板块的详细收入结构与利润率水平；缺少可引用的行业整体市场规模或竞争份额数据。",
+   "过去 4 个季度的财报数字",
+   "过去 4 个季度的电话会纪要",
+   "最新年报（10-K）正文",
+   "缺少对未来季度指引及管理层对利润率长期目标的明确量化数据",
+   "缺少关于合同重新定价对收入增长影响的具体量化估算",
+   "缺少关于AI新增收入与定价通缩对冲关系的可验证数据",
+   "缺少关于客户对AI定价模式接受度的调查或合同层面证据",
+   "缺乏对五家覆盖公司（如 GLOB、ACN、EPAM 等）同比收入增长和 bookings 的可比量化数据以进行系统比较，缺少过去四个季度的财报和电话会纪要以验证分化趋势，缺少市场隐含预期与预测线的详细对比数据。",
+   "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与 consensus 五类正式 authority 尚未接入，写任何倍数或目标价都会是无来源的数字。",
+   "过去 4 个季度的财报数字、电话会纪要及最新年报正文，用以设定各跟踪指标的基线和阈值"
+  ],
+  "hash": "0b0f91a546cc210add3c0b567dc9189fefbb04a96a58cb2d6008c0d196ab8c34",
+  "prior": null,
+  "question": null,
+  "ref": "mission-deliverable-version:310b57dd4ddbc6274674c6271ee0645f",
+  "sections": [
+   {
+    "body": "Cognizant（CTSH）是一家全球领先的IT服务公司，致力于通过AI builder战略帮助客户将AI投资转化为可衡量的业务成果，其近期完成了对Astreya的收购以增强AI基础设施能力。公司最新季度财报显示，2026年第一季度营收为USD 5413000000，同比增长5.83%，且自2024年第四季度以来bookings趋势强劲，有机恒定汇率营收增长持续优于同行，并提前进入双方共同定义的“赢家圈子”。当前最重要的判断是，Cognizant在应对AI引发的多年转型周期方面整体优于竞争对手，AI相关工作带来的新增量、市场份额提升及客户外包意愿增强，足以抵消AI带来的价格通缩压力，尽管中东地区仍是近期的逆风因素。最需要盯住的两件事是：一是“Project Leap”计划在2026年推进过程中，其生产力重塑与劳动力技能升级能否如期产生全年性成本节约，并支撑全年调整后营业利润率指引的上调；二是客户对更高年度生产力节省的预期（自2025年起）以及合同重新定价的推进节奏，即公司是否已如管理层所说行至中途，且能否持续以新增AI相关工作抵消价格压力，从而验证全年恒定汇率收入增长指引的维持与下半年增长势头的可持续性。",
+    "claim_refs": [
+     "claim-version:6c5a2bc28152bef98435c9b3f6ec395549ba59b5302c6e5318f8e83f66054d1c",
+     "claim-version:fddbec44d968bee857c2676d9f62802a5be4965c5c6619c0b72f14b5cefba471",
+     "claim-version:256e564f13b5f42fd57adddc473baebdd07cebbe0111af6e80e486d49e3e42a0",
+     "claim-version:952a55b0e191f3fa7d20867368717890ca0971e5537f2de8c33b1ef09cc509c0",
+     "claim-version:e6525e6704c42588e23c7190aa45444451ecb06b9b32151f00b48f8f320b6750",
+     "claim-version:4f615ac33b21fc4d5f0bef081e6a1efabb78422c8085c274d0c4ba3cdb2af810",
+     "claim-version:6ee92380bc6e730ca8645a4e76608c3b01f9e779e1160dca7c86224d107334d7",
+     "claim-version:25a8d34819f2f889fd63586a2bd6afeb9ad91325ab48331445e30c9f52ba5210",
+     "claim-version:f75afcf920a46458d8ea85f4785e9de5020711b8654418e7269a9711497ebc86",
+     "claim-version:698916e01ec6e64dd64a3c9def1e682e6801733a7de936c1c8140116a0740b32",
+     "claim-version:1b92480622e7d49ac6c0648c8f1468530b808b2956405680ae6c71fbae8a9a79",
+     "claim-version:72ce289668d6e7a0ea32f817bce210afb299ecfaa1607c739388ee678fb84c37",
+     "claim-version:211df4cf5f1609daaef36d5435ba8d7f1d6e4c95b07e07f205922347660dd2e2"
+    ],
+    "gaps": [
+     "过去4个季度的完整财报及分部业绩数据",
+     "过去4个季度的电话会纪要详细内容",
+     "最新年报（10-K）中的业务描述与风险因素",
+     "管理层对2026年全年收入与利润指引的具体数值",
+     "合同重新定价与Project Leap节约金额的量化数据"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+      "period": "2026-01-01..2026-03-31",
+      "text": "COGNIZANT TECHNOLOGY SOLUTIONS CORPORATION reported Revenues of USD 5413000000 for 2026-01-01..2026-03-31, up 5.83% year over year from USD 5115000000 in the comparable quarter."
+     }
+    ],
+    "title": "Key Information + Executive Summary"
+   },
+   {
+    "body": "Cognizant Technology Solutions Corporation 报告期（2026年第一季度）收入为 USD 5413000000，同比增长 5.83%。公司近期的经营重点围绕“AI builder”战略展开，管理层认为该战略通过行业专长与工程、数据现代化能力的结合，正在与客户产生共鸣，并指出市场机会比以往更大，因为组织正从 AI 实验转向企业级规模部署。金融服务业作为公司最大且最成熟的部门，已连续第二个季度实现同比两位数增长，管理层将此视为战略奏效的证据；生命科学领域需求亦保持健康，而通信、媒体和科技部门的客户特定疲软预计将在年内缓解。管理层还强调，传统系统现代化项目正在加速，因为客户在推进 AI 之旅时需应对大量技术债务，这反映在持续的 bookings 动能上。公司近期宣布的“Project Leap”计划旨在通过重塑生产力和 workforce 技能提升来为未来 AI 投资提供资金，预计将产生年内总节省，该举措与同行一致。此外，公司已完成对 Astreya 的收购，以增强面向大型科技公司的 AI 基础设施能力。",
+    "claim_refs": [
+     "claim-version:26077fd7abed974860590106365b34e2ad4e2e1ba80275e6cfda7c371f65359a",
+     "claim-version:25a8d34819f2f889fd63586a2bd6afeb9ad91325ab48331445e30c9f52ba5210",
+     "claim-version:77ad5de9437ffba2b65e8b9bfd0bdd29410bc7a9c345617337ac8ad986281f0a",
+     "claim-version:62ef5d76d8659b12bb49238e97993658be4a51c4cc5f47f8c1dc2a6592f5a7e1",
+     "claim-version:9969d9881336478daa3bd9949486387f7ec878185e59d75caf5167a079283c1d",
+     "claim-version:256e564f13b5f42fd57adddc473baebdd07cebbe0111af6e80e486d49e3e42a0",
+     "claim-version:f75afcf920a46458d8ea85f4785e9de5020711b8654418e7269a9711497ebc86"
+    ],
+    "gaps": [
+     "缺少分部收入与利润的详细构成数据",
+     "缺少最近报告期电话会纪要中关于分部业绩和经营优先级的更多细节"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+      "period": "2026-01-01..2026-03-31",
+      "text": "COGNIZANT TECHNOLOGY SOLUTIONS CORPORATION reported Revenues of USD 5413000000 for 2026-01-01..2026-03-31, up 5.83% year over year from USD 5115000000 in the comparable quarter."
+     }
+    ],
+    "title": "S1 公司概览（同 IM，无 ESOP 分析）"
+   },
+   {
+    "body": "美国IT服务行业的需求仍处于分化状态：可自由支配的咨询需求持续疲软，但以AI为核心的生产力与现代化改造需求正在形成对冲。常驻问题中关于需求是否见底，当前证据指向稳定而非强劲反弹：Wells Fargo认为需求正在企稳，而同行如Globant因客户购买行为变化与市场进入挑战而下调指引，暗示下半年增速将放缓。竞争格局方面，行业正经历AI带来的转型期，各家在抢跑位置上的表现不一。Cognizant在该周期中导航能力优于多数同行，其有机固定汇率收入增速自某季度以来持续高于可比公司，并提前进入共同定义的\"赢家圈\"。公司近期签订的大型交易利润率优于原始合同，且新签订单与扩张订单在上半年实现中双位数增长。公司在Financial Services与Life Sciences垂直领域需求保持健康，而Communications、Media与Technology板块的客户特定疲软预计将在年内缓解。管理层通过Project Leap重塑生产力并投入AI，该计划预计2026年内产生毛节省，与ACN、TCS等同行行动一致，同时公司已对存量合同重新定价约一半，以应对客户自2025年起提高的年度生产率节省预期。Cognizant的定位是AI builder，提供全栈AI方案，并通过收购Astreya强化AI基础设施能力，但在客户侧，health sciences仍偏谨慎且成本驱动。总体而言，公司处于行业分化的有利一侧，但需持续观察其AI新增量能否抵消定价压缩与宏观逆风。",
+    "claim_refs": [
+     "claim-version:6c5a2bc28152bef98435c9b3f6ec395549ba59b5302c6e5318f8e83f66054d1c",
+     "claim-version:c8681820b8d91883866c925b7fc21834acb6af117e2ccde05f5e4b00bda0221f",
+     "claim-version:fddbec44d968bee857c2676d9f62802a5be4965c5c6619c0b72f14b5cefba471",
+     "claim-version:256e564f13b5f42fd57adddc473baebdd07cebbe0111af6e80e486d49e3e42a0",
+     "claim-version:952a55b0e191f3fa7d20867368717890ca0971e5537f2de8c33b1ef09cc509c0",
+     "claim-version:25a8d34819f2f889fd63586a2bd6afeb9ad91325ab48331445e30c9f52ba5210",
+     "claim-version:698916e01ec6e64dd64a3c9def1e682e6801733a7de936c1c8140116a0740b32",
+     "claim-version:8c738083d12b54225cc8e0609cc1dce21bdc777e34ffb229133f858521bb543b",
+     "claim-version:72ce289668d6e7a0ea32f817bce210afb299ecfaa1607c739388ee678fb84c37",
+     "claim-version:211df4cf5f1609daaef36d5435ba8d7f1d6e4c95b07e07f205922347660dd2e2",
+     "claim-version:62ef5d76d8659b12bb49238e97993658be4a51c4cc5f47f8c1dc2a6592f5a7e1",
+     "claim-version:9969d9881336478daa3bd9949486387f7ec878185e59d75caf5167a079283c1d",
+     "claim-version:f85fbaac67d2c402e40618b2365a29504675424aa3add6cb2d77e55e59acdf54",
+     "claim-version:4788fd6008bd2d3dd09b7512f6f0c63447ae884f2fd0666b32a762319ddccdaf"
+    ],
+    "gaps": [
+     "缺少过去4个季度的财报数字与电话会纪要，无法量化行业整体增速与Cognizant相对同行的具体营收差异；缺少最新年报（10-K）正文，无法确认公司各业务板块的详细收入结构与利润率水平；缺少可引用的行业整体市场规模或竞争份额数据。"
+    ],
+    "numbers": [],
+    "title": "S2 行业概览（简版）"
+   },
+   {
+    "body": "我们的核心论点基于 Cognizant（CTSH）在 AI 转型周期中的相对执行优势，以及市场对这一优势的定价可能仍然不足。Wells Fargo 认为 CTSH 在该多年代际转型中整体上比竞争对手应对得更好，其新 AI 工作带来的新增量、份额获取以及客户更强的外包意愿，超过了 AI 带来的通缩性逆风，即便中东仍是近期的拖累因素。这一论点的量化基石是公司在 2026 年第一季度报告的营收为 USD 5413000000，同比增长 5.83%，该增速在有机固定汇率口径下持续改善，自最近某个季度以来平均增速高于可比公司，并提前进入我们共同界定的“赢家圈”。管理层将这一表现归因于其“AI 构建者”战略，该战略结合行业专长与工程和数据现代化能力，正在客户中产生共鸣，尤其体现在金融服务业连续两个季度实现两位数的同比增长，且金融服务业增速在同行中领先，可能成为其他行业的先行指标。市场可能尚未充分反映的，是 AI 对利润率的正反馈机制：“Project Leap”计划通过重塑生产力和劳动力技能提升，为未来 AI 投资提供资金，预计在 2026 年产生毛年度节省，公司已因此上调全年调整后营业利润率展望，同时维持固定汇率收入增长指引不变。更关键的是，管理层表示新签大型交易的利润率轨迹优于最初签约水平，得益于 AI 驱动的生产力传导，而客户自 2025 年起开始期望更高的年度生产力节省，公司认为其固定价格积压合同的重新定价大约已进行到一半，意味着未来仍有持续的压缩/转型空间。此外，管理层通过 pipeline 评论表明，2026 年上半年录得的 new and expansion bookings 增长在下半年具有可持续性，且未观察到因 AI 采用而出现广泛的客户内包迹象，全年 bookings 仍保持健康，过去十二个月 book-to-bill 大于一。然而，我们必须坦承证据缺口：我们缺乏过去四个季度的完整财报数字、电话会纪要以及最新 10-K 正文，因此无法独立验证上述管理层的定性表述与量化指引之间的勾稽关系，也无法对行业需求是否已见底这一常驻问题给出基于数据的结论。市场隐含预期与我们的预测线之间的差异，目前只能依赖上述管理层的表述性证据，而非可交叉检验的财务细节，这使得对于股价显著重估的充分论证仍不够完整。若证据不足，核心 thesis 的风险在于：AI 带来的通缩性定价压力，以及 Communications、Media and Technology 板块的客户特定疲软，可能比管理层预期的更持久，而我们尚无足够数据来量化这一尾部风险。",
+    "claim_refs": [
+     "claim-version:6c5a2bc28152bef98435c9b3f6ec395549ba59b5302c6e5318f8e83f66054d1c",
+     "claim-version:fddbec44d968bee857c2676d9f62802a5be4965c5c6619c0b72f14b5cefba471",
+     "claim-version:256e564f13b5f42fd57adddc473baebdd07cebbe0111af6e80e486d49e3e42a0",
+     "claim-version:952a55b0e191f3fa7d20867368717890ca0971e5537f2de8c33b1ef09cc509c0",
+     "claim-version:6ee92380bc6e730ca8645a4e76608c3b01f9e779e1160dca7c86224d107334d7",
+     "claim-version:77ad5de9437ffba2b65e8b9bfd0bdd29410bc7a9c345617337ac8ad986281f0a",
+     "claim-version:1b92480622e7d49ac6c0648c8f1468530b808b2956405680ae6c71fbae8a9a79",
+     "claim-version:72ce289668d6e7a0ea32f817bce210afb299ecfaa1607c739388ee678fb84c37",
+     "claim-version:62ef5d76d8659b12bb49238e97993658be4a51c4cc5f47f8c1dc2a6592f5a7e1",
+     "claim-version:a8ed699e90c155a252bbd29ff5cb1407c1700fa93dd94f22e452547351b702f0",
+     "claim-version:a7535c7119d63c708a7fdf7295af2e307edda8bdbc239e82a9e77e6941c784a5",
+     "claim-version:d18a7c4c1086a0bf52a07dcb2df19de47414fd53680b4b0e19589b16f0a370f6",
+     "claim-version:4788fd6008bd2d3dd09b7512f6f0c63447ae884f2fd0666b32a762319ddccdaf",
+     "claim-version:b524682dc84df90827f4bfef5c9b61bc6763e52095d087197dfc88c846782aaf",
+     "claim-version:6c0e7729bb0bba3a29c4d34bac63dfed875deef04232cdf9ccb45ab8d97d6e59"
+    ],
+    "gaps": [
+     "过去 4 个季度的财报数字",
+     "过去 4 个季度的电话会纪要",
+     "最新年报（10-K）正文"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+      "period": "2026-01-01..2026-03-31",
+      "text": "COGNIZANT TECHNOLOGY SOLUTIONS CORPORATION reported Revenues of USD 5413000000 for 2026-01-01..2026-03-31, up 5.83% year over year from USD 5115000000 in the comparable quarter."
+     }
+    ],
+    "title": "S3 核心 Thesis（简版）"
+   },
+   {
+    "body": "尽管我们当前对CTSH持相对建设性看法，并认可其已提前进入我们共同定义的“赢家圈子”，但一个完整的反向观点（anti-thesis）必须被严肃审视：市场可能正在为一家本质上仍处于结构性转型阵痛期的公司支付过高的转型溢价，而这一转型的终点远未可见。首先，AI对IT服务需求的价格（deflationary）冲击可能比我们预期的更为持久和普遍。管理层自己承认，自2025年起客户开始期望更高的年度生产率节省，并且公司认为其大约处于对其合约存量（back-book）重新定价的中途。若这一重新定价过程在下半年及未来继续侵蚀单位经济性，即便bookings健康，收入增长也可能持续低于名义GDP增速，而利润率的修复将完全依赖于成本削减计划（如Project Leap）的成功执行，而非定价权的回归。其次，我们引以为傲的bookings动能可能掩盖了需求质量的恶化。尽管新签与扩展bookings在上半年录得中双位数增长，但年度合同价值（ACV）却温和下降，这被归因于大型交易的合同周期延长。若这一趋势持续，意味着客户正在用更长期的承诺换取更低的年度支出承诺，这本质上是需求的“以量补价”或“以时间换空间”，而非有机扩张。如果宏观经济不确定性加剧，或者可自由支配支出继续承压，这些长期合同可能面临延期或缩减执行的风险。第三，我们假设公司在AI转型中优于同行，但这不等于其战略已完全奏效。管理层描述的“AI builder”战略和客户从实验转向企业级执行的叙事仍处于早期验证阶段。该反方观点成立的条件是：其一，若AI相关的增量工作（包括新AI驱动的外包量）无法在2-4个季度内持续转化为可计费的收入，而仅仅是作为对冲定价压力的工具，那么收入增长将出现停滞；其二，若客户对AI-infused定价模式（如嵌入预训练和推理成本的费率卡）的接受度低于预期，导致合同谈判周期拉长或利润率进一步受压，则我们预期的利润率爬坡将被推迟。第四，管理层指引中的乐观假设可能过于脆弱。他们假设今年第四季度的年假（furlough）比例略低，从而带来比传统季节性更好的环比增长，这一假设若因项目时间安排而被证伪，则季度间业绩可能出现波动。总而言之，该反向观点成立最核心的条件是：AI导致的定价通缩和合同重新定价的冲击，将超过AI带来的新增需求和市场份额提升，使得公司即便有健康的bookings，也只能在低增长、低利润率的均衡中徘徊，而市场当前给予的估值并未充分反映这一长期转型的不确定性。若上述条件在未来两个季度得到数据验证，我们将面临显著的下行风险。",
+    "claim_refs": [
+     "claim-version:fddbec44d968bee857c2676d9f62802a5be4965c5c6619c0b72f14b5cefba471",
+     "claim-version:e6525e6704c42588e23c7190aa45444451ecb06b9b32151f00b48f8f320b6750",
+     "claim-version:211df4cf5f1609daaef36d5435ba8d7f1d6e4c95b07e07f205922347660dd2e2",
+     "claim-version:6c0e7729bb0bba3a29c4d34bac63dfed875deef04232cdf9ccb45ab8d97d6e59",
+     "claim-version:f85fbaac67d2c402e40618b2365a29504675424aa3add6cb2d77e55e59acdf54",
+     "claim-version:27dd2a2fddb888b992c759ff4458b00b4aec631d809915db98ea7fa4b020246a",
+     "claim-version:26077fd7abed974860590106365b34e2ad4e2e1ba80275e6cfda7c371f65359a",
+     "claim-version:25a8d34819f2f889fd63586a2bd6afeb9ad91325ab48331445e30c9f52ba5210",
+     "claim-version:1fd8ad18e4a35ebbedac1f987b186683c8583547470c6eb1dfe91fa84c6da22b",
+     "claim-version:45ceaf12e7af039c2ff978641a81226046a89a024f0e611899e89d2c47c24e6f"
+    ],
+    "gaps": [
+     "缺少对未来季度指引及管理层对利润率长期目标的明确量化数据",
+     "缺少关于合同重新定价对收入增长影响的具体量化估算",
+     "缺少关于AI新增收入与定价通缩对冲关系的可验证数据",
+     "缺少关于客户对AI定价模式接受度的调查或合同层面证据"
+    ],
+    "numbers": [],
+    "title": "S4 风险与 Anti-thesis（简版）"
+   },
+   {
+    "body": "对于覆盖范围内的其他标的多空含义，Cognizant（CTSH）的近期表现与指引修正提供了重要的参照系。从行业需求端看，CTSH 在 2026 年第一季度实现营收 5413000000 美元，同比增长 5.83%，这与其在、 中提到的自 2024 年第四季度以来 bookings 趋势强劲、有机固定汇率收入增速持续改善并提前进入自定义的 “Winner's Circle” 一致。这一领先表现对同行 Globant（GLOB）构成相对负面的含义： 指出 GLOB 下调了有机固定汇率收入指引，隐含下半年增速放缓且明年退出增速低于预期， 则将归因于可自由支配支出环境持续疲软，这反过来印证了、 中 Wells Fargo 的观点，即 CTSH 在 AI 转型周期中比竞争对手应对得更好，AI 工作带来的新业务量、市场份额增长以及客户更愿意外包，正在抵消 AI 带来的通缩性逆风。对投资者而言，若 CTSH 的韧性代表行业新常态的赢家标准，那么 GLOB 的近端增长缺口和 AI 交付模式转型带来的波动性可能使其估值承受相对压力。相反，若将 CTSH 的强劲表现视为特定于公司的执行力优势而非全行业需求回暖，则对同类 IT 服务标的的短期需求预期不应过度外推。CTSH 在、 中宣布的“Project Leap”再培训计划，以及 中上调全年调整后营业利润率指引（与该项目节省相关），对同行如埃森哲（ACN）、塔塔咨询服务（TCS）等具有信号意义，因为这些效率行动本质上承认了 AI 对传统交付模式的通缩冲击，这可能迫使其他未充分调整成本结构的同业面临利润率压力。此外，CTSH 指引的温和下调发生在同行失望需求评论之后，这为板块整体的需求可见性设置了一个较低的预期门槛，若后续其他公司出现类似或更差的下修，市场可能因其已在股价中反映而反应温和；但若出现超出 CTSH 幅度的恶化，则可能引发板块性估值重估。跨区域看，CTSH 提到中东仍是近期逆风，而欧洲大陆业务在固定汇率基础上表现疲软，这暗示对在该地区敞口较大的同业的增长预期应保持审慎。总体而言，CTSH 作为行业的相对赢家，其表现强化了分化主题：赢家（CTSH）能通过 AI 相关新业务和成本效率平衡转型压力，输家（如增长放缓的 GLOB）则可能面临需求与估值的双重逆风。",
+    "claim_refs": [
+     "claim-version:6c5a2bc28152bef98435c9b3f6ec395549ba59b5302c6e5318f8e83f66054d1c",
+     "claim-version:e93949cc2281ef498549531ab9d796642bd48efeff331da391beb2db893d675e",
+     "claim-version:c8681820b8d91883866c925b7fc21834acb6af117e2ccde05f5e4b00bda0221f",
+     "claim-version:fddbec44d968bee857c2676d9f62802a5be4965c5c6619c0b72f14b5cefba471",
+     "claim-version:256e564f13b5f42fd57adddc473baebdd07cebbe0111af6e80e486d49e3e42a0",
+     "claim-version:2d5b6e678f1ea672d7e7696f4ccae34c8f3b4db29199a125409c55f2aebc558c",
+     "claim-version:952a55b0e191f3fa7d20867368717890ca0971e5537f2de8c33b1ef09cc509c0",
+     "claim-version:6ee92380bc6e730ca8645a4e76608c3b01f9e779e1160dca7c86224d107334d7",
+     "claim-version:80332715df5a110136ac3e05c6facaf6bfbf9cd38c99aca9fe8f8d614a7f0bd4",
+     "claim-version:1b92480622e7d49ac6c0648c8f1468530b808b2956405680ae6c71fbae8a9a79",
+     "claim-version:72ce289668d6e7a0ea32f817bce210afb299ecfaa1607c739388ee678fb84c37",
+     "claim-version:a7535c7119d63c708a7fdf7295af2e307edda8bdbc239e82a9e77e6941c784a5"
+    ],
+    "gaps": [
+     "缺乏对五家覆盖公司（如 GLOB、ACN、EPAM 等）同比收入增长和 bookings 的可比量化数据以进行系统比较，缺少过去四个季度的财报和电话会纪要以验证分化趋势，缺少市场隐含预期与预测线的详细对比数据。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+      "period": "2026-01-01..2026-03-31",
+      "text": "COGNIZANT TECHNOLOGY SOLUTIONS CORPORATION reported Revenues of USD 5413000000 for 2026-01-01..2026-03-31, up 5.83% year over year from USD 5115000000 in the comparable quarter."
+     }
+    ],
+    "title": "S5 Relevance to Universe（对 universe 内其他标的的多空含义，含跨区域）"
+   },
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与 consensus 五类正式 authority 尚未接入，写任何倍数或目标价都会是无来源的数字。"
+    ],
+    "numbers": [],
+    "title": "S6 估值（street 预期、框架、event pathway、IRR）"
+   },
+   {
+    "body": "数据跟踪应围绕验证或证伪“US IT Services 需求见底”以及“CTSH 在 AI 转型周期中相对占优”这两个核心判断展开。首要盯住的是营收增长本身：最新季度已报告营收为 5413000000 美元，同比增长 5.83%，后续季度需持续确认这一增速能否维持或改善。其次是 bookings 趋势， 与 显示自 C4Q24 以来 CTSH 的 bookings 强于同业，且已提前进入“赢家圈”，因此需跟踪每季度披露的新增与扩张 bookings 增速、LTM book-to-bill 是否持续大于 1，以及 annual contract value 的变化方向。第三是客户需求结构，需观察金融服务业双位数增长是否持续，以及 Communications、Media and Technology 板块的客户特定疲软是否如管理层预期在年内缓解，同时跟踪健康科学客户是否仍以成本驱动、可自由支配支出是否仍受严格审查。第四是定价与生产率压力的消化进度，管理层表示自 2025 年起客户开始要求更高的年度生产率节省，公司自认已完成约一半的 back-book 重定价，因此需跟踪剩余重定价对固定价格合同的毛利率影响是否可控。第五是 Project Leap 的重组节省与 AI 投资节奏，该项目预计大部分成本发生在 2026 年，同时产生年内毛节省，需关注全年调整后营业利润率指引是否如 所示因重组节省而上调，以及节省是否足以抵消 AI 相关定价压缩。第六是需求见底的外部验证信号，由于 显示同业 Globant 下调指引并隐含下半年增长减速，需对比 CTSH 的下半年收入指引与同业趋势，如果 CTSH 的增速差持续扩大则验证其赢家地位，如果同业普遍复苏则需重新评估“相对占优”是否已转化为行业 beta 回升。最后需跟踪管理层关于客户是否出现广泛 insourcing 的表述，以及新业务来源如 AI 相关工作量和 Physical AI 等新 TAM 的贡献，以判断增量需求是否抵消存量生产率压力。目前缺少过去四个季度的完整财报和电话会纪要，无法设定具体的数据跟踪基线或每个指标的阈值。",
+    "claim_refs": [
+     "claim-version:6c5a2bc28152bef98435c9b3f6ec395549ba59b5302c6e5318f8e83f66054d1c",
+     "claim-version:fddbec44d968bee857c2676d9f62802a5be4965c5c6619c0b72f14b5cefba471",
+     "claim-version:25bee1576fa8abb708028606dc2b1a356f72d8aac627cc5459ad25b6501df3e9",
+     "claim-version:256e564f13b5f42fd57adddc473baebdd07cebbe0111af6e80e486d49e3e42a0",
+     "claim-version:e93949cc2281ef498549531ab9d796642bd48efeff331da391beb2db893d675e",
+     "claim-version:6ee92380bc6e730ca8645a4e76608c3b01f9e779e1160dca7c86224d107334d7",
+     "claim-version:e6525e6704c42588e23c7190aa45444451ecb06b9b32151f00b48f8f320b6750",
+     "claim-version:211df4cf5f1609daaef36d5435ba8d7f1d6e4c95b07e07f205922347660dd2e2",
+     "claim-version:6c0e7729bb0bba3a29c4d34bac63dfed875deef04232cdf9ccb45ab8d97d6e59",
+     "claim-version:efaad2ae09270ed956489206465ba88dc18bd05bd430ac9305738d57cce80bf1",
+     "claim-version:62ef5d76d8659b12bb49238e97993658be4a51c4cc5f47f8c1dc2a6592f5a7e1",
+     "claim-version:77ad5de9437ffba2b65e8b9bfd0bdd29410bc7a9c345617337ac8ad986281f0a",
+     "claim-version:8c3c67ed09504554c18b382ff1b27a885f47baacbbd74ecf4ced4bc755d04ba9",
+     "claim-version:fe96ef6503ff14454f7491755b0ffd106a4efd010c4031fb7bd55f46db6cda8c",
+     "claim-version:a8ed699e90c155a252bbd29ff5cb1407c1700fa93dd94f22e452547351b702f0",
+     "claim-version:a7535c7119d63c708a7fdf7295af2e307edda8bdbc239e82a9e77e6941c784a5",
+     "claim-version:f85fbaac67d2c402e40618b2365a29504675424aa3add6cb2d77e55e59acdf54"
+    ],
+    "gaps": [
+     "过去 4 个季度的财报数字、电话会纪要及最新年报正文，用以设定各跟踪指标的基线和阈值"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+      "period": "2026-01-01..2026-03-31",
+      "text": "COGNIZANT TECHNOLOGY SOLUTIONS CORPORATION reported Revenues of USD 5413000000 for 2026-01-01..2026-03-31, up 5.83% year over year from USD 5115000000 in the comparable quarter."
+     }
+    ],
+    "title": "S7 数据跟踪"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "company:sec-cik:0001058290",
+  "title": "mission-deliverable:initial_screen:0001058290"
+ },
+ "case_ref": "live-ctsh-v1",
+ "expected": {
+  "deterministic": {
+   "claim_refs_resolve": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "duplicate_parallel_citations": {
+    "count": 0,
+    "status": "pass"
+   },
+   "numbers_without_refs": {
+    "count": 0,
+    "status": "pass"
+   },
+   "required_sections_present": {
+    "count": 0,
+    "status": "pass"
+   },
+   "residual_citation_artefacts": {
+    "count": 1,
+    "status": "fail"
+   }
+  },
+  "rationale": "一处残句给 1–2 而不是 0：它是一个句子的问题，不是整份文档的实质内容。资料底座缺电话会，所以 thesis 与来源纪律都压在中段。",
+  "score_ranges": {
+   "anti_thesis": [
+    2,
+    3
+   ],
+   "citation_dedupe": [
+    3,
+    4
+   ],
+   "citation_hygiene": [
+    1,
+    2
+   ],
+   "falsifiers_and_tracking": [
+    2,
+    3
+   ],
+   "gaps_honest": [
+    3,
+    4
+   ],
+   "key_driver_thesis": [
+    2,
+    3
+   ],
+   "number_provenance": [
+    3,
+    4
+   ],
+   "required_sections": [
+    3,
+    4
+   ],
+   "source_discipline": [
+    1,
+    2
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "CTSH Initial Screen v1（stage 仍是 entered，未过闸，缺电话会）。只有一处残迹：S5 的「： 指出 GLOB…」——主语随标记一起没了。数字纪律与章节结构都干净。",
+ "rubric": "initial_screen",
+ "source": "live Core 只读副本 2026-09-09；mission-deliverable-version:310b57dd4ddbc6274674c6271ee0645f（CTSH v1，发布于 2026-09-07T17:52:56）"
+}

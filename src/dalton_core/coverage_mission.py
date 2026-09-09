@@ -188,6 +188,13 @@ DISCOVERY_SOURCES: Mapping[str, Mapping[str, str]] = MappingProxyType({
         "operation": "list_filings",
         "document_ref_prefix": "sec:filing:",
     }),
+    # S2: Guidepoint 专家访谈库。发现的单位是问答摘录，不是访谈稿——
+    # 上游没有读全文的 op（见 guidepoint-get-transcript-narrowing-v1）。
+    "source:guidepoint": MappingProxyType({
+        "connector_source_ref": "source:guidepoint",
+        "operation": "search_library",
+        "document_ref_prefix": "guidepoint-excerpt:",
+    }),
 })
 DISCOVERED_DOCUMENT_STATUSES: tuple[str, ...] = (
     "discovered", "already_in_authority", "acquisition_launched", "acquired",

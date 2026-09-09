@@ -73,6 +73,40 @@ research plan、initial screen。
 **并行开发**：分析师蓝图按 [并行开发计划 v1.0](reports/parallel-development-plan-v1.0-2026-09-09.md) 推进：
 主 agent 定计划与集成，Opus 5 subagent 各自 worktree 写代码。进度账在该文档第 6 节。
 
+## 2026-09-09（并行开发第一天，晚）：五条线合进 main，未部署
+
+**合进 main 的**（`61f4255`，2,627 项测试通过，已 push；live 仍跑旧版，部署等 INT1 接线完）：
+- **Wave 0 lane registry**：加一条 lane = 自己的模块 + `*_schema.sql` + 测试 + `LANE_MODULES` 一行；
+  `writer_server` / `bounded_planner_driver` / `macos_launchagent` 从 registry 派生，行为逐字节零漂移（review 验证）。
+  G 线 13 个词入词表、live 不授予；ADR-0007 / ADR-0008 accepted。
+- **P11a / P11c 市场层**：yfinance connector（`daily_prices` / `analyst_estimates`，两条 proposed 治理记录）、
+  `MarketPriceSeriesVersion`（每根 bar 绑 invocation 与 artifact 哈希；盘中 bar 标 provisional，收盘后重取）、
+  `ValuationSnapshot`（公式冻结、`basis` 如实、拒绝 yfinance 基本面）。ACN 三年 752 根日线在临时目录跑通。
+- **P12b Claim 索引**：`aspect`（12 词封闭词表，与 dossier 分节一致）、`as_of`、`importance`（filing > 管理层 >
+  卖方 > 新闻）、按 period × basis 去重；live 抽样：22 filing / 571 管理层 / 217 卖方 / 1,360 新闻，
+  ACN 同季三重引用收成一条 canonical。**ADR-0007 数字进 Ledger 走新的 `mission_figure_authority` 模式**：
+  live 5 个 filing 数字全部重验通过并升成定量 Claim（policy 默认仍是旧规则，待 owner 重签）。
+- **P13-M2 预测模型**：`ForecastModelVersion` driver → assumption → result 三层，Decimal 精确重算；
+  estimate / actual 分格、`superseded_by`、五词 `change_reason`、`revise_assumptions` / `actualize_model` 入口——
+  **authority 永不自己出版本**（owner：版本化是机制不是触发器）。live 四家发布 v1，IBM 因规格收入 driver 全绑 null
+  如实拒绝，DXC 营业利润过零故税与净利 `unavailable`。
+- **Q1 质量回路**：三份 rubric（initial-screen / ask-answer / company-dossier）、10 项确定性检查 + 有界 judge +
+  独立 verifier、`QualityScoreVersion`、`AnalystJournalEntry`、20 例 golden；修了 P10c 残句与重复引用。
+  确定性层在五份已发布 screen 上发现 **30 处残留引用标记**（ACN 12、EPAM 11、IBM 6、CTSH 1）。
+
+**方法**：每条线一个 Opus 5 subagent 在独立 worktree 写，另一个 Opus 5 subagent 独立 review，主 agent 只定规格、
+裁决、集成。五条线 review 共抓出 9 个 blocker（全部修掉后才合），典型的：盘中价被冻成收盘价；中文句式被当残句；
+数字升级走了 ADR-0007 禁止的 transcript 模式；stale prior 的修订被记成决定。
+
+**owner 今日新增的方向**（已进计划文档）：daily tracking 在 Initial Screen 过闸后默认常驻，频率有基线、由大脑调配；
+sales note / wiki / 推特是 tracking 信息源；大脑要有 connector 能力地图；vision 回顾补了事件日历、预算池、
+宪法 method 消费者、规划质量指标四项遗漏。
+
+**在飞的分支**（各自 worktree）：S1 投喂（sales-notes 231 条正文归属命中，host-tool runner）、S2 Guidepoint、
+S3 雪球 / X / Blind、S4 cn-hk-findata、P14e 专项研究（建在 BoundedPlannerLoop 上）、P14a daily tracking +
+ResearchEvent + 事件判断、C1 事件日历、Q2 周报 rubric + Reflection、模型路由 fallback 与目录同步、INT1 cockpit 与
+install.sh 接线。
+
 ## 2026-09-09（并行开发准备）：先把「加一条 lane 要碰 23 个共享文件」收成一行
 
 owner 认可了蓝图的分法并定了三件事：行情用 yfinance；consensus 先从已入库研报抽、再用 yfinance

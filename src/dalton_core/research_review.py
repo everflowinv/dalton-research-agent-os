@@ -602,6 +602,21 @@ class HumanReviewAuthority:
             numeric_verification = None
             material_ref = source_verification["subject_ref"]
             material_hash = source_verification["subject_hash"]
+        elif self._staged_figure(claim["numeric_spec_ref"]) is not None:
+            # ADR-0007: the numeric authority is a verified figure row rather
+            # than a JSON-pointer spec, so there is no spec to open and no spec
+            # input to read the material off.  The source verification binds
+            # the material, exactly as it does for a semantic candidate.
+            numeric_spec = None
+            figure = self._staged_figure(claim["numeric_spec_ref"])
+            numeric_verification = validate_verification_bundle(load(
+                "candidate_verifications", "verification_id",
+                claim["numeric_verification_ref"], "candidate numeric verification",
+            ))
+            if claim["numeric_spec_hash"] != figure["content_hash"]:
+                raise ResearchReviewConflict("candidate figure hash binding drifted")
+            material_ref = source_verification["subject_ref"]
+            material_hash = source_verification["subject_hash"]
         else:
             numeric_spec = validate_numeric_verification_spec(load(
                 "candidate_numeric_specs", "numeric_spec_id",
@@ -650,6 +665,38 @@ class HumanReviewAuthority:
             "source_verification": source_verification,
             "numeric_verification": numeric_verification,
         }
+
+    def staged_figure(self, candidate_claim_ref: str) -> dict[str, Any] | None:
+        """ADR-0007: the verified figure a candidate's number rests on, if any.
+
+        A separate read rather than a field on ``candidate_authority_bundle``,
+        because that bundle is splatted straight into ``commit_policy_candidate``
+        by four callers and a new key there is a new keyword argument to all of
+        them.  The cockpit asks for the figure when it has one to show.
+        """
+
+        claim, _evidence = self._candidate_pair(
+            _text(candidate_claim_ref, "candidate_claim_ref"))
+        return self._staged_figure(claim.get("numeric_spec_ref"))
+
+    def _staged_figure(self, figure_id: Any) -> dict[str, Any] | None:
+        """The verified figure staged beside a candidate, if it has one."""
+
+        if not isinstance(figure_id, str) or not figure_id:
+            return None
+        try:
+            row = self.connection.execute(
+                "SELECT record_json,content_hash FROM candidate_figures WHERE figure_id=?",
+                (figure_id,),
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        if row is None:
+            return None
+        wire = json.loads(row["record_json"])
+        if row["content_hash"] != wire.get("content_hash"):
+            raise ResearchReviewConflict("candidate figure authority drifted")
+        return wire
 
     @_serialized
     def decide(

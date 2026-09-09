@@ -47,6 +47,23 @@ CREATE TABLE IF NOT EXISTS candidate_claim_versions (
     FOREIGN KEY(evidence_version_id) REFERENCES candidate_evidence_versions(version_id)
 );
 
+-- ADR-0007: the verified figure a quantitative candidate rests on.
+--
+-- A figure lives in the Core's mission tables and staging has no Core handle,
+-- so the row that was re-verified at admission is copied here beside the
+-- candidate. Without it the cockpit could show a claim whose numeric authority
+-- it cannot open, which is the one thing a review page must never do.
+--
+-- Immutable like everything else here: this is the figure as it was when the
+-- candidate was staged, and a later correction to the Core row is a new
+-- candidate rather than a quiet edit of this one.
+CREATE TABLE IF NOT EXISTS candidate_figures (
+    figure_id TEXT PRIMARY KEY,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS candidate_stage_requests (
     idempotency_key TEXT PRIMARY KEY,
     request_hash TEXT NOT NULL,
@@ -78,3 +95,8 @@ CREATE TRIGGER IF NOT EXISTS candidate_stage_requests_no_update
 BEFORE UPDATE ON candidate_stage_requests BEGIN SELECT RAISE(ABORT, 'candidate_stage_requests is immutable'); END;
 CREATE TRIGGER IF NOT EXISTS candidate_stage_requests_no_delete
 BEFORE DELETE ON candidate_stage_requests BEGIN SELECT RAISE(ABORT, 'candidate_stage_requests is immutable'); END;
+
+CREATE TRIGGER IF NOT EXISTS candidate_figures_no_update
+BEFORE UPDATE ON candidate_figures BEGIN SELECT RAISE(ABORT, 'candidate_figures is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS candidate_figures_no_delete
+BEFORE DELETE ON candidate_figures BEGIN SELECT RAISE(ABORT, 'candidate_figures is immutable'); END;

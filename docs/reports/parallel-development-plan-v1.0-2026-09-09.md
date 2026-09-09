@@ -146,6 +146,29 @@ owner 要求回顾全部 vision 讨论，补遗漏、修偏差。22 项承诺逐
 
 明确不做（连续多版冻结或主体已退役）：Skill 自主生成闭环、多 runtime、Interrupt / park / resume、embedding-first 检索、万华 Agenda shadow 指标。
 
+### Daily tracking：Initial Screen 过闸后默认开启（owner 2026-09-09 晚）
+
+owner 的要求：一家公司完成 Initial Screen 后，默认进入 daily tracking——每天股价、新闻、event 等，反馈给大脑，
+由大脑决定要不要追加研究、要不要出报告（股价异动的可能原因、重大新闻的 implication），以及要不要更新对公司的
+判断与模型。频率有基线，但由大脑调配：
+
+| 来源 | 基线频率 | 大脑可调 |
+| --- | --- | --- |
+| 股价（yfinance） | 每个交易日收盘后一次，盘中一次 provisional | 固定 |
+| AlphaEngine 研报 / 纪要 | 每天 2 次 | 覆盖少的公司降到 2–3 天一次甚至一周一次 |
+| Twitter / X（xreach） | 每天 2 次取新闻，web search 验证 | 同上 |
+| 股价异动（P11d） | 触发即取新闻（AlphaEngine + X + web search），不等基线 | 阈值进 policy |
+| Guidepoint、sales note、wiki、员工评价 | 稀疏（周级） | 大脑调 |
+| SEC 8-K / 财报日历（C1） | 每日检查 | 固定 |
+
+**owner 补充（同日稍晚）**：(1) 越过 Initial Screen 后 daily tracking 是**常驻任务**，无论大脑此时决定做什么别的（该公司深度覆盖、下一家公司的 Initial Screen、专项研究），tracking 都不停，大脑只调频率不停任务；(2) sales note、wiki 也是 tracking 的信息源，sales note 与推特对获取卖方研报之外的市场看法尤其有用；(3) 大脑要知道每个 connector 能取到什么内容（`SourceCapabilityMap`：connector → 内容类型、证据层级、市场、完备度、配额、基线频率、是否通用），想要某类内容时知道去哪取；web fetch / web search 是通用的。
+
+落实为四个对象与一条 lane（Wave 3 的 P14a 提前到现在，编号沿用）：
+- **`active_coverage` 阶段自动进入**：某公司任一版 Initial Screen `gate_passed` 即写 `active_coverage` 阶段记录（`STAGE_SPINE` 第一次为该阶段非空），tracking lane 只看这个阶段的公司。
+- **`ResearchEvent`**（append-only）：`{event_ref, company_ref, kind ∈ {price_move, news, filing, transcript, rating_change, calendar, reconciliation, claim}, occurred_at, source_refs[], payload_hash, content_hash}`。价格异动（P11d `MarketEvent` 并入此对象）、新文档、新 filing、日历到期、对账结果都变成事件。C1 的 `CatalystCalendarVersion` 以 `kind: calendar` 发事件。
+- **`TrackingCadenceVersion`**（大脑的调配结果，append-only）：company × source → 频率与理由；基线来自 policy，大脑按覆盖厚度与事件密度提出调整，每版带 `because` 与证据 refs。
+- **事件判断 lane**（判断层）：每个未判定事件一次有界模型调用 → 五词决定之一 + 理由 + 映射到 driver / thesis；决定为 `no_change` 也写事件账本；`note` 出一段带 refs 的短报告（异动归因、新闻 implication）；`research` 调 P14e 入口派专项研究；`revise` 调机制层入口（forecast `revise_assumptions`、dossier / thesis 修订候选）——永远是候选，人裁决。独立 verifier 复用 thesis-impact 的 independence predicate。
+
 ### Wave 2（Wave 1 合并后开）
 
 P11b consensus 双路（研报抽取走 `document_numeric_claim` 逐字核对，新 grade `broker-research-report`；yfinance 走 A 建好的 connector）、P11d `MarketEvent`、P12a `CompanyDossierVersion`、P12c `DebateMap`、P12f guidance 档案、S 线 Guidepoint lane。cockpit 集成从 Wave 2 起给一个专门的 agent。
@@ -182,7 +205,9 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-09 | connector 打包哈希再生（`build_connector_inventory.py --check`）摘到 main `99f6a9b` | 完成 |
 | 09-09 | **Wave 0 合并** `6e86fe8`：lane registry（加 lane = `LANE_MODULES` 一行）、`*_schema.sql` glob、`register_purpose` / `register_model_config_name`、G 线 13 个词、ADR-0007 / 0008 accepted；review 后修了三个静默失败模式；2,080 项通过 | 完成 |
 | 09-09 | Wave 1A / 1B / 1C / 1D 交付并进入 review；A 与 D 各有一个 blocker 在修 | 进行中 |
-| 09-09 | owner 要求回顾全部 vision 讨论找遗漏；调研 agent 进行中 | 进行中 |
+| 09-09 | vision 回顾完成，8 项补进计划 | 完成 |
+| 09-09 | **Wave 1 全部合并**：A `94f2475`、C `f8737c7`、D `56b0e63`、B `b239ee6`；main 2,627 项通过，已 push | 完成 |
+| 09-09 | 派出：P14e、P14a（daily tracking）、C1、Q2、S4、INT1、模型路由；S1 / S2 / S3 / P14e 在按 review 修 | 进行中 |
 
 ---
 
