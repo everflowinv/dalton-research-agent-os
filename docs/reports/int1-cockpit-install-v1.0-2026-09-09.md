@@ -2,7 +2,8 @@
 
 日期：2026-09-09
 分支：`int1-cockpit-install`（worktree `~/Projects/dalton-int1-cockpit-install-worktree`），基线 main `61f4255`（2,627 项）；
-2026-09-09 晚合并 main `7708d43`（S1 feeds、S2 Guidepoint、P14e 专项研究、P14-M 模型路由；2,843 项）并做了两项 follow-up，见第 9 节
+2026-09-09 晚合并 main `7708d43`（S1 feeds、S2 Guidepoint、P14e 专项研究、P14-M 模型路由；2,843 项）并做了两项 follow-up，见第 9 节；
+review 后又合并 main `f6eec59`（S3 大众源、S4 中国基本面、C1 日历、P14a 日常跟踪）并改了 review 点名的五处，见第 10 节
 角色：并行开发计划第 5 节的集成位。四条 Wave 1 lane 都在自己的报告里写了「集成时要接的线」然后一个字都没动
 驾驶舱，因为那两个文件不归任何一个 lane agent。这一片就是那些线。
 
@@ -218,13 +219,15 @@ live Core 上这四张表一张都没有（四条 lane 还没部署），2,098 �
 
 合并 main `7708d43` 之后：
 
+合并 main `f6eec59` 之后：
+
 ```
-Ran 2897 tests in 266.768s
+Ran 3500 tests in 428.094s
 
 OK (skipped=1)
 ```
 
-main `7708d43` 是 2,843 项，本片 **+54**：
+（合并 main `7708d43`（2,843 项）时是 `Ran 2897 tests ... OK (skipped=1)`，本片 **+54**：）
 
 | 文件 | 新增 |
 | --- | --- |
@@ -279,3 +282,36 @@ lane 模块 import 期不碰任何注册表消费者，`test_lane_registry` 的�
 **(3) 顺手：** 从 main 进来的四条 lane（Guidepoint 检索、sales note、公司维基、专项研究）加上
 claim-index，在驾驶舱的 lane 面板里都有了自己的中文名；新加一条测试断言「注册表里每条 lane 都有名字」，
 否则下一条新 lane 会在 owner 的页面上以 driver key 露面，而 ADR-0006 说这一页没有机器语言。
+
+
+---
+
+## 10. review 之后（合并 main `f6eec59`）
+
+review 的结论是可以合并，同时点了五处。都改了：
+
+1. **`feedback_enabled` 算了但页面用不上。** 那个标志在 payload 顶层，而按钮是照着每份交付物的
+   binding 画的，binding 上没有它——页面在真正画按钮的地方没有可依据的东西。现在
+   `docCard`、交付物全文页、问答答案三个调用点都在 `enabled !== false` 后面，问答的 binding 也带上了
+   这个标志（`_answer` 顺手查一次表在不在）。没有 journal 表的 Core 上三处都不画按钮，有测试。
+2. **lane 的 note 把 driver 的英文原话直接给了 owner。**「this mission does not grant market_price
+   in autonomy.may_write」对读 tick summary 的人是对的句子，对这一页是错的。现在每个状态词有自己的
+   中文句子（`LANE_STATUS_NOTES`），driver 的原话降到 `detail` 那一行（页面上是更暗的小字）。
+   `skipped[]` 的理由也归 detail。没有句子的状态词会显示 `状态：<word>`——那是这张表的缺口，不是 lane 的错。
+3. **`write_owner_only` 用 `secure_dir(path.parent)`（0700），不是靠 umask。** 文件本来就是 0600，
+   但目录名里有公司和这次运行，而这个 launcher 建的其它目录都是 0700。
+4. **`tests/test_model_vocabularies.py` 的顺序依赖修了。** 改成 setUp 快照 / tearDown 还原（照它上面
+   purpose 注册表已经学过的做法），「种子」那条断言也改成说它真正的意思：三个种子还在、还在最前、顺序没变，
+   后面跟着的是 lane 自己登记的名字。验证过：单独跑那一条、且先 import `claim_index_tagging`，现在也过。
+5. **两处小的。** 读不出来的治理记录不再被当成 approved（原来「文件不在」和「文件在但解析不了」被并成一种，
+   于是一份被截断的记录会让页面说这条 lane 正跑在一个它拿不出来的批准上）；`record_feedback` 在铸临时人类
+   主体之前先校验 `target_kind`，并且 writer 的 `rejected` / `protocol_error` / `forbidden` 现在回 400 而不是
+   409——对畸形请求答 409 等于让页面提供一个永远会同样失败的重试。
+
+**合并 main `f6eec59`** 没有冲突，`index.json` 也没有冲突（`build_connector_inventory.py --check` 归零）。
+新进来的四条 lane 在驾驶舱都有了中文名：日常跟踪、催化日历、事件判断、大众源。
+`test_every_registered_lane_is_named_in_the_owner_s_words` 会在下一条没起名的 lane 上直接失败。
+
+**一个过程教训**：第一次合并时本地 `main` 停在 `1ba8f47`，比实际的 tip 少一个 commit，而少掉的那一个
+（`f6eec59`）正好是修这两条测试的——于是全量出现两个失败，看起来像是我引入的。用 `git archive main` 把
+main 解到 /tmp 里跑那两条测试，两条都过，才定位到是 main 更新了。再合一次即可。
