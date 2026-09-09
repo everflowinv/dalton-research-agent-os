@@ -387,6 +387,87 @@ class SweepTests(unittest.TestCase):
         self.assertEqual(quote_span("quote:1:9:abcd"), (1, 9))
 
 
+class StatementLineTests(unittest.TestCase):
+    """The other verified number: a report line with an accession behind it.
+
+    Stronger provenance than a document figure -- the accession belongs to one
+    CIK by construction -- and weaker admissibility, because there is no text
+    citation for it to travel the cited-original path with. Verification is
+    implemented so both kinds of number answer the same question the same way;
+    the staging chain for a line is the SEC connector authority path and is not
+    built (see the P12b report).
+    """
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        from dalton_core.store import DaltonStore
+        from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
+
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.store = DaltonStore(str(Path(self._dir.name) / "core.sqlite"))
+        self.addCleanup(self.store.close)
+        state = bootstrap_method_authorities(self.store)
+        self.missions = CoverageMissionAuthority(self.store)
+        params = mission_params(state)
+        mission = self.missions.create_mission(params.pop("mission_ref"), **params)
+        authorization = self.missions.authorize_sec_lane(
+            company_ref=COMPANY, ticker="ACN", actor_ref=ACTOR,
+            mission_version_ref=mission["id"],
+            mission_version_hash=mission["content_hash"])
+        dispatch = self.missions.queue_statement_dispatch(authorization=authorization)
+        self.missions.mark_statement_dispatch_launched(
+            dispatch["dispatch_id"], "sec-financials-run:" + "1" * 24)
+        self.missions.record_statement_observation(
+            dispatch_id=dispatch["dispatch_id"],
+            observation={
+                "schema_version": "0.1", "cik": "0001467373",
+                "entity_name": "Accenture plc",
+                "filings": [{
+                    "accession": "0001467373-26-000031", "form": "10-Q",
+                    "filed": "2026-06-25", "report_date": "2026-06-30",
+                    "lines": [{
+                        "statement": "income", "concept": "us-gaap:Revenues",
+                        "label": "Revenues", "level": 0, "parent_concept": None,
+                        "is_breakdown": False, "dimension_axis": None,
+                        "dimension_member": None, "period_start": "2026-04-01",
+                        "period_end": "2026-06-30", "value": "17700000000",
+                        "unit": "USD", "balance": "credit",
+                    }],
+                }],
+                "source_record_refs": ["raw-sink:" + "c" * 64],
+                "next_cursor": None, "provider_status": 200,
+            },
+            governance_ref="g", governance_hash="b" * 64)
+        self.missions.settle_statement_dispatch(
+            dispatch["dispatch_id"], outcome="succeeded")
+        self.resolver = DocumentFigureResolver(self.store.connection)
+
+    def line_id(self):
+        return self.store.connection.execute(
+            "SELECT line_id FROM coverage_mission_statement_lines").fetchone()[0]
+
+    def test_a_line_re_verifies_against_its_filing_and_names_the_accession(self):
+        record, bundle = self.resolver.verify_statement_line(self.line_id())
+        self.assertEqual(record["figure_kind"], "statement_line")
+        self.assertEqual(record["accession"], "0001467373-26-000031")
+        self.assertEqual(record["value"], "17700000000")
+        self.assertEqual(record["period_end"], "2026-06-30")
+        self.assertEqual(bundle["kind"], "numeric")
+        self.assertEqual(bundle["verdict"], "pass")
+        self.assertEqual(bundle["checkpoint_ref"],
+                         "sec:filing:0001467373-26-000031")
+        self.assertEqual({item["code"] for item in bundle["findings"]},
+                         {"line_has_value", "filing_accession",
+                          "filing_source_records"})
+
+    def test_a_line_that_is_not_here_is_not_found(self):
+        with self.assertRaises(FigureNotFound):
+            self.resolver.verify_statement_line("statement-line:nope")
+
+
 class DuplicateFiguresTests(unittest.TestCase):
     """Three documents reporting one quarter's revenue are one canonical Claim."""
 
