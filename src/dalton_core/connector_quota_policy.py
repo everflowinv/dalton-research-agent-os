@@ -184,6 +184,23 @@ _DAILY_QUOTAS = MappingProxyType(
                 "max_physical_calls_per_unit": 4,
             }
         ),
+        # C1: one company's dated corporate events per unit.
+        #
+        # An earnings date is announced once and then does not move, so the
+        # calendar lane asks once a day per covered company and the five
+        # covered companies need five of these. Fifty leaves room for a
+        # business day's worth of retries and for the coverage universe to
+        # grow, without ever making this the reason Yahoo starts refusing.
+        #
+        # One physical call: ``Ticker.calendar`` is a single quoteSummary
+        # request against the same two hosts the price operation uses.
+        ("yfinance", "calendar"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
         # S1: the two local feeds. There is no upstream to be polite to and
         # nothing to pay -- these are file reads on this machine -- so the
         # ceilings are generous. They are declared anyway, because a lane

@@ -71,16 +71,19 @@ ROIC_GET_KIND = "roic-get-transcript"
 ROIC_LIST_CAPABILITY_ID = "capability:dalton:connector:roic-list-transcripts"
 ROIC_GET_CAPABILITY_ID = "capability:dalton:connector:roic-get-transcript"
 # P11a: Yahoo Finance. Prices are what a market printed; analyst estimates are
-# what sell-side analysts said. Two kinds because they are two kinds of thing,
-# and because a schema hash binds one operation.
+# what sell-side analysts said. C1 adds the calendar: when the company will
+# next speak. Three kinds because they are three kinds of thing, and because a
+# schema hash binds one operation.
 YFINANCE_DAILY_PRICES_KIND = "yfinance-daily-prices"
 YFINANCE_ANALYST_ESTIMATES_KIND = "yfinance-analyst-estimates"
+YFINANCE_CALENDAR_KIND = "yfinance-calendar"
 YFINANCE_DAILY_PRICES_CAPABILITY_ID = (
     "capability:dalton:connector:yfinance-daily-prices"
 )
 YFINANCE_ANALYST_ESTIMATES_CAPABILITY_ID = (
     "capability:dalton:connector:yfinance-analyst-estimates"
 )
+YFINANCE_CALENDAR_CAPABILITY_ID = "capability:dalton:connector:yfinance-calendar"
 # S1: the two human / vendor feeds. Each is split into an index operation and
 # a document operation for the same reason every library here is -- reading
 # what exists and reading one of them are different permissions.
@@ -275,6 +278,12 @@ def _yfinance_analyst_estimates_schema_hash() -> str:
     from .yfinance_core import ANALYST_ESTIMATES_OPERATION, yfinance_schema_hash
 
     return yfinance_schema_hash(ANALYST_ESTIMATES_OPERATION)
+
+
+def _yfinance_calendar_schema_hash() -> str:
+    from .yfinance_core import CALENDAR_OPERATION, yfinance_schema_hash
+
+    return yfinance_schema_hash(CALENDAR_OPERATION)
 
 
 def _sec_identity() -> dict[str, Any]:
@@ -681,6 +690,16 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         permissions=_yfinance_permissions,
         fixture_hash=_yfinance_fixture_hash,
     ),
+    # C1: the dated corporate events. Its own approval, so that a Core allowed
+    # to read prices is not thereby allowed to read anything else Yahoo serves.
+    YFINANCE_CALENDAR_KIND: _KindSpec(
+        capability_id=YFINANCE_CALENDAR_CAPABILITY_ID,
+        template_key="yfinance",
+        source_hash=_yfinance_source_hash,
+        schema_hash=_yfinance_calendar_schema_hash,
+        permissions=_yfinance_permissions,
+        fixture_hash=_yfinance_fixture_hash,
+    ),
     # S1: the sell-side notes already on this disk, and the human wiki beside
     # them. Both read files and neither holds a credential, so their
     # permissions name a host directory and no slot at all.
@@ -851,7 +870,8 @@ def build_governance_record(
             version=version,
         )
 
-    if kind in (YFINANCE_DAILY_PRICES_KIND, YFINANCE_ANALYST_ESTIMATES_KIND):
+    if kind in (YFINANCE_DAILY_PRICES_KIND, YFINANCE_ANALYST_ESTIMATES_KIND,
+                YFINANCE_CALENDAR_KIND):
         from .yfinance_core import (
             KIND_BY_OPERATION as YFINANCE_KINDS,
             build_yfinance_governance_record,
@@ -1216,6 +1236,7 @@ __all__ = [
     "GEMINI_WEB_SEARCH_CAPABILITY_ID", "GEMINI_WEB_SEARCH_KIND",
     "WEB_FETCH_CAPABILITY_ID", "WEB_FETCH_KIND",
     "YFINANCE_ANALYST_ESTIMATES_CAPABILITY_ID", "YFINANCE_ANALYST_ESTIMATES_KIND",
+    "YFINANCE_CALENDAR_CAPABILITY_ID", "YFINANCE_CALENDAR_KIND",
     "YFINANCE_DAILY_PRICES_CAPABILITY_ID", "YFINANCE_DAILY_PRICES_KIND",
     "SALES_NOTES_GET_CAPABILITY_ID", "SALES_NOTES_GET_KIND",
     "SALES_NOTES_LIST_CAPABILITY_ID", "SALES_NOTES_LIST_KIND",

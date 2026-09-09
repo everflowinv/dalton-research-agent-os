@@ -1,5 +1,5 @@
 {
-  "content_hash": "97b5e8e0b21f4a20f6a224e2b2873ccdb93594ae1192bfb8ea3f130b715d01f2",
+  "content_hash": "7e33d200c449bdc50bf53e815c1e2784268212d57acc6fbd1c54aa73cc07202c",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "id": "connector-inventory:p1-0:0.1",
   "profiles": [
@@ -41,11 +41,11 @@
     },
     {
       "connector_ref": "connector:yahoo-finance",
-      "fixture_manifest_hash": "2673180d6ec33e34be9d73b1db2db0f4d48f991d7ae6706450216349d5010ec7",
+      "fixture_manifest_hash": "5e20f2722d2f96aaf6eda9f076ea2dba2cae925f6fdf5dbc2bc35909c12357d3",
       "fixture_manifest_ref": "connector-fixture-manifest:yfinance:0.1",
-      "profile_template_hash": "6cf6012558bb70d7e4428efe0225ab92b8a22ccfd83c4826608d541bcc2b87d1",
+      "profile_template_hash": "d8a4cf8500a3b4518789b5aad04e28410c5c8c22f774fb1ca1c9a6959e031f00",
       "profile_template_ref": "connector-profile-template:yfinance:0.1",
-      "proposal_manifest_hash": "69eea458a80d21c7bdab739931840eb17b2e4dfb70548f5e7045dbccebd0345e",
+      "proposal_manifest_hash": "a0fde70c7913d79c404881271c320827befd7e256bb6ee4c94370724429bce8b",
       "proposal_manifest_ref": "connector-proposal-manifest:yfinance:0.2"
     },
     {

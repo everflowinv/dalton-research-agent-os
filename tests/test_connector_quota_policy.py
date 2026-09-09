@@ -197,6 +197,19 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # C1: one company's dated corporate events. Sorted between
+                    # the two above. Smaller and single-call: an earnings date
+                    # is announced once and then does not move, so the lane
+                    # asks once a day per covered company.
+                    "connector_slug": "yfinance",
+                    "operation": "calendar",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
                     "connector_slug": "yfinance",
                     "operation": "daily_prices",
                     "quota_unit": "search",

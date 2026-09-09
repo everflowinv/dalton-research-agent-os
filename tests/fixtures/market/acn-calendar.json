@@ -1,0 +1,23 @@
+{
+ "calendar": {
+  "Dividend Date": "2026-08-13",
+  "Earnings Average": 3.17886,
+  "Earnings Date": [
+   "2026-10-01"
+  ],
+  "Earnings High": 3.23,
+  "Earnings Low": 3.12,
+  "Ex-Dividend Date": "2026-07-08",
+  "Revenue Average": 18038995700,
+  "Revenue High": 18169000000,
+  "Revenue Low": 17816000000
+ },
+ "captured_at": "2026-09-09T19:43:05.420677+00:00",
+ "errors": {},
+ "library": "yfinance",
+ "library_version": "1.7.0",
+ "observed_on": "2026-09-09",
+ "operation": "calendar",
+ "schema_version": "0.1",
+ "ticker": "ACN"
+}

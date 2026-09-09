@@ -204,10 +204,112 @@
       "scenario": "timeout",
       "source_record_refs": [],
       "source_status": null
+    },
+    {
+      "case_ref": "fixture:yfinance:calendar:empty:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "calendar",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "6814dbbcfa2788254abb79203615f5eac467ed4e49815c657b4a2ac6cfb81abb",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:yfinance:calendar:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "calendar",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:yfinance:calendar:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "calendar",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "2dd4aa29bdf6c46fb073916be54a29a133e15c57ad5c0f5ddf96a4f4ab1b15f3",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:yfinance:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:yfinance:calendar:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "calendar",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:yfinance:calendar:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "calendar",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:yfinance:calendar:success:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "calendar",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "4d5e668ff2a5b36d8bc0db07ca74cf22b2ec19c078fd0dde77cebcc96f685546",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:yfinance:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:yfinance:calendar:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "calendar",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
     }
   ],
   "connector_template_ref": "connector-profile-template:yfinance:0.1",
-  "content_hash": "2673180d6ec33e34be9d73b1db2db0f4d48f991d7ae6706450216349d5010ec7",
+  "content_hash": "5e20f2722d2f96aaf6eda9f076ea2dba2cae925f6fdf5dbc2bc35909c12357d3",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "id": "connector-fixture-manifest:yfinance:0.1",
   "operations": [
@@ -217,6 +319,10 @@
     },
     {
       "operation": "analyst_estimates",
+      "pagination_mode": "none"
+    },
+    {
+      "operation": "calendar",
       "pagination_mode": "none"
     }
   ],
