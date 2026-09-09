@@ -203,6 +203,23 @@ class OldCoreTests(Wave1Case):
         # when pressed.
         self.assertFalse(view["feedback_enabled"])
 
+    def test_the_buttons_are_switched_off_where_the_buttons_are(self) -> None:
+        # The flag was at the top of the payload and not on the binding the
+        # page hands to the button bar, so the page had nothing to act on at
+        # the point where it draws them.
+        deliverable = self.publish_deliverable()
+        card = self.card(self.plane.overview())
+        self.assertFalse(card["document"]["feedback"]["enabled"])
+        self.assertFalse(self.plane.document(deliverable["id"])["feedback"]["enabled"])
+
+    def test_an_answer_on_a_core_with_no_journal_offers_no_buttons(self) -> None:
+        self.c.reply = json.dumps({"answer": "没有足够的结论。", "citations": [],
+                                   "confidence": "low", "gaps": ["什么都还没有"]})
+        done = self.c.wait(self.plane.ask(self.login, {
+            "question": "ACN 的收入是多少？", "request_id": "int1-nojournal"})["job_id"])
+        self.assertEqual(done["status"], "done", done["error"])
+        self.assertFalse(done["result"]["feedback"]["enabled"])
+
     def test_the_claims_view_still_answers_and_says_it_has_no_index(self) -> None:
         self.add_claim(statement="ACN 本季收入 1,000 百万美元。")
         listing = self.plane.claims()
@@ -393,6 +410,7 @@ class QualityAndJournalTests(Wave1Case):
         # And it shows up on the card and beside the document.
         view = self.plane.overview()
         self.assertTrue(view["feedback_enabled"])
+        self.assertTrue(self.card(view)["document"]["feedback"]["enabled"])
         card = self.card(view)
         self.assertEqual((card["feedback"]["total"], card["feedback"]["outstanding"]), (1, 1))
         document = self.plane.document(deliverable["id"])
@@ -408,6 +426,41 @@ class QualityAndJournalTests(Wave1Case):
                 "target_ref": "mission-deliverable-version:x", "target_hash": "a" * 64,
                 "target_kind": "initial_screen", "verdict": "excellent"})
         self.assertEqual(calls, [])
+
+    def test_a_kind_the_journal_does_not_take_never_leaves_the_cockpit(self) -> None:
+        # Checked here so a typo in the page costs a message rather than an
+        # ephemeral human principal and a round trip to the writer.
+        calls: list = []
+        self.plane.governance_call = lambda *a, **k: calls.append(k)
+        with self.assertRaises(CockpitError):
+            self.plane.record_feedback(self.login, {
+                "target_ref": "mission-deliverable-version:x", "target_hash": "a" * 64,
+                "target_kind": "spreadsheet", "verdict": "read"})
+        self.assertEqual(calls, [])
+
+    def test_a_contract_refusal_reads_as_a_bad_request_not_a_conflict(self) -> None:
+        # Answering "conflict" to a malformed request tells the page to offer
+        # a retry that will fail the same way forever.
+        from dalton_core.writer_protocol import RemoteError
+
+        def rejected(*args, **kwargs):
+            raise RemoteError("rejected", "request rejected by contract or gate")
+
+        self.plane.governance_call = rejected
+        with self.assertRaises(CockpitError) as caught:
+            self.plane.record_feedback(self.login, {
+                "target_ref": "mission-deliverable-version:x", "target_hash": "a" * 64,
+                "target_kind": "initial_screen", "verdict": "read"})
+        self.assertNotIsInstance(caught.exception, CockpitConflict)
+
+        def conflicted(*args, **kwargs):
+            raise RemoteError("conflict", "request conflicts with existing data")
+
+        self.plane.governance_call = conflicted
+        with self.assertRaises(CockpitConflict):
+            self.plane.record_feedback(self.login, {
+                "target_ref": "mission-deliverable-version:x", "target_hash": "a" * 64,
+                "target_kind": "initial_screen", "verdict": "read"})
 
     def test_a_refused_write_is_reported_rather_than_swallowed(self) -> None:
         from dalton_core.governance_cli import GovernanceCliError
@@ -510,20 +563,50 @@ class LaneVocabularyTests(Wave1Case):
         row = lanes["lane:claim_index"]
         self.assertEqual((row["status"], row["label"]), ("idle", "给结论建索引"))
 
-    def test_ungranted_is_not_idle(self) -> None:
+    def test_ungranted_is_not_idle_and_the_note_is_not_the_driver_s_english(self) -> None:
         lanes = self.lanes({
             "mission_market_prices": {
                 "status": "ungranted",
                 "reason": "this mission does not grant market_price in autonomy.may_write"},
             "company_model_forecast": {"status": "idle", "reason": "nothing to do"},
         })
-        self.assertEqual(lanes["lane:mission_market_prices"]["status"], "ungranted")
-        self.assertIn("market_price", lanes["lane:mission_market_prices"]["note"])
-        self.assertEqual(lanes["lane:company_model_forecast"]["status"], "idle")
+        row = lanes["lane:mission_market_prices"]
+        self.assertEqual(row["status"], "ungranted")
+        # The note is the owner's sentence; the driver's own words are the
+        # right sentence in the wrong place, so they go to a detail line.
+        self.assertEqual(row["note"], "研究目标还没授权它写入，所以一次也没跑")
+        self.assertNotIn("may_write", row["note"])
+        self.assertIn("market_price", row["detail"])
+        idle = lanes["lane:company_model_forecast"]
+        self.assertEqual((idle["status"], idle["note"]),
+                         ("idle", "装好了，这一轮没有要做的"))
+        self.assertEqual(idle["detail"], "nothing to do")
+
+    def test_every_note_the_panel_can_show_is_in_the_owner_s_language(self) -> None:
+        # ADR-0006: no machine language on this page. A status with no sentence
+        # would otherwise put the raw word where the sentence goes.
+        from dalton_core.cockpit_plane import LANE_STATUS_NOTES
+
+        statuses = ("launched", "busy", "idle", "held", "rejected", "unconfigured",
+                    "ungranted", "unavailable", "unstarted")
+        for status in statuses:
+            self.assertIn(status, LANE_STATUS_NOTES)
+            note = LANE_STATUS_NOTES[status]
+            self.assertTrue(note and not note.isascii(), status)
+
+    def test_skipped_reasons_are_a_detail_not_the_note(self) -> None:
+        row = self.lanes({"mission_market_prices": {
+            "status": "idle",
+            "skipped": [{"company_ref": ACN, "reason": "recently_current"},
+                        {"company_ref": CTSH, "reason": "current"}],
+        }})["lane:mission_market_prices"]
+        self.assertEqual(row["note"], "装好了，这一轮没有要做的")
+        self.assertIn("recently_current", row["detail"])
 
     def test_a_lane_that_never_ran_says_so_rather_than_reading_as_idle(self) -> None:
-        self.assertEqual(self.lanes({})["lane:mission_market_prices"]["status"],
-                         "unstarted")
+        row = self.lanes({})["lane:mission_market_prices"]
+        self.assertEqual(row["status"], "unstarted")
+        self.assertIsNone(row["detail"])
 
     def test_an_installed_but_unapproved_record_is_its_own_word(self) -> None:
         # The record is on disk, so the lane is configured and will keep
@@ -546,6 +629,18 @@ class LaneVocabularyTests(Wave1Case):
         after = self.lanes({"mission_market_prices": {"status": "unconfigured",
                                                       "reason": "no approved record"}})
         self.assertEqual(after["lane:mission_market_prices"]["status"], "unconfigured")
+
+    def test_a_governance_record_nobody_can_read_is_not_approval(self) -> None:
+        # A truncated or hand-edited record parses to nothing. Reading that as
+        # approved would be the page telling the owner a lane is running under
+        # an approval it cannot show them.
+        governance = self.root / "connector-governance"
+        governance.mkdir(parents=True, exist_ok=True)
+        (governance / "yfinance-daily-prices-v1.json").write_text(
+            "{not json", encoding="utf-8")
+        row = self.lanes({"mission_market_prices": {"status": "idle"}})[
+            "lane:mission_market_prices"]
+        self.assertEqual(row["status"], "unapproved")
 
     def test_the_four_named_lanes_keep_their_place_and_their_budgets(self) -> None:
         lanes = list(self.plane.overview()["activity"]["lanes"])
@@ -667,6 +762,22 @@ class PageVocabularyTests(unittest.TestCase):
         page = self.PAGE.read_text(encoding="utf-8")
         self.assertIn("/v1/cockpit/claims?", page)
         self.assertIn("/v1/cockpit/model?company=", page)
+
+    def test_the_buttons_are_drawn_only_when_the_binding_allows_them(self) -> None:
+        page = self.PAGE.read_text(encoding="utf-8")
+        # One definition and three call sites -- the card, the full-text page
+        # and the answer -- and every call site behind a guard, so a Core with
+        # no journal table shows no buttons rather than buttons that fail.
+        call_sites = page.count("feedbackBar(") - 1
+        self.assertEqual(call_sites, 3)
+        self.assertEqual(page.count(".enabled!==false"), call_sites)
+        self.assertIn("doc.feedback&&doc.feedback.enabled!==false", page)
+        self.assertIn("r.feedback&&r.feedback.enabled!==false", page)
+
+    def test_the_lane_row_shows_the_sentence_and_keeps_the_raw_reason_apart(self) -> None:
+        page = self.PAGE.read_text(encoding="utf-8")
+        self.assertIn("if(l.detail)", page)
+        self.assertIn(".lane small.raw", page)
 
     def test_the_price_block_says_when_it_is_not_a_close(self) -> None:
         self.assertIn("盘中价，当天还没收盘", self.PAGE.read_text(encoding="utf-8"))

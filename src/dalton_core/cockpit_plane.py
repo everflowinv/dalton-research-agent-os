@@ -133,6 +133,23 @@ QUALITY_CHECK_LABELS = {
     "new_version_cites_new_refs": "新版本用上了新证据",
     "restatement_drift": "改写没有偏离原意",
 }
+# What each status means, in the owner's language. The driver's own ``reason``
+# is English and written for whoever reads a tick summary -- "this mission does
+# not grant market_price in autonomy.may_write" is the right sentence in the
+# wrong place -- so it moves to a detail line and the owner reads this instead.
+LANE_STATUS_NOTES = {
+    "launched": "刚起了一个任务",
+    "busy": "上一个任务还在跑",
+    "idle": "装好了，这一轮没有要做的",
+    "held": "上一次没成，暂时不再试同一件事",
+    "rejected": "这次没被接受",
+    "unconfigured": "这台机器上没装这条流水线",
+    "ungranted": "研究目标还没授权它写入，所以一次也没跑",
+    "unavailable": "这一轮读不到它需要的东西",
+    "unstarted": "这台机器上还没有跑过这条流水线",
+    "current": "已经是最新的了",
+    "failed": "出错了",
+}
 # The lanes the registry knows about, named for the owner. A lane with no name
 # here still appears -- silence about a lane is exactly what this panel exists
 # to end -- under its own key, which is ugly but visible.
@@ -996,6 +1013,12 @@ class CockpitPlane:
                         "target_hash": deliverable["content_hash"],
                         "target_kind": "initial_screen",
                         "company_ref": company_ref,
+                        # A Core with no journal table shows no buttons rather
+                        # than buttons that fail when pressed. The card carried
+                        # the flag at the top level and the binding did not, so
+                        # the page had no way to act on it where the buttons
+                        # actually are.
+                        "enabled": journal["enabled"],
                         "entries": journal["by_target"].get(deliverable["version_ref"], []),
                     },
                 }
@@ -1282,26 +1305,36 @@ class CockpitPlane:
             if not isinstance(result, Mapping):
                 rows.append({"key": f"lane:{key}", "label": label,
                              "status": "unstarted",
-                             "note": "这台机器上还没有跑过这条流水线"})
+                             "note": LANE_STATUS_NOTES["unstarted"], "detail": None})
                 continue
             status = str(result.get("status") or "idle")
-            note = str(result.get("reason") or "")
+            detail = str(result.get("reason") or "")
+            note = LANE_STATUS_NOTES.get(status)
             record = self._lane_governance_record(spec, context)
-            if record is not None and governance.get(record) not in (None, "approved"):
-                # The record is on disk and the owner has not approved it. The
-                # lane will keep starting children that refuse, so the honest
-                # word is not "idle" and not "failed" -- it is "waiting for
-                # you".
+            if record is not None and record in governance and governance[record] != "approved":
+                # The record is on disk and the owner has not approved it --
+                # or it is on disk and unreadable, which is not approval
+                # either. The lane will keep starting children that refuse, so
+                # the honest word is not "idle" and not "failed": it is
+                # "waiting for you".
                 status = "unapproved"
                 note = f"数据源已经装好，等你批准（{record}）"
+            if note is None:
+                # A status this panel has no sentence for. Shown rather than
+                # hidden, because a lane nobody can read about is the thing
+                # this panel exists to stop -- but it is a gap here, not a
+                # lane's fault, and the raw word is all there is to show.
+                note = f"状态：{status}"
             skipped = result.get("skipped")
-            if not note and isinstance(skipped, list) and skipped:
+            if isinstance(skipped, list) and skipped:
                 reasons = [str(item.get("reason")) for item in skipped
                            if isinstance(item, Mapping) and item.get("reason")]
                 if reasons:
-                    note = "跳过了 " + "、".join(sorted(set(reasons))[:3])
+                    joined = "skipped: " + ", ".join(sorted(set(reasons))[:3])
+                    detail = f"{detail}；{joined}" if detail else joined
             rows.append({"key": f"lane:{key}", "label": label, "status": status,
-                         "note": note[:200], "company_ref": result.get("company_ref")})
+                         "note": note[:200], "detail": (detail[:300] or None),
+                         "company_ref": result.get("company_ref")})
         return rows
 
     def _model_status(self) -> dict[str, Any]:
@@ -1767,13 +1800,17 @@ class CockpitPlane:
         target_hash = _sha(value.get("target_hash"), "target_hash")
         target_kind = _text(value.get("target_kind"), "target_kind", maximum=64)
         verdict = _text(value.get("verdict"), "verdict", maximum=32)
-        # Checked against the authority's own vocabulary, not against the
+        # Checked against the authority's own vocabularies, not against the
         # label map: a word with no Chinese label would be a display bug, and
-        # a word the journal does not take is a refusal.
-        from .analyst_journal import VERDICTS
+        # a word the journal does not take is a refusal. Both are checked here
+        # so that a typo in the page costs a message rather than an ephemeral
+        # human principal and a round trip to the writer.
+        from .analyst_journal import TARGET_KINDS, VERDICTS
 
         if verdict not in VERDICTS:
             raise CockpitError("这不是一个可以给的反馈")
+        if target_kind not in TARGET_KINDS:
+            raise CockpitError("这不是一种可以给反馈的产出")
         note = value.get("note") or None
         if note is not None:
             note = _text(note, "note", maximum=4000)
@@ -1800,7 +1837,15 @@ class CockpitPlane:
             result = self.governance_call(
                 self.token_config, self.writer_socket, actor_ref=actor,
                 operation="record_analyst_journal_entry", params=params)
-        except (GovernanceCliError, RemoteError) as exc:
+        except RemoteError as exc:
+            # A refusal by contract is the caller's mistake and reads as 400;
+            # a conflict is about what is already stored and reads as 409.
+            # Answering "conflict" to a malformed request tells the page to
+            # offer a retry that will fail the same way forever.
+            if getattr(exc, "code", None) in {"rejected", "protocol_error", "forbidden"}:
+                raise CockpitError(f"这条反馈没有被记下：{_reason(exc)}") from exc
+            raise CockpitConflict(f"这条反馈没有被记下：{_reason(exc)}") from exc
+        except GovernanceCliError as exc:
             raise CockpitConflict(f"这条反馈没有被记下：{_reason(exc)}") from exc
         label = VERDICT_LABELS.get(verdict, verdict)
         self.journal.record_event(
@@ -1918,6 +1963,7 @@ class CockpitPlane:
             everything = self._claims(core)
             claims = self._indexed_claims(core, everything)
             theses = [json.loads(r["content_json"]) for r in core.execute("SELECT content_json FROM thesis_versions ORDER BY created_at").fetchall()]
+            journal_enabled = _table_exists(core, "analyst_journal_entries")
         members = self._members(mission)
         selected = self._select_claims(question, claims, members)
         prompt = self._ask_prompt(question, mission, members, selected, theses)
@@ -1954,7 +2000,7 @@ class CockpitPlane:
                                   for i, claim in enumerate(selected)],
             ref=f"cockpit-ask:{request_id}")
         result["feedback"] = {"target_ref": artefact["ref"], "target_hash": artefact["hash"],
-                              "target_kind": "ask_answer"}
+                              "target_kind": "ask_answer", "enabled": journal_enabled}
         self.journal.record_event(kind="question", title=f"你问了：{question[:120]}", detail=answer[:300], login=login,
                                   refs={"job_kind": "ask", "request_id": request_id, "work_order_ref": call["work_order_ref"]})
         return result

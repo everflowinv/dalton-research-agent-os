@@ -65,7 +65,13 @@ def write_owner_only(path: Path, value: Any) -> None:
     # the run directory is created when a ticket is started, and a child that
     # never got that far had nowhere to put the sentence explaining why.
     # Losing the explanation is worse than the refusal it explains.
-    path.parent.mkdir(parents=True, exist_ok=True)
+    #
+    # Through secure_dir, not mkdir: every other directory this launcher makes
+    # is 0700, and a plain mkdir takes whatever the umask happens to be. A
+    # ticket file is written 0600 into it either way, but the directory listing
+    # names the company and the run, and the whole point of the file mode is
+    # that this is nobody else's business.
+    secure_dir(path.parent)
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n",
                    encoding="utf-8")

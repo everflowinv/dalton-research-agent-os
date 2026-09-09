@@ -147,6 +147,10 @@ class OwnerOnlyWriteTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(target.read_text(encoding="utf-8"))["reason"], "no grant")
             self.assertEqual(target.stat().st_mode & 0o777, 0o600)
+            # Owner-only the whole way down: the directory listing names the
+            # company and the run, so it is 0700 like every other directory
+            # this launcher makes rather than whatever the umask allows.
+            self.assertEqual(target.parent.stat().st_mode & 0o777, 0o700)
 
     def test_writing_twice_still_replaces_in_place(self):
         with tempfile.TemporaryDirectory() as directory:
