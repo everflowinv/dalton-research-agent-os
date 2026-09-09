@@ -60,6 +60,18 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # S2: the smallest search ceiling of any source, because
+                    # the Guidepoint licence permits research reading and
+                    # forbids bulk extraction.
+                    "connector_slug": "guidepoint",
+                    "operation": "search_library",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 25,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
                     # P10p: the SEC filings index. Sorted before web-fetch.
                     "connector_slug": "sec",
                     "operation": "list_filings",
