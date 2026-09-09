@@ -22,6 +22,7 @@ from .bounded_probe_executor import (
     WORKER_REF,
     execute_probe_work_order,
 )
+from .lane_registry import RESERVED_DRIVER_KEYS, tick_lanes
 from .public_http_transport import PublicHttpTransport
 from .scheduler import Scheduler
 from .writer_client import WriterClient
@@ -203,6 +204,15 @@ class BoundedPlannerDriverConfig:
         )
 
 
+# Every key ``run_once`` puts in its summary that is not a lane's. Kept beside
+# the summary itself so a new one is added here, where it is visible, rather
+# than only in the registry.
+_RESERVED_SUMMARY_KEYS: frozenset[str] = frozenset({
+    "status", "active_loop_count", "probes_executed", "executed", "skipped",
+    "mission_sec_dispatch", "forecast_reconciliation",
+})
+
+
 class BoundedPlannerDriver:
     """Advance every active loop by at most one probe per tick."""
 
@@ -240,68 +250,26 @@ class BoundedPlannerDriver:
             forecast_reconciliation = self.client.call("reconcile_forecasts", {})
         except Exception as exc:
             forecast_reconciliation = {"status": f"unavailable:{type(exc).__name__}"}
-        # P9d-1: settle finished discovery / acquisition children and launch at
-        # most one search and one document acquisition under the mission grant
-        # and the shared AlphaEngine call budget.  The writer reports every
-        # skip (no grant, cadence, budget, busy) rather than hiding it.
-        try:
-            mission_source_discovery = self.client.call(
-                "dispatch_mission_source_discovery", {}
-            )
-        except Exception as exc:
-            mission_source_discovery = {"status": f"unavailable:{type(exc).__name__}"}
-        # ADR-0005 / P9d-17a: draft awaiting documents under the mission
-        # grant and budget, out of process; the writer reports every hold.
-        try:
-            document_extraction = self.client.call("dispatch_document_extraction", {})
-        except Exception as exc:
-            document_extraction = {"status": f"unavailable:{type(exc).__name__}"}
-        # P10a: enter the Playbook's first stage for any company that has none
-        # and report each company's source base, so the lanes above can be
-        # ordered by what the mission still needs.
-        try:
-            mission_stage = self.client.call("dispatch_mission_stage", {})
-        except Exception as exc:
-            mission_stage = {"status": f"unavailable:{type(exc).__name__}"}
-        # P10b: read admitted Claims back against the exact originals they cite;
-        # a wrong subject or a disclaimer is challenged and, under the mission's
-        # grant, retired.  The Ledger itself is never edited.
-        try:
-            claim_review = self.client.call("dispatch_claim_review", {})
-        except Exception as exc:
-            claim_review = {"status": f"unavailable:{type(exc).__name__}"}
-        # P10c: write one company's Initial Screen from the Claims the Ledger
-        # holds, and let the Playbook's own gate decide whether it passes.
-        # P10d: queue the SEC filings a company still needs for its four quarters,
-        # from the company-facts artifact Core already holds.
-        try:
-            sec_quarters = self.client.call("dispatch_mission_sec_quarters", {})
-        except Exception as exc:
-            sec_quarters = {"status": f"unavailable:{type(exc).__name__}"}
-        # P13ak: the statements lane -- one company's quarterly income,
-        # balance and cash statements as filed, structure and all. It is the
-        # substrate a model is built on, which the concept-at-a-time facts lane
-        # above cannot supply.
-        try:
-            mission_statements = self.client.call("dispatch_mission_statements", {})
-        except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
-            mission_statements = {"status": f"unavailable:{type(exc).__name__}"}
-        # P13am: how this company should be modelled -- what drives its
-        # revenue, how its costs behave, which statements it actually needs
-        # forecast. Derived from the statements ledger, so it falls silent once
-        # every company has a specification for what it has filed.
-        try:
-            company_model_spec = self.client.call("dispatch_company_model_spec", {})
-        except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
-            company_model_spec = {"status": f"unavailable:{type(exc).__name__}"}
-        try:
-            research_plan = self.client.call("dispatch_research_plan", {})
-        except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
-            research_plan = {"status": f"unavailable:{type(exc).__name__}"}
-        try:
-            initial_screen = self.client.call("dispatch_initial_screen", {})
-        except Exception as exc:
-            initial_screen = {"status": f"unavailable:{type(exc).__name__}"}
+        # P14-0: one lane, one registry entry.  The tick used to be eleven
+        # near-identical try/except blocks, and adding a lane meant adding a
+        # twelfth here and remembering that the order matters -- the filings
+        # index goes before web search because they share a fetch slot.  The
+        # order is now a number on the LaneSpec, which is at least somewhere a
+        # person can read it.  The semantics are unchanged: one lane's failure
+        # is that lane's, named by exception type, and never the tick's.
+        #
+        # The lane results are spread last into the summary below, so a lane
+        # driver key naming one of this tick's own keys would overwrite it
+        # silently.  RESERVED_DRIVER_KEYS is that list and the registry
+        # refuses a lane that claims one; this asserts the two have not drifted
+        # apart, because the failure they prevent is invisible.
+        assert RESERVED_DRIVER_KEYS == _RESERVED_SUMMARY_KEYS
+        lanes: dict[str, Any] = {}
+        for spec in tick_lanes():
+            try:
+                lanes[spec.driver_key] = self.client.call(spec.operation, {})
+            except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
+                lanes[spec.driver_key] = {"status": f"unavailable:{type(exc).__name__}"}
         listing = self.client.call("bounded_planner_active_loops", {})
         loops = listing["loops"]
         executed: list[dict[str, Any]] = []
@@ -484,15 +452,7 @@ class BoundedPlannerDriver:
             "skipped": skipped,
             "mission_sec_dispatch": mission_dispatch,
             "forecast_reconciliation": forecast_reconciliation,
-            "mission_source_discovery": mission_source_discovery,
-            "document_extraction": document_extraction,
-            "mission_stage": mission_stage,
-            "claim_review": claim_review,
-            "initial_screen": initial_screen,
-            "research_plan": research_plan,
-            "mission_sec_quarters": sec_quarters,
-            "mission_statements": mission_statements,
-            "company_model_spec": company_model_spec,
+            **lanes,
         }
 
 

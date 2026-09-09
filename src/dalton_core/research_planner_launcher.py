@@ -24,9 +24,10 @@ import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from .child_tickets import adopt_finished_child
+from .lane_registry import LaneSpec, register_lane
 from .launch_drain import _pid_alive
 from .store import canonical_json
 
@@ -283,12 +284,89 @@ class ResearchPlannerCoordinator:
         return {**result, "status": "launched", "ticket_ref": ticket["id"]}
 
 
+# P13o: the planner lane exists only when its configuration does, which is
+# only when the owner named a planner model at install time. Its model is far
+# more expensive than the extraction model, so it is opt-in.
+PLANNER_MODEL_CONFIG = "research-planner-model-config.json"
+LAUNCHER_KWARG = "research_planner_launcher"
+
+
+def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Controller tick (P13o).
+
+    One planner child at a time; the coordinator holds when the state has not
+    moved, and the child itself refuses to pay twice for the same world.
+    """
+
+    launcher = server.lane_launcher(LAUNCHER_KWARG)
+    if launcher is None:
+        return {"status": "unconfigured",
+                "reason": "no research planner lane on this writer"}
+    coordinator = server.lane_state.get(LAUNCHER_KWARG)
+    if coordinator is None:
+        coordinator = ResearchPlannerCoordinator(
+            store=server.store, launcher=launcher,
+        )
+        server.lane_state[LAUNCHER_KWARG] = coordinator
+    return coordinator.dispatch_once()
+
+
+def add_arguments(parser: Any) -> None:
+    parser.add_argument(
+        "--research-planner-model-config", type=Path, default=None,
+        help="Planner model configuration written by research_planner_setup. Omit and "
+             "the planner lane is absent: it decides what the research works on next, "
+             "and its model is far more expensive than the extraction model.",
+    )
+
+
+def build_launcher(args: Any) -> Any | None:
+    if args.research_planner_model_config is None:
+        return None
+    return ResearchPlannerLauncher(
+        state_dir=Path(args.db).expanduser().resolve().parent,
+        model_config_path=args.research_planner_model_config,
+        scheduler_db=args.scheduler,
+    )
+
+
+def argv_fragment(context: Any) -> list[str]:
+    # The planner rides on the writer's extraction wiring; without an
+    # extraction model configuration the writer has no lane host to hang it on.
+    if context.extraction_model_config_path is None:
+        return []
+    config = context.state / PLANNER_MODEL_CONFIG
+    if not config.is_file():
+        return []
+    return ["--research-planner-model-config", str(config)]
+
+
+LANE = register_lane(LaneSpec(
+    operation="dispatch_research_plan",
+    order=100,
+    driver_key="research_plan",
+    handler=dispatch,
+    init_kwarg=LAUNCHER_KWARG,
+    argparse=add_arguments,
+    launcher_factory=build_launcher,
+    argv_fragment=argv_fragment,
+    note="P13o: decides what the research works on next.",
+))
+
+
 __all__ = [
     "IDLE_HOLD",
+    "LANE",
+    "LAUNCHER_KWARG",
+    "PLANNER_MODEL_CONFIG",
     "ResearchPlannerCoordinator",
     "PlannerLaunchConflict",
     "PlannerLaunchError",
     "PlannerLaunchRejected",
     "ResearchPlannerLauncher",
     "TICKET_PREFIX",
+    "add_arguments",
+    "argv_fragment",
+    "build_launcher",
+    "dispatch",
 ]

@@ -19,9 +19,10 @@ one for the same judgement.
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from .company_model_cli import choose_company
+from .lane_registry import LaneSpec, register_lane
 from .lane_child_launcher import (
     LaneChildConflict,
     LaneChildRejected,
@@ -149,4 +150,96 @@ class MissionModelSpecLaneCoordinator:
         }
 
 
-__all__ = ["MAX_FAILURE_DETAIL_CHARS", "MissionModelSpecLaneCoordinator"]
+# P13ad installed this for the Initial Screen's own drafting model; P13am
+# runs the company model specification lane on it too, for the same reason it
+# exists -- both are judgement, not extraction. Deciding that IBM is a mix
+# story and Accenture is a headcount business is exactly where a weaker model
+# returns something plausible and generic, which looks like a decision and is
+# worse than none.
+MODEL_SPEC_MODEL_CONFIG = "initial-screen-model-config.json"
+LAUNCHER_KWARG = "model_spec_launcher"
+
+
+def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Controller tick (P13am).
+
+    One company's model specification at a time.  The lane has no queue: what
+    needs deciding is derived from the ledger every tick, so its resting state
+    is silence and there is nothing to leave stuck.
+    """
+
+    launcher = server.lane_launcher(LAUNCHER_KWARG)
+    if launcher is None:
+        return {"status": "unconfigured",
+                "reason": "no company model lane on this writer"}
+    coordinator = server.lane_state.get(LAUNCHER_KWARG)
+    if coordinator is None:
+        def mission() -> Any:
+            pointer = server.store.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer "
+                "ORDER BY mission_ref LIMIT 1"
+            ).fetchone()
+            return (None if pointer is None
+                    else server.coverage_mission.mission(pointer["mission_version_id"]))
+
+        coordinator = MissionModelSpecLaneCoordinator(
+            missions=server.coverage_mission,
+            launcher=launcher,
+            mission=mission,
+        )
+        server.lane_state[LAUNCHER_KWARG] = coordinator
+    return coordinator.dispatch_once()
+
+
+def add_arguments(parser: Any) -> None:
+    # Needs a model, because the judgement is the whole product; without one
+    # the child answers "gated" and nothing is written.
+    parser.add_argument("--model-spec-model-config")
+
+
+def build_launcher(args: Any) -> Any | None:
+    if args.model_spec_model_config is None:
+        return None
+    from pathlib import Path as _Path
+
+    from .company_model_launcher import CompanyModelSpecLauncher
+
+    return CompanyModelSpecLauncher(
+        state_dir=_Path(args.db).expanduser().resolve().parent,
+        model_config_path=args.model_spec_model_config,
+        scheduler_db=args.scheduler,
+    )
+
+
+def argv_fragment(context: Any) -> list[str]:
+    config = context.state / MODEL_SPEC_MODEL_CONFIG
+    if not config.is_file():
+        return []
+    return ["--model-spec-model-config", str(config)]
+
+
+LANE = register_lane(LaneSpec(
+    operation="dispatch_company_model_spec",
+    order=90,
+    driver_key="company_model_spec",
+    handler=dispatch,
+    init_kwarg=LAUNCHER_KWARG,
+    argparse=add_arguments,
+    launcher_factory=build_launcher,
+    argv_fragment=argv_fragment,
+    note="P13am: how this company should be modelled -- what drives revenue, "
+         "how costs behave, which statements it actually needs forecast.",
+))
+
+
+__all__ = [
+    "LANE",
+    "LAUNCHER_KWARG",
+    "MAX_FAILURE_DETAIL_CHARS",
+    "MODEL_SPEC_MODEL_CONFIG",
+    "MissionModelSpecLaneCoordinator",
+    "add_arguments",
+    "argv_fragment",
+    "build_launcher",
+    "dispatch",
+]

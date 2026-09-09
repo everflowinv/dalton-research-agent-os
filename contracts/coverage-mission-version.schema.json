@@ -69,13 +69,13 @@
         "may_write": {
           "type": "array",
           "uniqueItems": true,
-          "items": {"type": "string", "enum": ["evidence", "claim", "forecast_line", "model_run", "research_question", "observation", "stage_record"]}
+          "items": {"type": "string", "enum": ["evidence", "claim", "claim_challenge", "deliverable", "forecast_line", "model_run", "research_question", "observation", "stage_record", "forecast_reconciliation", "source_discovery", "market_price", "consensus_estimate", "valuation", "market_event", "dossier", "debate_map", "forecast_revision_proposal", "thesis_revision_candidate", "research_task", "conviction_call"]}
         },
         "human_checkpoints": {
           "type": "array",
           "minItems": 4,
           "uniqueItems": true,
-          "items": {"type": "string", "enum": ["deep_insight_gate", "investment_memo", "thesis_admission", "thesis_revision", "forecast_overturn", "scope_expansion", "budget_expansion"]},
+          "items": {"type": "string", "enum": ["deep_insight_gate", "investment_memo", "thesis_admission", "thesis_revision", "forecast_overturn", "scope_expansion", "budget_expansion", "thesis_revision_candidate", "conviction_call", "gate_reopen"]},
           "allOf": [
             {"contains": {"const": "thesis_admission"}},
             {"contains": {"const": "thesis_revision"}},
