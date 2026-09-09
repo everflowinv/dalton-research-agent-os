@@ -4,24 +4,57 @@
 
 ## 下一步（按顺序）
 
-0. **ACN 还有 2 份 filing 卡在 3 次上限**（`0001467373-25-000169` / `-25-000222`）。今天撤回的是能归因到三次
+1. **CTSH 的 Initial Screen 是 09-07 写的，早于今天的财报数字**（只带 5 个 figure，其余四家 14–21 个）。
+   它已发布，所以 launcher 报 "nothing to draft"，不会自己重写。要么等它的 earnings_calls 补齐触发重写，
+   要么想清楚"底座变了就该重出交付物"该由什么来判断——目前没有任何东西在判断这件事。
+2. **ACN 还有 2 份 filing 卡在 3 次上限**（`0001467373-25-000169` / `-25-000222`）。今天撤回的是能归因到三次
    基础设施故障的 20 次尝试；这两份的失败是 plan 执行层的（带 result envelope），归因不到那三次，所以没有撤回。
    要单独查它们的 result envelope 说了什么，再决定是不是也该豁免。
-1. **模型目录仍未对齐（与大脑无关，但会误导）。** `catalog_in_sync: false`：Dalton 有 5 个 broker 已不提供的静态
+3. **模型目录仍未对齐（与大脑无关，但会误导）。** `catalog_in_sync: false`：Dalton 有 5 个 broker 已不提供的静态
    profile（`gemini-3-7-flash` / `gemini-flash-latest` / `glm-5-2` / `gpt-5-5` / `openrouter-ox-alpha`），
    broker 有 4 个 Dalton 没有静态 profile 的。P13l 让部署会补齐"缺的"，但不会清理"多的"——删旧 profile 会改动
    历史版本链，值得单独做。
-2. **把已核验的数字接进 Ledger。** `CandidateStagingStore.stage` 明确拒绝 cited-original 的定量候选
+4. **把已核验的数字接进 Ledger。** `CandidateStagingStore.stage` 明确拒绝 cited-original 的定量候选
    （"a cited original is not a numeric authority"）。这是 ADR-0003 一脉的有意规则，要改得走 ADR + 重签策略。
    在那之前数字停在 `coverage_mission_document_figures`，驾驶舱直接读这张表。
-3. **接 Guidepoint。** 模板在，运行 lane 与两条 owner 签名的治理记录都还没有。
-4. **修 discovery 的公司归属（检索侧）。** 自由文本检索把别家公司的电话会归到了 EPAM 名下；抽取侧现在**三条
+5. **接 Guidepoint。** 模板在，运行 lane 与两条 owner 签名的治理记录都还没有。
+6. **修 discovery 的公司归属（检索侧）。** 自由文本检索把别家公司的电话会归到了 EPAM 名下；抽取侧现在**三条
    pass 都堵住了**（P13c 数字、P13i 定性、P13y 指标发现），但检索仍会把别家公司的文档放进队列，白花获取预算。
    owner 的判断是不该按 `company` 过滤——行业报告本来就没有公司标签；所以这一条是"怎么让检索更准"的开放问题，
    不是"加个过滤器"。
-5. **contested 指标要能在驾驶舱上看见。** P13y 之后，单位打架的指标不再成立需求，但也不再报错——
+7. **contested 指标要能在驾驶舱上看见。** P13y 之后，单位打架的指标不再成立需求，但也不再报错——
    `metric_discovery.contested()` 能说出是谁在哪个单位上分歧（live 5 条，都是 percent/ratio），页面还没读它。
-6. **AlphaEngine 滚动 24h 用量贴着上限**（131/130），是 CTSH 缺电话会的直接约束。
+8. **AlphaEngine 滚动 24h 用量贴着上限**（131/130），是 CTSH 缺电话会的直接约束。
+
+## 2026-09-09（下半）：Initial Screen 第一次真的写出来了
+
+**结果**：五家公司全部产出并发布 Initial Screen，gate 全过（source_base / number_provenance /
+key_driver / street_and_risk）。EPAM 21 个 figure、ACN 18、IBM 16、DXC 14。一份约 0.013 美元。
+这是这个任务的**交付物本身**，此前从未产出过。
+
+SEC 数字接通之后，挡在交付物前面的是另外三个 bug：
+
+1. **P13aa 同一个问题问第二次算冲突，所以八节一节都写不出来。** WorkOrder 的 id 按（用途、request_id、
+   任务版本、prompt）内容寻址，**故意不含时钟**——同一个问题就该是同一份工作。但 scheduler 哈希的是整个
+   wire，而 wire 里带着一个 wall-clock `created_at`：同一个幂等键、不同的哈希，这正是 scheduler 对"冲突"的
+   定义。报错说"ask again"，而再问一次只会再生成一个新时间戳，**永远不可能好**。自 09-07 起每一节每一轮都死在这里。
+   改法：时间戳从 id 所依据的同一个东西（任务版本）派生，身份和自己一致。
+   **只改定义还不够**：旧定义写下的键仍然存着旧哈希，改正后的请求会和自己的历史撞车。所以身份定义也**带版本**了
+   （和 SEC template registry 一样的做法）——定义变了就是另一个身份。
+2. **P13ab 打开 store 本身可能直接失败，而一个"偶发失败"的测试一直在说这件事。** `test_connector` 的并发配额
+   测试今天挂了两次、单独跑又过，看着像时序噪音。把它的失败信息弄清楚（barrier 的超时是为了制造竞争、不是为了
+   限制测试时长；再断言两个线程真的跑完了）之后，露出的是真实原因：worker 死在 `DaltonStore.__init__` 的
+   `database is locked`。**`busy_timeout` 管不到 `PRAGMA journal_mode`**——另一个连接持锁时 SQLite 直接拒绝，
+   不会调用 busy handler。代码正好依赖了相反的假设，注释还写得很肯定，并且引用了那个一直在失败的测试当证据。
+   这不只是测试问题：writer 一直握着 core.sqlite，每个 lane 子进程都要打开它。
+3. **P13ac 数字的长度上限比系统自己写出来的数字还窄。** 一个 figure 的 text 就是 Claim 的
+   `normalized_statement`，而 Claim 契约对它**没有上限**；SEC lane 写出来是 205 字符，这边卡 200，于是 EPAM
+   每一个数字都被拒，交付物永远发不出去——而且 Claim 是 append-only，事后没法改短，只有消费侧能动。
+   **截断比放宽更糟**：`unsourced_numbers` 是从这段 text 里把数字读回去的，而这些句子把数字放在最后，截断会
+   把数字弄丢，然后把引用它的正文报成"无出处"——错误答案比报错更坏。
+
+**今天第二次出现同一个形状**：两个必须一致的东西是分开算的（id 不含时钟、哈希含；生产端无上限、消费端有上限）。
+改法同样是让它们**由同一处派生**，而不是记得同时改两处。
 
 ## 2026-09-09：SEC 财报抓取停了一整天，五个 bug 叠在一起
 
