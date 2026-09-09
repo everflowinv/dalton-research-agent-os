@@ -1,0 +1,572 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "connector_ref": "connector:yahoo-finance",
+  "content_hash": "c3f3b5d055de82d156bed739f86a0b47035c6dc7b9dca04eb50a61da972de020",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "2673180d6ec33e34be9d73b1db2db0f4d48f991d7ae6706450216349d5010ec7",
+  "fixture_manifest_ref": "connector-fixture-manifest:yfinance:0.1",
+  "id": "connector-profile-template:yfinance:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "fa26684b462dc6dca19ba4ec118a9201959e1547af6c36a4b23d1d9570738013",
+      "input_schema_ref": "schema:connector-inventory:yfinance:daily_prices:input:0.1",
+      "operation": "daily_prices",
+      "output_schema_hash": "44e047ac1c4aa2970901cf391be7573a00a8bd1e7a24d5ca15b0ba1fbe8fc10d",
+      "output_schema_ref": "schema:connector-inventory:yfinance:daily_prices:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "daily_prices"
+    },
+    {
+      "completeness_ceiling": "ranked",
+      "input_schema_hash": "0e56586f0263ce92788a03e4d8154582d973fa2fe41026a9900e3b5e67de620c",
+      "input_schema_ref": "schema:connector-inventory:yfinance:analyst_estimates:input:0.1",
+      "operation": "analyst_estimates",
+      "output_schema_hash": "e8a4d9a877d4a35400fd15546eb9019d349b46c4b45d4024c824b67dd471802c",
+      "output_schema_ref": "schema:connector-inventory:yfinance:analyst_estimates:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "analyst_estimates"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "recorded_public_reference_shadow"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "transport:public-http:0.1"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:arbitrary-attachment-url"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "start": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "ticker": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticker",
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "fa26684b462dc6dca19ba4ec118a9201959e1547af6c36a4b23d1d9570738013",
+      "schema_ref": "schema:connector-inventory:yfinance:daily_prices:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "auto_adjust": {
+            "enum": [
+              false
+            ],
+            "type": "boolean"
+          },
+          "bars": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "adj_close": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": "string"
+                },
+                "close": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": "string"
+                },
+                "date": {
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                  "type": "string"
+                },
+                "high": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": "string"
+                },
+                "low": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": "string"
+                },
+                "open": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": "string"
+                },
+                "volume": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "adj_close",
+                "volume"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "currency": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observations": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "as_of": {
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                  "type": "string"
+                },
+                "observation": {
+                  "enum": [
+                    "shares_outstanding",
+                    "market_cap"
+                  ],
+                  "type": "string"
+                },
+                "unit": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "value": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "observation",
+                "as_of",
+                "value",
+                "unit"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "requested_end": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "requested_start": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "ticker": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "ticker",
+          "currency",
+          "requested_start",
+          "requested_end",
+          "auto_adjust",
+          "bars",
+          "observations",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "44e047ac1c4aa2970901cf391be7573a00a8bd1e7a24d5ca15b0ba1fbe8fc10d",
+      "schema_ref": "schema:connector-inventory:yfinance:daily_prices:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "ticker": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticker"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "0e56586f0263ce92788a03e4d8154582d973fa2fe41026a9900e3b5e67de620c",
+      "schema_ref": "schema:connector-inventory:yfinance:analyst_estimates:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "eps_estimates": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "avg": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "currency": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "growth": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "high": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "low": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "number_of_analysts": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "period": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "year_ago": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "period",
+                "avg",
+                "low",
+                "high",
+                "year_ago",
+                "growth",
+                "number_of_analysts",
+                "currency"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "price_target": {
+            "additionalProperties": false,
+            "properties": {
+              "current": {
+                "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "high": {
+                "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "low": {
+                "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "mean": {
+                "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "median": {
+                "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "number_of_analysts": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "current",
+              "high",
+              "low",
+              "mean",
+              "median",
+              "number_of_analysts"
+            ],
+            "type": "object"
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "recommendations": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "buy": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "hold": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "period": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "sell": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "strong_buy": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "strong_sell": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "period",
+                "strong_buy",
+                "buy",
+                "hold",
+                "sell",
+                "strong_sell"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "revenue_estimates": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "avg": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "currency": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "growth": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "high": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "low": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "number_of_analysts": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "period": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "year_ago": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "period",
+                "avg",
+                "low",
+                "high",
+                "year_ago",
+                "growth",
+                "number_of_analysts",
+                "currency"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "ticker": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "ticker",
+          "as_of",
+          "price_target",
+          "recommendations",
+          "eps_estimates",
+          "revenue_estimates",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "e8a4d9a877d4a35400fd15546eb9019d349b46c4b45d4024c824b67dd471802c",
+      "schema_ref": "schema:connector-inventory:yfinance:analyst_estimates:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:yahoo-finance",
+    "source_type": "market_data",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [
+      "query1.finance.yahoo.com",
+      "query2.finance.yahoo.com"
+    ],
+    "host_policy": "literal_allowlist",
+    "kind": "public_https",
+    "target_hash": "72bf94f540b86832f2c3984dcebd83d30cc2a1e0b212a692e4a96fa12a3da920",
+    "target_ref": "transport:public-http:0.1"
+  }
+}
