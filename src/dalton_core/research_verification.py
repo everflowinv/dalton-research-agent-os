@@ -73,6 +73,65 @@ TRANSCRIPT_CORE_AUTHORITY_MODE = "transcript_core_authority"
 # citable original is the verified rendering of its exact bytes.
 PUBLIC_WEB_CORE_AUTHORITY_MODE = "public_web_core_authority"
 CITED_CORE_AUTHORITY_MODES = frozenset({TRANSCRIPT_CORE_AUTHORITY_MODE, PUBLIC_WEB_CORE_AUTHORITY_MODE})
+# ADR-0007: whether a cited original may carry a number into the Ledger.
+#
+# ``reject_cited_quantitative`` is the rule as it has stood since ADR-0003:
+# a cited original is not a numeric authority, full stop, because the only way
+# to get a number out of a document's text was to build a text extractor and
+# that was the option the ADR refused.
+#
+# ``verified_figure`` is the rule ADR-0007 accepted, and it does not build a
+# text extractor either.  It admits a number whose authority is a
+# *already-verified figure row* -- one whose digits and as-reported label were
+# found in the exact quote it cites, checked before the row was written, and
+# re-checkable from the stored quote and hashes by anyone.  Admission re-runs
+# that check against the row read back out of Core; the candidate's own copy of
+# the figure is compared, never trusted.
+#
+# The default stays the old rule.  Changing what the Ledger will accept as a
+# number is a governance decision, and this flag exists so the integrator can
+# flip it deliberately -- with the policy re-signed -- rather than have it
+# arrive with a merge.
+FIGURE_ADMISSION_REJECT = "reject_cited_quantitative"
+FIGURE_ADMISSION_VERIFIED_FIGURE = "verified_figure"
+FIGURE_ADMISSION_POLICIES = frozenset({
+    FIGURE_ADMISSION_REJECT, FIGURE_ADMISSION_VERIFIED_FIGURE,
+})
+FIGURE_ADMISSION_DEFAULT = FIGURE_ADMISSION_REJECT
+
+
+def figure_candidate_numerics(figure: Mapping[str, Any]) -> dict[str, Any]:
+    """The numeric fields a CandidateClaim takes from a verified figure row.
+
+    One mapping, in one place, because two of the four fields need one: a
+    figure with no scale word is scale ``one`` (the CandidateClaim contract has
+    no null scale for a number), and the value is canonicalised the way every
+    other decimal in this module is.  Everything else is copied.
+    """
+
+    scale = figure.get("scale")
+    return {
+        "value": _decimal(_canonical_decimal_text(figure["value"]), "figure.value"),
+        "unit": figure["unit"],
+        "currency": figure.get("currency"),
+        "scale": scale if scale else "one",
+        "period": figure["period"],
+    }
+
+
+def _canonical_decimal_text(value: Any) -> str:
+    """``"5.60"`` and ``"5.6"`` are the same number; the contract wants one."""
+
+    if not isinstance(value, str):
+        raise ResearchVerificationError("figure value must be text")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise ResearchVerificationError("figure value is not a decimal") from exc
+    formatted = format(parsed, "f")
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+    return "0" if formatted in {"", "-0"} else formatted
 _AUTHORITY_PROVENANCE_MODES = frozenset({"connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE, PUBLIC_WEB_CORE_AUTHORITY_MODE})
 PUBLIC_WEB_SOURCE_VERIFIER_REF = "verifier:public-web-core-authority-source:0.1"
 TRANSCRIPT_SOURCE_VERIFIER_REF = "verifier:transcript-core-authority-source:0.1"
@@ -1406,6 +1465,9 @@ class CandidateStagingStore:
         numeric_verification: Mapping[str, Any] | None = None,
         verification_mode: str = "recorded_fixture",
         authority_resolver: Any | None = None,
+        figure_admission_policy: str = FIGURE_ADMISSION_DEFAULT,
+        verified_figure: Mapping[str, Any] | None = None,
+        figure_resolver: Any | None = None,
     ) -> dict[str, Any]:
         """Stage one verified candidate pair.
 
@@ -1429,8 +1491,18 @@ class CandidateStagingStore:
         # same correction authority is cited evidence too.
         transcript_evidence = evidence_wire["source_type"] in (TRANSCRIPT_EVIDENCE_SOURCE_TYPE, "public_web")
 
+        if figure_admission_policy not in FIGURE_ADMISSION_POLICIES:
+            raise VerificationRejected("figure_admission_policy is not a closed value")
+        if verified_figure is not None and figure_admission_policy != FIGURE_ADMISSION_VERIFIED_FIGURE:
+            raise VerificationRejected(
+                "a verified figure was supplied but this Core still runs the "
+                f"{FIGURE_ADMISSION_REJECT} rule; ADR-0007 has to be enabled "
+                "deliberately"
+            )
+
         spec_wire: dict[str, Any] | None
         numeric_wire: dict[str, Any] | None
+        figure_wire: dict[str, Any] | None = None
         if qualitative:
             if numeric_spec is not None or numeric_verification is not None:
                 raise VerificationRejected(
@@ -1443,6 +1515,23 @@ class CandidateStagingStore:
                 )
             spec_wire = None
             numeric_wire = None
+        elif verified_figure is not None:
+            # ADR-0007.  The figure row is the numeric authority, so there is
+            # no JSON-pointer spec to recompute and asking for one would be
+            # asking for the text extractor ADR-0003 refused to build.
+            if numeric_spec is not None or numeric_verification is not None:
+                raise VerificationRejected(
+                    "a figure-backed quantitative candidate carries no numeric "
+                    "spec; the figure row is its numeric authority"
+                )
+            if figure_resolver is None or not callable(
+                getattr(figure_resolver, "verify_figure", None)
+            ):
+                raise VerificationRejected(
+                    "figure admission requires a Core figure resolver"
+                )
+            spec_wire = None
+            numeric_wire = None
         else:
             if numeric_spec is None or numeric_verification is None:
                 raise VerificationRejected(
@@ -1452,7 +1541,7 @@ class CandidateStagingStore:
             numeric_wire = self._require_clean_pass(numeric_verification, "numeric")
 
         if verification_mode in CITED_CORE_AUTHORITY_MODES:
-            if not qualitative:
+            if not qualitative and verified_figure is None:
                 raise VerificationRejected(
                     f"{verification_mode} staging admits qualitative candidates only; "
                     "a cited original is not a numeric authority"
@@ -1501,6 +1590,25 @@ class CandidateStagingStore:
             raise ResearchVerificationConflict(
                 "source verification was not produced by the deterministic verifier"
             )
+        if verified_figure is not None:
+            # Re-verified here rather than trusted: the resolver reads the row
+            # back out of Core by id, recomputes its content hash from its own
+            # columns, refuses a retracted one, and re-runs the digits-and-label
+            # check against the quote the row stores.  Only then is the caller's
+            # copy compared, byte for byte.
+            figure_wire, figure_bundle = figure_resolver.verify_figure(verified_figure)
+            if canonical_json(figure_wire) != canonical_json(dict(verified_figure)):
+                raise ResearchVerificationConflict(
+                    "the supplied figure is not the figure Core holds"
+                )
+            numeric_wire = self._require_clean_pass(figure_bundle, "numeric")
+            if (
+                numeric_wire["subject_ref"] != figure_wire["figure_id"]
+                or numeric_wire["subject_hash"] != figure_wire["content_hash"]
+            ):
+                raise ResearchVerificationConflict(
+                    "figure numeric verification binds another figure"
+                )
         if spec_wire is not None and numeric_wire is not None:
             recomputed_numeric = verify_numeric_spec(
                 spec_wire, checkpoint_ref=recomputed_source["checkpoint_ref"],
@@ -1576,7 +1684,27 @@ class CandidateStagingStore:
             claim_wire["source_verification_ref"] == source_wire["id"],
             claim_wire["source_verification_hash"] == source_wire["content_hash"],
         ]
-        if spec_wire is not None and numeric_wire is not None:
+        if figure_wire is not None and numeric_wire is not None:
+            # ADR-0007: the figure row stands where the NumericVerificationSpec
+            # stands for a connector candidate, so the claim's numeric refs
+            # point at it and every numeric field has to equal the row's.  The
+            # value is compared as a number rather than as text: "5.60" and
+            # "5.6" are the same figure and only one of them is canonical.
+            expected_numerics = figure_candidate_numerics(figure_wire)
+            claim_checks.extend((
+                claim_wire["numeric_spec_ref"] == figure_wire["figure_id"],
+                claim_wire["numeric_spec_hash"] == figure_wire["content_hash"],
+                claim_wire["numeric_verification_ref"] == numeric_wire["id"],
+                claim_wire["numeric_verification_hash"] == numeric_wire["content_hash"],
+                Decimal(claim_wire["value"]) == Decimal(expected_numerics["value"]),
+                claim_wire["unit"] == expected_numerics["unit"],
+                claim_wire["currency"] == expected_numerics["currency"],
+                claim_wire["scale"] == expected_numerics["scale"],
+                canonical_json(claim_wire["period"])
+                == canonical_json(expected_numerics["period"]),
+                claim_wire["subject_ref"] == figure_wire["company_ref"],
+            ))
+        elif spec_wire is not None and numeric_wire is not None:
             claim_checks.extend((
                 claim_wire["numeric_spec_ref"] == spec_wire["id"],
                 claim_wire["numeric_spec_hash"] == spec_wire["content_hash"],
@@ -1600,14 +1728,21 @@ class CandidateStagingStore:
         if not all(claim_checks):
             raise ResearchVerificationConflict("candidate claim drifted from verified inputs")
 
-        request_hash = content_hash({
+        request_identity = {
             "material_hash": material_wire["content_hash"],
             "numeric_spec_hash": None if spec_wire is None else spec_wire["content_hash"],
             "source_verification_hash": source_wire["content_hash"],
             "numeric_verification_hash": None if numeric_wire is None else numeric_wire["content_hash"],
             "evidence_hash": evidence_wire["content_hash"],
             "claim_hash": claim_wire["content_hash"],
-        })
+        }
+        if figure_wire is not None:
+            # Added only on the figure path.  Every idempotency key already
+            # written was written under the six-key definition, and a request
+            # hash that changed shape for existing rows would turn every one of
+            # them into a permanent conflict.
+            request_identity["figure_hash"] = figure_wire["content_hash"]
+        request_hash = content_hash(request_identity)
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             prior = self.connection.execute(
@@ -1685,6 +1820,9 @@ class CandidateStagingStore:
 __all__ = [
     "ResearchVerificationError", "ResearchVerificationConflict", "VerificationRejected",
     "InjectedStagingCrash", "CandidateStagingStore",
+    "FIGURE_ADMISSION_DEFAULT", "FIGURE_ADMISSION_POLICIES",
+    "FIGURE_ADMISSION_REJECT", "FIGURE_ADMISSION_VERIFIED_FIGURE",
+    "figure_candidate_numerics",
     "TRANSCRIPT_CORE_AUTHORITY_MODE", "TRANSCRIPT_SOURCE_VERIFIER_REF",
     "TRANSCRIPT_SOURCE_VERIFIER_HASH",
     "build_source_verification_material", "build_authority_source_material",
