@@ -100,6 +100,16 @@ for guidepoint_kind in guidepoint-search-library guidepoint-get-transcript; do
     chmod 600 "$guidepoint_file"
   fi
 done
+# P13ag: SEC financial statements read through edgartools -- the same SEC as
+# the filings lane, read as statements rather than one XBRL concept at a time,
+# so a model can have line items at all. It does not replace reading filings:
+# whatever the parser cannot reach still comes from the original text.
+# Credential-free public HTTPS to two named SEC hosts. Seed once as *proposed*.
+sec_financials_file="$governance_dir/sec-financial-statements-v1.json"
+if [[ ! -f "$sec_financials_file" && -f "$repo_root/deploy/connector-governance/sec-financial-statements-v1.json" ]]; then
+  cp "$repo_root/deploy/connector-governance/sec-financial-statements-v1.json" "$sec_financials_file"
+  chmod 600 "$sec_financials_file"
+fi
 # P9d-1: AlphaEngine search_library is a separate governed capability.  Seed
 # the committed *proposed* record once; the owner approves in place with
 # dalton-connector-governance approve.  The discovery plan is a hash-bound

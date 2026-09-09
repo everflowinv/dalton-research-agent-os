@@ -1,0 +1,273 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "connector_ref": "connector:sec-financial-statements",
+  "content_hash": "b98dd76ceeb9d7d0074941435e53d423701424ec986387668c7744f94b5d3256",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "91045327aba2b9bda50d9589efe48b1d1c65102c1b32594c427855c981394638",
+  "fixture_manifest_ref": "connector-fixture-manifest:sec-financials:0.1",
+  "id": "connector-profile-template:sec-financials:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "e9ac765d737423888f30f091f4d4eff21ede8316fc3edd137c0fbd5b1321c623",
+      "input_schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:input:0.1",
+      "operation": "get_financial_statements",
+      "output_schema_hash": "152cee0cd267fab246d989b5ed28b0314be99941cf9be11c5f4ebc17fdc33a89",
+      "output_schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_financial_statements"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "recorded_public_reference_shadow"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "transport:public-http:0.1"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:arbitrary-attachment-url"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "cik": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "form": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "statement": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "ticker": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "cik",
+          "form"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "e9ac765d737423888f30f091f4d4eff21ede8316fc3edd137c0fbd5b1321c623",
+      "schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "cik": {
+            "pattern": "^[0-9]{10}$",
+            "type": "string"
+          },
+          "entity_name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "filings": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "accession": {
+                  "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+                  "type": "string"
+                },
+                "filed": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "form": {
+                  "enum": [
+                    "10-Q",
+                    "10-K"
+                  ],
+                  "type": "string"
+                },
+                "lines": {
+                  "items": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "balance": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "concept": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "dimension_axis": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "dimension_member": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "is_breakdown": {
+                        "type": "boolean"
+                      },
+                      "label": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "level": {
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "parent_concept": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "period_end": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "statement": {
+                        "enum": [
+                          "income",
+                          "balance",
+                          "cash"
+                        ],
+                        "type": "string"
+                      },
+                      "unit": {
+                        "minLength": 1,
+                        "type": "string"
+                      },
+                      "value": {
+                        "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "statement",
+                      "concept",
+                      "label",
+                      "level",
+                      "parent_concept",
+                      "is_breakdown",
+                      "dimension_axis",
+                      "dimension_member",
+                      "period_end",
+                      "value",
+                      "unit",
+                      "balance"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "report_date": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "accession",
+                "form",
+                "filed",
+                "report_date",
+                "lines"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "cik",
+          "entity_name",
+          "filings",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "152cee0cd267fab246d989b5ed28b0314be99941cf9be11c5f4ebc17fdc33a89",
+      "schema_ref": "schema:connector-inventory:sec-financials:get_financial_statements:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:sec-edgar",
+    "source_type": "official_filing",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [
+      "www.sec.gov",
+      "data.sec.gov"
+    ],
+    "host_policy": "literal_allowlist",
+    "kind": "public_https",
+    "target_hash": "38fe9a843e2b843616797db5122885d56c5684a8c22ffebaee86932f69268aeb",
+    "target_ref": "transport:public-http:0.1"
+  }
+}

@@ -58,6 +58,12 @@ GUIDEPOINT_SEARCH_CAPABILITY_ID = (
 GUIDEPOINT_TRANSCRIPT_CAPABILITY_ID = (
     "capability:dalton:connector:guidepoint-get-transcript"
 )
+# P13ag: SEC financial statements, the same SEC read as statements rather than
+# one concept at a time. Its own connector, schema and approval; shared source.
+SEC_FINANCIALS_KIND = "sec-financial-statements"
+SEC_FINANCIALS_CAPABILITY_ID = (
+    "capability:dalton:connector:sec-financial-statements"
+)
 
 
 class ConnectorGovernanceError(RuntimeError):
@@ -147,6 +153,30 @@ def _guidepoint_transcript_schema_hash() -> str:
     from .guidepoint_core import TRANSCRIPT_OPERATION, guidepoint_schema_hash
 
     return guidepoint_schema_hash(TRANSCRIPT_OPERATION)
+
+
+def _sec_financials_source_hash() -> str:
+    from .sec_financials_core import sec_financials_source_hash
+
+    return sec_financials_source_hash()
+
+
+def _sec_financials_schema_hash() -> str:
+    from .sec_financials_core import sec_financials_schema_hash
+
+    return sec_financials_schema_hash()
+
+
+def _sec_financials_permissions() -> dict[str, Any]:
+    from .sec_financials_core import sec_financials_permissions
+
+    return copy.deepcopy(sec_financials_permissions())
+
+
+def _sec_financials_fixture_hash() -> str:
+    from .sec_financials_core import sec_financials_fixture_hash
+
+    return sec_financials_fixture_hash()
 
 
 def _sec_identity() -> dict[str, Any]:
@@ -312,6 +342,14 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         permissions=_guidepoint_permissions,
         fixture_hash=_guidepoint_fixture_hash,
     ),
+    SEC_FINANCIALS_KIND: _KindSpec(
+        capability_id=SEC_FINANCIALS_CAPABILITY_ID,
+        template_key="sec-financials",
+        source_hash=_sec_financials_source_hash,
+        schema_hash=_sec_financials_schema_hash,
+        permissions=_sec_financials_permissions,
+        fixture_hash=_sec_financials_fixture_hash,
+    ),
 }
 # Public aliases make the registry discoverable without exposing mutable
 # implementation details of a spec.  The old name is useful to callers that
@@ -424,6 +462,17 @@ def build_governance_record(
         from .public_web_core_fetch import build_web_fetch_governance_record
 
         return build_web_fetch_governance_record(
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind == SEC_FINANCIALS_KIND:
+        from .sec_financials_core import build_sec_financials_governance_record
+
+        return build_sec_financials_governance_record(
             approved_by=approved_by,
             status=status,
             effective_from=effective_from,

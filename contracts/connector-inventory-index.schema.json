@@ -10,8 +10,8 @@
     "created_at": {"type": "string", "format": "date-time"},
     "profiles": {
       "type": "array",
-      "minItems": 10,
-      "maxItems": 10,
+      "minItems": 1,
+      "maxItems": 64,
       "items": {
         "type": "object",
         "additionalProperties": false,

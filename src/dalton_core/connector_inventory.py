@@ -30,15 +30,6 @@ _COMMON_SCENARIOS = frozenset(
     {"success", "empty", "partial", "schema_drift", "rate_limited", "timeout", "malformed"}
 )
 _AUTH_SCENARIOS = frozenset({"permission_denied", "revoked"})
-_REQUIRED_CONNECTOR_REFS = frozenset(
-    {
-        "connector:cninfo-announcements", "connector:sec-edgar",
-        "connector:alphaengine-library", "connector:x-xreach",
-        "connector:x-semantic-search", "connector:reddit-last30days",
-        "connector:guidepoint-library", "connector:gemini-web-search",
-        "connector:web-fetch", "connector:xueqiu",
-    }
-)
 _FORBIDDEN_SERIALIZED_MARKERS = (
     "xq_a_token", "refresh_token", "access_token", "authorization:",
     "cookie:", "oauth_config", "server_config", "127.0.0.1:", "/users/",
@@ -770,8 +761,16 @@ def validate_connector_inventory_index(spec: Mapping[str, Any]) -> dict[str, Any
         raise ConnectorInventoryError("inventory index id is not frozen")
     if wire["created_at"] != CREATED_AT:
         raise ConnectorInventoryError("index created_at differs from the frozen build")
-    if not isinstance(wire["profiles"], list) or len(wire["profiles"]) != 10:
-        raise ConnectorInventoryError("connector inventory must contain exactly ten profiles")
+    # P13ag: the count is the number of profiles this build defines, not a
+    # literal repeated in three places. Adding a connector used to mean
+    # editing a "10" here, a "10" in the file-set check and a "10" in the
+    # completeness check, and forgetting one of them fails somewhere far from
+    # the change -- the same shape as the identity bugs this codebase keeps
+    # finding.
+    if not isinstance(wire["profiles"], list) or len(wire["profiles"]) != len(PROFILE_DEFINITIONS):
+        raise ConnectorInventoryError(
+            "connector inventory profile count differs from the frozen build"
+        )
     entry_fields = {
         "connector_ref", "profile_template_ref", "profile_template_hash",
         "fixture_manifest_ref", "fixture_manifest_hash", "proposal_manifest_ref",
@@ -942,6 +941,72 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "provider_status", "content_hash",
             ),
         )
+    if (slug, operation) == ("sec-financials", "get_financial_statements"):
+        # P13ag: one row per statement line, per period, flat.
+        #
+        # The parser's own shape keys each period as a column
+        # (``{"2026-06-30": 2814828000}``), which a closed schema cannot
+        # describe -- the key is data. So the adapter normalises to one row per
+        # (statement, concept, period) and the wire carries explicit
+        # ``period_end``. The raw parser output is hashed as the artifact
+        # regardless, so nothing is lost by normalising the part that is
+        # validated.
+        line = _object_schema(
+            {
+                "statement": {"type": "string", "enum": ["income", "balance", "cash"]},
+                "concept": _string(),
+                "label": _string(),
+                # The disclosed structure: where the line sits and what it rolls
+                # into. This is the part company-facts cannot answer.
+                "level": _integer(0),
+                "parent_concept": {"type": ["string", "null"]},
+                "is_breakdown": {"type": "boolean"},
+                "dimension_axis": {"type": ["string", "null"]},
+                "dimension_member": {"type": ["string", "null"]},
+                # A figure is text on the wire for the same reason every other
+                # figure in this system is: a float is not what was filed.
+                "period_end": _string(),
+                "value": {
+                    "type": ["string", "null"],
+                    "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                },
+                "unit": _string(),
+                "balance": {"type": ["string", "null"]},
+            },
+            (
+                "statement", "concept", "label", "level", "parent_concept",
+                "is_breakdown", "dimension_axis", "dimension_member",
+                "period_end", "value", "unit", "balance",
+            ),
+        )
+        filing = _object_schema(
+            {
+                "accession": {
+                    "type": "string",
+                    "pattern": "^[0-9]{10}-[0-9]{2}-[0-9]{6}$",
+                },
+                "form": {"type": "string", "enum": ["10-Q", "10-K"]},
+                "filed": _string(),
+                "report_date": _string(),
+                "lines": {"type": "array", "items": line},
+            },
+            ("accession", "form", "filed", "report_date", "lines"),
+        )
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                "cik": {"type": "string", "pattern": "^[0-9]{10}$"},
+                "entity_name": _string(),
+                "filings": {"type": "array", "items": filing},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+            },
+            (
+                "schema_version", "cik", "entity_name", "filings",
+                "source_record_refs", "next_cursor", "provider_status",
+            ),
+        )
     return _object_schema(
         {
             "source_record_refs": _array_of_strings(),
@@ -1014,6 +1079,35 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
                     "cik", "taxonomy", "concept_candidates", "unit", "form",
                     "filed_from", "filed_to",
                 ),
+            ),
+        ),
+        "gate": "recorded_public_reference_shadow",
+    },
+    # P13ag: SEC financial statements, read through `edgartools` rather than
+    # one XBRL concept at a time.
+    #
+    # The same SEC is the same source, so `source_ref` is shared with the
+    # filings connector and the two source hashes match. What differs is the
+    # shape of what comes back: the statement *structure* -- which concept is
+    # which line, its level and parent, the dimension axes a company reports
+    # against -- which the company-facts operation does not carry and which a
+    # model needs before it can have line items at all.
+    #
+    # It does not replace reading the filings. Anything the parser does not
+    # reach still has to come from the original text, and that lane stays.
+    {
+        "slug": "sec-financials",
+        "connector_ref": "connector:sec-financial-statements",
+        "source_ref": "source:sec-edgar", "source_type": "official_filing",
+        "transport": "public_https", "target": "transport:public-http:0.1",
+        "hosts": ("www.sec.gov", "data.sec.gov"), "auth": "none",
+        "forbidden": ("route:arbitrary-attachment-url",), "fallbacks": (),
+        "operations": (
+            _operation(
+                "get_financial_statements",
+                completeness="enumerated",
+                input_fields=("cik", "ticker", "form", "statement", "limit"),
+                optional_fields=("ticker", "statement", "limit"),
             ),
         ),
         "gate": "recorded_public_reference_shadow",
@@ -1256,6 +1350,17 @@ def _validate_frozen_profile_contract(profile: Mapping[str, Any]) -> None:
     ):
         raise ConnectorInventoryError("operation contracts differ from the frozen definition")
 
+
+# P13ag: the allowlist is what this build defines, not a second copy of it.
+#
+# It guards the packaged index against a hand-edited or tampered file, and it
+# still does: the index must match the frozen definitions above. What it no
+# longer does is disagree with them silently, which is what a literal second
+# list eventually does -- the same failure shape as every identity bug in this
+# codebase.
+_REQUIRED_CONNECTOR_REFS = frozenset(
+    definition["connector_ref"] for definition in PROFILE_DEFINITIONS
+)
 
 def _fixture_case(
     slug: str, operation: str, scenario: str, completeness: str
@@ -1807,7 +1912,7 @@ def _load_connector_inventory(directory: Path) -> dict[str, Any]:
         name: sorted((directory / name).glob("*.json"))
         for name in ("profiles", "fixtures", "proposals")
     }
-    if any(len(paths) != 10 for paths in directory_files.values()):
+    if any(len(paths) != len(PROFILE_DEFINITIONS) for paths in directory_files.values()):
         raise ConnectorInventoryError("packaged inventory file set is partial or contains extras")
     used: dict[str, set[Path]] = {name: set() for name in directory_files}
     for entry in index["profiles"]:
@@ -1834,7 +1939,7 @@ def _load_connector_inventory(directory: Path) -> dict[str, Any]:
         result["templates"][file_slug] = profile
         result["fixtures"][file_slug] = fixture
         result["proposals"][file_slug] = proposal
-    if len(result["templates"]) != 10:
+    if len(result["templates"]) != len(PROFILE_DEFINITIONS):
         raise ConnectorInventoryError("packaged connector inventory is incomplete")
     if any(used[name] != set(paths) for name, paths in directory_files.items()):
         raise ConnectorInventoryError("packaged inventory contains an unbound file")

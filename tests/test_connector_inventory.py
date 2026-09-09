@@ -505,18 +505,26 @@ class ConnectorInventoryTests(unittest.TestCase):
             with self.assertRaises(ConnectorInventoryError):
                 load_connector_proposal_package(root)
 
-    def test_inventory_has_exactly_ten_distinct_profiles_and_required_splits(self) -> None:
+    def test_inventory_holds_exactly_the_defined_profiles_and_required_splits(self) -> None:
         profiles = self.built["templates"]
         self.assertEqual(
             set(profiles),
             {
-                "cninfo", "sec", "alphaengine", "x-xreach", "x-x-search",
-                "reddit-last30days", "guidepoint", "gemini-web-search",
-                "web-fetch", "xueqiu",
+                "cninfo", "sec", "sec-financials", "alphaengine", "x-xreach",
+                "x-x-search", "reddit-last30days", "guidepoint",
+                "gemini-web-search", "web-fetch", "xueqiu",
             },
         )
         refs = {profile["connector_ref"] for profile in profiles.values()}
-        self.assertEqual(len(refs), 10)
+        self.assertEqual(len(refs), len(profiles))
+        # P13ag: SEC filings and SEC financial statements are one source read
+        # two ways, so they share a source ref and must not share a connector.
+        self.assertNotEqual(
+            profiles["sec"]["connector_ref"], profiles["sec-financials"]["connector_ref"]
+        )
+        self.assertEqual(
+            profiles["sec"]["source_identity"], profiles["sec-financials"]["source_identity"]
+        )
         self.assertNotEqual(
             profiles["x-xreach"]["connector_ref"], profiles["x-x-search"]["connector_ref"]
         )
@@ -556,7 +564,7 @@ class ConnectorInventoryTests(unittest.TestCase):
         self.assertNotIn("cookie:", serialized)
 
     def test_transport_auth_and_readiness_never_fabricate_runner_authority(self) -> None:
-        public = {"cninfo", "sec", "web-fetch"}
+        public = {"cninfo", "sec", "sec-financials", "web-fetch"}
         for slug, profile in self.built["templates"].items():
             with self.subTest(slug=slug):
                 readiness = profile["readiness"]
