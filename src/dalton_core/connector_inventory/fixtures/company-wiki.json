@@ -1,0 +1,226 @@
+{
+  "authenticated": false,
+  "cases": [
+    {
+      "case_ref": "fixture:company-wiki:list_documents:empty:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "f127bdf8dd45a5e89a5c2a4663c64c19bd6fea4d3e0b991ad7c5f8de190ed757",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:company-wiki:list_documents:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:company-wiki:list_documents:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "5cf003dc6475186874aa2ff7c5aa868925791f6780ba255c7114d8e7dffc6f02",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:company-wiki:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:company-wiki:list_documents:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:company-wiki:list_documents:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:company-wiki:list_documents:success:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "936813feeeb6954046fa72064c244942549a009c8ae98b7389ea3051892df498",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:company-wiki:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:company-wiki:list_documents:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "list_documents",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:company-wiki:get_document:empty:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "51279bccea1652126e5efa59056fc1139c0e699c304eb37a6ce589d930bf71fb",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:company-wiki:get_document:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:company-wiki:get_document:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "5788153bf569e6ffd4ccbe2c1e30e91f8caef2234a1b7448a2114f21292c2f04",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:company-wiki:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:company-wiki:get_document:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:company-wiki:get_document:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:company-wiki:get_document:success:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "6708d7aaab5ffce7c12d010960b235629fbdd451560bf64e6f6d9634cd6ddc8f",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:company-wiki:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:company-wiki:get_document:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "get_document",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    }
+  ],
+  "connector_template_ref": "connector-profile-template:company-wiki:0.1",
+  "content_hash": "f41998992c0ad391c3034328384d9b63bbf6ad860a45ac58693a629e9d07f557",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "id": "connector-fixture-manifest:company-wiki:0.1",
+  "operations": [
+    {
+      "operation": "list_documents",
+      "pagination_mode": "none"
+    },
+    {
+      "operation": "get_document",
+      "pagination_mode": "none"
+    }
+  ],
+  "recording_boundary": "host_gateway",
+  "schema_version": "0.1",
+  "synthetic": true
+}

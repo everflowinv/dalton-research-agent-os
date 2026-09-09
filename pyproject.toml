@@ -42,6 +42,8 @@ dalton-stage-transcript-review = "dalton_core.transcript_review_inbox:main"
 dalton-acquire-alphaengine = "dalton_core.alphaengine_acquisition_cli:main"
 dalton-connector-governance = "dalton_core.connector_governance_cli:main"
 dalton-model-inputs = "dalton_core.company_model_report:main"
+dalton-sales-notes = "dalton_core.sales_notes_cli:main"
+dalton-company-wiki = "dalton_core.company_wiki_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

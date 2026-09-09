@@ -1,5 +1,5 @@
 {
-  "content_hash": "8b4c1a3d18b0b4b7da764250eed8c81921fd9dbf55979b12e869faeb97a2b6e4",
+  "content_hash": "52cfe5c6c4974b18e22ee419db9d3da5a9e1ccb2441d81029b17b738163d16bf",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "id": "connector-inventory:p1-0:0.1",
   "profiles": [
@@ -110,6 +110,24 @@
       "profile_template_ref": "connector-profile-template:xueqiu:0.1",
       "proposal_manifest_hash": "c5a65f008c34a38fecd8776bd0def726827a2e1ee90f2df9708223532d8061dc",
       "proposal_manifest_ref": "connector-proposal-manifest:xueqiu:0.2"
+    },
+    {
+      "connector_ref": "connector:sales-notes",
+      "fixture_manifest_hash": "9289bd7a2149179404fa5fb80fb5c73d082111eaf69f333cc82581392abc87a2",
+      "fixture_manifest_ref": "connector-fixture-manifest:sales-notes:0.1",
+      "profile_template_hash": "618e506dbe0eb4c2ec583b97c3f694509e4d7bb2e3eedaa3b6f14aba865776f1",
+      "profile_template_ref": "connector-profile-template:sales-notes:0.1",
+      "proposal_manifest_hash": "86c0765e094f9ae6b38602c1867a8abb35f919db6c8814767c815480c4329ce4",
+      "proposal_manifest_ref": "connector-proposal-manifest:sales-notes:0.2"
+    },
+    {
+      "connector_ref": "connector:company-wiki",
+      "fixture_manifest_hash": "f41998992c0ad391c3034328384d9b63bbf6ad860a45ac58693a629e9d07f557",
+      "fixture_manifest_ref": "connector-fixture-manifest:company-wiki:0.1",
+      "profile_template_hash": "e58e657244196c68bba034484ecd9bea50f4a5464e1080211d8b62c017b6668b",
+      "profile_template_ref": "connector-profile-template:company-wiki:0.1",
+      "proposal_manifest_hash": "45aa3569e798823b6ca143f6784b415323670b037c666f46037e53b92c7bb2d6",
+      "proposal_manifest_ref": "connector-proposal-manifest:company-wiki:0.2"
     }
   ],
   "schema_version": "0.1"

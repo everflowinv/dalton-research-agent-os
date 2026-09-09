@@ -1,0 +1,60 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:sales-notes:0.1",
+  "adapter_source_hash": "8d15438e7262f0f8dc1440d41d41937597e1781eae4b202d43aa5cafebd9d1bc",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:sales-notes:0.1",
+  "connector_ref": "connector:sales-notes",
+  "content_hash": "86c0765e094f9ae6b38602c1867a8abb35f919db6c8814767c815480c4329ce4",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "9289bd7a2149179404fa5fb80fb5c73d082111eaf69f333cc82581392abc87a2",
+  "fixture_manifest_ref": "connector-fixture-manifest:sales-notes:0.1",
+  "id": "connector-proposal-manifest:sales-notes:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "727a8cefbc61f27b61f123ae91492dc637b597d1f0e362faad60650ec2541992",
+      "input_schema_ref": "schema:connector-inventory:sales-notes:list_notes:input:0.1",
+      "operation": "list_notes",
+      "output_schema_hash": "8db17febf6ad733ce001ab929f5b210f0737b77c3e5b741a3722e8115060c707",
+      "output_schema_ref": "schema:connector-inventory:sales-notes:list_notes:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "09d5d80a7c74905382af43f37d45e1f0a1087f456959a975ffcca363d51bfd82",
+      "input_schema_ref": "schema:connector-inventory:sales-notes:get_note:input:0.1",
+      "operation": "get_note",
+      "output_schema_hash": "ab4925edfd4824497fd6580faa60a8c18f0c9b91984bf2fed686b9ca7a2d86c3",
+      "output_schema_ref": "schema:connector-inventory:sales-notes:get_note:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "618e506dbe0eb4c2ec583b97c3f694509e4d7bb2e3eedaa3b6f14aba865776f1",
+  "profile_template_ref": "connector-profile-template:sales-notes:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "host-tool:market-digest-output",
+    "adapter_version": "inventory-0.1",
+    "source": "source:sales-notes",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "host_tool",
+  "transport_target_hash": "9e327856bfdbc7458ddb0e237da4d75b86981d4ef40814173d0e621e675f01dd",
+  "transport_target_ref": "host-tool:market-digest-output"
+}

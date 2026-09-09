@@ -720,10 +720,20 @@ def _validate_connector_profile_template(
     if transport["kind"] == "mcp_managed" and auth != host_auth:
         raise ConnectorInventoryError("mcp_managed profiles require host-owned auth")
     if frozen and transport["kind"] == "host_tool":
-        keyless_reddit = transport["target_ref"] == "host-tool:last30days-reddit-keyless"
-        if keyless_reddit != (auth == none_auth):
+        # S1: which host routes need no credential is a declaration, not one
+        # named exception. It was Reddit alone until two feeds arrived that
+        # read bytes a host skill had already written to this disk -- the
+        # credential was spent before Dalton saw them, so there is nothing for
+        # a credential authority to hold. Reading the answer out of the frozen
+        # definitions keeps it in one place; a packaged profile whose auth
+        # disagrees with its own definition is still refused here.
+        keyless_targets = {
+            definition["target"] for definition in PROFILE_DEFINITIONS
+            if definition["transport"] == "host_tool" and definition["auth"] == "none"
+        }
+        if (transport["target_ref"] in keyless_targets) != (auth == none_auth):
             raise ConnectorInventoryError(
-                "only the frozen keyless Reddit host route may omit host-owned auth"
+                "host route auth must match its frozen keyless declaration"
             )
 
     readiness = _closed(
@@ -1014,6 +1024,166 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "source_record_refs", "next_cursor", "provider_status",
             ),
         )
+    # S1: the two human / vendor feeds.
+    #
+    # Both enumerate documents that already exist as bytes on this machine, so
+    # every header row carries the sha256 of the document body. That hash is
+    # the join between "the connector said this note exists" and "the
+    # acquisition wrote these bytes into the spool"; without it a feed row is
+    # a filename and a claim.
+    #
+    # `evidence_tier` is on the wire rather than derived downstream because
+    # the tier is a fact about the source, not about the text. A sell-side
+    # note is sell-side whatever it says; a management meeting minute is a
+    # management statement even when the analyst wrote the summary. Deriving
+    # it later from a document type string would put the vocabulary in two
+    # places and let them drift.
+    if slug in {"sales-notes", "company-wiki"}:
+        sha256 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        instant = {
+            "type": "string",
+            "pattern": (
+                "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+                "([.][0-9]{1,6})?[+][0-9]{2}:[0-9]{2}$"
+            ),
+        }
+        day = {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+        if slug == "sales-notes":
+            note = _object_schema(
+                {
+                    "note_id": {"type": "string", "pattern": "^sales-note:[0-9a-z]{6,40}$"},
+                    "sender": _string(),
+                    "sender_address": _string(),
+                    "sender_domain": _string(),
+                    "subject": {"type": "string"},
+                    # The mail's own Date header, normalised to UTC. The feed
+                    # keeps the instant rather than the day because two notes
+                    # from the same desk on the same morning are ordered by it.
+                    "sent_at": instant,
+                    "is_priority": {"type": "boolean"},
+                    "body_sha256": sha256,
+                    "body_chars": _integer(0),
+                    # Which enumeration run saw it. The same note appears in
+                    # two runs when a digest carries the previous one forward,
+                    # and the run that first saw it is part of its provenance.
+                    "digest_ref": _string(),
+                    "evidence_tier": {"type": "string", "enum": ["sell_side"]},
+                    "analyst_named": {"type": "boolean"},
+                },
+                (
+                    "note_id", "sender", "sender_address", "sender_domain",
+                    "subject", "sent_at", "is_priority", "body_sha256",
+                    "body_chars", "digest_ref", "evidence_tier", "analyst_named",
+                ),
+            )
+            if operation == "list_notes":
+                return _object_schema(
+                    {
+                        "schema_version": {"type": "string", "enum": ["0.1"]},
+                        "since": day,
+                        "sender_domain": {"type": ["string", "null"]},
+                        "notes": {"type": "array", "items": note},
+                        "note_count": _integer(0),
+                        "source_record_refs": _array_of_strings(),
+                        "next_cursor": {"type": ["string", "null"]},
+                        "provider_status": _integer(100),
+                    },
+                    (
+                        "schema_version", "since", "sender_domain", "notes",
+                        "note_count", "source_record_refs", "next_cursor",
+                        "provider_status",
+                    ),
+                )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "note": note,
+                    "body": {"type": "string"},
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                },
+                (
+                    "schema_version", "note", "body", "source_record_refs",
+                    "next_cursor", "provider_status",
+                ),
+            )
+        document = _object_schema(
+            {
+                "document_id": {
+                    "type": "string",
+                    "pattern": "^company-wiki-doc:sha256:[0-9a-f]{64}$",
+                },
+                # Both the wiki's own words for the document kind and the
+                # closed key this feed maps it onto. The raw string is kept
+                # because it is what a person typed and the mapping is ours.
+                "doc_type": _string(),
+                "doc_type_key": {
+                    "type": "string",
+                    "enum": [
+                        "management_meeting_minutes", "expert_interview",
+                        "broker_report", "quarterly_note", "ndr",
+                        "buy_side_note", "research_note", "other",
+                    ],
+                },
+                "evidence_tier": {
+                    "type": "string",
+                    "enum": [
+                        "management_statement", "expert", "sell_side",
+                        "internal", "unclassified",
+                    ],
+                },
+                "doc_date": day,
+                "category_type": {"type": "string", "enum": ["company", "sector"]},
+                "category_name": _string(),
+                # An industry note carries no company tag and is not forced
+                # to have one. An empty list here is the honest answer, not a
+                # gap to be filled by the nearest ticker in the text.
+                "company_tags": {"type": "array", "uniqueItems": True, "items": _string()},
+                "sector_tags": {"type": "array", "uniqueItems": True, "items": _string()},
+                "topic_tags": {"type": "array", "uniqueItems": True, "items": _string()},
+                "text_sha256": sha256,
+                "text_chars": _integer(0),
+            },
+            (
+                "document_id", "doc_type", "doc_type_key", "evidence_tier",
+                "doc_date", "category_type", "category_name", "company_tags",
+                "sector_tags", "topic_tags", "text_sha256", "text_chars",
+            ),
+        )
+        if operation == "list_documents":
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "since": day,
+                    "company": {"type": ["string", "null"]},
+                    "industry": {"type": ["string", "null"]},
+                    "documents": {"type": "array", "items": document},
+                    "document_count": _integer(0),
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                },
+                (
+                    "schema_version", "since", "company", "industry",
+                    "documents", "document_count", "source_record_refs",
+                    "next_cursor", "provider_status",
+                ),
+            )
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                "document": document,
+                "text": {"type": "string"},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+            },
+            (
+                "schema_version", "document", "text", "source_record_refs",
+                "next_cursor", "provider_status",
+            ),
+        )
     return _object_schema(
         {
             "source_record_refs": _array_of_strings(),
@@ -1254,6 +1424,61 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
             _operation("search_stock", completeness="ranked", pagination="page", input_fields=("query", "limit", "page")),
         ),
         "gate": "host_tool_runner_v0.2_and_credential_authority",
+    },
+    # S1: the two feeds a human already brings into this machine.
+    #
+    # Both read files that are *already on disk*. The sell-side notes were
+    # fetched from Gmail by a host skill hours earlier and written out
+    # verbatim; the wiki is markdown a person wrote or pasted. Dalton never
+    # authenticates to either upstream, which is why the auth boundary is
+    # `none` and `network` is false: the only permission this connector needs
+    # is to read one directory.
+    #
+    # They are `authenticated_library` because that is what they are -- a
+    # curated body of documents behind someone's credential -- even though the
+    # credential was spent before Dalton saw the bytes. The frozen source-type
+    # vocabulary has no word for "a human put it here", and inventing one
+    # would move a shared enum for two rows.
+    {
+        "slug": "sales-notes", "connector_ref": "connector:sales-notes",
+        "source_ref": "source:sales-notes", "source_type": "authenticated_library",
+        "transport": "host_tool", "target": "host-tool:market-digest-output",
+        "hosts": (), "auth": "none",
+        # The digest file also carries a model-written summary of the same
+        # mail. That summary is not the note and must never be cited as one,
+        # so reading it is a forbidden route rather than an option nobody
+        # happens to take.
+        "forbidden": ("route:gmail-api", "route:market-digest-ai-summary"),
+        "fallbacks": (),
+        "operations": (
+            _operation(
+                "list_notes", completeness="enumerated",
+                input_fields=("since", "sender_domain", "limit"),
+                optional_fields=("sender_domain", "limit"),
+            ),
+            _operation("get_note", completeness="enumerated", input_fields=("note_id",)),
+        ),
+        "gate": "host_tool_runner_v0.2",
+    },
+    {
+        "slug": "company-wiki", "connector_ref": "connector:company-wiki",
+        "source_ref": "source:company-wiki", "source_type": "authenticated_library",
+        "transport": "host_tool", "target": "host-tool:company-wiki-corpus",
+        "hosts": (), "auth": "none",
+        # The wiki ships an embedding index over the same corpus. Ranked
+        # nearest-neighbour lookup cannot be reconciled against a bounded
+        # window, so it can never be the route for an `enumerated` operation.
+        "forbidden": ("route:wiki-embedding-search", "route:wiki-gemini-tagger"),
+        "fallbacks": (),
+        "operations": (
+            _operation(
+                "list_documents", completeness="enumerated",
+                input_fields=("since", "company", "industry", "limit"),
+                optional_fields=("company", "industry", "limit"),
+            ),
+            _operation("get_document", completeness="enumerated", input_fields=("document_id",)),
+        ),
+        "gate": "host_tool_runner_v0.2",
     },
 )
 

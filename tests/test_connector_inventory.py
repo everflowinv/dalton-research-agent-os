@@ -555,6 +555,7 @@ class ConnectorInventoryTests(unittest.TestCase):
                 "cninfo", "sec", "sec-financials", "roic-transcript",
                 "alphaengine", "x-xreach", "x-x-search", "reddit-last30days",
                 "guidepoint", "gemini-web-search", "web-fetch", "xueqiu",
+                "sales-notes", "company-wiki",
             },
         )
         refs = {profile["connector_ref"] for profile in profiles.values()}
