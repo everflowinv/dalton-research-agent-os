@@ -1,11 +1,11 @@
 # S 线 S3：大众源三条连接器（雪球、X、员工评价）v1.0
 
 日期：2026-09-09
-分支：`s3-crowd-sources`（基于 main `88c040b`，已 merge main `61f4255`），未 push
+分支：`s3-crowd-sources`（基于 main `88c040b`，已 merge main `3d365e7`），未 push
 执行：Opus 5 subagent，worktree `~/Projects/dalton-s3-crowd-sources-worktree`
 验收：见第 9 节（全量测试原文）
 修订：v1.0 交付后按 code review 修了 B1 / B2 / S1 / S2 / S4 与四条 nit，`CROWD_IMPORTANCE`
-按合并进 main 的 claim index 改口径，lane order 120 → 140（120 归 S1）。见第 11 节。
+按合并进 main 的 claim index 改口径，lane order 120 → 140（120 归 S1；main 上现有的最大 order 是 110）。见第 11 节。
 
 ---
 
@@ -225,11 +225,11 @@
 全量：`PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -t .`
 
 ```
-Ran 2729 tests in 343.991s
+Ran 2798 tests in 393.024s
 OK (skipped=1)
 ```
 
-（基线 main `61f4255` 为 2,627；本片新增 102 项。
+（基线 main `3d365e7` 为 2,696；本片新增 102 项。
 另外 `PYTHONPATH=src .venv/bin/python scripts/build_connector_inventory.py --check` 输出
 `packaged connector inventory matches the frozen definitions`。）
 
