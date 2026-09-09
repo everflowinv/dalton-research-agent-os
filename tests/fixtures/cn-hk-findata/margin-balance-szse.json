@@ -1,0 +1,43 @@
+{
+ "captured_at": "2026-09-09T19:52:57.899973+00:00",
+ "errors": {},
+ "fallback_used": false,
+ "frames": {
+  "margin": {
+   "columns": [
+    "融资买入额",
+    "融资余额",
+    "融券卖出量",
+    "融券余量",
+    "融券余额",
+    "融资融券余额"
+   ],
+   "function": "stock_margin_szse",
+   "kwargs": {
+    "date": "20260908"
+   },
+   "row_count": 1,
+   "rows": [
+    {
+     "融券余量": "11.79",
+     "融券余额": "104.87",
+     "融券卖出量": "0.26",
+     "融资买入额": "822.71",
+     "融资余额": "12742.71",
+     "融资融券余额": "12847.58"
+    }
+   ]
+  }
+ },
+ "library": "akshare",
+ "library_version": "1.18.94",
+ "observed_on": "2026-09-09",
+ "operation": "margin_balance",
+ "parameters": {
+  "end": "2026-09-08",
+  "exchange": "szse",
+  "start": "2026-09-08"
+ },
+ "schema_version": "0.1",
+ "vendor": "szse"
+}

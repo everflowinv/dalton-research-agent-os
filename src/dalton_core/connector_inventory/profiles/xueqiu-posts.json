@@ -1,0 +1,550 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "host_owned",
+    "owner": "host",
+    "use_time_authority": "required_future"
+  },
+  "connector_ref": "connector:xueqiu-posts",
+  "content_hash": "68abd41a72f4c098184c044bc8d8ea837388a2ba1f4e6deb9b4b6989a632fecc",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "1ac7bbbc788d917912c0629b506c8e0e18b82402cb841b85fe17153b8d0468ea",
+  "fixture_manifest_ref": "connector-fixture-manifest:xueqiu-posts:0.1",
+  "id": "connector-profile-template:xueqiu-posts:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "ranked",
+      "input_schema_hash": "9e8472797ff6a53440b10050238882e7151e0101322f79f5971a13686bb77890",
+      "input_schema_ref": "schema:connector-inventory:xueqiu-posts:search_posts:input:0.1",
+      "operation": "search_posts",
+      "output_schema_hash": "51f2a3bd21409a5df287875169a1801b2906fb3153a4972e1f203e18415ca383",
+      "output_schema_ref": "schema:connector-inventory:xueqiu-posts:search_posts:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": "page",
+        "max_pages": 20,
+        "mode": "page"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "search_posts"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "7c2f1a82a59eb915ff0a1cad8bb36b04727a1031a3c2186c1065348e6f744269",
+      "input_schema_ref": "schema:connector-inventory:xueqiu-posts:get_post:input:0.1",
+      "operation": "get_post",
+      "output_schema_hash": "51f2a3bd21409a5df287875169a1801b2906fb3153a4972e1f203e18415ca383",
+      "output_schema_ref": "schema:connector-inventory:xueqiu-posts:get_post:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_post"
+    },
+    {
+      "completeness_ceiling": "ranked",
+      "input_schema_hash": "4e8e6cf7fb04b2d104f950e4adc6845290816804936386d7edb164df575d9e01",
+      "input_schema_ref": "schema:connector-inventory:xueqiu-posts:hot_rank:input:0.1",
+      "operation": "hot_rank",
+      "output_schema_hash": "7aa38279b43526a90583ab56d940ac445985793ac38fe14c566b8ec54c06b0e2",
+      "output_schema_ref": "schema:connector-inventory:xueqiu-posts:hot_rank:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": "page",
+        "max_pages": 20,
+        "mode": "page"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_hot_stocks"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "host_tool_runner_v0.2_and_credential_authority"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "host-tool:agent-reach-xueqiu-channel"
+    ],
+    "fallback_routes": [
+      {
+        "adapter_ref": "adapter:cn-hk-findata:xq-hot-rank",
+        "operation": "hot_rank",
+        "provenance_label": "xueqiu_hot_stock_rank_fallback",
+        "source_ref": "source:xueqiu",
+        "target_ref": "host-tool:cn-hk-findata-xq-hot-rank"
+      }
+    ],
+    "forbidden_target_refs": [
+      "route:public-http",
+      "route:reddit-cookie",
+      "route:xueqiu-web-front-end"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "date_from": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "limit",
+          "page"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "9e8472797ff6a53440b10050238882e7151e0101322f79f5971a13686bb77890",
+      "schema_ref": "schema:connector-inventory:xueqiu-posts:search_posts:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation": {
+            "enum": [
+              "search_posts",
+              "get_post"
+            ],
+            "type": "string"
+          },
+          "posts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "author": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "author_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "created_at": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "like_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "post_id": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "reply_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "retweet_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "text": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "view_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "author",
+                "author_id",
+                "created_at",
+                "like_count",
+                "post_id",
+                "reply_count",
+                "retweet_count",
+                "text",
+                "title",
+                "truncated",
+                "url",
+                "view_count"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "operation",
+          "posts",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "51f2a3bd21409a5df287875169a1801b2906fb3153a4972e1f203e18415ca383",
+      "schema_ref": "schema:connector-inventory:xueqiu-posts:search_posts:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "post_ref": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "post_ref"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "7c2f1a82a59eb915ff0a1cad8bb36b04727a1031a3c2186c1065348e6f744269",
+      "schema_ref": "schema:connector-inventory:xueqiu-posts:get_post:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation": {
+            "enum": [
+              "search_posts",
+              "get_post"
+            ],
+            "type": "string"
+          },
+          "posts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "author": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "author_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "created_at": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "like_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "post_id": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "reply_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "retweet_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "text": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "truncated": {
+                  "type": "boolean"
+                },
+                "url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "view_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "author",
+                "author_id",
+                "created_at",
+                "like_count",
+                "post_id",
+                "reply_count",
+                "retweet_count",
+                "text",
+                "title",
+                "truncated",
+                "url",
+                "view_count"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "operation",
+          "posts",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "51f2a3bd21409a5df287875169a1801b2906fb3153a4972e1f203e18415ca383",
+      "schema_ref": "schema:connector-inventory:xueqiu-posts:get_post:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "page": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "stock_type": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "limit",
+          "stock_type",
+          "page"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "4e8e6cf7fb04b2d104f950e4adc6845290816804936386d7edb164df575d9e01",
+      "schema_ref": "schema:connector-inventory:xueqiu-posts:hot_rank:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provenance_label": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "ranking": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "rank": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "symbol": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "value": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "symbol",
+                "name",
+                "rank",
+                "value"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "provenance_label",
+          "ranking",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "7aa38279b43526a90583ab56d940ac445985793ac38fe14c566b8ec54c06b0e2",
+      "schema_ref": "schema:connector-inventory:xueqiu-posts:hot_rank:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:xueqiu",
+    "source_type": "social_search",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [],
+    "host_policy": "not_applicable",
+    "kind": "host_tool",
+    "target_hash": "186ce21a18529da1b40048b82a5a6223bd59b9be58e9b4314cdfa9040ef6bf90",
+    "target_ref": "host-tool:agent-reach-xueqiu-channel"
+  }
+}

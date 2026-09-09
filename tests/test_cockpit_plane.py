@@ -127,7 +127,11 @@ class CockpitPlaneTests(unittest.TestCase):
                          ("初步筛选", "进行中", "initial_screen"))
         self.assertEqual(view["totals"]["found"], sum(c["progress"]["found"] for c in view["companies"]))
         self.assertEqual(view["activity"]["service_state"], "running")
-        self.assertEqual([l["key"] for l in view["activity"]["lanes"]], ["web", "alphaengine", "extraction", "weekly"])
+        lane_keys = [l["key"] for l in view["activity"]["lanes"]]
+        self.assertEqual(lane_keys[:4], ["web", "alphaengine", "extraction", "weekly"])
+        # INT1: and then one row per registered lane, so a lane that is
+        # silent because nobody granted it is visible as that.
+        self.assertIn("lane:mission_market_prices", lane_keys)
         self.assertEqual(view["budgets"]["web"], {"cap": 1000, "spent": 7})
         self.assertTrue(view["model_available"]["available"])
         # The acquisition ticket the harness wrote shows up as plain-language activity in the log.

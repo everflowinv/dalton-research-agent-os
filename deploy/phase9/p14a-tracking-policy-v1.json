@@ -1,0 +1,99 @@
+{
+  "schema_version": "0.1",
+  "policy_ref": "tracking-policy:p14a:v1",
+  "title": "Daily tracking baselines and abnormal-move thresholds",
+  "note": "Baselines, not decisions. The brain may publish a TrackingCadenceVersion that changes an adjustable interval with a reason and refs; it may never change a fixed one, and it may never skip a baseline pull. Owner instruction 2026-09-09: tracking is resident once a company has passed its Initial Screen.",
+  "cadences": [
+    {
+      "source_key": "yfinance",
+      "interval_seconds": 21600,
+      "adjustable": false,
+      "because": "one settled close a trading day plus an intraday provisional read; the price lane holds a company six hours after a run that added no trading day, so asking more often buys nothing and asking less often freezes an intraday print as a close"
+    },
+    {
+      "source_key": "sec",
+      "interval_seconds": 86400,
+      "adjustable": false,
+      "because": "8-K and the filing calendar are checked daily whatever else is happening; a filing nobody looked for is the one event a covering analyst may not miss"
+    },
+    {
+      "source_key": "alphaengine",
+      "interval_seconds": 43200,
+      "adjustable": true,
+      "because": "twice a day for broker reports and call minutes; thinly covered companies are where the brain should stretch this to two or three days, because a search that returns the same four documents is a search that cost a quota unit for nothing"
+    },
+    {
+      "source_key": "x-xreach",
+      "interval_seconds": 43200,
+      "adjustable": true,
+      "because": "twice a day for what the street is saying, verified by web search before anything from it is read as a fact; the owner reads this for market view, not for figures"
+    },
+    {
+      "source_key": "sales-notes",
+      "interval_seconds": 86400,
+      "adjustable": true,
+      "because": "daily, per the owner's cadence table. The notes themselves arrive about twice a day, which is why a day's pull picks up both; pulling twice would read the same file twice as often as it changes"
+    },
+    {
+      "source_key": "gemini-web-search",
+      "interval_seconds": 43200,
+      "adjustable": true,
+      "because": "the verification path behind a crowd post and the catch-all for company news; generic, so it runs alongside the specific sources rather than instead of them"
+    },
+    {
+      "source_key": "guidepoint",
+      "interval_seconds": 604800,
+      "adjustable": true,
+      "because": "expert call libraries turn over slowly and each read is expensive; weekly unless an event pulls it forward"
+    },
+    {
+      "source_key": "company-wiki",
+      "interval_seconds": 604800,
+      "adjustable": true,
+      "because": "the fund's own file changes when someone writes in it, which is roughly weekly"
+    },
+    {
+      "source_key": "employee-reviews",
+      "interval_seconds": 604800,
+      "adjustable": true,
+      "because": "hiring and morale move over quarters; a daily read of them is noise wearing a timestamp"
+    },
+    {
+      "source_key": "catalyst-calendar",
+      "interval_seconds": 86400,
+      "adjustable": false,
+      "because": "C1's CatalystCalendarVersion is checked every day and the brain does not get to slow it down: a date that moved and nobody looked is how a preview is written for the wrong week"
+    }
+  ],
+  "abnormal_move": {
+    "threshold_ref": "abnormal-move:p14a:v1",
+    "absolute_move_percent": "3.0",
+    "excess_vs_basket_percent": "2.5",
+    "excess_vs_benchmark_percent": "3.0",
+    "min_basket_members": 3,
+    "benchmark_refs": [
+      "company:benchmark:SPY"
+    ],
+    "max_lookback_trading_days": 5,
+    "note": "Three thresholds, any of which fires. Absolute catches a move nobody in the universe shared; excess-vs-basket is the one that matters for a five-name sector universe, because the whole sector falling four percent is not news about one company; excess-vs-benchmark only fires when a price series for the benchmark exists, and its absence is recorded rather than assumed to be zero. The divergence window is separate and slower: over ten settled trading days, a company running six points against what its thesis implies -- relative to the same equal-weight basket -- is the case the owner cares about most, because agreeing with the market is worth nothing and the interesting question is what we missed. One event per window per company; a divergence that persists does not re-fire daily.",
+    "window_trading_days": 10,
+    "divergence_vs_basket_percent": "6.0"
+  },
+  "immediate_pull": {
+    "trigger_kinds": [
+      "price_move"
+    ],
+    "source_keys": [
+      "alphaengine",
+      "x-xreach",
+      "gemini-web-search"
+    ],
+    "within_seconds": 21600,
+    "because": "a price that moved without a reason is the one case where waiting for the baseline is wrong: the reason is being written now and will be harder to find in two days"
+  },
+  "thesis_stances": {
+    "note": "Per-thesis overrides for the divergence detector. The fund is fundamental long-biased, so an admitted coverage thesis is read as long unless it is named here; a short thesis is a line of policy, not a code change.",
+    "default": "long",
+    "overrides": {}
+  }
+}

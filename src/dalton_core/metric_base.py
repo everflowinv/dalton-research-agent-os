@@ -72,13 +72,53 @@ UNIVERSAL_SPINE: tuple[dict[str, Any], ...] = (
 # Stages beyond the screen add depth by being entered, not by a model deciding
 # to go deeper. They are empty until built: a stage asking for figures nobody
 # serves would put a permanent gap on the cockpit.
+# P14a: the first stage other than the screen to declare anything.
+#
+# These three are counted, not extracted. Every other entry in this module
+# names a figure a document is asked for; these name figures the two P14a
+# ledgers answer -- how many events this company has produced, how many have
+# been judged, and how many are still waiting. ``extraction_requests`` is only
+# ever called with ``initial_screen`` (document_extraction.numeric_slots), so
+# nothing will ever go looking for "events judged" inside a 10-Q; the reader
+# that serves them is ``tracking_cadence.active_coverage_metrics``.
+#
+# They are declared here rather than kept privately because the stage spine is
+# where "what does this stage need and does this company have it" is answered,
+# and active coverage having an empty answer is what made it invisible.
+ACTIVE_COVERAGE_SPINE: tuple[dict[str, Any], ...] = (
+    {
+        "metric_ref": "metric:tracked-events-seen",
+        "label": "已记录事件数",
+        "unit": "count",
+        "periods": 1,
+        "prompt": "how many ResearchEvents this company has produced since it entered "
+                  "active coverage (counted from the event ledger, never read out of a document)",
+    },
+    {
+        "metric_ref": "metric:tracked-events-judged",
+        "label": "已判定事件数",
+        "unit": "count",
+        "periods": 1,
+        "prompt": "how many of those events carry a recorded judgement, including the "
+                  "ones judged no_change (counted from the judgement ledger)",
+    },
+    {
+        "metric_ref": "metric:tracked-events-open",
+        "label": "待判定事件数",
+        "unit": "count",
+        "periods": 1,
+        "prompt": "how many events are still waiting for a decision; a number that only "
+                  "grows means the judgement lane is not keeping up with the tracking lane",
+    },
+)
+
 STAGE_SPINE: Mapping[str, tuple[dict[str, Any], ...]] = {
     "initial_screen": UNIVERSAL_SPINE,
     "deep_insight_gate": (),
     "industry_model": (),
     "company_model": (),
     "investment_memo": (),
-    "active_coverage": (),
+    "active_coverage": ACTIVE_COVERAGE_SPINE,
 }
 
 
@@ -197,6 +237,7 @@ def extraction_requests(
 
 
 __all__ = [
+    "ACTIVE_COVERAGE_SPINE",
     "METRIC_UNITS",
     "MetricBaseError",
     "STAGE_SPINE",

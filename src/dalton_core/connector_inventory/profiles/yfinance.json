@@ -6,9 +6,9 @@
     "use_time_authority": "none"
   },
   "connector_ref": "connector:yahoo-finance",
-  "content_hash": "6cf6012558bb70d7e4428efe0225ab92b8a22ccfd83c4826608d541bcc2b87d1",
+  "content_hash": "d8a4cf8500a3b4518789b5aad04e28410c5c8c22f774fb1ca1c9a6959e031f00",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
-  "fixture_manifest_hash": "2673180d6ec33e34be9d73b1db2db0f4d48f991d7ae6706450216349d5010ec7",
+  "fixture_manifest_hash": "5e20f2722d2f96aaf6eda9f076ea2dba2cae925f6fdf5dbc2bc35909c12357d3",
   "fixture_manifest_ref": "connector-fixture-manifest:yfinance:0.1",
   "id": "connector-profile-template:yfinance:0.1",
   "operations": [
@@ -47,6 +47,24 @@
         "read:recorded-fixture"
       ],
       "source_method": "analyst_estimates"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "0e56586f0263ce92788a03e4d8154582d973fa2fe41026a9900e3b5e67de620c",
+      "input_schema_ref": "schema:connector-inventory:yfinance:calendar:input:0.1",
+      "operation": "calendar",
+      "output_schema_hash": "6efb5269d5233e56f5e09f7d97eeece0fa3c642b480fa2996f4273d7bb8972b3",
+      "output_schema_ref": "schema:connector-inventory:yfinance:calendar:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "calendar"
     }
   ],
   "readiness": {
@@ -576,6 +594,101 @@
       },
       "schema_hash": "184cc168f022adc54652e688e96ed2e134eaf4a1cb56cdcfec1668344dca5c97",
       "schema_ref": "schema:connector-inventory:yfinance:analyst_estimates:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "ticker": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticker"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "0e56586f0263ce92788a03e4d8154582d973fa2fe41026a9900e3b5e67de620c",
+      "schema_ref": "schema:connector-inventory:yfinance:calendar:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "captured_at": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "dividend_date": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "earnings_dates": {
+            "items": {
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "ex_dividend_date": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "ticker": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "ticker",
+          "as_of",
+          "captured_at",
+          "earnings_dates",
+          "dividend_date",
+          "ex_dividend_date",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "6efb5269d5233e56f5e09f7d97eeece0fa3c642b480fa2996f4273d7bb8972b3",
+      "schema_ref": "schema:connector-inventory:yfinance:calendar:output:0.1"
     }
   ],
   "schema_version": "0.1",
