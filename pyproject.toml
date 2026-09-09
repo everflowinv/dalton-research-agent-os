@@ -27,6 +27,14 @@ sec-financials = ["edgartools>=5.17.1,<6"]
 # is unofficial and the library tracks its breakages, so being able to take a
 # fix is worth more here than a narrow range.
 market-data = ["yfinance>=0.2.31"]
+# S4: the China / Hong Kong data library. Pinned exactly rather than floored,
+# which is the opposite of the market-data extra above and deliberate: akshare
+# renames columns, changes units and retires functions between point releases
+# -- `stock_hsgt_fund_flow_summary_em` divides the vendor's amounts by 10,000
+# in this version and did not always -- and the adapter reads those columns by
+# name. A floor would let a `pip install -U` silently change what a number
+# means. This is the version the OpenClaw skill runs.
+cn-hk-data = ["akshare==1.18.94"]
 
 [project.scripts]
 dalton-bootstrap = "dalton_core.bootstrap:main"
@@ -51,6 +59,7 @@ dalton-acquire-alphaengine = "dalton_core.alphaengine_acquisition_cli:main"
 dalton-connector-governance = "dalton_core.connector_governance_cli:main"
 dalton-model-inputs = "dalton_core.company_model_report:main"
 dalton-market-price = "dalton_core.market_price_cli:main"
+dalton-cn-hk-findata = "dalton_core.cn_hk_findata_cli:main"
 dalton-model-forecast = "dalton_core.company_model_forecast_cli:main"
 dalton-research-quality = "dalton_core.research_quality_cli:main"
 dalton-sales-notes = "dalton_core.sales_notes_cli:main"

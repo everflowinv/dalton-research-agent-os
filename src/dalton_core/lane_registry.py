@@ -126,14 +126,18 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.mission_sec_quarters",
     "dalton_core.mission_statement_lane",
     "dalton_core.mission_market_price_lane",
+    "dalton_core.mission_tracking_lane",
+    "dalton_core.mission_catalyst_lane",
     "dalton_core.mission_model_spec_lane",
     "dalton_core.mission_guidepoint_lane",
     "dalton_core.mission_model_forecast_lane",
     "dalton_core.mission_claim_index_lane",
     "dalton_core.research_planner_launcher",
     "dalton_core.initial_screen_launcher",
+    "dalton_core.mission_crowd_source_lane",
     "dalton_core.mission_feed_lane",
     "dalton_core.mission_research_task_lane",
+    "dalton_core.mission_event_judgement_lane",
 )
 
 # The keys the controller tick's summary already uses for things that are not

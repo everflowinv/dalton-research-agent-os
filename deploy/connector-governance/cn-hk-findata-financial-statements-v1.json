@@ -1,0 +1,32 @@
+{
+  "allowed_permissions": {
+    "core_db": false,
+    "credential_slot_refs": [],
+    "filesystem_read": [],
+    "filesystem_write": [
+      "runner:raw-sink"
+    ],
+    "network": true,
+    "risk_class": "low",
+    "side_effects": [
+      "read:public-http"
+    ]
+  },
+  "approval_ref": "approval:connector-governance:cn-hk-findata-financial-statements:v1",
+  "approved_by": "human:lumos",
+  "attestation_ref": "attestation:connector-governance:cn-hk-findata-financial-statements:v1",
+  "capability_id": "capability:dalton:connector:cn-hk-findata-financial-statements",
+  "content_hash": "8237cd9049e0c86cf7c7a94579da66e25b1396b041d0caf96c9bfab7105d5b36",
+  "decision_ref": "capability-decision:connector-governance:cn-hk-findata-financial-statements:v1",
+  "effective_from": "2026-09-09T00:00:00.000000+00:00",
+  "effective_until": null,
+  "expected_schema_hash": "1d0402b0627753eb11cdffa7bdf9f2b73936eda13ceab0d0c6aae0e1e89dc2ef",
+  "expected_source_hash": "8208919759b70c8e934c540c560e23b0d0d0c53103419e7e1811d5178be036f0",
+  "id": "connector-governance:cn-hk-findata-financial-statements:v1",
+  "max_lease_seconds": 300,
+  "policy_ref": "policy:dalton:connector-governance:cn-hk-findata-financial-statements:v1",
+  "principal_ref": "principal:dalton-core-trusted-runner",
+  "registry_revision_ref": "capability:dalton:connector:cn-hk-findata-financial-statements@v1",
+  "schema_version": "0.1",
+  "status": "proposed"
+}

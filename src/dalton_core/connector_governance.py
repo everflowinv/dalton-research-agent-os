@@ -71,16 +71,19 @@ ROIC_GET_KIND = "roic-get-transcript"
 ROIC_LIST_CAPABILITY_ID = "capability:dalton:connector:roic-list-transcripts"
 ROIC_GET_CAPABILITY_ID = "capability:dalton:connector:roic-get-transcript"
 # P11a: Yahoo Finance. Prices are what a market printed; analyst estimates are
-# what sell-side analysts said. Two kinds because they are two kinds of thing,
-# and because a schema hash binds one operation.
+# what sell-side analysts said. C1 adds the calendar: when the company will
+# next speak. Three kinds because they are three kinds of thing, and because a
+# schema hash binds one operation.
 YFINANCE_DAILY_PRICES_KIND = "yfinance-daily-prices"
 YFINANCE_ANALYST_ESTIMATES_KIND = "yfinance-analyst-estimates"
+YFINANCE_CALENDAR_KIND = "yfinance-calendar"
 YFINANCE_DAILY_PRICES_CAPABILITY_ID = (
     "capability:dalton:connector:yfinance-daily-prices"
 )
 YFINANCE_ANALYST_ESTIMATES_CAPABILITY_ID = (
     "capability:dalton:connector:yfinance-analyst-estimates"
 )
+YFINANCE_CALENDAR_CAPABILITY_ID = "capability:dalton:connector:yfinance-calendar"
 # S1: the two human / vendor feeds. Each is split into an index operation and
 # a document operation for the same reason every library here is -- reading
 # what exists and reading one of them are different permissions.
@@ -94,6 +97,21 @@ COMPANY_WIKI_LIST_CAPABILITY_ID = (
     "capability:dalton:connector:company-wiki-list-documents"
 )
 COMPANY_WIKI_GET_CAPABILITY_ID = "capability:dalton:connector:company-wiki-get-document"
+
+# S3 crowd sources. Grouped rather than named one by one at the call site,
+# because "which of these seven is it" is the only question the dispatcher asks.
+XUEQIU_KINDS = frozenset({"xueqiu-search-posts", "xueqiu-get-post", "xueqiu-hot-rank"})
+XREACH_KINDS = frozenset(
+    {"x-xreach-user-timeline", "x-xreach-search", "x-xreach-thread"}
+)
+EMPLOYEE_REVIEWS_KIND = "employee-reviews-blind"
+
+# S4: China / Hong Kong fundamentals through akshare. Six operations, six
+# kinds, six approvals -- reading one company's income statement and reading
+# the whole market's margin balance are not the same permission, and the kind
+# names are derived from the operation so a seventh cannot be typed by hand.
+CN_HK_FINDATA_KIND_BY_OPERATION: dict[str, str] = {}
+CN_HK_FINDATA_CAPABILITY_BY_OPERATION: dict[str, str] = {}
 
 
 class ConnectorGovernanceError(RuntimeError):
@@ -269,6 +287,41 @@ def _yfinance_analyst_estimates_schema_hash() -> str:
     return yfinance_schema_hash(ANALYST_ESTIMATES_OPERATION)
 
 
+def _yfinance_calendar_schema_hash() -> str:
+    from .yfinance_core import CALENDAR_OPERATION, yfinance_schema_hash
+
+    return yfinance_schema_hash(CALENDAR_OPERATION)
+
+
+def _cn_hk_findata_source_hash() -> str:
+    from .cn_hk_findata_core import cn_hk_findata_source_hash
+
+    return cn_hk_findata_source_hash()
+
+
+def _cn_hk_findata_permissions() -> dict[str, Any]:
+    from .cn_hk_findata_core import cn_hk_findata_permissions
+
+    return copy.deepcopy(cn_hk_findata_permissions())
+
+
+def _cn_hk_findata_fixture_hash() -> str:
+    from .cn_hk_findata_core import cn_hk_findata_fixture_hash
+
+    return cn_hk_findata_fixture_hash()
+
+
+def _cn_hk_findata_schema_hash(operation: str) -> Callable[[], str]:
+    """One thunk per operation, so six kinds do not share a schema hash."""
+
+    def thunk() -> str:
+        from .cn_hk_findata_core import cn_hk_findata_schema_hash
+
+        return cn_hk_findata_schema_hash(operation)
+
+    return thunk
+
+
 def _sec_identity() -> dict[str, Any]:
     from .research_plan_executor import sec_connector_identity
 
@@ -350,6 +403,89 @@ def _web_fetch_fixture_hash() -> str:
     from .public_web_core_fetch import web_fetch_fixture_hash
 
     return web_fetch_fixture_hash()
+
+
+# S3: the crowd connectors. Seven kinds, because there are seven operations and
+# a schema hash binds exactly one of them -- approving the Xueqiu post search is
+# not approving the Xueqiu post read, and approving either is certainly not
+# approving X. The source hash is shared inside each connector, because the same
+# Xueqiu and the same X are the same sources.
+def _xueqiu_source_hash() -> str:
+    from .xueqiu_core import xueqiu_source_hash
+
+    return xueqiu_source_hash()
+
+
+def _xueqiu_permissions() -> dict[str, Any]:
+    from .xueqiu_core import xueqiu_permissions
+
+    return copy.deepcopy(xueqiu_permissions())
+
+
+def _xueqiu_fixture_hash() -> str:
+    from .xueqiu_core import xueqiu_fixture_hash
+
+    return xueqiu_fixture_hash()
+
+
+def _xueqiu_schema_hash_for(operation: str) -> Callable[[], str]:
+    def hasher() -> str:
+        from .xueqiu_core import xueqiu_schema_hash
+
+        return xueqiu_schema_hash(operation)
+
+    return hasher
+
+
+def _xreach_source_hash() -> str:
+    from .xreach_core import xreach_source_hash
+
+    return xreach_source_hash()
+
+
+def _xreach_permissions() -> dict[str, Any]:
+    from .xreach_core import xreach_permissions
+
+    return copy.deepcopy(xreach_permissions())
+
+
+def _xreach_fixture_hash() -> str:
+    from .xreach_core import xreach_fixture_hash
+
+    return xreach_fixture_hash()
+
+
+def _xreach_schema_hash_for(operation: str) -> Callable[[], str]:
+    def hasher() -> str:
+        from .xreach_core import xreach_schema_hash
+
+        return xreach_schema_hash(operation)
+
+    return hasher
+
+
+def _employee_reviews_source_hash() -> str:
+    from .employee_reviews_core import employee_reviews_source_hash
+
+    return employee_reviews_source_hash()
+
+
+def _employee_reviews_schema_hash() -> str:
+    from .employee_reviews_core import employee_reviews_schema_hash
+
+    return employee_reviews_schema_hash()
+
+
+def _employee_reviews_permissions() -> dict[str, Any]:
+    from .employee_reviews_core import employee_reviews_permissions
+
+    return copy.deepcopy(employee_reviews_permissions())
+
+
+def _employee_reviews_fixture_hash() -> str:
+    from .employee_reviews_core import employee_reviews_fixture_hash
+
+    return employee_reviews_fixture_hash()
 
 
 def _sales_notes_source_hash() -> str:
@@ -516,6 +652,62 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         permissions=_roic_permissions,
         fixture_hash=_roic_fixture_hash,
     ),
+    "xueqiu-search-posts": _KindSpec(
+        capability_id="capability:dalton:connector:xueqiu-search-posts",
+        template_key="xueqiu-posts",
+        source_hash=_xueqiu_source_hash,
+        schema_hash=_xueqiu_schema_hash_for("search_posts"),
+        permissions=_xueqiu_permissions,
+        fixture_hash=_xueqiu_fixture_hash,
+    ),
+    "xueqiu-get-post": _KindSpec(
+        capability_id="capability:dalton:connector:xueqiu-get-post",
+        template_key="xueqiu-posts",
+        source_hash=_xueqiu_source_hash,
+        schema_hash=_xueqiu_schema_hash_for("get_post"),
+        permissions=_xueqiu_permissions,
+        fixture_hash=_xueqiu_fixture_hash,
+    ),
+    "xueqiu-hot-rank": _KindSpec(
+        capability_id="capability:dalton:connector:xueqiu-hot-rank",
+        template_key="xueqiu-posts",
+        source_hash=_xueqiu_source_hash,
+        schema_hash=_xueqiu_schema_hash_for("hot_rank"),
+        permissions=_xueqiu_permissions,
+        fixture_hash=_xueqiu_fixture_hash,
+    ),
+    "x-xreach-user-timeline": _KindSpec(
+        capability_id="capability:dalton:connector:x-xreach-user-timeline",
+        template_key="x-xreach-crowd",
+        source_hash=_xreach_source_hash,
+        schema_hash=_xreach_schema_hash_for("user_timeline"),
+        permissions=_xreach_permissions,
+        fixture_hash=_xreach_fixture_hash,
+    ),
+    "x-xreach-search": _KindSpec(
+        capability_id="capability:dalton:connector:x-xreach-search",
+        template_key="x-xreach-crowd",
+        source_hash=_xreach_source_hash,
+        schema_hash=_xreach_schema_hash_for("search"),
+        permissions=_xreach_permissions,
+        fixture_hash=_xreach_fixture_hash,
+    ),
+    "x-xreach-thread": _KindSpec(
+        capability_id="capability:dalton:connector:x-xreach-thread",
+        template_key="x-xreach-crowd",
+        source_hash=_xreach_source_hash,
+        schema_hash=_xreach_schema_hash_for("thread"),
+        permissions=_xreach_permissions,
+        fixture_hash=_xreach_fixture_hash,
+    ),
+    "employee-reviews-blind": _KindSpec(
+        capability_id="capability:dalton:connector:employee-reviews-blind",
+        template_key="employee-reviews",
+        source_hash=_employee_reviews_source_hash,
+        schema_hash=_employee_reviews_schema_hash,
+        permissions=_employee_reviews_permissions,
+        fixture_hash=_employee_reviews_fixture_hash,
+    ),
     # P11a: the market layer's source. Unofficial and free; the quota is small
     # and the approval is per operation.
     YFINANCE_DAILY_PRICES_KIND: _KindSpec(
@@ -531,6 +723,16 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         template_key="yfinance",
         source_hash=_yfinance_source_hash,
         schema_hash=_yfinance_analyst_estimates_schema_hash,
+        permissions=_yfinance_permissions,
+        fixture_hash=_yfinance_fixture_hash,
+    ),
+    # C1: the dated corporate events. Its own approval, so that a Core allowed
+    # to read prices is not thereby allowed to read anything else Yahoo serves.
+    YFINANCE_CALENDAR_KIND: _KindSpec(
+        capability_id=YFINANCE_CALENDAR_CAPABILITY_ID,
+        template_key="yfinance",
+        source_hash=_yfinance_source_hash,
+        schema_hash=_yfinance_calendar_schema_hash,
         permissions=_yfinance_permissions,
         fixture_hash=_yfinance_fixture_hash,
     ),
@@ -570,6 +772,38 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         fixture_hash=_company_wiki_fixture_hash,
     ),
 }
+
+
+def _register_cn_hk_findata_kinds() -> None:
+    """Register the six China / Hong Kong kinds from the frozen operation list.
+
+    Written as a loop rather than six near-identical literals because the six
+    differ in exactly one thing -- the schema hash -- and a copied block that
+    forgets to change it produces an approval that silently covers the wrong
+    operation. The import is local for the same reason every other identity
+    module's is: ``cn_hk_findata_core`` imports this module's error type.
+    """
+
+    from .cn_hk_findata_core import (
+        CAPABILITY_BY_OPERATION as _CN_HK_CAPABILITIES,
+        KIND_BY_OPERATION as _CN_HK_KINDS,
+    )
+
+    for operation, kind in _CN_HK_KINDS.items():
+        capability_id = _CN_HK_CAPABILITIES[operation]
+        CN_HK_FINDATA_KIND_BY_OPERATION[operation] = kind
+        CN_HK_FINDATA_CAPABILITY_BY_OPERATION[operation] = capability_id
+        GOVERNANCE_KIND_REGISTRY[kind] = _KindSpec(
+            capability_id=capability_id,
+            template_key="cn-hk-findata",
+            source_hash=_cn_hk_findata_source_hash,
+            schema_hash=_cn_hk_findata_schema_hash(operation),
+            permissions=_cn_hk_findata_permissions,
+            fixture_hash=_cn_hk_findata_fixture_hash,
+        )
+
+
+_register_cn_hk_findata_kinds()
 # Public aliases make the registry discoverable without exposing mutable
 # implementation details of a spec.  The old name is useful to callers that
 # treat the set as a connector-kind catalog.
@@ -704,7 +938,8 @@ def build_governance_record(
             version=version,
         )
 
-    if kind in (YFINANCE_DAILY_PRICES_KIND, YFINANCE_ANALYST_ESTIMATES_KIND):
+    if kind in (YFINANCE_DAILY_PRICES_KIND, YFINANCE_ANALYST_ESTIMATES_KIND,
+                YFINANCE_CALENDAR_KIND):
         from .yfinance_core import (
             KIND_BY_OPERATION as YFINANCE_KINDS,
             build_yfinance_governance_record,
@@ -720,10 +955,64 @@ def build_governance_record(
             version=version,
         )
 
+    if kind in CN_HK_FINDATA_KIND_BY_OPERATION.values():
+        from .cn_hk_findata_core import (
+            OPERATION_BY_KIND as CN_HK_OPERATIONS,
+            build_cn_hk_findata_governance_record,
+        )
+
+        return build_cn_hk_findata_governance_record(
+            operation=CN_HK_OPERATIONS[kind],
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
     if kind == SEC_FINANCIALS_KIND:
         from .sec_financials_core import build_sec_financials_governance_record
 
         return build_sec_financials_governance_record(
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in XUEQIU_KINDS:
+        from .xueqiu_core import KIND_BY_OPERATION as XUEQIU_BY_OPERATION
+        from .xueqiu_core import build_xueqiu_governance_record
+
+        operation = next(op for op, name in XUEQIU_BY_OPERATION.items() if name == kind)
+        return build_xueqiu_governance_record(
+            operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in XREACH_KINDS:
+        from .xreach_core import KIND_BY_OPERATION as XREACH_BY_OPERATION
+        from .xreach_core import build_xreach_governance_record
+
+        operation = next(op for op, name in XREACH_BY_OPERATION.items() if name == kind)
+        return build_xreach_governance_record(
+            operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind == EMPLOYEE_REVIEWS_KIND:
+        from .employee_reviews_core import build_employee_reviews_governance_record
+
+        return build_employee_reviews_governance_record(
             approved_by=approved_by,
             status=status,
             effective_from=effective_from,
@@ -1030,6 +1319,7 @@ __all__ = [
     "GEMINI_WEB_SEARCH_CAPABILITY_ID", "GEMINI_WEB_SEARCH_KIND",
     "WEB_FETCH_CAPABILITY_ID", "WEB_FETCH_KIND",
     "YFINANCE_ANALYST_ESTIMATES_CAPABILITY_ID", "YFINANCE_ANALYST_ESTIMATES_KIND",
+    "YFINANCE_CALENDAR_CAPABILITY_ID", "YFINANCE_CALENDAR_KIND",
     "YFINANCE_DAILY_PRICES_CAPABILITY_ID", "YFINANCE_DAILY_PRICES_KIND",
     "SALES_NOTES_GET_CAPABILITY_ID", "SALES_NOTES_GET_KIND",
     "SALES_NOTES_LIST_CAPABILITY_ID", "SALES_NOTES_LIST_KIND",

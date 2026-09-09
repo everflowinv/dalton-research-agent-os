@@ -1,0 +1,32 @@
+{
+  "allowed_permissions": {
+    "core_db": false,
+    "credential_slot_refs": [],
+    "filesystem_read": [],
+    "filesystem_write": [
+      "runner:raw-sink"
+    ],
+    "network": true,
+    "risk_class": "low",
+    "side_effects": [
+      "read:public-http"
+    ]
+  },
+  "approval_ref": "approval:connector-governance:cn-hk-findata-northbound-flow:v1",
+  "approved_by": "human:lumos",
+  "attestation_ref": "attestation:connector-governance:cn-hk-findata-northbound-flow:v1",
+  "capability_id": "capability:dalton:connector:cn-hk-findata-northbound-flow",
+  "content_hash": "3185945b9acd234c39074fd2939233a9efe587403d6a6b140afe381e47bdeb69",
+  "decision_ref": "capability-decision:connector-governance:cn-hk-findata-northbound-flow:v1",
+  "effective_from": "2026-09-09T00:00:00.000000+00:00",
+  "effective_until": null,
+  "expected_schema_hash": "52fa2a3fe10a33ea40d7de4b1513e5fbe80e7205b62a4a682a654280307a2855",
+  "expected_source_hash": "8208919759b70c8e934c540c560e23b0d0d0c53103419e7e1811d5178be036f0",
+  "id": "connector-governance:cn-hk-findata-northbound-flow:v1",
+  "max_lease_seconds": 300,
+  "policy_ref": "policy:dalton:connector-governance:cn-hk-findata-northbound-flow:v1",
+  "principal_ref": "principal:dalton-core-trusted-runner",
+  "registry_revision_ref": "capability:dalton:connector:cn-hk-findata-northbound-flow@v1",
+  "schema_version": "0.1",
+  "status": "proposed"
+}
