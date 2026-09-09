@@ -191,6 +191,10 @@ details{margin-top:14px}summary{cursor:pointer;color:var(--muted);font-size:13px
 .tag{font-size:10px;padding:1px 6px;border-radius:8px;white-space:nowrap}
 .tag.filed{background:rgba(45,160,120,.16);color:var(--teal,#2da078)}
 .tag.spoken{background:rgba(200,150,40,.16);color:#b8860b}
+.plan{list-style:none;padding:0;margin:8px 0}
+.plan .dir{padding:6px 0;border-top:1px solid rgba(128,128,128,.18)}
+.plan .dir:first-child{border-top:0}
+.plan .dir .hint{margin-top:2px}
 </style>
 </head>
 <body>
@@ -220,6 +224,16 @@ details{margin-top:14px}summary{cursor:pointer;color:var(--muted);font-size:13px
       <ol class="qlist" id="goal-questions"></ol>
       <h3>资料来源</h3>
       <div class="tags" id="goal-sources"></div>
+      <div id="plan-block" hidden>
+        <h3>系统自己的判断（下一步做什么）</h3>
+        <p class="objective" id="plan-assessment"></p>
+        <ol class="plan" id="plan-directives"></ol>
+        <div id="plan-inquiries-block" hidden>
+          <h3>值得深挖的问题</h3>
+          <ul class="latest" id="plan-inquiries"></ul>
+        </div>
+        <p class="hint" id="plan-when"></p>
+      </div>
       <details><summary>目标的修改记录</summary><div class="hist" id="goal-history"></div></details>
     </div>
 
@@ -333,6 +347,28 @@ function renderOverview(o){
   $("goal-title").textContent=g.title;$("goal-objective").textContent=g.objective;
   const tags=$("goal-tags");tags.replaceChildren(node("span",`第 ${g.version} 版 · ${fmtDate(g.published_at)} 发布`,"tag"),node("span",`${o.companies.length} 家公司`,"tag"),node("span",`${o.totals.theses} 条研究论点`,"tag"));
   const ql=$("goal-questions");ql.replaceChildren(...g.research_questions.map(q=>node("li",q)));
+  // P13w: what the system decided to do next, and why. It has been steering
+  // the lanes for a while with nothing on the page to show for it, and a
+  // decision nobody can read is the calendar it replaced.
+  const plan=o.plan;
+  $("plan-block").hidden=!plan;
+  if(plan){
+    $("plan-assessment").textContent=plan.assessment||"";
+    $("plan-directives").replaceChildren(...plan.directives.map(d=>{
+      const li=node("li",null,d.action==="stop"?"dir stop":"dir do");
+      li.append(node("span",d.action_label,"tag "+(d.action==="stop"?"spoken":"filed")),
+                node("span",` ${d.subject} · ${d.item}`,"figv"),
+                node("div",d.reason,"hint"));
+      return li}));
+    $("plan-inquiries-block").hidden=!plan.inquiries.length;
+    $("plan-inquiries").replaceChildren(...plan.inquiries.map(q=>{
+      const li=node("li");
+      li.append(node("div",`${q.subject}：${q.question}`),
+                node("div",`要看：${q.wants}`,"hint"));
+      return li}));
+    $("plan-when").textContent=`判断于 ${fmtDate(plan.decided_at)}`+
+      (plan.stopped?` · 其中 ${plan.stopped} 项要求停下`:"");
+  }
   $("goal-sources").replaceChildren(...g.sources.map(s=>node("span",`${s.connected?"● ":"○ "}${s.label}`,`tag ${s.connected?"on":"off"}`)));
   $("goal-history").replaceChildren(...g.history.map(h=>{const d=node("div",null,"h");d.append(node("b",`第 ${h.version} 版 · ${fmtDate(h.created_at)}`),node("div",h.title),node("div",`${h.research_questions.length} 个问题 · ${h.universe.join("、")}`));return d}));
   const t=o.totals,b=o.budgets;

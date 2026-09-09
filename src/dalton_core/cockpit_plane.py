@@ -61,6 +61,16 @@ SOURCE_LABELS = {
 # filed is its published figure; a number said on a call is a record of the
 # saying. Both are kept; the label is how the difference stays visible.
 _EMPTY_FIGURES: dict = {"total": 0, "by_grade": {}, "latest": []}
+# What a directive asks for, in the owner's language.
+PLAN_ACTION_LABELS = {
+    "search": "去找", "acquire": "去取", "read": "去读",
+    "extract_figures": "去抓数字", "stop": "停",
+}
+ITEM_LABELS = {
+    "quarterly_financials": "季度财报数字", "earnings_calls": "电话会纪要",
+    "annual_report": "年报正文", "broker_research": "券商观点",
+    "industry_demand": "行业需求", "competitive_landscape": "竞争格局",
+}
 FIGURE_GRADE_LABELS = {
     "company-filed-document": "公司文件披露",
     "earnings-call-transcript": "电话会口述（未经财报核对）",
@@ -477,6 +487,55 @@ class CockpitPlane:
             return "一个公开网页"
         return "一份文档"
 
+    def _plan(self, core: Any, mission: Mapping[str, Any],
+              members: Mapping[str, Any]) -> dict[str, Any] | None:
+        """The system's own decision about what to work on next.
+
+        P13w: the planner has been steering discovery for a while and the owner
+        could not see it -- the plan lived in one table and its effects showed
+        up only as lanes going quiet. A decision nobody can read is
+        indistinguishable from the calendar it replaced, which is the whole
+        objection this was built to answer.
+
+        Shown with its reasons and its subjects in the owner's own names,
+        because the point is that it can be argued with.
+        """
+
+        if not _table_exists(core, "coverage_mission_research_plans"):
+            return None
+        row = core.execute(
+            "SELECT * FROM coverage_mission_research_plans WHERE mission_version_ref=? "
+            "ORDER BY created_at DESC, plan_id DESC LIMIT 1", (mission["id"],),
+        ).fetchone()
+        if row is None:
+            return None
+
+        def subject(ref: Any) -> str:
+            if ref == mission.get("industry_ref"):
+                return "整个行业"
+            return self._label(members, ref)
+
+        directives = [
+            {"rank": d.get("rank"), "subject": subject(d.get("company_ref")),
+             "item": ITEM_LABELS.get(d.get("item_ref"), d.get("item_ref")),
+             "action": d.get("action"),
+             "action_label": PLAN_ACTION_LABELS.get(d.get("action"), d.get("action")),
+             "reason": d.get("reason")}
+            for d in json.loads(row["directives_json"])
+        ]
+        inquiries = [
+            {"subject": subject(q.get("company_ref")) if q.get("company_ref") else "整个行业",
+             "question": q.get("question"), "wants": q.get("wants"),
+             "because": q.get("because")}
+            for q in json.loads(row["inquiries_json"])
+        ]
+        return {
+            "plan_ref": row["plan_id"], "decided_at": row["created_at"],
+            "assessment": row["assessment"],
+            "directives": directives, "inquiries": inquiries,
+            "stopped": sum(1 for d in directives if d["action"] == "stop"),
+        }
+
     def _figures(self, core: Any) -> dict[str, dict[str, Any]]:
         """Verified figures per company, counted by grade with a few examples.
 
@@ -545,6 +604,7 @@ class CockpitPlane:
             theses = [json.loads(r["content_json"]) for r in core.execute(
                 "SELECT content_json FROM thesis_versions ORDER BY created_at").fetchall()]
             figures = self._figures(core)
+            plan = self._plan(core, mission, members)
             stages = self._stage_rows(core, mission)
             documents = self._deliverables(core, mission)
         today = self.clock().date().isoformat()
@@ -637,6 +697,7 @@ class CockpitPlane:
             "activity": {
                 "service_state": heartbeat.get("state"), "last_tick_at": heartbeat.get("last_tick_at"),
                 "lanes": self._lane_states(heartbeat, extraction, discovery, mission["budget"]), "running": running,
+            "plan": plan,
             },
             "budgets": budgets,
             "model_available": self._model_status(),
