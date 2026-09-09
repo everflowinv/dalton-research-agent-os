@@ -53,10 +53,28 @@ def _policy_filters(profile_ids: list[str]) -> dict[str, Any]:
 
 
 def ensure_extraction_policy(
-    router: ModelRouter, *, profile_ids: list[str], now: datetime | None = None
+    router: ModelRouter, *, profile_ids: list[str] | None = None,
+    now: datetime | None = None, tier: str | None = None,
 ) -> dict[str, Any]:
-    """Append a policy version only when the latest one differs; return its ref."""
+    """Append a policy version only when the latest one differs; return its ref.
 
+    P14-M: given a ``tier``, the policy pins that tier's whole fallback chain
+    and carries the chains with it, so an extraction window whose model is down
+    falls through to the next one named instead of being lost. Extraction is
+    cheap-tier work by description -- one window of a filing, thousands of
+    times -- and its long-standing single pin, ``profile:deepseek-v4-flash``, is
+    already that chain's first link, so turning the tier on adds alternatives
+    without changing which model normally reads.
+    """
+
+    from .model_fallback_chain import fallback_chains, tier_chain
+
+    if tier is not None:
+        chain = list(tier_chain(tier))
+        if profile_ids and list(profile_ids) != chain:
+            raise ValueError(f"tier {tier} pins its own chain; do not pass profile_ids as well")
+        profile_ids = chain
+    profile_ids = list(profile_ids or DEFAULT_PROFILE_IDS)
     slug = POLICY_ID.split(":", 1)[1]
     row = router.connection.execute(
         "SELECT policy_json FROM model_routing_policy_versions WHERE policy_id=? "
@@ -64,6 +82,7 @@ def ensure_extraction_policy(
         (POLICY_ID,),
     ).fetchone()
     filters = _policy_filters(profile_ids)
+    chains = fallback_chains() if tier is not None else None
     preferences = [
         {"field": "estimated_cost_usd", "direction": "asc"},
         {"field": "profile_version_ref", "direction": "asc"},
@@ -71,7 +90,8 @@ def ensure_extraction_policy(
     if row is not None:
         latest = json.loads(row["policy_json"])
         if canonical_json(latest["filters"]) == canonical_json(filters) and \
-                canonical_json(latest["ordered_preferences"]) == canonical_json(preferences):
+                canonical_json(latest["ordered_preferences"]) == canonical_json(preferences) and \
+                canonical_json(latest.get("fallback_chains")) == canonical_json(chains):
             return {"status": "duplicate", "policy_version_ref": latest["policy_version_ref"]}
         version = int(latest["version"]) + 1
         prior = latest["policy_version_ref"]
@@ -87,6 +107,8 @@ def ensure_extraction_policy(
         "filters": filters,
         "ordered_preferences": preferences,
     }
+    if chains is not None:
+        wire["fallback_chains"] = chains
     wire["content_hash"] = content_hash(wire)
     result = router.register_policy(wire)
     return {"status": result.get("status", "fresh"), "policy_version_ref": wire["policy_version_ref"]}
@@ -105,6 +127,7 @@ def install(
     profile_ids: list[str] | None = None,
     credential_slots: list[str] | None = None,
     now: datetime | None = None,
+    tier: str | None = None,
 ) -> dict[str, Any]:
     config_path = Path(config_path).expanduser().resolve()
     service = json.loads(config_path.read_text(encoding="utf-8"))
@@ -113,7 +136,18 @@ def install(
     state_dir = Path(service["core_db"]).parent
     router_db = str(Path(service["model_router_db"]).resolve())
     with ModelRouter(router_db) as router:
-        policy = ensure_extraction_policy(router, profile_ids=list(profile_ids or DEFAULT_PROFILE_IDS), now=now)
+        policy = ensure_extraction_policy(
+            router, profile_ids=list(profile_ids) if profile_ids else None,
+            now=now, tier=tier)
+        credential_slots = list(credential_slots or ())
+        if tier is not None and not credential_slots:
+            from .research_planner_setup import credential_slots_for
+            from .model_fallback_chain import tier_chain
+
+            # Every link of the chain needs its slot supplied or the router
+            # refuses it with credential_slot_unavailable -- which reads like a
+            # missing key and is really a missing line in a config.
+            credential_slots = credential_slots_for(router, list(tier_chain(tier)))
     model_config = validate_model_config({
         "routing_policy_ref": policy["policy_version_ref"],
         "credential_slot_refs": list(credential_slots or DEFAULT_CREDENTIAL_SLOTS),
@@ -147,13 +181,22 @@ def install(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", required=True, help="service.json")
-    parser.add_argument("--profile-ids", default=",".join(DEFAULT_PROFILE_IDS))
-    parser.add_argument("--credential-slots", default=",".join(DEFAULT_CREDENTIAL_SLOTS))
+    parser.add_argument("--profile-ids", default="")
+    parser.add_argument("--credential-slots", default="")
+    parser.add_argument(
+        "--tier",
+        help="pin a purpose tier's whole fallback chain instead of one profile, e.g. cheap",
+    )
     args = parser.parse_args(argv)
+    profile_ids = [item.strip() for item in args.profile_ids.split(",") if item.strip()]
+    slots = [item.strip() for item in args.credential_slots.split(",") if item.strip()]
+    if args.tier and profile_ids:
+        parser.error("choose --tier or --profile-ids, not both")
     result = install(
         args.config,
-        profile_ids=[item.strip() for item in args.profile_ids.split(",") if item.strip()],
-        credential_slots=[item.strip() for item in args.credential_slots.split(",") if item.strip()],
+        profile_ids=profile_ids or (None if args.tier else list(DEFAULT_PROFILE_IDS)),
+        credential_slots=slots or (None if args.tier else list(DEFAULT_CREDENTIAL_SLOTS)),
+        tier=args.tier,
     )
     print(json.dumps(result, sort_keys=True))
     return 0

@@ -28,6 +28,9 @@ CLAIM_STATUSES = frozenset({
 OPEN_QUESTION_STATES = frozenset({
     "open", "selected", "planned", "in_progress", "blocked",
 })
+# Where an untagged claim sorts among tagged ones: after all of them. Weaker
+# than any importance tier, undated, and last on every tiebreak.
+_UNTAGGED_ORDER = (99, (1, ""), "", "")
 STOP_KINDS = frozenset({
     "claim_committed", "thesis_admitted", "assessment_recorded",
     "verification_recorded", "brief_published", "question_recorded",
@@ -390,6 +393,109 @@ def build_company_research_view(
     return view
 
 
+def annotate_with_index(
+    connection: Any,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    ref_key: str = "claim_version_ref",
+    index_aspect: str | None = None,
+    as_of_from: str | None = None,
+    as_of_to: str | None = None,
+    importance: str | None = None,
+    canonical_only: bool = True,
+) -> list[dict[str, Any]]:
+    """Join P12b index entries onto claim rows and filter by them.
+
+    Separate from ``query_company_research`` because more than one reader wants
+    it: the cockpit's answer context reads ``claim_versions`` directly and
+    needs the same canonical-only, importance-ordered view without going
+    through the projection.
+
+    A Core with no index answers exactly as it did before P12b: every row is
+    returned, every index field is ``None``, and every index filter is
+    inapplicable rather than silently empty.  A filter that *needs* the index
+    is refused on an unindexed Core rather than quietly matching nothing --
+    "there is no index here" and "nothing matched" are different answers and a
+    caller that cannot tell them apart will draw the wrong conclusion.
+    """
+
+    from .claim_index_authority import (
+        IMPORTANCE_TIERS, canonical_order_key, current_entries, table_exists,
+    )
+    from .claim_aspect_vocabulary import ASPECTS
+
+    if index_aspect is not None and index_aspect not in ASPECTS:
+        raise CompanyResearchViewValidationError(
+            "index_aspect must be one of " + ", ".join(ASPECTS)
+        )
+    if importance is not None and importance not in IMPORTANCE_TIERS:
+        raise CompanyResearchViewValidationError(
+            "importance must be one of " + ", ".join(IMPORTANCE_TIERS)
+        )
+    for name, value in (("as_of_from", as_of_from), ("as_of_to", as_of_to)):
+        if value is not None:
+            _text(value, name)
+    requires_index = any(
+        value is not None
+        for value in (index_aspect, as_of_from, as_of_to, importance)
+    )
+    indexed = table_exists(connection)
+    if requires_index and not indexed:
+        raise CompanyResearchViewValidationError(
+            "this Core holds no Claim index; aspect, as_of and importance "
+            "filters cannot be answered here"
+        )
+    entries = (
+        current_entries(connection, claim_version_refs=[row[ref_key] for row in rows])
+        if indexed else {}
+    )
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        entry = entries.get(row[ref_key])
+        if entry is None:
+            # An index that has not reached this claim yet cannot say whether
+            # it is a duplicate, so ``canonical_only`` does not drop it: an
+            # untagged claim is a gap in the index, never a reason to hide a
+            # fact.  An explicit aspect/date/importance filter does drop it,
+            # because the answer to "which claims are tagged X" cannot include
+            # one that is tagged nothing.
+            if requires_index:
+                continue
+            result.append({
+                **dict(row),
+                "index_aspect": None, "as_of": None, "as_of_basis": None,
+                "importance": None, "dedupe_group_ref": None,
+                "is_canonical": None, "index_entry_ref": None,
+                # Present on every row or on none: a sort key that exists only
+                # for the rows that happen to be tagged cannot sort a list.
+                # An untagged claim sorts after every tagged one.
+                "index_order": _UNTAGGED_ORDER,
+            })
+            continue
+        if index_aspect is not None and entry["aspect"] != index_aspect:
+            continue
+        if importance is not None and entry["importance"] != importance:
+            continue
+        if as_of_from is not None and (entry["as_of"] is None or entry["as_of"] < as_of_from):
+            continue
+        if as_of_to is not None and (entry["as_of"] is None or entry["as_of"] > as_of_to):
+            continue
+        if canonical_only and not entry["is_canonical"]:
+            continue
+        result.append({
+            **dict(row),
+            "index_aspect": entry["aspect"],
+            "as_of": entry["as_of"],
+            "as_of_basis": entry["as_of_basis"],
+            "importance": entry["importance"],
+            "dedupe_group_ref": entry["dedupe_group_ref"],
+            "is_canonical": entry["is_canonical"],
+            "index_entry_ref": entry["id"],
+            "index_order": canonical_order_key(entry),
+        })
+    return result
+
+
 def query_company_research(
     store: DaltonStore,
     *,
@@ -398,8 +504,26 @@ def query_company_research(
     period: str | None = None,
     status: str | None = None,
     limit: int = 100,
+    index_aspect: str | None = None,
+    as_of_from: str | None = None,
+    as_of_to: str | None = None,
+    importance: str | None = None,
+    canonical_only: bool = True,
 ) -> list[dict[str, Any]]:
-    """Structured query over claim rows; returns immutable refs and hashes."""
+    """Structured query over claim rows; returns immutable refs and hashes.
+
+    ``aspect`` still filters the Ledger's free-text ``metric_or_aspect``; the
+    P12b closed vocabulary is ``index_aspect``.  Two names because they are two
+    fields and always were -- collapsing them would silently change what every
+    existing caller of ``aspect`` asks for.
+
+    ``canonical_only`` defaults to true, which is the whole point of the index:
+    a reader asking for a company's claims should get one copy of each fact,
+    not the same quarter's revenue three times.  It only ever removes a row
+    that the index has positively marked as a duplicate of another; a claim
+    with no index entry, and every claim in a Core with no index at all, is
+    returned exactly as before.
+    """
 
     if company_ref is not None:
         company_ref = _text(company_ref, "company_ref")
@@ -415,7 +539,7 @@ def query_company_research(
         raise CompanyResearchViewValidationError("limit must be between 1 and 1000")
     snapshot = store.claim_index_snapshot()
     rows = _claim_rows(store, snapshot, company_ref)
-    result = []
+    filtered = []
     for row in rows:
         if aspect is not None and row["metric_or_aspect"] != aspect:
             continue
@@ -423,9 +547,32 @@ def query_company_research(
             continue
         if status is not None and row["status"] != status:
             continue
-        result.append({
+        filtered.append({
             key: value for key, value in row.items() if key != "period_key"
         })
+    joined = annotate_with_index(
+        store.connection, filtered, index_aspect=index_aspect,
+        as_of_from=as_of_from, as_of_to=as_of_to, importance=importance,
+        canonical_only=canonical_only,
+    )
+    from .claim_index_authority import table_exists
+
+    # A Core that has never opened the index answers byte-identically to the
+    # way it did before P12b -- not with seven null columns bolted on.  A Core
+    # that has one always carries them, including on a claim the index has not
+    # reached yet, so that "untagged" is visible rather than indistinguishable
+    # from "no index anywhere".
+    indexed = table_exists(store.connection)
+    result = []
+    for row in joined:
+        row.pop("index_order", None)
+        if not indexed:
+            for field in (
+                "index_aspect", "as_of", "as_of_basis", "importance",
+                "dedupe_group_ref", "is_canonical", "index_entry_ref",
+            ):
+                row.pop(field, None)
+        result.append(row)
         if len(result) >= limit:
             break
     return result
@@ -436,6 +583,7 @@ __all__ = [
     "CompanyResearchViewError",
     "CompanyResearchViewValidationError",
     "PROJECTION_KIND",
+    "annotate_with_index",
     "build_company_research_view",
     "query_company_research",
 ]

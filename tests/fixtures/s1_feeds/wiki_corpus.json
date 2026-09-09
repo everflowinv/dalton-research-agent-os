@@ -1,0 +1,82 @@
+{
+  "documents": [
+    {
+      "category_type": "company",
+      "category_name": "ACN",
+      "content_type": "专家访谈",
+      "date": "2026-08-21",
+      "filename": "2026-08-21-expert.md",
+      "filepath": "wiki/companies/ACN/2026-08-21-expert.md",
+      "tags": [
+        "synthetic",
+        "it-services"
+      ],
+      "related": [
+        "ACN",
+        "CRM",
+        "us-software"
+      ],
+      "text": "---\ntags: [synthetic]\n---\n\nSYNTHETIC FIXTURE -- expert call notes about ACN.\n"
+    },
+    {
+      "category_type": "company",
+      "category_name": "ACN",
+      "content_type": "管理层会议纪要",
+      "date": "2026-07-15",
+      "filename": "2026-07-15-mgmt.md",
+      "filepath": "wiki/companies/ACN/2026-07-15-mgmt.md",
+      "tags": [
+        "synthetic"
+      ],
+      "related": [
+        "ACN"
+      ],
+      "text": "---\ntags: [synthetic]\n---\n\nSYNTHETIC FIXTURE -- management meeting minutes.\n"
+    },
+    {
+      "category_type": "company",
+      "category_name": "EPAM",
+      "content_type": "券商研报",
+      "date": "2026-08-30",
+      "filename": "2026-08-30-broker.md",
+      "filepath": "wiki/companies/EPAM/2026-08-30-broker.md",
+      "tags": [
+        "synthetic"
+      ],
+      "related": [
+        "EPAM"
+      ],
+      "text": "---\ntags: [synthetic]\n---\n\nSYNTHETIC FIXTURE -- broker report.\n"
+    },
+    {
+      "category_type": "sector",
+      "category_name": "us-it-services",
+      "content_type": "行业会议纪要",
+      "date": "2026-08-25",
+      "filename": "2026-08-25-industry.md",
+      "filepath": "wiki/sectors/us-it-services/2026-08-25-industry.md",
+      "tags": [
+        "synthetic"
+      ],
+      "related": [
+        "us-it-services"
+      ],
+      "text": "---\ntags: [synthetic]\n---\n\nSYNTHETIC FIXTURE -- industry conference notes, no company tag.\n"
+    },
+    {
+      "category_type": "company",
+      "category_name": "ACN",
+      "content_type": "季度研究笔记",
+      "date": "2026-06-01",
+      "filename": "2026-06-01-quarterly.md",
+      "filepath": "wiki/companies/ACN/2026-06-01-quarterly.md",
+      "tags": [
+        "synthetic"
+      ],
+      "related": [
+        "ACN"
+      ],
+      "text": "---\ntags: [synthetic]\n---\n\nSYNTHETIC FIXTURE -- quarterly note before the window.\n"
+    }
+  ]
+}

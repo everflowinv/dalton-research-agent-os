@@ -52,6 +52,25 @@ _DAILY_QUOTAS = MappingProxyType(
                 "max_physical_calls_per_unit": 1,
             }
         ),
+        # S2: one Guidepoint expert-transcript search per unit.
+        #
+        # Deliberately the smallest ceiling of any search source, and not
+        # because the proxy is slow. Guidepoint's licence permits research
+        # reading and explicitly forbids bulk extraction; a lane that can run
+        # hundreds of searches a day is one whose traffic pattern stops looking
+        # like research. The mission plan is five issuers times two specs plus
+        # four industry queries -- fourteen for a complete sweep -- and
+        # the plan's cadence repeats a spec weekly, so steady state is a
+        # handful a day. Twenty-five leaves room for one full re-sweep plus
+        # retries in a single day and nothing that resembles a crawl. Raising
+        # it is a governance decision, not a constant edit.
+        ("guidepoint", "search_library"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 25,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
         # P10p: one issuer's filing index per unit. A "search" unit rather than
         # a new word for it: one query in, a list of filings out, which is the
         # same shape the other search quotas already describe.
@@ -94,6 +113,47 @@ _DAILY_QUOTAS = MappingProxyType(
                 "quota_unit": "search",
                 "daily_unit_limit": 50,
                 "max_physical_calls_per_unit": 4,
+            }
+        ),
+        # S1: the two local feeds. There is no upstream to be polite to and
+        # nothing to pay -- these are file reads on this machine -- so the
+        # ceilings are generous. They are declared anyway, because a lane
+        # without a quota is a lane whose runaway loop nobody notices, and
+        # because admission refuses a route with no governed policy rather
+        # than inventing an unlimited one.
+        ("sales-notes", "list_notes"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                # One enumeration per window per tick, and a tick walks a few
+                # windows; a few hundred a day is a bug, not a workload.
+                "daily_unit_limit": 500,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        ("sales-notes", "get_note"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                # About twelve notes arrive per run and twenty-four a day. A
+                # thousand covers a full backfill of the whole archive in one
+                # day and still bounds a loop.
+                "daily_unit_limit": 1_000,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        ("company-wiki", "list_documents"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 500,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        ("company-wiki", "get_document"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                # The whole corpus is about a thousand documents, so this is
+                # "read everything once" and no more.
+                "daily_unit_limit": 1_000,
+                "max_physical_calls_per_unit": 1,
             }
         ),
     }
