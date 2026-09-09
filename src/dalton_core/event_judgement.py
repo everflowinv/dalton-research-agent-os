@@ -48,7 +48,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable
 
-from .cockpit_model import CockpitModelError, register_purpose, unwrap_json_object
+from .cockpit_model import (
+    CockpitModelError,
+    lane_status_for,
+    register_purpose,
+    unwrap_json_object,
+)
 from .research_event import EVIDENCE_TIERS, worst_tier
 from .research_playbook import DECISION_VOCABULARY
 from .store import canonical_json, content_hash
@@ -678,7 +683,7 @@ def reflect(
         )
     except CockpitModelError as exc:
         return {"status": "refused", "reason": f"the reflection call did not succeed: {exc}",
-                "model": None}
+                "lane_status": lane_status_for(exc, "refused"), "model": None}
     provenance = _provenance(call)
     provenance["purpose"] = REFLECTION_PURPOSE
     try:
@@ -742,6 +747,7 @@ def verify_reflection(
         )
     except CockpitModelError as exc:
         return {"status": "refused", "model": None,
+                "lane_status": lane_status_for(exc, "refused"),
                 "reason": f"the reflection verifier call did not succeed: {exc}"}
     provenance = _provenance(call)
     provenance["purpose"] = REFLECTION_PURPOSE
@@ -853,7 +859,11 @@ def judge(
             purpose=PURPOSE, request_id=request_id, prompt=prompt, mission=mission
         )
     except CockpitModelError as exc:
+        # C2: still a refusal -- the caller branches on this word -- but a
+        # spent pool says which kind, so the run reports a budget decision
+        # instead of eight identical refusals that look like an outage.
         return {"status": "refused", "reason": f"the model call did not succeed: {exc}",
+                "lane_status": lane_status_for(exc, "refused"),
                 "prompt_chars": len(prompt), "model": None}
     provenance = _provenance(call)
     try:
@@ -898,7 +908,7 @@ def verify(
         )
     except CockpitModelError as exc:
         return {"status": "refused", "reason": f"the verifier call did not succeed: {exc}",
-                "model": None}
+                "lane_status": lane_status_for(exc, "refused"), "model": None}
     provenance = _provenance(call)
     verifier_family = family_resolver(provenance.get("route_decision_ref"))
     independence = {

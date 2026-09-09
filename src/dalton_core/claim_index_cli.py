@@ -58,7 +58,7 @@ from .claim_index_tagging import (
     prompt_tagger,
     rule_tags,
 )
-from .cockpit_model import CockpitModel, CockpitModelError
+from .cockpit_model import CockpitModel, CockpitModelError, lane_status_for
 from .coverage_mission import CoverageMissionAuthority
 from .scheduler import SchedulerError
 from .store import DaltonStore, canonical_json
@@ -266,8 +266,11 @@ def run_claim_index(
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         except CockpitModelError as exc:
-            summary.update({"status": "succeeded", "index_status": "model_unavailable",
-                            "failure_reason": f"{type(exc).__name__}: {exc}"})
+            summary.update({
+                "status": "succeeded",
+                # C2: a spent pool is a budget decision, not an outage.
+                "index_status": lane_status_for(exc, "model_unavailable"),
+                "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
         summary["replayed"] = bool(call.get("replayed"))
         summary["cost_micros"] = int(call.get("cost_micros") or 0)
