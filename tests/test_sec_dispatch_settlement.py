@@ -191,6 +191,177 @@ class OutcomeTests(unittest.TestCase):
             self.authority.sec_dispatch_outcomes("company:sec-cik:0000051143")["settled"], 0)
         self.assertEqual(self.authority.sec_dispatch_outcomes()["settled"], 1)
 
+    def test_the_reason_a_run_failed_is_kept_beside_the_settlement(self):
+        dispatch_id = SettlementTests.dispatch(self, "0001467373-25-000217")
+        settled = self.authority.settle_sec_dispatch(
+            dispatch_id, outcome="finished", detail="failed",
+            failure_reason="ConnectorConflict: idempotency key conflict")
+        self.assertIn("idempotency key conflict", settled["failure_reason"])
+        row = self.store.connection.execute(
+            "SELECT failure_reason FROM coverage_mission_sec_dispatch_settlements "
+            "WHERE dispatch_id=?", (dispatch_id,),
+        ).fetchone()
+        self.assertIn("idempotency key conflict", row["failure_reason"])
+
+    def test_a_runaway_reason_cannot_become_the_largest_thing_in_the_ledger(self):
+        dispatch_id = SettlementTests.dispatch(self, "0001467373-25-000217")
+        settled = self.authority.settle_sec_dispatch(
+            dispatch_id, outcome="finished", detail="failed", failure_reason="x" * 9000)
+        self.assertEqual(len(settled["failure_reason"]), 500)
+
+
+class RunFailureReasonTests(unittest.TestCase):
+    """The reason lived in a summary file nobody read."""
+
+    def test_the_issuer_error_is_the_reason(self):
+        from dalton_core.coverage_mission import sec_run_failure_reason
+
+        self.assertEqual(
+            sec_run_failure_reason({"ok": False, "issuers": [
+                {"status": "failed", "error": "ConnectorConflict: idempotency key conflict"}]}),
+            "ConnectorConflict: idempotency key conflict",
+        )
+
+    def test_a_summary_with_nothing_wrong_names_no_reason(self):
+        from dalton_core.coverage_mission import sec_run_failure_reason
+
+        self.assertIsNone(sec_run_failure_reason({"ok": True, "issuers": [{"status": "ok"}]}))
+        self.assertIsNone(sec_run_failure_reason(None))
+        self.assertIsNone(sec_run_failure_reason("not a summary"))
+
+    def test_a_top_level_error_is_used_when_no_issuer_carries_one(self):
+        from dalton_core.coverage_mission import sec_run_failure_reason
+
+        self.assertEqual(sec_run_failure_reason({"error": "lane crashed"}), "lane crashed")
+
+
+class AttemptVoidTests(unittest.TestCase):
+    """P13z: an attempt spent by an outage tested nothing.
+
+    Three attempts per filing, each widening the window, then the lane stops.
+    A connector-profile conflict spent all three on every filing five companies
+    needed, and would have spent them on any filing equally. Fixing the
+    conflict does nothing while the budget stays gone.
+    """
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.store = DaltonStore(str(Path(self._dir.name) / "core.sqlite"))
+        self.addCleanup(self.store.close)
+        self.state = bootstrap_method_authorities(self.store)
+        self.authority = CoverageMissionAuthority(self.store)
+        params = mission_params(self.state)
+        self.mission = self.authority.create_mission(params.pop("mission_ref"), **params)
+
+    def attempts(self):
+        from dalton_core.mission_sec_quarters import MissionSecQuartersCoordinator
+
+        return MissionSecQuartersCoordinator._dispatch_attempts(
+            type("S", (), {"connection": self.store.connection})())
+
+    def dispatch(self, suffix: str, accession="0001467373-25-000217") -> str:
+        dispatch_id = f"mission-sec-dispatch:{suffix}"
+        with self.authority._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_sec_dispatches("
+                "dispatch_id,mission_version_ref,mission_version_hash,company_ref,ticker,"
+                "actor_ref,form,filed_from,filed_to,expected_accession,observation_ref,"
+                "authorization_json,request_hash,status,ticket_ref,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,'10-Q','2025-07-01','2025-07-05',?,'obs','{}','h',"
+                "'launched','sec-lane:aaaa','2026-09-07T18:00:00+00:00','2026-09-07T18:00:00+00:00')",
+                (dispatch_id, self.mission["id"], self.mission["content_hash"], ACN, "ACN",
+                 "automation:coverage-mission", accession),
+            )
+        return dispatch_id
+
+    def test_a_voided_attempt_does_not_count_against_the_budget(self):
+        first, second = self.dispatch("a"), self.dispatch("b")
+        self.assertEqual(self.attempts()["0001467373-25-000217"], 2)
+        self.authority.void_sec_dispatch_attempt(
+            first, reason="connector outage", voided_by="agent:dalton-core")
+        self.assertEqual(self.attempts()["0001467373-25-000217"], 1)
+        self.authority.void_sec_dispatch_attempt(
+            second, reason="connector outage", voided_by="agent:dalton-core")
+        self.assertEqual(self.attempts().get("0001467373-25-000217", 0), 0)
+
+    def test_the_dispatch_itself_is_not_deleted(self):
+        dispatch_id = self.dispatch("a")
+        self.authority.void_sec_dispatch_attempt(
+            dispatch_id, reason="connector outage", voided_by="agent:dalton-core")
+        self.assertIsNotNone(self.store.connection.execute(
+            "SELECT 1 FROM coverage_mission_sec_dispatches WHERE dispatch_id=?",
+            (dispatch_id,)).fetchone())
+
+    def test_the_reason_travels_with_the_void(self):
+        dispatch_id = self.dispatch("a")
+        self.authority.void_sec_dispatch_attempt(
+            dispatch_id, reason="P13z connector conflict", voided_by="agent:dalton-core")
+        [row] = self.authority.voided_sec_dispatch_attempts()
+        self.assertEqual(row["reason"], "P13z connector conflict")
+        self.assertEqual(row["expected_accession"], "0001467373-25-000217")
+
+    def test_voiding_twice_withdraws_once(self):
+        dispatch_id = self.dispatch("a")
+        first = self.authority.void_sec_dispatch_attempt(
+            dispatch_id, reason="one", voided_by="agent:dalton-core")
+        again = self.authority.void_sec_dispatch_attempt(
+            dispatch_id, reason="two", voided_by="agent:dalton-core")
+        self.assertEqual((first["status_marker"], again["status_marker"]), ("fresh", "duplicate"))
+        self.assertEqual(again["reason"], "one")
+
+    def test_an_unknown_dispatch_cannot_be_voided(self):
+        with self.assertRaises(CoverageMissionNotFound):
+            self.authority.void_sec_dispatch_attempt(
+                "mission-sec-dispatch:nope", reason="x", voided_by="agent:dalton-core")
+
+    def test_voids_are_append_only_and_authority_only(self):
+        dispatch_id = self.dispatch("a")
+        with self.assertRaises(Exception):
+            self.store.connection.execute(
+                "INSERT INTO coverage_mission_sec_dispatch_attempt_voids"
+                "(dispatch_id,reason,voided_by,voided_at) VALUES(?,?,?,?)",
+                (dispatch_id, "x", "y", "2026-09-09T00:00:00+00:00"))
+        self.authority.void_sec_dispatch_attempt(
+            dispatch_id, reason="x", voided_by="agent:dalton-core")
+        for sql in ("UPDATE coverage_mission_sec_dispatch_attempt_voids SET reason='z'",
+                    "DELETE FROM coverage_mission_sec_dispatch_attempt_voids"):
+            with self.assertRaises(Exception):
+                self.store.connection.execute(sql)
+
+    def test_the_script_never_offers_a_successful_run_for_voiding(self):
+        from scripts.void_sec_dispatch_attempts import candidates
+
+        worked, broke = self.dispatch("a"), self.dispatch("b")
+        self.authority.settle_sec_dispatch(worked, outcome="finished", detail="succeeded")
+        self.authority.settle_sec_dispatch(
+            broke, outcome="finished", detail="failed",
+            failure_reason="ConnectorConflict: idempotency key conflict")
+        offered = candidates(self.store, match=None)
+        self.assertEqual([item["dispatch_id"] for item in offered], [broke])
+
+    def test_the_script_can_be_narrowed_to_one_outage(self):
+        from scripts.void_sec_dispatch_attempts import candidates
+
+        conflict, other = self.dispatch("a"), self.dispatch("b")
+        self.authority.settle_sec_dispatch(
+            conflict, outcome="finished", detail="failed",
+            failure_reason="ConnectorConflict: idempotency key conflict")
+        self.authority.settle_sec_dispatch(
+            other, outcome="finished", detail="failed", failure_reason="filing not found")
+        offered = candidates(self.store, match="idempotency key conflict")
+        self.assertEqual([item["dispatch_id"] for item in offered], [conflict])
+
+    def test_an_already_voided_attempt_is_not_offered_again(self):
+        from scripts.void_sec_dispatch_attempts import candidates
+
+        dispatch_id = self.dispatch("a")
+        self.authority.settle_sec_dispatch(dispatch_id, outcome="finished", detail="failed")
+        self.assertEqual(len(candidates(self.store, match=None)), 1)
+        self.authority.void_sec_dispatch_attempt(
+            dispatch_id, reason="x", voided_by="agent:dalton-core")
+        self.assertEqual(candidates(self.store, match=None), [])
+
 
 if __name__ == "__main__":
     unittest.main()

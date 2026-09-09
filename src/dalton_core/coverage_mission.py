@@ -51,6 +51,32 @@ _SCHEMA_PATH = Path(__file__).with_name("coverage_mission_schema.sql")
 # Every other terminal status -- failed, orphaned, anything new -- is a run
 # that produced nothing, and is counted as such rather than assumed benign.
 SEC_RUN_SUCCEEDED = "succeeded"
+# A failure reason is a diagnostic, not evidence; it is bounded so a runaway
+# traceback cannot become the largest thing in the ledger.
+MAX_FAILURE_REASON_CHARS = 500
+
+
+def sec_run_failure_reason(summary: Any) -> str | None:
+    """Why a SEC lane run failed, from the summary it left behind.
+
+    The ticket status says ``failed``; the reason lives in the run summary's
+    per-issuer error.  Seventy-three runs said ``failed`` and every one of them
+    had died on the same connector-profile conflict -- one string that would
+    have named the outage on the first occurrence.
+    """
+
+    if not isinstance(summary, Mapping):
+        return None
+    for issuer in summary.get("issuers") or ():
+        if not isinstance(issuer, Mapping):
+            continue
+        error = issuer.get("error")
+        if isinstance(error, str) and error.strip():
+            return error.strip()[:MAX_FAILURE_REASON_CHARS]
+    error = summary.get("error")
+    if isinstance(error, str) and error.strip():
+        return error.strip()[:MAX_FAILURE_REASON_CHARS]
+    return None
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _HUMAN_RE = re.compile(r"^human:[A-Za-z0-9][A-Za-z0-9._/@:-]*$")
 _AUTOMATION_RE = re.compile(r"^automation:[A-Za-z0-9][A-Za-z0-9._/@:-]*$")
@@ -596,6 +622,29 @@ class CoverageMissionAuthority:
         )
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._migrate_discovered_document_host()
+        self._migrate_settlement_failure_reason()
+
+    def _migrate_settlement_failure_reason(self) -> None:
+        """P13z: add the nullable ``failure_reason`` column to older ledgers.
+
+        Additive only; settlements already written keep every value and gain
+        ``failure_reason=NULL``, which is honest -- nobody recorded why those
+        runs failed, and inventing a reason now would be worse than the gap.
+        """
+
+        columns = {
+            row[1] for row in self.connection.execute(
+                "PRAGMA table_info(coverage_mission_sec_dispatch_settlements)"
+            ).fetchall()
+        }
+        if "failure_reason" in columns:
+            return
+        if self.connection.in_transaction:
+            raise RuntimeError("settlement failure reason migration requires no open transaction")
+        self.connection.execute(
+            "ALTER TABLE coverage_mission_sec_dispatch_settlements "
+            "ADD COLUMN failure_reason TEXT"
+        )
 
     def _migrate_discovered_document_host(self) -> None:
         """P9d-13: add the nullable ``host`` column to ledgers created earlier.
@@ -2776,7 +2825,7 @@ class CoverageMissionAuthority:
 
     def settle_sec_dispatch(
         self, dispatch_id: str, *, outcome: str, ticket_ref: str | None = None,
-        detail: str | None = None,
+        detail: str | None = None, failure_reason: str | None = None,
     ) -> dict[str, Any]:
         """Record that a launched dispatch's run is over.
 
@@ -2806,15 +2855,62 @@ class CoverageMissionAuthority:
         if existing is not None:
             return {**dict(existing), "status_marker": "duplicate"}
         now = _now()
+        reason = (None if failure_reason is None
+                  else str(failure_reason)[:MAX_FAILURE_REASON_CHARS])
         with self._transaction() as cur:
             cur.execute(
                 "INSERT INTO coverage_mission_sec_dispatch_settlements("
-                "dispatch_id,ticket_ref,outcome,detail,settled_at) VALUES(?,?,?,?,?)",
+                "dispatch_id,ticket_ref,outcome,detail,settled_at,failure_reason) "
+                "VALUES(?,?,?,?,?,?)",
                 (dispatch_id, ticket_ref, outcome,
-                 None if detail is None else str(detail)[:500], now),
+                 None if detail is None else str(detail)[:500], now, reason),
             )
         return {"dispatch_id": dispatch_id, "ticket_ref": ticket_ref, "outcome": outcome,
-                "detail": detail, "settled_at": now, "status_marker": "fresh"}
+                "detail": detail, "failure_reason": reason, "settled_at": now,
+                "status_marker": "fresh"}
+
+    def void_sec_dispatch_attempt(
+        self, dispatch_id: str, *, reason: str, voided_by: str
+    ) -> dict[str, Any]:
+        """Record that an attempt proved nothing about the filing it was spent on.
+
+        The dispatch stays; only its claim on the retry budget is withdrawn.
+        """
+
+        dispatch_id = _text(dispatch_id, "dispatch_id")
+        reason = _text(reason, "reason")
+        voided_by = _text(voided_by, "voided_by")
+        row = self.connection.execute(
+            "SELECT 1 FROM coverage_mission_sec_dispatches WHERE dispatch_id=?",
+            (dispatch_id,),
+        ).fetchone()
+        if row is None:
+            raise CoverageMissionNotFound("mission SEC dispatch was not found")
+        existing = self.connection.execute(
+            "SELECT * FROM coverage_mission_sec_dispatch_attempt_voids WHERE dispatch_id=?",
+            (dispatch_id,),
+        ).fetchone()
+        if existing is not None:
+            return {**dict(existing), "status_marker": "duplicate"}
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_sec_dispatch_attempt_voids("
+                "dispatch_id,reason,voided_by,voided_at) VALUES(?,?,?,?)",
+                (dispatch_id, reason, voided_by, now),
+            )
+        return {"dispatch_id": dispatch_id, "reason": reason, "voided_by": voided_by,
+                "voided_at": now, "status_marker": "fresh"}
+
+    def voided_sec_dispatch_attempts(self) -> list[dict[str, Any]]:
+        """Every withdrawn attempt and why, so the forgiveness stays legible."""
+
+        return [dict(row) for row in self.connection.execute(
+            "SELECT v.*, d.company_ref, d.expected_accession "
+            "FROM coverage_mission_sec_dispatch_attempt_voids v "
+            "JOIN coverage_mission_sec_dispatches d ON d.dispatch_id=v.dispatch_id "
+            "ORDER BY v.voided_at, v.dispatch_id"
+        ).fetchall()]
 
     def sec_dispatch_outcomes(self, company_ref: str | None = None) -> dict[str, Any]:
         """How the settled SEC runs actually went, per outcome.
@@ -3293,9 +3389,12 @@ __all__ = [
     "DELIVERABLE_KINDS",
     "DISCOVERED_DOCUMENT_STATUSES",
     "DISCOVERY_DISPATCH_STATUSES",
+    "MAX_FAILURE_REASON_CHARS",
     "REQUIRED_CHECKPOINTS",
+    "SEC_RUN_SUCCEEDED",
     "SOURCE_STATUSES",
     "STAGE_STATUSES",
+    "sec_run_failure_reason",
     "CoverageMissionAuthority",
     "CoverageMissionConflict",
     "CoverageMissionError",

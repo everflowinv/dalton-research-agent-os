@@ -183,11 +183,13 @@ from .research_playbook import (
     ResearchPlaybookValidationError,
 )
 from .coverage_mission import (
+    SEC_RUN_SUCCEEDED,
     CoverageMissionAuthority,
     CoverageMissionConflict,
     CoverageMissionError,
     CoverageMissionNotFound,
     CoverageMissionValidationError,
+    sec_run_failure_reason,
 )
 from .model_forecast import (
     ModelForecastAuthority,
@@ -2994,21 +2996,29 @@ class WriterServer:
         for dispatch in open_dispatches:
             ticket_ref = dispatch.get("ticket_ref")
             outcome, detail = "orphaned", "dispatch carries no lane ticket"
+            failure_reason: str | None = None
             if ticket_ref:
                 try:
                     ticket = self.sec_lane_launcher.status(ticket_ref)
                 except LaneTicketNotFound:
                     detail = "lane ticket is no longer on disk"
-                except Exception as exc:  # noqa: BLE001
+                except Exception:  # noqa: BLE001
                     continue  # unreadable now; try again next tick
                 else:
                     if ticket.get("status") == "running":
                         continue
                     outcome, detail = "finished", str(ticket.get("status"))
+                    # P13z: the status alone said "failed" for 73 runs that had
+                    # all died on one connector conflict, and the reason lived
+                    # only in a summary file nobody read. Carry it, so the next
+                    # outage is one query away rather than a day of archaeology.
+                    if detail != SEC_RUN_SUCCEEDED:
+                        failure_reason = sec_run_failure_reason(ticket.get("summary"))
             try:
                 settled.append(self.coverage_mission.settle_sec_dispatch(
                     dispatch["dispatch_id"], outcome=outcome,
                     ticket_ref=ticket_ref, detail=detail,
+                    failure_reason=failure_reason,
                 ))
             except Exception:  # noqa: BLE001
                 continue

@@ -209,12 +209,22 @@ class MissionSecQuartersCoordinator:
         Live, three windows queued while the capability descriptor was stale
         are permanently dead that way.  Each retry therefore widens the filing
         window by a day, which is a different plan, and stops after three.
+
+        P13z: that reasoning holds only while the failure is a property of the
+        filing.  A connector-profile conflict killed every SEC run for a day
+        and would have killed any window equally; it spent all three attempts
+        on every filing five companies still needed and told nobody anything
+        about those filings.  A voided attempt is one somebody has recorded as
+        proving nothing, and it does not count against the budget.
         """
 
         try:
             rows = self.connection.execute(
-                "SELECT expected_accession, COUNT(*) AS n FROM coverage_mission_sec_dispatches "
-                "GROUP BY expected_accession"
+                "SELECT d.expected_accession AS expected_accession, COUNT(*) AS n "
+                "FROM coverage_mission_sec_dispatches d "
+                "LEFT JOIN coverage_mission_sec_dispatch_attempt_voids v "
+                "ON v.dispatch_id=d.dispatch_id "
+                "WHERE v.dispatch_id IS NULL GROUP BY d.expected_accession"
             ).fetchall()
         except Exception:  # noqa: BLE001
             return {}

@@ -394,7 +394,11 @@ CREATE TABLE IF NOT EXISTS coverage_mission_sec_dispatch_settlements (
     ticket_ref TEXT,
     outcome TEXT NOT NULL CHECK(outcome IN ('finished','orphaned')),
     detail TEXT,
-    settled_at TEXT NOT NULL
+    settled_at TEXT NOT NULL,
+    -- P13z: 'finished' says the run is over and 'failed' says it did not work.
+    -- Neither says *why*, and 73 runs that had all died on one connector
+    -- conflict looked like 73 unrelated failures for a day.
+    failure_reason TEXT
 );
 
 CREATE TRIGGER IF NOT EXISTS coverage_mission_sec_dispatch_settlements_authorized_insert
@@ -430,6 +434,36 @@ CREATE TRIGGER IF NOT EXISTS coverage_mission_document_figure_retractions_no_upd
 BEFORE UPDATE ON coverage_mission_document_figure_retractions BEGIN SELECT RAISE(ABORT, 'figure retractions are append-only'); END;
 CREATE TRIGGER IF NOT EXISTS coverage_mission_document_figure_retractions_no_delete
 BEFORE DELETE ON coverage_mission_document_figure_retractions BEGIN SELECT RAISE(ABORT, 'figure retractions are append-only'); END;
+
+-- P13z: an attempt that never tested the filing it was spent on.
+--
+-- A filing is retried at most three times, each with a wider window, because
+-- re-queuing the identical window replays the same failure. That reasoning
+-- holds only when the failure is a property of the filing. It was not: a
+-- connector-profile conflict killed every SEC run for a day, and it would have
+-- killed any window equally. The three attempts every company still needed
+-- were spent without a single one reaching the filing, and the lane then
+-- refused to try again -- permanently, for evidence nobody had gathered.
+--
+-- Voiding says those attempts did not count, and why. Append-only, and never a
+-- deletion of the dispatch: the attempt happened, it just proved nothing about
+-- the filing. Explicit rather than inferred, because a wrong guess here is a
+-- filing retried forever.
+CREATE TABLE IF NOT EXISTS coverage_mission_sec_dispatch_attempt_voids (
+    dispatch_id TEXT PRIMARY KEY
+        REFERENCES coverage_mission_sec_dispatches(dispatch_id),
+    reason TEXT NOT NULL,
+    voided_by TEXT NOT NULL,
+    voided_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS coverage_mission_sec_dispatch_attempt_voids_authorized_insert
+BEFORE INSERT ON coverage_mission_sec_dispatch_attempt_voids WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'voiding a SEC dispatch attempt requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_sec_dispatch_attempt_voids_no_update
+BEFORE UPDATE ON coverage_mission_sec_dispatch_attempt_voids BEGIN SELECT RAISE(ABORT, 'SEC dispatch attempt voids are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_sec_dispatch_attempt_voids_no_delete
+BEFORE DELETE ON coverage_mission_sec_dispatch_attempt_voids BEGIN SELECT RAISE(ABORT, 'SEC dispatch attempt voids are append-only'); END;
 
 -- P13y: a metric observation learned from a document that was not about this
 -- company.
