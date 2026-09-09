@@ -1336,12 +1336,15 @@ class RunnerBoundaryTests(unittest.TestCase):
             def lane_launcher(self, kwarg):
                 return object()
 
-        # DISCOVERY_SOURCES is not patched here: this is the writer as it
-        # stands today, and the honest answer is "not configured" rather than
-        # fifty child processes whose results the authority will refuse.
-        result = mission_feed_lane._dispatch(
-            Server(), SALES_NOTES, mission_feed_lane.SALES_NOTES_LAUNCHER_KWARG
-        )
+        # Simulate a Core whose authority does not know the feed yet: the
+        # honest answer is "not configured" rather than fifty child processes
+        # whose results the authority will refuse.
+        without = {k: v for k, v in coverage_mission_module.DISCOVERY_SOURCES.items()
+                   if k != SALES_NOTES}
+        with mock.patch.object(coverage_mission_module, "DISCOVERY_SOURCES", without):
+            result = mission_feed_lane._dispatch(
+                Server(), SALES_NOTES, mission_feed_lane.SALES_NOTES_LAUNCHER_KWARG
+            )
         self.assertEqual(result["status"], "unconfigured")
         self.assertIn("DISCOVERY_SOURCES", result["reason"])
 
@@ -1464,7 +1467,10 @@ class AuthoritySeamTests(unittest.TestCase):
             with self.subTest(source_ref=source_ref):
                 self.assertEqual(set(entry), set(existing))
                 self.assertEqual(entry["connector_source_ref"], source_ref)
-                self.assertNotIn(source_ref, coverage_mission_module.DISCOVERY_SOURCES)
+                # Integration added the rows to the authority's own table; the
+                # lane's copy and the authority's must never drift.
+                self.assertEqual(
+                    dict(coverage_mission_module.DISCOVERY_SOURCES[source_ref]), dict(entry))
 
 
 if __name__ == "__main__":
