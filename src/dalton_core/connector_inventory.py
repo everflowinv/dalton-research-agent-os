@@ -1151,6 +1151,46 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                     "source_record_refs", "next_cursor", "provider_status",
                 ),
             )
+        if operation == "calendar":
+            # C1: dates only, and every one of them nullable.
+            #
+            # No consensus figures here even though Yahoo serves them in the
+            # same block. `analyst_estimates` already carries the EPS and
+            # revenue consensus, and two operations claiming the same number
+            # is how the two of them come to disagree.
+            #
+            # `earnings_dates` is an array because Yahoo says "some time
+            # between these two days" when it cannot narrow the date, and
+            # collapsing that to one day would invent a precision the source
+            # did not offer. One entry is a day Yahoo names; two are the ends
+            # of a window; none is Yahoo having nothing.
+            #
+            # `dividend_date` and `ex_dividend_date` are what Yahoo last knew
+            # and are very often in the past -- DXC still reports an ex-date
+            # from March 2020, six years after it stopped paying. They are
+            # carried verbatim, and deciding that a past date is not a
+            # forthcoming event is the reader's job, not this contract's.
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "ticker": _string(),
+                    "as_of": iso_date,
+                    "captured_at": _string(),
+                    "earnings_dates": {
+                        "type": "array", "uniqueItems": True, "items": iso_date,
+                    },
+                    "dividend_date": {"type": ["string", "null"]},
+                    "ex_dividend_date": {"type": ["string", "null"]},
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                },
+                (
+                    "schema_version", "ticker", "as_of", "captured_at",
+                    "earnings_dates", "dividend_date", "ex_dividend_date",
+                    "source_record_refs", "next_cursor", "provider_status",
+                ),
+            )
     return _object_schema(
         {
             "source_record_refs": _array_of_strings(),
@@ -1316,6 +1356,15 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
             ),
             _operation(
                 "analyst_estimates", completeness="ranked",
+                input_fields=("ticker",),
+            ),
+            # C1: the dated corporate events Yahoo knows about. Its own
+            # operation rather than a block inside `analyst_estimates`,
+            # because a schema hash binds one operation and an approval to
+            # read what analysts forecast should not silently widen into
+            # reading when the company will next speak.
+            _operation(
+                "calendar", completeness="enumerated",
                 input_fields=("ticker",),
             ),
         ),
