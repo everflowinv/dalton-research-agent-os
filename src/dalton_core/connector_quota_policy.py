@@ -52,6 +52,25 @@ _DAILY_QUOTAS = MappingProxyType(
                 "max_physical_calls_per_unit": 1,
             }
         ),
+        # S2: one Guidepoint expert-transcript search per unit.
+        #
+        # Deliberately the smallest ceiling of any search source, and not
+        # because the proxy is slow. Guidepoint's licence permits research
+        # reading and explicitly forbids bulk extraction; a lane that can run
+        # hundreds of searches a day is one whose traffic pattern stops looking
+        # like research. The mission plan is five issuers times two specs plus
+        # five industry queries -- fifteen queries for a complete sweep -- and
+        # the plan's cadence repeats a spec weekly, so steady state is a
+        # handful a day. Twenty-five leaves room for one full re-sweep plus
+        # retries in a single day and nothing that resembles a crawl. Raising
+        # it is a governance decision, not a constant edit.
+        ("guidepoint", "search_library"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 25,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
         # P10p: one issuer's filing index per unit. A "search" unit rather than
         # a new word for it: one query in, a list of filings out, which is the
         # same shape the other search quotas already describe.
