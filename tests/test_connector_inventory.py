@@ -553,8 +553,9 @@ class ConnectorInventoryTests(unittest.TestCase):
             set(profiles),
             {
                 "cninfo", "sec", "sec-financials", "roic-transcript",
-                "alphaengine", "x-xreach", "x-x-search", "reddit-last30days",
-                "guidepoint", "gemini-web-search", "web-fetch", "xueqiu",
+                "yfinance", "alphaengine", "x-xreach", "x-x-search",
+                "reddit-last30days", "guidepoint", "gemini-web-search",
+                "web-fetch", "xueqiu",
             },
         )
         refs = {profile["connector_ref"] for profile in profiles.values()}
@@ -606,7 +607,8 @@ class ConnectorInventoryTests(unittest.TestCase):
         self.assertNotIn("cookie:", serialized)
 
     def test_transport_auth_and_readiness_never_fabricate_runner_authority(self) -> None:
-        public = {"cninfo", "sec", "sec-financials", "roic-transcript", "web-fetch"}
+        public = {"cninfo", "sec", "sec-financials", "roic-transcript",
+                  "yfinance", "web-fetch"}
         for slug, profile in self.built["templates"].items():
             with self.subTest(slug=slug):
                 readiness = profile["readiness"]

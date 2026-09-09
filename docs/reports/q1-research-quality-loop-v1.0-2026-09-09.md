@@ -1,8 +1,8 @@
 # Q 线：研究质量回路 v1.0
 
 日期：2026-09-09
-状态：分支 `wave1d-quality-loop`；第一轮 code review 的六项已修（第 9 节），已并入 main `bd7021f`（Wave 0，第 10 节），待合并
-基线：main `08c66d0`，其后并入 main `bd7021f`（Wave 0 lane registry）；[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 3 节 Wave 1「D 质量回路」；[能力差距分析与开发蓝图 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) 5.3 Q 线
+状态：分支 `wave1d-quality-loop`；第一轮 code review 的六项已修（第 9 节），已并入 main（Wave 0 `bd7021f` 与 Wave 1A `94f2475`，第 10 节），待合并
+基线：main `08c66d0`，其后并入 main `bd7021f`（Wave 0 lane registry）与 `94f2475`（Wave 1A 市场层）；[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 3 节 Wave 1「D 质量回路」；[能力差距分析与开发蓝图 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) 5.3 Q 线
 数据：live Core 只读副本（`/private/tmp/dalton-ro/core.sqlite`，2026-09-09 12:23），复制到 `/tmp` 后只读打开。**没有写过任何 live 状态，没有部署，没有发过 mission 版本，没有对 live 预算发起过模型调用。**
 
 ---
@@ -319,12 +319,12 @@ ACN 的 N2 现在是 `…249b41c5e9`（三条里最近记录的那条），一�
 全量测试，`PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -t .`：
 
 ```
-Ran 2244 tests in 249.891s
+Ran 2422 tests in 285.709s
 
 OK (skipped=1)
 ```
 
-这是**合并 Wave 0 之后**的全量数。分解：分支基线 2,034 → 本片新增 **164 项** → 2,198；Wave 0 带进来 46 项 → 2,244。没有失败、没有静默跳过。
+这是**合并 Wave 0 与 Wave 1A 之后**的全量数。分解：分支基线 2,034 → 本片新增 **164 项** → 2,198；Wave 0 带进来 46 项 → 2,244；Wave 1A 市场层带进来 178 项 → 2,422。没有失败、没有静默跳过。（合并 Wave 0 之后、合并 1A 之前的那一次是 `Ran 2244 tests ... OK (skipped=1)`。）
 
 `golden run` 20 例全部与 golden 一致（退出码 0）。
 
@@ -388,6 +388,8 @@ JUDGE_PURPOSE = register_purpose("quality")
 **模型配置名不注册。** `model_configurations.register_model_config_name` 是给「自己装一份配置文件」的 lane 用的；判读复用已在种子里的 `initial-screen-model-config.json`。`JUDGE_MODEL_CONFIG_NAME` 常量把这个选择写进代码，`test_the_judge_runs_on_an_already_installed_model_configuration` 断言它确实在注册表里——这样「复用哪一份」是一个被测试钉住的决定，而不是一句报告里的话。
 
 **console script 已加**：`dalton-research-quality = "dalton_core.research_quality_cli:main"`。两份 schema 由 Wave 0 的 `*_schema.sql` 通配自动打包，`pyproject.toml` 的 package-data 无需再动。
+
+**顺带并入了 Wave 1A（main `94f2475`，市场层）**，因为 main 在这一轮里又往前走了一步，把它留在后面等于把同样的活儿再交回给集成方。一处冲突，在 `[project.scripts]` 的同一行位置：`dalton-market-price` 与 `dalton-research-quality`，两条都留。除此之外两片没有接触面——市场层是连接器 lane，不调模型，所以用途注册表里只有我登记的 `quality`（`test_model_vocabularies` 与我新加的注册测试在合并后的树上一起过）。
 
 **改了一处 Wave 0 的测试，请评审确认。** `tests/test_model_vocabularies.py::ModelPurposeRegistryTests` 的 `tearDown` 把 `_PURPOSES` 重置回**种子**，而不是恢复成它进来时的样子。第一个真正登记用途的 lane 出现之后，这有两个后果：
 

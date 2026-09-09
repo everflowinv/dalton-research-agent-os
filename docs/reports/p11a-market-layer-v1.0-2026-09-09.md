@@ -1,0 +1,267 @@
+# P11a / P11c 市场层交付报告 v1.0
+
+日期：2026-09-09
+分支：`wave1a-market-layer`（worktree `~/Projects/dalton-wave1a-market-layer-worktree`）
+分叉基线：main `08c66d0`；已 `git merge main`（含 Wave 0 的 lane registry、schema glob、词表扩项）
+HEAD：分支 `wave1a-market-layer` 的末端，即下表最后一行那次提交（一次提交写不下自己的哈希，所以这里按主题指认；确切的 HEAD 随交付消息给出）
+全量测试：`Ran 2258 tests in 218.273s` / `OK (skipped=1)`（合并 Wave 0 之后。合并前本片自己是 `Ran 2209`，在 main `08c66d0` 的 2,034 之上新增 175 项；合并后再加 lane 注册的 5 项）
+
+---
+
+## 0. 一句话
+
+Dalton 现在能看见价格了：一条 yfinance 连接器（两个操作，两份治理记录，都是 `proposed`）、一个 append-only 的 `MarketPriceSeriesVersion` 权威（每根 K 线绑定一次 connector invocation 与原始产物哈希）、一条无队列的 tick lane，以及一个 derived_deterministic 的 `ValuationSnapshot`；`VALUATION_AUTHORITY_ROLES` 从「五个都要而一个都没有」放宽为「price + shares 必须有」，S6 的估值路径由此第一次可以写出东西。
+
+---
+
+## 1. 提交清单
+
+| commit | 内容 |
+| --- | --- |
+| `b2ecd54` | connector index 哈希由脚本重生成而非手抄（已被主 agent cherry-pick 到 main 为 `99f6a9b`） |
+| `1f840ec` | yfinance 连接器身份、两个操作契约、两份治理记录、配额 |
+| `68792dd` | `MarketPriceSeriesVersion` 权威 + schema + 适配器 + ACN 真实 fixture |
+| `b11a4fc` | 子进程 CLI + launcher + 无队列 tick coordinator + `market-data` extra |
+| `750de1a` | `ValuationSnapshot` 权威 + schema + `model_input` 闸门放宽 |
+| `f9dfa73` | 报告 v1.0 |
+| `76de788` | code review 修复：盘中价 provisional、残缺响应计为失败、回溯缺口、股本口径标注、单位校验、事务内读写、fetch 覆盖 |
+| （合并）`Merge branch 'main'` | 并入 Wave 0（lane registry、schema glob、词表扩项）；pyproject 的 optional-deps / scripts 与 package-data 通配符各留各的，无冲突 |
+| （末端）`P11a: the price lane registers itself` | `LaneSpec` + `LANE_MODULES` 一行；writer / driver / launchagent 未动 |
+
+未推送。未部署。未写 live 状态。未发布 mission 版本。
+
+---
+
+## 2. 做了什么
+
+### 2.1 yfinance 连接器（slug `yfinance`）
+
+- `source_ref: source:yahoo-finance`，`source_type: market_data`，transport `public_https`，host allowlist 只有 `query1.finance.yahoo.com` / `query2.finance.yahoo.com`，auth `none`，`ADAPTER_LIBRARY = "yfinance"`。
+- 两个操作一次定义完，避免二次动哈希钉死的 profile：
+  - **`daily_prices`**（入参 `ticker` / `start` / `end`）：输出 `bars[]`（date、open、high、low、close、**adj_close**、volume，全部十进制字符串）+ `observations[]`（`shares_outstanding`、`market_cap`，各自带 `as_of`）+ `auto_adjust`（契约层 `enum: [false]`）。
+  - **`analyst_estimates`**（入参 `ticker`）：`price_target`（current / high / low / mean / median / number_of_analysts）、`recommendations[]`（按 period 的 strong_buy…strong_sell）、`eps_estimates[]` 与 `revenue_estimates[]`（period / avg / low / high / year_ago / growth / number_of_analysts / currency）。**契约、适配器函数、真实 fixture 都已就位；它的 lane 是 Wave 2。**
+- `yfinance_core.py`：`yfinance_contract` / `_source_hash` / `_schema_hash(operation)` / `_adapter_hash(operation)` / `_identity(operation)` / `_permissions` / `_output_schema(operation)` / `build_yfinance_governance_record(operation=…)`，形状照 `roic_transcript_core.py`。另有 `invocation_ref(...)`：把 operation、source、adapter 哈希、治理记录、入参、产物哈希一起哈希成一次调用的名字——同窗口同批字节是同一次调用，字节变了就是另一次调用，这正是版本链需要分辨的东西。
+- `connector_governance.py`：两个 kind（`yfinance-daily-prices`、`yfinance-analyst-estimates`）、四个惰性哈希 thunk、`GOVERNANCE_KIND_REGISTRY` 两项、`build_governance_record` 分派、`__all__` 导出。
+- `deploy/connector-governance/yfinance-daily-prices-v1.json`、`yfinance-analyst-estimates-v1.json`，均 `status: proposed`，`approved_by: human:lumos`。
+- `connector_quota_policy.py`：`daily_prices` 200 单位 × 2 次物理调用（download + info），`analyst_estimates` 50 单位 × 4 次。理由写在代码里：这是个从未答应服务我们的非官方免费源，天花板是礼貌不是算术。
+- **这个连接器故意不暴露财务报表。** Yahoo 有，但抓来的二手财报数字和 filing 里的数字长得一模一样——一旦准进来，「每个数字都能回指 filing」就只是装饰。有一条测试钉住操作集合。
+
+### 2.2 `MarketPriceSeriesVersion`（`market_price.py` + `market_price_schema.sql`）
+
+- 每公司一条 append-only 版本链（`series_ref = market-price-series:{company_ref}`，按 company 而非 ticker 命名）；三触发器（`dalton_authorized()` insert guard、no_update、no_delete）、`content_hash`、写后读回校验。
+- 每根 K 线携带 `invocation_ref` + `artifact_hash`。
+- **发布规则**：只有当出现「上一版没有的交易日」或「某一天的数字变了」才发新版；否则 `duplicate`。新版携带完整历史，并显式列出 `added_bar_dates` 与 `restated_bar_dates`——拆股/分红/Yahoo 更正在版本链上看得见，而不是靠对比推断。改写历史永远是新版本，不是 update。
+- **不由 observations 触发发版**：盘中市值每秒都在动，一次没抓到新交易日但市值少了六百万，不是关于公司的新事实；否则整个下午每 tick 一版。同一天的同类观测取最新一次覆盖旧的。
+- **盘中价不是收盘价。** 每根 K 线记录 `captured_at`（微秒级 UTC）。一根在自己交易日 22:00Z 之前被读到的 K 线是 *provisional*——它的 close 只是那个下午的最后一笔成交，形状却和收盘价一模一样。版本记录里的 `provisional_bar_date` 把这件事说出来，lane 据此重新请求那一天。`SETTLED_AFTER_UTC_HOUR = 22` 是个刻意保守的常数：美股夏令时 20:00Z、冬令时 21:00Z 收盘，本系统没有交易日历，而「把已收盘的 K 线当成盘中」只多花一次请求，「把盘中价当成收盘价」会让一个错的数字永久留在每一次估值里。
+- 读者：`series()`、`latest_close()`（同时给 close 与 adj_close 及 `as_of` 与两个 ref）、`latest_observation(kind)`、`versions()`、`bar_is_provisional()` / `provisional_bar_date()`。
+- 「读—合并—写」整个过程在同一个事务里完成。否则两个子进程同时发布同一家公司时，两边都会从同一个 latest 算出版本 N，第二个撞上 UNIQUE 约束抛出裸的 `IntegrityError`；现在它得到的是 `MarketPriceConflict`。
+- 校验：close/open 必须落在当日 high/low 之内、low ≤ high、volume ≥ 0、同窗口不得重复日期、float 直接拒收（二进制浮点不是印出来的价格）、ticker/currency 不得中途变更。
+
+### 2.3 tick lane
+
+- `market_price_cli.py`（子进程）：**approval first → artifact always → contract last**。另外：`run()` 自己也检查「fixture 与 network 恰好选一个」，不再依赖 argparse——直接构造 Namespace 的调用方不该因为漏了一个 flag 就把请求发到 Yahoo。治理记录必须 approved 且哈希仍描述打包契约（不然在碰网络之前就拒）；库的完整输出 canonical + sha256 + 写入 RawSpool，**失败的运行也留产物**；wire 先过冻结的 output schema，再进权威。`summary.json` 总是写。退出码取自 status。模式二选一：`--allow-network` / `--fixture-file`，另有 `--no-publish`。
+- `market_price_launcher.py`：`MarketPriceLauncher(LaneChildLauncher)`，ticket 前缀 `market-price-run`，目录 `market-price-runs`，digest = `sha256(prefix|company|ticker|start|end)[:24]`。
+- `mission_market_price_lane.py`：`MissionMarketPriceLaneCoordinator`，**无队列**（照 `mission_model_spec_lane`）：先结算上一 tick 的孩子，再从 mission universe 里挑一家。`window()` 按顺序看三件事，并返回 `(start, end, kind)`：
+  1. `backfill`——没有任何历史，回溯 3 年；
+  2. `forward` / `restate_provisional`——从最后一根 K 线的次日起（Yahoo 的 `end` 是开区间，所以取「明天」）；**但如果最后一根是 provisional，窗口就从它本身开始**，下一跑把它改写掉。没有这条，authority 的改写路径从 lane 走不到，盘中价会被永久冻结成收盘价；
+  3. `backfill_gap`——序列的 `first_bar_date` 晚于三年下限（首跑被截断，或下限随时间后移），补请求更早的那一段。只问一次：一次向后的运行如果没带回任何 K 线，说明公司第一个交易日之前本来就没有东西，该公司在本进程内不再被问。
+- 一次「没有新增交易日」的运行把该公司搁置 6 小时。判据是 `added_bar_count == 0` 而不是「没发布版本」：只改写了 provisional 那一根的运行**确实发了版本**，若因此放开槽位，整个下午就会每 tick 改写同一根。6 小时意味着盘中价一天被修正几次——估值需要的正是这个粒度，再多就没有意义。
+- 连续失败 3 次的公司让出槽位，成功一次即清零。
+- **授权检查**：mission 的 `autonomy.may_write` 里没有 `market_price` 就返回 `ungranted` + 一句话理由，不起孩子，每 tick 如此直到 owner 发新版 mission。这是正确行为，不是要绕开的 bug。
+
+### 2.4 `ValuationSnapshot`（`valuation_snapshot.py` + schema）
+
+- `kind: derived_deterministic`，`formula_version: "valuation-formula:p11c:0.1"` 写进每条记录。
+- 指标与冻结公式：
+
+| 指标 | 公式 | 精度 |
+| --- | --- | --- |
+| `trailing_pe` | `market_cap / net_income_ttm` | 4 位小数 |
+| `price_to_sales` | `market_cap / revenue_ttm` | 4 位小数 |
+| `ev_to_ebitda` | `(market_cap + total_debt - cash_and_equivalents) / (operating_income_ttm + depreciation_amortisation_ttm)` | 4 位小数 |
+| `fcf_yield` | `(operating_cash_flow_ttm - capital_expenditure_ttm) / market_cap` | 6 位小数 |
+
+  `market_cap = close × shares_outstanding`（自己算，不用 yfinance 的 `marketCap` 字段；后者仍作为观测入库）。
+- **每个输入都是 ref**：价格 = 版本 ref + bar date + invocation + artifact；股本 = 版本 ref + 观测日期；filed 数字 = concept + statement + period + **accession**，且 `source_ref` 必须在 `ALLOWED_FUNDAMENTAL_SOURCES = {"source:sec-edgar"}` 内——**从 yfinance 取基本面会被按 source 拒绝**，有专门测试。
+- **单位必须与价格币种一致**。以千美元申报的收入除进以美元计的市值，得到的是小一千倍的 P/S，而记录上没有任何东西会说破。现在不匹配直接拒绝并给理由：算错的倍数比拿不到的倍数更糟。
+- 角色区分 flow / instant：`trailing_sum` 角色必须正好 4 个季度（三个季度当一年会低估每一个倍数），`instant` 角色必须正好 1 个时点；同一期间重复计入拒收；capex 必须为正的流出量（预先取负会让自由现金流翻倍），有测试。
+- **缺输入 = 该指标 `unavailable` + 一句人能行动的理由**，绝不猜、绝不回退到 yfinance 基本面。分母非正也 `unavailable`（亏损公司不给 P/E，「-40x」会诱导读者拿它和 40x 比）。整份快照不会因为一个概念缺失而失败。
+- **分位数**：`PERCENTILE_METHOD = "share_of_history_at_or_below"`，在每根库存 K 线上用「该日已披露」的基本面窗口重算指标；早于第一个窗口的 K 线被排除而不是回填（拿 2026 年的财报去给 2024 年的价格估值＝会看未来的分位）。样本 < 30 根不给分位，只给根数与理由。分位记录里有两个诚实字段：
+  - `basis`：按**实际被用到**的窗口数判定（`windows_used`），不是按传进来的窗口数。传进八个季度、而历史只落在最新那一个里面，仍然是 `price_only`——按传入数计数只会让价格驱动的分位穿上另一件外衣。（这条规则一加上就当场抓出了我自己一条标错的测试。）
+  - `shares_basis`：没有带日期的股本序列时，历史上每一天的市值都用**今天**的股本算，对持续回购的公司会系统性高估过去的倍数。这被如实记为 `current_shares_applied_to_history`；传入 `share_history`（`[{as_of, shares_outstanding}]`）后变成 `dated_shares`，每根 K 线用当日已知的股本计算。
+- 版本链：同 binding（价格 + 股本 + 窗口 + 公式版本 + 历史日期集合）→ `duplicate`；价格或财报一变就是新版本，旧版本的数字不变。
+
+### 2.5 闸门（`model_input.py`）
+
+```python
+VALUATION_AUTHORITY_ROLES = frozenset({"price", "shares", "fx", "rates", "consensus"})
+REQUIRED_VALUATION_AUTHORITY_ROLES = frozenset({"price", "shares"})
+```
+
+旧闸门要求五个角色全到，而系统里一个都产不出来——「估值需要五个」实际等于「估值永不可发布」。在什么都供不上的时候这是对的默认。现在 P11a 供得上「一个倍数在算术上不可能没有的那两个」。另外三个仍在词表里、被声明时仍被校验（声明 `fx` 依然必须绑定一个该角色的冻结 actual 输入），只是不再必需：美元本土公司没有 FX 可绑，而要求 consensus 才能发 P/E 是把「它交易在什么价位」和「街上怎么想」混为一谈。必需集合是具名常量，将来再放宽会以带理由的 diff 形式出现。
+
+`tests/test_model_input_ledger.py` 里那条测试改名为 `test_valuation_output_requires_price_and_shares_actual_authorities`（断言不变：只有 price 仍然被拒）；打开的正向路径在 `tests/test_valuation_snapshot.py::ValuationGateTests`。
+
+---
+
+## 3. 集成时要接的线
+
+### 3.1 lane 注册（已完成）
+
+Wave 0 的 `lane_registry` 合进来之后，本片自己把 lane 注册好了：`mission_market_price_lane.py` 尾部一个 `LaneSpec`，加 `lane_registry.LANE_MODULES` 里一行。`writer_server.py`、`bounded_planner_driver.py`、`macos_launchagent.py` **一行都没动**——它们从注册表推导。
+
+```python
+LANE = register_lane(LaneSpec(
+    operation="dispatch_mission_market_prices",
+    order=85,                                  # statements(80) 之后，model spec(90) 之前
+    driver_key="mission_market_prices",
+    handler=dispatch,                          # 缓存 coordinator 到 server.lane_state
+    init_kwarg="market_price_launcher",
+    argparse=add_arguments,                    # --market-price-governance
+    launcher_factory=build_launcher,           # MarketPriceLauncher(state_dir, governance_path)
+    argv_fragment=argv_fragment,               # 治理文件存在才输出
+))
+```
+
+推导结果已核验：`dispatch_mission_market_prices` 出现在 `writer_server.CORE_DISCOVERY_OPERATIONS`、`CORE_OPERATIONS`、`OPERATION_FIELDS`（空集，tick 不带参数）里，`mission_market_prices` 出现在 driver 的 tick 顺序里，位置在 `mission_statements` 与 `company_model_spec` 之间。
+
+几个设计点：
+
+1. **coordinator 缓存在 `server.lane_state`，不是每 tick 新建**（照 model spec lane，不照 statements lane）。它持有的进程内状态就是全部意义所在：哪个孩子还开着、哪些公司失败过、哪些上次问的时候已经是最新的、哪些的早期历史已经问过了。每 tick 换一个新的会把这四件事全忘掉，然后给一家刚被告知别管的公司起孩子。
+2. **开关是治理文件本身**：`{state}/connector-governance/yfinance-daily-prices-v1.json` 存在就开，不存在就整条 lane 不装（`build_launcher` 返回 `None`，`argv_fragment` 返回 `[]`，handler 回 `unconfigured` 并说原因）。与 statements lane 同一套。
+3. **不需要模型配置**，因此不碰 `cockpit_model.PURPOSES`，也不碰 `model_configurations` / `raise_day_budget_cap`——这条 lane 一次模型调用都不做。
+4. **写入靠的是 mission 授权，不是 launchagent**：即使 lane 装好了、治理记录也批了，mission 的 `may_write` 里没有 `market_price` 仍然每 tick 返回 `ungranted` 且一次网络调用都不发。
+5. 本模块 module 级不 import 任何注册表消费者，`tests/test_lane_registry.py` 的两条隔离测试（读文件 + 新解释器实跑）以及本片自己的一条都通过。
+
+`tests/test_lane_registry.py` 里四条 `MigratedLanesMatchTheOldLiteralsTests` 从「等于」放宽为「包含」，并写清了原因：它们是**迁移保真检查**，钉的是「P14-0 之前 writer 手写的那些 lane 现在还在、顺序没变、kwarg 没变」，不是「注册表里只能有这些 lane」。新 lane 的形状钉在 `tests/test_mission_market_price_lane.py::RegistrationTests` 里；重名、撞 order、撞 driver key 由注册表自己拒绝。
+
+### 3.2 `deploy/macos/install.sh`
+
+- **治理种子块**：新增两个 kind，照 `roic-*` 的循环写法：
+  ```sh
+  for yf_kind in yfinance-daily-prices yfinance-analyst-estimates; do
+      # seed deploy/connector-governance/${yf_kind}-v1.json
+  done
+  ```
+  两份都是 `proposed`。**owner 需要就地把 `yfinance-daily-prices` 改成 `approved`**，lane 才会真的跑；`yfinance-analyst-estimates` 可以先留 `proposed`（Wave 2 才有消费者）。
+- **不需要模型配置块**。lane 的接线已经完成，install.sh 这边只剩「把两份治理记录放进 `{state}/connector-governance/`」这一件事；`yfinance-daily-prices-v1.json` 一旦存在且 owner 就地改成 `approved`，LaunchAgent 下次渲染就会带上 `--market-price-governance`。
+- `.venv` 里需要 `yfinance`（`pip install -e '.[market-data]'` 或直接 `pip install yfinance`）。注意仓库 `.venv` 是主 checkout 的符号链接；本片已在其中装了 yfinance 1.7.0。
+- `tests/test_roic_transcript_core.py` 有一条 `test_the_installer_seeds_both` 断言 install.sh 提到两个 roic kind。我**没有**为 yfinance 写对应断言，因为 install.sh 在我的禁改清单里；集成时补上 install.sh 后，建议在 `tests/test_yfinance_core.py::ShippedRecordTests` 里加一条同形状的测试。
+
+### 3.3 mission 版本
+
+下一版 `coverage-mission:us-it-services` 的 `autonomy.may_write` 需要加 `market_price`。在那之前 lane 每 tick 返回 `ungranted`，一次网络调用都不发。（`AUTOMATION_WRITE_SCOPES` 加词由 Wave 0 负责；我没有改 `coverage_mission.py`。）
+
+### 3.4 cockpit
+
+- 公司卡需要展示：最新 close 与 `as_of`、区间涨跌、`ValuationSnapshot` 的四个指标与各自分位（`unavailable` 的要显示理由字符串而不是空白）。
+- 建议把 `percentile_basis` 直接显示出来：`price_only` 的分位必须让读者知道它只是价格分位。
+- `cockpit_plane` 的 lane 状态面板需要 `dispatch_mission_market_prices` 的 `status`（`launched` / `idle` / `busy` / `ungranted` / `rejected`）与 `skipped[].reason`。
+- **`ungranted` 应当在 cockpit 上可见**，否则一条因为缺授权而永远沉默的 lane 看起来和一条健康的空闲 lane 一模一样。
+
+### 3.5 连接器 index 合并
+
+四条连接器分支并行，`index.json` 会冲突。已交付 `scripts/build_connector_inventory.py`（含 `--check` 与具名 diff 摘要，main 上为 `99f6a9b`）：冲突时任取一边，重跑脚本，读摘要确认动的只有新连接器，`--check` 归零即可。
+
+---
+
+## 4. yfinance 的注意事项（务必保留）
+
+1. **`auto_adjust=False`，永远。** 默认的 `True` 会把 Close 悄悄换成复权序列并删掉 Adj Close，之后的读者拿到一列却分不清是哪一列。契约层把 `auto_adjust` 钉成 `enum: [false]`，适配器另有一道拒绝：带复权拍下来的产物不能被当成 Close 入库。
+2. **Close 与 Adj Close 分列入库，绝不在复权价上再加股息。** Adj Close 里已经含了。真实证据：ACN 2023-09-11 的 Close 是 `325.87`，Adj Close 是 `308.53607`，三年 5.6% 的差就是分红——谁把它们混为一谈，谁的总回报就错一次或两次。
+3. **展平 MultiIndex。** `yf.download` 即便只要一个 ticker，列也是 `(field, ticker)` 二级索引，`row["Close"]` 直接 KeyError，而 `row[("Close","ACN")]` 的形状在要两个 ticker 时又会变。适配器只在一处展平。
+4. **Yahoo 给的是被拓宽成 double 的单精度数。** ACN 开盘 183.78 到手是 `183.77999877929688`。原样入库会让每一条引用里出现一个交易所从没印过的数字，而且不同库版本的拓宽方式一变就看起来像一次 restatement。处理办法：当一个 double **恰好**是某个 float32 时（用 `struct` 判定，不是猜），取能 round-trip 回同一个 float32 的最短十进制；不是 float32 时原样保留。没有小数位常数，因此不会在次分位报价或 1998 年的复权价上出错。
+5. **盘中拉取的当天 K 线不是收盘价。** 窗口包含今天时，Yahoo 返回的是「到目前为止的最后一笔成交」，形状和收盘价完全一样。`captured_at` + `SETTLED_AFTER_UTC_HOUR = 22` 是唯一能分辨的东西；lane 会重新请求这一天直到它结算。烟测里可以直接看到：三年回填的最后一根被标为 `provisional_bar_date: 2026-09-09`，第二跑把它改写了。
+6. **残缺行会被丢弃。** 有洞的一天补不出来（补＝编造价格），所以丢；但丢了几行会被计数并带到 summary，而「每一行都残缺」被判为失败而不是「安静的一天」。
+7. **`shares_outstanding` / `market_cap` 没有历史。** Yahoo 只给「它现在知道的最新值」，所以它们是各自带 `as_of`（＝读取当天）的独立观测，不是 K 线上的字段。任何需要历史股本的估值都必须另找来源，不能假装这里有。
+8. **不要从这里取财报。** 见 2.1。
+9. **`analyst_estimates` 的每个块都可能整块消失**，所以契约里所有数字都可空；一个块没了不影响其它块。评级人数也可为空：「没有分析师给卖出」和「Yahoo 没说有几个给卖出」是两件不同的事，零只能表达其中一件。`growth` 一类字段带着 Yahoo 自己的浮点噪声（如 `0.012200001`），照原样保留——它们是意见，不是入账数字。
+10. **这是非官方源。** 没有 API、没有条款、没有申诉渠道，endpoint 随时可能改形状。配额小是礼貌；库版本变动应视为可能的 restatement 来源。
+
+---
+
+## 5. 验收
+
+### 5.1 全量测试（原文）
+
+```
+Ran 2258 tests in 218.273s
+
+OK (skipped=1)
+```
+
+命令：`PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -t .`（worktree 内，已 `git merge main`；已核验 `dalton_core.__file__` 指向 worktree）。合并前本片自己的基线是 `Ran 2209` / `OK (skipped=1)`（main 的 2,034 之上新增 175 项）；合并 Wave 0 后总数 2,258，再加上 lane 注册的 5 项。无跳过、无静默失败。
+
+新增测试文件：`tests/test_yfinance_core.py`、`tests/test_market_price_adapter.py`、`tests/test_market_price_authority.py`、`tests/test_market_price_cli.py`、`tests/test_mission_market_price_lane.py`、`tests/test_valuation_snapshot.py`。fixture：`tests/fixtures/market/acn-daily-prices.json`（ACN 十个交易日的真实 `yf.download`）、`acn-analyst-estimates.json`（真实 ACN 一致预期）。**全部离线运行**，网络只用于抓 fixture 与烟测。
+
+`tests/test_market_price_adapter.py::FetchTests` 用一个塞进 `sys.modules` 的 `yfinance` 假模块覆盖两个 fetch 函数本身——真实形状的二级列索引与带 `America/New_York` 时区的索引，断言 `auto_adjust=False` 被传下去、MultiIndex 被展平、交易日没有被时区换算成前一天。这段需要 pandas（随 `market-data` extra 而来）；没装时整类跳过。
+
+### 5.2 烟测（真实网络，写入临时 state 目录 `/tmp/p11a-smoke3`，未碰 live）
+
+第一跑，ACN 三年回填（当天盘中执行）：
+
+```json
+{
+ "status": "succeeded",
+ "failure_reason": null,
+ "series_status": "fresh",
+ "bar_count": 752,
+ "dropped_row_count": 0,
+ "first_bar_date": "2023-09-11",
+ "last_bar_date": "2026-09-09",
+ "added_bar_count": 752,
+ "restated_bar_dates": [],
+ "provisional_bar_date": "2026-09-09",
+ "invocation_ref": "connector-invocation:yfinance:8d4f6300b15399463ac845bb87673c12",
+ "series_version_ref": "market-price-series-version:989fc7439ecd7b8f4df57fd2efb5a54c"
+}
+```
+
+第二跑，lane 会做的事：重新请求那根 provisional 的 K 线。
+
+```json
+{
+ "status": "succeeded",
+ "failure_reason": null,
+ "series_status": "fresh",
+ "bar_count": 1,
+ "dropped_row_count": 0,
+ "first_bar_date": "2023-09-11",
+ "last_bar_date": "2026-09-09",
+ "added_bar_count": 0,
+ "restated_bar_dates": [
+  "2026-09-09"
+ ],
+ "provisional_bar_date": "2026-09-09",
+ "invocation_ref": "connector-invocation:yfinance:2fc22fb64db8dabb9ddf38f3a76f4271",
+ "series_version_ref": "market-price-series-version:157aad9458802a785c43149a4c9ca018"
+}
+```
+
+第一跑的最后一根被如实标成 provisional（当时美股尚未收盘），第二跑把它改写成新版本，旧版本里那个下午的数字仍在链上。它会继续 provisional 直到 22:00Z 之后的某一跑，此后 lane 的窗口才越过这一天。`added_bar_count == 0`，所以 lane 会把 ACN 搁置六小时——盘中改写一天几次，不是每 tick 一次。
+
+早先在旧的 `/tmp/p11a-smoke2` 上跑过一次同样的回填并复核了落库内容：752 根、`2023-09-11 → 2026-09-09`、`shares_outstanding = 611942109`、`market_cap = 108344344576`（皆 `as_of 2026-09-09`），第一根是 `2023-09-11 open=327.49 high=328.23 low=324.49 close=325.87 adj_close=308.53607 volume=1551300`——close 与 adj_close 三年 5.6% 的差就是分红，也是这两列必须分开的直接证据。原始产物 128 KB 在 `connector-spool`。
+
+**752 根 ≥3 年日线、每根绑 invocation 与 artifact 哈希**——蓝图 Wave 1 验收「五家 ≥3 年日线且每点绑 connector invocation」在 ACN 上已成立；另外四家只差 mission 授权与一次 lane tick。
+
+## 6. 没做什么
+
+- **lane 已注册**（§3.1）：`writer_server.py`、`bounded_planner_driver.py`、`macos_launchagent.py`、`deploy/macos/install.sh`、`coverage_mission.py`、cockpit 两个文件、`docs/PROJECT_STATUS.md`、`tests/test_service.py` 仍然一行未动——注册表把它们全推导掉了。install.sh 的治理种子块与 cockpit 展示仍待集成时处理（§3.2 / §3.4）。
+- **`analyst_estimates` 没有 lane**：契约、适配器、fixture、治理记录都在，`ConsensusEstimateVersion` 与它的 tick lane 是 Wave 2（P11b）。
+- **没有端到端的真实 ACN 估值**：`ValuationSnapshot` 的输入需要 statements 权威给出的 filed 数字（8 个角色 × 4 个季度 + 2 个时点），本片没有把 statements 侧的取数器接上（那会碰 `coverage_mission.py`）。公式已用手算数字逐一验证。
+- **没有 `MarketEvent`**（P11d，Wave 2）。
+- **没有历史股本序列**：yfinance 只给最新值，所以多期基本面窗口目前只能靠 statements 侧提供，估值分位在只有一个窗口时如实标 `price_only`。
+
+---
+
+## 7. 待决 / 开放问题
+
+1. **`yfinance-daily-prices` 需要 owner 批准**（就地把 `deploy/connector-governance/yfinance-daily-prices-v1.json` 的 `status` 改成 `approved`）。在此之前子进程会以「governance record is not approved」拒绝。
+2. **下一版 mission 需要授予 `market_price`**。没有它 lane 永远 `ungranted`。
+3. **估值分位的诚实度取决于基本面窗口数**。要让 `percentile_basis` 变成 `price_and_filed_fundamentals`，需要有人把 statements 权威里逐季的 TTM 窗口按「披露日」喂进来。建议在集成时把这件事挂到 statements lane 结算之后：每来一份新 10-Q，就多一个带日期的窗口。是否值得为此建一个 `valuation_snapshot_inputs` 投影，请主 agent 定。
+4. **历史股本从哪来？** `publish_snapshot` 现在接受 `share_history`，不传时记录如实写 `shares_basis: current_shares_applied_to_history`——对持续回购的公司会系统性高估过去的倍数。填上它需要一个带日期的股本序列：SEC 的 `dei:EntityCommonStockSharesOutstanding` 或 `us-gaap:WeightedAverageNumberOfDilutedSharesOutstanding` 是候选，但要在 statements 侧取。市场层这边每天会攒下一条 `shares_outstanding` 观测，几个月后本身也能当一段（很短的）序列用。
+5. **EV 的债务口径**：现在用 `total_debt` 与 `cash_and_equivalents` 两个角色，由调用方给出 concept。租赁负债是否计入、短期投资算不算现金，是需要在 concept 映射里写死的判断——这属于 statements/规格侧的决定，本片只保证「给什么就算什么，且每个数字带 accession」。
+6. **`fcf_yield` 的 capex 符号约定**：必须传正的流出量。若将来接自动取数器，取的是 `PaymentsToAcquirePropertyPlantAndEquipment`（正数），不要传现金流量表里带负号的呈现值。已有测试拒绝负值。
+7. **yfinance 版本漂移**：本片在 1.7.0 上开发与抓取；计划文档里记的系统 Python 是 1.2.0。extra 用的是下限 `>=0.2.31` 而非区间——这是个非官方源，能随时取到修复比锁窄更重要，但库升级应当被当作可能的 restatement 来源观察一次。
+8. **`SETTLED_AFTER_UTC_HOUR = 22` 是个近似。** 它对美股夏令时（20:00Z）与冬令时（21:00Z）都成立，但对非美国交易所不成立——一个东京上市公司的 K 线会在收盘后很久仍被当作 provisional，代价是每天几次多余的请求，不是错误的数字。universe 扩到美国以外时，这里需要的是每个交易所的收盘时间，而不是一个常数。
+9. **`.venv` 是主 checkout 的符号链接**，本片按指示在其中安装了 `yfinance`（连带 pandas 3.0.5 / numpy 2.5.3 等）。若主 checkout 的测试对这些包敏感，请主 agent 复核；本片的全量 2,173 项在装完之后全绿。

@@ -19,6 +19,14 @@ pdf = ["pypdf>=6.0,<7"]
 # itself: without it the lane refuses rather than guessing, and the identity's
 # adapter hash names the library so a swap is a different capability.
 sec-financials = ["edgartools>=5.17.1,<6"]
+# P11a: the market-data library. Optional for the same reason the SEC parser
+# is: it is the thing the owner agreed to trust in place of Dalton verifying
+# Yahoo's bytes itself, so without it the lane refuses with a reason rather
+# than guessing, and the identity's adapter hash names the library so swapping
+# it is a different capability. Floored rather than pinned tight -- the source
+# is unofficial and the library tracks its breakages, so being able to take a
+# fix is worth more here than a narrow range.
+market-data = ["yfinance>=0.2.31"]
 
 [project.scripts]
 dalton-bootstrap = "dalton_core.bootstrap:main"
@@ -42,6 +50,7 @@ dalton-stage-transcript-review = "dalton_core.transcript_review_inbox:main"
 dalton-acquire-alphaengine = "dalton_core.alphaengine_acquisition_cli:main"
 dalton-connector-governance = "dalton_core.connector_governance_cli:main"
 dalton-model-inputs = "dalton_core.company_model_report:main"
+dalton-market-price = "dalton_core.market_price_cli:main"
 dalton-research-quality = "dalton_core.research_quality_cli:main"
 
 [tool.setuptools]

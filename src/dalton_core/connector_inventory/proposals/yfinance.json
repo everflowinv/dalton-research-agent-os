@@ -1,0 +1,60 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:yfinance:0.1",
+  "adapter_source_hash": "10743773e15fcf8295be1f443d19ba9e5634ee162e96774f6ee6aa1f5826c7ce",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:yfinance:0.1",
+  "connector_ref": "connector:yahoo-finance",
+  "content_hash": "69eea458a80d21c7bdab739931840eb17b2e4dfb70548f5e7045dbccebd0345e",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "2673180d6ec33e34be9d73b1db2db0f4d48f991d7ae6706450216349d5010ec7",
+  "fixture_manifest_ref": "connector-fixture-manifest:yfinance:0.1",
+  "id": "connector-proposal-manifest:yfinance:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "fa26684b462dc6dca19ba4ec118a9201959e1547af6c36a4b23d1d9570738013",
+      "input_schema_ref": "schema:connector-inventory:yfinance:daily_prices:input:0.1",
+      "operation": "daily_prices",
+      "output_schema_hash": "72c9f17cba32e263e81d1a477ee1d6414337a27a020515667b36daf365eaf453",
+      "output_schema_ref": "schema:connector-inventory:yfinance:daily_prices:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "ranked",
+      "input_schema_hash": "0e56586f0263ce92788a03e4d8154582d973fa2fe41026a9900e3b5e67de620c",
+      "input_schema_ref": "schema:connector-inventory:yfinance:analyst_estimates:input:0.1",
+      "operation": "analyst_estimates",
+      "output_schema_hash": "184cc168f022adc54652e688e96ed2e134eaf4a1cb56cdcfec1668344dca5c97",
+      "output_schema_ref": "schema:connector-inventory:yfinance:analyst_estimates:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "6cf6012558bb70d7e4428efe0225ab92b8a22ccfd83c4826608d541bcc2b87d1",
+  "profile_template_ref": "connector-profile-template:yfinance:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "transport:public-http:0.1",
+    "adapter_version": "inventory-0.1",
+    "source": "source:yahoo-finance",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "public_https",
+  "transport_target_hash": "72bf94f540b86832f2c3984dcebd83d30cc2a1e0b212a692e4a96fa12a3da920",
+  "transport_target_ref": "transport:public-http:0.1"
+}

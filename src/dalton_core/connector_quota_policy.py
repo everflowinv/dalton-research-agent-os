@@ -69,6 +69,33 @@ _DAILY_QUOTAS = MappingProxyType(
                 "max_physical_calls_per_unit": 1,
             }
         ),
+        # P11a: one company's price window per unit.
+        #
+        # Deliberately modest. Yahoo is an unofficial free source that has not
+        # agreed to serve us: there is no published rate limit to stay under
+        # and no support channel when a request starts being refused, so the
+        # ceiling is politeness rather than arithmetic. Five covered companies
+        # ticking once a day need five of these; two hundred leaves room for
+        # backfills and retries without ever looking like a scraper.
+        ("yfinance", "daily_prices"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 200,
+                # One ``download`` plus one metadata read for the share count
+                # and market capitalisation, which Yahoo serves separately.
+                "max_physical_calls_per_unit": 2,
+            }
+        ),
+        # Estimates move slowly -- an analyst revises a target a handful of
+        # times a quarter -- so this is smaller again. Reading it more often
+        # would spend the source's goodwill on numbers that did not change.
+        ("yfinance", "analyst_estimates"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 4,
+            }
+        ),
     }
 )
 

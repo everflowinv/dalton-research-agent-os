@@ -70,6 +70,17 @@ ROIC_LIST_KIND = "roic-list-transcripts"
 ROIC_GET_KIND = "roic-get-transcript"
 ROIC_LIST_CAPABILITY_ID = "capability:dalton:connector:roic-list-transcripts"
 ROIC_GET_CAPABILITY_ID = "capability:dalton:connector:roic-get-transcript"
+# P11a: Yahoo Finance. Prices are what a market printed; analyst estimates are
+# what sell-side analysts said. Two kinds because they are two kinds of thing,
+# and because a schema hash binds one operation.
+YFINANCE_DAILY_PRICES_KIND = "yfinance-daily-prices"
+YFINANCE_ANALYST_ESTIMATES_KIND = "yfinance-analyst-estimates"
+YFINANCE_DAILY_PRICES_CAPABILITY_ID = (
+    "capability:dalton:connector:yfinance-daily-prices"
+)
+YFINANCE_ANALYST_ESTIMATES_CAPABILITY_ID = (
+    "capability:dalton:connector:yfinance-analyst-estimates"
+)
 
 
 class ConnectorGovernanceError(RuntimeError):
@@ -213,6 +224,36 @@ def _roic_get_schema_hash() -> str:
     from .roic_transcript_core import GET_OPERATION, roic_schema_hash
 
     return roic_schema_hash(GET_OPERATION)
+
+
+def _yfinance_source_hash() -> str:
+    from .yfinance_core import yfinance_source_hash
+
+    return yfinance_source_hash()
+
+
+def _yfinance_permissions() -> dict[str, Any]:
+    from .yfinance_core import yfinance_permissions
+
+    return copy.deepcopy(yfinance_permissions())
+
+
+def _yfinance_fixture_hash() -> str:
+    from .yfinance_core import yfinance_fixture_hash
+
+    return yfinance_fixture_hash()
+
+
+def _yfinance_daily_prices_schema_hash() -> str:
+    from .yfinance_core import DAILY_PRICES_OPERATION, yfinance_schema_hash
+
+    return yfinance_schema_hash(DAILY_PRICES_OPERATION)
+
+
+def _yfinance_analyst_estimates_schema_hash() -> str:
+    from .yfinance_core import ANALYST_ESTIMATES_OPERATION, yfinance_schema_hash
+
+    return yfinance_schema_hash(ANALYST_ESTIMATES_OPERATION)
 
 
 def _sec_identity() -> dict[str, Any]:
@@ -402,6 +443,24 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         permissions=_roic_permissions,
         fixture_hash=_roic_fixture_hash,
     ),
+    # P11a: the market layer's source. Unofficial and free; the quota is small
+    # and the approval is per operation.
+    YFINANCE_DAILY_PRICES_KIND: _KindSpec(
+        capability_id=YFINANCE_DAILY_PRICES_CAPABILITY_ID,
+        template_key="yfinance",
+        source_hash=_yfinance_source_hash,
+        schema_hash=_yfinance_daily_prices_schema_hash,
+        permissions=_yfinance_permissions,
+        fixture_hash=_yfinance_fixture_hash,
+    ),
+    YFINANCE_ANALYST_ESTIMATES_KIND: _KindSpec(
+        capability_id=YFINANCE_ANALYST_ESTIMATES_CAPABILITY_ID,
+        template_key="yfinance",
+        source_hash=_yfinance_source_hash,
+        schema_hash=_yfinance_analyst_estimates_schema_hash,
+        permissions=_yfinance_permissions,
+        fixture_hash=_yfinance_fixture_hash,
+    ),
 }
 # Public aliases make the registry discoverable without exposing mutable
 # implementation details of a spec.  The old name is useful to callers that
@@ -529,6 +588,22 @@ def build_governance_record(
 
         operation = next(op for op, name in ROIC_KINDS.items() if name == kind)
         return build_roic_governance_record(
+            operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in (YFINANCE_DAILY_PRICES_KIND, YFINANCE_ANALYST_ESTIMATES_KIND):
+        from .yfinance_core import (
+            KIND_BY_OPERATION as YFINANCE_KINDS,
+            build_yfinance_governance_record,
+        )
+
+        operation = next(op for op, name in YFINANCE_KINDS.items() if name == kind)
+        return build_yfinance_governance_record(
             operation=operation,
             approved_by=approved_by,
             status=status,
@@ -814,6 +889,8 @@ __all__ = [
     "GOVERNANCE_KIND_REGISTRY", "GOVERNANCE_KINDS", "GOVERNANCE_SCHEMA_VERSION",
     "GEMINI_WEB_SEARCH_CAPABILITY_ID", "GEMINI_WEB_SEARCH_KIND",
     "WEB_FETCH_CAPABILITY_ID", "WEB_FETCH_KIND",
+    "YFINANCE_ANALYST_ESTIMATES_CAPABILITY_ID", "YFINANCE_ANALYST_ESTIMATES_KIND",
+    "YFINANCE_DAILY_PRICES_CAPABILITY_ID", "YFINANCE_DAILY_PRICES_KIND",
     "SEC_CAPABILITY_ID", "SEC_COMPANY_FACTS_KIND", "build_governance_record",
     "governance_kind_for_capability", "load_connector_governance",
     "write_governance_proposal",
