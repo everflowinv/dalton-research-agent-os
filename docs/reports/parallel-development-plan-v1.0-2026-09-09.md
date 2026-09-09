@@ -30,6 +30,21 @@
 | 周报投递 | **搁置到最后**（P15c / P15e 排到 Wave 3 末尾） |
 | 工作方式 | 主 agent 持续推进不停；遇到问题按分析师要求自行定夺；必须人来解决的问题攒到最后一并提出 |
 
+**owner 补充的设计原则（2026-09-09 下午）：所有研究产出都要能版本化更新，不只是 Initial Screen。**
+有新数据、新信息进来就要能出新版本：财报后 estimate 变 actual；业绩之间观察到 driver 变化（比如新签大单）
+带来 estimate 修订；档案、debate、估值、thesis 同理。落实为四条硬规则，适用于每一个产出类 authority：
+
+1. 没有终态。`gate_passed`、`published`、`accepted` 都是「某一版的状态」，不是对象的状态。
+2. 每一版带 `change_reason`（`filing_actual` / `driver_event` / `assumption_review` / `evidence_thicker` /
+   `human_revision` 之一）和触发它的证据 refs；不带新证据的改写被权威拒绝（`duplicate`）。
+3. 被取代的值不删除、不覆盖：estimate 被 actual 取代时，estimate 那一格保留并标 `superseded_by`，
+   这样对账（forecast_reconciliation）和 guidance_style 校准才有原料。
+4. 认知迭代要能从版本链上读出来：任何产出都能按版本回放「当时知道什么、为什么这样判断」。
+
+对各波次的影响：Wave 1C 的 `ForecastModelVersion` 每格区分 `estimate` / `actual`，并预留 `driver_event`
+修订入口；Wave 2 的 dossier / DebateMap / 估值快照按同样规则；Wave 3 的 P14a 事件流是统一触发器，
+P14d 的「gate 重开」推广为「任何产出的 reopen」。ADR-0008 草稿（Wave 0 顺手写）把这四条写成合同。
+
 **主 agent 定的边界（依据 owner 授权）**：`adhoc_research` 解禁后，专项研究任务的单次模型开销上限沿用 `company_model_cli` 的 `MAX_COST_USD` 量级，日累计不超过 mission `max_daily_cost_usd` 的 25%；同一 inquiry 不重复派发（内容哈希去重）；产出只能是 Claim、observation、deliverable 三类既有写入范围。
 
 ## 2. 今日调查结论
