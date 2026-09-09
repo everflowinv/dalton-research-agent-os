@@ -45,6 +45,17 @@ PURPOSES = frozenset({"ask", "goal", "steer", "draft", "plan"})
 # Room for the completion write after the model answers, so a call that
 # finishes right on its timeout still has a live lease to complete against.
 _LEASE_GRACE_SECONDS = 30.0
+# P13aa: which definition of "the same request" produced this identity.
+#
+# Version 1 hashed a wall-clock created_at into the WorkOrder wire while
+# leaving it out of the id, so the same question asked twice reused one
+# idempotency key with two different hashes -- a permanent conflict, and every
+# Initial Screen section sat in it for two days. Fixing the definition is not
+# enough on its own: the keys written under the old definition still hold the
+# old hash, so a corrected request collides with its own history. A changed
+# identity definition is a changed identity, and it is versioned like every
+# other frozen definition here rather than quietly reusing the old keys.
+IDENTITY_VERSION = 2
 
 
 class CockpitModelError(RuntimeError):
@@ -62,7 +73,9 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
         raise CockpitModelError("unknown cockpit model purpose")
     if len(prompt.encode("utf-8")) > max_input_tokens:
         raise CockpitModelError("the question and its context exceed the model input bound")
-    identity = {"purpose": purpose, "request_id": request_id, "mission_version_ref": mission_version_ref,
+    identity = {"identity_version": IDENTITY_VERSION,
+                "purpose": purpose, "request_id": request_id,
+                "mission_version_ref": mission_version_ref,
                 "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest()}
     digest = content_hash(identity)
     at = created_at or _now()

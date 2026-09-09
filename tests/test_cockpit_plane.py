@@ -1,6 +1,7 @@
 """P9d-18 / ADR-0006: the owner's cockpit — goal, steer, log, ask, approve."""
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import time
@@ -12,6 +13,7 @@ from dalton_core.cockpit_model import CockpitModel, CockpitModelError, unwrap_js
 from dalton_core.cockpit_plane import CockpitConfig, CockpitConflict, CockpitError, CockpitPlane
 from dalton_core.cockpit_setup import install as install_cockpit
 from dalton_core.document_extraction import HermeticExtractionAdapter, build_prompt
+from dalton_core.store import content_hash
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
 from tests.test_document_extraction import ExtractionHarness, OWNER
 from tests.test_transcript_polish_model_worker import policy, profile
@@ -296,6 +298,28 @@ class CockpitPlaneTests(unittest.TestCase):
         self.assertTrue(second["replayed"])
         self.assertEqual(second["work_order_ref"], first["work_order_ref"])
         self.assertEqual(adapter.calls, 1)
+
+    def test_a_corrected_identity_does_not_collide_with_its_own_history(self) -> None:
+        # P13aa: fixing the definition was not enough. The keys written under
+        # the old definition still held the old hash, so live the corrected
+        # request kept conflicting with rows written two days earlier. A
+        # changed identity definition is a changed identity.
+        from dalton_core.cockpit_model import IDENTITY_VERSION, build_work
+
+        common = dict(purpose="ask", request_id="a", prompt="one",
+                      mission_version_ref="coverage-mission-version:x:1",
+                      max_input_tokens=1000, max_output_tokens=10,
+                      max_cost_usd=0.01, max_seconds=10)
+        self.assertGreaterEqual(IDENTITY_VERSION, 2)
+        work = build_work(**common, created_at="2026-09-01T00:00:00.000000+00:00")
+        # The identity version participates, so version 1's keys are not reused.
+        legacy = content_hash({
+            "purpose": "ask", "request_id": "a",
+            "mission_version_ref": "coverage-mission-version:x:1",
+            "prompt_sha256": hashlib.sha256(b"one").hexdigest(),
+        })
+        self.assertNotIn(legacy[:32], work.id)
+        self.assertNotEqual(work.idempotency_key, f"cockpit:ask:{legacy}")
 
     def test_a_different_question_is_still_different_work(self) -> None:
         # The identity must not have become so loose that two questions share
