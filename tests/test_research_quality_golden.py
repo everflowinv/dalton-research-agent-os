@@ -30,6 +30,7 @@ from dalton_core.research_quality_score import (
     build_judge_prompt,
     judge,
     run_deterministic,
+    withheld_criteria,
 )
 
 GOLDEN = Path(__file__).resolve().parent / "golden"
@@ -71,6 +72,14 @@ class GoldenSetShapeTests(unittest.TestCase):
         for case in cases():
             with self.subTest(case=case["case_ref"]):
                 self.assertIs(case["expected"]["score_ranges_are_calibration_only"], True)
+
+    def test_a_withheld_criterion_never_carries_a_floor_of_zero(self):
+        # Q2 review: the floor used to be 0, the judged test fed it to the
+        # judge, and a not-applicable arrived as a zero by the back door.
+        for case in cases():
+            for criterion_id in case["expected"].get("not_applicable_yet") or ():
+                with self.subTest(case=case["case_ref"], criterion=criterion_id):
+                    self.assertGreater(case["expected"]["score_ranges"][criterion_id][0], 0)
 
     def test_every_case_carries_a_range_for_every_criterion(self):
         for case in cases():
@@ -174,19 +183,29 @@ class JudgedGoldenTests(unittest.TestCase):
         for case in cases():
             rubric = get_rubric(case["rubric"])
             ranges = case["expected"]["score_ranges"]
+            deterministic = run_deterministic(case["artefact"], rubric)
+            # Q2: a criterion the capability gate withheld is not scored at
+            # all, so a reply that includes one is refused. The fake judge has
+            # to answer the question it was actually asked.
+            withheld = withheld_criteria(deterministic)
             scores = [
                 {"criterion_id": criterion_id, "score": ranges[criterion_id][0],
                  "evidence": f"以 {case['case_ref']} 的这一部分为依据"}
                 for criterion_id in rubric.criterion_ids
+                if criterion_id not in withheld
             ]
             with self.subTest(case=case["case_ref"]):
                 model = ReplayingJudge(scores)
-                result = judge(case["artefact"], rubric,
-                               run_deterministic(case["artefact"], rubric), model=model,
+                result = judge(case["artefact"], rubric, deterministic, model=model,
                                mission={"id": "coverage-mission-version:test", "content_hash": "h"},
                                request_id=case["case_ref"])
                 self.assertEqual(result["status"], "scored", result.get("reason"))
-                self.assertEqual(len(result["scores"]), len(rubric.criterion_ids))
+                self.assertEqual(len(result["scores"]),
+                                 len(rubric.criterion_ids) - len(withheld))
+                self.assertEqual(
+                    {item["criterion_id"] for item in result["summary"]["withheld"]},
+                    set(withheld),
+                )
 
     def test_every_prompt_fits_the_byte_bound_the_call_is_admitted_under(self):
         # MAX_INPUT_TOKENS is measured in bytes, not tokens: build_work compares
