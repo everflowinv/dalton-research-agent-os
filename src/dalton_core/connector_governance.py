@@ -287,12 +287,12 @@ def _yfinance_analyst_estimates_schema_hash() -> str:
     return yfinance_schema_hash(ANALYST_ESTIMATES_OPERATION)
 
 
-<<<<<<< HEAD
 def _yfinance_calendar_schema_hash() -> str:
     from .yfinance_core import CALENDAR_OPERATION, yfinance_schema_hash
 
     return yfinance_schema_hash(CALENDAR_OPERATION)
-=======
+
+
 def _cn_hk_findata_source_hash() -> str:
     from .cn_hk_findata_core import cn_hk_findata_source_hash
 
@@ -320,7 +320,6 @@ def _cn_hk_findata_schema_hash(operation: str) -> Callable[[], str]:
         return cn_hk_findata_schema_hash(operation)
 
     return thunk
->>>>>>> s4-cn-hk-findata
 
 
 def _sec_identity() -> dict[str, Any]:
