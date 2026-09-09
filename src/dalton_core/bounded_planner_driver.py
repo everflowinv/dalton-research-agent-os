@@ -37,6 +37,11 @@ DEFAULT_FILED_WINDOW_DAYS = 400
 # say.  Named because P14e's ad-hoc pool reserves against exactly this number
 # and a second copy of a price is a price that drifts.
 DEFAULT_PLANNER_MAX_COST_USD = 0.5
+# C2: the two ledgers the tick writes to and reads from, both beside the
+# scheduler in the state directory. Named here rather than in the config
+# because the config is a closed shape every installed service.json matches.
+TICK_LEDGER_FILENAME = "tick-ledger.sqlite"
+BUDGET_LEDGER_FILENAME = "thesis-impact-budget.sqlite"
 
 
 class BoundedPlannerDriverError(RuntimeError):
@@ -215,7 +220,7 @@ class BoundedPlannerDriverConfig:
 # than only in the registry.
 _RESERVED_SUMMARY_KEYS: frozenset[str] = frozenset({
     "status", "active_loop_count", "probes_executed", "executed", "skipped",
-    "mission_sec_dispatch", "forecast_reconciliation",
+    "mission_sec_dispatch", "forecast_reconciliation", "tick_ledger",
 })
 
 
@@ -270,8 +275,22 @@ class BoundedPlannerDriver:
         client: WriterClient | None = None,
         transport: Any | None = None,
         clock: Any | None = None,
+        tick_ledger_path: Path | str | None = None,
     ) -> None:
         self.config = config
+        # C2: the tick ledger lives beside the scheduler, in the same state
+        # directory, and is found rather than configured. Adding a field to
+        # ``BoundedPlannerDriverConfig`` would have changed a closed config
+        # shape that every installed service.json has to match, for a file
+        # whose location was never in doubt.
+        self.tick_ledger_path = Path(
+            tick_ledger_path if tick_ledger_path is not None
+            else config.scheduler_db.parent / TICK_LEDGER_FILENAME
+        )
+        # The day ledger is likewise found, and is read only to record what
+        # the day's pools moved by. Absent, unreadable or not yet migrated, it
+        # contributes nothing and the tick is unaffected.
+        self.budget_db_path = config.scheduler_db.parent / BUDGET_LEDGER_FILENAME
         if client is None:
             # Lazy import avoids a module-load cycle with writer_server.
             from .writer_server import load_principals
@@ -301,6 +320,7 @@ class BoundedPlannerDriver:
             return {"status": f"unavailable:{type(exc).__name__}"}
 
     def run_once(self) -> dict[str, Any]:
+        started_at = self.clock()
         try:
             mission_dispatch = self.client.call("dispatch_coverage_mission_sec_lane", {})
         except Exception as exc:
@@ -520,7 +540,7 @@ class BoundedPlannerDriver:
                         entry["mission_lane_ticket_ref"] = observation["lane_ticket_ref"]
             executed.append(entry)
             probes += 1
-        return {
+        summary = {
             "status": "completed" if executed else "idle",
             "active_loop_count": len(loops),
             "probes_executed": probes,
@@ -530,6 +550,46 @@ class BoundedPlannerDriver:
             "forecast_reconciliation": forecast_reconciliation,
             **lanes,
         }
+        summary["tick_ledger"] = self._record_tick(summary, started_at=started_at)
+        return summary
+
+    def _record_tick(
+        self, summary: Mapping[str, Any], *, started_at: datetime,
+    ) -> dict[str, Any]:
+        """Append this tick to the ledger, and say so if that failed.
+
+        C2. Before this the summary was a return value that ``service`` wrote
+        into ``run/heartbeat.json`` and the next tick overwrote, so the idle
+        ratio, lane stalls and spend by pool were not slow to compute -- they
+        were gone. The write is the last thing a tick does and is never
+        allowed to be the thing that fails it, but it is also never allowed to
+        fail quietly: a bookkeeper nobody can tell has stopped is worse than
+        no bookkeeper at all.
+        """
+
+        from .budget_pools import day_pool_spend_at, pool_for_operation
+        from .lane_registry import tick_lanes
+        from .tick_ledger import TickLedger
+
+        ended = self.clock()
+        try:
+            pool_spend = day_pool_spend_at(
+                self.budget_db_path,
+                day=ended.astimezone(timezone.utc).date().isoformat(),
+            )
+            operations, pools = {}, {}
+            for spec in tick_lanes():
+                operations[spec.driver_key] = spec.operation
+                pools[spec.driver_key] = pool_for_operation(spec.operation)
+            with TickLedger(self.tick_ledger_path, clock=self.clock) as ledger:
+                return ledger.append_tick(
+                    summary, started_at=started_at, ended_at=ended,
+                    pool_spend=pool_spend, lane_operations=operations,
+                    lane_pools=pools,
+                )
+        except Exception as exc:  # noqa: BLE001 - bookkeeping never fails a tick
+            return {"status": f"unrecorded:{type(exc).__name__}",
+                    "reason": str(exc)[:200]}
 
 
 __all__ = [
