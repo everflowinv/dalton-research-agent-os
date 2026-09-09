@@ -173,6 +173,7 @@ REGISTRY_LANE_LABELS = {
     "company_wiki_feed": "读公司维基与访谈纪要",
     "research_task": "做专项研究",
     "mission_reflection": "每周回头看时间花在哪",
+    "company_dossier": "写公司档案",
 }
 # Already shown by name above the registry rows, with their budgets.
 LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})
