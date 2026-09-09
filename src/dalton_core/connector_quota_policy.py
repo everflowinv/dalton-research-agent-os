@@ -79,6 +79,75 @@ _DAILY_QUOTAS = MappingProxyType(
         # mission needs a handful of these a day, not a stream. data.sec.gov is
         # free but rate limited, and this ceiling is what stands between a retry
         # loop and being throttled off the source the whole SEC lane depends on.
+        # S3: the crowd sources, all at fifty units a day.
+        #
+        # Fifty is not a measurement. None of these three publishes a rate
+        # limit, and two of them are read through a host tool that would be
+        # throttled or logged out long before any number here mattered. Fifty
+        # is a bound on what a bug can cost: five companies read once a day is
+        # five units, so this is ten times what the lane is for, and a runaway
+        # retry loop stops at breakfast rather than at the point where an
+        # account is flagged.
+        #
+        # It is deliberately the same number for all seven operations. A
+        # different figure for each would imply a measurement behind each one,
+        # and there is not.
+        #
+        # `max_physical_calls_per_unit` differs because paging does: one
+        # logical read of a timeline or a review library is several HTTP calls,
+        # and one post or one ranking is exactly one.
+        ("xueqiu-posts", "search_posts"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 5,
+            }
+        ),
+        ("xueqiu-posts", "get_post"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        ("xueqiu-posts", "hot_rank"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        ("x-xreach-crowd", "user_timeline"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 5,
+            }
+        ),
+        ("x-xreach-crowd", "search"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 5,
+            }
+        ),
+        ("x-xreach-crowd", "thread"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 5,
+            }
+        ),
+        # Free, unauthenticated and paged thirty rows at a time, so one
+        # employer's library is up to twenty page reads. The politeness bound
+        # is the point: nothing here is worth being blocked for.
+        ("employee-reviews", "blind_reviews"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 20,
+            }
+        ),
         ("sec", "list_filings"): MappingProxyType(
             {
                 "quota_unit": "search",
@@ -113,6 +182,23 @@ _DAILY_QUOTAS = MappingProxyType(
                 "quota_unit": "search",
                 "daily_unit_limit": 50,
                 "max_physical_calls_per_unit": 4,
+            }
+        ),
+        # C1: one company's dated corporate events per unit.
+        #
+        # An earnings date is announced once and then does not move, so the
+        # calendar lane asks once a day per covered company and the five
+        # covered companies need five of these. Fifty leaves room for a
+        # business day's worth of retries and for the coverage universe to
+        # grow, without ever making this the reason Yahoo starts refusing.
+        #
+        # One physical call: ``Ticker.calendar`` is a single quoteSummary
+        # request against the same two hosts the price operation uses.
+        ("yfinance", "calendar"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 1,
             }
         ),
         # S1: the two local feeds. There is no upstream to be polite to and
@@ -154,6 +240,83 @@ _DAILY_QUOTAS = MappingProxyType(
                 # "read everything once" and no more.
                 "daily_unit_limit": 1_000,
                 "max_physical_calls_per_unit": 1,
+            }
+        ),
+        # S4: China / Hong Kong fundamentals. Conservative throughout, and for
+        # a reason with a date on it: on 2026-08-21 the OpenClaw skill pressed
+        # 东方财富's price-history cluster a dozen times in a row and the
+        # neighbouring endpoints -- which had been healthy all along -- were
+        # cut off too, for minutes, with no error that said why. The skill's
+        # standing rule is 「不要批量探测东财」. These ceilings are that rule
+        # expressed as arithmetic.
+        #
+        # One company's statement history per unit. Behind the single library
+        # call are one report-date listing plus one fetch per five periods, so
+        # a decade of quarters is about nine physical calls; the Hong Kong
+        # route is a summary call plus one table call. A statement set changes
+        # four times a year, so twenty companies a day is generous.
+        ("cn-hk-findata", "financial_statements"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 20,
+                "max_physical_calls_per_unit": 12,
+            }
+        ),
+        # One company's holder picture per unit: the top-ten table for one
+        # report date, plus the holder-count history, which the vendor pages
+        # 500 rows at a time and which is short for any one issuer.
+        ("cn-hk-findata", "shareholders"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 20,
+                "max_physical_calls_per_unit": 6,
+            }
+        ),
+        # The most expensive of the six and the smallest allowance because of
+        # it: the vendor publishes one market-wide buyback table and offers no
+        # per-issuer route, so answering "did this company buy back stock"
+        # means reading every page of every company's answer and throwing away
+        # all but one. Four a day, and a lane that wants five companies should
+        # read the table once and filter it five times rather than ask again.
+        ("cn-hk-findata", "buybacks"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 4,
+                "max_physical_calls_per_unit": 40,
+            }
+        ),
+        # One exchange-day per unit, straight from the exchange rather than a
+        # vendor. Two exchanges times one trading day, with room to backfill a
+        # short window, is what 40 buys.
+        ("cn-hk-findata", "margin_balance"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 40,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        # A daily snapshot. Reading it more than a handful of times a day
+        # spends the source's patience on a number that moves once.
+        ("cn-hk-findata", "northbound_flow"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 8,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        # The one operation that must touch 东财's quote cluster -- the host
+        # the 2026-08 incident was about. Three pages of one hundred cover the
+        # 204-row A+H universe, which is why the per-unit ceiling is three and
+        # not a round number: the adapter also caps the library's own
+        # three-attempt retry loop to one attempt per page, so three pages is
+        # three GETs and the ceiling is the truth rather than a hope. Four
+        # units a day is deliberately below anything that could look like
+        # probing.
+        ("cn-hk-findata", "ah_premium"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 4,
+                "max_physical_calls_per_unit": 3,
             }
         ),
     }

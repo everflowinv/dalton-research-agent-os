@@ -44,6 +44,13 @@ WRITE_SCOPE = "deliverable"
 DELIVERABLE_KINDS: tuple[str, ...] = (
     "industry_framework", "initial_screen", "industry_model", "company_model",
     "forecast_lines", "investment_memo", "weekly_brief",
+    # P14a: the short note a tracked event produces -- "ACN fell 4.2% today:
+    # sector-wide, no company news; the nearest driver is X".  One chain per
+    # company, gaining a version per note, so the company's running commentary
+    # is replayable by version like every other output (ADR-0008).  It is a
+    # deliverable rather than a new object precisely so that it inherits the
+    # rule that a figure with no live Claim behind it is refused.
+    "event_note",
 )
 MAX_SECTIONS = 24
 MAX_BODY_CHARS = 6000
@@ -236,6 +243,83 @@ class MissionDeliverableAuthority:
             "dalton_mission_deliverable_authorized", 0, lambda: int(self._authorized)
         )
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._widen_kind_check()
+
+    def _widen_kind_check(self) -> None:
+        """P14a: admit ``event_note`` on a Core built before that kind existed.
+
+        ``CREATE TABLE IF NOT EXISTS`` does nothing to a table that is already
+        there, so a Core created under the seven-kind CHECK keeps refusing the
+        eighth for ever -- with an ``IntegrityError`` from the constraint
+        rather than the readable refusal the vocabulary check above gives.
+        Live holds a handful of deliverables, so the rebuild is small; it
+        follows ``DaltonStore._migrate_thesis_authority_columns`` exactly,
+        including the foreign-key check afterwards, because a rebuild that
+        silently orphaned the pointer would be worse than the constraint.
+        """
+
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='mission_deliverable_versions'"
+        ).fetchone()
+        if row is None or "'event_note'" in (row["sql"] or ""):
+            return
+        if self.connection.in_transaction:
+            raise MissionDeliverableConflict(
+                "the deliverable kind migration requires no open transaction"
+            )
+        self.connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.connection.executescript(
+                """
+                BEGIN IMMEDIATE;
+                DROP TRIGGER IF EXISTS mission_deliverables_authorized_insert;
+                DROP TRIGGER IF EXISTS mission_deliverables_no_update;
+                DROP TRIGGER IF EXISTS mission_deliverables_no_delete;
+                CREATE TABLE mission_deliverable_versions_v2 (
+                    version_id TEXT PRIMARY KEY,
+                    deliverable_ref TEXT NOT NULL,
+                    version_number INTEGER NOT NULL CHECK(version_number >= 1),
+                    prior_version_ref TEXT REFERENCES mission_deliverable_versions_v2(version_id),
+                    mission_version_ref TEXT NOT NULL REFERENCES coverage_mission_versions(mission_version_id),
+                    mission_version_hash TEXT NOT NULL,
+                    playbook_version_ref TEXT NOT NULL,
+                    playbook_version_hash TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN (
+                        'industry_framework','initial_screen','industry_model','company_model',
+                        'forecast_lines','investment_memo','weekly_brief','event_note'
+                    )),
+                    subject_ref TEXT NOT NULL,
+                    record_json TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    actor_ref TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(deliverable_ref, version_number)
+                );
+                INSERT INTO mission_deliverable_versions_v2 SELECT * FROM mission_deliverable_versions;
+                DROP TABLE mission_deliverable_versions;
+                ALTER TABLE mission_deliverable_versions_v2 RENAME TO mission_deliverable_versions;
+                CREATE INDEX IF NOT EXISTS idx_mission_deliverables_by_subject
+                ON mission_deliverable_versions(mission_version_ref, subject_ref, kind, created_at);
+                CREATE TRIGGER mission_deliverables_authorized_insert
+                BEFORE INSERT ON mission_deliverable_versions
+                WHEN dalton_mission_deliverable_authorized() = 0 BEGIN
+                    SELECT RAISE(ABORT, 'mission deliverable insert requires MissionDeliverableAuthority'); END;
+                CREATE TRIGGER mission_deliverables_no_update
+                BEFORE UPDATE ON mission_deliverable_versions BEGIN
+                    SELECT RAISE(ABORT, 'mission deliverables are append-only'); END;
+                CREATE TRIGGER mission_deliverables_no_delete
+                BEFORE DELETE ON mission_deliverable_versions BEGIN
+                    SELECT RAISE(ABORT, 'mission deliverables are append-only'); END;
+                COMMIT;
+                """
+            )
+        finally:
+            self.connection.execute("PRAGMA foreign_keys = ON")
+        if self.connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise MissionDeliverableConflict(
+                "the deliverable kind migration broke foreign keys"
+            )
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Cursor]:

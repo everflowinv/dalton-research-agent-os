@@ -28,6 +28,7 @@ from dalton_core.yfinance_core import (
     ADAPTER_LIBRARY,
     ANALYST_ESTIMATES_KIND,
     ANALYST_ESTIMATES_OPERATION,
+    CALENDAR_OPERATION,
     DAILY_PRICES_KIND,
     DAILY_PRICES_OPERATION,
     YFinanceError,
@@ -170,7 +171,12 @@ class ContractTests(unittest.TestCase):
         # clothes.
         template = load_packaged_connector_inventory()["templates"]["yfinance"]
         operations = {item["operation"] for item in template["operations"]}
-        self.assertEqual(operations, {DAILY_PRICES_OPERATION, ANALYST_ESTIMATES_OPERATION})
+        # C1 added `calendar`. The point of this assertion is unchanged: the
+        # set is closed and no statement operation is in it, so widening it
+        # has to be a deliberate edit here rather than something that happens.
+        self.assertEqual(operations, {
+            DAILY_PRICES_OPERATION, ANALYST_ESTIMATES_OPERATION, CALENDAR_OPERATION,
+        })
 
 
 class PermissionAndQuotaTests(unittest.TestCase):

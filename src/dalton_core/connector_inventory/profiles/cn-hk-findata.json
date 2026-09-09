@@ -1,0 +1,1506 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "connector_ref": "connector:cn-hk-findata",
+  "content_hash": "227c65980af5c35dfcf4bbe2bd03a6a22d757d1f9852e3f57968bb1ba24d4a2c",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "d28ae8c4b3619427508432ab87960b4171964fd0c93bc5ae13a01d77a12b5bb1",
+  "fixture_manifest_ref": "connector-fixture-manifest:cn-hk-findata:0.1",
+  "id": "connector-profile-template:cn-hk-findata:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "partial",
+      "input_schema_hash": "3d7a69a76b2a29762bb14b4db66020d6253810f6cd7cc3aa6ffdba1b4f53d152",
+      "input_schema_ref": "schema:connector-inventory:cn-hk-findata:financial_statements:input:0.1",
+      "operation": "financial_statements",
+      "output_schema_hash": "c58cc07607c497856f0c76c25de9ddfabd88177935c6e897baeb2b1b46d5e2fb",
+      "output_schema_ref": "schema:connector-inventory:cn-hk-findata:financial_statements:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "financial_statements"
+    },
+    {
+      "completeness_ceiling": "partial",
+      "input_schema_hash": "726507a2522c9468dd4dfec80983251e6f0f7b304c521652f3343795b90d87ce",
+      "input_schema_ref": "schema:connector-inventory:cn-hk-findata:shareholders:input:0.1",
+      "operation": "shareholders",
+      "output_schema_hash": "93897a236afb9e0832fe5b132fb9fd2f1ae7a83286aba76989a75f5d139520f2",
+      "output_schema_ref": "schema:connector-inventory:cn-hk-findata:shareholders:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "shareholders"
+    },
+    {
+      "completeness_ceiling": "partial",
+      "input_schema_hash": "7817cadcf3263f8aa3190ca12a590fac53a7386104c4f6f8697c9d05afde4b18",
+      "input_schema_ref": "schema:connector-inventory:cn-hk-findata:buybacks:input:0.1",
+      "operation": "buybacks",
+      "output_schema_hash": "65cdc0d4cad2a5490cea73ad12e7215c01e8cb92bd18c04e9dc4a18678dcf9c9",
+      "output_schema_ref": "schema:connector-inventory:cn-hk-findata:buybacks:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "buybacks"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "46130ee21aae292612cc07b567e926e16746f7e3d0a88693c9b6b2f96597f23c",
+      "input_schema_ref": "schema:connector-inventory:cn-hk-findata:margin_balance:input:0.1",
+      "operation": "margin_balance",
+      "output_schema_hash": "7299815eff9141c8127d4243c4c3b1856b10133c87d3b8292853ddc57d725157",
+      "output_schema_ref": "schema:connector-inventory:cn-hk-findata:margin_balance:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "margin_balance"
+    },
+    {
+      "completeness_ceiling": "partial",
+      "input_schema_hash": "827ea0407dfa59b4fa7355ef3482b3c12a51580412a607a0e6e877bff061aefb",
+      "input_schema_ref": "schema:connector-inventory:cn-hk-findata:northbound_flow:input:0.1",
+      "operation": "northbound_flow",
+      "output_schema_hash": "a2f18ef2ac570742523af805b05c20253f35f707777b94b710d703457d45f5f2",
+      "output_schema_ref": "schema:connector-inventory:cn-hk-findata:northbound_flow:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "northbound_flow"
+    },
+    {
+      "completeness_ceiling": "partial",
+      "input_schema_hash": "0e56586f0263ce92788a03e4d8154582d973fa2fe41026a9900e3b5e67de620c",
+      "input_schema_ref": "schema:connector-inventory:cn-hk-findata:ah_premium:input:0.1",
+      "operation": "ah_premium",
+      "output_schema_hash": "4c1f22c64cf1f549ed7afce2e553976bf970940bdb8980179346b99533eee3b5",
+      "output_schema_ref": "schema:connector-inventory:cn-hk-findata:ah_premium:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "ah_premium"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "recorded_public_reference_shadow"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "transport:public-http:0.1"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:cn-hk-findata-nl-router",
+      "route:eastmoney-push2his-batch-probe",
+      "route:tencent-ah-quote-list",
+      "route:arbitrary-attachment-url"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "market": {
+            "enum": [
+              "a",
+              "hk"
+            ],
+            "type": "string"
+          },
+          "period_type": {
+            "enum": [
+              "report",
+              "annual"
+            ],
+            "type": "string"
+          },
+          "statement_kind": {
+            "enum": [
+              "income",
+              "balance",
+              "cash"
+            ],
+            "type": "string"
+          },
+          "ticker": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "market",
+          "ticker",
+          "statement_kind",
+          "period_type"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "3d7a69a76b2a29762bb14b4db66020d6253810f6cd7cc3aa6ffdba1b4f53d152",
+      "schema_ref": "schema:connector-inventory:cn-hk-findata:financial_statements:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "account_standard": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "captured_at": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "currency": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "dropped_row_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "lines": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "account_standard": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "caliber_note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "concept": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "currency": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "fallback_used": {
+                  "type": "boolean"
+                },
+                "fiscal_year": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "label": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "period_end": {
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                  "type": "string"
+                },
+                "period_start": {
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "report_type": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source_vendor": {
+                  "enum": [
+                    "eastmoney"
+                  ],
+                  "type": "string"
+                },
+                "statement": {
+                  "enum": [
+                    "income",
+                    "balance",
+                    "cash"
+                  ],
+                  "type": "string"
+                },
+                "value": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "statement",
+                "period_end",
+                "period_start",
+                "fiscal_year",
+                "report_type",
+                "concept",
+                "label",
+                "value",
+                "currency",
+                "account_standard",
+                "source_vendor",
+                "fallback_used",
+                "caliber_note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "market": {
+            "enum": [
+              "a",
+              "hk"
+            ],
+            "type": "string"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "period_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "period_type": {
+            "enum": [
+              "report",
+              "annual"
+            ],
+            "type": "string"
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "security_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "statement": {
+            "enum": [
+              "income",
+              "balance",
+              "cash"
+            ],
+            "type": "string"
+          },
+          "ticker": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "market",
+          "ticker",
+          "security_name",
+          "statement",
+          "period_type",
+          "currency",
+          "account_standard",
+          "captured_at",
+          "lines",
+          "period_count",
+          "dropped_row_count",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "c58cc07607c497856f0c76c25de9ddfabd88177935c6e897baeb2b1b46d5e2fb",
+      "schema_ref": "schema:connector-inventory:cn-hk-findata:financial_statements:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "a_ticker": {
+            "pattern": "^[0-9]{6}$",
+            "type": "string"
+          },
+          "period_end": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "a_ticker",
+          "period_end"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "726507a2522c9468dd4dfec80983251e6f0f7b304c521652f3343795b90d87ce",
+      "schema_ref": "schema:connector-inventory:cn-hk-findata:shareholders:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "captured_at": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "dropped_row_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "holder_counts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "announced_on": {
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "as_of": {
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                  "type": "string"
+                },
+                "avg_shares_per_holder": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "avg_value_per_holder": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "caliber_note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "fallback_used": {
+                  "type": "boolean"
+                },
+                "holder_count": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "holder_count_change": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "holder_count_change_ratio": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "prior_holder_count": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source_vendor": {
+                  "enum": [
+                    "eastmoney"
+                  ],
+                  "type": "string"
+                },
+                "total_market_cap": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "total_shares": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "as_of",
+                "announced_on",
+                "holder_count",
+                "prior_holder_count",
+                "holder_count_change",
+                "holder_count_change_ratio",
+                "avg_shares_per_holder",
+                "avg_value_per_holder",
+                "total_shares",
+                "total_market_cap",
+                "source_vendor",
+                "fallback_used",
+                "caliber_note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "period_end": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "security_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "ticker": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "top_holders": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "caliber_note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "change": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "change_ratio": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "fallback_used": {
+                  "type": "boolean"
+                },
+                "holder_name": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "holder_nature": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pct_of_float": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "rank": {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "share_class": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "shares": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source_vendor": {
+                  "enum": [
+                    "eastmoney"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "rank",
+                "holder_name",
+                "holder_nature",
+                "share_class",
+                "shares",
+                "pct_of_float",
+                "change",
+                "change_ratio",
+                "source_vendor",
+                "fallback_used",
+                "caliber_note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "schema_version",
+          "ticker",
+          "security_name",
+          "period_end",
+          "captured_at",
+          "top_holders",
+          "holder_counts",
+          "dropped_row_count",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "93897a236afb9e0832fe5b132fb9fd2f1ae7a83286aba76989a75f5d139520f2",
+      "schema_ref": "schema:connector-inventory:cn-hk-findata:shareholders:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "a_ticker": {
+            "pattern": "^[0-9]{6}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "a_ticker"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "7817cadcf3263f8aa3190ca12a590fac53a7386104c4f6f8697c9d05afde4b18",
+      "schema_ref": "schema:connector-inventory:cn-hk-findata:buybacks:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "captured_at": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "dropped_row_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "announced_on": {
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "caliber_note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "fallback_used": {
+                  "type": "boolean"
+                },
+                "planned_amount_high": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "planned_amount_low": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "planned_pct_high": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "planned_pct_low": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "planned_shares_high": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "planned_shares_low": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "price_ceiling": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "progress": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "repurchased_amount": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "repurchased_price_high": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "repurchased_price_low": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "repurchased_shares": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "security_code": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "security_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source_vendor": {
+                  "enum": [
+                    "eastmoney"
+                  ],
+                  "type": "string"
+                },
+                "started_on": {
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "security_code",
+                "security_name",
+                "announced_on",
+                "started_on",
+                "progress",
+                "planned_shares_low",
+                "planned_shares_high",
+                "planned_amount_low",
+                "planned_amount_high",
+                "planned_pct_low",
+                "planned_pct_high",
+                "price_ceiling",
+                "repurchased_shares",
+                "repurchased_amount",
+                "repurchased_price_low",
+                "repurchased_price_high",
+                "source_vendor",
+                "fallback_used",
+                "caliber_note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "ticker": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "universe_row_count": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "ticker",
+          "captured_at",
+          "rows",
+          "universe_row_count",
+          "dropped_row_count",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "65cdc0d4cad2a5490cea73ad12e7215c01e8cb92bd18c04e9dc4a18678dcf9c9",
+      "schema_ref": "schema:connector-inventory:cn-hk-findata:buybacks:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "exchange": {
+            "enum": [
+              "sse",
+              "szse"
+            ],
+            "type": "string"
+          },
+          "start": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "exchange",
+          "start",
+          "end"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "46130ee21aae292612cc07b567e926e16746f7e3d0a88693c9b6b2f96597f23c",
+      "schema_ref": "schema:connector-inventory:cn-hk-findata:margin_balance:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "captured_at": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "dropped_row_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "exchange": {
+            "enum": [
+              "sse",
+              "szse"
+            ],
+            "type": "string"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "requested_end": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "requested_start": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "amount_unit": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "caliber_note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "currency": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "fallback_used": {
+                  "type": "boolean"
+                },
+                "financing_balance": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "financing_buy": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "short_balance_amount": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "short_balance_volume": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "short_selling_volume": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source_vendor": {
+                  "enum": [
+                    "sse",
+                    "szse"
+                  ],
+                  "type": "string"
+                },
+                "total_balance": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "trade_date": {
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                  "type": "string"
+                },
+                "volume_unit": {
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "trade_date",
+                "financing_balance",
+                "financing_buy",
+                "short_selling_volume",
+                "short_balance_volume",
+                "short_balance_amount",
+                "total_balance",
+                "currency",
+                "amount_unit",
+                "volume_unit",
+                "source_vendor",
+                "fallback_used",
+                "caliber_note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "exchange",
+          "requested_start",
+          "requested_end",
+          "captured_at",
+          "rows",
+          "dropped_row_count",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "7299815eff9141c8127d4243c4c3b1856b10133c87d3b8292853ddc57d725157",
+      "schema_ref": "schema:connector-inventory:cn-hk-findata:margin_balance:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "as_of": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "as_of"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "827ea0407dfa59b4fa7355ef3482b3c12a51580412a607a0e6e877bff061aefb",
+      "schema_ref": "schema:connector-inventory:cn-hk-findata:northbound_flow:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "captured_at": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "dropped_row_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "requested_as_of": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "advancing": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "amount_unit": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "board": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "caliber_note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "daily_quota_balance": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "declining": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "fallback_used": {
+                  "type": "boolean"
+                },
+                "funds_direction": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "index_change_percent": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "index_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "mutual_type": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "net_buy_amount": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "net_inflow": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source_vendor": {
+                  "enum": [
+                    "eastmoney"
+                  ],
+                  "type": "string"
+                },
+                "trade_date": {
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                  "type": "string"
+                },
+                "trade_status": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "unchanged": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "trade_date",
+                "mutual_type",
+                "board",
+                "funds_direction",
+                "trade_status",
+                "net_buy_amount",
+                "net_inflow",
+                "daily_quota_balance",
+                "advancing",
+                "unchanged",
+                "declining",
+                "index_name",
+                "index_change_percent",
+                "amount_unit",
+                "source_vendor",
+                "fallback_used",
+                "caliber_note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "requested_as_of",
+          "captured_at",
+          "rows",
+          "dropped_row_count",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "a2f18ef2ac570742523af805b05c20253f35f707777b94b710d703457d45f5f2",
+      "schema_ref": "schema:connector-inventory:cn-hk-findata:northbound_flow:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "ticker": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticker"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "0e56586f0263ce92788a03e4d8154582d973fa2fe41026a9900e3b5e67de620c",
+      "schema_ref": "schema:connector-inventory:cn-hk-findata:ah_premium:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "captured_at": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "dropped_row_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "rows": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "a_change_percent": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "a_code": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "a_currency": {
+                  "enum": [
+                    "CNY"
+                  ],
+                  "type": "string"
+                },
+                "a_price": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "caliber_note": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "fallback_used": {
+                  "type": "boolean"
+                },
+                "h_change_percent": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "h_code": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "h_currency": {
+                  "enum": [
+                    "HKD"
+                  ],
+                  "type": "string"
+                },
+                "h_price": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "name": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "premium_percent": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "price_ratio": {
+                  "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source_vendor": {
+                  "enum": [
+                    "eastmoney"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "h_code",
+                "a_code",
+                "h_price",
+                "h_change_percent",
+                "a_price",
+                "a_change_percent",
+                "price_ratio",
+                "premium_percent",
+                "h_currency",
+                "a_currency",
+                "source_vendor",
+                "fallback_used",
+                "caliber_note"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "ticker": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "universe_row_count": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "schema_version",
+          "ticker",
+          "captured_at",
+          "rows",
+          "universe_row_count",
+          "dropped_row_count",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "4c1f22c64cf1f549ed7afce2e553976bf970940bdb8980179346b99533eee3b5",
+      "schema_ref": "schema:connector-inventory:cn-hk-findata:ah_premium:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:cn-hk-findata",
+    "source_type": "market_data",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [
+      "datacenter-web.eastmoney.com",
+      "datacenter.eastmoney.com",
+      "emweb.securities.eastmoney.com",
+      "push2.eastmoney.com",
+      "query.sse.com.cn",
+      "www.szse.cn"
+    ],
+    "host_policy": "literal_allowlist",
+    "kind": "public_https",
+    "target_hash": "8237601468582f11293308387912f60447493a66bdb13f3456d9d74d6bef29ab",
+    "target_ref": "transport:public-http:0.1"
+  }
+}

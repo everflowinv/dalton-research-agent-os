@@ -12,6 +12,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+# The worktree's .venv is a symlink to the main checkout's, and a
+# symlink is a file: the trailing-slash pattern above does not match
+# it, so it was committed once. This line is the one that catches it.
+.venv
 venv/
 build/
 dist/

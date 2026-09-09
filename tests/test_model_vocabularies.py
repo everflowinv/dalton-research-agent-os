@@ -105,21 +105,36 @@ class ModelPurposeRegistryTests(unittest.TestCase):
 
 
 class ModelConfigurationRegistryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from dalton_core import model_configurations
+
+        # Snapshotted here, not reset to the seed in teardown. A lane module
+        # registers its own configuration name at import -- claim_index_tagging
+        # does -- and resetting to the seed deleted it for every test that ran
+        # afterwards. This class only passed because the one test that asserts
+        # the seed sorts last inside it, so an earlier test's teardown had
+        # already put the registry back. That is a coincidence of alphabetical
+        # order, not a fixture. Same lesson the purpose registry above learned.
+        self._names = list(model_configurations._NAMES)
+
     def tearDown(self) -> None:
         from dalton_core import model_configurations
 
-        model_configurations._NAMES[:] = list(SEED_MODEL_CONFIGS)
+        model_configurations._NAMES[:] = self._names
 
     def test_the_seed_is_what_the_script_tuple_said(self) -> None:
-        self.assertEqual(model_config_names(), SEED_MODEL_CONFIGS)
+        # The three this Core installs are still there, still first, still in
+        # order. Whatever follows them is a lane that registered its own, which
+        # is the registry working rather than drift.
+        self.assertEqual(
+            model_config_names()[:len(SEED_MODEL_CONFIGS)], SEED_MODEL_CONFIGS)
 
     def test_a_registered_name_is_appended_once_in_order(self) -> None:
+        before = model_config_names()
         register_model_config_name("market-model-config.json")
         register_model_config_name("market-model-config.json")
         self.assertEqual(
-            model_config_names(),
-            SEED_MODEL_CONFIGS + ("market-model-config.json",),
-        )
+            model_config_names(), before + ("market-model-config.json",))
 
     def test_a_name_that_is_not_a_state_directory_file_is_refused(self) -> None:
         for bad in ("../escape.json", "Market.json", "market-model-config",

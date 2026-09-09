@@ -80,6 +80,107 @@ STAGE_LABELS = {
     "company_model": "公司模型", "forecast_lines": "预测线", "investment_memo": "投资备忘录",
     "weekly_brief": "每周简报", "deep_insight_gate": "深度洞察", "continuous_coverage": "持续覆盖",
 }
+# -- P11a / P11c / P12b / P13-M2 / Q1 -----------------------------------------
+#
+# What the four Wave 1 lanes put in the Core, in the owner's language. Every
+# reader below returns nothing when its lane's table is absent, so a Core from
+# before that lane still shows the page it always showed rather than an error:
+# "this Core has no price history" and "this company has no price history" are
+# different answers, and only the second one is worth a note on a card.
+VERDICT_LABELS = {
+    "read": "读过", "useful": "有用", "needs_more_evidence": "证据不够",
+    "disagree": "不同意", "revise": "要重写",
+}
+# The verdicts that say the last attempt was not enough.
+OUTSTANDING_VERDICTS = frozenset({"needs_more_evidence", "disagree", "revise"})
+IMPORTANCE_LABELS = {
+    "filing": "公司报表原文", "management_statement": "管理层原话",
+    "sell_side": "卖方观点", "news": "新闻报道", "other": "其他",
+}
+ASPECT_LABELS = {
+    "business_model": "怎么赚钱", "segments_and_mix": "业务构成",
+    "demand_drivers": "需求从哪来", "supply_and_cost": "成本与供给",
+    "competitive_position": "竞争位置",
+    "management_and_capital_allocation": "管理层与资本配置",
+    "guidance_style": "指引风格", "kpi_dictionary": "关键指标口径",
+    "catalyst_calendar": "日程与催化", "history_of_price_drivers": "股价的历史驱动",
+    "industry": "行业", "other": "其他",
+}
+# P11c asked for this one specifically: a percentile computed while the
+# fundamentals never moved is the price's percentile wearing a multiple's
+# clothes, and a reader who is not told cannot know.
+PERCENTILE_BASIS_LABELS = {
+    "price_only": "只反映股价高低（这段历史里基本面没有变过）",
+    "price_and_filed_fundamentals": "股价与已报基本面一起算出来的",
+}
+CHANGE_REASON_LABELS = {
+    "filing_actual": "财报数字取代了当初的估计",
+    "driver_event": "有事件改变了驱动因素",
+    "assumption_review": "复核了假设",
+    "evidence_thicker": "证据变厚了",
+    "human_revision": "人改的",
+}
+ASSUMPTION_KIND_LABELS = {"estimate": "模型估的", "human": "人写的", "actual": "已报实际"}
+QUALITY_CHECK_LABELS = {
+    "numbers_without_refs": "每个数字都有出处",
+    "residual_citation_artefacts": "引用标记清理干净",
+    "duplicate_parallel_citations": "同一件事没有被并列引用多次",
+    "required_sections_present": "该写的章节都写了",
+    "claim_refs_resolve": "引用的结论都找得到",
+    "cites_only_shown_claims": "只引用了给它看过的结论",
+    "confidence_stated": "说明了把握有多大",
+    "every_section_cites": "每一节都有依据",
+    "new_version_cites_new_refs": "新版本用上了新证据",
+    "restatement_drift": "改写没有偏离原意",
+}
+# What each status means, in the owner's language. The driver's own ``reason``
+# is English and written for whoever reads a tick summary -- "this mission does
+# not grant market_price in autonomy.may_write" is the right sentence in the
+# wrong place -- so it moves to a detail line and the owner reads this instead.
+LANE_STATUS_NOTES = {
+    "launched": "刚起了一个任务",
+    "busy": "上一个任务还在跑",
+    "idle": "装好了，这一轮没有要做的",
+    "held": "上一次没成，暂时不再试同一件事",
+    "rejected": "这次没被接受",
+    "unconfigured": "这台机器上没装这条流水线",
+    "ungranted": "研究目标还没授权它写入，所以一次也没跑",
+    "unavailable": "这一轮读不到它需要的东西",
+    "unstarted": "这台机器上还没有跑过这条流水线",
+    "current": "已经是最新的了",
+    "failed": "出错了",
+}
+# The lanes the registry knows about, named for the owner. A lane with no name
+# here still appears -- silence about a lane is exactly what this panel exists
+# to end -- under its own key, which is ugly but visible.
+REGISTRY_LANE_LABELS = {
+    "guidepoint_discovery": "找专家访谈纪要",
+    "mission_sec_quarters": "取 SEC 季度数字",
+    "mission_statements": "取三张报表",
+    "mission_market_prices": "取每日股价",
+    "mission_tracking": "每天盯着已覆盖的公司",
+    "mission_catalyst_calendar": "记下公司下次开口的日子",
+    "company_model_spec": "写公司模型的规格",
+    "company_model_forecast": "算预测行",
+    "claim_index": "给结论建索引",
+    "research_plan": "决定下一步做什么",
+    "initial_screen": "写初步筛选",
+    "event_judgement": "判断新发生的事要不要动",
+    "mission_crowd_sources": "看散户与员工在说什么",
+    "mission_stage": "记录研究阶段",
+    "claim_review": "复核已有结论",
+    "sales_notes_feed": "读 sales note",
+    "company_wiki_feed": "读公司维基与访谈纪要",
+    "research_task": "做专项研究",
+}
+# Already shown by name above the registry rows, with their budgets.
+LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})
+# How many bars back the card's range change looks. About a trading year; the
+# start date is always named beside it, because a percentage whose window the
+# reader cannot see is a number they cannot check.
+RANGE_BARS = 252
+MAX_CLAIMS_IN_VIEW = 300
+
 JOB_TTL_SECONDS = 6 * 3600
 MAX_JOBS = 200
 MAX_CLAIMS_IN_PROMPT = 400
@@ -580,6 +681,266 @@ class CockpitPlane:
             entry["latest"] = entry["latest"][-6:][::-1]
         return out
 
+    # -- what the Wave 1 lanes wrote, per company ----------------------------
+    #
+    # Each of these reads one lane's own table out of the read-only Core and
+    # answers ``{}`` when that table is not there. The cockpit is installed on
+    # Cores older than every one of these lanes, and a page that raises rather
+    # than degrades is a page the owner cannot use to find out why.
+
+    @staticmethod
+    def _latest_by(core: Any, table: str, key: str, order: str) -> list[sqlite3.Row]:
+        """The newest row per ``key``, without parsing the ones it replaced.
+
+        Written as a join rather than "read them all and keep the last"
+        because a price series carries three years of bars in every version:
+        parsing the superseded ones costs the whole history, twice, to throw
+        it away.
+        """
+
+        return core.execute(
+            f"SELECT t.* FROM {table} t JOIN (SELECT {key} AS k, MAX({order}) AS n "
+            f"FROM {table} GROUP BY {key}) newest ON newest.k=t.{key} "
+            f"AND newest.n=t.{order}"
+        ).fetchall()
+
+    def _market(self, core: Any) -> dict[str, dict[str, Any]]:
+        """P11a: the latest close, when it is from, and whether it settled.
+
+        The provisional flag is the point of showing this at all. A price
+        pulled mid-session has exactly the shape of a close and is not one,
+        and a card that prints it without saying so is the page telling the
+        owner the market closed at a number it never closed at.
+        """
+
+        if not _table_exists(core, "market_price_series_versions"):
+            return {}
+        from .market_price import bar_is_provisional
+
+        out: dict[str, dict[str, Any]] = {}
+        for row in self._latest_by(
+            core, "market_price_series_versions", "series_ref", "version_number"
+        ):
+            record = json.loads(row["record_json"])
+            bars = record.get("bars") or []
+            if not bars:
+                continue
+            newest, window = bars[-1], bars[-RANGE_BARS:]
+            first = window[0]
+            try:
+                change = round(
+                    (float(newest["close"]) / float(first["close"]) - 1) * 100, 1)
+            except (TypeError, ValueError, ZeroDivisionError):
+                change = None
+            provisional = bar_is_provisional(newest)
+            out[record["company_ref"]] = {
+                "as_of": newest["date"], "close": newest["close"],
+                "adj_close": newest["adj_close"], "currency": record.get("currency"),
+                "provisional": provisional,
+                "note": ("这是盘中价，当天还没有收盘定价"
+                         if provisional else "收盘价"),
+                "bars": len(bars), "since": record.get("first_bar_date"),
+                "change_percent": change, "change_since": first["date"],
+                "version": record.get("version"),
+            }
+        return out
+
+    def _valuation(self, core: Any) -> dict[str, dict[str, Any]]:
+        """P11c: the four multiples, each with its percentile and its basis.
+
+        ``basis`` travels with the number rather than in a footnote: a
+        percentile computed over a stretch in which the filed fundamentals
+        never moved is the price's own percentile, and a reader who is not
+        told that will read it as "cheap against its own history".
+        """
+
+        if not _table_exists(core, "valuation_snapshot_versions"):
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for row in self._latest_by(
+            core, "valuation_snapshot_versions", "snapshot_ref", "version_number"
+        ):
+            record = json.loads(row["record_json"])
+            metrics = []
+            for item in record.get("metrics") or []:
+                percentile = item.get("percentile") or {}
+                basis = percentile.get("basis")
+                metrics.append({
+                    "metric": item.get("metric"), "label": item.get("label"),
+                    "unit": item.get("unit"), "status": item.get("status"),
+                    "value": item.get("value"),
+                    # An unavailable metric shows the sentence saying why,
+                    # never a blank: a blank reads as a zero.
+                    "reason": item.get("reason"),
+                    "percentile": percentile.get("value"),
+                    "percentile_basis": basis,
+                    "percentile_basis_label": PERCENTILE_BASIS_LABELS.get(basis),
+                    "percentile_reason": percentile.get("reason"),
+                    "sample_size": percentile.get("sample_size"),
+                })
+            basis = record.get("basis") or {}
+            dated = basis.get("shares_basis") == "dated_shares"
+            out[record["company_ref"]] = {
+                "as_of": record.get("as_of"), "currency": record.get("currency"),
+                "version": record.get("version"),
+                "available": sum(1 for m in metrics if m["status"] == "available"),
+                "metrics": metrics,
+                "basis": {
+                    "market_cap": basis.get("market_cap"),
+                    "market_cap_formula": basis.get("market_cap_formula"),
+                    "fundamental_windows": basis.get("fundamental_window_count"),
+                    "price_history_bars": basis.get("price_history_bars"),
+                    "shares_basis": basis.get("shares_basis"),
+                    "shares_note": ("股本按各期实际观测" if dated else
+                                    "历史市值用的是今天的股本（没有历史股本来源）"),
+                    "percentile_method": basis.get("percentile_method"),
+                },
+            }
+        return out
+
+    def _forecast(self, core: Any) -> dict[str, dict[str, Any]]:
+        """P13-M2: how much of each company's model actually stands up."""
+
+        if not _table_exists(core, "forecast_model_versions"):
+            return {}
+        from .model_forecast_driver import model_readiness
+
+        out: dict[str, dict[str, Any]] = {}
+        for row in self._latest_by(
+            core, "forecast_model_versions", "model_ref", "version_number"
+        ):
+            record = json.loads(row["record_json"])
+            readiness = model_readiness(record)
+            reason = record.get("change_reason")
+            kinds = readiness.get("assumption_kinds") or {}
+            out[record["company_ref"]] = {
+                "version": record.get("version"), "version_ref": record.get("id"),
+                "created_at": record.get("created_at"),
+                "change_reason": reason,
+                "change_reason_label": CHANGE_REASON_LABELS.get(reason, reason),
+                "decision": record.get("decision"),
+                "evidence_count": len(record.get("evidence_refs") or []),
+                "readiness": readiness,
+                "assumptions_by_kind": {
+                    ASSUMPTION_KIND_LABELS.get(kind, kind): count
+                    for kind, count in kinds.items()
+                },
+                "note": self._forecast_note(readiness),
+            }
+        return out
+
+    @staticmethod
+    def _forecast_note(readiness: Mapping[str, Any]) -> str:
+        """One sentence, counted rather than scored.
+
+        P13-M2 refused to put a percentage on a model and this refuses too:
+        "80% modelled" invites the owner to accept a model with no cost line
+        in it.
+        """
+
+        missing = list(readiness.get("results_unavailable") or [])
+        head = (f"{readiness.get('forecast_quarters', 0)} 个未来季度，"
+                f"{readiness.get('drivers_with_assumptions', 0)}/"
+                f"{readiness.get('drivers', 0)} 条驱动因素有假设")
+        if missing:
+            return head + "；算不出来的行：" + "、".join(missing[:3])
+        return head + "；这条链上的每一行都算出来了"
+
+    def _quality(self, core: Any) -> dict[str, dict[str, Any]]:
+        """Q1: the newest score of every artefact that has one, by target."""
+
+        if not _table_exists(core, "research_quality_score_versions"):
+            return {}
+        from .research_quality_rubrics import PASSING_SCORE, RUBRICS
+
+        out: dict[str, dict[str, Any]] = {}
+        for row in self._latest_by(
+            core, "research_quality_score_versions", "score_ref", "version_number"
+        ):
+            record = json.loads(row["record_json"])
+            rubric = RUBRICS.get(record.get("rubric_ref"))
+            questions = ({c.criterion_id: c.question for c in rubric.criteria}
+                         if rubric is not None else {})
+            deterministic = record.get("deterministic") or {}
+            judge = record.get("judge") or {}
+            verifier = record.get("verifier") or {}
+            summary = judge.get("summary") or {}
+            criteria = [{
+                "criterion_id": item.get("criterion_id"),
+                "question": questions.get(item.get("criterion_id"), item.get("criterion_id")),
+                "score": item.get("score"), "evidence": item.get("evidence"),
+                "below_passing": isinstance(item.get("score"), int)
+                and item["score"] < PASSING_SCORE,
+            } for item in judge.get("scores") or []]
+            out[record["target_ref"]] = {
+                "target_ref": record["target_ref"],
+                "target_hash": record.get("target_hash"),
+                "target_kind": record.get("artefact_kind"),
+                "subject_ref": record.get("subject_ref"),
+                "rubric": rubric.title if rubric is not None else record.get("rubric_ref"),
+                "rubric_ref": record.get("rubric_ref"),
+                "scored_at": record.get("created_at"),
+                "checks": [{
+                    "check": item.get("check"),
+                    "label": QUALITY_CHECK_LABELS.get(item.get("check"), item.get("check")),
+                    "status": item.get("status"), "count": item.get("count"),
+                } for item in deterministic.get("checks") or []],
+                "checks_passed": deterministic.get("passed"),
+                # The stored word, not one inferred from the rows: a judge
+                # that refused says so, and a score decided by the checks
+                # alone was never judged at all.
+                "judge_status": judge.get("status", "refused") if judge else "not_judged",
+                "mean": summary.get("mean"), "minimum": summary.get("minimum"),
+                "criteria": criteria,
+                "below_passing": [c["question"] for c in criteria if c["below_passing"]],
+                # An independent reader confirmed this reading, or nobody did.
+                "verified": verifier.get("status") == "verified",
+            }
+        return out
+
+    def _journal(self, core: Any) -> dict[str, Any]:
+        """Q1: what the PM said, by artefact and by company."""
+
+        if not _table_exists(core, "analyst_journal_entries"):
+            return {"by_target": {}, "by_company": {}, "enabled": False}
+        by_target: dict[str, list[dict[str, Any]]] = {}
+        by_company: dict[str, dict[str, Any]] = {}
+        for row in self._rows(core,
+            "SELECT target_ref, target_kind, company_ref, verdict, note, created_at, "
+            "entry_number FROM analyst_journal_entries ORDER BY created_at, entry_number",
+        ):
+            entry = {
+                "target_ref": row["target_ref"], "target_kind": row["target_kind"],
+                "verdict": row["verdict"],
+                "verdict_label": VERDICT_LABELS.get(row["verdict"], row["verdict"]),
+                "note": row["note"], "at": row["created_at"],
+                "number": row["entry_number"],
+                "outstanding": row["verdict"] in OUTSTANDING_VERDICTS,
+            }
+            by_target.setdefault(row["target_ref"], []).append(entry)
+            if row["company_ref"]:
+                bucket = by_company.setdefault(
+                    row["company_ref"], {"total": 0, "outstanding": 0, "latest": []})
+                bucket["total"] += 1
+                bucket["outstanding"] += int(entry["outstanding"])
+                bucket["latest"] = ([entry] + bucket["latest"])[:3]
+        return {"by_target": by_target, "by_company": by_company, "enabled": True}
+
+    def _governance_records(self) -> dict[str, str | None]:
+        """Every installed connector record and whether the owner approved it."""
+
+        directory = self.config.state_dir / "connector-governance"
+        out: dict[str, str | None] = {}
+        try:
+            names = sorted(directory.glob("*.json"))
+        except OSError:
+            return out
+        for path in names:
+            record = _load_json(path)
+            out[path.name] = (record.get("status")
+                              if isinstance(record, Mapping) else None)
+        return out
+
     # -- overview ------------------------------------------------------------------
 
     def overview(self) -> dict[str, Any]:
@@ -607,6 +968,14 @@ class CockpitPlane:
             plan = self._plan(core, mission, members)
             stages = self._stage_rows(core, mission)
             documents = self._deliverables(core, mission)
+            # Wave 1: the four lanes' own tables. Each answers {} on a Core
+            # that never had that lane, so the card degrades to the card it
+            # was rather than to an error page.
+            market = self._market(core)
+            valuation = self._valuation(core)
+            forecasts = self._forecast(core)
+            quality = self._quality(core)
+            journal = self._journal(core)
         today = self.clock().date().isoformat()
         by_company: dict[str, list[dict[str, Any]]] = {}
         for claim in claims:
@@ -634,13 +1003,36 @@ class CockpitPlane:
                 note = "能拿到的资料齐了；" + blocked[0]["note"]
             else:
                 note = "资料底座齐了，等着写初步筛选"
+            deliverable = documents.get(company_ref)
+            if deliverable is not None:
+                deliverable = {
+                    **deliverable,
+                    # Q1: what the rubric said about this exact document, and
+                    # what the owner has already said back. Both are bound to
+                    # the content hash, because praise for a document that has
+                    # since been rewritten is praise for the old one.
+                    "quality": quality.get(deliverable["version_ref"]),
+                    "feedback": {
+                        "target_ref": deliverable["version_ref"],
+                        "target_hash": deliverable["content_hash"],
+                        "target_kind": "initial_screen",
+                        "company_ref": company_ref,
+                        # A Core with no journal table shows no buttons rather
+                        # than buttons that fail when pressed. The card carried
+                        # the flag at the top level and the binding did not, so
+                        # the page had no way to act on it where the buttons
+                        # actually are.
+                        "enabled": journal["enabled"],
+                        "entries": journal["by_target"].get(deliverable["version_ref"], []),
+                    },
+                }
             companies.append({
                 "company_ref": company_ref, "ticker": member.get("ticker"), "name": COMPANY_NAMES.get(member.get("ticker", ""), ""),
                 "priority": member.get("bootstrap_priority"), "tier": member.get("coverage_tier"),
                 "stage": entry["stage_label"], "stage_ref": entry["stage"],
                 "stage_status": entry["stage_status_label"], "note": note,
                 "checklist": entry["items"],
-                "document": documents.get(company_ref),
+                "document": deliverable,
                 "progress": {"found": found, "held": held, "read": read, "waiting": waiting,
                              "percent": int(round(100 * len(done) / len(countable))) if countable else 0},
                 "claims": {"total": len(own), "today": today_claims,
@@ -651,6 +1043,17 @@ class CockpitPlane:
                 # a number the company filed and a number someone said on a
                 # call are both worth having and are not worth the same.
                 "figures": figures.get(company_ref, _EMPTY_FIGURES),
+                # P11a: the last close, when it is from, and whether the day
+                # it belongs to had actually finished when it was read.
+                "market": market.get(company_ref),
+                # P11c: the four multiples with their percentiles and the
+                # basis each percentile rests on.
+                "valuation": valuation.get(company_ref),
+                # P13-M2: how much of this company's forecast model stands up,
+                # counted rather than scored.
+                "model": forecasts.get(company_ref),
+                # Q1: what the PM has said about this company's work so far.
+                "feedback": journal["by_company"].get(company_ref),
             })
         planner = (heartbeat.get("bounded_planner") or {}).get("last_result") or {}
         discovery = planner.get("mission_source_discovery") or {}
@@ -696,12 +1099,17 @@ class CockpitPlane:
                         "summary": t.get("summary") or t.get("statement") or t.get("change_reason")} for t in theses],
             "activity": {
                 "service_state": heartbeat.get("state"), "last_tick_at": heartbeat.get("last_tick_at"),
-                "lanes": self._lane_states(heartbeat, extraction, discovery, mission["budget"]), "running": running,
+                "lanes": self._lane_states(heartbeat, extraction, discovery, mission["budget"], planner),
+                "running": running,
             },
             # P13w: the system's own decision about what to work on next. Top
             # level, beside the goal it serves -- it is not an activity note.
             "plan": plan,
             "budgets": budgets,
+            # Q1: whether this Core can take the feedback buttons at all. A
+            # Core with no journal table shows no buttons rather than buttons
+            # that fail when pressed.
+            "feedback_enabled": journal["enabled"],
             "model_available": self._model_status(),
         }
 
@@ -730,6 +1138,9 @@ class CockpitPlane:
             written = [section for section in record["sections"] if section["body"]]
             result[record["subject_ref"]] = {
                 "ref": record["deliverable_ref"], "version_ref": record["id"],
+                # Bound by hash as well as ref: a verdict about a document
+                # that has since been rewritten is a verdict about the old one.
+                "content_hash": record["content_hash"],
                 "version": record["version"], "created_at": record["created_at"],
                 "summary": record["summary"][:400],
                 "sections_written": len(written), "sections_total": len(record["sections"]),
@@ -752,14 +1163,22 @@ class CockpitPlane:
                 raise CockpitConflict("文档记录与哈希不符")
             mission = self._mission(core)
             members = self._members(mission)
+            # INT1: the reason a gate passed or failed lives inside the stage
+            # record, not in a column. Selecting it as one made this whole page
+            # raise "no such column: rationale" the first time a deliverable
+            # existed to open -- which is why nothing had noticed.
             stage = [
-                {"status": row["status"], "rationale": row["rationale"], "at": row["created_at"]}
+                {"status": row["status"],
+                 "rationale": json.loads(row["record_json"]).get("rationale"),
+                 "at": row["created_at"]}
                 for row in self._rows(core,
-                    "SELECT status, rationale, created_at FROM coverage_mission_stage_records "
+                    "SELECT status, record_json, created_at FROM coverage_mission_stage_records "
                     "WHERE mission_version_ref=? AND company_ref=? AND stage_ref='initial_screen' "
                     "ORDER BY created_at", (record["mission_version_ref"], record["subject_ref"]))
             ]
             claims = {claim["ref"]: claim for claim in self._claims(core)}
+            quality = self._quality(core).get(ref)
+            journal = self._journal(core)
         for section in record["sections"]:
             section["cited"] = [
                 {"statement": claims[ref]["statement"], "period": claims[ref]["period"]}
@@ -768,6 +1187,16 @@ class CockpitPlane:
         return {
             **record, "company": self._label(members, record["subject_ref"]),
             "stage_history": stage, "as_of": _iso(self.clock()),
+            # Q1: the rubric's reading of this exact version, and the owner's
+            # own verdicts on it, beside the text they are about.
+            "quality": quality,
+            "feedback": {
+                "target_ref": ref, "target_hash": record["content_hash"],
+                "target_kind": "initial_screen",
+                "company_ref": record["subject_ref"],
+                "enabled": journal["enabled"],
+                "entries": journal["by_target"].get(ref, []),
+            },
         }
 
     def _model_calls_today(self, mission: Mapping[str, Any], today: str) -> dict[str, Any] | None:
@@ -795,10 +1224,19 @@ class CockpitPlane:
         return {"used": calls, "cap": mission["budget"]["max_daily_paid_calls"],
                 "cost_usd": round(micros / 1_000_000, 4), "cost_cap_usd": mission["budget"]["max_daily_cost_usd"]}
 
-    @staticmethod
-    def _lane_states(heartbeat: Mapping[str, Any], extraction: Mapping[str, Any],
+    def _lane_states(self, heartbeat: Mapping[str, Any], extraction: Mapping[str, Any],
                      discovery: Mapping[str, Any],
-                     budget: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+                     budget: Mapping[str, Any] | None = None,
+                     planner: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+        """The four named lanes with their budgets, then every registered one."""
+
+        return [*self._base_lane_states(heartbeat, extraction, discovery, budget),
+                *self._registry_lane_states(planner or {})]
+
+    @staticmethod
+    def _base_lane_states(heartbeat: Mapping[str, Any], extraction: Mapping[str, Any],
+                          discovery: Mapping[str, Any],
+                          budget: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
         def one(key: str, label: str, status: str | None, note: str) -> dict[str, Any]:
             return {"key": key, "label": label, "status": status or "idle", "note": note}
         web = discovery.get("web_search") or {}
@@ -813,7 +1251,7 @@ class CockpitPlane:
         ae_note = _alphaengine_cap_note(ae_cap)
         awaiting = extraction.get("awaiting")
         last = extraction.get("last") or {}
-        return [
+        rows = [
             one("web", "搜索公开网页", web_status, "按公司轮流搜索并获取网页"),
             # P12c: the cap is read from the mission budget. It was a literal
             # "每 24 小时最多 30 次" here, so the page went on saying 30 for days
@@ -824,6 +1262,84 @@ class CockpitPlane:
                 f"排队 {awaiting} 份" + (f"，上一轮读了 {len(last.get('drafted') or []) if isinstance(last.get('drafted'), list) else last.get('drafted', 0)} 段" if last else "")),
             one("weekly", "每周简报", (heartbeat.get("weekly_brief") or {}).get("state"), "每周四早上发到 Discord"),
         ]
+        return rows
+
+    def _lane_governance_record(self, spec: Any, context: Any) -> str | None:
+        """The connector record this lane is switched on by, if it has one.
+
+        Read out of the lane's own LaunchAgent fragment rather than from a
+        table here, because that fragment is already the single place a lane
+        says what it needs installed -- the installer and the plist both
+        derive from it, and a second list in the cockpit would be a third
+        opinion that goes stale on its own schedule.
+        """
+
+        if spec.argv_fragment is None:
+            return None
+        try:
+            argv = spec.argv_fragment(context)
+        except Exception:  # noqa: BLE001 - a lane's fragment is not the page's problem
+            return None
+        for value in argv:
+            if isinstance(value, str) and "connector-governance" in value:
+                return Path(value).name
+        return None
+
+    def _registry_lane_states(self, planner: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """One row per registered lane, saying why a quiet one is quiet.
+
+        P11a asked for this: a lane the mission never granted, a lane whose
+        connector record is installed but unapproved, and a lane that is
+        installed and simply has nothing to do all look identical on a page
+        that only knows "idle". The first two are waiting on the owner and the
+        third is not, and the difference is the whole reason to look.
+        """
+
+        from .lane_registry import LaunchAgentContext, registered_lanes
+
+        governance = self._governance_records()
+        context = LaunchAgentContext(state=self.config.state_dir)
+        rows: list[dict[str, Any]] = []
+        for spec in registered_lanes():
+            key = spec.driver_key or spec.operation
+            if key in LANES_SHOWN_ELSEWHERE:
+                continue
+            label = REGISTRY_LANE_LABELS.get(key, key)
+            result = planner.get(key)
+            if not isinstance(result, Mapping):
+                rows.append({"key": f"lane:{key}", "label": label,
+                             "status": "unstarted",
+                             "note": LANE_STATUS_NOTES["unstarted"], "detail": None})
+                continue
+            status = str(result.get("status") or "idle")
+            detail = str(result.get("reason") or "")
+            note = LANE_STATUS_NOTES.get(status)
+            record = self._lane_governance_record(spec, context)
+            if record is not None and record in governance and governance[record] != "approved":
+                # The record is on disk and the owner has not approved it --
+                # or it is on disk and unreadable, which is not approval
+                # either. The lane will keep starting children that refuse, so
+                # the honest word is not "idle" and not "failed": it is
+                # "waiting for you".
+                status = "unapproved"
+                note = f"数据源已经装好，等你批准（{record}）"
+            if note is None:
+                # A status this panel has no sentence for. Shown rather than
+                # hidden, because a lane nobody can read about is the thing
+                # this panel exists to stop -- but it is a gap here, not a
+                # lane's fault, and the raw word is all there is to show.
+                note = f"状态：{status}"
+            skipped = result.get("skipped")
+            if isinstance(skipped, list) and skipped:
+                reasons = [str(item.get("reason")) for item in skipped
+                           if isinstance(item, Mapping) and item.get("reason")]
+                if reasons:
+                    joined = "skipped: " + ", ".join(sorted(set(reasons))[:3])
+                    detail = f"{detail}；{joined}" if detail else joined
+            rows.append({"key": f"lane:{key}", "label": label, "status": status,
+                         "note": note[:200], "detail": (detail[:300] or None),
+                         "company_ref": result.get("company_ref")})
+        return rows
 
     def _model_status(self) -> dict[str, Any]:
         if self.config.model_config_path is None or not self.config.model_config_path.exists():
@@ -1154,6 +1670,196 @@ class CockpitPlane:
         return {"status": "decided", "kind": kind, "ref": ref, "decision": decision,
                 "result": result if isinstance(result, (dict, list)) else None}
 
+    # -- claims, models and feedback -----------------------------------------
+
+    def claims(self, *, company_ref: str | None = None, index_aspect: str | None = None,
+               importance: str | None = None, canonical_only: bool = True,
+               limit: int = MAX_CLAIMS_IN_VIEW) -> dict[str, Any]:
+        """The Ledger's conclusions, read through P12b's index.
+
+        Canonical-only by default, which is what the index is for: the owner
+        asking what is known about a company should get one copy of each fact
+        rather than the same quarter's revenue three times. A claim the index
+        has not reached yet is never hidden by that -- an unindexed claim is a
+        gap in the index, not a reason to drop a fact.
+        """
+
+        from .claim_index_authority import table_exists
+        from .company_research_view import (
+            CompanyResearchViewValidationError, annotate_with_index,
+        )
+
+        if company_ref is not None:
+            company_ref = _text(company_ref, "company_ref", maximum=512)
+        with self._core() as core:
+            mission = self._mission(core)
+            members = self._members(mission)
+            rows = self._claims(core)
+            if company_ref is not None:
+                rows = [row for row in rows if row["subject_ref"] == company_ref]
+            indexed = table_exists(core)
+            try:
+                annotated = annotate_with_index(
+                    core, rows, ref_key="ref", index_aspect=index_aspect,
+                    importance=importance, canonical_only=canonical_only,
+                )
+            except CompanyResearchViewValidationError as exc:
+                raise CockpitError(
+                    "这个 Core 还没有给结论建索引，按主题或来源筛选在这里答不了"
+                    if not indexed else f"筛选条件不对：{exc}"
+                ) from exc
+        # Most important first, then newest: a company report outranks a news
+        # item about it, and among equals the recent one is the one to read.
+        annotated.sort(key=lambda row: (row["index_order"], row["created_at"]))
+        items = [{
+            "ref": row["ref"], "statement": row["statement"],
+            "company": self._label(members, row["subject_ref"]),
+            "company_ref": row["subject_ref"], "period": row["period"],
+            "at": row["created_at"],
+            "aspect": row["index_aspect"],
+            "aspect_label": ASPECT_LABELS.get(row["index_aspect"]),
+            "importance": row["importance"],
+            "importance_label": IMPORTANCE_LABELS.get(row["importance"]),
+            "as_of": row["as_of"], "as_of_basis": row["as_of_basis"],
+            "canonical": row["is_canonical"],
+            # An untagged claim says so rather than looking like a tagged one
+            # with nothing interesting in it.
+            "indexed": row["index_aspect"] is not None,
+        } for row in annotated[:max(1, min(int(limit), MAX_CLAIMS_IN_VIEW))]]
+        return {
+            "as_of": _iso(self.clock()), "indexed": indexed,
+            "total": len(annotated), "items": items,
+            "filters": {
+                "company_ref": company_ref, "aspect": index_aspect,
+                "importance": importance, "canonical_only": canonical_only,
+            },
+            "vocabulary": {
+                "aspects": [{"value": key, "label": label}
+                            for key, label in ASPECT_LABELS.items()],
+                "importance": [{"value": key, "label": label}
+                               for key, label in IMPORTANCE_LABELS.items()],
+            },
+            "companies": [{"company_ref": ref, "label": self._label(members, ref)}
+                          for ref in members],
+        }
+
+    def company_model(self, company_ref: str) -> dict[str, Any]:
+        """One company's forecast model, printed so a person can argue with it.
+
+        The table is P13-M2's own renderer rather than a second layout here:
+        it prints every assumption's ``because`` under the assumption and
+        every unavailable result's reason where its number would be, and a
+        cockpit-local re-rendering would lose exactly those two things.
+        """
+
+        ref = _text(company_ref, "company_ref", maximum=512)
+        from .company_model_report import render_forecast_model
+        from .model_forecast_driver import model_readiness
+
+        with self._core() as core:
+            if not _table_exists(core, "forecast_model_versions"):
+                raise CockpitError("这个系统还没有开始建预测模型")
+            mission = self._mission(core)
+            members = self._members(mission)
+            rows = self._rows(core,
+                "SELECT record_json, version_number, created_at FROM forecast_model_versions "
+                "WHERE company_ref=? ORDER BY version_number DESC", (ref,))
+            if not rows:
+                raise CockpitError("这家公司还没有预测模型")
+            record = json.loads(rows[0]["record_json"])
+            history = [{
+                "version": row["version_number"], "created_at": row["created_at"],
+                "change_reason": json.loads(row["record_json"]).get("change_reason"),
+                "change_reason_label": CHANGE_REASON_LABELS.get(
+                    json.loads(row["record_json"]).get("change_reason"),
+                    json.loads(row["record_json"]).get("change_reason")),
+            } for row in rows]
+        label = self._label(members, ref)
+        readiness = model_readiness(record)
+        return {
+            "as_of": _iso(self.clock()), "company_ref": ref, "company": label,
+            "version": record.get("version"), "version_ref": record.get("id"),
+            "created_at": record.get("created_at"),
+            "change_reason": record.get("change_reason"),
+            "change_reason_label": CHANGE_REASON_LABELS.get(
+                record.get("change_reason"), record.get("change_reason")),
+            "decision": record.get("decision"),
+            "readiness": readiness, "note": self._forecast_note(readiness),
+            "table": render_forecast_model(record, entity_name=label),
+            "history": history,
+        }
+
+    def record_feedback(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
+        """Q1: one PM verdict, written through the writer as the owner.
+
+        The cockpit holds no Core write handle, so this goes out as the
+        owner's Tailscale-derived principal through the same ephemeral
+        governance path every other cockpit decision takes. Nothing here is a
+        new authority: the journal refuses a non-human principal on its own.
+        """
+
+        if not isinstance(value, Mapping):
+            raise CockpitError("feedback must be an object")
+        target_ref = _text(value.get("target_ref"), "target_ref", maximum=512)
+        target_hash = _sha(value.get("target_hash"), "target_hash")
+        target_kind = _text(value.get("target_kind"), "target_kind", maximum=64)
+        verdict = _text(value.get("verdict"), "verdict", maximum=32)
+        # Checked against the authority's own vocabularies, not against the
+        # label map: a word with no Chinese label would be a display bug, and
+        # a word the journal does not take is a refusal. Both are checked here
+        # so that a typo in the page costs a message rather than an ephemeral
+        # human principal and a round trip to the writer.
+        from .analyst_journal import TARGET_KINDS, VERDICTS
+
+        if verdict not in VERDICTS:
+            raise CockpitError("这不是一个可以给的反馈")
+        if target_kind not in TARGET_KINDS:
+            raise CockpitError("这不是一种可以给反馈的产出")
+        note = value.get("note") or None
+        if note is not None:
+            note = _text(note, "note", maximum=4000)
+        company_ref = value.get("company_ref") or None
+        if company_ref is not None:
+            company_ref = _text(company_ref, "company_ref", maximum=512)
+        actor = _subject_for_login(login)
+        params = {
+            "target_ref": target_ref, "target_hash": target_hash,
+            "target_kind": target_kind, "verdict": verdict,
+            # Content-addressed rather than "cockpit:<login>:...": the login is
+            # an email address and the actor is deliberately a hash of it, so
+            # spelling the address into the Core's idempotency key would undo
+            # that. It is also the only form that stays inside the key's own
+            # length limit whatever the target ref looks like.
+            "idempotency_key": "cockpit:" + content_hash({
+                "actor": actor, "target": target_ref, "verdict": verdict})[:32],
+        }
+        if note:
+            params["note"] = note
+        if company_ref:
+            params["company_ref"] = company_ref
+        try:
+            result = self.governance_call(
+                self.token_config, self.writer_socket, actor_ref=actor,
+                operation="record_analyst_journal_entry", params=params)
+        except RemoteError as exc:
+            # A refusal by contract is the caller's mistake and reads as 400;
+            # a conflict is about what is already stored and reads as 409.
+            # Answering "conflict" to a malformed request tells the page to
+            # offer a retry that will fail the same way forever.
+            if getattr(exc, "code", None) in {"rejected", "protocol_error", "forbidden"}:
+                raise CockpitError(f"这条反馈没有被记下：{_reason(exc)}") from exc
+            raise CockpitConflict(f"这条反馈没有被记下：{_reason(exc)}") from exc
+        except GovernanceCliError as exc:
+            raise CockpitConflict(f"这条反馈没有被记下：{_reason(exc)}") from exc
+        label = VERDICT_LABELS.get(verdict, verdict)
+        self.journal.record_event(
+            kind="feedback", title=f"你对一份产出说了「{label}」", detail=note,
+            login=login, refs={"target_ref": target_ref, "verdict": verdict})
+        status = result.get("status") if isinstance(result, Mapping) else None
+        return {"status": status or "recorded", "verdict": verdict,
+                "verdict_label": label, "target_ref": target_ref,
+                "duplicate": status == "duplicate"}
+
     # -- jobs (model work off the request thread) -----------------------------------------
 
     def _model_instance(self) -> CockpitModel:
@@ -1235,11 +1941,33 @@ class CockpitPlane:
         return self._start_job("ask", login, {"question": question, "request_id": request_id},
                                lambda: self._answer(model, login, question, request_id))
 
+    def _indexed_claims(self, core: Any, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The answer context, read through P12b's index.
+
+        The cockpit reads ``claim_versions`` directly rather than through the
+        projection, so before this it saw every copy of every fact: the same
+        quarter's revenue from the filing, from a broker note and from a news
+        story, and an answer that cited all three read as three sources
+        agreeing. Canonical-only is the fix, and it only ever drops a row the
+        index has positively marked as a duplicate of another -- an untagged
+        claim is a gap in the index, never a reason to hide a fact.
+
+        The order is left as it was, oldest first: which claims survive the
+        prompt budget is decided by recency, and quietly re-sorting by
+        importance here would change which ones the model ever sees.
+        """
+
+        from .company_research_view import annotate_with_index
+
+        return annotate_with_index(core, rows, ref_key="ref")
+
     def _answer(self, model: CockpitModel, login: str, question: str, request_id: str) -> dict[str, Any]:
         with self._core() as core:
             mission = self._mission(core)
-            claims = self._claims(core)
+            everything = self._claims(core)
+            claims = self._indexed_claims(core, everything)
             theses = [json.loads(r["content_json"]) for r in core.execute("SELECT content_json FROM thesis_versions ORDER BY created_at").fetchall()]
+            journal_enabled = _table_exists(core, "analyst_journal_entries")
         members = self._members(mission)
         selected = self._select_claims(question, claims, members)
         prompt = self._ask_prompt(question, mission, members, selected, theses)
@@ -1257,8 +1985,26 @@ class CockpitPlane:
         gaps = [str(g) for g in parsed.get("gaps", [])] if isinstance(parsed.get("gaps"), list) else []
         confidence = parsed.get("confidence") if parsed.get("confidence") in {"high", "medium", "low"} else None
         result = {"question": question, "answer": answer, "citations": cited, "gaps": gaps, "confidence": confidence,
-                  "claims_considered": len(selected), "claims_total": len(claims), "cost_usd": round(call["cost_micros"] / 1_000_000, 4),
+                  "claims_considered": len(selected), "claims_total": len(everything),
+                  # How many copies of a fact the index took out before the
+                  # model saw them. Shown because "we read 400 conclusions"
+                  # and "we read 400 conclusions, 90 of them the same fact
+                  # three times" are different statements about an answer.
+                  "duplicates_dropped": len(everything) - len(claims),
+                  "cost_usd": round(call["cost_micros"] / 1_000_000, 4),
                   "replayed": call["replayed"], "answered_at": _iso(self.clock())}
+        # Q1: the answer is a cockpit artifact with no Core record, so the
+        # thing a verdict binds to is a hash of what was said and what it
+        # cited. Keyed on the request rather than the job, so feedback on a
+        # replayed answer lands on the same answer instead of splitting.
+        from .research_quality_score import artefact_from_ask_answer
+
+        artefact = artefact_from_ask_answer(
+            result, shown_claims=[{**claim, "tag": f"C{i + 1}"}
+                                  for i, claim in enumerate(selected)],
+            ref=f"cockpit-ask:{request_id}")
+        result["feedback"] = {"target_ref": artefact["ref"], "target_hash": artefact["hash"],
+                              "target_kind": "ask_answer", "enabled": journal_enabled}
         self.journal.record_event(kind="question", title=f"你问了：{question[:120]}", detail=answer[:300], login=login,
                                   refs={"job_kind": "ask", "request_id": request_id, "work_order_ref": call["work_order_ref"]})
         return result
@@ -1310,7 +2056,10 @@ class CockpitPlane:
         for i, claim in enumerate(claims):
             who = members.get(claim["subject_ref"], {}).get("ticker") or claim["subject_ref"].split(":", 1)[-1]
             value = "" if claim["value"] is None else f" value={claim['value']} {claim['unit'] or ''}".rstrip()
-            lines.append(f"C{i + 1} [{who}; {claim['period']}; {claim['created_at'][:10]}]{value} {claim['statement']}")
+            # P12b: the evidence tier travels with the claim, so a filing and
+            # a news story about the same quarter are not weighed the same.
+            tier = f"; {claim['importance']}" if claim.get("importance") else ""
+            lines.append(f"C{i + 1} [{who}; {claim['period']}; {claim['created_at'][:10]}{tier}]{value} {claim['statement']}")
         lines += ["", f"Question: {question}"]
         return "\n".join(lines)
 

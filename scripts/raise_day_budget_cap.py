@@ -36,6 +36,7 @@ from dalton_core.budget_pools import (  # noqa: E402
     POOL_NAMES,
     summarise_shares,
 )
+from dalton_core.lane_registry import load_lanes  # noqa: E402
 from dalton_core.model_configurations import model_config_names  # noqa: E402
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore  # noqa: E402
 
@@ -95,6 +96,16 @@ def raise_cap(config_path: Path, *, cap_usd: float, apply: bool) -> dict[str, An
     _write_owner_only(config_path, service)
     # P14-0: the set of configurations is a registry a lane adds itself to,
     # not a tuple in this script that a lane module could never reach.
+    #
+    # INT1: a registration happens at import, so the registry only knows what
+    # has been imported. Loading the lane registry imports every tick lane;
+    # the claim-index tagger spends on its own configuration but is not a tick
+    # lane yet, so it is named here until it becomes one. Reading the registry
+    # without this is how a configuration gets left behind -- which has
+    # already happened once, to the deliverable-drafting configuration.
+    load_lanes()
+    import dalton_core.claim_index_tagging  # noqa: F401
+
     for name in model_config_names():
         target = state_dir / name
         if not target.is_file():
