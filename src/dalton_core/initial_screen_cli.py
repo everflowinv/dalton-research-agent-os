@@ -48,6 +48,7 @@ from .mission_deliverable import (
     WRITE_SCOPE,
     unsourced_numbers,
 )
+from .research_quality_score import residual_citation_artefacts
 from .mission_stage import evaluate_mission, planned_spec_refs_from_directory
 from .store import DaltonStore
 
@@ -79,6 +80,11 @@ def _live_claims(store: DaltonStore, retired: set[str]) -> dict[str, list[dict[s
             "ref": row["claim_version_id"], "statement": claim.get("normalized_statement") or "",
             "period": claim.get("period"), "aspect": claim.get("metric_or_aspect"),
             "value": claim.get("value"), "created_at": row["created_at"],
+            # P10c/Q1: the drafter deduplicates by what a Claim asserts and
+            # prefers the filing-grade copy, so it needs the fields that say
+            # what was asserted and where it came from.
+            "unit": claim.get("unit"), "subject_ref": claim.get("subject_ref"),
+            "basis": claim.get("basis"),
         })
     return by_subject
 
@@ -134,6 +140,52 @@ def _target(
             continue
         return entry, skipped
     return None, skipped
+
+
+def _correction_note(stray: list[str], residue: list[dict[str, Any]]) -> str:
+    """What the one corrective attempt is told, in the terms of the defect."""
+
+    notes = ["\n"]
+    if stray:
+        notes.append(
+            "\nYour previous draft wrote figures no N tag carries: "
+            + "、".join(stray[:8])
+            + f"。Rewrite the section without them: copy a figure verbatim from an N tag "
+              f"or write {GAP_MARKER}. Do not convert units or scales."
+        )
+    if residue:
+        notes.append(
+            "\nYour previous draft left citation scaffolding in the prose. After the C/N tags "
+            "are removed the text reads: "
+            + "；".join(f"「{item['excerpt']}」" for item in residue[:4])
+            + "。Rewrite the section with no C or N tag anywhere in the body and no sentence "
+              "whose subject was a tag: name the source in words (管理层、该季报、卖方研报) and "
+              "put the tags in the JSON arrays only."
+        )
+    return "".join(notes)
+
+
+def _dropped_section(
+    title: str, stray: list[str], residue: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """A section whose one corrective attempt did not fix it.
+
+    Dropped to a gap rather than published: the rest of the document can still
+    go out, and the gap says which defect took this section, which is what a
+    reader needs to know that the absence is deliberate.
+    """
+
+    reasons = []
+    if stray:
+        reasons.append(f"写了没有来源的数字（{'、'.join(stray[:5])}）；需要的数字还没有进入账本")
+    if residue:
+        reasons.append(
+            "引用标记剥离后留下了残句（"
+            + "、".join(sorted({item["code"] for item in residue}))
+            + f"）：{residue[0]['excerpt']}"
+        )
+    return {"title": title, "body": "", "claim_refs": [], "numbers": [],
+            "gaps": ["这一节已丢弃：" + "；".join(reasons)]}
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -193,7 +245,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         summary["drafted"] = {"company_ref": company_ref, "ticker": entry["ticker"]}
         titles = section_titles(playbook)
         context = build_claim_context(claims.get(company_ref) or [])
-        summary["context"] = {"claims": len(context["claims"]), "numbers": len(context["numbers"])}
+        summary["context"] = {
+            "claims": len(context["claims"]), "numbers": len(context["numbers"]),
+            # One series means the screen this drafts will have one numeric
+            # series however well it is written; that is a Ledger fact and the
+            # summary is where it should be visible.
+            "series": context["series"],
+            "duplicates_dropped": context["duplicates_dropped"],
+        }
         model = None
         if not args.dry_run:
             model = CockpitModel(
@@ -234,45 +293,46 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             section = parse_section_output(call["text"], context=context, title=title)
             if call.get("invocation_ref"):
                 invocations.append(call["invocation_ref"])
-            # The authority refuses the whole document for one unsourced figure.
-            # Give the section one corrective attempt with the figures named,
-            # then drop its body to a gap so the rest can still be published.
+            # Two defects the publish path cannot catch on its own. The authority
+            # refuses the whole document for one unsourced figure, and it accepts
+            # citation-strip wreckage without comment -- live, four of the five
+            # published screens carry some, and gate_passed is terminal, so what
+            # is published this way is published forever. Give the section one
+            # corrective attempt with both named, then drop its body to a gap so
+            # the rest of the document can still be published.
             stray = unsourced_numbers(section["body"], section["numbers"])
+            residue = residual_citation_artefacts(section["body"])
             retried = False
-            if stray:
+            if stray or residue:
                 retried = True
                 try:
                     correction = model.call(
                         purpose="draft",
                         request_id=f"{mission['id']}:{company_ref}:{KIND}:{index}:"
                                    f"{len(claims.get(company_ref) or [])}:retry",
-                        prompt=prompt + (
-                            "\n\nYour previous draft wrote figures no N tag carries: "
-                            + "、".join(stray[:8])
-                            + f"。Rewrite the section without them: copy a figure verbatim from an N tag "
-                              f"or write {GAP_MARKER}. Do not convert units or scales."
-                        ),
+                        prompt=prompt + _correction_note(stray, residue),
                         mission=mission,
                     )
                     candidate = parse_section_output(correction["text"], context=context, title=title)
                     if correction.get("invocation_ref"):
                         invocations.append(correction["invocation_ref"])
-                    if candidate["body"] and not unsourced_numbers(candidate["body"], candidate["numbers"]):
+                    candidate_stray = unsourced_numbers(candidate["body"], candidate["numbers"])
+                    candidate_residue = residual_citation_artefacts(candidate["body"])
+                    if candidate["body"] and not candidate_stray and not candidate_residue:
                         section = candidate
-                        stray = []
+                        stray, residue = [], []
                     else:
-                        stray = unsourced_numbers(candidate["body"], candidate["numbers"]) or stray
+                        stray = candidate_stray or stray
+                        residue = candidate_residue or residue
                 except CockpitModelError as exc:
                     summary["sections"].append({"title": title, "status": "retry_failed", "reason": str(exc)})
-            if stray:
-                section = {
-                    "title": title, "body": "", "claim_refs": [], "numbers": [],
-                    "gaps": [f"这一节写了没有来源的数字（{'、'.join(stray[:5])}），已丢弃；"
-                             f"需要的数字还没有进入账本"],
-                }
+            if stray or residue:
+                section = _dropped_section(title, stray, residue)
             sections.append(section)
             summary["sections"].append({
-                "title": title, "status": "drafted" if section["body"] else "dropped_unsourced",
+                "title": title,
+                "status": ("drafted" if section["body"]
+                           else ("dropped_unsourced" if stray else "dropped_residual_citation")),
                 "retried": retried,
                 "chars": len(section["body"]), "claims": len(section["claim_refs"]),
                 "numbers": len(section["numbers"]), "replayed": call["replayed"],

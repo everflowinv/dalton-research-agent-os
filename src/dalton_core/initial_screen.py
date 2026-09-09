@@ -32,6 +32,11 @@ KIND = "initial_screen"
 TEMPLATE_KEY = "initial_screen"
 MAX_CLAIMS_PER_SECTION = 120
 MAX_CONTEXT_CHARS = 60_000
+# P10c/Q1: how many figures the drafter may offer. Live, every quantitative
+# Claim in the Ledger is quarterly revenue growth, so a flat tail of the 40
+# most recent rows was 40 revenue rows; see _select_numbers for how the budget
+# is now shared out, and _carries_a_figure for what counts as a figure at all.
+MAX_NUMBERS = 40
 VALUATION_TITLE_HINT = "估值"
 
 # What each templated section is for, in the Playbook's own terms.  The titles
@@ -143,10 +148,56 @@ def section_titles(playbook: Mapping[str, Any]) -> list[str]:
     return [str(title) for title in titles]
 
 
+# P10c/Q1: which Claims came from the filing itself.  The Ledger's ``basis`` is
+# free text written by whatever produced the Claim -- "official-filing-xbrl" for
+# the SEC lane, "Earnings call commentary" or "JP Morgan Chime 2Q26 recap" for
+# the rest -- so this reads it for the words that mean a filing rather than
+# matching a closed vocabulary that does not exist yet.  Agent B's claim index
+# will carry a real importance grade; until then this is the local reading.
+_FILING_GRADE_RE = re.compile(
+    r"filing|xbrl|10-?[kq]\b|20-?f\b|8-?k\b|annual report|prospectus|年报|季报|招股|公告",
+    re.IGNORECASE,
+)
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _is_filing_grade(claim: Mapping[str, Any]) -> bool:
+    return bool(_FILING_GRADE_RE.search(str(claim.get("basis") or "")))
+
+
+def _normalised_statement(claim: Mapping[str, Any]) -> str:
+    """The claim's words with spacing and terminal punctuation set aside."""
+
+    text = _WHITESPACE_RE.sub(" ", str(claim.get("statement") or "")).strip()
+    return text.rstrip("。.；;").lower()
+
+
+def _by_preference(claims: Sequence[Mapping[str, Any]]) -> list[int]:
+    """Row indices in the order the draft should prefer to cite them.
+
+    Filing-grade provenance first, then the most recently recorded, then the
+    ref, so the choice is total and does not depend on the order rows arrived.
+
+    P13ap kept the *earliest* copy instead, to keep the cited ref stable across
+    redrafts.  That argument is real and it loses to this one: a screen that
+    cites a sell-side paraphrase of a number the filing itself states is citing
+    the weaker of two sources, and the Playbook's source hierarchy is not a
+    tie-break.  The cost -- a redraft can change which ref carries a fact when
+    a better-sourced copy arrives -- is temporary; Agent B's claim index will
+    name one canonical member per dedupe group and this preference retires
+    with it.
+    """
+
+    order = sorted(range(len(claims)), key=lambda index: str(claims[index].get("ref") or ""))
+    order.sort(key=lambda index: str(claims[index].get("created_at") or ""), reverse=True)
+    order.sort(key=lambda index: 0 if _is_filing_grade(claims[index]) else 1)
+    return order
+
+
 def _dedupe(
-    claims: Sequence[Mapping[str, Any]], key: Any,
+    claims: Sequence[Mapping[str, Any]], keys: Any,
 ) -> tuple[list[dict[str, Any]], int]:
-    """One claim per distinct assertion, earliest kept.
+    """One claim per distinct assertion, the best-sourced copy kept.
 
     P13ap: three separate Claims asserted Accenture's 2025Q1 revenue in exactly
     the same words, so the drafter tagged them N1, N2 and N3 and the model --
@@ -156,22 +207,102 @@ def _dedupe(
     The model was not wrong. The context was. A figure asserted three times is
     one figure, and offering it three times invites a sentence that says so.
 
-    Earliest kept rather than latest, because identical assertions differ only
-    in when they were recorded, and a stable ref means a redraft cites the same
-    Claim rather than whichever copy happened to be written last. Assertions
-    that genuinely differ -- a restated figure -- have different keys and are
-    both kept; deciding between those is the Ledger's job, not the drafter's.
+    ``keys`` returns every identity a claim has, not one: two Claims are the
+    same assertion if they say the same words *or* if they measure the same
+    subject × metric × period × unit at the same value.  P13ap only had the
+    first, so a filing's figure and a broker's restatement of it in different
+    words were still offered side by side.  Assertions that genuinely differ --
+    a restated figure, a different period -- share no key and are both kept;
+    deciding between those is the Ledger's job, not the drafter's.
     """
 
-    kept: list[dict[str, Any]] = []
+    ordered = _by_preference(claims)
     seen: set[Any] = set()
-    for claim in claims:
-        identity = key(claim)
-        if identity in seen:
+    chosen: list[int] = []
+    for index in ordered:
+        identities = [key for key in keys(claims[index]) if key is not None]
+        if not identities:
+            chosen.append(index)
             continue
-        seen.add(identity)
-        kept.append(dict(claim))
-    return kept, len(claims) - len(kept)
+        if any(key in seen for key in identities):
+            continue
+        seen.update(identities)
+        chosen.append(index)
+    # Kept in the Ledger's own order, so the tags still read oldest first.
+    return [dict(claims[index]) for index in sorted(chosen)], len(claims) - len(chosen)
+
+
+def _number_keys(claim: Mapping[str, Any]) -> list[Any]:
+    keys: list[Any] = _statement_keys(claim)
+    aspect, period = claim.get("aspect"), claim.get("period")
+    if aspect and period:
+        keys.append((
+            "measurement", claim.get("subject_ref"), aspect, period,
+            claim.get("unit"), str(claim.get("value")),
+        ))
+    return keys
+
+
+def _statement_keys(claim: Mapping[str, Any]) -> list[Any]:
+    """Same words about the same period.
+
+    The period qualifies the words because the Ledger's statements do not
+    always carry one: two Claims that read "reported Revenues of USD 18.7bn"
+    for two different quarters say the same thing about different things, and
+    collapsing them would delete a figure rather than a duplicate.
+    """
+
+    statement = _normalised_statement(claim)
+    return [("statement", claim.get("period"), statement)] if statement else []
+
+
+def _carries_a_figure(claim: Mapping[str, Any]) -> bool:
+    """Does this Claim's own text assert a measurement?
+
+    A Claim with a ``value`` is quantitative by construction, but a Claim
+    without one can still state a figure in its sentence -- a utilisation rate
+    from an earnings call, a segment number from an MD&A -- and the drafting
+    contract lets a figure into the body only through an N tag.  Offered as a
+    statement, such a Claim's number is unusable; offered as a figure, it is
+    citable and checkable at publish time like any other.  This is what widens
+    the numeric context beyond the one series the Ledger happens to type.
+    """
+
+    return bool(value_tokens(str(claim.get("statement") or "")))
+
+
+def _select_numbers(
+    claims: Sequence[Mapping[str, Any]], *, limit: int = MAX_NUMBERS
+) -> list[dict[str, Any]]:
+    """Latest first within each series, round-robin across series.
+
+    A flat tail takes the most recently recorded rows, and when one series is
+    written far more often than the others -- which is exactly what a lane does
+    -- the most recent rows are all of that one series.  Live, every
+    quantitative Claim in the Ledger is quarterly revenue growth, and every
+    published screen has one numeric series; the tail was not the cause of that
+    but it would have been the cause of the next one.  Round-robin means a
+    second series is visible from its first row rather than from its fortieth,
+    and a single series still fills the whole budget.
+    """
+
+    series: dict[str, list[Mapping[str, Any]]] = {}
+    for claim in claims:
+        series.setdefault(str(claim.get("aspect") or ""), []).append(claim)
+    for rows in series.values():
+        rows.sort(key=lambda claim: str(claim.get("period") or ""), reverse=True)
+    chosen: list[Mapping[str, Any]] = []
+    for round_index in range(limit):
+        added = False
+        for key in sorted(series):
+            rows = series[key]
+            if round_index < len(rows) and len(chosen) < limit:
+                chosen.append(rows[round_index])
+                added = True
+        if not added or len(chosen) >= limit:
+            break
+    chosen.sort(key=lambda claim: (str(claim.get("aspect") or ""), str(claim.get("period") or "")))
+    return [dict(claim) for claim in chosen]
 
 
 def build_claim_context(
@@ -181,15 +312,11 @@ def build_claim_context(
 
     qualitative, quantitative = [], []
     for claim in claims:
-        (quantitative if claim.get("value") is not None else qualitative).append(claim)
+        numeric = claim.get("value") is not None or _carries_a_figure(claim)
+        (quantitative if numeric else qualitative).append(claim)
     # A figure is identified by what it asserts, not by which row carries it.
-    quantitative, dropped_numbers = _dedupe(quantitative, lambda claim: (
-        claim.get("aspect"), claim.get("period"), str(claim.get("value")),
-        str(claim.get("statement") or ""),
-    ))
-    qualitative, dropped_claims = _dedupe(qualitative, lambda claim: (
-        str(claim.get("statement") or "").strip(),
-    ))
+    quantitative, dropped_numbers = _dedupe(quantitative, _number_keys)
+    qualitative, dropped_claims = _dedupe(qualitative, _statement_keys)
     tagged_claims, tagged_numbers = [], []
     budget = MAX_CONTEXT_CHARS
     for claim in qualitative[-max_claims:]:
@@ -202,12 +329,12 @@ def build_claim_context(
             "period": claim.get("period"), "aspect": claim.get("aspect"),
             "created_at": claim.get("created_at"),
         })
-    for claim in quantitative[-40:]:
+    for claim in _select_numbers(quantitative, limit=MAX_NUMBERS):
         tagged_numbers.append({
             "tag": f"N{len(tagged_numbers) + 1}", "ref": claim["ref"],
             "statement": str(claim.get("statement") or ""),
             "figures": value_tokens(str(claim.get("statement") or "")),
-            "period": claim.get("period"),
+            "period": claim.get("period"), "aspect": claim.get("aspect"),
         })
     return {
         "claims": tagged_claims, "numbers": tagged_numbers,
@@ -217,6 +344,9 @@ def build_claim_context(
         "duplicates_dropped": {
             "claims": dropped_claims, "numbers": dropped_numbers,
         },
+        # Which series the draft could see. One entry means the screen it
+        # writes will have one numeric series however well it is written.
+        "series": sorted({str(item.get("aspect") or "") for item in tagged_numbers}),
     }
 
 
