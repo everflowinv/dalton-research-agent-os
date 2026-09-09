@@ -1,7 +1,7 @@
 # Q2：周报评分表与研究周期 Reflection v1.0
 
 日期：2026-09-09
-状态：分支 `q2-reflection`；第一轮 code review 的一个 blocker 与五项已修（第 10 节），已并入 main `8198f0f`（3,437 项测试，第 11 节），待合并
+状态：分支 `q2-reflection`；第一轮 code review 的一个 blocker 与五项已修（第 10 节），已并入 main `e5e10a0`（3,500 项测试，第 11 节），待合并
 基线：main `61f4255`（2,627 项测试）
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 3 节「vision 回顾后的补充」行 **D4 + C4 / Q2**；[全部 vision 讨论的复盘](vision-review-against-plan-v1.0-2026-09-09.md) **C4**、**D4**；[Q 线：研究质量回路 v1.0](q1-research-quality-loop-v1.0-2026-09-09.md)（本片扩展的评分表 / 打分器 / journal 框架）
 数据：live Core 只读副本（`/private/tmp/dalton-ro/core.sqlite`，复制到 `/tmp` 后打开）。**没有写过任何 live 状态，没有部署，没有发过 mission 版本，没有发起过任何真实模型调用。**
@@ -260,15 +260,15 @@ CLI 端到端（`--dry-run`，退出码 0）跑的是同一条路径，能力闸
 
 ## 9. 验收结果（原文）
 
-全量测试，`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，**合并 main `8198f0f` 之后**：
+全量测试，`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，**合并 main `e5e10a0` 之后**：
 
 ```
-Ran 3557 tests in 327.998s
+Ran 3620 tests in 355.622s
 
 OK (skipped=1)
 ```
 
-main 是 3,437 项，本片新增 **120 项**。分项：
+main 是 3,500 项，本片新增 **120 项**。分项：
 
 ```
 tests.test_research_quality_weekly_brief: Ran 41 tests in 0.066s
@@ -310,15 +310,23 @@ tests.test_research_quality_score:        Ran 77 tests in 0.108s   （Q1 原样�
 
 ---
 
-## 11. 并入 main（`8198f0f`）
+## 11. 并入 main（`e5e10a0`）
 
-评审期间 main 走了五步（S1 人工投喂、S2 Guidepoint、S3 众源、P14-M 模型路由、P14e 专项研究、C1 事件日历、P14a daily tracking），所以这里合了四次。除了下面三件事，四次都是「两条分支在同一个位置各加一行」。
+评审期间 main 走了八步（S1 人工投喂、S2 Guidepoint、S3 众源、P14-M 模型路由、P14e 专项研究、C1 事件日历、P14a daily tracking、INT1 驾驶舱接线），所以这里合了五次。除了下面三件事，四次都是「两条分支在同一个位置各加一行」。
 
 **lane order 从 120 挪到 160。** S1 的 feed lane 占了 120 与 130，S3 的众源 lane 占 140，P14e 的 research-task lane 占 150，而 `register_lane` 对重复 order 直接抛错——这正是 Wave 0 把顺序做成显式的理由。现在 registry 上有 20 条 lane，160 仍然是最后一个，理由没变：它读这一周别的 lane 干了什么。
 
 **S3 的众源 lane 有一条断言要跟着改。** `test_the_lane_runs_after_every_evidence_lane` 断言众源是最后一条**证据** lane，并手写了唯一的例外（P14e 的 research-task lane，它不取证据）。reflection 是第二个例外，所以那句断言改成说它本来的意思：排除「不取证据的那些」，而不是排除「上次看到的那一条」。
 
 **P14e 落地改变了一项指标的读法。** `planner_inquiries` 原来写的是「P14e 尚未落地，`adhoc_research_enabled` 仍为 False」——那句话现在是错的。派发数现在数的是 `admission.source == "inquiry"` 的新 loop（人开的 loop 单列 `human_opened_loops`：它也回答问题，但那不是 planner 的 inquiry 被执行），而 0 的理由改成去读 P14e 真正的两道闸。**live 上的答案是：ProbeTemplate 已经有 2 份，只差 mission 的 `may_write` 授予 `research_task`** ——这条现在会逐字出现在每周的 reflection 里，直到 owner 发一版授予它。
+
+**碰了一次禁改文件，一行，如实报告。** INT1 落地时加了一条断言：`test_cockpit_wave1::test_every_registered_lane_is_named_in_the_owner_s_words`——每一条注册过的 lane 都必须在 `cockpit_plane.REGISTRY_LANE_LABELS` 里有一个给 owner 看的中文名字，否则驾驶舱上会露出 driver key，而 ADR-0006 说那一页上不该有机器语言。`cockpit_*` 在我的禁改清单里，但这条断言是「每条 lane 都要做的事」，不做全量就是红的。所以加了一行：
+
+```python
+"mission_reflection": "每周回头看时间花在哪",
+```
+
+除此之外没有碰驾驶舱的任何东西。如果集成时想换个说法，换的是这一个字符串。
 
 **名字没有撞车，但离得很近。** P14a 带来了 `thesis_reflections` 与模型用途 `thesis_reflection`：那是「一个事件对某条 thesis 意味着什么」的判读，一次一个事件、要花模型钱。本片的 `research_cycle_reflection` 是「这一周我们把时间花在哪」，一周一条、不花钱、不产生任何投资断言。两者共用一个中文词而不是一个对象，集成时值得在 PROJECT_STATUS 上把这句话写清楚。
 
