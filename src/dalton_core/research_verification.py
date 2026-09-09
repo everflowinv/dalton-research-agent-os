@@ -99,6 +99,31 @@ FIGURE_ADMISSION_POLICIES = frozenset({
 })
 FIGURE_ADMISSION_DEFAULT = FIGURE_ADMISSION_REJECT
 
+# The two numeric verifiers ADR-0007 adds, named here beside the others because
+# the VerificationBundle contract keeps a closed list of who is allowed to have
+# produced one.  A verifier that is not on this list cannot sign a bundle, and
+# that is the guard that stops "we re-checked it" from being an assertion
+# anyone can make.
+FIGURE_NUMERIC_VERIFIER_REF = "verifier:document-figure-row-recheck:0.1"
+FIGURE_NUMERIC_VERIFIER_HASH = content_hash({
+    "verifier": FIGURE_NUMERIC_VERIFIER_REF,
+    "checks": [
+        "figure row content hash recomputes from its own columns",
+        "figure is not retracted",
+        "digits and as-reported label are in the stored citation",
+        "caller's copy is byte-identical to the Core row",
+    ],
+})
+STATEMENT_LINE_VERIFIER_REF = "verifier:statement-line-row-recheck:0.1"
+STATEMENT_LINE_VERIFIER_HASH = content_hash({
+    "verifier": STATEMENT_LINE_VERIFIER_REF,
+    "checks": [
+        "line belongs to an ingested filing with an accession",
+        "filing row content hash recomputes from its own columns",
+        "caller's copy is byte-identical to the Core row",
+    ],
+})
+
 
 def figure_candidate_numerics(figure: Mapping[str, Any]) -> dict[str, Any]:
     """The numeric fields a CandidateClaim takes from a verified figure row.
@@ -559,7 +584,11 @@ def validate_verification_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
             (PUBLIC_WEB_SOURCE_VERIFIER_REF, PUBLIC_WEB_SOURCE_VERIFIER_HASH),
         }
         if wire["kind"] == "source"
-        else {(_NUMERIC_VERIFIER_REF, _NUMERIC_VERIFIER_HASH)}
+        else {
+            (_NUMERIC_VERIFIER_REF, _NUMERIC_VERIFIER_HASH),
+            (FIGURE_NUMERIC_VERIFIER_REF, FIGURE_NUMERIC_VERIFIER_HASH),
+            (STATEMENT_LINE_VERIFIER_REF, STATEMENT_LINE_VERIFIER_HASH),
+        }
     )
     if (wire["verifier_ref"], wire["verifier_hash"]) not in expected_verifiers:
         raise ResearchVerificationConflict("VerificationBundle verifier version drifted")
@@ -1480,6 +1509,18 @@ class CandidateStagingStore:
         for transcript candidates whose raw ArtifactVersion is Core-held
         AlphaEngine authority without a ResearchCheckpoint.
         """
+        # Checked before anything is validated or read: which rule this Core
+        # runs is not a property of the candidate, and a caller asking for a
+        # rule that does not exist should be told so rather than told its
+        # material is malformed.
+        if figure_admission_policy not in FIGURE_ADMISSION_POLICIES:
+            raise VerificationRejected("figure_admission_policy is not a closed value")
+        if verified_figure is not None and figure_admission_policy != FIGURE_ADMISSION_VERIFIED_FIGURE:
+            raise VerificationRejected(
+                "a verified figure was supplied but this Core still runs the "
+                f"{FIGURE_ADMISSION_REJECT} rule; ADR-0007 has to be enabled "
+                "deliberately"
+            )
         material_wire = validate_source_verification_material(material)
         source_wire = self._require_clean_pass(source_verification, "source")
         evidence_wire = validate_candidate_evidence(evidence)
@@ -1490,15 +1531,6 @@ class CandidateStagingStore:
         # ADR-0005 / P9d-17c: a fetched public-web page cited through the
         # same correction authority is cited evidence too.
         transcript_evidence = evidence_wire["source_type"] in (TRANSCRIPT_EVIDENCE_SOURCE_TYPE, "public_web")
-
-        if figure_admission_policy not in FIGURE_ADMISSION_POLICIES:
-            raise VerificationRejected("figure_admission_policy is not a closed value")
-        if verified_figure is not None and figure_admission_policy != FIGURE_ADMISSION_VERIFIED_FIGURE:
-            raise VerificationRejected(
-                "a verified figure was supplied but this Core still runs the "
-                f"{FIGURE_ADMISSION_REJECT} rule; ADR-0007 has to be enabled "
-                "deliberately"
-            )
 
         spec_wire: dict[str, Any] | None
         numeric_wire: dict[str, Any] | None
@@ -1770,6 +1802,11 @@ class CandidateStagingStore:
             self._insert_immutable(self.connection, "candidate_source_materials", "material_id", material_wire["id"], material_wire)
             if spec_wire is not None:
                 self._insert_immutable(self.connection, "candidate_numeric_specs", "numeric_spec_id", spec_wire["id"], spec_wire)
+            if figure_wire is not None:
+                self._insert_immutable(
+                    self.connection, "candidate_figures", "figure_id",
+                    figure_wire["figure_id"], figure_wire,
+                )
             self._insert_immutable(self.connection, "candidate_verifications", "verification_id", source_wire["id"], source_wire)
             if numeric_wire is not None:
                 self._insert_immutable(self.connection, "candidate_verifications", "verification_id", numeric_wire["id"], numeric_wire)
@@ -1811,8 +1848,9 @@ class CandidateStagingStore:
             table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
             for table in (
                 "candidate_source_materials", "candidate_numeric_specs",
-                "candidate_verifications", "candidate_evidence_versions",
-                "candidate_claim_versions", "candidate_stage_requests",
+                "candidate_figures", "candidate_verifications",
+                "candidate_evidence_versions", "candidate_claim_versions",
+                "candidate_stage_requests",
             )
         }
 
@@ -1822,6 +1860,8 @@ __all__ = [
     "InjectedStagingCrash", "CandidateStagingStore",
     "FIGURE_ADMISSION_DEFAULT", "FIGURE_ADMISSION_POLICIES",
     "FIGURE_ADMISSION_REJECT", "FIGURE_ADMISSION_VERIFIED_FIGURE",
+    "FIGURE_NUMERIC_VERIFIER_HASH", "FIGURE_NUMERIC_VERIFIER_REF",
+    "STATEMENT_LINE_VERIFIER_HASH", "STATEMENT_LINE_VERIFIER_REF",
     "figure_candidate_numerics",
     "TRANSCRIPT_CORE_AUTHORITY_MODE", "TRANSCRIPT_SOURCE_VERIFIER_REF",
     "TRANSCRIPT_SOURCE_VERIFIER_HASH",

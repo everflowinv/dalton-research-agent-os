@@ -43,6 +43,10 @@ from .document_numeric_claim import (
 )
 from .research_verification import (
     FIGURE_ADMISSION_VERIFIED_FIGURE,
+    FIGURE_NUMERIC_VERIFIER_HASH,
+    FIGURE_NUMERIC_VERIFIER_REF,
+    STATEMENT_LINE_VERIFIER_HASH,
+    STATEMENT_LINE_VERIFIER_REF,
     ResearchVerificationConflict,
     VerificationRejected,
     build_candidate_evidence,
@@ -54,26 +58,11 @@ from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
 
-FIGURE_VERIFIER_REF = "verifier:document-figure-row-recheck:0.1"
-FIGURE_VERIFIER_HASH = content_hash({
-    "verifier": FIGURE_VERIFIER_REF,
-    "checks": [
-        "figure row content hash recomputes from its own columns",
-        "figure is not retracted",
-        "digits and as-reported label are in the stored citation",
-        "caller's copy is byte-identical to the Core row",
-    ],
-})
-
-STATEMENT_LINE_VERIFIER_REF = "verifier:statement-line-row-recheck:0.1"
-STATEMENT_LINE_VERIFIER_HASH = content_hash({
-    "verifier": STATEMENT_LINE_VERIFIER_REF,
-    "checks": [
-        "line belongs to an ingested filing with an accession",
-        "filing row content hash recomputes from its own columns",
-        "caller's copy is byte-identical to the Core row",
-    ],
-})
+# Named in ``research_verification`` beside the other numeric verifiers,
+# because a VerificationBundle keeps a closed list of who may have produced
+# one and a verifier this module invented for itself could not sign anything.
+FIGURE_VERIFIER_REF = FIGURE_NUMERIC_VERIFIER_REF
+FIGURE_VERIFIER_HASH = FIGURE_NUMERIC_VERIFIER_HASH
 
 FIGURE_KINDS: tuple[str, ...] = ("document_figure", "statement_line")
 

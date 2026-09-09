@@ -548,15 +548,18 @@ def query_company_research(
         as_of_from=as_of_from, as_of_to=as_of_to, importance=importance,
         canonical_only=canonical_only,
     )
+    from .claim_index_authority import table_exists
+
+    # A Core that has never opened the index answers byte-identically to the
+    # way it did before P12b -- not with seven null columns bolted on.  A Core
+    # that has one always carries them, including on a claim the index has not
+    # reached yet, so that "untagged" is visible rather than indistinguishable
+    # from "no index anywhere".
+    indexed = table_exists(store.connection)
     result = []
     for row in joined:
         row.pop("_order", None)
-        if all(
-            row.get(field) is None
-            for field in ("index_aspect", "as_of", "importance", "dedupe_group_ref")
-        ) and row.get("index_entry_ref") is None:
-            # No index entry: hand back the row the shape it has always had, so
-            # that a Core written before P12b answers byte-identically.
+        if not indexed:
             for field in (
                 "index_aspect", "as_of", "as_of_basis", "importance",
                 "dedupe_group_ref", "is_canonical", "index_entry_ref",
