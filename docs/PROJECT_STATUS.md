@@ -28,6 +28,50 @@
    `metric_discovery.contested()` 能说出是谁在哪个单位上分歧（live 5 条，都是 percent/ratio），页面还没读它。
 8. **AlphaEngine 滚动 24h 用量贴着上限**（131/130），是 CTSH 缺电话会的直接约束。
 
+## 2026-09-09：OpenClaw 现有 skills 里值得接进来的能力（调研，未实现）
+
+owner 问：现有 82 个 skill 里还有哪些值得做成 connector；以及能不能直接接 findata analyst，
+省掉逐份 SEC filing 爬取。**答案是能，而且比预期的更值。**
+
+**findata-analyst（底层是 `edgartools`）**——一次调用拿到的东西，实测 EPAM 最新 10-Q：
+- **完整三表**（income / balance / cash），一次 `financials --statement all`；
+- income 表 **77 行、22 个顶层科目**，就是这家公司真实的费用结构（Cost of revenues、SG&A、
+  D&A、Humanitarian Commitment……），以及收入按定价方式拆分（Time-and-materials / Fixed-price / Licensing）；
+- **6 个 dimension 轴**的分部数据（地理、业务分部、定价方式、consolidation items……）；
+- 每行带 XBRL concept id、层级、parent、balance(credit/debit)、weight、preferred_sign；
+- 整份绑定到 **accession `0001352010-26-000046`**，filing_date / report_date 齐全。
+
+对照今天 Dalton 自己的 SEC lane：一次 dispatch 取**一个**指标，跑通 5 次得到 6 条
+`quarterly_revenue_yoy_growth`。差距是数量级的。
+
+**这直接改写建模的设计**：owner 原本设想"大脑决定抽取哪些字段（费用有哪些科目、revenue driver 是什么）"。
+但这些**公司自己在 XBRL 里披露了**——费用科目就是 income 表的行，revenue driver 就是 dimension 轴。
+大脑的工作因此从"发明一套字段"变成"在已披露的结构里挑哪些重要"，这比原设想更可靠，也更省。
+
+**但有一个诚实的代价，需要 owner 定夺**：Dalton 的规矩是每个数字都绑定到经
+`ConnectorTransportExecutor` 哈希过的字节。edgartools 在库内部自己发 HTTP，绕开了那条链路。三种做法：
+1. **当作 connector，记录其输出**：子进程跑，把它的原始 JSON 当 artifact 哈希入库，claim 绑定
+   (accession, concept, period)。溯源链就从"Dalton 亲自验证 SEC 字节"变成"信任 edgartools 的解析"，
+   但 accession 在手，任何一个数字都能回到 SEC 复核。**最快，溯源略弱。**
+2. **把 edgartools 放进 Dalton 自己的 lane、让它的 HTTP 走 Dalton 的 transport**：保留字节级验证，
+   前提是 edgartools 允许注入 transport（未验证）。
+3. **扩自己的 company-facts adapter**：Dalton **已经**在取 `companyfacts` 并哈希入库了，缺的只是
+   **报表结构**（哪一行是哪个科目、层级、dimension）。补这一层就全程留在现有治理里。**最干净，工作量最大。**
+
+**其余值得接的（按对当前阻塞的价值排序）：**
+1. **`roic-transcript`（电话会纪要，roic.ai）**——**当下最高杠杆**。CTSH 的 Initial Screen 正卡在
+   earnings_calls 1/4，而 AlphaEngine 24h 用量贴着上限（131/130）。这是一条**独立于 AlphaEngine** 的
+   纪要来源，直接解开那个阻塞。
+2. **`xlsx`**——"读写电子表格并**保留公式**"。正是 owner 说的"建模阶段不碰 excel，导出交付物时再连公式导出"。
+   建模阶段的导出端就是它。
+3. `guidepoint-transcript-search`——Guidepoint 治理刚签完，这个 skill 展示了预期用法。
+4. 之后：`13f-tracker`（持仓）、`employee-reviews`（Blind/Indeed/Glassdoor 另类数据）、
+   `company-filings-alert`（覆盖公司 filing 监控）、`findata-return`（股东回报）。
+   `cn-hk-findata`（cninfo + AkShare）对当前 US IT services universe 用不上。
+
+**注意**：`ratios` 这类**算出来的**值（gross margin = GP/Rev）不能当披露值入库——
+model_discipline 明确"不以残差或比例分摊冒充披露值"。要接的是 `financials` / `facts` 这些披露值。
+
 ## 2026-09-09（Guidepoint 第一段）：身份与治理已签，lane 卡在一个命名冲突上
 
 **已完成并部署**：Guidepoint 的 identity + 两条 owner 已批准的治理记录。
