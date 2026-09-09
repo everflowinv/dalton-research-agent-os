@@ -52,11 +52,9 @@ SCHEMA_VERSION = "0.1"
 # which is the whole of what a new lane used to have to do here.
 _PURPOSE_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
 _SEED_PURPOSES = ("ask", "goal", "steer", "draft", "plan", "model_spec")
+# Read through purposes(), never as a module constant: a name rebound on every
+# registration is a snapshot waiting to go stale in whoever imported it first.
 _PURPOSES: set[str] = set(_SEED_PURPOSES)
-# Kept as a name because callers read it; rebound whenever a purpose is
-# registered, so a caller holding the old frozenset sees the old vocabulary
-# and a caller reading the attribute sees the current one.
-PURPOSES = frozenset(_PURPOSES)
 
 # Room for the completion write after the model answers, so a call that
 # finishes right on its timeout still has a live lease to complete against.
@@ -87,12 +85,9 @@ def register_purpose(name: str) -> str:
     refused, because it ends up in a WorkOrder id.
     """
 
-    global PURPOSES
-
     if not isinstance(name, str) or not _PURPOSE_RE.fullmatch(name):
         raise CockpitModelError("a model purpose is lowercase words joined by _")
     _PURPOSES.add(name)
-    PURPOSES = frozenset(_PURPOSES)
     return name
 
 
@@ -320,6 +315,6 @@ def unwrap_json_object(text: str) -> dict[str, Any] | None:
 
 
 __all__ = [
-    "CockpitModel", "CockpitModelError", "PURPOSES", "WORKER_REF", "build_work",
+    "CockpitModel", "CockpitModelError", "WORKER_REF", "build_work",
     "purposes", "register_purpose", "unwrap_json_object",
 ]

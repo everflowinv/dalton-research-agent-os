@@ -14,9 +14,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import json
+import os
 import plistlib
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -26,6 +31,8 @@ from dalton_core.bounded_planner_driver import (
     BoundedPlannerDriverConfig,
 )
 from dalton_core.lane_registry import (
+    LANE_MODULES,
+    RESERVED_DRIVER_KEYS,
     LaneRegistryError,
     LaneSpec,
     LaunchAgentContext,
@@ -304,6 +311,48 @@ class RegistryRefusalTests(unittest.TestCase):
                 launcher_factory=lambda args: None,
             )
 
+    def test_a_driver_key_the_tick_summary_owns_is_refused(self) -> None:
+        # The lane results are spread last into the tick summary, so a lane
+        # claiming one of the summary's own keys would overwrite it and the
+        # tick would report a lane's result as its own status.
+        for reserved in sorted(RESERVED_DRIVER_KEYS):
+            with self.assertRaises(LaneRegistryError):
+                register_lane(fake_lane_spec(driver_key=reserved))
+
+    def test_the_reserved_keys_are_the_ticks_own_keys(self) -> None:
+        from dalton_core import bounded_planner_driver
+
+        self.assertEqual(
+            RESERVED_DRIVER_KEYS, bounded_planner_driver._RESERVED_SUMMARY_KEYS
+        )
+
+    def test_a_lane_without_a_handler_or_a_writer_method_is_refused(self) -> None:
+        # Worse than a missing lane: it enters CORE_OPERATIONS, bootstrap
+        # grants it to the core principal, and then every call raises. The
+        # registration is the mistake, so it fails where the registry is read.
+        register_lane(LaneSpec(operation="dispatch_unanswerable", order=10_002))
+        try:
+            with self.assertRaises(LaneRegistryError):
+                writer_server.install_lane_operations()
+            self.assertNotIn("dispatch_unanswerable", writer_server.OPERATION_FIELDS)
+            self.assertNotIn("dispatch_unanswerable", writer_server.CORE_OPERATIONS)
+        finally:
+            unregister_lane("dispatch_unanswerable")
+            writer_server.install_lane_operations()
+
+    def test_deriving_from_a_half_loaded_registry_is_refused(self) -> None:
+        # load_lanes() returns silently on re-entry, which is what stops a
+        # circular import recursing. The cost would be a writer folding in
+        # whatever happened to be registered so far: the lane in the tick and
+        # the plist, absent from OPERATION_FIELDS, refused forever.
+        lane_registry._LOADING = True
+        try:
+            with self.assertRaises(LaneRegistryError):
+                writer_server.install_lane_operations()
+        finally:
+            lane_registry._LOADING = False
+        writer_server.install_lane_operations()
+
     def test_a_lane_may_not_shadow_a_literal_writer_operation(self) -> None:
         # ``dispatch_answer_refresh`` is not a lane; it is a writer operation
         # with its own parameter contract, and a lane claiming that name would
@@ -342,12 +391,17 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
         )
 
     def test_every_lane_is_either_handled_here_or_by_the_writer(self) -> None:
-        for spec in registered_lanes():
-            if spec.handler is None:
-                self.assertTrue(
-                    hasattr(writer_server.WriterServer, f"_op_{spec.operation}"),
-                    f"{spec.operation} has neither a handler nor a writer method",
-                )
+        # The same check install_lane_operations() makes at import; kept as a
+        # test so the four handler-less lanes are named somewhere a reader
+        # will look.
+        writer_server.require_lane_handlers(writer_server.WriterServer)
+        handled_by_the_writer = {
+            spec.operation for spec in registered_lanes() if spec.handler is None
+        }
+        self.assertEqual(handled_by_the_writer, {
+            "dispatch_mission_source_discovery", "dispatch_document_extraction",
+            "dispatch_mission_stage", "dispatch_claim_review",
+        })
 
     def test_the_launcher_lanes_name_the_kwargs_the_writer_took(self) -> None:
         # These four keywords were explicit parameters of WriterServer.__init__
@@ -473,14 +527,60 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
             self.assertIn("mission_sec_dispatch", result)
             self.assertIn("forecast_reconciliation", result)
 
-    def test_a_lane_module_registers_and_does_nothing_else(self) -> None:
-        # Registration is the only import-time effect a lane module may have,
-        # and the registry itself must never reach into the writer.
+    def test_no_lane_module_imports_a_registry_consumer_at_module_level(self) -> None:
+        # A lane module may not import, at module level, anything that derives
+        # from the registry: writer_server folds the registry in at its own
+        # import, so being imported *by* a lane module would fold in a
+        # half-built registry.  Their own expensive imports stay inside the
+        # handler and the launcher factory, which is what the top-level import
+        # list has to show.
+        consumers = ("writer_server", "bounded_planner_driver", "macos_launchagent")
+        for name in LANE_MODULES:
+            module = importlib.import_module(name)
+            source = Path(module.__file__).read_text(encoding="utf-8")
+            top_level = [
+                line for line in source.splitlines()
+                if line.startswith(("import ", "from "))
+            ]
+            for consumer in consumers:
+                self.assertFalse(
+                    [line for line in top_level if consumer in line],
+                    f"{name} imports {consumer} at module level",
+                )
+            self.assertIn("register_lane", source, name)
+
+    def test_importing_a_lane_module_alone_pulls_in_no_consumer(self) -> None:
+        # The check above reads the file; this one runs it.  A transitive
+        # import three modules down is exactly the one nobody would spot by
+        # reading, and it is the one that produces a lane the tick calls and
+        # the writer refuses.
+        source_root = Path(lane_registry.__file__).resolve().parents[1]
+        environment = dict(os.environ, PYTHONPATH=str(source_root))
+        for name in LANE_MODULES:
+            script = textwrap.dedent(f"""
+                import sys
+                import importlib
+                importlib.import_module({name!r})
+                leaked = sorted(
+                    module for module in sys.modules
+                    if module in (
+                        "dalton_core.writer_server",
+                        "dalton_core.bounded_planner_driver",
+                        "dalton_core.macos_launchagent",
+                    )
+                )
+                print(",".join(leaked))
+            """)
+            finished = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True, text=True, env=environment, timeout=120,
+            )
+            self.assertEqual(finished.returncode, 0, finished.stderr)
+            self.assertEqual(finished.stdout.strip(), "", f"{name} pulled in a consumer")
+
+    def test_every_lane_is_registered_and_findable(self) -> None:
         for spec in registered_lanes():
             self.assertIsNotNone(lane_for_operation(spec.operation))
-        source = (Path(lane_registry.__file__)).read_text(encoding="utf-8")
-        self.assertNotIn("import writer_server", source)
-        self.assertNotIn("from .writer_server", source)
 
 
 if __name__ == "__main__":

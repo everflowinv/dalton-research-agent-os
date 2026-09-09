@@ -22,7 +22,7 @@ from .bounded_probe_executor import (
     WORKER_REF,
     execute_probe_work_order,
 )
-from .lane_registry import tick_lanes
+from .lane_registry import RESERVED_DRIVER_KEYS, tick_lanes
 from .public_http_transport import PublicHttpTransport
 from .scheduler import Scheduler
 from .writer_client import WriterClient
@@ -204,6 +204,15 @@ class BoundedPlannerDriverConfig:
         )
 
 
+# Every key ``run_once`` puts in its summary that is not a lane's. Kept beside
+# the summary itself so a new one is added here, where it is visible, rather
+# than only in the registry.
+_RESERVED_SUMMARY_KEYS: frozenset[str] = frozenset({
+    "status", "active_loop_count", "probes_executed", "executed", "skipped",
+    "mission_sec_dispatch", "forecast_reconciliation",
+})
+
+
 class BoundedPlannerDriver:
     """Advance every active loop by at most one probe per tick."""
 
@@ -248,6 +257,13 @@ class BoundedPlannerDriver:
         # order is now a number on the LaneSpec, which is at least somewhere a
         # person can read it.  The semantics are unchanged: one lane's failure
         # is that lane's, named by exception type, and never the tick's.
+        #
+        # The lane results are spread last into the summary below, so a lane
+        # driver key naming one of this tick's own keys would overwrite it
+        # silently.  RESERVED_DRIVER_KEYS is that list and the registry
+        # refuses a lane that claims one; this asserts the two have not drifted
+        # apart, because the failure they prevent is invisible.
+        assert RESERVED_DRIVER_KEYS == _RESERVED_SUMMARY_KEYS
         lanes: dict[str, Any] = {}
         for spec in tick_lanes():
             try:

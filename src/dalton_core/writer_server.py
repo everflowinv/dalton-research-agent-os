@@ -31,6 +31,7 @@ from typing import Any, Mapping
 from .lane_registry import (
     LaneRegistryError,
     add_lane_arguments,
+    require_lanes_loaded,
     build_lane_launchers,
     core_discovery_operations,
     lane_for_operation,
@@ -821,6 +822,12 @@ def install_lane_operations() -> None:
 
     global CORE_DISCOVERY_OPERATIONS, CORE_OPERATIONS
 
+    require_lanes_loaded()
+    # Before anything is written, so a refused registration leaves the tables
+    # as they were rather than half-installed.
+    server = globals().get("WriterServer")
+    if server is not None:
+        require_lane_handlers(server)
     operations = lane_operations()
     for retired in _INSTALLED_LANE_OPERATIONS - operations:
         OPERATION_FIELDS.pop(retired, None)
@@ -834,6 +841,23 @@ def install_lane_operations() -> None:
     _INSTALLED_LANE_OPERATIONS.update(operations)
     CORE_DISCOVERY_OPERATIONS = CORE_DISCOVERY_LITERALS | core_discovery_operations()
     CORE_OPERATIONS = CORE_OPERATION_LITERALS | lane_operations()
+
+
+def require_lane_handlers(server: type) -> None:
+    """Every lane must be answerable, by its own handler or by a method here.
+
+    A lane with neither is worse than a lane that is missing: it is in
+    CORE_OPERATIONS, so ``bootstrap`` rewrites the token config to grant it to
+    the core principal, and then every call raises. The registration is the
+    mistake, so it fails at import rather than on the first tick.
+    """
+
+    for spec in registered_lanes():
+        if spec.handler is None and not hasattr(server, f"_op_{spec.operation}"):
+            raise LaneRegistryError(
+                f"{spec.operation} has neither a handler nor a "
+                f"_op_{spec.operation} method on the writer"
+            )
 
 
 install_lane_operations()
@@ -3537,6 +3561,11 @@ class WriterServer:
         if isinstance(exc, (EvaluationRejected, PromotionRejected, PermissionEscalation)):
             return "request rejected by capability governance"
         return "writer service failed to complete the request"
+
+
+# The class exists now, so the check install_lane_operations() had to skip at
+# the top of this module can finally run.
+require_lane_handlers(WriterServer)
 
 
 def main(argv: list[str] | None = None) -> int:

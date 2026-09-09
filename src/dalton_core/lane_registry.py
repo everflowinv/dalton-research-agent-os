@@ -130,6 +130,16 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.initial_screen_launcher",
 )
 
+# The keys the controller tick's summary already uses for things that are not
+# lanes: its own status, the probe accounting, and the two calls that run
+# outside the lane loop.  A lane whose ``driver_key`` collided with one of
+# these would overwrite it -- the lane results are spread last -- and the
+# damage would be silent: a tick reporting a lane's result as its own status.
+RESERVED_DRIVER_KEYS: frozenset[str] = frozenset({
+    "status", "active_loop_count", "probes_executed", "executed", "skipped",
+    "mission_sec_dispatch", "forecast_reconciliation",
+})
+
 _LANES: dict[str, LaneSpec] = {}
 _LOADING = False
 _LOADED = False
@@ -142,6 +152,11 @@ def register_lane(spec: LaneSpec) -> LaneSpec:
         raise LaneRegistryError("register_lane takes a LaneSpec")
     if spec.operation in _LANES:
         raise LaneRegistryError(f"{spec.operation} is already a registered lane")
+    if spec.driver_key in RESERVED_DRIVER_KEYS:
+        raise LaneRegistryError(
+            f"{spec.operation}: driver key {spec.driver_key!r} is the tick "
+            "summary's own; a lane may not overwrite it"
+        )
     for existing in _LANES.values():
         if existing.order == spec.order:
             raise LaneRegistryError(
@@ -181,6 +196,28 @@ def load_lanes() -> None:
         _LOADED = True
     finally:
         _LOADING = False
+
+
+def require_lanes_loaded() -> None:
+    """Refuse to derive anything from a registry that is still loading.
+
+    ``load_lanes()`` returns silently on re-entry, which is what keeps a
+    circular import from recursing.  The cost is that a lane module importing
+    ``writer_server`` -- directly or three modules down -- would have
+    ``writer_server`` fold in whatever happened to be registered by then: the
+    lane would be in ``registered_lanes()``, so the tick would call it and the
+    plist would wire it, and absent from ``OPERATION_FIELDS``, so the writer
+    would answer "unknown operation" for the life of the process.  A tick
+    reporting ``unavailable:PermissionError`` forever is a bad way to learn
+    about an import cycle, so the derivation refuses instead.
+    """
+
+    if _LOADING:
+        raise LaneRegistryError(
+            "the lane registry is still loading; a lane module must not import "
+            "a module that derives from the registry (writer_server), even "
+            "indirectly -- keep those imports inside the handler"
+        )
 
 
 def registered_lanes() -> tuple[LaneSpec, ...]:
@@ -260,6 +297,7 @@ def build_lane_launchers(args: Any) -> dict[str, Any]:
 
 __all__ = [
     "LANE_MODULES",
+    "RESERVED_DRIVER_KEYS",
     "LaneRegistryError",
     "LaneSpec",
     "LaunchAgentContext",
@@ -274,6 +312,7 @@ __all__ = [
     "load_lanes",
     "register_lane",
     "registered_lanes",
+    "require_lanes_loaded",
     "tick_lanes",
     "unregister_lane",
 ]

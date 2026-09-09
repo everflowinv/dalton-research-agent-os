@@ -1,7 +1,7 @@
 """The two model vocabularies a lane used to have to edit by hand.
 
 A lane that spends money on a model touched two closed lists it had no
-business owning: ``cockpit_model.PURPOSES``, which is what a WorkOrder is
+business owning: the cockpit model purposes, which are what a WorkOrder is
 identified by, and the tuple of installed model configuration file names that
 a day-cap raise repoints. Both are now registries with the old literals as the
 seed, so a lane names its own purpose and its own configuration from its own
@@ -58,11 +58,14 @@ class ModelPurposeRegistryTests(unittest.TestCase):
     def tearDown(self) -> None:
         cockpit_model._PURPOSES.clear()
         cockpit_model._PURPOSES.update(SEED_PURPOSES)
-        cockpit_model.PURPOSES = frozenset(cockpit_model._PURPOSES)
 
     def test_the_seed_is_what_the_literal_said(self) -> None:
         self.assertEqual(purposes(), SEED_PURPOSES)
-        self.assertEqual(cockpit_model.PURPOSES, SEED_PURPOSES)
+
+    def test_there_is_no_module_constant_to_go_stale(self) -> None:
+        # A rebound frozenset is a snapshot: whoever imported it before a lane
+        # registered keeps the old vocabulary and refuses a legal purpose.
+        self.assertFalse(hasattr(cockpit_model, "PURPOSES"))
 
     def test_an_unregistered_purpose_is_refused(self) -> None:
         with self.assertRaises(CockpitModelError):
@@ -71,7 +74,6 @@ class ModelPurposeRegistryTests(unittest.TestCase):
     def test_a_registered_purpose_may_build_work(self) -> None:
         register_purpose("valuation")
         self.assertIn("valuation", purposes())
-        self.assertIn("valuation", cockpit_model.PURPOSES)
         order = work("valuation")
         self.assertIn("valuation", order.id)
 
