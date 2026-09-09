@@ -145,6 +145,15 @@ CAPABILITIES: Mapping[str, Mapping[str, Any]] = MappingProxyType({
     }),
     # Not in the inventory yet: the S1 / S3 connectors.  Declared here so the
     # cadence policy and the judgement prompt can name them before they merge.
+    # C1's catalyst calendar is a source in the cadence sense -- something we
+    # look at on a schedule -- even though its content is derived from the
+    # price and filing connectors rather than fetched from a vendor.
+    "catalyst-calendar": MappingProxyType({
+        "content_kinds": ("calendar",), "evidence_tier": "derived",
+        "markets": ("US",), "generic": False,
+        "note": "earnings, guidance, investor days and filing due dates; only a "
+                "confirmed date drives a preview",
+    }),
     "sales-notes": MappingProxyType({
         "content_kinds": ("sales_note", "news"), "evidence_tier": "vendor_note",
         "markets": ("US", "global"), "generic": False,

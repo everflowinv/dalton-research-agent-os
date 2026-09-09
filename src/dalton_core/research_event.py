@@ -580,7 +580,13 @@ def document_event_candidates(
         "WHERE d.company_ref=? AND d.created_at>=? AND d.status IN "
         "('acquired','already_in_authority') AND d.mission_version_ref IN "
         "(SELECT mission_version_id FROM coverage_mission_versions WHERE mission_ref=?) "
-        "ORDER BY d.created_at DESC, d.record_id DESC LIMIT ?",
+        # Oldest first inside the window. Newest first with a LIMIT silently
+        # drops the tail for ever: the rows past the limit are never reached
+        # again, because tomorrow's scan finds the same newest rows and stops
+        # in the same place. Oldest first makes every run monotone -- what was
+        # recorded is a duplicate next time and costs a lookup, so the window
+        # is worked through rather than skimmed.
+        "ORDER BY d.created_at ASC, d.record_id ASC LIMIT ?",
         (company_ref, since, mission_ref, int(limit)),
     ).fetchall()
     seen: set[str] = set()
@@ -637,7 +643,8 @@ def claim_event_candidates(
     rows = connection.execute(
         "SELECT claim_version_id AS id, claim_ref, claim_json, created_at FROM claim_versions "
         "WHERE json_extract(claim_json,'$.subject_ref')=? AND created_at>=? "
-        "ORDER BY created_at DESC, claim_version_id DESC LIMIT ?",
+        # Oldest first, for the reason above.
+        "ORDER BY created_at ASC, claim_version_id ASC LIMIT ?",
         (company_ref, since, int(limit)),
     ).fetchall()
     candidates: list[dict[str, Any]] = []
@@ -682,7 +689,7 @@ def reconciliation_event_candidates(
             "SELECT reconciliation_id, metric_ref, period_end, band, record_json, "
             "forecast_line_version_ref, claim_version_ref, created_at "
             "FROM forecast_reconciliations WHERE subject_ref=? AND created_at>=? "
-            "ORDER BY created_at DESC LIMIT ?",
+            "ORDER BY created_at ASC, reconciliation_id ASC LIMIT ?",
             (company_ref, since, int(limit)),
         ).fetchall()
     except sqlite3.OperationalError as exc:

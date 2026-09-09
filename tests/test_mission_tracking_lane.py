@@ -26,6 +26,7 @@ from dalton_core.tracking_lane_cli import (
     company_events,
     missing_write_scopes,
     price_events,
+    round_robin,
     run_tracking,
 )
 from tests.p14a_fixtures import ACN, AUTOMATION, CTSH, DXC, EPAM, IBM, P14aHarness
@@ -392,3 +393,60 @@ class DivergenceRunTests(P14aHarness):
         stances = thesis_stances(self.store, load_policy(POLICY_PATH), tracked=[ACN])
         self.assertEqual(stances[ACN]["stance"], "long")
         self.assertTrue(stances[ACN]["thesis_ref"].startswith("thesis-version:"))
+
+
+class FairnessTests(P14aHarness):
+    """B1: a cap on candidates in universe order starves every company but the first."""
+
+    def setUp(self):
+        super().setUp()
+        for ref in (ACN, CTSH, EPAM):
+            self.pass_screen(ref)
+
+    def run_child(self, **kwargs):
+        return run_tracking(
+            state_dir=self.state_dir, summary_dir=self.state_dir / "summary",
+            policy_path=POLICY_PATH, now=NOW, **kwargs,
+        )
+
+    def test_the_cap_counts_what_was_written_not_what_was_looked_at(self):
+        for ref in (ACN, CTSH, EPAM):
+            for index in range(4):
+                self.claim(subject=ref, statement=f"{ref} fact {index}")
+        first = self.run_child(max_events=6)
+        self.assertEqual(first["events_recorded"], 6)
+        events = ResearchEventAuthority(self.store)
+        seen = {ref: len(events.events(company_ref=ref)) for ref in (ACN, CTSH, EPAM)}
+        # Two apiece, not six for the first company.
+        self.assertEqual(seen, {ACN: 2, CTSH: 2, EPAM: 2})
+
+    def test_a_second_run_reaches_the_rest_rather_than_re_recognising_duplicates(self):
+        for ref in (ACN, CTSH, EPAM):
+            for index in range(4):
+                self.claim(subject=ref, statement=f"{ref} fact {index}")
+        self.run_child(max_events=6)
+        second = self.run_child(max_events=6)
+        self.assertEqual(second["events_recorded"], 6)
+        events = ResearchEventAuthority(self.store)
+        self.assertEqual(
+            {ref: len(events.events(company_ref=ref)) for ref in (ACN, CTSH, EPAM)},
+            {ACN: 4, CTSH: 4, EPAM: 4},
+        )
+
+    def test_a_company_with_far_more_candidates_does_not_crowd_the_others_out(self):
+        for index in range(20):
+            self.claim(subject=ACN, statement=f"ACN fact {index}")
+        self.claim(subject=CTSH, statement="CTSH fact")
+        self.claim(subject=EPAM, statement="EPAM fact")
+        self.run_child(max_events=4)
+        events = ResearchEventAuthority(self.store)
+        self.assertEqual(len(events.events(company_ref=CTSH)), 1)
+        self.assertEqual(len(events.events(company_ref=EPAM)), 1)
+        self.assertEqual(len(events.events(company_ref=ACN)), 2)
+
+    def test_the_interleave_is_one_per_company_in_universe_order(self):
+        queues = {ACN: [{"i": 1}, {"i": 2}, {"i": 3}], CTSH: [{"i": 9}], EPAM: []}
+        self.assertEqual(
+            [row["i"] for row in round_robin(queues, order=[ACN, CTSH, EPAM])],
+            [1, 9, 2, 3],
+        )

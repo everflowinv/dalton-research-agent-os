@@ -122,6 +122,15 @@ MAX_REFS = 12
 MAX_RECENT_JUDGEMENTS = 5
 MAX_CLAIMS_IN_PROMPT = 12
 MAX_PROMPT_CHARS = 24_000
+# Payload fields that hold a ref, named rather than sniffed. Testing a string
+# for a colon would let "3.0:1" or a title with a time in it become a citable
+# ref, and the whole point of the permitted set is that a citation names
+# something this system can resolve.
+REF_PAYLOAD_FIELDS: frozenset[str] = frozenset({
+    "document_ref", "discovery_ref", "claim_version_ref", "claim_ref",
+    "reconciliation_ref", "forecast_line_version_ref", "price_version_ref",
+    "invocation_ref", "calendar_version_ref", "thesis_ref", "source_ref",
+})
 _SENTENCE_RE = re.compile(r"[^.!?。！？]+[.!?。！？]?")
 
 
@@ -265,8 +274,9 @@ def allowed_refs(context: Mapping[str, Any]) -> set[str]:
     """Every ref the prompt printed.  A citation outside this set is a refusal."""
 
     refs = {context["event"]["id"], *context["event"]["source_refs"]}
-    for value in context["event"]["payload"].values():
-        if isinstance(value, str) and ":" in value:
+    for field in REF_PAYLOAD_FIELDS:
+        value = context["event"]["payload"].get(field)
+        if isinstance(value, str) and value:
             refs.add(value)
     refs.update(thesis["ref"] for thesis in context.get("theses") or ())
     refs.update(driver["ref"] for driver in context.get("drivers") or ())
@@ -557,6 +567,11 @@ def validate_reflection_output(value: Any, context: Mapping[str, Any]) -> dict[s
             f"followup_tracking must be a list of at most {MAX_FOLLOWUPS}"
         )
     known_sources = set(context.get("source_keys") or ())
+    if tracking and not known_sources:
+        raise EventJudgementValidationError(
+            "a tracking follow-up cannot be checked without the cadence policy's "
+            "source keys; refusing rather than accepting an unverifiable proposal"
+        )
     checked_tracking = []
     for row in tracking:
         if not isinstance(row, Mapping) or set(row) != {
@@ -567,7 +582,7 @@ def validate_reflection_output(value: Any, context: Mapping[str, Any]) -> dict[s
                 "and because"
             )
         source_key = _text(row["source_key"], "followup_tracking[].source_key", maximum=64)
-        if known_sources and source_key not in known_sources:
+        if source_key not in known_sources:
             raise EventJudgementValidationError(
                 f"followup_tracking names a source with no baseline cadence: {source_key!r}"
             )
@@ -712,6 +727,13 @@ def verify_reflection(
 
     if reflection.get("status") != "reflected":
         return {"status": "skipped", "reason": "there is no reflection to verify"}
+    producer_family = family_resolver((reflection.get("model") or {}).get("route_decision_ref"))
+    if producer_family is None:
+        return {"status": "refused", "model": None,
+                "independence": {"producer_family": None, "verifier_family": None,
+                                 "predicate": "model_family_ne"},
+                "reason": "the model family behind the reflection could not be resolved; "
+                          "an unverifiable independence claim is not independence"}
     prompt = build_reflection_verifier_prompt(context, reflection)
     try:
         call = model.call(
@@ -723,14 +745,13 @@ def verify_reflection(
                 "reason": f"the reflection verifier call did not succeed: {exc}"}
     provenance = _provenance(call)
     provenance["purpose"] = REFLECTION_PURPOSE
-    producer_family = family_resolver((reflection.get("model") or {}).get("route_decision_ref"))
     verifier_family = family_resolver(provenance.get("route_decision_ref"))
     independence = {"producer_family": producer_family,
                     "verifier_family": verifier_family,
                     "predicate": "model_family_ne"}
-    if producer_family is None or verifier_family is None:
+    if verifier_family is None:
         return {"status": "refused", "model": provenance, "independence": independence,
-                "reason": "the model family behind one of the two calls could not be "
+                "reason": "the model family behind the reflection verifier could not be "
                           "resolved; an unverifiable independence claim is not independence"}
     if producer_family == verifier_family:
         return {"status": "refused", "model": provenance, "independence": independence,
@@ -861,6 +882,15 @@ def verify(
 
     if judgement.get("status") != "judged":
         return {"status": "skipped", "reason": "there is no judgement to verify"}
+    # Resolve what can be resolved before paying: a producer whose family is
+    # unknown can never be verified independently, so there is nothing to buy.
+    producer_family = family_resolver((judgement.get("model") or {}).get("route_decision_ref"))
+    if producer_family is None:
+        return {"status": "refused", "model": None,
+                "independence": {"producer_family": None, "verifier_family": None,
+                                 "predicate": "model_family_ne"},
+                "reason": "the model family behind the judgement could not be resolved; "
+                          "an unverifiable independence claim is not independence"}
     prompt = build_verifier_prompt(context, judgement)
     try:
         call = model.call(
@@ -870,16 +900,15 @@ def verify(
         return {"status": "refused", "reason": f"the verifier call did not succeed: {exc}",
                 "model": None}
     provenance = _provenance(call)
-    producer_family = family_resolver((judgement.get("model") or {}).get("route_decision_ref"))
     verifier_family = family_resolver(provenance.get("route_decision_ref"))
     independence = {
         "producer_family": producer_family,
         "verifier_family": verifier_family,
         "predicate": "model_family_ne",
     }
-    if producer_family is None or verifier_family is None:
+    if verifier_family is None:
         return {"status": "refused", "model": provenance, "independence": independence,
-                "reason": "the model family behind one of the two calls could not be resolved; "
+                "reason": "the model family behind the verifier could not be resolved; "
                           "an unverifiable independence claim is not independence"}
     if producer_family == verifier_family:
         return {"status": "refused", "model": provenance, "independence": independence,
@@ -993,12 +1022,64 @@ class EventJudgementAuthority:
         return [_decode(row, "EventJudgement") for row in rows]
 
     def day_cost_micros(self, day: str) -> int:
+        """Everything this lane paid for today, refusals and reflections included.
+
+        Read from the spend ledger rather than from the judgement rows: a
+        refused judgement writes no judgement row and its two calls were still
+        paid for, and a reflection is a second pair against the same
+        judgement. Summing the judgements would under-report the day by
+        exactly the spend a misbehaving model produces most of.
+        """
+
         row = self.connection.execute(
-            "SELECT COALESCE(SUM(cost_micros), 0) AS spent FROM event_judgements "
-            "WHERE substr(created_at, 1, 10)=?",
+            "SELECT COALESCE(SUM(cost_micros), 0) AS spent FROM event_response_spend "
+            "WHERE day=?",
             (day,),
         ).fetchone()
         return 0 if row is None else int(row["spent"])
+
+    def record_spend(
+        self,
+        *,
+        call: Mapping[str, Any] | None,
+        purpose: str,
+        outcome: str,
+        event_ref: str,
+        mission: Mapping[str, Any],
+        day: str | None = None,
+    ) -> int:
+        """Book one call against the day, or nothing when there was no call.
+
+        Keyed by the WorkOrder, so a replayed call -- which costs nothing --
+        is booked once and a retry of the same request does not double-count.
+        """
+
+        provenance = dict(call or {})
+        work_order_ref = provenance.get("work_order_ref")
+        if not work_order_ref:
+            return 0
+        cost = int(provenance.get("cost_micros") or 0)
+        created_at = _now()
+        record_day = day or created_at[:10]
+        with self.store._transaction() as cur:
+            existing = cur.execute(
+                "SELECT cost_micros FROM event_response_spend WHERE work_order_ref=?",
+                (work_order_ref,),
+            ).fetchone()
+            if existing is not None:
+                return 0
+            cur.execute(
+                "INSERT INTO event_response_spend(spend_id,day,work_order_ref,purpose,"
+                "outcome,event_ref,cost_micros,mission_version_ref,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    "event-response-spend:" + content_hash(
+                        {"work_order_ref": work_order_ref})[:32],
+                    record_day, work_order_ref, purpose, outcome, event_ref, cost,
+                    mission["id"], created_at,
+                ),
+            )
+        return cost
 
     def thesis_candidates(self, company_ref: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT * FROM thesis_revision_candidates"
@@ -1410,9 +1491,14 @@ def company_theses(connection: sqlite3.Connection, company_ref: str) -> list[dic
     try:
         rows = connection.execute(
             "SELECT v.version_id AS version_id, v.thesis_id AS thesis_id, "
-            "v.version_number AS version_number, v.content_json AS content_json "
+            "v.version_number AS version_number, v.created_at AS created_at, "
+            "v.content_json AS content_json "
             "FROM thesis_versions v WHERE v.version_number = "
-            "(SELECT MAX(version_number) FROM thesis_versions w WHERE w.thesis_id=v.thesis_id)"
+            "(SELECT MAX(version_number) FROM thesis_versions w WHERE w.thesis_id=v.thesis_id) "
+            # Oldest first, so a caller that wants "the newest" takes the last
+            # one rather than whichever version id happened to sort highest --
+            # a version id is a hash and hash order is not time order.
+            "ORDER BY v.created_at ASC, v.version_id ASC"
         ).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table" not in str(exc):
@@ -1447,8 +1533,9 @@ def company_theses(connection: sqlite3.Connection, company_ref: str) -> list[dic
             "falsifier_refs": list(wire.get("falsifier_refs") or ()),
             "content_hash": wire.get("content_hash"),
             "subject_ref": subject,
+            "created_at": row["created_at"],
         })
-    return sorted(theses, key=lambda item: item["ref"])
+    return theses
 
 
 MAX_ASSUMPTIONS_PER_DRIVER = 3
@@ -1606,6 +1693,24 @@ def publish_event_note(
     )
 
 
+def revision_for_event(
+    forecast_models: Any, model_version: Mapping[str, Any], event_ref: str
+) -> dict[str, Any] | None:
+    """The version this event already published against this model, if any."""
+
+    try:
+        chain = forecast_models.versions(model_version["company_ref"])
+    except Exception:  # noqa: BLE001 - an unreadable chain is "not found"
+        return None
+    for version in chain:
+        if version.get("change_reason") != "driver_event":
+            continue
+        for ref in version.get("evidence_refs") or ():
+            if isinstance(ref, Mapping) and ref.get("ref") == event_ref:
+                return version
+    return None
+
+
 def _event_evidence_refs(event: Mapping[str, Any]) -> list[dict[str, Any]]:
     return [{"kind": "event", "ref": event["id"], "concept": None,
              "period_end": None, "accession": None}]
@@ -1674,6 +1779,18 @@ def apply_effect(
                               "the revision is a proposal for the human checkpoint"}
         from .model_forecast_driver import ForecastModelError, revise_assumptions
 
+        # Keyed on the event, because the judgement row is written after this
+        # and a crash in between would otherwise publish a second version of
+        # the same revision on the retry. The effect is idempotent instead of
+        # the ordering being made safe, which is the cheaper of the two: the
+        # note, the candidate and the proposal are already keyed this way.
+        already = revision_for_event(forecast_models, model_version, event["id"])
+        if already is not None:
+            return {"kind": "revise_forecast", "status": "duplicate",
+                    "model_version_ref": already["id"],
+                    "change_reason": already.get("change_reason"),
+                    "decision": already.get("decision"),
+                    "reason": "this event has already revised this model"}
         try:
             body = revise_assumptions(
                 model_version,
@@ -1753,6 +1870,7 @@ __all__ = [
     "publish_event_note",
     "recent_claims",
     "reflect",
+    "revision_for_event",
     "reflection_is_owed",
     "route_family_resolver",
     "validate_judge_output",

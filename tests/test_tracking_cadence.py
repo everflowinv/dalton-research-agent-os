@@ -11,13 +11,11 @@ from dalton_core.event_judgement import EventJudgementAuthority
 from dalton_core.metric_base import ACTIVE_COVERAGE_SPINE, STAGE_SPINE, metrics_for
 from dalton_core.research_event import ResearchEventAuthority, record_event
 from dalton_core.tracking_cadence import (
-    TRACKING_STAGE,
     TrackingCadenceAuthority,
     TrackingCadenceConflict,
     TrackingCadenceValidationError,
     active_coverage_metrics,
     due_sources,
-    enter_active_coverage,
     immediate_pull_sources,
     load_policy,
     next_due,
@@ -36,19 +34,20 @@ class PolicyTests(unittest.TestCase):
     def test_the_shipped_policy_names_every_source_the_owner_named(self):
         for source in ("yfinance", "sec", "alphaengine", "x-xreach", "sales-notes",
                        "guidepoint", "company-wiki", "employee-reviews",
-                       "gemini-web-search"):
+                       "gemini-web-search", "catalyst-calendar"):
             self.assertIn(source, self.policy["cadences"])
 
-    def test_prices_and_the_filing_calendar_are_fixed(self):
+    def test_prices_filings_and_the_catalyst_calendar_are_fixed(self):
         self.assertFalse(self.policy["cadences"]["yfinance"]["adjustable"])
         self.assertFalse(self.policy["cadences"]["sec"]["adjustable"])
+        self.assertFalse(self.policy["cadences"]["catalyst-calendar"]["adjustable"])
 
     def test_the_owner_baselines_are_what_the_plan_says(self):
         # AlphaEngine 2/day, X 2/day, sales notes twice a day, wiki and
         # Guidepoint weekly.
         self.assertEqual(self.policy["cadences"]["alphaengine"]["interval_seconds"], 43200)
         self.assertEqual(self.policy["cadences"]["x-xreach"]["interval_seconds"], 43200)
-        self.assertEqual(self.policy["cadences"]["sales-notes"]["interval_seconds"], 43200)
+        self.assertEqual(self.policy["cadences"]["sales-notes"]["interval_seconds"], 86400)
         self.assertEqual(self.policy["cadences"]["guidepoint"]["interval_seconds"], 604800)
         self.assertEqual(self.policy["cadences"]["company-wiki"]["interval_seconds"], 604800)
 
@@ -184,20 +183,34 @@ class MembershipTests(P14aHarness):
             screen_passed_companies(self.missions, self.mission), [ACN, EPAM]
         )
 
-    def test_the_stage_write_is_attempted_and_its_refusal_is_reported(self):
-        # The Playbook's stage ladder puts active_coverage behind the
-        # Investment Memo, which is a human checkpoint. Until
-        # coverage_mission.record_stage carries a carve-out for the resident
-        # tracking state, the write is refused and the refusal is a reported
-        # outcome rather than a swallowed exception.
+    def test_residency_survives_the_next_mission_version(self):
+        # A stage record binds the version it was written under, and a new
+        # version does not copy the old records forward. Reading only the
+        # current version would drop all four covered companies out of
+        # tracking on the day the owner published the grant that lets tracking
+        # write anything at all.
         self.pass_screen(ACN)
-        entries = enter_active_coverage(self.missions, self.mission)
-        self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0]["company_ref"], ACN)
-        self.assertIn(entries[0]["status"], {"fresh", "duplicate", "recorded", "refused"})
-        if entries[0]["status"] == "refused":
-            self.assertIn("investment_memo", entries[0]["reason"])
-        self.assertEqual(TRACKING_STAGE, "active_coverage")
+        first_version = self.mission["id"]
+        self.assertEqual(screen_passed_companies(self.missions, self.mission), [ACN])
+        self.grant("consensus_estimate")
+        self.assertNotEqual(self.mission["id"], first_version)
+        self.assertEqual(
+            [record["stage_ref"] for record
+             in self.missions.stage_records(self.mission["id"])],
+            [],
+            "the new version carries no stage records of its own",
+        )
+        self.assertEqual(screen_passed_companies(self.missions, self.mission), [ACN])
+
+    def test_no_stage_record_is_written(self):
+        # Owner decision 2026-09-09: resident tracking is not the Playbook's
+        # sixth research stage. Two different things, one name; this module
+        # writes no stage record.
+        self.pass_screen(ACN)
+        screen_passed_companies(self.missions, self.mission)
+        stages = {record["stage_ref"]
+                  for record in self.missions.stage_records(self.mission["id"])}
+        self.assertEqual(stages, {"initial_screen"})
 
 
 class SpineTests(P14aHarness):

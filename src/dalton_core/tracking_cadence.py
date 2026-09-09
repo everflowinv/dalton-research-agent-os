@@ -8,9 +8,16 @@ tracked every day, for as long as it is covered, whatever else the system is
 doing -- deep coverage of that company, the next company's screen, an ad-hoc
 research task.  Nothing the brain decides may switch tracking off, and no
 later stage exits it.  That is why membership is computed from one fact --
-*this company's Initial Screen passed* -- and not from a status field
-somebody could set: a resident property implemented as a mutable flag is a
-property that gets turned off by accident at 03:00.
+*this company's Initial Screen passed, under any version of this mission* --
+and not from a status field somebody could set: a resident property
+implemented as a mutable flag is a property that gets turned off by accident
+at 03:00.
+
+Resident tracking is deliberately **not** the Playbook's ``active_coverage``
+stage (owner decision, 2026-09-09).  That stage is the sixth step of a
+research process a company reaches after its Investment Memo; this is a
+standing state a company enters the day its screen passes.  They are two
+different things and this module writes no stage record at all.
 
 **The rate is a judgement.**  How often to pull AlphaEngine for a company with
 four documents is not a constant; it depends on how much is there.  So the
@@ -53,7 +60,6 @@ POLICY_PATH = (
 
 WRITE_SCOPE = "observation"
 FIRST_STAGE = "initial_screen"
-TRACKING_STAGE = "active_coverage"
 
 # Why a cadence version exists.  The same closed vocabulary ADR-0008 froze for
 # every other output-class authority; ``driver_event`` is what an abnormal move
@@ -195,78 +201,37 @@ def baseline_cadences(policy: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
 def screen_passed_companies(
     missions: Any, mission: Mapping[str, Any]
 ) -> list[str]:
-    """Every company whose Initial Screen has passed under this mission version.
+    """Every company whose Initial Screen has passed, under *any* version.
 
-    This is the whole membership rule and it is deliberately monotone: no
-    later stage, no research task and no judgement decision can remove a
-    company from it, because the owner's instruction is that tracking is
-    resident once the screen has passed.  A company only leaves by leaving the
+    Across every version of the same mission, not the current one, and that is
+    the whole of what makes residency real.  A stage record binds the mission
+    version it was written under; publishing a new version does not copy the
+    old records forward, so the four companies that passed under v13 would
+    read as unpassed the moment v14 exists -- and every one of them would fall
+    out of tracking on the day the owner granted the scope that lets tracking
+    write anything.  The document checklist found the same shape and counts
+    the same way.
+
+    Deliberately monotone otherwise: no later stage, no research task and no
+    judgement decision removes a company.  A company leaves by leaving the
     mission universe, which is a human act.
     """
 
-    passed: list[str] = []
-    for record in missions.stage_records(mission["id"]):
-        if (
-            record["stage_ref"] == FIRST_STAGE
-            and record["status"] == "gate_passed"
-            and record["company_ref"] not in passed
-        ):
-            passed.append(record["company_ref"])
+    mission_ref = mission["mission_ref"]
+    try:
+        rows = missions.connection.execute(
+            "SELECT DISTINCT company_ref FROM coverage_mission_stage_records "
+            "WHERE stage_ref=? AND status='gate_passed' AND mission_version_ref IN "
+            "(SELECT mission_version_id FROM coverage_mission_versions WHERE mission_ref=?)",
+            (FIRST_STAGE, mission_ref),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        return []
+    passed = {row["company_ref"] for row in rows}
     universe = [member["company_ref"] for member in mission["universe"]]
     return [ref for ref in universe if ref in passed]
-
-
-def enter_active_coverage(
-    missions: Any, mission: Mapping[str, Any]
-) -> list[dict[str, Any]]:
-    """Write the ``active_coverage`` stage record for every screened company.
-
-    Uses the mission's own stage-record write path -- the one the Initial
-    Screen lane uses -- so there is one stage ledger and not two.
-
-    It can refuse, and the refusal is expected on a live Core today: the
-    authority's ladder requires the previous stage's gate before a stage may
-    be *entered*, and ``active_coverage`` sits behind the Investment Memo,
-    which is a human checkpoint.  The owner's instruction and the Playbook's
-    stage order disagree about what ``active_coverage`` means -- a resident
-    daily state versus the sixth research stage -- and resolving that is a
-    contract change in ``coverage_mission.record_stage``, which this slice is
-    not allowed to make and which the report names precisely.  So the write is
-    attempted every tick, idempotently, and its refusal is reported rather
-    than swallowed; membership (above) does not depend on it.
-    """
-
-    from .coverage_mission import CoverageMissionError
-
-    results: list[dict[str, Any]] = []
-    automation = mission["autonomy"]["automation_principal"]
-    for company_ref in screen_passed_companies(missions, mission):
-        try:
-            record = missions.record_stage(
-                mission_version_ref=mission["id"],
-                mission_version_hash=mission["content_hash"],
-                company_ref=company_ref,
-                stage_ref=TRACKING_STAGE,
-                status="entered",
-                evidence_refs=[mission["id"]],
-                rationale=(
-                    "P14a：Initial Screen 过闸，按 owner 指令默认进入每日跟踪；"
-                    "这是常驻状态，不因为其他阶段的工作而退出。"
-                ),
-                actor_ref=automation,
-                idempotency_key=f"{mission['id']}:{company_ref}:{TRACKING_STAGE}:entered",
-            )
-            results.append({
-                "company_ref": company_ref,
-                "status": record.get("status_marker", "recorded"),
-            })
-        except CoverageMissionError as exc:
-            results.append({
-                "company_ref": company_ref,
-                "status": "refused",
-                "reason": f"{type(exc).__name__}: {exc}",
-            })
-    return results
 
 
 def active_coverage_metrics(events: Any, judgements: Any, company_ref: str) -> dict[str, int]:
@@ -607,7 +572,6 @@ __all__ = [
     "FIRST_STAGE",
     "POLICY_PATH",
     "SCHEMA_VERSION",
-    "TRACKING_STAGE",
     "TrackingCadenceAuthority",
     "TrackingCadenceConflict",
     "TrackingCadenceError",
@@ -617,7 +581,6 @@ __all__ = [
     "baseline_cadences",
     "cadence_ref_for",
     "due_sources",
-    "enter_active_coverage",
     "immediate_pull_sources",
     "load_policy",
     "next_due",

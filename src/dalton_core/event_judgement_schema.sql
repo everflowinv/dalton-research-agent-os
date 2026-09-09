@@ -127,3 +127,40 @@ CREATE TRIGGER IF NOT EXISTS thesis_reflections_no_delete
 BEFORE DELETE ON thesis_reflections BEGIN
     SELECT RAISE(ABORT, 'thesis reflections are immutable');
 END;
+
+-- The pool's one book.
+--
+-- The judgement rows cannot be it: a refused judgement writes no row and its
+-- two calls were still paid for, and a reflection is a second pair of calls
+-- against the same judgement. Summing the judgements therefore under-reports
+-- the day by exactly the spend that a misbehaving model produces most of --
+-- which is the direction that matters, because that is the day the cap is
+-- there for. Every call outcome lands here, keyed by its WorkOrder so a
+-- replayed call is not counted twice.
+CREATE TABLE IF NOT EXISTS event_response_spend (
+    spend_id TEXT PRIMARY KEY,
+    day TEXT NOT NULL,
+    work_order_ref TEXT NOT NULL UNIQUE,
+    purpose TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    event_ref TEXT NOT NULL,
+    cost_micros INTEGER NOT NULL CHECK(cost_micros >= 0),
+    mission_version_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS event_response_spend_by_day
+ON event_response_spend(day);
+
+CREATE TRIGGER IF NOT EXISTS event_response_spend_insert_guard
+BEFORE INSERT ON event_response_spend WHEN dalton_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'event response spend insert requires DaltonStore');
+END;
+CREATE TRIGGER IF NOT EXISTS event_response_spend_no_update
+BEFORE UPDATE ON event_response_spend BEGIN
+    SELECT RAISE(ABORT, 'event response spend is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS event_response_spend_no_delete
+BEFORE DELETE ON event_response_spend BEGIN
+    SELECT RAISE(ABORT, 'event response spend is immutable');
+END;

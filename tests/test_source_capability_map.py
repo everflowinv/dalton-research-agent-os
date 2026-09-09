@@ -39,13 +39,16 @@ class TableTests(unittest.TestCase):
         with self.assertRaises(SourceCapabilityError):
             sources_for("vibes")
 
-    def test_the_owner_named_sources_are_declared_before_they_are_merged(self):
-        # The S1 / S3 connectors are on other branches. A map that only knew
-        # what was already merged could not be used to plan for what is coming.
-        for slug in ("sales-notes", "company-wiki", "employee-reviews"):
-            entry = capability(slug)
-            self.assertFalse(entry["in_inventory"])
-            self.assertTrue(entry["content_kinds"])
+    def test_a_source_still_on_another_branch_is_declared_and_marked(self):
+        # A map that only knew what had merged could not be used to plan for
+        # what is arriving. S1's two connectors have since landed; S3's
+        # employee reviews have not, and the flag says which is which.
+        for slug in ("sales-notes", "company-wiki"):
+            self.assertTrue(capability(slug)["in_inventory"], slug)
+        pending = capability("employee-reviews")
+        self.assertFalse(pending["in_inventory"])
+        self.assertTrue(pending["content_kinds"])
+        self.assertTrue(capability("catalyst-calendar")["content_kinds"])
 
     def test_a_merged_connector_carries_its_inventory_facts(self):
         entry = capability("alphaengine")

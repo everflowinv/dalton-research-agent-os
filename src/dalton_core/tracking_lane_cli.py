@@ -25,6 +25,7 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .coverage_mission import CoverageMissionAuthority
@@ -50,7 +51,6 @@ from .tracking_cadence import (
     TrackingCadenceAuthority,
     TrackingCadenceError,
     due_sources,
-    enter_active_coverage,
     load_policy,
     screen_passed_companies,
 )
@@ -143,8 +143,14 @@ def thesis_stances(
         theses = company_theses(store.connection, company_ref)
         if not theses:
             continue
+        # The newest, by the time it was admitted rather than by version id:
+        # company_theses returns oldest first for exactly this reason, because
+        # a version id is a hash and hash order is not time order.
         own = [row for row in theses if row.get("subject_ref") == company_ref]
-        chosen = (own or theses)[-1]
+        chosen = max(
+            (own or theses),
+            key=lambda row: (str(row.get("created_at") or ""), row["ref"]),
+        )
         stances[company_ref] = {
             "thesis_ref": chosen["ref"],
             "stance": overrides.get(chosen.get("thesis_ref") or "", default)
@@ -215,6 +221,30 @@ def company_events(
     return candidates
 
 
+def round_robin(
+    by_company: Mapping[str, Sequence[Mapping[str, Any]]], *, order: Sequence[str]
+) -> list[dict[str, Any]]:
+    """One candidate from each company in turn, until they are all spent.
+
+    The interleave is the whole of the fairness guarantee. Concatenating the
+    per-company lists puts the first company's hundred candidates in front of
+    the fifth company's two, and any cap at all then starves the tail.
+    """
+
+    queues = {ref: list(by_company.get(ref, ())) for ref in order}
+    result: list[dict[str, Any]] = []
+    index = 0
+    while any(queues.values()):
+        for ref in order:
+            queue = queues[ref]
+            if index < len(queue):
+                result.append(dict(queue[index]))
+        if not any(index < len(queue) for queue in queues.values()):
+            break
+        index += 1
+    return result
+
+
 def run_tracking(
     *,
     state_dir: Path,
@@ -237,7 +267,6 @@ def run_tracking(
         "tracking_status": None,
         "policy_ref": None,
         "tracked_companies": [],
-        "stage_entries": [],
         "events_recorded": 0,
         "events_duplicate": 0,
         "events_by_kind": {},
@@ -280,27 +309,40 @@ def run_tracking(
             summary.update({"status": "idle", "tracking_status": "nothing_tracked"})
             return summary
 
-        summary["stage_entries"] = enter_active_coverage(missions, mission)
-
         events = ResearchEventAuthority(store)
         cadences = TrackingCadenceAuthority(store)
         prices = MarketPriceSeriesAuthority(store)
         actor = mission["autonomy"]["automation_principal"]
 
-        candidates = price_events(prices, mission, policy, tracked=tracked)
-        candidates.extend(divergence_events(
+        by_company: dict[str, list[dict[str, Any]]] = {ref: [] for ref in tracked}
+        for candidate in price_events(prices, mission, policy, tracked=tracked):
+            by_company[candidate["company_ref"]].append(candidate)
+        for candidate in divergence_events(
             store, prices, mission, policy, events, tracked=tracked, now=moment,
-        ))
+        ):
+            by_company[candidate["company_ref"]].append(candidate)
         for ref in tracked:
-            candidates.extend(
+            by_company[ref].extend(
                 company_events(store, mission, company_ref=ref, now=moment,
                                lookback_days=lookback_days)
             )
-        recorded = duplicated = 0
+        candidates = round_robin(by_company, order=tracked)
+
+        recorded = duplicated = previewed = 0
         by_kind: dict[str, int] = {}
-        for candidate in candidates[:max_events]:
+        for candidate in candidates:
+            # The cap counts what was *written*, not what was looked at, and
+            # the queue is interleaved by company. Both halves matter and the
+            # bug they prevent is the same one: ACN alone produces a hundred
+            # candidates a week, so a cap applied to candidates in universe
+            # order spends the whole run re-recognising ACN's duplicates and
+            # never reaches IBM -- while the lane reports a healthy run,
+            # because a duplicate is a success.
+            if recorded + previewed >= max_events:
+                break
             if dry_run:
                 by_kind[candidate["kind"]] = by_kind.get(candidate["kind"], 0) + 1
+                previewed += 1
                 continue
             result = record_event(
                 events,
@@ -393,6 +435,7 @@ __all__ = [
     "main",
     "missing_write_scopes",
     "price_events",
+    "round_robin",
     "run_tracking",
     "thesis_stances",
 ]

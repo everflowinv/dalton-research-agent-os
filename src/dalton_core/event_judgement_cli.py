@@ -49,6 +49,7 @@ from .mission_deliverable import MissionDeliverableAuthority
 from .model_configurations import register_model_config_name
 from .research_event import ResearchEventAuthority
 from .source_capability_map import build_map, prompt_table
+from .store import content_hash
 from .store import DaltonStore
 from .tracking_cadence import load_policy, screen_passed_companies
 
@@ -107,19 +108,74 @@ def unjudged_events(
     company_ref: str,
     limit: int,
 ) -> list[dict[str, Any]]:
-    """This company's newest events with no judgement, oldest of those first.
+    """This company's oldest events with no judgement.
 
-    Newest first from the ledger, then reversed: within one bounded batch the
-    older events are judged first, so a decision reads the ones before it in
-    the order they happened rather than backwards.
+    An anti-join in SQL rather than "read the newest N and filter": the filter
+    version reads a fixed window and, once that window is entirely judged,
+    returns nothing while older events sit unjudged for ever. Oldest first so
+    a decision reads the events before it in the order they happened, and so
+    the backlog drains from the end that is not moving.
     """
 
-    judged = judgements.judged_event_refs(company_ref)
-    rows = [
-        event for event in events.events(company_ref=company_ref, limit=limit * 8)
-        if event["id"] not in judged
-    ]
-    return list(reversed(rows[: limit * 8]))[-limit:] if rows else []
+    rows = events.connection.execute(
+        "SELECT e.event_id AS event_id FROM research_events e "
+        "LEFT JOIN event_judgements j ON j.event_ref = e.event_id "
+        "WHERE e.company_ref = ? AND j.event_ref IS NULL "
+        "ORDER BY e.occurred_at ASC, e.event_id ASC LIMIT ?",
+        (company_ref, max(1, int(limit))),
+    ).fetchall()
+    return [events.event(row["event_id"]) for row in rows]
+
+
+def config_fingerprint(*paths: Path | None) -> str:
+    """A short hash of the model configurations this run is using.
+
+    Folded into every ``request_id`` because a cockpit WorkOrder is content
+    addressed on (purpose, request_id, mission version, prompt) and *not* on
+    the configuration that answered it. Without this, a run made under a
+    misconfigured verifier poisons every event it touched: the configuration
+    is fixed, the request is identical, and the scheduler replays the old
+    result -- including its old route -- for ever. With it, fixing the
+    configuration is a different request and the events become retryable.
+    """
+
+    material = []
+    for path in paths:
+        if path is None:
+            material.append(None)
+            continue
+        try:
+            material.append(Path(path).expanduser().read_text(encoding="utf-8"))
+        except OSError:
+            material.append(str(path))
+    return content_hash({"configs": material})[:8]
+
+
+def same_routing_policy(judge: Path | None, verifier: Path | None) -> str | None:
+    """The cheap pre-check: two configurations that route the same way.
+
+    Catches the misconfiguration that actually happens -- somebody copies the
+    judge's file to the verifier's name -- before a single call is paid for.
+    It is not the guarantee; the guarantee is the family check on the route
+    the broker took. It is the difference between finding out for nothing and
+    finding out for the price of a pair of calls.
+    """
+
+    if judge is None or verifier is None:
+        return None
+    try:
+        left = json.loads(Path(judge).expanduser().read_text(encoding="utf-8"))
+        right = json.loads(Path(verifier).expanduser().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if left == right:
+        return "the judge and verifier configurations are the same file"
+    if left.get("routing_policy_ref") == right.get("routing_policy_ref"):
+        return (
+            "the judge and verifier configurations name the same routing policy "
+            f"({left.get('routing_policy_ref')}), so both calls select the same model"
+        )
+    return None
 
 
 def _model(config_path: Path | None, state_dir: Path, scheduler_db: Path | None) -> Any:
@@ -211,6 +267,7 @@ def run_judgement(
         "refused": 0,
         "decisions": {},
         "actions": {},
+        "config_fingerprint": None,
         "reflections": 0,
         "reflections_refused": 0,
         "followups": [],
@@ -243,7 +300,8 @@ def run_judgement(
         tracked = screen_passed_companies(missions, mission)
         if company_ref is not None:
             tracked = [ref for ref in tracked if ref == company_ref]
-        state = pool_state(judgements, mission, day=moment.date().isoformat())
+        day = moment.date().isoformat()
+        state = pool_state(judgements, mission, day=day)
         summary["pool"] = state
 
         batch: list[dict[str, Any]] = []
@@ -271,6 +329,18 @@ def run_judgement(
                                   "verifier configuration; it will not run on one",
             })
             return summary
+        # Before anything is paid for. The route-level family check is the
+        # guarantee, but it costs a pair of calls to reach; this costs a file
+        # read and catches the misconfiguration that actually happens.
+        shared = same_routing_policy(judge_model_config, verifier_model_config)
+        if shared is not None:
+            summary.update({
+                "status": "idle", "judgement_status": "gated:same_family",
+                "failure_reason": shared,
+            })
+            return summary
+        fingerprint = config_fingerprint(judge_model_config, verifier_model_config)
+        summary["config_fingerprint"] = fingerprint
         if family_resolver is None:
             config = json.loads(
                 Path(judge_model_config).expanduser().read_text(encoding="utf-8")
@@ -308,16 +378,23 @@ def run_judgement(
                 recent_events=events.events(company_ref=event["company_ref"], limit=40),
                 source_keys=() if policy is None else sorted(policy["cadences"]),
             )
-            request_id = event["id"].split(":", 1)[-1][:32]
+            request_id = f"{fingerprint}{event['id'].split(':', 1)[-1]}"[:32]
             decided = judge(
                 context, model=judge_model, mission=mission, request_id=request_id
             )
             checked = verify(
                 context, decided, model=verifier_model, mission=mission,
-                request_id=f"v{request_id}"[:32], family_resolver=family_resolver,
+                request_id=f"v{request_id}"[:31], family_resolver=family_resolver,
             )
-            spent += int((decided.get("model") or {}).get("cost_micros") or 0)
-            spent += int((checked.get("model") or {}).get("cost_micros") or 0)
+            spent += judgements.record_spend(
+                call=decided.get("model"), purpose="event_judgement",
+                outcome=decided["status"], event_ref=event["id"], mission=mission, day=day,
+            )
+            spent += judgements.record_spend(
+                call=checked.get("model"), purpose="event_judgement",
+                outcome=f"verify:{checked['status']}", event_ref=event["id"],
+                mission=mission, day=day,
+            )
             if decided["status"] != "judged" or checked.get("verdict") != "pass":
                 summary["refused"] += 1
                 summary["effects"].append({
@@ -326,6 +403,13 @@ def run_judgement(
                     or "the verifier rejected the decision",
                     "findings": checked.get("findings") or [],
                 })
+                # A verifier that shares the producer's family will do so for
+                # every event in the batch. Stopping here costs one pair
+                # instead of eight, and the run says which half is wrong
+                # rather than reporting eight refusals nobody can act on.
+                if "model_family_not_independent" in str(checked.get("reason") or ""):
+                    summary["judgement_status"] = "gated:same_family"
+                    break
                 continue
             effect = apply_effect(
                 event=event, judgement=decided, context=context, mission=mission,
@@ -346,13 +430,21 @@ def run_judgement(
             reflection_ref = None
             if reflection_is_owed(event, decided):
                 thought = reflect(context, decided, model=judge_model,
-                                  mission=mission, request_id=f"f{request_id}"[:32])
+                                  mission=mission, request_id=f"f{request_id}"[:31])
                 reviewed = verify_reflection(
                     context, thought, model=verifier_model, mission=mission,
-                    request_id=f"fv{request_id}"[:32], family_resolver=family_resolver,
+                    request_id=f"fv{request_id}"[:30], family_resolver=family_resolver,
                 )
-                spent += int((thought.get("model") or {}).get("cost_micros") or 0)
-                spent += int((reviewed.get("model") or {}).get("cost_micros") or 0)
+                spent += judgements.record_spend(
+                    call=thought.get("model"), purpose="thesis_reflection",
+                    outcome=thought["status"], event_ref=event["id"], mission=mission,
+                    day=day,
+                )
+                spent += judgements.record_spend(
+                    call=reviewed.get("model"), purpose="thesis_reflection",
+                    outcome=f"verify:{reviewed['status']}", event_ref=event["id"],
+                    mission=mission, day=day,
+                )
                 if thought["status"] == "reflected" and reviewed.get("verdict") == "pass":
                     recorded = judgements.record_reflection(
                         judgement=written, event=event, reflection=thought,
@@ -492,6 +584,8 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
 
 __all__ = [
     "JUDGE_MODEL_CONFIG",
+    "config_fingerprint",
+    "same_routing_policy",
     "MAX_COST_USD",
     "MAX_EVENTS_PER_COMPANY",
     "MAX_EVENTS_PER_RUN",

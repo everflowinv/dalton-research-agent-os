@@ -80,7 +80,6 @@ class MissionTrackingLaneCoordinator:
             "tracked_companies": summary.get("tracked_companies"),
             "events_recorded": summary.get("events_recorded"),
             "events_by_kind": summary.get("events_by_kind"),
-            "stage_entries": summary.get("stage_entries"),
         }
         reason = summary.get("failure_reason")
         if reason:
@@ -171,7 +170,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_mission_tracking",
-    order=87,
+    order=86,
     driver_key="mission_tracking",
     handler=dispatch,
     init_kwarg=LAUNCHER_KWARG,
@@ -179,9 +178,10 @@ LANE = register_lane(LaneSpec(
     launcher_factory=build_launcher,
     argv_fragment=argv_fragment,
     note="P14a: daily tracking for every company past its Initial Screen. Runs "
-         "after the price lane (85) because an abnormal move is read off the "
-         "bars that lane just published, and before the judgement lane (115) "
-         "which reads what this one records.",
+         "at 86, after the price lane (85) because an abnormal move is read "
+         "off the bars that lane just published, and before the judgement "
+         "lane, which reads what this one records. 87 is C1's catalyst "
+         "calendar.",
 ))
 
 

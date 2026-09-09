@@ -26,6 +26,7 @@ from dalton_core.event_judgement import (
     pool_state,
     reflect,
     reflection_is_owed,
+    revision_for_event,
     validate_judge_output,
     validate_reflection_output,
     validate_verifier_output,
@@ -417,19 +418,64 @@ class LedgerTests(JudgementHarness):
         prompt = build_judge_prompt(self.context())
         self.assertIn("NO_CHANGE / no_change", prompt)
 
-    def test_the_pool_is_the_ledger_summed(self):
+    def test_the_pool_reads_the_spend_ledger(self):
         state = pool(self.mission)
         self.assertEqual(state["pool"], POOL_NAME)
         _context, judged = self.judged()
-        written = self.judgements.record(
-            event=self.event, judgement=judged, verification=self.verified(judged),
-            effect={"kind": "no_change", "status": "recorded"},
-            mission=self.mission, actor_ref=AUTOMATION,
+        checked = self.verified(judged)
+        self.judgements.record_spend(
+            call=judged["model"], purpose="event_judgement", outcome="judged",
+            event_ref=self.event["id"], mission=self.mission, day="2026-09-09",
         )
-        day = written["created_at"][:10]
-        after = pool_state(self.judgements, self.mission, day=day)
+        self.judgements.record_spend(
+            call=checked["model"], purpose="event_judgement", outcome="verify:verified",
+            event_ref=self.event["id"], mission=self.mission, day="2026-09-09",
+        )
+        after = pool_state(self.judgements, self.mission, day="2026-09-09")
         self.assertEqual(after["spent_micros"], 40_000)
         self.assertEqual(after["remaining_micros"], after["cap_micros"] - 40_000)
+
+    def test_a_refused_pair_is_still_spend(self):
+        # It writes no judgement row and it was still paid for; summing the
+        # judgements would under-report exactly the day the cap exists for.
+        context = self.context()
+        refused = judge(context, model=FakeModel(["not json"]), mission=self.mission,
+                        request_id="r9")
+        self.assertEqual(refused["status"], "refused")
+        self.judgements.record_spend(
+            call=refused["model"], purpose="event_judgement", outcome="refused",
+            event_ref=self.event["id"], mission=self.mission, day="2026-09-09",
+        )
+        self.assertEqual(self.judgements.judged_count(ACN), 0)
+        self.assertEqual(
+            pool_state(self.judgements, self.mission, day="2026-09-09")["spent_micros"],
+            20_000,
+        )
+
+    def test_a_replayed_call_is_booked_once(self):
+        _context, judged = self.judged()
+        first = self.judgements.record_spend(
+            call=judged["model"], purpose="event_judgement", outcome="judged",
+            event_ref=self.event["id"], mission=self.mission, day="2026-09-09",
+        )
+        second = self.judgements.record_spend(
+            call=judged["model"], purpose="event_judgement", outcome="judged",
+            event_ref=self.event["id"], mission=self.mission, day="2026-09-09",
+        )
+        self.assertEqual((first, second), (20_000, 0))
+        self.assertEqual(
+            pool_state(self.judgements, self.mission, day="2026-09-09")["spent_micros"],
+            20_000,
+        )
+
+    def test_a_call_that_never_happened_books_nothing(self):
+        self.assertEqual(
+            self.judgements.record_spend(
+                call=None, purpose="event_judgement", outcome="refused",
+                event_ref=self.event["id"], mission=self.mission, day="2026-09-09",
+            ),
+            0,
+        )
 
 
 class EffectTests(JudgementHarness):
@@ -1034,3 +1080,124 @@ class ReflectionLedgerTests(JudgementHarness):
             reflection_ref=recorded["id"],
         )
         self.assertEqual(candidate["reflection_ref"], recorded["id"])
+
+
+class ReferenceAndFailClosedTests(JudgementHarness):
+    """Nits with teeth: what counts as a ref, and what happens with no policy."""
+
+    def test_a_payload_value_that_merely_contains_a_colon_is_not_a_ref(self):
+        event = record_event(
+            self.events, company_ref=ACN, kind="rating_change",
+            occurred_at="2026-09-08T00:00:00+00:00",
+            source_refs=["source:alphaengine", "alphaengine-doc:7"],
+            payload={"document_ref": "alphaengine-doc:7",
+                     "source_ref": "source:alphaengine", "broker": "Wolfe",
+                     "from_rating": "outperform", "to_rating": "peer perform: cut",
+                     "price_target": "310"},
+            mission=self.mission, actor_ref=AUTOMATION,
+        )
+        context = build_context(
+            event=event, mission=self.mission, connection=self.store.connection,
+            judgements=self.judgements, source_table="t",
+        )
+        refs = allowed_refs(context)
+        self.assertIn("alphaengine-doc:7", refs)
+        self.assertNotIn("peer perform: cut", refs)
+        self.assertNotIn("Wolfe", refs)
+
+    def test_a_tracking_follow_up_is_refused_when_no_policy_was_loaded(self):
+        # Fail closed: an unverifiable proposal is not a safer proposal.
+        context = build_context(
+            event=self.event, mission=self.mission, connection=self.store.connection,
+            judgements=self.judgements, source_table="t", source_keys=(),
+        )
+        with self.assertRaises(EventJudgementValidationError) as caught:
+            validate_reflection_output({
+                "thesis_refs": [], "what_we_expected": "a", "what_happened": "b",
+                "why": "c", "citations": [self.event["id"]], "missed_debates": [],
+                "followup_tracking": [{"source_key": "alphaengine",
+                                       "interval_seconds": 3600, "because": "b"}],
+                "followup_research": [],
+                "market_view_vs_ours": {"available": False, "our_direction": "long",
+                                        "summary": "nothing held", "refs": []},
+                "convergence_pathway": "d",
+            }, context)
+        self.assertIn("cannot be checked without", str(caught.exception))
+
+    def test_an_unresolvable_producer_family_costs_no_verifier_call(self):
+        context = self.context()
+        judged = judge(context, model=FakeModel([decision()]), mission=self.mission,
+                       request_id="r1")
+        verifier = FakeModel([PASS], route=VERIFIER_ROUTE)
+        checked = verify(context, judged, model=verifier, mission=self.mission,
+                         request_id="v1", family_resolver=resolver({}))
+        self.assertEqual(checked["status"], "refused")
+        self.assertEqual(verifier.prompts, [], "the verifier was never called")
+
+
+class RevisionIdempotencyTests(JudgementHarness):
+    """S1: an effect that runs before the judgement row must be replayable."""
+
+    def setUp(self):
+        super().setUp()
+        from tests.test_model_forecast_driver import model as forecast_body
+
+        self.models = ForecastModelAuthority(self.store)
+        self.model_version = self.models.publish(forecast_body())
+        self.grant("forecast_line")
+
+    def a_change(self):
+        drivers = model_drivers(self.model_version)
+        driver = next(row for row in drivers if row["assumptions"])
+        return {"driver_ref": driver["ref"],
+                "period_end": driver["assumptions"][0]["period_end"],
+                "value": "0.02", "because": "A contract win the trailing average "
+                                            "cannot know about."}
+
+    def judged_revision(self):
+        change = self.a_change()
+        context = build_context(
+            event=self.event, mission=self.mission, connection=self.store.connection,
+            judgements=self.judgements, source_table="t",
+            model_version=self.model_version,
+        )
+        judged = validate_judge_output(decision(
+            action="revise_forecast", word="THESIS_WEAKENED",
+            driver_refs=[change["driver_ref"]], citations=[self.event["id"]],
+            forecast_change=change,
+        ), context)
+        return context, judged
+
+    def apply(self, context, judged):
+        return apply_effect(
+            event=self.event, judgement=judged, context=context, mission=self.mission,
+            playbook=self.playbook, deliverables=None, forecast_models=self.models,
+            model_version=self.models.latest(ACN), research_admitter=None,
+            actor_ref=AUTOMATION,
+        )
+
+    def test_the_same_event_never_publishes_two_forecast_versions(self):
+        context, judged = self.judged_revision()
+        first = self.apply(context, judged)
+        self.assertEqual(first["status"], "fresh")
+        # The crash: the version was published and the judgement row was not
+        # written, so the next run judges the event again.
+        second = self.apply(context, judged)
+        self.assertEqual(second["status"], "duplicate")
+        self.assertEqual(second["model_version_ref"], first["model_version_ref"])
+        self.assertEqual(len(self.models.versions(ACN)), 2)
+
+    def test_a_different_event_may_still_revise_the_same_model(self):
+        context, judged = self.judged_revision()
+        self.apply(context, judged)
+        other = record_event(
+            self.events, company_ref=ACN, kind="news",
+            occurred_at="2026-09-10T00:00:00+00:00",
+            source_refs=["source:alphaengine", "alphaengine-doc:2"],
+            payload={"document_ref": "alphaengine-doc:2",
+                     "source_ref": "source:alphaengine", "spec_ref": None,
+                     "discovery_ref": None, "title": None, "host": None},
+            mission=self.mission, actor_ref=AUTOMATION,
+        )
+        self.assertIsNone(revision_for_event(self.models, self.models.latest(ACN),
+                                             other["id"]))

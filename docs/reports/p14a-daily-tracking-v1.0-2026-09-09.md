@@ -1,19 +1,19 @@
 # P14a 每日跟踪、ResearchEvent 与事件判断 lane v1.0
 
-日期：2026-09-09
-分支：`p14a-daily-tracking`（worktree `~/Projects/dalton-p14a-daily-tracking-worktree`），基线 main `2fa5934`
+日期：2026-09-09（v1.1：过 review，修 B1/B2/B3 + S1–S5 + 四个 nit，已 `git merge main` 到 `7708d43`）
+分支：`p14a-daily-tracking`（worktree `~/Projects/dalton-p14a-daily-tracking-worktree`），基线 main `2fa5934`，已并入 main `7708d43`
 作者：P14a agent（Opus 5）
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md)「Daily tracking：Initial Screen 过闸后默认开启」与 owner 三批追加指令、[能力差距分析 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) §3 ④ / §5.2 P11d·P14a-c、ADR-0007 / ADR-0008、[P11a 市场层](p11a-market-layer-v1.0-2026-09-09.md)、[P13-M2 预测行](p13-m2-forecast-lines-v1.0-2026-09-09.md)、[P14e 专项研究](p14e-research-tasks-v1.0-2026-09-09.md)
 
 全量测试：
 
 ```
-Ran 2746 tests in 328.113s
+Ran 3099 tests in 280.353s
 
 OK (skipped=1)
 ```
 
-（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`；基线 main `2fa5934` 是 2,512，本片 +234。）
+（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`；合并 main `7708d43`（2,843）之后，本片 +256。）
 
 ---
 
@@ -41,6 +41,8 @@ Dalton 现在**每天都在看**：过闸的公司自动进入常驻跟踪，价
 | `lane_registry.py` | 改（两行） | `LANE_MODULES` |
 | `mission_deliverable.py` + `mission_deliverable_schema.sql` | 改（加法 + 一次窄迁移） | `DELIVERABLE_KINDS` 加 `event_note` |
 | `tests/test_mission_market_price_lane.py` | 改（一条断言） | 相邻断言改成序关系（见 §9） |
+
+lane order：跟踪 **86**（价格 85 之后；87 留给 C1 的催化剂日历），判断 **116**（Initial Screen 110 之后，feed lane 120/130 与 research task 150 之前）。
 
 **没有碰**：`writer_server.py`、`coverage_mission.py`（及其 schema）、`bounded_planner_driver.py`、`macos_launchagent.py`、`install.sh`、cockpit 两个文件、`PROJECT_STATUS.md`、`tests/test_service.py`、`tests/test_lane_registry.py`。
 
@@ -130,11 +132,12 @@ Dalton 现在**每天都在看**：过闸的公司自动进入常驻跟踪，价
 | `sec` | 24 小时 | ❌ | 8-K 与财报日历每天查，没人去找的 filing 是覆盖分析师唯一不能漏的事件 |
 | `alphaengine` | 12 小时 | ✅ | 每天 2 次；覆盖薄的公司应当被拉长到 2–3 天，同样四份文档搜十次是白花额度 |
 | `x-xreach` | 12 小时 | ✅ | 每天 2 次取街上的说法，经 web search 验证后才当事实读 |
-| `sales-notes` | 12 小时 | ✅ | 台里的 note 一天来两次，是「街上在吵什么」最早的一手，比后来登在研报上的同一个论点早 |
+| `sales-notes` | 24 小时 | ✅ | 按 owner 频率表是「每天」；note 本身一天来两次，一次日拉两条都能取到，拉两次是按比它变化更快的节奏读同一个文件 |
 | `gemini-web-search` | 12 小时 | ✅ | 通用源；crowd post 的验证路径与公司新闻的兜底 |
 | `guidepoint` | 7 天 | ✅ | 专家库周转慢、每次读贵 |
 | `company-wiki` | 7 天 | ✅ | 基金自己的档案，有人写才变 |
 | `employee-reviews` | 7 天 | ✅ | 招聘与士气按季度动 |
+| `catalyst-calendar` | 24 小时 | ❌ | C1 的 `CatalystCalendarVersion` 每天查，大脑不能放慢它：日期变了没人看，preview 就写到错的那一周去了 |
 
 **异动阈值**（`abnormal_move`，任一命中即触发）：绝对 3.0%、相对等权 basket 2.5%、相对 benchmark 3.0%，`min_basket_members: 3`，`benchmark_refs: ["company:benchmark:SPY"]`，回看 5 个已结算交易日。
 
@@ -184,7 +187,9 @@ Dalton 现在**每天都在看**：过闸的公司自动进入常驻跟踪，价
 
 ## 5. 常驻性（owner 第一批指令）
 
-- 成员判定 = 「该公司在当前 mission 版本下有一条 `initial_screen` `gate_passed`」，**单调**：进了 `deep_insight_gate`、开了专项研究、别的公司在做 Initial Screen，都不会把它移出去。唯一的离开方式是被移出 mission universe，那是人的动作。
+- 成员判定 = 「该公司在**这个 mission 的任意版本**下有一条 `initial_screen` `gate_passed`」，**单调**：进了 `deep_insight_gate`、开了专项研究、别的公司在做 Initial Screen，都不会把它移出去。唯一的离开方式是被移出 mission universe，那是人的动作。
+  - **跨版本是 review 抓出来的一个静默失效（B2）**：stage 记录绑它被写入的那一版，发新版本不会把旧记录复制过来。只读当前版本的话，owner 一发布「加 `market_event`」的那一版，四家过闸公司会在同一秒全部掉出跟踪，而 lane 会报告一切正常。现在按 `mission_ref` across all versions 查（文档清单早就是这么数的）。
+- **常驻跟踪不是 Playbook 的 `active_coverage` 阶段**（owner 裁决，2026-09-09）。那是公司走完 Investment Memo 之后才到的第六个研究阶段；这是 screen 过闸当天就进入的常驻状态。两件事，一个名字。本片**不写任何 stage 记录**，`enter_active_coverage` 已整个删除。
 - lane **没有选择器**：一个 child 扫全部被跟踪公司，不是一 tick 一家。测试 `test_every_tracked_company_is_scanned_on_every_run` 与 `test_tracking_is_resident_across_later_stage_work` 钉住这两条。
 - 基线拉取不由判断层裁量：判断层只能提 `TrackingCadenceVersion`（改**值**），policy 标 fixed 的源连值都改不了。
 
@@ -222,6 +227,33 @@ if not due["due"]:
 
 ---
 
+## 6.5 review 修的三个静默失效
+
+三个都属于同一类：**lane 报告健康，实际什么都没在做**。
+
+**B1 — 每次运行的上限按候选切片，按 universe 顺序，于是除第一家外全部饿死。** 旧代码 `candidates[:120]` 在幂等检查**之前**切，而候选按公司顺序拼接：ACN 一周产出一百多条，每次运行都被它自己的重复项吃满配额，IBM / DXC 一条事件都拿不到——而 lane 报的是成功，因为 duplicate 是成功。修法两半，缺一不可：候选按公司**轮转交错**（`round_robin`），上限只数**真正写下去的**条数。回归测试：三家各四条、上限 6，结果是 2/2/2 而不是 6/0/0；第二次运行再拿到剩下的 6 条而不是重新认一遍重复项；一家有 20 条时另两家仍各拿到 1 条。
+
+**B2 — 常驻性在下一版 mission 上死掉。** 见 §5。测试跑两个版本，并断言新版本自己一条 stage 记录都没有。
+
+**B3 — 配错 family 会把事件永久毒死。** cockpit 的 WorkOrder 按 (purpose, request_id, mission version, prompt) 内容寻址，**不含模型配置**；所以一次在错配置下跑过的事件，即使配置修好了，请求逐字节相同，scheduler 会永远重放旧结果（连同旧 route）。三层修法：
+1. **付钱之前的便宜检查**：两份配置逐字节相同、或指向同一个 `routing_policy_ref` → 整轮 `gated:same_family`，一次调用都不发（这正是实际会发生的错法：有人把 judge 的文件复制成 verifier 的名字）；
+2. **第一对调用之后的真检查**：route 上读出的两个 family 相同 → 整轮 `gated:same_family` 并 break，代价是一对而不是八对；
+3. **`request_id` 里折进一个 8 位配置指纹**：配置改了就是另一个请求，事件重新可试。
+
+## 6.6 review 修的五个次级问题与四个 nit
+
+| 编号 | 问题 | 修法 |
+| --- | --- | --- |
+| S1 | 效果先于判决落库，崩溃会重复发布一版 `ForecastModelVersion` | `revise_forecast` 按事件 ref 幂等（`revision_for_event` 扫版本链找 `change_reason=driver_event` 且 `evidence_refs` 含本事件的那一版）。note / research / candidate / proposal 本来就按 ref 或 judgement_ref 幂等，所以现在**六个动作全部可重放** |
+| S2 | 池只数判决行，漏掉被拒的那一对与反思的那一对 | 新建 `event_response_spend` 一张账（按 `work_order_ref` 唯一，重放不重复计），每次调用无论结果都记；`day_cost_micros` 只读它。**仍然只有一本账** |
+| S3 | 未判定事件用「读最新 N 再过滤」，窗口全判完之后就永远返回空 | 改成 SQL anti-join、**oldest first**、不要 `limit*8` 窗口 |
+| S4 | 背离方向选的 thesis 按 ref（哈希）排序取最后一个 | `company_theses` 按 `created_at, version_id` 升序返回，选择器按 `created_at` 取最新 |
+| S5 | emitter 的 `LIMIT 60` 是 newest-first，超出的旧事件永远够不到 | 三个 emitter 都改成 lookback 窗口内 **oldest first**：写过的下次是 duplicate 只花一次查表，所以每次运行都单调推进，窗口被走完而不是被撇一层 |
+| nit | `allowed_refs` 把任何含冒号的 payload 值当成可引用 ref | 改成具名字段集合 `REF_PAYLOAD_FIELDS`；`"peer perform: cut"` 不再是 ref |
+| nit | 没有 policy 时 follow-up 的 `source_key` 检查被跳过 | fail closed：没有 source keys 就拒绝，而不是接受一个无法核验的提案 |
+| nit | 独立性在**付过** verifier 的钱之后才检查 | producer family 解析不出来就在调用之前拒绝（测试断言 verifier 一次都没被调用） |
+| nit | sales-notes 基线 12h 与计划的「每天」不符；日历没有自己的 key | sales-notes → 86400；新增 `catalyst-calendar` key（86400，fixed），能力表里也加了一条 |
+
 ## 7. owner 需要做的事
 
 1. **发一版 mission，`autonomy.may_write` 加 `market_event`。** live 第 13 版有 `observation`、`deliverable`、`forecast_line`、`stage_record`，缺 `market_event`——跟踪 lane 每 tick 返回 `ungranted`、一个事件都不写（冒烟已实测，见 §8）。这是本片**唯一必须**的授权。
@@ -240,7 +272,7 @@ if not due["due"]:
 
 ```
 mission     : coverage-mission-version:us-it-services:13
-policy      : tracking-policy:p14a:v1 (34411714c04c)
+policy      : tracking-policy:p14a:v1 (dc6b69166a63)
 universe    : 5 companies
 tracked     : 4 with a passed Initial Screen
   market_event     NOT GRANTED — the lane would be idle
@@ -250,35 +282,35 @@ tracked     : 4 with a passed Initial Screen
 price days  : none — this Core holds no MarketPriceSeriesVersion, so neither the
               abnormal-move nor the divergence emitter would record anything
 
-ACN   company:sec-cik:0001467373: 103 events {'news': 42, 'filing': 1, 'claim': 60}
-EPAM  company:sec-cik:0001352010:  94 events {'news': 34, 'claim': 60}
-IBM   company:sec-cik:0000051143:  97 events {'news': 37, 'claim': 60}
-DXC   company:sec-cik:001688568 :  92 events {'news': 31, 'filing': 1, 'claim': 60}
+ACN   company:sec-cik:0001467373:  84 events {'transcript': 4, 'news': 20, 'claim': 60}
+EPAM  company:sec-cik:0001352010:  54 events {'transcript': 16, 'claim': 38}
+IBM   company:sec-cik:0000051143: 105 events {'transcript': 16, 'news': 29, 'claim': 60}
+DXC   company:sec-cik:001688568 : 104 events {'transcript': 5, 'news': 39, 'claim': 60}
 
-total       : 386 events over the last 7 days
-judgement   : 386 bounded calls at $0.10 a pair would cost $38.60; the
+total       : 347 events over the last 7 days
+judgement   : 347 bounded calls at $0.10 a pair would cost $34.70; the
               event_response pool is $15.00 a day
 ```
 
 读法：
 
-- **过闸四家（ACN / EPAM / IBM / DXC）自动进入跟踪，CTSH 不在**——它的 Initial Screen 还是 `entered`。这正是「过闸后默认开启」。
+- **过闸四家（ACN / EPAM / IBM / DXC）自动进入跟踪，CTSH 不在**——它的 Initial Screen 还是 `entered`。这正是「过闸后默认开启」。合并 S1/S2 之后 `transcript` 事件开始出现（Guidepoint 与 AlphaEngine 的纪要都被分类到位）。
 - **价格事件是零，因为 live 上还没有一根 K 线**：P11a 的 lane 尚未在这台机器上跑过。异动与背离两条路径在这份 Core 上都不会产出任何东西，这是数据缺口不是逻辑缺口（隔离测试里两条路径都跑通）。
 - **`claim` 每家 60 条是扫描上限（`MAX_EVENTS_PER_SCAN`）而不是真实计数**，见开放问题 ①。
-- 386 条 × $0.10 > 一天 $15 的池：跟踪 lane 一次最多记 120 条、判断 lane 一次最多判 8 条（每公司 3 条），池耗尽时返回 `skipped:pool_exhausted`，积压量由 `metric:tracked-events-open` 可见。
+- 347 条 × $0.10 > 一天 $15 的池：跟踪 lane 一次最多**写下** 120 条（按公司轮转，见 §6.5 B1）、判断 lane 一次最多判 8 条（每公司 3 条，oldest first），池耗尽时返回 `skipped:pool_exhausted`，积压量由 `metric:tracked-events-open` 可见。
 
 ---
 
 ## 9. 集成时要接的线
 
-1. **lane 注册已完成**：`LANE_MODULES` 两行，`writer_server.py` / `bounded_planner_driver.py` / `macos_launchagent.py` 一字未动。新解释器里实跑验证过（`tests/test_mission_tracking_lane.py::RegistrationTests::test_a_fresh_interpreter_derives_the_lane_from_the_registry_alone`）。order：跟踪 87（价格 85 之后），判断 115（Initial Screen 110 之后）。P14e 的 120 不冲突。
+1. **lane 注册已完成**：`LANE_MODULES` 两行，`writer_server.py` / `bounded_planner_driver.py` / `macos_launchagent.py` 一字未动。新解释器里实跑验证过（`tests/test_mission_tracking_lane.py::RegistrationTests::test_a_fresh_interpreter_derives_the_lane_from_the_registry_alone`）。order：跟踪 **86**（价格 85 之后；87 让给 C1 的催化剂日历），判断 **116**（Initial Screen 110 之后）。合并 main `7708d43` 之后的全表：30 / 35 / 40 / 50 / 60 / 70 / 80 / 85 / **86** / 90 / 95 / 100 / 110 / **116** / 120 / 130 / 150，无重复。
 2. **`tests/test_mission_market_price_lane.py` 改了一条断言**：它原本断言价格 lane 的**下一条**是 model spec lane。P14a 的跟踪 lane 必须排在价格之后（异动是从那条 lane 刚发布的 K 线上读出来的），所以相邻断言改成了序关系断言，注释写清了原因。这是 P11a 的测试文件，不在我的禁改清单里，但集成时请确认这是可接受的改法。
 3. **`mission_deliverable` 的 CHECK 迁移**：`event_note` 进 `DELIVERABLE_KINDS` 需要同时放宽 schema 的 `CHECK(kind IN …)`，而 `CREATE TABLE IF NOT EXISTS` 对已存在的表什么都不做。`MissionDeliverableAuthority.__init__` 里加了一段窄迁移（照 `DaltonStore._migrate_thesis_authority_columns` 的写法，含 `PRAGMA foreign_key_check` 收尾），只在旧 CHECK 存在时重建。live 只有几条 deliverable，重建很小。**这是本片唯一动到既有表结构的地方，值得在 review 时单独看一眼。**
 4. **cockpit** 需要的字段（都是现成读者）：
    - 公司卡：`ResearchEventAuthority.counts(company)`、`events(company_ref=…, limit=…)`（kind / tier / occurred_at / payload），`EventJudgementAuthority.recent(company)`（decision / action / because）、`judged_count`、`reflections(company)`；`tracking_cadence.active_coverage_metrics(events, judgements, company)` 的三个数。
    - 待审批页：`thesis_candidates(company)` 与 `forecast_proposals(company)`，候选上的 `reflection_ref` 应当直接展开成反思正文——ADR-0007 的候选和「我们可能漏了什么」并排看才有意义。
    - lane 面板：`dispatch_mission_tracking` 与 `dispatch_event_judgement` 的 `status`（`launched`/`idle`/`busy`/`rejected`/`unconfigured`/`unavailable`）、`settled.tracking_status`（含 `ungranted`）、`settled.judgement_status`（含 `skipped:pool_exhausted`、`gated`）、`pool`。
-   - **`ungranted` 必须可见**：一条因为缺授权而永远沉默的 lane，看起来和一条健康的空闲 lane一模一样。
+   - **`ungranted` 必须可见**：一条因为缺授权而永远沉默的 lane，看起来和一条健康的空闲 lane一模一样。`gated:same_family` 同理——那是「两份配置指向同一个模型」，不修就永远判不了一条。
 5. **`install.sh`**：加一个种子块把 `deploy/phase9/p14a-tracking-policy-v1.json` 放到 `{state}/tracking-policy.json`，再加两个模型配置文件的生成（照 `initial-screen-model-config.json` 的写法，verifier 那份要指向不同 family 的 routing policy）。本片按分工没碰它。
 6. **P14e 已在 main（`e6c87b9`），本片基线在它之前**：`event_judgement_cli.research_admitter_for` 是按名字 import 的，合并后 `research` 决定会自动开始走 `plan_admissions` / `admit_inquiry`；合并前它返回 `queued` + 原因。两边都有测试。
 
@@ -301,7 +333,7 @@ judgement   : 386 bounded calls at $0.10 a pair would cost $38.60; the
 
 ## 11. 测试
 
-各文件项数：`test_research_event` 27、`test_market_event` 26、`test_tracking_cadence` 34、`test_source_capability_map` 15、`test_event_judgement` 75、`test_mission_tracking_lane` 26、`test_mission_event_judgement_lane` 31，合计 234。
+各文件项数：`test_research_event` 27、`test_market_event` 26、`test_tracking_cadence` 35、`test_source_capability_map` 15、`test_event_judgement` 83、`test_mission_tracking_lane` 30、`test_mission_event_judgement_lane` 40，合计 256。
 
 覆盖到的、指令逐条点名的：
 
@@ -314,15 +346,16 @@ judgement   : 386 bounded calls at $0.10 a pair would cost $38.60; the
 - **来源能力表**：每个声明的源至少一种内容；每个 tier 在冻结词表里；未知 slug 拒绝且报出已知集合；未知 content kind 拒绝；未合并的 S 线连接器标 `in_inventory: false` 但有内容；已合并的带 transport / operations / 额度；specific 源排在两个通用源前面；live mission 里每个 connected 源都映射到 ≥1 种内容；`source:web-search → source:public-web` 别名解析（否则会读成 undeclared）；投影哈希稳定。
 - **判断**：每条动作路径（no_change / note / research / revise_forecast / revise_thesis / revise_dossier）；每一种拒绝（多 key、少 key、第六个词、不兼容组合、未展示的引用、不存在的 driver、无引用的非 no_change、note 超四句、note 该有没有 / 不该有却有、散文）；verifier pass 与 reject；**同 family 拒绝**、**family 解析不出来拒绝**；verdict 绑定它读的那条决定；模型不可达是带理由的拒绝；**同一事件不判两次**（第二次返回第一次的记录、动作不变）；`revise_forecast` 真的发出一版 `change_reason=driver_event` + `decision` + 事件 ref 的 `ForecastModelVersion`（v2）；无授权时变成 `ForecastRevisionProposal`；候选形状（float confidence 被拒、无证据被拒、第六个词被拒）；note 走 deliverable 且带上它引用的 Claim、无来源数字被权威拒绝；research 按名字调 P14e 且缺席时 `queued`；池是账本求和、耗尽时 `skipped:pool_exhausted`。
 - **反思**（owner 第三批）：divergence 即使决定是 `no_change` 也欠一条；每个 `revise_*` 都欠一条；普通事件上的 note 不欠；封闭 schema 与整条拒绝；无引用被拒；`market_view_vs_ours` 声称 available 必须引用、声称不可得则不许引用；follow-up 点名没有基线的源被拒；反思的 verifier 遵守同一条 family 规则；同一判决第二条反思是 duplicate；**follow-up 只是候选**（跑完之后 `TrackingCadenceAuthority.latest(...)` 仍是 `None`）；候选带 `reflection_ref`；被拒的反思不落库、判决仍在；lane summary 里 `reflections` / `reflections_refused` / `followups` 三个字段。
+- **review 修的（§6.5 / §6.6）**：上限按写下的条数而不是候选数、按公司轮转、一家多候选不挤掉别家（B1）；跨 mission 版本的常驻性、新版本自身零 stage 记录、不写任何 stage 记录（B2）；同 routing policy 的两份配置零花费被拦、route family 相同时只赔一对就 break、配置指纹变了 / 不变（B3）；同一事件不发第二版预测、别的事件仍可改同一个模型（S1）；被拒的一对仍计入当日、重放只计一次、没发生的调用计零（S2）；anti-join 最旧优先、最新窗口全判完之后旧事件仍被取到（S3）；含冒号的 payload 值不是 ref、无 policy 时 follow-up 拒绝、producer family 解析不出来时 verifier 一次都没被调用（nit）。
 - **lane**：新解释器实跑推导（writer 三处 + driver tick 顺序 + 两条 lane 的相对位置）；policy 文件 = 开关；judge 与 verifier 缺一不成 lane；两个模型配置名都进了抬预算清单；同一窗口只起一个孩子、新窗口再起、上一个孩子在下一 tick 被结算；没有 mission 是 unconfigured 不是崩溃；选择器抛错不掀翻 tick；每次运行扫全部被跟踪公司；第二次运行零新增；summary 永远写。
 
 ---
 
 ## 12. 开放问题
 
-1. **每条 Claim 都值一次模型调用吗？** 冒烟显示 live 一周产出 ~240 条 `claim` 事件（每家扫描上限 60 条封顶，真实值可能更高）。现在的答案是：全部入账本，判断 lane 按每公司 3 条 / 每次 8 条 / 池 $15 的三重上限消化，积压由 `metric:tracked-events-open` 可见。两个可选的收窄，都需要 owner 定：(a) 只为**定量** Claim 发事件（live 2,170 条里只有 22 条定量），定性 Claim 由它所在文档的 `news` / `transcript` 事件代表；(b) 等 P12b 的 `importance` 落地后按重要性过滤。我倾向 (b)，因为 (a) 会漏掉「新签大单」这类定性但要命的 Claim。
+1. **每条 Claim 都值一次模型调用吗？** 冒烟显示 live 一周产出 ~218 条 `claim` 事件（每家扫描上限 60 条封顶，真实值更高）。现在的答案是：全部入账本，判断 lane 按每公司 3 条 / 每次 8 条 / 池 $15 的三重上限消化，积压由 `metric:tracked-events-open` 可见。S5 修完之后积压是**单调收敛**的（emitter 与选择器都最旧优先），但收敛得比事件产生得慢，所以这个问题仍然要答。两个可选的收窄，都需要 owner 定：(a) 只为**定量** Claim 发事件（live 2,170 条里只有 22 条定量），定性 Claim 由它所在文档的 `news` / `transcript` 事件代表；(b) 等 P12b 的 `importance` 落地后按重要性过滤。我倾向 (b)，因为 (a) 会漏掉「新签大单」这类定性但要命的 Claim。
 2. **阈值。** 3.0% / 2.5% / 3.0%（异动）与 10 日 6.0%（背离）是没有历史校准的第一版数字——live 上一根 K 线都还没有，无从校准。建议 P11a 的价格 lane 跑满三年历史之后，用五家的真实分布重标一次（比如取相对 basket 日收益的 2σ）。阈值在 policy 文件里，重标不用改码。
-3. **`active_coverage` 阶段记录写不进去。** Playbook 的阶段阶梯要求进入某一阶段前它的上一阶段已过闸，而 `active_coverage` 排在 Investment Memo 之后，后者是人类检查点。owner 说的「过闸后默认进入每日跟踪」和 Playbook 的「第六个研究阶段」是**两件事共用一个名字**。三条路，请 owner 选：(a) `coverage_mission.record_stage` 加一条窄豁免——`active_coverage` 的 `entered` 只要求 `initial_screen` `gate_passed`（四行 diff，但改的是冻结的阶段语义）；(b) 常驻跟踪不叫 `active_coverage`，另起一个不在 `STAGE_ORDER` 里的状态；(c) 维持现状——成员判定用「screen 过闸」这个事实（本片就是这么做的，lane 完全能跑），阶段记录等 memo 过闸后自然补上。本片选了 (c) 作为默认，并且每 tick 仍然尝试写、把拒绝原因如实报出来。
+3. ~~`active_coverage` 阶段记录写不进去。~~ **已裁决（2026-09-09）：常驻跟踪不是 Playbook 的 `active_coverage` 阶段。** 成员判定用「screen 过闸（任意 mission 版本）」这个事实，`enter_active_coverage` 整个删掉，本片不写任何 stage 记录。`STAGE_SPINE["active_coverage"]` 的三个数仍然是那个阶段的数，只是现在由两个账本回答；等哪天真有公司走到第六阶段，它们会同时是那个阶段的验收指标。
 4. **thesis 方向的默认值。** 「覆盖 thesis 默认是 long」对一家 long-biased 基金是对的，但一条「某二线厂商会被挤压」的 thesis 就是空头，而它今天会被读成多头、于是背离检测的方向反了。overrides 在 policy 里，owner 加一行即可；更好的解法是 thesis 对象本身带一个 `stance` 字段，那是 ADR-0001 的合同改动，本片不碰。
 5. **`market_view_vs_ours` 现在几乎总是 `available: false`。** 没有 consensus 权威（P11b 是 Wave 2）、没有评级变化事件（要 P11b 的研报抽取）、没有 sales note / X（S1 / S3 还在别的分支）。反思因此现在只能诚实地说「我们没有街上的看法可比」。这不是缺陷，是缺口的如实呈现；P11b 与 S 线合并后同一段 prompt 会自动变得有内容，无需改码。
 6. **`event_response` 池的口径是预留，不是结算。** 和 P14e 的 `adhoc` 池同一个开放问题：`ThesisImpactBudgetStore.admit` 按 `mission_ref` 分组、没有 pool 维度，所以实际结算的钱归不到池上。C2 应该给 `mission_binding` 加 `pool` 字段。本片的池账**从判决账本求和**（`cost_micros` 列），所以池和账本不可能各说各话，但它统计的是本 lane 自己的花费，不是全局。

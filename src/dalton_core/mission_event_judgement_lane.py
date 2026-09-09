@@ -205,7 +205,7 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_event_judgement",
-    order=115,
+    order=116,
     driver_key="event_judgement",
     handler=dispatch,
     init_kwarg=LAUNCHER_KWARG,
@@ -214,7 +214,7 @@ LANE = register_lane(LaneSpec(
     argv_fragment=argv_fragment,
     note="P14a: one bounded call per unjudged event -- what should change, "
          "why, and against which driver and thesis. Runs after the tracking "
-         "lane (87), which is where the events it reads come from, and after "
+         "lane (86), which is where the events it reads come from, and after "
          "the Initial Screen lane (110), because a company that has just "
          "passed its gate should be tracked before it is judged.",
 ))

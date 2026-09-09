@@ -10,8 +10,10 @@ from pathlib import Path
 from dalton_core.event_judgement import EventJudgementAuthority, pool_state
 from dalton_core.event_judgement_cli import (
     MAX_COST_USD,
+    config_fingerprint,
     missing_write_scopes,
     run_judgement,
+    same_routing_policy,
     unjudged_events,
 )
 from dalton_core.lane_child_launcher import LaneChildRejected
@@ -452,3 +454,158 @@ class ReflectionRunTests(P14aHarness):
         self.assertEqual(summary["judged"], 1)
         self.assertEqual(summary["reflections"], 0)
         self.assertEqual(summary["cost_micros"], 40_000)
+
+
+class SameFamilyGateTests(P14aHarness):
+    """B3: a misconfigured verifier must not poison every event it touches."""
+
+    def setUp(self):
+        super().setUp()
+        self.events = ResearchEventAuthority(self.store)
+        self.judgements = EventJudgementAuthority(self.store)
+        self.pass_screen(ACN)
+
+    def config(self, name, routing_policy, slot="slot:one"):
+        path = self.state_dir / name
+        path.write_text(json.dumps({
+            "routing_policy_ref": routing_policy,
+            "credential_slot_refs": [slot],
+            "model_router_db": "/tmp/router.sqlite",
+            "broker_socket": "/tmp/broker.sock",
+            "broker_auth_key": "/tmp/key", "broker_client_id": "dalton",
+            "expected_agent_id": "agent", "budget_db": "/tmp/budget.sqlite",
+            "budget_policy_ref": "policy:day",
+        }), encoding="utf-8")
+        return path
+
+    def event(self, document="alphaengine-doc:1"):
+        return record_event(
+            self.events, company_ref=ACN, kind="news",
+            occurred_at="2026-09-09T10:00:00+00:00",
+            source_refs=["source:alphaengine", document],
+            payload={"document_ref": document, "source_ref": "source:alphaengine",
+                     "spec_ref": None, "discovery_ref": None, "title": None,
+                     "host": None},
+            mission=self.mission, actor_ref=AUTOMATION,
+        )
+
+    def test_two_configurations_naming_one_routing_policy_are_caught_for_nothing(self):
+        judge_config = self.config("judge.json", "routing-policy:extraction:1")
+        verifier_config = self.config(
+            "verifier.json", "routing-policy:extraction:1", slot="slot:two")
+        self.assertIn("same routing policy",
+                      same_routing_policy(judge_config, verifier_config))
+        self.event()
+        judge_model = FakeModel([decision()], route=JUDGE_ROUTE)
+        summary = run_judgement(
+            state_dir=self.state_dir, summary_dir=self.state_dir / "judge",
+            policy_path=POLICY_PATH, now=NOW,
+            judge_model_config=judge_config, verifier_model_config=verifier_config,
+            judge_model=judge_model,
+            verifier_model=FakeModel([PASS], route=VERIFIER_ROUTE),
+            family_resolver=resolver(),
+        )
+        self.assertEqual(summary["judgement_status"], "gated:same_family")
+        self.assertEqual(judge_model.prompts, [], "nothing was paid for")
+
+    def test_two_different_policies_pass_the_cheap_check(self):
+        self.assertIsNone(same_routing_policy(
+            self.config("judge.json", "routing-policy:a:1"),
+            self.config("verifier.json", "routing-policy:b:1"),
+        ))
+
+    def test_the_run_stops_at_the_first_pair_when_the_route_families_match(self):
+        for index in range(4):
+            self.event(document=f"alphaengine-doc:{index}")
+        summary = run_judgement(
+            state_dir=self.state_dir, summary_dir=self.state_dir / "judge",
+            policy_path=POLICY_PATH, now=NOW,
+            judge_model=FakeModel([decision()] * 4, route=JUDGE_ROUTE),
+            verifier_model=FakeModel([PASS] * 4, route=VERIFIER_ROUTE),
+            family_resolver=resolver({JUDGE_ROUTE: "anthropic",
+                                      VERIFIER_ROUTE: "anthropic"}),
+        )
+        self.assertEqual(summary["judgement_status"], "gated:same_family")
+        self.assertEqual(summary["refused"], 1, "one pair, not four")
+        self.assertEqual(summary["judged"], 0)
+
+    def test_a_fixed_configuration_makes_the_event_retryable(self):
+        # The WorkOrder is content addressed on (purpose, request_id, mission,
+        # prompt) and not on the configuration, so without a fingerprint the
+        # scheduler would replay the poisoned result for ever.
+        broken = config_fingerprint(self.config("judge.json", "routing-policy:a:1"),
+                                    self.config("verifier.json", "routing-policy:a:1"))
+        fixed = config_fingerprint(self.config("judge.json", "routing-policy:a:1"),
+                                   self.config("verifier.json", "routing-policy:b:1"))
+        self.assertNotEqual(broken, fixed)
+        self.assertEqual(len(broken), 8)
+
+    def test_the_fingerprint_is_stable_for_an_unchanged_configuration(self):
+        judge_config = self.config("judge.json", "routing-policy:a:1")
+        verifier_config = self.config("verifier.json", "routing-policy:b:1")
+        self.assertEqual(config_fingerprint(judge_config, verifier_config),
+                         config_fingerprint(judge_config, verifier_config))
+
+    def test_refused_pairs_are_charged_to_the_day(self):
+        self.event()
+        summary = run_judgement(
+            state_dir=self.state_dir, summary_dir=self.state_dir / "judge",
+            policy_path=POLICY_PATH, now=NOW,
+            judge_model=FakeModel(["not json"], route=JUDGE_ROUTE),
+            verifier_model=FakeModel([PASS], route=VERIFIER_ROUTE),
+            family_resolver=resolver(),
+        )
+        self.assertEqual(summary["judged"], 0)
+        self.assertEqual(summary["refused"], 1)
+        self.assertEqual(summary["cost_micros"], 20_000)
+        self.assertEqual(self.judgements.day_cost_micros("2026-09-09"), 20_000)
+
+
+class UnjudgedSelectionTests(P14aHarness):
+    """S3: an anti-join, oldest first, not a window that can be entirely judged."""
+
+    def setUp(self):
+        super().setUp()
+        self.events = ResearchEventAuthority(self.store)
+        self.judgements = EventJudgementAuthority(self.store)
+
+    def event(self, index, day=9):
+        return record_event(
+            self.events, company_ref=ACN, kind="news",
+            occurred_at=f"2026-09-{day:02d}T{index % 24:02d}:00:00+00:00",
+            source_refs=["source:alphaengine", f"alphaengine-doc:{index}"],
+            payload={"document_ref": f"alphaengine-doc:{index}",
+                     "source_ref": "source:alphaengine", "spec_ref": None,
+                     "discovery_ref": None, "title": None, "host": None},
+            mission=self.mission, actor_ref=AUTOMATION,
+        )
+
+    def judge_it(self, event):
+        self.judgements.record(
+            event=event,
+            judgement={"decision": "NO_CHANGE", "action": "no_change",
+                       "driver_refs": [], "thesis_refs": [], "because": "b",
+                       "citations": [], "model": {"cost_micros": 0}},
+            verification={"status": "verified", "verdict": "pass", "findings": []},
+            effect={"kind": "no_change", "status": "recorded"},
+            mission=self.mission, actor_ref=AUTOMATION,
+        )
+
+    def test_the_oldest_unjudged_events_come_first(self):
+        made = [self.event(index) for index in range(1, 6)]
+        batch = unjudged_events(self.events, self.judgements, company_ref=ACN, limit=2)
+        self.assertEqual([row["id"] for row in batch], [made[0]["id"], made[1]["id"]])
+
+    def test_an_old_event_is_reached_after_the_newest_window_is_judged(self):
+        old = self.event(1, day=1)
+        for index in range(2, 30):
+            self.judge_it(self.event(index))
+        batch = unjudged_events(self.events, self.judgements, company_ref=ACN, limit=3)
+        self.assertEqual([row["id"] for row in batch], [old["id"]])
+
+    def test_a_judged_event_is_never_selected_again(self):
+        made = self.event(1)
+        self.judge_it(made)
+        self.assertEqual(
+            unjudged_events(self.events, self.judgements, company_ref=ACN, limit=5), []
+        )

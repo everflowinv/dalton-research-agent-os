@@ -30,9 +30,9 @@
     },
     {
       "source_key": "sales-notes",
-      "interval_seconds": 43200,
+      "interval_seconds": 86400,
       "adjustable": true,
-      "because": "the desk's notes arrive about twice a day, and they are the earliest read on what the street is arguing about -- ahead of the published reports the same argument later appears in"
+      "because": "daily, per the owner's cadence table. The notes themselves arrive about twice a day, which is why a day's pull picks up both; pulling twice would read the same file twice as often as it changes"
     },
     {
       "source_key": "gemini-web-search",
@@ -57,6 +57,12 @@
       "interval_seconds": 604800,
       "adjustable": true,
       "because": "hiring and morale move over quarters; a daily read of them is noise wearing a timestamp"
+    },
+    {
+      "source_key": "catalyst-calendar",
+      "interval_seconds": 86400,
+      "adjustable": false,
+      "because": "C1's CatalystCalendarVersion is checked every day and the brain does not get to slow it down: a date that moved and nobody looked is how a preview is written for the wrong week"
     }
   ],
   "abnormal_move": {
