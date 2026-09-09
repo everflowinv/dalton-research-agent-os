@@ -41,6 +41,17 @@
    这样对账（forecast_reconciliation）和 guidance_style 校准才有原料。
 4. 认知迭代要能从版本链上读出来：任何产出都能按版本回放「当时知道什么、为什么这样判断」。
 
+**owner 的澄清：版本化是机制，不是触发器。** 不是任何新闻出来模型都要更新一次；要不要更新、怎么更新，
+由「大脑」判断决定。所以分两层：
+- **机制层**（各 authority）：只提供 `revise` / `actualize` / `reopen` 这类入口，入口要求带 `change_reason`
+  与证据 refs；authority 本身永远不主动出新版。
+- **判断层**（Wave 3 的 P14a 事件流）：每个 `ResearchEvent`（新 filing、8-K、电话会、评级变化、价格异动、
+  新签大单的 Claim）先由模型映射到 driver 与 thesis，给出五词决定（`DECISION_VOCABULARY` 首次被代码消费）；
+  只有决定是「修订」时才调用机制层的入口，并把决定与理由一起写进新版本的 `change_reason`。
+  决定「不动」也要留痕（事件账本记 `no_change` 与理由），这样周会能回答「为什么没改」。
+- 唯一接近机械的动作是历史期 estimate 被 filing 的 actual 取代（`actualize`），但它也只改历史格；
+  未来期 estimate 要不要因此修订，仍由判断层决定。
+
 对各波次的影响：Wave 1C 的 `ForecastModelVersion` 每格区分 `estimate` / `actual`，并预留 `driver_event`
 修订入口；Wave 2 的 dossier / DebateMap / 估值快照按同样规则；Wave 3 的 P14a 事件流是统一触发器，
 P14d 的「gate 重开」推广为「任何产出的 reopen」。ADR-0008 草稿（Wave 0 顺手写）把这四条写成合同。
