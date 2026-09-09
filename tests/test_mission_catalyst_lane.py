@@ -426,12 +426,13 @@ class RegistrationTests(unittest.TestCase):
         from dalton_core.lane_registry import registered_lanes
 
         order = [spec.operation for spec in registered_lanes()]
-        self.assertEqual(
-            order[order.index("dispatch_mission_market_prices") + 1],
-            "dispatch_mission_catalyst_calendar")
-        self.assertEqual(
-            order[order.index("dispatch_mission_catalyst_calendar") + 1],
-            "dispatch_company_model_spec")
+        # Ordering, not adjacency: the daily-tracking lane (P14a) now sits
+        # between the prices and the calendar, and adjacency was never the
+        # decision -- prices before the calendar, calendar before the spec.
+        self.assertLess(order.index("dispatch_mission_market_prices"),
+                        order.index("dispatch_mission_catalyst_calendar"))
+        self.assertLess(order.index("dispatch_mission_catalyst_calendar"),
+                        order.index("dispatch_company_model_spec"))
 
     def test_the_operation_reaches_the_writer_and_the_driver(self):
         from dalton_core import writer_server

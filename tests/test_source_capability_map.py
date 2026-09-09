@@ -39,16 +39,17 @@ class TableTests(unittest.TestCase):
         with self.assertRaises(SourceCapabilityError):
             sources_for("vibes")
 
-    def test_a_source_still_on_another_branch_is_declared_and_marked(self):
+    def test_a_declared_source_is_marked_by_whether_the_inventory_has_it(self):
         # A map that only knew what had merged could not be used to plan for
-        # what is arriving. S1's two connectors have since landed; S3's
-        # employee reviews have not, and the flag says which is which.
-        for slug in ("sales-notes", "company-wiki"):
-            self.assertTrue(capability(slug)["in_inventory"], slug)
-        pending = capability("employee-reviews")
-        self.assertFalse(pending["in_inventory"])
-        self.assertTrue(pending["content_kinds"])
+        # what is arriving. Every source S1/S3 declared has since landed, so
+        # each is in the inventory; the flag still exists for the next one.
+        for slug in ("sales-notes", "company-wiki", "employee-reviews"):
+            entry = capability(slug)
+            self.assertTrue(entry["in_inventory"], slug)
+            self.assertTrue(entry["content_kinds"], slug)
         self.assertTrue(capability("catalyst-calendar")["content_kinds"])
+        with self.assertRaises(Exception):
+            capability("not-a-connector")
 
     def test_a_merged_connector_carries_its_inventory_facts(self):
         entry = capability("alphaengine")
