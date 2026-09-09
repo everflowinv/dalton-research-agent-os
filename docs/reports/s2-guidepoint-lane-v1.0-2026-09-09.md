@@ -33,7 +33,7 @@ launchagent 一行没动），抽取分支与 acquisition launcher 也已接上�
 | `src/dalton_core/connector_quota_policy.py` | 追加 `("guidepoint","search_library")` 日配额（纯追加） |
 | `src/dalton_core/lane_registry.py` | `LANE_MODULES` 加 `"dalton_core.mission_guidepoint_lane"` 一行 |
 | `src/dalton_core/live_mcp_connector.py` | ranked 搜索的饱和页语义（见 2.4），三个适配器同步 |
-| `src/dalton_core/public_web_core_search.py`、`src/dalton_core/alphaengine_core_search.py` | 同上，各一处 `source_status` |
+| `src/dalton_core/public_web_core_search.py` | 同上，一处 `source_status`（AlphaEngine 的适配器就在 `live_mcp_connector` 里，同一处改完） |
 | `src/dalton_core/document_extraction.py` | Guidepoint 抽取分支一支（纯追加，见 3.4） |
 | `tests/test_connector_quota_policy.py` | 配额清单字面量加一条 |
 | `tests/test_guidepoint_search_lane.py`、`tests/test_guidepoint_acquisition.py`、`tests/test_guidepoint_lane.py`、`tests/fixtures/guidepoint_search_library_synthetic.json` | 69 项离线测试与合成 fixture |
