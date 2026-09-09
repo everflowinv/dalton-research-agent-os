@@ -30,13 +30,13 @@ from typing import Any, Mapping
 
 from .lane_registry import (
     LaneRegistryError,
+    add_lane_arguments,
     build_lane_launchers,
     core_discovery_operations,
     lane_for_operation,
     lane_init_kwargs,
     lane_operation_fields,
     lane_operations,
-    add_lane_arguments,
     registered_lanes,
 )
 from .mission_source_discovery import (
@@ -420,12 +420,13 @@ CORE_RECONCILIATION_OPERATIONS = frozenset({
 # P14-0: the lane dispatches come from the lane registry, which is the one
 # place a lane says what it is; the reads beside them stay literal because
 # they are projections, not lanes.
-CORE_DISCOVERY_OPERATIONS = frozenset({
+CORE_DISCOVERY_LITERALS = frozenset({
     "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
     "mission_stage_checklist",
     "mission_deliverables",
-}) | core_discovery_operations()
+})
+CORE_DISCOVERY_OPERATIONS = CORE_DISCOVERY_LITERALS
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
     "weekly_brief_feedback", "weekly_brief_integrity_report",
@@ -475,7 +476,7 @@ SCOPED_FEEDBACK_OPERATION_SETS = {
 SCOPED_REVIEW_PRINCIPALS = {
     "research-review-control": "bridge:tailscale-review",
 }
-CORE_OPERATIONS = frozenset({
+CORE_OPERATION_LITERALS = frozenset({
     "register_invocation", "stage_change", "verify_change", "commit",
     "commit_reviewed_candidate", "candidate_promotions",
     "current_pointer", "get_version", "list_events", "active_policy",
@@ -536,7 +537,8 @@ CORE_OPERATIONS = frozenset({
     "intent_context_bindings", "admit_intent_question", "issue_intent_directive",
     "publish_answer_sufficiency_policy", "answer_subjects", "route_answer",
     "dispatch_answer_refresh",
-}) | lane_operations()
+})
+CORE_OPERATIONS = CORE_OPERATION_LITERALS
 
 
 # Explicit operation parameter contracts.  The server must reject unknown
@@ -796,16 +798,45 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "thesis_impact_invocation": frozenset({"invocation_ref"}),
     "thesis_impact_find_invocation": frozenset({"invocation_ref"}),
 }
-# P14-0: each registered lane owns its own parameter contract. A lane that
-# names an operation this file already spells out is a mistake worth failing
-# at import rather than a silent override.
-for _lane_operation, _lane_fields in lane_operation_fields().items():
-    if _lane_operation in OPERATION_FIELDS:
-        raise LaneRegistryError(
-            f"{_lane_operation} is both a registered lane and a literal operation"
-        )
-    OPERATION_FIELDS[_lane_operation] = _lane_fields
-del _lane_operation, _lane_fields
+
+
+# The lane operations this module last folded in, so a lane that goes away
+# takes its parameter contract with it instead of leaving one behind.
+_INSTALLED_LANE_OPERATIONS: set[str] = set()
+
+
+def install_lane_operations() -> None:
+    """Fold the lane registry into this module's operation tables.
+
+    Called once at import, when the registry already holds every lane in
+    ``LANE_MODULES``.  It is a function rather than three expressions because
+    the tables are what a lane's registration has to reach, and a lane
+    registered after this module was imported -- in a test, or by a plugin --
+    needs a way to say "read the registry again" that is the same code the
+    import path took.
+
+    A lane that names an operation this file already spells out as a literal
+    is a registration bug and fails here rather than silently overriding it.
+    """
+
+    global CORE_DISCOVERY_OPERATIONS, CORE_OPERATIONS
+
+    operations = lane_operations()
+    for retired in _INSTALLED_LANE_OPERATIONS - operations:
+        OPERATION_FIELDS.pop(retired, None)
+    for operation, fields in lane_operation_fields().items():
+        if operation in OPERATION_FIELDS and operation not in _INSTALLED_LANE_OPERATIONS:
+            raise LaneRegistryError(
+                f"{operation} is both a registered lane and a literal operation"
+            )
+        OPERATION_FIELDS[operation] = fields
+    _INSTALLED_LANE_OPERATIONS.clear()
+    _INSTALLED_LANE_OPERATIONS.update(operations)
+    CORE_DISCOVERY_OPERATIONS = CORE_DISCOVERY_LITERALS | core_discovery_operations()
+    CORE_OPERATIONS = CORE_OPERATION_LITERALS | lane_operations()
+
+
+install_lane_operations()
 
 
 OPERATION_ACTOR_FIELDS: dict[str, str] = {
