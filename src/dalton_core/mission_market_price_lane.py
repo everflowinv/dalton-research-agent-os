@@ -29,6 +29,7 @@ from .lane_child_launcher import (
     LaneChildRejected,
     LaneChildTicketNotFound,
 )
+from .market_price import provisional_bar_date
 
 WRITE_SCOPE = "market_price"
 # How far back a company with no stored history is fetched. Three years is the
@@ -38,9 +39,15 @@ BACKFILL_YEARS = 3
 # Yahoo's window excludes ``end``, so asking for tomorrow is how today's bar is
 # included. Not a fudge: it is what the source means by the parameter.
 END_LOOKAHEAD_DAYS = 1
-# After a run that found nothing new, leave the company alone for this long.
-# A weekend tick would otherwise spend a call every five minutes discovering
-# that Saturday is still not a trading day.
+# After a run that added no trading day, leave the company alone for this long.
+#
+# Two things ride on this. A weekend tick would otherwise spend a call every
+# five minutes discovering that Saturday is still not a trading day. And once
+# the lane re-requests a provisional bar -- one read mid-session, whose close
+# is only the last trade so far -- there is always a window to ask for, so
+# without a hold the afternoon would be one restatement version per tick. Six
+# hours means an intraday bar is corrected a few times a day, which is what a
+# valuation needs and no more.
 SATISFIED_HOLD_SECONDS = 6 * 3600
 MAX_FAILURE_DETAIL_CHARS = 500
 # A company whose runs keep failing stops consuming the single slot. Held in
@@ -117,39 +124,70 @@ class MissionMarketPriceLaneCoordinator:
         self._failure_reason: dict[str, str] = {}
         # Companies that were up to date last time they were asked, and when.
         self._satisfied: dict[str, datetime] = {}
+        # Companies whose earlier history has been asked for once and found to
+        # be all there is. Held in this process only, like every other hold.
+        self._backfilled: set[str] = set()
+        # The window each open child was launched for, so its result can be
+        # read as an answer to the question that was actually asked.
+        self._open_kind: str | None = None
 
     # -- window ------------------------------------------------------------
 
     def _today(self) -> date:
         return self.clock().astimezone(timezone.utc).date()
 
-    def window(self, company_ref: str) -> tuple[str, str] | None:
-        """The days this company is missing, or None if it has them all.
+    def _floor(self) -> date:
+        today = self._today()
+        try:
+            return today.replace(year=today.year - self.backfill_years)
+        except ValueError:
+            # 29 February exists in one year in four; the backfill does not
+            # need to fail on the one tick a leap year that lands on it.
+            return today.replace(year=today.year - self.backfill_years, month=2, day=28)
 
-        The first run reaches back three years. Every run after that starts the
-        day after the last stored bar, so a lane running daily asks for one day
-        and a lane that was off for a month asks for a month -- without anyone
-        having to decide which.
+    def window(self, company_ref: str) -> tuple[str, str, str] | None:
+        """The days this company is missing, and which end they are missing at.
+
+        Three cases, checked in that order.
+
+        *No history at all*: reach back three years.
+
+        *Missing recent days*: start the day after the last stored bar, so a
+        lane running daily asks for one day and a lane that was off for a month
+        asks for a month, without anyone deciding which. **Unless that last bar
+        is provisional** -- read before its own trading day settled, so its
+        close is whatever the last trade happened to be that afternoon. Then
+        the window starts *on* it, and the next run restates it. Without this
+        the authority's restatement path is unreachable through the lane and a
+        mid-session print is frozen as a close forever.
+
+        *Missing earlier days*: a series that starts inside the three-year
+        floor is short at the far end -- a first run that was cut off, or a
+        floor that has since moved back past what was fetched. Asked for once;
+        a backward run that finds nothing settles the question for this
+        process, because there is nothing behind the company's first trading
+        day and asking again every six hours would never learn that.
         """
 
         today = self._today()
         end = today + timedelta(days=END_LOOKAHEAD_DAYS)
         latest = self.authority.latest_version(company_ref)
         if latest is None:
-            try:
-                start = today.replace(year=today.year - self.backfill_years)
-            except ValueError:
-                # 29 February exists in one year in four; the backfill does not
-                # need to fail on the one tick a leap year that lands on it.
-                start = today.replace(
-                    year=today.year - self.backfill_years, month=2, day=28
-                )
-            return start.isoformat(), end.isoformat()
+            return self._floor().isoformat(), end.isoformat(), "backfill"
         last = date.fromisoformat(latest["last_bar_date"])
-        start = last + timedelta(days=1)
-        if start >= end:
-            return None
-        return start.isoformat(), end.isoformat()
+        provisional = provisional_bar_date(latest)
+        start = last if provisional == latest["last_bar_date"] else last + timedelta(days=1)
+        if start < end:
+            return (
+                start.isoformat(), end.isoformat(),
+                "restate_provisional" if provisional else "forward",
+            )
+        if company_ref not in self._backfilled:
+            floor = self._floor()
+            first = date.fromisoformat(latest["first_bar_date"])
+            if floor < first:
+                return floor.isoformat(), first.isoformat(), "backfill_gap"
+        return None
 
     # -- settling ----------------------------------------------------------
 
@@ -176,6 +214,8 @@ class MissionMarketPriceLaneCoordinator:
             "added_bar_count": summary.get("added_bar_count"),
             "restated_bar_dates": summary.get("restated_bar_dates"),
             "last_bar_date": summary.get("last_bar_date"),
+            "provisional_bar_date": summary.get("provisional_bar_date"),
+            "dropped_row_count": summary.get("dropped_row_count"),
             "invocation_ref": summary.get("invocation_ref"),
         }
         reason = summary.get("failure_reason")
@@ -197,7 +237,8 @@ class MissionMarketPriceLaneCoordinator:
         settled = self._settle(self._open)
         if settled is None or settled.get("status") == "running":
             return settled
-        self._open = None
+        kind, self._open, self._open_kind = self._open_kind, None, None
+        settled["window_kind"] = kind
         company_ref = settled.get("company_ref")
         if not company_ref:
             return settled
@@ -213,7 +254,15 @@ class MissionMarketPriceLaneCoordinator:
         # not about quiet markets.
         self._failures.pop(company_ref, None)
         self._failure_reason.pop(company_ref, None)
-        if settled.get("series_status") in {"duplicate", "empty"}:
+        if kind == "backfill_gap" and not settled.get("added_bar_count"):
+            # There is nothing behind this company's first trading day. Asked
+            # and answered; asking again every six hours would never learn it.
+            self._backfilled.add(company_ref)
+        # Held on "added no trading day", not on "published nothing". A run
+        # that only restated a provisional bar did publish a version, and if
+        # that reopened the slot the lane would restate the same afternoon bar
+        # every tick until the market closed.
+        if not settled.get("added_bar_count"):
             self._satisfied[company_ref] = self.clock()
         else:
             self._satisfied.pop(company_ref, None)
@@ -271,7 +320,7 @@ class MissionMarketPriceLaneCoordinator:
             if window is None:
                 skipped.append({"company_ref": company_ref, "reason": "current"})
                 continue
-            start, end = window
+            start, end, kind = window
             try:
                 ticket = self.launcher.start(
                     company_ref=company_ref, ticker=company["ticker"],
@@ -288,10 +337,12 @@ class MissionMarketPriceLaneCoordinator:
                 return {"status": "rejected", "company_ref": company_ref,
                         "settled": settled, "skipped": skipped, "reason": reason}
             self._open = ticket["id"]
+            self._open_kind = kind
             return {
                 "status": "launched", "company_ref": company_ref,
                 "ticker": company["ticker"], "requested_start": start,
-                "requested_end": end, "ticket_ref": ticket["id"],
+                "requested_end": end, "window_kind": kind,
+                "ticket_ref": ticket["id"],
                 "settled": settled, "skipped": skipped,
             }
         return {

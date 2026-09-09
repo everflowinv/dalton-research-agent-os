@@ -2,11 +2,15 @@
 
 ``derived_deterministic``: nothing in a snapshot is a judgement. Given the same
 price version, the same share observation and the same filed figures, the same
-formula version produces the same record, byte for byte. That is the whole
-reason the formula string is stored in every record instead of living only in
-this file -- a snapshot published today has to stay reproducible after this
-module changes, and a reader has to be able to see *which* arithmetic produced
-the number they are looking at.
+formula version produces the same *metrics* -- every figure below is replayable
+from the refs beside it. Two records of the same inputs are not byte-identical,
+because ``created_at`` sits inside the hashed body and no two publications share
+a timestamp; what is identical is ``binding_hash``, which is what the duplicate
+rule compares and what a replay should be checked against. That is also the
+whole reason the formula string is stored in every record rather than living
+only in this file: a snapshot published today has to stay reproducible after
+this module changes, and a reader has to be able to see *which* arithmetic
+produced the number they are looking at.
 
 Three rules this module exists to enforce.
 
@@ -26,12 +30,16 @@ earnings number would look exactly like a P/E built on a filed one, which is
 precisely why it can never be allowed to exist: the moment one is admitted,
 "every number goes back to a filing" is decoration.
 
-**On the percentile.** A multiple's percentile is only as honest as the
-fundamentals behind the history. This computes each metric at every stored bar
-using the fundamental window that was known as of that bar -- so with one
-window, the percentile is driven entirely by price, and the record says so in
-``percentile_basis``. That is a real limitation, stated in the record rather
-than hidden by it; feeding several dated windows in makes the history real.
+**On the percentile.** A multiple's percentile is only as honest as the inputs
+behind the history, and there are two of them. This computes each metric at
+every stored bar using the fundamental window that was known as of that bar --
+so with one window, the percentile is driven entirely by price, and the record
+says ``basis: price_only``. Share count is the second: without a dated share
+history, every historical market cap is built from *today's* share count, which
+for a company that has been buying back stock overstates the past. That is
+recorded as ``shares_basis: current_shares_applied_to_history``, and passing
+``share_history`` in turns it into ``dated_shares``. Both limitations are
+stated in the record rather than hidden by it.
 """
 
 from __future__ import annotations
@@ -326,13 +334,27 @@ def _shares_binding(value: Any) -> tuple[dict[str, Any], Decimal]:
     return wire, shares
 
 
-def _role_input(role: str, value: Any, name: str) -> tuple[dict[str, Any], Decimal]:
+def _role_input(
+    role: str, value: Any, name: str, *, currency: str
+) -> tuple[dict[str, Any], Decimal]:
     wire = _closed(
         value,
         {"concept", "statement", "unit", "source_ref", "components"},
         name,
     )
     aggregation = ROLE_AGGREGATION[role]
+    # Every role here is money, and the market capitalisation it will be
+    # divided into is in the price's currency. A filer reporting in thousands,
+    # or a foreign issuer reporting in euros, would otherwise produce a
+    # price/sales a thousand times too small with nothing on the record to say
+    # so -- the units are checked because a wrong multiple is worse than an
+    # unavailable one.
+    unit = _text(wire["unit"], f"{name}.unit")
+    if unit != currency:
+        raise ValuationSnapshotConflict(
+            f"{name} is reported in {unit} and the price is in {currency}; "
+            "a multiple across two units is not a multiple"
+        )
     source_ref = _text(wire["source_ref"], f"{name}.source_ref")
     if source_ref not in ALLOWED_FUNDAMENTAL_SOURCES:
         # The one refusal this whole module is built around.
@@ -404,14 +426,14 @@ def _role_input(role: str, value: Any, name: str) -> tuple[dict[str, Any], Decim
         "aggregation": aggregation,
         "concept": _text(wire["concept"], f"{name}.concept"),
         "statement": _text(wire["statement"], f"{name}.statement"),
-        "unit": _text(wire["unit"], f"{name}.unit"),
+        "unit": unit,
         "source_ref": source_ref,
         "components": rows,
         "value": _format(total),
     }, total
 
 
-def _fundamental_windows(value: Any) -> list[dict[str, Any]]:
+def _fundamental_windows(value: Any, *, currency: str) -> list[dict[str, Any]]:
     """Filed figures, dated by when they became knowable.
 
     ``as_of`` is the filing date, not the period end: a March quarter is not
@@ -449,7 +471,8 @@ def _fundamental_windows(value: Any) -> list[dict[str, Any]]:
         totals: dict[str, Decimal] = {}
         for role in sorted(roles):
             normalised[role], totals[role] = _role_input(
-                role, roles[role], f"fundamental_windows[{index}].roles.{role}"
+                role, roles[role], f"fundamental_windows[{index}].roles.{role}",
+                currency=currency,
             )
         windows.append({"as_of": as_of, "roles": normalised, "_totals": totals})
     windows.sort(key=lambda item: item["as_of"])
@@ -499,16 +522,22 @@ def compute_metrics(
     as_of: str,
     windows: Sequence[Mapping[str, Any]],
     bars: Sequence[Mapping[str, Any]],
+    share_history: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Every metric at ``as_of``, and where each sits in its own history.
 
     The history is built the only honest way available: at each stored bar, the
-    metric is recomputed with the fundamental window that was already filed on
-    that date. A bar earlier than the first window has no fundamentals behind
-    it and is left out rather than back-filled with figures nobody had yet.
+    metric is recomputed with the fundamental window -- and, when one is given,
+    the share observation -- that was already known on that date. A bar earlier
+    than the first window has no fundamentals behind it and is left out rather
+    than back-filled with figures nobody had yet.
     """
 
     market_cap = close * shares
+    dated_shares = sorted(
+        ((row["as_of"], Decimal(row["shares_outstanding"])) for row in share_history),
+        key=lambda item: item[0],
+    )
 
     def window_for(bar_date: str) -> Mapping[str, Decimal] | None:
         chosen: Mapping[str, Decimal] | None = None
@@ -516,6 +545,23 @@ def compute_metrics(
             if window["as_of"] <= bar_date:
                 chosen = window["_totals"]
         return chosen
+
+    def shares_for(bar_date: str) -> Decimal:
+        """The share count that was known on that day, or today's if none is.
+
+        Falling back to today's count is a real distortion for a company that
+        has been retiring stock -- its past market caps come out too large and
+        its past multiples too high. It is done anyway because the alternative
+        is no history at all, and it is labelled rather than absorbed.
+        """
+
+        chosen = shares
+        for observed_on, count in dated_shares:
+            if observed_on <= bar_date:
+                chosen = count
+        return chosen
+
+    shares_basis = "dated_shares" if dated_shares else "current_shares_applied_to_history"
 
     # Every window dated after the bar being valued means nothing was filed
     # yet. Valuing today's price against next quarter's filing would be the
@@ -566,11 +612,19 @@ def compute_metrics(
             })
             continue
         sample: list[Decimal] = []
+        # Which windows the sample actually rested on, not how many were
+        # supplied. Handing in eight quarters and then valuing a history that
+        # only reaches back into the newest of them is a price-driven
+        # percentile wearing the other label.
+        windows_used: set[str] = set()
         for bar in bars:
             totals = window_for(bar["date"])
             if totals is None or any(role not in totals for role in roles):
                 continue
-            bar_cap = Decimal(bar["close"]) * shares
+            for window in windows:
+                if window["_totals"] is totals:
+                    windows_used.add(window["as_of"])
+            bar_cap = Decimal(bar["close"]) * shares_for(bar["date"])
             historical, _reason = _metric_value(definition, bar_cap, totals)
             if historical is not None:
                 sample.append(historical)
@@ -581,6 +635,8 @@ def compute_metrics(
                 "sample_size": len(sample),
                 "method": PERCENTILE_METHOD,
                 "basis": None,
+                "shares_basis": None,
+                "windows_used": len(windows_used),
                 "reason": (
                     f"{len(sample)} bars of history behind this metric; a "
                     f"percentile needs at least {MIN_PERCENTILE_SAMPLE}"
@@ -591,13 +647,16 @@ def compute_metrics(
                 "value": _percentile(sample, value),
                 "sample_size": len(sample),
                 "method": PERCENTILE_METHOD,
-                # The honesty field. One window means the fundamentals never
+                # The honesty fields. One window means the fundamentals never
                 # moved across the history, so the percentile is the price's
-                # percentile in multiple clothing.
+                # percentile in multiple clothing; and without dated share
+                # observations every past market cap carries today's count.
                 "basis": (
-                    "price_only" if len(windows) == 1
+                    "price_only" if len(windows_used) < 2
                     else "price_and_filed_fundamentals"
                 ),
+                "shares_basis": shares_basis,
+                "windows_used": len(windows_used),
                 "reason": None,
             }
         metrics.append({
@@ -616,6 +675,8 @@ def compute_metrics(
         "market_cap_formula": "close * shares_outstanding",
         "fundamental_window_count": len(windows),
         "fundamental_window_as_ofs": [window["as_of"] for window in windows],
+        "share_observation_count": len(dated_shares),
+        "shares_basis": shares_basis,
         "price_history_bars": len(bars),
         "percentile_method": PERCENTILE_METHOD,
         "min_percentile_sample": MIN_PERCENTILE_SAMPLE,
@@ -658,6 +719,7 @@ class ValuationSnapshotAuthority:
         shares: Mapping[str, Any],
         fundamental_windows: Sequence[Mapping[str, Any]],
         price_history: Sequence[Mapping[str, Any]] = (),
+        share_history: Sequence[Mapping[str, Any]] = (),
         actor_ref: str = ACTOR_REF,
     ) -> dict[str, Any]:
         """Compute and store one snapshot, or say it is the same as the last."""
@@ -666,7 +728,28 @@ class ValuationSnapshotAuthority:
         actor_ref = _text(actor_ref, "actor_ref")
         price_wire, close = _price_binding(price)
         shares_wire, share_count = _shares_binding(shares)
-        windows = _fundamental_windows(fundamental_windows)
+        windows = _fundamental_windows(
+            fundamental_windows, currency=price_wire["currency"])
+
+        dated_shares: list[dict[str, str]] = []
+        seen_share_dates: set[str] = set()
+        for index, raw in enumerate(share_history):
+            row = _closed(
+                raw, {"as_of", "shares_outstanding"}, f"share_history[{index}]")
+            observed_on = _iso_date(row["as_of"], f"share_history[{index}].as_of")
+            if observed_on in seen_share_dates:
+                raise ValuationSnapshotConflict(
+                    f"share_history carries {observed_on} twice")
+            seen_share_dates.add(observed_on)
+            count = _decimal(
+                row["shares_outstanding"],
+                f"share_history[{index}].shares_outstanding")
+            if count <= 0:
+                raise ValuationSnapshotConflict(
+                    f"share_history[{index}] is not a positive count")
+            dated_shares.append(
+                {"as_of": observed_on, "shares_outstanding": _format(count)})
+        dated_shares.sort(key=lambda row: row["as_of"])
 
         bars: list[dict[str, str]] = []
         seen_dates: set[str] = set()
@@ -696,7 +779,7 @@ class ValuationSnapshotAuthority:
 
         metrics, basis = compute_metrics(
             close=close, shares=share_count, as_of=price_wire["bar_date"],
-            windows=windows, bars=bars,
+            windows=windows, bars=bars, share_history=dated_shares,
         )
         public_windows = [
             {"as_of": window["as_of"], "roles": window["roles"]} for window in windows
@@ -707,6 +790,7 @@ class ValuationSnapshotAuthority:
             "shares": shares_wire,
             "fundamental_windows": public_windows,
             "price_history_dates": [bar["date"] for bar in bars],
+            "share_history": dated_shares,
         }
         binding_hash = content_hash(binding)
 
@@ -741,6 +825,7 @@ class ValuationSnapshotAuthority:
             "currency": price_wire["currency"],
             "price": price_wire,
             "shares": shares_wire,
+            "share_history": dated_shares,
             "fundamental_windows": public_windows,
             "basis": basis,
             "metrics": metrics,

@@ -1068,7 +1068,16 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                     # Frozen false on the wire, so a run that adjusted the
                     # prices cannot be validated as one that did not.
                     "auto_adjust": {"type": "boolean", "enum": [False]},
+                    # When the source was read. A window that includes today
+                    # returns the last trade so far in the same shape as a
+                    # settled close, and this is the only field that can tell
+                    # a later reader which one it is holding.
+                    "captured_at": _string(),
                     "bars": {"type": "array", "items": bar},
+                    # Days the source returned with a hole in them. A frame
+                    # that arrives entirely as NaN must not be indistinguishable
+                    # from a genuinely quiet window.
+                    "dropped_row_count": _integer(0),
                     "observations": {"type": "array", "items": observation},
                     "source_record_refs": _array_of_strings(),
                     "next_cursor": {"type": ["string", "null"]},
@@ -1076,7 +1085,8 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 },
                 (
                     "schema_version", "ticker", "currency", "requested_start",
-                    "requested_end", "auto_adjust", "bars", "observations",
+                    "requested_end", "auto_adjust", "captured_at", "bars",
+                    "dropped_row_count", "observations",
                     "source_record_refs", "next_cursor", "provider_status",
                 ),
             )
@@ -1094,12 +1104,16 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 },
                 ("current", "high", "low", "mean", "median", "number_of_analysts"),
             )
+            # Nullable counts. "No analyst rates it a sell" and "Yahoo did not
+            # say how many rate it a sell" are different facts, and a zero can
+            # only express one of them.
+            nullable_count = {"type": ["integer", "null"], "minimum": 0}
             recommendation = _object_schema(
                 {
                     "period": _string(),
-                    "strong_buy": _integer(0), "buy": _integer(0),
-                    "hold": _integer(0), "sell": _integer(0),
-                    "strong_sell": _integer(0),
+                    "strong_buy": nullable_count, "buy": nullable_count,
+                    "hold": nullable_count, "sell": nullable_count,
+                    "strong_sell": nullable_count,
                 },
                 ("period", "strong_buy", "buy", "hold", "sell", "strong_sell"),
             )

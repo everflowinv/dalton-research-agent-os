@@ -1,4 +1,5 @@
 {
+ "captured_at": "2026-09-09T18:38:55.072533+00:00",
  "earnings_estimate": {
   "+1q": {
    "avg": 3.98814,
@@ -47,7 +48,7 @@
  "observed_on": "2026-09-09",
  "operation": "analyst_estimates",
  "price_target": {
-  "current": 177.03,
+  "current": 177.13,
   "high": 275.0,
   "low": 130.0,
   "mean": 184.1884,

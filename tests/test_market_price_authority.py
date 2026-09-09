@@ -21,6 +21,8 @@ from dalton_core.market_price import (
     MarketPriceNotFound,
     MarketPriceSeriesAuthority,
     MarketPriceValidationError,
+    bar_is_provisional,
+    provisional_bar_date,
     series_ref_for,
 )
 from dalton_core.store import DaltonStore, canonical_json
@@ -30,6 +32,9 @@ INVOCATION = "connector-invocation:yfinance:" + "a" * 32
 ARTIFACT = "1" * 64
 GOVERNANCE = "connector-governance:yfinance-daily-prices:v1"
 GOVERNANCE_HASH = "2" * 64
+# After the US close on either side of daylight saving; see
+# SETTLED_AFTER_UTC_HOUR.
+SETTLED = "2026-09-01T23:30:00+00:00"
 
 
 def bar(date, close="100", **overrides):
@@ -51,13 +56,14 @@ class AuthorityTestCase(unittest.TestCase):
 
     def publish(self, bars, *, observations=(), invocation=INVOCATION,
                 artifact=ARTIFACT, company_ref=ACN, ticker="ACN",
-                currency="USD", start="2026-09-01", end="2026-09-10"):
+                currency="USD", start="2026-09-01", end="2026-09-10",
+                captured_at=SETTLED):
         return self.authority.publish_series(
             company_ref=company_ref, ticker=ticker, currency=currency,
             bars=bars, observations=observations,
             invocation_ref=invocation, artifact_hash=artifact,
             governance_ref=GOVERNANCE, governance_hash=GOVERNANCE_HASH,
-            requested_start=start, requested_end=end,
+            requested_start=start, requested_end=end, captured_at=captured_at,
         )
 
 
@@ -138,6 +144,68 @@ class VersionChainTests(AuthorityTestCase):
                 if row["observation"] == "shares_outstanding"]
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["value"], "611000000")
+
+
+class ProvisionalBarTests(AuthorityTestCase):
+    """A mid-session read is not a close, and must not be frozen as one.
+
+    A window that includes today returns the last trade so far in the same
+    shape as a settled close. If the lane then moved past that day, a price
+    that was only ever an afternoon snapshot would sit in every valuation
+    forever and the restatement path would never fire.
+    """
+
+    def test_a_bar_read_during_its_own_session_is_provisional(self):
+        published = self.publish(
+            [bar("2026-09-01")], captured_at="2026-09-01T16:00:00+00:00")
+        self.assertEqual(published["provisional_bar_date"], "2026-09-01")
+        self.assertTrue(bar_is_provisional(published["bars"][-1]))
+        self.assertEqual(provisional_bar_date(published), "2026-09-01")
+
+    def test_a_bar_read_after_its_day_settled_is_not(self):
+        published = self.publish(
+            [bar("2026-09-01")], captured_at="2026-09-01T23:30:00+00:00")
+        self.assertIsNone(published["provisional_bar_date"])
+        self.assertIsNone(provisional_bar_date(published))
+
+    def test_a_bar_read_on_a_later_day_is_not(self):
+        published = self.publish(
+            [bar("2026-09-01")], captured_at="2026-09-04T09:00:00+00:00")
+        self.assertIsNone(published["provisional_bar_date"])
+
+    def test_the_close_moving_after_the_session_is_a_restatement(self):
+        # The whole point: the intraday capture is re-requested, and the
+        # settled close lands as a new version rather than being lost.
+        intraday = self.publish(
+            [bar("2026-09-01", "100")], captured_at="2026-09-01T16:00:00+00:00")
+        self.assertEqual(intraday["provisional_bar_date"], "2026-09-01")
+        settled = self.publish(
+            [bar("2026-09-01", "97.5", low="97")],
+            captured_at="2026-09-02T02:00:00+00:00")
+        self.assertEqual(settled["status"], "fresh")
+        self.assertEqual(settled["restated_bar_dates"], ["2026-09-01"])
+        self.assertIsNone(settled["provisional_bar_date"])
+        self.assertEqual(settled["bars"][-1]["close"], "97.5")
+        # And the afternoon's number is still on the chain, not overwritten.
+        self.assertEqual(
+            self.authority.version(intraday["id"])["bars"][-1]["close"], "100")
+
+    def test_the_capture_time_is_not_a_reason_to_publish_a_version(self):
+        # Re-reading a settled window an hour later is the same series.
+        self.publish([bar("2026-09-01")], captured_at="2026-09-02T02:00:00+00:00")
+        again = self.publish(
+            [bar("2026-09-01")], captured_at="2026-09-02T03:00:00+00:00")
+        self.assertEqual(again["status"], "duplicate")
+
+    def test_a_capture_time_without_a_timezone_is_refused(self):
+        with self.assertRaises(MarketPriceValidationError):
+            self.publish([bar("2026-09-01")], captured_at="2026-09-01T16:00:00")
+
+    def test_a_bar_from_before_this_field_existed_reads_as_settled(self):
+        # Not re-fetched forever: a lane that cannot date a series must not
+        # keep asking about it.
+        self.assertFalse(bar_is_provisional({"date": "2026-09-01"}))
+        self.assertIsNone(provisional_bar_date(None))
 
 
 class ReaderTests(AuthorityTestCase):

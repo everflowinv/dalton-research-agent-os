@@ -113,7 +113,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "artifact": None,
         "invocation_ref": None,
         "bar_count": 0,
+        "dropped_row_count": 0,
         "observation_count": 0,
+        "captured_at": None,
+        "provisional_bar_date": None,
         "series_status": None,
         "series_version_ref": None,
         "series_version_hash": None,
@@ -124,6 +127,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     }
     store: DaltonStore | None = None
     try:
+        # The argument parser refuses a run with neither mode or both, but
+        # ``run`` is called directly by tests and by anything that builds a
+        # Namespace itself. Reaching Yahoo because a flag was forgotten is not
+        # a mistake this should make on the caller's behalf.
+        if bool(args.fixture_file) == bool(getattr(args, "allow_network", False)):
+            raise MarketPriceRunError(
+                "exactly one of --fixture-file or --allow-network must be chosen"
+            )
         governance = _load_governance(Path(args.governance).expanduser().resolve())
         summary["governance_ref"] = governance.id
         summary["governance_hash"] = governance.content_hash
@@ -155,7 +166,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
         _schema_matches(wire, yfinance_output_schema(DAILY_PRICES_OPERATION), "output")
         summary["bar_count"] = len(wire["bars"])
+        summary["dropped_row_count"] = wire["dropped_row_count"]
         summary["observation_count"] = len(wire["observations"])
+        summary["captured_at"] = wire["captured_at"]
+        if wire["dropped_row_count"] and not wire["bars"]:
+            # Yahoo returned rows and every one of them had a hole in it. That
+            # is a broken response, not a quiet market, and it must not settle
+            # as a successful empty window -- doing so cleared the lane's
+            # failure budget and put the company aside for six hours on the
+            # strength of a frame that contained nothing.
+            raise MarketPriceRunError(
+                f"the source returned {wire['dropped_row_count']} rows and every "
+                "one of them was incomplete"
+            )
 
         invocation = build_invocation_ref(
             operation=DAILY_PRICES_OPERATION,
@@ -192,6 +215,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 governance_hash=governance.content_hash,
                 requested_start=wire["requested_start"],
                 requested_end=wire["requested_end"],
+                captured_at=wire["captured_at"],
                 actor_ref=args.actor_ref,
             )
             summary.update({
@@ -202,6 +226,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "first_bar_date": published["first_bar_date"],
                 "last_bar_date": published["last_bar_date"],
                 "series_bar_count": published["bar_count"],
+                "provisional_bar_date": published.get("provisional_bar_date"),
                 # What *this run* changed, not what the version it landed on
                 # once did. A duplicate returns the standing version, whose
                 # own ``added_bar_dates`` describe the run that created it --
@@ -262,8 +287,9 @@ def main(argv: list[str] | None = None) -> int:
     if not args.quiet:
         print(json.dumps({key: summary[key] for key in (
             "status", "failure_reason", "series_status", "bar_count",
-            "first_bar_date", "last_bar_date", "added_bar_count",
-            "restated_bar_dates", "invocation_ref", "series_version_ref",
+            "dropped_row_count", "first_bar_date", "last_bar_date",
+            "added_bar_count", "restated_bar_dates", "provisional_bar_date",
+            "invocation_ref", "series_version_ref",
         )}, ensure_ascii=False, indent=1))
     return 0 if summary["status"] == "succeeded" else 1
 

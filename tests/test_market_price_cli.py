@@ -176,6 +176,65 @@ class ChildTests(unittest.TestCase):
         summary = self.run_child(fixture=self.fixture(raw))
         self.assertEqual(summary["status"], "succeeded")
         self.assertEqual(summary["series_status"], "empty")
+        self.assertEqual(summary["dropped_row_count"], 0)
+
+    def test_a_response_whose_every_row_was_incomplete_is_a_failure(self):
+        # Rows came back and not one of them was usable. That is a broken
+        # response, not a quiet market -- and settling it as a successful empty
+        # window cleared the lane's failure budget and put the company aside
+        # for six hours on the strength of a frame containing nothing.
+        raw = json.loads((FIXTURES / "acn-daily-prices.json").read_text(encoding="utf-8"))
+        raw["rows"] = [{"date": row["date"], "Open": None, "High": None,
+                        "Low": None, "Close": None, "Adj Close": None,
+                        "Volume": None} for row in raw["rows"]]
+        summary = self.run_child(fixture=self.fixture(raw))
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["dropped_row_count"], 10)
+        self.assertIn("every one of them was incomplete", summary["failure_reason"])
+        self.assertIsNone(summary["series_version_ref"])
+        # The artifact is still kept: it is the evidence of what came back.
+        self.assertIsNotNone(summary["artifact"])
+
+    def test_a_partly_incomplete_response_still_publishes_and_says_how_many(self):
+        raw = json.loads((FIXTURES / "acn-daily-prices.json").read_text(encoding="utf-8"))
+        raw["rows"][0]["Close"] = None
+        summary = self.run_child(fixture=self.fixture(raw))
+        self.assertEqual(summary["status"], "succeeded")
+        self.assertEqual(summary["dropped_row_count"], 1)
+        self.assertEqual(summary["bar_count"], 9)
+
+    def test_the_capture_time_reaches_the_stored_bars(self):
+        summary = self.run_child()
+        store = DaltonStore(str(self.state / "core.sqlite"))
+        self.addCleanup(store.close)
+        version = MarketPriceSeriesAuthority(store).version(
+            summary["series_version_ref"])
+        for bar in version["bars"]:
+            self.assertEqual(bar["captured_at"], summary["captured_at"])
+        # Every bar in the fixture is older than the capture, so none of them
+        # is provisional.
+        self.assertIsNone(summary["provisional_bar_date"])
+
+    def test_a_bar_read_during_its_own_session_is_marked_provisional(self):
+        raw = json.loads((FIXTURES / "acn-daily-prices.json").read_text(encoding="utf-8"))
+        raw["captured_at"] = f"{raw['rows'][-1]['date']}T16:00:00+00:00"
+        summary = self.run_child(fixture=self.fixture(raw))
+        self.assertEqual(summary["status"], "succeeded")
+        self.assertEqual(summary["provisional_bar_date"], raw["rows"][-1]["date"])
+
+    def test_a_run_with_neither_mode_never_reaches_the_network(self):
+        # ``run`` is called directly by tests and by anything that builds a
+        # Namespace itself; reaching Yahoo because a flag was forgotten is not
+        # a mistake to make on the caller's behalf.
+        args = build_parser().parse_args([
+            "--state-dir", str(self.state), "--governance", str(self.governance()),
+            "--company-ref", ACN, "--ticker", "ACN",
+            "--start", "2026-08-25", "--end", "2026-09-09", "--quiet",
+        ])
+        summary = run(args)
+        self.assertEqual(summary["status"], "failed")
+        self.assertIn("exactly one of", summary["failure_reason"])
+        self.assertIsNone(summary["artifact"])
 
     def test_a_summary_is_always_written(self):
         self.run_child(governance=self.governance(status="proposed"))

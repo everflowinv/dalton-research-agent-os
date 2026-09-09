@@ -47,9 +47,9 @@ QUARTER_ENDS = ("2025-11-30", "2026-02-28", "2026-05-31", "2026-08-31")
 QUARTER_STARTS = ("2025-09-01", "2025-12-01", "2026-03-01", "2026-06-01")
 
 
-def flow(value, *, source_ref="source:sec-edgar", concept="Concept"):
+def flow(value, *, source_ref="source:sec-edgar", concept="Concept", unit="USD"):
     return {
-        "concept": concept, "statement": "income", "unit": "USD",
+        "concept": concept, "statement": "income", "unit": unit,
         "source_ref": source_ref,
         "components": [
             {"period_start": start, "period_end": end,
@@ -232,15 +232,71 @@ class PercentileTests(ValuationTestCase):
             "price_only")
 
     def test_several_dated_windows_make_the_history_real(self):
+        # Both windows fall inside the 40-day history, so both are actually
+        # used to value bars.
+        published = self.publish(windows=[
+            {"as_of": "2026-08-01", "roles": roles(
+                net_income=flow("2000000", concept="NetIncomeLoss"))},
+            {"as_of": "2026-08-20", "roles": roles()},
+        ])
+        percentile = self.metrics(published)["trailing_pe"]["percentile"]
+        self.assertEqual(percentile["basis"], "price_and_filed_fundamentals")
+        self.assertEqual(percentile["windows_used"], 2)
+        self.assertEqual(published["basis"]["fundamental_window_count"], 2)
+
+    def test_a_window_the_history_never_reaches_does_not_upgrade_the_label(self):
+        # Two windows supplied, but every bar is newer than the second, so the
+        # first was never used to value anything. Counting what was handed in
+        # rather than what was used is a price-driven percentile wearing the
+        # other label.
         published = self.publish(windows=[
             {"as_of": "2025-01-31", "roles": roles(
                 net_income=flow("2000000", concept="NetIncomeLoss"))},
             {"as_of": "2025-12-31", "roles": roles()},
         ])
-        self.assertEqual(
-            self.metrics(published)["trailing_pe"]["percentile"]["basis"],
-            "price_and_filed_fundamentals")
+        percentile = self.metrics(published)["trailing_pe"]["percentile"]
+        self.assertEqual(percentile["windows_used"], 1)
+        self.assertEqual(percentile["basis"], "price_only")
         self.assertEqual(published["basis"]["fundamental_window_count"], 2)
+
+    def test_without_a_dated_share_history_the_record_says_so(self):
+        published = self.publish()
+        self.assertEqual(
+            published["basis"]["shares_basis"],
+            "current_shares_applied_to_history")
+        self.assertEqual(
+            self.metrics(published)["trailing_pe"]["percentile"]["shares_basis"],
+            "current_shares_applied_to_history")
+        self.assertEqual(published["basis"]["share_observation_count"], 0)
+
+    def test_a_dated_share_history_values_each_bar_with_the_count_then_known(self):
+        # A company that has been retiring stock: every past market cap built
+        # from today's smaller count understates the past, and the percentile
+        # inherits the error.
+        published = self.publish(share_history=[
+            {"as_of": "2026-07-01", "shares_outstanding": "2000000"},
+            {"as_of": "2026-08-20", "shares_outstanding": "1000000"},
+        ])
+        percentile = self.metrics(published)["trailing_pe"]["percentile"]
+        self.assertEqual(percentile["shares_basis"], "dated_shares")
+        self.assertEqual(published["basis"]["share_observation_count"], 2)
+        # The early bars now carry twice the share count, so their P/E is
+        # roughly double and today sits lower in its own history than it did
+        # when every bar was valued on today's count.
+        without = self.authority.publish_snapshot(
+            company_ref="company:sec-cik:0000000002",
+            price=self.price(), shares=self.shares(),
+            fundamental_windows=[{"as_of": "2025-12-31", "roles": roles()}],
+            price_history=history(),
+        )
+        self.assertLess(
+            Decimal(percentile["value"]),
+            Decimal(self.metrics(without)["trailing_pe"]["percentile"]["value"]))
+
+    def test_a_share_observation_of_zero_is_not_a_count(self):
+        with self.assertRaises(ValuationSnapshotConflict):
+            self.publish(share_history=[
+                {"as_of": "2026-07-01", "shares_outstanding": "0"}])
 
     def test_a_bar_older_than_every_filing_is_left_out_not_back_filled(self):
         # Valuing a 2024 price against a 2026 filing is a percentile that knows
@@ -332,6 +388,15 @@ class RefusalTests(ValuationTestCase):
             self.publish(windows=[{"as_of": "2025-12-31", "roles": roles(
                 capital_expenditure=flow("-1000000"))}])
         self.assertIn("sign convention", str(caught.exception))
+
+    def test_a_figure_reported_in_another_unit_is_refused(self):
+        # Revenue in thousands divided into a dollar market capitalisation is a
+        # price/sales a thousand times too small, and nothing on the record
+        # would say so. A wrong multiple is worse than an unavailable one.
+        with self.assertRaises(ValuationSnapshotConflict) as caught:
+            self.publish(windows=[{"as_of": "2025-12-31", "roles": roles(
+                revenue=flow("12500", concept="Revenues", unit="USD_thousands"))}])
+        self.assertIn("not a multiple", str(caught.exception))
 
     def test_a_role_no_metric_uses_is_refused(self):
         with self.assertRaises(ValuationSnapshotValidationError):

@@ -43,6 +43,15 @@ ACTOR_REF = "core:market-price-worker"
 # The columns one bar has. Close and Adj Close are both here, on purpose.
 BAR_FIELDS = ("open", "high", "low", "close", "adj_close", "volume")
 OBSERVATION_KINDS = ("shares_outstanding", "market_cap")
+# After this hour UTC, a bar dated that day has settled.
+#
+# US equities close at 20:00Z on summer time and 21:00Z on winter time, and
+# this system has no exchange calendar to tell it which. 22:00Z is after both
+# with an hour to spare, and the error is deliberately one-sided: calling a
+# settled bar provisional costs one extra request, while calling a provisional
+# bar settled freezes a mid-session print as the day's close forever. The
+# second is the failure this constant exists to prevent, so it is generous.
+SETTLED_AFTER_UTC_HOUR = 22
 # A ceiling, not an expectation: twenty years of daily bars for one company.
 MAX_BARS = 6000
 MAX_OBSERVATIONS = 4000
@@ -94,6 +103,57 @@ def _iso_date(value: Any, name: str) -> str:
     except ValueError as exc:
         raise MarketPriceValidationError(f"{name} must be YYYY-MM-DD") from exc
     return value
+
+
+def _rfc3339(value: Any, name: str) -> str:
+    value = _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise MarketPriceValidationError(f"{name} must be RFC3339") from exc
+    if parsed.tzinfo is None:
+        raise MarketPriceValidationError(f"{name} must carry a timezone")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def bar_is_provisional(bar: Mapping[str, Any]) -> bool:
+    """Was this bar read before its own trading day had finished?
+
+    A mid-session read of "today" returns the last trade so far, and Yahoo
+    presents it in the same shape as a settled close. Storing that as the close
+    and then never asking again is how a wrong number becomes permanent: the
+    lane would move its window past the day, the restatement path would never
+    fire, and every valuation built on it would quietly use a price that was
+    only ever a snapshot of an afternoon.
+
+    So each bar records when it was captured, and a bar captured before its own
+    day settled says so. The next tick re-requests it.
+    """
+
+    captured_at = bar.get("captured_at")
+    if not isinstance(captured_at, str) or not captured_at:
+        # A bar from before this field existed. Treated as settled rather than
+        # re-fetched forever: the alternative is a lane that never stops asking
+        # about a series it cannot date.
+        return False
+    try:
+        moment = datetime.fromisoformat(captured_at.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    moment = moment.astimezone(timezone.utc)
+    settles_at = datetime.fromisoformat(
+        f"{bar['date']}T{SETTLED_AFTER_UTC_HOUR:02d}:00:00+00:00"
+    )
+    return moment < settles_at
+
+
+def provisional_bar_date(version: Mapping[str, Any] | None) -> str | None:
+    """The newest bar of a version, if it was read before its day settled."""
+
+    if not version or not version.get("bars"):
+        return None
+    newest = version["bars"][-1]
+    return newest["date"] if bar_is_provisional(newest) else None
 
 
 def _decimal_string(value: Any, name: str) -> str:
@@ -189,6 +249,7 @@ def _normalise_bars(
     *,
     invocation_ref: str,
     artifact_hash: str,
+    captured_at: str,
 ) -> list[dict[str, Any]]:
     """One row per trading day, each bound to the call that produced it."""
 
@@ -220,6 +281,9 @@ def _normalise_bars(
             raise MarketPriceConflict(f"bar {bar_date} has negative volume")
         row["invocation_ref"] = invocation_ref
         row["artifact_hash"] = artifact_hash
+        # When this bar was read, so a later tick can tell a settled close from
+        # an afternoon's last trade.
+        row["captured_at"] = captured_at
         rows.append(row)
     return rows
 
@@ -301,9 +365,13 @@ class MarketPriceSeriesAuthority:
     # -- reading -----------------------------------------------------------
 
     def version(self, version_ref: str) -> dict[str, Any]:
-        row = self.connection.execute(
+        return self._decode_version(self.connection, _text(version_ref, "version_ref"))
+
+    @staticmethod
+    def _decode_version(cursor: Any, version_ref: str) -> dict[str, Any]:
+        row = cursor.execute(
             "SELECT * FROM market_price_series_versions WHERE version_id=?",
-            (_text(version_ref, "version_ref"),),
+            (version_ref,),
         ).fetchone()
         return _decode(row, f"MarketPriceSeriesVersion {version_ref}")
 
@@ -413,6 +481,7 @@ class MarketPriceSeriesAuthority:
         governance_hash: str,
         requested_start: str,
         requested_end: str,
+        captured_at: str,
         actor_ref: str = ACTOR_REF,
     ) -> dict[str, Any]:
         """Merge one fetched window into the chain, or say it added nothing.
@@ -421,6 +490,17 @@ class MarketPriceSeriesAuthority:
         both know about -- which is how a restatement lands. Nothing is
         dropped: a version always carries the full history, so a reader never
         has to assemble one from a chain.
+
+        ``captured_at`` is when the source was actually read, and it is
+        recorded on every bar rather than on the version: a version can carry
+        bars from a dozen calls, and which of them was read mid-session is a
+        fact about the bar.
+
+        The whole read-merge-write runs inside one transaction. Two children
+        publishing the same company at once would otherwise both compute
+        version N from the same latest, and the second would hit the UNIQUE
+        constraint as a bare IntegrityError rather than as something a caller
+        can recognise.
         """
 
         company_ref = _text(company_ref, "company_ref")
@@ -439,15 +519,42 @@ class MarketPriceSeriesAuthority:
         if requested_end < requested_start:
             raise MarketPriceValidationError("requested_end precedes requested_start")
         actor_ref = _text(actor_ref, "actor_ref")
+        captured_at = _rfc3339(captured_at, "captured_at")
         fetched = _normalise_bars(
-            bars, invocation_ref=invocation_ref, artifact_hash=artifact_hash
+            bars, invocation_ref=invocation_ref, artifact_hash=artifact_hash,
+            captured_at=captured_at,
         )
         fetched_observations = _normalise_observations(
             observations, invocation_ref=invocation_ref, artifact_hash=artifact_hash
         )
 
         series_ref = series_ref_for(company_ref)
-        latest = self.latest_version(company_ref)
+        with self.store._transaction() as cur:
+            return self._merge_and_insert(
+                cur, series_ref=series_ref, company_ref=company_ref,
+                ticker=ticker, currency=currency, fetched=fetched,
+                fetched_observations=fetched_observations,
+                invocation_ref=invocation_ref, artifact_hash=artifact_hash,
+                governance_ref=governance_ref, governance_hash=governance_hash,
+                requested_start=requested_start, requested_end=requested_end,
+                captured_at=captured_at, actor_ref=actor_ref,
+            )
+
+    def _merge_and_insert(
+        self, cur: sqlite3.Cursor, *, series_ref: str, company_ref: str,
+        ticker: str, currency: str, fetched: list[dict[str, Any]],
+        fetched_observations: list[dict[str, Any]], invocation_ref: str,
+        artifact_hash: str, governance_ref: str, governance_hash: str,
+        requested_start: str, requested_end: str, captured_at: str,
+        actor_ref: str,
+    ) -> dict[str, Any]:
+        row = cur.execute(
+            "SELECT * FROM market_price_series_versions WHERE series_ref=? "
+            "ORDER BY version_number DESC LIMIT 1",
+            (series_ref,),
+        ).fetchone()
+        latest = None if row is None else _decode(
+            row, f"latest MarketPriceSeriesVersion for {company_ref}")
         prior_bars: dict[str, dict[str, Any]] = {}
         prior_observations: list[dict[str, Any]] = []
         if latest is not None:
@@ -529,6 +636,12 @@ class MarketPriceSeriesAuthority:
             # evidence that a split or a correction happened, and a reader who
             # has to diff two versions to find out will not.
             "restated_bar_dates": restated,
+            # The newest bar, if it was read before its own trading day
+            # settled. Null means every bar in this version is a settled
+            # close; a date means the lane must ask for that day again.
+            "provisional_bar_date": (
+                ordered[-1]["date"] if bar_is_provisional(ordered[-1]) else None
+            ),
             "fetch": {
                 "invocation_ref": invocation_ref,
                 "artifact_hash": artifact_hash,
@@ -537,10 +650,11 @@ class MarketPriceSeriesAuthority:
                 "requested_start": requested_start,
                 "requested_end": requested_end,
                 "fetched_bar_count": len(fetched),
+                "captured_at": captured_at,
             },
             "actor_ref": actor_ref,
         })
-        with self.store._transaction() as cur:
+        try:
             cur.execute(
                 "INSERT INTO market_price_series_versions "
                 "(version_id,series_ref,version_number,prior_version_id,company_ref,"
@@ -555,10 +669,18 @@ class MarketPriceSeriesAuthority:
                     actor_ref, wire["created_at"],
                 ),
             )
+        except sqlite3.IntegrityError as exc:
+            # Two children publishing the same company at once. The read above
+            # is inside this transaction, so this should be unreachable -- and
+            # a caller that meets it deserves to be told it lost a race rather
+            # than handed a bare constraint name.
+            raise MarketPriceConflict(
+                "another run published this company's next version first"
+            ) from exc
         # Read back rather than trust the write: the row that answers every
         # later question is the one that has to be correct, not the dict that
         # was handed to sqlite.
-        stored = self.version(version_id)
+        stored = self._decode_version(cur, version_id)
         if stored != wire:
             raise MarketPriceConflict("stored market price version does not read back")
         return {"status": "fresh", **stored}
@@ -577,5 +699,8 @@ __all__ = [
     "MarketPriceNotFound",
     "MarketPriceSeriesAuthority",
     "MarketPriceValidationError",
+    "SETTLED_AFTER_UTC_HOUR",
+    "bar_is_provisional",
+    "provisional_bar_date",
     "series_ref_for",
 ]

@@ -73,6 +73,10 @@ def _today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
 
 
+def _captured_at() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
 def json_safe(value: Any) -> Any:
     """Plain JSON for the artifact, including whatever the library hands back.
 
@@ -254,6 +258,10 @@ def fetch_daily_prices(ticker: str, *, start: str, end: str) -> dict[str, Any]:
         "requested_end": end,
         "auto_adjust": False,
         "observed_on": _today(),
+        # When the source was read, to the microsecond. A window that includes
+        # today returns the last trade so far, which looks exactly like a
+        # settled close; this is the only thing that can tell them apart.
+        "captured_at": _captured_at(),
         "columns": columns,
         "rows": rows,
         "metadata": metadata,
@@ -278,6 +286,7 @@ def fetch_analyst_estimates(ticker: str) -> dict[str, Any]:
         "operation": ANALYST_ESTIMATES_OPERATION,
         "ticker": ticker,
         "observed_on": _today(),
+        "captured_at": _captured_at(),
         "errors": {},
     }
     blocks: dict[str, Any] = {
@@ -348,7 +357,14 @@ def daily_prices_wire(
         raise MarketDataAdapterError("the raw output carries no rows")
     if len(rows) > MAX_BARS:
         raise MarketDataAdapterError(f"a run may carry at most {MAX_BARS} bars")
+    captured_at = raw.get("captured_at")
+    if not isinstance(captured_at, str) or not captured_at.strip():
+        # An older capture, or one taken by something that did not record when.
+        # Fall back to the observation date at midnight, which is before any
+        # settlement hour and so reads as provisional -- the safe direction.
+        captured_at = f"{observed_on}T00:00:00+00:00"
     bars: list[dict[str, str]] = []
+    dropped = 0
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
             raise MarketDataAdapterError(f"rows[{index}] is not a row")
@@ -356,7 +372,11 @@ def daily_prices_wire(
         if missing:
             # A day Yahoo has partial data for is a day this contract cannot
             # describe. Dropping it keeps the series honest; filling it would
-            # invent a price.
+            # invent a price. Counted, though, and carried onto the wire: a
+            # frame that arrived entirely as NaN used to produce an empty
+            # series that read as a normal quiet day, cleared the lane's
+            # failure budget and held the company for six hours.
+            dropped += 1
             continue
         bars.append({
             "date": str(row.get("date"))[:10],
@@ -397,7 +417,9 @@ def daily_prices_wire(
         "requested_start": str(raw.get("requested_start"))[:10],
         "requested_end": str(raw.get("requested_end"))[:10],
         "auto_adjust": False,
+        "captured_at": captured_at,
         "bars": bars,
+        "dropped_row_count": dropped,
         "observations": observations,
         "source_record_refs": list(source_record_refs),
         "next_cursor": None,
@@ -459,8 +481,11 @@ def analyst_estimates_wire(
             continue
         recommendations.append({
             "period": period,
+            # Absent stays absent. "No analyst rates it a sell" and "Yahoo did
+            # not say how many rate it a sell" are different facts, and zero
+            # can only express one of them.
             **{
-                wire: (_optional_count(row.get(column)) or 0)
+                wire: _optional_count(row.get(column))
                 for column, wire in _RECOMMENDATION_COLUMNS.items()
             },
         })

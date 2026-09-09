@@ -1,5 +1,6 @@
 {
  "auto_adjust": false,
+ "captured_at": "2026-09-09T18:38:55.069718+00:00",
  "columns": [
   "Adj Close",
   "Close",
@@ -13,10 +14,10 @@
  "metadata": {
   "currency": "USD",
   "exchange": "NYQ",
-  "marketCap": 108387180544,
+  "marketCap": 108393299968,
   "numberOfAnalystOpinions": 25,
   "quoteType": "EQUITY",
-  "regularMarketTime": 1788976819,
+  "regularMarketTime": 1788979116,
   "sharesOutstanding": 611942109,
   "shortName": "Accenture plc"
  },
