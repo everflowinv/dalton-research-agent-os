@@ -315,6 +315,57 @@ class LauncherTests(unittest.TestCase):
         }), encoding="utf-8")
         self.assertEqual(launcher.status("initial-screen:" + "b" * 24)["status"], "orphaned")
 
+    def test_a_real_claim_statement_fits_in_a_cited_figure(self) -> None:
+        """P13ac: the bound was narrower than what the system produces.
+
+        A number's text is the Claim's own normalized_statement, and the Claim
+        contract puts no ceiling on that. The SEC lane writes 205-character
+        statements, so every EPAM figure was refused and the Initial Screen
+        could not be published at all -- permanently, since Claims are
+        append-only and cannot be shortened afterwards.
+        """
+
+        from dalton_core.mission_deliverable import (
+            MAX_NUMBER_TEXT,
+            MissionDeliverableValidationError,
+            validate_section,
+        )
+
+        statement = (
+            "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, "
+            "Excluding Assessed Tax of 1,459,000,000 USD for the quarter ended "
+            "2025-06-30, an increase of 18.04 percent against the same quarter "
+            "of the prior year as reported in the same filing."
+        )
+        self.assertGreater(len(statement), 200)
+        section = validate_section({
+            "title": "S1", "body": "Revenue grew 18.04 percent.",
+            "numbers": [{"text": statement,
+                         "claim_version_ref": "claim-version:x", "period": "2025Q2"}],
+        })
+        self.assertEqual(section["numbers"][0]["text"], statement)
+        # Still bounded: one statement may not become a document.
+        with self.assertRaises(MissionDeliverableValidationError):
+            validate_section({
+                "title": "S1", "body": "b",
+                "numbers": [{"text": "x" * (MAX_NUMBER_TEXT + 1),
+                             "claim_version_ref": "claim-version:x"}],
+            })
+
+    def test_a_long_statement_still_sources_the_figures_in_the_body(self) -> None:
+        # Eliding instead of widening would have dropped the figure, because
+        # these statements put it last, and then reported the body citing it as
+        # unsourced.
+        from dalton_core.mission_deliverable import unsourced_numbers
+
+        statement = "EPAM " + ("very long preamble " * 12) + "revenue was 18.04 percent"
+        self.assertGreater(len(statement), 200)
+        self.assertEqual(
+            unsourced_numbers("Revenue grew 18.04 percent.",
+                              [{"text": statement, "claim_version_ref": "claim-version:x"}]),
+            [],
+        )
+
     def test_a_hold_says_whether_the_last_run_broke_or_had_nothing_to_write(self) -> None:
         """P13aa: those are different facts and read as the same one.
 

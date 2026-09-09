@@ -70,6 +70,11 @@ _PERIOD_TOKEN_RE = re.compile(
 # 跌破 1", "两条线"), not a measurement, and requiring a Claim for it would
 # empty the document without making it truer.
 _BARE_SMALL_INTEGER = 12
+# The longest rendering of one cited figure. A Claim's normalized_statement has
+# no ceiling in its own contract, so this is generous on purpose: it exists to
+# stop a single statement becoming a document, not to police wording. The
+# document's real bound is the 60-entry cap on a section's numbers.
+MAX_NUMBER_TEXT = 1000
 _VALUE_TOKEN_RE = re.compile(r"[$€£¥]\s?\d[\d,.]*|\d[\d,.]*\s?%|\d[\d,.]*")
 
 
@@ -171,7 +176,23 @@ def validate_section(
                 "a figure cites a Claim that is retired or does not exist: " + ref
             )
         checked.append({
-            "text": _text(item["text"], "number.text", maximum=200),
+            # P13ac: a number's text is the Claim's own normalized_statement,
+            # and the Claim contract puts no ceiling on that. 200 was narrower
+            # than what the system legitimately produces: the SEC lane writes
+            # "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer,
+            # Excluding Assessed Tax of ..." at 205 characters, so every EPAM
+            # figure failed here and the Initial Screen could not be published
+            # at all -- permanently, because Claims are append-only and cannot
+            # be shortened after the fact.
+            #
+            # Eliding instead of widening would be worse: unsourced_numbers
+            # reads the figures back out of this text, and these statements put
+            # the figure last, so a truncation would drop the number and then
+            # report the body that cites it as unsourced.
+            #
+            # The document stays bounded by the 60-entry cap above; this bound
+            # is only here so one statement cannot be a document.
+            "text": _text(item["text"], "number.text", maximum=MAX_NUMBER_TEXT),
             "claim_version_ref": ref,
             "period": None if item.get("period") is None else _text(item["period"], "number.period", maximum=120),
         })
