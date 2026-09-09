@@ -17,21 +17,29 @@ import unittest
 from pathlib import Path
 
 from dalton_core.research_quality_rubrics import (
+    RUBRIC_ALIASES,
     WEEKLY_BRIEF,
     WEEKLY_BRIEF_SECTIONS,
     rubric as get_rubric,
 )
 from dalton_core.research_quality_score import (
     CHECKS,
+    PASSING_SCORE,
     REF_MARKER,
     WEEKLY_BRIEF_CAPABILITY_SOURCES,
+    ResearchQualityValidationError,
     artefact_from_weekly_brief,
+    build_judge_prompt,
+    judge,
     run_deterministic,
+    summarise_scores,
+    validate_judge_output,
     weekly_brief_capabilities,
+    withheld_criteria,
 )
 from dalton_core.weekly_brief import ISSUE_SECTIONS
 
-GOLDEN = Path(__file__).resolve().parent / "golden" / "weekly-brief"
+GOLDEN = Path(__file__).resolve().parent / "golden" / "weekly_brief"
 
 
 def cases() -> list[dict]:
@@ -160,6 +168,156 @@ class CapabilityGateTests(unittest.TestCase):
         self.assertIn("weekly_brief_capability_gate", CHECKS)
         result = CHECKS["weekly_brief_capability_gate"]({"sections": []}, {"core": None})
         self.assertEqual(result["status"], "pass")
+
+
+class WithheldScoringTests(unittest.TestCase):
+    """A withheld criterion must not become a zero on the way through.
+
+    It used to. The gate reported it, and then ``summarise_scores`` averaged
+    every criterion the judge returned and listed the low ones under
+    ``below_passing`` -- and the golden floor for a withheld criterion was 0,
+    which the judged golden test fed straight to the judge. Three separate
+    places had to agree that not-applicable is not a grade; now they read one
+    function.
+    """
+
+    def setUp(self) -> None:
+        self.case = next(item for item in cases() if item["case_ref"] == "live-w36-second-issue")
+        self.deterministic = run_deterministic(self.case["artefact"], WEEKLY_BRIEF)
+        self.withheld = withheld_criteria(self.deterministic)
+        self.graded = [c for c in WEEKLY_BRIEF.criterion_ids if c not in self.withheld]
+
+    def reply(self, scores):
+        return {"scores": scores}
+
+    def full_marks(self, *, extra=()):
+        return [
+            {"criterion_id": criterion_id, "score": 3, "evidence": "以这一节为依据"}
+            for criterion_id in self.graded
+        ] + list(extra)
+
+    def test_the_gate_is_read_once_and_names_both_criteria_with_a_reason(self):
+        self.assertEqual(set(self.withheld),
+                         {"price_performance_attribution", "debate_shifts"})
+        for reason in self.withheld.values():
+            self.assertTrue(reason.strip())
+
+    def test_a_deterministic_layer_without_the_gate_withholds_nothing(self):
+        # The three Q1 rubrics never name the gate, so their judge contract is
+        # exactly what it was: every criterion scored, nothing withheld.
+        self.assertEqual(withheld_criteria(None), {})
+        self.assertEqual(withheld_criteria({"checks": []}), {})
+        screen = get_rubric("initial_screen")
+        self.assertNotIn("weekly_brief_capability_gate", screen.deterministic_checks)
+
+    def test_the_prompt_tells_the_judge_not_to_score_them(self):
+        prompt = build_judge_prompt(self.case["artefact"], WEEKLY_BRIEF, self.deterministic)
+        self.assertIn("NOT APPLICABLE YET", prompt)
+        self.assertIn("A number for one of them is refused", prompt)
+        # And it does not hand over the anchors that would invite a score.
+        anchor = WEEKLY_BRIEF.criterion("price_performance_attribution").anchors["0"]
+        self.assertNotIn(anchor, prompt)
+
+    def test_omitting_a_withheld_criterion_is_accepted(self):
+        validated = validate_judge_output(
+            self.reply(self.full_marks()), WEEKLY_BRIEF, withheld=self.withheld,
+        )
+        self.assertEqual(len(validated["scores"]), len(self.graded))
+        self.assertEqual({item["criterion_id"] for item in validated["withheld"]},
+                         set(self.withheld))
+
+    def test_nulling_a_withheld_criterion_is_accepted_and_keeps_its_sentence(self):
+        validated = validate_judge_output(
+            self.reply(self.full_marks(extra=[{
+                "criterion_id": "debate_shifts", "score": None,
+                "evidence": "这一期没有 DebateMap 可比，简报也没有声称有",
+            }])),
+            WEEKLY_BRIEF, withheld=self.withheld,
+        )
+        self.assertEqual(len(validated["scores"]), len(self.graded))
+        declined = {item["criterion_id"]: item for item in validated["withheld"]}
+        self.assertIn("DebateMap", declined["debate_shifts"]["evidence"])
+        self.assertIsNone(declined["price_performance_attribution"]["evidence"])
+
+    def test_a_number_for_a_withheld_criterion_is_refused(self):
+        for score in (0, 2, 4):
+            with self.subTest(score=score):
+                with self.assertRaises(ResearchQualityValidationError):
+                    validate_judge_output(
+                        self.reply(self.full_marks(extra=[{
+                            "criterion_id": "price_performance_attribution",
+                            "score": score, "evidence": "x",
+                        }])),
+                        WEEKLY_BRIEF, withheld=self.withheld,
+                    )
+
+    def test_nulling_an_applicable_criterion_is_refused(self):
+        scores = self.full_marks()
+        scores[0] = {"criterion_id": scores[0]["criterion_id"], "score": None, "evidence": "x"}
+        with self.assertRaises(ResearchQualityValidationError):
+            validate_judge_output(self.reply(scores), WEEKLY_BRIEF, withheld=self.withheld)
+
+    def test_a_missing_applicable_criterion_is_still_refused(self):
+        with self.assertRaises(ResearchQualityValidationError):
+            validate_judge_output(
+                self.reply(self.full_marks()[1:]), WEEKLY_BRIEF, withheld=self.withheld,
+            )
+
+    def test_withheld_criteria_are_out_of_the_mean_and_out_of_below_passing(self):
+        validated = validate_judge_output(
+            self.reply(self.full_marks()), WEEKLY_BRIEF, withheld=self.withheld,
+        )
+        summary = summarise_scores(validated["scores"], validated["withheld"])
+        self.assertEqual(summary["criteria"], len(self.graded))
+        self.assertEqual(summary["mean"], 3.0)
+        self.assertEqual(summary["below_passing"], [])
+        self.assertEqual({item["criterion_id"] for item in summary["withheld"]},
+                         set(self.withheld))
+        for item in summary["withheld"]:
+            with self.subTest(criterion=item["criterion_id"]):
+                self.assertEqual(item["status"], "not_applicable_yet")
+                self.assertTrue(item["reason"].strip())
+
+    def test_a_genuinely_bad_score_still_reaches_below_passing(self):
+        scores = self.full_marks()
+        scores[0] = {**scores[0], "score": PASSING_SCORE - 1}
+        validated = validate_judge_output(self.reply(scores), WEEKLY_BRIEF, withheld=self.withheld)
+        summary = summarise_scores(validated["scores"], validated["withheld"])
+        self.assertEqual(summary["below_passing"], [self.graded[0]])
+
+    def test_the_judge_layer_carries_the_gate_through_end_to_end(self):
+        class Fake:
+            def call(self, *, purpose, request_id, prompt, mission):
+                return {"text": json.dumps({"scores": [
+                    {"criterion_id": c, "score": 3, "evidence": "以这一节为依据"}
+                    for c in WEEKLY_BRIEF.criterion_ids
+                    if c not in ("price_performance_attribution", "debate_shifts")
+                ]}), "replayed": False, "cost_micros": 0,
+                    "work_order_ref": "w", "invocation_ref": "i",
+                    "result_envelope_ref": "r", "route_decision_ref": "route:fake"}
+
+        result = judge(self.case["artefact"], WEEKLY_BRIEF, self.deterministic, model=Fake(),
+                       mission={"id": "m", "content_hash": "h"}, request_id="r")
+        self.assertEqual(result["status"], "scored")
+        self.assertEqual(result["summary"]["criteria"], 8)
+        self.assertEqual(result["summary"]["mean"], 3.0)
+        self.assertEqual(len(result["withheld"]), 2)
+
+    def test_a_judge_that_scores_a_withheld_criterion_is_refused_end_to_end(self):
+        class Fake:
+            def call(self, *, purpose, request_id, prompt, mission):
+                return {"text": json.dumps({"scores": [
+                    {"criterion_id": c, "score": 0 if c == "price_performance_attribution" else 3,
+                     "evidence": "x"}
+                    for c in WEEKLY_BRIEF.criterion_ids if c != "debate_shifts"
+                ]}), "replayed": False, "cost_micros": 0,
+                    "work_order_ref": "w", "invocation_ref": "i",
+                    "result_envelope_ref": "r", "route_decision_ref": "route:fake"}
+
+        result = judge(self.case["artefact"], WEEKLY_BRIEF, self.deterministic, model=Fake(),
+                       mission={"id": "m", "content_hash": "h"}, request_id="r")
+        self.assertEqual(result["status"], "refused")
+        self.assertIn("not applicable yet", result["reason"])
 
 
 class AdapterTests(unittest.TestCase):
@@ -335,8 +493,16 @@ class GoldenSetTests(unittest.TestCase):
                 )
 
     def test_the_rubric_short_name_matches_the_golden_directory(self):
-        self.assertEqual(GOLDEN.name, "weekly-brief")
+        self.assertEqual(GOLDEN.name, "weekly_brief")
         self.assertIs(get_rubric(GOLDEN.name), WEEKLY_BRIEF)
+
+    def test_the_hyphenated_spelling_still_resolves_but_is_not_the_name(self):
+        # The refs are hyphenated and the short names are not, so this is the
+        # mistake a person makes once. It resolves; it is not in the aliases,
+        # because the golden directories and the CLI's choices come from those.
+        self.assertIs(get_rubric("weekly-brief"), WEEKLY_BRIEF)
+        self.assertNotIn("weekly-brief", RUBRIC_ALIASES)
+        self.assertIn("weekly_brief", RUBRIC_ALIASES)
 
 
 if __name__ == "__main__":

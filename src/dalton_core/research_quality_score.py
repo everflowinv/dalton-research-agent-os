@@ -334,34 +334,23 @@ REF_MARKER = "〔ref〕"
 _BRIEF_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
 
 
-def _brief_prose(text: str, company_names: Mapping[str, str]) -> tuple[str, int]:
+def _brief_prose(text: str, company_names: Mapping[str, str]) -> str:
     """One section's prose with machine addresses replaced by a marker."""
 
-    stripped = 0
-
     def mark(match: "re.Match[str]") -> str:
-        nonlocal stripped
-        stripped += 1
         return REF_MARKER
-
-    body = _BRIEF_CLAIM_REF_RE.sub(mark, text)
 
     def name(match: "re.Match[str]") -> str:
-        ref = match.group(0)
-        label = company_names.get(ref)
-        if label:
-            return label
-        nonlocal stripped
-        stripped += 1
-        return REF_MARKER
+        return company_names.get(match.group(0)) or REF_MARKER
 
+    body = _BRIEF_CLAIM_REF_RE.sub(mark, text)
     body = _BRIEF_COMPANY_REF_RE.sub(name, body)
     for pattern in _BRIEF_MACHINE_PATTERNS:
         body = pattern.sub(mark, body)
     # A run of markers left by "｜ref｜hash｜retrieved" is one marker: the
     # density that matters is per sentence, not per field.
     body = re.sub(f"(?:{re.escape(REF_MARKER)}[\\s｜|,，、]*)+", REF_MARKER + " ", body)
-    return body.strip(), stripped
+    return body.strip()
 
 
 def artefact_from_weekly_brief(
@@ -396,7 +385,7 @@ def artefact_from_weekly_brief(
         end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
         raw = body[match.end():end]
         refs = list(dict.fromkeys(_BRIEF_CLAIM_REF_RE.findall(raw)))
-        prose, stripped = _brief_prose(raw, names)
+        prose = _brief_prose(raw, names)
         numbers: list[dict[str, Any]] = []
         for ref in refs:
             claim = claims.get(ref)
@@ -413,9 +402,6 @@ def artefact_from_weekly_brief(
         sections.append({
             "title": title, "body": prose, "claim_refs": refs, "numbers": numbers,
             "gaps": [],
-            # Kept for the report and for a future hygiene check; the section
-            # shape drops unknown keys, so this rides on the section it
-            # describes rather than inside it.
         })
     return artefact(
         artefact_kind="weekly_brief",
@@ -800,14 +786,28 @@ WEEKLY_BRIEF_CAPABILITY_SOURCES: Mapping[str, tuple[str, str]] = {
 }
 
 
-def _mission_write_scopes(core: sqlite3.Connection) -> set[str] | None:
-    """What the live missions are allowed to write, or None if unreadable."""
+def _mission_write_scopes(
+    core: sqlite3.Connection, mission_ref: str | None = None
+) -> set[str] | None:
+    """What a mission is allowed to write, or None if unreadable.
 
+    Scoped to one mission when the caller names one.  A union across every
+    mission on the Core would let a second mission's grant open a gate for the
+    document of a mission that does not have it -- there is one mission today,
+    which is exactly when this kind of thing gets written and never noticed.
+    """
+
+    sql = (
+        "SELECT v.record_json AS record_json, p.mission_ref AS mission_ref "
+        "FROM coverage_mission_pointer p "
+        "JOIN coverage_mission_versions v ON v.mission_version_id=p.mission_version_id"
+    )
+    params: tuple[Any, ...] = ()
+    if mission_ref:
+        sql += " WHERE p.mission_ref=?"
+        params = (mission_ref,)
     try:
-        rows = core.execute(
-            "SELECT v.record_json AS record_json FROM coverage_mission_pointer p "
-            "JOIN coverage_mission_versions v ON v.mission_version_id=p.mission_version_id"
-        ).fetchall()
+        rows = core.execute(sql, params).fetchall()
     except sqlite3.OperationalError:
         return None
     scopes: set[str] = set()
@@ -821,7 +821,9 @@ def _mission_write_scopes(core: sqlite3.Connection) -> set[str] | None:
     return scopes
 
 
-def weekly_brief_capabilities(core: sqlite3.Connection | None) -> dict[str, dict[str, Any]]:
+def weekly_brief_capabilities(
+    core: sqlite3.Connection | None, *, mission_ref: str | None = None,
+) -> dict[str, dict[str, Any]]:
     """For each gated capability: is it there, and if not, why not.
 
     A capability counts as present only when both halves are true -- the
@@ -836,7 +838,7 @@ def weekly_brief_capabilities(core: sqlite3.Connection | None) -> dict[str, dict
                    "reason": "没有 Core 连接，无法确认这一层是否已接入；按未接入处理"}
             for name in WEEKLY_BRIEF_CAPABILITY_SOURCES
         }
-    scopes = _mission_write_scopes(core)
+    scopes = _mission_write_scopes(core, mission_ref)
     out: dict[str, dict[str, Any]] = {}
     for name, (table, scope) in WEEKLY_BRIEF_CAPABILITY_SOURCES.items():
         try:
@@ -870,7 +872,9 @@ def check_weekly_brief_capability_gate(
     """
 
     rubric: Rubric | None = context.get("rubric")
-    capabilities = weekly_brief_capabilities(context.get("core"))
+    capabilities = weekly_brief_capabilities(
+        context.get("core"), mission_ref=context.get("mission_ref"),
+    )
     findings: list[dict[str, Any]] = []
     criteria = () if rubric is None else rubric.criteria
     for criterion in criteria:
@@ -913,15 +917,40 @@ CHECKS: Mapping[str, Callable[[Mapping[str, Any], CheckContext], dict[str, Any]]
 }
 
 
+def withheld_criteria(deterministic: Mapping[str, Any] | None) -> dict[str, str]:
+    """Criteria the capability gate withheld, and why.
+
+    Q2 review: a withheld criterion is not a low score, and everything
+    downstream has to agree about that or it becomes one.  The judge is told
+    not to score them, ``summarise_scores`` keeps them out of the mean and out
+    of ``below_passing``, and the record publishes them as
+    ``not_applicable_yet`` with the reason.  One reading of the gate, used by
+    all three, so they cannot drift apart.
+    """
+
+    if not deterministic:
+        return {}
+    for item in deterministic.get("checks") or ():
+        if item.get("check") != "weekly_brief_capability_gate":
+            continue
+        return {
+            str(finding["criterion_id"]): str(finding.get("reason") or "")
+            for finding in item.get("findings") or ()
+            if finding.get("code") == "not_applicable_yet"
+        }
+    return {}
+
+
 def run_deterministic(
-    art: Mapping[str, Any], rubric: Rubric, *, core: sqlite3.Connection | None = None
+    art: Mapping[str, Any], rubric: Rubric, *,
+    core: sqlite3.Connection | None = None, mission_ref: str | None = None,
 ) -> dict[str, Any]:
     """Every check this rubric names, in the rubric's own order."""
 
     # The rubric travels in the context because Q2's capability gate is a
     # check about the *rubric*: which of its criteria this Core cannot yet
     # hold against a document. Every other check ignores it.
-    context: CheckContext = {"core": core, "rubric": rubric}
+    context: CheckContext = {"core": core, "rubric": rubric, "mission_ref": mission_ref}
     results = [CHECKS[name](art, context) for name in rubric.deterministic_checks]
     failed = [item["check"] for item in results if item["status"] == "fail"]
     return {
@@ -958,13 +987,28 @@ def build_judge_prompt(art: Mapping[str, Any], rubric: Rubric, deterministic: Ma
         lines.append("")
         lines.append("Grading notes:")
         lines.extend(f"  - {note}" for note in rubric.grading_notes)
+    withheld = withheld_criteria(deterministic)
     lines.append("")
     lines.append("Criteria:")
     for criterion in rubric.criteria:
+        if criterion.criterion_id in withheld:
+            lines.append(
+                f"- {criterion.criterion_id}: NOT APPLICABLE YET — do not score this one. "
+                f"{withheld[criterion.criterion_id]}"
+            )
+            continue
         lines.append(f"- {criterion.criterion_id}: {criterion.question}")
         lines.append(f"    评分依据必须能指认：{criterion.evidence_required}")
         for level in ("0", "2", "4"):
             lines.append(f"    {level} = {criterion.anchors[level]}")
+    if withheld:
+        lines.append("")
+        lines.append(
+            "The criteria marked NOT APPLICABLE YET need a system capability that is not "
+            "installed. Return no entry for them, or an entry whose score is null. A number "
+            "for one of them is refused: the artefact did not fail at something nothing could "
+            "have done."
+        )
     lines.append("")
     lines.append("Checks already run mechanically (do not re-derive them; use them as facts):")
     for item in deterministic["checks"]:
@@ -973,7 +1017,7 @@ def build_judge_prompt(art: Mapping[str, Any], rubric: Rubric, deterministic: Ma
     lines.append("Return raw JSON only, no markdown fence, with this exact shape and nothing else:")
     lines.append('{"scores": [{"criterion_id": "<one of the ids above>", "score": 0-4,')
     lines.append('             "evidence": "<one sentence naming what in the artefact you scored>"}]}')
-    lines.append("One entry per criterion, every criterion exactly once, no other keys.")
+    lines.append("One entry per criterion you were asked to score, exactly once, no other keys.")
     lines.append("The evidence sentence must point at the artefact, not restate the criterion.")
     lines.append("")
     if art.get("question"):
@@ -1027,14 +1071,25 @@ def _one_sentence(value: Any, name: str) -> str:
     return text
 
 
-def validate_judge_output(value: Any, rubric: Rubric) -> dict[str, Any]:
+def validate_judge_output(
+    value: Any, rubric: Rubric, *, withheld: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     """The judge's reply, or a refusal.  Nothing is repaired.
 
     A reply with an extra key, a criterion the rubric does not have, a missing
     criterion, a score out of range or an essay where a sentence belongs is not
     a judgement that needs tidying: it is a judgement about something other
     than this rubric, and it is refused.
+
+    ``withheld`` names the criteria the capability gate took off the table.
+    The judge may omit them or answer ``null``; **a number for one of them is
+    refused**.  That refusal is the point of the whole gate: if a withheld
+    criterion could come back as a 1, it would land in the mean and in
+    ``below_passing`` and the document would be marked down for not doing a
+    thing nothing could have done.
     """
+
+    withheld = dict(withheld or {})
 
     if not isinstance(value, Mapping):
         raise ResearchQualityValidationError("the judge did not return an object")
@@ -1047,9 +1102,12 @@ def validate_judge_output(value: Any, rubric: Rubric) -> dict[str, Any]:
     if not isinstance(rows, list) or not rows:
         raise ResearchQualityValidationError("the judge returned no scores")
     scores: list[dict[str, Any]] = []
+    declined: dict[str, str | None] = {}
     seen: set[str] = set()
     for row in rows:
-        if not isinstance(row, Mapping) or set(row) != {"criterion_id", "score", "evidence"}:
+        if not isinstance(row, Mapping) or set(row) - {"criterion_id", "score", "evidence"} or not {
+            "criterion_id", "score"
+        } <= set(row):
             raise ResearchQualityValidationError(
                 "each score must be exactly criterion_id, score and evidence"
             )
@@ -1064,6 +1122,21 @@ def validate_judge_output(value: Any, rubric: Rubric) -> dict[str, Any]:
             )
         seen.add(criterion_id)
         score = row["score"]
+        if criterion_id in withheld:
+            if score is not None:
+                raise ResearchQualityValidationError(
+                    f"{criterion_id}: this criterion is not applicable yet and must not be "
+                    f"scored; the judge returned {score!r}"
+                )
+            declined[criterion_id] = (
+                None if row.get("evidence") is None
+                else _one_sentence(row["evidence"], f"{criterion_id}.evidence")
+            )
+            continue
+        if score is None:
+            raise ResearchQualityValidationError(
+                f"{criterion_id}: this criterion is applicable and must be scored"
+            )
         if isinstance(score, bool) or not isinstance(score, int):
             raise ResearchQualityValidationError(
                 f"{criterion_id}: score must be a whole number {SCORE_MIN}..{SCORE_MAX}"
@@ -1072,20 +1145,49 @@ def validate_judge_output(value: Any, rubric: Rubric) -> dict[str, Any]:
             raise ResearchQualityValidationError(
                 f"{criterion_id}: score {score} is outside {SCORE_MIN}..{SCORE_MAX}"
             )
+        if "evidence" not in row:
+            raise ResearchQualityValidationError(
+                f"{criterion_id}: a score needs one sentence of evidence"
+            )
         scores.append({
             "criterion_id": criterion_id, "score": score,
             "evidence": _one_sentence(row["evidence"], f"{criterion_id}.evidence"),
         })
-    missing = [item for item in rubric.criterion_ids if item not in seen]
+    missing = [
+        item for item in rubric.criterion_ids
+        if item not in seen and item not in withheld
+    ]
     if missing:
         raise ResearchQualityValidationError(
             f"the judge did not score every criterion; missing: {missing}"
         )
     scores.sort(key=lambda item: rubric.criterion_ids.index(item["criterion_id"]))
-    return {"schema_version": SCHEMA_VERSION, "scores": scores}
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "scores": scores,
+        # Published beside the scores rather than mixed into them: a reader who
+        # sums the list must not be able to sum a not-applicable.
+        "withheld": [
+            {"criterion_id": criterion_id, "reason": reason,
+             "evidence": declined.get(criterion_id)}
+            for criterion_id, reason in sorted(withheld.items())
+        ],
+    }
 
 
-def summarise_scores(scores: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+def summarise_scores(
+    scores: Sequence[Mapping[str, Any]],
+    withheld: Sequence[Mapping[str, Any]] = (),
+) -> dict[str, Any]:
+    """The arithmetic, over the criteria that were actually graded.
+
+    ``withheld`` never enters ``mean`` or ``below_passing``.  Averaging a
+    not-applicable is how a gate that was built to protect a document ends up
+    marking it down: a criterion nothing could have satisfied would drag the
+    mean toward zero and appear in the list of findings, which is a zero
+    wearing a different name.
+    """
+
     values = [int(item["score"]) for item in scores]
     return {
         "criteria": len(values),
@@ -1093,6 +1195,12 @@ def summarise_scores(scores: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "mean": round(sum(values) / len(values), 3) if values else None,
         "below_passing": [
             item["criterion_id"] for item in scores if int(item["score"]) < PASSING_SCORE
+        ],
+        "withheld": [
+            {"criterion_id": str(item["criterion_id"]),
+             "status": "not_applicable_yet",
+             "reason": str(item.get("reason") or "")}
+            for item in withheld
         ],
     }
 
@@ -1145,6 +1253,7 @@ def judge(
     """One bounded call, verified before it is believed."""
 
     prompt = build_judge_prompt(art, rubric, deterministic)
+    withheld = withheld_criteria(deterministic)
     try:
         call = model.call(purpose=JUDGE_PURPOSE, request_id=request_id, prompt=prompt, mission=mission)
     except CockpitModelError as exc:
@@ -1164,7 +1273,7 @@ def judge(
         "purpose": JUDGE_PURPOSE,
     }
     try:
-        validated = validate_judge_output(parsed, rubric)
+        validated = validate_judge_output(parsed, rubric, withheld=withheld)
     except ResearchQualityValidationError as exc:
         return {
             "status": "refused", "reason": str(exc),
@@ -1176,7 +1285,8 @@ def judge(
         "rubric_ref": rubric.rubric_ref,
         "rubric_hash": rubric.content_hash,
         "scores": validated["scores"],
-        "summary": summarise_scores(validated["scores"]),
+        "withheld": validated["withheld"],
+        "summary": summarise_scores(validated["scores"], validated["withheld"]),
         "prompt_chars": len(prompt),
         "model": provenance,
     }
@@ -1205,7 +1315,13 @@ def build_verifier_prompt(art: Mapping[str, Any], rubric: Rubric, judgement: Map
         "",
         f"Rubric: {rubric.title} ({rubric.rubric_ref} v{rubric.version})",
     ]
+    # Criteria that were never scored are not shown: a verifier given an anchor
+    # for a criterion with no score in front of it has been handed a missing
+    # answer to find.
+    graded = {str(row["criterion_id"]) for row in judgement.get("scores") or ()}
     for criterion in rubric.criteria:
+        if graded and criterion.criterion_id not in graded:
+            continue
         lines.append(f"- {criterion.criterion_id}: {criterion.question}")
         lines.append(f"    0 = {criterion.anchors['0']}")
         lines.append(f"    4 = {criterion.anchors['4']}")
@@ -1555,7 +1671,10 @@ def score_artefact(
     """Run the deterministic layer always, the judge layer only if given a model."""
 
     rubric = get_rubric(rubric_name)
-    deterministic = run_deterministic(art, rubric, core=core)
+    deterministic = run_deterministic(
+        art, rubric, core=core,
+        mission_ref=None if mission is None else mission.get("mission_ref"),
+    )
     judgement = None
     verification = None
     if model is not None:
@@ -1619,4 +1738,5 @@ __all__ = [
     "validate_verifier_output",
     "verify",
     "weekly_brief_capabilities",
+    "withheld_criteria",
 ]

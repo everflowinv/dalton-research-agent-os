@@ -14,6 +14,7 @@ it would be finding a registration some other import performed.
 from __future__ import annotations
 
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -48,18 +49,19 @@ UNGRANTED = {
 
 class FakeLauncher:
     def __init__(self, *, conflict: bool = False, reject: bool = False) -> None:
-        self.started: list[str] = []
+        self.started: list[tuple[str, str]] = []
         self.conflict = conflict
         self.reject = reject
         self.tickets: dict[str, dict] = {}
 
-    def start(self, *, iso_week: str) -> dict:
+    def start(self, *, iso_week: str, inputs_hash: str) -> dict:
         if self.conflict:
             raise LaneChildConflict("a reflection child is already running")
         if self.reject:
             raise LaneChildRejected("no week")
-        self.started.append(iso_week)
-        ticket = {"id": f"research-cycle-reflection:{'0' * 24}", "iso_week": iso_week}
+        self.started.append((iso_week, inputs_hash))
+        ticket = {"id": f"research-cycle-reflection:{inputs_hash[:24]:0<24}",
+                  "iso_week": iso_week, "inputs_hash": inputs_hash}
         self.tickets[ticket["id"]] = {**ticket, "status": "running", "summary": None}
         return ticket
 
@@ -70,14 +72,25 @@ class FakeLauncher:
         return self.tickets[ticket_ref]
 
 
-def coordinator(launcher, *, mission=GRANTED, reflected=(), now=MONDAY):
-    weeks = set(reflected)
-    return MissionReflectionLaneCoordinator(
-        launcher=launcher,
-        mission=lambda: mission,
-        already_reflected=lambda mission_ref, iso_week: iso_week in weeks,
+def coordinator(launcher, *, mission=GRANTED, recorded=(), digest="hash-a", now=MONDAY):
+    """A lane whose week reads as ``digest`` and whose Ledger holds ``recorded``."""
+
+    known = {(week, item) for week, item in recorded}
+    state = {"digest": digest}
+
+    def week_state(mission_record, window):
+        return {
+            "inputs_hash": state["digest"],
+            "already_recorded": (window["iso_week"], state["digest"]) in known,
+        }
+
+    lane = MissionReflectionLaneCoordinator(
+        launcher=launcher, mission=lambda: mission, week_state=week_state,
         clock=lambda: now,
     )
+    lane.set_digest = lambda value: state.__setitem__("digest", value)
+    lane.remember = lambda week, value: known.add((week, value))
+    return lane
 
 
 class CadenceTests(unittest.TestCase):
@@ -86,25 +99,51 @@ class CadenceTests(unittest.TestCase):
         result = coordinator(launcher).dispatch_once()
         self.assertEqual(result["status"], "launched")
         self.assertEqual(result["iso_week"], "2026-W36")
-        self.assertEqual(launcher.started, ["2026-W36"])
+        self.assertEqual(result["inputs_hash"], "hash-a")
+        self.assertEqual(launcher.started, [("2026-W36", "hash-a")])
 
     def test_a_week_already_reflected_on_is_a_duplicate_not_an_idle(self):
         # "Idle" would say there was nothing to do. There was something to do
         # and it is done, and a restart on Wednesday should read as a no-op
         # rather than as a lane with no work.
         launcher = FakeLauncher()
-        result = coordinator(launcher, reflected={"2026-W36"}).dispatch_once()
+        result = coordinator(launcher, recorded={("2026-W36", "hash-a")}).dispatch_once()
         self.assertEqual(result["status"], "duplicate")
         self.assertEqual(result["reflection_ref"],
                          reflection_ref_for("coverage-mission:test", "2026-W36"))
         self.assertEqual(launcher.started, [])
+
+    def test_a_week_whose_inputs_moved_is_launched_again(self):
+        # The documented second version: a cost row that lands on Tuesday about
+        # Friday's work makes this week a different reading, and the lane has
+        # to notice. Asking "is there a row for this week" never would.
+        launcher = FakeLauncher()
+        lane = coordinator(launcher, recorded={("2026-W36", "hash-a")})
+        self.assertEqual(lane.dispatch_once()["status"], "duplicate")
+        lane.set_digest("hash-b")
+        again = lane.dispatch_once()
+        self.assertEqual(again["status"], "launched")
+        self.assertEqual(again["inputs_hash"], "hash-b")
+        self.assertEqual(launcher.started, [("2026-W36", "hash-b")])
+
+    def test_an_unreadable_week_is_reported_rather_than_raised(self):
+        def explode(mission_record, window):
+            raise sqlite3.OperationalError("database is locked")
+
+        lane = MissionReflectionLaneCoordinator(
+            launcher=FakeLauncher(), mission=lambda: GRANTED, week_state=explode,
+            clock=lambda: MONDAY,
+        )
+        result = lane.dispatch_once()
+        self.assertEqual(result["status"], "unavailable")
+        self.assertIn("OperationalError", result["reason"])
 
     def test_every_tick_for_the_rest_of_the_week_stays_a_duplicate(self):
         launcher = FakeLauncher()
         for offset in range(0, 7):
             with self.subTest(day=offset):
                 result = coordinator(
-                    launcher, reflected={"2026-W36"},
+                    launcher, recorded={("2026-W36", "hash-a")},
                     now=MONDAY + timedelta(days=offset),
                 ).dispatch_once()
                 self.assertEqual(result["status"], "duplicate")
@@ -113,7 +152,7 @@ class CadenceTests(unittest.TestCase):
     def test_the_next_monday_is_a_different_week_and_launches_again(self):
         launcher = FakeLauncher()
         result = coordinator(
-            launcher, reflected={"2026-W36"}, now=MONDAY + timedelta(days=7),
+            launcher, recorded={("2026-W36", "hash-a")}, now=MONDAY + timedelta(days=7),
         ).dispatch_once()
         self.assertEqual(result["status"], "launched")
         self.assertEqual(result["iso_week"], "2026-W37")
@@ -124,7 +163,7 @@ class CadenceTests(unittest.TestCase):
         lane.dispatch_once()
         again = lane.dispatch_once()
         self.assertEqual(again["status"], "running")
-        self.assertEqual(launcher.started, ["2026-W36"])
+        self.assertEqual(launcher.started, [("2026-W36", "hash-a")])
 
     def test_a_busy_launcher_is_reported_rather_than_raised(self):
         result = coordinator(FakeLauncher(conflict=True)).dispatch_once()
@@ -158,7 +197,7 @@ class GrantTests(unittest.TestCase):
 class SettlementTests(unittest.TestCase):
     def test_a_finished_child_is_settled_on_the_next_tick(self):
         launcher = FakeLauncher()
-        lane = coordinator(launcher, reflected=set())
+        lane = coordinator(launcher)
         started = lane.dispatch_once()
         launcher.settle(started["ticket_ref"], status="succeeded", summary={
             "recorded": {"reflection_ref": "research-cycle-reflection:test:2026-W36",
@@ -168,7 +207,7 @@ class SettlementTests(unittest.TestCase):
         })
         # The week is now written, so the same coordinator reports duplicate
         # and carries last run's settlement with it.
-        lane.already_reflected = lambda mission_ref, iso_week: True
+        lane.remember("2026-W36", "hash-a")
         result = lane.dispatch_once()
         self.assertEqual(result["status"], "duplicate")
         self.assertEqual(result["settled"]["reflection_status"], "fresh")
@@ -182,7 +221,19 @@ class SettlementTests(unittest.TestCase):
         held = lane.dispatch_once()
         self.assertEqual(held["status"], "held")
         self.assertEqual(held["reason"], "boom")
-        self.assertEqual(launcher.started, ["2026-W36"])
+        self.assertEqual(launcher.started, [("2026-W36", "hash-a")])
+
+    def test_a_held_week_is_tried_again_once_its_numbers_move(self):
+        # The hold is keyed by week *and* reading. A week held on one reading
+        # would otherwise be dead until the process restarted, even though the
+        # thing that broke may be exactly what changed.
+        launcher = FakeLauncher()
+        lane = coordinator(launcher)
+        started = lane.dispatch_once()
+        launcher.settle(started["ticket_ref"], status="failed", summary={"reason": "boom"})
+        self.assertEqual(lane.dispatch_once()["status"], "held")
+        lane.set_digest("hash-b")
+        self.assertEqual(lane.dispatch_once()["status"], "launched")
 
 
 class LauncherTests(unittest.TestCase):
@@ -203,7 +254,9 @@ class LauncherTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             launcher = ReflectionLauncher(state_dir=Path(directory))
             with self.assertRaises(LaneChildRejected):
-                launcher.start(iso_week="")
+                launcher.start(iso_week="", inputs_hash="h")
+            with self.assertRaises(LaneChildRejected):
+                launcher.start(iso_week="2026-W36", inputs_hash="")
 
 
 class LaunchAgentTests(unittest.TestCase):

@@ -760,9 +760,14 @@ RUBRIC_ALIASES: Mapping[str, str] = MappingProxyType({
     "initial_screen": INITIAL_SCREEN.rubric_ref,
     "ask_answer": ASK_ANSWER.rubric_ref,
     "company_dossier": COMPANY_DOSSIER.rubric_ref,
-    # Hyphenated, unlike the other three: it is what the CLI flag and the
-    # golden directory are called, and three spellings of one rubric is
-    # two spellings too many.
+    "weekly_brief": WEEKLY_BRIEF.rubric_ref,
+})
+# Spellings that resolve but are not the name.  The refs are hyphenated and the
+# short names are not, so the hyphenated form of this one is the mistake a
+# person makes once; ``rubric()`` accepts it rather than making them read the
+# error.  Not in ``RUBRIC_ALIASES``, because that mapping is one entry per
+# rubric -- the golden directories and the CLI's choices are derived from it.
+_TOLERATED_SPELLINGS: Mapping[str, str] = MappingProxyType({
     "weekly-brief": WEEKLY_BRIEF.rubric_ref,
 })
 
@@ -774,7 +779,8 @@ class UnknownRubric(KeyError):
 def rubric(name: str) -> Rubric:
     """Look one up by ref or by short name."""
 
-    ref = RUBRIC_ALIASES.get(str(name), str(name))
+    key = str(name)
+    ref = RUBRIC_ALIASES.get(key) or _TOLERATED_SPELLINGS.get(key, key)
     try:
         return RUBRICS[ref]
     except KeyError:

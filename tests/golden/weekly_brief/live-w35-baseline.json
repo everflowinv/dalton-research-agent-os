@@ -197,7 +197,7 @@
    "price_performance_attribution",
    "debate_shifts"
   ],
-  "rationale": "结构缺 预测对账（这一期发布时模板还只有七节），所以 structure_complete 与 forecast_changes 都低。数字纪律干净：四条基线 Claim 的 5.59 / 4.53 / 1.09 / 5.83 percent 全部逐字回指。正文里每一行都拖着一个 〔ref〕，所以 citation_hygiene 不高——机器地址被印进了给人读的句子里。下期研究问题四条全是「下一次跑会不会还是正的」，可执行性低。",
+  "rationale": "结构缺 预测对账（这一期发布时模板还只有七节），所以 structure_complete 与 forecast_changes 都低。数字纪律干净：四条基线 Claim 的 5.59 / 4.53 / 1.09 / 5.83 percent 全部逐字回指。正文里每一行都拖着一个 〔ref〕，所以 citation_hygiene 不高——机器地址被印进了给人读的句子里。下期研究问题四条全是「下一次跑会不会还是正的」，可执行性低。　price_performance_attribution 与 debate_shifts 今天由能力闸判为 not_applicable_yet：判官不会为它们打分，记录里它们带原因发布，也不计入均值与 below_passing。上面给它们留的区间不是对这一期的判断，而是市场层与 DebateMap 落地之后一个评分者应当落在的位置。",
   "score_ranges": {
    "citation_dedupe": [
     3,
@@ -208,8 +208,8 @@
     2
    ],
    "debate_shifts": [
-    0,
-    2
+    2,
+    4
    ],
    "forecast_changes": [
     0,
@@ -228,8 +228,8 @@
     4
    ],
    "price_performance_attribution": [
-    0,
-    2
+    2,
+    4
    ],
    "structure_complete": [
     1,
@@ -243,6 +243,6 @@
   "score_ranges_are_calibration_only": true
  },
  "note": "第一期，是基线：change_summary.is_baseline 为真，没有相对上一期的变化可报。它是判断「首期没有 delta 不该扣分」这条 grading note 是否被遵守的那一例。",
- "rubric": "weekly-brief",
+ "rubric": "weekly_brief",
  "source": "live Core（/private/tmp/dalton-ro/core.sqlite 的 /tmp 副本，2026-09-09），weekly-brief-version:us-it-services:2026-w35，人类 human:lumos 于 2026-08-27 发布并投递至 Discord。正文由 WeeklyBriefAuthority.render_markdown 从 evidence pack 重放，逐字。"
 }

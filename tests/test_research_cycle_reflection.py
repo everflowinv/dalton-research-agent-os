@@ -277,9 +277,21 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(journal["outstanding_words"], 1)
         self.assertTrue(journal["sources"]["analyst_journal"]["available"])
         # The weekly brief keeps its own feedback table with the same five
-        # words; this Core does not have one, and that is reported rather than
-        # folded into the count.
+        # words; this Core does not have one, so the count is flagged partial
+        # rather than presented as the whole of this week's feedback.
         self.assertFalse(journal["sources"]["weekly_brief"]["available"])
+        self.assertTrue(journal["partial"])
+        self.assertEqual(journal["missing_sources"], ["weekly_brief_feedback"])
+
+    def test_with_neither_feedback_table_the_metric_is_absent_not_zero(self):
+        # "0 条反馈" would say the owner read it and had no comment. What
+        # happened is that there was nowhere to put a comment.
+        bare = open_fixture_core(schemas=("schema.sql",))
+        self.addCleanup(bare.close)
+        journal = compute_metrics(bare, window=self.window, now=NOW)["journal"]
+        self.assertFalse(journal["available"])
+        self.assertIn("analyst_journal_entries", journal["reason"])
+        self.assertIn("weekly_brief_feedback", journal["reason"])
 
     def test_a_missing_authority_is_an_absence_with_a_reason_not_a_zero(self):
         bare = open_fixture_core(schemas=("schema.sql",))
@@ -310,10 +322,9 @@ class MetricTests(unittest.TestCase):
                 self.assertIn("available", value)
                 if not value["available"]:
                     self.assertTrue(value["reason"].strip())
-        self.assertEqual(
-            [name for name, value in metrics.items() if value["available"]], ["journal"],
-        )
-        self.assertEqual(metrics["journal"]["entries"], 0)
+        # Not one of the eight is readable on a bare store, and every one of
+        # them says which table it wanted.
+        self.assertEqual([name for name, value in metrics.items() if value["available"]], [])
 
 
 class NarrativeTests(unittest.TestCase):
@@ -348,6 +359,10 @@ class NarrativeTests(unittest.TestCase):
         )
         rendered = narrative(metrics, self.window)
         self.assertIn("闲置率不可算", rendered["prose"])
+
+    def test_a_partial_feedback_count_says_which_half_it_counted(self):
+        rendered = narrative(self.metrics, self.window)
+        self.assertIn("weekly_brief_feedback", rendered["prose"])
 
 
 class CandidateTests(unittest.TestCase):
@@ -478,23 +493,50 @@ class AuthorityTests(unittest.TestCase):
 class FreezeTests(unittest.TestCase):
     """The v0.4 freeze: no Ledger write, no policy change, no question admitted."""
 
-    MODULE = Path(__file__).resolve().parents[1] / "src" / "dalton_core" / "research_cycle_reflection.py"
+    SRC = Path(__file__).resolve().parents[1] / "src" / "dalton_core"
+    MODULE = SRC / "research_cycle_reflection.py"
+    CHILD = SRC / "research_cycle_reflection_cli.py"
+
+    # Everything that could put something in the Ledger, change a policy or
+    # admit a question. ``coverage_mission`` is handled separately: the child
+    # has to read the active mission, and that authority is the only thing that
+    # validates one.
+    FORBIDDEN = (
+        "claim_index", "mission_deliverable", "research_question_backlog",
+        "governance", "candidate_staging", "thesis", "ClaimAuthority",
+        "industry_research", "weekly_brief",
+    )
+
+    def imports(self, path: Path) -> list[str]:
+        return [
+            line.strip() for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip().startswith(("import ", "from "))
+        ]
 
     def test_the_module_imports_nothing_that_could_write_the_ledger(self):
-        source = self.MODULE.read_text(encoding="utf-8")
-        forbidden = (
-            "claim_index", "coverage_mission import", "mission_deliverable",
-            "research_question_backlog", "governance", "candidate_staging",
-            "thesis", "ClaimAuthority",
-        )
-        imports = [
-            line for line in source.splitlines()
-            if line.startswith(("import ", "from ")) or line.strip().startswith(("import ", "from "))
-        ]
-        for line in imports:
-            for name in forbidden:
-                with self.subTest(line=line.strip(), forbidden=name):
+        for line in self.imports(self.MODULE):
+            for name in self.FORBIDDEN + ("coverage_mission import",):
+                with self.subTest(line=line, forbidden=name):
                     self.assertNotIn(name, line)
+
+    def test_the_lane_child_imports_nothing_that_could_write_the_ledger_either(self):
+        # Q2 review: the authority module was scanned and the module the lane
+        # actually spawns was not, which is the one that runs unattended.
+        for line in self.imports(self.CHILD):
+            for name in self.FORBIDDEN:
+                with self.subTest(line=line, forbidden=name):
+                    self.assertNotIn(name, line)
+
+    def test_the_child_reads_the_mission_and_never_holds_the_authority(self):
+        # The one exception, and why it is one: the child has to find the
+        # active mission, and CoverageMissionAuthority is the only thing that
+        # can validate one. It is imported inside the function that reads it,
+        # it is never stored, and only ``.mission(...)`` is called on it. The
+        # authorizer test below is what actually holds this.
+        source = self.CHILD.read_text(encoding="utf-8")
+        self.assertNotIn("\nfrom .coverage_mission import", source)
+        self.assertIn("CoverageMissionAuthority(store).mission(", source)
+        self.assertEqual(source.count("CoverageMissionAuthority"), 2)
 
     def test_the_only_writes_are_its_own_two_tables(self):
         # A spy connection: everything the run does is allowed to read, and any
@@ -539,6 +581,62 @@ class FreezeTests(unittest.TestCase):
         self.addCleanup(core.set_authorizer, None)
         body = build_reflection(core, mission=MISSION, now=NOW, tick_summaries=TICKS)
         self.assertEqual(body["iso_week"], "2026-W36")
+
+    def test_the_lane_child_writes_only_its_own_two_tables(self):
+        """The control that actually holds the freeze, on the code that runs.
+
+        The child opens its own store, so the authorizer has to be installed
+        from inside: ``DaltonStore`` is replaced for the duration with one that
+        arms it on construction. Then the real ``main(["run", ...])`` runs --
+        finding the mission, computing eight metrics, writing a record -- and
+        every INSERT, UPDATE and DELETE it performs is checked.
+        """
+
+        import dalton_core.research_cycle_reflection_cli as child
+
+        allowed = {"research_cycle_reflection_versions", "research_cycle_reflection_pointer"}
+        seen: list[str] = []
+
+        def authorizer(action, arg1, arg2, db_name, trigger):
+            if action in (sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE):
+                table = str(arg1 or "")
+                if not table.startswith("sqlite_"):
+                    seen.append(table)
+                    if table not in allowed:
+                        return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        class WatchedStore(DaltonStore):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.connection.set_authorizer(authorizer)
+
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        state = Path(directory.name)
+        store = DaltonStore(str(state / "core.sqlite"))
+        try:
+            fixtures = bootstrap_method_authorities(store)
+            params = mission_params(fixtures)
+            ref = params.pop("mission_ref")
+            params["autonomy"] = {
+                **params["autonomy"],
+                "may_write": sorted(set(params["autonomy"]["may_write"]) | {"deliverable"}),
+            }
+            CoverageMissionAuthority(store).create_mission(ref, **params)
+        finally:
+            store.close()
+
+        original = child.DaltonStore
+        child.DaltonStore = WatchedStore
+        self.addCleanup(setattr, child, "DaltonStore", original)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = child.main(["run", "--state-dir", str(state)])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(buffer.getvalue())["recorded"]["status"], "fresh")
+        self.assertTrue(seen)
+        self.assertEqual(set(seen) - allowed, set())
 
     def test_the_record_says_out_loud_what_it_is_not_allowed_to_do(self):
         core = two_week_core()

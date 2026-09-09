@@ -39,7 +39,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -91,6 +91,8 @@ WORK_ORDER_FAMILY_LANES: Mapping[str, str] = {
     "document-numeric": "document_extraction",
     "metric-discovery": "document_extraction",
     "llm-research-planner": "research_plan",
+    "research-plan": "research_plan",
+    "plan": "research_plan",
 }
 
 
@@ -167,9 +169,18 @@ def closed_week(now: datetime) -> dict[str, Any]:
 
     if now.tzinfo is None:
         now = now.astimezone()
-    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    this_monday = midnight - timedelta(days=midnight.weekday())
-    start = this_monday - timedelta(days=7)
+    # Arithmetic on the calendar, then one conversion back to an instant.
+    # Subtracting seven days from an aware datetime moves the instant, so
+    # across a DST boundary the "Monday 00:00" it lands on is 23:00 or 01:00 --
+    # and the window silently gains or loses an hour of the week it reports on.
+    # ``date`` has no offset to lose, so the boundary is a calendar fact and
+    # the offset is applied to it afterwards.
+    today = now.date()
+    this_monday_date = today - timedelta(days=today.weekday())
+    start_date = this_monday_date - timedelta(days=7)
+    zone = now.tzinfo
+    this_monday = datetime.combine(this_monday_date, time.min).replace(tzinfo=zone)
+    start = datetime.combine(start_date, time.min).replace(tzinfo=zone)
     return {
         "iso_week": iso_week_label(start),
         "start": start.astimezone(timezone.utc).isoformat(timespec="microseconds"),
@@ -177,6 +188,9 @@ def closed_week(now: datetime) -> dict[str, Any]:
         "start_local": start.isoformat(timespec="seconds"),
         "end_local": this_monday.isoformat(timespec="seconds"),
         "days": 7,
+        # The window is seven calendar days; across a DST boundary it is 167 or
+        # 169 hours, and the cap arithmetic uses the days.
+        "hours": round((this_monday - start).total_seconds() / 3600, 3),
     }
 
 
@@ -321,9 +335,21 @@ def backlog_movement(core: sqlite3.Connection, window: Mapping[str, Any]) -> dic
         if not _in_window(row["created_at"], window):
             continue
         by_state.setdefault(str(row["state"]), []).append(str(row["question_ref"]))
-    heads: dict[str, str] = {}
+    # The head state *as of the end of the window*, and by instant rather than
+    # by the order rows came back in. Two events a millisecond apart on
+    # different offsets sort the wrong way as text, and "what was still open on
+    # Sunday night" is not "what is open now": a question answered on Tuesday
+    # was open for the whole week being reported on.
+    end = _as_utc(window["end"])
+    heads: dict[str, tuple[datetime, str]] = {}
     for row in rows:
-        heads[str(row["question_ref"])] = str(row["state"])
+        moment = _as_utc(row["created_at"])
+        if moment is None or (end is not None and moment >= end):
+            continue
+        ref = str(row["question_ref"])
+        seen = heads.get(ref)
+        if seen is None or moment >= seen[0]:
+            heads[ref] = (moment, str(row["state"]))
     open_states = {"open", "selected", "planned", "in_progress"}
     return {
         "available": True,
@@ -334,7 +360,7 @@ def backlog_movement(core: sqlite3.Connection, window: Mapping[str, Any]) -> dic
         "moved_by_state": {state: len(refs) for state, refs in sorted(by_state.items())},
         "new_question_refs": sorted(set(by_state.get("open", [])))[:MAX_REFS],
         "answered_refs": sorted(set(by_state.get("answered", [])))[:MAX_REFS],
-        "open_at_end": sum(1 for state in heads.values() if state in open_states),
+        "open_at_end": sum(1 for _, state in heads.values() if state in open_states),
         "unreadable_timestamps": unreadable,
     }
 
@@ -503,13 +529,24 @@ def open_human_checkpoints(
         return _unavailable("coverage_mission_stage_records 不在这个 Core 里")
     rows = _rows(core, (
         "SELECT company_ref, stage_ref, status, actor_ref, created_at "
-        "FROM coverage_mission_stage_records ORDER BY created_at"
+        "FROM coverage_mission_stage_records"
     ))
-    latest: dict[tuple[str, str], sqlite3.Row] = {}
+    # Ordered in Python by the parsed instant, not by SQLite's text collation.
+    # The Ledger holds both "...+00:00" and local-offset stamps -- the first
+    # weekly brief was published at -04:00 -- and sorted as text, a stamp
+    # written in a western offset sorts *after* a later UTC one. Getting this
+    # wrong reads a closed checkpoint as still open.
+    latest: dict[tuple[str, str], tuple[datetime, sqlite3.Row]] = {}
     for row in rows:
-        latest[(str(row["company_ref"]), str(row["stage_ref"]))] = row
+        moment = _as_utc(row["created_at"])
+        if moment is None:
+            continue
+        key = (str(row["company_ref"]), str(row["stage_ref"]))
+        seen = latest.get(key)
+        if seen is None or moment >= seen[0]:
+            latest[key] = (moment, row)
     open_rows = []
-    for (company_ref, stage_ref), row in sorted(latest.items()):
+    for (company_ref, stage_ref), (_, row) in sorted(latest.items()):
         if str(row["status"]) != "entered":
             continue
         entered = _as_utc(row["created_at"])
@@ -588,12 +625,14 @@ def journal_feedback(core: sqlite3.Connection, window: Mapping[str, Any]) -> dic
     words = ("read", "useful", "needs_more_evidence", "disagree", "revise")
     by_word = {word: 0 for word in words}
     sources: dict[str, Any] = {}
+    missing: list[str] = []
     for table, label in (
         ("analyst_journal_entries", "analyst_journal"),
         ("weekly_brief_feedback", "weekly_brief"),
     ):
         if not _table_exists(core, table):
             sources[label] = {"available": False, "reason": f"{table} 不在这个 Core 里"}
+            missing.append(table)
             continue
         count = 0
         for row in _rows(core, f"SELECT verdict, created_at FROM {table}"):
@@ -605,8 +644,21 @@ def journal_feedback(core: sqlite3.Connection, window: Mapping[str, Any]) -> dic
             count += 1
         sources[label] = {"available": True, "entries": count}
     total = sum(by_word.values())
+    if len(missing) == len(sources):
+        # Both places feedback is written are absent. Reporting "0 条反馈" here
+        # would say the owner read and had no comment, when what happened is
+        # that there was nowhere to put a comment.
+        return _unavailable(
+            "两处反馈表都不在这个 Core 里（" + "、".join(missing) + "），"
+            "「没有反馈」读不出任何东西",
+            by_word=by_word, sources=sources,
+        )
     return {
         "available": True,
+        # Partial when one of the two is absent: the count is real, but it is
+        # a count of one of the two places a verdict can land.
+        "partial": bool(missing),
+        "missing_sources": missing,
         "entries": total,
         "by_word": by_word,
         "sources": sources,
@@ -794,17 +846,24 @@ def narrative(metrics: Mapping[str, Any], window: Mapping[str, Any]) -> dict[str
         )
     else:
         lines.append(f"质量分不可读：{scores.get('reason')}")
-    if journal.get("available"):
-        if journal["entries"]:
-            words = "、".join(
-                f"{word} {count}" for word, count in journal["by_word"].items() if count
-            )
-            lines.append(f"人给了 {journal['entries']} 条反馈：{words}。")
-        else:
-            lines.append(
-                "这一周没有人给过任何一条反馈。"
-                "五个词的反馈词表还没有 UI，所以「没有反馈」暂时不能读成「读过而没有意见」。"
-            )
+    if not journal.get("available"):
+        lines.append(f"人类反馈不可读：{journal.get('reason')}")
+    elif journal["entries"]:
+        words = "、".join(
+            f"{word} {count}" for word, count in journal["by_word"].items() if count
+        )
+        partial = ("（只数了两处反馈表里的一处，"
+                   + "、".join(journal["missing_sources"]) + " 不在这个 Core 里）"
+                   if journal.get("partial") else "")
+        lines.append(f"人给了 {journal['entries']} 条反馈：{words}{partial}。")
+    else:
+        partial = ("；另一处（" + "、".join(journal["missing_sources"])
+                   + "）不在这个 Core 里，没有数进来"
+                   if journal.get("partial") else "")
+        lines.append(
+            f"这一周没有人给过任何一条反馈{partial}。"
+            "五个词的反馈词表还没有 UI，所以「没有反馈」暂时不能读成「读过而没有意见」。"
+        )
     return {"title": NARRATIVE_TITLE, "prose": "\n".join(lines), "table": table[:MAX_TABLE_ROWS]}
 
 
@@ -892,7 +951,7 @@ def backlog_candidates(metrics: Mapping[str, Any], window: Mapping[str, Any]) ->
             "Q1 建了评分表与打分器但没有建 lane：没有人调用它，它就只是一个能力。",
             [],
         ))
-    if journal.get("available") and journal["entries"] == 0:
+    if journal.get("available") and not journal.get("partial") and journal["entries"] == 0:
         out.append(_candidate(
             "这一周没有任何人类反馈落到 AnalystJournal 或周报反馈上，缺的是意见还是入口？",
             "五个词的反馈词表已经存在两处，两处都还没有 UI。没有入口时的沉默读不出任何东西。",

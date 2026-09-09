@@ -197,7 +197,7 @@
    "price_performance_attribution",
    "debate_shifts"
   ],
-  "rationale": "duplicate_parallel_citations 必须 fail，且 findings 里那一组要含三条 ref、period 为 2026-04-01..2026-06-30。",
+  "rationale": "duplicate_parallel_citations 必须 fail，且 findings 里那一组要含三条 ref、period 为 2026-04-01..2026-06-30。　price_performance_attribution 与 debate_shifts 今天由能力闸判为 not_applicable_yet：判官不会为它们打分，记录里它们带原因发布，也不计入均值与 below_passing。上面给它们留的区间不是对这一期的判断，而是市场层与 DebateMap 落地之后一个评分者应当落在的位置。",
   "score_ranges": {
    "citation_dedupe": [
     0,
@@ -208,8 +208,8 @@
     2
    ],
    "debate_shifts": [
-    1,
-    3
+    2,
+    4
    ],
    "forecast_changes": [
     0,
@@ -228,8 +228,8 @@
     4
    ],
    "price_performance_attribution": [
-    0,
-    2
+    2,
+    4
    ],
    "structure_complete": [
     1,
@@ -243,6 +243,6 @@
   "score_ranges_are_calibration_only": true
  },
  "note": "去重是投影层的责任，不是起草的。周报读的是 evidence pack 的 claim 集合，所以只要账本里还有重复 Claim，周报就会照抄这份重复。",
- "rubric": "weekly-brief",
+ "rubric": "weekly_brief",
  "source": "live-w36-second-issue 的副本，把 DXC 的 -5.06% 变成由三条不同 claim ref 并列承载，复制的是 live ACN v2 的 S7 上真实发生过的形状（同一季度收入被三条重复 Claim 引用三次）。"
 }

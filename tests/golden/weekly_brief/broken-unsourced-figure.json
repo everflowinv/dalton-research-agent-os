@@ -175,7 +175,7 @@
    "price_performance_attribution",
    "debate_shifts"
   ],
-  "rationale": "numbers_without_refs 必须 fail：14.7% 与 60（bps）都不在任何被引 Claim 里。其余检查不受影响，正是这一例要证明的——一处无源数字不会连累引用卫生。",
+  "rationale": "numbers_without_refs 必须 fail：14.7% 与 60（bps）都不在任何被引 Claim 里。其余检查不受影响，正是这一例要证明的——一处无源数字不会连累引用卫生。　price_performance_attribution 与 debate_shifts 今天由能力闸判为 not_applicable_yet：判官不会为它们打分，记录里它们带原因发布，也不计入均值与 below_passing。上面给它们留的区间不是对这一期的判断，而是市场层与 DebateMap 落地之后一个评分者应当落在的位置。",
   "score_ranges": {
    "citation_dedupe": [
     3,
@@ -186,8 +186,8 @@
     2
    ],
    "debate_shifts": [
-    1,
-    3
+    2,
+    4
    ],
    "forecast_changes": [
     0,
@@ -206,8 +206,8 @@
     0
    ],
    "price_performance_attribution": [
-    0,
-    2
+    2,
+    4
    ],
    "structure_complete": [
     1,
@@ -221,6 +221,6 @@
   "score_ranges_are_calibration_only": true
  },
  "note": "周报最容易出的一类错：叙事层想给一句总结，于是写了一个账本里没有的数字。这一句读起来完全像研究，数字纪律是唯一能拦住它的东西。",
- "rubric": "weekly-brief",
+ "rubric": "weekly_brief",
  "source": "live-w36-second-issue 的副本，在「本期研究变化」末尾加了一句没有任何 Claim 承载的行业 margin 数字。"
 }

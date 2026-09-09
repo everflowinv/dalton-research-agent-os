@@ -40,7 +40,7 @@
     "title": "本期研究变化"
    },
    {
-    "body": "- ACN：、、（同一季度数据重复）显示 Large-scale AI and reinvention work N1 可以抵消疲软的可选咨询支出；和指出管理层维持中个位数本币增长指引（数据来源：）。\n- IBM：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。\n- CTSH：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。\n- EPAM：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。\n- ACN：Large-scale AI and reinvention work plus managed services can offset soft discretionary consulting, allowing Accenture to sustain mid-single-digit local-currency growth without sacrificing operating margin. (confidence=medium; thesis=〔ref〕 ; 本期版本变化=yes)\n- DXC：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。",
+    "body": "- IBM：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。\n- CTSH：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。\n- EPAM：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。\n- ACN：Large-scale AI and reinvention work plus managed services can offset soft discretionary consulting, allowing Accenture to sustain mid-single-digit local-currency growth without sacrificing operating margin. (confidence=medium; thesis=〔ref〕 ; 本期版本变化=yes)\n- DXC：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。",
     "claim_refs": [],
     "gaps": [],
     "numbers": [],
@@ -143,7 +143,7 @@
   "subject_ref": "industry:us-it-services",
   "title": "weekly-brief:us-it-services"
  },
- "case_ref": "broken-residual-markers",
+ "case_ref": "live-w36-second-issue",
  "expected": {
   "deterministic": {
    "claim_refs_resolve": {
@@ -163,8 +163,8 @@
     "status": "fail"
    },
    "residual_citation_artefacts": {
-    "count": 5,
-    "status": "fail"
+    "count": 0,
+    "status": "pass"
    },
    "weekly_brief_capability_gate": {
     "count": 2,
@@ -175,19 +175,19 @@
    "price_performance_attribution",
    "debate_shifts"
   ],
-  "rationale": "residual_citation_artefacts 必须 fail，并且要同时抓到孤儿句首动词、孤儿连词动词、空引用括号与裸标记 N1 四类形状。",
+  "rationale": "view_changes 上了一档：ACN 有具名 thesis、confidence 与「本期版本变化=yes」，其余四家诚实地写 insufficient。关键争议多了一条 against（DXC），但简报没有说这条把辩论推到哪里，所以 debate_shifts 仍在中段——而它本来就被能力闸标成 not_applicable_yet。预测对账一节仍然缺席。　price_performance_attribution 与 debate_shifts 今天由能力闸判为 not_applicable_yet：判官不会为它们打分，记录里它们带原因发布，也不计入均值与 below_passing。上面给它们留的区间不是对这一期的判断，而是市场层与 DebateMap 落地之后一个评分者应当落在的位置。",
   "score_ranges": {
    "citation_dedupe": [
     3,
     4
    ],
    "citation_hygiene": [
-    0,
-    0
+    1,
+    2
    ],
    "debate_shifts": [
-    1,
-    3
+    2,
+    4
    ],
    "forecast_changes": [
     0,
@@ -206,8 +206,8 @@
     4
    ],
    "price_performance_attribution": [
-    0,
-    2
+    2,
+    4
    ],
    "structure_complete": [
     1,
@@ -220,7 +220,7 @@
   },
   "score_ranges_are_calibration_only": true
  },
- "note": "周报 v2 的叙事将由 LLM 起草并剥离标记，也就是说 Initial Screen 身上那 30 处残迹会原样搬到周报上。这一例是把那个未来的缺陷先钉住。",
- "rubric": "weekly-brief",
- "source": "live-w36-second-issue 的副本，把「对现有观点的影响」第一行换成 P10c 在已发布 Initial Screen 上留下的那种引用剥离残迹（逐字取自 live ACN v2 的 S7：「、、（同一季度数据重复）显示」「和指出」）。"
+ "note": "第二期，也是目前 live 上最后一期：有真实 delta（新增 DXC 的 -5.06% 与一条新问题），ACN 第一次有正式 ThesisVersion 绑定，所以 view_changes 第一次有东西可评。",
+ "rubric": "weekly_brief",
+ "source": "live Core 同一副本，weekly-brief-version:9eafec9e9796671cd2ed9fcbae0ef596，由 core 于 2026-09-03 按 cycle admission 自动发布并投递。"
 }

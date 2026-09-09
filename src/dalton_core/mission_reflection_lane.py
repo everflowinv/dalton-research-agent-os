@@ -22,7 +22,16 @@ So the cadence is expressed twice, in two different mechanisms, on purpose:
 A week whose numbers changed after Monday -- a late-arriving cost row, a
 question answered on Tuesday about Friday's work -- can be reflected on again,
 and that is a new version of the same week rather than a second record.  This
-is why the lane keeps looking rather than firing once and going quiet.
+is why the lane keeps looking rather than firing once and going quiet, and it
+is why the tick asks *the hash*, not *is there a row*: a lane that stopped at
+"this week exists" would make the documented second version unreachable.
+
+The cost of asking is the reflection itself, computed in-process every tick.
+That is eight read-only queries and no model, which is cheap enough to do at
+tick rate and is the only honest way to answer "has anything moved" -- the
+answer is a function of every row the reflection reads.  The child then
+recomputes and writes; if a row landed between the two, the authority sees a
+different hash and writes a version, which is correct.
 
 The child costs nothing.  There is no model in this lane at all, which is also
 why it takes the tick's child slot so rarely and so briefly.
@@ -43,7 +52,12 @@ from .lane_child_launcher import (
     LaneChildTicketNotFound,
 )
 from .lane_registry import LaneSpec, register_lane
-from .research_cycle_reflection import WRITE_SCOPE, closed_week, reflection_ref_for
+from .research_cycle_reflection import (
+    WRITE_SCOPE,
+    build_reflection,
+    closed_week,
+    reflection_ref_for,
+)
 from .store import canonical_json
 
 LAUNCHER_KWARG = "reflection_launcher"
@@ -96,6 +110,19 @@ class ReflectionLauncher(LaneChildLauncher):
         )
         self.actor_ref = actor_ref
 
+    def tick_summaries(self) -> list[dict[str, Any]]:
+        """What the coordinator's own reading of the week should count.
+
+        The launcher owns the archive path, so it is the one thing that can
+        hand the tick's in-process computation the same summaries the child
+        will read.  Without this the two would disagree about the idle ratio
+        and therefore about the hash, and every tick would look like a change.
+        """
+
+        from .research_cycle_reflection_cli import load_tick_summaries
+
+        return load_tick_summaries(self.tick_summary_dir)
+
     def _command(self, *, ticket_dir: Path, **_: Any) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE, "run",
@@ -108,15 +135,25 @@ class ReflectionLauncher(LaneChildLauncher):
             command += ["--tick-summary-dir", str(self.tick_summary_dir)]
         return command
 
-    def start(self, *, iso_week: str) -> dict[str, Any]:
-        """One child for one week.  The week names the ticket."""
+    def start(self, *, iso_week: str, inputs_hash: str) -> dict[str, Any]:
+        """One child for one reading of one week.
+
+        The ticket is named by the week **and** the inputs hash, so a week
+        re-reflected after a late row is a new ticket rather than a collision
+        with the run that produced the version before it.
+        """
 
         if not isinstance(iso_week, str) or not iso_week.strip():
             raise LaneChildRejected("a reflection run is named by its ISO week")
+        if not isinstance(inputs_hash, str) or not inputs_hash.strip():
+            raise LaneChildRejected("a reflection run is named by the inputs it read")
         digest = hashlib.sha256(
-            canonical_json({"iso_week": iso_week, "state": str(self.state_dir)}).encode("utf-8")
+            canonical_json({"iso_week": iso_week, "inputs_hash": inputs_hash,
+                            "state": str(self.state_dir)}).encode("utf-8")
         ).hexdigest()[:24]
-        return self.spawn(digest=digest, record={"iso_week": iso_week})
+        return self.spawn(
+            digest=digest, record={"iso_week": iso_week, "inputs_hash": inputs_hash},
+        )
 
 
 class MissionReflectionLaneCoordinator:
@@ -127,19 +164,23 @@ class MissionReflectionLaneCoordinator:
         *,
         launcher: Any,
         mission: Callable[[], dict[str, Any] | None],
-        already_reflected: Callable[[str, str], bool],
+        week_state: Callable[[Mapping[str, Any], Mapping[str, Any]], dict[str, Any]],
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.launcher = launcher
         self.mission = mission
-        self.already_reflected = already_reflected
+        # (mission, window) -> {"inputs_hash", "already_recorded"}. Named as a
+        # collaborator rather than done inline so the tick's decision can be
+        # tested without a Core, and so the coordinator cannot reach a writer.
+        self.week_state = week_state
         self.clock = clock or (lambda: datetime.now().astimezone())
         self._open: str | None = None
-        # Weeks whose run failed, so a broken week does not consume the child
-        # slot every five minutes for the rest of the week.  Process-local: a
-        # restart is nearly always a deploy, which is the likeliest thing to
-        # have fixed it.
-        self._failed: dict[str, str] = {}
+        # Runs that failed, keyed by week *and inputs hash*, so a broken week
+        # does not consume the child slot every five minutes -- and so a week
+        # whose numbers then move is tried again, because that is a different
+        # attempt rather than the same one.  Process-local: a restart is nearly
+        # always a deploy, which is the likeliest thing to have fixed it.
+        self._failed: dict[tuple[str, str], str] = {}
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:
@@ -156,6 +197,7 @@ class MissionReflectionLaneCoordinator:
             "status": ticket.get("status"),
             "ticket_ref": ticket_ref,
             "iso_week": ticket.get("iso_week"),
+            "inputs_hash": ticket.get("inputs_hash"),
             "reflection_status": recorded.get("status"),
             "reflection_ref": recorded.get("reflection_ref"),
             "version": recorded.get("version"),
@@ -175,8 +217,9 @@ class MissionReflectionLaneCoordinator:
             return settled
         self._open = None
         week = settled.get("iso_week")
-        if week and settled.get("status") != "succeeded":
-            self._failed[str(week)] = (
+        digest = settled.get("inputs_hash")
+        if week and digest and settled.get("status") != "succeeded":
+            self._failed[(str(week), str(digest))] = (
                 settled.get("failure_reason") or f"last run: {settled.get('status')}"
             )
         return settled
@@ -202,26 +245,29 @@ class MissionReflectionLaneCoordinator:
             }
         week = closed_week(self.clock())
         iso_week = week["iso_week"]
-        held = self._failed.get(iso_week)
-        if held is not None:
-            return {"status": "held", "iso_week": iso_week, "settled": settled, "reason": held}
         try:
-            done = self.already_reflected(str(mission["mission_ref"]), iso_week)
+            state = self.week_state(mission, week)
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
-            return {"status": "unavailable", "settled": settled,
+            return {"status": "unavailable", "iso_week": iso_week, "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
-        if done:
+        digest = str(state["inputs_hash"])
+        reflection_ref = reflection_ref_for(str(mission["mission_ref"]), iso_week)
+        if state["already_recorded"]:
             # The normal resting state, six days out of seven. Named
             # "duplicate" rather than "idle" because it is not that there was
-            # nothing to do -- the week's reflection exists, and saying so is
-            # what makes a restart on Wednesday visibly a no-op.
+            # nothing to do -- this exact reading of the week exists, and
+            # saying so is what makes a restart on Wednesday visibly a no-op.
             return {
                 "status": "duplicate", "iso_week": iso_week, "settled": settled,
-                "reflection_ref": reflection_ref_for(str(mission["mission_ref"]), iso_week),
+                "reflection_ref": reflection_ref, "inputs_hash": digest,
                 "reason": f"{iso_week} 已经有一条 reflection，且它的输入没有变",
             }
+        held = self._failed.get((iso_week, digest))
+        if held is not None:
+            return {"status": "held", "iso_week": iso_week, "inputs_hash": digest,
+                    "settled": settled, "reason": held}
         try:
-            ticket = self.launcher.start(iso_week=iso_week)
+            ticket = self.launcher.start(iso_week=iso_week, inputs_hash=digest)
         except LaneChildConflict as exc:
             return {"status": "busy", "iso_week": iso_week, "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
@@ -230,7 +276,7 @@ class MissionReflectionLaneCoordinator:
                     "reason": f"{type(exc).__name__}: {exc}"}
         self._open = ticket["id"]
         return {
-            "status": "launched", "iso_week": iso_week,
+            "status": "launched", "iso_week": iso_week, "inputs_hash": digest,
             "ticket_ref": ticket["id"], "settled": settled,
         }
 
@@ -256,25 +302,43 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             return (None if pointer is None
                     else server.coverage_mission.mission(pointer["mission_version_id"]))
 
-        def already_reflected(mission_ref: str, iso_week: str) -> bool:
-            # Read straight through the writer's connection rather than opening
-            # the authority: the coordinator has no business being able to
-            # write, and this is the only thing it needs to know.
-            row = server.store.connection.execute(
+        def week_state(
+            mission_record: Mapping[str, Any], window: Mapping[str, Any]
+        ) -> dict[str, Any]:
+            """This week's reading, and whether the Ledger already has it.
+
+            The reflection is computed here -- read-only, no model -- because
+            "has anything moved" is a function of every row it reads, and a
+            tick that only asked "is there a row for this week" could never
+            reach the second version the design promises.
+
+            Reads go straight through the writer's connection rather than
+            through the authority: the coordinator has no business holding
+            something that can write.
+            """
+
+            connection = server.store.connection
+            body = build_reflection(
+                connection, mission=mission_record, window=window,
+                tick_summaries=getattr(launcher, "tick_summaries", lambda: ())(),
+            )
+            digest = str(body["inputs_hash"])
+            installed = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' "
                 "AND name='research_cycle_reflection_versions'"
             ).fetchone()
-            if row is None:
-                return False
-            found = server.store.connection.execute(
+            if installed is None:
+                return {"inputs_hash": digest, "already_recorded": False}
+            found = connection.execute(
                 "SELECT 1 FROM research_cycle_reflection_versions "
-                "WHERE reflection_ref=? LIMIT 1",
-                (reflection_ref_for(mission_ref, iso_week),),
+                "WHERE reflection_ref=? AND inputs_hash=? LIMIT 1",
+                (reflection_ref_for(str(mission_record["mission_ref"]), window["iso_week"]),
+                 digest),
             ).fetchone()
-            return found is not None
+            return {"inputs_hash": digest, "already_recorded": found is not None}
 
         coordinator = MissionReflectionLaneCoordinator(
-            launcher=launcher, mission=mission, already_reflected=already_reflected,
+            launcher=launcher, mission=mission, week_state=week_state,
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()
