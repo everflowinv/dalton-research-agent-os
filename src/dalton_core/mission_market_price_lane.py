@@ -29,6 +29,7 @@ from .lane_child_launcher import (
     LaneChildRejected,
     LaneChildTicketNotFound,
 )
+from .lane_registry import LaneSpec, register_lane
 from .market_price import provisional_bar_date
 
 WRITE_SCOPE = "market_price"
@@ -351,13 +352,121 @@ class MissionMarketPriceLaneCoordinator:
         }
 
 
+# -- registration ----------------------------------------------------------
+#
+# The one line the rest of the system needs. Everything below is either this
+# lane's own decision (which approval turns it on, what it is called in the
+# tick summary) or a lazy import, so that importing this module registers the
+# lane without dragging in the writer.
+
+LAUNCHER_KWARG = "market_price_launcher"
+# The approved record's filename under the live state's governance directory.
+# Its presence is what turns the lane on, exactly as the statements lane works:
+# a Core without an approved price connector runs without one rather than
+# failing to start.
+MARKET_PRICE_GOVERNANCE = "yfinance-daily-prices-v1.json"
+
+
+def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Controller tick (P11a).
+
+    One company's price window at a time. The lane has no queue: what needs
+    fetching is derived from the price authority every tick, so a company that
+    is current is simply not chosen and there is nothing to leave stuck.
+
+    The coordinator is cached rather than rebuilt, because its held state is
+    the point: which child is open, which companies failed, which were current
+    when last asked, and which have had their earlier history settled. A fresh
+    coordinator every tick would forget all four and start a child for a
+    company it had just been told to leave alone.
+    """
+
+    launcher = server.lane_launcher(LAUNCHER_KWARG)
+    if launcher is None:
+        return {"status": "unconfigured",
+                "reason": "no approved market-price connector on this writer"}
+    coordinator = server.lane_state.get(LAUNCHER_KWARG)
+    if coordinator is None:
+        from .market_price import MarketPriceSeriesAuthority
+
+        def mission() -> Any:
+            pointer = server.store.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer "
+                "ORDER BY mission_ref LIMIT 1"
+            ).fetchone()
+            return (None if pointer is None
+                    else server.coverage_mission.mission(pointer["mission_version_id"]))
+
+        coordinator = MissionMarketPriceLaneCoordinator(
+            authority=MarketPriceSeriesAuthority(server.store),
+            launcher=launcher,
+            mission=mission,
+        )
+        server.lane_state[LAUNCHER_KWARG] = coordinator
+    return coordinator.dispatch_once()
+
+
+def add_arguments(parser: Any) -> None:
+    # Off unless an approved governance record is named, like every other
+    # connector on this writer. No model configuration: this lane makes no
+    # model call at all.
+    parser.add_argument(
+        "--market-price-governance",
+        help="approved yfinance-daily-prices governance record",
+    )
+
+
+def build_launcher(args: Any) -> Any | None:
+    if args.market_price_governance is None:
+        return None
+    from pathlib import Path as _Path
+
+    from .market_price_launcher import MarketPriceLauncher
+
+    return MarketPriceLauncher(
+        state_dir=_Path(args.db).expanduser().resolve().parent,
+        governance_path=args.market_price_governance,
+    )
+
+
+def argv_fragment(context: Any) -> list[str]:
+    governance = context.state / "connector-governance" / MARKET_PRICE_GOVERNANCE
+    if not governance.is_file():
+        return []
+    return ["--market-price-governance", str(governance)]
+
+
+LANE = register_lane(LaneSpec(
+    operation="dispatch_mission_market_prices",
+    # After the statements lane and before the model specification: prices are
+    # what the specification's valuation section will be read against, and both
+    # of them want the tick's single child slot less than a filing does.
+    order=85,
+    driver_key="mission_market_prices",
+    handler=dispatch,
+    init_kwarg=LAUNCHER_KWARG,
+    argparse=add_arguments,
+    launcher_factory=build_launcher,
+    argv_fragment=argv_fragment,
+    note="P11a: one company's daily bars, share count and market capitalisation, "
+         "every bar bound to the call that fetched it.",
+))
+
+
 __all__ = [
     "BACKFILL_YEARS",
     "END_LOOKAHEAD_DAYS",
     "MAX_FAILURES_PER_COMPANY",
     "MAX_FAILURE_DETAIL_CHARS",
     "SATISFIED_HOLD_SECONDS",
+    "LANE",
+    "LAUNCHER_KWARG",
+    "MARKET_PRICE_GOVERNANCE",
     "WRITE_SCOPE",
     "MissionMarketPriceLaneCoordinator",
+    "add_arguments",
+    "argv_fragment",
+    "build_launcher",
+    "dispatch",
     "may_write_market_price",
 ]

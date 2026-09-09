@@ -49,6 +49,14 @@ from dalton_core.macos_launchagent import render
 # What the literals said before the registry derived them.  These are the
 # expected values, spelled out, so a lane that falls out of a set is visible as
 # a diff here rather than as a lane that silently stops being dispatched.
+#
+# This is a *migration* check, and the assertions below are containment rather
+# than equality for that reason: they pin that every lane the writer used to
+# spell out is still registered, still core-discoverable, still in the same
+# relative tick order and still arriving on the same keyword.  A lane added
+# after P14-0 -- the first was P11a's market prices -- is not supposed to
+# appear here; it is pinned in its own module's tests, and the registry's own
+# duplicate, order and reserved-key rules are what stop it colliding.
 LANE_OPERATIONS = frozenset({
     "dispatch_mission_source_discovery",
     "dispatch_document_extraction",
@@ -368,14 +376,14 @@ class RegistryRefusalTests(unittest.TestCase):
 
 class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
     def test_every_lane_the_writer_used_to_spell_out_is_registered(self) -> None:
-        self.assertEqual(
-            frozenset(spec.operation for spec in registered_lanes()),
+        self.assertLessEqual(
             LANE_OPERATIONS,
+            frozenset(spec.operation for spec in registered_lanes()),
         )
 
     def test_the_writer_operation_sets_are_what_they_were(self) -> None:
-        self.assertEqual(
-            writer_server.CORE_DISCOVERY_OPERATIONS, CORE_DISCOVERY_OPERATIONS
+        self.assertLessEqual(
+            CORE_DISCOVERY_OPERATIONS, writer_server.CORE_DISCOVERY_OPERATIONS
         )
         self.assertTrue(LANE_OPERATIONS <= writer_server.CORE_OPERATIONS)
         for operation in LANE_OPERATIONS:
@@ -385,8 +393,10 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
             )
 
     def test_the_tick_order_and_keys_are_what_they_were(self) -> None:
+        migrated = frozenset(operation for operation, _key in TICK_ORDER)
         self.assertEqual(
-            tuple((spec.operation, spec.driver_key) for spec in tick_lanes()),
+            tuple((spec.operation, spec.driver_key) for spec in tick_lanes()
+                  if spec.operation in migrated),
             TICK_ORDER,
         )
 
@@ -406,11 +416,11 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
     def test_the_launcher_lanes_name_the_kwargs_the_writer_took(self) -> None:
         # These four keywords were explicit parameters of WriterServer.__init__
         # before P14-0; existing callers still pass them by name.
-        self.assertEqual(
-            {spec.init_kwarg for spec in registered_lanes()
-             if spec.init_kwarg is not None},
+        self.assertLessEqual(
             {"statement_lane_launcher", "model_spec_launcher",
              "initial_screen_launcher", "research_planner_launcher"},
+            {spec.init_kwarg for spec in registered_lanes()
+             if spec.init_kwarg is not None},
         )
 
     def test_an_unknown_launcher_keyword_is_refused(self) -> None:

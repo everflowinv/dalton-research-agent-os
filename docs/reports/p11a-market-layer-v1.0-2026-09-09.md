@@ -2,9 +2,9 @@
 
 日期：2026-09-09
 分支：`wave1a-market-layer`（worktree `~/Projects/dalton-wave1a-market-layer-worktree`）
-基线 main：`08c66d0`
-HEAD：分支 `wave1a-market-layer` 的末端，即下表最后一行那次提交（一次提交无法写下自己的哈希，所以这里按主题指认；确切的 HEAD 随交付消息给出）
-全量测试：`Ran 2209 tests in 278.184s` / `OK (skipped=1)`（基线 2,034 通过 1 跳过；本片新增 175 项）
+分叉基线：main `08c66d0`；已 `git merge main`（含 Wave 0 的 lane registry、schema glob、词表扩项）
+HEAD：分支 `wave1a-market-layer` 的末端，即下表最后一行那次提交（一次提交写不下自己的哈希，所以这里按主题指认；确切的 HEAD 随交付消息给出）
+全量测试：`Ran 2258 tests in 218.273s` / `OK (skipped=1)`（合并 Wave 0 之后。合并前本片自己是 `Ran 2209`，在 main `08c66d0` 的 2,034 之上新增 175 项；合并后再加 lane 注册的 5 项）
 
 ---
 
@@ -24,7 +24,9 @@ Dalton 现在能看见价格了：一条 yfinance 连接器（两个操作，两
 | `b11a4fc` | 子进程 CLI + launcher + 无队列 tick coordinator + `market-data` extra |
 | `750de1a` | `ValuationSnapshot` 权威 + schema + `model_input` 闸门放宽 |
 | `f9dfa73` | 报告 v1.0 |
-| （末端）`P11a: an afternoon's last trade is not a closing price` | code review 修复：盘中价 provisional、残缺响应计为失败、回溯缺口、股本口径标注、单位校验、事务内读写、fetch 覆盖 |
+| `76de788` | code review 修复：盘中价 provisional、残缺响应计为失败、回溯缺口、股本口径标注、单位校验、事务内读写、fetch 覆盖 |
+| （合并）`Merge branch 'main'` | 并入 Wave 0（lane registry、schema glob、词表扩项）；pyproject 的 optional-deps / scripts 与 package-data 通配符各留各的，无冲突 |
+| （末端）`P11a: the price lane registers itself` | `LaneSpec` + `LANE_MODULES` 一行；writer / driver / launchagent 未动 |
 
 未推送。未部署。未写 live 状态。未发布 mission 版本。
 
@@ -104,39 +106,34 @@ REQUIRED_VALUATION_AUTHORITY_ROLES = frozenset({"price", "shares"})
 
 ## 3. 集成时要接的线
 
-### 3.1 `lane_registry.LaneSpec` 需要什么（Wave 0 落地后一行注册）
+### 3.1 lane 注册（已完成）
+
+Wave 0 的 `lane_registry` 合进来之后，本片自己把 lane 注册好了：`mission_market_price_lane.py` 尾部一个 `LaneSpec`，加 `lane_registry.LANE_MODULES` 里一行。`writer_server.py`、`bounded_planner_driver.py`、`macos_launchagent.py` **一行都没动**——它们从注册表推导。
 
 ```python
-LaneSpec(
+LANE = register_lane(LaneSpec(
     operation="dispatch_mission_market_prices",
-    core_only=True,                       # 与 dispatch_company_model_spec 同类：无外部副作用声明
-    param_fields=frozenset(),             # 无参数，和 dispatch_company_model_spec 一样
-    build_coordinator=lambda server: MissionMarketPriceLaneCoordinator(
-        authority=MarketPriceSeriesAuthority(server.store),
-        launcher=server._market_price_launcher,
-        mission=server._active_mission_params,   # 与 model-spec lane 取 mission 的方式相同
-    ),
-    launcher_factory=lambda args, state_dir: MarketPriceLauncher(
-        state_dir=state_dir,
-        governance_path=args.market_price_governance,
-    ),                                    # governance_path 为 None 时不构造 launcher，lane 保持关闭
-    argparse=("--market-price-governance",),          # 单个可选路径参数，默认 None
-    argv_fragment=[                                    # macos_launchagent.render 拼接
-        "--market-price-governance", str(market_price_governance),
-    ],                                                 # 条件：该文件存在（照 --statement-lane-governance 的样子）
-    driver_key="mission_market_prices",   # bounded_planner_driver.run_once 的结果键
-)
+    order=85,                                  # statements(80) 之后，model spec(90) 之前
+    driver_key="mission_market_prices",
+    handler=dispatch,                          # 缓存 coordinator 到 server.lane_state
+    init_kwarg="market_price_launcher",
+    argparse=add_arguments,                    # --market-price-governance
+    launcher_factory=build_launcher,           # MarketPriceLauncher(state_dir, governance_path)
+    argv_fragment=argv_fragment,               # 治理文件存在才输出
+))
 ```
 
-要点：
+推导结果已核验：`dispatch_mission_market_prices` 出现在 `writer_server.CORE_DISCOVERY_OPERATIONS`、`CORE_OPERATIONS`、`OPERATION_FIELDS`（空集，tick 不带参数）里，`mission_market_prices` 出现在 driver 的 tick 顺序里，位置在 `mission_statements` 与 `company_model_spec` 之间。
 
-1. **operation 名建议 `dispatch_mission_market_prices`**，与 `dispatch_mission_statements` / `dispatch_company_model_spec` 同族。
-2. **launcher 构造参数**：`state_dir`（= `Path(args.db).parent`，与其它 lane 一致）、`governance_path`、可选 `actor_ref`（默认 `automation:coverage-mission`）。
-3. **coordinator 构造参数**：`authority`（`MarketPriceSeriesAuthority(store)`）、`launcher`、`mission`（无参 callable，返回 mission params dict 或 None）、可选 `clock`、`backfill_years`。
-4. **不需要模型配置**，不碰 `cockpit_model.PURPOSES`，不碰 `scripts/raise_day_budget_cap.py`——这条 lane 一次模型调用都不做。
-5. **argv 片段的开关条件**：治理记录文件存在即开，不存在即关（`--statement-lane-governance` 的先例）。写入靠的是 mission 授权，不是 launchagent。
-6. `writer_server.close()` 需要 `self._market_price_launcher.close()`。
-7. `daily_prices` 的子进程还需要 `market-data` extra 已安装；未安装时 CLI 会以一句「install this package with the [market-data] extra」失败，而不是 import 崩溃。
+几个设计点：
+
+1. **coordinator 缓存在 `server.lane_state`，不是每 tick 新建**（照 model spec lane，不照 statements lane）。它持有的进程内状态就是全部意义所在：哪个孩子还开着、哪些公司失败过、哪些上次问的时候已经是最新的、哪些的早期历史已经问过了。每 tick 换一个新的会把这四件事全忘掉，然后给一家刚被告知别管的公司起孩子。
+2. **开关是治理文件本身**：`{state}/connector-governance/yfinance-daily-prices-v1.json` 存在就开，不存在就整条 lane 不装（`build_launcher` 返回 `None`，`argv_fragment` 返回 `[]`，handler 回 `unconfigured` 并说原因）。与 statements lane 同一套。
+3. **不需要模型配置**，因此不碰 `cockpit_model.PURPOSES`，也不碰 `model_configurations` / `raise_day_budget_cap`——这条 lane 一次模型调用都不做。
+4. **写入靠的是 mission 授权，不是 launchagent**：即使 lane 装好了、治理记录也批了，mission 的 `may_write` 里没有 `market_price` 仍然每 tick 返回 `ungranted` 且一次网络调用都不发。
+5. 本模块 module 级不 import 任何注册表消费者，`tests/test_lane_registry.py` 的两条隔离测试（读文件 + 新解释器实跑）以及本片自己的一条都通过。
+
+`tests/test_lane_registry.py` 里四条 `MigratedLanesMatchTheOldLiteralsTests` 从「等于」放宽为「包含」，并写清了原因：它们是**迁移保真检查**，钉的是「P14-0 之前 writer 手写的那些 lane 现在还在、顺序没变、kwarg 没变」，不是「注册表里只能有这些 lane」。新 lane 的形状钉在 `tests/test_mission_market_price_lane.py::RegistrationTests` 里；重名、撞 order、撞 driver key 由注册表自己拒绝。
 
 ### 3.2 `deploy/macos/install.sh`
 
@@ -147,7 +144,7 @@ LaneSpec(
   done
   ```
   两份都是 `proposed`。**owner 需要就地把 `yfinance-daily-prices` 改成 `approved`**，lane 才会真的跑；`yfinance-analyst-estimates` 可以先留 `proposed`（Wave 2 才有消费者）。
-- **不需要模型配置块**。
+- **不需要模型配置块**。lane 的接线已经完成，install.sh 这边只剩「把两份治理记录放进 `{state}/connector-governance/`」这一件事；`yfinance-daily-prices-v1.json` 一旦存在且 owner 就地改成 `approved`，LaunchAgent 下次渲染就会带上 `--market-price-governance`。
 - `.venv` 里需要 `yfinance`（`pip install -e '.[market-data]'` 或直接 `pip install yfinance`）。注意仓库 `.venv` 是主 checkout 的符号链接；本片已在其中装了 yfinance 1.7.0。
 - `tests/test_roic_transcript_core.py` 有一条 `test_the_installer_seeds_both` 断言 install.sh 提到两个 roic kind。我**没有**为 yfinance 写对应断言，因为 install.sh 在我的禁改清单里；集成时补上 install.sh 后，建议在 `tests/test_yfinance_core.py::ShippedRecordTests` 里加一条同形状的测试。
 
@@ -188,12 +185,12 @@ LaneSpec(
 ### 5.1 全量测试（原文）
 
 ```
-Ran 2209 tests in 278.184s
+Ran 2258 tests in 218.273s
 
 OK (skipped=1)
 ```
 
-命令：`PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -t .`（worktree 内；已核验 `dalton_core.__file__` 指向 worktree）。基线 2,034 通过 / 1 跳过，本片新增 175 项，无跳过、无静默失败。
+命令：`PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -t .`（worktree 内，已 `git merge main`；已核验 `dalton_core.__file__` 指向 worktree）。合并前本片自己的基线是 `Ran 2209` / `OK (skipped=1)`（main 的 2,034 之上新增 175 项）；合并 Wave 0 后总数 2,258，再加上 lane 注册的 5 项。无跳过、无静默失败。
 
 新增测试文件：`tests/test_yfinance_core.py`、`tests/test_market_price_adapter.py`、`tests/test_market_price_authority.py`、`tests/test_market_price_cli.py`、`tests/test_mission_market_price_lane.py`、`tests/test_valuation_snapshot.py`。fixture：`tests/fixtures/market/acn-daily-prices.json`（ACN 十个交易日的真实 `yf.download`）、`acn-analyst-estimates.json`（真实 ACN 一致预期）。**全部离线运行**，网络只用于抓 fixture 与烟测。
 
@@ -249,7 +246,7 @@ OK (skipped=1)
 
 ## 6. 没做什么
 
-- **没有接线**：`writer_server.py`、`bounded_planner_driver.py`、`macos_launchagent.py`、`deploy/macos/install.sh`、`coverage_mission.py`、cockpit 两个文件、`docs/PROJECT_STATUS.md`、`tests/test_service.py` 一律未动（禁改清单）。lane 需要的注册信息见 §3.1。
+- **lane 已注册**（§3.1）：`writer_server.py`、`bounded_planner_driver.py`、`macos_launchagent.py`、`deploy/macos/install.sh`、`coverage_mission.py`、cockpit 两个文件、`docs/PROJECT_STATUS.md`、`tests/test_service.py` 仍然一行未动——注册表把它们全推导掉了。install.sh 的治理种子块与 cockpit 展示仍待集成时处理（§3.2 / §3.4）。
 - **`analyst_estimates` 没有 lane**：契约、适配器、fixture、治理记录都在，`ConsensusEstimateVersion` 与它的 tick lane 是 Wave 2（P11b）。
 - **没有端到端的真实 ACN 估值**：`ValuationSnapshot` 的输入需要 statements 权威给出的 filed 数字（8 个角色 × 4 个季度 + 2 个时点），本片没有把 statements 侧的取数器接上（那会碰 `coverage_mission.py`）。公式已用手算数字逐一验证。
 - **没有 `MarketEvent`**（P11d，Wave 2）。

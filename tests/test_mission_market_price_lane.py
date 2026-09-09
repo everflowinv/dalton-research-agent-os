@@ -413,5 +413,109 @@ class SettleTests(LaneTestCase):
         self.assertEqual(second["status"], "launched")
 
 
+class RegistrationTests(unittest.TestCase):
+    """The lane declares itself once, and the rest is derived.
+
+    P14-0 turned "adding a lane means editing ten regions of three modules"
+    into one ``LaneSpec``. What is pinned here is this lane's half of that
+    contract: the names it claims, that it turns itself off without an
+    approval, and that importing it does not drag in the machinery that reads
+    the registry.
+    """
+
+    def test_the_lane_is_registered_under_the_names_it_claims(self):
+        from dalton_core.lane_registry import lane_for_operation
+        from dalton_core.mission_market_price_lane import LANE, LAUNCHER_KWARG
+
+        spec = lane_for_operation("dispatch_mission_market_prices")
+        self.assertIs(spec, LANE)
+        self.assertEqual(spec.driver_key, "mission_market_prices")
+        self.assertEqual(spec.init_kwarg, LAUNCHER_KWARG)
+        self.assertTrue(spec.core_discovery)
+        # A tick takes no arguments.
+        self.assertEqual(spec.param_fields, frozenset())
+
+    def test_it_runs_between_the_statements_and_the_model_specification(self):
+        from dalton_core.lane_registry import registered_lanes
+
+        order = [spec.operation for spec in registered_lanes()]
+        self.assertEqual(
+            order[order.index("dispatch_mission_statements") + 1],
+            "dispatch_mission_market_prices")
+        self.assertEqual(
+            order[order.index("dispatch_mission_market_prices") + 1],
+            "dispatch_company_model_spec")
+
+    def test_without_an_approval_there_is_no_launcher_and_no_argv(self):
+        import argparse
+        import tempfile
+        from pathlib import Path
+
+        from dalton_core.lane_registry import LaunchAgentContext
+        from dalton_core.mission_market_price_lane import (
+            MARKET_PRICE_GOVERNANCE, add_arguments, argv_fragment, build_launcher,
+        )
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--db")
+        add_arguments(parser)
+        args = parser.parse_args(["--db", "/tmp/core.sqlite"])
+        self.assertIsNone(args.market_price_governance)
+        self.assertIsNone(build_launcher(args))
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            self.assertEqual(argv_fragment(LaunchAgentContext(state=state)), [])
+            governance = state / "connector-governance" / MARKET_PRICE_GOVERNANCE
+            governance.parent.mkdir(parents=True)
+            governance.write_text("{}", encoding="utf-8")
+            self.assertEqual(
+                argv_fragment(LaunchAgentContext(state=state)),
+                ["--market-price-governance", str(governance)])
+
+    def test_a_writer_without_the_lane_says_so_rather_than_failing(self):
+        from dalton_core.mission_market_price_lane import dispatch
+
+        class Server:
+            lane_state: dict = {}
+
+            def lane_launcher(self, kwarg):
+                return None
+
+        result = dispatch(Server(), {})
+        self.assertEqual(result["status"], "unconfigured")
+        self.assertIn("market-price", result["reason"])
+
+    def test_importing_this_module_does_not_pull_in_the_writer(self):
+        # The registry's own rule, checked here too because this module is the
+        # one being added: a lane module that imports writer_server would have
+        # writer_server fold in a half-built registry, and the lane would be
+        # dispatched by the tick and refused by the writer for the life of the
+        # process.
+        import subprocess
+        import sys
+        import textwrap
+        from pathlib import Path
+
+        import dalton_core
+
+        root = Path(dalton_core.__file__).resolve().parents[1]
+        script = textwrap.dedent("""
+            import sys
+            import dalton_core.mission_market_price_lane  # noqa: F401
+            print(",".join(sorted(
+                module for module in sys.modules
+                if module in ("dalton_core.writer_server",
+                              "dalton_core.bounded_planner_driver",
+                              "dalton_core.macos_launchagent")
+            )))
+        """)
+        finished = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            env={"PYTHONPATH": str(root), "PATH": "/usr/bin:/bin"}, timeout=120,
+        )
+        self.assertEqual(finished.returncode, 0, finished.stderr)
+        self.assertEqual(finished.stdout.strip(), "")
+
+
 if __name__ == "__main__":
     unittest.main()
