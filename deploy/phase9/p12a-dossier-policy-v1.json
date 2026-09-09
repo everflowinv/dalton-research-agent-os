@@ -1,0 +1,41 @@
+{
+  "schema_version": "0.1",
+  "policy_ref": "dossier-policy:us-it-services:v1",
+  "causal_chain_maps": [
+    {
+      "constitution_ref": "constitution:us-it-services",
+      "causal_chain_hash": "b1781893ffcc079653ac07106408dc794ecb1237ab6b2ad4dc5db782c307f454",
+      "sections": [
+        "demand_drivers",
+        "demand_drivers",
+        "demand_drivers",
+        "demand_drivers",
+        "supply_and_cost",
+        "supply_and_cost"
+      ],
+      "note": "The six links of the US IT services chain. The first four are about what makes customers spend -- budgets and their lag, bookings leading revenue, the AI budget pool, the annuity share -- and the last two are about delivery economics and the cash that trails them. Mapped by position and bound to the hash of the whole chain: a chain that gains, loses or reorders a link no longer matches this entry, and those two sections go unavailable until a person maps it again. That is deliberate. Which section a new causal link belongs to is a methodology question, and a rule that guessed would quietly rewrite the Constitution's shape into whatever the keywords suggested."
+    }
+  ],
+  "output_rubric_bindings": [
+    {
+      "criterion_hash": "27f861e631002a629a69c9d68b6a5d392222c69d031ead5ab769e461f42c691f",
+      "check": null,
+      "reason": "This criterion is about the weekly brief's contents. A dossier is not a weekly brief, so there is nothing here for a structural check to read. Declared rather than skipped: a criterion nobody mentions is a standard nobody applied."
+    },
+    {
+      "criterion_hash": "7c0bf3a19bcfd2f750b366987d0d677349f9e91783132848a671d590dd7a8ee6",
+      "check": "numbers_trace_to_refs",
+      "reason": "Every number in an output traces to evidence: each figure in the prose must appear verbatim in a row the sentence cites."
+    },
+    {
+      "criterion_hash": "b404c93b91337588629d4721e1f1280d2f83929ed46e1f0f404f9749e4a09049",
+      "check": "no_investment_conclusion",
+      "reason": "Outputs never auto-generate investment conclusions. A dossier that says buy, sell or a target price has stopped being a file and become a call, and a call is admitted by a person (ADR-0001)."
+    },
+    {
+      "criterion_hash": "99ea4d51515b906b5ef5c391e6178e2dc8ce9331b815af63c971f22ab82dac2c",
+      "check": "not_a_restatement",
+      "reason": "A good research output reduces the open question set or sharpens a falsifier; a bad one restates known facts. Structurally: a new version cites something the current one did not."
+    }
+  ]
+}

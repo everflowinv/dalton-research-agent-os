@@ -1,0 +1,945 @@
+"""P12a child: draft the stalest parts of one company's dossier and publish.
+
+Out of process, like every lane that calls a model, because the writer abandons
+a request after 30 seconds and a drafting call is allowed 180.
+
+One run does six things and stops:
+
+1. check the grant before spending anything -- drafting and then being refused
+   costs the mission real model calls;
+2. choose one company that has passed its Initial Screen and has new canonical
+   Claims for some part of its file since the last version;
+3. decide, per unit, whether it can be drafted at all: an unmapped causal
+   chain, an absent calendar authority, an absent price series and an empty
+   aspect are four different reasons a section is *unavailable*, and none of
+   them is a reason to write something;
+4. draft the stalest few units, one bounded call each, refusing any reply that
+   leaves its contract;
+5. verify the whole draft once, with a model of a different family, and run
+   Q1's ``company-dossier`` rubric and the Constitution's ``output_rubric``
+   over it;
+6. publish -- where ADR-0008 decides whether this is a version at all.
+
+Exit 0 when the run completed, including when it decided nothing needed doing.
+
+``formal_authority_writes`` is always 0.  A dossier is assembled *from* Claims
+and never writes one; the Ledger is not opened for writing here.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Mapping, Sequence
+
+from .cockpit_model import CockpitModel
+from .company_dossier import (
+    CLASSIFICATION_UNIT,
+    SECTIONS,
+    UNITS,
+    VARIANT_UNIT,
+    CompanyDossierAuthority,
+    CompanyDossierError,
+    DossierStructureUnmapped,
+    WRITE_SCOPE,
+    dossier_artefact,
+    evidence_scope,
+    load_policy,
+    new_refs,
+    output_rubric_findings,
+    policy_hash,
+    section_body,
+    unit_slots,
+)
+from .company_dossier_draft import (
+    MAX_CLAIM_ROWS,
+    MAX_COST_USD,
+    MAX_INPUT_TOKENS,
+    MAX_NUMBER_ROWS,
+    MAX_OUTPUT_TOKENS,
+    MAX_RUN_COST_USD,
+    MAX_UNITS_PER_RUN,
+    TIMEOUT_SECONDS,
+    draft_unit,
+    independence,
+    material_rows,
+    router_family_resolver,
+    summarise_blocks,
+    verify,
+)
+from .coverage_mission import CoverageMissionAuthority
+from .guidance_profile import build_profile, render_profile_table
+from .store import DaltonStore, canonical_json
+
+SUMMARY_SCHEMA_VERSION = "0.1"
+# The two deterministic checks a draft may not fail. Everything else the rubric
+# reports is recorded and read; these two are the blueprint's stop-loss for
+# this layer, so they are a gate rather than a score.
+HARD_CHECKS: tuple[str, ...] = ("numbers_without_refs", "new_version_cites_new_refs")
+MAX_STATEMENT_PERIODS = 8
+# The sections a filed figure belongs beside. The rest of the file is about
+# judgement, and a number offered to a section that cannot use it is prompt
+# budget spent on distraction.
+FIGURE_SECTIONS: tuple[str, ...] = (
+    "business_model", "segments_and_mix", "demand_drivers", "supply_and_cost",
+)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _write_owner_only(path: Path, value: Any) -> None:
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(canonical_json(value) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def granted_scope(mission: Mapping[str, Any]) -> str | None:
+    """The word that lets this run write, or None.
+
+    No fallback. ``dossier`` is already in the frozen vocabulary (Wave 0 added
+    it), so a mission that has not granted it has not granted this -- and a run
+    that borrowed ``deliverable`` would be writing an authority the owner never
+    authorised under a word that means something else.
+    """
+
+    may_write = set((mission.get("autonomy") or {}).get("may_write") or [])
+    return WRITE_SCOPE if WRITE_SCOPE in may_write else None
+
+
+def table_exists(connection: Any, name: str) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is not None
+
+
+def screened_companies(missions: Any, mission: Mapping[str, Any]) -> list[str]:
+    """Companies whose Initial Screen has passed, in mission priority order.
+
+    The dossier is the layer above the screen: a company nobody has screened
+    has no file to deepen, and drafting one would spend model calls on the
+    material the screen exists to assemble.
+    """
+
+    passed = {
+        record["company_ref"]
+        for record in missions.stage_records(mission["id"])
+        if record["stage_ref"] == "initial_screen" and record["status"] == "gate_passed"
+    }
+    return [
+        str(member["company_ref"])
+        for member in mission.get("universe") or []
+        if member.get("company_ref") in passed
+    ]
+
+
+def claim_material(
+    store: DaltonStore, company_ref: str, aspect: str, *, limit: int = MAX_CLAIM_ROWS
+) -> list[dict[str, Any]]:
+    """The canonical Claims for one aspect, importance first, bounded.
+
+    ``canonical_only`` is the index's whole point: one copy of each fact, so a
+    section does not cite the same quarter's revenue three times because three
+    Claims assert it.
+    """
+
+    from .company_research_view import query_company_research
+
+    rows = query_company_research(
+        store, company_ref=company_ref, index_aspect=aspect,
+        canonical_only=True, limit=min(limit * 3, 1000),
+    )
+    from .claim_index_authority import IMPORTANCE_RANK
+
+    rows.sort(key=lambda row: (
+        IMPORTANCE_RANK.get(str(row.get("importance") or ""), 99),
+        # Newest first inside a tier: an old filing and a new one are both
+        # filings, and the new one is the one the file should rest on.
+        str(row.get("as_of") or ""),
+    ), reverse=False)
+    material = []
+    for row in rows[:limit]:
+        material.append({
+            "ref": row["claim_version_ref"],
+            "text": row.get("normalized_statement") or "",
+            "period": row.get("period"),
+            "importance": row.get("importance"),
+            # When this Claim entered the Ledger. Staleness is decided by this
+            # and not by "material this section did not happen to cite": a
+            # section that cites three of its ten Claims has not left seven
+            # things undone, and treating it as stale would redraft it every
+            # tick for ever and publish a duplicate each time.
+            "created_at": row.get("created_at"),
+        })
+    return material
+
+
+def number_material(
+    store: DaltonStore, company_ref: str, *, limit: int = MAX_NUMBER_ROWS
+) -> list[dict[str, Any]]:
+    """Figures the dossier may cite: filed statement lines and forecast cells.
+
+    Both are refs a reader can open. A cell of the model input table is not:
+    that projection is derived on demand and stored nowhere, so a ref into it
+    would name something that does not exist. The filed line it was built from
+    does exist, and it is what the number is actually evidence of.
+    """
+
+    rows: list[dict[str, Any]] = []
+    connection = store.connection
+    if table_exists(connection, "coverage_mission_statement_lines"):
+        periods = [
+            str(row["period_end"]) for row in connection.execute(
+                "SELECT DISTINCT l.period_end AS period_end "
+                "FROM coverage_mission_statement_lines l "
+                "JOIN coverage_mission_statement_filings f ON f.ingest_id=l.ingest_id "
+                "WHERE f.company_ref=? ORDER BY l.period_end DESC LIMIT ?",
+                (company_ref, MAX_STATEMENT_PERIODS),
+            ).fetchall()
+        ]
+        if periods:
+            placeholders = ",".join("?" * len(periods))
+            seen: set[tuple[str, str, str]] = set()
+            for row in connection.execute(
+                "SELECT l.line_id AS line_id, l.label AS label, l.concept AS concept, "
+                "l.value AS value, l.unit AS unit, l.period_start AS period_start, "
+                "l.period_end AS period_end, l.statement AS statement, "
+                "f.accession AS accession "
+                "FROM coverage_mission_statement_lines l "
+                "JOIN coverage_mission_statement_filings f ON f.ingest_id=l.ingest_id "
+                f"WHERE f.company_ref=? AND l.period_end IN ({placeholders}) "
+                # The top of each statement, not its breakdowns: a dossier
+                # section cites what the company reported, and the segment
+                # detail below it is what the Claims are for. There is no
+                # level 0 in this ledger -- the roots are levels one to three.
+                "AND l.value IS NOT NULL AND l.level<=3 AND l.is_breakdown=0 "
+                # Newest first, and the income statement before the cash flow
+                # before the balance sheet. Without the statement order the
+                # bound is spent on the tail of whichever statement happens to
+                # be filed last, and a section about the business model is
+                # offered the closing cash balance instead of revenue.
+                "ORDER BY l.period_end DESC, CASE l.statement WHEN 'income' THEN 0 "
+                "WHEN 'cash' THEN 1 ELSE 2 END, l.ordinal LIMIT ?",
+                (company_ref, *periods, limit * 4),
+            ).fetchall():
+                # One row per measurement. The same quarter is filed twice --
+                # once in the 10-Q and again in the 10-K -- and a year-to-date
+                # figure sits beside the quarter under the same label and the
+                # same period_end. Both are why the span is in the key and in
+                # the text: "18.7bn for the quarter" and "37.7bn year to date"
+                # are different facts, and a reader who cannot tell them apart
+                # will read the second as a restatement of the first.
+                key = (str(row["concept"]), str(row["period_start"] or "-"),
+                       str(row["period_end"]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                span = (f"{row['period_start']}..{row['period_end']}"
+                        if row["period_start"] else f"as at {row['period_end']}")
+                rows.append({
+                    "kind": "figure",
+                    "ref": f"statement-line:{row['line_id']}",
+                    "text": (f"{row['label']} ({row['concept']}) for {span} was "
+                             f"{row['value']} {row['unit']}, as filed in "
+                             f"{row['accession']}"),
+                    "period": span,
+                    "importance": "filing",
+                })
+                if len(rows) >= limit:
+                    break
+    if table_exists(connection, "forecast_model_versions"):
+        from .model_forecast_driver import ForecastModelAuthority, cell_ref
+
+        model = ForecastModelAuthority(store).latest(company_ref)
+        for line in (model or {}).get("results") or []:
+            for cell in line.get("cells") or []:
+                if cell.get("value") is None:
+                    continue
+                end = str(cell["period"]["end"])
+                rows.append({
+                    "kind": "forecast_cell",
+                    "ref": cell_ref(str(line["ref"]), end, str(cell["kind"])),
+                    "text": (f"{line['label']} for the quarter ending {end} is "
+                             f"{cell['value']} {line['unit']} ({cell['kind']})"),
+                    "period": end,
+                    "importance": "filing" if cell["kind"] == "actual" else "other",
+                })
+    return rows[:limit]
+
+
+def market_view_material(
+    store: DaltonStore, company_ref: str, *, limit: int = MAX_CLAIM_ROWS
+) -> list[dict[str, Any]]:
+    """What is known about the market's view: sell-side Claims and price drivers.
+
+    A deliberately narrow rule, stated rather than inferred: sell-side-graded
+    Claims and Claims filed under ``history_of_price_drivers``. Consensus
+    estimates (P11b) and sales-note material (S1) will arrive under the same
+    two doors; until they do, most companies have nothing here and the variant
+    view says so instead of imagining a street.
+    """
+
+    rows = claim_material(store, company_ref, "history_of_price_drivers", limit=limit)
+    seen = {row["ref"] for row in rows}
+    for aspect in SECTIONS:
+        for row in claim_material(store, company_ref, aspect, limit=limit):
+            if row.get("importance") == "sell_side" and row["ref"] not in seen:
+                seen.add(row["ref"])
+                rows.append(row)
+    return rows[:limit]
+
+
+def guidance_material(
+    store: DaltonStore, company_ref: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """What P12f computes over: guidance statements and settled numbers."""
+
+    guides = [
+        {"ref": row["ref"], "text": row["text"], "period": row.get("period"),
+         "label": row.get("text")}
+        for row in claim_material(store, company_ref, "guidance_style")
+    ]
+    actuals = []
+    for row in number_material(store, company_ref, limit=MAX_NUMBER_ROWS):
+        actuals.append({
+            "ref": row["ref"], "text": row["text"], "label": row["text"],
+            "period": row.get("period"), "value": None, "unit": None,
+        })
+    return guides, actuals
+
+
+def unresolved_refs(
+    connection: Any, record: Mapping[str, Any], *, forecast_cells: set[str]
+) -> list[dict[str, str]]:
+    """Every ref the draft cites, checked against the authority that owns it.
+
+    Q1's ``claim_refs_resolve`` resolves Claims; a dossier also cites filed
+    statement lines and forecast cells, and a ref nobody can open is the one
+    defect a citation-bearing document must not have.
+    """
+
+    kinds: dict[str, str] = {}
+    for section in record.get("sections") or []:
+        for row in section.get("sources") or []:
+            kinds[row["ref"]] = row["kind"]
+    for block in (record.get("industry_classification"), record.get("variant_view")):
+        for row in (block or {}).get("sources") or []:
+            kinds[row["ref"]] = row["kind"]
+    missing: list[dict[str, str]] = []
+    retired: set[str] = set()
+    if table_exists(connection, "claim_retirement_decisions"):
+        retired = {
+            str(row[0]) for row in connection.execute(
+                "SELECT claim_version_ref FROM claim_retirement_decisions "
+                "WHERE decision='retired'").fetchall()
+        }
+    for ref, kind in sorted(kinds.items()):
+        if kind == "claim":
+            row = connection.execute(
+                "SELECT 1 FROM claim_versions WHERE claim_version_id=?", (ref,)
+            ).fetchone()
+            if row is None:
+                missing.append({"ref": ref, "reason": "no such claim version"})
+            elif ref in retired:
+                missing.append({"ref": ref, "reason": "the Claim was retired"})
+        elif kind == "forecast_cell":
+            if ref not in forecast_cells:
+                missing.append({"ref": ref, "reason": "no such forecast cell"})
+        elif ref.startswith("statement-line:"):
+            row = connection.execute(
+                "SELECT 1 FROM coverage_mission_statement_lines WHERE line_id=?",
+                (ref.split(":", 1)[1],),
+            ).fetchone()
+            if row is None:
+                missing.append({"ref": ref, "reason": "no such statement line"})
+        elif ref.startswith("mission-document-figure:"):
+            row = connection.execute(
+                "SELECT 1 FROM coverage_mission_document_figures WHERE figure_id=?",
+                (ref,),
+            ).fetchone()
+            if row is None:
+                missing.append({"ref": ref, "reason": "no such document figure"})
+        else:
+            missing.append({"ref": ref, "reason": "unrecognised figure ref shape"})
+    return missing
+
+
+# ---------------------------------------------------------------------------
+# what the run does
+# ---------------------------------------------------------------------------
+
+
+def unavailable_section(aspect: str, reason: str, structure: Sequence[str] = ()) -> dict[str, Any]:
+    return {"aspect": aspect, "status": "unavailable", "reason": reason,
+            "structure": list(structure), "slots": [], "sources": [], "gaps": [],
+            "profile": None}
+
+
+def undrafted_classification() -> dict[str, Any]:
+    from .company_dossier import CLASSIFICATION_SLOTS
+
+    return {
+        "classification": "insufficient_evidence",
+        "slots": [{"slot_id": slot, "unknown": "not drafted on this run"}
+                  for slot in CLASSIFICATION_SLOTS],
+        "sources": [],
+    }
+
+
+def undrafted_variant(reason: str = "not_drafted_this_run") -> dict[str, Any]:
+    return {"status": "unavailable", "reason": reason, "market_view_available": False,
+            "market_view_reason": None, "structure": [], "slots": [], "sources": []}
+
+
+def plan_units(
+    *,
+    store: DaltonStore,
+    company_ref: str,
+    constitution: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    prior: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Per unit: can it be drafted, is it stale, and what would it be shown."""
+
+    connection = store.connection
+    prior_sections = {item["aspect"]: item for item in (prior or {}).get("sections") or []}
+    plan: dict[str, Any] = {}
+    numbers = number_material(store, company_ref)
+    market = market_view_material(store, company_ref)
+    for unit in UNITS:
+        entry: dict[str, Any] = {"unit": unit, "status": "ready", "reason": None,
+                                 "structure": [], "material": [], "new_refs": 0,
+                                 "stale": True}
+        try:
+            structure = unit_slots(
+                unit, constitution=constitution, policy=policy,
+                market_view_available=bool(market),
+            )
+        except DossierStructureUnmapped as exc:
+            entry.update({"status": "unavailable", "reason": "causal_chain_unmapped",
+                          "detail": str(exc)})
+            plan[unit] = entry
+            continue
+        entry["structure"] = list(structure)
+        # A section is made of Claims. Figures accompany them -- a filed
+        # number is what a sentence about the business rests on -- but they do
+        # not by themselves make a section draftable: a business-model section
+        # written from the tail of a cash-flow statement is what "assembled by
+        # grouping Claims" was supposed to stop.
+        if unit in SECTIONS:
+            claims = claim_material(store, company_ref, unit)
+            material = (claims + [row for row in numbers
+                                  if unit in FIGURE_SECTIONS]) if claims else []
+        elif unit == CLASSIFICATION_UNIT:
+            material = [row for aspect in ("business_model", "segments_and_mix",
+                                           "demand_drivers", "supply_and_cost")
+                        for row in claim_material(store, company_ref, aspect, limit=10)]
+        else:
+            material = (market + [row for row in claim_material(
+                store, company_ref, "competitive_position", limit=10)]) if market else []
+        if not material:
+            reason = "no_canonical_claims"
+            if unit == "catalyst_calendar" and not table_exists(
+                connection, "catalyst_calendar_versions"
+            ):
+                reason = "no_catalyst_calendar_authority"
+            elif unit == "history_of_price_drivers" and not table_exists(
+                connection, "market_price_series_versions"
+            ):
+                reason = "no_market_data"
+            entry.update({"status": "unavailable", "reason": reason})
+            plan[unit] = entry
+            continue
+        entry["material"] = material
+        held = prior_sections.get(unit)
+        if unit == CLASSIFICATION_UNIT:
+            held = (prior or {}).get("industry_classification")
+        elif unit == VARIANT_UNIT:
+            held = (prior or {}).get("variant_view")
+        cited = {row["ref"] for row in (held or {}).get("sources") or []}
+        entry["new_refs"] = len({row["ref"] for row in material} - cited)
+        drafted_before = held is not None and held.get("status") != "unavailable"
+        entry["last_drafted"] = (prior or {}).get("version") if drafted_before else None
+        newest = max((str(row.get("created_at") or "") for row in material),
+                     default="")
+        entry["stale"] = (
+            not drafted_before
+            or prior is None
+            or newest > str(prior.get("created_at") or ""))
+        plan[unit] = entry
+    return plan
+
+
+def stale_units(
+    plan: Mapping[str, Any], *, limit: int = MAX_UNITS_PER_RUN,
+    revise: Sequence[str] = (),
+) -> list[str]:
+    """The units to draft this tick: never drafted first, then most new evidence.
+
+    "Stalest" is a fact about the file, not about the clock: a unit nobody has
+    drafted is staler than one drafted last week, and a unit with twelve new
+    Claims is staler than one with one. A unit with no new evidence is not
+    drafted at all -- redrafting it would produce a version ADR-0008 refuses.
+
+    ``revise`` is the other door: a person asking for one part to be written
+    again. It overrides staleness and nothing else -- a unit whose material is
+    missing is still unavailable, and the version it produces still has to cite
+    something the current one does not.
+    """
+
+    order = {unit: index for index, unit in enumerate(UNITS)}
+    asked = set(revise)
+    ready = [entry for entry in plan.values()
+             if entry["status"] == "ready"
+             and (entry["unit"] in asked
+                  or (entry.get("stale") and entry["new_refs"] > 0))]
+    ready.sort(key=lambda entry: (
+        0 if entry.get("last_drafted") is None else 1,
+        -int(entry["new_refs"]),
+        order[entry["unit"]],
+    ))
+    return [entry["unit"] for entry in ready[:limit]]
+
+
+def run_dossier(
+    *,
+    state_dir: Path,
+    model_config_path: Path | None,
+    summary_dir: Path,
+    scheduler_db: Path | None = None,
+    policy_path: Path | None = None,
+    company_ref: str | None = None,
+    change_reason: str = "evidence_thicker",
+    revise_units: Sequence[str] = (),
+    max_units: int = MAX_UNITS_PER_RUN,
+    dry_run: bool = False,
+    model_factory: Callable[..., Any] | None = None,
+    verifier_model_factory: Callable[..., Any] | None = None,
+    family_resolver: Callable[[str | None], str | None] | None = None,
+) -> dict[str, Any]:
+    state_dir = Path(state_dir).expanduser().resolve()
+    summary_dir = Path(summary_dir)
+    summary_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    summary: dict[str, Any] = {
+        "schema_version": SUMMARY_SCHEMA_VERSION,
+        "created_at": _now(),
+        "status": "failed",
+        "dossier_status": None,
+        "company_ref": company_ref,
+        "write_scope": None,
+        "units_planned": {},
+        "units_drafted": [],
+        "refused": [],
+        "verification": None,
+        "rubric": None,
+        "output_rubric_findings": [],
+        "version_ref": None,
+        "version_status": None,
+        "new_refs": 0,
+        "cost_micros": 0,
+        "failure_reason": None,
+        "formal_authority_writes": 0,
+    }
+    store = DaltonStore(str(state_dir / "core.sqlite"))
+    try:
+        missions = CoverageMissionAuthority(store)
+        pointer = store.connection.execute(
+            "SELECT mission_version_id FROM coverage_mission_pointer "
+            "ORDER BY mission_ref LIMIT 1"
+        ).fetchone()
+        if pointer is None:
+            summary.update({"status": "idle", "dossier_status": "no_mission"})
+            return summary
+        mission = missions.mission(pointer["mission_version_id"])
+        scope = granted_scope(mission)
+        if scope is None:
+            summary.update({
+                "status": "held", "dossier_status": "not_authorized",
+                "failure_reason": (
+                    f"任务 {mission['id']} 还没有授予 {WRITE_SCOPE} 写入范围；"
+                    "在授权前不起草，免得白花模型调用"),
+            })
+            return summary
+        summary["write_scope"] = scope
+        actor_ref = mission["autonomy"]["automation_principal"]
+
+        from .claim_index_authority import table_exists as index_exists
+
+        if not index_exists(store.connection):
+            summary.update({
+                "status": "held", "dossier_status": "no_claim_index",
+                "failure_reason": ("this Core holds no Claim index; a dossier "
+                                   "section is 'the canonical Claims for one aspect' "
+                                   "and without the index there is no such set"),
+            })
+            return summary
+
+        candidates = screened_companies(missions, mission)
+        if company_ref is not None:
+            candidates = [company_ref] if company_ref in candidates else []
+        if not candidates:
+            summary.update({"status": "idle", "dossier_status": "no_screened_company",
+                            "failure_reason": "no company in this mission has passed "
+                                              "its Initial Screen"})
+            return summary
+
+        from .research_constitution import ResearchConstitutionAuthority
+
+        binding = mission["bindings"]["constitution_version"]
+        constitution = ResearchConstitutionAuthority(store).constitution(binding["ref"])
+        if constitution["content_hash"] != binding["hash"]:
+            summary.update({"status": "failed", "dossier_status": "binding_drift",
+                            "failure_reason": "the mission's constitution binding drifted"})
+            return summary
+        policy = load_policy(policy_path)
+        authority = CompanyDossierAuthority(store)
+
+        chosen = None
+        plan: dict[str, Any] = {}
+        prior = None
+        examined = candidates[0]
+        for candidate in candidates:
+            examined = candidate
+            prior = authority.latest(candidate)
+            plan = plan_units(store=store, company_ref=candidate,
+                              constitution=constitution, policy=policy, prior=prior)
+            if stale_units(plan, limit=max_units, revise=revise_units):
+                chosen = candidate
+                break
+        def planned(entries: Mapping[str, Any]) -> dict[str, Any]:
+            return {
+                unit: {"status": entry["status"], "reason": entry["reason"],
+                       "new_refs": entry["new_refs"], "stale": entry["stale"],
+                       "slots": len(entry["structure"])}
+                for unit, entry in entries.items()
+            }
+
+        if chosen is None:
+            # An idle run still says what it looked at. "Nothing to do" without
+            # the plan behind it is the summary an operator cannot act on.
+            summary.update({
+                "status": "idle", "dossier_status": "nothing_new",
+                "company_ref": examined, "units_planned": planned(plan),
+                "failure_reason": "no company has new canonical Claims for "
+                                  "any part of its file"})
+            return summary
+        summary["company_ref"] = chosen
+        summary["units_planned"] = planned(plan)
+        wanted = stale_units(plan, limit=max_units, revise=revise_units)
+        if dry_run:
+            summary.update({"status": "succeeded", "dossier_status": "dry_run",
+                            "units_drafted": wanted})
+            return summary
+        if model_config_path is None:
+            summary.update({"status": "succeeded", "dossier_status": "gated",
+                            "failure_reason": "no model configured",
+                            "units_drafted": []})
+            return summary
+
+        config = json.loads(Path(model_config_path).expanduser().read_text(encoding="utf-8"))
+        factory = model_factory or (lambda: CockpitModel(
+            config, scheduler_db=str(scheduler_db or (state_dir / "scheduler.sqlite")),
+            max_input_tokens=MAX_INPUT_TOKENS, max_output_tokens=MAX_OUTPUT_TOKENS,
+            max_cost_usd=MAX_COST_USD, timeout_seconds=TIMEOUT_SECONDS,
+        ))
+        model = factory()
+        company = {"company_ref": chosen, "ticker": next(
+            (member.get("ticker") for member in mission["universe"]
+             if member.get("company_ref") == chosen), None)}
+
+        profile = None
+        profile_table = ""
+        if "guidance_style" in wanted:
+            guides, actuals = guidance_material(store, chosen)
+            profile = build_profile(company_ref=chosen, guides=guides, actuals=actuals)
+            profile_table = render_profile_table(profile)
+
+        blocks: dict[str, Any] = {}
+        draft_routes: list[str | None] = []
+        spent = 0
+        prior_sections = {item["aspect"]: item
+                          for item in (prior or {}).get("sections") or []}
+        for unit in wanted:
+            if spent >= int(MAX_RUN_COST_USD * 1_000_000):
+                summary["refused"].append({"unit": unit, "reason": "run cost bound reached"})
+                continue
+            entry = plan[unit]
+            held = prior_sections.get(unit)
+            # A claim row has no ``kind``; a figure or forecast row does. That
+            # is the whole distinction the two tables in the prompt make.
+            material = material_rows(
+                [row for row in entry["material"] if "kind" not in row],
+                [row for row in entry["material"] if "kind" in row],
+            )
+            outcome = draft_unit(
+                model, unit=unit, structure=entry["structure"], material=material,
+                company=company, mission=mission,
+                prior_body="" if held is None else section_body(held),
+                profile=profile if unit == "guidance_style" else None,
+                profile_table=profile_table if unit == "guidance_style" else "",
+                market_view_available=any(
+                    slot["slot_id"] == "market_view" for slot in entry["structure"]),
+            )
+            spent += int((outcome.get("model") or {}).get("cost_micros") or 0)
+            if outcome["status"] != "drafted":
+                summary["refused"].append({"unit": unit, "reason": outcome["reason"]})
+                continue
+            blocks[unit] = outcome["block"]
+            draft_routes.append((outcome.get("model") or {}).get("route_decision_ref"))
+        summary["cost_micros"] = spent
+        summary["units_drafted"] = sorted(blocks)
+        if not blocks:
+            summary.update({"status": "succeeded", "dossier_status": "nothing_drafted"})
+            return summary
+
+        verifier = (verifier_model_factory or factory)()
+        verdict = verify(verifier, blocks, company=company, mission=mission)
+        spent += int((verdict.get("model") or {}).get("cost_micros") or 0)
+        summary["cost_micros"] = spent
+        resolve = family_resolver or router_family_resolver(config)
+        check = independence(
+            draft_routes=draft_routes,
+            verifier_route=(verdict.get("model") or {}).get("route_decision_ref"),
+            resolve=resolve,
+        )
+        summary["verification"] = {
+            "status": verdict.get("status"), "verdict": verdict.get("verdict"),
+            "findings": verdict.get("findings") or [],
+            "reason": verdict.get("reason"),
+            "independent": check["independent"],
+            "independence_reason": check["reason"],
+            "verifier_family": check["verifier_family"],
+        }
+        if verdict.get("status") != "verified" or verdict.get("verdict") != "pass":
+            summary.update({"status": "succeeded", "dossier_status": "verification_failed"})
+            return summary
+        if not check["independent"]:
+            summary.update({"status": "succeeded", "dossier_status": "not_independent"})
+            return summary
+
+        record = assemble(
+            company_ref=chosen, blocks=blocks, plan=plan, prior=prior,
+            profile=profile, constitution=constitution, policy=policy,
+            mission=mission, actor_ref=actor_ref, change_reason=change_reason,
+        )
+        forecast_cells = {row["ref"] for row in number_material(store, chosen)
+                          if row["kind"] == "forecast_cell"}
+        missing = unresolved_refs(store.connection, record, forecast_cells=forecast_cells)
+        if missing:
+            summary.update({"status": "succeeded", "dossier_status": "unresolvable_refs",
+                            "failure_reason": json.dumps(missing[:5], ensure_ascii=False)})
+            return summary
+        gate = rubric_gate(store.connection, record, prior=prior)
+        summary["rubric"] = gate["summary"]
+        if gate["failed"]:
+            summary.update({"status": "succeeded", "dossier_status": "rubric_refused",
+                            "failure_reason": "hard checks failed: "
+                                              + ", ".join(gate["failed"])})
+            return summary
+        findings = output_rubric_findings(record, constitution=constitution,
+                                          policy=policy, prior=prior)
+        summary["output_rubric_findings"] = findings
+        if findings:
+            summary.update({"status": "succeeded", "dossier_status": "constitution_refused",
+                            "failure_reason": "the Constitution's output_rubric was not "
+                                              "satisfied"})
+            return summary
+        summary["new_refs"] = len(new_refs(record, prior))
+        published = authority.publish(record)
+        summary.update({
+            "status": "succeeded",
+            "dossier_status": ("published" if published["status"] == "fresh"
+                               else "duplicate"),
+            "version_ref": published["id"],
+            "version_status": published["status"],
+            "duplicate_reason": published.get("duplicate_reason"),
+            **summarise_blocks(blocks),
+        })
+        return summary
+    except CompanyDossierError as exc:
+        summary["failure_reason"] = f"{type(exc).__name__}: {exc}"
+        summary["status"] = "failed"
+        return summary
+    except Exception as exc:  # unexpected: record for the parent, then surface
+        summary["failure_reason"] = f"unexpected {type(exc).__name__}: {exc}"
+        raise
+    finally:
+        _write_owner_only(summary_dir / "summary.json", summary)
+        store.close()
+
+
+def assemble(
+    *,
+    company_ref: str,
+    blocks: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    prior: Mapping[str, Any] | None,
+    profile: Mapping[str, Any] | None,
+    constitution: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    mission: Mapping[str, Any],
+    actor_ref: str,
+    change_reason: str,
+) -> dict[str, Any]:
+    """Freshly drafted parts, carried-forward parts, and the bindings."""
+
+    from .company_dossier import SOURCE_VERSION_KEY, causal_chain_hash
+    from .research_quality_rubrics import rubric as get_rubric
+
+    prior_sections = {item["aspect"]: item for item in (prior or {}).get("sections") or []}
+    sections = []
+    for aspect in SECTIONS:
+        if aspect in blocks:
+            section = dict(blocks[aspect])
+            if aspect == "guidance_style" and profile is not None:
+                section["profile"] = profile
+            sections.append(section)
+            continue
+        held = prior_sections.get(aspect)
+        if held is not None:
+            sections.append(dict(held))
+            continue
+        entry = plan.get(aspect) or {}
+        sections.append(unavailable_section(
+            aspect,
+            entry.get("reason") or "not_drafted_this_run",
+            [slot["slot_id"] for slot in entry.get("structure") or []],
+        ))
+    classification = blocks.get(CLASSIFICATION_UNIT) or (
+        (prior or {}).get("industry_classification") or undrafted_classification())
+    variant = blocks.get(VARIANT_UNIT)
+    if variant is None:
+        variant = (prior or {}).get("variant_view") or undrafted_variant(
+            (plan.get(VARIANT_UNIT) or {}).get("reason") or "not_drafted_this_run")
+    chain = list((constitution.get("method") or {}).get("causal_chain") or [])
+    rubric = get_rubric("company_dossier")
+    fresh = [
+        row
+        for block in blocks.values()
+        for row in block.get("sources") or []
+    ]
+    known = set() if prior is None else set(evidence_scope(prior))
+    evidence_refs = [row for row in {row["ref"]: row for row in fresh}.values()
+                     if row["ref"] not in known] or fresh[:1]
+    return {
+        SOURCE_VERSION_KEY: None if prior is None else prior["id"],
+        "company_ref": company_ref,
+        "sections": sections,
+        "industry_classification": classification,
+        "variant_view": variant,
+        "bindings": {
+            "constitution_version": {"ref": constitution["id"],
+                                     "hash": constitution["content_hash"]},
+            "playbook_version": {
+                "ref": mission["bindings"]["playbook_version"]["ref"],
+                "hash": mission["bindings"]["playbook_version"]["hash"]},
+            "mission_version_ref": mission["id"],
+            "policy_ref": policy["policy_ref"],
+            "policy_hash": policy_hash(policy),
+            "causal_chain_hash": causal_chain_hash(chain) if chain else None,
+            "rubric_ref": rubric.rubric_ref,
+            "rubric_hash": rubric.content_hash,
+        },
+        "actor_ref": actor_ref,
+        "change_reason": change_reason,
+        "evidence_refs": evidence_refs,
+        "decision": None,
+    }
+
+
+def rubric_gate(
+    connection: Any, record: Mapping[str, Any], *, prior: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    """Q1's deterministic layer, run on the draft before it can be a version."""
+
+    from .company_dossier import body_hash
+    from .research_quality_rubrics import rubric as get_rubric
+    from .research_quality_score import run_deterministic
+
+    digest = body_hash(record)
+    art = dossier_artefact(
+        {**dict(record), "id": f"company-dossier-draft:{digest[:32]}",
+         "content_hash": digest, "dossier_ref": record.get("company_ref")},
+        prior=prior,
+    )
+    result = run_deterministic(art, get_rubric("company_dossier"), core=connection)
+    failed = [name for name in result["failed_checks"] if name in HARD_CHECKS]
+    return {
+        "failed": failed,
+        "summary": {
+            "passed": result["passed"],
+            "failed_checks": result["failed_checks"],
+            "hard_failed": failed,
+            "checks": {item["check"]: {"status": item["status"], "count": item["count"]}
+                       for item in result["checks"]},
+        },
+    }
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--model-config", type=Path)
+    parser.add_argument("--summary-dir", type=Path, help="defaults to the state dir")
+    parser.add_argument("--scheduler-db", type=Path)
+    parser.add_argument("--dossier-policy", type=Path,
+                        help="defaults to deploy/phase9/p12a-dossier-policy-v1.json")
+    parser.add_argument("--company-ref", help="draft this company rather than choosing")
+    parser.add_argument("--change-reason", default="evidence_thicker")
+    parser.add_argument("--revise", action="append", default=[], dest="revise_units",
+                        help="draft this part again even if nothing new arrived; "
+                             "repeatable. The version still has to cite something "
+                             "the current one does not.")
+    parser.add_argument("--max-units", type=int, default=MAX_UNITS_PER_RUN)
+    parser.add_argument("--dry-run", action="store_true",
+                        help="plan and stop; no model call and no write")
+    parser.add_argument("--quiet", action="store_true")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    summary = run_dossier(
+        state_dir=args.state_dir, model_config_path=args.model_config,
+        summary_dir=args.summary_dir if args.summary_dir is not None else args.state_dir,
+        scheduler_db=args.scheduler_db, policy_path=args.dossier_policy,
+        company_ref=args.company_ref, change_reason=args.change_reason,
+        revise_units=tuple(args.revise_units), max_units=args.max_units,
+        dry_run=args.dry_run,
+    )
+    if not args.quiet:
+        print(json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=1))
+    return 0 if summary["status"] in ("succeeded", "idle", "held") else 1
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
+    sys.exit(main())
+
+
+__all__ = [
+    "HARD_CHECKS",
+    "assemble",
+    "build_parser",
+    "claim_material",
+    "granted_scope",
+    "guidance_material",
+    "main",
+    "market_view_material",
+    "number_material",
+    "plan_units",
+    "rubric_gate",
+    "run_dossier",
+    "screened_companies",
+    "stale_units",
+    "table_exists",
+    "unavailable_section",
+    "undrafted_classification",
+    "undrafted_variant",
+    "unresolved_refs",
+]
