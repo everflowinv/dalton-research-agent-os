@@ -1,9 +1,25 @@
 # P12b：给 Claim 建索引，一个 Claim 字节都不改；已核验的数字有了进 Ledger 的门
 
-*2026-09-09* · 分支 `wave1b-claim-index`，基线 main `08c66d0`
+*2026-09-09* · 分支 `wave1b-claim-index`，已合并 main `888a814`（Wave 0 在内）
 · 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 3 节 B 线、
 [能力差距分析 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) 5.2 P12b、
 ADR-0003 / ADR-0004 / ADR-0005、ADR-0007（owner 已接受）
+
+## review 之后改了什么（v1.1，合并 main `888a814` 之后）
+
+| review 项 | 改动 |
+| --- | --- |
+| **B1** figure 路径与 ADR-0007 冲突 | 恢复 `transcript_core_authority` 的原拒绝；新增 provenance mode `mission_figure_authority`（material = figure 行 + 其 Core 链）；只收 `company-filed-document`，spoken 在 store / promoter / sweep 三处各自拒绝；rule ref 常量落地。**报告里的阻塞点因此消失**，live 五条 figure 全部促进、一条进了 Ledger。见第三、四节 |
+| **B2** scale-less figure 崩溃 / 基类异常逃逸 | 数值字段统一走 `figure_candidate_numerics()`；sweep 捕获 `ResearchVerificationError`；百分比 figure 有测试 |
+| **B3** 定量去重过度合并 | 键改为 `period_key` + `basis`，绝不用回退的 as_of；期间解析不出来的 Claim 自成一组；FY-vs-Q4、basis A/B、不可解析期间三种情况都有测试 |
+| (a) 组的结算 | 重打标签会结算它**离开**的那个组；`duplicate` 短路不再跳过结算；新增 `settle_group()` 公开入口 |
+| (b) 引文绑定复核 | 不再适用：新模式里没有引文绑定。等价检查落在 `verify_source_material` 的 `review_binds_document` / `envelope_names_the_document` / `quote_names_a_span` 三条 finding 上 |
+| (c) PURPOSES | 撤回对 `cockpit_model.py` 的改动，改为 `claim_index_tagging` import 时 `register_purpose("claim_index")` |
+| (d) 瞬时状态 | `busy` / `model_unavailable` 不再进 `self._failed` |
+| (e) `_order` 泄漏 | 改名 `index_order`，**每一行都有**（未标注的排在最后），投影层剥掉 |
+| nits | `--dry-run` 一个字节都不写（连规则标签也不写，`index_status = dry_run`）；sweep 返回 `truncated` |
+
+---
 
 ## 这一片回答的问题
 
@@ -114,32 +130,47 @@ live 有 2,170 条 Claim。它们**每一条的出处都无可挑剔**，但堆�
 - `canonical_only` 只会去掉索引**正面标记为重复**的行；未标注的 Claim 永不因它消失。
 - 另导出 `annotate_with_index(connection, rows, ...)`：驾驶舱的问答上下文
   （`cockpit_plane._claims`）是直接读 `claim_versions` 的，不走这个投影，
-  集成时一行就能接上（见第五节）。
+  集成时一行就能接上（见第五节）。它给**每一行**都带上 `index_order` 排序键
+  （未标注的 Claim 排在所有已标注之后），因为只在部分行上出现的排序键排不了序；
+  `query_company_research` 把它剥掉，投影的形状不变。
 
 ## 三、ADR-0007：已核验的数字进 Ledger
 
-**没有重开 ADR-0003 关上的那扇门。** Ledger 的数字入口是 JSON pointer 复算，
-文档正文没有可复算的 payload，而"写个正文抽数器"正是 ADR-0003 选项 C 拒绝的东西。
+**ADR-0003 B 的拒绝原样不动。** 第一版把拒绝**收窄在 `transcript_core_authority` 里面**，
+这正是 ADR-0007 §Decision 明确不许做的事。ADR-0003 的判断是关于逐字稿的，而且对逐字稿是对的；
+错的是它当时说不出来的那句话——**"原文被引用"不是数字不能从它来的理由**。
 
-这里用的是另一件事实：**figure 行本身已经是一个确定性数值权威**。它的数字与
-as-reported 标签在写入前就已经在它引用的那段原文里核对过，而原文、manifest 哈希、
-行自身的 content_hash 全都存着，谁都可以重跑。`claim_index_figures.py` 就是重跑它：
+所以两条 cited-original 模式（`transcript_core_authority`、`public_web_core_authority`）
+**逐字恢复原状**，只收定性候选；已核验数字走一条**新的 provenance mode
+`mission_figure_authority`**。
 
-1. 按 figure_id **从 Core 读回**这一行（不看调用方给的那份）；
-2. 用它自己的列重算 `content_hash`；
-3. 查撤回；
-4. 用写入时同一个确定性校验器 `verify_numeric_candidate` 重跑数字与标签；
-5. **最后**才把调用方那份逐字节比对。
+**它的 material 就是 figure 行本身**，周围的一切从 Core 重新推导：
 
-产出是 staging 本来就要的那个 `numeric` VerificationBundle。于是 figure 行站在
-NumericVerificationSpec 的位置上：`numeric_spec_ref` = figure_id，
+```
+figure → mission document review → discovered document → 找到它的那次 discovery
+       → 枚举出该文档的 connector SourceEnvelope → 原始 ArtifactVersion
+```
+
+十五条 finding，全部在 staging 时重算、不接受调用方断言：figure 行哈希由自己的列重算、
+未撤回、grade 是 filed、数字与 as-reported 标签在它引用的原文里、`citation_hash` 相符、
+`quote_id` 命名一个 span、review 指向这份文档、discovered document 指向这份文档、
+SourceEnvelope 是精确 Core 权威且枚举了这份文档、artifact ref/hash 精确、
+`raw_response_hash` 等于 artifact 字节哈希、lineage 精确。
+
+**整条链里没有任何 citation binding**——这正是 SEC filing 的 figure 能动起来的原因：
+一份 filing 没有更正集，也永远不会有。**第一版报告里的阻塞点就此消失。**
+
+**只有 company-filed 的 figure。** `earnings-call-transcript` 的 figure 保持定性
+（ADR-0007 §Decision 4）。这条拒绝写在三处——staging store（合同）、promoter（给调用方读的句子）、
+sweep（列进 `skipped` 并写明理由，绝不静默跳过）——因为只写在一处的规则是会被绕开的规则。
+
+figure 行站在 NumericVerificationSpec 的位置上：`numeric_spec_ref` = figure_id，
 `numeric_spec_hash` = figure 的 content_hash。**CandidateClaim 契约一个字段都没改，
-审阅与裁决路径一点没改**，figure ref 因此从正式 ClaimVersion 经
-`candidate_origin_ref`（逐跳带哈希）一路可回指。
+审阅与裁决路径一点没改**，figure ref 从正式 ClaimVersion 经 `candidate_origin_ref`
+（逐跳带哈希）一路可回指。
 
-**默认仍是老规则。** `figure_admission_policy` 默认 `reject_cited_quantitative`，
-只有调用方明确要 `verified_figure` 才放行。改变"Ledger 认什么是数字"是治理决定，
-应当是有人按下去的，不应当是一次合并带进来的。两条路径都有测试。
+**默认仍是老规则。** `figure_admission_policy` 默认 `reject_cited_quantitative`。
+改变"Ledger 认什么是数字"是治理决定，应当是有人按下去的。两条路径都有测试。
 
 **促进器不做去重。** 三份文档报同一个季度的收入就是三条候选；索引把它们放进一个组、
 留一个 canonical。拒绝第二第三条，等于扔掉"两份文档互相印证"这个信息。
@@ -150,14 +181,19 @@ staging 没有 Core 句柄，否则驾驶舱会显示一条它打不开数值权
 上的新字段——那个 bundle 被四个调用方原样 splat 进 `commit_policy_candidate`，
 加一个键就是给四个函数加一个关键字参数（这是全量测试抓到的）。
 
+**两个真崩溃**（review 指出，已修并各有测试）：百分比没有 scale 词、而合同没有空 scale，
+直接读 `held["scale"]` 会在"研究里大多数数字"上崩；数值字段现在统一从
+`figure_candidate_numerics()` 一处映射出来。`ResearchVerificationError` 是基类，
+从 sweep 的 except 元组里漏出去，一行坏数据会中止整轮。
+
 ## 四、验收结果（原文）
 
 ```
-Ran 2130 tests in 269.258s
+Ran 2195 tests in 203.729s
 OK (skipped=1)
 ```
 
-基线 2,034，本片新增 96 项。命令：
+合并 main `888a814` 后的基线是 2,064，本片新增 131 项。命令：
 `PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`
 （注意 `PYTHONPATH` 必须是**绝对路径**：子进程 cwd 是 state dir，相对的 `src`
 会解析不到，于是子进程用回 venv 里指向主 checkout 的可编辑安装。）
@@ -165,37 +201,60 @@ OK (skipped=1)
 ### 冒烟：今日 live Core 只读副本（`/tmp` 拷贝，规则跑，不调模型）
 
 ```
-mission: coverage-mission-version:us-it-services:13   scope: claim
-pending: 2170 in 0.54s
-rule-settled: 22, left for the model: 2148
-importance: {'filing': 22, 'management_statement': 571, 'sell_side': 217, 'news': 1360}
-as_of_basis: {'period_end': 23, 'period_label': 685, 'evidence_retrieved_at': 1462}
-rule aspects: {'segments_and_mix': 22}
-dedupe groups >1: 4   duplicates collapsed: 5
-   3x quant|company:sec-cik:0001467373|quarterly_revenue_yoy_growth|2025-11-30|percent
+tagged 2170 in 2.24s
+rule-settled 22 / model 2148
+importance   {'filing': 22, 'management_statement': 571, 'sell_side': 217, 'news': 1360}
+as_of_basis  {'period_end': 23, 'period_label': 685, 'evidence_retrieved_at': 1462}
+dedupe groups >1: 4   collapsed: 5
+   3x quant|company:sec-cik:0001467373|quarterly_revenue_yoy_growth|2025-09-01..2025-11-30|official-filing
    2x qual|company:sec-cik:0001352010|eff31965...
    2x qual|company:sec-cik:0001058290|1287e75e...
    2x qual|company:sec-cik:0001058290|1f774f3d...
-first model batch: 40 claims, 14830 prompt bytes
-batches needed for the backlog: 54
+ungrouped (unparseable period, quantitative): 0
+batch 40 claims / 14830 bytes; 54 batches
 wrote 22 entries in 0.01s  {'entries': 22, 'versions': 22}
 canonical: {True: 20, False: 2}
-live figures: 5 (12 recorded, 7 retracted) — all 5 re-verify against their stored citation
-figures with an admitted citation: 0 of 5
+
+--- ADR-0007 sweep over live figures ---
+  company-filed-document metric:revenue           pass ()
+  company-filed-document metric:net-income        pass ()
+  company-filed-document metric:net-income        pass ()
+  company-filed-document metric:net-income        pass ()
+  company-filed-document metric:adjusted-eps      pass ()
+promoted: 5 fresh    skipped: []    truncated: 0
+  claim: quantitative 69.7 currency billion
+         "$69.7B in revenues for Fiscal 2025 was USD 69.7 billion (currency),
+          as published by the company in this document."
+  numeric_spec_ref = mission-document-figure:a2d1c43eb64d9ae76d25914d06592b20
+staging: {'candidate_numeric_specs': 0, 'candidate_figures': 5,
+          'candidate_claim_versions': 5}
+
+--- and one of them all the way through ---
+COMMIT: fresh claim-version:c0a907f54b12e6e31cd6cd95ab922ad1e90c9820db2ee3e7f18bb4ddadc5c43d
 ```
 
-三件事值得单独说：
+四件事值得单独说：
 
-1. **ACN 那三条并排引用被抓到了**，`quarterly_revenue_yoy_growth`、
-   2025-09-01..2025-11-30、percent，一个组、一条 canonical、另两条追加了
-   `recanonicalised` 版本。另外还找出 3 组定性重复（EPAM 一组、CTSH 两组）。
-2. **period 解析的唯一真错误在冒烟里现形并修掉了**：live 的定量 period 形状是
+1. **ADR-0007 在 live 数据上端到端跑通了。** 五条现存 figure 全部重核通过、全部促进为
+   定量候选；其中一条经 `HumanReviewAuthority` 人工裁决进入 Ledger，成为一条
+   quantitative ClaimVersion（ACN 2025 财年收入 69.7 亿美元口径的那条）。
+   第一版报告里"live 五条一条也促进不了"的阻塞点，是那一版把路径挂在
+   transcript 引文绑定上造成的，换成 ADR-0007 定义的 `mission_figure_authority` 之后消失。
+   **这仍然没有绕过任何签名**：`figure_admission_policy` 默认关闭，
+   `research-auto-commit:mission-verified-figure:v1` 仍待 owner 发布并签名。
+2. **ACN 那三条并排引用仍被抓到**，而且现在的组键是**声明的期间**
+   `2025-09-01..2025-11-30` 加 `basis`，不是解析出来的日期。另有 3 组定性重复
+   （EPAM 一组、CTSH 两组）。
+3. **去重不再过度合并**（review B3）。旧键用解析后的 as_of（`FY2025` 与 `Q4 2025`
+   都落在 2025-12-31，是两个数）、不含 `basis`（GAAP 与 non-GAAP 同季营业利润率会被合并）、
+   期间解析不出来时退到 `evidence_retrieved_at`（live 2,170 条里有 1,462 条），于是
+   "同一家公司、同一个指标、同一天抓的"会变成一组——而 `canonical_only` 默认为真，
+   那些互不相同的事实会直接从读取结果里消失。现在：键用 `period_key` + `basis`，
+   期间解析不出来的 Claim **自成一组、永不合并**，as_of 只用于排序。
+   live 的 22 条定量期间全部可解析，所以 `ungrouped` 为 0。
+4. **period 解析的唯一真错误在第一轮冒烟里现形并修掉了**：live 的定量 period 形状是
    `2026-03-01..2026-05-31`，第一版没有区间规则，退到"取字符串里第一个年份"，
-   于是 ACN 三个不同季度全被合并成 "2026"。现在区间是一条规则，裸年份规则改成
-   **整串锚定**（`revenue in 2025 and 2026` 因此不再产生日期）。
-3. **14,830 字节的 prompt**：远低于 `company_model_cli` 记录的 43KB 被拒线，
-   按它 24KB / $0.24 的量级推算，2,148 条定性 Claim 需要 54 批，一次性补完
-   大约在个位数美元。`MAX_COST_USD = 0.60`（预留，不是价格）。
+   于是 ACN 三个不同季度全被合并成 "2026"。现在区间是一条规则，裸年份规则整串锚定。
 
 ## 五、集成要接的线
 
@@ -228,11 +287,12 @@ coordinator 的构造签名是 `store` / `launcher` / `mission`（**不是** `mi
 mission 里授予，**代码不用改**；`FALLBACK_WRITE_SCOPES` 那一行连同它上面的 TODO
 可以删掉。live mission v13 已有 `claim`，所以今天就能跑。
 
-### 3. `cockpit_model.PURPOSES` 加了一个词 `claim_index`
+### 3. 模型用途：已按 Wave 0 的形状登记，无需接线
 
-Wave 0 正在把 PURPOSES 改成可登记的注册表；这里是一行冲突，取 Wave 0 的形状、
-把 `claim_index` 登记上即可。同时建议 `scripts/raise_day_budget_cap.MODEL_CONFIG_NAMES`
-加一个 `claim-index` 模型配置名（本片没碰那个文件）。
+`claim_index_tagging` 在 import 时调用 `cockpit_model.register_purpose("claim_index")`。
+`cockpit_model.py` 本身**未改**（合并 main 时取了 Wave 0 那一侧）。
+仍建议 `scripts/raise_day_budget_cap.MODEL_CONFIG_NAMES` 加一个 `claim-index`
+模型配置名（本片没碰那个文件）。
 
 ### 4. 打包
 
@@ -256,29 +316,35 @@ Wave 0 正在把 PURPOSES 改成可登记的注册表；这里是一行冲突，
 本片**没有伪造任何哈希**。规则藏在 `figure_admission_policy` 后面、默认是老行为，
 两条路径都有测试。集成时要做的是：
 
-1. 在 ADR-0007 正文里写明 `FIGURE_ADMISSION_VERIFIED_FIGURE` 是被接受的那条规则；
-2. 若治理 policy 的哈希覆盖候选准入规则，**重新签一次**并记录；
-3. 把促进器的调用方（CLI 或将来的 lane）显式传 `figure_admission_policy=
-   "verified_figure"`——`promote_figure` 已经是这样传的，`stage()` 的默认值不动。
+1. **owner 发布并签署一版治理 policy**，其
+   `research_candidate_auto_commit.rules` 列出
+   `research-auto-commit:mission-verified-figure:v1`
+   （常量在 `research_verification.MISSION_VERIFIED_FIGURE_RULE_REF`，
+   ADR-0007 Decision 末段点名的就是它，做法与 ADR-0005 的
+   `research-auto-commit:mission-document-qualitative:v1` 一致）；
+2. 把促进器的调用方（CLI 或将来的 lane）显式传 `figure_admission_policy=
+   "verified_figure"`——`promote_figure` 已经是这样传的，`stage()` 的默认值不动；
+3. 注意本片实现的是**人工审阅**那条路（`commit_reviewed_candidate`，已在 live 副本上
+   跑通）。走 policy 自动准入（`commit_policy_candidate` / `research_auto_commit`）
+   需要上面那条 rule ref 生效之后再接一次，本片没有实现自动准入分支。
 
 **未接线**：`claim_index_cli.py --promote-figures --staging-db <path>` 是手跑入口，
 没有 lane、没有 launcher、没有写进 driver。
 
 ## 六、没做的、以及发现的缺口
 
-- **live 那 5 条 figure 今天一条都促进不了**，原因不是策略而是链路：它们的
-  `document_ref` 全是 `sec:filing:…`，而 ADR-0007 的 staging 走的是 cited-original
-  路径（`transcript_core_authority` / `public_web_core_authority`），它要一条
-  claim-eligible 的引文绑定，而引文绑定来自 transcript 更正权威——SEC filing 文档
-  根本没有更正集。**要么**给 SEC filing 正文建一条同样的引文权威，**要么**新增一个
-  `sec_core_authority` provenance mode。这是把数字接进 Ledger 的下一块，
-  已在 AlphaEngine / public-web 文档上端到端跑通并测过（`test_figure_admission.py`
-  从 staging 一路到 `commit_reviewed_candidate`，落成一条 quantitative ClaimVersion）。
-- **`coverage_mission_statement_lines`（live 11,831 行）只做了核验、没做准入**：
-  `DocumentFigureResolver.verify_statement_line` 重算 filing 行的哈希、检查
-  accession 与原始产物记录、产出 numeric bundle；但报表行没有正文引文，走不了
-  cited-original 路径，它的链路是 SEC 连接器权威。与上一条是同一个设计问题
-  （PROJECT_STATUS 待办第 6 条末尾自己也这么说）。
+- **`coverage_mission_statement_lines`（live 11,831 行）只做了核验、没做准入。**
+  ADR-0007 §Decision 1 把报表行和 document figure 并列为可准入的两种数值权威；
+  本片只实现了 document figure 那一半。`DocumentFigureResolver.verify_statement_line`
+  已经按同样的方式重核（行有值、filing 有 accession、filing 记录了原始产物 refs，
+  产出 numeric bundle），但 `mission_figure_authority` 的 material 走的是
+  **mission 文档链**（review → discovered document → discovery → SourceEnvelope），
+  而报表行没有文档链——它的链路是 SEC financials 的 dispatch / ingest 与那条
+  连接器权威。要接上，需要给报表行建一份等价的 material（`ingest_id` 当
+  envelope、`source_record_refs_json` 里的 `raw-sink:<sha>` 当 artifact，
+  并校验 `governance_ref`/`governance_hash` 已批准，即 ADR-0007 §Decision 3 后半句）。
+  估计一个人日以内，但它是 ADR 的另一半，值得单独一片。
+- **自动准入分支没写。** 见五·6 第 3 条。
 - **`build_claim_index`（ClaimIndex 0.1 wire）没有改。** 它是 agenda ContextPack
   里按 ref+hash 校验的冻结对象，往它的 closed entry 上加字段会改掉每一个已存在
   对象的哈希。索引通过 `company_research_view` / `annotate_with_index` 读，不经过它。
@@ -293,8 +359,10 @@ Wave 0 正在把 PURPOSES 改成可登记的注册表；这里是一行冲突，
 
 1. **`claim_index` 要不要成为 `may_write` 的新词？** 建议要（见五·2）。
    不要的话，`claim` 授权已经够用，把 `claim_index_cli` 里的 TODO 删掉即可。
-2. **ADR-0007 的策略开关谁来打开、什么时候？** 本片默认关闭。
-   打开之前，第六节第一条（SEC filing 引文链路）不解决的话，live 上打开也没有数字能进。
+2. **ADR-0007 的策略开关谁来打开、什么时候？** 本片默认关闭，但链路已经通：
+   live 副本上五条 figure 全部促进、其中一条经人工裁决进了 Ledger。
+   打开需要 owner 签一版列出 `research-auto-commit:mission-verified-figure:v1`
+   的 policy（五·6）。
 3. **定性去重要不要更进一步？** 现在只合并"同一主体的同一句话"。live 只找到 3 组。
    更强的合并需要相似度模型，那是冻结项。
 4. **补完 2,148 条存量的一次性开销**（54 批，约个位数美元）走 mission 日预算，
