@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 from pathlib import Path
 from typing import Any
@@ -35,9 +36,12 @@ from .company_wiki_core import (
 from .connector_governance import ConnectorGovernance
 from .feed_acquisition import validate_feed_acquisition_manifest
 from .lane_child_launcher import (
+    TICKET_SCHEMA_VERSION,
     LaneChildLauncher,
     LaneChildRejected,
     secure_dir,
+    wire_time,
+    write_owner_only,
 )
 from .sales_notes_core import (
     GET_OPERATION as NOTES_GET_OPERATION,
@@ -208,6 +212,65 @@ class FeedChildLauncher(LaneChildLauncher):
 
     def _document_args(self, document_ref: str) -> dict[str, Any]:
         raise NotImplementedError
+
+    def child_command(
+        self, *, operation: str, output_dir: str | Path, **parameters: Any
+    ) -> list[str]:
+        """The argv the host-tool runner executes for one operation.
+
+        The same builder the launcher's own ``spawn`` uses, plus
+        ``--emit-wire``: the runner treats stdout as the raw response, so the
+        child must print the closed observation wire and nothing else.
+        """
+
+        return self._command(
+            ticket_dir=Path(output_dir), operation=operation, **parameters
+        ) + ["--emit-wire"]
+
+    # -- runs this launcher did not spawn ---------------------------------
+
+    def prepare_run(self, *, digest: str, record: Mapping[str, Any]) -> tuple[str, Path]:
+        """A ticket directory for a run the host-tool runner will execute.
+
+        The connector runner owns the process and the authority chain; the
+        launcher owns tickets, because the ticket directory is what the review
+        path searches to find which run produced a document's bytes. Splitting
+        it that way keeps one run: the child writes its manifest here, and the
+        same child's stdout is what the runner records as the raw response.
+        """
+
+        if not re.fullmatch(r"[0-9a-f]{24}", digest or ""):
+            raise FeedLaunchRejected("ticket digest must be 24 hex characters")
+        ticket_id = f"{self.TICKET_PREFIX}:{digest}"
+        ticket_dir = secure_dir(self.tickets_dir / digest)
+        write_owner_only(ticket_dir / "ticket.json", {
+            "schema_version": TICKET_SCHEMA_VERSION,
+            "id": ticket_id,
+            **dict(record),
+            "started_at": wire_time(self.clock()),
+            "pid": os.getpid(),
+            "status": "running",
+            "exit_code": None,
+            "completed_at": None,
+        })
+        return ticket_id, ticket_dir
+
+    def settle_run(self, ticket_id: str, *, status: str, exit_code: int | None = None,
+                   failure_reason: str | None = None) -> dict[str, Any]:
+        """Close a prepared ticket. ``running`` is never a settled answer."""
+
+        if status not in {"succeeded", "failed"}:
+            raise FeedLaunchRejected("a settled feed run is succeeded or failed")
+        path = self._ticket_path(ticket_id)
+        record = self._read_owner_only(path)
+        record.update({
+            "status": status,
+            "exit_code": exit_code,
+            "completed_at": wire_time(self.clock()),
+            "failure_reason": failure_reason,
+        })
+        write_owner_only(path, record)
+        return record
 
     @staticmethod
     def _require_caller(caller_ref: Any) -> None:

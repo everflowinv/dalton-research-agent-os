@@ -1456,7 +1456,16 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 input_fields=("since", "sender_domain", "limit"),
                 optional_fields=("sender_domain", "limit"),
             ),
-            _operation("get_note", completeness="enumerated", input_fields=("note_id",)),
+            # `digest_ref` is an optional locator hint, not a second way to
+            # ask: the run a note first appeared in is already on every
+            # enumerated header, and passing it back turns a scan of every
+            # run into opening one file. Optional because a caller holding
+            # only an id must still be able to ask.
+            _operation(
+                "get_note", completeness="enumerated",
+                input_fields=("note_id", "digest_ref"),
+                optional_fields=("digest_ref",),
+            ),
         ),
         "gate": "host_tool_runner_v0.2",
     },

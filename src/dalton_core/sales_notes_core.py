@@ -35,7 +35,7 @@ import re
 from datetime import datetime, timezone
 from email.utils import parseaddr, parsedate_to_datetime
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 
 from .connector_inventory import load_packaged_connector_inventory
 from .store import content_hash
@@ -233,7 +233,7 @@ def note_ref(note_id: str) -> str:
     return f"{DOCUMENT_REF_PREFIX}{note_id}"
 
 
-def digest_ref(path: Path) -> str:
+def digest_ref_of(path: Path) -> str:
     """``market-digest:<date>:<AM|PM>`` -- which run first saw a note."""
 
     match = DIGEST_FILE_RE.fullmatch(path.name)
@@ -308,7 +308,7 @@ def _note_header(raw: Mapping[str, Any], *, source: Path) -> dict[str, Any]:
         "is_priority": bool(raw["is_priority"]),
         "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
         "body_chars": len(body),
-        "digest_ref": digest_ref(source),
+        "digest_ref": digest_ref_of(source),
         "evidence_tier": EVIDENCE_TIER,
         # Three banks, and every one of these arrives from a person or a named
         # desk. The flag is here so the claim index never has to infer it.
@@ -367,22 +367,45 @@ def enumerate_notes(
     return notes
 
 
-def read_note(directory: str | Path, note_id: str) -> tuple[dict[str, Any], str]:
+def read_note(
+    directory: str | Path, note_id: str, *, digest_ref: str | None = None
+) -> tuple[dict[str, Any], str]:
     """One note's header and its verbatim body.
 
     The header is rebuilt from the same run ``list_notes`` would name, so the
     ``body_sha256`` an enumeration published is the hash of the bytes this
     returns.
+
+    ``digest_ref`` is the run an enumeration said first published the note. It
+    is a hint and not a key: with it this opens one file, without it it walks
+    every run in the same ascending order the enumeration used, and a hint
+    that turns out not to hold the note falls back to that walk rather than
+    reporting a note that exists as missing. The difference matters at scale
+    -- a body-attribution pass over a six-month archive is a few thousand of
+    these, and a scan each would make it quadratic.
     """
 
     if not isinstance(note_id, str) or not note_id.startswith(DOCUMENT_REF_PREFIX):
         raise SalesNotesError(f"note id must start with {DOCUMENT_REF_PREFIX}")
-    for path in digest_files(directory):
+    paths = digest_files(directory)
+    if isinstance(digest_ref, str) and digest_ref.strip():
+        hinted = [path for path in paths if digest_ref_of(path) == digest_ref.strip()]
+        found = _find_note(hinted, note_id)
+        if found is not None:
+            return found
+    found = _find_note(paths, note_id)
+    if found is None:
+        raise SalesNotesError("no sales note with that id is in the feed")
+    return found
+
+
+def _find_note(paths: Sequence[Path], note_id: str) -> tuple[dict[str, Any], str] | None:
+    for path in paths:
         for raw in _emails(path):
             if f"{DOCUMENT_REF_PREFIX}{str(raw.get('id', '')).strip().lower()}" != note_id:
                 continue
             return _note_header(raw, source=path), str(raw["body"])
-    raise SalesNotesError("no sales note with that id is in the feed")
+    return None
 
 
 __all__ = [
@@ -405,7 +428,7 @@ __all__ = [
     "WIRE_SCHEMA_VERSION",
     "build_sales_notes_governance_record",
     "digest_files",
-    "digest_ref",
+    "digest_ref_of",
     "enumerate_notes",
     "note_ref",
     "read_note",

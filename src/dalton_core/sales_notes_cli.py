@@ -145,6 +145,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "transport": "host-tool",
         "since": args.since,
         "sender_domain": args.sender_domain,
+        "digest_ref": args.digest_ref,
         "document_ref": args.note_id,
         "status": "failed",
         "failure_reason": None,
@@ -190,7 +191,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             summary["note_count"] = len(notes)
             summary["senders"] = dict(sorted(senders.items()))
         else:
-            header, body = read_note(args.digest_dir, args.note_id)
+            header, body = read_note(
+                args.digest_dir, args.note_id, digest_ref=args.digest_ref
+            )
             # Two objects: the note as the source record saw it, and the body
             # bytes the review path will re-read and re-hash. The second is
             # the document; the first is how it arrived.
@@ -257,11 +260,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sender-domain", default=None)
     parser.add_argument("--limit", type=int, default=MAX_NOTES)
     parser.add_argument("--note-id", default=None, help="sales-note:<id>, get_note only")
+    parser.add_argument("--digest-ref", default=None,
+                        help="locator hint: the run that first published the note")
     parser.add_argument("--ticker", action="append", default=None,
                         help="company this note was queued for; repeatable, may be empty")
     parser.add_argument("--spool-dir", type=Path, default=None)
     parser.add_argument("--summary-dir", default=None)
     parser.add_argument("--quiet", action="store_true")
+    # The host-tool runner treats this child's stdout as the raw
+    # response: exactly the closed observation wire and nothing else,
+    # so the bytes it hashes into the spool are the bytes it validates.
+    parser.add_argument("--emit-wire", action="store_true",
+                        help="print the closed observation wire on stdout")
     return parser
 
 
@@ -271,15 +281,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.operation == LIST_OPERATION:
         if not args.since:
             parser.error("--since is required for list_notes")
-        if args.note_id:
-            parser.error("--note-id is not a list_notes argument")
+        if args.note_id or args.digest_ref:
+            parser.error("--note-id and --digest-ref are not list_notes arguments")
     else:
         if not args.note_id:
             parser.error("--note-id is required for get_note")
         if args.since or args.sender_domain:
             parser.error("--since and --sender-domain are not get_note arguments")
     summary = run(args)
-    if not args.quiet:
+    if summary["status"] == "succeeded" and args.emit_wire:
+        print(canonical_json(summary["observation"]))
+    elif not args.quiet:
         print(json.dumps({key: summary[key] for key in (
             "status", "failure_reason", "operation", "note_count", "senders",
             "manifest_ref",

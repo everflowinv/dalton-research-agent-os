@@ -10,7 +10,7 @@
   "builder_ref": "builder:dalton-connector-inventory:0.1",
   "capability_proposal_ref": "capability-proposal:connector:sales-notes:0.1",
   "connector_ref": "connector:sales-notes",
-  "content_hash": "86c0765e094f9ae6b38602c1867a8abb35f919db6c8814767c815480c4329ce4",
+  "content_hash": "faf4871c0be5a4dbd931344bae6726ed325d7593a9a6777283aab8a676306cdd",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "fixture_manifest_hash": "9289bd7a2149179404fa5fb80fb5c73d082111eaf69f333cc82581392abc87a2",
   "fixture_manifest_ref": "connector-fixture-manifest:sales-notes:0.1",
@@ -32,7 +32,7 @@
     },
     {
       "completeness": "enumerated",
-      "input_schema_hash": "09d5d80a7c74905382af43f37d45e1f0a1087f456959a975ffcca363d51bfd82",
+      "input_schema_hash": "3d0093eb6d4d74d462fe1fcc543ca1e1a2d88e8883361757e86a47f4dbfed197",
       "input_schema_ref": "schema:connector-inventory:sales-notes:get_note:input:0.1",
       "operation": "get_note",
       "output_schema_hash": "ab4925edfd4824497fd6580faa60a8c18f0c9b91984bf2fed686b9ca7a2d86c3",
@@ -43,7 +43,7 @@
       ]
     }
   ],
-  "profile_template_hash": "618e506dbe0eb4c2ec583b97c3f694509e4d7bb2e3eedaa3b6f14aba865776f1",
+  "profile_template_hash": "52b6428c7932121677acb3a137bc7376915f4d120950ec99578f3f05c36a86a3",
   "profile_template_ref": "connector-profile-template:sales-notes:0.1",
   "promotion_policy_ref": "policy:connector-promotion:0.1",
   "requested_canary": null,

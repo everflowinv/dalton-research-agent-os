@@ -245,6 +245,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--spool-dir", type=Path, default=None)
     parser.add_argument("--summary-dir", default=None)
     parser.add_argument("--quiet", action="store_true")
+    # The host-tool runner treats this child's stdout as the raw
+    # response: exactly the closed observation wire and nothing else,
+    # so the bytes it hashes into the spool are the bytes it validates.
+    parser.add_argument("--emit-wire", action="store_true",
+                        help="print the closed observation wire on stdout")
     return parser
 
 
@@ -262,7 +267,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.since or args.company or args.industry:
             parser.error("--since, --company and --industry are not get_document arguments")
     summary = run(args)
-    if not args.quiet:
+    if summary["status"] == "succeeded" and args.emit_wire:
+        print(canonical_json(summary["observation"]))
+    elif not args.quiet:
         print(json.dumps({key: summary[key] for key in (
             "status", "failure_reason", "operation", "document_count",
             "doc_types", "manifest_ref",

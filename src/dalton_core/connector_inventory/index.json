@@ -1,5 +1,5 @@
 {
-  "content_hash": "52cfe5c6c4974b18e22ee419db9d3da5a9e1ccb2441d81029b17b738163d16bf",
+  "content_hash": "3549297b586b4cd1fdfe06477090da995ff77e003b1900569a46d07360b82ea8",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "id": "connector-inventory:p1-0:0.1",
   "profiles": [
@@ -115,9 +115,9 @@
       "connector_ref": "connector:sales-notes",
       "fixture_manifest_hash": "9289bd7a2149179404fa5fb80fb5c73d082111eaf69f333cc82581392abc87a2",
       "fixture_manifest_ref": "connector-fixture-manifest:sales-notes:0.1",
-      "profile_template_hash": "618e506dbe0eb4c2ec583b97c3f694509e4d7bb2e3eedaa3b6f14aba865776f1",
+      "profile_template_hash": "52b6428c7932121677acb3a137bc7376915f4d120950ec99578f3f05c36a86a3",
       "profile_template_ref": "connector-profile-template:sales-notes:0.1",
-      "proposal_manifest_hash": "86c0765e094f9ae6b38602c1867a8abb35f919db6c8814767c815480c4329ce4",
+      "proposal_manifest_hash": "faf4871c0be5a4dbd931344bae6726ed325d7593a9a6777283aab8a676306cdd",
       "proposal_manifest_ref": "connector-proposal-manifest:sales-notes:0.2"
     },
     {

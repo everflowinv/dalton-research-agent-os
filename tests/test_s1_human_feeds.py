@@ -40,7 +40,10 @@ from dalton_core.connector_governance import (
     ConnectorGovernance,
     build_governance_record,
 )
+from dalton_core.connector import ConnectorStore
+from dalton_core.connector_authority_port import ConnectorCompletionReceiptReader
 from dalton_core.connector_inventory import load_packaged_connector_inventory
+from dalton_core.observability import ObservabilityStore
 from dalton_core.coverage_mission import (
     CoverageMissionAuthority,
     CoverageMissionConflict,
@@ -62,10 +65,16 @@ from dalton_core.mission_feed_lane import (
     FeedDiscoveryCoordinator,
     FeedLaneError,
     FeedLaneRejected,
+    attribute_body,
     attribute_notes,
     attribute_wiki_documents,
+    build_feed_runner,
     feed_discovery_parameters,
     feed_query_hash,
+    load_feed_discovery_plan,
+    plan_terms,
+    triage_notes,
+    validate_feed_discovery_plan,
     wiki_spec_ref,
 )
 from dalton_core.raw_spool import RawSpool
@@ -84,6 +93,7 @@ import dalton_core.company_wiki_cli as wiki_cli
 import dalton_core.sales_notes_cli as notes_cli
 
 REPO = Path(__file__).resolve().parents[1]
+PLAN_PATH = REPO / "deploy" / "phase9" / "p9-us-it-services-feeds-v1.json"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "s1_feeds"
 ACN = "company:sec-cik:0001467373"
 CTSH = "company:sec-cik:0001058290"
@@ -104,6 +114,7 @@ MACRO_NOTE = "sales-note:aaaa000000000002"
 EPAM_NOTE = "sales-note:aaaa000000000003"
 CTSH_NOTE = "sales-note:aaaa000000000004"
 OLD_NOTE = "sales-note:aaaa000000000005"
+OPEN_NOTE = "sales-note:aaaa000000000006"
 
 
 def write_governance(directory: Path, kind: str, *, status: str = "approved") -> Path:
@@ -224,7 +235,7 @@ class SalesNotesFeedTests(unittest.TestCase):
     def test_enumeration_hashes_bodies_and_suppresses_the_carried_forward_note(self) -> None:
         notes = enumerate_notes(FIXTURES, since="2026-09-01")
         ids = [note["note_id"] for note in notes]
-        self.assertEqual(ids, [ACN_NOTE, MACRO_NOTE, EPAM_NOTE, CTSH_NOTE])
+        self.assertEqual(ids, [ACN_NOTE, MACRO_NOTE, EPAM_NOTE, OPEN_NOTE, CTSH_NOTE])
         # The morning note is republished by the evening run; it is one note.
         self.assertEqual(len(ids), len(set(ids)))
         first = notes[0]
@@ -253,7 +264,7 @@ class SalesNotesFeedTests(unittest.TestCase):
             FIXTURES, since="2026-09-01", sender_domain="example-broker.test"
         )
         self.assertEqual(
-            [note["note_id"] for note in filtered], [MACRO_NOTE, CTSH_NOTE]
+            [note["note_id"] for note in filtered], [MACRO_NOTE, OPEN_NOTE, CTSH_NOTE]
         )
 
     def test_bad_windows_and_unknown_ids_are_refused(self) -> None:
@@ -379,11 +390,11 @@ class FeedChildTests(unittest.TestCase):
         summary = self.run_notes(governance=governance, operation="list_notes",
                                  since="2026-09-01")
         self.assertEqual(summary["status"], "succeeded", summary["failure_reason"])
-        self.assertEqual(summary["note_count"], 4)
+        self.assertEqual(summary["note_count"], 5)
         self.assertEqual(summary["senders"],
-                         {"example-bank.test": 2, "example-broker.test": 2})
+                         {"example-bank.test": 2, "example-broker.test": 3})
         self.assertEqual(summary["observation"]["source_record_refs"],
-                         [ACN_NOTE, MACRO_NOTE, EPAM_NOTE, CTSH_NOTE])
+                         [ACN_NOTE, MACRO_NOTE, EPAM_NOTE, OPEN_NOTE, CTSH_NOTE])
         spool = RawSpool(str(self.spool_dir), max_total_bytes=1_000_000_000)
         self.assertTrue(spool.object_exists(summary["artifact"]["content_hash"]))
 
@@ -466,7 +477,7 @@ class FeedAttributionTests(unittest.TestCase):
         self.assertEqual(attribution["by_company"][CTSH], [CTSH_NOTE])
         # The rates note names nobody in its subject, so it is not forced onto
         # a company queue.
-        self.assertEqual(attribution["unattributed"], [MACRO_NOTE])
+        self.assertEqual(attribution["unattributed"], [MACRO_NOTE, OPEN_NOTE])
 
     def test_wiki_attribution_uses_the_corpus_tags_and_leaves_industry_alone(self) -> None:
         documents = [
@@ -633,7 +644,7 @@ class FeedGrantTests(unittest.TestCase):
         self.create(connected=True, scopes=True, version=2, prior=v1["id"])
         coordinator = FeedDiscoveryCoordinator(
             missions=self.missions, launcher=None, source_ref=SALES_NOTES,
-            companies={ACN: "Accenture ACN"},
+            plan=load_feed_discovery_plan(PLAN_PATH),
         )
         self.assertEqual(
             coordinator.authorize(company_ref=ACN)["source_ref"], SALES_NOTES
@@ -645,7 +656,8 @@ class FeedGrantTests(unittest.TestCase):
         with self.assertRaises(FeedLaneRejected):
             FeedDiscoveryCoordinator(
                 missions=self.missions, launcher=None,
-                source_ref="source:alphaengine", companies={},
+                source_ref="source:alphaengine",
+                plan=load_feed_discovery_plan(PLAN_PATH),
             )
 
 
@@ -714,17 +726,14 @@ class FeedLaneTickTests(unittest.TestCase):
     def coordinator(self, missions) -> FeedDiscoveryCoordinator:
         return FeedDiscoveryCoordinator(
             missions=missions, launcher=self.launcher, source_ref=SALES_NOTES,
-            companies={ACN: "Accenture ACN"}, acquisitions_per_tick=2,
+            plan=load_feed_discovery_plan(PLAN_PATH), acquisitions_per_tick=2,
             acquisition_wait_seconds=90.0,
         )
 
     def test_enumeration_runs_through_the_governed_child(self) -> None:
         coordinator = self.coordinator(RecordingMissions([]))
         observation = coordinator.enumerate(since="2026-09-01")
-        self.assertEqual(observation["note_count"], 4)
-        self.assertEqual(
-            coordinator.attribute(observation, UNIVERSE)["unattributed"], [MACRO_NOTE]
-        )
+        self.assertEqual(observation["note_count"], 5)
         self.assertEqual(coordinator.spec_refs(observation)[ACN_NOTE], "sales-note")
 
     def test_a_tick_acquires_a_bounded_batch_settles_it_and_opens_reviews(self) -> None:
@@ -776,18 +785,16 @@ class FeedLaneTickTests(unittest.TestCase):
         self.assertEqual(row["status"], "acquisition_failed")
         self.assertEqual(missions.reviews, [])
 
-    def test_recording_without_a_connector_receipt_refuses_with_a_reason(self) -> None:
+    def test_a_coordinator_without_a_runner_refuses_to_read_and_says_why(self) -> None:
         coordinator = self.coordinator(RecordingMissions([]))
-        observation = coordinator.enumerate(since="2026-09-01")
         with self.assertRaises(FeedLaneError) as ctx:
-            coordinator.record_discoveries(
-                observation=observation, universe=UNIVERSE,
-                parameters=feed_discovery_parameters(
-                    terms="Accenture ACN", since="2026-09-01", as_of="2026-09-09"
-                ),
-                discovery_plan_ref="discovery-plan:x", discovery_plan_hash="0" * 64,
+            coordinator.resolve_documents(
+                queue=[ACN_NOTE], universe=UNIVERSE, headers={}, header_company={},
+                since="2026-08-01",
             )
         self.assertIn("host-tool runner", str(ctx.exception))
+        with self.assertRaises(FeedLaneError):
+            coordinator.enumerate_via_runner(since="2026-09-01")
 
 
 class FeedLauncherTests(unittest.TestCase):
@@ -879,6 +886,230 @@ class FeedLauncherTests(unittest.TestCase):
         self.assertIn("--corpus-root", command)
         self.assertIn("--company", command)
         self.assertNotIn("--document-id", command)
+
+
+class FeedPlanTests(unittest.TestCase):
+    def test_the_committed_plan_loads_and_binds_its_own_hash(self) -> None:
+        plan = load_feed_discovery_plan(PLAN_PATH)
+        self.assertEqual(plan["mission_ref"], "coverage-mission:us-it-services")
+        self.assertEqual(len(plan["companies"]), 5)
+        self.assertEqual(set(plan["source_refs"]), set(FEED_DISCOVERY_SOURCES))
+        # The coverage companies are matched by the ledger's own name table,
+        # so the plan's terms are the industry and the peers and nothing else.
+        self.assertIn("IT services", plan_terms(plan))
+        self.assertIn("Infosys", plan_terms(plan))
+        self.assertNotIn("Accenture", plan_terms(plan))
+
+    def test_a_tampered_or_unsorted_plan_is_refused(self) -> None:
+        plan = load_feed_discovery_plan(PLAN_PATH)
+        tampered = dict(plan)
+        tampered["lookback_days"] = 10
+        with self.assertRaises(FeedLaneRejected):
+            validate_feed_discovery_plan(tampered)
+        unsorted_terms = dict(plan)
+        unsorted_terms["peer_names"] = list(reversed(plan["peer_names"]))
+        unsorted_terms.pop("content_hash")
+        unsorted_terms["content_hash"] = content_hash(unsorted_terms)
+        with self.assertRaises(FeedLaneRejected):
+            validate_feed_discovery_plan(unsorted_terms)
+        for bad in ({}, {**plan, "extra": 1}):
+            with self.assertRaises(FeedLaneRejected):
+                validate_feed_discovery_plan(bad)
+
+
+class FeedTriageTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.plan = load_feed_discovery_plan(PLAN_PATH)
+
+    def test_a_header_hit_attributes_and_a_header_miss_only_defers(self) -> None:
+        notes = enumerate_notes(FIXTURES, since="2026-09-01")
+        triage = triage_notes(notes, UNIVERSE, self.plan)
+        self.assertEqual(triage["header_company"][ACN], [ACN_NOTE])
+        self.assertEqual(triage["header_company"][EPAM], [EPAM_NOTE])
+        # Nothing is dropped at the header. The queue holds every note,
+        # header hits first, because the body is a local file and the header
+        # saying nothing is not evidence that the body says nothing.
+        self.assertEqual(sorted(triage["read_queue"]),
+                         sorted(note["note_id"] for note in notes))
+        self.assertEqual(triage["read_queue"][:3],
+                         [ACN_NOTE, EPAM_NOTE, CTSH_NOTE])
+
+    def test_the_body_decides_company_industry_or_dropped(self) -> None:
+        _, acn_body = read_note(FIXTURES, ACN_NOTE)
+        self.assertEqual(
+            attribute_body(acn_body, UNIVERSE, self.plan)["outcome"], "company"
+        )
+        _, macro_body = read_note(FIXTURES, MACRO_NOTE)
+        macro = attribute_body(macro_body, UNIVERSE, self.plan)
+        self.assertEqual(macro["outcome"], "industry")
+        self.assertEqual(macro["industry_terms"], ["IT services"])
+        _, open_body = read_note(FIXTURES, OPEN_NOTE)
+        dropped = attribute_body(open_body, UNIVERSE, self.plan)
+        self.assertEqual(dropped["outcome"], "dropped")
+        self.assertTrue(dropped["reason"])
+        # A header hit stands even when the body never repeats the name.
+        self.assertEqual(
+            attribute_body(open_body, UNIVERSE, self.plan,
+                           header_companies=[ACN])["company_refs"],
+            [ACN],
+        )
+
+
+class FeedEndToEndTests(unittest.TestCase):
+    """The whole lane against the real mission authority and a real runner."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / "state"
+        self.state.mkdir()
+        spawn_env(self)
+        self.core = DaltonStore(str(self.root / "core.sqlite"))
+        self.addCleanup(self.core.close)
+        self.connectors = ConnectorStore(self.core)
+        self.observability = ObservabilityStore(self.core)
+        self.spool = RawSpool(str(self.root / "spool"), max_total_bytes=1_000_000_000)
+        self.bootstrap = bootstrap_method_authorities(self.core)
+        self.missions = CoverageMissionAuthority(self.core)
+        patch = mock.patch.object(
+            coverage_mission_module, "DISCOVERY_SOURCES",
+            MappingProxyType({
+                **dict(coverage_mission_module.DISCOVERY_SOURCES),
+                **dict(FEED_DISCOVERY_SOURCES),
+            }),
+        )
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.mission = self.publish_mission()
+        self.governance = {
+            "list_notes": write_governance(self.root, SALES_NOTES_LIST_KIND),
+            "get_note": write_governance(self.root, SALES_NOTES_GET_KIND),
+        }
+        self.launcher = SalesNotesFeedLauncher(
+            digest_dir=FIXTURES, state_dir=self.state,
+            governance_paths=self.governance, spool_dir=self.root / "spool",
+        )
+        self.addCleanup(self.launcher.close)
+
+    def publish_mission(self):
+        params = mission_params(self.bootstrap)
+        params["source_plan"] = list(params["source_plan"]) + [{
+            "source_ref": SALES_NOTES, "role": "named sell-side notes on this machine",
+            "status": "connected",
+        }]
+        params["autonomy"]["may_write"] = list(
+            params["autonomy"]["may_write"]
+        ) + ["source_discovery"]
+        ref = params.pop("mission_ref")
+        return self.missions.create_mission(ref, **params)
+
+    def coordinator(self, **overrides):
+        runners = {
+            name: build_feed_runner(
+                launcher=self.launcher, operation=operation,
+                governance=ConnectorGovernance.load(self.governance[operation]),
+                store=self.core, connectors=self.connectors,
+                observability=self.observability, spool=self.spool,
+                source_ref=SALES_NOTES,
+            )
+            for name, operation in (("enumerator", "list_notes"), ("runner", "get_note"))
+        }
+        return FeedDiscoveryCoordinator(
+            missions=self.missions, launcher=self.launcher, source_ref=SALES_NOTES,
+            plan=load_feed_discovery_plan(PLAN_PATH), **runners, **overrides,
+        )
+
+    def test_a_tick_reads_records_and_opens_reviews_end_to_end(self) -> None:
+        coordinator = self.coordinator()
+        result = coordinator.dispatch_once(universe=UNIVERSE, since="2026-08-01")
+        self.assertEqual(result["status"], "dispatched")
+        read = result["read"]
+        self.assertEqual(read["read"], 6)
+        # Four notes name a covered company, one names only the industry, one
+        # names neither. Only the four enter the mission's queue.
+        self.assertEqual(read["company"], 4)
+        self.assertEqual(read["industry"], 1)
+        self.assertEqual(read["dropped"], 1)
+        outcomes = {item["document_ref"]: item for item in read["outcomes"]}
+        self.assertEqual(outcomes[MACRO_NOTE]["outcome"], "industry")
+        self.assertEqual(outcomes[MACRO_NOTE]["records"], [])
+        self.assertEqual(outcomes[OPEN_NOTE]["outcome"], "dropped")
+
+        version_ref = self.mission["id"]
+        queued = self.missions.discovered_documents(version_ref, limit=100)
+        self.assertEqual({row["document_ref"] for row in queued},
+                         {ACN_NOTE, EPAM_NOTE, CTSH_NOTE, OLD_NOTE})
+        self.assertEqual({row["status"] for row in queued}, {"acquired"})
+        reviews = {row["document_ref"] for row in
+                   self.missions.document_reviews(version_ref, limit=100)}
+        self.assertEqual(reviews, {ACN_NOTE, EPAM_NOTE, CTSH_NOTE, OLD_NOTE})
+
+        # Every queued document's discovery binds a source envelope that is
+        # really in Core and really names that one document.
+        reader = ConnectorCompletionReceiptReader(
+            connectors=self.connectors, observability=self.observability
+        )
+        for discovery in self.missions.source_discoveries(version_ref, limit=100):
+            envelope = reader.get_source_envelope(discovery["source_envelope_ref"])
+            self.assertIsNotNone(envelope)
+            self.assertEqual(envelope["content_hash"], discovery["source_envelope_hash"])
+            self.assertEqual(envelope["operation"], "get_note")
+            self.assertEqual(envelope["source"], SALES_NOTES)
+            self.assertEqual(envelope["source_record_refs"], discovery["document_refs"])
+            invocation = reader.get_invocation(discovery["connector_invocation_ref"])
+            self.assertEqual(invocation["content_hash"],
+                             discovery["connector_invocation_hash"])
+
+        # And the bytes the review path will read verify against the manifest
+        # the same run wrote.
+        for row in queued:
+            manifest = self.launcher.read_completed_manifest(
+                row["ticket_ref"], row["document_ref"]
+            )
+            _, text = verified_feed_source(self.core, self.spool, manifest)
+            self.assertEqual(manifest["evidence_tier"], "sell_side")
+            self.assertTrue(text)
+
+    def test_a_second_tick_discovers_nothing_new(self) -> None:
+        coordinator = self.coordinator()
+        coordinator.dispatch_once(universe=UNIVERSE, since="2026-08-01")
+        before = len(self.missions.source_discoveries(self.mission["id"], limit=200))
+        again = coordinator.dispatch_once(universe=UNIVERSE, since="2026-08-01")
+        after = self.missions.source_discoveries(self.mission["id"], limit=200)
+        # Nothing new is discovered and nothing is queued twice: the four
+        # documents the mission already holds are not read again.
+        self.assertEqual(len(after), before)
+        self.assertEqual(again["read"]["already_held"], 4)
+        self.assertEqual(again["read"]["company"], 0)
+        # The two it kept nothing from are re-read, because the ledger has no
+        # row for "looked, kept nothing"; the per-tick bound is the guard.
+        self.assertEqual(again["read"]["read"], 2)
+        self.assertEqual(
+            {row["status"] for row in
+             self.missions.discovered_documents(self.mission["id"], limit=100)},
+            {"acquired"},
+        )
+
+    def test_the_batch_is_bounded_by_the_plan(self) -> None:
+        coordinator = self.coordinator(body_reads_per_tick=2)
+        result = coordinator.dispatch_once(universe=UNIVERSE, since="2026-08-01")
+        self.assertEqual(result["read"]["read"], 2)
+        self.assertEqual(
+            len(self.missions.discovered_documents(self.mission["id"], limit=100)), 2
+        )
+
+    def test_a_document_the_child_cannot_read_settles_as_failed_not_queued(self) -> None:
+        coordinator = self.coordinator()
+        outcome = coordinator._resolve_one(
+            document_ref="sales-note:ffffffffffffffff", universe=UNIVERSE,
+            header={}, header_companies=(), since="2026-08-01", requested_by=None,
+        )
+        self.assertEqual(outcome["outcome"], "failed")
+        self.assertIn("get_note", outcome["reason"])
+        self.assertEqual(
+            self.missions.discovered_documents(self.mission["id"], limit=100), []
+        )
 
 
 class AuthoritySeamTests(unittest.TestCase):
