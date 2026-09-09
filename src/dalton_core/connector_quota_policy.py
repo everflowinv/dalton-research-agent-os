@@ -79,6 +79,75 @@ _DAILY_QUOTAS = MappingProxyType(
         # mission needs a handful of these a day, not a stream. data.sec.gov is
         # free but rate limited, and this ceiling is what stands between a retry
         # loop and being throttled off the source the whole SEC lane depends on.
+        # S3: the crowd sources, all at fifty units a day.
+        #
+        # Fifty is not a measurement. None of these three publishes a rate
+        # limit, and two of them are read through a host tool that would be
+        # throttled or logged out long before any number here mattered. Fifty
+        # is a bound on what a bug can cost: five companies read once a day is
+        # five units, so this is ten times what the lane is for, and a runaway
+        # retry loop stops at breakfast rather than at the point where an
+        # account is flagged.
+        #
+        # It is deliberately the same number for all seven operations. A
+        # different figure for each would imply a measurement behind each one,
+        # and there is not.
+        #
+        # `max_physical_calls_per_unit` differs because paging does: one
+        # logical read of a timeline or a review library is several HTTP calls,
+        # and one post or one ranking is exactly one.
+        ("xueqiu-posts", "search_posts"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 5,
+            }
+        ),
+        ("xueqiu-posts", "get_post"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        ("xueqiu-posts", "hot_rank"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        ("x-xreach-crowd", "user_timeline"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 5,
+            }
+        ),
+        ("x-xreach-crowd", "search"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 5,
+            }
+        ),
+        ("x-xreach-crowd", "thread"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 5,
+            }
+        ),
+        # Free, unauthenticated and paged thirty rows at a time, so one
+        # employer's library is up to twenty page reads. The politeness bound
+        # is the point: nothing here is worth being blocked for.
+        ("employee-reviews", "blind_reviews"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 20,
+            }
+        ),
         ("sec", "list_filings"): MappingProxyType(
             {
                 "quota_unit": "search",
@@ -113,6 +182,23 @@ _DAILY_QUOTAS = MappingProxyType(
                 "quota_unit": "search",
                 "daily_unit_limit": 50,
                 "max_physical_calls_per_unit": 4,
+            }
+        ),
+        # C1: one company's dated corporate events per unit.
+        #
+        # An earnings date is announced once and then does not move, so the
+        # calendar lane asks once a day per covered company and the five
+        # covered companies need five of these. Fifty leaves room for a
+        # business day's worth of retries and for the coverage universe to
+        # grow, without ever making this the reason Yahoo starts refusing.
+        #
+        # One physical call: ``Ticker.calendar`` is a single quoteSummary
+        # request against the same two hosts the price operation uses.
+        ("yfinance", "calendar"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 1,
             }
         ),
         # S1: the two local feeds. There is no upstream to be polite to and

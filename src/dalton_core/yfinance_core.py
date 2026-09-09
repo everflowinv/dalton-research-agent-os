@@ -27,10 +27,17 @@ behind it; a scraped second-hand copy of the same figure is a worse number
 wearing the same clothes, and the moment one is admitted the whole "every
 number goes back to a filing" discipline is decoration.
 
-Two operations, two capabilities, two approvals. ``daily_prices`` is what a
-market printed; ``analyst_estimates`` is what sell-side analysts said. They are
-different kinds of thing, and a schema hash binds one operation, so one record
-cannot be reused for the other without widening what was approved.
+Three operations, three capabilities, three approvals. ``daily_prices`` is
+what a market printed; ``analyst_estimates`` is what sell-side analysts said;
+``calendar`` (C1) is when the company will next speak. They are different kinds
+of thing, and a schema hash binds one operation, so one record cannot be reused
+for another without widening what was approved.
+
+**What ``calendar`` may not be read as.** Yahoo does not say where a date came
+from, so a date from here is an *estimate* and enters the catalyst calendar as
+one. A company saying "we will report on the 25th" in an 8-K is a different
+kind of fact, and only that kind confirms a date. This is why the calendar
+authority refuses to mark an entry ``confirmed`` on this source alone.
 """
 
 from __future__ import annotations
@@ -45,21 +52,28 @@ from .store import content_hash
 TEMPLATE_KEY = "yfinance"
 DAILY_PRICES_OPERATION = "daily_prices"
 ANALYST_ESTIMATES_OPERATION = "analyst_estimates"
-OPERATIONS = (DAILY_PRICES_OPERATION, ANALYST_ESTIMATES_OPERATION)
+CALENDAR_OPERATION = "calendar"
+OPERATIONS = (
+    DAILY_PRICES_OPERATION, ANALYST_ESTIMATES_OPERATION, CALENDAR_OPERATION,
+)
 
 DAILY_PRICES_KIND = "yfinance-daily-prices"
 ANALYST_ESTIMATES_KIND = "yfinance-analyst-estimates"
+CALENDAR_KIND = "yfinance-calendar"
 KIND_BY_OPERATION = {
     DAILY_PRICES_OPERATION: DAILY_PRICES_KIND,
     ANALYST_ESTIMATES_OPERATION: ANALYST_ESTIMATES_KIND,
+    CALENDAR_OPERATION: CALENDAR_KIND,
 }
 DAILY_PRICES_CAPABILITY_ID = "capability:dalton:connector:yfinance-daily-prices"
 ANALYST_ESTIMATES_CAPABILITY_ID = (
     "capability:dalton:connector:yfinance-analyst-estimates"
 )
+CALENDAR_CAPABILITY_ID = "capability:dalton:connector:yfinance-calendar"
 CAPABILITY_BY_OPERATION = {
     DAILY_PRICES_OPERATION: DAILY_PRICES_CAPABILITY_ID,
     ANALYST_ESTIMATES_OPERATION: ANALYST_ESTIMATES_CAPABILITY_ID,
+    CALENDAR_OPERATION: CALENDAR_CAPABILITY_ID,
 }
 
 GOVERNANCE_SCHEMA_VERSION = "0.1"
@@ -259,6 +273,9 @@ __all__ = [
     "ANALYST_ESTIMATES_CAPABILITY_ID",
     "ANALYST_ESTIMATES_KIND",
     "ANALYST_ESTIMATES_OPERATION",
+    "CALENDAR_CAPABILITY_ID",
+    "CALENDAR_KIND",
+    "CALENDAR_OPERATION",
     "CAPABILITY_BY_OPERATION",
     "DAILY_PRICES_CAPABILITY_ID",
     "DAILY_PRICES_KIND",

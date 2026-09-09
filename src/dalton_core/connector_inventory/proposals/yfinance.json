@@ -1,6 +1,6 @@
 {
   "adapter_package_ref": "inventory-artifact:adapter-contract:yfinance:0.1",
-  "adapter_source_hash": "10743773e15fcf8295be1f443d19ba9e5634ee162e96774f6ee6aa1f5826c7ce",
+  "adapter_source_hash": "4006a1c45031433541e0c45a435f3de3346af592251c56b53ad982e6eee434b3",
   "auth_boundary": {
     "credential_material": "forbidden",
     "mode": "none",
@@ -10,9 +10,9 @@
   "builder_ref": "builder:dalton-connector-inventory:0.1",
   "capability_proposal_ref": "capability-proposal:connector:yfinance:0.1",
   "connector_ref": "connector:yahoo-finance",
-  "content_hash": "69eea458a80d21c7bdab739931840eb17b2e4dfb70548f5e7045dbccebd0345e",
+  "content_hash": "a0fde70c7913d79c404881271c320827befd7e256bb6ee4c94370724429bce8b",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
-  "fixture_manifest_hash": "2673180d6ec33e34be9d73b1db2db0f4d48f991d7ae6706450216349d5010ec7",
+  "fixture_manifest_hash": "5e20f2722d2f96aaf6eda9f076ea2dba2cae925f6fdf5dbc2bc35909c12357d3",
   "fixture_manifest_ref": "connector-fixture-manifest:yfinance:0.1",
   "id": "connector-proposal-manifest:yfinance:0.2",
   "inventory_state": "proposal_only",
@@ -41,9 +41,21 @@
       "side_effects": [
         "read:recorded-fixture"
       ]
+    },
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "0e56586f0263ce92788a03e4d8154582d973fa2fe41026a9900e3b5e67de620c",
+      "input_schema_ref": "schema:connector-inventory:yfinance:calendar:input:0.1",
+      "operation": "calendar",
+      "output_schema_hash": "6efb5269d5233e56f5e09f7d97eeece0fa3c642b480fa2996f4273d7bb8972b3",
+      "output_schema_ref": "schema:connector-inventory:yfinance:calendar:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
     }
   ],
-  "profile_template_hash": "6cf6012558bb70d7e4428efe0225ab92b8a22ccfd83c4826608d541bcc2b87d1",
+  "profile_template_hash": "d8a4cf8500a3b4518789b5aad04e28410c5c8c22f774fb1ca1c9a6959e031f00",
   "profile_template_ref": "connector-profile-template:yfinance:0.1",
   "promotion_policy_ref": "policy:connector-promotion:0.1",
   "requested_canary": null,

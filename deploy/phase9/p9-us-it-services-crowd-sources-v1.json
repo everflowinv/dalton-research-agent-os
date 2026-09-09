@@ -1,0 +1,43 @@
+{
+  "schema_version": "0.1",
+  "id": "crowd-source-map:us-it-services:v1",
+  "industry_ref": "industry:us-it-services",
+  "note": "Which handle, retail-forum query and employer slug belong to which covered company. None of this is derivable: a company's corporate account, the name retail investors use for it and its employer page are three separate facts. An absent field means this source has nothing for this company, which is a real answer and better than a guess -- a wrong entry here fills one company's file with another company's chatter. Employer slugs whose company is an initialism (IBM, DXC) are the ones most likely to be wrong and are the ones to check first.",
+  "companies": [
+    {
+      "company_ref": "company:sec-cik:0001467373",
+      "ticker": "ACN",
+      "xueqiu_query": "Accenture",
+      "x_handles": ["Accenture"],
+      "employer_slug": "Accenture"
+    },
+    {
+      "company_ref": "company:sec-cik:0001058290",
+      "ticker": "CTSH",
+      "xueqiu_query": "Cognizant",
+      "x_handles": ["Cognizant"],
+      "employer_slug": "Cognizant"
+    },
+    {
+      "company_ref": "company:sec-cik:0001352010",
+      "ticker": "EPAM",
+      "xueqiu_query": "EPAM",
+      "x_handles": ["EPAMSYSTEMS"],
+      "employer_slug": "EPAM Systems"
+    },
+    {
+      "company_ref": "company:sec-cik:0000051143",
+      "ticker": "IBM",
+      "xueqiu_query": "IBM",
+      "x_handles": ["IBM"],
+      "employer_slug": "IBM"
+    },
+    {
+      "company_ref": "company:sec-cik:001688568",
+      "ticker": "DXC",
+      "xueqiu_query": "DXC",
+      "x_handles": ["DXCTechnology"],
+      "employer_slug": "DXC Technology"
+    }
+  ]
+}

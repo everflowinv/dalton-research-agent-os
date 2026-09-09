@@ -827,7 +827,181 @@ def _array_of_strings() -> dict[str, Any]:
     return {"type": "array", "uniqueItems": True, "items": _string()}
 
 
+def _crowd_rating() -> dict[str, Any]:
+    """A rating on the wire is text, for the reason every figure here is text.
+
+    A float is not what was read: 3.7 and 3.70 are the same float and different
+    readings, and a JSON parser is free to give either back. Null is a real
+    answer -- a reviewer may score some dimensions and not others.
+    """
+
+    return {"type": ["string", "null"], "pattern": "^(0|[1-9][0-9]*)([.][0-9]+)?$"}
+
+
+def _crowd_counter() -> dict[str, Any]:
+    """A like or reply count, which the source may simply not report."""
+
+    return {"type": ["integer", "null"], "minimum": 0}
+
+
+def _crowd_post_schema(*, extra: Mapping[str, Any]) -> dict[str, Any]:
+    """One post from a crowd source: who said it, when, and what it said.
+
+    Deliberately not a Claim shape. There is no metric, no period and no unit,
+    because a post is not an assertion about a company's results; it is a
+    record that somebody wrote something. Everything a reader would need to go
+    back and look at the original is here, and nothing more.
+    """
+
+    properties: dict[str, Any] = {
+        "post_id": _string(),
+        "url": {"type": ["string", "null"]},
+        "created_at": _string(),
+        "author": {"type": ["string", "null"]},
+        "author_id": {"type": ["string", "null"]},
+        "text": {"type": ["string", "null"]},
+        "reply_count": _crowd_counter(),
+        "like_count": _crowd_counter(),
+        "view_count": _crowd_counter(),
+    }
+    properties.update(extra)
+    return _object_schema(properties, tuple(sorted(properties)))
+
+
 def _output_schema(slug: str, operation: str) -> dict[str, Any]:
+    # S3: the crowd connectors carry their records on the wire rather than only
+    # naming them. The lane's whole output is a set of posts and reviews, and a
+    # contract that validated only the refs would leave the part that becomes
+    # evidence unchecked.
+    if slug == "xueqiu-posts" and operation in {"search_posts", "get_post"}:
+        post = _crowd_post_schema(extra={
+            "title": {"type": ["string", "null"]},
+            "retweet_count": _crowd_counter(),
+            # The list endpoint cuts long posts; reading one whole needs the
+            # single-post operation. Saying so on the record is what keeps a
+            # reader from quoting half a sentence as the whole of one.
+            "truncated": {"type": "boolean"},
+        })
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                "operation": {"type": "string", "enum": ["search_posts", "get_post"]},
+                "posts": {"type": "array", "items": post},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+            },
+            (
+                "schema_version", "operation", "posts", "source_record_refs",
+                "next_cursor", "provider_status",
+            ),
+        )
+    if (slug, operation) == ("xueqiu-posts", "hot_rank"):
+        entry = _object_schema(
+            {
+                "symbol": _string(),
+                "name": {"type": ["string", "null"]},
+                "rank": _integer(1),
+                "value": {"type": ["string", "null"],
+                          "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$"},
+            },
+            ("symbol", "name", "rank", "value"),
+        )
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                # Which route produced this ranking. The fallback is a
+                # different source of the same list and must never be shown as
+                # the primary one, so the label travels with the data.
+                "provenance_label": _string(),
+                "ranking": {"type": "array", "items": entry},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+            },
+            (
+                "schema_version", "provenance_label", "ranking",
+                "source_record_refs", "next_cursor", "provider_status",
+            ),
+        )
+    if slug == "x-xreach-crowd":
+        post = _crowd_post_schema(extra={
+            "repost_count": _crowd_counter(),
+            "is_reply": {"type": "boolean"},
+        })
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                "operation": {
+                    "type": "string",
+                    "enum": ["user_timeline", "search", "thread"],
+                },
+                # What the response is complete with respect to. A timeline
+                # paged to its end is enumerated; a keyword search never is,
+                # whatever the cursor says.
+                "completeness": {
+                    "type": "string",
+                    "enum": ["enumerated", "ranked", "partial", "unknown"],
+                },
+                "posts": {"type": "array", "items": post},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+            },
+            (
+                "schema_version", "operation", "completeness", "posts",
+                "source_record_refs", "next_cursor", "provider_status",
+            ),
+        )
+    if (slug, operation) == ("employee-reviews", "blind_reviews"):
+        ratings = _object_schema(
+            {name: _crowd_rating() for name in (
+                "overall", "career", "balance", "compensation", "culture",
+                "management",
+            )},
+            (
+                "overall", "career", "balance", "compensation", "culture",
+                "management",
+            ),
+        )
+        review = _object_schema(
+            {
+                "review_id": _string(),
+                "created_at": _string(),
+                "summary": {"type": ["string", "null"]},
+                "ratings": ratings,
+                # The source substitutes placeholder prose for everything past
+                # its most recent page. The ratings and the date on the same
+                # row are real, so the row is kept and the substitution is
+                # recorded rather than the row being dropped.
+                "body_locked": {"type": "boolean"},
+                "pros": {"type": ["string", "null"]},
+                "cons": {"type": ["string", "null"]},
+                "jobgroup": {"type": ["string", "null"]},
+                "location": {"type": ["string", "null"]},
+            },
+            (
+                "review_id", "created_at", "summary", "ratings", "body_locked",
+                "pros", "cons", "jobgroup", "location",
+            ),
+        )
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                "employer_slug": _string(),
+                "library_total": {"type": ["integer", "null"], "minimum": 0},
+                "body_locked_count": _integer(0),
+                "reviews": {"type": "array", "items": review},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+            },
+            (
+                "schema_version", "employer_slug", "library_total",
+                "body_locked_count", "reviews", "source_record_refs",
+                "next_cursor", "provider_status",
+            ),
+        )
     if (slug, operation) in {
         ("cninfo", "list_announcements"),
         ("sec", "list_filings"),
@@ -1161,6 +1335,46 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                     "source_record_refs", "next_cursor", "provider_status",
                 ),
             )
+        if operation == "calendar":
+            # C1: dates only, and every one of them nullable.
+            #
+            # No consensus figures here even though Yahoo serves them in the
+            # same block. `analyst_estimates` already carries the EPS and
+            # revenue consensus, and two operations claiming the same number
+            # is how the two of them come to disagree.
+            #
+            # `earnings_dates` is an array because Yahoo says "some time
+            # between these two days" when it cannot narrow the date, and
+            # collapsing that to one day would invent a precision the source
+            # did not offer. One entry is a day Yahoo names; two are the ends
+            # of a window; none is Yahoo having nothing.
+            #
+            # `dividend_date` and `ex_dividend_date` are what Yahoo last knew
+            # and are very often in the past -- DXC still reports an ex-date
+            # from March 2020, six years after it stopped paying. They are
+            # carried verbatim, and deciding that a past date is not a
+            # forthcoming event is the reader's job, not this contract's.
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "ticker": _string(),
+                    "as_of": iso_date,
+                    "captured_at": _string(),
+                    "earnings_dates": {
+                        "type": "array", "uniqueItems": True, "items": iso_date,
+                    },
+                    "dividend_date": {"type": ["string", "null"]},
+                    "ex_dividend_date": {"type": ["string", "null"]},
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                },
+                (
+                    "schema_version", "ticker", "as_of", "captured_at",
+                    "earnings_dates", "dividend_date", "ex_dividend_date",
+                    "source_record_refs", "next_cursor", "provider_status",
+                ),
+            )
     # S1: the two human / vendor feeds.
     #
     # Both enumerate documents that already exist as bytes on this machine, so
@@ -1486,6 +1700,15 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 "analyst_estimates", completeness="ranked",
                 input_fields=("ticker",),
             ),
+            # C1: the dated corporate events Yahoo knows about. Its own
+            # operation rather than a block inside `analyst_estimates`,
+            # because a schema hash binds one operation and an approval to
+            # read what analysts forecast should not silently widen into
+            # reading when the company will next speak.
+            _operation(
+                "calendar", completeness="enumerated",
+                input_fields=("ticker",),
+            ),
         ),
         "gate": "recorded_public_reference_shadow",
     },
@@ -1595,6 +1818,136 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
             _operation("search_stock", completeness="ranked", pagination="page", input_fields=("query", "limit", "page")),
         ),
         "gate": "host_tool_runner_v0.2_and_credential_authority",
+    },
+    # S3: the crowd layer. Three connectors whose evidence is anonymous by
+    # construction -- retail posts, X accounts, employee reviews written under
+    # a pseudonym. They are worth reading for direction and for the questions
+    # they raise; they are never worth quoting as a number, and none of them
+    # may be the sole source of a quantitative Claim.
+    #
+    # Each is a *new* connector rather than an edit to the shadow template it
+    # descends from. The 2026-08-14 templates for `xueqiu` and `x-xreach` sit
+    # behind hashes the owner has already seen; widening one in place would
+    # move a hash the owner approved. The precedent is `sec` / `sec-financials`:
+    # one source read two ways is one source ref and two connectors.
+    #
+    # P13ao-era note about routes: the targets are the ones the shadow
+    # templates already name. `host-tool:agent-reach-xueqiu-channel` is the
+    # host-owned Xueqiu channel, which reaches the post endpoints as well as
+    # the quote ones; `host-tool:cn-hk-findata-xq-hot-rank` stays what it was,
+    # a fallback for the hot-stock ranking and nothing else; `host-tool:xreach`
+    # is the enumerating X CLI. No new host bridge is introduced here.
+    {
+        # The Xueqiu posts a Chinese retail investor writes about a US IT
+        # services name are not a fact about that name. They are a reading of
+        # the sentiment around it, and that is the whole claim being made.
+        "slug": "xueqiu-posts", "connector_ref": "connector:xueqiu-posts",
+        "source_ref": "source:xueqiu", "source_type": "social_search",
+        "transport": "host_tool", "target": "host-tool:agent-reach-xueqiu-channel",
+        "hosts": (), "auth": "host_owned",
+        # The web front end sits behind a WAF challenge and returns a shell;
+        # naming that route as forbidden is how the refusal survives someone
+        # later "fixing" the connector by pointing it at the site.
+        "forbidden": ("route:public-http", "route:reddit-cookie", "route:xueqiu-web-front-end"),
+        "fallbacks": (
+            # Carried over unchanged from the shadow template, including the
+            # restriction that made it safe: the cn-hk-findata ranking is a
+            # fallback for the ranking alone. It is not Xueqiu post text and
+            # must never be presented as any.
+            {
+                "operation": "hot_rank",
+                "target_ref": "host-tool:cn-hk-findata-xq-hot-rank",
+                "source_ref": "source:xueqiu",
+                "adapter_ref": "adapter:cn-hk-findata:xq-hot-rank",
+                "provenance_label": "xueqiu_hot_stock_rank_fallback",
+            },
+        ),
+        "operations": (
+            _operation(
+                "search_posts", completeness="ranked", pagination="page",
+                input_fields=("query", "date_from", "limit", "page"),
+                optional_fields=("date_from",),
+            ),
+            _operation("get_post", completeness="enumerated", input_fields=("post_ref",)),
+            # The host tool calls this ranking `get_hot_stocks`; Dalton calls
+            # the operation `hot_rank`. `source_method` exists for exactly this
+            # and the fallback binding follows the Dalton name.
+            dict(
+                _operation(
+                    "hot_rank", completeness="ranked", pagination="page",
+                    input_fields=("limit", "stock_type", "page"),
+                ),
+                source_method="get_hot_stocks",
+            ),
+        ),
+        "gate": "host_tool_runner_v0.2_and_credential_authority",
+    },
+    {
+        # `xreach` enumerates: a handle's timeline can be paged to a bounded
+        # end, which is why it and not `x_search` is the one built. `x_search`
+        # is synthetic and cannot be enumerated, so it stays a shadow and the
+        # forbidden list keeps saying so.
+        "slug": "x-xreach-crowd", "connector_ref": "connector:x-xreach-crowd",
+        "source_ref": "source:x", "source_type": "social_enumeration",
+        "transport": "host_tool", "target": "host-tool:xreach",
+        "hosts": (), "auth": "host_owned",
+        "forbidden": ("route:last30days-x", "route:agent-reach-twitter"),
+        "fallbacks": (),
+        "operations": (
+            dict(
+                _operation(
+                    "user_timeline", completeness="enumerated", pagination="cursor",
+                    input_fields=("handle", "date_from", "cursor"),
+                ),
+                source_method="tweets",
+            ),
+            # Search is ranked and says so. A keyword search on X returns what
+            # X chose to return; a cursor means there is more, not that the
+            # result can be reconciled against anything.
+            _operation(
+                "search", completeness="ranked", pagination="cursor",
+                input_fields=("query", "date_from", "cursor"),
+            ),
+            dict(
+                _operation(
+                    "thread", completeness="enumerated", pagination="cursor",
+                    input_fields=("post_ref", "cursor"),
+                ),
+                source_method="thread",
+            ),
+        ),
+        "gate": "host_tool_runner_v0.2_and_credential_authority",
+    },
+    {
+        # Blind, and only Blind. It is public HTTPS with no credential at all,
+        # which is why it is the one employee-review route built: Indeed and
+        # Glassdoor both need a paid scraping transport whose credits are
+        # exhausted, and a connector that cannot run is not a connector.
+        #
+        # `partial` is the honest ceiling and not a placeholder. Blind releases
+        # the prose of the most recent page only; everything older comes back
+        # with placeholder pros and cons. The ratings and dates of those rows
+        # are real and are what the series is built from, but a response whose
+        # bodies are substituted is a truncated response, and the contract says
+        # so rather than letting a reader assume otherwise.
+        "slug": "employee-reviews",
+        "connector_ref": "connector:employee-reviews-blind",
+        "source_ref": "source:blind", "source_type": "social_enumeration",
+        "transport": "public_https", "target": "transport:public-http:0.1",
+        "hosts": ("www.teamblind.com",), "auth": "none",
+        "forbidden": (
+            "route:firecrawl-indeed", "route:firecrawl-glassdoor",
+            "route:credential-channel",
+        ),
+        "fallbacks": (),
+        "operations": (
+            _operation(
+                "blind_reviews", completeness="partial", pagination="page",
+                input_fields=("employer_slug", "date_from", "limit", "page"),
+                optional_fields=("date_from",),
+            ),
+        ),
+        "gate": "recorded_public_reference_shadow",
     },
     # S1: the two feeds a human already brings into this machine.
     #

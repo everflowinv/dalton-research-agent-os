@@ -51,6 +51,24 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # S3: the crowd sources are all fifty units a day. Fifty is
+                    # not a measurement -- none of the three publishes a rate
+                    # limit -- it is ten times what the lane is for, so a retry
+                    # loop stops at breakfast rather than at the point where an
+                    # account is flagged. The same figure for all seven, because
+                    # a different one for each would imply a measurement behind
+                    # each one. Only the calls-per-unit differ, because paging
+                    # does: one review library is up to twenty page reads, one
+                    # post is one call.
+                    "connector_slug": "employee-reviews",
+                    "operation": "blind_reviews",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 20,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
                     "connector_slug": "gemini-web-search",
                     "operation": "search_web",
                     "quota_unit": "search",
@@ -111,6 +129,60 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    "connector_slug": "x-xreach-crowd",
+                    "operation": "search",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 5,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "x-xreach-crowd",
+                    "operation": "thread",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 5,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "x-xreach-crowd",
+                    "operation": "user_timeline",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 5,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "xueqiu-posts",
+                    "operation": "get_post",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "xueqiu-posts",
+                    "operation": "hot_rank",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "xueqiu-posts",
+                    "operation": "search_posts",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 5,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
                     # P11a: Yahoo is an unofficial free source that never
                     # agreed to serve us. There is no published rate limit to
                     # stay under and nobody to appeal to, so these ceilings are
@@ -121,6 +193,19 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "quota_unit": "search",
                     "daily_unit_limit": 50,
                     "max_physical_calls_per_unit": 4,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    # C1: one company's dated corporate events. Sorted between
+                    # the two above. Smaller and single-call: an earnings date
+                    # is announced once and then does not move, so the lane
+                    # asks once a day per covered company.
+                    "connector_slug": "yfinance",
+                    "operation": "calendar",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 1,
                     "window_seconds": 86_400,
                     "reset_timezone": "Asia/Shanghai",
                 },
