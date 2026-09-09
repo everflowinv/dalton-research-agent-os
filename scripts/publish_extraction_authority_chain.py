@@ -332,7 +332,8 @@ def rehearse(state_dir: Path, target: Path, *, add_rules: list[str] | None = Non
 
 
 def live(state_dir: Path, *, add_rules: list[str] | None = None, max_daily_paid_calls: int | None = None,
-         max_alphaengine_calls_24h: int | None = None) -> dict[str, Any]:
+         max_alphaengine_calls_24h: int | None = None,
+         max_daily_cost_usd: float | None = None) -> dict[str, Any]:
     from dalton_core.governance_cli import ephemeral_call
     read = sqlite3.connect(f"file:{state_dir / 'core.sqlite'}?mode=ro", uri=True)
     try:
@@ -341,7 +342,8 @@ def live(state_dir: Path, *, add_rules: list[str] | None = None, max_daily_paid_
         read.close()
     chain = build_chain(current, now=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
                         add_rules=add_rules, max_daily_paid_calls=max_daily_paid_calls,
-                            max_alphaengine_calls_24h=max_alphaengine_calls_24h)
+                        max_alphaengine_calls_24h=max_alphaengine_calls_24h,
+                        max_daily_cost_usd=max_daily_cost_usd)
     token_config = state_dir / "writer-tokens.json"
     socket = state_dir / "run" / "writer.sock"
 
