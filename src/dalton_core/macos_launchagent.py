@@ -80,6 +80,10 @@ def render(
     statement_governance = (
         state / "connector-governance" / "sec-financial-statements-v2.json"
     )
+    # P13ad installed this for the Initial Screen's own drafting model; P13am
+    # runs the company model specification lane on it too, for the same reason
+    # it exists -- both are judgement, not extraction.
+    deliverable_model_config = state / "initial-screen-model-config.json"
     if (
         service_config is not None
         and service_config.control is not None
@@ -209,6 +213,15 @@ def render(
                 "--statement-lane-user-agent", STATEMENT_LANE_USER_AGENT,
             ]
             if statement_governance.is_file() else []
+        ) + (
+            # P13am: the company model specification lane runs on the
+            # deliverable-drafting configuration -- the strongest routed model
+            # -- because deciding that IBM is a mix story and Accenture is a
+            # headcount business is exactly where a weaker model returns
+            # something plausible and generic, which looks like a decision and
+            # is worse than none.
+            ["--model-spec-model-config", str(deliverable_model_config)]
+            if deliverable_model_config.is_file() else []
         ) + (
             # P8c-4c: the bounded planner's model call runs inside the writer
             # (it accounts into this Core); derive its broker wiring from the

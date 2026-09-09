@@ -54,18 +54,17 @@ SUMMARY_SCHEMA_VERSION = "0.1"
 # bounds are generous against that, and small against a filing window.
 MAX_INPUT_TOKENS = 120_000
 MAX_OUTPUT_TOKENS = 4_000
-# P13n: sized to the call, not to a comfortable round number. The state is
-# ~3,300 tokens in and the answer ~1,000 out, which is about $0.08 on the
-# planner's model; reserving $1.50 for it pushed the day past the mission's $5
-# cap and the call was refused before it was made. A reservation is money the
-# rest of the day cannot spend.
 # The router estimates a call at its *permitted* output, not its likely one:
 # 13,300 tokens in and the full 4,000 out is $0.33 on this model, while a real
 # plan answers in about a quarter of that. The reservation has to cover what
-# the work order allows or the call is refused before it is made -- and it has
-# to be sized to the call rather than to a round number, because $1.50 reserved
-# for an $0.08 call pushed the day past the mission's $5 cap.
-MAX_COST_USD = 0.40
+# the work order allows or the call is refused before it is made.
+#
+# P13n set this to $0.40 because $1.50 reserved for an $0.08 call pushed the
+# day past the mission's $5 cap. P13am: that cap is $100 now, so the constraint
+# that produced the number is gone and keeping it would only buy refusals on a
+# day when the state got large. A reservation is still money the rest of the
+# day cannot spend -- this is headroom, not a licence.
+MAX_COST_USD = 1.50
 TIMEOUT_SECONDS = 300
 
 

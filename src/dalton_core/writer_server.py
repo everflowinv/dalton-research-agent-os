@@ -414,6 +414,7 @@ CORE_DISCOVERY_OPERATIONS = frozenset({
     "dispatch_claim_review", "dispatch_initial_screen", "dispatch_research_plan",
     "mission_deliverables",
     "dispatch_mission_sec_quarters", "dispatch_mission_statements",
+    "dispatch_company_model_spec",
 })
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
@@ -518,6 +519,7 @@ CORE_OPERATIONS = frozenset({
     "dispatch_claim_review", "claim_retirement_challenges",
     "dispatch_initial_screen", "dispatch_research_plan", "mission_deliverables",
     "dispatch_mission_sec_quarters", "dispatch_mission_statements",
+    "dispatch_company_model_spec",
     "mission_document_reviews",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
@@ -680,6 +682,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "dispatch_research_plan": frozenset(),
     "dispatch_mission_sec_quarters": frozenset(),
     "dispatch_mission_statements": frozenset(),
+    "dispatch_company_model_spec": frozenset(),
     "mission_deliverables": frozenset({"mission_version_ref", "kind", "subject_ref"}),
     "claim_retirement_challenges": frozenset({"open_only", "limit"}),
     "decide_claim_retirement": frozenset({
@@ -1026,6 +1029,7 @@ class WriterServer:
         candidate_staging_path: str | Path | None = None,
         sec_lane_launcher: SecLaneLauncher | None = None,
         statement_lane_launcher: Any | None = None,
+        model_spec_launcher: Any | None = None,
         planner_model_config: Mapping[str, Any] | None = None,
         document_extraction_model_config: Mapping[str, Any] | None = None,
         search_launcher: AlphaEngineSearchLauncher | None = None,
@@ -1123,6 +1127,8 @@ class WriterServer:
         # S7d: out-of-process SEC company-facts lane runs (human-only ops).
         self._sec_lane_launcher = sec_lane_launcher
         self._statement_lane_launcher = statement_lane_launcher
+        self._model_spec_launcher = model_spec_launcher
+        self._model_spec_coordinator = None
         # The same owner-only CandidateStaging file the Cockpit review plane
         # opens as ``research_review.candidate_staging_path``; the writer
         # stages transcript candidates into it and reads status back from it.
@@ -1602,6 +1608,8 @@ class WriterServer:
             self._sec_lane_launcher.close()
         if self._statement_lane_launcher is not None:
             self._statement_lane_launcher.close()
+        if self._model_spec_launcher is not None:
+            self._model_spec_launcher.close()
         if self._candidate_review is not None:
             self._candidate_review.close()
             self._candidate_review = None
@@ -2630,6 +2638,32 @@ class WriterServer:
             state_dir=Path(self.db_path).expanduser().resolve().parent,
             checklist=checklist,
         ).dispatch_once()
+
+    def _op_dispatch_company_model_spec(self, p: Mapping[str, Any]) -> Any:
+        # Controller tick (P13am). One company's model specification at a time.
+        # The lane has no queue: what needs deciding is derived from the ledger
+        # every tick, so its resting state is silence and there is nothing to
+        # leave stuck.
+        if self._model_spec_launcher is None:
+            return {"status": "unconfigured",
+                    "reason": "no company model lane on this writer"}
+        if self._model_spec_coordinator is None:
+            from .mission_model_spec_lane import MissionModelSpecLaneCoordinator
+
+            def mission() -> Any:
+                pointer = self.store.connection.execute(
+                    "SELECT mission_version_id FROM coverage_mission_pointer "
+                    "ORDER BY mission_ref LIMIT 1"
+                ).fetchone()
+                return (None if pointer is None
+                        else self.coverage_mission.mission(pointer["mission_version_id"]))
+
+            self._model_spec_coordinator = MissionModelSpecLaneCoordinator(
+                missions=self.coverage_mission,
+                launcher=self._model_spec_launcher,
+                mission=mission,
+            )
+        return self._model_spec_coordinator.dispatch_once()
 
     def _op_dispatch_mission_statements(self, p: Mapping[str, Any]) -> Any:
         # Controller tick (P13ak). One financial-statements child at a time:
@@ -3686,6 +3720,10 @@ def main(argv: list[str] | None = None) -> int:
         help="rehearsal only: replay a captured parse instead of reaching SEC",
     )
     parser.add_argument("--statement-lane-user-agent", default=None)
+    # P13am: the company model specification lane. Needs a model, because
+    # the judgement is the whole product; without one the child answers
+    # "gated" and nothing is written.
+    parser.add_argument("--model-spec-model-config")
     args = parser.parse_args(argv)
     try:
         principals = load_principals(args.token_config)
@@ -3726,6 +3764,15 @@ def main(argv: list[str] | None = None) -> int:
                 governance_path=args.statement_lane_governance,
                 mode_args=statement_mode_args,
                 user_agent=args.statement_lane_user_agent,
+            )
+        model_spec_launcher = None
+        if args.model_spec_model_config is not None:
+            from .company_model_launcher import CompanyModelSpecLauncher
+
+            model_spec_launcher = CompanyModelSpecLauncher(
+                state_dir=Path(args.db).expanduser().resolve().parent,
+                model_config_path=args.model_spec_model_config,
+                scheduler_db=args.scheduler,
             )
         if args.connector_governance is not None:
             if args.acquisition_rehearsal_document is not None:
@@ -3890,6 +3937,7 @@ def main(argv: list[str] | None = None) -> int:
             candidate_staging_path=args.candidate_staging,
             sec_lane_launcher=sec_lane_launcher,
             statement_lane_launcher=statement_lane_launcher,
+            model_spec_launcher=model_spec_launcher,
             planner_model_config=planner_model_config,
             document_extraction_model_config=(None if args.document_extraction_model_config is None
                 else json.loads(Path(args.document_extraction_model_config).read_text(encoding="utf-8"))),

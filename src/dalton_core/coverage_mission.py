@@ -3558,6 +3558,13 @@ class CoverageMissionAuthority:
             "company_ref": company_ref, "failures": failures,
             "accessions": [item["accession"] for item in held],
             "forms": sorted({item["form"] for item in held}),
+            # P13am: per form, because how much history a model needs is asked
+            # and answered per form. A company holding four 10-Qs and no 10-K
+            # is short of neither if only quarters were wanted.
+            "held_by_form": {
+                form: sum(1 for item in held if item["form"] == form)
+                for form in sorted({item["form"] for item in held})
+            },
             "latest_report_date": max((item["report_date"] for item in held), default=None),
             "line_count": sum(int(item["line_count"]) for item in held),
             "dispatches": by_status,

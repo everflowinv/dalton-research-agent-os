@@ -37,6 +37,11 @@ POLICY_ID_PREFIX = "thesis-impact-day-budget-policy:production"
 MODEL_CONFIG_NAMES = (
     "document-extraction-model-config.json",
     "research-planner-model-config.json",
+    # P13am: the deliverable-drafting configuration, which the company model
+    # specification lane also runs on. It was left out when it was added, so
+    # the last cap raise repointed two of three configurations and this one
+    # would have kept naming a superseded policy version.
+    "initial-screen-model-config.json",
 )
 
 

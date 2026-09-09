@@ -52,10 +52,14 @@ SUMMARY_SCHEMA_VERSION = "0.1"
 # judgement. Both bounds are generous against that.
 MAX_INPUT_TOKENS = 120_000
 MAX_OUTPUT_TOKENS = 6_000
-# Sized to the call rather than to a round number, for the reason the planner
-# learned the hard way: a reservation is money the rest of the day cannot
-# spend, and an oversized one gets the call refused before it is made.
-MAX_COST_USD = 0.60
+# P13am: the reservation, not the price. The router estimates a call at its
+# permitted output and at prompt *bytes* rather than tokens, so it reserves
+# roughly four times what the call costs -- IBM's ran for $0.24 against an
+# estimate of $0.46, and at 43KB of prompt the estimate was $0.73 and the call
+# was refused before it was made. With the day cap at $100 the old $0.60 bought
+# nothing but that refusal, so this is sized to admit a large company's
+# structure rather than to look frugal.
+MAX_COST_USD = 2.50
 TIMEOUT_SECONDS = 300
 
 

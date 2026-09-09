@@ -197,6 +197,34 @@ class MissionStatementLaneCoordinator:
             result["failure_reason"] = f"{type(exc).__name__}: {exc}"
         return result
 
+    # -- depth -------------------------------------------------------------
+
+    def _wanted_filings(self, company_ref: str) -> int:
+        """How many filings of this form this company's model rests on.
+
+        The specification says how many quarters of history it needs; this lane
+        bounds that by what one child may parse in a run. A company with no
+        specification yet gets the floor -- enough to decide a specification
+        from, which is what unblocks the rest.
+        """
+
+        try:
+            spec = self.missions.latest_company_model_spec(company_ref)
+        except Exception:  # noqa: BLE001 - the floor is always safe
+            return self.filing_limit
+        if not spec:
+            return self.filing_limit
+        horizon = spec.get("horizon") or {}
+        quarters = horizon.get("historical_quarters")
+        if isinstance(quarters, bool) or not isinstance(quarters, int) or quarters < 1:
+            return self.filing_limit
+        # A 10-K covers a year, so asking for twenty quarters of annual reports
+        # would be asking for twenty years. Quarters are quarters; anything
+        # else is scaled to what the form actually reports.
+        if self.form == "10-K":
+            quarters = max(1, (quarters + 3) // 4)
+        return max(self.filing_limit, min(quarters, MAX_STATEMENT_FILINGS))
+
     # -- queueing ----------------------------------------------------------
 
     def _queue(self) -> list[dict[str, Any]]:
@@ -236,16 +264,20 @@ class MissionStatementLaneCoordinator:
                     })
                     continue
                 retry_salt = self._retry_salt()
-            # Whatever this company already has of this form is enough for now.
-            # Depth beyond the newest quarter is the planner's call, not a
-            # default this lane takes on its own.
-            if coverage["accessions"] and self.form in coverage["forms"]:
+            # P13am: how much history this company needs is its own model's
+            # answer, not a constant. IBM's specification asked for twenty
+            # quarters to separate mainframe launch cycles from the underlying
+            # business; a consultancy with a steady book needs far less. Until
+            # a specification exists, one quarter is the floor that keeps the
+            # lane moving and gives the model something to reason over.
+            wanted = self._wanted_filings(company_ref)
+            if coverage.get("held_by_form", {}).get(self.form, 0) >= wanted:
                 continue
             try:
                 authorization = self.missions.sec_lane_authorization_for_company(company_ref)
                 dispatch = self.missions.queue_statement_dispatch(
                     authorization=authorization, form=self.form,
-                    filing_limit=self.filing_limit, attempt=len(charged),
+                    filing_limit=wanted, attempt=len(charged),
                     retry_salt=retry_salt,
                 )
             except CoverageMissionError as exc:

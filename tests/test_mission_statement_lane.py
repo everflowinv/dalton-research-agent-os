@@ -11,7 +11,11 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from dalton_core.coverage_mission import CoverageMissionAuthority
+from dalton_core.company_model_spec import spec_from_response
+from dalton_core.coverage_mission import (
+    MAX_STATEMENT_FILINGS,
+    CoverageMissionAuthority,
+)
 from dalton_core.lane_child_launcher import (
     LaneChildConflict,
     LaneChildRejected,
@@ -27,6 +31,39 @@ from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 
 ACN = "company:sec-cik:0001467373"
 ACCESSION = "0001467373-26-000031"
+
+
+def _model_spec(*, historical_quarters):
+    """The smallest specification the frame accepts, with a chosen horizon."""
+
+    return {
+        "schema_version": "0.1",
+        "assessment": "A people business: heads times realised rate.",
+        "revenue_drivers": [{
+            "ref": "heads", "label": "Billable headcount", "kind": "volume",
+            "basis_concept": None, "unit": "headcount",
+            "because": "Capacity binds delivery revenue.",
+        }],
+        "expense_lines": [{
+            "ref": "delivery", "label": "Cost of services",
+            "basis_concept": "us-gaap:Revenues",
+            "behaviour": "variable_with_headcount", "driver_ref": "heads",
+            "because": "Delivery payroll follows the billable base.",
+        }],
+        "forecast_statements": [
+            {"statement": "income", "importance": "required",
+             "because": "Revenue and margin are the question."},
+            {"statement": "balance", "importance": "supporting",
+             "because": "Capital light."},
+            {"statement": "cash", "importance": "supporting",
+             "because": "Conversion is steady."},
+        ],
+        "operating_metrics": [],
+        "horizon": {
+            "historical_quarters": historical_quarters, "forecast_quarters": 8,
+            "because": "What this company's cycle needs.",
+        },
+    }
 
 
 def _observation(accession=ACCESSION):
@@ -240,6 +277,34 @@ class StatementLaneTests(unittest.TestCase):
         lane = MissionStatementLaneCoordinator(
             missions=self.missions, launcher=self.launcher, checklist=angry)
         self.assertEqual(lane.dispatch_once()["status"], "idle")
+
+    def test_history_depth_comes_from_the_company_own_model(self):
+        # P13am: IBM's specification asked for twenty quarters to separate
+        # mainframe launch cycles from the underlying business. One quarter is
+        # only the floor for a company that has no specification yet.
+        launched = self.lane.dispatch_once()
+        self.assertEqual(self.launcher.started[0]["limit"], 1)
+        self.launcher.finish(launched["ticket_ref"], summary=self.succeeded_summary())
+        spec = spec_from_response(
+            {"company_ref": ACN, "state_hash": "a" * 64,
+             "concepts": ["us-gaap:Revenues"]},
+            _model_spec(historical_quarters=20), decided_by="automation:x")
+        self.missions.record_company_model_spec(
+            spec, mission_version_ref=self.mission["id"])
+        deeper = self.lane.dispatch_once()
+        # Bounded by what one child may parse in a run, not by what was asked.
+        self.assertEqual(self.launcher.started[-1]["limit"], MAX_STATEMENT_FILINGS)
+        self.assertEqual(deeper["settled"][0]["outcome"], "succeeded")
+
+    def test_a_specification_asking_for_less_never_goes_below_the_floor(self):
+        spec = spec_from_response(
+            {"company_ref": ACN, "state_hash": "a" * 64,
+             "concepts": ["us-gaap:Revenues"]},
+            _model_spec(historical_quarters=1), decided_by="automation:x")
+        self.missions.record_company_model_spec(
+            spec, mission_version_ref=self.mission["id"])
+        self.lane.dispatch_once()
+        self.assertEqual(self.launcher.started[0]["limit"], 1)
 
     def test_a_company_without_a_ticker_is_skipped(self):
         self.companies = [{"company_ref": ACN}, {"ticker": "ACN"}]

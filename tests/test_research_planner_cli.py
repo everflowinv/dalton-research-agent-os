@@ -102,11 +102,18 @@ class PlannerChildTests(unittest.TestCase):
         self.publish_mission()
         self.assertEqual(self.plan()["formal_authority_writes"], 0)
 
-    def test_the_reservation_is_sized_to_the_call(self):
-        # $1.50 reserved for an $0.08 call pushed the day past the mission's
-        # $5 cap and the call was refused before it was made.
-        self.assertLess(MAX_COST_USD, 0.5)
+    def test_the_reservation_covers_the_call_the_work_order_permits(self):
+        # Two ways to get this wrong, and this lane has hit both. Too low and
+        # the router refuses before the call is made: it estimates at the
+        # *permitted* output, which is $0.33 on this model, so anything under
+        # that buys nothing but refusals. Too high and the reservation is money
+        # the rest of the day cannot spend -- P13n set it to $0.40 because
+        # $1.50 pushed the day past the mission's $5 cap.
+        #
+        # P13am: that cap is $100 now, so the ceiling here is about staying a
+        # small fraction of a day rather than about fitting inside one.
         self.assertGreater(MAX_COST_USD, 0.33)
+        self.assertLess(MAX_COST_USD, 5.0)
 
     def test_a_lease_another_attempt_holds_is_busy_not_a_crash(self):
         # The work order is keyed by the state hash, so a hand-run beside the

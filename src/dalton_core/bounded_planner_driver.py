@@ -286,6 +286,14 @@ class BoundedPlannerDriver:
             mission_statements = self.client.call("dispatch_mission_statements", {})
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
             mission_statements = {"status": f"unavailable:{type(exc).__name__}"}
+        # P13am: how this company should be modelled -- what drives its
+        # revenue, how its costs behave, which statements it actually needs
+        # forecast. Derived from the statements ledger, so it falls silent once
+        # every company has a specification for what it has filed.
+        try:
+            company_model_spec = self.client.call("dispatch_company_model_spec", {})
+        except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
+            company_model_spec = {"status": f"unavailable:{type(exc).__name__}"}
         try:
             research_plan = self.client.call("dispatch_research_plan", {})
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
@@ -484,6 +492,7 @@ class BoundedPlannerDriver:
             "research_plan": research_plan,
             "mission_sec_quarters": sec_quarters,
             "mission_statements": mission_statements,
+            "company_model_spec": company_model_spec,
         }
 
 
