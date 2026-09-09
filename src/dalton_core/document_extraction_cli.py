@@ -514,6 +514,12 @@ def _secondary_sweep(
                          "offset": offset, "status": status,
                          "replayed": bool(result.get("replayed"))}
                 entry.update({name: len(result.get(key, [])) for name, key in counts.items()})
+                # P13y: a pass that lost its learned requirements still reads,
+                # on the universal floor alone, and used to look identical to a
+                # company nobody had read yet. The summary is where the evidence
+                # of the last silent failure was eventually found; put it there.
+                if result.get("requirements_error"):
+                    entry["requirements_error"] = result["requirements_error"]
                 summary[entries].append(entry)
                 summary[total[0]] += len(result.get(total[1], []))
                 if context["next_offset"] is None:

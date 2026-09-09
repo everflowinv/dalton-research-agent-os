@@ -923,8 +923,15 @@ class DocumentExtractionService:
         Absent rather than fatal: discovery has not run for most companies, and
         a company with no learned requirements should still be asked for the
         floor rather than skipped.
+
+        But "none learned" and "the reader raised" are different answers that
+        looked identical here, and the difference cost three of four companies
+        their entire requirement list without a word anywhere. The failure is
+        recorded now, so a pass that lost its requirements says so instead of
+        looking like a company nobody has read yet.
         """
 
+        self._requirements_error = None
         reader = getattr(self.writer, "metric_requirements", None)
         if reader is None:
             mission = getattr(self.writer, "coverage_mission", None)
@@ -933,7 +940,8 @@ class DocumentExtractionService:
             return ()
         try:
             return reader(company_ref)
-        except Exception:  # noqa: BLE001 - a missing requirement list is not a gate
+        except Exception as exc:  # noqa: BLE001 - a missing requirement list is not a gate
+            self._requirements_error = f"{type(exc).__name__}: {exc}"
             return ()
 
     def _document_spec_ref(self, context):
@@ -1052,9 +1060,11 @@ class DocumentExtractionService:
                         "recorded": [], "subject": subject,
                         "formal_authority_writes": 0}
         slots = self.numeric_slots(context)
+        requirements_error = getattr(self, "_requirements_error", None)
         if not slots:
             return {"status": "nothing_owed", "verified": [], "refused": [],
-                    "recorded": [], "formal_authority_writes": 0}
+                    "recorded": [], "requirements_error": requirements_error,
+                    "formal_authority_writes": 0}
         config = getattr(self.writer, "_document_extraction_model_config", None)
         factory = self.writer._document_extraction_worker_factory
         if factory is None and config is None:
@@ -1081,6 +1091,9 @@ class DocumentExtractionService:
         return {"status": "read", "replayed": replayed, "source_grade": grade,
                 "attributed_by": attribution or "document-names-company",
                 "subject_matched": list(subject.get("matched") or ()),
+                # Non-null means the pass ran on the universal floor alone
+                # because the learned requirements could not be read.
+                "requirements_error": requirements_error,
                 "formal_authority_writes": 0, **result, **journal}
 
     def generate_metric_discovery(self, *, review_id, expected_review_hash, offset,

@@ -110,6 +110,23 @@ class MetricDiscoveryLaneTests(unittest.TestCase):
         # The universal floor is still asked for beside it.
         self.assertIn("metric:revenue", [slot["metric_ref"] for slot in slots])
 
+    def test_a_requirement_reader_that_raises_does_not_pass_for_an_empty_one(self):
+        # P13y: these two were indistinguishable, and the difference cost three
+        # of four companies their whole requirement list in silence. The pass
+        # still runs on the universal floor -- but it says why it is alone.
+        from unittest.mock import patch
+
+        with patch.object(type(self.h.missions), "metric_requirements",
+                          side_effect=RuntimeError("conflicting units")):
+            slots = self.h.service.numeric_slots(self.h.context())
+        self.assertIn("metric:revenue", [slot["metric_ref"] for slot in slots])
+        self.assertEqual(self.h.service._requirements_error,
+                         "RuntimeError: conflicting units")
+
+    def test_a_company_with_nothing_learned_yet_reports_no_error(self):
+        self.h.service.numeric_slots(self.h.context())
+        self.assertIsNone(self.h.service._requirements_error)
+
     def test_the_discovery_order_is_its_own_call_and_rebuilds_as_itself(self):
         from dalton_core.document_extraction import (
             DocumentExtractionModelWorker, build_work as qualitative,
