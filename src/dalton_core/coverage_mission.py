@@ -3072,6 +3072,113 @@ class CoverageMissionAuthority:
             "status_marker": "fresh",
         }
 
+    # -- company model specifications (P13al) --------------------------------
+
+    def record_company_model_spec(
+        self, spec: Mapping[str, Any], *, mission_version_ref: str,
+        model_profile_ref: str | None = None, work_order_ref: str | None = None,
+    ) -> dict[str, Any]:
+        """Store one verified model specification for one company.
+
+        Keyed by (company, state hash): deciding twice about an unchanged
+        disclosure is the same decision. A specification is a judgement about
+        how to model a company, not a claim about the world, so it lives here
+        rather than in the Ledger -- the numbers it eventually produces are the
+        things that will need citing.
+        """
+
+        required = (
+            "company_ref", "state_hash", "assessment", "revenue_drivers",
+            "expense_lines", "forecast_statements", "operating_metrics",
+            "horizon", "decided_by", "task_hash", "content_hash",
+        )
+        for field in required:
+            if spec.get(field) in (None, ""):
+                raise CoverageMissionValidationError(
+                    f"company model spec is missing {field}")
+        company_ref = _text(spec["company_ref"], "company_ref")
+        state_hash = _text(spec["state_hash"], "state_hash")
+        mission_version_ref = _text(mission_version_ref, "mission_version_ref")
+        spec_id = _ref("company-model-spec", {
+            "company_ref": company_ref, "state_hash": state_hash,
+        })
+        existing = self.connection.execute(
+            "SELECT * FROM coverage_mission_company_model_specs WHERE spec_id=?",
+            (spec_id,),
+        ).fetchone()
+        if existing is not None:
+            return {**self._model_spec_row(existing), "status": "duplicate"}
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_company_model_specs("
+                "spec_id,company_ref,mission_version_ref,state_hash,assessment,"
+                "revenue_drivers_json,expense_lines_json,forecast_statements_json,"
+                "operating_metrics_json,horizon_json,task_hash,model_profile_ref,"
+                "work_order_ref,decided_by,created_at,content_hash) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    spec_id, company_ref, mission_version_ref, state_hash,
+                    spec["assessment"],
+                    canonical_json(spec["revenue_drivers"]),
+                    canonical_json(spec["expense_lines"]),
+                    canonical_json(spec["forecast_statements"]),
+                    canonical_json(spec["operating_metrics"]),
+                    canonical_json(spec["horizon"]),
+                    _sha256(spec["task_hash"], "task_hash"),
+                    model_profile_ref, work_order_ref,
+                    _text(spec["decided_by"], "decided_by"), now,
+                    _sha256(spec["content_hash"], "content_hash"),
+                ),
+            )
+            row = cur.execute(
+                "SELECT * FROM coverage_mission_company_model_specs WHERE spec_id=?",
+                (spec_id,),
+            ).fetchone()
+        return {**self._model_spec_row(row), "status": "fresh"}
+
+    @staticmethod
+    def _model_spec_row(row: Any) -> dict[str, Any]:
+        wire = dict(row)
+        for field in ("revenue_drivers", "expense_lines", "forecast_statements",
+                      "operating_metrics", "horizon"):
+            wire[field] = json.loads(wire.pop(f"{field}_json"))
+        return wire
+
+    def company_model_spec_for_state(
+        self, company_ref: str, state_hash: str
+    ) -> dict[str, Any] | None:
+        """The specification decided from exactly this disclosure, if one was."""
+
+        row = self.connection.execute(
+            "SELECT * FROM coverage_mission_company_model_specs "
+            "WHERE company_ref=? AND state_hash=?",
+            (_text(company_ref, "company_ref"), _text(state_hash, "state_hash")),
+        ).fetchone()
+        return None if row is None else self._model_spec_row(row)
+
+    def latest_company_model_spec(self, company_ref: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM coverage_mission_company_model_specs WHERE company_ref=? "
+            "ORDER BY created_at DESC, spec_id DESC LIMIT 1",
+            (_text(company_ref, "company_ref"),),
+        ).fetchone()
+        return None if row is None else self._model_spec_row(row)
+
+    def company_model_specs(self, company_ref: str | None = None) -> list[dict[str, Any]]:
+        if company_ref is None:
+            rows = self.connection.execute(
+                "SELECT * FROM coverage_mission_company_model_specs "
+                "ORDER BY company_ref,created_at"
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM coverage_mission_company_model_specs "
+                "WHERE company_ref=? ORDER BY created_at",
+                (_text(company_ref, "company_ref"),),
+            ).fetchall()
+        return [self._model_spec_row(row) for row in rows]
+
     # -- statement ingest (P13ak) --------------------------------------------
 
     def queue_statement_dispatch(

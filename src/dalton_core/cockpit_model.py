@@ -41,7 +41,12 @@ SCHEMA_VERSION = "0.1"
 # cockpit-shaped call -- one bounded, budgeted, replayable model call against
 # the mission -- but it is not the cockpit answering the owner, so it is named
 # rather than folded into "ask".
-PURPOSES = frozenset({"ask", "goal", "steer", "draft", "plan"})
+# P13al: "model_spec" is deciding how one company should be modelled -- what
+# drives its revenue, how its costs behave, which statements matter, which
+# operating metrics the market watches. Named rather than folded into "plan"
+# because it is a judgement about a company, not about this system's own work,
+# and the two are routed and budgeted separately.
+PURPOSES = frozenset({"ask", "goal", "steer", "draft", "plan", "model_spec"})
 # Room for the completion write after the model answers, so a call that
 # finishes right on its timeout still has a live lease to complete against.
 _LEASE_GRACE_SECONDS = 30.0

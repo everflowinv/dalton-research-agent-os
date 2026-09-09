@@ -656,3 +656,53 @@ BEFORE UPDATE ON coverage_mission_statement_lines BEGIN
 CREATE TRIGGER IF NOT EXISTS coverage_mission_statement_lines_no_delete
 BEFORE DELETE ON coverage_mission_statement_lines BEGIN
     SELECT RAISE(ABORT, 'statement lines are append-only'); END;
+
+-- P13al: how one company should be modelled, decided per company.
+--
+-- A generic three-statement template is not a model. What matters about
+-- Accenture is bookings and utilisation; about IBM the software mix and the
+-- cash it throws off. Same industry, different questions, and the judgement of
+-- which question this company poses is the specification stored here.
+--
+-- Append-only and bound to ``state_hash`` -- the hash of the statement
+-- structure it was decided from -- for the same reason research plans are. A
+-- specification written against three filings is history once a fourth
+-- introduces a line nobody had seen; it is not wrong, it was decided about a
+-- company that has since disclosed something new, and both facts should
+-- survive.
+--
+-- No workbook anywhere near this table. The model is structure and reasoning
+-- while it is being built; a spreadsheet with formulas is a rendering of it,
+-- produced when something has to be delivered.
+CREATE TABLE IF NOT EXISTS coverage_mission_company_model_specs (
+    spec_id TEXT PRIMARY KEY,
+    company_ref TEXT NOT NULL,
+    mission_version_ref TEXT NOT NULL,
+    state_hash TEXT NOT NULL,
+    assessment TEXT NOT NULL,
+    revenue_drivers_json TEXT NOT NULL,
+    expense_lines_json TEXT NOT NULL,
+    forecast_statements_json TEXT NOT NULL,
+    operating_metrics_json TEXT NOT NULL,
+    horizon_json TEXT NOT NULL,
+    task_hash TEXT NOT NULL,
+    model_profile_ref TEXT,
+    work_order_ref TEXT,
+    decided_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    UNIQUE(company_ref, state_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_coverage_mission_company_model_specs_company
+ON coverage_mission_company_model_specs(company_ref, created_at);
+
+CREATE TRIGGER IF NOT EXISTS coverage_mission_company_model_specs_authorized_insert
+BEFORE INSERT ON coverage_mission_company_model_specs WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'company model spec insert requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_company_model_specs_no_update
+BEFORE UPDATE ON coverage_mission_company_model_specs BEGIN
+    SELECT RAISE(ABORT, 'company model specs are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_company_model_specs_no_delete
+BEFORE DELETE ON coverage_mission_company_model_specs BEGIN
+    SELECT RAISE(ABORT, 'company model specs are append-only'); END;
