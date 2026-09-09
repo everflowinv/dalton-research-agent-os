@@ -1,9 +1,10 @@
 # Wave 0：lane registry、schema glob、词表与两份 ADR 草稿 v1.0
 
 日期：2026-09-09
-分支：`wave0-lane-registry`（基于 main `47d3316`），HEAD `d4145e1`，未 push
+分支：`wave0-lane-registry`（基于 main `47d3316`，已 merge main `99f6a9b`），未 push
 执行：Opus 5 subagent，worktree `~/Projects/dalton-wave0-lane-registry-worktree`
-验收：`Ran 2071 tests in 181.409s` / `OK (skipped=1)`（基线 2,034，新增 37 项）
+验收：`Ran 2080 tests in 266.841s` / `OK (skipped=1)`（基线 2,034，新增 46 项）
+修订：v1.0 交付后按 code review 补了三条 should-fix 与两处 nit，ADR 两份按 owner 裁决改为 `accepted`（见第 10 节）
 
 ---
 
@@ -22,11 +23,11 @@ cockpit 与 `install.sh` 仍需人工接线（见第 6 节），这两处 Wave 0
 | `src/dalton_core/lane_registry.py` | `LaneSpec` 冻结记录、注册表、`LANE_MODULES` 显式 import 列表、三个消费点用的派生函数 |
 | `src/dalton_core/writer_lanes.py` | 四条「writer 自己实现」的 lane 的 spec（无 handler，见第 4 节） |
 | `src/dalton_core/model_configurations.py` | 模型配置文件名注册表（原 `raise_day_budget_cap.MODEL_CONFIG_NAMES`） |
-| `tests/test_lane_registry.py` | 注册一条假 lane → writer / driver / launchagent 三处同时出现；重复注册被拒；旧字面量被钉成期望值 |
+| `tests/test_lane_registry.py` | 注册一条假 lane → writer / driver / launchagent 三处同时出现；重复注册被拒；旧字面量被钉成期望值；lane 模块的导入隔离（含子进程实测） |
 | `tests/test_model_vocabularies.py` | `PURPOSES` 与模型配置名两个注册表 |
 | `tests/test_mission_vocabulary_extension.py` | 新词可授予、live mission 未授予、JSON 合同与代码一致 |
-| `docs/adr/0007-thesis-revision-candidates-and-verified-figures-in-the-ledger.md` | 草稿，`Status: proposed` |
-| `docs/adr/0008-research-outputs-are-never-terminal.md` | 草稿，`Status: proposed` |
+| `docs/adr/0007-thesis-revision-candidates-and-verified-figures-in-the-ledger.md` | `Status: accepted`（owner 2026-09-09 裁决） |
+| `docs/adr/0008-research-outputs-are-never-terminal.md` | `Status: accepted`（owner 2026-09-09 裁决） |
 
 **改动**
 
@@ -36,7 +37,7 @@ cockpit 与 `install.sh` 仍需人工接线（见第 6 节），这两处 Wave 0
 | `src/dalton_core/bounded_planner_driver.py` | `run_once` 的九个 try/except 收成一个按 `order` 的循环 |
 | `src/dalton_core/macos_launchagent.py` | writer `ProgramArguments` 拼接 `lane_argv(LaunchAgentContext(...))`；`STATEMENT_LANE_USER_AGENT` 移到 statements lane 模块 |
 | `src/dalton_core/mission_statement_lane.py`、`mission_model_spec_lane.py`、`mission_sec_quarters.py`、`initial_screen_launcher.py`、`research_planner_launcher.py` | 各自加 `dispatch` / `add_arguments` / `build_launcher` / `argv_fragment` 与 `register_lane(LaneSpec(...))` |
-| `src/dalton_core/cockpit_model.py` | `PURPOSES` → `register_purpose()` / `purposes()`，六个词作种子 |
+| `src/dalton_core/cockpit_model.py` | `PURPOSES` 常量删除 → `register_purpose()` / `purposes()`，六个词作种子 |
 | `src/dalton_core/coverage_mission.py` | `AUTOMATION_WRITE_SCOPES` +10 词、`CHECKPOINT_KINDS` +3 词 |
 | `contracts/coverage-mission-version.schema.json` | 两个 enum 与代码对齐（顺带补上早已漂移的四个 scope） |
 | `pyproject.toml` | package-data 的 37 个 schema 名 → `schema.sql` + `*_schema.sql` |
@@ -97,10 +98,13 @@ register_lane(LaneSpec(operation="dispatch_market_prices", order=120, driver_key
 外加 `lane_registry.LANE_MODULES` 里一行 `"dalton_core.market_price_lane",`。
 `writer_server.py`、`bounded_planner_driver.py`、`macos_launchagent.py` 一个字不用改。
 
-**约束**：注册表拒绝重复的 `operation`、重复的 `order`、重复的 `driver_key`、重复的 `init_kwarg`；
+**约束**：注册表拒绝重复的 `operation`、重复的 `order`、重复的 `driver_key`、重复的 `init_kwarg`，
+以及落在 `RESERVED_DRIVER_KEYS`（tick 摘要自己的七个 key）里的 `driver_key`；
 `operation` 必须 `dispatch_` 开头；有 `launcher_factory` 就必须有 `init_kwarg`；
-lane 模块的 import 期副作用只能是 `register_lane`，`lane_registry` 本身不 import `writer_server`
-（有测试钉住）。
+`handler=None` 的 lane 必须在 writer 上有 `_op_<operation>` 方法，否则
+`install_lane_operations()` 在 import 期就抛；lane 模块的 import 期副作用只能是
+`register_lane`，且**不得在模块级 import `writer_server` / `bounded_planner_driver` /
+`macos_launchagent`**——有两条测试钉住（读顶层 import 行 + 在新解释器子进程里实测）。
 
 ## 4. 迁了哪些、没迁哪些
 
@@ -184,13 +188,13 @@ lane 模块的 import 期副作用只能是 `register_lane`，`lane_registry` �
 ## 8. 测试结果（原文）
 
 ```
-Ran 2071 tests in 181.409s
+Ran 2080 tests in 266.841s
 
 OK (skipped=1)
 ```
 
-（基线 2,034 / OK / 1 skipped；新增 37 项：lane registry 17、model vocabularies 10、
-mission vocabulary 6、packaging 净 +4。）
+（基线 2,034 / OK / 1 skipped；新增 46 项：lane registry 23、model vocabularies 11、
+mission vocabulary 6、packaging 净 +4，另加 merge 进来的 main `99f6a9b` 的 2 项。）
 
 ## 9. 开放问题
 
@@ -206,6 +210,46 @@ mission vocabulary 6、packaging 净 +4。）
 4. **ADR-0007 的 figure 路径要给 staging store 一个新句柄。** `CandidateStagingStore` 今天是
    owner-only 的 scratch authority，没有 Ledger 句柄；按草案它要能只读 mission 表来复核数字。
    这是一次实打实的可见范围放宽，实现时该单独过一遍。
-5. **ADR-0008 的 `change_reason` 词表冻结在哪一层？** 草案把它写成合同，但没说它住在
+5. **ADR-0008 的 `change_reason` 词表冻结在哪一层？** ADR 把它写成合同，但没说它住在
    `coverage_mission.py` 的词表里还是各 authority 自己的模块里。Wave 1C 第一个实现它的人
    会替所有人决定这件事。
+
+## 10. v1.0 之后的修订（code review 回合）
+
+review 逐字校验了行为等价（操作集、`OPERATION_FIELDS`、argparse、11 种场景的 launchd argv、
+tick 顺序），并提出三条 should-fix，都是同一个形状：**一条「注册到能被调用、但没注册到能应答」
+的 lane**。
+
+1. **半加载的注册表快照。** `load_lanes()` 在重入时静默返回（这正是防循环 import 递归的机制）。
+   代价是：如果某个 lane 模块在模块级 import 了 `writer_server`（哪怕隔三层），
+   `writer_server` 会把「到那一刻为止注册了什么」折进表里——这条 lane 会出现在
+   `registered_lanes()` 里（tick 会调它、plist 会接它），却不在 `OPERATION_FIELDS` 里
+   （writer 整个进程生命周期都答 `unknown operation`，tick 上显示
+   `unavailable:PermissionError`）。修法：`install_lane_operations()` 在 `_LOADING` 为真时抛
+   `LaneRegistryError`。两条测试：一条读每个 lane 模块的顶层 import 行；一条在**新解释器
+   子进程**里逐个 import `LANE_MODULES`，断言 `dalton_core.writer_server` 等三个消费者
+   都没有被带进 `sys.modules`（已用反例验证该检测确实会命中）。
+2. **`driver_key` 可以覆盖 tick 摘要。** lane 结果是最后 `**lanes` 展开进摘要的，排在
+   `status` / `active_loop_count` / `probes_executed` / `executed` / `skipped` /
+   `mission_sec_dispatch` / `forecast_reconciliation` 之后。一条 `driver_key` 撞上其中任何一个
+   都会静默覆盖——tick 会把某条 lane 的结果当成自己的 status 报出去。修法：
+   `lane_registry.RESERVED_DRIVER_KEYS` 列出这七个，`register_lane` 拒绝；
+   `run_once` 里加一条 assert 钉住这两份列表没有漂移。
+3. **注册了却无人应答的 lane。** `handler=None` 且 writer 上没有 `_op_` 方法，仍然会进
+   `CORE_OPERATIONS`，于是 `bootstrap` 会重写 token config 把它授给 core principal，
+   然后每次调用都抛「has no handler」。原来这条断言在测试里；现在搬进
+   `install_lane_operations()`，且放在改动三张表**之前**，所以一次坏注册在 import 期就失败，
+   并且不会留下半装好的状态。
+
+两处 nit 也做了：删掉 `cockpit_model.PURPOSES` 常量（每次注册就重绑的 frozenset 是个快照陷阱：
+先 import 它的人会一直用旧词表拒绝合法 purpose），只留 `purposes()`；
+`test_a_lane_module_registers_and_does_nothing_else` 改成检查 **lane 模块**的源码而不是
+`lane_registry.py` 自己的源码（原来那条只是在读自己的 docstring）。
+
+**ADR 状态。** owner 2026-09-09 下午裁决：ADR-0007 **接受**；ADR-0008 的四条规则连同
+「版本化是机制不是触发器」的澄清也已明确。两份都改为 `Status: accepted`，加上
+`Owner decision 2026-09-09, recorded in parallel-development-plan v1.0 §1` 的出处行；
+ADR-0008 的 Context 改为**引用**该裁决而不是自己主张。两份的 Consequences 都保留
+「尚未实现」：ADR-0007 的数字路径仍需一份列出
+`research-auto-commit:mission-verified-figure:v1` 的已签策略版本，thesis 路径仍需一次授予
+`thesis_revision_candidate` 的 mission 版本。

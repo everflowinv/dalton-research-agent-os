@@ -1,12 +1,14 @@
 # ADR-0008: No research output is ever finished, but nothing revises itself
 
-*2026-09-09*  ·  Status: proposed  ·  Contract for every output-class authority; extends ADR-0004 §5 (append-only stage ledger) and ADR-0007 (the proposal / decision split); does not touch ADR-0001's human admission
+*2026-09-09*  ·  Status: accepted  ·  Owner decision 2026-09-09, recorded in [parallel-development-plan v1.0 §1](../reports/parallel-development-plan-v1.0-2026-09-09.md)  ·  Contract for every output-class authority; extends ADR-0004 §5 (append-only stage ledger) and ADR-0007 (the proposal / decision split); does not touch ADR-0001's human admission
 
 ## Context
 
 Four companies have `gate_passed` on their Initial Screen, and the selection rule skips a company whose gate has passed. So ACN, EPAM, IBM and DXC will never have their screen rewritten, no matter how much evidence arrives afterwards — and a great deal has: 26 quarterly filings, 10,023 statement lines and nine modelling specifications, all of it dated after those screens were written by a weaker model on thinner evidence. The gate was designed as a stage marker and became a terminal state by accident.
 
-The owner's decision is that a passed screen may be re-issued when the evidence thickens, and that this is not a property of Initial Screens: a forecast line becomes an actual after the company files; a large contract win between earnings revises an estimate; a dossier, a debate map, a valuation snapshot and a thesis all age the same way. Nothing the research produces is a final answer. But the owner was equally clear about the opposite failure: versioning is a mechanism, not a trigger. A system that re-issues an output every time news arrives produces noise and destroys the meaning of a version chain, which is the only place the owner can watch an analyst's understanding change.
+The owner decided on 2026-09-09 (recorded in [parallel-development-plan v1.0 §1](../reports/parallel-development-plan-v1.0-2026-09-09.md)) that a passed screen may be re-issued when the evidence thickens, provided it is versioned and old versions are never deleted, because the version chain is how the owner watches the understanding iterate. The owner extended the same rule to every research output, not only Initial Screens: an estimate becomes an actual after the filing; a driver change observed between earnings, such as a large contract win, revises an estimate; dossiers, debate maps, valuation snapshots and theses age the same way.
+
+The owner clarified the constraint that makes this safe in the same session: **versioning is a mechanism, not a trigger.** Not every piece of news re-issues an output. Whether and how to update is a judgement, and the owner put that judgement in a separate layer from the storage. A system in which the authority re-issues on its own produces noise and destroys the meaning of the chain, which is the only place the change of mind is legible.
 
 ## Decision
 
@@ -27,4 +29,4 @@ The owner's decision is that a passed screen may be re-issued when the evidence 
 - `gate_reopen` is already in `CHECKPOINT_KINDS` (P14-0) and grants nothing yet. Reopening a gate a company has passed stays a human checkpoint by construction, not a rule the machine can satisfy.
 - ADR-0007's split holds at a second layer: automation proposes a revision to a thesis and a person accepts it; automation calls `revise` on a forecast line or a dossier under a mission grant, but only because a judgement step decided to, and the decision is recorded either way.
 - ADR-0001 is untouched. A thesis chain is versioned like everything else, and admission to it is still human-only.
-- Nothing here is implemented.
+- Nothing here is implemented yet. The decision is recorded; the first authority to carry the contract is Wave 1C's, and the reopen policy that unblocks the four passed gates is Wave 3.

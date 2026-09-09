@@ -1,6 +1,6 @@
 # ADR-0007: Automation may propose that a thesis is wrong, and a verified number may be a Claim
 
-*2026-09-09*  ·  Status: proposed  ·  Extends ADR-0001 (thesis admission is human-only) and ADR-0004 (§2 write scope, §6 the ADR-0003 B carve-out); narrows the refusal ADR-0003 B installed in `CandidateStagingStore.stage`
+*2026-09-09*  ·  Status: accepted  ·  Owner decision 2026-09-09, recorded in [parallel-development-plan v1.0 §1](../reports/parallel-development-plan-v1.0-2026-09-09.md)  ·  Extends ADR-0001 (thesis admission is human-only) and ADR-0004 (§2 write scope, §6 the ADR-0003 B carve-out); narrows the refusal ADR-0003 B installed in `CandidateStagingStore.stage`
 
 ## Context
 
@@ -41,4 +41,4 @@ Neither of these is a lane. Both are contract changes, and both change who may w
 - The staging store gains a read of the mission tables, which it does not have today — it is an owner-only scratch authority with no Ledger handle, and this gives it a second, read-only handle. That is a real widening of what the staging process can see and should be reviewed as such when it is implemented.
 - The five-word decision vocabulary now appears outside the Playbook for the first time. It stays frozen; a candidate carrying a sixth word is refused by contract, not by policy.
 - `gate_reopen` is in `CHECKPOINT_KINDS` and is deliberately not used here. Whether a passed Initial Screen should be re-issued on thicker evidence is a separate decision (see ADR-0008) and this ADR does not take it.
-- Nothing here is implemented. Both halves need the owner's decision first, and the figure half needs a signed policy version before a single Claim moves.
+- Nothing here is implemented yet. The owner's decision is recorded; the figure half still needs a signed policy version listing `research-auto-commit:mission-verified-figure:v1`, and the thesis half still needs a mission version granting `thesis_revision_candidate` with its matching checkpoint. Until both signatures exist, nothing that runs changes.
