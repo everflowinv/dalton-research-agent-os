@@ -183,15 +183,15 @@ verdict 是关于虚无的 verdict。
 ## 6. 验收结果（原文）
 
 ```
-Ran 2949 tests in 310.530s
+Ran 2950 tests in 292.233s
 OK (skipped=1)
 ```
 
 命令：`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`
 （`PYTHONPATH` 必须是**绝对路径**：子进程 cwd 是 state dir，相对的 `src` 会解析不到。）
-基线 main `7708d43` 是 2,843，本片新增 **106** 项，分布：
+基线 main `7708d43` 是 2,843，本片新增 **107** 项，分布：
 `test_company_dossier.py` 28、`test_company_dossier_draft.py` 27、`test_guidance_profile.py` 18、
-`test_dossier_lane.py` 33。全部用假模型，没有对 live 预算发起过任何模型调用。
+`test_dossier_lane.py` 34。全部用假模型，没有对 live 预算发起过任何模型调用。
 
 ### 冒烟：live 只读副本（`/tmp` 拷贝，规则跑，不调模型）
 
@@ -238,20 +238,22 @@ P12b 的 aspect 标注只有规则那一半跑过（规则只settle定量 Claim�
    报 `held / not_authorized` 且**一分钱不花**（授权检查在任何模型调用之前）。
 2. **P12b 模型标注器要先跑完**（见第 6 节）。补完 2,148 条存量是 P12b 报告第七节的开放问题；
    在它跑完之前，档案 lane 会诚实地只写有材料的那一两节。
-3. **install.sh / launchagent**：lane 的 argv 片段是 `--company-dossier-model-config <state>/initial-screen-model-config.json`，
+3. **policy 文件要随部署落盘**：`deploy/phase9/p12a-dossier-policy-v1.json` 的默认路径只在源码 checkout 里
+   成立；安装环境要用 `--company-dossier-policy` 指到它，否则 lane 报 `held / no_policy`（不会崩，也不会花钱）。
+4. **install.sh / launchagent**：lane 的 argv 片段是 `--company-dossier-model-config <state>/initial-screen-model-config.json`，
    与 Initial Screen 复用同一份起草模型配置（同一条路由、同一个 broker、同一本日账），
    所以 `scripts/raise_day_budget_cap.MODEL_CONFIG_NAMES` 不用加新名字。
    argv 片段已经按 registry 的形状写好，`macos_launchagent` 无需改动。
-4. **cockpit**：需要一个公司档案页——十节、每节可点回 Claim / filing 行 / forecast 格、
+5. **cockpit**：需要一个公司档案页——十节、每节可点回 Claim / filing 行 / forecast 格、
    版本链可回放（`CompanyDossierAuthority.replay_section(company, aspect)` 已经就是这个读法：
    每一版说了什么、`change_reason` 是什么、引了哪些 ref）。
    `writer_server.OPERATION_FIELDS` 不需要新参数：lane 的 tick 不带参数。
-5. **Q1 的 `DOSSIER_SECTIONS` 与 aspect 词表对齐**（Q1 报告 1.3 已经点名的那件事）。
+6. **Q1 的 `DOSSIER_SECTIONS` 与 aspect 词表对齐**（Q1 报告 1.3 已经点名的那件事）。
    本片没有改 `research_quality_rubrics.py`（不是我的文件），而是在
    `company_dossier.dossier_artefact()` 里直接传 aspect 名作 `expected_sections`。
    集成时把 `DOSSIER_SECTIONS` 换成 `claim_aspect_vocabulary.ASPECTS[:10]` 并升一版 rubric，
    本片这条注释就可以删掉。
-6. **Q1 的 `claim_refs_resolve` 只解析 Claim。** 档案还引用报表行与 forecast 格，本片自己有
+7. **Q1 的 `claim_refs_resolve` 只解析 Claim。** 档案还引用报表行与 forecast 格，本片自己有
    `unresolved_refs()` 逐种检查；如果 Q1 那条检查将来认得另外两种 ref，这一层可以退休。
 
 ## 8. 没做的

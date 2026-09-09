@@ -209,6 +209,13 @@ class GrantTests(unittest.TestCase):
         summary = harness.run()
         self.assertEqual(summary["dossier_status"], "no_claim_index")
 
+    def test_an_installation_without_the_policy_is_held_not_crashed(self):
+        harness = Harness()
+        self.addCleanup(harness.close)
+        summary = harness.run(policy_path=harness.state_dir / "absent.json")
+        self.assertEqual((summary["status"], summary["dossier_status"]),
+                         ("held", "no_policy"))
+
     def test_a_company_that_has_not_passed_its_screen_has_no_file_to_deepen(self):
         harness = Harness(screened=False)
         self.addCleanup(harness.close)

@@ -597,7 +597,17 @@ def run_dossier(
             summary.update({"status": "failed", "dossier_status": "binding_drift",
                             "failure_reason": "the mission's constitution binding drifted"})
             return summary
-        policy = load_policy(policy_path)
+        try:
+            policy = load_policy(policy_path)
+        except (OSError, ValueError) as exc:
+            # The policy is a deploy artefact and the default path only exists
+            # in a source checkout. An installation without it is held rather
+            # than crashed: the structure of two sections is a human decision,
+            # and its absence is a wiring gap, not a bad run.
+            summary.update({
+                "status": "held", "dossier_status": "no_policy",
+                "failure_reason": f"the dossier policy could not be read: {exc}"})
+            return summary
         authority = CompanyDossierAuthority(store)
 
         chosen = None
