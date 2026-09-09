@@ -553,9 +553,9 @@ class ConnectorInventoryTests(unittest.TestCase):
             set(profiles),
             {
                 "cninfo", "sec", "sec-financials", "roic-transcript",
-                "yfinance", "alphaengine", "x-xreach", "x-x-search",
-                "reddit-last30days", "guidepoint", "gemini-web-search",
-                "web-fetch", "xueqiu",
+                "yfinance", "cn-hk-findata", "alphaengine", "x-xreach",
+                "x-x-search", "reddit-last30days", "guidepoint",
+                "gemini-web-search", "web-fetch", "xueqiu",
             },
         )
         refs = {profile["connector_ref"] for profile in profiles.values()}
@@ -608,7 +608,7 @@ class ConnectorInventoryTests(unittest.TestCase):
 
     def test_transport_auth_and_readiness_never_fabricate_runner_authority(self) -> None:
         public = {"cninfo", "sec", "sec-financials", "roic-transcript",
-                  "yfinance", "web-fetch"}
+                  "yfinance", "cn-hk-findata", "web-fetch"}
         for slug, profile in self.built["templates"].items():
             with self.subTest(slug=slug):
                 readiness = profile["readiness"]
