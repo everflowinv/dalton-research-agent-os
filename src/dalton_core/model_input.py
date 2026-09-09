@@ -35,6 +35,26 @@ RECONCILIATION_CHECKS = (
 VALUATION_AUTHORITY_ROLES = frozenset({
     "price", "shares", "fx", "rates", "consensus",
 })
+# P11c: which of those a valuation actually cannot be published without.
+#
+# The gate used to demand all five, and all five were unobtainable -- there was
+# no market data in this system at all -- so "requires price, shares, fx, rates
+# and consensus" meant "no valuation may ever be published". That was the right
+# default while nothing could supply any of them: better a closed door than a
+# multiple resting on a number somebody typed.
+#
+# P11a supplies the two that a multiple is arithmetically impossible without: a
+# price and a share count, both version-bound to a connector invocation. The
+# other three stay in the vocabulary and stay checked when they are claimed --
+# an FX or consensus binding still has to be a frozen actual input of the
+# matching role -- but they are no longer required, because a US-dollar
+# domestic company has no FX to bind and demanding a consensus figure to
+# publish a P/E confuses "what it trades at" with "what the street thinks".
+#
+# Widening this set again is a decision about what a valuation *means*, not a
+# convenience; it belongs in a diff with a reason, which is why it is a named
+# constant rather than a literal in the check below.
+REQUIRED_VALUATION_AUTHORITY_ROLES = frozenset({"price", "shares"})
 _SCHEMA_PATH = Path(__file__).with_name("model_input_schema.sql")
 _DECIMAL_RE = re.compile(r"^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -793,8 +813,19 @@ class ModelInputLedger:
                     raise ModelInputConflict("valuation authority must bind an actual input")
             if row["output_kind"] == "metric" and authorities:
                 raise ModelInputValidationError("metric output cannot claim valuation authority")
-            if row["output_kind"] == "valuation" and authority_roles != VALUATION_AUTHORITY_ROLES:
-                raise ModelInputConflict("valuation output lacks price/shares/fx/rates/consensus authority")
+            if row["output_kind"] == "valuation":
+                unknown = sorted(authority_roles - VALUATION_AUTHORITY_ROLES)
+                if unknown:
+                    raise ModelInputValidationError(
+                        f"valuation authority role is not in the vocabulary: {unknown}"
+                    )
+                missing = sorted(REQUIRED_VALUATION_AUTHORITY_ROLES - authority_roles)
+                if missing:
+                    raise ModelInputConflict(
+                        "valuation output lacks "
+                        + "/".join(missing)
+                        + " authority"
+                    )
             row["authority_bindings"] = authorities
         return outputs
 
