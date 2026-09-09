@@ -131,6 +131,7 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.mission_model_forecast_lane",
     "dalton_core.research_planner_launcher",
     "dalton_core.initial_screen_launcher",
+    "dalton_core.mission_crowd_source_lane",
     "dalton_core.mission_feed_lane",
     "dalton_core.mission_research_task_lane",
 )

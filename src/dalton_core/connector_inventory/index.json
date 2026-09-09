@@ -1,5 +1,5 @@
 {
-  "content_hash": "8462572ee9f76f38e81dd32f25a5bbb6670f13cff847f5090473ed4edd6f532b",
+  "content_hash": "97b5e8e0b21f4a20f6a224e2b2873ccdb93594ae1192bfb8ea3f130b715d01f2",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "id": "connector-inventory:p1-0:0.1",
   "profiles": [
@@ -119,6 +119,33 @@
       "profile_template_ref": "connector-profile-template:xueqiu:0.1",
       "proposal_manifest_hash": "c5a65f008c34a38fecd8776bd0def726827a2e1ee90f2df9708223532d8061dc",
       "proposal_manifest_ref": "connector-proposal-manifest:xueqiu:0.2"
+    },
+    {
+      "connector_ref": "connector:xueqiu-posts",
+      "fixture_manifest_hash": "1ac7bbbc788d917912c0629b506c8e0e18b82402cb841b85fe17153b8d0468ea",
+      "fixture_manifest_ref": "connector-fixture-manifest:xueqiu-posts:0.1",
+      "profile_template_hash": "68abd41a72f4c098184c044bc8d8ea837388a2ba1f4e6deb9b4b6989a632fecc",
+      "profile_template_ref": "connector-profile-template:xueqiu-posts:0.1",
+      "proposal_manifest_hash": "723f935f7314e53214a8bb74b434fc264cb38d674444614d1c3dd6964e609c98",
+      "proposal_manifest_ref": "connector-proposal-manifest:xueqiu-posts:0.2"
+    },
+    {
+      "connector_ref": "connector:x-xreach-crowd",
+      "fixture_manifest_hash": "c60a0555127ec986fc9055d8f57ad0f03740cbb6e403c57a2e35ec4470d769b9",
+      "fixture_manifest_ref": "connector-fixture-manifest:x-xreach-crowd:0.1",
+      "profile_template_hash": "7213f2d66de4d6e473862d8f013d059349ab7f9ea0cfeb61653ac0bfb31297bd",
+      "profile_template_ref": "connector-profile-template:x-xreach-crowd:0.1",
+      "proposal_manifest_hash": "65b255e333f4116aaf51255c608ab86936a916a78149f3fb80f9e9a1b9940988",
+      "proposal_manifest_ref": "connector-proposal-manifest:x-xreach-crowd:0.2"
+    },
+    {
+      "connector_ref": "connector:employee-reviews-blind",
+      "fixture_manifest_hash": "6173745acdd93f6c5f7f982794f59357e1580fb690feca9e5331d721d3d06050",
+      "fixture_manifest_ref": "connector-fixture-manifest:employee-reviews:0.1",
+      "profile_template_hash": "4bdbaaeef1e481adb2cb4ad89cf640be0c3e8dd4ecd065fc9a416049b56bf768",
+      "profile_template_ref": "connector-profile-template:employee-reviews:0.1",
+      "proposal_manifest_hash": "7525190be2c937a530f172c905007191bea4d2948e88d233ef7fbf00e7f23778",
+      "proposal_manifest_ref": "connector-proposal-manifest:employee-reviews:0.2"
     },
     {
       "connector_ref": "connector:sales-notes",
