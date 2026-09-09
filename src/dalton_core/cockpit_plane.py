@@ -274,6 +274,17 @@ CHECKPOINT_TABLES = {
     "gate_reopen": ("gate_reopen_proposals", "proposal_id",
                     "gate_reopen_decisions", "proposal_ref"),
 }
+CHECKPOINT_TITLES = {
+    "thesis_revision_candidate": "有事情发生，可能要改我们对这家公司的判断",
+    "gate_reopen": "一道已经过掉的闸，现在有证据说可以重开",
+}
+# C2: the four pools a day's budget is split into, named for what each buys.
+POOL_LABELS = {
+    "coverage": "把公司读完（找、取、读、抽数字）",
+    "event_response": "判断每天发生的事",
+    "adhoc": "专项研究",
+    "maintenance": "维护（打标签、复核、周报）",
+}
 # How many of each of these a company card carries. The card is a card.
 MAX_EVENTS_ON_CARD = 8
 MAX_JUDGEMENTS_ON_CARD = 5
@@ -1359,11 +1370,12 @@ class CockpitPlane:
             row["loop_version_ref"]: row["terminal_state"] for row in self._rows(core,
                 "SELECT loop_version_ref, terminal_state FROM bounded_planner_terminal_events")
         }
-        questions: dict[str, dict[str, Any]] = {}
-        for row in self._rows(core,
-            "SELECT version_id, record_json FROM research_question_versions",
-        ):
-            questions[row["version_id"]] = json.loads(row["record_json"])
+        questions: dict[str, dict[str, Any]] = {
+            row["version_id"]: {"question": row["question"],
+                                "company_ref": row["company_ref"]}
+            for row in self._rows(core,
+                "SELECT version_id, question, company_ref FROM backlog_question_versions")
+        }
         out: dict[str, list[dict[str, Any]]] = {}
         for row in self._latest_by(
             core, "bounded_planner_loop_versions", "loop_ref", "version_number"
@@ -1445,6 +1457,15 @@ class CockpitPlane:
             forecasts = self._forecast(core)
             quality = self._quality(core)
             journal = self._journal(core)
+            # INT2: P14a's daily tracking, C1's calendar and P14e's tasks.
+            # Same degradation rule: {} on a Core without the lane's table.
+            policy = self._tracking_policy()
+            events = self._events(core)
+            judgements = self._judgements(core)
+            reflections = self._reflections(core)
+            catalysts = self._catalysts(core)
+            cadences = self._cadences(core, policy)
+            tasks = self._research_tasks(core)
         today = self.clock().date().isoformat()
         by_company: dict[str, list[dict[str, Any]]] = {}
         for claim in claims:
@@ -1523,6 +1544,26 @@ class CockpitPlane:
                 "model": forecasts.get(company_ref),
                 # Q1: what the PM has said about this company's work so far.
                 "feedback": journal["by_company"].get(company_ref),
+                # P14a 今日事件: what happened to this company, by kind, each
+                # carrying the tier a reader should believe it at.
+                "events": events.get(company_ref),
+                # P14a 大脑的判断: the decision word, the one-line because,
+                # what the effect actually was, and what the independent
+                # reader said about it.
+                "judgements": judgements["by_company"].get(company_ref),
+                # P14a 反思: what we expected, what happened, what debate we
+                # may have missed, and what we would follow up.
+                "reflections": reflections["by_company"].get(company_ref),
+                # C1 下一个催化剂 T−N 天, with 日期未确认 beside it when the
+                # date is a vendor's guess rather than the company's word.
+                "catalyst": catalysts.get(company_ref),
+                # P14a 频率: how often we look at each source, and why. The
+                # policy baseline for every source, replaced by the brain's
+                # own version where it has published one.
+                "cadence": cadences.get(company_ref) or cadences.get("__baseline__"),
+                # P14e 专项研究: what is being researched, on what budget,
+                # and what it concluded or is still missing.
+                "research_tasks": tasks.get(company_ref),
             })
         planner = (heartbeat.get("bounded_planner") or {}).get("last_result") or {}
         discovery = planner.get("mission_source_discovery") or {}
@@ -1533,6 +1574,9 @@ class CockpitPlane:
             "alphaengine": ((discovery.get("acquisition") or {}).get("budget") or (discovery.get("discovery") or {}).get("budget")),
             "web": ((web.get("acquisition") or {}).get("budget") or (web.get("discovery") or {}).get("budget")),
             "mission": mission["budget"],
+            # C2: one total cannot tell "the system stopped" from "the cheap
+            # half of the system stopped". Four pools can.
+            "pools": self._pools(mission, today),
         }
         running = [self._ticket_event(t, members, self._url_map()) for t in self.tickets.tickets()
                    if _ticket_still_running(t["ticket"])]
@@ -1570,6 +1614,11 @@ class CockpitPlane:
                 "service_state": heartbeat.get("state"), "last_tick_at": heartbeat.get("last_tick_at"),
                 "lanes": self._lane_states(heartbeat, extraction, discovery, mission["budget"], planner),
                 "running": running,
+                # C2: how many heartbeats had nothing to do, and which lane
+                # could not work. Q2 found this unanswerable because the
+                # driver's summary was overwritten every tick; it now has a
+                # ledger, so the page can say it.
+                "ticks": self._ticks(),
             },
             # P13w: the system's own decision about what to work on next. Top
             # level, beside the goal it serves -- it is not an activity note.
@@ -1692,6 +1741,122 @@ class CockpitPlane:
             micros += int(settled if isinstance(settled, int) else row["reserved_micros"])
         return {"used": calls, "cap": mission["budget"]["max_daily_paid_calls"],
                 "cost_usd": round(micros / 1_000_000, 4), "cost_cap_usd": mission["budget"]["max_daily_cost_usd"]}
+
+    def _budget_db(self) -> Path | None:
+        """Where the day ledger lives, according to the model configuration."""
+
+        if self.config.model_config_path is None:
+            return None
+        config = _load_json(self.config.model_config_path)
+        if not isinstance(config, dict) or not config.get("budget_db"):
+            return None
+        return Path(str(config["budget_db"]))
+
+    def _pools(self, mission: Mapping[str, Any], today: str) -> dict[str, Any] | None:
+        """C2: what each of the four pools has left, and who ran out today.
+
+        A day's cap split four ways is the difference between "the system
+        stopped" and "the cheap half of the system stopped"; the owner cannot
+        tell those apart from one total. Read from the day ledger, not from
+        the Core, and empty on a ledger that has not been migrated -- a
+        read-only copy from before C2 has no ``pool`` column at all.
+        """
+
+        path = self._budget_db()
+        if path is None:
+            return None
+        from .budget_pools import POOL_NAMES, has_pool_columns, pool_status
+
+        try:
+            with closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)) as ledger:
+                ledger.row_factory = sqlite3.Row
+                if not has_pool_columns(ledger):
+                    return None
+                status = pool_status(
+                    ledger, mission=mission, day=today, now=self.clock())
+        except sqlite3.Error:
+            return None
+        pools = []
+        for name in POOL_NAMES:
+            entry = status["pools"][name]
+            pools.append({
+                "pool": name, "label": POOL_LABELS.get(name, name),
+                "cap_usd": round(entry["cap_micros"] / 1_000_000, 4),
+                "spent_usd": round(entry["spent_micros"] / 1_000_000, 4),
+                "remaining_usd": round(entry["remaining_micros"] / 1_000_000, 4),
+                "borrowed_usd": round(entry["borrowed_micros"] / 1_000_000, 4),
+                "borrowed_from": [POOL_LABELS.get(key, key)
+                                  for key in entry["borrowed_from"]],
+                "lent_usd": round(entry["lent_micros"] / 1_000_000, 4),
+                "exhausted": entry["exhausted"],
+                "note": ("这一池今天已经用完，剩下的请求会被拒" if entry["exhausted"]
+                         else None),
+            })
+        return {
+            "day": status["day"], "pools": pools,
+            # A default split is not the owner's split. Saying so is the
+            # difference between a number they chose and one they inherited.
+            "caps_defaulted": status["caps_defaulted"],
+            "caps_note": ("这四个上限是默认分法，研究目标里没有自己的分法"
+                          if status["caps_defaulted"] else "上限来自研究目标自己的分法"),
+            "borrow_open": status["borrow_open"],
+            "borrow_note": ("过了半天，闲着的池可以把额度借给覆盖池"
+                            if status["borrow_open"] else "今天还早，暂时不允许互借"),
+            "unpooled_usd": round(status["unpooled_micros"] / 1_000_000, 4),
+            "exhausted_lane_count": status["exhausted_lane_count"],
+            "exhausted_lanes": [
+                {"lane": item["lane"],
+                 "lane_label": REGISTRY_LANE_LABELS.get(item["lane"], item["lane"]),
+                 "pool": item["pool"],
+                 "pool_label": POOL_LABELS.get(item["pool"], item["pool"]),
+                 "at": item["at"]}
+                for item in status["exhausted_lanes"][:6]
+            ],
+        }
+
+    def _ticks(self) -> dict[str, Any] | None:
+        """C2: how many ticks ran, how many did nothing, and what stalled.
+
+        Q2 found that this was unanswerable: the driver's summary went into
+        ``heartbeat.json`` and the next tick overwrote it. It now has a
+        ledger, so the answer exists and this is where the owner reads it.
+        """
+
+        from .tick_ledger import TickLedger, TickLedgerError, default_path
+
+        path = default_path(self.config.state_dir)
+        if not path.is_file():
+            return None
+        try:
+            # Only the two summaries, never ``summarise``: that one also
+            # returns every tick with every lane row, which is the whole
+            # ledger on a page that refreshes.
+            with TickLedger(path, read_only=True) as ledger:
+                idle = ledger.idle_ratio()
+                stalls = ledger.lane_stalls()
+        except (TickLedgerError, sqlite3.Error, OSError, ValueError):
+            return None
+        if not idle.get("available"):
+            return {"available": False, "reason": idle.get("reason"),
+                    "window": idle.get("window")}
+        stalled = [
+            {"lane": key,
+             "lane_label": REGISTRY_LANE_LABELS.get(key, key),
+             "ticks": entry["ticks"], "stalls": entry["stalls"],
+             "longest_stall_run": entry["longest_stall_run"],
+             "pool_exhausted_ticks": entry["pool_exhausted_ticks"]}
+            for key, entry in (stalls.get("lanes") or {}).items()
+            if entry["stalls"] or entry["pool_exhausted_ticks"]
+        ]
+        stalled.sort(key=lambda row: -row["stalls"])
+        return {
+            "available": True, "window": idle.get("window"),
+            "ticks": idle.get("ticks"), "idle_ticks": idle.get("idle_ticks"),
+            "idle_ratio": idle.get("ratio"),
+            "idle_note": (f"{idle.get('idle_ticks')}/{idle.get('ticks')} "
+                          "次心跳里没有任何流水线有事可做"),
+            "stalled_lanes": stalled[:6],
+        }
 
     def _lane_states(self, heartbeat: Mapping[str, Any], extraction: Mapping[str, Any],
                      discovery: Mapping[str, Any],
@@ -2061,6 +2226,11 @@ class CockpitPlane:
                                 {"decision": "kept", "label": "保留"}],
                     "needs_rationale": False,
                 })
+        # INT2 / ADR-0007: the checkpoints the revision loop raises. Rendered
+        # from whatever rows exist, with no decision buttons: the ops that
+        # decide them are on another branch, and offering a button that goes
+        # nowhere is worse than showing the item and saying who owes what.
+        items.extend(self._revision_checkpoints())
         for row in self.journal.rows("SELECT * FROM cockpit_drafts WHERE status='open' ORDER BY created_at"):
             draft = json.loads(row["draft_json"])
             items.append({
@@ -2072,6 +2242,78 @@ class CockpitPlane:
             })
         items.sort(key=lambda i: i["at"])
         return {"schema_version": SCHEMA_VERSION, "as_of": _iso(self.clock()), "items": items, "count": len(items)}
+
+    def _revision_checkpoints(self) -> list[dict[str, Any]]:
+        """ADR-0007 / P14d: revision candidates, gate reopens, forecast overturns.
+
+        Every one of these is a human checkpoint the mission vocabulary names
+        and no lane may decide. Their rows may or may not be in this Core --
+        the judgement lane writes the first and the third only when the
+        mission grants them, and the fourth table does not exist yet -- so
+        each is read only when its table is, and a decided one is filtered
+        out only when a decisions table exists to filter against.
+
+        A candidate is shown with its reflection expanded rather than as a
+        ref: ADR-0007's candidate and "what we may have missed" are worth
+        exactly as much as each other when a person is deciding.
+        """
+
+        items: list[dict[str, Any]] = []
+        with self._core() as core:
+            mission = self._mission(core)
+            members = self._members(mission)
+            reflections = self._reflections(core)
+            for kind, (table, key, decisions, ref_column) in CHECKPOINT_TABLES.items():
+                if not _table_exists(core, table):
+                    continue
+                sql = f"SELECT t.* FROM {table} t "
+                if _table_exists(core, decisions):
+                    sql += (f"LEFT JOIN {decisions} d ON d.{ref_column}=t.{key} "
+                            "WHERE d.rowid IS NULL ")
+                for row in self._rows(core, sql + "ORDER BY t.created_at"):
+                    record = json.loads(row["record_json"])
+                    decision = record.get("decision")
+                    items.append({
+                        "kind": kind, "ref": row[key], "hash": row["content_hash"],
+                        "at": row["created_at"],
+                        "title": (CHECKPOINT_TITLES.get(kind) or kind),
+                        "who": self._label(members, record.get("company_ref")),
+                        "summary": record.get("because") or record.get("rationale") or "",
+                        "details": {
+                            "大脑的判断": JUDGEMENT_DECISION_LABELS.get(decision, decision),
+                            "提议改成": record.get("proposed_statement"),
+                            "提议的把握": record.get("proposed_confidence"),
+                            "证伪条件": record.get("falsifier_ref"),
+                            "依据": list(record.get("evidence_refs") or ()),
+                        },
+                        # Both halves, side by side.
+                        "reflection": reflections["by_judgement"].get(
+                            record.get("judgement_ref")),
+                        "actions": [],
+                        "needs_rationale": False,
+                        "note": "这一项要人裁决，而裁决入口还没有接上（ADR-0007）",
+                    })
+            if _table_exists(core, "forecast_revision_proposals"):
+                for row in self._rows(core,
+                    "SELECT * FROM forecast_revision_proposals ORDER BY created_at",
+                ):
+                    record = json.loads(row["record_json"])
+                    items.append({
+                        "kind": "forecast_proposal", "ref": row["proposal_id"],
+                        "hash": row["content_hash"], "at": row["created_at"],
+                        "title": "预测行想改，但研究目标没有授权自动改",
+                        "who": self._label(members, record.get("company_ref")),
+                        "summary": record.get("because") or "",
+                        "details": {
+                            "哪条驱动": record.get("driver_ref"),
+                            "哪一期": record.get("period_end"),
+                            "想改成": record.get("proposed_value"),
+                            "为什么没直接改": record.get("reason"),
+                        },
+                        "actions": [], "needs_rationale": False,
+                        "note": "授予 forecast_line 之后判断层可以直接改，否则要人裁决",
+                    })
+        return items
 
     def decide(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(value, Mapping):
@@ -2256,6 +2498,212 @@ class CockpitPlane:
             "readiness": readiness, "note": self._forecast_note(readiness),
             "table": render_forecast_model(record, entity_name=label),
             "history": history,
+        }
+
+    # -- INT2: 来源 and 模型 --------------------------------------------------
+
+    def sources(self) -> dict[str, Any]:
+        """P14a's SourceCapabilityMap and P14-M's routing, on one page.
+
+        The owner asked for the first one by name: the brain has to know what
+        each connector can actually hand over before it can decide where to
+        go for something. The second is the same question about the model
+        side -- which model serves a purpose, what happens when it is down,
+        and whether the catalog this Core holds is the catalog the broker
+        offers.
+        """
+
+        from .source_capability_map import build_map
+        from .tracking_cadence import baseline_cadences
+
+        policy = self._tracking_policy()
+        with self._core() as core:
+            mission = self._mission(core)
+        projection = build_map(
+            mission=mission,
+            cadences=None if policy is None else baseline_cadences(policy),
+        )
+        rows = []
+        for entry in projection["sources"]:
+            status = entry["connection_status"]
+            tier = entry["evidence_tier"]
+            completeness = entry["completeness_ceiling"]
+            rows.append({
+                "slug": entry["slug"], "source_ref": entry["source_ref"],
+                "label": SOURCE_LABELS.get(entry["source_ref"], entry["slug"]),
+                # 能取什么
+                "content": [CONTENT_KIND_LABELS.get(kind, kind)
+                            for kind in entry["content_kinds"]],
+                # 层级
+                "tier": tier, "tier_label": EVIDENCE_TIER_LABELS.get(tier, tier),
+                # 状态
+                "status": status,
+                "status_label": CONNECTION_STATUS_LABELS.get(status, status),
+                "installed": entry["in_inventory"],
+                "installed_note": (None if entry["in_inventory"]
+                                   else "这条来源还没装进目录"),
+                # 配额: the map carries each row as sorted item pairs so the
+                # projection can be hashed; a dict is what a page renders.
+                "quotas": [
+                    {"operation": row.get("operation"),
+                     "daily_limit": row.get("daily_unit_limit"),
+                     "unit": row.get("quota_unit")}
+                    for row in (dict(pairs) for pairs in entry["quotas"])
+                ],
+                # 频率
+                "cadence_label": _interval_label(entry["cadence_baseline_seconds"]),
+                "cadence_adjustable": entry["cadence_adjustable"],
+                "completeness": completeness,
+                "completeness_label": COMPLETENESS_LABELS.get(completeness),
+                # web fetch / web search answer anything, which is what makes
+                # them the last resort rather than the first: the owner asked
+                # for the generic ones to be marked as such.
+                "generic": entry["generic"],
+                "generic_note": ("通用来源：什么都能问，所以只在没有专门来源时才用"
+                                 if entry["generic"] else None),
+                "markets": list(entry["markets"]),
+                "note": entry["note"],
+            })
+        # Specific sources first, generic last, exactly the order the map's
+        # own ``sources_for`` hands them to a research decision.
+        rows.sort(key=lambda row: (row["generic"], row["slug"]))
+        return {
+            "as_of": _iso(self.clock()),
+            "schema_version": SCHEMA_VERSION,
+            "sources": rows,
+            "content_kinds": [{"value": kind, "label": CONTENT_KIND_LABELS.get(kind, kind)}
+                              for kind in projection["content_kinds"]],
+            "policy_ref": None if policy is None else policy["policy_ref"],
+            "policy_note": (None if policy is not None else
+                            "这台机器上还没有跟踪频率政策，所以频率一栏是空的"),
+            "routing": self._routing(),
+        }
+
+    def _routing(self) -> dict[str, Any]:
+        """P14-M: which model serves each purpose, and what it falls back to."""
+
+        config = (_load_json(self.config.model_config_path)
+                  if self.config.model_config_path is not None else None)
+        path = (config or {}).get("model_router_db") if isinstance(config, dict) else None
+        if not path or not Path(str(path)).is_file():
+            return {"available": False,
+                    "reason": "这台机器上还没有模型路由库，所以没有可读的路由"}
+        from .model_fallback_chain import FallbackChainError, routing_overview
+        from .model_router import ModelRouter
+
+        openclaw = Path.home() / ".openclaw" / "openclaw.json"
+        broker = _load_json(openclaw)
+        try:
+            with closing(ModelRouter(str(path), read_only=True)) as router:
+                overview = routing_overview(
+                    router,
+                    openclaw_config=broker if isinstance(broker, Mapping) else None,
+                    checked_at=self.clock(),
+                )
+        except (FallbackChainError, sqlite3.Error, OSError, ValueError) as exc:
+            return {"available": False, "reason": f"路由库读不出来：{_reason(exc)}"}
+        tiers = []
+        for tier, entry in overview["tiers"].items():
+            served = entry["last_served"]
+            tiers.append({
+                "tier": tier, "label": MODEL_TIER_LABELS.get(tier, tier),
+                # The chain in order, so "what runs when the first one is
+                # down" is a thing on the page rather than a thing to ask.
+                "chain": [{
+                    "position": link["position"], "model": link["profile_id"],
+                    "registered": link["registered"], "status": link["status"],
+                    "family": link["family"],
+                    "note": (None if link["registered"]
+                             else "这台机器上没有这个模型的档案"),
+                } for link in entry["chain"]],
+                "last_served": None if served is None else {
+                    "model": served["profile_id"],
+                    "position": served["chain_position"],
+                    "purpose": served["purpose"],
+                    "at": served["created_at"],
+                },
+                "last_served_note": (
+                    "还没有用过这一层" if served is None else
+                    (f"上一次是链上第 {served['chain_position']} 个模型服务的"
+                     + ("（也就是第一选择）" if served["chain_position"] == 1
+                        else "——第一选择当时没答上"))),
+                "skipped_since_last_served": [
+                    {"model": link["profile_id"], "reason": link["skip_reason"]}
+                    for link in entry["skipped_since_last_served"][-4:]
+                ],
+            })
+        catalog = overview["catalog"]
+        return {
+            "available": True,
+            "purposes": [
+                {"purpose": purpose, "tier": tier,
+                 "tier_label": MODEL_TIER_LABELS.get(tier, tier)}
+                for purpose, tier in sorted(overview["purpose_tiers"].items())
+            ],
+            # A purpose with no tier is refused rather than defaulted, so an
+            # unmapped one is a lane that cannot call a model at all.
+            "unmapped_purposes": list(overview["unmapped_purposes"]),
+            "unmapped_note": (None if not overview["unmapped_purposes"] else
+                              "这些用途还没有指定层级，它们一次模型都调不了"),
+            "tiers": tiers,
+            "catalog": None if catalog is None else {
+                "in_sync": catalog["catalog_in_sync"],
+                "checked_at": catalog["checked_at"],
+                "note": ("这台机器的模型目录和网关一致" if catalog["catalog_in_sync"]
+                         else "这台机器的模型目录和网关不一致，跑一次安装脚本会对上"),
+                # Both diff sets by name: "which way" is the only part of
+                # "out of sync" that tells anybody what to do.
+                "missing_here": list(catalog["missing_static_profile_ids"]),
+                "not_in_broker": list(catalog["not_in_broker_profile_ids"]),
+            },
+            "catalog_note": (None if catalog is not None else
+                             "没有找到 OpenClaw 配置，所以无法比对模型目录"),
+        }
+
+    def cycle_reflection(self) -> dict[str, Any]:
+        """Q2: 每周回头看 -- the latest week's "我们把时间花在哪"."""
+
+        with self._core() as core:
+            mission = self._mission(core)
+            if not _table_exists(core, "research_cycle_reflection_versions"):
+                return {"as_of": _iso(self.clock()), "available": False,
+                        "reason": "这个 Core 还没有写过每周回头看"}
+            rows = self._rows(core,
+                "SELECT record_json, iso_week, created_at FROM "
+                "research_cycle_reflection_versions WHERE mission_ref=? "
+                "ORDER BY iso_week DESC, version_number DESC LIMIT 1",
+                (mission["mission_ref"],))
+            weeks = [row["iso_week"] for row in self._rows(core,
+                "SELECT DISTINCT iso_week FROM research_cycle_reflection_versions "
+                "WHERE mission_ref=? ORDER BY iso_week DESC LIMIT 12",
+                (mission["mission_ref"],))]
+        if not rows:
+            return {"as_of": _iso(self.clock()), "available": False,
+                    "reason": "这个研究目标还没有写过每周回头看"}
+        record = json.loads(rows[0]["record_json"])
+        narrative = record.get("narrative") or {}
+        return {
+            "as_of": _iso(self.clock()), "available": True,
+            "iso_week": record.get("iso_week"),
+            "window": {"since": record.get("window_start"),
+                       "until": record.get("window_end")},
+            "written_at": rows[0]["created_at"],
+            "version": record.get("version"),
+            "title": narrative.get("title") or "我们把时间花在哪",
+            # The prose and the table are both derived from the metrics; no
+            # model wrote either, which is why they can be shown verbatim.
+            "prose": narrative.get("prose"),
+            "table": [dict(row) for row in narrative.get("table") or ()],
+            "backlog_candidates": [
+                {"question": item.get("question"), "because": item.get("because"),
+                 "refs": list(item.get("refs") or ())}
+                for item in record.get("backlog_candidates") or ()
+            ],
+            # These are sentences for the owner, not decisions: the reflection
+            # has no path to change a policy and says so in its own record.
+            "policy_suggestions": list(record.get("policy_suggestions") or ()),
+            "authority_note": record.get("authority_note"),
+            "weeks": weeks,
         }
 
     def record_feedback(self, login: str, value: Mapping[str, Any]) -> dict[str, Any]:
