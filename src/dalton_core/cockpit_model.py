@@ -42,6 +42,9 @@ SCHEMA_VERSION = "0.1"
 # the mission -- but it is not the cockpit answering the owner, so it is named
 # rather than folded into "ask".
 PURPOSES = frozenset({"ask", "goal", "steer", "draft", "plan"})
+# Room for the completion write after the model answers, so a call that
+# finishes right on its timeout still has a live lease to complete against.
+_LEASE_GRACE_SECONDS = 30.0
 
 
 class CockpitModelError(RuntimeError):
@@ -135,14 +138,23 @@ class CockpitModel:
                  "mission_version_hash": mission["content_hash"],
                  "max_daily_paid_calls": int(mission["budget"]["max_daily_paid_calls"]),
                  "max_daily_cost_micros": int(Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1_000_000)}
-        with Scheduler(self.scheduler_db) as scheduler:
+        # P13s: the lease has to outlast the call it covers. The scheduler's
+        # default lease is 30 s and its ceiling 60; a cockpit call is allowed
+        # up to its own timeout, and a reasoning model on a large prompt takes
+        # longer than either. When the lease lapsed mid-call the completion was
+        # refused with "attempt is not the current leased attempt" -- the work
+        # was done and paid for, and the answer was thrown away.
+        lease_seconds = float(self.timeout_seconds) + _LEASE_GRACE_SECONDS
+        with Scheduler(self.scheduler_db, max_lease_seconds=lease_seconds,
+                       max_total_lease_seconds=lease_seconds * 2) as scheduler:
             if scheduler.enqueue(work)["status"] == "conflict":
                 raise CockpitModelError("this request is bound to different content; ask again")
             formal = scheduler.formal_result(work.id)
             replayed = formal is not None
             cost_micros, cost_status = 0, "replayed"
             if formal is None:
-                lease = scheduler.claim(WORKER_REF, work_order_id=work.id)
+                lease = scheduler.claim(WORKER_REF, work_order_id=work.id,
+                                        lease_seconds=lease_seconds)
                 if lease is None:
                     raise CockpitModelError("this request is already running")
                 attempt = lease["attempt"]["attempt_number"]

@@ -128,6 +128,26 @@ class PlannerChildTests(unittest.TestCase):
         self.assertEqual(summary["plan_status"], "busy")
         self.assertIn("LeaseRejected", summary["failure_reason"])
 
+    def test_the_lease_outlasts_the_call_it_covers(self):
+        # The scheduler's default lease is 30s and its ceiling 60; a planner
+        # call is allowed 300. When the lease lapsed mid-call the completion
+        # was refused as "attempt is not the current leased attempt" -- the
+        # work was done and paid for, and the answer thrown away.
+        from dalton_core.cockpit_model import _LEASE_GRACE_SECONDS
+        from dalton_core.research_planner_cli import TIMEOUT_SECONDS
+
+        self.assertGreater(_LEASE_GRACE_SECONDS, 0)
+        self.assertGreater(TIMEOUT_SECONDS + _LEASE_GRACE_SECONDS, TIMEOUT_SECONDS)
+
+    def test_a_cockpit_call_claims_a_lease_covering_its_timeout(self):
+        import inspect
+
+        from dalton_core import cockpit_model
+
+        source = inspect.getsource(cockpit_model.CockpitModel.call)
+        self.assertIn("lease_seconds=lease_seconds", source)
+        self.assertIn("max_lease_seconds=lease_seconds", source)
+
 
 if __name__ == "__main__":
     unittest.main()
