@@ -1,0 +1,123 @@
+{
+ "captured_at": "2026-09-09T18:38:55.072533+00:00",
+ "earnings_estimate": {
+  "+1q": {
+   "avg": 3.98814,
+   "currency": "USD",
+   "growth": 0.012200001,
+   "high": 4.16,
+   "low": 3.83,
+   "numberOfAnalysts": 20,
+   "yearAgoEps": 3.94
+  },
+  "+1y": {
+   "avg": 14.65516,
+   "currency": "USD",
+   "growth": 0.0572,
+   "high": 15.18,
+   "low": 14.07379,
+   "numberOfAnalysts": 28,
+   "yearAgoEps": 13.86199
+  },
+  "0q": {
+   "avg": 3.17886,
+   "currency": "USD",
+   "growth": 0.049099997,
+   "high": 3.23,
+   "low": 3.12,
+   "numberOfAnalysts": 20,
+   "yearAgoEps": 3.03
+  },
+  "0y": {
+   "avg": 13.86199,
+   "currency": "USD",
+   "growth": 0.0721,
+   "high": 13.93,
+   "low": 13.79,
+   "numberOfAnalysts": 27,
+   "yearAgoEps": 12.93
+  }
+ },
+ "errors": {},
+ "library": "yfinance",
+ "library_version": "1.7.0",
+ "metadata": {
+  "currency": "USD",
+  "numberOfAnalystOpinions": 25
+ },
+ "observed_on": "2026-09-09",
+ "operation": "analyst_estimates",
+ "price_target": {
+  "current": 177.13,
+  "high": 275.0,
+  "low": 130.0,
+  "mean": 184.1884,
+  "median": 185.0
+ },
+ "recommendations": [
+  {
+   "buy": 11,
+   "hold": 13,
+   "period": "0m",
+   "sell": 0,
+   "strongBuy": 3,
+   "strongSell": 0
+  },
+  {
+   "buy": 11,
+   "hold": 13,
+   "period": "-1m",
+   "sell": 0,
+   "strongBuy": 3,
+   "strongSell": 0
+  },
+  {
+   "buy": 12,
+   "hold": 13,
+   "period": "-2m",
+   "sell": 0,
+   "strongBuy": 2,
+   "strongSell": 0
+  }
+ ],
+ "revenue_estimate": {
+  "+1q": {
+   "avg": 19408034670,
+   "currency": "USD",
+   "growth": 0.0355,
+   "high": 19743000000,
+   "low": 19002900000,
+   "numberOfAnalysts": 17,
+   "yearAgoRevenue": 18742125000
+  },
+  "+1y": {
+   "avg": 76583683960,
+   "currency": "USD",
+   "growth": 0.040700004,
+   "high": 79304000000,
+   "low": 75166000000,
+   "numberOfAnalysts": 27,
+   "yearAgoRevenue": 73587678730
+  },
+  "0q": {
+   "avg": 18038995700,
+   "currency": "USD",
+   "growth": 0.0252,
+   "high": 18169000000,
+   "low": 17816000000,
+   "numberOfAnalysts": 20,
+   "yearAgoRevenue": 17596260000
+  },
+  "0y": {
+   "avg": 73587678730,
+   "currency": "USD",
+   "growth": 0.056199998,
+   "high": 74162935080,
+   "low": 73320000000,
+   "numberOfAnalysts": 26,
+   "yearAgoRevenue": 69672977000
+  }
+ },
+ "schema_version": "0.1",
+ "ticker": "ACN"
+}

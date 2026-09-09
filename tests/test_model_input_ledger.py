@@ -342,7 +342,12 @@ class ModelInputLedgerTests(unittest.TestCase):
                 version_id="input-version:stale", idempotency_key="decide:stale",
             )
 
-    def test_valuation_output_requires_all_five_actual_authorities(self) -> None:
+    def test_valuation_output_requires_price_and_shares_actual_authorities(self) -> None:
+        # P11c: this asked for all five roles until the market layer could
+        # supply two of them, and asserted the same thing it does now -- a
+        # price on its own is not a valuation. The positive case, where price
+        # and shares together open the gate, lives with the valuation
+        # authority in tests/test_valuation_snapshot.py.
         scenario = self.admit(
             "scenario", "scenario:base", self.scenario_payload(), suffix="scenario"
         )
