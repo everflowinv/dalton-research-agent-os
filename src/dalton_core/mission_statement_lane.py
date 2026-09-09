@@ -29,6 +29,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Sequence
 
 from .coverage_mission import CoverageMissionError, MAX_STATEMENT_FILINGS
+from .lane_registry import LaneSpec, register_lane
 from .lane_child_launcher import (
     LaneChildConflict,
     LaneChildRejected,
@@ -352,12 +353,114 @@ class MissionStatementLaneCoordinator:
         }
 
 
+# P13ak: SEC asks a client to say who it is and how to reach it. The
+# statements lane says so in its own name rather than borrowing the
+# company-facts lane's, and it carries the same contact address this Core
+# already publishes on its outbound public requests -- the parser refuses an
+# identity without one, which is how the first live tick failed.
+STATEMENT_LANE_USER_AGENT = (
+    "Dalton Research Agent OS SEC financial-statements lane everflow@lumos.space"
+)
+# The approved record this lane runs under, named by version rather than
+# discovered, so a future v3 is a deliberate edit here and not something the
+# writer picks up because a file appeared.
+STATEMENT_LANE_GOVERNANCE = "sec-financial-statements-v2.json"
+LAUNCHER_KWARG = "statement_lane_launcher"
+
+
+def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Controller tick (P13ak).
+
+    One financial-statements child at a time: queue the companies the
+    checklist covers, launch one, and record a finished child's lines into the
+    ledger.
+    """
+
+    launcher = server.lane_launcher(LAUNCHER_KWARG)
+    if launcher is None:
+        return {"status": "unconfigured",
+                "reason": "no statements lane on this writer"}
+    return MissionStatementLaneCoordinator(
+        missions=server.coverage_mission,
+        launcher=launcher,
+        checklist=server.lane_company_checklist(),
+    ).dispatch_once()
+
+
+def add_arguments(parser: Any) -> None:
+    # Off unless an approved governance record is named, like every other
+    # connector on this writer.
+    parser.add_argument(
+        "--statement-lane-governance",
+        help="approved sec-financial-statements governance record",
+    )
+    parser.add_argument(
+        "--statement-lane-fixture",
+        help="rehearsal only: replay a captured parse instead of reaching SEC",
+    )
+    parser.add_argument("--statement-lane-user-agent", default=None)
+
+
+def build_launcher(args: Any) -> Any | None:
+    if args.statement_lane_governance is None:
+        return None
+    from pathlib import Path as _Path
+
+    from .sec_financials_launcher import SecFinancialsLauncher
+
+    mode_args = (
+        ("--fixture-file", args.statement_lane_fixture)
+        if args.statement_lane_fixture is not None else ("--allow-network",)
+    )
+    return SecFinancialsLauncher(
+        state_dir=_Path(args.db).expanduser().resolve().parent,
+        governance_path=args.statement_lane_governance,
+        mode_args=mode_args,
+        user_agent=args.statement_lane_user_agent,
+    )
+
+
+def argv_fragment(context: Any) -> list[str]:
+    # Independent of the Cockpit staging file -- this lane writes into the
+    # mission ledger, not the Cockpit inbox -- so it is enabled by its own
+    # approved record being present, and stays off on a Core without one.
+    governance = context.state / "connector-governance" / STATEMENT_LANE_GOVERNANCE
+    if not governance.is_file():
+        return []
+    return [
+        "--statement-lane-governance", str(governance),
+        "--statement-lane-user-agent", STATEMENT_LANE_USER_AGENT,
+    ]
+
+
+LANE = register_lane(LaneSpec(
+    operation="dispatch_mission_statements",
+    order=80,
+    driver_key="mission_statements",
+    handler=dispatch,
+    init_kwarg=LAUNCHER_KWARG,
+    argparse=add_arguments,
+    launcher_factory=build_launcher,
+    argv_fragment=argv_fragment,
+    note="P13ak: one company's quarterly income, balance and cash statements "
+         "as filed, structure and all.",
+))
+
+
 __all__ = [
     "COMPANY_FAILURE_MARKERS",
     "DEFAULT_FILING_LIMIT",
     "DEFAULT_FORM",
+    "LANE",
+    "LAUNCHER_KWARG",
     "MAX_ATTEMPTS_PER_COMPANY",
     "MAX_FAILURES_PER_COMPANY",
     "MAX_QUEUED_PER_RUN",
+    "STATEMENT_LANE_GOVERNANCE",
+    "STATEMENT_LANE_USER_AGENT",
     "MissionStatementLaneCoordinator",
+    "add_arguments",
+    "argv_fragment",
+    "build_launcher",
+    "dispatch",
 ]

@@ -31,18 +31,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:  # pragma: no cover - script bootstrap
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from dalton_core.model_configurations import model_config_names  # noqa: E402
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore  # noqa: E402
 
 POLICY_ID_PREFIX = "thesis-impact-day-budget-policy:production"
-MODEL_CONFIG_NAMES = (
-    "document-extraction-model-config.json",
-    "research-planner-model-config.json",
-    # P13am: the deliverable-drafting configuration, which the company model
-    # specification lane also runs on. It was left out when it was added, so
-    # the last cap raise repointed two of three configurations and this one
-    # would have kept naming a superseded policy version.
-    "initial-screen-model-config.json",
-)
 
 
 def _write_owner_only(path: Path, value: Any) -> None:
@@ -87,7 +79,9 @@ def raise_cap(config_path: Path, *, cap_usd: float, apply: bool) -> dict[str, An
     # lane keeps spending against a cap that is no longer the current one.
     thesis["budget_policy_version_id"] = new_ref
     _write_owner_only(config_path, service)
-    for name in MODEL_CONFIG_NAMES:
+    # P14-0: the set of configurations is a registry a lane adds itself to,
+    # not a tuple in this script that a lane module could never reach.
+    for name in model_config_names():
         target = state_dir / name
         if not target.is_file():
             continue
