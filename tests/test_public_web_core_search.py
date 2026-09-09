@@ -20,6 +20,7 @@ from dalton_core.connector_governance_cli import approve_governance_record
 from dalton_core.connector_runner import RunnerValidationError
 from dalton_core.live_mcp_connector import (
     GEMINI_WEB_SEARCH_CREDENTIAL_SLOT_REF,
+    host_tool_bridge_for,
     host_tool_bridge_for_operation,
 )
 from dalton_core.observability import ObservabilityStore
@@ -154,7 +155,12 @@ class GovernanceAndSpecTests(unittest.TestCase):
              OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH, "public_web",
              GEMINI_WEB_SEARCH_CREDENTIAL_SLOT_REF, {"search_web": "web_search"}),
         )
-        alpha = host_tool_bridge_for_operation("search_library")
+        # P13af: search_library is no longer resolvable by name -- AlphaEngine
+        # and Guidepoint both expose one, on different sources and under
+        # different approvals. The single-key path refuses rather than picks.
+        with self.assertRaises(RunnerValidationError):
+            host_tool_bridge_for_operation("search_library")
+        alpha = host_tool_bridge_for("source:alphaengine", "search_library")
         self.assertEqual((alpha.template_key, alpha.source_type, alpha.plan_prefix),
                          ("alphaengine", "authenticated_library", "live-mcp-plan:alphaengine"))
         with self.assertRaises(RunnerValidationError):

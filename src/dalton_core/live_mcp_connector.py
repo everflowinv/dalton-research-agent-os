@@ -8,10 +8,12 @@ profile, a frozen inventory schema, and one host-owned bridge target.
 P9d-4a: the lane serves a frozen registry of host-owned bridges instead of
 one.  Each bridge names its inventory template, its operation -> host tool
 map, the source type its template declares and its logical credential slot.
-Operations are unique across bridges, so every validator resolves the bridge
-from the operation name; the AlphaEngine wire (ids, hashes, error paths) is
-unchanged.  The second entry is OpenClaw's Gemini ``web_search`` host tool
-(``search_web``), whose results are discovery-only URL refs.
+Every validator resolves the bridge from the pair (source ref, operation): an
+operation name alone does not identify a bridge, because two authenticated
+libraries can both expose ``search_library``.  The AlphaEngine wire (ids,
+hashes, error paths) is unchanged.  The second entry is OpenClaw's Gemini
+``web_search`` host tool (``search_web``), whose results are discovery-only
+URL refs.
 """
 
 from __future__ import annotations
@@ -70,6 +72,25 @@ OPENCLAW_ALPHAENGINE_BRIDGE_HASH = content_hash(
     }
 )
 GEMINI_WEB_SEARCH_CREDENTIAL_SLOT_REF = "credential-slot:gemini-web-search"
+# P13af: the expert-network library, reached through the same host-owned MCP
+# protocol as AlphaEngine. Its ``search_library`` is a different tool on a
+# different source from AlphaEngine's, which is exactly why the bridge key had
+# to stop being the operation name.
+OPENCLAW_GUIDEPOINT_BRIDGE_REF = "openclaw-bridge:guidepoint-mcp:0.1"
+_GUIDEPOINT_TOOL_NAMES = {
+    "search_library": "search_library",
+    "get_transcript": "get_transcript",
+}
+OPENCLAW_GUIDEPOINT_BRIDGE_HASH = content_hash(
+    {
+        "bridge_ref": OPENCLAW_GUIDEPOINT_BRIDGE_REF,
+        "transport_kind": "mcp_managed",
+        "source_ref": "source:guidepoint",
+        "operation_tools": _GUIDEPOINT_TOOL_NAMES,
+        "arbitrary_tool_execution": False,
+        "credential_material_serialized": False,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +98,13 @@ class HostToolBridge:
     """One host-owned bridge the live lane may route an operation through."""
 
     template_key: str
+    # P13af: which source this bridge speaks for. An operation name alone does
+    # not identify a bridge -- AlphaEngine and Guidepoint both expose
+    # ``search_library`` -- and this is the field that tells them apart. It is
+    # on every wire that needs to resolve a bridge (compiled step, transport
+    # plan, adapter request all carry a source ref), so nothing has to be
+    # threaded through to use it.
+    source_ref: str
     bridge_ref: str
     bridge_hash: str
     tool_names: Mapping[str, str]
@@ -88,6 +116,7 @@ class HostToolBridge:
 _BRIDGES: tuple[HostToolBridge, ...] = (
     HostToolBridge(
         template_key="alphaengine",
+        source_ref="source:alphaengine",
         bridge_ref=OPENCLAW_ALPHAENGINE_BRIDGE_REF,
         bridge_hash=OPENCLAW_ALPHAENGINE_BRIDGE_HASH,
         tool_names=MappingProxyType(dict(_ALPHAENGINE_TOOL_NAMES)),
@@ -100,6 +129,7 @@ _BRIDGES: tuple[HostToolBridge, ...] = (
     # the host key stays with OpenClaw, Core only carries a logical slot ref.
     HostToolBridge(
         template_key="gemini-web-search",
+        source_ref="source:public-web",
         bridge_ref=OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_REF,
         bridge_hash=OPENCLAW_GEMINI_WEB_SEARCH_BRIDGE_HASH,
         tool_names=MappingProxyType({"search_web": "web_search"}),
@@ -107,22 +137,71 @@ _BRIDGES: tuple[HostToolBridge, ...] = (
         credential_slot_ref=GEMINI_WEB_SEARCH_CREDENTIAL_SLOT_REF,
         plan_prefix="live-mcp-plan:gemini-web-search",
     ),
+    # P13ae/P13af: Guidepoint, the second authenticated library. Its presence
+    # is what proved the operation-name key was wrong: `search_library` here is
+    # a different tool, on a different source, under a different approval.
+    HostToolBridge(
+        template_key="guidepoint",
+        source_ref="source:guidepoint",
+        bridge_ref=OPENCLAW_GUIDEPOINT_BRIDGE_REF,
+        bridge_hash=OPENCLAW_GUIDEPOINT_BRIDGE_HASH,
+        tool_names=MappingProxyType(dict(_GUIDEPOINT_TOOL_NAMES)),
+        source_type="authenticated_library",
+        credential_slot_ref="credential-slot:guidepoint",
+        plan_prefix="live-mcp-plan:guidepoint",
+    ),
 )
-_BRIDGE_BY_OPERATION: Mapping[str, HostToolBridge] = MappingProxyType({
-    operation: bridge for bridge in _BRIDGES for operation in bridge.tool_names
+# P13af: the key is (source, operation), not operation.
+#
+# This was keyed by operation alone, with an assert that operation names were
+# unique across bridges. That assert was doing real work -- it is what stopped
+# a call being routed to another provider's tool -- but the premise expired the
+# moment a second authenticated library appeared: AlphaEngine exposes
+# ``search_library`` and so does Guidepoint. Keying on the pair keeps the
+# guarantee and stops the uniqueness of operation names being load-bearing.
+_BRIDGE_BY_SOURCE_OPERATION: Mapping[tuple[str, str], HostToolBridge] = MappingProxyType({
+    (bridge.source_ref, operation): bridge
+    for bridge in _BRIDGES for operation in bridge.tool_names
 })
-assert len(_BRIDGE_BY_OPERATION) == sum(len(bridge.tool_names) for bridge in _BRIDGES), (
-    "host tool operations must be unique across bridges"
-)
+assert len(_BRIDGE_BY_SOURCE_OPERATION) == sum(
+    len(bridge.tool_names) for bridge in _BRIDGES
+), "host tool (source, operation) pairs must be unique across bridges"
+
+
+def host_tool_bridge_for(source_ref: str, operation: str) -> HostToolBridge:
+    """Resolve the frozen bridge serving one source's operation (fail closed)."""
+
+    key = (source_ref, operation)
+    bridge = (_BRIDGE_BY_SOURCE_OPERATION.get(key)
+              if isinstance(source_ref, str) and isinstance(operation, str) else None)
+    if bridge is None:
+        raise RunnerValidationError(
+            "live MCP operation is not served by a frozen host bridge for this source"
+        )
+    return bridge
 
 
 def host_tool_bridge_for_operation(operation: str) -> HostToolBridge:
-    """Resolve the frozen bridge that serves ``operation`` (fail closed)."""
+    """Resolve by operation alone, refusing when more than one source offers it.
 
-    bridge = _BRIDGE_BY_OPERATION.get(operation) if isinstance(operation, str) else None
-    if bridge is None:
+    Kept for callers that genuinely have no source in hand. It refuses an
+    ambiguous operation rather than picking one, because picking is exactly the
+    failure the pair key exists to prevent -- and a caller that cannot say which
+    source it means has not established the right to reach either.
+    """
+
+    if not isinstance(operation, str):
         raise RunnerValidationError("live MCP operation is not served by a frozen host bridge")
-    return bridge
+    matches = [bridge for bridge in _BRIDGES if operation in bridge.tool_names]
+    if len(matches) != 1:
+        raise RunnerValidationError(
+            "live MCP operation is not served by exactly one frozen host bridge; "
+            "resolve it with its source"
+            if matches else
+            "live MCP operation is not served by a frozen host bridge"
+        )
+    return matches[0]
+
 
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _REF_RE = re.compile(
@@ -206,9 +285,9 @@ def _validate_hash(wire: Mapping[str, Any], name: str) -> None:
 
 
 def _bridge_template_operation(
-    operation: str,
+    source_ref: str, operation: str,
 ) -> tuple[HostToolBridge, dict[str, Any], dict[str, Any]]:
-    bridge = host_tool_bridge_for_operation(operation)
+    bridge = host_tool_bridge_for(source_ref, operation)
     inventory = load_packaged_connector_inventory()
     template = inventory["templates"][bridge.template_key]
     matches = [
@@ -241,7 +320,9 @@ def build_live_mcp_transport_plan(
     installed = [item for item in plan["steps"] if item["id"] == step["id"]]
     if len(installed) != 1 or installed[0] != step:
         raise RunnerConflict("compiled MCP step is not installed in its plan")
-    bridge, template, operation = _bridge_template_operation(step["operation"])
+    bridge, template, operation = _bridge_template_operation(
+        step["source_ref"], step["operation"]
+    )
     identity = {
         "compiled_connector_plan_ref": plan["id"],
         "compiled_connector_plan_hash": plan["content_hash"],
@@ -308,7 +389,9 @@ def validate_live_mcp_transport_plan(
         {"operation": wire["operation"], "parameters": wire["parameters"]}
     ):
         raise RunnerConflict("LiveMcpTransportPlan query_hash mismatch")
-    bridge, template, operation = _bridge_template_operation(wire["operation"])
+    bridge, template, operation = _bridge_template_operation(
+        wire["source_ref"], wire["operation"]
+    )
     if (
         wire["bridge_ref"] != bridge.bridge_ref
         or wire["bridge_hash"] != bridge.bridge_hash
@@ -407,7 +490,9 @@ def validate_live_mcp_adapter_request(
     ):
         wire[name] = _hash(wire[name], name)
     wire["operation"] = _text(wire["operation"], "operation")
-    bridge = host_tool_bridge_for_operation(wire["operation"])
+    bridge = host_tool_bridge_for(
+        wire["source_identity"]["source_ref"], wire["operation"]
+    )
     wire["tool_name"] = _text(wire["tool_name"], "tool_name")
     wire["deadline_at"] = _timestamp(wire["deadline_at"], "deadline_at")
     wire["physical_attempt_number"] = _integer(
@@ -488,8 +573,10 @@ class LiveMcpRunnerAdmissionGate(ConnectorRunnerAdmissionGate):
         self.credential_authority = credential_authority
         self._templates = load_packaged_connector_inventory()["templates"]
 
-    def _bridge_template(self, operation: str) -> tuple[HostToolBridge, dict[str, Any]]:
-        bridge = host_tool_bridge_for_operation(operation)
+    def _bridge_template(
+        self, source_ref: str, operation: str
+    ) -> tuple[HostToolBridge, dict[str, Any]]:
+        bridge = host_tool_bridge_for(source_ref, operation)
         return bridge, self._templates[bridge.template_key]
 
     def _validate_runner_request_protocol(self, wire: Mapping[str, Any]) -> None:
@@ -544,7 +631,9 @@ class LiveMcpRunnerAdmissionGate(ConnectorRunnerAdmissionGate):
         compiled: Mapping[str, Any],
         step: Mapping[str, Any],
     ) -> None:
-        bridge, template = self._bridge_template(transport["operation"])
+        bridge, template = self._bridge_template(
+            transport["source_ref"], transport["operation"]
+        )
         operation = next(
             item for item in template["operations"]
             if item["operation"] == transport["operation"]
@@ -895,7 +984,9 @@ class LiveMcpRunnerAdmissionGate(ConnectorRunnerAdmissionGate):
             raise RunnerConflict("live MCP observation lacks transport authority")
         self._validate_adapter_request_authority(request, transport)
         if observation["outcome"] == "succeeded":
-            _, template = self._bridge_template(request["operation"])
+            _, template = self._bridge_template(
+                request["source_identity"]["source_ref"], request["operation"]
+            )
             documents = {
                 item["schema_ref"]: item for item in template["schema_documents"]
             }
@@ -1316,6 +1407,7 @@ __all__ = [
     "LiveMcpRunnerAdmissionGate",
     "OPENCLAW_ALPHAENGINE_BRIDGE_HASH",
     "OPENCLAW_ALPHAENGINE_BRIDGE_REF",
+    "host_tool_bridge_for",
     "host_tool_bridge_for_operation",
     "alphaengine_document_page_from_raw_response",
     "alphaengine_tool_arguments",
