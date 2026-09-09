@@ -555,6 +555,10 @@ class ConnectorInventoryTests(unittest.TestCase):
                 "cninfo", "sec", "sec-financials", "roic-transcript",
                 "alphaengine", "x-xreach", "x-x-search", "reddit-last30days",
                 "guidepoint", "gemini-web-search", "web-fetch", "xueqiu",
+                # S3: the crowd layer. Each is a new connector rather than a
+                # widened shadow template, so the 2026-08-14 hashes the owner
+                # has seen do not move.
+                "xueqiu-posts", "x-xreach-crowd", "employee-reviews",
             },
         )
         refs = {profile["connector_ref"] for profile in profiles.values()}
@@ -570,6 +574,17 @@ class ConnectorInventoryTests(unittest.TestCase):
         self.assertNotEqual(
             profiles["x-xreach"]["connector_ref"], profiles["x-x-search"]["connector_ref"]
         )
+        # S3: same reasoning again. One Xueqiu and one X, each read two ways,
+        # so the source refs match and the connector refs must not.
+        for shadow, crowd in (("xueqiu", "xueqiu-posts"),
+                              ("x-xreach", "x-xreach-crowd")):
+            self.assertEqual(
+                profiles[shadow]["source_identity"]["source_ref"],
+                profiles[crowd]["source_identity"]["source_ref"],
+            )
+            self.assertNotEqual(
+                profiles[shadow]["connector_ref"], profiles[crowd]["connector_ref"]
+            )
         self.assertNotEqual(
             profiles["gemini-web-search"]["connector_ref"], profiles["web-fetch"]["connector_ref"]
         )
@@ -606,7 +621,11 @@ class ConnectorInventoryTests(unittest.TestCase):
         self.assertNotIn("cookie:", serialized)
 
     def test_transport_auth_and_readiness_never_fabricate_runner_authority(self) -> None:
-        public = {"cninfo", "sec", "sec-financials", "roic-transcript", "web-fetch"}
+        # S3: `employee-reviews` joins the public set. Blind is plain HTTPS to
+        # one host with no credential anywhere, so it carries a host allowlist
+        # like the other public connectors and unlike the host-owned ones.
+        public = {"cninfo", "sec", "sec-financials", "roic-transcript", "web-fetch",
+                  "employee-reviews"}
         for slug, profile in self.built["templates"].items():
             with self.subTest(slug=slug):
                 readiness = profile["readiness"]

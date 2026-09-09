@@ -1,0 +1,136 @@
+{
+  "authenticated": false,
+  "cases": [
+    {
+      "case_ref": "fixture:employee-reviews:blind_reviews:empty:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "blind_reviews",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "e4a2e4f1b42b98103585139695cca772fe77d7fb3955ab1fe122439937cc8113",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:employee-reviews:blind_reviews:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "blind_reviews",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:employee-reviews:blind_reviews:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "blind_reviews",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "9e71fd9543e672e51214c152aa8f30c93db76d5d18406746f62c33b5319eb073",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:employee-reviews:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:employee-reviews:blind_reviews:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "blind_reviews",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:employee-reviews:blind_reviews:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "blind_reviews",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:employee-reviews:blind_reviews:success:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "blind_reviews",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "f2cf6ed0120d664bebb9f4571db8e74893ed16c50dc854e587873fc22298a09a",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:employee-reviews:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:employee-reviews:blind_reviews:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "blind_reviews",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:employee-reviews:blind_reviews:pagination:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": "synthetic-next",
+      "operation": "blind_reviews",
+      "outcome": "succeeded",
+      "page": 1,
+      "provider_status": 200,
+      "raw_payload_hash": "7c1027db77f6ed325e88b403376322c7ad0b494354ea265c934596948fba8fd4",
+      "scenario": "pagination",
+      "source_record_refs": [
+        "record:employee-reviews:synthetic:1"
+      ],
+      "source_status": "partial"
+    }
+  ],
+  "connector_template_ref": "connector-profile-template:employee-reviews:0.1",
+  "content_hash": "6173745acdd93f6c5f7f982794f59357e1580fb690feca9e5331d721d3d06050",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "id": "connector-fixture-manifest:employee-reviews:0.1",
+  "operations": [
+    {
+      "operation": "blind_reviews",
+      "pagination_mode": "page"
+    }
+  ],
+  "recording_boundary": "public_provider",
+  "schema_version": "0.1",
+  "synthetic": true
+}

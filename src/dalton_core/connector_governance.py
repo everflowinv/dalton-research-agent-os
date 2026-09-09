@@ -71,6 +71,14 @@ ROIC_GET_KIND = "roic-get-transcript"
 ROIC_LIST_CAPABILITY_ID = "capability:dalton:connector:roic-list-transcripts"
 ROIC_GET_CAPABILITY_ID = "capability:dalton:connector:roic-get-transcript"
 
+# S3 crowd sources. Grouped rather than named one by one at the call site,
+# because "which of these seven is it" is the only question the dispatcher asks.
+XUEQIU_KINDS = frozenset({"xueqiu-search-posts", "xueqiu-get-post", "xueqiu-hot-rank"})
+XREACH_KINDS = frozenset(
+    {"x-xreach-user-timeline", "x-xreach-search", "x-xreach-thread"}
+)
+EMPLOYEE_REVIEWS_KIND = "employee-reviews-blind"
+
 
 class ConnectorGovernanceError(RuntimeError):
     """A malformed, unknown, or inactive connector governance record."""
@@ -298,6 +306,89 @@ def _web_fetch_fixture_hash() -> str:
     return web_fetch_fixture_hash()
 
 
+# S3: the crowd connectors. Seven kinds, because there are seven operations and
+# a schema hash binds exactly one of them -- approving the Xueqiu post search is
+# not approving the Xueqiu post read, and approving either is certainly not
+# approving X. The source hash is shared inside each connector, because the same
+# Xueqiu and the same X are the same sources.
+def _xueqiu_source_hash() -> str:
+    from .xueqiu_core import xueqiu_source_hash
+
+    return xueqiu_source_hash()
+
+
+def _xueqiu_permissions() -> dict[str, Any]:
+    from .xueqiu_core import xueqiu_permissions
+
+    return copy.deepcopy(xueqiu_permissions())
+
+
+def _xueqiu_fixture_hash() -> str:
+    from .xueqiu_core import xueqiu_fixture_hash
+
+    return xueqiu_fixture_hash()
+
+
+def _xueqiu_schema_hash_for(operation: str) -> Callable[[], str]:
+    def hasher() -> str:
+        from .xueqiu_core import xueqiu_schema_hash
+
+        return xueqiu_schema_hash(operation)
+
+    return hasher
+
+
+def _xreach_source_hash() -> str:
+    from .xreach_core import xreach_source_hash
+
+    return xreach_source_hash()
+
+
+def _xreach_permissions() -> dict[str, Any]:
+    from .xreach_core import xreach_permissions
+
+    return copy.deepcopy(xreach_permissions())
+
+
+def _xreach_fixture_hash() -> str:
+    from .xreach_core import xreach_fixture_hash
+
+    return xreach_fixture_hash()
+
+
+def _xreach_schema_hash_for(operation: str) -> Callable[[], str]:
+    def hasher() -> str:
+        from .xreach_core import xreach_schema_hash
+
+        return xreach_schema_hash(operation)
+
+    return hasher
+
+
+def _employee_reviews_source_hash() -> str:
+    from .employee_reviews_core import employee_reviews_source_hash
+
+    return employee_reviews_source_hash()
+
+
+def _employee_reviews_schema_hash() -> str:
+    from .employee_reviews_core import employee_reviews_schema_hash
+
+    return employee_reviews_schema_hash()
+
+
+def _employee_reviews_permissions() -> dict[str, Any]:
+    from .employee_reviews_core import employee_reviews_permissions
+
+    return copy.deepcopy(employee_reviews_permissions())
+
+
+def _employee_reviews_fixture_hash() -> str:
+    from .employee_reviews_core import employee_reviews_fixture_hash
+
+    return employee_reviews_fixture_hash()
+
+
 # Capability id is deliberately the dispatch key at load time because it is
 # the only kind identity present in the closed governance record.
 GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
@@ -401,6 +492,62 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         schema_hash=_roic_get_schema_hash,
         permissions=_roic_permissions,
         fixture_hash=_roic_fixture_hash,
+    ),
+    "xueqiu-search-posts": _KindSpec(
+        capability_id="capability:dalton:connector:xueqiu-search-posts",
+        template_key="xueqiu-posts",
+        source_hash=_xueqiu_source_hash,
+        schema_hash=_xueqiu_schema_hash_for("search_posts"),
+        permissions=_xueqiu_permissions,
+        fixture_hash=_xueqiu_fixture_hash,
+    ),
+    "xueqiu-get-post": _KindSpec(
+        capability_id="capability:dalton:connector:xueqiu-get-post",
+        template_key="xueqiu-posts",
+        source_hash=_xueqiu_source_hash,
+        schema_hash=_xueqiu_schema_hash_for("get_post"),
+        permissions=_xueqiu_permissions,
+        fixture_hash=_xueqiu_fixture_hash,
+    ),
+    "xueqiu-hot-rank": _KindSpec(
+        capability_id="capability:dalton:connector:xueqiu-hot-rank",
+        template_key="xueqiu-posts",
+        source_hash=_xueqiu_source_hash,
+        schema_hash=_xueqiu_schema_hash_for("hot_rank"),
+        permissions=_xueqiu_permissions,
+        fixture_hash=_xueqiu_fixture_hash,
+    ),
+    "x-xreach-user-timeline": _KindSpec(
+        capability_id="capability:dalton:connector:x-xreach-user-timeline",
+        template_key="x-xreach-crowd",
+        source_hash=_xreach_source_hash,
+        schema_hash=_xreach_schema_hash_for("user_timeline"),
+        permissions=_xreach_permissions,
+        fixture_hash=_xreach_fixture_hash,
+    ),
+    "x-xreach-search": _KindSpec(
+        capability_id="capability:dalton:connector:x-xreach-search",
+        template_key="x-xreach-crowd",
+        source_hash=_xreach_source_hash,
+        schema_hash=_xreach_schema_hash_for("search"),
+        permissions=_xreach_permissions,
+        fixture_hash=_xreach_fixture_hash,
+    ),
+    "x-xreach-thread": _KindSpec(
+        capability_id="capability:dalton:connector:x-xreach-thread",
+        template_key="x-xreach-crowd",
+        source_hash=_xreach_source_hash,
+        schema_hash=_xreach_schema_hash_for("thread"),
+        permissions=_xreach_permissions,
+        fixture_hash=_xreach_fixture_hash,
+    ),
+    "employee-reviews-blind": _KindSpec(
+        capability_id="capability:dalton:connector:employee-reviews-blind",
+        template_key="employee-reviews",
+        source_hash=_employee_reviews_source_hash,
+        schema_hash=_employee_reviews_schema_hash,
+        permissions=_employee_reviews_permissions,
+        fixture_hash=_employee_reviews_fixture_hash,
     ),
 }
 # Public aliases make the registry discoverable without exposing mutable
@@ -541,6 +688,45 @@ def build_governance_record(
         from .sec_financials_core import build_sec_financials_governance_record
 
         return build_sec_financials_governance_record(
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in XUEQIU_KINDS:
+        from .xueqiu_core import KIND_BY_OPERATION as XUEQIU_BY_OPERATION
+        from .xueqiu_core import build_xueqiu_governance_record
+
+        operation = next(op for op, name in XUEQIU_BY_OPERATION.items() if name == kind)
+        return build_xueqiu_governance_record(
+            operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in XREACH_KINDS:
+        from .xreach_core import KIND_BY_OPERATION as XREACH_BY_OPERATION
+        from .xreach_core import build_xreach_governance_record
+
+        operation = next(op for op, name in XREACH_BY_OPERATION.items() if name == kind)
+        return build_xreach_governance_record(
+            operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind == EMPLOYEE_REVIEWS_KIND:
+        from .employee_reviews_core import build_employee_reviews_governance_record
+
+        return build_employee_reviews_governance_record(
             approved_by=approved_by,
             status=status,
             effective_from=effective_from,

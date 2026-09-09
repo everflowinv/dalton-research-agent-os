@@ -33,6 +33,21 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # S3: the crowd sources are all fifty a day. Fifty is not a
+                    # measurement of anything the sources publish; it is ten
+                    # times what the lane is for, so a retry loop stops at
+                    # breakfast rather than at the point where an account is
+                    # flagged. Sorted here because "employee-reviews" sorts
+                    # between "alphaengine" and "gemini-web-search".
+                    "connector_slug": "employee-reviews",
+                    "operation": "blind_reviews",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 20,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
                     "connector_slug": "gemini-web-search",
                     "operation": "search_web",
                     "quota_unit": "search",
@@ -57,6 +72,60 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "quota_unit": "document",
                     "daily_unit_limit": 1_000,
                     "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "x-xreach-crowd",
+                    "operation": "search",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 5,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "x-xreach-crowd",
+                    "operation": "thread",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 5,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "x-xreach-crowd",
+                    "operation": "user_timeline",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 5,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "xueqiu-posts",
+                    "operation": "get_post",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "xueqiu-posts",
+                    "operation": "hot_rank",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "xueqiu-posts",
+                    "operation": "search_posts",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 5,
                     "window_seconds": 86_400,
                     "reset_timezone": "Asia/Shanghai",
                 },
