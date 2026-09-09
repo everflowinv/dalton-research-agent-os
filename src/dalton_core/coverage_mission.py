@@ -155,6 +155,9 @@ AUTOMATION_WRITE_SCOPES: tuple[str, ...] = (
     # The five-word decision at the end of an Active Coverage event, recorded
     # as its own object so a call can be looked up rather than inferred.
     "conviction_call",
+    # P12b: the claim index is a projection over Claims (aspect, as_of,
+    # importance, dedupe group); tagging writes index entries, never Claims.
+    "claim_index",
 )
 DISCOVERY_DISPATCH_STATUSES: tuple[str, ...] = ("launched", "succeeded", "failed", "rejected")
 # Sources a mission may run search-driven discovery against, and the Core
