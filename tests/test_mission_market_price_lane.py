@@ -436,15 +436,20 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(spec.param_fields, frozenset())
 
     def test_it_runs_between_the_statements_and_the_model_specification(self):
+        # C1: relaxed from adjacency to ordering, for the reason Wave 0 relaxed
+        # the registry's own migration checks from "equals" to "contains".
+        # What this pins is a real decision -- prices are fetched after the
+        # filings and before the specification that will be read against them.
+        # "And nothing may ever sit between them" was never that decision, and
+        # asserting it made every later lane in this range someone else's
+        # failing test. The catalyst calendar lane is at order 87.
         from dalton_core.lane_registry import registered_lanes
 
         order = [spec.operation for spec in registered_lanes()]
-        self.assertEqual(
-            order[order.index("dispatch_mission_statements") + 1],
-            "dispatch_mission_market_prices")
-        self.assertEqual(
-            order[order.index("dispatch_mission_market_prices") + 1],
-            "dispatch_company_model_spec")
+        self.assertLess(order.index("dispatch_mission_statements"),
+                        order.index("dispatch_mission_market_prices"))
+        self.assertLess(order.index("dispatch_mission_market_prices"),
+                        order.index("dispatch_company_model_spec"))
 
     def test_without_an_approval_there_is_no_launcher_and_no_argv(self):
         import argparse

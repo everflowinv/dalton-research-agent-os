@@ -28,6 +28,7 @@ from .lane_child_launcher import (
     LaneChildRejected,
     LaneChildTicketNotFound,
 )
+from .lane_registry import LaneSpec, register_lane
 
 MAX_FAILURE_DETAIL_CHARS = 500
 # One tick looks at this many pending claims per company before deciding.  The
@@ -181,9 +182,118 @@ class MissionClaimIndexLaneCoordinator:
         }
 
 
+# -- registration ------------------------------------------------------------
+#
+# INT1: P12b delivered the coordinator, the launcher and the CLI and wrote the
+# LaneSpec out in its report without putting it anywhere, so the index had no
+# tick and only ever ran by hand. This is that line.
+#
+# Everything below is either this lane's own decision -- what turns it on, what
+# it is called in the tick summary -- or a lazy import, so that importing this
+# module registers the lane without dragging in the writer.
+
+LAUNCHER_KWARG = "claim_index_launcher"
+# The child tags every claim's importance, as_of and dedupe group by rule and
+# needs a model only for the aspect of qualitative prose, so the configuration
+# is what turns the *lane* on rather than what makes it useful: without one the
+# child would report ``gated`` on every batch it could not finish, every tick,
+# forever. Same switch shape as the model-specification lane.
+CLAIM_INDEX_MODEL_CONFIG = "claim-index-model-config.json"
+
+
+def dispatch(server: Any, params: Any) -> dict[str, Any]:
+    """Controller tick (P12b).
+
+    One company's pending batch at a time. The lane has no queue -- what is
+    untagged is derived from the Ledger every tick -- so its resting state is
+    silence and there is nothing to leave stuck.
+
+    The coordinator is cached in ``server.lane_state`` rather than rebuilt,
+    because the state it holds is the point: which batch is open and which
+    batches have already failed. A fresh coordinator every tick would forget
+    both and re-launch a child for a batch it had just been told was doomed.
+    """
+
+    launcher = server.lane_launcher(LAUNCHER_KWARG)
+    if launcher is None:
+        return {"status": "unconfigured",
+                "reason": "no claim index lane on this writer"}
+    coordinator = server.lane_state.get(LAUNCHER_KWARG)
+    if coordinator is None:
+        def mission() -> Any:
+            pointer = server.store.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer "
+                "ORDER BY mission_ref LIMIT 1"
+            ).fetchone()
+            return (None if pointer is None
+                    else server.coverage_mission.mission(pointer["mission_version_id"]))
+
+        coordinator = MissionClaimIndexLaneCoordinator(
+            # The store, not the missions authority: what this lane needs to
+            # read is the claim index snapshot.
+            store=server.store,
+            launcher=launcher,
+            mission=mission,
+        )
+        server.lane_state[LAUNCHER_KWARG] = coordinator
+    return coordinator.dispatch_once()
+
+
+def add_arguments(parser: Any) -> None:
+    parser.add_argument(
+        "--claim-index-model-config",
+        help="model configuration for tagging qualitative claims",
+    )
+
+
+def build_launcher(args: Any) -> Any | None:
+    if args.claim_index_model_config is None:
+        return None
+    from pathlib import Path as _Path
+
+    from .claim_index_launcher import ClaimIndexLauncher
+
+    return ClaimIndexLauncher(
+        state_dir=_Path(args.db).expanduser().resolve().parent,
+        model_config_path=args.claim_index_model_config,
+        scheduler_db=args.scheduler,
+    )
+
+
+def argv_fragment(context: Any) -> list[str]:
+    config = context.state / CLAIM_INDEX_MODEL_CONFIG
+    if not config.is_file():
+        return []
+    return ["--claim-index-model-config", str(config)]
+
+
+LANE = register_lane(LaneSpec(
+    operation="dispatch_claim_index",
+    # After the research plan (100) and before the Initial Screen (110): the
+    # screen drafts from Claims, and drafting from an indexed set is what stops
+    # it citing the same quarter's revenue three times in one paragraph.
+    order=105,
+    driver_key="claim_index",
+    handler=dispatch,
+    init_kwarg=LAUNCHER_KWARG,
+    argparse=add_arguments,
+    launcher_factory=build_launcher,
+    argv_fragment=argv_fragment,
+    note="P12b: aspect, as_of, importance and duplicate-merge for every Claim, "
+         "as an append-only projection that changes no Claim's bytes.",
+))
+
+
 __all__ = [
+    "CLAIM_INDEX_MODEL_CONFIG",
+    "LANE",
+    "LAUNCHER_KWARG",
     "MAX_FAILURE_DETAIL_CHARS",
     "MAX_PENDING_SCANNED",
     "TRANSIENT_STATUSES",
     "MissionClaimIndexLaneCoordinator",
+    "add_arguments",
+    "argv_fragment",
+    "build_launcher",
+    "dispatch",
 ]

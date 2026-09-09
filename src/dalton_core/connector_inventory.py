@@ -827,7 +827,181 @@ def _array_of_strings() -> dict[str, Any]:
     return {"type": "array", "uniqueItems": True, "items": _string()}
 
 
+def _crowd_rating() -> dict[str, Any]:
+    """A rating on the wire is text, for the reason every figure here is text.
+
+    A float is not what was read: 3.7 and 3.70 are the same float and different
+    readings, and a JSON parser is free to give either back. Null is a real
+    answer -- a reviewer may score some dimensions and not others.
+    """
+
+    return {"type": ["string", "null"], "pattern": "^(0|[1-9][0-9]*)([.][0-9]+)?$"}
+
+
+def _crowd_counter() -> dict[str, Any]:
+    """A like or reply count, which the source may simply not report."""
+
+    return {"type": ["integer", "null"], "minimum": 0}
+
+
+def _crowd_post_schema(*, extra: Mapping[str, Any]) -> dict[str, Any]:
+    """One post from a crowd source: who said it, when, and what it said.
+
+    Deliberately not a Claim shape. There is no metric, no period and no unit,
+    because a post is not an assertion about a company's results; it is a
+    record that somebody wrote something. Everything a reader would need to go
+    back and look at the original is here, and nothing more.
+    """
+
+    properties: dict[str, Any] = {
+        "post_id": _string(),
+        "url": {"type": ["string", "null"]},
+        "created_at": _string(),
+        "author": {"type": ["string", "null"]},
+        "author_id": {"type": ["string", "null"]},
+        "text": {"type": ["string", "null"]},
+        "reply_count": _crowd_counter(),
+        "like_count": _crowd_counter(),
+        "view_count": _crowd_counter(),
+    }
+    properties.update(extra)
+    return _object_schema(properties, tuple(sorted(properties)))
+
+
 def _output_schema(slug: str, operation: str) -> dict[str, Any]:
+    # S3: the crowd connectors carry their records on the wire rather than only
+    # naming them. The lane's whole output is a set of posts and reviews, and a
+    # contract that validated only the refs would leave the part that becomes
+    # evidence unchecked.
+    if slug == "xueqiu-posts" and operation in {"search_posts", "get_post"}:
+        post = _crowd_post_schema(extra={
+            "title": {"type": ["string", "null"]},
+            "retweet_count": _crowd_counter(),
+            # The list endpoint cuts long posts; reading one whole needs the
+            # single-post operation. Saying so on the record is what keeps a
+            # reader from quoting half a sentence as the whole of one.
+            "truncated": {"type": "boolean"},
+        })
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                "operation": {"type": "string", "enum": ["search_posts", "get_post"]},
+                "posts": {"type": "array", "items": post},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+            },
+            (
+                "schema_version", "operation", "posts", "source_record_refs",
+                "next_cursor", "provider_status",
+            ),
+        )
+    if (slug, operation) == ("xueqiu-posts", "hot_rank"):
+        entry = _object_schema(
+            {
+                "symbol": _string(),
+                "name": {"type": ["string", "null"]},
+                "rank": _integer(1),
+                "value": {"type": ["string", "null"],
+                          "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$"},
+            },
+            ("symbol", "name", "rank", "value"),
+        )
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                # Which route produced this ranking. The fallback is a
+                # different source of the same list and must never be shown as
+                # the primary one, so the label travels with the data.
+                "provenance_label": _string(),
+                "ranking": {"type": "array", "items": entry},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+            },
+            (
+                "schema_version", "provenance_label", "ranking",
+                "source_record_refs", "next_cursor", "provider_status",
+            ),
+        )
+    if slug == "x-xreach-crowd":
+        post = _crowd_post_schema(extra={
+            "repost_count": _crowd_counter(),
+            "is_reply": {"type": "boolean"},
+        })
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                "operation": {
+                    "type": "string",
+                    "enum": ["user_timeline", "search", "thread"],
+                },
+                # What the response is complete with respect to. A timeline
+                # paged to its end is enumerated; a keyword search never is,
+                # whatever the cursor says.
+                "completeness": {
+                    "type": "string",
+                    "enum": ["enumerated", "ranked", "partial", "unknown"],
+                },
+                "posts": {"type": "array", "items": post},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+            },
+            (
+                "schema_version", "operation", "completeness", "posts",
+                "source_record_refs", "next_cursor", "provider_status",
+            ),
+        )
+    if (slug, operation) == ("employee-reviews", "blind_reviews"):
+        ratings = _object_schema(
+            {name: _crowd_rating() for name in (
+                "overall", "career", "balance", "compensation", "culture",
+                "management",
+            )},
+            (
+                "overall", "career", "balance", "compensation", "culture",
+                "management",
+            ),
+        )
+        review = _object_schema(
+            {
+                "review_id": _string(),
+                "created_at": _string(),
+                "summary": {"type": ["string", "null"]},
+                "ratings": ratings,
+                # The source substitutes placeholder prose for everything past
+                # its most recent page. The ratings and the date on the same
+                # row are real, so the row is kept and the substitution is
+                # recorded rather than the row being dropped.
+                "body_locked": {"type": "boolean"},
+                "pros": {"type": ["string", "null"]},
+                "cons": {"type": ["string", "null"]},
+                "jobgroup": {"type": ["string", "null"]},
+                "location": {"type": ["string", "null"]},
+            },
+            (
+                "review_id", "created_at", "summary", "ratings", "body_locked",
+                "pros", "cons", "jobgroup", "location",
+            ),
+        )
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                "employer_slug": _string(),
+                "library_total": {"type": ["integer", "null"], "minimum": 0},
+                "body_locked_count": _integer(0),
+                "reviews": {"type": "array", "items": review},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+            },
+            (
+                "schema_version", "employer_slug", "library_total",
+                "body_locked_count", "reviews", "source_record_refs",
+                "next_cursor", "provider_status",
+            ),
+        )
     if (slug, operation) in {
         ("cninfo", "list_announcements"),
         ("sec", "list_filings"),
@@ -1161,6 +1335,46 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                     "source_record_refs", "next_cursor", "provider_status",
                 ),
             )
+        if operation == "calendar":
+            # C1: dates only, and every one of them nullable.
+            #
+            # No consensus figures here even though Yahoo serves them in the
+            # same block. `analyst_estimates` already carries the EPS and
+            # revenue consensus, and two operations claiming the same number
+            # is how the two of them come to disagree.
+            #
+            # `earnings_dates` is an array because Yahoo says "some time
+            # between these two days" when it cannot narrow the date, and
+            # collapsing that to one day would invent a precision the source
+            # did not offer. One entry is a day Yahoo names; two are the ends
+            # of a window; none is Yahoo having nothing.
+            #
+            # `dividend_date` and `ex_dividend_date` are what Yahoo last knew
+            # and are very often in the past -- DXC still reports an ex-date
+            # from March 2020, six years after it stopped paying. They are
+            # carried verbatim, and deciding that a past date is not a
+            # forthcoming event is the reader's job, not this contract's.
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "ticker": _string(),
+                    "as_of": iso_date,
+                    "captured_at": _string(),
+                    "earnings_dates": {
+                        "type": "array", "uniqueItems": True, "items": iso_date,
+                    },
+                    "dividend_date": {"type": ["string", "null"]},
+                    "ex_dividend_date": {"type": ["string", "null"]},
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                },
+                (
+                    "schema_version", "ticker", "as_of", "captured_at",
+                    "earnings_dates", "dividend_date", "ex_dividend_date",
+                    "source_record_refs", "next_cursor", "provider_status",
+                ),
+            )
     # S1: the two human / vendor feeds.
     #
     # Both enumerate documents that already exist as bytes on this machine, so
@@ -1319,6 +1533,376 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "next_cursor", "provider_status",
             ),
         )
+    if slug == "cn-hk-findata":
+        # S4: China / Hong Kong fundamentals, read through `akshare`.
+        #
+        # Every row of every operation carries three fields that are not data:
+        # which vendor produced it, whether the declared primary vendor was
+        # the one that answered, and -- when it was not -- what the difference
+        # in 口径 is. The OpenClaw skill learned that the hard way: 同花顺's
+        # industry fund flow is an "即时" measure where 东财's is "今日", and a
+        # row that does not say which one it is looks exactly like a row that
+        # does. So the label travels with the number rather than with the run.
+        #
+        # Every figure is nullable. The vendor drops a line item without
+        # dropping the period around it, and an absent figure has to look
+        # absent rather than like a zero.
+        nullable_decimal = {
+            "type": ["string", "null"],
+            "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+        }
+        iso_date = {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+        nullable_date = {
+            "type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+        }
+        nullable_string = {"type": ["string", "null"]}
+        nullable_count = {"type": ["integer", "null"], "minimum": 0}
+
+        def provenance(vendors: Sequence[str]) -> dict[str, Any]:
+            """The three fields every row carries, whatever the operation.
+
+            ``source_vendor`` is an enum of exactly the vendors this
+            operation's approval covers, so a row produced by a vendor nobody
+            approved cannot be validated into the system at all -- the refusal
+            is the contract's, not the adapter's good manners.
+            """
+
+            return {
+                "source_vendor": {"type": "string", "enum": list(vendors)},
+                "fallback_used": {"type": "boolean"},
+                # Required to be present, allowed to be null, and the adapter
+                # refuses a row whose ``fallback_used`` is true without one.
+                "caliber_note": nullable_string,
+            }
+
+        provenance_fields = ("source_vendor", "fallback_used", "caliber_note")
+        envelope = {
+            "source_record_refs": _array_of_strings(),
+            "next_cursor": {"type": ["string", "null"]},
+            "provider_status": _integer(100),
+        }
+        envelope_fields = ("source_record_refs", "next_cursor", "provider_status")
+
+        if operation == "financial_statements":
+            # One row per (statement, period, concept). The vendor serves the
+            # A-share tables wide -- one column per line item, one row per
+            # period -- and the Hong Kong tables long, and a closed schema can
+            # describe neither shape while the column names are data. Long is
+            # the shape both can be turned into without losing anything.
+            #
+            # ``account_standard`` is on every line rather than only in the
+            # header because it is the thing that makes two numbers
+            # incomparable. The Hong Kong feed names it per report; the
+            # A-share feed does not name it at all, and the adapter fills in
+            # 中国企业会计准则 rather than leaving a blank that later reads as
+            # "the same as the other one".
+            line = _object_schema(
+                {
+                    "statement": {
+                        "type": "string", "enum": ["income", "balance", "cash"],
+                    },
+                    "period_end": iso_date,
+                    # Null on a balance-sheet line, which is an instant and has
+                    # no start, and null wherever the vendor did not say.
+                    "period_start": nullable_date,
+                    "fiscal_year": nullable_string,
+                    "report_type": nullable_string,
+                    "concept": _string(),
+                    "label": nullable_string,
+                    "value": nullable_decimal,
+                    "currency": nullable_string,
+                    "account_standard": nullable_string,
+                    **provenance(("eastmoney",)),
+                },
+                (
+                    "statement", "period_end", "period_start", "fiscal_year",
+                    "report_type", "concept", "label", "value", "currency",
+                    "account_standard", *provenance_fields,
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "market": {"type": "string", "enum": ["a", "hk"]},
+                    "ticker": _string(),
+                    "security_name": nullable_string,
+                    "statement": {
+                        "type": "string", "enum": ["income", "balance", "cash"],
+                    },
+                    "period_type": {"type": "string", "enum": ["report", "annual"]},
+                    "currency": nullable_string,
+                    "account_standard": nullable_string,
+                    "captured_at": _string(),
+                    "lines": {"type": "array", "items": line},
+                    "period_count": _integer(0),
+                    "dropped_row_count": _integer(0),
+                    **envelope,
+                },
+                (
+                    "schema_version", "market", "ticker", "security_name",
+                    "statement", "period_type", "currency", "account_standard",
+                    "captured_at", "lines", "period_count", "dropped_row_count",
+                    *envelope_fields,
+                ),
+            )
+        if operation == "shareholders":
+            # Two blocks, because they answer two questions and arrive from two
+            # endpoints: who the largest holders are at one report date, and
+            # how the number of holders has moved over time. A rising share
+            # price with a falling holder count is the 筹码集中 story an
+            # analyst wants; neither half tells it alone.
+            holder = _object_schema(
+                {
+                    "rank": _integer(1),
+                    "holder_name": _string(),
+                    "holder_nature": nullable_string,
+                    "share_class": nullable_string,
+                    "shares": nullable_decimal,
+                    "pct_of_float": nullable_decimal,
+                    # The vendor reports this as free text ("不变", "新进",
+                    # a signed number), so it stays text rather than being
+                    # coerced into a number that would have to invent a zero.
+                    "change": nullable_string,
+                    "change_ratio": nullable_decimal,
+                    **provenance(("eastmoney",)),
+                },
+                (
+                    "rank", "holder_name", "holder_nature", "share_class",
+                    "shares", "pct_of_float", "change", "change_ratio",
+                    *provenance_fields,
+                ),
+            )
+            count = _object_schema(
+                {
+                    "as_of": iso_date,
+                    "announced_on": nullable_date,
+                    "holder_count": nullable_decimal,
+                    "prior_holder_count": nullable_decimal,
+                    "holder_count_change": nullable_decimal,
+                    "holder_count_change_ratio": nullable_decimal,
+                    "avg_shares_per_holder": nullable_decimal,
+                    "avg_value_per_holder": nullable_decimal,
+                    "total_shares": nullable_decimal,
+                    "total_market_cap": nullable_decimal,
+                    **provenance(("eastmoney",)),
+                },
+                (
+                    "as_of", "announced_on", "holder_count",
+                    "prior_holder_count", "holder_count_change",
+                    "holder_count_change_ratio", "avg_shares_per_holder",
+                    "avg_value_per_holder", "total_shares", "total_market_cap",
+                    *provenance_fields,
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "ticker": _string(),
+                    "security_name": nullable_string,
+                    "period_end": iso_date,
+                    "captured_at": _string(),
+                    "top_holders": {"type": "array", "items": holder},
+                    "holder_counts": {"type": "array", "items": count},
+                    "dropped_row_count": _integer(0),
+                    **envelope,
+                },
+                (
+                    "schema_version", "ticker", "security_name", "period_end",
+                    "captured_at", "top_holders", "holder_counts",
+                    "dropped_row_count", *envelope_fields,
+                ),
+            )
+        if operation == "buybacks":
+            row = _object_schema(
+                {
+                    "security_code": _string(),
+                    "security_name": nullable_string,
+                    "announced_on": nullable_date,
+                    "started_on": nullable_date,
+                    "progress": nullable_string,
+                    "planned_shares_low": nullable_decimal,
+                    "planned_shares_high": nullable_decimal,
+                    "planned_amount_low": nullable_decimal,
+                    "planned_amount_high": nullable_decimal,
+                    "planned_pct_low": nullable_decimal,
+                    "planned_pct_high": nullable_decimal,
+                    "price_ceiling": nullable_decimal,
+                    "repurchased_shares": nullable_decimal,
+                    "repurchased_amount": nullable_decimal,
+                    "repurchased_price_low": nullable_decimal,
+                    "repurchased_price_high": nullable_decimal,
+                    **provenance(("eastmoney",)),
+                },
+                (
+                    "security_code", "security_name", "announced_on",
+                    "started_on", "progress", "planned_shares_low",
+                    "planned_shares_high", "planned_amount_low",
+                    "planned_amount_high", "planned_pct_low",
+                    "planned_pct_high", "price_ceiling", "repurchased_shares",
+                    "repurchased_amount", "repurchased_price_low",
+                    "repurchased_price_high", *provenance_fields,
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "ticker": _string(),
+                    "captured_at": _string(),
+                    "rows": {"type": "array", "items": row},
+                    # The vendor publishes one market-wide table and has no
+                    # per-issuer route, so the whole table is read and then
+                    # filtered. Saying how many rows were read is the only way
+                    # a reader can tell "this company announced no buyback"
+                    # from "the table came back short".
+                    "universe_row_count": _integer(0),
+                    "dropped_row_count": _integer(0),
+                    **envelope,
+                },
+                (
+                    "schema_version", "ticker", "captured_at", "rows",
+                    "universe_row_count", "dropped_row_count",
+                    *envelope_fields,
+                ),
+            )
+        if operation == "margin_balance":
+            row = _object_schema(
+                {
+                    "trade_date": iso_date,
+                    "financing_balance": nullable_decimal,
+                    "financing_buy": nullable_decimal,
+                    "short_selling_volume": nullable_decimal,
+                    "short_balance_volume": nullable_decimal,
+                    # Shanghai calls this 融券余量金额 and Shenzhen calls it
+                    # 融券余额. Same quantity, two names; one field, and the
+                    # vendor's own name for it kept in ``caliber_note``.
+                    "short_balance_amount": nullable_decimal,
+                    "total_balance": nullable_decimal,
+                    "currency": _string(),
+                    # The two exchanges publish the same six quantities in
+                    # different units, by a factor of a hundred million.
+                    # Measured on 2026-09: Shanghai's 融资融券余额 came back as
+                    # 1,350,016,680,402 and Shenzhen's as 12,847.58 -- the same
+                    # order of magnitude of money, written two ways. Without
+                    # these two fields a reader adds them together and is out
+                    # by eight orders, and nothing on the row says so.
+                    "amount_unit": _string(),
+                    "volume_unit": _string(),
+                    **provenance(("sse", "szse")),
+                },
+                (
+                    "trade_date", "financing_balance", "financing_buy",
+                    "short_selling_volume", "short_balance_volume",
+                    "short_balance_amount", "total_balance", "currency",
+                    "amount_unit", "volume_unit",
+                    *provenance_fields,
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "exchange": {"type": "string", "enum": ["sse", "szse"]},
+                    "requested_start": iso_date,
+                    "requested_end": iso_date,
+                    "captured_at": _string(),
+                    "rows": {"type": "array", "items": row},
+                    "dropped_row_count": _integer(0),
+                    **envelope,
+                },
+                (
+                    "schema_version", "exchange", "requested_start",
+                    "requested_end", "captured_at", "rows",
+                    "dropped_row_count", *envelope_fields,
+                ),
+            )
+        if operation == "northbound_flow":
+            row = _object_schema(
+                {
+                    "trade_date": iso_date,
+                    "mutual_type": _string(),
+                    "board": nullable_string,
+                    "funds_direction": nullable_string,
+                    "trade_status": nullable_string,
+                    "net_buy_amount": nullable_decimal,
+                    "net_inflow": nullable_decimal,
+                    "daily_quota_balance": nullable_decimal,
+                    "advancing": nullable_count,
+                    "unchanged": nullable_count,
+                    "declining": nullable_count,
+                    "index_name": nullable_string,
+                    "index_change_percent": nullable_decimal,
+                    # The library divides the vendor's raw amounts by 10,000
+                    # before returning them. The unit is therefore a property
+                    # of the library version, not of the source, and it is
+                    # written down rather than assumed.
+                    "amount_unit": _string(),
+                    **provenance(("eastmoney",)),
+                },
+                (
+                    "trade_date", "mutual_type", "board", "funds_direction",
+                    "trade_status", "net_buy_amount", "net_inflow",
+                    "daily_quota_balance", "advancing", "unchanged",
+                    "declining", "index_name", "index_change_percent",
+                    "amount_unit", *provenance_fields,
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "requested_as_of": iso_date,
+                    "captured_at": _string(),
+                    "rows": {"type": "array", "items": row},
+                    "dropped_row_count": _integer(0),
+                    **envelope,
+                },
+                (
+                    "schema_version", "requested_as_of", "captured_at", "rows",
+                    "dropped_row_count", *envelope_fields,
+                ),
+            )
+        if operation == "ah_premium":
+            row = _object_schema(
+                {
+                    "name": _string(),
+                    "h_code": _string(),
+                    "a_code": _string(),
+                    "h_price": nullable_decimal,
+                    "h_change_percent": nullable_decimal,
+                    "a_price": nullable_decimal,
+                    "a_change_percent": nullable_decimal,
+                    # 比价 and 溢价 as the vendor computes them, not as this
+                    # system recomputes them: the two prices are in two
+                    # currencies and the exchange rate the vendor used is not
+                    # published, so a locally recomputed premium would be a
+                    # different number wearing the vendor's name.
+                    "price_ratio": nullable_decimal,
+                    "premium_percent": nullable_decimal,
+                    "h_currency": {"type": "string", "enum": ["HKD"]},
+                    "a_currency": {"type": "string", "enum": ["CNY"]},
+                    **provenance(("eastmoney",)),
+                },
+                (
+                    "name", "h_code", "a_code", "h_price", "h_change_percent",
+                    "a_price", "a_change_percent", "price_ratio",
+                    "premium_percent", "h_currency", "a_currency",
+                    *provenance_fields,
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "ticker": _string(),
+                    "captured_at": _string(),
+                    "rows": {"type": "array", "items": row},
+                    "universe_row_count": _integer(0),
+                    "dropped_row_count": _integer(0),
+                    **envelope,
+                },
+                (
+                    "schema_version", "ticker", "captured_at", "rows",
+                    "universe_row_count", "dropped_row_count",
+                    *envelope_fields,
+                ),
+            )
     return _object_schema(
         {
             "source_record_refs": _array_of_strings(),
@@ -1486,6 +2070,105 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
                 "analyst_estimates", completeness="ranked",
                 input_fields=("ticker",),
             ),
+            # C1: the dated corporate events Yahoo knows about. Its own
+            # operation rather than a block inside `analyst_estimates`,
+            # because a schema hash binds one operation and an approval to
+            # read what analysts forecast should not silently widen into
+            # reading when the company will next speak.
+            _operation(
+                "calendar", completeness="enumerated",
+                input_fields=("ticker",),
+            ),
+        ),
+        "gate": "recorded_public_reference_shadow",
+    },
+    # S4: China and Hong Kong fundamentals, read through `akshare`.
+    #
+    # The OpenClaw `cn-hk-findata` skill routes 87 natural-language intents at
+    # a vendor library. Six of them are what a fundamental analyst needs first,
+    # and they are what this profile freezes. The skill's router is explicitly
+    # *not* imported: a model choosing the endpoint at call time is the thing
+    # the protocol forbids, so each operation names one function, on one host,
+    # with one vendor, decided before the call rather than during it.
+    #
+    # Six hosts, because the six operations genuinely reach six places. Three
+    # are 东方财富 (the F10 statement pages, the Hong Kong datacenter, the
+    # web datacenter that serves buybacks, holder counts and 沪深港通), two are
+    # the exchanges themselves for 融资融券, and one is 东财's quote cluster
+    # for the AH premium. Nothing else may be reached: a host that is not on
+    # this list is a forbidden route, including the Tencent AH list, which is
+    # a real alternative that returns no premium at all and would therefore
+    # answer the question with a number that is not the answer.
+    #
+    # The vendor is *not* the primary source. A Chinese company's filed figure
+    # lives in the 巨潮 announcement the `cninfo` connector already reaches;
+    # what arrives here is 东财's normalisation of it, which is faster, wider
+    # and second-hand. That is why every row names its vendor, and why the
+    # evidence tier of a row from this connector is never "filing".
+    {
+        "slug": "cn-hk-findata", "connector_ref": "connector:cn-hk-findata",
+        "source_ref": "source:cn-hk-findata", "source_type": "market_data",
+        "transport": "public_https", "target": "transport:public-http:0.1",
+        "hosts": (
+            "datacenter-web.eastmoney.com",
+            "datacenter.eastmoney.com",
+            "emweb.securities.eastmoney.com",
+            "push2.eastmoney.com",
+            "query.sse.com.cn",
+            "www.szse.cn",
+        ),
+        "auth": "none",
+        "forbidden": (
+            # The skill's natural-language router picks the endpoint at call
+            # time from 87 candidates and falls back to name similarity when
+            # none match -- which is how a question about sector flows comes
+            # back as a dividend table with `degraded=true`. One frozen choice
+            # per operation is the whole point of a connector.
+            "route:cn-hk-findata-nl-router",
+            # 2026-08-21: pressing 东财's price-history cluster a dozen times
+            # got the neighbouring endpoints cut off too, for minutes. The
+            # skill's rule is "do not batch-probe it"; here it is a route
+            # nobody is allowed to take.
+            "route:eastmoney-push2his-batch-probe",
+            # Tencent's A+H list exists and returns only the H-share quote --
+            # no 比价, no 溢价. Using it to answer `ah_premium` would produce a
+            # confident answer to a different question.
+            "route:tencent-ah-quote-list",
+            "route:arbitrary-attachment-url",
+        ),
+        # No permitted vendor fallback. The skill declares 12 of them, and not
+        # one is for these six operations: the fundamentals path has a single
+        # vendor each. When the vendor is down these operations refuse and say
+        # so, rather than answering out of a different 口径.
+        "fallbacks": (),
+        "operations": (
+            _operation(
+                "financial_statements", completeness="partial",
+                input_fields=("market", "ticker", "statement_kind", "period_type"),
+            ),
+            _operation(
+                "shareholders", completeness="partial",
+                input_fields=("a_ticker", "period_end"),
+            ),
+            _operation(
+                "buybacks", completeness="partial",
+                input_fields=("a_ticker",),
+            ),
+            # The only enumerated one: both exchanges publish the complete
+            # daily 融资融券 summary for a bounded window and it can be
+            # reconciled day by day.
+            _operation(
+                "margin_balance", completeness="enumerated",
+                input_fields=("exchange", "start", "end"),
+            ),
+            _operation(
+                "northbound_flow", completeness="partial",
+                input_fields=("as_of",),
+            ),
+            _operation(
+                "ah_premium", completeness="partial",
+                input_fields=("ticker",),
+            ),
         ),
         "gate": "recorded_public_reference_shadow",
     },
@@ -1596,6 +2279,136 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         ),
         "gate": "host_tool_runner_v0.2_and_credential_authority",
     },
+    # S3: the crowd layer. Three connectors whose evidence is anonymous by
+    # construction -- retail posts, X accounts, employee reviews written under
+    # a pseudonym. They are worth reading for direction and for the questions
+    # they raise; they are never worth quoting as a number, and none of them
+    # may be the sole source of a quantitative Claim.
+    #
+    # Each is a *new* connector rather than an edit to the shadow template it
+    # descends from. The 2026-08-14 templates for `xueqiu` and `x-xreach` sit
+    # behind hashes the owner has already seen; widening one in place would
+    # move a hash the owner approved. The precedent is `sec` / `sec-financials`:
+    # one source read two ways is one source ref and two connectors.
+    #
+    # P13ao-era note about routes: the targets are the ones the shadow
+    # templates already name. `host-tool:agent-reach-xueqiu-channel` is the
+    # host-owned Xueqiu channel, which reaches the post endpoints as well as
+    # the quote ones; `host-tool:cn-hk-findata-xq-hot-rank` stays what it was,
+    # a fallback for the hot-stock ranking and nothing else; `host-tool:xreach`
+    # is the enumerating X CLI. No new host bridge is introduced here.
+    {
+        # The Xueqiu posts a Chinese retail investor writes about a US IT
+        # services name are not a fact about that name. They are a reading of
+        # the sentiment around it, and that is the whole claim being made.
+        "slug": "xueqiu-posts", "connector_ref": "connector:xueqiu-posts",
+        "source_ref": "source:xueqiu", "source_type": "social_search",
+        "transport": "host_tool", "target": "host-tool:agent-reach-xueqiu-channel",
+        "hosts": (), "auth": "host_owned",
+        # The web front end sits behind a WAF challenge and returns a shell;
+        # naming that route as forbidden is how the refusal survives someone
+        # later "fixing" the connector by pointing it at the site.
+        "forbidden": ("route:public-http", "route:reddit-cookie", "route:xueqiu-web-front-end"),
+        "fallbacks": (
+            # Carried over unchanged from the shadow template, including the
+            # restriction that made it safe: the cn-hk-findata ranking is a
+            # fallback for the ranking alone. It is not Xueqiu post text and
+            # must never be presented as any.
+            {
+                "operation": "hot_rank",
+                "target_ref": "host-tool:cn-hk-findata-xq-hot-rank",
+                "source_ref": "source:xueqiu",
+                "adapter_ref": "adapter:cn-hk-findata:xq-hot-rank",
+                "provenance_label": "xueqiu_hot_stock_rank_fallback",
+            },
+        ),
+        "operations": (
+            _operation(
+                "search_posts", completeness="ranked", pagination="page",
+                input_fields=("query", "date_from", "limit", "page"),
+                optional_fields=("date_from",),
+            ),
+            _operation("get_post", completeness="enumerated", input_fields=("post_ref",)),
+            # The host tool calls this ranking `get_hot_stocks`; Dalton calls
+            # the operation `hot_rank`. `source_method` exists for exactly this
+            # and the fallback binding follows the Dalton name.
+            dict(
+                _operation(
+                    "hot_rank", completeness="ranked", pagination="page",
+                    input_fields=("limit", "stock_type", "page"),
+                ),
+                source_method="get_hot_stocks",
+            ),
+        ),
+        "gate": "host_tool_runner_v0.2_and_credential_authority",
+    },
+    {
+        # `xreach` enumerates: a handle's timeline can be paged to a bounded
+        # end, which is why it and not `x_search` is the one built. `x_search`
+        # is synthetic and cannot be enumerated, so it stays a shadow and the
+        # forbidden list keeps saying so.
+        "slug": "x-xreach-crowd", "connector_ref": "connector:x-xreach-crowd",
+        "source_ref": "source:x", "source_type": "social_enumeration",
+        "transport": "host_tool", "target": "host-tool:xreach",
+        "hosts": (), "auth": "host_owned",
+        "forbidden": ("route:last30days-x", "route:agent-reach-twitter"),
+        "fallbacks": (),
+        "operations": (
+            dict(
+                _operation(
+                    "user_timeline", completeness="enumerated", pagination="cursor",
+                    input_fields=("handle", "date_from", "cursor"),
+                ),
+                source_method="tweets",
+            ),
+            # Search is ranked and says so. A keyword search on X returns what
+            # X chose to return; a cursor means there is more, not that the
+            # result can be reconciled against anything.
+            _operation(
+                "search", completeness="ranked", pagination="cursor",
+                input_fields=("query", "date_from", "cursor"),
+            ),
+            dict(
+                _operation(
+                    "thread", completeness="enumerated", pagination="cursor",
+                    input_fields=("post_ref", "cursor"),
+                ),
+                source_method="thread",
+            ),
+        ),
+        "gate": "host_tool_runner_v0.2_and_credential_authority",
+    },
+    {
+        # Blind, and only Blind. It is public HTTPS with no credential at all,
+        # which is why it is the one employee-review route built: Indeed and
+        # Glassdoor both need a paid scraping transport whose credits are
+        # exhausted, and a connector that cannot run is not a connector.
+        #
+        # `partial` is the honest ceiling and not a placeholder. Blind releases
+        # the prose of the most recent page only; everything older comes back
+        # with placeholder pros and cons. The ratings and dates of those rows
+        # are real and are what the series is built from, but a response whose
+        # bodies are substituted is a truncated response, and the contract says
+        # so rather than letting a reader assume otherwise.
+        "slug": "employee-reviews",
+        "connector_ref": "connector:employee-reviews-blind",
+        "source_ref": "source:blind", "source_type": "social_enumeration",
+        "transport": "public_https", "target": "transport:public-http:0.1",
+        "hosts": ("www.teamblind.com",), "auth": "none",
+        "forbidden": (
+            "route:firecrawl-indeed", "route:firecrawl-glassdoor",
+            "route:credential-channel",
+        ),
+        "fallbacks": (),
+        "operations": (
+            _operation(
+                "blind_reviews", completeness="partial", pagination="page",
+                input_fields=("employer_slug", "date_from", "limit", "page"),
+                optional_fields=("date_from",),
+            ),
+        ),
+        "gate": "recorded_public_reference_shadow",
+    },
     # S1: the two feeds a human already brings into this machine.
     #
     # Both read files that are *already on disk*. The sell-side notes were
@@ -1684,8 +2497,26 @@ def _field_schema(name: str) -> dict[str, Any]:
     # free text. A window whose ends cannot be parsed is a window nobody can
     # replay, and replaying the exact window is the whole point of binding a
     # bar to the invocation that produced it.
-    if name in {"date_after", "date_before", "start", "end", "since", "until"}:
+    if name in {"date_after", "date_before", "start", "end", "since", "until",
+                "period_end", "as_of"}:
         return {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+    # S4: the China / Hong Kong fundamentals connector. These field names are
+    # its own rather than the obvious short ones, because ``statement`` and
+    # ``date_from`` already belong to frozen SEC and CNINFO contracts and
+    # narrowing them here would silently move approvals nobody asked to move.
+    if name == "market":
+        return {"type": "string", "enum": ["a", "hk"]}
+    if name == "statement_kind":
+        return {"type": "string", "enum": ["income", "balance", "cash"]}
+    if name == "period_type":
+        return {"type": "string", "enum": ["report", "annual"]}
+    if name == "exchange":
+        return {"type": "string", "enum": ["sse", "szse"]}
+    # Six digits and nothing else: the operations that take this field have no
+    # Hong Kong route upstream at all, and the contract says so rather than
+    # letting a run discover it.
+    if name == "a_ticker":
+        return {"type": "string", "pattern": "^[0-9]{6}$"}
     # S1: the run a note first appeared in, ``market-digest:<date>:<AM|PM>``.
     # A free-text hint would let a caller point the reader at an arbitrary
     # string; the shape is fixed because the shape is what makes it a locator.

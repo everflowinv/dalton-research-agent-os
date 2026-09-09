@@ -163,6 +163,18 @@ owner 的要求：一家公司完成 Initial Screen 后，默认进入 daily tra
 
 **owner 补充（同日稍晚）**：(1) 越过 Initial Screen 后 daily tracking 是**常驻任务**，无论大脑此时决定做什么别的（该公司深度覆盖、下一家公司的 Initial Screen、专项研究），tracking 都不停，大脑只调频率不停任务；(2) sales note、wiki 也是 tracking 的信息源，sales note 与推特对获取卖方研报之外的市场看法尤其有用；(3) 大脑要知道每个 connector 能取到什么内容（`SourceCapabilityMap`：connector → 内容类型、证据层级、市场、完备度、配额、基线频率、是否通用），想要某类内容时知道去哪取；web fetch / web search 是通用的。
 
+**owner 再补充（同日夜）：Dalton 要能自我反思。** 市场看涨你也看涨、市场看跌你也看跌，没有价值；要想的是市场定价
+错在哪、有什么 pathway 让市场向我们的判断靠拢。如果因为一件事决定调整对公司的判断，或者股价走势持续与预想不一致，
+要反思背后原因：是不是遗漏了关键 debate，是不是要追加 tracking 或研究。落实为：
+- **variant view 是一等字段**：thesis / dossier / DebateMap / ConvictionCall 都要写「我们的看法 vs 市场的看法
+（consensus、卖方评级、sales note 与推特里的主流叙事）」、差在哪、市场靠拢的 pathway 与可观察信号；
+与市场同向且无 pathway 的 thesis 在质量 rubric 里得低分（Q 线加一条 criterion `variant_view`）。
+- **`ThesisReflection`**（append-only，判断层产出）：两个触发——(a) 判断层给出任一 `revise_*` 决定；
+(b) 股价持续背离（`price_divergence` 事件：N 个交易日内相对行业篮子的累计走势与 thesis 方向相反超过阈值）。
+内容：`what_we_expected` / `what_happened` / `why`（引用 refs）/ `missed_debates[]` / `followup_tracking[]`
+（新的 cadence 或来源）/ `followup_research[]`（P14e 任务候选）；候选进 planner backlog 与 DebateMap 草稿。
+- 反思本身不改 thesis；它是 `thesis_revision_candidate` 的附件，人裁决时一起看。
+
 落实为四个对象与一条 lane（Wave 3 的 P14a 提前到现在，编号沿用）：
 - **`active_coverage` 阶段自动进入**：某公司任一版 Initial Screen `gate_passed` 即写 `active_coverage` 阶段记录（`STAGE_SPINE` 第一次为该阶段非空），tracking lane 只看这个阶段的公司。
 - **`ResearchEvent`**（append-only）：`{event_ref, company_ref, kind ∈ {price_move, news, filing, transcript, rating_change, calendar, reconciliation, claim}, occurred_at, source_refs[], payload_hash, content_hash}`。价格异动（P11d `MarketEvent` 并入此对象）、新文档、新 filing、日历到期、对账结果都变成事件。C1 的 `CatalystCalendarVersion` 以 `kind: calendar` 发事件。
@@ -207,7 +219,12 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-09 | Wave 1A / 1B / 1C / 1D 交付并进入 review；A 与 D 各有一个 blocker 在修 | 进行中 |
 | 09-09 | vision 回顾完成，8 项补进计划 | 完成 |
 | 09-09 | **Wave 1 全部合并**：A `94f2475`、C `f8737c7`、D `56b0e63`、B `b239ee6`；main 2,627 项通过，已 push | 完成 |
-| 09-09 | 派出：P14e、P14a（daily tracking）、C1、Q2、S4、INT1、模型路由；S1 / S2 / S3 / P14e 在按 review 修 | 进行中 |
+| 09-09 | 派出：P14e、P14a（daily tracking）、C1、Q2、S4、INT1、模型路由；S1 / S2 / S3 / P14e 在按 review 修 | 完成 |
+| 09-09 晚 | **合并**：S2 Guidepoint、S1 投喂 + host-tool runner、P14e 专项研究、模型路由（目录退役不删除 + 三层 fallback 链）、S3 大众源、C1 事件日历、S4 cn-hk-findata、**P14a daily tracking**（ResearchEvent、cadence、能力地图、事件判断、ThesisReflection）。main `f6eec59`，3,437 项通过，已 push。每条线都经独立 review，共修掉 12 个 blocker | 完成 |
+| 09-09 晚 | 一次事故：S4 合并时 `connector_governance.py` 带冲突标记被提交并推上去（146 个模块加载失败），10 分钟内修复；此后合并只在全量绿时才 push | 完成 |
+| 09-09 晚 | Wave 2 派出：档案 P12a/P12f、DebateMap P12c、consensus P11b、预算池 C2；INT1 与 Q2 在修 review 意见 | 进行中 |
+| 09-09 夜 | 合并 INT1（cockpit 接线、journal op、install.sh 种子、claim-index lane 登记）与 Q2（周报 rubric、ResearchCycleReflection）。main `d509897`，3,620 项通过 | 完成 |
+| 09-09 夜 | 派出 Wave 3 首批：P14f 业绩季工作流、P14b + P14d 修订候选裁决与版本化重出、INT2 第二批接线；抽取吞吐诊断在跑 | 进行中 |
 
 ---
 

@@ -102,10 +102,22 @@ research plan、initial screen。
 sales note / wiki / 推特是 tracking 信息源；大脑要有 connector 能力地图；vision 回顾补了事件日历、预算池、
 宪法 method 消费者、规划质量指标四项遗漏。
 
-**在飞的分支**（各自 worktree）：S1 投喂（sales-notes 231 条正文归属命中，host-tool runner）、S2 Guidepoint、
-S3 雪球 / X / Blind、S4 cn-hk-findata、P14e 专项研究（建在 BoundedPlannerLoop 上）、P14a daily tracking +
-ResearchEvent + 事件判断、C1 事件日历、Q2 周报 rubric + Reflection、模型路由 fallback 与目录同步、INT1 cockpit 与
-install.sh 接线。
+**同日更晚又合进 main 的**（`f6eec59`，3,437 项通过）：S2 Guidepoint lane（≤20 词引用限制对中文生效）、S1 sales-notes /
+company-wiki 投喂 + `host_tool_runner`（正文归属：五家 231 条，九月 5 条）、P14e 专项研究（= 以 inquiry 为题的
+BoundedPlannerLoop，$25/日池；卡住的 loop 不再每 tick 付费）、模型路由（目录同步退役不删除：5 退役 4 补齐；
+brain astra → fable-5-1，cheap deepseek-flash → glm-flash → gemini-flash-lite，verifier 与 producer 不同家族）、
+S3 雪球 / X / Blind（走 runner，50/日配额真实生效）、C1 事件日历（yfinance + 8-K 互证；estimated 日期开 preview
+并标注未确认；ACN 10/1 T−22 触发）、S4 cn-hk-findata 六个 op（东财不重试；沪深融资余额单位差 1e8 已标注）、
+**P14a daily tracking**：过闸即常驻；`ResearchEvent` 12 种；频率基线 + `TrackingCadenceVersion`；
+`SourceCapabilityMap`；事件判断 lane 五词决定 + 独立 verifier；`price_divergence` + `ThesisReflection`（市场看法 vs 我们、
+收敛 pathway、遗漏 debate、追加 tracking / 研究候选）。
+
+**发现的结构性瓶颈**（不是代码）：ACN 有 885 份卖方文档但只有 5 条卖方层级 Claim——研报大多没被抽取成 Claim，
+DebateMap 的「多空各 ≥2 独立来源」验收在此之前无法满足；2,170 条 Claim 里只有 22 条有 aspect，要等 P12b 的模型
+标注跑完。行业主体一条 Claim 都没有。
+
+**在飞的分支**：P12a 档案 + P12f guidance、P12c DebateMap（已交付在审）、P11b consensus 双路、C2 预算池 + tick
+账本（已交付在审）、Q2 周报 rubric + Reflection（修 review）、INT1 cockpit + install.sh（修 review）。
 
 ## 2026-09-09（并行开发准备）：先把「加一条 lane 要碰 23 个共享文件」收成一行
 

@@ -239,7 +239,9 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_company_dossier",
-    order=135,
+    # 137, between the crowd-source feed and the research-task lane. The
+    # debate map takes 135: it reads the dossier, so it runs after it.
+    order=137,
     driver_key="company_dossier",
     handler=dispatch,
     init_kwarg=LAUNCHER_KWARG,

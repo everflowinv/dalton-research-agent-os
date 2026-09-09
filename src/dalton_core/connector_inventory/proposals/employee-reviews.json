@@ -1,0 +1,48 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:employee-reviews:0.1",
+  "adapter_source_hash": "7a9d751f3ccb3330fb317f764f5dd820ad4692cf11ee60d0a084dd109ab620b6",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:employee-reviews:0.1",
+  "connector_ref": "connector:employee-reviews-blind",
+  "content_hash": "7525190be2c937a530f172c905007191bea4d2948e88d233ef7fbf00e7f23778",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "6173745acdd93f6c5f7f982794f59357e1580fb690feca9e5331d721d3d06050",
+  "fixture_manifest_ref": "connector-fixture-manifest:employee-reviews:0.1",
+  "id": "connector-proposal-manifest:employee-reviews:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "partial",
+      "input_schema_hash": "b0d0c44f2d8f180d7a60cddc958f9c33a388fe59696b1466b4d6987bb0a3a19f",
+      "input_schema_ref": "schema:connector-inventory:employee-reviews:blind_reviews:input:0.1",
+      "operation": "blind_reviews",
+      "output_schema_hash": "5a60d9eb87d7fd71495282a6eaf99e6e52f9dd36b1cb7fd18a44a906a5900ead",
+      "output_schema_ref": "schema:connector-inventory:employee-reviews:blind_reviews:output:0.1",
+      "pagination": "page",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "4bdbaaeef1e481adb2cb4ad89cf640be0c3e8dd4ecd065fc9a416049b56bf768",
+  "profile_template_ref": "connector-profile-template:employee-reviews:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "transport:public-http:0.1",
+    "adapter_version": "inventory-0.1",
+    "source": "source:blind",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "public_https",
+  "transport_target_hash": "99d74ac1771cdba1fb326b02cd06622bcbb063dcf447cdc576b98f00b634fc00",
+  "transport_target_ref": "transport:public-http:0.1"
+}

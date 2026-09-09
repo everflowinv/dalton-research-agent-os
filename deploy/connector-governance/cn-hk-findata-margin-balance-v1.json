@@ -1,0 +1,32 @@
+{
+  "allowed_permissions": {
+    "core_db": false,
+    "credential_slot_refs": [],
+    "filesystem_read": [],
+    "filesystem_write": [
+      "runner:raw-sink"
+    ],
+    "network": true,
+    "risk_class": "low",
+    "side_effects": [
+      "read:public-http"
+    ]
+  },
+  "approval_ref": "approval:connector-governance:cn-hk-findata-margin-balance:v1",
+  "approved_by": "human:lumos",
+  "attestation_ref": "attestation:connector-governance:cn-hk-findata-margin-balance:v1",
+  "capability_id": "capability:dalton:connector:cn-hk-findata-margin-balance",
+  "content_hash": "11bd1163d336e9d88eb04e5a1c4f6ab7d3ca33666a722212a957056462ab6fcc",
+  "decision_ref": "capability-decision:connector-governance:cn-hk-findata-margin-balance:v1",
+  "effective_from": "2026-09-09T00:00:00.000000+00:00",
+  "effective_until": null,
+  "expected_schema_hash": "29bb284706f8b6f7c0c914ca7dce372d10e9448d904c5b8975bcb3d933ef190f",
+  "expected_source_hash": "8208919759b70c8e934c540c560e23b0d0d0c53103419e7e1811d5178be036f0",
+  "id": "connector-governance:cn-hk-findata-margin-balance:v1",
+  "max_lease_seconds": 300,
+  "policy_ref": "policy:dalton:connector-governance:cn-hk-findata-margin-balance:v1",
+  "principal_ref": "principal:dalton-core-trusted-runner",
+  "registry_revision_ref": "capability:dalton:connector:cn-hk-findata-margin-balance@v1",
+  "schema_version": "0.1",
+  "status": "proposed"
+}

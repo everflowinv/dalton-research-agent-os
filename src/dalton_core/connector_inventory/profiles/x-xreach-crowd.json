@@ -1,0 +1,616 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "host_owned",
+    "owner": "host",
+    "use_time_authority": "required_future"
+  },
+  "connector_ref": "connector:x-xreach-crowd",
+  "content_hash": "7213f2d66de4d6e473862d8f013d059349ab7f9ea0cfeb61653ac0bfb31297bd",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "c60a0555127ec986fc9055d8f57ad0f03740cbb6e403c57a2e35ec4470d769b9",
+  "fixture_manifest_ref": "connector-fixture-manifest:x-xreach-crowd:0.1",
+  "id": "connector-profile-template:x-xreach-crowd:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "f069f1a505b23d088e52a96688041f21a99ac02fd808df39530cddb0a67a4ead",
+      "input_schema_ref": "schema:connector-inventory:x-xreach-crowd:user_timeline:input:0.1",
+      "operation": "user_timeline",
+      "output_schema_hash": "cea0c71e727eaf693159f2b465e7d04a1cd9a7dbfb0f7a69afab807953177621",
+      "output_schema_ref": "schema:connector-inventory:x-xreach-crowd:user_timeline:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": "cursor",
+        "max_pages": 20,
+        "mode": "cursor"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "tweets"
+    },
+    {
+      "completeness_ceiling": "ranked",
+      "input_schema_hash": "b6f44bc2f7d3c35eb9094aaf055978c22e03ad75aebc5118111bf7523cc5aa7f",
+      "input_schema_ref": "schema:connector-inventory:x-xreach-crowd:search:input:0.1",
+      "operation": "search",
+      "output_schema_hash": "cea0c71e727eaf693159f2b465e7d04a1cd9a7dbfb0f7a69afab807953177621",
+      "output_schema_ref": "schema:connector-inventory:x-xreach-crowd:search:output:0.1",
+      "pagination": {
+        "bounded_window_required": false,
+        "cursor_field": "cursor",
+        "max_pages": 20,
+        "mode": "cursor"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "search"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "52b72c2a02341cbe66ba8434c101ff66fcc07ac16e1a6b8a26e8f15d78a3b8fb",
+      "input_schema_ref": "schema:connector-inventory:x-xreach-crowd:thread:input:0.1",
+      "operation": "thread",
+      "output_schema_hash": "cea0c71e727eaf693159f2b465e7d04a1cd9a7dbfb0f7a69afab807953177621",
+      "output_schema_ref": "schema:connector-inventory:x-xreach-crowd:thread:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": "cursor",
+        "max_pages": 20,
+        "mode": "cursor"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "thread"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "host_tool_runner_v0.2_and_credential_authority"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "host-tool:xreach"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:last30days-x",
+      "route:agent-reach-twitter"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "date_from": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "handle": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "handle",
+          "date_from"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "f069f1a505b23d088e52a96688041f21a99ac02fd808df39530cddb0a67a4ead",
+      "schema_ref": "schema:connector-inventory:x-xreach-crowd:user_timeline:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "completeness": {
+            "enum": [
+              "enumerated",
+              "ranked",
+              "partial",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation": {
+            "enum": [
+              "user_timeline",
+              "search",
+              "thread"
+            ],
+            "type": "string"
+          },
+          "posts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "author": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "author_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "created_at": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "is_reply": {
+                  "type": "boolean"
+                },
+                "like_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "post_id": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "reply_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "repost_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "text": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "view_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "author",
+                "author_id",
+                "created_at",
+                "is_reply",
+                "like_count",
+                "post_id",
+                "reply_count",
+                "repost_count",
+                "text",
+                "url",
+                "view_count"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "operation",
+          "completeness",
+          "posts",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "cea0c71e727eaf693159f2b465e7d04a1cd9a7dbfb0f7a69afab807953177621",
+      "schema_ref": "schema:connector-inventory:x-xreach-crowd:user_timeline:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "date_from": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "query": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "query",
+          "date_from"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "b6f44bc2f7d3c35eb9094aaf055978c22e03ad75aebc5118111bf7523cc5aa7f",
+      "schema_ref": "schema:connector-inventory:x-xreach-crowd:search:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "completeness": {
+            "enum": [
+              "enumerated",
+              "ranked",
+              "partial",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation": {
+            "enum": [
+              "user_timeline",
+              "search",
+              "thread"
+            ],
+            "type": "string"
+          },
+          "posts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "author": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "author_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "created_at": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "is_reply": {
+                  "type": "boolean"
+                },
+                "like_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "post_id": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "reply_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "repost_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "text": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "view_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "author",
+                "author_id",
+                "created_at",
+                "is_reply",
+                "like_count",
+                "post_id",
+                "reply_count",
+                "repost_count",
+                "text",
+                "url",
+                "view_count"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "operation",
+          "completeness",
+          "posts",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "cea0c71e727eaf693159f2b465e7d04a1cd9a7dbfb0f7a69afab807953177621",
+      "schema_ref": "schema:connector-inventory:x-xreach-crowd:search:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "post_ref": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "post_ref"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "52b72c2a02341cbe66ba8434c101ff66fcc07ac16e1a6b8a26e8f15d78a3b8fb",
+      "schema_ref": "schema:connector-inventory:x-xreach-crowd:thread:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "completeness": {
+            "enum": [
+              "enumerated",
+              "ranked",
+              "partial",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "operation": {
+            "enum": [
+              "user_timeline",
+              "search",
+              "thread"
+            ],
+            "type": "string"
+          },
+          "posts": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "author": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "author_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "created_at": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "is_reply": {
+                  "type": "boolean"
+                },
+                "like_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "post_id": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "reply_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "repost_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "text": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "view_count": {
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "author",
+                "author_id",
+                "created_at",
+                "is_reply",
+                "like_count",
+                "post_id",
+                "reply_count",
+                "repost_count",
+                "text",
+                "url",
+                "view_count"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "operation",
+          "completeness",
+          "posts",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "cea0c71e727eaf693159f2b465e7d04a1cd9a7dbfb0f7a69afab807953177621",
+      "schema_ref": "schema:connector-inventory:x-xreach-crowd:thread:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:x",
+    "source_type": "social_enumeration",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [],
+    "host_policy": "not_applicable",
+    "kind": "host_tool",
+    "target_hash": "282987badcc41baa01a371eb12df6492492cd2adf3ad994332e7150253bf93fa",
+    "target_ref": "host-tool:xreach"
+  }
+}

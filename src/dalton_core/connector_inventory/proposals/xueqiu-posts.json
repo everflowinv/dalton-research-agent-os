@@ -1,0 +1,72 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:xueqiu-posts:0.1",
+  "adapter_source_hash": "162e9bdb252ce69763bb8267f4dfb8b1b22fe1ab2951e96407b793a4d376a9c7",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "host_owned",
+    "owner": "host",
+    "use_time_authority": "required_future"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:xueqiu-posts:0.1",
+  "connector_ref": "connector:xueqiu-posts",
+  "content_hash": "723f935f7314e53214a8bb74b434fc264cb38d674444614d1c3dd6964e609c98",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "1ac7bbbc788d917912c0629b506c8e0e18b82402cb841b85fe17153b8d0468ea",
+  "fixture_manifest_ref": "connector-fixture-manifest:xueqiu-posts:0.1",
+  "id": "connector-proposal-manifest:xueqiu-posts:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "ranked",
+      "input_schema_hash": "9e8472797ff6a53440b10050238882e7151e0101322f79f5971a13686bb77890",
+      "input_schema_ref": "schema:connector-inventory:xueqiu-posts:search_posts:input:0.1",
+      "operation": "search_posts",
+      "output_schema_hash": "51f2a3bd21409a5df287875169a1801b2906fb3153a4972e1f203e18415ca383",
+      "output_schema_ref": "schema:connector-inventory:xueqiu-posts:search_posts:output:0.1",
+      "pagination": "page",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "7c2f1a82a59eb915ff0a1cad8bb36b04727a1031a3c2186c1065348e6f744269",
+      "input_schema_ref": "schema:connector-inventory:xueqiu-posts:get_post:input:0.1",
+      "operation": "get_post",
+      "output_schema_hash": "51f2a3bd21409a5df287875169a1801b2906fb3153a4972e1f203e18415ca383",
+      "output_schema_ref": "schema:connector-inventory:xueqiu-posts:get_post:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "ranked",
+      "input_schema_hash": "4e8e6cf7fb04b2d104f950e4adc6845290816804936386d7edb164df575d9e01",
+      "input_schema_ref": "schema:connector-inventory:xueqiu-posts:hot_rank:input:0.1",
+      "operation": "hot_rank",
+      "output_schema_hash": "7aa38279b43526a90583ab56d940ac445985793ac38fe14c566b8ec54c06b0e2",
+      "output_schema_ref": "schema:connector-inventory:xueqiu-posts:hot_rank:output:0.1",
+      "pagination": "page",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "68abd41a72f4c098184c044bc8d8ea837388a2ba1f4e6deb9b4b6989a632fecc",
+  "profile_template_ref": "connector-profile-template:xueqiu-posts:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "host-tool:agent-reach-xueqiu-channel",
+    "adapter_version": "inventory-0.1",
+    "source": "source:xueqiu",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "host_tool",
+  "transport_target_hash": "186ce21a18529da1b40048b82a5a6223bd59b9be58e9b4314cdfa9040ef6bf90",
+  "transport_target_ref": "host-tool:agent-reach-xueqiu-channel"
+}
