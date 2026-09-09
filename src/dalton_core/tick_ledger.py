@@ -93,6 +93,33 @@ def status_word(status: Any) -> str:
     return text.split(":", 1)[0]
 
 
+def mentions_pool_exhausted(value: Any, *, depth: int = 2) -> bool:
+    """Whether this lane result says a pool ran out, wherever it says it.
+
+    A lane that does its model work in a child process does not say it at the
+    top level: the word arrives a tick later as ``settled.index_status`` or
+    ``last.summary_status``, while the lane's own status is ``launched``. A
+    column that read only the top-level status would report a week of budget
+    decisions as an ordinary quiet week, which is the exact confusion this
+    column exists to prevent.
+    """
+
+    from .budget_pools import POOL_EXHAUSTED_REASON
+
+    suffix = ":" + POOL_EXHAUSTED_REASON
+    if isinstance(value, str):
+        return value == POOL_EXHAUSTED_REASON or value.endswith(suffix)
+    if depth <= 0:
+        return False
+    if isinstance(value, Mapping):
+        return any(mentions_pool_exhausted(item, depth=depth - 1)
+                   for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(mentions_pool_exhausted(item, depth=depth - 1)
+                   for item in value)
+    return False
+
+
 def bounded_counts(result: Mapping[str, Any]) -> dict[str, Any]:
     """The small, countable part of one lane's result.
 
@@ -241,7 +268,7 @@ class TickLedger:
         idle_lanes = 0
         for key, result in sorted(lanes.items()):
             word = status_word(result.get("status"))
-            exhausted = str(result.get("status") or "").endswith(":pool_exhausted")
+            exhausted = mentions_pool_exhausted(result)
             idle = word in IDLE_STATUS_WORDS
             idle_lanes += int(idle)
             lane_rows.append((
@@ -457,16 +484,26 @@ class TickLedger:
         }
 
     def spend_by_pool(self, window: Any = None, *, now: datetime | None = None) -> dict[str, Any]:
-        """What each pool moved by over the window, summed from tick deltas.
+        """What each pool spent over the window, a day at a time.
 
         This is the answer to Q2's "cost is attributable only to a work-order
         prefix": every micro here was attributed at admission time to the pool
         the caller declared, not inferred afterwards from an id.
+
+        A day's figure is **the last tick's cumulative**, not the sum of that
+        day's deltas.  The day ledger holds a reservation until the call
+        settles, so a pool's committed total goes up when a call is admitted
+        and back down when it settles for less than it reserved.  Summing only
+        the positive deltas therefore counts every reservation and forgives
+        every refund, which on this ledger's reserve-then-settle profile
+        overstated a week by an order of magnitude.  The last cumulative of a
+        day is what that day actually cost, and it is the same number the day
+        ledger itself would report.
         """
 
         since, until = _window(window, now=now)
         rows = self.connection.execute(
-            "SELECT day, pool_spend_json FROM tick_ledger_ticks "
+            "SELECT day, pool_cumulative_json FROM tick_ledger_ticks "
             "WHERE day BETWEEN ? AND ? ORDER BY started_at", (since, until),
         ).fetchall()
         window_wire = {"since": since, "until": until}
@@ -480,17 +517,15 @@ class TickLedger:
         by_day: dict[str, Counter] = {}
         for row in rows:
             try:
-                delta = json.loads(row["pool_spend_json"])
+                cumulative = json.loads(row["pool_cumulative_json"])
             except (TypeError, ValueError):
                 continue
-            for pool, micros in (delta or {}).items():
-                amount = int(micros)
-                if amount <= 0:
-                    # A negative delta means the day rolled over or a
-                    # reservation settled below its hold; neither is spend.
-                    continue
-                totals[pool] += amount
-                by_day.setdefault(row["day"], Counter())[pool] += amount
+            # Rows arrive oldest first, so the last one for a day wins.
+            day_totals = by_day.setdefault(row["day"], Counter())
+            for pool, micros in (cumulative or {}).items():
+                day_totals[pool] = max(int(micros), 0)
+        for day_totals in by_day.values():
+            totals.update(day_totals)
         lane_rows = self.connection.execute(
             "SELECT pool, COUNT(*) AS ticks, "
             "COALESCE(SUM(pool_spend_delta_micros),0) AS reported "
@@ -540,6 +575,7 @@ __all__ = [
     "TickLedger",
     "TickLedgerError",
     "bounded_counts",
+    "mentions_pool_exhausted",
     "default_path",
     "status_word",
     "summarise",

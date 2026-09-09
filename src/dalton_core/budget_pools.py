@@ -63,7 +63,7 @@ import sqlite3
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Mapping
 
 from .store import canonical_json, content_hash
 
@@ -112,22 +112,25 @@ POOL_EXHAUSTED_REASON = "pool_exhausted"
 # second rounding rule and the mission already speaks in dollars.
 MISSION_POOLS_FIELD = "pools"
 
+# How many of today's pool refusals ``pool_status`` returns.  A spent pool
+# refuses everything that asks for the rest of the day, so the interesting
+# facts are how many and which lanes most recently -- not all of them.
+MAX_EXHAUSTED_LANES = 20
+
 # Which pool each lane operation drinks from.  Central on purpose: assigning a
 # pool must not mean editing fifteen lane modules owned by other agents.  A
 # lane that wants to say it itself sets ``LaneSpec(budget_pool=...)``, which
 # wins over this table; a lane that says nothing and is not named here is
 # coverage, which is what every lane effectively was before this module.
 #
-# The entries below the line are lanes that are not registered on this branch
-# yet (P14a's tracking and event lanes, Q2's reflection lane, the catalog
-# work).  Naming them here now is what keeps them from landing silently in
-# coverage the week they merge.
+# The entries below the line are lanes that are not registered yet.  Naming
+# them here now is what keeps them from landing silently in coverage the week
+# they merge.
 LANE_POOLS: dict[str, str] = {
     "dispatch_mission_source_discovery": "coverage",
     "dispatch_guidepoint_discovery": "coverage",
     "dispatch_document_extraction": "coverage",
     "dispatch_mission_stage": "coverage",
-    "dispatch_claim_review": "maintenance",
     "dispatch_mission_sec_quarters": "coverage",
     "dispatch_mission_statements": "coverage",
     "dispatch_mission_market_prices": "coverage",
@@ -137,14 +140,20 @@ LANE_POOLS: dict[str, str] = {
     "dispatch_initial_screen": "coverage",
     "dispatch_sales_notes_feed": "coverage",
     "dispatch_company_wiki_feed": "coverage",
-    "dispatch_research_task": "adhoc",
-    # -- not registered on this branch yet ---------------------------------
-    "dispatch_research_events": "event_response",
+    "dispatch_mission_crowd_sources": "coverage",
+    # P14a and C1: what happened today, and the calendar that says what is
+    # about to.  The judgement lane keeps its own book of what it spent
+    # (``event_response_spend``); this is the same pool seen from the ledger.
+    "dispatch_mission_tracking": "event_response",
+    "dispatch_mission_catalyst_calendar": "event_response",
     "dispatch_event_judgement": "event_response",
-    "dispatch_tracking_cadence": "event_response",
-    "dispatch_market_events": "event_response",
-    "dispatch_catalyst_calendar": "event_response",
+    # P14e.
+    "dispatch_research_task": "adhoc",
+    # Keeping the shelves tidy.
+    "dispatch_claim_review": "maintenance",
     "dispatch_claim_index": "maintenance",
+    # -- not registered yet -------------------------------------------------
+    "dispatch_market_events": "event_response",
     "dispatch_catalog_sync": "maintenance",
     "dispatch_research_reflection": "maintenance",
     "dispatch_claim_retirement": "maintenance",
@@ -163,10 +172,16 @@ PURPOSE_POOLS: dict[str, str] = {
     "model_spec": "coverage",
     "claim_index": "maintenance",
     "quality": "maintenance",
-    # P14e's loops and P14a's judgement, when they get their own purposes.
+    # P14a's judgement lane pays for two calls per event and two more per
+    # reflection, and books every one of them in its own
+    # ``event_response_spend`` table.  Both purposes belong to the same pool,
+    # or its book and this ledger would be counting different things.
+    "event_judgement": "event_response",
+    "thesis_reflection": "event_response",
+    # P14e's loops, when they get their own purpose (today their model call
+    # goes through llm_planner_execute, which carries the pool explicitly).
     "research_task": "adhoc",
     "adhoc_research": "adhoc",
-    "event_judgement": "event_response",
     "tracking": "event_response",
 }
 
@@ -455,24 +470,6 @@ def has_pool_columns(connection: Any) -> bool:
     return "pool" in {row["name"] for row in rows}
 
 
-def _admission_rows(
-    connection: Any, *, day: str, mission_ref: str | None,
-) -> list[sqlite3.Row]:
-    sql = (
-        "SELECT a.admission_id, a.work_order_ref, a.reserved_micros, a.day, "
-        " s.actual_micros AS actual_micros, b.mission_ref AS mission_ref "
-        "FROM thesis_impact_day_admissions a "
-        "LEFT JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
-        "LEFT JOIN model_mission_budget_bindings b ON b.admission_id=a.admission_id "
-        "WHERE a.day=?"
-    )
-    params: list[Any] = [day]
-    if mission_ref is not None:
-        sql += " AND (b.mission_ref=? OR b.mission_ref IS NULL)"
-        params.append(mission_ref)
-    return connection.execute(sql, params).fetchall()
-
-
 def day_pool_spend(
     connection: Any, *, day: str, mission_ref: str | None = None,
 ) -> dict[str, int]:
@@ -502,35 +499,61 @@ def day_pool_spend(
     return totals
 
 
-def day_pool_lent(
+def day_pool_loans(
     connection: Any, *, day: str, mission_ref: str | None = None,
-) -> dict[str, int]:
-    """What each pool has already lent out today, per lender.
+) -> dict[str, dict[str, int]]:
+    """Today's loans, read from both ends: ``lent`` out and ``borrowed`` in.
 
-    Without this a lender's unspent share would be offered twice: its own
-    ``spent`` never moves when coverage borrows from it, so the same idle
-    dollar could be lent every hour until the day cap noticed.
+    Both ends are needed and for opposite reasons, and getting only one of
+    them was this module's worst bug.
+
+    ``lent`` keeps a lender from offering the same idle dollar twice: its own
+    ``spent`` never moves when coverage borrows from it, so without this the
+    same dollar could be lent once an hour.
+
+    ``borrowed`` is what a borrower's cap becomes.  A pool that has borrowed
+    ten micros has spent ten micros it did not own; if the next admission
+    compares that spend against the *unraised* cap it sees the same overage
+    again and borrows a second time to cover a shortfall that was already
+    covered.  Four ten-micro admissions against an exhausted pool borrowed a
+    hundred.  The cap and the spend have to be read from the same side of the
+    loan.
     """
 
-    lent: dict[str, int] = {name: 0 for name in POOL_NAMES}
+    loans: dict[str, dict[str, int]] = {
+        "lent": {name: 0 for name in POOL_NAMES},
+        "borrowed": {name: 0 for name in POOL_NAMES},
+    }
+    detail: dict[str, dict[str, int]] = {name: {} for name in POOL_NAMES}
+    loans["detail"] = detail  # type: ignore[assignment]
     if not has_pool_columns(connection):
-        return lent
-    rows = connection.execute(
-        "SELECT a.borrowed_from AS borrowed_from, b.mission_ref AS mission_ref "
+        return loans
+    sql = (
+        "SELECT a.pool AS pool, a.borrowed_from AS borrowed_from, "
+        " b.mission_ref AS mission_ref "
         "FROM thesis_impact_day_admissions a "
         "LEFT JOIN model_mission_budget_bindings b ON b.admission_id=a.admission_id "
-        "WHERE a.day=? AND a.borrowed_from IS NOT NULL", (day,),
-    ).fetchall()
-    for row in rows:
-        if mission_ref is not None and row["mission_ref"] not in (None, mission_ref):
-            continue
+        "WHERE a.day=? AND a.borrowed_from IS NOT NULL"
+    )
+    params: list[Any] = [day]
+    if mission_ref is not None:
+        # An admission with no binding at all predates mission binding and
+        # belongs to no mission's pools; it can never have borrowed, but the
+        # filter says so rather than relying on that.
+        sql += " AND b.mission_ref=?"
+        params.append(mission_ref)
+    for row in connection.execute(sql, params).fetchall():
         try:
-            loans = json.loads(row["borrowed_from"])
+            lenders = json.loads(row["borrowed_from"])
         except ValueError:
             continue
-        for lender, micros in (loans or {}).items():
-            lent[lender] = lent.get(lender, 0) + int(micros)
-    return lent
+        for lender, micros in (lenders or {}).items():
+            loans["lent"][lender] = loans["lent"].get(lender, 0) + int(micros)
+            if row["pool"] in POOL_NAMES:
+                loans["borrowed"][row["pool"]] += int(micros)
+                bucket = detail[row["pool"]]
+                bucket[lender] = bucket.get(lender, 0) + int(micros)
+    return loans
 
 
 def day_pool_spend_at(
@@ -644,8 +667,12 @@ def pool_decision(
     pool = _pool_name(pool)
     mission_ref = mission_binding["mission_ref"]
     spend = day_pool_spend(cursor, day=day, mission_ref=mission_ref)
-    lent = day_pool_lent(cursor, day=day, mission_ref=mission_ref)
-    cap = int(caps.get(pool, 0))
+    loans = day_pool_loans(cursor, day=day, mission_ref=mission_ref)
+    lent, borrowed_in = loans["lent"], loans["borrowed"]
+    # Both sides of every loan already made today, or the same overage is
+    # borrowed for again on the next admission: what a pool borrowed raises
+    # its cap, what it lent lowers what it has left.
+    cap = int(caps.get(pool, 0)) + int(borrowed_in.get(pool, 0))
     spent = int(spend.get(pool, 0)) + int(lent.get(pool, 0))
     shortfall = spent + int(reserved_micros) - cap
     borrowed: dict[str, int] = {}
@@ -692,6 +719,7 @@ def pool_status(
     store: Any, *, mission: Mapping[str, Any] | None = None,
     mission_ref: str | None = None, day: str,
     caps: Mapping[str, int] | None = None, now: datetime | None = None,
+    max_exhausted_lanes: int = MAX_EXHAUSTED_LANES,
 ) -> dict[str, Any]:
     """Per pool: cap, spent, borrowed, remaining -- and who ran out today.
 
@@ -713,32 +741,15 @@ def pool_status(
     moment = now or datetime.now(timezone.utc)
     connection = getattr(store, "connection", store)
     spend = day_pool_spend(connection, day=day, mission_ref=mission_ref)
-    borrowed: dict[str, dict[str, int]] = {name: {} for name in POOL_NAMES}
-    if has_pool_columns(connection):
-        rows = connection.execute(
-            "SELECT pool, borrowed_from FROM thesis_impact_day_admissions "
-            "WHERE day=? AND borrowed_from IS NOT NULL", (day,),
-        ).fetchall()
-        for row in rows:
-            if row["pool"] not in POOL_NAMES:
-                continue
-            try:
-                loans = json.loads(row["borrowed_from"])
-            except ValueError:
-                continue
-            for lender, micros in (loans or {}).items():
-                bucket = borrowed[row["pool"]]
-                bucket[lender] = bucket.get(lender, 0) + int(micros)
-    lent: dict[str, int] = {name: 0 for name in POOL_NAMES}
-    for loans in borrowed.values():
-        for lender, micros in loans.items():
-            lent[lender] = lent.get(lender, 0) + int(micros)
+    loans = day_pool_loans(connection, day=day, mission_ref=mission_ref)
+    borrowed = loans["detail"]
+    lent = loans["lent"]
     refusals = pool_rejections(connection, day=day, mission_ref=mission_ref)
     pools: dict[str, Any] = {}
     for name in POOL_NAMES:
         cap = int(caps.get(name, 0))
         spent = int(spend.get(name, 0))
-        borrowed_total = sum(borrowed[name].values())
+        borrowed_total = int(loans["borrowed"].get(name, 0))
         pools[name] = {
             "cap_micros": cap,
             "spent_micros": spent,
@@ -759,6 +770,12 @@ def pool_status(
         "borrow_open": borrow_open(moment, day),
         "pools": pools,
         "unpooled_micros": int(spend.get("unpooled", 0)),
+        # The most recent few, newest first, and the count.  A pool that is
+        # spent refuses every lane that asks for the rest of the day, so on a
+        # bad day this list is thousands of rows long and a cockpit panel that
+        # renders all of them is a cockpit panel nobody opens twice.  The
+        # count is the number that matters; the rows are the examples.
+        "exhausted_lane_count": len(refusals),
         "exhausted_lanes": [
             {
                 "lane": item.get("pool_lane"),
@@ -768,7 +785,7 @@ def pool_status(
                 "spent": item["spent"],
                 "cap": item["cap"],
             }
-            for item in refusals
+            for item in list(reversed(refusals))[:max(0, int(max_exhausted_lanes))]
         ],
     }
 
@@ -783,12 +800,6 @@ def summarise_shares(caps_micros: Mapping[str, int]) -> dict[str, str]:
     }
 
 
-def pooled_statuses(statuses: Iterable[str]) -> Sequence[str]:
-    """The subset of lane statuses that mean "this pool is spent for today"."""
-
-    return [status for status in statuses if status == POOL_EXHAUSTED_STATUS]
-
-
 __all__ = [
     "BORROWING_POOLS",
     "BORROW_AFTER_DAY_FRACTION",
@@ -796,6 +807,7 @@ __all__ = [
     "DEFAULT_POOL",
     "DEFAULT_SHARES",
     "LANE_POOLS",
+    "MAX_EXHAUSTED_LANES",
     "MISSION_POOLS_FIELD",
     "POOL_EXHAUSTED_REASON",
     "POOL_EXHAUSTED_STATUS",
@@ -808,7 +820,7 @@ __all__ = [
     "borrowable_micros",
     "classify_legacy_work_order",
     "day_fraction_elapsed",
-    "day_pool_lent",
+    "day_pool_loans",
     "day_pool_spend",
     "day_pool_spend_at",
     "has_pool_columns",
@@ -821,7 +833,6 @@ __all__ = [
     "pool_rejection_wire",
     "pool_rejections",
     "pool_status",
-    "pooled_statuses",
     "record_pool_rejection",
     "summarise_shares",
 ]

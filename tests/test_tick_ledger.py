@@ -17,6 +17,7 @@ from dalton_core.tick_ledger import (
     TickLedger,
     TickLedgerError,
     bounded_counts,
+    mentions_pool_exhausted,
     status_word,
 )
 
@@ -98,6 +99,28 @@ class TickLedgerWriteTests(unittest.TestCase):
         lane = self.ledger.ticks(now=NOW)["ticks"][0]["lanes"][0]
         self.assertEqual(lane["status_word"], "missing")
         self.assertFalse(lane["idle"])
+
+    def test_a_child_lanes_pool_word_is_seen_one_level_down(self) -> None:
+        # A lane that does its model work in a child says "launched" this tick
+        # and reports the child's word the next one. A column that read only
+        # the top-level status would file a week of budget decisions as an
+        # ordinary quiet week.
+        self.assertTrue(mentions_pool_exhausted(
+            {"status": "launched",
+             "settled": {"status": "succeeded",
+                         "index_status": "skipped:pool_exhausted"}}))
+        self.assertFalse(mentions_pool_exhausted(
+            {"status": "launched",
+             "settled": {"status": "succeeded", "index_status": "tagged"}}))
+        self.ledger.append_tick(
+            summary(claim_index={"status": "launched",
+                                 "settled": {"index_status": "skipped:pool_exhausted"}}),
+            started_at=NOW - timedelta(seconds=3), ended_at=NOW,
+            lane_pools={"claim_index": "maintenance"},
+        )
+        lane = self.ledger.ticks(now=NOW)["ticks"][0]["lanes"][0]
+        self.assertTrue(lane["pool_exhausted"])
+        self.assertEqual(lane["status_word"], "launched")
 
     def test_the_counts_a_lane_reported_are_kept_and_bounded(self) -> None:
         counts = bounded_counts({
@@ -207,6 +230,27 @@ class TickLedgerReaderTests(unittest.TestCase):
         self.assertEqual(spend["pools"]["adhoc"], 14 * 25_000)
         self.assertEqual(spend["total_micros"], 1_400_000 + 350_000)
         self.assertEqual(len(spend["by_day"]), 14)
+
+    def test_a_reservation_that_settles_for_less_is_not_counted_as_spend(self) -> None:
+        # The day ledger holds a reservation and releases the difference when
+        # the call settles, so a pool's committed total goes up and then back
+        # down within a day. Summing the positive deltas counted every
+        # reservation and forgave every refund; the day is worth what it ended
+        # at.
+        ledger = TickLedger(clock=lambda: NOW)
+        self.addCleanup(ledger.close)
+        day = datetime(2026, 9, 9, 0, 0, tzinfo=timezone.utc)
+        for index, committed in enumerate((100_000, 300_000, 150_000)):
+            moment = day + timedelta(hours=index)
+            ledger.append_tick(
+                summary(document_extraction={"status": "launched"}),
+                started_at=moment, ended_at=moment + timedelta(seconds=5),
+                pool_spend={"coverage": committed},
+                lane_pools={"document_extraction": "coverage"},
+            )
+        spend = ledger.spend_by_pool(1, now=day.replace(hour=23))
+        self.assertEqual(spend["pools"]["coverage"], 150_000)
+        self.assertEqual(spend["by_day"]["2026-09-09"]["coverage"], 150_000)
 
     def test_a_window_with_no_ticks_says_so_rather_than_reporting_zero(self) -> None:
         empty = TickLedger(clock=lambda: NOW)

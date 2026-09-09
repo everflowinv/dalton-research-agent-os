@@ -58,7 +58,13 @@ def raise_cap(config_path: Path, *, cap_usd: float, apply: bool) -> dict[str, An
     state_dir = Path(service["core_db"]).parent
     current_ref = thesis["budget_policy_version_id"]
     cap_micros = int(round(cap_usd * 1_000_000))
-    with ThesisImpactBudgetStore(str(budget_db)) as budget:
+    # A dry run opens the ledger read-only. Opening it for writing runs C2's
+    # additive pool migration, and a command whose whole promise is "without
+    # --apply this only describes the change" must not alter the schema of a
+    # live authority to keep it. (A read-only open of a WAL database needs its
+    # sidecars, so a dry run against a stopped service says so rather than
+    # provisioning them.)
+    with ThesisImpactBudgetStore(str(budget_db), read_only=not apply) as budget:
         row = budget.connection.execute(
             "SELECT policy_version_id, day_cap_micros FROM thesis_impact_budget_policies "
             "ORDER BY rowid DESC LIMIT 1"

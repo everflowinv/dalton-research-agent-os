@@ -1,7 +1,7 @@
 # C2：容量配额池与 tick 账本 v1.0
 
 日期：2026-09-09
-分支：`w2-budget-pools`（worktree `~/Projects/dalton-w2-budget-pools-worktree`），基线 main `7708d43`（2,843 项）
+分支：`w2-budget-pools`（worktree `~/Projects/dalton-w2-budget-pools-worktree`），基线 main `7708d43`（2,843 项）；review 后已合 main `e5e10a0`（3,500 项）
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 3 节 C2 与第 1 节「日累计不超过 mission `max_daily_cost_usd` 的 25%」、[vision 复盘 C2 / C4](vision-review-against-plan-v1.0-2026-09-09.md)、[P14e 报告](p14e-research-tasks-v1.0-2026-09-09.md) 开放问题 2、Q2 报告「Core 里没有 tick 账本」
 
 ---
@@ -34,6 +34,11 @@
    事件池不是闲置额度，是安静的上午。借出的准入带 `borrowed_from`（`{lender: micros}`），
    出借方的「已借出」会从它自己的可借额度里扣掉——同一块闲钱不会被借第二次。借款要么足额
    要么不借（半额贷款等于把缺口甩给下一个发现它的 cap）。
+   **借贷要从两头读**（review 的 blocker）：借入方的**上限**要加上它已借入的额度，出借方的
+   **余额**要减去它已借出的额度。只读一头的后果是：借来的钱抬高了 spent 却没抬高 cap，于是
+   下一次准入又看见同一笔超额、又借一次——四笔 10 微元的准入借出了 100。
+   `day_pool_loans()` 一次把 `lent` 与 `borrowed` 两头都读出来，回归测试断言
+   「总借出 == 总超额」。
 4. **超池的拒绝不毒化身份。** 它写进新表 `model_budget_pool_rejections`，不写
    `thesis_impact_day_rejections`——后者的行是对某个准入身份的**永久判决**（「被拒过的准入不能
    再被准入」），而池在午夜会重新装满。
@@ -75,16 +80,36 @@
 | `dispatch_mission_market_prices` | coverage |
 | `dispatch_company_model_spec` / `dispatch_company_model_forecast` | coverage |
 | `dispatch_research_plan` / `dispatch_initial_screen` | coverage |
-| `dispatch_sales_notes_feed` / `dispatch_company_wiki_feed` | coverage |
-| `dispatch_claim_review` | maintenance |
-| `dispatch_research_task` | **adhoc** |
-| （未登记，预留）`dispatch_research_events` / `dispatch_event_judgement` / `dispatch_tracking_cadence` / `dispatch_market_events` / `dispatch_catalyst_calendar` | event_response |
-| （未登记，预留）`dispatch_claim_index` / `dispatch_catalog_sync` / `dispatch_research_reflection` / `dispatch_claim_retirement` | maintenance |
+| `dispatch_sales_notes_feed` / `dispatch_company_wiki_feed` / `dispatch_mission_crowd_sources` | coverage |
+| `dispatch_mission_tracking`（P14a） | **event_response** |
+| `dispatch_mission_catalyst_calendar`（C1） | **event_response** |
+| `dispatch_event_judgement`（P14a） | **event_response** |
+| `dispatch_research_task`（P14e） | **adhoc** |
+| `dispatch_claim_review` / `dispatch_claim_index` | maintenance |
+| （未登记，预留）`dispatch_market_events` | event_response |
+| （未登记，预留）`dispatch_catalog_sync` / `dispatch_research_reflection` / `dispatch_claim_retirement` | maintenance |
 
 cockpit 形态的模型调用不是按 lane 而是按 **purpose** 准入的（`cockpit_model` 是唯一的准入口），
 所以另有 `PURPOSE_POOLS`：`ask` / `goal` / `steer` / `draft` / `plan` / `model_spec` → coverage；
-`claim_index` / `quality` → maintenance；预留 `research_task` / `adhoc_research` → adhoc、
-`event_judgement` / `tracking` → event_response。未登记的 purpose → coverage。
+`claim_index` / `quality` → maintenance；`event_judgement` / `thesis_reflection` →
+event_response（P14a 的判断 lane 每个事件付两次调用、每次 reflection 再两次，两个 purpose
+必须同池，否则它的账本和这本账数的不是同一件事）；预留 `research_task` / `adhoc_research`
+→ adhoc、`tracking` → event_response。未登记的 purpose → coverage。
+
+### 与 P14a `event_response_spend` 的对账
+
+P14a 在 Core 里有自己的一张 `event_response_spend`（按 WorkOrder 记实际 `cost_micros`，
+`day_cost_micros(day)` 求和），并用 `POOL_SHARE = 0.15` 自己算上限——和
+`DEFAULT_SHARES["event_response"]` 是同一个数（有测试钉住）。两本账是同一笔钱的两面：
+
+- **它的账**是 lane 自己的成本明细（拒绝与 reflection 也记），准入前自己先 gate；
+- **这本账**是日预算账本按池归集的准入与结算，覆盖同一个 mission 的**所有** event_response
+  花费（包括手跑、包括别的 lane 以后进这个池）。
+
+两边都可能先说停，说的是同一个词：`skipped:pool_exhausted`。`event_judgement.py` 的四个
+拒绝分支现在带 `lane_status`，`event_judgement_cli` 在批次里见到它就把
+`judgement_status` 置成同一个词并 break——和它已有的 `gated:same_family` 提前退出同构：
+池空了，这一批剩下的事件只会得到同样的拒绝。
 
 `LaneSpec` 新增两个字段，默认值保持今天的行为不变：
 `budget_pool: str | None = None`（None = 用中央映射）、`pool_share: float | None = None`
@@ -107,8 +132,16 @@ cockpit 形态的模型调用不是按 lane 而是按 **purpose** 准入的（`c
 - 空窗口报 `available: false` 加原因，不报一个舒服的 0——这是 Q2 立的规矩。
 - `idle` 是状态**词**不是「没有」：一个什么都没报的 lane 记成 `missing` 而不是 idle。
 - 池花费：tick 行同时记当天的**累计**（来自日账本 `day_pool_spend_at`，按当天、按池）与相对
-  当天上一个 tick 的**增量**。累计能和账本对账，增量能按周求和。日账本不在、读不了、还没迁移
-  过，都只是「这一格没有数」，不影响 tick。
+  当天上一个 tick 的**增量**。日账本不在、读不了、还没迁移过，都只是「这一格没有数」，
+  不影响 tick。
+- **`spend_by_pool` 按天取「当天最后一个 tick 的累计」，不是把增量加起来**（review 第 2 条）。
+  日账本在调用期间持有 reservation，结算低于预留时把差额放回去，所以一个池当天的 committed
+  会先涨后落；只把正增量相加等于「每一次预留都算、每一次退款都不算」，在这本账
+  reserve-then-settle 的形态下把一周高估了一个数量级。当天最后的累计就是当天真花了多少，
+  也正是日账本自己会报的那个数。
+- `pool_exhausted` 这一列**向下看一层**：走子进程的 lane 当 tick 只会说 `launched`，池的词
+  下一 tick 才作为 `settled.index_status` 出现；只读顶层 status 会把一周的预算决定记成
+  一周的安静。
 - 写账本失败**不会**让 tick 失败，但也**不会**默默失败：摘要里多一个
   `tick_ledger: {"status": "recorded" | "duplicate" | "unrecorded:<Type>"}`。这个键同时加进了
   `RESERVED_DRIVER_KEYS` 与驱动自己的 `_RESERVED_SUMMARY_KEYS`（两者仍由那句 `assert` 锁着），
@@ -125,7 +158,7 @@ cockpit 形态的模型调用不是按 lane 而是按 **purpose** 准入的（`c
 | Q2「各 lane 花费 / 池上限」按前缀猜 | `work:cockpit-plan-...` 猜用途 | `spend_by_pool(window)`（周级）与 `budget_pools.pool_status(store, mission=..., day=...)`（日级）。每一微元都是**准入时**归的池，不是事后从 id 上猜的 |
 | P14e `research_task.pool_state` | 从 loop 权威推导 adhoc 池的**预留** | 保持不变（准入闸门仍然可以从自己的权威推导）；**实际花掉的钱**现在从 `pool_status(...)["pools"]["adhoc"]["spent_micros"]` 读，两者第一次可以互相对账 |
 | P14a 事件 lane | 无池 | 在 `LANE_POOLS` 里已预留 `event_response`；lane 模块**不需要改**，合并即生效 |
-| INT1 cockpit | 无 | `pool_status(...)`：每池 `cap/spent/borrowed/borrowed_from/lent/remaining/exhausted`，加 `exhausted_lanes`（今天撞过 `pool_exhausted` 的 lane、池、work order、时刻、当时的 spent/cap）、`unpooled_micros`、`borrow_open`、`caps_defaulted` |
+| INT1 cockpit | 无 | `pool_status(...)`：每池 `cap/spent/borrowed/borrowed_from/lent/remaining/exhausted`，加 `exhausted_lane_count`（今天一共撞了多少次）与 `exhausted_lanes`（**最近 20 条**，新的在前：lane、池、work order、时刻、当时的 spent/cap）、`unpooled_micros`、`borrow_open`、`caps_defaulted`。池一旦空了，当天余下的每一次请求都会被拒，所以有用的是计数，行只是例子 |
 
 ## 5. 迁移
 
@@ -139,6 +172,18 @@ cockpit 形态的模型调用不是按 lane 而是按 **purpose** 准入的（`c
 - 没有池的准入（C2 之前的每一个调用者，包括 `document_extraction`）行为**完全不变**：
   不过闸门、不占池、日 cap 仍然抛 `ThesisImpactDayBudgetExceeded`，在 `pool_status` 里记成
   `unpooled_micros`（而不是偷偷算进 coverage）。
+- **迁移在服务停止时跑一次。** `ALTER TABLE ADD COLUMN` 是即时的（SQLite 只改 schema 头，
+  不重写行），但它要一把写锁，而 live 的 writer 长期持有这个库的连接。部署顺序：停 launchagent
+  → 用新代码打开一次日账本（任何写入路径都会触发 `apply_pool_migration`，或直接
+  `python -c "from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore as S; S('<path>').close()"`）
+  → 再启动。**`raise_day_budget_cap.py --apply` 也会顺带迁移；它的 dry run 不会**——dry run
+  现在只读打开（review 的 nit：一个承诺「不加 --apply 就只描述」的命令，不该为了描述而改
+  live 权威的 schema）。只读打开 WAL 库需要 `-wal` / `-shm` 兄弟文件，所以服务停着时 dry run
+  会明说打不开，而不是顺手把它们建出来。
+- **迁移前后的重放兼容**：C2 之前记下的准入，其 `mission_binding` 没有池字段；迁移后同一次
+  调用重放会带上池字段，而 `admit` 的重放校验本来会把这判成「绑定变了」并拒绝——正好卡住
+  迁移那一刻在飞的工作。所以重放比较时，若已存的绑定完全没有池字段，就按「同一次准入多了一个
+  维度」处理（`_POOL_BINDING_KEYS`）；真的改了别的字段仍然是冲突，两条都有测试。
 - schema 文件走 Wave 0 的 `*_schema.sql` glob，打包不用改 `pyproject.toml`。
 - tick 账本**故意不开 WAL**：进过 WAL 的库头里会留下标记，而 `connect_read_only` 拒绝没有
   `-wal` / `-shm` 兄弟文件的 WAL 库——干净关闭的账本正好就是那个状态。读者是 cockpit 与周报，
@@ -182,36 +227,62 @@ live 准入永远不猜）。mission `coverage-mission:us-it-services`，`max_da
 的价目、registry 对没声明池的 lane 行为不变、非法池名 / 份额在注册时被拒、tick 每 tick 每 lane
 写一行、四个读者在两个合成周上的答案、保留窗口、账本写失败被报告而不掀 tick。
 
-全量：
+review 后补的：借入方不为同一笔超额借第二次（总借出 == 总超额）、`pool_status` 截断刷屏的
+拒绝并给出总数、当天内退款不被算作花费、走子进程的 lane 的池的词能被看见一层、
+`lane_status_for` 的两条分支、**研究计划子进程端到端**（真的 `run_planner`，cockpit 抛
+`CockpitModelPoolExhausted`，摘要里 `plan_status == "skipped:pool_exhausted"`）、
+P14a 的 `POOL_SHARE` 与 `DEFAULT_SHARES["event_response"]` 一致、迁移前后的重放兼容与
+「真的改了仍是冲突」。
+
+全量（合 main `e5e10a0` 之后）：
 
 ```
-Ran 2895 tests in 305.372s
+Ran 3561 tests in 382.923s
 
 OK (skipped=1)
 ```
 
-（基线 2,843 + 52 = 2,895；命令 `PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`）
+（main 3,500 + 61 = 3,561；命令 `PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`）
 
 ## 8. 没做 / 开放问题
 
-1. **`llm_planner_execute` 还没有池维度。** driver 通过写入端 RPC 让 loop 前进，
-   `OPERATION_FIELDS["llm_planner_execute"]` 是闭集，加一个 `pool` 参数必须动
-   `writer_server.py`（本片禁止触碰）。所以研究任务 loop 的模型花费目前仍然算在 planner 的
-   mission 绑定上，而不是 `adhoc` 池。集成时的最小改动：给该 operation 的字段集加 `"pool"`，
-   在 `_op_llm_planner_execute` 里透传到它的 `mission_binding`。**这是 P14e 开放问题 2 剩下的
-   最后一半**，也是 driver「把 lane 的池传进准入」唯一还差的一处。
-2. **`document_extraction.py` 的准入还没带池。** 它不在本片的所有权范围内。带上之后
-   `unpooled_micros` 会归零、coverage 池才真正开始约束抽取——从第 6 节看，加上也不会打爆。
-   改动是一行：给它的 `mission_binding` merge 一个 `mission_pool_scope(mission, operation=...)`。
+1. **`llm_planner_execute` 这条路上根本没有日预算准入——比「缺一个池维度」严重。**
+   本来要按 review 的授权给 `OPERATION_FIELDS["llm_planner_execute"]` 加一个 `pool` 字段，
+   查下去发现无处可绑：`writer_server` 的 `planner_model_config` 只有
+   `routing_policy_ref` / `credential_slot_refs` / `model_router_db` / `broker_socket` /
+   `broker_auth_key` / `broker_client_id` / `expected_agent_id`——**没有 `budget_db`，
+   也没有 `budget_policy_ref`**；`LLMResearchPlannerModelWorker.run_once` 从头到尾不调
+   `ThesisImpactBudgetStore.admit`。也就是说 bounded planner loop（含 P14e 的研究任务）
+   的每一次模型调用都绕过了日预算账本，日 cap 与 mission cap 对它都不生效；P14e 的 adhoc
+   池是从 loop 权威推导的**预留**闸门，那是目前唯一拦着它的东西。
+   加一个被忽略的参数只会让人以为池绑上了，所以**没加**。要真绑上，需要：给 planner
+   model config 加 `budget_db` 与 `budget_policy_ref`（新的 writer 命令行参数 + install.sh
+   种子 + service 配置），在 `_op_llm_planner_execute` 外面包一层 admit/settle，
+   再把 `pool` 透传进去。这动 `install.sh` 与 `macos_launchagent`，是一次独立的集成，
+   不该塞进这一片。
+2. **`document_extraction` 的准入现在带池了**（review 解除限制后做的）：它的
+   `mission_binding` merge 了 `mission_pool_scope(mission, operation="dispatch_document_extraction")`
+   → coverage。池空时在调用前拒绝，抛的错带 `skipped:pool_exhausted` 与池名（和这条路上
+   所有别的预算拒绝一样，最终包成 `OpenClawModelAdapterError`）。这意味着
+   `unpooled_micros` 从此归零、coverage 上限第一次真正约束抽取——按第 6 节的实测（今天
+   18.81/55 USD），不会打爆。**但这是 live 行为改变，值得在部署当天盯一眼。**
 3. **`maintenance` 5% 可能偏紧。** Claim 索引打标（`claim_index`）是逐条 Claim 的模型调用，
    一旦上线，5% 是否够要看实测；今天没有 live 数据可以判断。第一次出现
    `skipped:pool_exhausted` 的多半是它。
 4. **借用规则用的是日账本自己的时钟**（`ThesisImpactBudgetStore.clock`），而 cockpit 传的是
    自己的 clock。生产里两者都是真实时间所以一致；写测试的人要知道这一点（本片的测试用
    「所有池都是 0」来避开时钟依赖）。
-5. **`pool_share` 只登记不执行**（见第 2 节末）。要执行需要日账本按 lane 归集，也就是先做第 1、2 条。
-6. **`raise_day_budget_cap.py`** 现在会在输出里多一块 `default_pool_caps_usd`，告诉 owner 新的
+5. **`pool_share` 只登记不执行**（见第 2 节末）。要执行需要日账本按 lane 归集；
+   `pool_lane` 这一列已经在记「谁要的」，缺的是把它变成子上限的那一步。
+6. **`skipped:pool_exhausted` 现在会出现在几个子状态里**（`plan_status` / `spec_status` /
+   `index_status` / Initial Screen 的分节状态）。已核对两处会因为状态词而改变控制流的地方，
+   都不会把它误判成失败：`mission_claim_index_lane` 的 `failed` 需要
+   `status != succeeded` 或词在 `(refused, failed, not_authorized)` 里，
+   `mission_model_spec_lane` 的判据同理——两处都不会把「池空了」的批次永久扣下。
+   `research_quality_score` 与 `event_judgement` 的四个拒绝分支保留 `"refused"`（调用方按
+   这个词分支），另带 `lane_status`。
+7. **`raise_day_budget_cap.py`** 现在会在输出里多一块 `default_pool_caps_usd`，告诉 owner 新的
    日 cap 按默认分法各池是多少。它**不写** mission 的 `pools`——那是 mission 版本的事，人来发。
-7. **cockpit / install.sh 接线没做**（本片禁止）。INT1 要的入口是
+8. **cockpit / install.sh 接线没做**（本片禁止）。INT1 要的入口是
    `budget_pools.pool_status(store, mission=..., day=...)` 与
    `tick_ledger.summarise(path, window)`，两个都是纯读。

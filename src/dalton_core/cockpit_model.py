@@ -98,6 +98,22 @@ class CockpitModelPoolExhausted(CockpitModelError):
         self.cap = self.rejection.get("cap")
 
 
+def lane_status_for(exc: BaseException, fallback: str) -> str:
+    """The word a lane should report for a call the cockpit refused.
+
+    Every caller used to flatten every refusal to one word -- usually
+    ``model_unavailable`` -- and a spent pool is not an outage. The difference
+    matters to two readers: the tick ledger, whose ``pool_exhausted`` column
+    is how a week's worth of budget decisions is told apart from a week's
+    worth of broken routes, and the owner, for whom "no model route" and "this
+    kind of work has had its share of today" call for opposite actions.
+    """
+
+    if isinstance(exc, CockpitModelPoolExhausted):
+        return exc.lane_status
+    return fallback
+
+
 def _pool_refusal_message(rejection: Mapping[str, Any]) -> str:
     return (
         f"{POOL_EXHAUSTED_STATUS}: the {rejection.get('pool')} pool is spent "

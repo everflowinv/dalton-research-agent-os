@@ -43,7 +43,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from .cockpit_model import CockpitModelError, register_purpose, unwrap_json_object
+from .cockpit_model import (
+    CockpitModelError,
+    lane_status_for,
+    register_purpose,
+    unwrap_json_object,
+)
 from .mission_deliverable import unsourced_numbers, value_tokens
 from .research_quality_rubrics import (
     DOSSIER_SECTIONS,
@@ -899,7 +904,12 @@ def judge(
         call = model.call(purpose=JUDGE_PURPOSE, request_id=request_id, prompt=prompt, mission=mission)
     except CockpitModelError as exc:
         return {
+            # C2: refused either way -- the scoring path branches on
+            # this word -- but a spent pool says so, so the run that
+            # reports it can call it a budget decision rather than an
+            # outage.
             "status": "refused", "reason": f"模型调用没有成功：{exc}",
+            "lane_status": lane_status_for(exc, "refused"),
             "rubric_ref": rubric.rubric_ref, "rubric_hash": rubric.content_hash,
             "prompt_chars": len(prompt),
         }
@@ -1036,7 +1046,8 @@ def verify(
     try:
         call = model.call(purpose=JUDGE_PURPOSE, request_id=request_id, prompt=prompt, mission=mission)
     except CockpitModelError as exc:
-        return {"status": "refused", "reason": f"复核调用没有成功：{exc}"}
+        return {"status": "refused", "reason": f"复核调用没有成功：{exc}",
+                "lane_status": lane_status_for(exc, "refused")}
     provenance = {
         "work_order_ref": call.get("work_order_ref"),
         "invocation_ref": call.get("invocation_ref"),

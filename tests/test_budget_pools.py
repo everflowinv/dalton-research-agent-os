@@ -27,7 +27,12 @@ from dalton_core.budget_pools import (
     pool_for_purpose,
     pool_status,
 )
-from dalton_core.cockpit_model import CockpitModel, CockpitModelPoolExhausted
+from dalton_core.cockpit_model import (
+    CockpitModel,
+    CockpitModelError,
+    CockpitModelPoolExhausted,
+    lane_status_for,
+)
 from dalton_core.lane_registry import (
     LaneRegistryError,
     LaneSpec,
@@ -284,11 +289,41 @@ class PoolAdmissionTests(unittest.TestCase):
         # The event pool's remaining 1.4M, then the next pool in order for the
         # rest -- never the 100k it had already lent.
         self.assertEqual(second["borrowed_from"],
-                         {"event_response": 1_400_000, "adhoc": 200_000})
+                         {"event_response": 1_400_000, "adhoc": 100_000})
         status = pool_status(self.store, mission=self.mission, day=DAY, now=EVENING)
         self.assertEqual(status["pools"]["event_response"]["lent_micros"], 1_500_000)
         self.assertEqual(status["pools"]["event_response"]["remaining_micros"], 0)
-        self.assertEqual(status["pools"]["coverage"]["borrowed_micros"], 1_700_000)
+        # Exactly the overage, borrowed once: 5.6 + 1.5 against a 5.5 cap.
+        self.assertEqual(status["pools"]["coverage"]["borrowed_micros"], 1_600_000)
+
+    def test_a_borrower_does_not_borrow_for_the_same_overage_twice(self) -> None:
+        # The bug this asserts against: a loan raised the pool's spend but not
+        # its cap, so every later admission saw the whole accumulated overage
+        # again and borrowed for it again. Four ten-micro admissions against
+        # an exhausted pool lent a hundred.
+        self.now = EVENING
+        self.admit("fill", "coverage", 5_500_000)
+        for index in range(4):
+            admitted = self.admit(f"over{index}", "coverage", 10)
+            self.assertEqual(admitted["status"], "fresh")
+        status = pool_status(self.store, mission=self.mission, day=DAY, now=EVENING)
+        overage = status["pools"]["coverage"]["spent_micros"] - 5_500_000
+        self.assertEqual(overage, 40)
+        self.assertEqual(status["pools"]["coverage"]["borrowed_micros"], 40)
+        self.assertEqual(
+            sum(pool["lent_micros"] for pool in status["pools"].values()), 40)
+
+    def test_pool_status_caps_the_refusals_it_returns_and_counts_them_all(self) -> None:
+        self.admit("fill", "adhoc", 2_500_000)
+        for index in range(25):
+            self.assertEqual(
+                self.admit(f"no{index}", "adhoc", 1)["status"], "rejected")
+        status = pool_status(self.store, mission=self.mission, day=DAY,
+                             now=MORNING, max_exhausted_lanes=5)
+        self.assertEqual(status["exhausted_lane_count"], 25)
+        self.assertEqual(len(status["exhausted_lanes"]), 5)
+        self.assertEqual(status["exhausted_lanes"][0]["work_order_ref"],
+                         "work:no24")
 
     def test_a_settlement_is_attributed_to_the_pool_of_its_admission(self) -> None:
         admitted = self.admit("one", "event_response", 1_000_000)
@@ -480,6 +515,124 @@ class CockpitPoolTests(unittest.TestCase):
         self.assertEqual(caught.exception.lane_status, POOL_EXHAUSTED_STATUS)
         self.assertEqual(caught.exception.pool, "coverage")
         self.assertEqual(adapter.served, [])
+
+
+class LaneStatusTests(unittest.TestCase):
+    """What a lane says when the cockpit refuses for want of pool, not route."""
+
+    def refusal(self, pool: str = "coverage") -> CockpitModelPoolExhausted:
+        return CockpitModelPoolExhausted(
+            "the coverage pool is spent",
+            {"pool": pool, "day": DAY, "spent": 10, "cap": 10,
+             "reason": "pool_exhausted"},
+        )
+
+    def test_a_pool_refusal_keeps_its_word_and_anything_else_falls_back(self) -> None:
+        self.assertEqual(
+            lane_status_for(self.refusal(), "model_unavailable"),
+            POOL_EXHAUSTED_STATUS)
+        self.assertEqual(
+            lane_status_for(CockpitModelError("no route"), "model_unavailable"),
+            "model_unavailable")
+
+    def test_the_planner_child_reports_a_budget_decision_not_an_outage(self) -> None:
+        # End to end through the real child: the cockpit call raises, and the
+        # summary the tick's parent reads says which kind of no it was.
+        from unittest.mock import patch
+
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        from dalton_core.research_planner_cli import run_planner
+        from dalton_core.store import DaltonStore
+        from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state = root / "state"
+            state.mkdir(mode=0o700)
+            store = DaltonStore(str(state / "core.sqlite"))
+            missions = CoverageMissionAuthority(store)
+            fixtures = bootstrap_method_authorities(store)
+            params = mission_params(fixtures)
+            missions.create_mission(params.pop("mission_ref"), **params)
+            store.close()
+            config = root / "model.json"
+            config.write_text("{}", encoding="utf-8")
+            with patch("dalton_core.research_planner_cli.CockpitModel") as model:
+                model.return_value.call.side_effect = self.refusal()
+                summary = run_planner(
+                    state_dir=state, model_config_path=config,
+                    summary_dir=root / "out", scheduler_db=None,
+                    plans_dir=state / "discovery-plans", dry_run=False,
+                )
+        self.assertEqual(summary["status"], "succeeded")
+        self.assertEqual(summary["plan_status"], POOL_EXHAUSTED_STATUS)
+        self.assertIn("CockpitModelPoolExhausted", summary["failure_reason"])
+
+    def test_the_judgement_lane_says_which_gate_stopped_it(self) -> None:
+        # P14a keeps its own book of what this lane spent and gates on it; the
+        # day ledger's event_response pool is the same money from the other
+        # side and can refuse first. Both say the same word.
+        from dalton_core.event_judgement import POOL_NAME, POOL_SHARE
+
+        self.assertEqual(POOL_NAME, "event_response")
+        self.assertEqual(POOL_SHARE, DEFAULT_SHARES["event_response"])
+        self.assertEqual(budget_pools.PURPOSE_POOLS["event_judgement"], POOL_NAME)
+        self.assertEqual(budget_pools.PURPOSE_POOLS["thesis_reflection"], POOL_NAME)
+        self.assertEqual(
+            pool_for_operation("dispatch_event_judgement"), POOL_NAME)
+
+
+class PreC2ReplayTests(unittest.TestCase):
+    """A call admitted before the migration, replayed after it."""
+
+    def test_an_admission_without_pool_keys_replays_with_them(self) -> None:
+        store = ThesisImpactBudgetStore(clock=lambda: MORNING)
+        self.addCleanup(store.close)
+        store.register_policy(policy_version_id=POLICY, day_cap_micros=100_000_000)
+        wire = mission()
+        scope = {
+            "mission_ref": wire["mission_ref"],
+            "mission_version_ref": wire["id"],
+            "mission_version_hash": wire["content_hash"],
+            "max_daily_paid_calls": 100,
+            "max_daily_cost_micros": 10_000_000,
+        }
+        args = dict(
+            policy_version_id=POLICY, day=DAY, work_order_ref="work:inflight",
+            attempt_number=1, phase="assessment", route_decision_ref="route:1",
+            reserved_micros=1_000,
+        )
+        before = store.admit(**args, mission_binding=scope)
+        self.assertEqual(before["status"], "fresh")
+        after = store.admit(
+            **args,
+            mission_binding={**scope, **mission_pool_scope(wire, pool="coverage")},
+        )
+        self.assertEqual(after["status"], "duplicate")
+        self.assertEqual(after["admission_id"], before["admission_id"])
+
+    def test_a_binding_that_really_changed_is_still_a_conflict(self) -> None:
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetConflict
+
+        store = ThesisImpactBudgetStore(clock=lambda: MORNING)
+        self.addCleanup(store.close)
+        store.register_policy(policy_version_id=POLICY, day_cap_micros=100_000_000)
+        wire = mission()
+        scope = {
+            "mission_ref": wire["mission_ref"],
+            "mission_version_ref": wire["id"],
+            "mission_version_hash": wire["content_hash"],
+            "max_daily_paid_calls": 100,
+            "max_daily_cost_micros": 10_000_000,
+        }
+        args = dict(
+            policy_version_id=POLICY, day=DAY, work_order_ref="work:changed",
+            attempt_number=1, phase="assessment", route_decision_ref="route:1",
+            reserved_micros=1_000,
+        )
+        store.admit(**args, mission_binding=scope)
+        with self.assertRaises(ThesisImpactBudgetConflict):
+            store.admit(**args, mission_binding={**scope, "max_daily_paid_calls": 7})
 
 
 if __name__ == "__main__":  # pragma: no cover

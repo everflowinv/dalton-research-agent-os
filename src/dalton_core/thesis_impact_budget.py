@@ -38,6 +38,9 @@ SCHEMA_VERSION = "0.1"
 ALERT_KINDS = frozenset({"day_budget_exceeded", "work_order_failed"})
 ALERT_SEVERITIES = frozenset({"high", "medium"})
 ALERT_MAX_DELIVERY_ATTEMPTS = 5
+# C2's additions to a mission binding, named so a replay can tell "this
+# admission gained a dimension" from "this admission changed".
+_POOL_BINDING_KEYS = frozenset({"pool", "pool_caps_micros", "pool_lane"})
 _SCHEMA_PATH = Path(__file__).with_name("thesis_impact_budget_schema.sql")
 _DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -430,7 +433,18 @@ class ThesisImpactBudgetStore:
                     )
                 binding_row = cur.execute("SELECT record_json FROM model_mission_budget_bindings WHERE admission_id=?", (persisted["admission_id"],)).fetchone()
                 saved_binding = None if binding_row is None else json.loads(binding_row["record_json"])
-                if saved_binding != mission_binding:
+                comparable = mission_binding
+                if (saved_binding is not None and mission_binding is not None
+                        and not _POOL_BINDING_KEYS & set(saved_binding)):
+                    # C2: a binding saved before the pool dimension existed
+                    # has no pool keys, and the same call replayed after the
+                    # migration carries them. That is the same admission with
+                    # a dimension added, not a different one -- and refusing
+                    # it would strand exactly the work that was in flight when
+                    # the migration ran.
+                    comparable = {key: value for key, value in mission_binding.items()
+                                  if key not in _POOL_BINDING_KEYS}
+                if saved_binding != comparable:
                     raise ThesisImpactBudgetConflict("mission budget binding changed on replay")
                 return {**persisted, "status": "duplicate"}
             prior_row = cur.execute(
