@@ -41,6 +41,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
 from .company_wiki_core import SOURCE_REF as COMPANY_WIKI_SOURCE_REF
+from .coverage_mission import DISCOVERED_DOCUMENT_STATUSES
 from .document_subject import COMPANY_NAMES, subject_names
 from .sales_notes_core import (
     DOCUMENT_REF_PREFIX as SALES_NOTE_REF_PREFIX,
@@ -84,6 +85,17 @@ ACQUISITIONS_PER_TICK = 8
 ACQUISITION_WAIT_SECONDS = 30.0
 TICK_BUDGET_SECONDS = 20.0
 ACQUISITION_RETRY_INTERVAL = timedelta(hours=1)
+# The queue reader's own maximum page. One query per status stays far
+# under it; a status bucket that reaches it is reported, not truncated.
+DOCUMENT_PAGE_LIMIT = 1_000
+# How much of the lookback one enumeration asks for. Two weeks of this
+# feed is a couple of hundred notes, comfortably inside the record
+# ceiling, so a window that truncates is a busy fortnight rather than
+# the normal case.
+ENUMERATION_WINDOW_DAYS = 14
+# A truncated window is halved; this bounds the halving so a
+# pathological day cannot recurse without end.
+MAX_WINDOW_SPLITS = 6
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -405,7 +417,8 @@ def triage_wiki_documents(
     terms = plan_terms(plan)
     company: dict[str, list[str]] = {}
     tagged: list[str] = []
-    candidates: list[str] = []
+    industry: list[str] = []
+    other: list[str] = []
     for document in documents:
         hits = [tag for tag in document.get("company_tags", ()) if tag in ticker_to_ref]
         if hits:
@@ -417,15 +430,19 @@ def triage_wiki_documents(
             list(document.get("sector_tags", ())) + list(document.get("topic_tags", ()))
             + [str(document.get("category_name") or ""), str(document.get("doc_type") or "")]
         )
-        if mentions_any(tag_text, terms):
-            candidates.append(document["document_id"])
-        else:
-            candidates.append(document["document_id"])
+        # Nothing is dropped here either -- the tags are thin and a document
+        # may only say what it is about in its text -- but a document whose
+        # tags already name the industry is read before one whose tags say
+        # nothing, because a bounded batch should spend itself on the likely
+        # half first.
+        (industry if mentions_any(tag_text, terms) else other).append(
+            document["document_id"]
+        )
     return {
         "header_company": {ref: sorted(dict.fromkeys(refs))
                            for ref, refs in sorted(company.items())},
-        "read_queue": tagged + candidates,
-        "header_industry_count": 0,
+        "read_queue": tagged + industry + other,
+        "header_industry_count": len(industry),
     }
 
 
@@ -442,6 +459,20 @@ def wiki_spec_ref(doc_type_key: str) -> str:
     if not re.fullmatch(r"[a-z][a-z0-9_]*", key):
         raise FeedLaneRejected("wiki document kind is not a usable spec key")
     return WIKI_SPEC_PREFIX + key.replace("_", "-")
+
+
+def _merge_reads(source_ref: str, reads: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """One tick's reads across several windows, as one answer."""
+
+    merged: dict[str, Any] = {
+        "source_ref": source_ref, "read": 0, "already_held": 0, "outcomes": [],
+        "company": 0, "industry": 0, "dropped": 0, "failed": 0,
+    }
+    for item in reads:
+        for key in ("read", "already_held", "company", "industry", "dropped", "failed"):
+            merged[key] += item[key]
+        merged["outcomes"].extend(item["outcomes"])
+    return merged
 
 
 # -- the lane -----------------------------------------------------------
@@ -494,21 +525,47 @@ class FeedDiscoveryCoordinator:
             else body_reads_per_tick
         )
 
-    # -- window ---------------------------------------------------------
+    # -- windows --------------------------------------------------------
 
     def window_start(self) -> str:
-        """The oldest day this tick will look at, from the plan's lookback."""
+        """The oldest day this lane will look at, from the plan's lookback."""
 
         as_of = self.clock().date()
         return (as_of - timedelta(days=int(self.plan["lookback_days"]))).isoformat()
 
-    def enumerate_via_runner(self, *, since: str) -> dict[str, Any]:
-        """The index read, through the connector runner so it is recorded too.
+    def windows(self, *, since: str | None = None) -> list[tuple[str, str]]:
+        """The lookback split into bounded windows, **newest first**.
+
+        Newest first because that is the order the work is worth doing in: a
+        tick that spends its read budget on notes from five months ago and
+        never reaches this morning's is worse than useless -- it looks busy.
+        Bounded because one enumeration carries one bounded response, and a
+        window that does not fit comes back truncated rather than as a silent
+        prefix.
+        """
+
+        oldest = date.fromisoformat(since or self.window_start())
+        newest = self.clock().date()
+        if newest < oldest:
+            return []
+        step = timedelta(days=ENUMERATION_WINDOW_DAYS)
+        spans: list[tuple[str, str]] = []
+        end = newest
+        while end >= oldest:
+            begin = max(oldest, end - step + timedelta(days=1))
+            spans.append((begin.isoformat(), end.isoformat()))
+            if begin == oldest:
+                break
+            end = begin - timedelta(days=1)
+        return spans
+
+    def enumerate_via_runner(self, *, since: str, until: str) -> dict[str, Any]:
+        """One window's index read, through the connector runner.
 
         An enumeration is a governed call like any other: it reads a source,
-        it should leave an invocation behind, and its raw bytes belong in the
-        spool. It does not become a discovery record -- a listing is not a
-        document -- but it is not an unrecorded read either.
+        it leaves an invocation behind, and its raw bytes go into the spool.
+        It does not become a discovery record -- a listing is not a document
+        -- but it is not an unrecorded read either.
         """
 
         if self.enumerator is None:
@@ -516,17 +573,48 @@ class FeedDiscoveryCoordinator:
                 f"{self.source_ref} has no enumeration runner; the index "
                 "operation is not installed on this coordinator"
             )
-        parameters = self.enumeration_parameters(since=since)
+        parameters = self.enumeration_parameters(since=since, until=until)
         receipt = self.enumerator.run(
             parameters=parameters,
-            work_ref=f"work:{self.source_ref}:enumerate:{since}",
+            work_ref=f"work:{self.source_ref}:enumerate:{since}:{until}",
         )
         return dict(receipt.observation)
 
-    def enumeration_parameters(self, *, since: str) -> dict[str, Any]:
-        if self.source_ref == SALES_NOTES_SOURCE_REF:
-            return {"since": since}
-        return {"since": since}
+    def enumerate_window(
+        self, *, since: str, until: str, depth: int = 0
+    ) -> list[dict[str, Any]]:
+        """Every observation needed to cover one window without truncation.
+
+        A truncated listing is split in half and both halves are asked for.
+        The alternative -- accepting the prefix -- would leave the older half
+        of every busy window permanently unread while the envelope claimed the
+        window was enumerated. Splitting bottoms out at a single day, which no
+        real day of this feed exceeds; a single day that still truncates is
+        returned as it is, honestly marked ``partial``, because there is no
+        smaller window to ask for.
+        """
+
+        observation = self.enumerate_via_runner(since=since, until=until)
+        if observation.get("next_cursor") is None:
+            return [observation]
+        begin, end = date.fromisoformat(since), date.fromisoformat(until)
+        if begin >= end or depth >= MAX_WINDOW_SPLITS:
+            return [observation]
+        middle = begin + (end - begin) // 2
+        return (
+            self.enumerate_window(
+                since=(middle + timedelta(days=1)).isoformat(), until=until,
+                depth=depth + 1,
+            )
+            + self.enumerate_window(
+                since=since, until=middle.isoformat(), depth=depth + 1,
+            )
+        )
+
+    def enumeration_parameters(self, *, since: str, until: str) -> dict[str, Any]:
+        """Both feeds take the same bounded window; neither takes a query."""
+
+        return {"since": since, "until": until}
 
     def triage(
         self, observation: Mapping[str, Any], universe: Sequence[Mapping[str, Any]]
@@ -620,12 +708,9 @@ class FeedDiscoveryCoordinator:
         """
 
         authorization = self.authorize(company_ref=company_ref, requested_by=requested_by)
-        known = {
-            row["document_ref"]
-            for row in self.missions.discovered_documents(
-                authorization["mission_version_ref"], company_ref=company_ref, limit=500
-            )
-        }
+        known = self._documents_for(
+            authorization["mission_version_ref"], company_ref=company_ref
+        )
         return self.missions.record_source_discovery(
             authorization=authorization,
             discovery_plan_ref=self.plan["id"],
@@ -772,7 +857,9 @@ class FeedDiscoveryCoordinator:
             # discovery record's own id: one discovery names one document,
             # but the queue row is keyed by (mission version, document) so
             # that two companies' discoveries of the same note are one row.
-            row = self._queued_row(recorded["mission_version_ref"], document_ref)
+            row = self._queued_row(
+                recorded["mission_version_ref"], document_ref, company_ref
+            )
             if row is None:
                 raise FeedLaneError(
                     "the discovery was recorded but its document is not in the queue"
@@ -786,20 +873,75 @@ class FeedDiscoveryCoordinator:
             result["records"].append(row["record_id"])
         return result
 
-    def documents_in_authority(self) -> list[str]:
-        """Every document of this feed the mission already holds."""
+    def documents_in_authority(self) -> set[str]:
+        """Every document of this feed the mission already holds.
+
+        Paged, because the reader caps a page and a mission that has been
+        running for a while holds more documents than one page. An unpaged
+        read here would silently stop reporting held documents past the cap
+        and the lane would re-read them for ever.
+        """
 
         version = self.missions.active_mission(self.plan["mission_ref"])
-        return [
-            row["document_ref"]
-            for row in self.missions.discovered_documents(version["id"], limit=500)
-            if row["source_ref"] == self.source_ref
-        ]
+        held: set[str] = set()
+        # One bucket per (company, status). The reader has no cursor, so the
+        # only way to stay under its page cap is to ask narrower questions,
+        # and the plan already knows which companies this lane covers.
+        for company_ref in self.companies:
+            held |= self._documents_for(version["id"], company_ref=company_ref)
+        return held
 
-    def _queued_row(self, mission_version_ref: str, document_ref: str) -> Any:
-        for row in self.missions.discovered_documents(mission_version_ref, limit=500):
-            if row["document_ref"] == document_ref:
-                return row
+    def _documents_for(
+        self, mission_version_ref: str, *, company_ref: str | None = None
+    ) -> set[str]:
+        """Every discovered-document ref of this feed, one query per status.
+
+        The reader caps a page at a thousand rows and offers no cursor, so a
+        single call is a page and not an answer. Splitting by status -- and by
+        company where the caller knows it -- keeps every query far under that
+        cap for a mission of any plausible size, and a bucket that reaches it
+        raises rather than quietly reporting fewer held documents than there
+        are: under-reporting here means re-reading documents for ever.
+        """
+
+        held: set[str] = set()
+        for status in DISCOVERED_DOCUMENT_STATUSES:
+            page = self.missions.discovered_documents(
+                mission_version_ref, company_ref=company_ref, status=status,
+                limit=DOCUMENT_PAGE_LIMIT,
+            )
+            if len(page) == DOCUMENT_PAGE_LIMIT:
+                raise FeedLaneError(
+                    f"{status} documents for this mission fill a whole page; "
+                    "the queue reader has no cursor, so this lane cannot see "
+                    "past it -- narrow the mission or add paging to the reader"
+                )
+            held.update(
+                row["document_ref"] for row in page
+                if row["source_ref"] == self.source_ref
+            )
+        return held
+
+    def _queued_row(
+        self, mission_version_ref: str, document_ref: str, company_ref: str
+    ) -> Any:
+        """The queue row for one document, narrowed rather than scanned.
+
+        Reading one capped page and giving up is a bug that only appears once
+        a mission holds more documents than a page -- and it appears at the
+        worst possible moment, after ``record_source_discovery`` has already
+        committed, leaving the row stuck at ``discovered`` and the tick
+        failing on every pass. Filtering by company and by status keeps every
+        query small and covers every row.
+        """
+
+        for status in DISCOVERED_DOCUMENT_STATUSES:
+            for row in self.missions.discovered_documents(
+                mission_version_ref, company_ref=company_ref, status=status,
+                limit=DOCUMENT_PAGE_LIMIT,
+            ):
+                if row["document_ref"] == document_ref:
+                    return row
         return None
 
     # -- per-source shapes ----------------------------------------------
@@ -920,11 +1062,19 @@ class FeedDiscoveryCoordinator:
 
     def dispatch_once(self, *, universe: Sequence[Mapping[str, Any]] | None = None,
                       since: str | None = None) -> dict[str, Any]:
-        """One tick: settle what is outstanding, enumerate, then read a batch.
+        """One tick: settle what is outstanding, then walk windows newest first.
 
         Settling first is not cosmetic. A tick that launched before settling
         would find the single slot occupied by its own previous child and
         report ``busy`` forever.
+
+        The windows are walked newest first and the read budget is spent as it
+        goes, so the newest unread material is always what a tick reads. Older
+        windows are still enumerated when the budget runs out -- enumerating is
+        one cheap local read and the counts are worth having -- but nothing is
+        read from them, and the next tick, with those documents now held,
+        reaches further back. That is how the whole lookback gets covered
+        without any tick being unbounded.
 
         Without a runner the tick still does the queue half -- acquiring rows
         some other path discovered -- and says so, rather than failing a
@@ -937,16 +1087,41 @@ class FeedDiscoveryCoordinator:
         }
         results["settled"].extend(self.settle_documents())
         if self.runner is not None and universe:
-            window = since or self.window_start()
-            observation = self.enumerate_via_runner(since=window)
-            triage = self.triage(observation, universe)
-            headers = self.headers_by_document(observation)
-            results["read"] = self.resolve_documents(
-                queue=triage["read_queue"], universe=universe, headers=headers,
-                header_company=triage["header_company"], since=window,
-                known=self.documents_in_authority(),
-            )
-            results["enumerated"] = len(headers)
+            held = self.documents_in_authority()
+            budget = self.body_reads_per_tick
+            enumerated = 0
+            windows = 0
+            partial_windows = 0
+            reads: list[dict[str, Any]] = []
+            for window_since, window_until in self.windows(since=since):
+                if budget <= 0:
+                    break
+                for observation in self.enumerate_window(
+                    since=window_since, until=window_until
+                ):
+                    windows += 1
+                    if observation.get("next_cursor") is not None:
+                        partial_windows += 1
+                    headers = self.headers_by_document(observation)
+                    enumerated += len(headers)
+                    if budget <= 0:
+                        continue
+                    triage = self.triage(observation, universe)
+                    read = self.resolve_documents(
+                        queue=triage["read_queue"], universe=universe,
+                        headers=headers, header_company=triage["header_company"],
+                        since=window_since, known=held, limit=budget,
+                    )
+                    reads.append(read)
+                    budget -= read["read"]
+                    held.update(
+                        item["document_ref"] for item in read["outcomes"]
+                        if item["outcome"] == "company"
+                    )
+            results["read"] = _merge_reads(self.source_ref, reads)
+            results["enumerated"] = enumerated
+            results["windows"] = windows
+            results["partial_windows"] = partial_windows
         else:
             for _ in range(self.acquisitions_per_tick):
                 outcome = self.launch_acquisition()
@@ -1007,9 +1182,11 @@ def build_feed_runner(
 
     template_key = FEED_IDENTITY[source_ref][0]
 
-    def command(parameters: Mapping[str, Any], output_dir: Path) -> list[str]:
+    def command(parameters: Mapping[str, Any], output_dir: Path,
+                context: Mapping[str, str]) -> list[str]:
         return launcher.child_command(
-            operation=operation, output_dir=output_dir, **dict(parameters)
+            operation=operation, output_dir=output_dir, context=context,
+            **dict(parameters)
         )
 
     return HostToolRunner(
@@ -1046,6 +1223,22 @@ def _dispatch(server: Any, source_ref: str, launcher_kwarg: str) -> dict[str, An
     launcher = server.lane_launcher(launcher_kwarg)
     if launcher is None:
         return {"status": "unconfigured", "reason": f"no {source_ref} lane on this writer"}
+    # Preflight the one thing this lane cannot install for itself. Until the
+    # mission authority knows the feed is a discovery source, every read this
+    # tick performs is quota spent on documents that will be refused at
+    # ``record_source_discovery`` -- so it is checked before the first child
+    # starts, not after fifty of them have run.
+    from .coverage_mission import DISCOVERY_SOURCES
+
+    if source_ref not in DISCOVERY_SOURCES:
+        return {
+            "status": "unconfigured",
+            "reason": (
+                f"{source_ref} is not registered in coverage_mission."
+                "DISCOVERY_SOURCES; the mission authority cannot bind a "
+                "discovery to it yet"
+            ),
+        }
     plan_path = getattr(launcher, "feed_plan_path", None)
     if plan_path is None:
         return {"status": "unconfigured", "reason": "no feed discovery plan"}
@@ -1237,7 +1430,10 @@ __all__ = [
     "COMPANY_WIKI_LAUNCHER_KWARG",
     "COMPANY_WIKI_SOURCE_REF",
     "DISCOVERY_SCOPE",
+    "DOCUMENT_PAGE_LIMIT",
+    "ENUMERATION_WINDOW_DAYS",
     "FEED_DISCOVERY_SOURCES",
+    "MAX_WINDOW_SPLITS",
     "FEED_IDENTITY",
     "MAX_BODY_READS_PER_TICK",
     "PLAN_SCHEMA_VERSION",

@@ -15,7 +15,8 @@ import json
 import sqlite3
 import tempfile
 import unittest
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from email.utils import format_datetime
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -233,12 +234,14 @@ class FeedIdentityTests(unittest.TestCase):
 
 class SalesNotesFeedTests(unittest.TestCase):
     def test_enumeration_hashes_bodies_and_suppresses_the_carried_forward_note(self) -> None:
-        notes = enumerate_notes(FIXTURES, since="2026-09-01")
+        notes, truncated = enumerate_notes(FIXTURES, since="2026-09-01", until="2026-09-30")
+        self.assertFalse(truncated)
         ids = [note["note_id"] for note in notes]
-        self.assertEqual(ids, [ACN_NOTE, MACRO_NOTE, EPAM_NOTE, OPEN_NOTE, CTSH_NOTE])
+        # Newest first: the evening note leads and the morning ones follow.
+        self.assertEqual(ids, [CTSH_NOTE, ACN_NOTE, OPEN_NOTE, EPAM_NOTE, MACRO_NOTE])
         # The morning note is republished by the evening run; it is one note.
         self.assertEqual(len(ids), len(set(ids)))
-        first = notes[0]
+        first = next(note for note in notes if note["note_id"] == ACN_NOTE)
         self.assertEqual(first["digest_ref"], "market-digest:2026-09-08:AM")
         self.assertEqual(first["evidence_tier"], "sell_side")
         self.assertTrue(first["analyst_named"])
@@ -251,29 +254,46 @@ class SalesNotesFeedTests(unittest.TestCase):
         self.assertEqual(first["body_chars"], len(body))
         # A second run over the same directory is the same enumeration: the
         # feed grows at the end, so re-reading it is not re-discovering it.
-        self.assertEqual(notes, enumerate_notes(FIXTURES, since="2026-09-01"))
+        self.assertEqual(
+            (notes, truncated),
+            enumerate_notes(FIXTURES, since="2026-09-01", until="2026-09-30"),
+        )
 
     def test_window_and_sender_filters_are_applied_to_the_mail_not_the_run(self) -> None:
-        self.assertNotIn(
-            OLD_NOTE, [note["note_id"] for note in enumerate_notes(FIXTURES, since="2026-09-01")]
-        )
-        self.assertIn(
-            OLD_NOTE, [note["note_id"] for note in enumerate_notes(FIXTURES, since="2026-07-01")]
-        )
-        filtered = enumerate_notes(
-            FIXTURES, since="2026-09-01", sender_domain="example-broker.test"
+        recent, _ = enumerate_notes(FIXTURES, since="2026-09-01", until="2026-09-30")
+        self.assertNotIn(OLD_NOTE, [note["note_id"] for note in recent])
+        wider, _ = enumerate_notes(FIXTURES, since="2026-07-01", until="2026-09-30")
+        self.assertIn(OLD_NOTE, [note["note_id"] for note in wider])
+        # `until` bounds the other end, so an older window excludes the newer
+        # notes rather than returning everything since a date.
+        older, _ = enumerate_notes(FIXTURES, since="2026-07-01", until="2026-08-31")
+        self.assertEqual([note["note_id"] for note in older], [OLD_NOTE])
+        filtered, _ = enumerate_notes(
+            FIXTURES, since="2026-09-01", until="2026-09-30",
+            sender_domain="example-broker.test",
         )
         self.assertEqual(
-            [note["note_id"] for note in filtered], [MACRO_NOTE, OPEN_NOTE, CTSH_NOTE]
+            [note["note_id"] for note in filtered], [CTSH_NOTE, OPEN_NOTE, MACRO_NOTE]
         )
 
     def test_bad_windows_and_unknown_ids_are_refused(self) -> None:
         with self.assertRaises(SalesNotesError):
-            enumerate_notes(FIXTURES, since="September")
+            enumerate_notes(FIXTURES, since="September", until="2026-09-30")
         with self.assertRaises(SalesNotesError):
-            enumerate_notes(FIXTURES, since="2026-09-01", limit=0)
+            enumerate_notes(FIXTURES, since="2026-09-30", until="2026-09-01")
+        with self.assertRaises(SalesNotesError):
+            enumerate_notes(FIXTURES, since="2026-09-01", until="2026-09-30", limit=0)
         with self.assertRaises(SalesNotesError):
             read_note(FIXTURES, "sales-note:ffffffffffffffff")
+
+    def test_a_window_that_does_not_fit_says_so_and_keeps_the_newest(self) -> None:
+        notes, truncated = enumerate_notes(
+            FIXTURES, since="2026-07-01", until="2026-09-30", limit=2
+        )
+        self.assertTrue(truncated)
+        # The two kept are the newest two, not the two the scan happened to
+        # reach first. A prefix of the oldest is the failure this prevents.
+        self.assertEqual([note["note_id"] for note in notes], [CTSH_NOTE, ACN_NOTE])
 
 
 class CompanyWikiFeedTests(unittest.TestCase):
@@ -297,9 +317,10 @@ class CompanyWikiFeedTests(unittest.TestCase):
         self.assertEqual(classify_doc_type(""), ("other", "unclassified"))
 
     def test_enumeration_reads_tags_from_the_corpus_and_hashes_the_file(self) -> None:
-        documents = enumerate_documents(
-            self.index, self.corpus, since="2026-07-01", company="ACN"
+        documents, truncated = enumerate_documents(
+            self.index, self.corpus, since="2026-07-01", until="2026-12-31", company="ACN"
         )
+        self.assertFalse(truncated)
         self.assertEqual(
             [item["doc_type_key"] for item in documents],
             ["expert_interview", "management_meeting_minutes"],
@@ -320,8 +341,9 @@ class CompanyWikiFeedTests(unittest.TestCase):
         self.assertNotIn("quarterly_note", [item["doc_type_key"] for item in documents])
 
     def test_an_industry_document_carries_no_company_tag(self) -> None:
-        documents = enumerate_documents(
-            self.index, self.corpus, since="2026-07-01", industry="us-it-services"
+        documents, _ = enumerate_documents(
+            self.index, self.corpus, since="2026-07-01", until="2026-12-31",
+            industry="us-it-services",
         )
         self.assertEqual(len(documents), 1)
         self.assertEqual(documents[0]["category_type"], "sector")
@@ -339,7 +361,8 @@ class CompanyWikiFeedTests(unittest.TestCase):
         connection.commit()
         connection.close()
         with self.assertRaises(CompanyWikiError):
-            enumerate_documents(self.index, self.corpus, since="2026-07-01", company="ACN")
+            enumerate_documents(self.index, self.corpus, since="2026-07-01",
+                                until="2026-12-31", company="ACN")
 
 
 class FeedChildTests(unittest.TestCase):
@@ -371,7 +394,7 @@ class FeedChildTests(unittest.TestCase):
     def test_an_unapproved_or_wrong_capability_record_stops_the_run(self) -> None:
         proposed = write_governance(self.root, SALES_NOTES_LIST_KIND, status="proposed")
         summary = self.run_notes(governance=proposed, operation="list_notes",
-                                 since="2026-09-01")
+                                 since="2026-09-01", until="2026-09-30")
         self.assertEqual(summary["status"], "failed")
         self.assertIn("not approved", summary["failure_reason"])
         self.assertIsNone(summary["artifact"])
@@ -388,13 +411,25 @@ class FeedChildTests(unittest.TestCase):
     def test_list_notes_validates_against_the_frozen_contract_and_spools_the_read(self) -> None:
         governance = write_governance(self.root, SALES_NOTES_LIST_KIND)
         summary = self.run_notes(governance=governance, operation="list_notes",
-                                 since="2026-09-01")
+                                 since="2026-09-01", until="2026-09-30")
         self.assertEqual(summary["status"], "succeeded", summary["failure_reason"])
         self.assertEqual(summary["note_count"], 5)
+        self.assertFalse(summary["observation"]["truncated"])
+        self.assertIsNone(summary["observation"]["next_cursor"])
         self.assertEqual(summary["senders"],
                          {"example-bank.test": 2, "example-broker.test": 3})
         self.assertEqual(summary["observation"]["source_record_refs"],
-                         [ACN_NOTE, MACRO_NOTE, EPAM_NOTE, OPEN_NOTE, CTSH_NOTE])
+                         [CTSH_NOTE, ACN_NOTE, OPEN_NOTE, EPAM_NOTE, MACRO_NOTE])
+
+    def test_a_truncated_listing_carries_a_cursor_and_never_claims_completeness(self) -> None:
+        governance = write_governance(self.root, SALES_NOTES_LIST_KIND)
+        summary = self.run_notes(governance=governance, operation="list_notes",
+                                 since="2026-07-01", until="2026-09-30", limit=2)
+        self.assertEqual(summary["status"], "succeeded", summary["failure_reason"])
+        self.assertTrue(summary["observation"]["truncated"])
+        # The cursor is the day of the oldest row returned: everything before
+        # it is still unread, and the caller narrows the window.
+        self.assertEqual(summary["observation"]["next_cursor"], "2026-09-08")
         spool = RawSpool(str(self.spool_dir), max_total_bytes=1_000_000_000)
         self.assertTrue(spool.object_exists(summary["artifact"]["content_hash"]))
 
@@ -439,8 +474,8 @@ class FeedChildTests(unittest.TestCase):
 
     def test_wiki_child_reads_one_document_and_keeps_the_corpus_tags(self) -> None:
         governance = write_governance(self.root, COMPANY_WIKI_GET_KIND)
-        documents = enumerate_documents(
-            self.index, self.corpus, since="2026-07-01", company="ACN"
+        documents, _ = enumerate_documents(
+            self.index, self.corpus, since="2026-07-01", until="2026-12-31", company="ACN"
         )
         ticket_dir = self.root / "wiki-ticket"
         ticket_dir.mkdir()
@@ -470,7 +505,7 @@ class FeedChildTests(unittest.TestCase):
 
 class FeedAttributionTests(unittest.TestCase):
     def test_a_note_naming_a_covered_company_is_queued_and_a_macro_note_is_not(self) -> None:
-        notes = enumerate_notes(FIXTURES, since="2026-09-01")
+        notes, _ = enumerate_notes(FIXTURES, since="2026-09-01", until="2026-09-30")
         attribution = attribute_notes(notes, UNIVERSE)
         self.assertEqual(attribution["by_company"][ACN], [ACN_NOTE])
         self.assertEqual(attribution["by_company"][EPAM], [EPAM_NOTE])
@@ -732,7 +767,7 @@ class FeedLaneTickTests(unittest.TestCase):
 
     def test_enumeration_runs_through_the_governed_child(self) -> None:
         coordinator = self.coordinator(RecordingMissions([]))
-        observation = coordinator.enumerate(since="2026-09-01")
+        observation = coordinator.enumerate(since="2026-09-01", until="2026-09-30")
         self.assertEqual(observation["note_count"], 5)
         self.assertEqual(coordinator.spec_refs(observation)[ACN_NOTE], "sales-note")
 
@@ -794,7 +829,7 @@ class FeedLaneTickTests(unittest.TestCase):
             )
         self.assertIn("host-tool runner", str(ctx.exception))
         with self.assertRaises(FeedLaneError):
-            coordinator.enumerate_via_runner(since="2026-09-01")
+            coordinator.enumerate_via_runner(since="2026-09-01", until="2026-09-30")
 
 
 class FeedLauncherTests(unittest.TestCase):
@@ -922,7 +957,7 @@ class FeedTriageTests(unittest.TestCase):
         self.plan = load_feed_discovery_plan(PLAN_PATH)
 
     def test_a_header_hit_attributes_and_a_header_miss_only_defers(self) -> None:
-        notes = enumerate_notes(FIXTURES, since="2026-09-01")
+        notes, _ = enumerate_notes(FIXTURES, since="2026-09-01", until="2026-09-30")
         triage = triage_notes(notes, UNIVERSE, self.plan)
         self.assertEqual(triage["header_company"][ACN], [ACN_NOTE])
         self.assertEqual(triage["header_company"][EPAM], [EPAM_NOTE])
@@ -931,8 +966,8 @@ class FeedTriageTests(unittest.TestCase):
         # saying nothing is not evidence that the body says nothing.
         self.assertEqual(sorted(triage["read_queue"]),
                          sorted(note["note_id"] for note in notes))
-        self.assertEqual(triage["read_queue"][:3],
-                         [ACN_NOTE, EPAM_NOTE, CTSH_NOTE])
+        self.assertEqual(set(triage["read_queue"][:3]),
+                         {ACN_NOTE, EPAM_NOTE, CTSH_NOTE})
 
     def test_the_body_decides_company_industry_or_dropped(self) -> None:
         _, acn_body = read_note(FIXTURES, ACN_NOTE)
@@ -1067,9 +1102,19 @@ class FeedEndToEndTests(unittest.TestCase):
             manifest = self.launcher.read_completed_manifest(
                 row["ticket_ref"], row["document_ref"]
             )
-            _, text = verified_feed_source(self.core, self.spool, manifest)
+            # The manifest names the invocation that read the bytes, so the
+            # review path re-reads that receipt from Core as well as the bytes.
+            self.assertEqual(
+                manifest["connector_invocation_hash"],
+                reader.get_invocation(manifest["connector_invocation_ref"])["content_hash"],
+            )
+            _, text = verified_feed_source(self.core, self.spool, manifest, reader)
             self.assertEqual(manifest["evidence_tier"], "sell_side")
             self.assertTrue(text)
+        # Without the reader the manifest cannot be honoured: it names an
+        # authority nobody offered to check.
+        with self.assertRaises(FeedSourceConflict):
+            verified_feed_source(self.core, self.spool, manifest)
 
     def test_a_second_tick_discovers_nothing_new(self) -> None:
         coordinator = self.coordinator()
@@ -1110,6 +1155,281 @@ class FeedEndToEndTests(unittest.TestCase):
         self.assertEqual(
             self.missions.discovered_documents(self.mission["id"], limit=100), []
         )
+
+
+def synthetic_digests(root: Path, *, days: int, per_day: int) -> Path:
+    """A feed big enough that one bounded response cannot hold a window."""
+
+    root.mkdir(parents=True, exist_ok=True)
+    start = date(2026, 5, 1)
+    serial = 0
+    for offset in range(days):
+        day = start + timedelta(days=offset)
+        emails = []
+        for slot in range(per_day):
+            serial += 1
+            body = f"SYNTHETIC FIXTURE BODY -- note {serial}.\r\n"
+            emails.append({
+                "id": f"bbbb{serial:012d}",
+                "from": '"Desk" <desk@example-broker.test>',
+                "subject": f"Synthetic note {serial}",
+                "date": format_datetime(
+                    datetime(day.year, day.month, day.day, 6 + slot,
+                             tzinfo=timezone.utc)
+                ),
+                "is_priority": False,
+                "body_length": len(body),
+                "body": body,
+            })
+        (root / f"digest_{day.isoformat()}_AM.json").write_text(
+            json.dumps({
+                "ok": True, "status": "emails_fetched", "date": day.isoformat(),
+                "period": "AM", "count": len(emails), "priority_count": 0,
+                "raw_chunks_indexed": 0, "emails": emails,
+            }, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    return root
+
+
+class TruncationTests(unittest.TestCase):
+    """A window that does not fit says so, and the walk still covers it."""
+
+    NOTES = 1_200
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.digests = synthetic_digests(self.root / "digests", days=120, per_day=10)
+        self.plan = load_feed_discovery_plan(PLAN_PATH)
+
+    def test_a_window_returns_the_newest_and_admits_what_it_left(self) -> None:
+        notes, truncated = enumerate_notes(
+            self.digests, since="2026-05-01", until="2026-08-28", limit=100
+        )
+        self.assertTrue(truncated)
+        self.assertEqual(len(notes), 100)
+        # Newest first, so the hundred kept are the hundred that matter.
+        self.assertEqual(notes[0]["sent_at"][:10], "2026-08-28")
+        self.assertGreater(notes[0]["sent_at"], notes[-1]["sent_at"])
+
+    def test_the_walk_covers_every_note_newest_first_over_successive_ticks(self) -> None:
+        # A fake enumerator: the real core read, wrapped in the wire shape the
+        # runner would return. The subject under test is the window walk, and
+        # twelve hundred child processes would test the operating system.
+        limit = 100
+        calls: list[tuple[str, str]] = []
+
+        class Enumerator:
+            def run(self, *, parameters, work_ref, output_dir=None):
+                calls.append((parameters["since"], parameters["until"]))
+                rows, truncated = enumerate_notes(
+                    self_digests, since=parameters["since"],
+                    until=parameters["until"], limit=limit,
+                )
+                observation = {
+                    "schema_version": "0.1", "since": parameters["since"],
+                    "until": parameters["until"], "sender_domain": None,
+                    "notes": rows, "note_count": len(rows), "truncated": truncated,
+                    "source_record_refs": [row["note_id"] for row in rows],
+                    "next_cursor": rows[-1]["sent_at"][:10] if truncated and rows else None,
+                    "provider_status": 200,
+                }
+                return mock.Mock(observation=observation)
+
+        self_digests = self.digests
+        clock = lambda: datetime(2026, 8, 28, 12, tzinfo=timezone.utc)
+        coordinator = FeedDiscoveryCoordinator(
+            missions=RecordingMissions([]), launcher=None, source_ref=SALES_NOTES,
+            plan=self.plan, enumerator=Enumerator(), clock=clock,
+        )
+        seen: list[str] = []
+        for window_since, window_until in coordinator.windows(since="2026-05-01"):
+            for observation in coordinator.enumerate_window(
+                since=window_since, until=window_until
+            ):
+                # Every observation is honest about itself: a cursor exactly
+                # when it left rows behind.
+                self.assertEqual(
+                    observation["next_cursor"] is not None, observation["truncated"]
+                )
+                seen.extend(observation["source_record_refs"])
+        every, _ = enumerate_notes(
+            self.digests, since="2026-05-01", until="2026-08-28", limit=2_000
+        )
+        self.assertEqual(len(every), self.NOTES)
+        # Every note is enumerated exactly once across the walk, and the walk
+        # went newest first: the first window asked for the most recent days.
+        self.assertEqual(sorted(seen), sorted(note["note_id"] for note in every))
+        self.assertEqual(len(seen), len(set(seen)))
+        self.assertEqual(calls[0][1], "2026-08-28")
+        self.assertGreater(calls[0][0], calls[-1][0])
+        # A fortnight of this feed is a hundred and forty notes, so the first
+        # ask truncated and was split rather than accepted.
+        self.assertGreater(len(calls), len(coordinator.windows(since="2026-05-01")))
+
+    def test_a_truncated_listing_binds_partial_not_enumerated(self) -> None:
+        spawn_env(self)
+        core = DaltonStore(str(self.root / "core.sqlite"))
+        self.addCleanup(core.close)
+        connectors = ConnectorStore(core)
+        observability = ObservabilityStore(core)
+        spool = RawSpool(str(self.root / "spool"), max_total_bytes=1_000_000_000)
+        governance = {
+            "list_notes": write_governance(self.root, SALES_NOTES_LIST_KIND),
+            "get_note": write_governance(self.root, SALES_NOTES_GET_KIND),
+        }
+        launcher = SalesNotesFeedLauncher(
+            digest_dir=FIXTURES, state_dir=self.root, governance_paths=governance,
+            spool_dir=self.root / "spool",
+        )
+        self.addCleanup(launcher.close)
+        runner = build_feed_runner(
+            launcher=launcher, operation="list_notes",
+            governance=ConnectorGovernance.load(governance["list_notes"]),
+            store=core, connectors=connectors, observability=observability,
+            spool=spool, source_ref=SALES_NOTES,
+        )
+        receipt = runner.run(
+            parameters={"since": "2026-07-01", "until": "2026-09-30", "limit": 2},
+            work_ref="work:truncation:1",
+        )
+        reader = ConnectorCompletionReceiptReader(
+            connectors=connectors, observability=observability
+        )
+        envelope = reader.get_source_envelope(receipt.source_envelope_ref)
+        # The operation's ceiling is `enumerated`; this listing did not earn it.
+        self.assertEqual(envelope["completeness"], "partial")
+        self.assertEqual(envelope["status"], "partial")
+        self.assertEqual(len(envelope["source_record_refs"]), 2)
+        full = runner.run(
+            parameters={"since": "2026-09-01", "until": "2026-09-30"},
+            work_ref="work:truncation:2",
+        )
+        complete = reader.get_source_envelope(full.source_envelope_ref)
+        self.assertEqual(complete["completeness"], "enumerated")
+        self.assertEqual(complete["status"], "complete")
+
+
+class RunnerBoundaryTests(unittest.TestCase):
+    def test_the_runner_refuses_a_template_that_is_not_a_host_tool(self) -> None:
+        from dalton_core.host_tool_runner import HostToolRunError, HostToolRunner
+        from dalton_core.sec_financials_core import sec_financials_identity
+
+        # Pointed at a public_https template it would publish a profile
+        # claiming no host allowlist and no network policy for a connector
+        # whose template names two SEC hosts.
+        with self.assertRaises(HostToolRunError) as ctx:
+            HostToolRunner(
+                store=None, connectors=None, observability=None, spool=None,
+                template_key="sec-financials",
+                identity=sec_financials_identity(),
+                governance=None, command=lambda parameters, output_dir: [],
+            )
+        self.assertIn("public_https", str(ctx.exception))
+
+    def test_the_lane_refuses_to_spend_quota_before_the_authority_knows_the_feed(self) -> None:
+        from dalton_core import mission_feed_lane
+
+        class Server:
+            def lane_launcher(self, kwarg):
+                return object()
+
+        # DISCOVERY_SOURCES is not patched here: this is the writer as it
+        # stands today, and the honest answer is "not configured" rather than
+        # fifty child processes whose results the authority will refuse.
+        result = mission_feed_lane._dispatch(
+            Server(), SALES_NOTES, mission_feed_lane.SALES_NOTES_LAUNCHER_KWARG
+        )
+        self.assertEqual(result["status"], "unconfigured")
+        self.assertIn("DISCOVERY_SOURCES", result["reason"])
+
+
+class PagedMissions(RecordingMissions):
+    """A queue reader with the authority's own page cap and no cursor."""
+
+    PAGE_CAP = 1_000
+
+    def discovered_documents(self, mission_version_ref, *, company_ref=None,
+                             status=None, limit=100):
+        if not 1 <= limit <= self.PAGE_CAP:
+            raise ValueError("discovered document limit must be 1..1000")
+        rows = [
+            row for row in self.rows.values()
+            if (company_ref is None or row["company_ref"] == company_ref)
+            and (status is None or row["status"] == status)
+        ]
+        return [dict(row) for row in rows[:limit]]
+
+
+class LargeQueueTests(unittest.TestCase):
+    """The queue outgrows one page long before the mission is finished."""
+
+    def setUp(self) -> None:
+        rows = []
+        for index in range(600):
+            for company in (ACN, EPAM):
+                rows.append({
+                    "record_id": f"mission-discovered-document:{company}:{index}",
+                    "document_ref": f"sales-note:aaaa{index:012d}{'a' if company == ACN else 'b'}",
+                    "source_ref": SALES_NOTES, "company_ref": company,
+                    "status": "acquired", "ticket_ref": "sales-notes-run:" + "0" * 24,
+                })
+        self.missions = PagedMissions(rows)
+        self.coordinator = FeedDiscoveryCoordinator(
+            missions=self.missions, launcher=None, source_ref=SALES_NOTES,
+            plan=load_feed_discovery_plan(PLAN_PATH),
+        )
+
+    def test_a_row_past_the_first_page_is_still_found(self) -> None:
+        # 1,200 rows: an unfiltered read caps at a thousand and the last two
+        # hundred vanish. They are exactly the rows a long-running mission has
+        # most of, and the failure lands *after* record_source_discovery has
+        # committed -- the row stuck at `discovered`, the tick failing on
+        # every pass. Narrowing by company and status is what makes each
+        # query small enough to be an answer.
+        last = self.missions.rows[f"mission-discovered-document:{EPAM}:599"]
+        found = self.coordinator._queued_row(
+            "coverage-mission-version:us-it-services:1",
+            last["document_ref"], EPAM,
+        )
+        self.assertIsNotNone(found)
+        self.assertEqual(found["record_id"], last["record_id"])
+
+    def test_every_held_document_is_reported_not_the_first_page_of_them(self) -> None:
+        held = set()
+        for company_ref in (ACN, EPAM):
+            held |= self.coordinator._documents_for(
+                "coverage-mission-version:us-it-services:1", company_ref=company_ref
+            )
+        self.assertEqual(len(held), 1_200)
+
+    def test_a_bucket_that_fills_a_page_is_reported_rather_than_truncated(self) -> None:
+        # Under-reporting held documents means re-reading them for ever, so
+        # the lane refuses to guess when a bucket reaches the cap.
+        rows = {
+            f"mission-discovered-document:{index}": {
+                "record_id": f"mission-discovered-document:{index}",
+                "document_ref": f"sales-note:cccc{index:012d}",
+                "source_ref": SALES_NOTES, "company_ref": ACN,
+                "status": "acquired", "ticket_ref": None,
+            }
+            for index in range(PagedMissions.PAGE_CAP)
+        }
+        coordinator = FeedDiscoveryCoordinator(
+            missions=PagedMissions(list(rows.values())), launcher=None,
+            source_ref=SALES_NOTES, plan=load_feed_discovery_plan(PLAN_PATH),
+        )
+        with self.assertRaises(FeedLaneError):
+            coordinator._documents_for("coverage-mission-version:us-it-services:1")
+
+    def test_the_page_limit_is_the_authority_own_cap(self) -> None:
+        from dalton_core.mission_feed_lane import DOCUMENT_PAGE_LIMIT
+
+        signature = inspect.signature(CoverageMissionAuthority.discovered_documents)
+        self.assertIn("limit", signature.parameters)
+        self.assertEqual(DOCUMENT_PAGE_LIMIT, PagedMissions.PAGE_CAP)
 
 
 class AuthoritySeamTests(unittest.TestCase):

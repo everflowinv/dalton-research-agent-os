@@ -214,17 +214,28 @@ class FeedChildLauncher(LaneChildLauncher):
         raise NotImplementedError
 
     def child_command(
-        self, *, operation: str, output_dir: str | Path, **parameters: Any
+        self, *, operation: str, output_dir: str | Path,
+        context: Mapping[str, str] | None = None, **parameters: Any
     ) -> list[str]:
         """The argv the host-tool runner executes for one operation.
 
         The same builder the launcher's own ``spawn`` uses, plus
         ``--emit-wire``: the runner treats stdout as the raw response, so the
         child must print the closed observation wire and nothing else.
+
+        On the document operation the invocation the runner registered is
+        passed down, so the manifest the child writes names it from the start.
+        The listing operation writes no manifest and is given nothing.
         """
 
+        extra: dict[str, Any] = {}
+        if context and operation == self.GET_OPERATION:
+            extra = {
+                "connector_invocation_ref": context["connector_invocation_ref"],
+                "connector_invocation_hash": context["connector_invocation_hash"],
+            }
         return self._command(
-            ticket_dir=Path(output_dir), operation=operation, **parameters
+            ticket_dir=Path(output_dir), operation=operation, **parameters, **extra
         ) + ["--emit-wire"]
 
     # -- runs this launcher did not spawn ---------------------------------

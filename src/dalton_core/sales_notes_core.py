@@ -73,7 +73,11 @@ DIGEST_FILE_RE = re.compile(r"^digest_(\d{4}-\d{2}-\d{2})_(AM|PM)\.json$")
 _NOTE_ID_RE = re.compile(r"^[0-9a-z]{6,40}$")
 _REQUIRED_EMAIL_FIELDS = frozenset({"id", "from", "subject", "date", "is_priority", "body"})
 
-MAX_NOTES = 500
+# A window's worth of headers, not the archive's. Six months of this feed is
+# about 2,900 notes and one month about 490, so a caller that asks for a
+# window this cannot hold is asking for a smaller window -- and is told so
+# rather than handed a silent prefix.
+MAX_NOTES = 2_000
 
 
 class SalesNotesError(RuntimeError):
@@ -333,19 +337,36 @@ def enumerate_notes(
     directory: str | Path,
     *,
     since: str,
+    until: str,
     sender_domain: str | None = None,
     limit: int = MAX_NOTES,
-) -> list[dict[str, Any]]:
-    """Every distinct note sent on or after ``since``, oldest run first.
+) -> tuple[list[dict[str, Any]], bool]:
+    """Distinct notes sent within ``[since, until]``, **newest first**.
 
-    One pass over the runs in ascending order, first occurrence wins. That is
-    what makes a second run over the same directory produce the same refs and
-    the same ``digest_ref`` -- the feed grows at the end, so re-reading it is
-    not re-discovering it.
+    Returns ``(notes, truncated)``. Two properties matter and they pull in
+    opposite directions:
+
+    *Ordering.* The runs are scanned in ascending order and the first
+    occurrence of a note wins, which is what makes a second pass over the same
+    directory produce the same refs and the same ``digest_ref`` -- a note
+    carried forward into the next run is the same note, published by the run
+    that first published it. But a caller reading a bounded batch wants the
+    newest material first, so the result is sorted descending afterwards. The
+    scan order is about identity; the result order is about usefulness.
+
+    *Truncation.* A window can hold more notes than one bounded response may
+    carry. When it does, the oldest are dropped and ``truncated`` is true --
+    the caller narrows the window and asks again. Returning a silent prefix
+    and calling it an enumeration is the failure this signature exists to
+    prevent: it would look complete, and every tick would re-read the same
+    oldest notes and never reach this week.
     """
 
-    if not isinstance(since, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", since) is None:
-        raise SalesNotesError("since must be a YYYY-MM-DD date")
+    for name, value in (("since", since), ("until", until)):
+        if not isinstance(value, str) or re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) is None:
+            raise SalesNotesError(f"{name} must be a YYYY-MM-DD date")
+    if until < since:
+        raise SalesNotesError("the enumeration window ends before it starts")
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_NOTES:
         raise SalesNotesError(f"limit must be 1..{MAX_NOTES}")
     domain = sender_domain.lower().strip() if isinstance(sender_domain, str) else None
@@ -357,14 +378,13 @@ def enumerate_notes(
             if header["note_id"] in seen:
                 continue
             seen.add(header["note_id"])
-            if header["sent_at"][:10] < since:
+            if not since <= header["sent_at"][:10] <= until:
                 continue
             if domain and header["sender_domain"] != domain:
                 continue
             notes.append(header)
-            if len(notes) >= limit:
-                return notes
-    return notes
+    notes.sort(key=lambda item: (item["sent_at"], item["note_id"]), reverse=True)
+    return notes[:limit], len(notes) > limit
 
 
 def read_note(

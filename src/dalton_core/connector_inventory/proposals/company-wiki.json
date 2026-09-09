@@ -10,7 +10,7 @@
   "builder_ref": "builder:dalton-connector-inventory:0.1",
   "capability_proposal_ref": "capability-proposal:connector:company-wiki:0.1",
   "connector_ref": "connector:company-wiki",
-  "content_hash": "45aa3569e798823b6ca143f6784b415323670b037c666f46037e53b92c7bb2d6",
+  "content_hash": "014439d2db59589c62f92061a98243ad231e19f9e12cefafb74d484ea72b669d",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "fixture_manifest_hash": "f41998992c0ad391c3034328384d9b63bbf6ad860a45ac58693a629e9d07f557",
   "fixture_manifest_ref": "connector-fixture-manifest:company-wiki:0.1",
@@ -20,10 +20,10 @@
   "operations": [
     {
       "completeness": "enumerated",
-      "input_schema_hash": "3405e2b4eab1ae8760871d94d136c29f03c5951a19955eb625846408e9cbdb86",
+      "input_schema_hash": "e986342f2870c8af55cef1138307d8c41d8ee9e287204c73bba864cab52c081e",
       "input_schema_ref": "schema:connector-inventory:company-wiki:list_documents:input:0.1",
       "operation": "list_documents",
-      "output_schema_hash": "2092f9c6a1ce2419efa71f68aca2f64b00347acc4128457ed24d16809ab23b60",
+      "output_schema_hash": "98aff7e4cd4ddec5ea3c9fb5580b604817d4073531015c8b278e4ea391d42f3f",
       "output_schema_ref": "schema:connector-inventory:company-wiki:list_documents:output:0.1",
       "pagination": "none",
       "side_effects": [
@@ -43,7 +43,7 @@
       ]
     }
   ],
-  "profile_template_hash": "e58e657244196c68bba034484ecd9bea50f4a5464e1080211d8b62c017b6668b",
+  "profile_template_hash": "47dd51f923d379710a9a4884c0912ed7fe15d63cddf7e6b95fb5f5095d186bf4",
   "profile_template_ref": "connector-profile-template:company-wiki:0.1",
   "promotion_policy_ref": "policy:connector-promotion:0.1",
   "requested_canary": null,

@@ -144,7 +144,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "operation": args.operation,
         "transport": "host-tool",
         "since": args.since,
+        "until": args.until,
         "sender_domain": args.sender_domain,
+        "truncated": False,
         "digest_ref": args.digest_ref,
         "document_ref": args.note_id,
         "status": "failed",
@@ -167,24 +169,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         spool = _spool(state, args.spool_dir)
 
         if args.operation == LIST_OPERATION:
-            notes = enumerate_notes(
-                args.digest_dir, since=args.since,
+            notes, truncated = enumerate_notes(
+                args.digest_dir, since=args.since, until=args.until,
                 sender_domain=args.sender_domain, limit=args.limit,
             )
             # The artifact is the enumeration, kept whole and hashed before
             # anything is read out of it.
             artifact = _spool_bytes(spool, canonical_json(notes).encode("utf-8"))
             summary["artifact"] = artifact
+            # A truncated listing says so, and says where it stopped: the day
+            # of the oldest note it returned. Everything before that day is
+            # still unread, and the caller narrows the window and asks again.
+            # A null cursor here is a claim that the window is complete.
             wire = {
                 "schema_version": WIRE_SCHEMA_VERSION,
                 "since": args.since,
+                "until": args.until,
                 "sender_domain": args.sender_domain,
                 "notes": notes,
                 "note_count": len(notes),
+                "truncated": truncated,
                 "source_record_refs": [note["note_id"] for note in notes],
-                "next_cursor": None,
+                "next_cursor": notes[-1]["sent_at"][:10] if truncated and notes else None,
                 "provider_status": 200,
             }
+            summary["truncated"] = truncated
             senders: dict[str, int] = {}
             for note in notes:
                 senders[note["sender_domain"]] = senders.get(note["sender_domain"], 0) + 1
@@ -217,6 +226,11 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 subject_tickers=list(args.ticker or []),
                 text=body,
                 assembled_object=assembled,
+                # The runner registered this invocation before it started this
+                # process, so the manifest names it from the start rather than
+                # being stamped afterwards -- one write, one hash, one record.
+                connector_invocation_ref=args.connector_invocation_ref,
+                connector_invocation_hash=args.connector_invocation_hash,
             )
             _write_owner_only(summary_dir / "manifest.json", manifest)
             summary["manifest_ref"] = manifest["id"]
@@ -257,6 +271,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the host skill's output directory of digest runs")
     parser.add_argument("--operation", required=True, choices=list(OPERATIONS))
     parser.add_argument("--since", default=None, help="YYYY-MM-DD, list_notes only")
+    parser.add_argument("--until", default=None, help="YYYY-MM-DD, list_notes only")
     parser.add_argument("--sender-domain", default=None)
     parser.add_argument("--limit", type=int, default=MAX_NOTES)
     parser.add_argument("--note-id", default=None, help="sales-note:<id>, get_note only")
@@ -264,6 +279,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="locator hint: the run that first published the note")
     parser.add_argument("--ticker", action="append", default=None,
                         help="company this note was queued for; repeatable, may be empty")
+    parser.add_argument("--connector-invocation-ref", default=None,
+                        help="the invocation the host-tool runner registered")
+    parser.add_argument("--connector-invocation-hash", default=None)
     parser.add_argument("--spool-dir", type=Path, default=None)
     parser.add_argument("--summary-dir", default=None)
     parser.add_argument("--quiet", action="store_true")
@@ -279,15 +297,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.operation == LIST_OPERATION:
-        if not args.since:
-            parser.error("--since is required for list_notes")
+        if not args.since or not args.until:
+            parser.error("--since and --until are required for list_notes")
         if args.note_id or args.digest_ref:
             parser.error("--note-id and --digest-ref are not list_notes arguments")
     else:
         if not args.note_id:
             parser.error("--note-id is required for get_note")
-        if args.since or args.sender_domain:
-            parser.error("--since and --sender-domain are not get_note arguments")
+        if args.since or args.until or args.sender_domain:
+            parser.error(
+                "--since, --until and --sender-domain are not get_note arguments"
+            )
     summary = run(args)
     if summary["status"] == "succeeded" and args.emit_wire:
         print(canonical_json(summary["observation"]))

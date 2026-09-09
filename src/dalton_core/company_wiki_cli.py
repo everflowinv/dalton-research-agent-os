@@ -125,7 +125,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "operation": args.operation,
         "transport": "host-tool",
         "since": args.since,
+        "until": args.until,
         "company": args.company,
+        "truncated": False,
         "industry": args.industry,
         "document_ref": args.document_id,
         "status": "failed",
@@ -148,8 +150,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         spool = _spool(state, args.spool_dir)
 
         if args.operation == LIST_OPERATION:
-            documents = enumerate_documents(
-                args.index_db, args.corpus_root, since=args.since,
+            documents, truncated = enumerate_documents(
+                args.index_db, args.corpus_root, since=args.since, until=args.until,
                 company=args.company, industry=args.industry, limit=args.limit,
             )
             artifact = _spool_bytes(spool, canonical_json(documents).encode("utf-8"))
@@ -157,14 +159,19 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             wire = {
                 "schema_version": WIRE_SCHEMA_VERSION,
                 "since": args.since,
+                "until": args.until,
                 "company": args.company,
                 "industry": args.industry,
                 "documents": documents,
                 "document_count": len(documents),
+                "truncated": truncated,
                 "source_record_refs": [item["document_id"] for item in documents],
-                "next_cursor": None,
+                "next_cursor": (
+                    documents[-1]["doc_date"] if truncated and documents else None
+                ),
                 "provider_status": 200,
             }
+            summary["truncated"] = truncated
             kinds: dict[str, int] = {}
             for item in documents:
                 kinds[item["doc_type_key"]] = kinds.get(item["doc_type_key"], 0) + 1
@@ -198,6 +205,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 subject_tickers=list(header["company_tags"]),
                 text=text,
                 assembled_object=assembled,
+                connector_invocation_ref=args.connector_invocation_ref,
+                connector_invocation_hash=args.connector_invocation_hash,
             )
             _write_owner_only(summary_dir / "manifest.json", manifest)
             summary["manifest_ref"] = manifest["id"]
@@ -237,11 +246,15 @@ def build_parser() -> argparse.ArgumentParser:
                         help="root the index's filepaths are relative to")
     parser.add_argument("--operation", required=True, choices=list(OPERATIONS))
     parser.add_argument("--since", default=None, help="YYYY-MM-DD, list_documents only")
+    parser.add_argument("--until", default=None, help="YYYY-MM-DD, list_documents only")
     parser.add_argument("--company", default=None, help="ticker as the corpus tags it")
     parser.add_argument("--industry", default=None, help="sector slug as the corpus tags it")
     parser.add_argument("--limit", type=int, default=MAX_DOCUMENTS)
     parser.add_argument("--document-id", default=None,
                         help="company-wiki-doc:sha256:<hash>, get_document only")
+    parser.add_argument("--connector-invocation-ref", default=None,
+                        help="the invocation the host-tool runner registered")
+    parser.add_argument("--connector-invocation-hash", default=None)
     parser.add_argument("--spool-dir", type=Path, default=None)
     parser.add_argument("--summary-dir", default=None)
     parser.add_argument("--quiet", action="store_true")
@@ -257,15 +270,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(list(argv) if argv is not None else None)
     if args.operation == LIST_OPERATION:
-        if not args.since:
-            parser.error("--since is required for list_documents")
+        if not args.since or not args.until:
+            parser.error("--since and --until are required for list_documents")
         if args.document_id:
             parser.error("--document-id is not a list_documents argument")
     else:
         if not args.document_id:
             parser.error("--document-id is required for get_document")
-        if args.since or args.company or args.industry:
-            parser.error("--since, --company and --industry are not get_document arguments")
+        if args.since or args.until or args.company or args.industry:
+            parser.error(
+                "--since, --until, --company and --industry are not get_document arguments"
+            )
     summary = run(args)
     if summary["status"] == "succeeded" and args.emit_wire:
         print(canonical_json(summary["observation"]))

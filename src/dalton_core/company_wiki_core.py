@@ -60,7 +60,10 @@ SOURCE_REF = "source:company-wiki"
 DOCUMENT_REF_PREFIX = "company-wiki-doc:sha256:"
 WIRE_SCHEMA_VERSION = "0.1"
 
-MAX_DOCUMENTS = 500
+# One window's worth, not the corpus's. The whole corpus is about a thousand
+# documents; a caller whose window does not fit narrows it rather than being
+# handed a silent prefix.
+MAX_DOCUMENTS = 2_000
 MAX_DOCUMENT_BYTES = 8 * 1024 * 1024
 
 # The wiki's own naming: companies are upper-case tickers, sectors are
@@ -378,35 +381,45 @@ def enumerate_documents(
     corpus_root: str | Path,
     *,
     since: str,
+    until: str,
     company: str | None = None,
     industry: str | None = None,
     limit: int = MAX_DOCUMENTS,
-) -> list[dict[str, Any]]:
-    """Headers for documents dated on or after ``since``, newest first.
+) -> tuple[list[dict[str, Any]], bool]:
+    """Headers for documents dated within ``[since, until]``, newest first.
 
-    The body hash is computed from the file, not from the index, because the
-    index is a rebuildable projection and the file is the document. Only the
-    selected rows are opened.
+    Returns ``(documents, truncated)``. Matching is decided from the index --
+    metadata only, cheap -- and the files are opened for the selected rows
+    alone, because the body hash has to come from the file: the index is a
+    rebuildable projection and the file is the document.
+
+    ``truncated`` is true when the window holds more than ``limit``. It is
+    counted before the files are opened, so admitting the truncation costs
+    nothing, and the caller narrows the window rather than receiving a prefix
+    that calls itself an enumeration.
     """
 
-    if not isinstance(since, str) or _DATE_RE.fullmatch(since) is None:
-        raise CompanyWikiError("since must be a YYYY-MM-DD date")
+    for name, value in (("since", since), ("until", until)):
+        if not isinstance(value, str) or _DATE_RE.fullmatch(value) is None:
+            raise CompanyWikiError(f"{name} must be a YYYY-MM-DD date")
+    if until < since:
+        raise CompanyWikiError("the enumeration window ends before it starts")
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_DOCUMENTS:
         raise CompanyWikiError(f"limit must be 1..{MAX_DOCUMENTS}")
     root = Path(corpus_root).expanduser().resolve()
     if not root.is_dir():
         raise CompanyWikiError("wiki corpus root is missing")
-    selected: list[dict[str, Any]] = []
-    for row in _rows(index_db):
-        date = str(row["date"] or "").strip()
-        if _DATE_RE.fullmatch(date) is None or date < since:
-            continue
-        if not _matches(row, company=company, industry=industry):
-            continue
-        selected.append(_header(row, text=_read_text(_resolve(root, str(row["filepath"])))))
-        if len(selected) >= limit:
-            break
-    return selected
+    matching = [
+        row for row in _rows(index_db)
+        if _DATE_RE.fullmatch(str(row["date"] or "").strip()) is not None
+        and since <= str(row["date"]).strip() <= until
+        and _matches(row, company=company, industry=industry)
+    ]
+    selected = [
+        _header(row, text=_read_text(_resolve(root, str(row["filepath"]))))
+        for row in matching[:limit]
+    ]
+    return selected, len(matching) > limit
 
 
 def read_document(

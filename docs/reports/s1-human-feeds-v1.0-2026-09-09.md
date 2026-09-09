@@ -3,7 +3,7 @@
 日期：2026-09-09
 状态：development candidate；已按 Wave 0 的 registry 接线（writer / driver / launchagent 三处零改动）；
 未部署、未发 mission 版本；四条治理记录为 `proposed`，等 owner 批准
-分支：`s1-human-feeds`（基线 main `88c040b` → cherry-pick Agent A `99f6a9b` → merge Wave 0 main `888a814`）
+分支：`s1-human-feeds`（基线 main `88c040b` → cherry-pick `99f6a9b` → merge `888a814` → merge main `2fa5934`）
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 3 节 S 线、[OpenClaw 数据源盘点](openclaw-data-source-survey-v1.0-2026-09-09.md) A 表 market-digest / company-wiki、B.1、B.12
 
 ---
@@ -30,7 +30,7 @@ wiki 是人自己写的 markdown。Dalton 不认证 Gmail、不跑 wiki 的 tagg
 | 规模 | 246 份 digest（另有 `digest_pretty.json`、`all_emails.txt`、`emails/` 9 份、`split/` 14 份，均非 digest run，已被文件名正则排除）；2,952 条 email，**2,923 条不重复** | `documents` 1,010 行；1,014 份 md（另 159 份 `index.md`）；258 MB |
 | 窗口 | 2026-03-13 → 2026-09-09 | `date` 2021-07-22 → 2026-09-04 |
 | 每条字段 | `id / from / subject / date / is_priority / body_length / body`，全 2,952 条一致 | `category_type / category_name / content_type / date / filename / filepath / created_at / tags / related`；**没有正文列**，正文只在磁盘上 |
-| 发件域 | 只有三个：`bofa.com` 1,619、`mail.marquee.gs.com` 1,166、`jefferies.com` 138；41 个不同发件人 | 公司 747 份 / 135 家；行业 263 份 / 24 个 |
+| 发件域 | 只有三家具名投行：1,619 / 1,166 / 138 封；41 个不同发件人 | 公司 747 份 / 135 家；行业 263 份 / 24 个 |
 | 日期格式 | RFC 2822 带偏移（`-0400 (EDT)` / `+0000`），**没有一条是 ISO** | `date` 为 `YYYY-MM-DD` |
 | 正文 | 纯文本、CRLF；中位 13,277 字符，最长 112,717 | md 全文含 YAML frontmatter |
 
@@ -77,7 +77,8 @@ wiki 是人自己写的 markdown。Dalton 不认证 Gmail、不跑 wiki 的 tagg
 
 `list_notes` →
 ```
-{schema_version, since, sender_domain|null, notes[], note_count, source_record_refs, next_cursor, provider_status}
+{schema_version, since, until, sender_domain|null, notes[], note_count, truncated,
+ source_record_refs, next_cursor, provider_status}
 note = {note_id, sender, sender_address, sender_domain, subject, sent_at, is_priority,
         body_sha256, body_chars, digest_ref, evidence_tier, analyst_named}
 ```
@@ -85,8 +86,8 @@ note = {note_id, sender, sender_address, sender_domain, subject, sent_at, is_pri
 
 `list_documents` →
 ```
-{schema_version, since, company|null, industry|null, documents[], document_count,
- source_record_refs, next_cursor, provider_status}
+{schema_version, since, until, company|null, industry|null, documents[], document_count,
+ truncated, source_record_refs, next_cursor, provider_status}
 document = {document_id, doc_type, doc_type_key, evidence_tier, doc_date, category_type,
             category_name, company_tags[], sector_tags[], topic_tags[], text_sha256, text_chars}
 ```
@@ -98,10 +99,18 @@ document = {document_id, doc_type, doc_type_key, evidence_tier, doc_date, catego
   没有它，一行 feed 记录就只是一个文件名加一句主张。
 - **`evidence_tier` 上 wire，不在下游推。** 层级是关于**来源**的事实，不是关于文本的：卖方 note 不管写了什么都是卖方，
   管理层纪要不管是谁整理的都是管理层原话。放在两个地方推导迟早会漂移。
-- schema 里不能出现 `/`（`_assert_no_sensitive_material` 会拒），所以时间戳 pattern 用 `[+][0-9]{2}:[0-9]{2}` 收尾。
+- **`since` / `until` 两端都必填，`truncated` 与 `next_cursor` 是这份合同的诚实条款。** 一个每天都在长的
+  feed，无界枚举无法对账；而一份撞到记录上限就停下的清单**不是 `enumerated`**，它是一段前缀披着枚举的词。
+  所以：截断时 `truncated=true`、`next_cursor` 是返回的最旧一行的日期（在它之前的都还没读），
+  runner 据此把 envelope 标成 `partial`。这条修的是一个真实的 bug——原先每个 tick 都重读同样 500 封最旧的邮件，
+  永远到不了本周。
+- schema 里不能出现 `/`（`_assert_no_sensitive_material` 会拒），所以时间戳 pattern 用 `[+][0-9]{2}:[0-9]{2}` 收尾；
+  `digest_ref` 这个定位提示也有自己的 pattern（`^market-digest:<date>:(AM|PM)$`），
+  免得一个自由文本把读取器指向任意字符串。
 
-`_field_schema` **没有改**：`since` / `sender_domain` / `note_id` / `company` / `industry` / `document_id` 都落在默认的
-`_string()`，`limit` 落在已有的 `_integer(1)`。这是特意选的输入字段名，为的是不碰另外三个 agent 也会碰的那个函数。
+`_field_schema` 只加了两条：`since` / `until` 并入已有的日期分支，`digest_ref` 是新的一条。
+其余输入字段（`sender_domain` / `note_id` / `company` / `industry` / `document_id`）落在默认的 `_string()`，
+`limit` 落在已有的 `_integer(1)`。
 
 ### 证据层级映射（`company_wiki_core.DOC_TYPE_RULES`，有序，先匹配先赢）
 
@@ -179,8 +188,13 @@ web lane 绑 URL + body hash，AlphaEngine 绑 provider 声明的文档哈希 + 
 ```
 
 `id` 由 `(document_ref, 正文 sha256)` 派生：同一份没变的文档重取得到同一个 manifest，变了的文档冒充不了同一次 acquisition。
-connector authority 两个字段**成对可空、现在是 null**：等 host-tool runner 落地后它们会像 fetch 一样带真 invocation，
-`verified_feed_source` 已经写好了「非空就必须回 Core 复核」的分支。显式为空好过悄悄没有。
+
+`connector_invocation_ref` / `_hash` 现在**是真的**：runner 在起子进程**之前**就注册好了 invocation，
+把它作为一个 context 传给 command 构造器，子进程于是**一次写成**带 invocation 的 manifest。
+（先写后盖章的做法试过，是错的：manifest 的 hash 会和子进程自己 summary 里记的那个不一致，
+launcher 的三方交叉核对立刻发现——一次运行留下两份互相打架的记录。）
+两个字段仍然成对可空，因为一次人工触发的、不经 runner 的读没有 invocation 可绑；
+`verified_feed_source` 的规则是：**非空就必须给 receipt reader 并回 Core 复核**，不给就拒。
 
 `verified_feed_source(core, spool, manifest, receipt_reader=None) -> (manifest, text)`：
 校验闭合 manifest → 从 spool 按 `assembled_object.content_hash` 取字节 → 复核字节数 → **重算 sha256** →
@@ -228,6 +242,17 @@ approval → register_profile(auth_mode=host_tool) → register_price_rate(0) �
    并且仍然如实结算（`indeterminate`），而不是凭空消失。两个 CLI 因此新增 `--emit-wire`。
 4. **计量按合同说回来了什么算。** document 单位的配额预留 1 份文档、search 单位预留 profile 的记录上限；
    把上限预留在 document 配额上会让一次读花掉一天的额度（第一次跑就撞上了）。
+5. **transport 自检。** runner 一定要求模板的 `transport.kind == "host_tool"`。指错模板的话，
+   它会为一个模板声明了两台 SEC 主机的 connector 发布一份「无主机、无网络策略」的 profile——
+   那是在 owner 唯一会读的那份记录里写假话。
+6. **stdout 边读边设上限。** `subprocess.run` 会把整个 stdout 缓冲完才轮到谁来反对，
+   所以一个决定打印一个 GB 的子进程，在尺寸检查跑之前已经在这个进程的内存里了。
+   现在是 `Popen` + 每次 `select` 再 `os.read`，逐块套上限；`select` 是必需的，
+   因为「只在阻塞读之间检查的截止时间」不是截止时间。
+7. **raw sink 的句柄来自 authority，不来自字节。** 由 `(invocation, reservation, attempt)` 派生，
+   照 `connector_runner` 的写法。用内容摘要派生的话，两次产出相同输出的运行会指向同一个 `.partial` 文件，
+   而 spool 用 `O_EXCL` 创建它：第二次要么因为一次毫无意义的碰撞失败，要么更糟——
+   接手一个前一次还没写完的 partial。
 
 **S3 要复用它需要做的**（runner 里没有任何 feed 专属逻辑）：
 
@@ -271,9 +296,21 @@ approval → register_profile(auth_mode=host_tool) → register_price_rate(0) �
 wiki 不做正文归属：**人已经把文档归档到某个 ticker 或某个 sector 了**，这份归档比任何对散文的正则都强——
 一份提到 Accenture 两次的行业专家访谈仍然是行业文档。正文只用来判定「行业级还是丢弃」。
 
+**窗口是有界的、从新到旧走。** 一个 tick 把 lookback 切成 14 天的窗口（实测一个 14 天窗口 238 封，
+远在 2,000 的记录上限之内），从最近的那个开始走，边走边花读取预算。预算花完之后仍然继续枚举
+（枚举是一次便宜的本地读，计数值得有），但不再读正文；下一个 tick 因为那些文档已入库而能往更早走。
+**一个截断的窗口会被对半拆开重问**，拆到单日为止——接受前缀等于让每个繁忙窗口更早的那一半永远读不到，
+而 envelope 还宣称这个窗口枚举完整了。
+
 **跨 tick 去重**：mission 已经持有的文档不再读第二遍（第二个 tick 对同一窗口只花「每条新 note 一次读」）。
 读过但没入库的（行业级与丢弃）**会被重读**，因为账本里没有一行叫「看过，什么都没留下」；
 每 tick 上限就是这件事的护栏。补一行这样的账是集成待办（第 8 节第 6 条）。
+
+**队列读要分页。** `discovered_documents` 单页上限 1,000 且没有 cursor，所以一次调用是一页而不是一个答案。
+按 (company, status) 分桶查询让每个桶远在上限之内；某个桶真的填满一页时**报错而不是猜**——
+少报「已持有」的后果是永远重读。原先那个 `limit=500` 的无过滤查询有一个真 bug：
+超过 500 份已发现文档之后，`_queued_row` 会在 `record_source_discovery` **已经提交之后**才失败，
+行卡在 `discovered`，此后每个 tick 都在同一处崩。
 
 ### 冻结的 feed discovery plan
 
@@ -330,16 +367,20 @@ lookback_days: 400    body_reads_per_tick: 50    companies: 五家（company_ref
 
 ### sales-notes
 
-`list_notes` 走真实 `market-digest/output`（一次全目录枚举约 1.0 秒）：
+`list_notes` 走真实 `market-digest/output`（一次全目录枚举约 1.0 秒）。发件人是三家具名投行，
+下面只报计数，不报域名：
 
-| since | 去重后条数 | bofa.com | mail.marquee.gs.com | jefferies.com |
-| --- | --- | --- | --- | --- |
-| 2026-09-01 | 142 | 86 | 49 | 7 |
-| 2026-08-01 | 500（触顶 `--limit`） | 264 | 215 | 21 |
-| 2026-03-01 | 500（触顶） | 276 | 198 | 26 |
+| 窗口 | 去重后条数 | truncated | next_cursor |
+| --- | --- | --- | --- |
+| 2026-09-01 .. 09-09 | 142 | false | null |
+| 2026-08-26 .. 09-09（一个 14 天 lane 窗口） | 238 | false | null |
+| 2026-03-01 .. 09-09（`--limit 2000`） | 2,000 | **true** | 2026-05-07 |
 
-整个 feed（按 7 天步长取窗口再并集）：**2,923 条不重复**（原始 2,952，结转去重 29），
-bofa.com 1,619 / mail.marquee.gs.com 1,166 / jefferies.com 138，41 个发件人，315 条 `is_priority`。
+第二行是这条 lane 实际要的东西：**一个 14 天窗口 238 封，远在记录上限之内**，所以正常运行不截断。
+第三行是刻意超界的六个月，它如实说自己截断了、并给出还没读到哪一天——envelope 因此绑 `partial`。
+
+整个 feed（按窗口并集）：**2,923 条不重复**（原始 2,952，结转去重 29），三家投行分别 1,619 / 1,166 / 138，
+41 个发件人，315 条 `is_priority`。
 
 **两段式归属的产出**（同一套代码，全量 2,923 与 2026-09 窗口）：
 
@@ -357,7 +398,7 @@ bofa.com 1,619 / mail.marquee.gs.com 1,166 / jefferies.com 138，41 个发件人
 
 `/tmp` 上的 `vectors.db` 只读副本 + `--corpus-root ~/.openclaw/workspace`：
 
-- `--company ACN --since 2021-01-01`：**1 份**，`expert_interview` / `expert`（与盘点一致）。
+- `--company ACN --since 2021-01-01 --until 2026-12-31`：**1 份**，`expert_interview` / `expert`（与盘点一致）。
 - 同一套两段式规则跑全语料 1,010 行：**公司标签命中 5 份**（IBM 3、ACN 1、CTSH 1，EPAM / DXC 各 0）、
   **行业级 33 份**、丢弃 972 份。
 - 全语料按 `doc_type_key`：`research_note` 646、`expert_interview` 100、`broker_report` 78、
@@ -371,7 +412,8 @@ bofa.com 1,619 / mail.marquee.gs.com 1,166 / jefferies.com 138，41 个发件人
 
 对合成 fixture 跑通 `list_notes` 与 `get_note` 全链，`ConnectorCompletionReceiptReader`
 复核 invocation 与 envelope 的 `content_hash` 均一致，envelope 的 `operation=get_note`、
-`source_record_refs` 恰为那一份文档。报告里不含任何邮件或 wiki 正文。
+`source_record_refs` 恰为那一份文档；同一个 runner 对一个截断的清单绑出 `completeness=partial` /
+`status=partial`，对一个完整窗口绑出 `enumerated` / `complete`。报告里不含任何邮件或 wiki 正文。
 
 ## 8. 集成待办（按依赖顺序）
 
@@ -409,11 +451,13 @@ bofa.com 1,619 / mail.marquee.gs.com 1,166 / jefferies.com 138，41 个发件人
          manifest = (launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
                      if row["ticket_ref"] else
                      launcher.locate_completed_manifest(review["document_ref"]))
-         _, text = verified_feed_source(self.writer.store, self.writer._transcript_spool, manifest)
+         _, text = verified_feed_source(
+             self.writer.store, self.writer._transcript_spool, manifest, reader)
          return text
      ```
    - `_source_context` 里同形状的一支，`source_content_hash = manifest["declared_content_sha256"]`，
-     `web_fields` 为空。
+     `web_fields` 为空。`reader` 就是那两处已经构造好的 `ConnectorCompletionReceiptReader`：
+     manifest 现在带真 invocation，`verified_feed_source` 会回 Core 复核它，不给 reader 就拒。
    
    之所以仍然没做：`writer_server.py` 是禁改文件，而这段要经 `lane_launcher(...)` 拿到 launcher；
    只改 `document_extraction.py` 会留下一个引用不存在 kwarg 的分支，那不是「纯追加」。
@@ -454,6 +498,9 @@ bofa.com 1,619 / mail.marquee.gs.com 1,166 / jefferies.com 138，41 个发件人
   host_tool 分支（它们同样硬编码了 https network policy），然后照 `public_web_core_fetch` 的骨架接上。
 - **行业级文档没有账本行**：`record_source_discovery` 要求一个在 universe 里的 `company_ref`，
   所以「关于行业、不关于任何公司」的 605 封只出现在 tick 摘要里。见 8.6。
+- **队列有一个真实的天花板**：`discovered_documents` 没有 cursor，所以每个 (company, status) 桶
+  最多 1,000 行。五家公司五个状态就是 25,000 行的余量，这条 feed 用不到；填满时报错而不是少报。
+  真正的修法是给 reader 加一个 cursor，那要动 `coverage_mission.py`。
 - **没有跑 openclaw 的任何 skill、没有碰 Gmail、没有写 live 状态目录、没有部署、没有发 mission 版本。**
 
 ## 10. 需要 owner 裁决的开放问题
@@ -481,14 +528,14 @@ bofa.com 1,619 / mail.marquee.gs.com 1,166 / jefferies.com 138，41 个发件人
 
 ```
 ----------------------------------------------------------------------
-Ran 2124 tests in 306.441s
+Ran 2567 tests in 368.940s
 
 OK (skipped=1)
 ```
 
-Wave 0 合并后的基线 2,080 + 本切片 44 项 = 2,124，与实际一致。
+合并 main `2fa5934` 后的基线 2,512 + 本切片 55 项 = 2,567，与实际一致。
 
-新增 `tests/test_s1_human_feeds.py`，44 项，全部离线：
+新增 `tests/test_s1_human_feeds.py`，55 项，全部离线：
 
 - **身份**：两个 operation 的 schema hash 不同、source hash 共享、跨 feed 的 source hash 不同；
   packaged profile 是 keyless `host_tool` 且带 forbidden routes；四条治理记录 round-trip 且声明零 credential slot；
@@ -522,11 +569,21 @@ Wave 0 合并后的基线 2,080 + 本切片 44 项 = 2,124，与实际一致。
 - **旧队列路径**（没有 runner 时）：三份待取文档、`acquisitions_per_tick=2` → 第一 tick 取 2 份开 2 条 review，
   第三份仍在队列；第二 tick 取完、第三 tick `idle`；没有 runner 时 `resolve_documents` /
   `enumerate_via_runner` 带原因拒绝。
+- **截断（1,200 封合成 note，120 天 × 10）**：一个装不下的窗口返回**最新的**那 100 封并说自己截断了；
+  窗口从新到旧走、遇到截断就对半拆，**1,200 封每一封都被枚举到且只枚举一次**，
+  每份 observation 的 `next_cursor` 与 `truncated` 严格同步；第一次问的是最近的日子。
+  真 runner 上：截断的清单绑 `partial` / `partial`，完整窗口绑 `enumerated` / `complete`。
+- **队列超过一页（1,200 行、两家公司各 600）**：位置在第一页之后的那一行仍然找得到；
+  已持有文档报满 1,200 份而不是第一页；某个桶填满一页时报错而不是少报；
+  `DOCUMENT_PAGE_LIMIT` 与权威自己的上限一致。
+- **边界**：runner 指向 `public_https` 模板直接拒（会发布一份说自己碰不到网络的 profile）；
+  `source_ref` 还没进 `DISCOVERY_SOURCES` 时 lane 返回 `unconfigured` 而**不先花配额**。
 - **launcher**：缺记录 / 未批准 / 非法 principal / 非法 ticket 全拒；ticket 与 manifest 不一致
   （要另一份文档）被拒；wiki launcher 的 argv 构造正确。
 - **seam**：tick 用到的每个权威方法都能用真签名 `bind`。
 
-fixtures 全部合成：`tests/fixtures/s1_feeds/` 两份 digest（六封虚构银行的虚构邮件——一封在 PM run 里结转、
+fixtures 全部合成：截断测试的 1,200 封在临时目录里现造；`tests/fixtures/s1_feeds/` 两份 digest
+（六封虚构银行的虚构邮件——一封在 PM run 里结转、
 一封只提行业、一封两者都不提、一封在窗口外）加一份 `wiki_corpus.json`（五份文档，含一份 ACN 专家访谈、
 一份 ACN 管理层纪要、一份 EPAM 券商研报、一份无公司标签的行业纪要、一份窗口外的季度笔记），
 wiki 索引与 md 在测试里于临时目录现建。**仓库里没有任何真实邮件或 wiki 正文。**

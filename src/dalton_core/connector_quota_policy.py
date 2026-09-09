@@ -69,6 +69,33 @@ _DAILY_QUOTAS = MappingProxyType(
                 "max_physical_calls_per_unit": 1,
             }
         ),
+        # P11a: one company's price window per unit.
+        #
+        # Deliberately modest. Yahoo is an unofficial free source that has not
+        # agreed to serve us: there is no published rate limit to stay under
+        # and no support channel when a request starts being refused, so the
+        # ceiling is politeness rather than arithmetic. Five covered companies
+        # ticking once a day need five of these; two hundred leaves room for
+        # backfills and retries without ever looking like a scraper.
+        ("yfinance", "daily_prices"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 200,
+                # One ``download`` plus one metadata read for the share count
+                # and market capitalisation, which Yahoo serves separately.
+                "max_physical_calls_per_unit": 2,
+            }
+        ),
+        # Estimates move slowly -- an analyst revises a target a handful of
+        # times a quarter -- so this is smaller again. Reading it more often
+        # would spend the source's goodwill on numbers that did not change.
+        ("yfinance", "analyst_estimates"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 50,
+                "max_physical_calls_per_unit": 4,
+            }
+        ),
         # S1: the two local feeds. There is no upstream to be polite to and
         # nothing to pay -- these are file reads on this machine -- so the
         # ceilings are generous. They are declared anyway, because a lane
@@ -78,8 +105,8 @@ _DAILY_QUOTAS = MappingProxyType(
         ("sales-notes", "list_notes"): MappingProxyType(
             {
                 "quota_unit": "search",
-                # Two digest runs a day; a tick that asks for the index more
-                # than a few hundred times is a bug, not a workload.
+                # One enumeration per window per tick, and a tick walks a few
+                # windows; a few hundred a day is a bug, not a workload.
                 "daily_unit_limit": 500,
                 "max_physical_calls_per_unit": 1,
             }

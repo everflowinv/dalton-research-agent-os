@@ -1,0 +1,373 @@
+{
+ "artefact": {
+  "artefact_kind": "initial_screen",
+  "cited_tags": [],
+  "confidence": null,
+  "expected_sections": [
+   "Key Information + Executive Summary",
+   "S1 公司概览（同 IM，无 ESOP 分析）",
+   "S2 行业概览（简版）",
+   "S3 核心 Thesis（简版）",
+   "S4 风险与 Anti-thesis（简版）",
+   "S5 Relevance to Universe（对 universe 内其他标的的多空含义，含跨区域）",
+   "S6 估值（street 预期、框架、event pathway、IRR）",
+   "S7 数据跟踪"
+  ],
+  "gaps": [
+   "缺乏IBM Consulting分部单独的收入与利润数据，无法评估AI咨询对整体业绩的量化贡献。",
+   "缺少分部门（软件、咨询、基础设施）的收入与利润具体构成数据；缺少管理层在最近报告期电话会上对分部业绩的详细点评（如咨询收入具体数字、签约额、利用率等）；缺少与收入增长相关的订单簿或积压订单的量化数据。",
+   "模型引用了不存在的标签：N1、N2",
+   "缺乏IT服务行业整体市场规模或增长率的第三方数据",
+   "缺乏IBM Consulting分部收入及利润率的细分数据",
+   "缺乏竞争对手（如Accenture、Deloitte、TCS等）在IT服务领域具体收入或市场份额的可引用数字",
+   "缺乏用于判断需求是否见底的领先指标（如bookings、backlog增速）的量化数据",
+   "缺少 AI 相关咨询订单向收入转化的季度性量化数据，缺少市场隐含预期与公司预测线的具体比较，缺少关于 discretionary consulting 下滑幅度与 AI 增长抵消力度的量化拆解。",
+   "缺少IBM咨询部门单独的季度收入与同比增速数据，以验证AI咨询需求是否独立于整体收入表现而加速；缺少AI相关订单簿规模及其向收入转化的历史转化率数据；缺少IBM Consulting与Accenture、Deloitte在AI咨询市场份额的量化对比数据；缺少IBM咨询业务利润率的历史趋势数据以检验利润率改善论点。",
+   "缺少其他覆盖公司（如Accenture、TCS等）的财务数据与业绩评论，无法直接进行分化比较",
+   "缺少universe内各公司在AI咨询收入、订单积压或利润率上的具体量化数据",
+   "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与 consensus 五类正式 authority 尚未接入，写任何倍数或目标价都会是无来源的数字。",
+   "缺乏IBM Consulting分部单独的季度营收与利润率数据；缺乏bookings与utilization的具体高频指标来源；缺乏AI项目收入占比或转化率的量化数据。"
+  ],
+  "hash": "0cff09310af4516a99314735135c6b65532c6130f318012ae209ba67a5e7af26",
+  "prior": null,
+  "question": null,
+  "ref": "mission-deliverable-version:e0327e68e7f04e15d7f798e790c8bef4",
+  "sections": [
+   {
+    "body": "IBM是一家以软件、基础设施和咨询组合服务企业客户的IT服务公司，其咨询业务通过watsonx平台提供模型无关的交付，并可与第三方生成式AI模型切换。当前最重要的判断是，AI相关咨询需求（尤其来自其既有安装基础客户）能否抵消可自由支配咨询的下滑，并在2至4个季度内转化为收入；管理层认为AI采用正从实验转向企业级部署，并已看到咨询积压订单增长。需要盯住的关键事项是：咨询业务中AI新业务（如watsonx相关）的转化节奏与利润率，以及基础设施（尤其IBM Z）大型交易的签约延迟是否会持续拖累整体收入。第二季度总收入同比增长1.09%至USD 17162000000，增速较第一季度9.46%明显放缓，显示增长动能需要AI与软件业务接力。",
+    "claim_refs": [
+     "claim-version:a788156c1d3c0b4abd39d38be388a3b49b1532e273a1362c6e6e182ecba0231f",
+     "claim-version:8efce08c3833c8896295864e584ee90498f9d03a6682a9fc888d6c9f8d2b5847",
+     "claim-version:4fd13661bf4a6d7e0a0cac522f5976dbb6432639c9212dbceccd42f9e5e4a83d",
+     "claim-version:82a5973051bef7471ba1bd087b50e8d32f0545c49cfc6dce4dbed364333e26cb",
+     "claim-version:b29284b23b5568d77ab67dfb675e94e329eb86a732579335b79335b127972141",
+     "claim-version:858e816582e1bcb4d1b7f3d3a6a3ea3be5da911b8a7cc01004ed334d5cbfd675",
+     "claim-version:38a52896c64aeda576b995a76a3f1fc38ed345ec83dacd50d7f498d46c51b02e"
+    ],
+    "gaps": [
+     "缺乏IBM Consulting分部单独的收入与利润数据，无法评估AI咨询对整体业绩的量化贡献。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+      "period": "2026-04-01..2026-06-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 17162000000 for 2026-04-01..2026-06-30, up 1.09% year over year from USD 16977000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:103b1dedc39896de22f0ae8aa018209ba8f468d23a55c1ec970f96dac234d655",
+      "period": "2026-01-01..2026-03-31",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 15917000000 for 2026-01-01..2026-03-31, up 9.46% year over year from USD 14541000000 in the comparable quarter."
+     }
+    ],
+    "title": "Key Information + Executive Summary"
+   },
+   {
+    "body": "IBM 的核心业务由软件、基础设施与咨询三大板块构成，管理层认为该组合能够帮助客户把握AI驱动未来的价值，并称公司正处于这一结构性转变的早期阶段。在最近报告期（2026年第二季度，即2026-04-01至2026-06-30），IBM 报告总收入为 USD 17162000000，同比增长 1.09%；而前一季度（2026-01-01至2026-03-31）收入为 USD 15917000000，同比增长 9.46%。管理层在第二季度观察到，客户需求最强劲的领域集中于高增长组合产品，如 Red Hat、watsonx、HashiCorp 和 Confluent，这些产品与需求最强的领域高度对应。同时，管理层将基础设施收入不及预期的大部分原因归结于数十笔大型交易的延迟关闭，而非客户需求减弱。咨询业务方面，IBM Consulting 被定位为提供在现有合同与运营中嵌入AI的托管服务，其watsonx平台与可切换模型的交付方式使IBM具有模型无关的差异化特征。不过，公司也承认整个行业（而非仅IBM）面临咨询业务的逆风，原因是客户在不确定的经济环境下对可自由支配的技术项目承诺缓慢。管理层认为，生成式AI是长期增长机会，将克服当前可自由支配支出低迷的影响，因为客户正将支出重新优先分配给新技术。此外，IBM 表示其咨询积压订单正在增长，利润率同比改善，这被视为未来需求复苏的良好指标。",
+    "claim_refs": [
+     "claim-version:537f6e7e2bfd0a92db26e6d597028a8422710d342273423eb9fdf6781277e0a9",
+     "claim-version:6bb89f473f9bda4b6cdbdef40f089c33d676dd78ef9b09b928a103091abfbef8",
+     "claim-version:b29284b23b5568d77ab67dfb675e94e329eb86a732579335b79335b127972141",
+     "claim-version:9e7028cf994856af9bbdac95689a901c496efdf50843de822badb01f00fd15f1",
+     "claim-version:a788156c1d3c0b4abd39d38be388a3b49b1532e273a1362c6e6e182ecba0231f",
+     "claim-version:ae23daf99ad5b6c20ad2114fb86fd721d35d75cec3b720cb81c9ebd6bcb8d46c",
+     "claim-version:350cdd8157e183fb091f728014146e09039f347d74182fa713cf3b80f8f51df6",
+     "claim-version:2ab32913abf65cb2379efdf886ccd0866ae6ebe5f18b8a2868db5f65d153162e",
+     "claim-version:82a5973051bef7471ba1bd087b50e8d32f0545c49cfc6dce4dbed364333e26cb"
+    ],
+    "gaps": [
+     "缺少分部门（软件、咨询、基础设施）的收入与利润具体构成数据；缺少管理层在最近报告期电话会上对分部业绩的详细点评（如咨询收入具体数字、签约额、利用率等）；缺少与收入增长相关的订单簿或积压订单的量化数据。",
+     "模型引用了不存在的标签：N1、N2"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+      "period": "2026-04-01..2026-06-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 17162000000 for 2026-04-01..2026-06-30, up 1.09% year over year from USD 16977000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:103b1dedc39896de22f0ae8aa018209ba8f468d23a55c1ec970f96dac234d655",
+      "period": "2026-01-01..2026-03-31",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 15917000000 for 2026-01-01..2026-03-31, up 9.46% year over year from USD 14541000000 in the comparable quarter."
+     }
+    ],
+    "title": "S1 公司概览（同 IM，无 ESOP 分析）"
+   },
+   {
+    "body": "美国IT服务行业的需求来源呈现分化态势。一方面，传统可自由支配的咨询支出（如人员增补）依然疲软，客户在经济不确定环境下对 discretionary 项目的承诺缓慢。另一方面，AI与生成式AI相关的需求正成为结构性增长点，管理层的信号是行业正处于向AI驱动企业的结构性转变的早期阶段，AI采用正从实验走向企业级部署。IBM自身观察到客户对Red Hat、watsonx、HashiCorp等增长型产品的需求最强，并认为生成式AI是能够克服当前 discretionary 支出低迷的长期增长机会，尽管其咨询业务仍面临全行业性的逆风。竞争格局方面，该市场高度分散，Accenture与Deloitte在生成式AI服务领域领先，对IBM构成压力；同时IBM也与大型云厂商及传统咨询公司存在竞争。IBM Consulting在市场中的定位依托于其watsonx平台与模型无关的交付能力，可切换多种模型以适配客户需求，这使其区别于绑定特定云厂商联盟的同行。然而，其AI咨询需求与自身安装基础高度相关，最适合已运行IBM基础设施的企业，尤其在主机和IBM Cloud环境中具备深度。IBM管理层强调其从硬件到软件再到咨询的全栈差异化能力，以及混合云能力（可在本地和云端运行）是重要优势，因为许多企业倾向于将数据保留在本地而非云端。公司收入端可见一定韧性，但需注意结构性质量。根据可引用数据，IBM在2026年第二季度（2026-04-01至2026-06-30）报告收入为USD 17162000000，同比增长1.09%；2026年第一季度（2026-01-01至2026-03-31）报告收入为USD 15917000000，同比增长9.46%；2025年第二季度（2025-04-01至2025-06-30）报告收入为USD 16977000000，同比增长7.65%；而2024年第三季度（2024-07-01至2024-09-30）收入为USD 14968000000，同比增长1.46%。值得注意的是，这些数字均为公司整体收入，并未拆分公司服务或咨询业务的具体收入。",
+    "claim_refs": [
+     "claim-version:a788156c1d3c0b4abd39d38be388a3b49b1532e273a1362c6e6e182ecba0231f",
+     "claim-version:2aed287f84a58c0a20b9dd69a20feabd7b49666f4a0d013f4065744962e87723",
+     "claim-version:b7284891e2f3483b7c4fcf956dd51d7c640471af311d2fc783f562158fa9a605",
+     "claim-version:537f6e7e2bfd0a92db26e6d597028a8422710d342273423eb9fdf6781277e0a9",
+     "claim-version:6bb89f473f9bda4b6cdbdef40f089c33d676dd78ef9b09b928a103091abfbef8",
+     "claim-version:8efce08c3833c8896295864e584ee90498f9d03a6682a9fc888d6c9f8d2b5847",
+     "claim-version:ae23daf99ad5b6c20ad2114fb86fd721d35d75cec3b720cb81c9ebd6bcb8d46c",
+     "claim-version:6023e669431aeea5bf6d0eaa28de0d65fadfe8d5c404516ff6fbee41bfea82cc",
+     "claim-version:4fd13661bf4a6d7e0a0cac522f5976dbb6432639c9212dbceccd42f9e5e4a83d",
+     "claim-version:cfb3ab30e058bc89514f87dcf5797cc2b4ec250fd3f818eadfee008701cf0b2e",
+     "claim-version:350cdd8157e183fb091f728014146e09039f347d74182fa713cf3b80f8f51df6",
+     "claim-version:2ab32913abf65cb2379efdf886ccd0866ae6ebe5f18b8a2868db5f65d153162e",
+     "claim-version:c84dd00f0b86558962da08c81d72777d451b3b170cbe417a9f80a8f19140f68f",
+     "claim-version:a7122127af7ae0d2239e677392154990f55569b724339c6567d19520b5b4caa9",
+     "claim-version:ece95a9aa5b27fcbff421f33a74012b70d53a9427e009540ab4fec5e9a051a6d"
+    ],
+    "gaps": [
+     "缺乏IT服务行业整体市场规模或增长率的第三方数据",
+     "缺乏IBM Consulting分部收入及利润率的细分数据",
+     "缺乏竞争对手（如Accenture、Deloitte、TCS等）在IT服务领域具体收入或市场份额的可引用数字",
+     "缺乏用于判断需求是否见底的领先指标（如bookings、backlog增速）的量化数据"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+      "period": "2026-04-01..2026-06-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 17162000000 for 2026-04-01..2026-06-30, up 1.09% year over year from USD 16977000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:103b1dedc39896de22f0ae8aa018209ba8f468d23a55c1ec970f96dac234d655",
+      "period": "2026-01-01..2026-03-31",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 15917000000 for 2026-01-01..2026-03-31, up 9.46% year over year from USD 14541000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:ab1409765a083e91f98825bb4ec65a3f3a7d41643433c07efbe887ae6990721d",
+      "period": "2024-07-01..2024-09-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 14968000000 for 2024-07-01..2024-09-30, up 1.46% year over year from USD 14752000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:44d630bbcbe019f97d3885d3255fb71f4a8cc6c439d4a1fb0504baafd93963d2",
+      "period": "2025-04-01..2025-06-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 16977000000 for 2025-04-01..2025-06-30, up 7.65% year over year from USD 15770000000 in the comparable quarter."
+     }
+    ],
+    "title": "S2 行业概览（简版）"
+   },
+   {
+    "body": "IBM Consulting 的核心价值创造驱动在于其将 AI 嵌入既有合同与运营的托管服务模式，以及其 watsonx 平台的模型无关交付能力。然而，这一能力主要服务于已运行 IBM 基础设施的企业，其 AI 咨询需求与安装基础强相关，形成平台锁定风险与较慢的创新周期。市场未充分反映的潜在正面因素是，AI 相关咨询的订单强劲，且 AI 项目可能比正在衰退的项目类型利润更高，有助于整体利润率扩张，但市场同时担忧其 AI 订单簿为非 GAAP 指标，且服务类交易的收入确认周期较长。近期收入数据显示，IBM 在 2026 年第一季度收入为 USD 15917000000，同比增长 9.46%，而 2026 年第二季度收入为 USD 17162000000，同比增长 1.09%，结合管理层观察到客户需求最强处集中于高增长产品组合，显示其增长引擎正从咨询转向软件。但常驻问题中“AI/reinvention 需求能否抵消 discretionary consulting 下滑并在 2–4 个季度内转化为收入”目前缺乏充分证据来论证其转化速度与幅度。市场可能低估了 IBM 在 AI 驱动型结构性转变中被视为关键受益者的潜力，尤其是当企业 AI 采用从实验转向企业级部署时。然而，由于公司主要增长领域涉及新产品、新客户与新兴竞争，财务结果难以预测，而持续的 discretionary 支出疲软仍是咨询业务的逆风，因此核心论点需要更多关于 AI 订单转化为收入的季度性证据，以及市场隐含预期与预测线的差异点。",
+    "claim_refs": [
+     "claim-version:9e7028cf994856af9bbdac95689a901c496efdf50843de822badb01f00fd15f1",
+     "claim-version:a788156c1d3c0b4abd39d38be388a3b49b1532e273a1362c6e6e182ecba0231f",
+     "claim-version:2aed287f84a58c0a20b9dd69a20feabd7b49666f4a0d013f4065744962e87723",
+     "claim-version:55c5ddcdfc805aec7a00fdd7b689f5270dddd771048e21177c28378d84464da6",
+     "claim-version:0140668c9a180549faf05732cc981fbe3adfcb250d1d1f30358862be28c0b581",
+     "claim-version:38a52896c64aeda576b995a76a3f1fc38ed345ec83dacd50d7f498d46c51b02e",
+     "claim-version:4358cc418f875b19a03d1e26233184f2c6094c8b1e4007709b487816dd8fd20d",
+     "claim-version:6bb89f473f9bda4b6cdbdef40f089c33d676dd78ef9b09b928a103091abfbef8",
+     "claim-version:0447345db286b2e74e7fffeed786fb824424285dfeb2f2397b4932131429e4c4",
+     "claim-version:8efce08c3833c8896295864e584ee90498f9d03a6682a9fc888d6c9f8d2b5847",
+     "claim-version:e2da580dd11655ded223d157a5dbba2b15da5c037d70ee5cf9f2e3f85a830ceb",
+     "claim-version:ae23daf99ad5b6c20ad2114fb86fd721d35d75cec3b720cb81c9ebd6bcb8d46c"
+    ],
+    "gaps": [
+     "缺少 AI 相关咨询订单向收入转化的季度性量化数据，缺少市场隐含预期与公司预测线的具体比较，缺少关于 discretionary consulting 下滑幅度与 AI 增长抵消力度的量化拆解。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:103b1dedc39896de22f0ae8aa018209ba8f468d23a55c1ec970f96dac234d655",
+      "period": "2026-01-01..2026-03-31",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 15917000000 for 2026-01-01..2026-03-31, up 9.46% year over year from USD 14541000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+      "period": "2026-04-01..2026-06-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 17162000000 for 2026-04-01..2026-06-30, up 1.09% year over year from USD 16977000000 in the comparable quarter."
+     }
+    ],
+    "title": "S3 核心 Thesis（简版）"
+   },
+   {
+    "body": "对IBM最完整的反向观点不是罗列经营瑕疵，而是质疑其增长叙事的可持续性：IBM Consulting的AI（watsonx）实践被反复定位为最适合已在运行IBM基础设施的企业，这意味着其AI咨询需求本质上是绑定于既有装机量的存量生意，而非能独立获取新客户的增量引擎。若这一前提成立，则IBM在生成式AI服务市场中的可寻址空间将远小于Accenture、Deloitte等已建立前端领先地位且不受制于特定技术栈的竞争对手；换言之，当企业AI支出从试点转向规模化部署时，买家更可能选择那些被其CEO描述为“AI正成为所做一切的一部分”且拥有广泛伙伴生态的厂商，而IBM则可能被困在其大型机与IBM Cloud的舒适区，创新周期慢于AI原生的竞争者。该反方立场成立的条件是：企业AI采购决策的主导权从基础设施架构师转向业务与数据负责人，且后者更看重模型中立与交付速度而非合规与治理——若此条件成立，IBM将因“平台锁定风险”而在竞争性评估中持续失分。其次，市场与部分怀疑者质疑IBM所强调的AI相关需求（如生成式AI订单簿）是否能在合理时间内转化为可确认的收入；该指标被指为非GAAP口径、并非已确认收入，且软件与服务业务的转化节奏和利润率差异显著，因此存在管理层以“结构性转变”的前瞻表述掩盖咨询板块在不确定经济环境下客户对可自由支配项目承诺缓慢这一现实的可能性。此观点成立的条件是：AI订单到收入的转化周期持续长于市场预期，且咨询利润率因项目周期拉长而无法兑现管理层所暗示的改善；若该条件成立，则IBM披露的收入增速（如2026年第二季度Revenues of USD 17162000000，同比仅增长1.09%）将被视为AI需求尚未实质性渗透至咨询部门的证据，而非暂时性的订单交付节奏问题。第三个反方维度关乎其商业模式的历史包袱：IBM在云与AI领域的转型曾长期落后于Amazon与Microsoft，且即便经历重大收购与其自身承认的转型努力，其销售收入自2012年以来仍大幅下滑；该历史记录削弱了当前管理层关于“AI驱动未来”论述的可信度，尤其是当基础设施收入短收被归因于“数十笔大型交易延迟关闭而非需求转弱”时，投资者有理由怀疑这是否是周期性借口而非结构性问题。此观点成立的条件是：宏观环境维持现状或恶化，使得企业客户继续推迟可自由支配的技术支出，同时IBM的大型机更新周期（被部分人视为周期性强劲而非持续性AI需求驱动，）趋于尾声；若如此，其咨询与基础设施的双重收入引擎将同时失速，且缺乏新的增长点来弥补。最后，竞争格局本身可能侵蚀IBM的差异点：IBM强调其混合云与watsonx的模型中立交付能力，但该市场高度分散且由Accenture与Deloitte领先，同时传统印度服务商TCS、Wipro、Infosys以全球交付模式在价格上具备优势，而IBM还被认为在AI思潮领导力上弱于McKinsey与Deloitte，其框架是叙述性而非量化的。若客户在评估AI合作伙伴时更看重思想领导力、行业垂直深度或成本竞争力，而非IBM所宣称的多模型切换技术能力，则其差异化叙事将难以转化为市场份额；此条件若成立，IBM Consulting将面临在高端被Accenture与Deloitte挤压、在规模化交付上被印度厂商蚕食的双重夹击。综合而言，该反方观点成立的核心检验变量是：未来2至4个季度内，IBM咨询业务的收入增速是否出现可观察的、由AI需求驱动的加速；若其继续延续类似2026年第二季度整体收入仅增长1.09%的低个位数表现，且无法以AI订单转化率或咨询利润率改善来反驳，则市场对其结构性转变叙事的怀疑将日益占据上风。",
+    "claim_refs": [
+     "claim-version:2aed287f84a58c0a20b9dd69a20feabd7b49666f4a0d013f4065744962e87723",
+     "claim-version:55c5ddcdfc805aec7a00fdd7b689f5270dddd771048e21177c28378d84464da6",
+     "claim-version:0140668c9a180549faf05732cc981fbe3adfcb250d1d1f30358862be28c0b581",
+     "claim-version:537f6e7e2bfd0a92db26e6d597028a8422710d342273423eb9fdf6781277e0a9",
+     "claim-version:b29284b23b5568d77ab67dfb675e94e329eb86a732579335b79335b127972141",
+     "claim-version:848d3cede848b53fb4b8fa4641861c4bab50a16281fbd8e8c10e3a6e66890584",
+     "claim-version:ae23daf99ad5b6c20ad2114fb86fd721d35d75cec3b720cb81c9ebd6bcb8d46c",
+     "claim-version:6023e669431aeea5bf6d0eaa28de0d65fadfe8d5c404516ff6fbee41bfea82cc",
+     "claim-version:9efb53762dd48377db96512b89b9b2eb1d9123f4d32be213f9215f2f2377b7d5",
+     "claim-version:803ccffd0664332fa23dd0ea3a1ac6c4b45994d3435d1f5308543e9b263edab0",
+     "claim-version:963d44b1542dfacc178038419bbe9caef3fd3bbe6adb74915ef36ba47e111e8a",
+     "claim-version:4fd13661bf4a6d7e0a0cac522f5976dbb6432639c9212dbceccd42f9e5e4a83d",
+     "claim-version:ea234eb0c4697f098f7d80e954227d0a926d92713c3425f84eb1bf40203f1725",
+     "claim-version:cd363b6370bdfc47ef31f59a589887b068ecac4934eec598cd745a50735b2a8f",
+     "claim-version:7cbfeb5b713533ed7e95b401cbdc32864a17afcfbf694381ad18214c486bd855",
+     "claim-version:4358cc418f875b19a03d1e26233184f2c6094c8b1e4007709b487816dd8fd20d",
+     "claim-version:79fd2fe82d35e5cf341bfecfbbc23969fdd1a9a217d0a81b365a967bae789f5d",
+     "claim-version:0ec9d0d42c39a12654356b5885c3fbde243776c1cff77e52705022418fef4896",
+     "claim-version:d8b44d60fe0c436bc80972cc69fcc9be17d4c9430580cf434f293cf225d15a78"
+    ],
+    "gaps": [
+     "缺少IBM咨询部门单独的季度收入与同比增速数据，以验证AI咨询需求是否独立于整体收入表现而加速；缺少AI相关订单簿规模及其向收入转化的历史转化率数据；缺少IBM Consulting与Accenture、Deloitte在AI咨询市场份额的量化对比数据；缺少IBM咨询业务利润率的历史趋势数据以检验利润率改善论点。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+      "period": "2026-04-01..2026-06-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 17162000000 for 2026-04-01..2026-06-30, up 1.09% year over year from USD 16977000000 in the comparable quarter."
+     }
+    ],
+    "title": "S4 风险与 Anti-thesis（简版）"
+   },
+   {
+    "body": "对于universe内其他标的，IBM的咨询业务表现具有明确的多空含义。首先，IBM Consulting的AI实践（watsonx）被视为最适合已经运行IBM基础设施的企业，其AI咨询需求与既有安装基础绑定，这意味着IBM并未在通用AI咨询市场与Accenture、Deloitte等全面竞争，而是聚焦于其存量客户的深度整合与混合云部署。因此，对于以通用AI咨询和跨厂商交付为核心能力的同行（如Accenture，其CEO强调Advanced AI已融入其全部业务并推动大规模部署，、），IBM的差异化定位暗示其AI收入增长路径更依赖自身生态的渗透率提升，而非抢占新客户，这或意味着在争夺大型企业AI转型预算时，IBM对Accenture、Deloitte等构成的直接竞争压力相对有限。反之，对于与IBM生态紧密相关的服务商，如TCS（与IBM咨询在高价值服务上直接竞争，且依赖与IBM的合作伙伴关系，）以及SAP（既是大型高利润率咨询合同的直接对手，又是其主要平台实施的关键执行方，），IBM在watsonx和其安装基础内的AI服务加深可能带来两种含义：一方面，IBM强化其平台绑定可能挤压TCS等依托IBM技术栈的交付份额；另一方面，IBM对混合云与AI的推动可能带动对相关实施服务的需求，为这些合作方创造增量。跨区域看，IBM管理层明确指出AI生成式需求是长期增长机会，将克服当前可自由支配支出低迷，且行业层面Gartner预测到2026年底企业应用中将大量嵌入AI智能体，这支持了对AI相关IT服务需求的正面判断。然而，IBM也承认整个行业面临咨询业务逆风，这并非仅IBM独有，且CEO观察到客户需求最强处集中在Red Hat、watsonx、HashiCorp等新增量产品，而传统可自由支配咨询（如人员增补）持续疲软。因此，对于universe内业务更侧重于传统咨询或人员外包的同行，IBM的业绩与评论（如Q2 2026收入同比仅增长1.09%，见）表明此类需求尚未见底；而对于已成功转向AI与成果导向合同的同行，IBM的观察则提供了交叉验证，即结构性需求转移正在进行，但转化节奏可能滞后。最后，IBM管理层的乐观基调与对咨询订单积压增长的表述可作为行业需求二至四季度内复苏的领先信号，若兑现，将对所有覆盖标的构成多头支撑；反之，若IBM因大型交易关闭延迟而持续遭遇逆风，则需对其他公司相似的交易型收入来源保持审慎。",
+    "claim_refs": [
+     "claim-version:2aed287f84a58c0a20b9dd69a20feabd7b49666f4a0d013f4065744962e87723",
+     "claim-version:55c5ddcdfc805aec7a00fdd7b689f5270dddd771048e21177c28378d84464da6",
+     "claim-version:0140668c9a180549faf05732cc981fbe3adfcb250d1d1f30358862be28c0b581",
+     "claim-version:6bb89f473f9bda4b6cdbdef40f089c33d676dd78ef9b09b928a103091abfbef8",
+     "claim-version:b29284b23b5568d77ab67dfb675e94e329eb86a732579335b79335b127972141",
+     "claim-version:858e816582e1bcb4d1b7f3d3a6a3ea3be5da911b8a7cc01004ed334d5cbfd675",
+     "claim-version:6023e669431aeea5bf6d0eaa28de0d65fadfe8d5c404516ff6fbee41bfea82cc",
+     "claim-version:9efb53762dd48377db96512b89b9b2eb1d9123f4d32be213f9215f2f2377b7d5",
+     "claim-version:803ccffd0664332fa23dd0ea3a1ac6c4b45994d3435d1f5308543e9b263edab0",
+     "claim-version:65d5ae2571e88195f6a5127392aa302d99cfe699bd373fca2d2b38de6f478d09",
+     "claim-version:7551cf77b85b140be9051a57b86c74c06b8d88afd5e3cd5b1100423ee3004ce3",
+     "claim-version:bda94738c073d18727228365048869dd3a6b17987d4a1f7efd9819440b1f3d47",
+     "claim-version:448a3133b7489f20348c015a7ad87b45e95420dd6c8331b93357febe04f976d7",
+     "claim-version:62b90780f21a408c6e9266157216548213688b0f61e98fa4ac59045bfbd173fe",
+     "claim-version:f37659ad338567ea527cd7dd81fe956176b4596d1fb9bde0e29e0b43c45164e8",
+     "claim-version:cfb3ab30e058bc89514f87dcf5797cc2b4ec250fd3f818eadfee008701cf0b2e",
+     "claim-version:da77d42df1d21a784fa3e21c0842624649d0a46510d8f97226b930cac65af4a3",
+     "claim-version:350cdd8157e183fb091f728014146e09039f347d74182fa713cf3b80f8f51df6",
+     "claim-version:2ab32913abf65cb2379efdf886ccd0866ae6ebe5f18b8a2868db5f65d153162e",
+     "claim-version:82a5973051bef7471ba1bd087b50e8d32f0545c49cfc6dce4dbed364333e26cb",
+     "claim-version:c594a6c1ae6d3e19aa9784a8c653d99d9fd3684120396274778ff941566c6b36"
+    ],
+    "gaps": [
+     "缺少其他覆盖公司（如Accenture、TCS等）的财务数据与业绩评论，无法直接进行分化比较",
+     "缺少universe内各公司在AI咨询收入、订单积压或利润率上的具体量化数据"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+      "period": "2026-04-01..2026-06-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 17162000000 for 2026-04-01..2026-06-30, up 1.09% year over year from USD 16977000000 in the comparable quarter."
+     }
+    ],
+    "title": "S5 Relevance to Universe（对 universe 内其他标的的多空含义，含跨区域）"
+   },
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与 consensus 五类正式 authority 尚未接入，写任何倍数或目标价都会是无来源的数字。"
+    ],
+    "numbers": [],
+    "title": "S6 估值（street 预期、框架、event pathway、IRR）"
+   },
+   {
+    "body": "数据跟踪应以验证或证伪两条主线为核心：一是AI/reinvention需求能否抵消discretionary consulting下滑并在2–4个季度内转化为收入；二是咨询业务在bookings、utilization、margin上的分化是否如管理层所说正在改善。可观察的高频或定期数据包括：IBM Consulting的季度营收增速与segment profit margin（指出利润率已处于三年高点，且AI项目可能比衰减的项目类型更具盈利性）；咨询backlog的变化方向，因管理层视其为未来需求恢复的先行指标；新签AI相关咨询bookings与staff augmentation及discretionary spending的此消彼长；以及AI项目从booking转化为收入的节奏，特别是区分软件与服务转化的时间差，服务类项目收入按项目阶段摊认。此外，应跟踪管理层在财报电话会中关于client buying behavior与行业增长预期的表述是否与IDC/Gartner的2026年行业增长预测一致，以及on-contract growth的季度变化，因当前其增速约为去年同期的两倍。对于验证discretionary demand是否见底，可观察客户对大型项目的commitment速度（、中提及large deals closing延迟），以及outsourcing与time-and-material合同模式被outcome-based模式替代的进度。季度营收方面，可用最近报告期数据作为基准：2026年第二季度营收为USD 17162000000，同比上升1.09%，而2026年第一季度营收为USD 15917000000，同比上升9.46%；但需注意2025年第二季度基数已较高（USD 16977000000，同比7.65%，），而2024年第三季度营收为USD 14968000000，同比仅增1.46%，显示增长波动较大。若连续两个季度出现咨询营收同比下滑且margin未能维持，则证伪AI抵消假设；若backlog持续扩张且AI项目收入占比上升，则验证转型逻辑。",
+    "claim_refs": [
+     "claim-version:858e816582e1bcb4d1b7f3d3a6a3ea3be5da911b8a7cc01004ed334d5cbfd675",
+     "claim-version:38a52896c64aeda576b995a76a3f1fc38ed345ec83dacd50d7f498d46c51b02e",
+     "claim-version:4358cc418f875b19a03d1e26233184f2c6094c8b1e4007709b487816dd8fd20d",
+     "claim-version:beebfb10717ee60a57d4c5bf2faae7f0a467c80590d8e06c20e29a9c45e3cebf",
+     "claim-version:2ab32913abf65cb2379efdf886ccd0866ae6ebe5f18b8a2868db5f65d153162e",
+     "claim-version:82a5973051bef7471ba1bd087b50e8d32f0545c49cfc6dce4dbed364333e26cb",
+     "claim-version:5f08720d8da4dbdd083ce879fbb066eadca36bab51e41e2fd2e0d34f3280439b",
+     "claim-version:b29284b23b5568d77ab67dfb675e94e329eb86a732579335b79335b127972141",
+     "claim-version:ae23daf99ad5b6c20ad2114fb86fd721d35d75cec3b720cb81c9ebd6bcb8d46c",
+     "claim-version:da77d42df1d21a784fa3e21c0842624649d0a46510d8f97226b930cac65af4a3"
+    ],
+    "gaps": [
+     "缺乏IBM Consulting分部单独的季度营收与利润率数据；缺乏bookings与utilization的具体高频指标来源；缺乏AI项目收入占比或转化率的量化数据。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+      "period": "2026-04-01..2026-06-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 17162000000 for 2026-04-01..2026-06-30, up 1.09% year over year from USD 16977000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:103b1dedc39896de22f0ae8aa018209ba8f468d23a55c1ec970f96dac234d655",
+      "period": "2026-01-01..2026-03-31",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 15917000000 for 2026-01-01..2026-03-31, up 9.46% year over year from USD 14541000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:ab1409765a083e91f98825bb4ec65a3f3a7d41643433c07efbe887ae6990721d",
+      "period": "2024-07-01..2024-09-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 14968000000 for 2024-07-01..2024-09-30, up 1.46% year over year from USD 14752000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:44d630bbcbe019f97d3885d3255fb71f4a8cc6c439d4a1fb0504baafd93963d2",
+      "period": "2025-04-01..2025-06-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 16977000000 for 2025-04-01..2025-06-30, up 7.65% year over year from USD 15770000000 in the comparable quarter."
+     }
+    ],
+    "title": "S7 数据跟踪"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "company:sec-cik:0000051143",
+  "title": "mission-deliverable:initial_screen:0000051143"
+ },
+ "case_ref": "live-ibm-v1",
+ "expected": {
+  "deterministic": {
+   "claim_refs_resolve": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "duplicate_parallel_citations": {
+    "count": 0,
+    "status": "pass"
+   },
+   "numbers_without_refs": {
+    "count": 0,
+    "status": "pass"
+   },
+   "required_sections_present": {
+    "count": 0,
+    "status": "pass"
+   },
+   "residual_citation_artefacts": {
+    "count": 6,
+    "status": "fail"
+   }
+  },
+  "rationale": "残括号让读者看到引用曾经在那里，比丢主语轻，给 1–2。来源纪律给 0–2：卖方只有一家，Playbook 要求关键数字两个独立来源，这里做不到，文档应当说明这一点。",
+  "score_ranges": {
+   "anti_thesis": [
+    2,
+    3
+   ],
+   "citation_dedupe": [
+    3,
+    4
+   ],
+   "citation_hygiene": [
+    1,
+    2
+   ],
+   "falsifiers_and_tracking": [
+    2,
+    3
+   ],
+   "gaps_honest": [
+    3,
+    4
+   ],
+   "key_driver_thesis": [
+    2,
+    3
+   ],
+   "number_provenance": [
+    3,
+    4
+   ],
+   "required_sections": [
+    3,
+    4
+   ],
+   "source_discipline": [
+    0,
+    2
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "IBM Initial Screen v1。六处残迹全部是括号边上的分隔符（「，）」「、）」），即 P13ap 修的第二种形状；数字与章节干净。IBM 的研报素材最薄（只有 RBC 一家）。",
+ "rubric": "initial_screen",
+ "source": "live Core 只读副本 2026-09-09；mission-deliverable-version:e0327e68e7f04e15d7f798e790c8bef4（IBM v1，发布于 2026-09-09T10:28:56）"
+}

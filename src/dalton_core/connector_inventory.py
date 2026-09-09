@@ -1024,6 +1024,143 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "source_record_refs", "next_cursor", "provider_status",
             ),
         )
+    if slug == "yfinance":
+        decimal = {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$"}
+        nullable_decimal = {
+            "type": ["string", "null"],
+            "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+        }
+        iso_date = {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+        if operation == "daily_prices":
+            # P11a: one row per trading day, and Close and Adj Close in
+            # separate columns.
+            #
+            # This is the lesson the owner's other tooling paid for. Yahoo's
+            # `auto_adjust=True` silently replaces Close with the
+            # split-and-dividend-adjusted series and drops Adj Close, so a
+            # later reader cannot tell which one it is holding -- and anyone
+            # who then adds dividends on top of an adjusted price counts them
+            # twice. Both columns are stored, always, and which is which is a
+            # column name rather than a convention.
+            bar = _object_schema(
+                {
+                    "date": iso_date,
+                    "open": decimal, "high": decimal, "low": decimal,
+                    "close": decimal, "adj_close": decimal,
+                    "volume": decimal,
+                },
+                ("date", "open", "high", "low", "close", "adj_close", "volume"),
+            )
+            # Share count and market capitalisation are not properties of a
+            # trading day: Yahoo reports the latest it knows, once, with no
+            # history behind it. Carrying them as their own dated observations
+            # keeps them from being read as "the shares outstanding on that
+            # bar", which is a claim this source cannot support.
+            observation = _object_schema(
+                {
+                    "observation": {
+                        "type": "string",
+                        "enum": ["shares_outstanding", "market_cap"],
+                    },
+                    "as_of": iso_date,
+                    "value": decimal,
+                    "unit": _string(),
+                },
+                ("observation", "as_of", "value", "unit"),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "ticker": _string(),
+                    "currency": _string(),
+                    "requested_start": iso_date,
+                    "requested_end": iso_date,
+                    # Frozen false on the wire, so a run that adjusted the
+                    # prices cannot be validated as one that did not.
+                    "auto_adjust": {"type": "boolean", "enum": [False]},
+                    # When the source was read. A window that includes today
+                    # returns the last trade so far in the same shape as a
+                    # settled close, and this is the only field that can tell
+                    # a later reader which one it is holding.
+                    "captured_at": _string(),
+                    "bars": {"type": "array", "items": bar},
+                    # Days the source returned with a hole in them. A frame
+                    # that arrives entirely as NaN must not be indistinguishable
+                    # from a genuinely quiet window.
+                    "dropped_row_count": _integer(0),
+                    "observations": {"type": "array", "items": observation},
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                },
+                (
+                    "schema_version", "ticker", "currency", "requested_start",
+                    "requested_end", "auto_adjust", "captured_at", "bars",
+                    "dropped_row_count", "observations",
+                    "source_record_refs", "next_cursor", "provider_status",
+                ),
+            )
+        if operation == "analyst_estimates":
+            # P11a: what sell-side analysts said, which is an opinion with a
+            # date on it and never a fundamental. Every figure is nullable
+            # because Yahoo drops whole blocks without warning, and an absent
+            # estimate has to look absent rather than like a zero.
+            price_target = _object_schema(
+                {
+                    "current": nullable_decimal, "high": nullable_decimal,
+                    "low": nullable_decimal, "mean": nullable_decimal,
+                    "median": nullable_decimal,
+                    "number_of_analysts": {"type": ["integer", "null"], "minimum": 0},
+                },
+                ("current", "high", "low", "mean", "median", "number_of_analysts"),
+            )
+            # Nullable counts. "No analyst rates it a sell" and "Yahoo did not
+            # say how many rate it a sell" are different facts, and a zero can
+            # only express one of them.
+            nullable_count = {"type": ["integer", "null"], "minimum": 0}
+            recommendation = _object_schema(
+                {
+                    "period": _string(),
+                    "strong_buy": nullable_count, "buy": nullable_count,
+                    "hold": nullable_count, "sell": nullable_count,
+                    "strong_sell": nullable_count,
+                },
+                ("period", "strong_buy", "buy", "hold", "sell", "strong_sell"),
+            )
+            estimate = _object_schema(
+                {
+                    "period": _string(),
+                    "avg": nullable_decimal, "low": nullable_decimal,
+                    "high": nullable_decimal,
+                    "year_ago": nullable_decimal,
+                    "growth": nullable_decimal,
+                    "number_of_analysts": {"type": ["integer", "null"], "minimum": 0},
+                    "currency": {"type": ["string", "null"]},
+                },
+                (
+                    "period", "avg", "low", "high", "year_ago", "growth",
+                    "number_of_analysts", "currency",
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "ticker": _string(),
+                    "as_of": iso_date,
+                    "price_target": price_target,
+                    "recommendations": {"type": "array", "items": recommendation},
+                    "eps_estimates": {"type": "array", "items": estimate},
+                    "revenue_estimates": {"type": "array", "items": estimate},
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                },
+                (
+                    "schema_version", "ticker", "as_of", "price_target",
+                    "recommendations", "eps_estimates", "revenue_estimates",
+                    "source_record_refs", "next_cursor", "provider_status",
+                ),
+            )
     # S1: the two human / vendor feeds.
     #
     # Both enumerate documents that already exist as bytes on this machine, so
@@ -1033,11 +1170,13 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
     # a filename and a claim.
     #
     # `evidence_tier` is on the wire rather than derived downstream because
-    # the tier is a fact about the source, not about the text. A sell-side
-    # note is sell-side whatever it says; a management meeting minute is a
-    # management statement even when the analyst wrote the summary. Deriving
-    # it later from a document type string would put the vocabulary in two
-    # places and let them drift.
+    # the tier is a fact about the source, not about the text.
+    #
+    # `next_cursor` is where a listing admits it did not finish. A local feed
+    # can hold more documents in one window than a bounded response may carry,
+    # and a listing that stopped at its cap is `partial`, never `enumerated`.
+    # The cursor is the day of the oldest row returned: everything before it
+    # is still unread.
     if slug in {"sales-notes", "company-wiki"}:
         sha256 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
         instant = {
@@ -1048,6 +1187,8 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
             ),
         }
         day = {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+        nullable_day = {"type": ["string", "null"],
+                        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
         if slug == "sales-notes":
             note = _object_schema(
                 {
@@ -1056,16 +1197,10 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                     "sender_address": _string(),
                     "sender_domain": _string(),
                     "subject": {"type": "string"},
-                    # The mail's own Date header, normalised to UTC. The feed
-                    # keeps the instant rather than the day because two notes
-                    # from the same desk on the same morning are ordered by it.
                     "sent_at": instant,
                     "is_priority": {"type": "boolean"},
                     "body_sha256": sha256,
                     "body_chars": _integer(0),
-                    # Which enumeration run saw it. The same note appears in
-                    # two runs when a digest carries the previous one forward,
-                    # and the run that first saw it is part of its provenance.
                     "digest_ref": _string(),
                     "evidence_tier": {"type": "string", "enum": ["sell_side"]},
                     "analyst_named": {"type": "boolean"},
@@ -1081,17 +1216,19 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                     {
                         "schema_version": {"type": "string", "enum": ["0.1"]},
                         "since": day,
+                        "until": day,
                         "sender_domain": {"type": ["string", "null"]},
                         "notes": {"type": "array", "items": note},
                         "note_count": _integer(0),
+                        "truncated": {"type": "boolean"},
                         "source_record_refs": _array_of_strings(),
-                        "next_cursor": {"type": ["string", "null"]},
+                        "next_cursor": nullable_day,
                         "provider_status": _integer(100),
                     },
                     (
-                        "schema_version", "since", "sender_domain", "notes",
-                        "note_count", "source_record_refs", "next_cursor",
-                        "provider_status",
+                        "schema_version", "since", "until", "sender_domain",
+                        "notes", "note_count", "truncated", "source_record_refs",
+                        "next_cursor", "provider_status",
                     ),
                 )
             return _object_schema(
@@ -1114,9 +1251,6 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                     "type": "string",
                     "pattern": "^company-wiki-doc:sha256:[0-9a-f]{64}$",
                 },
-                # Both the wiki's own words for the document kind and the
-                # closed key this feed maps it onto. The raw string is kept
-                # because it is what a person typed and the mapping is ours.
                 "doc_type": _string(),
                 "doc_type_key": {
                     "type": "string",
@@ -1137,8 +1271,7 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "category_type": {"type": "string", "enum": ["company", "sector"]},
                 "category_name": _string(),
                 # An industry note carries no company tag and is not forced
-                # to have one. An empty list here is the honest answer, not a
-                # gap to be filled by the nearest ticker in the text.
+                # to have one. An empty list here is the honest answer.
                 "company_tags": {"type": "array", "uniqueItems": True, "items": _string()},
                 "sector_tags": {"type": "array", "uniqueItems": True, "items": _string()},
                 "topic_tags": {"type": "array", "uniqueItems": True, "items": _string()},
@@ -1156,18 +1289,20 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 {
                     "schema_version": {"type": "string", "enum": ["0.1"]},
                     "since": day,
+                    "until": day,
                     "company": {"type": ["string", "null"]},
                     "industry": {"type": ["string", "null"]},
                     "documents": {"type": "array", "items": document},
                     "document_count": _integer(0),
+                    "truncated": {"type": "boolean"},
                     "source_record_refs": _array_of_strings(),
-                    "next_cursor": {"type": ["string", "null"]},
+                    "next_cursor": nullable_day,
                     "provider_status": _integer(100),
                 },
                 (
-                    "schema_version", "since", "company", "industry",
-                    "documents", "document_count", "source_record_refs",
-                    "next_cursor", "provider_status",
+                    "schema_version", "since", "until", "company", "industry",
+                    "documents", "document_count", "truncated",
+                    "source_record_refs", "next_cursor", "provider_status",
                 ),
             )
         return _object_schema(
@@ -1318,6 +1453,42 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         ),
         "gate": "recorded_public_reference_shadow",
     },
+    # P11a: daily prices and street estimates from Yahoo Finance, read through
+    # the `yfinance` library.
+    #
+    # This is an *unofficial* free source: Yahoo publishes no API and no terms
+    # that cover this, the library scrapes endpoints that can move without
+    # notice, and there is nobody to appeal to when they do. That is written
+    # down here rather than discovered later, and it is why the daily quota is
+    # a couple of hundred calls rather than a thousand: politeness towards a
+    # source that has not agreed to serve us.
+    #
+    # Two operations, because a price and an analyst's opinion are not the same
+    # kind of thing and a schema hash binds one operation. Prices are facts a
+    # market printed; estimates are what sell-side analysts said, and they enter
+    # the system as claims about opinion, never as fundamentals. Yahoo also
+    # carries financial statements, and this connector deliberately does not
+    # expose them: SEC is the primary source for a filed figure and a scraped
+    # second-hand copy of one would be a worse number wearing the same clothes.
+    {
+        "slug": "yfinance", "connector_ref": "connector:yahoo-finance",
+        "source_ref": "source:yahoo-finance", "source_type": "market_data",
+        "transport": "public_https", "target": "transport:public-http:0.1",
+        "hosts": ("query1.finance.yahoo.com", "query2.finance.yahoo.com"),
+        "auth": "none",
+        "forbidden": ("route:arbitrary-attachment-url",), "fallbacks": (),
+        "operations": (
+            _operation(
+                "daily_prices", completeness="enumerated",
+                input_fields=("ticker", "start", "end"),
+            ),
+            _operation(
+                "analyst_estimates", completeness="ranked",
+                input_fields=("ticker",),
+            ),
+        ),
+        "gate": "recorded_public_reference_shadow",
+    },
     {
         "slug": "alphaengine", "connector_ref": "connector:alphaengine-library",
         "source_ref": "source:alphaengine", "source_type": "authenticated_library",
@@ -1436,31 +1607,31 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
     #
     # They are `authenticated_library` because that is what they are -- a
     # curated body of documents behind someone's credential -- even though the
-    # credential was spent before Dalton saw the bytes. The frozen source-type
-    # vocabulary has no word for "a human put it here", and inventing one
-    # would move a shared enum for two rows.
+    # credential was spent before Dalton saw the bytes.
     {
         "slug": "sales-notes", "connector_ref": "connector:sales-notes",
         "source_ref": "source:sales-notes", "source_type": "authenticated_library",
         "transport": "host_tool", "target": "host-tool:market-digest-output",
         "hosts": (), "auth": "none",
         # The digest file also carries a model-written summary of the same
-        # mail. That summary is not the note and must never be cited as one,
-        # so reading it is a forbidden route rather than an option nobody
-        # happens to take.
+        # mail. That summary is not the note and must never be cited as one.
         "forbidden": ("route:gmail-api", "route:market-digest-ai-summary"),
         "fallbacks": (),
         "operations": (
+            # `since` and `until` bound one window. Both are required for the
+            # same reason a paged search needs a page: an unbounded listing of
+            # a feed that grows every day cannot be reconciled, and a listing
+            # that silently stops at a record cap is not `enumerated` -- it is
+            # a truncation wearing an enumeration's word.
             _operation(
                 "list_notes", completeness="enumerated",
-                input_fields=("since", "sender_domain", "limit"),
+                input_fields=("since", "until", "sender_domain", "limit"),
                 optional_fields=("sender_domain", "limit"),
             ),
             # `digest_ref` is an optional locator hint, not a second way to
             # ask: the run a note first appeared in is already on every
-            # enumerated header, and passing it back turns a scan of every
-            # run into opening one file. Optional because a caller holding
-            # only an id must still be able to ask.
+            # enumerated header, and passing it back turns a scan of every run
+            # into opening one file.
             _operation(
                 "get_note", completeness="enumerated",
                 input_fields=("note_id", "digest_ref"),
@@ -1482,10 +1653,11 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         "operations": (
             _operation(
                 "list_documents", completeness="enumerated",
-                input_fields=("since", "company", "industry", "limit"),
+                input_fields=("since", "until", "company", "industry", "limit"),
                 optional_fields=("company", "industry", "limit"),
             ),
-            _operation("get_document", completeness="enumerated", input_fields=("document_id",)),
+            _operation("get_document", completeness="enumerated",
+                       input_fields=("document_id",)),
         ),
         "gate": "host_tool_runner_v0.2",
     },
@@ -1508,8 +1680,18 @@ def _field_schema(name: str) -> dict[str, Any]:
         }
     if name == "cursor":
         return {"type": ["string", "null"]}
-    if name in {"date_after", "date_before"}:
+    # P11a: ``start`` and ``end`` bound one price window and are dates, not
+    # free text. A window whose ends cannot be parsed is a window nobody can
+    # replay, and replaying the exact window is the whole point of binding a
+    # bar to the invocation that produced it.
+    if name in {"date_after", "date_before", "start", "end", "since", "until"}:
         return {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+    # S1: the run a note first appeared in, ``market-digest:<date>:<AM|PM>``.
+    # A free-text hint would let a caller point the reader at an arbitrary
+    # string; the shape is fixed because the shape is what makes it a locator.
+    if name == "digest_ref":
+        return {"type": "string",
+                "pattern": "^market-digest:[0-9]{4}-[0-9]{2}-[0-9]{2}:(AM|PM)$"}
     if name == "freshness":
         return {"type": "string", "enum": ["day", "week", "month", "year"]}
     if name in {"allowed_handles", "subreddits", "concept_candidates"}:

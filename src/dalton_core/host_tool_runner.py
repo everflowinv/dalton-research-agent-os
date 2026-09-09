@@ -43,9 +43,9 @@ one operation), a command builder, and parameters.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
+import select
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -150,7 +150,7 @@ class HostToolRunner:
         template_key: str,
         identity: Mapping[str, Any],
         governance: Any,
-        command: Callable[[Mapping[str, Any], Path], Sequence[str]],
+        command: Callable[[Mapping[str, Any], Path, Mapping[str, str]], Sequence[str]],
         connector_slug: str | None = None,
         credential_slot_refs: Sequence[str] = (),
         credential_resolver: Callable[[str], str] | None = None,
@@ -177,6 +177,17 @@ class HostToolRunner:
         self.max_response_bytes = int(max_response_bytes)
         self.max_records = int(max_records)
         self._template = load_packaged_connector_inventory()["templates"][template_key]
+        # This runner spawns a process and declares a profile with no host
+        # allowlist and no network policy. Pointed at a public_https or
+        # mcp_managed template it would be publishing a profile that says the
+        # connector reaches nothing while the template says it reaches a host
+        # -- so the transport is checked here, once, rather than trusted.
+        kind = self._template["transport"]["kind"]
+        if kind != "host_tool":
+            raise HostToolRunError(
+                f"{template_key} is a {kind} connector; the host-tool runner "
+                "only executes host_tool templates"
+            )
         self._authorities: dict[str, Any] | None = None
 
     # -- approval ---------------------------------------------------------
@@ -383,7 +394,8 @@ class HostToolRunner:
         return env
 
     def _execute(
-        self, parameters: Mapping[str, Any], output_dir: Path | None
+        self, parameters: Mapping[str, Any], output_dir: Path | None,
+        context: Mapping[str, str],
     ) -> tuple[bytes, int, str | None]:
         """Run the child and return its raw stdout, exit code and failure note.
 
@@ -396,33 +408,92 @@ class HostToolRunner:
 
         with tempfile.TemporaryDirectory(prefix="host-tool-") as scratch:
             target = Path(output_dir) if output_dir is not None else Path(scratch)
-            argv = [str(item) for item in self.command(parameters, target)]
+            argv = [str(item) for item in self.command(parameters, target, context)]
             if not argv:
                 raise HostToolRunError("host-tool command builder produced no argv")
             try:
-                completed = subprocess.run(
+                process = subprocess.Popen(
                     argv,
                     cwd=scratch,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     env=self._environment(),
-                    timeout=self.timeout_seconds,
-                    check=False,
                 )
-            except subprocess.TimeoutExpired:
-                return b"", -1, "timeout"
             except OSError as exc:
                 return b"", -1, f"OSError: {exc}"
-        raw = completed.stdout or b""
-        if len(raw) > self.max_response_bytes:
-            return raw[: self.max_response_bytes], completed.returncode, "response too large"
-        note = None
-        if completed.returncode != 0:
-            detail = (completed.stderr or b"").decode("utf-8", "replace").strip()
-            note = f"exit {completed.returncode}: {detail[:300]}" if detail else \
-                f"exit {completed.returncode}"
-        return raw, completed.returncode, note
+            # Read as it comes, and stop at the ceiling. ``subprocess.run``
+            # buffers the whole of stdout before anyone can object, so a child
+            # that decides to print a gigabyte is a gigabyte in this process's
+            # memory before the size check runs. The bound has to be applied
+            # while reading or it is not a bound.
+            return self._drain(process)
+
+    def _drain(self, process: subprocess.Popen) -> tuple[bytes, int, str | None]:
+        """Read stdout under a byte ceiling and a wall deadline, then settle.
+
+        ``select`` before every read, because a child that produces nothing
+        and never exits would otherwise block here forever: a deadline checked
+        only between blocking reads is not a deadline. The ceiling is applied
+        to each chunk as it arrives, which is the difference between a bound
+        and a check performed after the whole response is already in memory.
+        """
+
+        chunks: list[bytes] = []
+        total = 0
+        overflowed = False
+        timed_out = False
+        stderr_tail = b""
+        deadline = self.clock().timestamp() + self.timeout_seconds
+        stdout = process.stdout
+        assert stdout is not None
+        try:
+            while True:
+                remaining = deadline - self.clock().timestamp()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                if not select.select([stdout], [], [], min(remaining, 1.0))[0]:
+                    continue
+                chunk = os.read(stdout.fileno(), 65_536)
+                if not chunk:
+                    break
+                room = self.max_response_bytes - total
+                if len(chunk) > room:
+                    chunks.append(chunk[:room])
+                    overflowed = True
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+            if timed_out or overflowed:
+                process.kill()
+            try:
+                process.wait(timeout=max(1.0, deadline - self.clock().timestamp()))
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+                timed_out = True
+            if process.stderr is not None:
+                try:
+                    stderr_tail = process.stderr.read(4_096) or b""
+                except (OSError, ValueError):
+                    stderr_tail = b""
+        finally:
+            for stream in (process.stdout, process.stderr):
+                if stream is not None and not stream.closed:
+                    stream.close()
+        raw = b"".join(chunks)
+        if timed_out:
+            return raw, -1, "timeout"
+        if overflowed:
+            return raw, process.returncode or -1, "response exceeds the profile byte ceiling"
+        if process.returncode != 0:
+            detail = stderr_tail.decode("utf-8", "replace").strip()
+            return raw, process.returncode, (
+                f"exit {process.returncode}: {detail[:300]}" if detail
+                else f"exit {process.returncode}"
+            )
+        return raw, process.returncode, None
 
     # -- one run ----------------------------------------------------------
 
@@ -524,16 +595,35 @@ class HostToolRunner:
         )
 
         started_at = _wire_time(self.clock())
-        raw, exit_code, note = self._execute(parameters, output_dir)
+        # The child is told which invocation is running it, so anything
+        # durable it writes can name that invocation itself. Stamping it
+        # afterwards would mean rewriting a file the child had already hashed
+        # into its own summary, and then two records of one run would disagree.
+        raw, exit_code, note = self._execute(parameters, output_dir, {
+            "connector_invocation_ref": invocation["id"],
+            "connector_invocation_hash": invocation["content_hash"],
+        })
         completed_at = _wire_time(self.clock())
         provider_request_id = f"host-tool:{self.template_key}:{suffix}"
 
         # Artifact always: the bytes are hashed into the spool before they are
         # parsed, so a wire that fails the contract still leaves the read
         # recoverable.
-        digest = hashlib.sha256(raw).hexdigest()
+        #
+        # The sink handle is derived from this invocation, reservation and
+        # attempt -- the way the runner request already derives it -- and not
+        # from a digest of the bytes. A content-derived handle names the same
+        # partial file for two runs that produced identical output, and the
+        # spool creates that file with O_EXCL: the second run would fail on a
+        # collision that means nothing, or worse, adopt a partial the first
+        # run had not finished writing.
+        sink_ref = "raw-sink:" + content_hash({
+            "connector_invocation_ref": invocation["id"],
+            "reservation_ref": reservation["id"],
+            "physical_attempt_number": 1,
+        })
         sink = self.spool.open_sink(
-            f"raw-sink:{digest}", max_response_bytes=max(1, len(raw))
+            sink_ref, max_response_bytes=self.max_response_bytes
         )
         sink.write(raw)
         raw_object = sink.finalize()
@@ -570,6 +660,7 @@ class HostToolRunner:
                 failure = f"{type(exc).__name__}: {exc}"
 
         measured = observation is not None
+        truncated = bool(observation and observation.get("next_cursor") is not None)
         records = (1 if self._quota_unit == "document" else len(document_refs)) if measured else 0
         usage = self.connectors.record_usage(
             attempt["id"],
@@ -638,10 +729,17 @@ class HostToolRunner:
             "raw_response_hash": raw_object.content_hash,
             "source_schema_hash": profile["output_schema_hashes"][operation],
             "source_content_hash": "",
-            # A local read of a bounded window either found everything in it or
-            # failed; there is no page left behind to make it partial.
-            "completeness": profile["completeness"][operation] if document_refs else "unknown",
-            "status": "complete" if document_refs else "empty",
+            # A listing that hit its record ceiling left rows behind, and it
+            # says so with a cursor. That is `partial`, never the operation's
+            # `enumerated` ceiling: an enumeration is a claim that the window
+            # can be reconciled, and a truncated window cannot.
+            "completeness": (
+                "partial" if truncated else
+                (profile["completeness"][operation] if document_refs else "unknown")
+            ),
+            "status": (
+                "partial" if truncated else ("complete" if document_refs else "empty")
+            ),
             "access_policy_ref": profile["access_policy_ref"],
             "retention_policy_ref": profile["retention_policy_ref"],
             "terms_policy_ref": profile["terms_policy_ref"],

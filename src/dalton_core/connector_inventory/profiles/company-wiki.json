@@ -6,7 +6,7 @@
     "use_time_authority": "none"
   },
   "connector_ref": "connector:company-wiki",
-  "content_hash": "e58e657244196c68bba034484ecd9bea50f4a5464e1080211d8b62c017b6668b",
+  "content_hash": "47dd51f923d379710a9a4884c0912ed7fe15d63cddf7e6b95fb5f5095d186bf4",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "fixture_manifest_hash": "f41998992c0ad391c3034328384d9b63bbf6ad860a45ac58693a629e9d07f557",
   "fixture_manifest_ref": "connector-fixture-manifest:company-wiki:0.1",
@@ -14,10 +14,10 @@
   "operations": [
     {
       "completeness_ceiling": "enumerated",
-      "input_schema_hash": "3405e2b4eab1ae8760871d94d136c29f03c5951a19955eb625846408e9cbdb86",
+      "input_schema_hash": "e986342f2870c8af55cef1138307d8c41d8ee9e287204c73bba864cab52c081e",
       "input_schema_ref": "schema:connector-inventory:company-wiki:list_documents:input:0.1",
       "operation": "list_documents",
-      "output_schema_hash": "2092f9c6a1ce2419efa71f68aca2f64b00347acc4128457ed24d16809ab23b60",
+      "output_schema_hash": "98aff7e4cd4ddec5ea3c9fb5580b604817d4073531015c8b278e4ea391d42f3f",
       "output_schema_ref": "schema:connector-inventory:company-wiki:list_documents:output:0.1",
       "pagination": {
         "bounded_window_required": true,
@@ -84,16 +84,21 @@
             "type": "integer"
           },
           "since": {
-            "minLength": 1,
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "until": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
             "type": "string"
           }
         },
         "required": [
-          "since"
+          "since",
+          "until"
         ],
         "type": "object"
       },
-      "schema_hash": "3405e2b4eab1ae8760871d94d136c29f03c5951a19955eb625846408e9cbdb86",
+      "schema_hash": "e986342f2870c8af55cef1138307d8c41d8ee9e287204c73bba864cab52c081e",
       "schema_ref": "schema:connector-inventory:company-wiki:list_documents:input:0.1"
     },
     {
@@ -218,6 +223,7 @@
             ]
           },
           "next_cursor": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
             "type": [
               "string",
               "null"
@@ -244,22 +250,31 @@
             },
             "type": "array",
             "uniqueItems": true
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "until": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
           }
         },
         "required": [
           "schema_version",
           "since",
+          "until",
           "company",
           "industry",
           "documents",
           "document_count",
+          "truncated",
           "source_record_refs",
           "next_cursor",
           "provider_status"
         ],
         "type": "object"
       },
-      "schema_hash": "2092f9c6a1ce2419efa71f68aca2f64b00347acc4128457ed24d16809ab23b60",
+      "schema_hash": "98aff7e4cd4ddec5ea3c9fb5580b604817d4073531015c8b278e4ea391d42f3f",
       "schema_ref": "schema:connector-inventory:company-wiki:list_documents:output:0.1"
     },
     {

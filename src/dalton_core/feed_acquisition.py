@@ -203,6 +203,34 @@ def build_feed_acquisition_manifest(
     return validate_feed_acquisition_manifest(base)
 
 
+def bind_manifest_to_invocation(
+    manifest: Mapping[str, Any], *,
+    connector_invocation_ref: str, connector_invocation_hash: str,
+) -> dict[str, Any]:
+    """Bind a child-written manifest to the invocation that ran the child.
+
+    The child writes the manifest because the child is what read the bytes;
+    it cannot know the invocation, because the runner registers that around
+    it. So the runner's caller closes the loop afterwards, and the manifest
+    that lands on disk carries both halves. The content hash is recomputed,
+    which is the point: a manifest that named an invocation without rehashing
+    would be a manifest whose own hash no longer described it.
+    """
+
+    wire = validate_feed_acquisition_manifest(manifest)
+    base = {key: value for key, value in wire.items() if key != "content_hash"}
+    base["connector_invocation_ref"] = _text(
+        connector_invocation_ref, "connector_invocation_ref"
+    )
+    base["connector_invocation_hash"] = _hash(
+        connector_invocation_hash, "connector_invocation_hash"
+    )
+    base["content_hash"] = content_hash(
+        {key: value for key, value in base.items() if key != "content_hash"}
+    )
+    return validate_feed_acquisition_manifest(base)
+
+
 def verified_feed_source(
     core: Any, spool: Any, manifest: Mapping[str, Any], receipt_reader: Any = None
 ) -> tuple[dict[str, Any], str]:
@@ -259,6 +287,7 @@ __all__ = [
     "SALES_NOTES_SOURCE_REF",
     "FeedManifestError",
     "FeedSourceConflict",
+    "bind_manifest_to_invocation",
     "build_feed_acquisition_manifest",
     "validate_feed_acquisition_manifest",
     "verified_feed_source",

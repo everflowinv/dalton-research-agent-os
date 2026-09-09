@@ -10,7 +10,7 @@
   "builder_ref": "builder:dalton-connector-inventory:0.1",
   "capability_proposal_ref": "capability-proposal:connector:sales-notes:0.1",
   "connector_ref": "connector:sales-notes",
-  "content_hash": "faf4871c0be5a4dbd931344bae6726ed325d7593a9a6777283aab8a676306cdd",
+  "content_hash": "3f118a1ffb2c55a6df499545688eed17b6083c0a74c4cbafc46f1d2d90652c97",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "fixture_manifest_hash": "9289bd7a2149179404fa5fb80fb5c73d082111eaf69f333cc82581392abc87a2",
   "fixture_manifest_ref": "connector-fixture-manifest:sales-notes:0.1",
@@ -20,10 +20,10 @@
   "operations": [
     {
       "completeness": "enumerated",
-      "input_schema_hash": "727a8cefbc61f27b61f123ae91492dc637b597d1f0e362faad60650ec2541992",
+      "input_schema_hash": "3c20db8b707074cfa8d481e953babc737f1f37c8ef9a6d2bd5846bbd79903da1",
       "input_schema_ref": "schema:connector-inventory:sales-notes:list_notes:input:0.1",
       "operation": "list_notes",
-      "output_schema_hash": "8db17febf6ad733ce001ab929f5b210f0737b77c3e5b741a3722e8115060c707",
+      "output_schema_hash": "097b8a176468fc2a6a621029a7550aeda4faf693cbef9f7cd9818257ba6a4275",
       "output_schema_ref": "schema:connector-inventory:sales-notes:list_notes:output:0.1",
       "pagination": "none",
       "side_effects": [
@@ -32,7 +32,7 @@
     },
     {
       "completeness": "enumerated",
-      "input_schema_hash": "3d0093eb6d4d74d462fe1fcc543ca1e1a2d88e8883361757e86a47f4dbfed197",
+      "input_schema_hash": "08e0024cd964050303b1a50bff7e643b1f5ea590ad6d40a27260e4aeafe090e8",
       "input_schema_ref": "schema:connector-inventory:sales-notes:get_note:input:0.1",
       "operation": "get_note",
       "output_schema_hash": "ab4925edfd4824497fd6580faa60a8c18f0c9b91984bf2fed686b9ca7a2d86c3",
@@ -43,7 +43,7 @@
       ]
     }
   ],
-  "profile_template_hash": "52b6428c7932121677acb3a137bc7376915f4d120950ec99578f3f05c36a86a3",
+  "profile_template_hash": "e1eb0689e7731486a1aee3409ffd870511b932b1d1aa842740b0426f50bc9cf7",
   "profile_template_ref": "connector-profile-template:sales-notes:0.1",
   "promotion_policy_ref": "policy:connector-promotion:0.1",
   "requested_canary": null,
