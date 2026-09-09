@@ -334,6 +334,22 @@ class NumericContextWidthTests(unittest.TestCase):
         self.assertEqual(context["numbers"][0]["figures"], ["91.2%"])
         self.assertEqual(context["claims"], [])
 
+    def test_a_structured_period_does_not_crash_the_dedupe(self):
+        # Live, one Accenture bookings Claim carries a period object rather
+        # than a string: {"kind": "fiscal_quarter", "label": "FY2026Q3", ...}.
+        # A dict cannot go in a set, and the drafter crashing on a Ledger row
+        # is a worse failure than any duplicate it might have collapsed.
+        period = {"kind": "fiscal_quarter", "label": "FY2026Q3",
+                  "start": "2026-03-01T00:00:00+00:00", "end": "2026-05-31T23:59:59+00:00"}
+        claim = {"ref": "claim:bookings", "statement": "Accenture 报告新签订单同比温和增长。",
+                 "period": period, "aspect": "aspect:new-bookings-direction", "value": None,
+                 "unit": None, "basis": "Earnings call commentary",
+                 "subject_ref": "company:sec-cik:0001467373",
+                 "created_at": "2026-07-01T00:00:00+00:00"}
+        context = build_claim_context([claim, {**claim, "ref": "claim:bookings-copy"}])
+        self.assertEqual(len(context["claims"]), 1)
+        self.assertEqual(context["duplicates_dropped"]["claims"], 1)
+
     def test_a_claim_with_no_figure_is_still_a_statement(self):
         context = build_claim_context([{
             "ref": "claim:demand", "statement": "管理层称 discretionary 支出与去年持平。",

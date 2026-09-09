@@ -165,6 +165,21 @@ def _is_filing_grade(claim: Mapping[str, Any]) -> bool:
     return bool(_FILING_GRADE_RE.search(str(claim.get("basis") or "")))
 
 
+def _key_part(value: Any) -> str:
+    """One component of a dedupe key, as something hashable.
+
+    A Claim's ``period`` is usually a string but is not always one: live, one
+    Accenture bookings Claim carries a structured period
+    ({"kind": "fiscal_quarter", "label": "FY2026Q3", ...}).  A dict cannot go
+    in a set, and the drafter crashing on a Ledger row is a worse failure than
+    any duplicate it might have collapsed.
+    """
+
+    if value is None or isinstance(value, str):
+        return "" if value is None else value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
 def _normalised_statement(claim: Mapping[str, Any]) -> str:
     """The claim's words with spacing and terminal punctuation set aside."""
 
@@ -237,8 +252,8 @@ def _number_keys(claim: Mapping[str, Any]) -> list[Any]:
     aspect, period = claim.get("aspect"), claim.get("period")
     if aspect and period:
         keys.append((
-            "measurement", claim.get("subject_ref"), aspect, period,
-            claim.get("unit"), str(claim.get("value")),
+            "measurement", _key_part(claim.get("subject_ref")), _key_part(aspect),
+            _key_part(period), _key_part(claim.get("unit")), str(claim.get("value")),
         ))
     return keys
 
@@ -253,7 +268,7 @@ def _statement_keys(claim: Mapping[str, Any]) -> list[Any]:
     """
 
     statement = _normalised_statement(claim)
-    return [("statement", claim.get("period"), statement)] if statement else []
+    return [("statement", _key_part(claim.get("period")), statement)] if statement else []
 
 
 def _carries_a_figure(claim: Mapping[str, Any]) -> bool:
@@ -288,9 +303,9 @@ def _select_numbers(
 
     series: dict[str, list[Mapping[str, Any]]] = {}
     for claim in claims:
-        series.setdefault(str(claim.get("aspect") or ""), []).append(claim)
+        series.setdefault(_key_part(claim.get("aspect")), []).append(claim)
     for rows in series.values():
-        rows.sort(key=lambda claim: str(claim.get("period") or ""), reverse=True)
+        rows.sort(key=lambda claim: _key_part(claim.get("period")), reverse=True)
     chosen: list[Mapping[str, Any]] = []
     for round_index in range(limit):
         added = False
@@ -301,7 +316,7 @@ def _select_numbers(
                 added = True
         if not added or len(chosen) >= limit:
             break
-    chosen.sort(key=lambda claim: (str(claim.get("aspect") or ""), str(claim.get("period") or "")))
+    chosen.sort(key=lambda claim: (_key_part(claim.get("aspect")), _key_part(claim.get("period"))))
     return [dict(claim) for claim in chosen]
 
 
