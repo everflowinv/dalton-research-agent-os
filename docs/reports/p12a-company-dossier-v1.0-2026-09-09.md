@@ -1,6 +1,7 @@
 # P12a / P12f：公司档案十节，结构由 Constitution 定，没有新证据的一版不是一版
 
-*2026-09-09* · 分支 `w2-dossier`，基于 main `7708d43`（2,843 项）
+*2026-09-09* · 分支 `w2-dossier`，基于 main `7708d43`（2,843 项），已并入 main `6da8f82`
+· v1.1：第一轮 code review 的两个 blocker 与其余十项已修（第 10 节）
 · 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 1 节（版本化是机制不是触发器）、
 第 3 节 Wave 2、vision 回顾补充行 **C3**（Constitution `method` 接消费者）与 **D2**（认知层产出复用
 independence predicate）、[能力差距分析 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md)
@@ -156,9 +157,15 @@ verdict 是关于虚无的 verdict。
 
   > 结算事件 = 有指引区间且有同口径实际值。少于 4 条 → `insufficient_data`。否则：beats ≥ 75% 且连续两次
   > 指引中至少一半被上调 → `beat_and_raise`；beats ≥ 75% 而没有上调模式 → `conservative`；
-  > misses ≥ 50% → `aggressive`；其余 → `insufficient_data`（没有任何模式达到阈值）。
+  > misses ≥ 50% → `aggressive`；其余 → **`mixed`**。
 
-  三个季度的连胜是一段运气，不是一种风格；`insufficient_data` 是真答案，而且今天是最常见的正确答案。
+  三个季度的连胜是一段运气，不是一种风格。**第五个词 `mixed` 由 owner 裁定加入（2026-09-09）**：
+  「十二条结算事件看不出模式」是关于这支管理层的发现，「两条结算事件」是我们证据的缺口，
+  共用一个词会把这两件事说成同一件。
+- **配对规则**：guide 与 actual 按**期末**相遇（`2026-03-01..2026-05-31` 与 `2026-05-31` 是同一个期末），
+  财年标签不解析成日期（P12b 拒绝猜财年日历的同一条理由）。同一期末下 YTD 与季度并存时，
+  取**跨度最短**的那一条；guide 自己带起点时要求起点相同。没有这条，一个季度的指引会被年初至今的
+  收入判成 beat。
 - profile 存在 `guidance_style` 那一节的 `profile` 字段里，`render_profile_table()` 把它渲染成
   tab 表贴进 prompt，并明说「这张表已经算好，不是你的活；描述它，不要重算」。
 
@@ -182,16 +189,18 @@ verdict 是关于虚无的 verdict。
 
 ## 6. 验收结果（原文）
 
+合并 main `6da8f82` 之后：
+
 ```
-Ran 2950 tests in 292.233s
+Ran 3818 tests in 374.660s
 OK (skipped=1)
 ```
 
 命令：`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`
 （`PYTHONPATH` 必须是**绝对路径**：子进程 cwd 是 state dir，相对的 `src` 会解析不到。）
-基线 main `7708d43` 是 2,843，本片新增 **107** 项，分布：
-`test_company_dossier.py` 28、`test_company_dossier_draft.py` 27、`test_guidance_profile.py` 18、
-`test_dossier_lane.py` 34。全部用假模型，没有对 live 预算发起过任何模型调用。
+本片新增 **137** 项，分布：`test_company_dossier.py` 33、`test_company_dossier_draft.py` 31、
+`test_guidance_profile.py` 23、`test_dossier_lane.py` 50。全部用假模型，
+没有对 live 预算发起过任何模型调用。
 
 ### 冒烟：live 只读副本（`/tmp` 拷贝，规则跑，不调模型）
 
@@ -233,27 +242,36 @@ P12b 的 aspect 标注只有规则那一半跑过（规则只settle定量 Claim�
 
 ## 7. 集成要接的线
 
-1. **mission 授权**：live `coverage-mission-version:us-it-services:13` 的 `may_write` 里**没有** `dossier`。
+1. **lane 序号 137**（原 135）：debate map 占 135，而且它读档案、应当排在档案之后。
+2. **mission 授权**：live `coverage-mission-version:us-it-services:13` 的 `may_write` 里**没有** `dossier`。
    词已经在词表里（Wave 0 加的），owner 发一版新 mission 授予即可，代码不用改。在那之前 lane 每 tick
    报 `held / not_authorized` 且**一分钱不花**（授权检查在任何模型调用之前）。
-2. **P12b 模型标注器要先跑完**（见第 6 节）。补完 2,148 条存量是 P12b 报告第七节的开放问题；
+3. **P12b 模型标注器要先跑完**（见第 6 节）。补完 2,148 条存量是 P12b 报告第七节的开放问题；
    在它跑完之前，档案 lane 会诚实地只写有材料的那一两节。
-3. **policy 文件要随部署落盘**：`deploy/phase9/p12a-dossier-policy-v1.json` 的默认路径只在源码 checkout 里
+4. **policy 文件要随部署落盘**：`deploy/phase9/p12a-dossier-policy-v1.json` 的默认路径只在源码 checkout 里
    成立；安装环境要用 `--company-dossier-policy` 指到它，否则 lane 报 `held / no_policy`（不会崩，也不会花钱）。
-4. **install.sh / launchagent**：lane 的 argv 片段是 `--company-dossier-model-config <state>/initial-screen-model-config.json`，
-   与 Initial Screen 复用同一份起草模型配置（同一条路由、同一个 broker、同一本日账），
-   所以 `scripts/raise_day_budget_cap.MODEL_CONFIG_NAMES` 不用加新名字。
-   argv 片段已经按 registry 的形状写好，`macos_launchagent` 无需改动。
-5. **cockpit**：需要一个公司档案页——十节、每节可点回 Claim / filing 行 / forecast 格、
+5. **install.sh / launchagent**：argv 片段是
+   `--company-dossier-model-config <state>/initial-screen-model-config.json`
+   `--company-dossier-policy <state>/p12a-dossier-policy-v1.json`
+   （两个文件都不在就整条 lane 不装），可选
+   `--company-dossier-verifier-model-config <state>/dossier-verifier-model-config.json`。
+   起草复用 Initial Screen 的模型配置（同一条路由、同一个 broker、同一本日账），所以
+   `scripts/raise_day_budget_cap.MODEL_CONFIG_NAMES` 不用加新名字；**复核那一份要新加**，
+   而且它必须能路由到与起草不同的 model family，否则 lane 永远不发布（见 3 与第 3 节 D2）。
+   `macos_launchagent` 无需改动。
+6. **cockpit**：`cockpit_plane.REGISTRY_LANE_LABELS` 已加一行 `company_dossier: 写公司档案`——
+   这是本片唯一一处碰 cockpit 的地方，因为 main 上新增的
+   `test_cockpit_wave1.LaneVocabularyTests` 要求每条注册 lane 都有中文名，不加就是红的全量测试。
+   措辞由集成时定夺。还需要一个公司档案页——十节、每节可点回 Claim / filing 行 / forecast 格、
    版本链可回放（`CompanyDossierAuthority.replay_section(company, aspect)` 已经就是这个读法：
    每一版说了什么、`change_reason` 是什么、引了哪些 ref）。
    `writer_server.OPERATION_FIELDS` 不需要新参数：lane 的 tick 不带参数。
-6. **Q1 的 `DOSSIER_SECTIONS` 与 aspect 词表对齐**（Q1 报告 1.3 已经点名的那件事）。
+7. **Q1 的 `DOSSIER_SECTIONS` 与 aspect 词表对齐**（Q1 报告 1.3 已经点名的那件事）。
    本片没有改 `research_quality_rubrics.py`（不是我的文件），而是在
    `company_dossier.dossier_artefact()` 里直接传 aspect 名作 `expected_sections`。
    集成时把 `DOSSIER_SECTIONS` 换成 `claim_aspect_vocabulary.ASPECTS[:10]` 并升一版 rubric，
    本片这条注释就可以删掉。
-7. **Q1 的 `claim_refs_resolve` 只解析 Claim。** 档案还引用报表行与 forecast 格，本片自己有
+8. **Q1 的 `claim_refs_resolve` 只解析 Claim。** 档案还引用报表行与 forecast 格，本片自己有
    `unresolved_refs()` 逐种检查；如果 Q1 那条检查将来认得另外两种 ref，这一层可以退休。
 
 ## 8. 没做的
@@ -291,11 +309,30 @@ P12b 的 aspect 标注只有规则那一半跑过（规则只settle定量 Claim�
    `kpi_dictionary` 上是 0，在 `demand_drivers` 上是 178（36%）。两头都不能用。
    **真正的漏检率要等模型标注器跑完再测**，方法是现成的：对每一节比较索引供给集与关键词集的差集。
    在那之前不要动 embedding 这个冻结项。
-2. **`guidance_style` 的第五个词。** 封闭词表是 owner 给的四个词，于是「结算够多但没有模式」只能落进
-   `insufficient_data`，与「样本太少」共用一个词（`basis` 里写清了是哪一种）。建议加一个 `mixed`；
-   这是词表变更，需要 owner 点头。
+2. ~~**`guidance_style` 的第五个词。**~~ **已裁定（owner，2026-09-09）**：加 `mixed`，已实现。
 3. **`unavailable` 的节要不要计入 cockpit 的完成度？** 建议要，而且要显示理由——
    「十节里有两节在等 C1 与 P11a」本身就是给 owner 看的排期信息。
 4. **档案版本要不要成为 `mission_deliverable` 的一种 kind？** 现在不是（它有自己的权威）。
    周报与 memo 将来要引用档案时，引的是 `company-dossier-version:<company>:<n>`，
    这一点最好在 P15 之前定下来。
+
+
+## 10. review 之后改了什么（v1.1）
+
+| review 项 | 改动 |
+| --- | --- |
+| **1 BLOCKER** P12f 永远结算不了 | actual 行原来 `value` / `unit` 是 None（`guidance_profile` 直接跳过），而 guide 的 period 是 Claim 键、actual 的是区间，两边永远碰不上。现在：`number_material` 带出 `value` / `unit` / 期间起止；**定量 Claim 本身就是 actual**（live 上唯一存在的已结算增速数字就是它们）；两边按 `period_key`（期末）相遇；同期末多条时取跨度最短的那条。新增四项端到端测试，经 `guidance_material` 跑出 beat / miss / inline |
+| **2 BLOCKER** 陈旧度饿死 unit | 原来与链头的 `created_at` 比：一 tick 三个 unit、共十二个 unit，只要有任何一个 unit 发版，从没写过的那些立刻看起来是「新的」，档案永远停在三节。现在每个 unit 记 `drafted_at`（顶层字段，**排除在 body hash 之外**，否则同样的散文换个时间会变成另一份档案），只与**它自己**上次被写的时间比。新增 starvation 测试：五个 unit、每 tick 三个，第二 tick 写完剩下两个，第三 tick 静默 |
+| 3 `output_rubric` 漏掉两个块 | 改为遍历 `_artefact_sections(record)`：目标价与「低估」如果出现，就出现在 `our_view` |
+| 4 「新证据」有两个定义 | Q1 的 `new_version_cites_new_refs` 只看 Claim ref；新入库的报表行也是新证据。`rubric_gate` 在 `new_refs(record, prior)` 非空时撤销这一条硬失败，并把撤销记进 `overridden_checks` |
+| 5 「正文不写标签」只在 prompt 里 | 权威层拒绝 `[CN]\d{1,3}`。只写在 prompt 里的规则，下一个起草器不会读到 |
+| 6 `evidence_refs` 的兜底 | 删掉 `or fresh[:1]`；没有新证据时在组装记录之前就报 `no_new_evidence` |
+| 7 figure 配额 | 报表行会把 30 条上限占满、挤掉预测格。现在预测格有配额（10），未用完的配额归对方 |
+| 8 复核独立性 | 起草的 family 在**调用复核之前**从 route decision 读出来，读不出来就不打这一通；预算不够也不打（`unverified`，不发布）；**没有单独的复核模型配置时在第一次起草之前就 `held`**（一份配置两次调用必然同 family，事后拒绝等于花十二次调用的钱得到同一个答案） |
+| 9 `x_dash_y` 未锚定 | 必须跟 `%` / `percent` / `个百分点`，否则 `2025-09-01..2026-05-31` 会被读成「9 到 2026」的区间 |
+| 10 `argv_fragment` 门槛 | 改为「起草模型配置 + policy 文件」都在才装，不再看 extraction 配置（这条 lane 不抽取任何东西）；policy 路径与复核配置一并传给子进程 |
+| nit 句子拼接 | 中文句子直接相连，非中文之间补空格 |
+| nit 两个块的 `gaps` | 加上了 |
+| nit `market_view` 的来源等级 | 只有 `sell_side` 与 `news` 可以填 `market_view`：公司自己说的话不是市场的看法，拿它当市场看法就是把分歧凭空造出来 |
+| nit 复核成本 | 起草前后都做预算检查，留不出复核的钱就不发布 |
+| nit 结转节的死锁 | 结转过来的一节引用的 Claim 被撤回时，**这一节掉成 `unavailable / refused_by_verification`**、版本照发，而不是让整条链卡在一个不发版就修不了的节上。刚起草的节引用解析不开仍然整轮拒绝 |
