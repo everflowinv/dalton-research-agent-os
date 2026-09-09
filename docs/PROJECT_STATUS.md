@@ -1,30 +1,43 @@
 # Dalton 项目进度
 
-更新日期：2026-09-08
+更新日期：2026-09-09
 
 ## 下一步（按顺序）
 
-1. **把大脑接到 tick 上（唯一还缺的一段）。** 路由已经通了：`profile:gpt-6-astra` 已注册，
-   `model-routing-policy:dalton-openclaw-planner-decisions:1` 已钉，`research-planner-model-config.json` 已写。
-   计划的存放也有了（`coverage_mission_research_plans`，append-only，按"任务版本 + 状态哈希"去重）。
-   **还缺一个跑它的子进程**：planner 单次调用最长 300s，超过 writer 30s 的请求上限，所以必须像抽取那样出进程跑
-   （CLI child + launcher + coordinator），然后把计划写进上面那张表。
-2. **让计划真正调度。** `research_planner` 能产出 directives（在固化清单之内排序）与 inquiries（清单覆盖不到的
-   追问）。`wanted_specs()` 是接口：计划没点名的 spec 就不搜，无论隔了多久。P13h 的"超额即停"是确定性下限，
-   计划应当能在两个方向上覆盖它。
-3. **模型目录仍未对齐（与大脑无关，但会误导）。** `catalog_in_sync: false`：Dalton 有 5 个 broker 已不提供的静态
+1. **模型目录仍未对齐（与大脑无关，但会误导）。** `catalog_in_sync: false`：Dalton 有 5 个 broker 已不提供的静态
    profile（`gemini-3-7-flash` / `gemini-flash-latest` / `glm-5-2` / `gpt-5-5` / `openrouter-ox-alpha`），
    broker 有 4 个 Dalton 没有静态 profile 的。P13l 让部署会补齐"缺的"，但不会清理"多的"——删旧 profile 会改动
    历史版本链，值得单独做。
-4. **把已核验的数字接进 Ledger。** `CandidateStagingStore.stage` 明确拒绝 cited-original 的定量候选
+2. **把已核验的数字接进 Ledger。** `CandidateStagingStore.stage` 明确拒绝 cited-original 的定量候选
    （"a cited original is not a numeric authority"）。这是 ADR-0003 一脉的有意规则，要改得走 ADR + 重签策略。
    在那之前数字停在 `coverage_mission_document_figures`，驾驶舱直接读这张表。
-5. **接 Guidepoint。** 模板在，运行 lane 与两条 owner 签名的治理记录都还没有。
-6. **修 discovery 的公司归属（检索侧）。** 自由文本检索把别家公司的电话会归到了 EPAM 名下；抽取侧已经拦住了数字，
-   但**定性 Claim 仍在从这些文档里产生**（那两份文档还有 18 条 review，EPAM 名下共 739 条 Claim）。
-   **抽取侧已经堵住**（P13i：文档没点到公司名就不准入，并直接 dismiss），但检索仍会把别家公司的文档放进队列，
-   白花获取预算。owner 的判断是不该按 `company` 过滤——行业报告本来就没有公司标签；所以这一条是"怎么让检索更准"
-   的开放问题，不是"加个过滤器"。
+3. **接 Guidepoint。** 模板在，运行 lane 与两条 owner 签名的治理记录都还没有。
+4. **修 discovery 的公司归属（检索侧）。** 自由文本检索把别家公司的电话会归到了 EPAM 名下；抽取侧现在**三条
+   pass 都堵住了**（P13c 数字、P13i 定性、P13y 指标发现），但检索仍会把别家公司的文档放进队列，白花获取预算。
+   owner 的判断是不该按 `company` 过滤——行业报告本来就没有公司标签；所以这一条是"怎么让检索更准"的开放问题，
+   不是"加个过滤器"。
+5. **contested 指标要能在驾驶舱上看见。** P13y 之后，单位打架的指标不再成立需求，但也不再报错——
+   `metric_discovery.contested()` 能说出是谁在哪个单位上分歧（live 5 条，都是 percent/ratio），页面还没读它。
+6. **AlphaEngine 滚动 24h 用量贴着上限**（131/130），是 CTSH 缺电话会的直接约束。
+
+## 2026-09-09：第三条 pass，和一条把整家公司抹掉的异常
+
+- **P13y 指标发现从来没装归属闸门。** 读一个窗口有三条 pass：数字（P13c）和定性（P13i）都拒绝"文档里从没出现过
+  这家公司名字"的来源，**指标发现没有**。它被漏掉是因为它不写 Claim——但两条观察就构成一条 requirement，而
+  requirement 正是数字 pass 接下来要在**这家公司自己的财报里**去找的东西。从别家公司电话会里学到的指标，会让后面
+  每一次（付费的）阅读都去找一个这家公司根本不披露的科目。live 496 条观察里有 **170 条**来自另外两条 pass 早已
+  判定不归属的 31 份文档。
+- **哪些是错的不需要重新判断。** 运行中的系统已经逐窗口判过：每一份 extraction summary 里的 `not_attributed`
+  就是那次判断，落在磁盘上。`scripts/retract_unattributed_metric_observations.py` 读这些判决、映射回文档、
+  撤回从中学到的观察。撤回而非删除，理由留档（`coverage_mission_metric_observation_retractions`，append-only，
+  与数字撤回同一套规则；被撤回的观察任何读取都不再返回，重新提出也不会复活）。
+  **已执行：170 条撤回，19 条 requirement 随之消失**——包括 IT 服务公司名下的 `adjusted-ebitda`、`net-cash`、
+  `ebitda-margin`，这些本来就不像是这个行业的口径。
+- **一条指标的分歧，抹掉了整家公司。** `establish_requirements` 遇到"同名不同单位"时**抛异常**，而每一个调用点都
+  `except Exception: return ()`——于是四家公司里有三家的 requirement 列表是空的，**且没有任何地方报错**。IBM 有
+  176 条观察、0 条 requirement，只因为两份文档对 net retention rate 该用 percent 还是 ratio 意见不一。
+  分歧是真的、值得看见，但它只关乎那一条指标：现在只把有争议的那条排除，其余照常成立，`contested()` 说出谁在
+  分歧什么。**修完这一条，三家公司恢复了 52 条 requirement。**
 
 ## 2026-09-08：数字、大脑与一天的事故
 

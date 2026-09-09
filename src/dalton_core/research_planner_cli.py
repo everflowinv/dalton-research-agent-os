@@ -147,8 +147,11 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
     planned = planned_spec_refs_from_directory(plans_dir)
     checklist = evaluate_mission(store.connection, mission, planned_specs=planned)
     industry = evaluate_industry(store.connection, mission, planned_specs=planned)
+    from .metric_discovery import contested, establish_requirements, uncorroborated
+
     figures: dict[str, Any] = {}
     metrics: dict[str, Any] = {}
+    disputed: dict[str, Any] = {}
     for entry in checklist:
         company_ref = entry["company_ref"]
         held = missions.document_figures(company_ref)
@@ -159,10 +162,18 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
                 for grade in {item["source_grade"] for item in held}
             },
         }
-        metrics[company_ref] = missions.metric_observations(company_ref)
+        # Corroboration counts, established first and then the ones still short
+        # of a second document. Passing the raw observations here put
+        # "documents: 0" beside every measure and showed the planner whichever
+        # ones happened to have been recorded first rather than the most cited.
+        observations = missions.metric_observations(company_ref)
+        metrics[company_ref] = (establish_requirements(observations)
+                                + uncorroborated(observations))
+        disputed[company_ref] = contested(observations)
     return build_research_state(
         mission=mission, checklist=checklist, industry=industry,
         figures_by_company=figures, metrics_by_company=metrics,
+        contested_by_company=disputed,
         budget=mission["budget"],
         spend=read_spend(store, mission, budget_db=budget_db,
                          as_of=datetime.fromisoformat(as_of)),

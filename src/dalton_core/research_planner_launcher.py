@@ -227,7 +227,13 @@ class ResearchPlannerCoordinator:
                 "SELECT COUNT(*) FROM coverage_mission_document_figures f "
                 "LEFT JOIN coverage_mission_document_figure_retractions r "
                 "ON r.figure_id=f.figure_id WHERE r.figure_id IS NULL"),
-            "metrics": count("SELECT COUNT(*) FROM coverage_mission_metric_observations"),
+            # Retracted the same way figures are: withdrawing 170 wrongly
+            # attributed observations changes what the planner should decide,
+            # so it has to change the signature that decides whether to ask.
+            "metrics": count(
+                "SELECT COUNT(*) FROM coverage_mission_metric_observations o "
+                "LEFT JOIN coverage_mission_metric_observation_retractions r "
+                "ON r.observation_id=o.observation_id WHERE r.observation_id IS NULL"),
             # A new mission version is a new goal, which is always worth a plan.
             "mission_versions": count("SELECT COUNT(*) FROM coverage_mission_versions"),
         }

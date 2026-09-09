@@ -138,11 +138,25 @@ class RequirementEstablishmentTests(unittest.TestCase):
     def test_the_same_name_in_two_units_is_refused_not_merged(self) -> None:
         # Revenue in currency and revenue in percent are different figures;
         # merging them would make the series meaningless.
-        with self.assertRaises(MetricDiscoveryError):
-            establish_requirements([
-                proposal(document_ref=DOC_A),
-                proposal(document_ref=DOC_B, unit="percent"),
-            ])
+        self.assertEqual(establish_requirements([
+            proposal(document_ref=DOC_A),
+            proposal(document_ref=DOC_B, unit="percent"),
+        ]), [])
+
+    def test_a_contested_metric_does_not_take_the_others_down_with_it(self) -> None:
+        # P13y: this used to raise, and every caller read the exception as "no
+        # requirements learned". IBM held 176 observations and got zero, in
+        # silence, because two documents disagreed about one of them.
+        established = establish_requirements([
+            proposal(document_ref=DOC_A),
+            proposal(document_ref=DOC_B, unit="percent"),
+            proposal(metric_ref="metric:free-cash-flow", label="free cash flow",
+                     evidence_phrase="free cash flow", document_ref=DOC_A),
+            proposal(metric_ref="metric:free-cash-flow", label="free cash flow",
+                     evidence_phrase="free cash flow", document_ref=DOC_B),
+        ])
+        self.assertEqual([item["metric_ref"] for item in established],
+                         ["metric:free-cash-flow"])
 
     def test_a_metric_the_market_moves_to_is_visible_before_it_qualifies(self) -> None:
         proposals = [

@@ -109,5 +109,95 @@ class AdmissionAttributionTests(unittest.TestCase):
             )
 
 
+class MetricDiscoveryAttributionTests(unittest.TestCase):
+    """P13y: the third pass, which the gate was never added to.
+
+    It writes no claim, which is why it was missed, and why it was worth
+    finding: two observations make a requirement, and a requirement is what the
+    numeric pass then hunts in this company's own filings.
+    """
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.h = ExtractionHarness(Path(self.temp.name))
+        self.addCleanup(self.h.close)
+        params = mission_params(self.h.state)
+        params["autonomy"]["may_write"] = list(params["autonomy"]["may_write"]) + ["source_discovery"]
+        for item in params["source_plan"]:
+            if item["source_ref"] == "source:alphaengine":
+                item["status"] = "connected"
+        params.update({"version_id": "coverage-mission-version:us-it-services:2",
+                       "prior_version_ref": self.h.mission["id"],
+                       "idempotency_key": "coverage-mission:us-it-services:2"})
+        ref = params.pop("mission_ref")
+        self.v2 = self.h.missions.create_mission(ref, **params)
+        self.h.missions.carry_forward_superseded_documents(ref)
+        self.h.missions.backfill_document_reviews(ref)
+        self.review = self.h.missions.document_reviews(
+            self.v2["id"], state="awaiting_human_extraction", limit=1)[0]
+        self.actor = self.v2["autonomy"]["automation_principal"]
+
+    def discover(self):
+        context = self.h.service.context(
+            self.review["review_id"], content_hash(self.review), 0, self.actor,
+            require_open=False)
+        return self.h.service.generate_metric_discovery(
+            review_id=self.review["review_id"],
+            expected_review_hash=content_hash(self.review),
+            offset=0, expected_context_hash=context["content_hash"],
+            actor_ref=self.actor,
+        )
+
+    def test_a_document_that_never_names_the_company_teaches_nothing(self):
+        with patch.object(type(self.h.service), "document_names_subject",
+                          return_value={"checked": True, "names_subject": False,
+                                        "matched": []}):
+            result = self.discover()
+        self.assertEqual(result["status"], "not_attributed")
+        self.assertEqual(result["recorded"], [])
+        self.assertEqual(result["proposals"], [])
+
+    def test_the_refusal_comes_before_the_model_is_paid_for(self):
+        # A pass that refuses after the call has already spent the money on a
+        # window it was never going to learn from.
+        calls = []
+        with patch.object(type(self.h.service), "document_names_subject",
+                          return_value={"checked": True, "names_subject": False,
+                                        "matched": []}), \
+             patch.object(type(self.h.service), "_run_secondary",
+                          side_effect=lambda *a, **k: calls.append(a) or (None, False)):
+            self.discover()
+        self.assertEqual(calls, [])
+
+    def test_a_document_that_names_the_company_is_not_blocked_here(self):
+        with patch.object(type(self.h.service), "document_names_subject",
+                          return_value={"checked": True, "names_subject": True,
+                                        "matched": ["Accenture"]}):
+            result = self.discover()
+        self.assertNotEqual(result["status"], "not_attributed")
+
+    def test_a_subject_nobody_configured_is_not_treated_as_evidence(self):
+        with patch.object(type(self.h.service), "document_names_subject",
+                          return_value={"checked": False, "names_subject": False,
+                                        "matched": []}):
+            result = self.discover()
+        self.assertNotEqual(result["status"], "not_attributed")
+
+    def test_a_filing_is_attributed_by_its_accession_without_a_text_check(self):
+        calls = []
+
+        def never(_self, context):
+            calls.append(context)
+            return {"checked": True, "names_subject": False, "matched": []}
+
+        with patch.object(type(self.h.service), "_document_spec_ref",
+                          return_value="annual-report-10k"), \
+             patch.object(type(self.h.service), "document_names_subject", never):
+            result = self.discover()
+        self.assertNotEqual(result["status"], "not_attributed")
+        self.assertEqual(calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

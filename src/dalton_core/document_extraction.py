@@ -1100,6 +1100,20 @@ class DocumentExtractionService:
                                require_open=False)
         if context["content_hash"] != expected_context_hash:
             raise ResearchVerificationConflict("source context changed; reload original")
+        # P13y: the third pass, and the one the P13c/P13i gate was never added
+        # to. Writing no claim is not the same as being harmless: a requirement
+        # is what the numeric pass then goes hunting, so a measure learned from
+        # another company's call sends every later read looking for a line item
+        # this company does not report. 170 of 496 live observations came from
+        # documents this same gate had already refused elsewhere.
+        from .document_figure_grade import attribution_for
+
+        if attribution_for(self._document_spec_ref(context)) is None:
+            subject = self.document_names_subject(context)
+            if subject.get("checked") and not subject.get("names_subject"):
+                return {"status": "not_attributed", "proposals": [], "refused": [],
+                        "recorded": [], "subject": subject,
+                        "formal_authority_writes": 0}
         config = getattr(self.writer, "_document_extraction_model_config", None)
         factory = self.writer._document_extraction_worker_factory
         if factory is None and config is None:

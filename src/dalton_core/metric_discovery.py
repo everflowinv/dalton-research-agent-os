@@ -158,6 +158,14 @@ def establish_requirements(
     A requirement carries its citations. That is what makes it answerable later
     when someone asks why the system is hunting this figure -- the answer is
     the documents that named it, not "a model decided".
+
+    A metric whose documents disagree about its unit is **contested** and is
+    left out; see ``contested`` for who disagreed.  This used to raise, which
+    made one local disagreement fatal to the whole company: IBM had 176
+    observations and got zero requirements because two documents could not
+    agree what net retention rate is measured in.  The disagreement is real and
+    worth surfacing, but it is about one metric, and the blast radius should be
+    that metric.
     """
 
     if not isinstance(min_documents, int) or isinstance(min_documents, bool) or min_documents < 1:
@@ -175,18 +183,18 @@ def establish_requirements(
             "metric_ref": wire["metric_ref"],
             "label": wire["label"],
             "unit": wire["unit"],
+            "units": set(),
             "documents": {},
         })
-        if entry["unit"] != wire["unit"]:
-            # The same name reported in two units is two different figures, and
-            # storing either would make the series meaningless.
-            raise MetricDiscoveryError(
-                f"{wire['metric_ref']} was proposed with conflicting units"
-            )
+        entry["units"].add(wire["unit"])
         entry["documents"].setdefault(wire["document_ref"], wire["evidence_phrase"])
     established: list[dict[str, Any]] = []
     for entry in grouped.values():
         documents = entry.pop("documents")
+        # The same name reported in two units is two different figures, and
+        # requiring either would make the series meaningless.
+        if len(entry.pop("units")) > 1:
+            continue
         if len(documents) < min_documents:
             continue
         established.append({
@@ -228,10 +236,44 @@ def uncorroborated(
     )
 
 
+def contested(proposals: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Metrics whose documents disagree about the unit, and what they said.
+
+    ``establish_requirements`` leaves these out, and absence on its own reads
+    as "nobody mentioned it" -- which is the opposite of the truth.  A
+    contested metric is one several documents thought worth naming and could
+    not agree how to measure, which is a fact about the metric worth seeing.
+    """
+
+    units: dict[str, dict[str, set[str]]] = {}
+    labels: dict[str, str] = {}
+    for item in proposals:
+        ref = item.get("metric_ref")
+        unit = item.get("unit")
+        if not isinstance(ref, str) or not isinstance(unit, str):
+            continue
+        units.setdefault(ref, {}).setdefault(unit, set()).add(str(item.get("document_ref")))
+        labels.setdefault(ref, str(item.get("label")))
+    return sorted(
+        (
+            {
+                "metric_ref": ref,
+                "label": labels[ref],
+                "units": sorted(by_unit),
+                "cited_by": {unit: sorted(docs) for unit, docs in sorted(by_unit.items())},
+            }
+            for ref, by_unit in units.items()
+            if len(by_unit) > 1
+        ),
+        key=lambda item: item["metric_ref"],
+    )
+
+
 __all__ = [
     "MIN_CORROBORATING_DOCUMENTS",
     "MetricDiscoveryError",
     "SIGNAL_SPEC_REFS",
+    "contested",
     "establish_requirements",
     "uncorroborated",
     "validate_metric_proposal",

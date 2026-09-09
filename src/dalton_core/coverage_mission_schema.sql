@@ -431,6 +431,35 @@ BEFORE UPDATE ON coverage_mission_document_figure_retractions BEGIN SELECT RAISE
 CREATE TRIGGER IF NOT EXISTS coverage_mission_document_figure_retractions_no_delete
 BEFORE DELETE ON coverage_mission_document_figure_retractions BEGIN SELECT RAISE(ABORT, 'figure retractions are append-only'); END;
 
+-- P13y: a metric observation learned from a document that was not about this
+-- company.
+--
+-- The figures pass and the qualitative pass both refuse an unattributed
+-- document; the metric-discovery pass did not, and 170 of the first 496
+-- observations came from documents the other two passes had already refused.
+-- An observation writes no claim, which is why it was missed -- but two of them
+-- make a *requirement*, and a requirement is what the numeric pass then goes
+-- hunting. A measure learned from another company's earnings call sends every
+-- later read looking for a line item this company does not report.
+--
+-- Retracted rather than deleted, for the same reason figures are: the record
+-- of what was wrongly learned is worth more than a clean table.
+CREATE TABLE IF NOT EXISTS coverage_mission_metric_observation_retractions (
+    observation_id TEXT PRIMARY KEY
+        REFERENCES coverage_mission_metric_observations(observation_id),
+    reason TEXT NOT NULL,
+    retracted_by TEXT NOT NULL,
+    retracted_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS coverage_mission_metric_observation_retractions_authorized_insert
+BEFORE INSERT ON coverage_mission_metric_observation_retractions WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+    SELECT RAISE(ABORT, 'metric observation retraction requires CoverageMissionAuthority'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_metric_observation_retractions_no_update
+BEFORE UPDATE ON coverage_mission_metric_observation_retractions BEGIN SELECT RAISE(ABORT, 'metric observation retractions are append-only'); END;
+CREATE TRIGGER IF NOT EXISTS coverage_mission_metric_observation_retractions_no_delete
+BEFORE DELETE ON coverage_mission_metric_observation_retractions BEGIN SELECT RAISE(ABORT, 'metric observation retractions are append-only'); END;
+
 -- P13m: a plan the research system made about its own work.
 --
 -- Append-only, and bound to the state it was decided from. Two plans made an

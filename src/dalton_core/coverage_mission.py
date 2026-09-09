@@ -1718,7 +1718,7 @@ class CoverageMissionAuthority:
                 )
             wires.append((wire, citation))
         now = _now()
-        recorded, duplicates = [], []
+        recorded, duplicates, retracted = [], [], []
         with self._transaction() as cur:
             for wire, citation in wires:
                 observation_id = _ref("mission-metric-observation", {
@@ -1731,7 +1731,17 @@ class CoverageMissionAuthority:
                     "WHERE observation_id=?", (observation_id,),
                 ).fetchone()
                 if existing is not None:
-                    duplicates.append(wire["metric_ref"])
+                    # A retracted observation is held, not free: re-proposing it
+                    # does not revive it. Reported apart from a plain duplicate
+                    # because "we have this" and "we decided this was wrong" are
+                    # different answers, and the second one wants looking at.
+                    if cur.execute(
+                        "SELECT 1 FROM coverage_mission_metric_observation_retractions "
+                        "WHERE observation_id=?", (observation_id,),
+                    ).fetchone() is not None:
+                        retracted.append(wire["metric_ref"])
+                    else:
+                        duplicates.append(wire["metric_ref"])
                     continue
                 cur.execute(
                     "INSERT INTO coverage_mission_metric_observations("
@@ -1745,7 +1755,7 @@ class CoverageMissionAuthority:
                     ),
                 )
                 recorded.append(wire["metric_ref"])
-        return {"recorded": recorded, "duplicates": duplicates}
+        return {"recorded": recorded, "duplicates": duplicates, "retracted": retracted}
 
     def record_document_figures(
         self,
@@ -1952,13 +1962,61 @@ class CoverageMissionAuthority:
         params.append(limit)
         return [dict(row) for row in self.connection.execute(query, params).fetchall()]
 
+    def retract_metric_observation(
+        self, observation_id: str, *, reason: str, retracted_by: str
+    ) -> dict[str, Any]:
+        """Unlearn a measure that was never this company's."""
+
+        observation_id = _text(observation_id, "observation_id")
+        reason = _text(reason, "reason")
+        retracted_by = _text(retracted_by, "retracted_by")
+        row = self.connection.execute(
+            "SELECT 1 FROM coverage_mission_metric_observations WHERE observation_id=?",
+            (observation_id,),
+        ).fetchone()
+        if row is None:
+            raise CoverageMissionNotFound("metric observation was not found")
+        existing = self.connection.execute(
+            "SELECT * FROM coverage_mission_metric_observation_retractions "
+            "WHERE observation_id=?", (observation_id,),
+        ).fetchone()
+        if existing is not None:
+            return {**dict(existing), "status_marker": "duplicate"}
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_metric_observation_retractions("
+                "observation_id,reason,retracted_by,retracted_at) VALUES(?,?,?,?)",
+                (observation_id, reason, retracted_by, now),
+            )
+        return {"observation_id": observation_id, "reason": reason,
+                "retracted_by": retracted_by, "retracted_at": now, "status_marker": "fresh"}
+
+    def retracted_metric_observations(self) -> list[dict[str, Any]]:
+        """Every unlearned measure and why, so the mistake stays legible."""
+
+        return [dict(row) for row in self.connection.execute(
+            "SELECT r.*, o.company_ref, o.metric_ref, o.label, o.unit, o.document_ref "
+            "FROM coverage_mission_metric_observation_retractions r "
+            "JOIN coverage_mission_metric_observations o "
+            "ON o.observation_id=r.observation_id "
+            "ORDER BY r.retracted_at, r.observation_id"
+        ).fetchall()]
+
     def metric_observations(self, company_ref: str) -> list[dict[str, Any]]:
-        """Every measure this company has been seen judged on, as proposals."""
+        """Every measure this company has been seen judged on, as proposals.
+
+        A retracted observation is not evidence any more, so no read returns
+        it -- the same rule ``document_figures`` follows.
+        """
 
         rows = self.connection.execute(
-            "SELECT metric_ref,label,unit,evidence_phrase,quote_id,document_ref "
-            "FROM coverage_mission_metric_observations WHERE company_ref=? "
-            "ORDER BY created_at, observation_id",
+            "SELECT o.metric_ref,o.label,o.unit,o.evidence_phrase,o.quote_id,o.document_ref "
+            "FROM coverage_mission_metric_observations o "
+            "LEFT JOIN coverage_mission_metric_observation_retractions r "
+            "ON r.observation_id=o.observation_id "
+            "WHERE r.observation_id IS NULL AND o.company_ref=? "
+            "ORDER BY o.created_at, o.observation_id",
             (_text(company_ref, "company_ref"),),
         ).fetchall()
         return [dict(row) for row in rows]

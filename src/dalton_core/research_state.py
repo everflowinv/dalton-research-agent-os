@@ -45,6 +45,7 @@ def company_state(
     *,
     figures: Mapping[str, Any] | None = None,
     metrics: Sequence[Mapping[str, Any]] = (),
+    contested: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """One company's position, as a planner needs to see it.
 
@@ -88,13 +89,24 @@ def company_state(
             "total": _int(held.get("total")),
             "by_grade": dict(held.get("by_grade") or {}),
         },
-        # Measures the market was seen citing for this company. A requirement
-        # needs two documents; the uncorroborated ones are shown because they
-        # are the strongest hint about what to go looking for next.
+        # Measures the market was seen citing for this company, most-cited
+        # first. A requirement needs two documents; the uncorroborated ones are
+        # shown because they are the strongest hint about what to go looking
+        # for next. These are *corroboration counts*, not raw observations --
+        # passing the observations put "documents: 0" beside every measure and
+        # showed whichever ones happened to be recorded first.
         "metrics_watched": [
             {"metric_ref": m.get("metric_ref"), "label": m.get("label"),
              "documents": _int(m.get("citation_count"))}
-            for m in list(metrics)[:MAX_EXAMPLES]
+            for m in sorted(metrics, key=lambda m: -_int(m.get("citation_count")))[:MAX_EXAMPLES]
+        ],
+        # P13y: measures several documents named and could not agree how to
+        # measure. Left out of the requirements, so without this they read as
+        # "nobody mentioned it" -- the opposite of what happened.
+        "metrics_contested": [
+            {"metric_ref": m.get("metric_ref"), "label": m.get("label"),
+             "units": list(m.get("units") or ())}
+            for m in list(contested or ())[:MAX_EXAMPLES]
         ],
     }
 
@@ -145,6 +157,7 @@ def build_research_state(
     industry: Mapping[str, Any] | None = None,
     figures_by_company: Mapping[str, Any] | None = None,
     metrics_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    contested_by_company: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     budget: Mapping[str, Any] | None = None,
     spend: Mapping[str, Any] | None = None,
     as_of: str,
@@ -158,11 +171,13 @@ def build_research_state(
 
     figures_by_company = figures_by_company or {}
     metrics_by_company = metrics_by_company or {}
+    contested_by_company = contested_by_company or {}
     companies = [
         company_state(
             entry,
             figures=figures_by_company.get(entry.get("company_ref")),
             metrics=metrics_by_company.get(entry.get("company_ref"), ()),
+            contested=contested_by_company.get(entry.get("company_ref"), ()),
         )
         for entry in checklist
     ]

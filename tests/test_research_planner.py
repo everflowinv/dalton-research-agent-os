@@ -129,6 +129,29 @@ class StateTests(unittest.TestCase):
         built = state(metrics_by_company={ACN: many})
         self.assertLessEqual(len(built["companies"][0]["metrics_watched"]), 5)
 
+    def test_the_measures_shown_are_the_most_cited_ones(self):
+        # P13y: the list is truncated, so the order decides what the planner
+        # sees at all. The CLI used to pass raw observations, which have no
+        # count -- every measure read "documents: 0" and the five shown were
+        # whichever happened to be recorded first.
+        built = state(metrics_by_company={ACN: [
+            {"metric_ref": f"metric:m{i}", "label": str(i), "citation_count": i}
+            for i in range(8)
+        ]})
+        watched = built["companies"][0]["metrics_watched"]
+        self.assertEqual([m["documents"] for m in watched], [7, 6, 5, 4, 3])
+
+    def test_a_contested_measure_is_shown_rather_than_merely_absent(self):
+        built = state(contested_by_company={ACN: [
+            {"metric_ref": "metric:net-retention-rate", "label": "net retention rate",
+             "units": ["percent", "ratio"]},
+        ]})
+        self.assertEqual(built["companies"][0]["metrics_contested"],
+                         [{"metric_ref": "metric:net-retention-rate",
+                           "label": "net retention rate",
+                           "units": ["percent", "ratio"]}])
+        self.assertEqual(built["companies"][1]["metrics_contested"], [])
+
     def test_the_state_hashes_so_a_plan_can_bind_to_it(self):
         first, second = state(), state()
         self.assertEqual(first["content_hash"], second["content_hash"])
