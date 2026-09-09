@@ -266,7 +266,7 @@ for either, and adding them would queue two uncalibrated models for a smoke run.
 ## 6. Tests
 
 ```
-Ran 2741 tests in 368.480s
+Ran 2843 tests in 321.684s
 
 OK (skipped=1)
 ```
