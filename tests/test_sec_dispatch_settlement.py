@@ -286,6 +286,36 @@ class AttemptVoidTests(unittest.TestCase):
             second, reason="connector outage", voided_by="agent:dalton-core")
         self.assertEqual(self.attempts().get("0001467373-25-000217", 0), 0)
 
+    def test_forgiveness_restores_the_budget_without_rewinding_the_window(self):
+        """P13z: the attempt count was doing two jobs, and voiding undid both.
+
+        The count is the retry budget *and* the salt that widens the filing
+        window by a day so a retry is a different dispatch. Giving back the
+        budget also rewound the window, so the coordinator recomputed a window
+        it had already used, the queue call replayed that settled dispatch
+        instead of writing a new one, and nothing was left pending for the lane
+        to run. Live, the ledger said "queued" while the lane sat idle.
+        """
+
+        from dalton_core.mission_sec_quarters import MissionSecQuartersCoordinator
+
+        stub = type("S", (), {"connection": self.store.connection})()
+        first, second = self.dispatch("a"), self.dispatch("b")
+        accession = "0001467373-25-000217"
+        self.assertEqual(
+            MissionSecQuartersCoordinator._dispatch_windows_used(stub)[accession], 2)
+        self.authority.void_sec_dispatch_attempt(
+            first, reason="outage", voided_by="agent:dalton-core")
+        self.authority.void_sec_dispatch_attempt(
+            second, reason="outage", voided_by="agent:dalton-core")
+        # The budget is forgiven ...
+        self.assertEqual(
+            MissionSecQuartersCoordinator._dispatch_attempts(stub).get(accession, 0), 0)
+        # ... but both windows were still used, so the next dispatch gets a
+        # window neither of them had.
+        self.assertEqual(
+            MissionSecQuartersCoordinator._dispatch_windows_used(stub)[accession], 2)
+
     def test_the_dispatch_itself_is_not_deleted(self):
         dispatch_id = self.dispatch("a")
         self.authority.void_sec_dispatch_attempt(

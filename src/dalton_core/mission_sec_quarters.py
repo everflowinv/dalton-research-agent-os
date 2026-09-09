@@ -230,6 +230,30 @@ class MissionSecQuartersCoordinator:
             return {}
         return {row["expected_accession"]: int(row["n"]) for row in rows if row["expected_accession"]}
 
+    def _dispatch_windows_used(self) -> dict[str, int]:
+        """How many windows each accession has already been queued under.
+
+        P13z: the attempt count was doing two jobs -- the retry budget, and the
+        salt that widens the filing window by a day so a retry is a *different*
+        dispatch. Voiding an attempt is meant to give back only the first, but
+        it gave back both: the coordinator recomputed a window it had already
+        used, the queue call replayed that settled dispatch instead of writing
+        a new one, and nothing was ever left pending for the lane to run. The
+        ledger showed "queued" while the lane sat idle.
+
+        A voided attempt still consumed its window, so this counts every
+        dispatch ever made. The budget forgives; the calendar does not.
+        """
+
+        try:
+            rows = self.connection.execute(
+                "SELECT expected_accession, COUNT(*) AS n "
+                "FROM coverage_mission_sec_dispatches GROUP BY expected_accession"
+            ).fetchall()
+        except Exception:  # noqa: BLE001
+            return {}
+        return {row["expected_accession"]: int(row["n"]) for row in rows if row["expected_accession"]}
+
     # -- the pass ------------------------------------------------------------
 
     def dispatch_once(self) -> dict[str, Any]:
@@ -238,6 +262,7 @@ class MissionSecQuartersCoordinator:
         except Exception as exc:  # noqa: BLE001 - report, never crash the tick
             return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
         attempts = self._dispatch_attempts()
+        windows_used = self._dispatch_windows_used()
         skipped: list[dict[str, Any]] = []
         for entry in companies:
             item = next(
@@ -278,7 +303,10 @@ class MissionSecQuartersCoordinator:
                                     "reason": f"这份 filing 已经试过 {tried} 次"})
                     continue
                 seen_accessions.add(filing["accession"])
-                wanted.append({**filing, "attempt": tried})
+                # The budget is what forgiveness restores; the window salt is
+                # what keeps each queued dispatch a new row.
+                wanted.append({**filing, "attempt": tried,
+                               "window_salt": windows_used.get(filing["accession"], 0)})
                 if len(wanted) >= max(1, REQUIRED_QUARTERS - item["have"]):
                     break
             if not wanted:
@@ -296,7 +324,7 @@ class MissionSecQuartersCoordinator:
             queued: list[dict[str, Any]] = []
             for filing in wanted[:MAX_QUEUED_PER_RUN]:
                 filed = date.fromisoformat(filing["filed"])
-                span = FILING_WINDOW_DAYS + int(filing.get("attempt", 0))
+                span = FILING_WINDOW_DAYS + int(filing.get("window_salt", 0))
                 try:
                     record = self.missions.queue_sec_dispatch(
                         authorization=authorization, form="10-Q",
