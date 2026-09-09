@@ -31,6 +31,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT / "src") not in sys.path:  # pragma: no cover - script bootstrap
     sys.path.insert(0, str(REPO_ROOT / "src"))
 
+from dalton_core.budget_pools import (  # noqa: E402
+    DEFAULT_SHARES,
+    POOL_NAMES,
+    summarise_shares,
+)
 from dalton_core.model_configurations import model_config_names  # noqa: E402
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore  # noqa: E402
 
@@ -70,6 +75,15 @@ def raise_cap(config_path: Path, *, cap_usd: float, apply: bool) -> dict[str, An
             "to": {"policy_version_id": new_ref, "day_cap_micros": cap_micros},
             "service_config": str(config_path),
             "model_configs": [],
+            # C2: the owner cap is one number and the mission spends it in
+            # four pools, so a cap raised without saying what each pool
+            # becomes is a raise nobody can check against a lane that says
+            # skipped:pool_exhausted. This is what the default split makes of
+            # the new cap; a mission that declares budget.pools overrides it.
+            "default_pool_caps_usd": summarise_shares({
+                name: int(round(cap_micros * float(DEFAULT_SHARES[name])))
+                for name in POOL_NAMES
+            }),
         }
         if not apply:
             return plan

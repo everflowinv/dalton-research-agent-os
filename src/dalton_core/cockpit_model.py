@@ -32,6 +32,7 @@ from .model_router import ModelRouter, RoutingPolicyNotFound
 from .openclaw_model_adapter import OpenClawModelAdapter, OpenClawModelAdapterError
 from .scheduler import Scheduler
 from .store import content_hash
+from .budget_pools import POOL_EXHAUSTED_STATUS, mission_pool_scope
 from .thesis_impact_budget import ThesisImpactBudgetError, ThesisImpactBudgetStore
 
 WORKER_REF = "worker:cockpit-model:0.1"
@@ -74,6 +75,43 @@ IDENTITY_VERSION = 2
 
 class CockpitModelError(RuntimeError):
     """The call was refused or failed; the message is safe to show."""
+
+
+class CockpitModelPoolExhausted(CockpitModelError):
+    """C2: this purpose's capacity pool is spent for today.
+
+    A separate class because it is a different kind of "no": the day cap being
+    exhausted is the mission out of money, while a spent pool is this kind of
+    work having had its share -- another pool may still be running, and the
+    lane's honest word for it is ``skipped:pool_exhausted`` rather than a
+    failure.  ``lane_status`` is that word, so a caller reports the pool
+    without having to know how the sentence was spelled.
+    """
+
+    lane_status = POOL_EXHAUSTED_STATUS
+
+    def __init__(self, message: str, rejection: Mapping[str, Any]) -> None:
+        super().__init__(message)
+        self.rejection = dict(rejection)
+        self.pool = self.rejection.get("pool")
+        self.spent = self.rejection.get("spent")
+        self.cap = self.rejection.get("cap")
+
+
+def _pool_refusal_message(rejection: Mapping[str, Any]) -> str:
+    return (
+        f"{POOL_EXHAUSTED_STATUS}: the {rejection.get('pool')} pool is spent "
+        f"for {rejection.get('day')} ({rejection.get('spent')} of "
+        f"{rejection.get('cap')} micros)"
+    )
+
+
+def _raise_failure(message: str, rejection: Mapping[str, Any] | None) -> None:
+    """Raise the refusal in the shape that says which kind of no it was."""
+
+    if rejection is not None:
+        raise CockpitModelPoolExhausted(message, rejection)
+    raise CockpitModelError(message)
 
 def register_purpose(name: str) -> str:
     """Name one more thing a cockpit-shaped model call may be for.
@@ -203,7 +241,13 @@ class CockpitModel:
         scope = {"mission_ref": mission["mission_ref"], "mission_version_ref": mission["id"],
                  "mission_version_hash": mission["content_hash"],
                  "max_daily_paid_calls": int(mission["budget"]["max_daily_paid_calls"]),
-                 "max_daily_cost_micros": int(Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1_000_000)}
+                 "max_daily_cost_micros": int(Decimal(str(mission["budget"]["max_daily_cost_usd"])) * 1_000_000),
+                 # C2: which of the day's four pools this purpose spends from,
+                 # and that mission version's split of the day. The caps
+                 # travel with the admission because the day ledger is a
+                 # separate authority and must not open the Core to learn what
+                 # a mission said.
+                 **mission_pool_scope(mission, purpose=purpose)}
         # P13s: the lease has to outlast the call it covers. The scheduler's
         # default lease is 30 s and its ceiling 60; a cockpit call is allowed
         # up to its own timeout, and a reasoning model on a large prompt takes
@@ -237,6 +281,7 @@ class CockpitModel:
                 with ModelRouter(self.config["model_router_db"]) as router, \
                         ThesisImpactBudgetStore(self.config["budget_db"]) as budget:
                     prompt_bytes = len(prompt.encode("utf-8"))
+                    pool_rejection: dict[str, Any] | None = None
                     result: ResultEnvelope
                     tier = self._chain_tier(router, purpose)
                     if tier is not None:
@@ -257,7 +302,7 @@ class CockpitModel:
                         if completion["status"] == "conflict":
                             raise CockpitModelError("the request completion conflicted; ask again")
                         if failure is not None:
-                            raise CockpitModelError(failure)
+                            _raise_failure(failure, outcome.get("pool_rejection"))
                         formal = scheduler.formal_result(work.id)
                         return self._answer(formal, work, replayed, cost_micros, cost_status)
                     route = router.route(
@@ -285,6 +330,14 @@ class CockpitModel:
                             admission = None
                             result = _failure(work, "BUDGET_REFUSED", route["id"])
                             failure = f"today's research budget refused the call: {exc}"
+                        if admission is not None and admission.get("status") == "rejected":
+                            # A spent pool is returned rather than raised: this
+                            # kind of work has had its share of the day, which
+                            # is a decision and not a fault.
+                            pool_rejection = admission
+                            admission = None
+                            result = _failure(work, "POOL_EXHAUSTED", route["id"])
+                            failure = _pool_refusal_message(pool_rejection)
                         if admission is not None:
                             try:
                                 invocation, result = self._adapter(router).execute(work, route, profile)
@@ -300,7 +353,7 @@ class CockpitModel:
                     if completion["status"] == "conflict":
                         raise CockpitModelError("the request completion conflicted; ask again")
                     if failure is not None:
-                        raise CockpitModelError(failure)
+                        _raise_failure(failure, pool_rejection)
                 formal = scheduler.formal_result(work.id)
             return self._answer(formal, work, replayed, cost_micros, cost_status)
 
@@ -386,9 +439,10 @@ class CockpitModel:
         first_route_ref: str | None = None
         spend: dict[str, tuple[int, str]] = {}
         refusal: list[str] = []
+        pool_rejection: dict[str, Any] | None = None
 
         def admit(route: Mapping[str, Any], profile: Mapping[str, Any], micros: int) -> Any:
-            nonlocal admission, first_route_ref
+            nonlocal admission, first_route_ref, pool_rejection
             if admission is not None:
                 # One attempt, one reservation. The later links of a chain run
                 # under the reservation the first one took out.
@@ -402,6 +456,14 @@ class CockpitModel:
                 )
             except ThesisImpactBudgetError as exc:
                 refusal.append(str(exc))
+                return None
+            if admission.get("status") == "rejected":
+                # The chain halts on the first link: every link in a tier
+                # spends from the same pool, so a spent pool refuses all of
+                # them and trying the next one only writes another refusal.
+                pool_rejection = admission
+                admission = None
+                refusal.append(_pool_refusal_message(pool_rejection))
                 return None
             first_route_ref = route["id"]
             return {"status": "admitted"}
@@ -450,23 +512,32 @@ class CockpitModel:
         route_ref = outcome.get("route_decision_ref") or first_route_ref
         if outcome["status"] == "served":
             return {"result": outcome["value"], "failure": None,
-                    "cost_micros": served_micros, "cost_status": served_status}
+                    "cost_micros": served_micros, "cost_status": served_status,
+                    "pool_rejection": None}
         if outcome["status"] == "halted" and outcome.get("reason") == "budget_refused":
+            if pool_rejection is not None:
+                return {"result": _failure(work, "POOL_EXHAUSTED", route_ref),
+                        "failure": _pool_refusal_message(pool_rejection),
+                        "cost_micros": 0, "cost_status": "failed",
+                        "pool_rejection": pool_rejection}
             reason = refusal[-1] if refusal else "the day cap is exhausted"
             return {"result": _failure(work, "BUDGET_REFUSED", route_ref),
                     "failure": f"today's research budget refused the call: {reason}",
-                    "cost_micros": 0, "cost_status": "failed"}
+                    "cost_micros": 0, "cost_status": "failed",
+                    "pool_rejection": None}
         if not outcome["links"]:
             return {"result": _failure(work, "MODEL_ROUTE_REJECTED", route_ref),
                     "failure": "no model route is available right now",
-                    "cost_micros": 0, "cost_status": "failed"}
+                    "cost_micros": 0, "cost_status": "failed",
+                    "pool_rejection": None}
         skipped = ", ".join(
             f"{link['profile_id']} ({link['skip_reason']})"
             for link in outcome["links"] if not link["served"]
         )
         return {"result": _failure(work, "MODEL_CHAIN_EXHAUSTED", route_ref),
                 "failure": f"every model in the {tier} chain failed: {skipped}",
-                "cost_micros": 0, "cost_status": "failed"}
+                "cost_micros": 0, "cost_status": "failed",
+                "pool_rejection": None}
 
 
 def unwrap_json_object(text: str) -> dict[str, Any] | None:
@@ -492,6 +563,7 @@ def unwrap_json_object(text: str) -> dict[str, Any] | None:
 
 
 __all__ = [
-    "CockpitModel", "CockpitModelError", "WORKER_REF", "build_work",
+    "CockpitModel", "CockpitModelError", "CockpitModelPoolExhausted",
+    "WORKER_REF", "build_work",
     "purposes", "register_purpose", "unwrap_json_object",
 ]
