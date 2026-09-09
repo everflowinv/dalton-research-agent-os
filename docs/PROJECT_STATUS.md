@@ -4,22 +4,22 @@
 
 ## 下一步（按顺序）
 
-1. **gate_passed 是终态，所以四家公司的 Initial Screen 永远不会重写。** ACN / EPAM / IBM / DXC 已过闸，
+1. **Guidepoint lane：先解开 host-bridge 的 operation 命名冲突。** `live_mcp_connector` 按 operation 名解析该走哪个 host tool，且断言 operation 全局唯一；AlphaEngine 与 Guidepoint 都有 `search_library`。改成按 `bridge_ref` 解析、再校验 operation 属于该 bridge，断言改为 (bridge, operation) 唯一。三个调用点，安全相关，单独一轮做。之后是 child CLI、discovery plan、launcher、接线，以及 owner 发新 mission 版本把 `source:guidepoint` 置为 connected。
+2. **gate_passed 是终态，所以四家公司的 Initial Screen 永远不会重写。** ACN / EPAM / IBM / DXC 已过闸，
    selection 第一条规则就把它们跳过（"initial screen already passed"），无论后来多了多少证据、换了多强的模型。
    CTSH 不受此限（它没过闸），它在等 earnings_calls 补齐（1/4，卡在 AlphaEngine 上限），补齐后会用新模型重写。
    **要决定的是**：一份在较弱模型、较薄证据下过了闸的 screen，值不值得在证据变厚之后重出一版？
    重出要花钱、也会给 append-only 的交付物加一个版本；不重出则今天换的模型对这四家永远不起作用。
-2. **ACN 还有 2 份 filing 卡在 3 次上限**（`0001467373-25-000169` / `-25-000222`）。今天撤回的是能归因到三次
+3. **ACN 还有 2 份 filing 卡在 3 次上限**（`0001467373-25-000169` / `-25-000222`）。今天撤回的是能归因到三次
    基础设施故障的 20 次尝试；这两份的失败是 plan 执行层的（带 result envelope），归因不到那三次，所以没有撤回。
    要单独查它们的 result envelope 说了什么，再决定是不是也该豁免。
-3. **模型目录仍未对齐（与大脑无关，但会误导）。** `catalog_in_sync: false`：Dalton 有 5 个 broker 已不提供的静态
+4. **模型目录仍未对齐（与大脑无关，但会误导）。** `catalog_in_sync: false`：Dalton 有 5 个 broker 已不提供的静态
    profile（`gemini-3-7-flash` / `gemini-flash-latest` / `glm-5-2` / `gpt-5-5` / `openrouter-ox-alpha`），
    broker 有 4 个 Dalton 没有静态 profile 的。P13l 让部署会补齐"缺的"，但不会清理"多的"——删旧 profile 会改动
    历史版本链，值得单独做。
-4. **把已核验的数字接进 Ledger。** `CandidateStagingStore.stage` 明确拒绝 cited-original 的定量候选
+5. **把已核验的数字接进 Ledger。** `CandidateStagingStore.stage` 明确拒绝 cited-original 的定量候选
    （"a cited original is not a numeric authority"）。这是 ADR-0003 一脉的有意规则，要改得走 ADR + 重签策略。
    在那之前数字停在 `coverage_mission_document_figures`，驾驶舱直接读这张表。
-5. **接 Guidepoint。** 模板在，运行 lane 与两条 owner 签名的治理记录都还没有。
 6. **修 discovery 的公司归属（检索侧）。** 自由文本检索把别家公司的电话会归到了 EPAM 名下；抽取侧现在**三条
    pass 都堵住了**（P13c 数字、P13i 定性、P13y 指标发现），但检索仍会把别家公司的文档放进队列，白花获取预算。
    owner 的判断是不该按 `company` 过滤——行业报告本来就没有公司标签；所以这一条是"怎么让检索更准"的开放问题，
@@ -27,6 +27,33 @@
 7. **contested 指标要能在驾驶舱上看见。** P13y 之后，单位打架的指标不再成立需求，但也不再报错——
    `metric_discovery.contested()` 能说出是谁在哪个单位上分歧（live 5 条，都是 percent/ratio），页面还没读它。
 8. **AlphaEngine 滚动 24h 用量贴着上限**（131/130），是 CTSH 缺电话会的直接约束。
+
+## 2026-09-09（Guidepoint 第一段）：身份与治理已签，lane 卡在一个命名冲突上
+
+**已完成并部署**：Guidepoint 的 identity + 两条 owner 已批准的治理记录。
+
+- **两条记录而不是一条**：`search_library` 读索引、`get_transcript` 读文档，是两种权限；schema hash 只绑定一个
+  operation，一条记录复用到另一个就等于悄悄放宽了批准范围。AlphaEngine（P9d-1）和 SEC（P10e）都是这么拆的，
+  这里跟随而不是另发明一种形状。source hash 共用——同一个 Guidepoint 就是同一个来源。
+- **结构上无凭据**：host-owned MCP transport，模板声明 `credential_material: forbidden`，permissions 里只有
+  credential *slot* 而没有任何 material；自身无网络、无 Core 访问，唯一的写是 raw sink（字节先哈希再被读）。
+- 仓库出 proposed、owner 就地 approve；测试断言**出厂记录永远是 proposed**（出厂即 approved 等于替 owner 签字），
+  并断言其哈希仍与打包模板一致（漂了的记录会在机器上 load 时被拒，那是最糟糕的发现时机）。
+
+**下一段卡在哪（真问题，不是没时间做）**：`live_mcp_connector` 有一张 host-bridge 注册表，
+**按 operation 名字解析该走哪个 host tool**，并且有一条断言要求 operation 在所有 bridge 间全局唯一。
+AlphaEngine 有 `search_library`，Guidepoint 也有 `search_library`——直接加进去会踩到那条断言。
+
+那条断言是**有用的**（它防的正是"一个调用被路由到另一个 provider 的工具"），所以不能削弱它。
+好消息是数据里已经有明确的区分键：runner wire 里带 `bridge_ref`，schema ref 也是按模板命名空间的
+（`schema:connector-inventory:guidepoint:search_library:input:0.1`）。
+**做法**：按 `bridge_ref` 解析、再校验 operation 属于该 bridge；断言从"operation 唯一"改成
+"(bridge, operation) 唯一"。三个调用点 + 若干测试（现有测试断言 `search_library` → AlphaEngine）。
+这是一条安全相关的路由路径，值得单独一轮仔细做，不适合塞在别的改动尾巴上。
+
+之后才是 child CLI（`guidepoint_search_cli` / 取纪要）、discovery plan、launcher（`_SearchLauncherBase`
+子类，约十几行）与 writer/installer 接线。另外 mission 的 `source_plan` 里 `source:guidepoint` 还是
+`not_connected`，要接通需要 owner 发一版新的 mission。
 
 ## 2026-09-09（收尾）：交付物由谁来写
 
