@@ -615,6 +615,27 @@ class SecCompanyFactsLane:
             identity["template"] = template_tag
         return identity
 
+    @staticmethod
+    def question_text(identity: Mapping[str, Any]) -> str:
+        """The backlog question this run asks, derived from its own identity.
+
+        P13z: the question has to carry everything the identity carries, or the
+        two disagree about what makes a run the same run.  The identity gained
+        the contract version and the text did not, so a run under the new
+        contract minted a fresh selection key against a question the old
+        contract's run had already taken -- "only an open question can be
+        selected", on every company, with nothing else changed.
+
+        Deriving one from the other makes them agree by construction, which is
+        the only way this stays true the next time the identity grows.
+        """
+
+        window = f"{identity.get('form', '10-Q')} filed " \
+                 f"{identity['filed_from']}..{identity['filed_to']}"
+        if "template" in identity:
+            window += f", contract {identity['template']}"
+        return f"{QUESTION} ({window})"
+
     def _register_question(
         self, issuer: Issuer, *, filed_from: str, filed_to: str, run_key: str,
         form: str = "10-Q",
@@ -630,7 +651,8 @@ class SecCompanyFactsLane:
         # with "only an open question can be selected".  Each run therefore
         # asks its own window-specific question; exact same-parameter reruns
         # still converge through the idempotent request keys below.
-        question_text = f"{QUESTION} ({form} filed {filed_from}..{filed_to})"
+        #
+        question_text = self.question_text(identity)
         snapshot = {
             "schema_version": "0.1",
             "snapshot_id": f"perception:{issuer.company_ref}:{filed_to}:{suffix}",

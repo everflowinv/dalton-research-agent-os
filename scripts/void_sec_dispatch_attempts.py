@@ -39,6 +39,8 @@ from dalton_core.coverage_mission import (  # noqa: E402
 )
 from dalton_core.store import DaltonStore  # noqa: E402
 
+PRECONDITION_PREFIX = "lane precondition failed:"
+
 
 def run_error(state_dir: Path | None, ticket_ref: str | None) -> str | None:
     """What the lane run itself said went wrong, from its summary on disk.
@@ -56,16 +58,30 @@ def run_error(state_dir: Path | None, ticket_ref: str | None) -> str | None:
 
     if state_dir is None or not isinstance(ticket_ref, str) or ":" not in ticket_ref:
         return None
-    path = state_dir / "sec-lane-runs" / ticket_ref.split(":", 1)[1] / "summary.json"
+    directory = state_dir / "sec-lane-runs" / ticket_ref.split(":", 1)[1]
     try:
-        summary = json.loads(path.read_text(encoding="utf-8"))
+        summary = json.loads((directory / "summary.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        summary = None
+    if isinstance(summary, dict):
+        if summary.get("ok") is True:
+            return None
+        for issuer in summary.get("issuers") or ():
+            if isinstance(issuer, dict) and isinstance(issuer.get("error"), str):
+                return issuer["error"].strip()
         return None
-    if not isinstance(summary, dict) or summary.get("ok") is True:
+    # A run that failed its preconditions never wrote a summary at all -- it
+    # refused before opening anything -- so its only trace is the log line.
+    # Those are exactly the infrastructure failures worth telling apart from a
+    # filing that genuinely cannot be fetched, and reading nothing would leave
+    # them unattributable and therefore unforgivable.
+    try:
+        log = (directory / "run.log").read_text(encoding="utf-8")
+    except OSError:
         return None
-    for issuer in summary.get("issuers") or ():
-        if isinstance(issuer, dict) and isinstance(issuer.get("error"), str):
-            return issuer["error"].strip()
+    for line in log.splitlines():
+        if line.startswith(PRECONDITION_PREFIX):
+            return line.strip()
     return None
 
 

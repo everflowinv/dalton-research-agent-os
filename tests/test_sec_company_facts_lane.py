@@ -448,6 +448,34 @@ class LaneTests(unittest.TestCase):
             "run_key": "run-1", **WINDOW,
         })
 
+    def test_the_question_carries_everything_the_identity_carries(self) -> None:
+        """P13z: the identity grew and the question text did not.
+
+        The identity decides the selection key; the text decides which backlog
+        question that key selects. When only one of them gained the contract
+        version, a run under the new contract minted a fresh key against a
+        question the old contract's run had already taken -- "only an open
+        question can be selected", on every company at once.
+        """
+
+        import dalton_core.sec_company_facts_lane as lane_module
+
+        def text(tag, **kw):
+            with patch.object(lane_module, "sec_template_registry_tag",
+                              return_value=tag):
+                identity = SecCompanyFactsLane.question_identity(
+                    ISSUER, run_key="run-1", **{**WINDOW, **kw})
+            return SecCompanyFactsLane.question_text(identity)
+
+        self.assertNotEqual(text("v2"), text("v3"))
+        self.assertIn("contract v3", text("v3"))
+        # v1 is spelled by omission on both sides, so historical question text
+        # is unchanged.
+        self.assertNotIn("contract", text("v1"))
+        self.assertIn("10-Q filed 2025-08-20..2026-08-20", text("v1"))
+        # Everything else the identity distinguishes is still distinguished.
+        self.assertNotEqual(text("v3"), text("v3", form="10-K"))
+
     def test_the_annual_form_still_separates_itself(self) -> None:
         # P9b's rule is unchanged: 10-K is its own identity, 10-Q is bare.
         quarterly = SecCompanyFactsLane.question_identity(
