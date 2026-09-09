@@ -129,6 +129,23 @@ owner 要接的：sales note、员工调研、Twitter、雪球、cn-hk-findata�
 
 不做或攒到最后裁决：roic 两条批准（撤回或换 transport）、Firecrawl 作 `web-fetch` 回退 transport（额度已用尽）、Reddit（上游已死，改指或撤回）、Bloomberg CSV（再分发裁决）。
 
+### vision 回顾后的补充（2026-09-09 下午，依据 [全部 vision 讨论的复盘](vision-review-against-plan-v1.0-2026-09-09.md)）
+
+owner 要求回顾全部 vision 讨论，补遗漏、修偏差。22 项承诺逐项核对后，补进计划的有：
+
+| 编号 | 事项 | 处置 |
+| --- | --- | --- |
+| **D1 / P14e** | 专项研究不新造 dispatcher：`ResearchTask` = 以 planner inquiry 为 question、以已准入 `ProbeTemplate` 为动作集、带 rounds / cost / seconds 三重预算的 `BoundedPlannerLoop`；解禁 = `adhoc_research_enabled` 置 True + 为 web-search / AlphaEngine / SEC 各发布一个 ProbeTemplate | **现在派**（Wave 1.5，独立 agent） |
+| **C1** | `CatalystCalendarVersion` 事件日历：earnings / guidance / investor_day / filing_due；yfinance 与 SEC 8-K Item 2.02 互证，只有 confirmed 驱动 preview；日期变化出新版带 `driver_event` | Wave 1A 合并后派（Wave 1.5） |
+| **C3** | Constitution `method` 三字段接消费者：DebateMap 候选先过 `question_admission`；dossier 分节由 `causal_chain` 派生；发布前结构检查读 `output_rubric` | 写进 Wave 2 dossier / DebateMap 的规格 |
+| **D4 + C4 / Q2** | 周报 rubric 直接对 live `weekly_brief_issue_versions` 打分（搁置的是投递不是评估）；`ResearchCycleReflection` 每周一条规划质量指标，不写 Ledger 不改 policy | Wave 1D 合并后派（Q2） |
+| **C2** | 容量配额池：`LaneSpec` 增 `budget_pool` / `pool_share`，mission budget 增四池，超池 = `skipped:pool_exhausted` | Wave 2，随 P14e 之后 |
+| **D2** | 认知层产出复用 independence predicate：rubric 评分与 producer 不同 `model_family`；dossier / DebateMap 每版发布前跑同约束校验 | Wave 2 规格 |
+| **D3** | P14a 前先裁决 `perception.py` / `agenda_coordinator.py` 去留（迁移为 ResearchEvent 来源或显式退役），不建第二套事件平面 | Wave 3 前置 |
+| **D5** | gate reopen 判据 = 重跑出口门结构自评，任一项从「缺」变「有」即提案；`gate_reopen` 仍是人类检查点 | Wave 3 P14d |
+
+明确不做（连续多版冻结或主体已退役）：Skill 自主生成闭环、多 runtime、Interrupt / park / resume、embedding-first 检索、万华 Agenda shadow 指标。
+
 ### Wave 2（Wave 1 合并后开）
 
 P11b consensus 双路（研报抽取走 `document_numeric_claim` 逐字核对，新 grade `broker-research-report`；yfinance 走 A 建好的 connector）、P11d `MarketEvent`、P12a `CompanyDossierVersion`、P12c `DebateMap`、P12f guidance 档案、S 线 Guidepoint lane。cockpit 集成从 Wave 2 起给一个专门的 agent。
