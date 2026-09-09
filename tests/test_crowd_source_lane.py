@@ -55,33 +55,37 @@ def mission(*, may_write=None, connected=("source:xueqiu", "source:x",
     }
 
 
-class FakeLauncher:
-    """A launcher that records what it was asked for and answers on demand."""
+class FakeExecution:
+    """The coordinator's whole seam: a source ref and one ``execute``.
+
+    Stands in for ``CrowdSourceExecution``, which is a launcher for the ticket
+    and S1's host-tool runner for the process and the authority chain. What the
+    coordinator needs from either is the same two things.
+    """
 
     def __init__(self, source_ref: str) -> None:
         self.SOURCE_REF = source_ref
         self.started: list[dict[str, Any]] = []
-        self._tickets: dict[str, dict[str, Any]] = {}
         self.reject: str | None = None
+        self.raises: Exception | None = None
+        self.answer: Mapping[str, Any] | None = None
 
-    def start(self, *, operation: str, actor_ref: str, **params: Any) -> dict[str, Any]:
+    def execute(self, *, operation: str, parameters: Mapping[str, Any],
+                actor_ref: str, company_ref: str) -> dict[str, Any]:
+        self.started.append({"operation": operation, "company_ref": company_ref,
+                             **dict(parameters)})
+        if self.raises is not None:
+            raise self.raises
         if self.reject:
-            raise LaneChildRejected(self.reject)
-        ticket_ref = f"ticket-{len(self.started)}"
-        self.started.append({"operation": operation, **params})
-        self._tickets[ticket_ref] = {"status": "running", "summary": None}
-        return {"id": ticket_ref}
-
-    def finish(self, ticket_ref: str, summary: Mapping[str, Any] | None,
-               status: str = "succeeded") -> None:
-        self._tickets[ticket_ref] = {"status": status, "summary": summary}
-
-    def status(self, ticket_ref: str) -> dict[str, Any]:
-        return self._tickets[ticket_ref]
+            return {"status": "failed", "failure_reason": self.reject}
+        if self.answer is not None:
+            return dict(self.answer)
+        return summary_with(2)
 
 
 def summary_with(posts: int, *, first_id: int = 1) -> dict[str, Any]:
     return {
+        "status": "succeeded",
         "governance_ref": "connector-governance:xueqiu-search-posts:v1",
         "governance_hash": "c" * 64,
         "artifact": {"content_hash": "d" * 64, "size_bytes": 10,
@@ -157,6 +161,18 @@ class LauncherTests(unittest.TestCase):
             self.xueqiu().start(operation="search_posts", query="x",
                                 since="last tuesday",
                                 actor_ref="automation:coverage-mission")
+
+    def test_validating_a_validated_job_twice_gives_the_same_answer(self):
+        """The runner asks for the argv, so `_validate` runs over its own output.
+
+        An absent `since` comes back from the first pass as the empty string,
+        and treating that as a malformed date made the second pass refuse a job
+        the first pass had just accepted.
+        """
+
+        launcher = self.xueqiu()
+        once = launcher._validate("search_posts", {"query": "x"})
+        self.assertEqual(launcher._validate("search_posts", once), once)
 
     def test_the_argv_a_child_receives_is_one_a_child_can_parse(self):
         launcher = self.xueqiu()
@@ -333,9 +349,9 @@ class CoordinatorTests(unittest.TestCase):
         self.root = Path(self._temp.name)
         self.ledger = CrowdObservationLedger(self.root / "ledger.jsonl")
         self.launchers = {
-            "xueqiu": FakeLauncher("source:xueqiu"),
-            "x": FakeLauncher("source:x"),
-            "employee-reviews": FakeLauncher("source:blind"),
+            "xueqiu": FakeExecution("source:xueqiu"),
+            "x": FakeExecution("source:x"),
+            "employee-reviews": FakeExecution("source:blind"),
         }
         self.source_map = load_crowd_source_map(MAP_PATH)
 
@@ -362,65 +378,64 @@ class CoordinatorTests(unittest.TestCase):
                 if item["status"] == "held"}
         self.assertEqual(held, {"x", "employee-reviews"})
 
-    def test_one_child_per_source_per_tick(self):
+    def test_one_read_per_source_per_tick_and_it_is_recorded_before_returning(self):
         coordinator = self.coordinator(mission())
         result = coordinator.dispatch_once()
-        self.assertEqual(result["status"], "launched")
-        self.assertEqual(
-            sorted(item["source"] for item in result["sources"]
-                   if item["status"] == "launched"),
-            ["employee-reviews", "x", "xueqiu"])
-        for launcher in self.launchers.values():
-            self.assertEqual(len(launcher.started), 1)
-
-    def test_a_source_with_a_child_in_flight_is_busy_not_doubled(self):
-        coordinator = self.coordinator(mission())
-        coordinator.dispatch_once()
-        again = coordinator.dispatch_once()
-        self.assertTrue(all(item["status"] == "busy" for item in again["sources"]))
-        self.assertEqual(len(self.launchers["xueqiu"].started), 1)
-
-    def test_a_finished_child_is_recorded_with_the_crowd_grade(self):
-        coordinator = self.coordinator(mission())
-        coordinator.dispatch_once()
-        self.launchers["xueqiu"].finish("ticket-0", summary_with(2))
-        settled = coordinator.dispatch_once()["settled"]
-        recorded = [item for item in settled if item["source"] == "xueqiu"]
-        self.assertEqual(recorded[0]["outcome"], "succeeded")
-        self.assertEqual(recorded[0]["recorded"], 2)
+        self.assertEqual(result["status"], "recorded")
+        recorded = [item for item in result["sources"]
+                    if item["status"] == "recorded"]
+        self.assertEqual(sorted(item["source"] for item in recorded),
+                         ["employee-reviews", "x", "xueqiu"])
+        for execution in self.launchers.values():
+            self.assertEqual(len(execution.started), 1)
         self.assertEqual(recorded[0]["grade"], CROWD_GRADE)
+        self.assertEqual(
+            [item["recorded"] for item in recorded if item["source"] == "xueqiu"],
+            [2])
+
+    def test_the_next_tick_moves_on_to_the_next_company(self):
+        coordinator = self.coordinator(mission())
+        coordinator.dispatch_once()
+        coordinator.dispatch_once()
+        asked = [item["company_ref"] for item in self.launchers["xueqiu"].started]
+        self.assertEqual(len(asked), 2)
+        self.assertNotEqual(asked[0], asked[1])
 
     def test_the_same_posts_on_a_later_tick_are_duplicates(self):
         coordinator = self.coordinator(mission())
         coordinator.dispatch_once()
-        self.launchers["xueqiu"].finish("ticket-0", summary_with(2))
-        coordinator.dispatch_once()
-        self.launchers["xueqiu"].finish("ticket-1", summary_with(2))
-        settled = coordinator.dispatch_once()["settled"]
-        again = [item for item in settled if item["source"] == "xueqiu"][0]
+        result = coordinator.dispatch_once()
+        again = [item for item in result["sources"]
+                 if item["source"] == "xueqiu"][0]
         self.assertEqual(again["recorded"], 0)
         self.assertEqual(again["duplicates"], 2)
 
-    def test_a_failed_child_stops_that_company_being_retried_forever(self):
+    def test_a_failed_read_stops_that_company_being_retried_at_once(self):
         coordinator = self.coordinator(mission())
+        self.launchers["xueqiu"].reject = "XueqiuRunError: nothing there"
+        result = coordinator.dispatch_once()
+        failed = [item for item in result["sources"]
+                  if item["source"] == "xueqiu"][0]
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn("nothing there", failed["reason"])
+        first_company = self.launchers["xueqiu"].started[0]["company_ref"]
         coordinator.dispatch_once()
-        first_company = self.launchers["xueqiu"].started[0]
-        self.launchers["xueqiu"].finish(
-            "ticket-0", {"failure_reason": "XueqiuRunError: nothing there"},
-            status="failed")
-        settled = coordinator.dispatch_once()["settled"]
-        failed = [item for item in settled if item["source"] == "xueqiu"][0]
-        self.assertEqual(failed["outcome"], "failed")
-        self.assertIn("nothing there", failed["failure_reason"])
-        # The next tick moves on to a different company rather than retrying.
-        self.assertNotEqual(self.launchers["xueqiu"].started[-1], first_company)
+        self.assertNotEqual(
+            self.launchers["xueqiu"].started[-1]["company_ref"], first_company)
 
-    def test_a_rejected_launch_does_not_break_the_tick(self):
-        self.launchers["x"].reject = "the record is not approved"
+    def test_a_runner_that_raises_does_not_break_the_tick(self):
+        self.launchers["x"].raises = RuntimeError("the host tool is gone")
         result = self.coordinator(mission()).dispatch_once()
         statuses = {item["source"]: item["status"] for item in result["sources"]}
-        self.assertEqual(statuses["x"], "rejected")
-        self.assertEqual(statuses["xueqiu"], "launched")
+        self.assertEqual(statuses["x"], "failed")
+        self.assertEqual(statuses["xueqiu"], "recorded")
+
+    def test_a_run_that_succeeds_without_an_observation_is_a_failure(self):
+        self.launchers["xueqiu"].answer = {"status": "succeeded"}
+        result = self.coordinator(mission()).dispatch_once()
+        failed = [item for item in result["sources"]
+                  if item["source"] == "xueqiu"][0]
+        self.assertEqual(failed["status"], "failed")
 
     def test_a_held_company_is_retried_after_the_cool_off(self):
         """A failure is a pause, not a verdict.
@@ -487,11 +502,22 @@ class LaneRegistrationTests(unittest.TestCase):
         lane_registry.load_lanes()
         self.registry = lane_registry
 
-    def test_the_lane_is_registered_last_in_the_tick(self):
+    def test_the_lane_runs_after_every_evidence_lane(self):
+        """The crowd is the least of the evidence, so it goes last of those.
+
+        Not last of everything: P14e's research-task lane sits below it and is
+        not an evidence source at all. What matters is that a tick which runs
+        out of time runs out of it here, rather than before a filing.
+        """
+
         from dalton_core.mission_crowd_source_lane import LANE
 
         self.assertEqual(LANE.operation, "dispatch_mission_crowd_sources")
-        self.assertEqual(self.registry.tick_lanes()[-1].operation, LANE.operation)
+        evidence_lanes = [
+            spec.operation for spec in self.registry.tick_lanes()
+            if spec.operation != "dispatch_research_task"
+        ]
+        self.assertEqual(evidence_lanes[-1], LANE.operation)
 
     def test_an_empty_state_directory_leaves_the_lane_off(self):
         from dalton_core.mission_crowd_source_lane import argv_fragment
@@ -539,3 +565,141 @@ class LaneRegistrationTests(unittest.TestCase):
 
         server = type("Server", (), {"lane_launcher": lambda self, key: None})()
         self.assertEqual(dispatch(server, {})["status"], "unconfigured")
+
+
+class ExecutionTests(unittest.TestCase):
+    """The real join: a launcher for the ticket, a runner for the chain.
+
+    The runner is faked, because what is under test here is the wiring -- the
+    argv the runner would execute, the ticket opened before it and settled
+    after it, and the receipt turned into the shape the ledger reads. S1's
+    runner has its own tests for the authority chain.
+    """
+
+    def setUp(self) -> None:
+        self._temp = TemporaryDirectory()
+        self.addCleanup(self._temp.cleanup)
+        self.root = Path(self._temp.name)
+        self.state = self.root / "state"
+        self.state.mkdir()
+        self.commands: list[list[str]] = []
+
+    def governance(self, kind: str, *, status: str = "approved") -> Path:
+        from dalton_core.connector_governance import build_governance_record
+
+        record = build_governance_record(kind, approved_by="human:tester",
+                                         status=status)
+        path = self.root / f"{kind}.json"
+        path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+        return path
+
+    def execution(self, *, status: str = "approved", fail: bool = False) -> Any:
+        from dalton_core.crowd_source_launcher import EmployeeReviewsLauncher
+        from dalton_core.mission_crowd_source_lane import CrowdSourceExecution
+
+        launcher = EmployeeReviewsLauncher(
+            state_dir=self.state,
+            governance_paths={"blind_reviews": self.governance(
+                "employee-reviews-blind", status=status)},
+        )
+        self.addCleanup(launcher.close)
+        outer = self
+
+        class FakeRunner:
+            def run(self, *, parameters, work_ref, output_dir):
+                outer.commands.append(launcher.child_command(
+                    operation="blind_reviews", output_dir=output_dir,
+                    context={}, **parameters))
+                if fail:
+                    raise RuntimeError("the host tool is gone")
+                return type("Receipt", (), {
+                    "observation": {"reviews": [
+                        {"review_id": "r0", "created_at": "2026-09-01T00:00:00Z",
+                         "body_locked": False}]},
+                    "raw_response_hash": "e" * 64,
+                    "connector_invocation_ref": "connector-invocation:synthetic",
+                    "source_envelope_ref": "source-envelope:synthetic",
+                })()
+
+        return CrowdSourceExecution(
+            source="employee-reviews", launcher=launcher,
+            runner_factory=lambda **_kwargs: FakeRunner(),
+        )
+
+    def run_one(self, execution: Any) -> dict[str, Any]:
+        return execution.execute(
+            operation="blind_reviews",
+            parameters={"employer_slug": "SyntheticCo", "pages": 2},
+            actor_ref="automation:coverage-mission",
+            company_ref="company:x")
+
+    def test_the_child_is_told_to_print_the_wire_on_stdout(self):
+        self.run_one(self.execution())
+        self.assertEqual(self.commands[0][-1], "--emit-wire")
+        self.assertIn("--employer-slug", self.commands[0])
+
+    def test_a_run_opens_a_ticket_and_settles_it(self):
+        outcome = self.run_one(self.execution())
+        self.assertEqual(outcome["status"], "succeeded")
+        ticket = json.loads(
+            (self.state / "employee-reviews-runs"
+             / outcome["ticket_ref"].split(":")[-1] / "ticket.json"
+             ).read_text(encoding="utf-8"))
+        self.assertEqual(ticket["status"], "succeeded")
+        self.assertEqual(ticket["company_ref"], "company:x")
+
+    def test_the_receipt_becomes_the_shape_the_ledger_reads(self):
+        outcome = self.run_one(self.execution())
+        self.assertEqual(outcome["artifact"]["content_hash"], "e" * 64)
+        entries = observation_entries(
+            source_ref="source:blind", company_ref="company:x",
+            operation="blind_reviews", summary=outcome,
+            observed_at="2026-09-09T00:00:00.000000+00:00")
+        self.assertEqual(entries[0]["artifact_hash"], "e" * 64)
+        self.assertEqual(entries[0]["grade"], CROWD_GRADE)
+
+    def test_an_unapproved_record_never_reaches_the_runner(self):
+        outcome = self.run_one(self.execution(status="proposed"))
+        self.assertEqual(outcome["status"], "failed")
+        self.assertIn("not approved", outcome["failure_reason"])
+        self.assertEqual(self.commands, [])
+
+    def test_a_runner_that_raises_settles_the_ticket_failed(self):
+        outcome = self.run_one(self.execution(fail=True))
+        self.assertEqual(outcome["status"], "failed")
+        ticket = json.loads(
+            (self.state / "employee-reviews-runs"
+             / outcome["ticket_ref"].split(":")[-1] / "ticket.json"
+             ).read_text(encoding="utf-8"))
+        self.assertEqual(ticket["status"], "failed")
+
+    def test_the_runner_is_bound_to_the_slug_the_quota_table_uses(self):
+        """The declared fifty a day is only real if these two strings match."""
+
+        from dalton_core.connector_quota_policy import governed_daily_quota
+        from dalton_core.mission_crowd_source_lane import SOURCE_IDENTITY
+
+        for source, operations in (
+            ("xueqiu", ("search_posts", "get_post", "hot_rank")),
+            ("x", ("user_timeline", "search", "thread")),
+            ("employee-reviews", ("blind_reviews",)),
+        ):
+            template_key = SOURCE_IDENTITY[source][0]
+            for operation in operations:
+                quota = governed_daily_quota(template_key, operation)
+                self.assertEqual(quota["daily_unit_limit"], 50)
+
+    def test_every_source_has_an_identity_the_runner_can_bind(self):
+        from dalton_core.mission_crowd_source_lane import source_identity
+
+        for source, operations in (
+            ("xueqiu", ("search_posts", "get_post", "hot_rank")),
+            ("x", ("user_timeline", "search", "thread")),
+            ("employee-reviews", ("blind_reviews",)),
+        ):
+            for operation in operations:
+                identity = source_identity(source, operation)
+                self.assertEqual(identity["operation"], operation)
+                for field in ("capability_id", "source_hash", "schema_hash",
+                              "adapter_ref"):
+                    self.assertTrue(identity[field], f"{source}/{operation}")

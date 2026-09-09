@@ -1,11 +1,13 @@
 # S 线 S3：大众源三条连接器（雪球、X、员工评价）v1.0
 
 日期：2026-09-09
-分支：`s3-crowd-sources`（基于 main `88c040b`，已 merge main `3d365e7`），未 push
+分支：`s3-crowd-sources`（基于 main `88c040b`，已 merge main `d07ed8d`），未 push
 执行：Opus 5 subagent，worktree `~/Projects/dalton-s3-crowd-sources-worktree`
 验收：见第 9 节（全量测试原文）
 修订：v1.0 交付后按 code review 修了 B1 / B2 / S1 / S2 / S4 与四条 nit，`CROWD_IMPORTANCE`
-按合并进 main 的 claim index 改口径，lane order 120 → 140（120 归 S1；main 上现有的最大 order 是 110）。见第 11 节。
+按合并进 main 的 claim index 改口径，lane order 120 → 140（120 归 S1）。
+**S1 的 `host_tool_runner` 合进 main 之后，三个 child 已经接上去了**——配额从「声明」变成「真的在数」，
+lane 从「起了再等下一 tick 结算」变成「一次 tick 内跑完并落账」。见第 11、12 节。
 
 ---
 
@@ -143,46 +145,48 @@
 
 ## 7. 集成时要接的线
 
-### 7.1 配额今天只是声明，不是执行
+### 7.1 配额现在是真的在数了
 
-**说清楚：我的 child 绕过 `ConnectorStore` 的 rate policy。** 七条日配额进了
-`connector_quota_policy._DAILY_QUOTAS`，是治理输入；但 child 是自己 `subprocess` 调 host tool 的，
-中间没有 reservation、没有 physical attempt、没有 settlement，所以**今天没有任何东西在数这 50 次**。
-真正的边界目前是三条更粗的东西：launcher 一次只跑一个 child、coordinator 每源每 tick 只起一个、
-以及 host tool 自己的限流。这不是「差不多等价」，是「还没接」。
+v1.0 时这里写的是「配额只是声明」：child 自己 `subprocess` 调 host tool，中间没有 reservation、
+没有 physical attempt、没有 settlement，所以没有任何东西在数那 50 次。
 
-接上它的是 S1 的 `host_tool_runner`（分支 `s1-human-feeds`，`eeeb4b1`，我读了但**没有合并**）。
-它 `governed_daily_quota(connector_slug, operation)` + `apply_governed_quota_to_limits(...)`
-注册 rate policy，`connector_slug` 默认取 `template_key`——我的三个 template key
-（`xueqiu-posts` / `x-xreach-crowd` / `employee-reviews`）与我的配额键**逐字相同**，所以接上去就生效，
-不用改配额表。
+**S1 的 `host_tool_runner` 合进 main 之后，这条已经修好了。** runner 用
+`governed_daily_quota(connector_slug, operation)` + `apply_governed_quota_to_limits(...)`
+注册 rate policy，而 `connector_slug` 取的是 `template_key`——我的三个 template key
+（`xueqiu-posts` / `x-xreach-crowd` / `employee-reviews`）与我的配额键**逐字相同**，
+所以配额表一个字没改就生效了。有一条测试专门钉这两串字符串必须相等，因为它们一旦分叉，
+「声明了 50」和「执行 50」就会静默地变成两件事。
 
-### 7.2 接到 S1 的 `HostToolRunner` 要做什么
+### 7.2 接上去之后长什么样（已完成）
 
-读过 `src/dalton_core/host_tool_runner.py` 之后，我这边要动的是这些：
-
-1. **stdout 已经对上了。** runner 把「child 只在 stdout 打一份闭合 wire」当契约，我的 `--emit-wire`
-   就是这个。**一处要注意**：拒绝时我现在也打一份 `{"status":"failed","failure_reason":...}`
-   （原来什么都不打，runner 只能拿到退出码）。它和 wire 靠字段区分（wire 有 `source_record_refs`），
-   runner 会在 schema 校验处拒掉它，而字节已经安全落 spool，退出码非零也已经进 `note`。
-2. **command builder 形状**：runner 要 `command(parameters, output_dir) -> argv`。
-   我的 `CrowdSourceLauncher._command(ticket_dir=..., operation=..., params=...)` 只差一个闭包，
-   每条源一行。
-3. **凭证模型不一样，要 owner 知道。** 我的 child 拿 `CredentialGrantEnvelope`（只有 ref 与到期，
-   看不见值）；runner 是**由 writer 解析槽名、把值作为环境变量注进 child**（child 拿不到
-   `os.environ`，只拿到 profile 声明的那几个槽）。两者不冲突：我的 grant 检查是本地那道便宜的闸，
-   runner 的槽解析是让工具真的能跑。我的 child 用 `subprocess.run` 不改 env，所以注进来的槽
-   会继续传给 host tool；`agent-reach` / `xreach` 今天读的是自己的配置文件而不是环境变量，
-   两条路都通。
-4. **重复的工作是幂等的，不用拆。** runner 自己也做批准与哈希校验、也 spool、也校 schema；
-   我的 child 同样做。spool 是内容寻址的（同 hash 命中已存在对象），所以不会写两份；
-   批准检查便宜；child 里的那份要留着，因为 child 是可以被人手工跑的。
-5. **identity 直接可用**：`xueqiu_identity(op)` / `xreach_identity(op)` / `employee_reviews_identity()`
-   返回的就是 runner 要的 `identity`（`capability_id` / `source_hash` / `schema_hash` /
-   `adapter_ref` / `operation`）。
-6. **coordinator 一行不用改。** 接缝叫 `runners`（构造参数），只要求每个条目有
-   `SOURCE_REF` / `start(operation=..., actor_ref=..., **params)` / `status(ticket_ref)` 三样。
-   换掉的是 `CrowdSourceLaunchers` 里装的东西。
+- **`CrowdSourceExecution`**（`mission_crowd_source_lane.py`）：一个 launcher 管 ticket，
+  一个 `HostToolRunner` 管进程与权威链。这是 S1 的拆法，也是对的——ticket 目录是「哪一次运行
+  产出了哪些字节」的持久记录，而 runner 负责 call spec / invocation / reservation /
+  physical attempt / raw artifact / SourceEnvelope。**仍然只有一个 child 进程。**
+- **`child_command(operation=..., output_dir=..., context=..., **parameters)`**：与 spawn 用的是
+  同一个 argv 构造器，末尾加 `--emit-wire`。runner 把 stdout 当原始响应，所以 child 只在 stdout
+  打一份闭合 wire。
+- **`prepare_run` / `settle_run` / `run_digest`** 加在 `CrowdSourceLauncher` 上（照 `feed_launcher`
+  的样子），digest 与 spawn 路径同源，所以同一个请求还是同一个 ticket。
+- **`build_crowd_source_runner(...)`** 把 template key、identity、argv 三样喂给通用 runner；
+  `source_identity()` 直接用三个 `*_core` 模块本来就在产的 identity（`capability_id` /
+  `source_hash` / `schema_hash` / `adapter_ref` / `operation`），一个字段都没有为此新增。
+- **coordinator 变成同步的。** 原来是「这一 tick 起 child，下一 tick 结算」；现在是一次 tick 内
+  跑完并落账。收回来的是一整类状态：没有 `_open`、没有孤儿 ticket、没有「起了但再也没被结算」的洞。
+  receipt 回不来就是这次读没发生。接缝也随之收窄——coordinator 只问每个条目两件事：
+  `SOURCE_REF` 和 `execute(operation=..., parameters=..., actor_ref=..., company_ref=...)`，
+  测试里的 fake 也只实现这两样。
+- **凭证模型两条并存，是有意的。** 我的 child 收 `CredentialGrantEnvelope`（只有 ref 与到期，
+  看不见值）；runner 是由 writer 解析槽名、把值作为环境变量注进 child，且 child 拿不到
+  `os.environ`，只拿到 profile 声明的那几个槽。前者是本地那道便宜的闸（在 spawn 前按名字拒绝），
+  后者是让工具真的能跑。identity 里的 `credential_slot_refs` 直接喂给 runner 的
+  `credential_slot_refs`。
+- **重复的工作是幂等的，没有拆。** runner 自己也做批准与哈希校验、也 spool、也校 schema；child
+  同样做。spool 是内容寻址的，同 hash 命中已存在对象，所以不会写两份。child 里那份留着，
+  因为 child 是可以被人手工跑的，而手工跑的人也该被拒绝。
+- **踩到一个真 bug**：`_validate` 现在会跑两次（coordinator 建 job 时一次，runner 要 argv 时一次，
+  第二次跑在自己第一次的输出上）。空的 `since` 第一次输出成 `""`，第二次被当成「格式错的日期」
+  拒掉——第一次刚接受的 job 第二次被拒。校验必须幂等，加了一条测试钉住。
 
 ### 7.3 其余
 
@@ -225,11 +229,11 @@
 全量：`PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -t .`
 
 ```
-Ran 2798 tests in 393.024s
+Ran 2908 tests in 322.826s
 OK (skipped=1)
 ```
 
-（基线 main `3d365e7` 为 2,696；本片新增 102 项。
+（基线 main `d07ed8d` 为 2,798；本片新增 110 项。
 另外 `PYTHONPATH=src .venv/bin/python scripts/build_connector_inventory.py --check` 输出
 `packaged connector inventory matches the frozen definitions`。）
 
@@ -283,3 +287,15 @@ lane 登记（在 tick 末位、空 state 目录下 argv 为空、**`proposed` �
 （live gate 对所有非公开 transport 都要求这个词），但这是个占位。要么加一个 `host_tool` grant kind，
 要么明确 `mcp_managed` 就是「host 拥有的一切」的意思——两者都要改 `credential_authority.py`，
 不在我的范围内。
+
+
+## 12. 接上 host_tool_runner 之后改了什么（第二轮 review）
+
+| 项 | 改了什么 |
+| --- | --- |
+| 合并 | main `d07ed8d`（S1 feeds + `host_tool_runner`、P14e research task）。六个文件冲突，全是「两边各自 append」：`connector_governance.py` / `connector_inventory.py` / `LANE_MODULES` 保留两侧；`index.json` 与打包文件**用 `scripts/build_connector_inventory.py` 再生**，没有手工合过；两份测试的字面量按生成器与配额表的排序合进去（`company-wiki` 排在 `employee-reviews` 前，`x-xreach-crowd` / `xueqiu-posts` 排在 `web-fetch` 后、`yfinance` 前）。 |
+| lane order | 140（120 / 130 是 S1 的两条 feed，150 是 P14e 的 research task）。tick 末位断言改成「所有**证据类** lane 的末位」——research task 排在我后面，但它不是证据源。 |
+| 执行模型 | 从异步（起 child → 下一 tick 结算）改成同步（一次 tick 内跑完并落账），见 7.2。`_open` / `_settle` / `LaneChildConflict` / 孤儿 ticket 处理整块删掉——那些状态在同步模型里不存在。 |
+| 配额 | 从声明变成执行，见 7.1。新增测试钉 `template_key` 与配额键逐字相等。 |
+| 幂等校验 | `_since("")` 原来抛「格式错的日期」，导致二次校验拒掉自己刚接受的 job。空即无。 |
+| 新测试 | `ExecutionTests` 七条：argv 末尾是 `--emit-wire`、ticket 开了又结、receipt 变成 ledger 读得懂的形状、未批准的记录**根本到不了 runner**、runner 抛异常时 ticket 结成 failed、三条源七个 operation 的 identity 都能绑、配额键对得上。 |

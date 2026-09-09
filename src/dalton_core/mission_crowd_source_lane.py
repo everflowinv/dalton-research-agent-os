@@ -40,12 +40,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from .lane_child_launcher import (
-    LaneChildConflict,
-    LaneChildRejected,
-    LaneChildTicketNotFound,
-)
 from .lane_registry import LaneSpec, register_lane
+from .lane_child_launcher import LaneChildRejected
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -300,27 +296,114 @@ def observation_entries(
 # -- the coordinator ---------------------------------------------------------
 
 
-def _failure_reason(summary: Any) -> str | None:
-    if not isinstance(summary, Mapping):
-        return None
-    reason = summary.get("failure_reason")
-    if not isinstance(reason, str) or not reason.strip():
-        return None
-    return reason.strip()[:MAX_FAILURE_DETAIL_CHARS]
+class CrowdSourceExecution:
+    """One source's child, run by the connector runner and ticketed by the launcher.
+
+    This is the join S1's runner made possible. Before it there was no runner
+    for a ``host_tool`` connector at all, so this lane spawned its children
+    itself and the seven declared quotas were governance inputs nothing
+    counted. The runner registers the call spec, the invocation, the quota
+    reservation, the physical attempt, the raw artifact and the SourceEnvelope
+    around the same child -- so the same fifty-a-day that used to be a sentence
+    in a policy table is now a reservation that fails closed.
+
+    The split of responsibilities is S1's and it is the right one: the runner
+    owns the process and the authority chain, the launcher owns tickets,
+    because the ticket directory is the durable record of which run produced
+    which bytes. There is still exactly one child.
+    """
+
+    def __init__(
+        self,
+        *,
+        source: str,
+        launcher: Any,
+        runner_factory: Callable[..., Any],
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.source = source
+        self.launcher = launcher
+        self.SOURCE_REF = launcher.SOURCE_REF
+        self.runner_factory = runner_factory
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def execute(self, *, operation: str, parameters: Mapping[str, Any],
+                actor_ref: str, company_ref: str) -> dict[str, Any]:
+        """Run one bounded read and answer in the shape a summary has.
+
+        Refusals that were always going to happen -- an unapproved record, a
+        parameter this connector will not take -- come back as a failed status
+        rather than an exception, because the tick reports them and carries on
+        to the next source.
+        """
+
+        try:
+            governance = self.launcher.load_governance(operation)
+        except LaneChildRejected as exc:
+            return {"status": "failed", "failure_reason": f"{type(exc).__name__}: {exc}"}
+        if not getattr(governance, "approved", False):
+            return {"status": "failed",
+                    "failure_reason": f"the {operation} governance record is not approved"}
+        try:
+            cleaned = self.launcher._validate(operation, parameters)
+        except LaneChildRejected as exc:
+            return {"status": "failed", "failure_reason": f"{type(exc).__name__}: {exc}"}
+
+        digest = self.launcher.run_digest(operation, cleaned, governance.content_hash)
+        ticket_id, ticket_dir = self.launcher.prepare_run(
+            digest=digest,
+            record={
+                "source_ref": self.SOURCE_REF, "operation": operation,
+                "parameters": dict(cleaned), "actor_ref": actor_ref,
+                "company_ref": company_ref,
+                "governance_ref": governance.id,
+                "governance_hash": governance.content_hash,
+                "transport": "host-tool",
+            },
+        )
+        runner = self.runner_factory(
+            source=self.source, operation=operation, launcher=self.launcher,
+            governance=governance,
+        )
+        try:
+            receipt = runner.run(
+                parameters=cleaned,
+                work_ref=f"work:{self.SOURCE_REF}:{digest}",
+                output_dir=ticket_dir,
+            )
+        except Exception as exc:  # noqa: BLE001 - one read, reported not raised
+            reason = f"{type(exc).__name__}: {exc}"[:MAX_FAILURE_DETAIL_CHARS]
+            self.launcher.settle_run(ticket_id, status="failed", exit_code=1,
+                                     failure_reason=reason)
+            return {"status": "failed", "failure_reason": reason,
+                    "ticket_ref": ticket_id}
+        self.launcher.settle_run(ticket_id, status="succeeded", exit_code=0)
+        return {
+            "status": "succeeded",
+            "ticket_ref": ticket_id,
+            "observation": dict(receipt.observation),
+            # The runner hashes the child's stdout into the spool; that hash is
+            # what a record cites, and it is the same object the child's own
+            # spool write produced, because the spool is content addressed.
+            "artifact": {"content_hash": receipt.raw_response_hash},
+            "governance_ref": governance.id,
+            "governance_hash": governance.content_hash,
+            "connector_invocation_ref": receipt.connector_invocation_ref,
+            "source_envelope_ref": receipt.source_envelope_ref,
+        }
 
 
 class MissionCrowdSourceLaneCoordinator:
     """One bounded child per source per tick, over the mission's companies.
 
     **The runner seam.** ``runners`` maps a source name to whatever executes
-    that source's child. This coordinator asks each entry for three things and
-    nothing else: ``SOURCE_REF``, ``start(operation=..., actor_ref=...,
-    **params)`` returning a ticket with an ``id``, and ``status(ticket_ref)``
-    returning ``{"status": ..., "summary": ...}``. Today the entries are the
-    launchers in ``crowd_source_launcher``; a shared host-tool runner that
-    wraps the same children in a ConnectorInvocation and a SourceEnvelope
-    satisfies the same three, and swapping it in changes what is passed here
-    and nothing in this class. The tests pass a fake through the same door.
+    that source's child. This coordinator asks each entry for two things and
+    nothing else: ``SOURCE_REF``, and ``execute(operation=..., parameters=...,
+    actor_ref=..., company_ref=...)`` returning a summary-shaped mapping with a
+    ``status`` and, when it succeeded, an ``observation`` and an ``artifact``.
+    ``CrowdSourceExecution`` below is the real one -- a launcher for the ticket
+    and S1's ``HostToolRunner`` for the process and the authority chain -- and
+    the tests pass a fake through the same door.
     """
 
     GRANTS = LANE_GRANTS
@@ -343,7 +426,6 @@ class MissionCrowdSourceLaneCoordinator:
         self.actor_ref = actor_ref
         self.since = since
         self.clock = clock or (lambda: datetime.now(timezone.utc))
-        self._open: dict[str, tuple[str, str, str]] = {}
         self._cursor: dict[str, int] = {}
         # (source|company) -> (reason, ticks remaining before it is retried).
         self._failed: dict[str, tuple[str, int]] = {}
@@ -422,82 +504,71 @@ class MissionCrowdSourceLaneCoordinator:
                 "since": self.since}
         return None
 
-    # -- settling ----------------------------------------------------------
+    # -- running one job ---------------------------------------------------
 
-    def _settle(self, source: str) -> dict[str, Any] | None:
-        open_run = self._open.get(source)
-        if open_run is None:
-            return None
-        ticket_ref, company_ref, operation = open_run
-        runner = self.runners[source]
-        try:
-            ticket = runner.status(ticket_ref)
-        except LaneChildTicketNotFound:
-            self._open.pop(source, None)
-            return {"source": source, "company_ref": company_ref,
-                    "outcome": "failed",
-                    "failure_reason": "lane ticket is no longer on disk"}
-        except Exception:  # noqa: BLE001 - unreadable now; try next tick
-            return None
-        if ticket.get("status") == "running":
-            return None
-        self._open.pop(source, None)
-        summary = ticket.get("summary")
-        if ticket.get("status") != "succeeded":
-            reason = _failure_reason(summary) or f"lane run {ticket.get('status')}"
-            self._hold(source, company_ref, reason)
-            return {"source": source, "company_ref": company_ref,
-                    "outcome": "failed", "failure_reason": reason}
-        try:
-            entries = observation_entries(
-                source_ref=runner.SOURCE_REF, company_ref=company_ref,
-                operation=operation, summary=summary,
-                observed_at=self.clock().astimezone(timezone.utc)
-                .isoformat(timespec="microseconds"),
-            )
-            recorded = self.ledger.record(entries)
-        except (CrowdSourceLaneError, OSError, KeyError) as exc:
-            reason = f"{type(exc).__name__}: {exc}"
-            self._hold(source, company_ref, reason)
-            return {"source": source, "company_ref": company_ref,
-                    "outcome": "failed", "failure_reason": reason}
-        return {
-            "source": source, "company_ref": company_ref, "outcome": "succeeded",
-            "recorded": len(recorded["recorded"]),
-            "duplicates": len(recorded["duplicates"]),
-            "grade": CROWD_GRADE,
-        }
+    def _run(self, source: str, connected: set[str]) -> dict[str, Any]:
+        """One company, one source, one bounded read, recorded on the spot.
 
-    # -- launching ---------------------------------------------------------
+        Synchronous, unlike the first version of this lane, and that is the
+        change S1's host-tool runner brings. The runner registers the call, the
+        invocation, the reservation, the physical attempt and the
+        SourceEnvelope around the same child this lane used to spawn and settle
+        a tick later -- and the declared quota becomes a quota that is actually
+        counted, because the reservation is what counts it. A receipt that does
+        not come back is a run that did not happen; there is no half-finished
+        state left for the next tick to find.
+        """
 
-    def _launch(self, source: str, connected: set[str]) -> dict[str, Any]:
-        runner = self.runners[source]
-        if source in self._open:
-            return {"source": source, "status": "busy"}
-        if runner.SOURCE_REF not in connected:
+        execution = self.runners[source]
+        if execution.SOURCE_REF not in connected:
             return {"source": source, "status": "held",
-                    "reason": f"{runner.SOURCE_REF} is not connected in this "
+                    "reason": f"{execution.SOURCE_REF} is not connected in this "
                               "mission version"}
         job = self._next_job(source)
         if job is None:
             return {"source": source, "status": "idle"}
         company_ref = job.pop("company_ref")
         operation = job.pop("operation")
-        params = {key: value for key, value in job.items() if value}
+        parameters = {key: value for key, value in job.items() if value}
         try:
-            ticket = runner.start(operation=operation, actor_ref=self.actor_ref,
-                                  **params)
-        except LaneChildConflict as exc:
-            return {"source": source, "status": "deferred",
-                    "reason": f"{type(exc).__name__}: {exc}"}
-        except LaneChildRejected as exc:
-            reason = f"{type(exc).__name__}: {exc}"
+            outcome = execution.execute(
+                operation=operation, parameters=parameters,
+                actor_ref=self.actor_ref, company_ref=company_ref,
+            )
+        except Exception as exc:  # noqa: BLE001 - one read, reported not raised
+            reason = f"{type(exc).__name__}: {exc}"[:MAX_FAILURE_DETAIL_CHARS]
             self._hold(source, company_ref, reason)
-            return {"source": source, "status": "rejected",
-                    "company_ref": company_ref, "reason": reason}
-        self._open[source] = (ticket["id"], company_ref, operation)
-        return {"source": source, "status": "launched", "company_ref": company_ref,
-                "operation": operation, "ticket_ref": ticket["id"]}
+            return {"source": source, "status": "failed",
+                    "company_ref": company_ref, "operation": operation,
+                    "reason": reason}
+        if outcome.get("status") != "succeeded":
+            reason = str(outcome.get("failure_reason")
+                         or "the read failed without a reason")[:MAX_FAILURE_DETAIL_CHARS]
+            self._hold(source, company_ref, reason)
+            return {"source": source, "status": "failed",
+                    "company_ref": company_ref, "operation": operation,
+                    "reason": reason, "ticket_ref": outcome.get("ticket_ref")}
+        try:
+            entries = observation_entries(
+                source_ref=execution.SOURCE_REF, company_ref=company_ref,
+                operation=operation, summary=outcome,
+                observed_at=self.clock().astimezone(timezone.utc)
+                .isoformat(timespec="microseconds"),
+            )
+            recorded = self.ledger.record(entries)
+        except (CrowdSourceLaneError, OSError, KeyError) as exc:
+            reason = f"{type(exc).__name__}: {exc}"[:MAX_FAILURE_DETAIL_CHARS]
+            self._hold(source, company_ref, reason)
+            return {"source": source, "status": "failed",
+                    "company_ref": company_ref, "operation": operation,
+                    "reason": reason}
+        return {
+            "source": source, "status": "recorded", "company_ref": company_ref,
+            "operation": operation, "ticket_ref": outcome.get("ticket_ref"),
+            "recorded": len(recorded["recorded"]),
+            "duplicates": len(recorded["duplicates"]),
+            "grade": CROWD_GRADE,
+        }
 
     # -- the tick ----------------------------------------------------------
 
@@ -547,22 +618,17 @@ class MissionCrowdSourceLaneCoordinator:
         return {key: reason for key, (reason, _ticks) in self._failed.items()}
 
     def dispatch_once(self) -> dict[str, Any]:
-        """Settle what finished, then start at most one child per source."""
+        """One bounded read per source, recorded before the tick returns."""
 
         gated = self._gate()
         if gated is not None:
-            return {**gated, "settled": [], "sources": []}
+            return {**gated, "sources": [], "held": {}}
         self._age_holds()
         connected = self._connected_sources()
-        settled = [item for item in
-                   (self._settle(source) for source in sorted(self.runners))
-                   if item is not None]
-        sources = [self._launch(source, connected)
-                   for source in sorted(self.runners)]
-        launched = [item for item in sources if item["status"] == "launched"]
+        sources = [self._run(source, connected) for source in sorted(self.runners)]
+        recorded = [item for item in sources if item["status"] == "recorded"]
         return {
-            "status": "launched" if launched else "idle",
-            "settled": settled,
+            "status": "recorded" if recorded else "idle",
             "sources": sources,
             # Named rather than counted, because "idle" and "everything is
             # held" look identical from outside and are not the same thing.
@@ -593,12 +659,89 @@ CROWD_SOURCE_MAP = "p9-us-it-services-crowd-sources-v1.json"
 LAUNCHER_KWARG = "crowd_source_launcher"
 
 
+# Which packaged template and which identity function each source answers to.
+# The identity is what the host-tool runner binds its profile and its schema
+# check to, and every one of these already existed -- the runner asks for
+# exactly the shape the three `*_core` modules were already producing.
+SOURCE_IDENTITY = {
+    "xueqiu": ("xueqiu-posts", "xueqiu_core", "xueqiu_identity"),
+    "x": ("x-xreach-crowd", "xreach_core", "xreach_identity"),
+    "employee-reviews": ("employee-reviews", "employee_reviews_core",
+                         "employee_reviews_identity"),
+}
+
+
+def source_identity(source: str, operation: str) -> dict[str, Any]:
+    """The frozen identity of one operation of one crowd source."""
+
+    import importlib
+
+    try:
+        _template, module_name, function_name = SOURCE_IDENTITY[source]
+    except KeyError as exc:
+        raise CrowdSourceLaneError(f"{source} is not a crowd source") from exc
+    module = importlib.import_module(f".{module_name}", __package__)
+    function = getattr(module, function_name)
+    # Blind has one operation and its identity takes no argument, because
+    # there is nothing to choose between.
+    return function() if source == "employee-reviews" else function(operation)
+
+
+def build_crowd_source_runner(
+    *,
+    source: str,
+    operation: str,
+    launcher: Any,
+    governance: Any,
+    store: Any,
+    connectors: Any,
+    observability: Any,
+    spool: Any,
+    actor_ref: str = "automation:coverage-mission",
+    clock: Callable[[], datetime] | None = None,
+) -> Any:
+    """A host-tool runner bound to one crowd operation and its child command.
+
+    The runner stays generic: everything source-specific -- which template,
+    which identity, which argv -- is supplied here. ``connector_slug`` is the
+    template key, which is deliberately the same string these connectors'
+    quota entries are keyed by, so the fifty-a-day in
+    ``connector_quota_policy`` becomes the reservation ceiling without another
+    table to keep in step.
+    """
+
+    from .host_tool_runner import HostToolRunner
+
+    template_key = SOURCE_IDENTITY[source][0]
+
+    def command(parameters: Mapping[str, Any], output_dir: Path,
+                context: Mapping[str, str]) -> list[str]:
+        return launcher.child_command(
+            operation=operation, output_dir=output_dir, context=context,
+            **dict(parameters)
+        )
+
+    identity = source_identity(source, operation)
+    return HostToolRunner(
+        store=store, connectors=connectors, observability=observability, spool=spool,
+        template_key=template_key,
+        identity=identity,
+        governance=governance,
+        command=command,
+        connector_slug=template_key,
+        credential_slot_refs=identity.get("credential_slot_refs", ()),
+        actor_ref=actor_ref,
+        clock=clock,
+    )
+
+
 def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     """Controller tick (S3).
 
-    At most one child per source per tick. The coordinator is cached across
-    ticks because what it holds is which child is in flight and how far round
-    the company list each source has got -- process state, deliberately not a
+    One bounded read per source per tick, run through the connector runner and
+    recorded before the tick returns. The coordinator is cached across ticks
+    because what it holds is how far round the company list each source has
+    got and which pairs are cooling off -- process state, deliberately not a
     table, because losing it costs one duplicate read and nothing else.
     """
 
@@ -616,9 +759,24 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             return (None if pointer is None
                     else server.coverage_mission.mission(pointer["mission_version_id"]))
 
+        def runner_factory(*, source: str, operation: str, launcher: Any,
+                           governance: Any) -> Any:
+            return build_crowd_source_runner(
+                source=source, operation=operation, launcher=launcher,
+                governance=governance, store=server.store,
+                connectors=server.connectors,
+                observability=server.observability, spool=server.spool,
+            )
+
         coordinator = MissionCrowdSourceLaneCoordinator(
             mission=mission,
-            runners=launchers.by_source,
+            runners={
+                source: CrowdSourceExecution(
+                    source=source, launcher=launcher,
+                    runner_factory=runner_factory,
+                )
+                for source, launcher in launchers.by_source.items()
+            },
             source_map=load_crowd_source_map(launchers.source_map_path),
             ledger=CrowdObservationLedger(
                 Path(launchers.state_dir) / LEDGER_FILENAME),
@@ -782,7 +940,11 @@ __all__ = [
     "MAX_RECORDS_PER_RUN",
     "SPEC_REF_BY_SOURCE",
     "CrowdObservationLedger",
+    "CrowdSourceExecution",
+    "SOURCE_IDENTITY",
     "approved_records",
+    "build_crowd_source_runner",
+    "source_identity",
     "CrowdSourceLaneError",
     "FAILURE_COOL_OFF_TICKS",
     "MissionCrowdSourceLaneCoordinator",

@@ -81,6 +81,19 @@ YFINANCE_DAILY_PRICES_CAPABILITY_ID = (
 YFINANCE_ANALYST_ESTIMATES_CAPABILITY_ID = (
     "capability:dalton:connector:yfinance-analyst-estimates"
 )
+# S1: the two human / vendor feeds. Each is split into an index operation and
+# a document operation for the same reason every library here is -- reading
+# what exists and reading one of them are different permissions.
+SALES_NOTES_LIST_KIND = "sales-notes-list-notes"
+SALES_NOTES_GET_KIND = "sales-notes-get-note"
+SALES_NOTES_LIST_CAPABILITY_ID = "capability:dalton:connector:sales-notes-list-notes"
+SALES_NOTES_GET_CAPABILITY_ID = "capability:dalton:connector:sales-notes-get-note"
+COMPANY_WIKI_LIST_KIND = "company-wiki-list-documents"
+COMPANY_WIKI_GET_KIND = "company-wiki-get-document"
+COMPANY_WIKI_LIST_CAPABILITY_ID = (
+    "capability:dalton:connector:company-wiki-list-documents"
+)
+COMPANY_WIKI_GET_CAPABILITY_ID = "capability:dalton:connector:company-wiki-get-document"
 
 # S3 crowd sources. Grouped rather than named one by one at the call site,
 # because "which of these seven is it" is the only question the dispatcher asks.
@@ -430,6 +443,66 @@ def _employee_reviews_fixture_hash() -> str:
     return employee_reviews_fixture_hash()
 
 
+def _sales_notes_source_hash() -> str:
+    from .sales_notes_core import sales_notes_source_hash
+
+    return sales_notes_source_hash()
+
+
+def _sales_notes_permissions() -> dict[str, Any]:
+    from .sales_notes_core import sales_notes_permissions
+
+    return sales_notes_permissions()
+
+
+def _sales_notes_fixture_hash() -> str:
+    from .sales_notes_core import sales_notes_fixture_hash
+
+    return sales_notes_fixture_hash()
+
+
+def _sales_notes_list_schema_hash() -> str:
+    from .sales_notes_core import LIST_OPERATION, sales_notes_schema_hash
+
+    return sales_notes_schema_hash(LIST_OPERATION)
+
+
+def _sales_notes_get_schema_hash() -> str:
+    from .sales_notes_core import GET_OPERATION, sales_notes_schema_hash
+
+    return sales_notes_schema_hash(GET_OPERATION)
+
+
+def _company_wiki_source_hash() -> str:
+    from .company_wiki_core import company_wiki_source_hash
+
+    return company_wiki_source_hash()
+
+
+def _company_wiki_permissions() -> dict[str, Any]:
+    from .company_wiki_core import company_wiki_permissions
+
+    return company_wiki_permissions()
+
+
+def _company_wiki_fixture_hash() -> str:
+    from .company_wiki_core import company_wiki_fixture_hash
+
+    return company_wiki_fixture_hash()
+
+
+def _company_wiki_list_schema_hash() -> str:
+    from .company_wiki_core import LIST_OPERATION, company_wiki_schema_hash
+
+    return company_wiki_schema_hash(LIST_OPERATION)
+
+
+def _company_wiki_get_schema_hash() -> str:
+    from .company_wiki_core import GET_OPERATION, company_wiki_schema_hash
+
+    return company_wiki_schema_hash(GET_OPERATION)
+
+
 # Capability id is deliberately the dispatch key at load time because it is
 # the only kind identity present in the closed governance record.
 GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
@@ -607,6 +680,41 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         schema_hash=_yfinance_analyst_estimates_schema_hash,
         permissions=_yfinance_permissions,
         fixture_hash=_yfinance_fixture_hash,
+    ),
+    # S1: the sell-side notes already on this disk, and the human wiki beside
+    # them. Both read files and neither holds a credential, so their
+    # permissions name a host directory and no slot at all.
+    SALES_NOTES_LIST_KIND: _KindSpec(
+        capability_id=SALES_NOTES_LIST_CAPABILITY_ID,
+        template_key="sales-notes",
+        source_hash=_sales_notes_source_hash,
+        schema_hash=_sales_notes_list_schema_hash,
+        permissions=_sales_notes_permissions,
+        fixture_hash=_sales_notes_fixture_hash,
+    ),
+    SALES_NOTES_GET_KIND: _KindSpec(
+        capability_id=SALES_NOTES_GET_CAPABILITY_ID,
+        template_key="sales-notes",
+        source_hash=_sales_notes_source_hash,
+        schema_hash=_sales_notes_get_schema_hash,
+        permissions=_sales_notes_permissions,
+        fixture_hash=_sales_notes_fixture_hash,
+    ),
+    COMPANY_WIKI_LIST_KIND: _KindSpec(
+        capability_id=COMPANY_WIKI_LIST_CAPABILITY_ID,
+        template_key="company-wiki",
+        source_hash=_company_wiki_source_hash,
+        schema_hash=_company_wiki_list_schema_hash,
+        permissions=_company_wiki_permissions,
+        fixture_hash=_company_wiki_fixture_hash,
+    ),
+    COMPANY_WIKI_GET_KIND: _KindSpec(
+        capability_id=COMPANY_WIKI_GET_CAPABILITY_ID,
+        template_key="company-wiki",
+        source_hash=_company_wiki_source_hash,
+        schema_hash=_company_wiki_get_schema_hash,
+        permissions=_company_wiki_permissions,
+        fixture_hash=_company_wiki_fixture_hash,
     ),
 }
 # Public aliases make the registry discoverable without exposing mutable
@@ -817,6 +925,38 @@ def build_governance_record(
 
         operation = next(op for op, name in KIND_BY_OPERATION.items() if name == kind)
         return build_guidepoint_governance_record(
+            operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in (SALES_NOTES_LIST_KIND, SALES_NOTES_GET_KIND):
+        from .sales_notes_core import (
+            KIND_BY_OPERATION as SALES_NOTES_KINDS,
+            build_sales_notes_governance_record,
+        )
+
+        operation = next(op for op, name in SALES_NOTES_KINDS.items() if name == kind)
+        return build_sales_notes_governance_record(
+            operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in (COMPANY_WIKI_LIST_KIND, COMPANY_WIKI_GET_KIND):
+        from .company_wiki_core import (
+            KIND_BY_OPERATION as COMPANY_WIKI_KINDS,
+            build_company_wiki_governance_record,
+        )
+
+        operation = next(op for op, name in COMPANY_WIKI_KINDS.items() if name == kind)
+        return build_company_wiki_governance_record(
             operation=operation,
             approved_by=approved_by,
             status=status,
@@ -1077,6 +1217,10 @@ __all__ = [
     "WEB_FETCH_CAPABILITY_ID", "WEB_FETCH_KIND",
     "YFINANCE_ANALYST_ESTIMATES_CAPABILITY_ID", "YFINANCE_ANALYST_ESTIMATES_KIND",
     "YFINANCE_DAILY_PRICES_CAPABILITY_ID", "YFINANCE_DAILY_PRICES_KIND",
+    "SALES_NOTES_GET_CAPABILITY_ID", "SALES_NOTES_GET_KIND",
+    "SALES_NOTES_LIST_CAPABILITY_ID", "SALES_NOTES_LIST_KIND",
+    "COMPANY_WIKI_GET_CAPABILITY_ID", "COMPANY_WIKI_GET_KIND",
+    "COMPANY_WIKI_LIST_CAPABILITY_ID", "COMPANY_WIKI_LIST_KIND",
     "SEC_CAPABILITY_ID", "SEC_COMPANY_FACTS_KIND", "build_governance_record",
     "governance_kind_for_capability", "load_connector_governance",
     "write_governance_proposal",

@@ -25,11 +25,21 @@ that sentence rather than guessing.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import re
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .employee_reviews_core import OPERATION as BLIND_OPERATION
-from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
+from .lane_child_launcher import (
+    TICKET_SCHEMA_VERSION,
+    LaneChildLauncher,
+    LaneChildRejected,
+    secure_dir,
+    wire_time,
+    write_owner_only,
+)
 from .xreach_core import OPERATIONS as XREACH_OPERATIONS
 from .xueqiu_core import OPERATIONS as XUEQIU_OPERATIONS
 
@@ -151,6 +161,78 @@ class CrowdSourceLauncher(LaneChildLauncher):
     def _validate(self, operation: str, params: Mapping[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
 
+    # -- runs the host-tool runner owns -----------------------------------
+    #
+    # The connector runner owns the process and the authority chain; the
+    # launcher owns tickets. That split is S1's and it is the right one: the
+    # ticket directory is the durable record of which run produced which
+    # bytes, and the same child's stdout is what the runner records as the raw
+    # response, so there is still exactly one run.
+
+    def child_command(
+        self, *, operation: str, output_dir: str | Path,
+        context: Mapping[str, str] | None = None, **parameters: Any
+    ) -> list[str]:
+        """The argv the host-tool runner executes for one operation.
+
+        The same builder ``spawn`` uses, plus ``--emit-wire``: the runner
+        treats stdout as the raw response, so the child prints the closed
+        observation wire and nothing else. ``context`` carries the invocation
+        the runner registered; these children have nothing to write into a
+        manifest, so they take no note of it.
+        """
+
+        return self._command(
+            ticket_dir=Path(output_dir), operation=operation,
+            params=self._validate(operation, parameters),
+        ) + ["--emit-wire"]
+
+    def prepare_run(self, *, digest: str, record: Mapping[str, Any]) -> tuple[str, Path]:
+        """A ticket directory for a run the host-tool runner will execute."""
+
+        if not re.fullmatch(r"[0-9a-f]{24}", digest or ""):
+            raise LaneChildRejected("ticket digest must be 24 hex characters")
+        ticket_id = f"{self.TICKET_PREFIX}:{digest}"
+        ticket_dir = secure_dir(self.tickets_dir / digest)
+        write_owner_only(ticket_dir / "ticket.json", {
+            "schema_version": TICKET_SCHEMA_VERSION,
+            "id": ticket_id,
+            **dict(record),
+            "started_at": wire_time(self.clock()),
+            "pid": os.getpid(),
+            "status": "running",
+            "exit_code": None,
+            "completed_at": None,
+        })
+        return ticket_id, ticket_dir
+
+    def settle_run(self, ticket_id: str, *, status: str, exit_code: int | None = None,
+                   failure_reason: str | None = None) -> dict[str, Any]:
+        """Close a prepared ticket. ``running`` is never a settled answer."""
+
+        if status not in {"succeeded", "failed"}:
+            raise LaneChildRejected("a settled crowd run is succeeded or failed")
+        path = self._ticket_path(ticket_id)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record.update({
+            "status": status,
+            "exit_code": exit_code,
+            "completed_at": wire_time(self.clock()),
+            "failure_reason": failure_reason,
+        })
+        write_owner_only(path, record)
+        return record
+
+    def run_digest(self, operation: str, parameters: Mapping[str, Any],
+                   governance_hash: str) -> str:
+        """The same name a spawn would have given this request."""
+
+        identity = "|".join(f"{key}={parameters[key]}" for key in sorted(parameters))
+        return hashlib.sha256(
+            f"{self.TICKET_PREFIX}|{operation}|{identity}|{governance_hash}"
+            .encode("utf-8")
+        ).hexdigest()[:24]
+
     @staticmethod
     def _bounded_text(value: Any, *, name: str, limit: int) -> str:
         if not isinstance(value, str) or not value.strip():
@@ -162,9 +244,21 @@ class CrowdSourceLauncher(LaneChildLauncher):
 
     @staticmethod
     def _since(value: Any) -> str | None:
+        """A date or nothing. Empty is nothing, not a malformed date.
+
+        Validation has to be idempotent: `_validate` runs once when the
+        coordinator builds the job and again when the host-tool runner asks for
+        the argv, and it runs the second time over its own output. An absent
+        `since` comes back from the first pass as `""`, and treating that as a
+        malformed date made the second pass refuse a job the first pass had
+        just accepted.
+        """
+
         if value is None:
             return None
         text = str(value).strip()
+        if not text:
+            return None
         if len(text) != 10 or text[4] != "-" or text[7] != "-":
             raise LaneChildRejected("since must be YYYY-MM-DD")
         return text

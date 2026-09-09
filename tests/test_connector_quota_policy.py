@@ -33,6 +33,24 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    "connector_slug": "company-wiki",
+                    "operation": "get_document",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 1_000,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "company-wiki",
+                    "operation": "list_documents",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 500,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
                     # S3: the crowd sources are all fifty units a day. Fifty is
                     # not a measurement -- none of the three publishes a rate
                     # limit -- it is ten times what the lane is for, so a retry
@@ -67,6 +85,26 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "operation": "search_library",
                     "quota_unit": "search",
                     "daily_unit_limit": 25,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    # S1: local file reads, so the ceiling is a loop bound
+                    # rather than a courtesy to an upstream.
+                    "connector_slug": "sales-notes",
+                    "operation": "get_note",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 1_000,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "sales-notes",
+                    "operation": "list_notes",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 500,
                     "max_physical_calls_per_unit": 1,
                     "window_seconds": 86_400,
                     "reset_timezone": "Asia/Shanghai",

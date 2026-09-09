@@ -555,7 +555,7 @@ class ConnectorInventoryTests(unittest.TestCase):
                 "cninfo", "sec", "sec-financials", "roic-transcript",
                 "yfinance", "alphaengine", "x-xreach", "x-x-search",
                 "reddit-last30days", "guidepoint", "gemini-web-search",
-                "web-fetch", "xueqiu",
+                "web-fetch", "xueqiu", "sales-notes", "company-wiki",
                 # S3: the crowd layer. Each is a new connector rather than a
                 # widened shadow template, so the 2026-08-14 hashes the owner
                 # has seen do not move.
