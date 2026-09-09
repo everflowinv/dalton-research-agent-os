@@ -204,6 +204,7 @@ def run_planner(
         "plan_status": None,
         "directives": 0,
         "inquiries": 0,
+        "sufficiency": 0,
         "replayed": False,
         "cost_micros": 0,
         "failure_reason": None,
@@ -236,6 +237,7 @@ def run_planner(
                 "status": "succeeded", "plan_status": "unchanged", "replayed": True,
                 "directives": len(existing["directives"]),
                 "inquiries": len(existing["inquiries"]),
+                "sufficiency": len(existing.get("sufficiency") or []),
                 "plan_ref": existing["plan_id"],
             })
             return summary
@@ -289,6 +291,7 @@ def run_planner(
         summary.update({
             "status": "succeeded", "plan_status": stored["status"],
             "directives": len(plan["directives"]), "inquiries": len(plan["inquiries"]),
+            "sufficiency": len(plan.get("sufficiency") or []),
             "assessment": plan["assessment"], "plan_ref": stored["plan_id"],
         })
         return summary

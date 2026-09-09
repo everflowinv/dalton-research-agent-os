@@ -511,6 +511,11 @@ CREATE TABLE IF NOT EXISTS coverage_mission_research_plans (
     assessment TEXT NOT NULL,
     directives_json TEXT NOT NULL,
     inquiries_json TEXT NOT NULL,
+    -- P13ai: whether what is held actually answers the stage, which the
+    -- checklist's count cannot say. Nullable: plans written before this
+    -- existed made no such judgement, and inventing one for them would be
+    -- worse than the gap.
+    sufficiency_json TEXT,
     model_profile_ref TEXT,
     work_order_ref TEXT,
     decided_by TEXT NOT NULL,

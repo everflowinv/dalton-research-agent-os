@@ -1317,11 +1317,51 @@ class MissionSourceDiscoveryCoordinator:
         held = next((i for i in items if i["item_ref"] == item["item_ref"]), None)
         if held is None:
             return None
-        ceiling = int(held["required"]) * SATISFIED_OVERSHOOT
+        # P13ai: the count is the floor's question, not the only question. A
+        # plan may have looked at what is held and judged that it does not
+        # answer the stage -- live, eighteen broker reports against a
+        # requirement of three read as complete while none of them bore on the
+        # driver. A judgement of insufficient leaves the ceiling out of it.
+        verdict, required = self._sufficiency(mission, company_ref, item["item_ref"])
+        if verdict == "insufficient":
+            return None
+        # A plan may also decide this company needs more than the Playbook
+        # asks. It may never decide it needs less: the floor is the owner's.
+        floor = max(int(held["required"]), required or 0)
+        ceiling = floor * SATISFIED_OVERSHOOT
         if held["have"] >= ceiling:
             return (f"{item['item_ref']} already holds {held['have']} of "
-                    f"{held['required']} required; not searching past {ceiling}")
+                    f"{floor} required; not searching past {ceiling}")
         return None
+
+    def _sufficiency(self, mission: Mapping[str, Any], company_ref: str,
+                     item_ref: str) -> tuple[str | None, int | None]:
+        """The plan's judgement about one item, or (None, None) if it has none.
+
+        Silence is not a verdict: a plan that says nothing about an item leaves
+        the deterministic floor to decide, which is why an empty plan changes
+        nothing rather than holding every item open forever.
+        """
+
+        try:
+            plan = self.missions.latest_research_plan(mission["id"])
+        except Exception:  # noqa: BLE001 - an unreadable plan is not a judgement
+            return None, None
+        if not plan:
+            return None, None
+        subjects = {company_ref}
+        if mission.get("industry_ref"):
+            subjects.add(mission["industry_ref"])
+        for judgement in plan.get("sufficiency", ()):
+            if judgement.get("item_ref") != item_ref:
+                continue
+            if judgement.get("company_ref") not in subjects:
+                continue
+            required = judgement.get("required")
+            return judgement.get("verdict"), (
+                required if isinstance(required, int) and not isinstance(required, bool)
+                else None)
+        return None, None
 
     def _cadence_block(self, mission_version_ref: str, company_ref: str, spec: Mapping[str, Any]) -> str | None:
         latest = self.missions.discovery_dispatches(

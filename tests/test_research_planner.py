@@ -74,9 +74,11 @@ def state(**overrides):
     return build_research_state(**kwargs)
 
 
-def response(*directives, assessment="ACN needs one more quarter.", inquiries=()):
+def response(*directives, assessment="ACN needs one more quarter.", inquiries=(),
+             sufficiency=()):
     return json.dumps({"schema_version": "0.1", "assessment": assessment,
-                       "directives": list(directives), "inquiries": list(inquiries)})
+                       "directives": list(directives), "inquiries": list(inquiries),
+                       "sufficiency": list(sufficiency)})
 
 
 def inquiry(**overrides):
@@ -191,6 +193,78 @@ class StateTests(unittest.TestCase):
     def test_a_company_with_nothing_yet_still_projects(self):
         built = company_state(entry("company:x", "X"))
         self.assertEqual((built["items"], built["figures"]["total"]), ([], 0))
+
+
+def judgement(**overrides):
+    base = {"company_ref": IBM, "item_ref": "broker_research",
+            "verdict": "insufficient", "required": None,
+            "because": "eighteen reports and none address the AI displacement driver"}
+    base.update(overrides)
+    return base
+
+
+class SufficiencyTests(unittest.TestCase):
+    """P13ai: whether what is held is enough is a judgement, not a count.
+
+    Live, CTSH held 18 broker reports against a requirement of 3 and read as
+    "complete". Nothing asked whether any of the 18 bore on the question the
+    stage exists to answer.
+    """
+
+    def plan(self, *judgements, **kwargs):
+        return plan_from_response(
+            state(), response(sufficiency=list(judgements), **kwargs), created_at=NOW)
+
+    def test_a_verdict_carries_the_floor_it_was_measured_against(self):
+        [verdict] = self.plan(judgement())["sufficiency"]
+        self.assertEqual(verdict["verdict"], "insufficient")
+        self.assertEqual(verdict["floor"], 4)
+        # Left null, the requirement stays the Playbook's own number.
+        self.assertEqual(verdict["required"], 4)
+
+    def test_a_company_may_need_more_than_the_playbook_asks(self):
+        [verdict] = self.plan(judgement(required=8))["sufficiency"]
+        self.assertEqual((verdict["floor"], verdict["required"]), (4, 8))
+
+    def test_a_plan_may_not_lower_the_playbook_floor(self):
+        # The floor is the owner's signed number. A model that could lower it
+        # would be editing the standard it is being measured against.
+        with self.assertRaises(ResearchPlanError) as caught:
+            self.plan(judgement(required=1))
+        self.assertIn("below the Playbook floor", str(caught.exception))
+
+    def test_a_plan_may_not_raise_a_floor_without_bound(self):
+        with self.assertRaises(ResearchPlanError):
+            self.plan(judgement(required=400))
+
+    def test_a_judgement_about_work_that_does_not_exist_is_refused(self):
+        with self.assertRaises(ResearchPlanError) as caught:
+            self.plan(judgement(item_ref="vibes"))
+        self.assertIn("not in the state", str(caught.exception))
+
+    def test_a_verdict_without_a_reason_is_refused(self):
+        # A count is not a reason, and neither is silence.
+        with self.assertRaises(ResearchPlanError):
+            self.plan(judgement(because="   "))
+
+    def test_an_unknown_verdict_is_refused(self):
+        with self.assertRaises(ResearchPlanError):
+            self.plan(judgement(verdict="probably fine"))
+
+    def test_sufficiency_is_bounded_like_everything_else(self):
+        from dalton_core.research_planner import MAX_SUFFICIENCY
+
+        with self.assertRaises(ResearchPlanError):
+            self.plan(*[judgement() for _ in range(MAX_SUFFICIENCY + 1)])
+
+    def test_a_plan_with_no_judgement_is_still_a_plan(self):
+        # Saying nothing about sufficiency is not the same as saying enough.
+        self.assertEqual(self.plan()["sufficiency"], [])
+
+    def test_the_judgement_travels_in_the_hashed_plan(self):
+        first = self.plan(judgement())
+        second = self.plan(judgement(verdict="sufficient"))
+        self.assertNotEqual(first["content_hash"], second["content_hash"])
 
 
 class PromptTests(unittest.TestCase):

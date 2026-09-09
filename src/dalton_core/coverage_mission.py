@@ -623,6 +623,23 @@ class CoverageMissionAuthority:
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._migrate_discovered_document_host()
         self._migrate_settlement_failure_reason()
+        self._migrate_plan_sufficiency()
+
+    def _migrate_plan_sufficiency(self) -> None:
+        """P13ai: add the nullable ``sufficiency_json`` column to older ledgers."""
+
+        columns = {
+            row[1] for row in self.connection.execute(
+                "PRAGMA table_info(coverage_mission_research_plans)"
+            ).fetchall()
+        }
+        if "sufficiency_json" in columns:
+            return
+        if self.connection.in_transaction:
+            raise RuntimeError("plan sufficiency migration requires no open transaction")
+        self.connection.execute(
+            "ALTER TABLE coverage_mission_research_plans ADD COLUMN sufficiency_json TEXT"
+        )
 
     def _migrate_settlement_failure_reason(self) -> None:
         """P13z: add the nullable ``failure_reason`` column to older ledgers.
@@ -1699,10 +1716,11 @@ class CoverageMissionAuthority:
             cur.execute(
                 "INSERT INTO coverage_mission_research_plans("
                 "plan_id,mission_version_ref,state_hash,assessment,directives_json,"
-                "inquiries_json,model_profile_ref,work_order_ref,decided_by,created_at,"
-                "content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                "inquiries_json,sufficiency_json,model_profile_ref,work_order_ref,"
+                "decided_by,created_at,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (plan_id, mission_version_ref, state_hash, plan["assessment"],
                  canonical_json(plan["directives"]), canonical_json(plan["inquiries"]),
+                 canonical_json(plan.get("sufficiency") or []),
                  model_profile_ref, work_order_ref, decided_by, now, plan["content_hash"]),
             )
             row = cur.execute(
@@ -1715,6 +1733,10 @@ class CoverageMissionAuthority:
         wire = dict(row)
         wire["directives"] = json.loads(wire.pop("directives_json"))
         wire["inquiries"] = json.loads(wire.pop("inquiries_json"))
+        raw = wire.pop("sufficiency_json", None)
+        # A plan written before judgements existed made none; an empty list is
+        # "said nothing", which is what the lane treats as silence anyway.
+        wire["sufficiency"] = json.loads(raw) if raw else []
         return wire
 
     def latest_research_plan(self, mission_version_ref: str) -> dict[str, Any] | None:

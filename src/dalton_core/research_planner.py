@@ -59,6 +59,12 @@ SCHEMA_VERSION = "0.1"
 TASK_REF = "task:research-plan-directives:0.1"
 MAX_DIRECTIVES = 12
 MAX_INQUIRIES = 6
+MAX_SUFFICIENCY = 12
+# P13ai: how far above the Playbook's floor a judgement may reach in one plan.
+# Unbounded, a plan could ask for sixty transcripts and call it a judgement;
+# the point is to let the brain say "this one needs more", not to remove the
+# bound that makes the work finite.
+MAX_REQUIRED_MULTIPLE = 3
 
 # What the dispatcher can actually do. A plan may only ask for these, because
 # a directive nobody can execute is a plan that looks like work and is not.
@@ -81,7 +87,9 @@ OUTPUT_SCHEMA = {
     "title": "ResearchPlanDirectivesV0.1",
     "type": "object",
     "additionalProperties": False,
-    "required": ["schema_version", "assessment", "directives", "inquiries"],
+    "required": [
+        "schema_version", "assessment", "directives", "inquiries", "sufficiency",
+    ],
     "properties": {
         "schema_version": {"const": "0.1"},
         "assessment": {
@@ -135,6 +143,51 @@ OUTPUT_SCHEMA = {
                 },
             },
         },
+        # P13ai: whether what is held is actually enough, which a count cannot
+        # answer. Live, CTSH held 18 broker reports against a requirement of 3
+        # and read as "complete" -- nothing asked whether any of the 18 bore on
+        # the question. Sufficiency is a judgement about the material, and the
+        # judgement belongs to the brain rather than to the checklist.
+        "sufficiency": {
+            "type": "array",
+            "maxItems": MAX_SUFFICIENCY,
+            "description": (
+                "Whether the material held for an item answers what the stage "
+                "needs. May raise what this company requires above the "
+                "Playbook's floor; may never lower it."
+            ),
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["company_ref", "item_ref", "verdict", "because"],
+                "properties": {
+                    "company_ref": {"type": "string", "minLength": 1, "maxLength": 120},
+                    "item_ref": {"type": "string", "minLength": 1, "maxLength": 80},
+                    "verdict": {
+                        "enum": ["sufficient", "insufficient"],
+                        "description": (
+                            "sufficient: the material answers what the stage needs. "
+                            "insufficient: it does not, whatever the count says."
+                        ),
+                    },
+                    "required": {
+                        "type": ["integer", "null"], "minimum": 0,
+                        "description": (
+                            "How many this company needs, when that is more than "
+                            "the Playbook asks. Null to leave the floor as it is. "
+                            "A number below the floor is refused."
+                        ),
+                    },
+                    "because": {
+                        "type": "string", "minLength": 1, "maxLength": 400,
+                        "description": (
+                            "What about the material held leads to this verdict. "
+                            "A count is not a reason."
+                        ),
+                    },
+                },
+            },
+        },
     },
 }
 TASK_HASH = content_hash({
@@ -182,6 +235,15 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "collected, a company whose situation warrants more than the standard. Each names "
         "what material would answer it and what in the state prompted it. Return an empty "
         "list when nothing has raised one; padding this is worse than leaving it empty.\n\n"
+        "Also return `sufficiency`: for any item where the count and the truth differ, "
+        "whether what is actually held answers what this stage needs. A company can hold "
+        "eighteen broker reports and still hold nothing that bears on its driver; the "
+        "checklist counts documents and cannot see that. Say `insufficient` and why, in "
+        "terms of the material rather than the number, and the lane will keep looking. "
+        "Where this company genuinely needs more than the standard asks, set `required` "
+        "above it. You may raise that bar and never lower it: the floor is the owner's "
+        "standard, not yours. Judge only the items you have grounds to judge; silence "
+        "leaves the standard as it is.\n\n"
         "You may only name a company_ref and item_ref that appear in RESEARCH_STATE. "
         "Inventing either voids the whole plan. Return fewer directives rather than "
         "padding: a short plan that is right beats a long one that is thorough.\n"
@@ -247,7 +309,7 @@ def parse_response(text: Any) -> dict[str, Any]:
     if payload is None:
         raise ResearchPlanError("model response is not JSON")
     if not isinstance(payload, Mapping) or set(payload) != {
-        "schema_version", "assessment", "directives", "inquiries",
+        "schema_version", "assessment", "directives", "inquiries", "sufficiency",
     }:
         raise ResearchPlanError("plan has an invalid closed shape")
     if payload["schema_version"] != SCHEMA_VERSION:
@@ -264,8 +326,15 @@ def parse_response(text: Any) -> dict[str, Any]:
         raise ResearchPlanError("inquiries must be a list")
     if len(inquiries) > MAX_INQUIRIES:
         raise ResearchPlanError(f"a plan may hold at most {MAX_INQUIRIES} inquiries")
+    sufficiency = payload["sufficiency"]
+    if not isinstance(sufficiency, list):
+        raise ResearchPlanError("sufficiency must be a list")
+    if len(sufficiency) > MAX_SUFFICIENCY:
+        raise ResearchPlanError(
+            f"a plan may hold at most {MAX_SUFFICIENCY} sufficiency judgements")
     return {"assessment": payload["assessment"].strip(),
-            "directives": list(directives), "inquiries": list(inquiries)}
+            "directives": list(directives), "inquiries": list(inquiries),
+            "sufficiency": list(sufficiency)}
 
 
 def _known_work(state: Mapping[str, Any]) -> dict[str, set[str]]:
@@ -286,6 +355,35 @@ def _known_work(state: Mapping[str, Any]) -> dict[str, set[str]]:
                 if isinstance(item.get("item_ref"), str)
             }
     return known
+
+
+def _required_floors(state: Mapping[str, Any]) -> dict[tuple[str, str], int]:
+    """What the Playbook requires of each item, from the state it produced.
+
+    This is the floor the brain may stand on and not dig under. It comes from
+    the codified checklist, so it is the owner's signed number rather than
+    anything the model said.
+    """
+
+    floors: dict[tuple[str, str], int] = {}
+    industry = state.get("industry")
+    if industry and isinstance(industry.get("industry_ref"), str):
+        for item in industry.get("items", ()):
+            if isinstance(item.get("item_ref"), str):
+                floors[(industry["industry_ref"], item["item_ref"])] = _int(
+                    item.get("required"))
+    for company in state.get("companies", ()):
+        ref = company.get("company_ref")
+        if not isinstance(ref, str):
+            continue
+        for item in company.get("items", ()):
+            if isinstance(item.get("item_ref"), str):
+                floors[(ref, item["item_ref"])] = _int(item.get("required"))
+    return floors
+
+
+def _int(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
 def plan_from_response(
@@ -344,6 +442,49 @@ def plan_from_response(
             "wants": inquiry["wants"].strip(),
             "because": inquiry["because"].strip(),
         })
+    floors = _required_floors(state)
+    judgements: list[dict[str, Any]] = []
+    for index, item in enumerate(parsed["sufficiency"]):
+        if not isinstance(item, Mapping) or set(item) - {
+            "company_ref", "item_ref", "verdict", "required", "because"
+        } or not {"company_ref", "item_ref", "verdict", "because"} <= set(item):
+            raise ResearchPlanError(f"sufficiency {index} has an invalid closed shape")
+        company_ref, item_ref = item["company_ref"], item["item_ref"]
+        if item_ref not in known.get(company_ref, set()):
+            raise ResearchPlanError(
+                f"sufficiency {index} judges work that is not in the state: "
+                f"{company_ref} / {item_ref}"
+            )
+        if item["verdict"] not in ("sufficient", "insufficient"):
+            raise ResearchPlanError(f"sufficiency {index} has an unknown verdict")
+        if not isinstance(item["because"], str) or not item["because"].strip():
+            raise ResearchPlanError(f"sufficiency {index} gives no reason")
+        floor = floors.get((company_ref, item_ref), 0)
+        required = item.get("required")
+        if required is not None:
+            if isinstance(required, bool) or not isinstance(required, int):
+                raise ResearchPlanError(f"sufficiency {index} required must be an integer")
+            # The floor is the owner's signed number. A plan may decide this
+            # company needs more than the Playbook asks; it may not decide the
+            # Playbook asks for less, which would be the model editing the
+            # standard it is being measured against.
+            if required < floor:
+                raise ResearchPlanError(
+                    f"sufficiency {index} would lower {company_ref} / {item_ref} "
+                    f"below the Playbook floor of {floor}"
+                )
+            if floor and required > floor * MAX_REQUIRED_MULTIPLE:
+                raise ResearchPlanError(
+                    f"sufficiency {index} raises {company_ref} / {item_ref} beyond "
+                    f"{MAX_REQUIRED_MULTIPLE}x the Playbook floor"
+                )
+        judgements.append({
+            "company_ref": company_ref, "item_ref": item_ref,
+            "verdict": item["verdict"],
+            "floor": floor,
+            "required": floor if required is None else int(required),
+            "because": item["because"].strip(),
+        })
     plan = {
         "schema_version": SCHEMA_VERSION,
         "task_ref": TASK_REF,
@@ -361,6 +502,10 @@ def plan_from_response(
         # Additive work the codified checklist cannot anticipate. It never
         # substitutes for a checklist item, and it does not lower a bar.
         "inquiries": inquiries,
+        # Whether what is held actually answers the stage, which a count cannot
+        # say. May raise this company's bar above the Playbook floor; the floor
+        # itself stays the owner's.
+        "sufficiency": judgements,
     }
     plan["content_hash"] = content_hash(plan)
     return plan
