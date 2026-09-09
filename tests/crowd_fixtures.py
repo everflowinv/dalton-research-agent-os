@@ -85,9 +85,12 @@ def xueqiu_posts(count: int = 2, *, first_id: int = 1) -> dict[str, Any]:
 
 
 def xreach_posts(count: int = 2, *, first_id: int = 100) -> dict[str, Any]:
+    """The envelope the tool really uses: `items` and `hasMore`."""
+
     return {
         "next_cursor": None,
-        "tweets": [
+        "hasMore": False,
+        "items": [
             {
                 "id": str(first_id + index),
                 "url": f"https://example.invalid/x/{first_id + index}",

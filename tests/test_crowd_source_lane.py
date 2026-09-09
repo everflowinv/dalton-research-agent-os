@@ -341,7 +341,7 @@ class CoordinatorTests(unittest.TestCase):
 
     def coordinator(self, mission_value: Any) -> MissionCrowdSourceLaneCoordinator:
         return MissionCrowdSourceLaneCoordinator(
-            mission=lambda: mission_value, launchers=self.launchers,
+            mission=lambda: mission_value, runners=self.launchers,
             source_map=self.source_map, ledger=self.ledger,
             clock=lambda: datetime(2026, 9, 9, tzinfo=timezone.utc))
 
@@ -430,3 +430,56 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(
             self.launchers["employee-reviews"].started[0]["employer_slug"],
             "Accenture")
+
+
+class LaneRegistrationTests(unittest.TestCase):
+    """The lane is registered, and it is off on a Core that has not approved.
+
+    All seven governance records ship `proposed`, so a deployment picks this
+    lane up only once the owner has approved at least one of them and the
+    per-mission map is on disk. Until then `argv_fragment` returns nothing and
+    the writer never learns the lane exists, which is the correct behaviour for
+    a connector nobody has agreed to yet.
+    """
+
+    def setUp(self) -> None:
+        from dalton_core import lane_registry
+
+        lane_registry.load_lanes()
+        self.registry = lane_registry
+
+    def test_the_lane_is_registered_last_in_the_tick(self):
+        from dalton_core.mission_crowd_source_lane import LANE
+
+        self.assertEqual(LANE.operation, "dispatch_mission_crowd_sources")
+        self.assertEqual(self.registry.tick_lanes()[-1].operation, LANE.operation)
+
+    def test_an_empty_state_directory_leaves_the_lane_off(self):
+        from dalton_core.mission_crowd_source_lane import argv_fragment
+
+        with TemporaryDirectory() as temp:
+            context = type("Context", (), {"state": Path(temp)})()
+            self.assertEqual(argv_fragment(context), [])
+
+    def test_an_approved_record_and_a_map_turn_it_on(self):
+        from dalton_core.mission_crowd_source_lane import (
+            CROWD_SOURCE_MAP,
+            argv_fragment,
+        )
+
+        with TemporaryDirectory() as temp:
+            state = Path(temp)
+            (state / "phase9").mkdir()
+            (state / "phase9" / CROWD_SOURCE_MAP).write_text("{}", encoding="utf-8")
+            (state / "connector-governance").mkdir()
+            (state / "connector-governance"
+             / "employee-reviews-blind-v1.json").write_text("{}", encoding="utf-8")
+            context = type("Context", (), {"state": state})()
+            fragment = argv_fragment(context)
+            self.assertIn("--crowd-source-map", fragment)
+
+    def test_a_writer_without_the_lane_says_so_rather_than_crashing(self):
+        from dalton_core.mission_crowd_source_lane import dispatch
+
+        server = type("Server", (), {"lane_launcher": lambda self, key: None})()
+        self.assertEqual(dispatch(server, {})["status"], "unconfigured")

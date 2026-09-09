@@ -255,6 +255,10 @@ def build_wire(
 def run(args: argparse.Namespace) -> dict[str, Any]:
     state = Path(args.state_dir).expanduser().resolve()
     summary_dir = Path(args.summary_dir).expanduser().resolve() if args.summary_dir else state
+    # A refusal must be able to say why, and it cannot if the directory it
+    # would say it in does not exist. The launcher always makes the ticket
+    # directory first; a person running the child by hand does not.
+    summary_dir.mkdir(parents=True, exist_ok=True)
     summary: dict[str, Any] = {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
@@ -346,6 +350,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-network", action="store_true")
     parser.add_argument("--fixture-file", default=None,
                         help="replay a captured page instead of reaching the site")
+    parser.add_argument("--emit-wire", action="store_true",
+                        help="print the validated wire on stdout, for a runner "
+                             "that records it rather than reading the summary")
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -360,7 +367,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.deadline_seconds <= 0:
         parser.error("--deadline-seconds must be positive")
     summary = run(args)
-    if not args.quiet:
+    # One JSON document on stdout is the contract a host-tool runner reads:
+    # it records the wire and never has to know where the summary was written.
+    # The summary is written either way, because a refusal has no wire and
+    # still has a reason.
+    if args.emit_wire:
+        print(json.dumps(summary["observation"], ensure_ascii=False))
+    elif not args.quiet:
         print(json.dumps({key: summary[key] for key in (
             "status", "failure_reason", "record_count", "body_locked_count",
         )}, ensure_ascii=False, indent=1))

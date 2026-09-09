@@ -46,6 +46,7 @@ from .lane_child_launcher import (
     LaneChildRejected,
     LaneChildTicketNotFound,
 )
+from .lane_registry import LaneSpec, register_lane
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -290,7 +291,18 @@ def _failure_reason(summary: Any) -> str | None:
 
 
 class MissionCrowdSourceLaneCoordinator:
-    """One bounded child per source per tick, over the mission's companies."""
+    """One bounded child per source per tick, over the mission's companies.
+
+    **The runner seam.** ``runners`` maps a source name to whatever executes
+    that source's child. This coordinator asks each entry for three things and
+    nothing else: ``SOURCE_REF``, ``start(operation=..., actor_ref=...,
+    **params)`` returning a ticket with an ``id``, and ``status(ticket_ref)``
+    returning ``{"status": ..., "summary": ...}``. Today the entries are the
+    launchers in ``crowd_source_launcher``; a shared host-tool runner that
+    wraps the same children in a ConnectorInvocation and a SourceEnvelope
+    satisfies the same three, and swapping it in changes what is passed here
+    and nothing in this class. The tests pass a fake through the same door.
+    """
 
     GRANTS = LANE_GRANTS
 
@@ -298,7 +310,7 @@ class MissionCrowdSourceLaneCoordinator:
         self,
         *,
         mission: Callable[[], Mapping[str, Any] | None],
-        launchers: Mapping[str, Any],
+        runners: Mapping[str, Any],
         source_map: Mapping[str, Any],
         ledger: CrowdObservationLedger,
         actor_ref: str = "automation:coverage-mission",
@@ -306,7 +318,7 @@ class MissionCrowdSourceLaneCoordinator:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.mission = mission
-        self.launchers = dict(launchers)
+        self.runners = dict(runners)
         self.companies = list(source_map["companies"])
         self.ledger = ledger
         self.actor_ref = actor_ref
@@ -392,9 +404,9 @@ class MissionCrowdSourceLaneCoordinator:
         if open_run is None:
             return None
         ticket_ref, company_ref, operation = open_run
-        launcher = self.launchers[source]
+        runner = self.runners[source]
         try:
-            ticket = launcher.status(ticket_ref)
+            ticket = runner.status(ticket_ref)
         except LaneChildTicketNotFound:
             self._open.pop(source, None)
             return {"source": source, "company_ref": company_ref,
@@ -413,7 +425,7 @@ class MissionCrowdSourceLaneCoordinator:
                     "outcome": "failed", "failure_reason": reason}
         try:
             entries = observation_entries(
-                source_ref=launcher.SOURCE_REF, company_ref=company_ref,
+                source_ref=runner.SOURCE_REF, company_ref=company_ref,
                 operation=operation, summary=summary,
                 observed_at=self.clock().astimezone(timezone.utc)
                 .isoformat(timespec="microseconds"),
@@ -434,12 +446,12 @@ class MissionCrowdSourceLaneCoordinator:
     # -- launching ---------------------------------------------------------
 
     def _launch(self, source: str, connected: set[str]) -> dict[str, Any]:
-        launcher = self.launchers[source]
+        runner = self.runners[source]
         if source in self._open:
             return {"source": source, "status": "busy"}
-        if launcher.SOURCE_REF not in connected:
+        if runner.SOURCE_REF not in connected:
             return {"source": source, "status": "held",
-                    "reason": f"{launcher.SOURCE_REF} is not connected in this "
+                    "reason": f"{runner.SOURCE_REF} is not connected in this "
                               "mission version"}
         job = self._next_job(source)
         if job is None:
@@ -448,8 +460,8 @@ class MissionCrowdSourceLaneCoordinator:
         operation = job.pop("operation")
         params = {key: value for key, value in job.items() if value}
         try:
-            ticket = launcher.start(operation=operation, actor_ref=self.actor_ref,
-                                    **params)
+            ticket = runner.start(operation=operation, actor_ref=self.actor_ref,
+                                  **params)
         except LaneChildConflict as exc:
             return {"source": source, "status": "deferred",
                     "reason": f"{type(exc).__name__}: {exc}"}
@@ -472,10 +484,10 @@ class MissionCrowdSourceLaneCoordinator:
             return {**gated, "settled": [], "sources": []}
         connected = self._connected_sources()
         settled = [item for item in
-                   (self._settle(source) for source in sorted(self.launchers))
+                   (self._settle(source) for source in sorted(self.runners))
                    if item is not None]
         sources = [self._launch(source, connected)
-                   for source in sorted(self.launchers)]
+                   for source in sorted(self.runners)]
         launched = [item for item in sources if item["status"] == "launched"]
         return {
             "status": "launched" if launched else "idle",
@@ -484,8 +496,187 @@ class MissionCrowdSourceLaneCoordinator:
         }
 
 
+# -- the lane ----------------------------------------------------------------
+
+# The approved records this lane runs under, named by version rather than
+# discovered, so a future v2 is a deliberate edit here and not something the
+# writer picks up because a file appeared. One per operation, because a schema
+# hash binds one operation.
+GOVERNANCE_FILES = {
+    "xueqiu": {
+        "search_posts": "xueqiu-search-posts-v1.json",
+        "get_post": "xueqiu-get-post-v1.json",
+        "hot_rank": "xueqiu-hot-rank-v1.json",
+    },
+    "x": {
+        "user_timeline": "x-xreach-user-timeline-v1.json",
+        "search": "x-xreach-search-v1.json",
+        "thread": "x-xreach-thread-v1.json",
+    },
+    "employee-reviews": {"blind_reviews": "employee-reviews-blind-v1.json"},
+}
+CROWD_SOURCE_MAP = "p9-us-it-services-crowd-sources-v1.json"
+LAUNCHER_KWARG = "crowd_source_launcher"
+
+
+def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Controller tick (S3).
+
+    At most one child per source per tick. The coordinator is cached across
+    ticks because what it holds is which child is in flight and how far round
+    the company list each source has got -- process state, deliberately not a
+    table, because losing it costs one duplicate read and nothing else.
+    """
+
+    launchers = server.lane_launcher(LAUNCHER_KWARG)
+    if not launchers:
+        return {"status": "unconfigured",
+                "reason": "no crowd-source lane on this writer"}
+    coordinator = server.lane_state.get(LAUNCHER_KWARG)
+    if coordinator is None:
+        def mission() -> Any:
+            pointer = server.store.connection.execute(
+                "SELECT mission_version_id FROM coverage_mission_pointer "
+                "ORDER BY mission_ref LIMIT 1"
+            ).fetchone()
+            return (None if pointer is None
+                    else server.coverage_mission.mission(pointer["mission_version_id"]))
+
+        coordinator = MissionCrowdSourceLaneCoordinator(
+            mission=mission,
+            runners=launchers.by_source,
+            source_map=load_crowd_source_map(launchers.source_map_path),
+            ledger=CrowdObservationLedger(
+                Path(launchers.state_dir) / LEDGER_FILENAME),
+        )
+        server.lane_state[LAUNCHER_KWARG] = coordinator
+    return coordinator.dispatch_once()
+
+
+def add_arguments(parser: Any) -> None:
+    # Off unless the map is named. Without it there is nothing to ask any of
+    # the three sources, because none of the three can be asked about a company
+    # by ticker.
+    parser.add_argument("--crowd-source-map",
+                        help="per-mission handles, queries and employer slugs")
+    parser.add_argument("--crowd-source-governance-dir",
+                        help="directory holding the seven approved records")
+    parser.add_argument("--crowd-source-xueqiu-tool", default=None)
+    parser.add_argument("--crowd-source-xueqiu-fallback-tool", default=None)
+    parser.add_argument("--crowd-source-xreach-tool", default=None)
+    parser.add_argument("--crowd-source-credential-grant", default=None,
+                        help="host grant envelope naming the cookie slots")
+    parser.add_argument("--crowd-source-fixture", default=None,
+                        help="rehearsal only: replay a captured run")
+
+
+def build_launcher(args: Any) -> Any | None:
+    """Build whichever of the three this Core is configured for.
+
+    A source with no approved record is simply absent rather than present and
+    broken: an absent source reports nothing, and a present one that refuses
+    every tick fills the tick summary with the same sentence forever.
+    """
+
+    if args.crowd_source_map is None:
+        return None
+    from .crowd_source_launcher import (
+        CrowdSourceLaunchers,
+        EmployeeReviewsLauncher,
+        XreachLauncher,
+        XueqiuLauncher,
+    )
+
+    state_dir = Path(args.db).expanduser().resolve().parent
+    governance_dir = Path(
+        args.crowd_source_governance_dir or (state_dir / "connector-governance")
+    ).expanduser().resolve()
+    mode_args = (
+        ("--fixture-file", args.crowd_source_fixture)
+        if args.crowd_source_fixture is not None else ("--allow-network",)
+    )
+
+    def paths(source: str) -> dict[str, Path]:
+        found = {}
+        for operation, name in GOVERNANCE_FILES[source].items():
+            candidate = governance_dir / name
+            if candidate.is_file():
+                found[operation] = candidate
+        return found
+
+    built: dict[str, Any] = {}
+    xueqiu_paths = paths("xueqiu")
+    if xueqiu_paths:
+        built["xueqiu"] = XueqiuLauncher(
+            state_dir=state_dir, governance_paths=xueqiu_paths,
+            credential_grant_path=args.crowd_source_credential_grant,
+            tool=args.crowd_source_xueqiu_tool,
+            fallback_tool=args.crowd_source_xueqiu_fallback_tool,
+            mode_args=mode_args,
+        )
+    x_paths = paths("x")
+    if x_paths:
+        built["x"] = XreachLauncher(
+            state_dir=state_dir, governance_paths=x_paths,
+            credential_grant_path=args.crowd_source_credential_grant,
+            tool=args.crowd_source_xreach_tool, mode_args=mode_args,
+        )
+    review_paths = paths("employee-reviews")
+    if review_paths:
+        built["employee-reviews"] = EmployeeReviewsLauncher(
+            state_dir=state_dir, governance_paths=review_paths,
+            mode_args=mode_args,
+        )
+    if not built:
+        return None
+    launchers = CrowdSourceLaunchers(**built)
+    launchers.state_dir = state_dir
+    launchers.source_map_path = Path(args.crowd_source_map).expanduser().resolve()
+    return launchers
+
+
+def argv_fragment(context: Any) -> list[str]:
+    # Enabled by the map and at least one approved record being on disk, and
+    # off on a Core with neither -- which is every Core until the owner
+    # approves, because all seven records ship proposed.
+    source_map = context.state / "phase9" / CROWD_SOURCE_MAP
+    governance = context.state / "connector-governance"
+    approved = [name for names in GOVERNANCE_FILES.values()
+                for name in names.values()
+                if (governance / name).is_file()]
+    if not source_map.is_file() or not approved:
+        return []
+    return ["--crowd-source-map", str(source_map),
+            "--crowd-source-governance-dir", str(governance)]
+
+
+LANE = register_lane(LaneSpec(
+    operation="dispatch_mission_crowd_sources",
+    # Last in the tick. The crowd is the least of the evidence, and a tick that
+    # runs out of time should run out of it here rather than before a filing.
+    order=120,
+    driver_key="mission_crowd_sources",
+    handler=dispatch,
+    init_kwarg=LAUNCHER_KWARG,
+    argparse=add_arguments,
+    launcher_factory=build_launcher,
+    argv_fragment=argv_fragment,
+    note="S3: what the crowd is saying about a covered company -- Xueqiu, X "
+         "and anonymous employee reviews. Observation-class evidence at the "
+         "lowest importance; never the sole source of a number.",
+))
+
+
 __all__ = [
     "CROWD_BASIS",
+    "CROWD_SOURCE_MAP",
+    "GOVERNANCE_FILES",
+    "LANE",
+    "LAUNCHER_KWARG",
+    "add_arguments",
+    "argv_fragment",
+    "build_launcher",
+    "dispatch",
     "CROWD_GRADE",
     "CROWD_IMPORTANCE",
     "CROWD_QUALIFIER",

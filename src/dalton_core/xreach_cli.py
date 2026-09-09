@@ -216,9 +216,14 @@ def build_wire(
 ) -> dict[str, Any]:
     rows = raw
     next_cursor = None
+    has_more = False
     if isinstance(raw, Mapping):
         next_cursor = _text(raw.get("next_cursor") or raw.get("cursor"))
-        for key in ("posts", "tweets", "results", "data"):
+        # `items` is what the tool actually returns; the rest are accepted
+        # because a CLI that renames its envelope key should not silently
+        # produce an empty timeline, which reads exactly like a quiet account.
+        has_more = bool(raw.get("hasMore"))
+        for key in ("items", "posts", "tweets", "results", "data"):
             if isinstance(raw.get(key), list):
                 rows = raw[key]
                 break
@@ -229,7 +234,8 @@ def build_wire(
     return {
         "schema_version": "0.1",
         "operation": operation,
-        "completeness": completeness_for(operation, next_cursor=next_cursor),
+        "completeness": completeness_for(
+            operation, next_cursor=next_cursor or ("more" if has_more else None)),
         "posts": posts,
         "source_record_refs": list(source_record_refs),
         "next_cursor": next_cursor,
@@ -240,6 +246,10 @@ def build_wire(
 def run(args: argparse.Namespace) -> dict[str, Any]:
     state = Path(args.state_dir).expanduser().resolve()
     summary_dir = Path(args.summary_dir).expanduser().resolve() if args.summary_dir else state
+    # A refusal must be able to say why, and it cannot if the directory it
+    # would say it in does not exist. The launcher always makes the ticket
+    # directory first; a person running the child by hand does not.
+    summary_dir.mkdir(parents=True, exist_ok=True)
     summary: dict[str, Any] = {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
@@ -344,6 +354,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--summary-dir", default=None)
     parser.add_argument("--allow-network", action="store_true")
     parser.add_argument("--fixture-file", default=None)
+    parser.add_argument("--emit-wire", action="store_true",
+                        help="print the validated wire on stdout, for a runner "
+                             "that records it rather than reading the summary")
     parser.add_argument("--quiet", action="store_true")
     return parser
 
@@ -364,7 +377,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.deadline_seconds <= 0:
         parser.error("--deadline-seconds must be positive")
     summary = run(args)
-    if not args.quiet:
+    # One JSON document on stdout is the contract a host-tool runner reads:
+    # it records the wire and never has to know where the summary was written.
+    # The summary is written either way, because a refusal has no wire and
+    # still has a reason.
+    if args.emit_wire:
+        print(json.dumps(summary["observation"], ensure_ascii=False))
+    elif not args.quiet:
         print(json.dumps({key: summary[key] for key in (
             "status", "failure_reason", "operation", "record_count",
         )}, ensure_ascii=False, indent=1))

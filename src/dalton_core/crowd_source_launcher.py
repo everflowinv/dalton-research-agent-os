@@ -304,8 +304,39 @@ LAUNCHER_BY_SOURCE = {
 }
 
 
+class CrowdSourceLaunchers:
+    """The three launchers as one object, because a lane arrives on one kwarg.
+
+    A ``LaneSpec`` names a single ``init_kwarg``, and the writer stores and
+    closes whatever arrives on it. This lane has three children, so what
+    arrives is this: a mapping the coordinator reads and a ``close`` the writer
+    calls.
+
+    **The seam.** The coordinator does not care that these are launchers. What
+    it needs from each entry is ``SOURCE_REF``, ``start(operation=...,
+    actor_ref=..., **params)`` returning a ticket with an ``id``, and
+    ``status(ticket_ref)`` returning ``{"status": ..., "summary": ...}``. A
+    shared host-tool runner that records a ConnectorInvocation and a
+    SourceEnvelope around the same children satisfies that contract, and
+    swapping it in is a change to this class and to nothing else. The tests
+    inject a fake through the same door.
+    """
+
+    def __init__(self, **by_source: Any) -> None:
+        self.by_source = {name: launcher for name, launcher in by_source.items()
+                          if launcher is not None}
+
+    def __bool__(self) -> bool:
+        return bool(self.by_source)
+
+    def close(self) -> None:
+        for launcher in self.by_source.values():
+            launcher.close()
+
+
 __all__ = [
     "LAUNCHER_BY_SOURCE",
+    "CrowdSourceLaunchers",
     "LIVE_MODE_ARGS",
     "MAX_HANDLE_CHARS",
     "MAX_QUERY_CHARS",

@@ -59,6 +59,8 @@ LANE_OPERATIONS = frozenset({
     "dispatch_company_model_spec",
     "dispatch_research_plan",
     "dispatch_initial_screen",
+    # S3: the crowd lane, added after P14-0 rather than migrated into it.
+    "dispatch_mission_crowd_sources",
 })
 CORE_DISCOVERY_OPERATIONS = frozenset({
     "dispatch_mission_source_discovery", "mission_source_discovery_status",
@@ -69,6 +71,7 @@ CORE_DISCOVERY_OPERATIONS = frozenset({
     "mission_deliverables",
     "dispatch_mission_sec_quarters", "dispatch_mission_statements",
     "dispatch_company_model_spec",
+    "dispatch_mission_crowd_sources",
 })
 # The controller tick's lane order, as run_once ran it before P14-0.
 TICK_ORDER = (
@@ -81,6 +84,8 @@ TICK_ORDER = (
     ("dispatch_company_model_spec", "company_model_spec"),
     ("dispatch_research_plan", "research_plan"),
     ("dispatch_initial_screen", "initial_screen"),
+    # Last, because the crowd is the least of the evidence.
+    ("dispatch_mission_crowd_sources", "mission_crowd_sources"),
 )
 LANE_PARAM_FIELDS = {
     "dispatch_claim_review": frozenset({"max_claims"}),
@@ -410,7 +415,10 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
             {spec.init_kwarg for spec in registered_lanes()
              if spec.init_kwarg is not None},
             {"statement_lane_launcher", "model_spec_launcher",
-             "initial_screen_launcher", "research_planner_launcher"},
+             "initial_screen_launcher", "research_planner_launcher",
+             # S3: a lane arrives on one kwarg, so the three crowd launchers
+             # arrive as one object that holds them.
+             "crowd_source_launcher"},
         )
 
     def test_an_unknown_launcher_keyword_is_refused(self) -> None:
