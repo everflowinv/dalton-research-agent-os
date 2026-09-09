@@ -1210,6 +1210,79 @@ class MissionSourceDiscoveryCoordinator:
         return document_in_authority(self.store.connection, document_ref)
 
     # -- discovery launch ----------------------------------------------------
+    def _plan_decision(self, mission: Mapping[str, Any], company_ref: str,
+                       spec_ref: str) -> tuple[str | None, str | None]:
+        """What the current plan says about this (subject, spec), if anything.
+
+        P13v: this is the seam the whole planner exists for. Cadence and the
+        overshoot ceiling are the deterministic floor -- they stop obvious
+        waste without anyone deciding anything. A plan can move in either
+        direction on top of that: `stop` refuses work the floor would have
+        allowed, and `search` or `acquire` allows work it would have blocked.
+
+        Returns (block_reason, allow_reason); at most one is set. A plan that
+        says nothing about this pair leaves the floor to decide, which is why
+        an empty plan changes nothing rather than stopping everything.
+        """
+
+        from .mission_stage import INDUSTRY_BASE_ITEMS, SOURCE_BASE_ITEMS
+
+        item = next(
+            (i for i in (*SOURCE_BASE_ITEMS, *INDUSTRY_BASE_ITEMS)
+             if spec_ref in i["spec_refs"]),
+            None,
+        )
+        if item is None:
+            return None, None
+        try:
+            plan = self.missions.latest_research_plan(mission["id"])
+        except Exception:  # noqa: BLE001 - an unreadable plan is not a decision
+            return None, None
+        if not plan:
+            return None, None
+        # An industry item is addressed as the industry, not as a company.
+        subjects = {company_ref}
+        if item in INDUSTRY_BASE_ITEMS and mission.get("industry_ref"):
+            subjects = {mission["industry_ref"]}
+        for directive in plan.get("directives", ()):
+            if directive.get("item_ref") != item["item_ref"]:
+                continue
+            if directive.get("company_ref") not in subjects:
+                continue
+            reason = str(directive.get("reason") or "")[:160]
+            if directive.get("action") == "stop":
+                return f"the plan says stop: {reason}", None
+            if directive.get("action") in ("search", "acquire"):
+                return None, f"the plan asks for this: {reason}"
+        return None, None
+
+    def _spec_block(self, mission: Mapping[str, Any], company_ref: str,
+                    spec: Mapping[str, Any]) -> str | None:
+        """Why this (company, spec) is not searched now, or None to search it.
+
+        Three gates, in this order, and the order is the design:
+
+        1. the **plan**, when it has an opinion. `stop` refuses work the floor
+           would have allowed; `search` or `acquire` allows work the floor
+           would have blocked. This runs first or the floor would pre-empt the
+           decision the planner exists to make.
+        2. the **overshoot ceiling**, when the plan is silent -- the
+           deterministic floor that stops obvious waste with nobody deciding.
+        3. the **cadence**, always. A plan may say "search this"; it may not
+           say "search this every five minutes", and an open dispatch is still
+           an open dispatch.
+        """
+
+        spec_ref = spec["spec_ref"]
+        planned_block, planned_allow = self._plan_decision(mission, company_ref, spec_ref)
+        if planned_block is not None:
+            return planned_block
+        if planned_allow is None:
+            satisfied = self._satisfied_block(mission, company_ref, spec_ref)
+            if satisfied is not None:
+                return satisfied
+        return self._cadence_block(mission["id"], company_ref, spec)
+
     def _satisfied_block(self, mission: Mapping[str, Any], company_ref: str,
                          spec_ref: str) -> str | None:
         """Whether the checklist item this spec feeds already has more than enough.
@@ -1339,9 +1412,7 @@ class MissionSourceDiscoveryCoordinator:
                 skipped.append({"company_ref": company_ref, "reason": "not in discovery plan"})
                 continue
             for spec in self.plan["specs"]:
-                block = self._satisfied_block(mission, company_ref, spec["spec_ref"])
-                if block is None:
-                    block = self._cadence_block(mission["id"], company_ref, spec)
+                block = self._spec_block(mission, company_ref, spec)
                 if block is not None:
                     skipped.append({
                         "company_ref": company_ref, "spec_ref": spec["spec_ref"], "reason": block,

@@ -31,7 +31,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .cockpit_model import CockpitModel, CockpitModelError
 from .scheduler import SchedulerError
@@ -76,8 +76,72 @@ def _write_owner_only(path: Path, value: Any) -> None:
     os.replace(tmp, path)
 
 
+def read_spend(store: DaltonStore, mission: Mapping[str, Any], *,
+               budget_db: Path | None, as_of: datetime) -> dict[str, Any]:
+    """What has actually been spent, per lane, against what it is allowed.
+
+    P13u: the first Astra plan said so itself -- "spend is not reported, so
+    remaining capacity cannot be calculated" -- because this was passed empty.
+    A planner that cannot see what is left will rank work it cannot afford,
+    and cannot tell "stop, that is exhausted" from "stop, that is finished".
+
+    Every number is read, never estimated. A lane whose ledger cannot be read
+    is reported absent rather than as zero: zero spend and unknown spend lead
+    to opposite decisions.
+    """
+
+    from .bounded_alphaengine_probe import count_recent_alphaengine_calls
+    from .public_web_core_fetch import count_recent_public_web_fetch_calls
+    from .public_web_core_search import count_recent_web_search_calls
+
+    spend: dict[str, Any] = {}
+    budget = mission.get("budget") or {}
+    try:
+        calls = count_recent_alphaengine_calls(store.connection, as_of=as_of)
+        cap = int(budget.get("max_alphaengine_calls_24h") or 0)
+        spend["alphaengine_24h"] = {
+            "spent": calls, "cap": cap, "remaining": max(0, cap - calls),
+        }
+    except Exception:  # noqa: BLE001 - unreadable is not zero
+        pass
+    try:
+        spend["web_search_24h"] = {
+            "searches": count_recent_web_search_calls(store.connection, as_of=as_of),
+            "fetches": count_recent_public_web_fetch_calls(store.connection, as_of=as_of),
+        }
+    except Exception:  # noqa: BLE001
+        pass
+    if budget_db is not None and Path(budget_db).is_file():
+        try:
+            import sqlite3
+
+            day = as_of.date().isoformat()
+            read = sqlite3.connect(f"file:{Path(budget_db)}?mode=ro", uri=True)
+            try:
+                row = read.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(actual_micros),0) "
+                    "FROM thesis_impact_day_settlements WHERE substr(created_at,1,10)=?",
+                    (day,),
+                ).fetchone()
+            finally:
+                read.close()
+            cap_usd = float(budget.get("max_daily_cost_usd") or 0)
+            spent_usd = round(int(row[1]) / 1_000_000, 4)
+            spend["model_today"] = {
+                "calls": int(row[0]),
+                "cost_usd": spent_usd,
+                "cost_cap_usd": cap_usd,
+                "remaining_usd": round(max(0.0, cap_usd - spent_usd), 4),
+                "call_cap": int(budget.get("max_daily_paid_calls") or 0),
+            }
+        except Exception:  # noqa: BLE001
+            pass
+    return spend
+
+
 def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
-                mission: dict[str, Any], *, plans_dir: Path, as_of: str) -> dict[str, Any]:
+                mission: dict[str, Any], *, plans_dir: Path, as_of: str,
+                budget_db: Path | None = None) -> dict[str, Any]:
     """Assemble everything the planner is allowed to see, and nothing else."""
 
     planned = planned_spec_refs_from_directory(plans_dir)
@@ -99,7 +163,10 @@ def build_state(store: DaltonStore, missions: CoverageMissionAuthority,
     return build_research_state(
         mission=mission, checklist=checklist, industry=industry,
         figures_by_company=figures, metrics_by_company=metrics,
-        budget=mission["budget"], spend={}, as_of=as_of,
+        budget=mission["budget"],
+        spend=read_spend(store, mission, budget_db=budget_db,
+                         as_of=datetime.fromisoformat(as_of)),
+        as_of=as_of,
     )
 
 
@@ -143,6 +210,7 @@ def run_planner(
             store, missions, mission,
             plans_dir=plans_dir or (state_dir / "discovery-plans"),
             as_of=now.isoformat(timespec="microseconds"),
+            budget_db=state_dir / "thesis-impact-budget.sqlite",
         )
         summary["state_hash"] = state["content_hash"]
         summary["digest"] = state_digest(state)
