@@ -219,8 +219,17 @@ class AgendaControlPlane:
         dashboard_client: WriterClient | None = None,
         timeout_client: WriterClient | None = None,
         governance_call: Any = ephemeral_call,
+        research_task_grant: Any = None,
     ) -> None:
         self.config = config
+        # P14e: ``adhoc_research_enabled`` was the literal ``False``.  It is
+        # now a question with an answer -- "does the active mission grant
+        # research_task, and has the owner published an ad-hoc ProbeTemplate an
+        # executor can run" -- asked of whoever can see the Core.  The cockpit
+        # process holds no Core handle, so the resolver is injected; absent, the
+        # honest answer is still no, and it is no because nothing said yes
+        # rather than because a constant said so.
+        self.research_task_grant = research_task_grant
         principals = None
         if dashboard_client is None or timeout_client is None:
             principals = load_principals(config.token_config)
@@ -267,8 +276,24 @@ class AgendaControlPlane:
                 "answer_direct", "answer_after_refresh", "recommend_agenda_item",
             ],
             "refresh_enabled": True,
-            "adhoc_research_enabled": False,
+            "adhoc_research_enabled": self.adhoc_research_enabled(),
         }
+
+    def adhoc_research_enabled(self) -> bool:
+        """Whether ad-hoc research is granted, never raising to say so.
+
+        The authoritative gate is the research-task lane's own, which reads the
+        mission and the probe catalogue in the writer.  This is the same
+        predicate for display; a resolver that cannot answer is not a licence.
+        """
+
+        if self.research_task_grant is None:
+            return False
+        try:
+            decision = self.research_task_grant()
+        except Exception:  # noqa: BLE001 - a display flag never breaks the view
+            return False
+        return bool(isinstance(decision, Mapping) and decision.get("granted"))
 
     def route_answer(
         self, subject_binding: Mapping[str, Any], question: str

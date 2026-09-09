@@ -1,0 +1,60 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:company-wiki:0.1",
+  "adapter_source_hash": "8ee58f36a33bcc2aefed608c1c876764c9169f50632eedac73f3cf02abde3abb",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:company-wiki:0.1",
+  "connector_ref": "connector:company-wiki",
+  "content_hash": "014439d2db59589c62f92061a98243ad231e19f9e12cefafb74d484ea72b669d",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "f41998992c0ad391c3034328384d9b63bbf6ad860a45ac58693a629e9d07f557",
+  "fixture_manifest_ref": "connector-fixture-manifest:company-wiki:0.1",
+  "id": "connector-proposal-manifest:company-wiki:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "e986342f2870c8af55cef1138307d8c41d8ee9e287204c73bba864cab52c081e",
+      "input_schema_ref": "schema:connector-inventory:company-wiki:list_documents:input:0.1",
+      "operation": "list_documents",
+      "output_schema_hash": "98aff7e4cd4ddec5ea3c9fb5580b604817d4073531015c8b278e4ea391d42f3f",
+      "output_schema_ref": "schema:connector-inventory:company-wiki:list_documents:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "e6bc44dc692e7cf12a96ace793c310f139a752e011a2f22bb85ed560f55ffc57",
+      "input_schema_ref": "schema:connector-inventory:company-wiki:get_document:input:0.1",
+      "operation": "get_document",
+      "output_schema_hash": "8e3c19c7f7ee00a5bd4295c54b303bddc75e300e9367ba479c34ec015b6f9625",
+      "output_schema_ref": "schema:connector-inventory:company-wiki:get_document:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "47dd51f923d379710a9a4884c0912ed7fe15d63cddf7e6b95fb5f5095d186bf4",
+  "profile_template_ref": "connector-profile-template:company-wiki:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "host-tool:company-wiki-corpus",
+    "adapter_version": "inventory-0.1",
+    "source": "source:company-wiki",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "host_tool",
+  "transport_target_hash": "815d93d090740d812c1e0b786d632b8404aa9509c485c818de55cbfe85e6837a",
+  "transport_target_ref": "host-tool:company-wiki-corpus"
+}
