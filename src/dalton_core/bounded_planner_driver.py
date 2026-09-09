@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .bounded_probe_executor import (
     WORKER_REF,
@@ -25,6 +25,7 @@ from .bounded_probe_executor import (
 from .lane_registry import RESERVED_DRIVER_KEYS, tick_lanes
 from .public_http_transport import PublicHttpTransport
 from .scheduler import Scheduler
+from .store import content_hash
 from .writer_client import WriterClient
 
 
@@ -32,6 +33,10 @@ DEFAULT_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_MAX_PROBES_PER_TICK = 1
 DEFAULT_FILED_WINDOW_DAYS = 400
+# What one loop's planner call is allowed to cost when the deployment does not
+# say.  Named because P14e's ad-hoc pool reserves against exactly this number
+# and a second copy of a price is a price that drifts.
+DEFAULT_PLANNER_MAX_COST_USD = 0.5
 
 
 class BoundedPlannerDriverError(RuntimeError):
@@ -198,7 +203,8 @@ class BoundedPlannerDriverConfig:
             planner_broker_client_id=(planner_client_id or "client:dalton-core"),
             planner_expected_agent_id=planner_agent,
             planner_max_cost_usd=float(
-                planner_max_cost if planner_max_cost is not None else 0.5
+                planner_max_cost if planner_max_cost is not None
+                else DEFAULT_PLANNER_MAX_COST_USD
             ),
             **paths, **numbers,
         )
@@ -211,6 +217,47 @@ _RESERVED_SUMMARY_KEYS: frozenset[str] = frozenset({
     "status", "active_loop_count", "probes_executed", "executed", "skipped",
     "mission_sec_dispatch", "forecast_reconciliation",
 })
+
+
+def _refused_probe_envelope(work: Mapping[str, Any], exc: BaseException) -> dict[str, Any]:
+    """A failed ResultEnvelope for a probe the executor would not run.
+
+    The executors refuse a WorkOrder outside their scope or operation by
+    raising, and that raise leaves the round admitted with no outcome -- which
+    is the one state a loop cannot leave.  It stays pending forever, every
+    later tick refuses to materialize its context, and nothing about the
+    summary says the loop is stuck rather than merely quiet.
+
+    A refusal is a source that could not be read, which the loop already has a
+    word for.  Recording it as a failed round spends one of the loop's rounds
+    and lets the next proposal be a terminal one; the loop ends, honestly,
+    instead of stalling.
+    """
+
+    identity = {
+        "work_order_ref": work.get("id"),
+        "refusal": f"{type(exc).__name__}: {exc}",
+    }
+    digest = content_hash(identity)[:32]
+    return {
+        "schema_version": "0.1",
+        "id": f"result:bounded-probe-refused:{digest}",
+        "created_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+        "work_order_ref": work.get("id"),
+        "invocation_ref": f"invocation:bounded-probe-refused:{digest}",
+        "status": "failed",
+        "outputs": {},
+        # Nothing ran, so nothing was touched: the empty set is a subset of
+        # whatever the template declared, which is what the outcome checks.
+        "actual_side_effects": [],
+        "usage_refs": [],
+        "artifact_refs": [],
+        "error": {
+            "code": "PROBE_EXECUTOR_REFUSED",
+            "message": f"{type(exc).__name__}: {exc}",
+        },
+        "metadata": {"probe": "refused", "bytes_written": 0},
+    }
 
 
 class BoundedPlannerDriver:
@@ -238,6 +285,20 @@ class BoundedPlannerDriver:
         self.client = client
         self.transport = transport or PublicHttpTransport()
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _model_proposal(self, context: Mapping[str, Any]) -> dict[str, Any]:
+        """One bounded model attempt for a loop that can act on the answer."""
+
+        try:
+            return self.client.call("llm_planner_execute", {
+                "context_pack_ref": context["id"],
+                "max_input_tokens": 16_000,
+                "max_output_tokens": 1_200,
+                "max_cost_usd": self.config.planner_max_cost_usd,
+                "max_seconds": 180,
+            })
+        except Exception as exc:  # noqa: BLE001 - one loop's failure is not the tick's
+            return {"status": f"unavailable:{type(exc).__name__}"}
 
     def run_once(self) -> dict[str, Any]:
         try:
@@ -300,21 +361,28 @@ class BoundedPlannerDriver:
                         },
                     )
                 except Exception as exc:
+                    # Materializing is free and refuses outright while a round
+                    # is pending, so this is where a stalled loop is learned --
+                    # before any model call.  Naming it as the pending round it
+                    # is keeps it from reading as a broken doctrine pack.
+                    pending = "round is pending" in str(exc)
                     skipped.append({
                         "loop_version_ref": loop["loop_version_ref"],
-                        "reason": f"doctrine_context_unavailable:{type(exc).__name__}",
+                        "reason": (
+                            "pending_round" if pending
+                            else f"doctrine_context_unavailable:{type(exc).__name__}"
+                        ),
                     })
                     continue
-                try:
-                    executed_model = self.client.call("llm_planner_execute", {
-                        "context_pack_ref": context["id"],
-                        "max_input_tokens": 16_000,
-                        "max_output_tokens": 1_200,
-                        "max_cost_usd": self.config.planner_max_cost_usd,
-                        "max_seconds": 180,
-                    })
-                except Exception as exc:
-                    executed_model = {"status": f"unavailable:{type(exc).__name__}"}
+                remaining = context.get("remaining_budget") or {}
+                if int(remaining.get("rounds_remaining", 1)) < 1:
+                    # A loop with no round left cannot probe, so a model asked
+                    # what to probe next is money spent on an answer that
+                    # cannot be admitted.  The deterministic planner is free
+                    # and can still propose the terminal this loop needs.
+                    executed_model = {"status": "budget_exhausted"}
+                else:
+                    executed_model = self._model_proposal(context)
                 if executed_model.get("status") == "proposal_ready":
                     proposal = executed_model["proposal"]
                 elif executed_model.get("status") == "core_action":
@@ -379,20 +447,26 @@ class BoundedPlannerDriver:
                     )
                 work = authority["work_order"]
                 operation = (work.get("metadata") or {}).get("operation")
-                if operation == "alphaengine_get_document":
-                    envelope = self.client.call("bounded_alphaengine_probe", {
-                        "work_order": work,
-                    })
+                try:
+                    if operation == "alphaengine_get_document":
+                        envelope = self.client.call("bounded_alphaengine_probe", {
+                            "work_order": work,
+                        })
+                    else:
+                        envelope = execute_probe_work_order(
+                            work,
+                            transport=self.transport,
+                            user_agent=self.config.user_agent,
+                            max_response_bytes=int(self.config.max_response_bytes),
+                            timeout_seconds=float(self.config.timeout_seconds),
+                            filed_window_days=int(self.config.filed_window_days),
+                            clock=self.clock,
+                        )
+                except Exception as exc:  # noqa: BLE001 - see the envelope's docstring
+                    envelope = _refused_probe_envelope(work, exc)
+                    probe_refusal = envelope["error"]["message"]
                 else:
-                    envelope = execute_probe_work_order(
-                        work,
-                        transport=self.transport,
-                        user_agent=self.config.user_agent,
-                        max_response_bytes=int(self.config.max_response_bytes),
-                        timeout_seconds=float(self.config.timeout_seconds),
-                        filed_window_days=int(self.config.filed_window_days),
-                        clock=self.clock,
-                    )
+                    probe_refusal = None
                 lease = scheduler.claim(WORKER_REF, work_order_id=work_id)
                 if lease is None:
                     raise BoundedPlannerDriverError(
@@ -417,6 +491,8 @@ class BoundedPlannerDriver:
                 "outcome_status": outcome.get("status"),
                 "outcome_kind": (outcome.get("outcome") or {}).get("outcome_kind"),
             }
+            if probe_refusal is not None:
+                entry["probe_refused"] = probe_refusal
             if self.config.observation_mandate_version_ref is not None:
                 try:
                     observation = self.client.call(

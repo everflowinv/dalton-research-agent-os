@@ -132,6 +132,7 @@ LANE_MODULES: tuple[str, ...] = (
     "dalton_core.research_planner_launcher",
     "dalton_core.initial_screen_launcher",
     "dalton_core.mission_feed_lane",
+    "dalton_core.mission_research_task_lane",
 )
 
 # The keys the controller tick's summary already uses for things that are not
