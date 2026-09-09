@@ -146,6 +146,27 @@ owner 要求回顾全部 vision 讨论，补遗漏、修偏差。22 项承诺逐
 
 明确不做（连续多版冻结或主体已退役）：Skill 自主生成闭环、多 runtime、Interrupt / park / resume、embedding-first 检索、万华 Agenda shadow 指标。
 
+### Daily tracking：Initial Screen 过闸后默认开启（owner 2026-09-09 晚）
+
+owner 的要求：一家公司完成 Initial Screen 后，默认进入 daily tracking——每天股价、新闻、event 等，反馈给大脑，
+由大脑决定要不要追加研究、要不要出报告（股价异动的可能原因、重大新闻的 implication），以及要不要更新对公司的
+判断与模型。频率有基线，但由大脑调配：
+
+| 来源 | 基线频率 | 大脑可调 |
+| --- | --- | --- |
+| 股价（yfinance） | 每个交易日收盘后一次，盘中一次 provisional | 固定 |
+| AlphaEngine 研报 / 纪要 | 每天 2 次 | 覆盖少的公司降到 2–3 天一次甚至一周一次 |
+| Twitter / X（xreach） | 每天 2 次取新闻，web search 验证 | 同上 |
+| 股价异动（P11d） | 触发即取新闻（AlphaEngine + X + web search），不等基线 | 阈值进 policy |
+| Guidepoint、sales note、wiki、员工评价 | 稀疏（周级） | 大脑调 |
+| SEC 8-K / 财报日历（C1） | 每日检查 | 固定 |
+
+落实为三个对象与一条 lane（Wave 3 的 P14a 提前到现在，编号沿用）：
+- **`active_coverage` 阶段自动进入**：某公司任一版 Initial Screen `gate_passed` 即写 `active_coverage` 阶段记录（`STAGE_SPINE` 第一次为该阶段非空），tracking lane 只看这个阶段的公司。
+- **`ResearchEvent`**（append-only）：`{event_ref, company_ref, kind ∈ {price_move, news, filing, transcript, rating_change, calendar, reconciliation, claim}, occurred_at, source_refs[], payload_hash, content_hash}`。价格异动（P11d `MarketEvent` 并入此对象）、新文档、新 filing、日历到期、对账结果都变成事件。C1 的 `CatalystCalendarVersion` 以 `kind: calendar` 发事件。
+- **`TrackingCadenceVersion`**（大脑的调配结果，append-only）：company × source → 频率与理由；基线来自 policy，大脑按覆盖厚度与事件密度提出调整，每版带 `because` 与证据 refs。
+- **事件判断 lane**（判断层）：每个未判定事件一次有界模型调用 → 五词决定之一 + 理由 + 映射到 driver / thesis；决定为 `no_change` 也写事件账本；`note` 出一段带 refs 的短报告（异动归因、新闻 implication）；`research` 调 P14e 入口派专项研究；`revise` 调机制层入口（forecast `revise_assumptions`、dossier / thesis 修订候选）——永远是候选，人裁决。独立 verifier 复用 thesis-impact 的 independence predicate。
+
 ### Wave 2（Wave 1 合并后开）
 
 P11b consensus 双路（研报抽取走 `document_numeric_claim` 逐字核对，新 grade `broker-research-report`；yfinance 走 A 建好的 connector）、P11d `MarketEvent`、P12a `CompanyDossierVersion`、P12c `DebateMap`、P12f guidance 档案、S 线 Guidepoint lane。cockpit 集成从 Wave 2 起给一个专门的 agent。
