@@ -1,0 +1,226 @@
+{
+  "authenticated": false,
+  "cases": [
+    {
+      "case_ref": "fixture:roic-transcript:list_transcripts:empty:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "list_transcripts",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "73cf6a015fa01fd96436b17307fd2997a4894a392e8f16e21b60855e560996dd",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:roic-transcript:list_transcripts:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "list_transcripts",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:roic-transcript:list_transcripts:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "list_transcripts",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "8f70efef9304cf6e5c802a3ee29337db796a7398a4888912d1fcc0c6d1c949f0",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:roic-transcript:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:roic-transcript:list_transcripts:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "list_transcripts",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:roic-transcript:list_transcripts:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "list_transcripts",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:roic-transcript:list_transcripts:success:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "list_transcripts",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "403e9a6859ee1c515925419d6a754571e4351a9bd9738f37fe728e778d1380f9",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:roic-transcript:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:roic-transcript:list_transcripts:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "list_transcripts",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:roic-transcript:get_transcript:empty:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "58274c8189e7f1383c2b80b0b36e83e4ef6a0b9e66298843a4d38a5b45d5f206",
+      "scenario": "empty",
+      "source_record_refs": [],
+      "source_status": "empty"
+    },
+    {
+      "case_ref": "fixture:roic-transcript:get_transcript:malformed:0.1",
+      "completeness": null,
+      "error_code": "malformed",
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "malformed",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:roic-transcript:get_transcript:partial:0.1",
+      "completeness": "partial",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "654caffbf4ab9284f66ec348d775574b5392e08801cc1b9f15305cc4e542dd9e",
+      "scenario": "partial",
+      "source_record_refs": [
+        "record:roic-transcript:synthetic:1"
+      ],
+      "source_status": "partial"
+    },
+    {
+      "case_ref": "fixture:roic-transcript:get_transcript:rate_limited:0.1",
+      "completeness": null,
+      "error_code": "rate_limited",
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "rate_limited",
+      "page": null,
+      "provider_status": 429,
+      "raw_payload_hash": null,
+      "scenario": "rate_limited",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:roic-transcript:get_transcript:schema_drift:0.1",
+      "completeness": null,
+      "error_code": "schema_drift",
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "failed",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": null,
+      "scenario": "schema_drift",
+      "source_record_refs": [],
+      "source_status": null
+    },
+    {
+      "case_ref": "fixture:roic-transcript:get_transcript:success:0.1",
+      "completeness": "enumerated",
+      "error_code": null,
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "succeeded",
+      "page": null,
+      "provider_status": 200,
+      "raw_payload_hash": "f35d789df2067da46adc37da8bd0b2eae25f2e3f6a7aec176bb4ce1b8bfbdd8c",
+      "scenario": "success",
+      "source_record_refs": [
+        "record:roic-transcript:synthetic:1"
+      ],
+      "source_status": "complete"
+    },
+    {
+      "case_ref": "fixture:roic-transcript:get_transcript:timeout:0.1",
+      "completeness": null,
+      "error_code": "timeout",
+      "next_cursor": null,
+      "operation": "get_transcript",
+      "outcome": "timeout",
+      "page": null,
+      "provider_status": null,
+      "raw_payload_hash": null,
+      "scenario": "timeout",
+      "source_record_refs": [],
+      "source_status": null
+    }
+  ],
+  "connector_template_ref": "connector-profile-template:roic-transcript:0.1",
+  "content_hash": "34c2df0422df8ea073a002bbfa5f3914a88587722767951b72d2ce86196a794b",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "id": "connector-fixture-manifest:roic-transcript:0.1",
+  "operations": [
+    {
+      "operation": "list_transcripts",
+      "pagination_mode": "none"
+    },
+    {
+      "operation": "get_transcript",
+      "pagination_mode": "none"
+    }
+  ],
+  "recording_boundary": "public_provider",
+  "schema_version": "0.1",
+  "synthetic": true
+}

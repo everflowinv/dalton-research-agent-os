@@ -1,0 +1,60 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:roic-transcript:0.1",
+  "adapter_source_hash": "4b2e3c7133a95e28929a0aa9c2458d71e1b96e1b2a84fd4a6d64a5fb595236a2",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:roic-transcript:0.1",
+  "connector_ref": "connector:roic-transcript",
+  "content_hash": "59a3f39e3ea8f704d843dc7b493ec02d16fd9b1822d9869ee4d9cabd8e512c82",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "34c2df0422df8ea073a002bbfa5f3914a88587722767951b72d2ce86196a794b",
+  "fixture_manifest_ref": "connector-fixture-manifest:roic-transcript:0.1",
+  "id": "connector-proposal-manifest:roic-transcript:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "0e56586f0263ce92788a03e4d8154582d973fa2fe41026a9900e3b5e67de620c",
+      "input_schema_ref": "schema:connector-inventory:roic-transcript:list_transcripts:input:0.1",
+      "operation": "list_transcripts",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:roic-transcript:list_transcripts:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "6aaa42d82494e05717abe32f07883c9d50395bbdcec788a5d08230856805199f",
+      "input_schema_ref": "schema:connector-inventory:roic-transcript:get_transcript:input:0.1",
+      "operation": "get_transcript",
+      "output_schema_hash": "2d6209614d453c6f07b491b781140964200b82f501b1c2fa0f75bc241851560e",
+      "output_schema_ref": "schema:connector-inventory:roic-transcript:get_transcript:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "d14dfb88f27abdb736b9ace0bd3b8ee70b9f19a0f8b1a8c2a2c5c0d63be7f239",
+  "profile_template_ref": "connector-profile-template:roic-transcript:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "transport:public-http:0.1",
+    "adapter_version": "inventory-0.1",
+    "source": "source:roic",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "public_https",
+  "transport_target_hash": "9d405ad13c6b56e4833dd9d67763eeecea2d5b65a9ce9dd882ad62de0e0cb2f1",
+  "transport_target_ref": "transport:public-http:0.1"
+}

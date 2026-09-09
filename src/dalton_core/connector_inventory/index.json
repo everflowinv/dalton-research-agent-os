@@ -1,5 +1,5 @@
 {
-  "content_hash": "574c43f17502081579e55460674bebbe65d4b3e5bf17f07f93549abe574f7f2d",
+  "content_hash": "8b4c1a3d18b0b4b7da764250eed8c81921fd9dbf55979b12e869faeb97a2b6e4",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "id": "connector-inventory:p1-0:0.1",
   "profiles": [
@@ -29,6 +29,15 @@
       "profile_template_ref": "connector-profile-template:sec-financials:0.1",
       "proposal_manifest_hash": "3dd4c5c644c5e33ed8bf2a33dfcb6fd7a8971e0a73e0c28f64ec91a5cd790b1c",
       "proposal_manifest_ref": "connector-proposal-manifest:sec-financials:0.2"
+    },
+    {
+      "connector_ref": "connector:roic-transcript",
+      "fixture_manifest_hash": "34c2df0422df8ea073a002bbfa5f3914a88587722767951b72d2ce86196a794b",
+      "fixture_manifest_ref": "connector-fixture-manifest:roic-transcript:0.1",
+      "profile_template_hash": "d14dfb88f27abdb736b9ace0bd3b8ee70b9f19a0f8b1a8c2a2c5c0d63be7f239",
+      "profile_template_ref": "connector-profile-template:roic-transcript:0.1",
+      "proposal_manifest_hash": "59a3f39e3ea8f704d843dc7b493ec02d16fd9b1822d9869ee4d9cabd8e512c82",
+      "proposal_manifest_ref": "connector-proposal-manifest:roic-transcript:0.2"
     },
     {
       "connector_ref": "connector:alphaengine-library",

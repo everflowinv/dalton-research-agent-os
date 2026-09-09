@@ -1119,6 +1119,35 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         ),
         "gate": "recorded_public_reference_shadow",
     },
+    # P13ah: earnings call transcripts from roic.ai.
+    #
+    # The Playbook's Initial Screen asks for four quarters of calls and the
+    # Deep Insight Gate rests on what operators said. AlphaEngine carries them
+    # too, and is capped at 130 calls a day -- live, CTSH sat at one call of
+    # four with the cap exhausted. A second, independent source for the same
+    # requirement is the difference between waiting a day and not.
+    #
+    # Public web, no credential: the transcript is a page on roic.ai. Split in
+    # two the way every library here is -- listing what exists and reading one
+    # are different permissions.
+    {
+        "slug": "roic-transcript", "connector_ref": "connector:roic-transcript",
+        "source_ref": "source:roic", "source_type": "public_web",
+        "transport": "public_https", "target": "transport:public-http:0.1",
+        "hosts": ("www.roic.ai",), "auth": "none",
+        "forbidden": ("route:arbitrary-attachment-url",), "fallbacks": (),
+        "operations": (
+            _operation(
+                "list_transcripts", completeness="enumerated",
+                input_fields=("ticker",),
+            ),
+            _operation(
+                "get_transcript", completeness="enumerated",
+                input_fields=("ticker", "fiscal_year", "fiscal_quarter"),
+            ),
+        ),
+        "gate": "recorded_public_reference_shadow",
+    },
     {
         "slug": "alphaengine", "connector_ref": "connector:alphaengine-library",
         "source_ref": "source:alphaengine", "source_type": "authenticated_library",

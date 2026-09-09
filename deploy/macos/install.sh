@@ -93,6 +93,18 @@ fi
 # and a schema hash binds one operation. Same seed-once rule: copied in as
 # *proposed*, and the owner approves each in place with
 # `dalton-connector-governance approve`. Until then the lane cannot run.
+# P13ah: roic.ai transcripts, a second independent source for the four
+# quarters of calls the Playbook requires. AlphaEngine carries them too and is
+# capped at 130 calls a day -- live, CTSH sat at one call of four with the cap
+# exhausted and its screen could not be rewritten. Public web, no credential.
+# Two records for the same reason every library here has two.
+for roic_kind in roic-list-transcripts roic-get-transcript; do
+  roic_file="$governance_dir/${roic_kind}-v1.json"
+  if [[ ! -f "$roic_file" && -f "$repo_root/deploy/connector-governance/${roic_kind}-v1.json" ]]; then
+    cp "$repo_root/deploy/connector-governance/${roic_kind}-v1.json" "$roic_file"
+    chmod 600 "$roic_file"
+  fi
+done
 for guidepoint_kind in guidepoint-search-library guidepoint-get-transcript; do
   guidepoint_file="$governance_dir/${guidepoint_kind}-v1.json"
   if [[ ! -f "$guidepoint_file" && -f "$repo_root/deploy/connector-governance/${guidepoint_kind}-v1.json" ]]; then

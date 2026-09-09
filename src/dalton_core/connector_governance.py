@@ -64,6 +64,12 @@ SEC_FINANCIALS_KIND = "sec-financial-statements"
 SEC_FINANCIALS_CAPABILITY_ID = (
     "capability:dalton:connector:sec-financial-statements"
 )
+# P13ah: roic.ai transcripts, a second independent source for the calls the
+# Playbook requires. Split in two like every other library here.
+ROIC_LIST_KIND = "roic-list-transcripts"
+ROIC_GET_KIND = "roic-get-transcript"
+ROIC_LIST_CAPABILITY_ID = "capability:dalton:connector:roic-list-transcripts"
+ROIC_GET_CAPABILITY_ID = "capability:dalton:connector:roic-get-transcript"
 
 
 class ConnectorGovernanceError(RuntimeError):
@@ -177,6 +183,36 @@ def _sec_financials_fixture_hash() -> str:
     from .sec_financials_core import sec_financials_fixture_hash
 
     return sec_financials_fixture_hash()
+
+
+def _roic_source_hash() -> str:
+    from .roic_transcript_core import roic_source_hash
+
+    return roic_source_hash()
+
+
+def _roic_permissions() -> dict[str, Any]:
+    from .roic_transcript_core import roic_permissions
+
+    return copy.deepcopy(roic_permissions())
+
+
+def _roic_fixture_hash() -> str:
+    from .roic_transcript_core import roic_fixture_hash
+
+    return roic_fixture_hash()
+
+
+def _roic_list_schema_hash() -> str:
+    from .roic_transcript_core import LIST_OPERATION, roic_schema_hash
+
+    return roic_schema_hash(LIST_OPERATION)
+
+
+def _roic_get_schema_hash() -> str:
+    from .roic_transcript_core import GET_OPERATION, roic_schema_hash
+
+    return roic_schema_hash(GET_OPERATION)
 
 
 def _sec_identity() -> dict[str, Any]:
@@ -350,6 +386,22 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         permissions=_sec_financials_permissions,
         fixture_hash=_sec_financials_fixture_hash,
     ),
+    ROIC_LIST_KIND: _KindSpec(
+        capability_id=ROIC_LIST_CAPABILITY_ID,
+        template_key="roic-transcript",
+        source_hash=_roic_source_hash,
+        schema_hash=_roic_list_schema_hash,
+        permissions=_roic_permissions,
+        fixture_hash=_roic_fixture_hash,
+    ),
+    ROIC_GET_KIND: _KindSpec(
+        capability_id=ROIC_GET_CAPABILITY_ID,
+        template_key="roic-transcript",
+        source_hash=_roic_source_hash,
+        schema_hash=_roic_get_schema_hash,
+        permissions=_roic_permissions,
+        fixture_hash=_roic_fixture_hash,
+    ),
 }
 # Public aliases make the registry discoverable without exposing mutable
 # implementation details of a spec.  The old name is useful to callers that
@@ -462,6 +514,22 @@ def build_governance_record(
         from .public_web_core_fetch import build_web_fetch_governance_record
 
         return build_web_fetch_governance_record(
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in (ROIC_LIST_KIND, ROIC_GET_KIND):
+        from .roic_transcript_core import (
+            KIND_BY_OPERATION as ROIC_KINDS,
+            build_roic_governance_record,
+        )
+
+        operation = next(op for op, name in ROIC_KINDS.items() if name == kind)
+        return build_roic_governance_record(
+            operation=operation,
             approved_by=approved_by,
             status=status,
             effective_from=effective_from,
