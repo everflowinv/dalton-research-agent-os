@@ -272,6 +272,15 @@ def argv_fragment(context: Any) -> list[str]:
     return ["--debate-map-model-config", str(config)]
 
 
+# C2's budget pools. Drawing the map is part of covering a company -- it reads
+# the Claims coverage produced and says what they disagree about -- so it
+# belongs in the same pool as the screen and the model specification, not in
+# the event-response pool that pays for reacting to today's news. That is also
+# where an unassigned lane lands by default, so the lane is correct today with
+# no declaration, and ``LaneSpec.budget_pool`` is deliberately left unset:
+# every registered lane currently takes its pool from ``budget_pools.LANE_POOLS``
+# and C2 has a test saying so. The explicit line belongs in that table, which
+# is not this slice's file; it is named in the report's integration list.
 LANE = register_lane(LaneSpec(
     operation="dispatch_debate_map",
     # 135: after the reading lanes that produce the Claims it argues over and

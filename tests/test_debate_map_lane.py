@@ -474,6 +474,16 @@ class LaneRegistrationTests(unittest.TestCase):
         orders = [item.order for item in registered_lanes()]
         self.assertEqual(len(orders), len(set(orders)))
 
+    def test_the_lane_and_its_model_call_drink_from_the_same_pool(self):
+        # Coverage, by C2's default for a lane its table has not named. Both
+        # ends have to agree: the tick's ledger books the lane's spend and the
+        # router admits the call by purpose, and a lane whose two ends resolved
+        # differently would be charged twice against different budgets.
+        from dalton_core.budget_pools import pool_for_operation, pool_for_purpose
+
+        self.assertEqual(pool_for_operation("dispatch_debate_map"), "coverage")
+        self.assertEqual(pool_for_purpose("debate_map"), "coverage")
+
     def test_the_lane_is_absent_when_no_model_configuration_is_installed(self):
         class Args:
             debate_map_model_config = None

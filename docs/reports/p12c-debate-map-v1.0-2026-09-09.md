@@ -1,6 +1,6 @@
 # P12c：分歧地图——把「市场在哪、我们在哪、什么能验证」写成版本链
 
-*2026-09-09* · 分支 `w2-debate-map`，基于 main `7708d43`，已合并 main `e5e10a0`（3,500 项）
+*2026-09-09* · 分支 `w2-debate-map`，基于 main `7708d43`，已合并 main `6da8f82`（C2 预算池在内）
 · 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 1 节（owner 自省清单）、
 C3（Constitution `question_admission` 作为 debate 候选的闸门）、D2（independence predicate）、
 [能力差距分析 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) 5.2 P12c、
@@ -9,7 +9,7 @@ C3（Constitution `question_admission` 作为 debate 候选的闸门）、D2（i
 
 ---
 
-## review 之后改了什么（合并 main `e5e10a0` 之后）
+## review 之后改了什么（合并 main `6da8f82` 之后）
 
 | review 项 | 改动 |
 | --- | --- |
@@ -254,18 +254,23 @@ driver_key="debate_map")`。选 135：在读取层（120 / 130）之后；
 
 ## 八、验收结果（原文）
 
-合并 main `e5e10a0` 之后：
+合并 main `6da8f82`（C2 预算池在内）之后：
 
 ```
-Ran 3612 tests in 380.717s
+Ran 3794 tests in 363.897s
 OK (skipped=1)
 ```
 
 命令：`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`
 （`PYTHONPATH` 必须绝对路径，理由同 P12b 报告第四节。）
-main `e5e10a0` 的基线是 3,500，本片新增 **112** 项：
-`tests/test_debate_map.py` 43、`tests/test_debate_map_draft.py` 41、`tests/test_debate_map_lane.py` 28。
-（合并前、基于 `7708d43` 的那一次是 `Ran 2938 tests in 304.490s / OK (skipped=1)`。）
+本片新增 **113** 项：`tests/test_debate_map.py` 43、`tests/test_debate_map_draft.py` 41、
+`tests/test_debate_map_lane.py` 29。
+（合并 `e5e10a0` 那一轮是 `Ran 3612 tests / OK`；合并前、基于 `7708d43` 的第一轮是
+`Ran 2938 tests in 304.490s / OK (skipped=1)`。）
+
+**对 main 的改动就是两行**（`git diff main --stat`）：
+`lane_registry.LANE_MODULES` 一行、`cockpit_plane.REGISTRY_LANE_LABELS` 一个字典项。
+其余全是本片自己的新文件。
 
 ## 九、冒烟：今日 live Core 只读副本（`/tmp` 拷贝，跑 B 的规则标签，不调模型）
 
@@ -333,26 +338,33 @@ total variant seeds across five companies: 6
 
 1. **lane registry 已经接好**（`LANE_MODULES` 一行 + `LaneSpec`，order **135**）。
    `writer_server` / `bounded_planner_driver` / `macos_launchagent` 一个字节没改（Wave 0 的合同生效）。
-2. **模型配置名**：lane 复用 `initial-screen-model-config.json`（与 model spec lane 同样的理由：
+2. **C2 的预算池**：`budget_pools.LANE_POOLS` 里应当加一行
+   `"dispatch_debate_map": "coverage"`。今天不加也是对的——未列出的 lane 默认落 `coverage`，
+   而 `PURPOSE_POOLS` 里未列出的 `debate_map` 用途也默认落 `coverage`，两端一致，
+   测试断言了这一点。**本片没有在 `LaneSpec` 上声明 `budget_pool`**：C2 有一条测试说
+   「当前每条 lane 的池都来自那张表」，声明会把它打红；那张表不是本片的文件。
+3. **模型配置名**：lane 复用 `initial-screen-model-config.json`（与 model spec lane 同样的理由：
    两者都是判断不是抽取）。若要独立配额，`scripts/raise_day_budget_cap.MODEL_CONFIG_NAMES`
    加一个 `debate-map`，并把 `mission_debate_map_lane.DEBATE_MAP_MODEL_CONFIG` 指过去。本片没碰那个文件。
-3. **`may_write`：`debate_map` 已在 `AUTOMATION_WRITE_SCOPES`（Wave 0 加的），live mission 尚未授予。**
+4. **`may_write`：`debate_map` 已在 `AUTOMATION_WRITE_SCOPES`（Wave 0 加的），live mission 尚未授予。**
    没有它，child 在花钱之前就 `held` / `not_authorized`。owner 发新版 mission 时授予即可，代码不用改。
-4. **路由：verifier 必须能落到与起草不同的 model_family。** 本片 fail-closed——
+5. **路由：verifier 必须能落到与起草不同的 model_family。** 本片 fail-closed——
    family 读不出来就不发布。集成时要确认 `debate_map` 用途的路由链里至少有两个 family，
    否则这条 lane 会一直停在 `not_independent`（这是**正确**的停法，但要有人知道为什么停）。
    更好的做法是让第二次调用带 `producer_family` 走 `ModelRouter.route`（路由器已经支持
    `family_independence_capabilities` 与 `model_family_not_independent`），本片没有改 `cockpit_model`
    的调用签名，所以走的是「事后从 route decision 读 family」这条路。
-5. **DocumentIndex 与 Core 同库**：publisher 那一级要的是 `document_index_documents.title`。
+6. **DocumentIndex 与 Core 同库**：publisher 那一级要的是 `document_index_documents.title`。
    今天它不在 live Core 里（第九节 3）。接上之后 `_document_titles` 会自动把标题喂给冻结的
    publisher 表，一个字节代码都不用改。
-6. **打包**：`debate_map_schema.sql` 靠 Wave 0 的 `*_schema.sql` 通配进包，本片没碰 `pyproject.toml`。
-7. **驾驶舱**：lane 已在 `REGISTRY_LANE_LABELS` 有名字（见开头「越界一处」）。
+7. **打包**：`debate_map_schema.sql` 靠 Wave 0 的 `*_schema.sql` 通配进包，本片没碰 `pyproject.toml`。
+8. **驾驶舱**：lane 已在 `REGISTRY_LANE_LABELS` 有名字（见开头「越界一处」）。
    公司卡可以读 `open_debates(company)`；周报读 `shifted_since(company, version)`。
    除那一个字典项之外没碰 `cockpit_*`。
 
-9. **P14a（`event_judgement.py`）应当消费这两个读取入口。** 它现在的 `missed_debates`
+9. **P12b 的模型标注要先跑**，否则前置扫描按 aspect 分组会一直是 0（第九节）。
+   起草本身不依赖 aspect（表照样有 Claim），但排序质量会差很多。
+10. **P14a（`event_judgement.py`）应当消费这两个读取入口。** 它现在的 `missed_debates`
    是 `{question, refs}`——由反思 prompt 现场造出来的自由文本问题，没有 `debate_ref`、
    没有 driver 绑定、没有状态，也**没有任何一处读过 debate map**。
    于是同一个争论会在每个事件上被重新发明一遍，而「这条 debate 自上周以来转向了」
@@ -363,14 +375,12 @@ total variant seeds across five companies: 6
      模型于是要么指认一条我们已有的争论，要么明说这是一个新问题；
    - 判断 prompt 里加 `shifted_since(company_ref, last_read_version)`，
      它给的是「上次你读之后哪条转向了、凭什么」，正是五词决定要的输入。
-10. **周报**：`weekly_brief.py` 现在渲染的是 `industry_research` 的 debates（人写的 v1–v5），
+11. **周报**：`weekly_brief.py` 现在渲染的是 `industry_research` 的 debates（人写的 v1–v5），
    本片**没有动它**。两边的 `DEBATE_STATUSES` 是同名不同物——
    `industry_research` 是 `frozenset({"open","resolved"})`，
    `debate_map` 是 `("candidate","open","shifting","resolved")`。
    两个模块都没有 `import *`，今天不冲突；集成时若把周报切到本片的读取入口，
    要留意这个重名，别把两张表混起来。
-8. **P12b 的模型标注要先跑**，否则前置扫描按 aspect 分组会一直是 0（第九节）。
-   起草本身不依赖 aspect（表照样有 Claim），但排序质量会差很多。
 
 ## 十一、没做的
 
