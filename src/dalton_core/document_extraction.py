@@ -378,6 +378,33 @@ class HermeticExtractionAdapter:
         return self.saved[work.id]
 
 
+def reservation_micros(work, profile) -> int:
+    """What to hold against the day cap for one window of this model.
+
+    P10x: the WorkOrder's flat ``max_cost_usd`` is the ceiling the *contract*
+    allows and it is hashed, so it cannot move without invalidating every
+    persisted result.  What can move -- and is the number that actually decides
+    how many windows a day holds -- is what the lane reserves: the served
+    profile's published price against the same token bounds the adapter already
+    enforces.  Live, the flat reservation is $0.05 and the settled mean is
+    $0.000294, so the lane holds a hundred and seventy times the money it
+    spends and the ledger counts the hold, not the spend.
+
+    Never above the contract's ceiling, and never below one micro: a
+    reservation of nothing would let an unpriced profile spend without a hold.
+    """
+
+    from .extraction_priority import window_reservation_micros
+
+    ceiling = int(Decimal(str(work.budget["max_cost_usd"])) * 1000000)
+    try:
+        derived = window_reservation_micros(profile["cost"], work.budget)
+    except (KeyError, TypeError, ValueError):
+        # An unpriced or oddly shaped profile is not a reason to under-reserve.
+        return ceiling
+    return max(1, min(ceiling, derived))
+
+
 class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
     """Reuse the existing routed worker, including late-lease and replay accounting."""
     worker_ref = WORKER_REF
@@ -432,7 +459,7 @@ class DocumentExtractionModelWorker(RoutedTranscriptPolishModelWorker):
             self.admission = self.budget_store.admit(
                 policy_version_id=self.budget_policy_ref, day=day, work_order_ref=work.id,
                 attempt_number=route["attempt_number"], phase="assessment", route_decision_ref=route["id"],
-                reserved_micros=int(Decimal(str(work.budget["max_cost_usd"])) * 1000000), mission_binding=scope)
+                reserved_micros=reservation_micros(work, profile), mission_binding=scope)
         except Exception as exc:
             raise OpenClawModelAdapterError("document extraction budget/source admission rejected") from exc
 
@@ -962,6 +989,62 @@ class DocumentExtractionService:
             return None
         return specs.get(context["document_ref"])
 
+    def recorded_subjects(self, document_ref):
+        """Covered subjects the search wire's own company list named, if kept.
+
+        P10x: the AlphaEngine search result carries ``companies`` -- one live
+        Wells Fargo note names Accenture, Cognizant, EPAM and Infosys -- and
+        the lane threw it away, so a five-vendor note produced Claims for
+        whichever query returned it and nothing for the other four.  Reading is
+        optional on purpose: an install without the table behaves exactly as it
+        did, because an empty list adds no subject.
+        """
+
+        connection = self.writer.store.connection
+        try:
+            row = connection.execute(
+                "SELECT covered_subjects_json FROM document_provenance_records WHERE document_ref=?",
+                (document_ref,),
+            ).fetchone()
+        except Exception:  # noqa: BLE001 - no table is "nothing recorded"
+            return []
+        if row is None:
+            return []
+        try:
+            value = json.loads(row["covered_subjects_json"])
+        except (ValueError, TypeError):
+            return []
+        return [item for item in value if isinstance(item, str) and item]
+
+    def statement_subjects(self, context, spec_ref):
+        """A resolver for who each drafted statement is about.
+
+        Built once per window because it reads the mission and the provenance
+        row, neither of which can change while a window is being admitted.
+        """
+
+        from .document_provenance import INDUSTRY_SPEC_REFS, subjects_for_statement
+
+        company_ref = context["company_ref"]
+        mission = self.writer.coverage_mission.mission(context["mission_version_ref"])
+        members = {m["company_ref"]: m for m in mission["universe"]}
+        extra: dict[str, str] = {}
+        for subject_ref in self.recorded_subjects(context["document_ref"]):
+            member = members.get(subject_ref) or {}
+            if subject_ref != company_ref and member.get("ticker"):
+                extra[subject_ref] = member["ticker"]
+        industry_document = isinstance(spec_ref, str) and spec_ref in INDUSTRY_SPEC_REFS
+
+        def resolve(statement):
+            return subjects_for_statement(
+                statement, company_ref=company_ref,
+                company_names_key=context.get("company_ticker"),
+                industry_ref=mission.get("industry_ref"), extra_subjects=extra,
+                industry_document=industry_document,
+            )
+
+        return resolve
+
     def document_names_subject(self, context):
         """Whether this document names the company it was filed under.
 
@@ -1284,7 +1367,8 @@ class DocumentExtractionService:
         # AlphaEngine or web result is attributed by naming the company.
         from .document_figure_grade import attribution_for
 
-        if attribution_for(self._document_spec_ref(context)) is None:
+        spec_ref = self._document_spec_ref(context)
+        if attribution_for(spec_ref) is None:
             subject = self.document_names_subject(context)
             if subject.get("checked") and not subject.get("names_subject"):
                 return {"status": "not_attributed", "admitted": [],
@@ -1320,57 +1404,70 @@ class DocumentExtractionService:
             authority, _ = self.writer._transcript_corrections(manifest)
             source_kind, source_envelope_ref = "alphaengine", None
         from .transcript_candidate_staging import stage_transcript_qualitative_candidate
+        # P10x: who each statement is about, rather than who the search was
+        # about.  A statement naming only the review's company resolves to
+        # exactly the one subject it always did, so every key below is
+        # byte-identical for it and a replay is still a duplicate.
+        resolve_subjects = self.statement_subjects(context, spec_ref)
         results = []
         for suggestion in drafted["suggestions"]:
             quote = suggestion["citation"]
             start, end = quote["source_start"], quote["source_end"]
-            entry = {"suggestion_ref": suggestion["id"], "source_start": start, "source_end": end}
-            try:
-                set_ref = "transcript-correction-set:auto:" + content_hash({
-                    "source_manifest_hash": context["source_manifest_hash"], "start": start, "end": end})[:32]
-                latest = self.writer.store.connection.execute(
-                    "SELECT version_id,content_hash FROM transcript_correction_set_versions "
-                    "WHERE correction_set_ref=? ORDER BY version_number DESC LIMIT 1", (set_ref,),
-                ).fetchone()
-                if latest is None:
-                    correction = authority.publish(
-                        set_ref, source_manifest_ref=context["source_manifest_ref"],
-                        source_manifest_hash=context["source_manifest_hash"],
-                        source_content_hash=context["source_content_hash"],
-                        review_scope="automation_verified_raw_span", corrections=[], actor_ref=actor_ref,
-                        raw_review={"source_start": start, "source_end": end, "source_sha256": quote["source_sha256"],
-                                    "rationale": (f"ADR-0005 mission automation: model draft {suggestion['invocation_ref']} "
-                                                  f"via {suggestion['route_ref']}; suggestion {suggestion['id']}")},
-                    )
-                else:
-                    correction = authority.resolve(latest["version_id"], latest["content_hash"])["correction_set"]
-                citation = authority.bind_claim_citation(
-                    correction["id"], correction["content_hash"], source_start=start, source_end=end)
-                key = "document-admission:" + content_hash({"suggestion": suggestion["id"], "context": context["content_hash"]})
-                # Two views on one quote may share aspect, period and basis, so
-                # the candidate pair is keyed by the suggestion itself; the
-                # default identity ignores the statement and the second view
-                # collided ("candidate version chain mismatch", live).
-                pair_key = content_hash({"citation": citation["id"], "suggestion": suggestion["id"]})[:32]
-                staged = stage_transcript_qualitative_candidate(
-                    self.writer.store, staging, correction_set_ref=correction["id"], citation_ref=citation["id"],
-                    subject_ref=context["company_ref"], metric_or_aspect=suggestion["metric_or_aspect"],
-                    period=suggestion["period"], basis=suggestion["basis"],
-                    normalized_statement=suggestion["normalized_statement"], actor_ref=actor_ref,
-                    idempotency_key=key, artifact_reader=self.writer._read_transcript_artifact,
-                    candidate_evidence_ref=f"candidate-evidence:{source_kind}:" + pair_key,
-                    candidate_claim_ref=f"candidate-claim:{source_kind}:" + pair_key,
-                    source_kind=source_kind, source_envelope_ref=source_envelope_ref)
-                bundle = reviewer.candidate_authority_bundle(staged["claim"]["id"])
-                promotion = self.writer.store.commit_policy_candidate(**bundle, idempotency_key="policy-ledger:" + key)
-                entry.update({"status": "duplicate" if promotion.get("status") == "duplicate" else "admitted",
-                              "candidate_claim_ref": staged["claim"]["id"],
-                              "claim_version_ref": promotion.get("claim_version_ref"),
-                              "evidence_version_ref": promotion.get("evidence_version_ref"),
-                              "policy_rule_ref": (promotion.get("authorization") or {}).get("rule_ref")})
-            except Exception as exc:  # one refused suggestion must not block the rest; the reason is the record
-                entry.update({"status": "rejected", "reason": f"{type(exc).__name__}: {exc}"})
-            results.append(entry)
+            plan = resolve_subjects(suggestion["normalized_statement"])
+            for subject_ref in plan["subjects"]:
+                entry = {"suggestion_ref": suggestion["id"], "source_start": start, "source_end": end,
+                         "subject_ref": subject_ref, "subject_basis": plan["basis"]}
+                # Only a subject other than the review's own company widens the
+                # identity; the primary one keeps the key it has always had.
+                extra_key = {} if subject_ref == context["company_ref"] else {"subject": subject_ref}
+                try:
+                    set_ref = "transcript-correction-set:auto:" + content_hash({
+                        "source_manifest_hash": context["source_manifest_hash"], "start": start, "end": end})[:32]
+                    latest = self.writer.store.connection.execute(
+                        "SELECT version_id,content_hash FROM transcript_correction_set_versions "
+                        "WHERE correction_set_ref=? ORDER BY version_number DESC LIMIT 1", (set_ref,),
+                    ).fetchone()
+                    if latest is None:
+                        correction = authority.publish(
+                            set_ref, source_manifest_ref=context["source_manifest_ref"],
+                            source_manifest_hash=context["source_manifest_hash"],
+                            source_content_hash=context["source_content_hash"],
+                            review_scope="automation_verified_raw_span", corrections=[], actor_ref=actor_ref,
+                            raw_review={"source_start": start, "source_end": end, "source_sha256": quote["source_sha256"],
+                                        "rationale": (f"ADR-0005 mission automation: model draft {suggestion['invocation_ref']} "
+                                                      f"via {suggestion['route_ref']}; suggestion {suggestion['id']}")},
+                        )
+                    else:
+                        correction = authority.resolve(latest["version_id"], latest["content_hash"])["correction_set"]
+                    citation = authority.bind_claim_citation(
+                        correction["id"], correction["content_hash"], source_start=start, source_end=end)
+                    key = "document-admission:" + content_hash(
+                        {"suggestion": suggestion["id"], "context": context["content_hash"], **extra_key})
+                    # Two views on one quote may share aspect, period and basis, so
+                    # the candidate pair is keyed by the suggestion itself; the
+                    # default identity ignores the statement and the second view
+                    # collided ("candidate version chain mismatch", live).
+                    pair_key = content_hash(
+                        {"citation": citation["id"], "suggestion": suggestion["id"], **extra_key})[:32]
+                    staged = stage_transcript_qualitative_candidate(
+                        self.writer.store, staging, correction_set_ref=correction["id"], citation_ref=citation["id"],
+                        subject_ref=subject_ref, metric_or_aspect=suggestion["metric_or_aspect"],
+                        period=suggestion["period"], basis=suggestion["basis"],
+                        normalized_statement=suggestion["normalized_statement"], actor_ref=actor_ref,
+                        idempotency_key=key, artifact_reader=self.writer._read_transcript_artifact,
+                        candidate_evidence_ref=f"candidate-evidence:{source_kind}:" + pair_key,
+                        candidate_claim_ref=f"candidate-claim:{source_kind}:" + pair_key,
+                        source_kind=source_kind, source_envelope_ref=source_envelope_ref)
+                    bundle = reviewer.candidate_authority_bundle(staged["claim"]["id"])
+                    promotion = self.writer.store.commit_policy_candidate(**bundle, idempotency_key="policy-ledger:" + key)
+                    entry.update({"status": "duplicate" if promotion.get("status") == "duplicate" else "admitted",
+                                  "candidate_claim_ref": staged["claim"]["id"],
+                                  "claim_version_ref": promotion.get("claim_version_ref"),
+                                  "evidence_version_ref": promotion.get("evidence_version_ref"),
+                                  "policy_rule_ref": (promotion.get("authorization") or {}).get("rule_ref")})
+                except Exception as exc:  # one refused suggestion must not block the rest; the reason is the record
+                    entry.update({"status": "rejected", "reason": f"{type(exc).__name__}: {exc}"})
+                results.append(entry)
         status = "admitted" if any(r["status"] in ("admitted", "duplicate") for r in results) else (
             "rejected" if results else "nothing_to_admit")
         return {"status": status, "admitted": results, "suggestion_count": len(results)}

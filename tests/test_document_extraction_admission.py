@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core.document_extraction import DocumentExtractionService, build_work, HermeticExtractionAdapter
+from dalton_core.extraction_priority import window_reservation_micros
 from dalton_core.openclaw_model_adapter import OpenClawModelAdapter, BrokerConnectionError
 from dalton_core.research_verification import CandidateStagingStore, ResearchVerificationError, ResearchVerificationConflict
 from dalton_core.store import content_hash
@@ -291,7 +292,15 @@ class BrokerAdmissionTests(unittest.TestCase):
         with patch.object(OpenClawModelAdapter,'execute',side_effect=BrokerConnectionError('synthetic disconnect')) as call:
             result=self.h.generate();self.assertEqual(result['status'],'failed',result)
             self.h.generate();self.assertEqual(call.call_count,1)
-        self.assertEqual(self.b.connection.execute('SELECT reserved_micros FROM thesis_impact_day_admissions').fetchone()[0],50000)
+        # P10x: the whole reservation stays open, and "the whole reservation"
+        # is now this profile's rate card against the window's token bounds
+        # rather than the flat ceiling the WorkOrder contract allows.  What
+        # this test is about is that a disconnect frees nothing; the amount is
+        # asserted against the same derivation the worker used, so it moves
+        # with the profile instead of being a second copy of the number.
+        expected=window_reservation_micros(self.pr['cost'],{'max_input_tokens':16000,'max_output_tokens':3000})
+        self.assertEqual(self.b.connection.execute('SELECT reserved_micros FROM thesis_impact_day_admissions').fetchone()[0],expected)
+        self.assertLess(expected,50000)
         self.assertEqual(self.b.connection.execute('SELECT count(*) FROM thesis_impact_day_settlements').fetchone()[0],0)
 
     def test_owner_budget_exhausted_blocks_before_adapter(self):
