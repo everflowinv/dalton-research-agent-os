@@ -15,10 +15,16 @@ another: the schema hash binds one.
 
 **Artifact always.** Every frame the library returns is canonicalised --
 column order kept, every cell rendered as text, no floats anywhere -- and the
-whole capture is hashed into the raw spool before a single number is read out
-of it. That hash is what stands in for Dalton verifying 东方财富's bytes. It is
+capture is hashed into the raw spool before a single number is read out of it.
+That hash is what stands in for Dalton verifying 东方财富's bytes. It is
 written for a run that then fails to normalise, too, because a capture that
 could not be read is exactly the capture somebody will want to look at.
+
+What is hashed is what the vendor said, and not when this machine happened to
+ask: the two local clock fields are lifted out first (``CLOCK_FIELDS``) and
+kept on the summary and the wire instead. With them inside, every run minted a
+new hash and therefore a new invocation ref, so two readings of the same
+unchanged quarter looked like two different facts.
 
 **Contract last.** The wire is validated against the frozen output schema
 before it goes anywhere. An observation the contract cannot describe is
@@ -69,6 +75,17 @@ DEFAULT_SPOOL_NAME = "connector-spool"
 # A decade of a three-hundred-line statement, canonicalised to text, is a few
 # megabytes. This is a ceiling the spool refuses beyond, not an expectation.
 MAX_RAW_BYTES = 64 * 1024 * 1024
+
+# Read off the capture before it is hashed, and kept on the summary and the
+# wire instead.
+#
+# These two say when this machine made the call. They are not something the
+# source returned, and leaving them inside the hashed bytes meant every run
+# minted a new artifact hash and therefore a new invocation ref -- so two
+# fetches of the same unchanged quarter looked like two different facts, which
+# is the exact distinction the invocation ref exists to make. What is hashed
+# is what the vendor said.
+CLOCK_FIELDS = ("captured_at", "observed_on")
 
 # Which command-line arguments each operation's fetcher takes. Frozen here so a
 # run cannot pass a parameter the approval never described.
@@ -183,20 +200,35 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 Path(args.fixture_file).expanduser().read_text(encoding="utf-8"))
             if not isinstance(raw, dict):
                 raise CnHkFinDataRunError("the fixture is not a capture")
-            # A replay answers the question the capture answered, not the one
-            # the command line asked. Saying so is cheaper than discovering it
-            # from a wire whose ticker is not the ticker anyone typed.
             raw = dict(raw)
-            raw["parameters"] = dict(raw.get("parameters") or {})
+            # A replay answers the question the capture answered, not the one
+            # the command line asked. They have to be the same question. A
+            # capture of 600519 replayed under --a-ticker 000001 would produce
+            # a wire that validates, publishes and is about a different
+            # company; there is nothing further down the chain that could
+            # notice.
+            captured = dict(raw.get("parameters") or {})
+            if captured != parameters:
+                raise CnHkFinDataRunError(
+                    "the fixture answers a different request than the one "
+                    f"asked for: captured {captured}, asked {parameters}. A "
+                    "replay cannot be relabelled -- the rows describe what was "
+                    "captured, whatever the command line says"
+                )
+            raw["parameters"] = captured
         else:
             raw = FETCHERS[operation](**parameters)
         if not isinstance(raw, dict):
             raise CnHkFinDataRunError("the library returned something that is not a call")
 
-        # The artifact is the whole capture, canonical and hashed before
-        # anything is read out of it: whatever the normaliser drops stays
-        # recoverable, and the same call twice is the same hash twice.
-        payload = canonical_json(raw).encode("utf-8")
+        # The artifact is the capture, canonical and hashed before anything is
+        # read out of it: whatever the normaliser drops stays recoverable, and
+        # the same answer twice is the same hash twice. The two local clock
+        # fields are lifted out first -- see CLOCK_FIELDS -- so that "the same
+        # answer" means what the vendor said and not what time it was said at.
+        payload = canonical_json(
+            {key: value for key, value in raw.items() if key not in CLOCK_FIELDS}
+        ).encode("utf-8")
         digest = hashlib.sha256(payload).hexdigest()
         spool = RawSpool(str(state / DEFAULT_SPOOL_NAME), max_total_bytes=1_000_000_000)
         sink = spool.open_sink(f"raw-sink:{digest}", max_response_bytes=MAX_RAW_BYTES)
@@ -220,7 +252,16 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         summary["dropped_row_count"] = wire["dropped_row_count"]
         summary["captured_at"] = wire["captured_at"]
         vendors = sorted({row["source_vendor"] for row in rows})
-        summary["source_vendor"] = vendors[0] if len(vendors) == 1 else vendors
+        # A wire with no rows is a real answer -- this company announced no
+        # buyback, this code is not half of an A+H pair -- and it has no
+        # vendor, which is different from having an empty list of them. One
+        # vendor reads as a string because that is what almost every operation
+        # returns; only 融资融券 can carry two, and only if a caller merged
+        # exchanges.
+        summary["source_vendor"] = (
+            None if not vendors else
+            vendors[0] if len(vendors) == 1 else vendors
+        )
         summary["fallback_used"] = any(row["fallback_used"] for row in rows)
         summary["caliber_notes"] = sorted(
             {row["caliber_note"] for row in rows if row["caliber_note"]})

@@ -205,6 +205,20 @@ class QuotaTests(unittest.TestCase):
             self.assertGreaterEqual(quota["daily_unit_limit"], 1)
             self.assertGreaterEqual(quota["max_physical_calls_per_unit"], 1)
 
+    def test_the_quote_cluster_ceiling_is_the_true_page_count(self):
+        # Not a round number and not a hope: three pages of one hundred over
+        # the 204-row A+H universe, one attempt each because the adapter caps
+        # akshare's own three-retry loop for the length of the call. Before
+        # that cap existed this ceiling was a fiction -- the library could
+        # spend nine GETs against a refusing host and stay inside it.
+        from dalton_core.cn_hk_findata_adapter import (
+            AH_PREMIUM_MAX_PAGES, AH_PREMIUM_MAX_RETRIES,
+        )
+
+        quota = governed_daily_quota("cn-hk-findata", "ah_premium")
+        self.assertEqual(quota["max_physical_calls_per_unit"],
+                         AH_PREMIUM_MAX_PAGES * AH_PREMIUM_MAX_RETRIES)
+
     def test_the_quote_cluster_operation_has_the_smallest_allowance(self):
         # 「不要批量探测东财」 expressed as arithmetic: four a day against the
         # host that went quiet in August 2026 cannot look like probing.

@@ -5,9 +5,10 @@ without a network, a store or a subprocess: a fixture in, a wire out.
 
 **Canonicalisation happens before hashing, not after.** akshare hands back
 pandas DataFrames whose cells are numpy scalars, ``pandas.Timestamp``,
-``datetime.date``, ``NaN`` and occasionally a string with a comma in it. None
-of that is JSON, and several of them serialise differently depending on the
-version of numpy underneath. So every frame becomes ``{"columns": [...],
+``datetime.date``, ``NaN``, ``NaT`` -- which is a *subclass* of ``datetime``
+and so answers a type check by handing back the string "NaT" -- and
+occasionally a string with a comma in it. None of that is JSON, and several of
+them serialise differently depending on the version of numpy underneath. So every frame becomes ``{"columns": [...],
 "rows": [{column: text-or-null}]}`` with the column order the library returned
 and every cell rendered as text, *before* the artifact is hashed. Two runs that
 saw the same numbers then produce the same hash, which is the only thing that
@@ -17,6 +18,14 @@ makes "this figure came from that call" checkable later.
 for the reason the rest of this system already has one: binary floating point
 is not what a filing printed, and a series whose last bit moves reads as a
 restatement to anything watching a version chain.
+
+**The library retries where this module cannot see it.** Nothing here retries
+a failed call. But ``stock_zh_ah_spot_em`` reaches its host through akshare's
+own paginated helper, which attempts each page three times with exponential
+backoff -- nine GETs against a refusing host for the one operation that has to
+touch the cluster the 2026-08 incident was about. There is no argument for it,
+so the helper is rebound for the length of that call and restored afterwards.
+See ``_one_attempt_per_page``.
 
 **Every row says who produced it.** ``source_vendor``, ``fallback_used`` and
 ``caliber_note`` are on every row of every operation. Today no operation has a
@@ -30,10 +39,13 @@ number.
 
 from __future__ import annotations
 
+import functools
+import importlib
 import math
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from .cn_hk_findata_core import (
     ADAPTER_LIBRARY,
@@ -62,18 +74,40 @@ MAX_PERIODS = 20
 MAX_HOLDER_COUNT_ROWS = 200
 MAX_ROWS = 20_000
 
+# S4: the AH premium is the one operation that must touch 东财's quote cluster,
+# and "no retry" was not true of it until this existed.
+#
+# ``stock_zh_ah_spot_em`` does not issue its own request. It calls
+# ``akshare.utils.func.fetch_paginated_data``, which calls
+# ``akshare.utils.request.request_with_retry`` -- and that helper defaults to
+# ``max_retries=3`` with exponential backoff plus jitter. At ``pz=100`` over the
+# 204-row A+H universe that is three pages, so a refused host is pressed up to
+# nine times, sleeping between each. That is precisely the shape that took the
+# neighbouring 东财 endpoints down for minutes on 2026-08-21, and precisely
+# what ``NO_BATCH_PROBE_HOSTS`` and a ceiling of three physical calls forbid.
+#
+# The library offers no argument for it, so the helper is rebound for the
+# duration of the one call and restored afterwards. One attempt per page.
+AH_PREMIUM_MAX_RETRIES = 1
+# Three pages of one hundred over a universe that has been 204 rows. The quota
+# ceiling is this number; if the universe grows past three pages the call will
+# exceed what was approved, and the wire says how many rows it saw so that
+# shows up rather than creeping.
+AH_PREMIUM_MAX_PAGES = 3
+
+# The bounds behind the 融资融券 unit labels, which were inferred from the
+# captures rather than published by either exchange. See ``_check_margin_units``.
+MIN_PLAUSIBLE_SSE_YUAN = Decimal("100000")
+MAX_PLAUSIBLE_SZSE_YI_YUAN = Decimal("100000000")
+
 # Columns of the A-share statement tables that describe the report rather than
 # report a line item. Everything else in the frame is a concept.
 _A_STATEMENT_METADATA = frozenset({
     "SECUCODE", "SECURITY_CODE", "SECURITY_NAME_ABBR", "ORG_CODE", "ORG_TYPE",
     "REPORT_DATE", "REPORT_TYPE", "REPORT_DATE_NAME", "SECURITY_TYPE_CODE",
     "NOTICE_DATE", "UPDATE_DATE", "CURRENCY", "START_DATE", "OPINION_TYPE",
-    "OSOPINION_TYPE", "LISTING_STATE", "MINORITY_INTEREST",  # see below
+    "OSOPINION_TYPE", "LISTING_STATE",
 })
-# ``MINORITY_INTEREST`` is a real line item and is removed from the metadata
-# set again here rather than being left out above, so the list above can stay a
-# copy of the vendor's own envelope columns.
-_A_STATEMENT_METADATA = _A_STATEMENT_METADATA - {"MINORITY_INTEREST"}
 
 _STATEMENT_KINDS = ("income", "balance", "cash")
 _A_FUNCTION_BY_STATEMENT = {
@@ -130,6 +164,17 @@ def cell_text(value: Any) -> str | None:
 
     if value is None:
         return None
+    # Absence first, before anything looks at the type. ``pandas.NaT`` is a
+    # subclass of ``datetime``, so the date branch below would have called
+    # ``isoformat()`` on it and stored the literal string "NaT" as though the
+    # vendor had reported a date. NaN and NaT are the only values in this
+    # domain that are unequal to themselves, which is what asks the question
+    # without naming a library this module does not import.
+    try:
+        if value != value:
+            return None
+    except (TypeError, ValueError):  # pragma: no cover - exotic comparisons
+        pass
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
@@ -349,6 +394,43 @@ def _envelope(source_record_refs: Sequence[str]) -> dict[str, Any]:
 # -- fetching --------------------------------------------------------------
 
 
+@contextmanager
+def _one_attempt_per_page(akshare: Any) -> Iterator[None]:
+    """Cap akshare's own retry loop for the length of one call.
+
+    Refuses rather than proceeding when the helper is not where this version
+    of the library puts it. The alternative is reaching the one host that has
+    already demonstrated what happens when it is pressed, without the cap the
+    approval was granted on the strength of -- and a silent ``getattr`` miss
+    is exactly how that would happen unnoticed.
+    """
+
+    try:
+        module = importlib.import_module("akshare.utils.func")
+    except ImportError as exc:  # pragma: no cover - depends on the extra
+        raise CnHkFinDataAdapterError(
+            "this akshare does not expose akshare.utils.func, so its retry "
+            "loop cannot be capped; refusing rather than reaching the quote "
+            "cluster uncapped"
+        ) from exc
+    original = getattr(module, "request_with_retry", None)
+    if not callable(original):
+        raise CnHkFinDataAdapterError(
+            "this akshare does not route paginated requests through "
+            f"request_with_retry (expected in {ADAPTER_LIBRARY} "
+            f"{ADAPTER_LIBRARY_VERSION}), so its retry loop cannot be capped; "
+            "refusing rather than reaching the quote cluster uncapped"
+        )
+    module.request_with_retry = functools.partial(
+        original, max_retries=AH_PREMIUM_MAX_RETRIES)
+    try:
+        yield
+    finally:
+        # Restored on every path. Leaving the cap installed would quietly
+        # change how every other akshare call in the process behaves.
+        module.request_with_retry = original
+
+
 def _library() -> Any:
     """Import lazily, so a Core without the extra refuses with a reason."""
 
@@ -365,9 +447,13 @@ def _library() -> Any:
 def _call(akshare: Any, function: str, **kwargs: Any) -> Any:
     """One upstream call, with the vendor's failure turned into a refusal.
 
-    No retry. The skill's own rule, learned on 2026-08-21: connection refused,
-    reset, 502 and 403 are not transient against these hosts, and pressing them
-    took down the endpoints that were still healthy.
+    This layer never retries: the skill's own rule, learned on 2026-08-21, is
+    that connection refused, reset, 502 and 403 are not transient against these
+    hosts and pressing them took down the endpoints that were still healthy.
+
+    It is not the whole story, because the library retries underneath. Only
+    the paginated 东财 quote route does so, and ``_one_attempt_per_page`` caps
+    it there; the other five operations call ``requests.get`` once and raise.
     """
 
     handle = getattr(akshare, function, None)
@@ -544,14 +630,17 @@ def fetch_northbound_flow(*, as_of: str) -> dict[str, Any]:
 def fetch_ah_premium(*, ticker: str) -> dict[str, Any]:
     """One A+H pair's premium, from the vendor that actually computes one.
 
-    This is the single operation that has to touch 东财's quote cluster --
-    the host the 2026-08 incident was about. One call, no retry, and a quota
-    that makes probing arithmetically impossible.
+    This is the single operation that has to touch 东财's quote cluster -- the
+    host the 2026-08 incident was about. Three paged GETs, one attempt each
+    because the library's own three-retry loop is capped for the duration of
+    the call, no retry of the call itself, and a quota that makes probing
+    arithmetically impossible.
     """
 
     akshare = _library()
     raw = _raw_envelope(AH_PREMIUM_OPERATION, "eastmoney", {"ticker": ticker})
-    frame = _call(akshare, "stock_zh_ah_spot_em")
+    with _one_attempt_per_page(akshare):
+        frame = _call(akshare, "stock_zh_ah_spot_em")
     raw["frames"]["ah"] = frame_to_raw(
         frame, function="stock_zh_ah_spot_em", kwargs={})
     return raw
@@ -963,6 +1052,7 @@ def margin_balance_wire(
                 **_provenance(MARGIN_BALANCE_OPERATION, vendor=vendor,
                               fallback_used=fallback_used, caliber_note=note),
             })
+    _check_margin_units(exchange, rows)
     rows.sort(key=lambda item: item["trade_date"])
     return {
         "schema_version": WIRE_SCHEMA_VERSION,
@@ -974,6 +1064,52 @@ def margin_balance_wire(
         "dropped_row_count": dropped,
         **_envelope(source_record_refs),
     }
+
+
+def _check_margin_units(exchange: str, rows: Sequence[Mapping[str, Any]]) -> None:
+    """Refuse when the figures contradict the unit written on them.
+
+    The units are not published by either exchange; they were read off the
+    magnitudes -- Shanghai returned 1,350,016,680,402 and Shenzhen 12,847.58
+    for the same quantity two days apart -- and a label that was inferred has
+    to be able to notice when it stops being true. If Shenzhen starts serving
+    元 or Shanghai starts serving 亿元, every row would still validate and
+    every figure would be out by eight orders of magnitude with nothing on the
+    row to say so.
+
+    The bounds are deliberately far from anything real rather than tight. A
+    market-wide margin balance below a hundred thousand 元 is impossible even
+    on the first day of the 2010 pilot, which cleared millions; a balance of a
+    hundred million 亿元 would be ten quadrillion 元. Either one means the unit
+    flipped, not that the market moved.
+    """
+
+    floor, ceiling = (
+        (MIN_PLAUSIBLE_SSE_YUAN, None) if exchange == "sse"
+        else (None, MAX_PLAUSIBLE_SZSE_YI_YUAN)
+    )
+    for row in rows:
+        value = row.get("total_balance")
+        if value is None:
+            continue
+        amount = Decimal(value)
+        if amount <= 0:
+            continue
+        if floor is not None and amount < floor:
+            raise CnHkFinDataAdapterError(
+                f"the Shanghai total balance for {row['trade_date']} is {value}, "
+                f"which is below {floor} 元 and so cannot be a market-wide "
+                "total in 元; the exchange appears to have changed units and "
+                f"the row would have been labelled {row['amount_unit']} anyway"
+            )
+        if ceiling is not None and amount > ceiling:
+            raise CnHkFinDataAdapterError(
+                f"the Shenzhen total balance for {row['trade_date']} is "
+                f"{value}, which is above {ceiling} 亿元 and so cannot be a "
+                "market-wide total in 亿元; the exchange appears to have "
+                f"changed units and the row would have been labelled "
+                f"{row['amount_unit']} anyway"
+            )
 
 
 def northbound_flow_wire(
@@ -1134,7 +1270,11 @@ __all__ = [
     "FETCHERS",
     "MAX_HOLDER_COUNT_ROWS",
     "MAX_PERIODS",
+    "AH_PREMIUM_MAX_PAGES",
+    "AH_PREMIUM_MAX_RETRIES",
+    "MAX_PLAUSIBLE_SZSE_YI_YUAN",
     "MAX_ROWS",
+    "MIN_PLAUSIBLE_SSE_YUAN",
     "RAW_SCHEMA_VERSION",
     "WIRE_BUILDERS",
     "WIRE_SCHEMA_VERSION",

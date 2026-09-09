@@ -15,19 +15,28 @@ are labelled on every row instead of in a comment somewhere.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
+import sys
+import types
 import unittest
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
 from dalton_core.authority_resolver import _schema_matches
 from dalton_core.cn_hk_findata_adapter import (
+    AH_PREMIUM_MAX_PAGES,
+    AH_PREMIUM_MAX_RETRIES,
     CnHkFinDataAdapterError,
     CnHkFinDataVendorRefusal,
+    MAX_PLAUSIBLE_SZSE_YI_YUAN,
+    MIN_PLAUSIBLE_SSE_YUAN,
     WIRE_BUILDERS,
     a_share_symbol,
     cell_text,
+    fetch_ah_premium,
     frame_to_raw,
     hk_symbol,
 )
@@ -59,6 +68,113 @@ class Frame:
         return [dict(record) for record in self._records]
 
 
+class NotATime(datetime):
+    """What ``pandas.NaT`` is: a datetime that is not equal to itself."""
+
+    def __eq__(self, other):
+        return False
+
+    def __ne__(self, other):
+        return True
+
+    def __hash__(self):
+        return 0
+
+
+@contextlib.contextmanager
+def fake_akshare(spot):
+    """A library-shaped stand-in, so the retry cap can be tested offline.
+
+    The real akshare is an optional extra and is not installed for the suite.
+    What is under test is not the library but what this adapter does to it
+    before it is allowed near 东财's quote cluster, and that is visible from a
+    module tree with the same three names in it.
+    """
+
+    def request_with_retry(url, params=None, timeout=15, max_retries=3):
+        raise AssertionError("no test may actually request anything")
+
+    func = types.ModuleType("akshare.utils.func")
+    func.request_with_retry = request_with_retry
+    utils = types.ModuleType("akshare.utils")
+    utils.func = func
+    akshare = types.ModuleType("akshare")
+    akshare.utils = utils
+    akshare.__version__ = "1.18.94"
+    akshare.stock_zh_ah_spot_em = spot
+    replaced = {"akshare": akshare, "akshare.utils": utils,
+                "akshare.utils.func": func}
+    saved = {name: sys.modules.get(name) for name in replaced}
+    sys.modules.update(replaced)
+    try:
+        yield func, request_with_retry
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
+class QuoteClusterRetryTests(unittest.TestCase):
+    """The one operation that has to touch the host that went quiet in August.
+
+    ``stock_zh_ah_spot_em`` issues no request of its own: it calls
+    ``fetch_paginated_data``, which calls ``request_with_retry``, which
+    defaults to three attempts with exponential backoff. Three pages of one
+    hundred over a 204-row universe is therefore up to nine GETs against a
+    refusing host -- nine, sleeping between each, which is the shape of the
+    2026-08-21 incident and nine times the approved ceiling of three.
+    """
+
+    def spot(self, seen, raise_with=None):
+        def stock_zh_ah_spot_em():
+            module = sys.modules["akshare.utils.func"]
+            seen.append(getattr(module.request_with_retry, "keywords", None))
+            if raise_with is not None:
+                raise raise_with
+            return Frame(["名称", "H股代码", "A股代码"],
+                         [{"名称": "工商银行", "H股代码": "01398",
+                           "A股代码": "601398"}])
+        return stock_zh_ah_spot_em
+
+    def test_the_library_retry_loop_is_capped_for_the_length_of_the_call(self):
+        seen = []
+        with fake_akshare(self.spot(seen)) as (module, original):
+            fetch_ah_premium(ticker="01398")
+            self.assertEqual(seen, [{"max_retries": AH_PREMIUM_MAX_RETRIES}])
+            self.assertEqual(AH_PREMIUM_MAX_RETRIES, 1)
+            # Restored, so the cap cannot leak into any other akshare call
+            # that happens to run in the same process.
+            self.assertIs(module.request_with_retry, original)
+
+    def test_the_cap_is_lifted_even_when_the_call_fails(self):
+        seen = []
+        with fake_akshare(self.spot(seen, raise_with=OSError("refused"))) as (
+                module, original):
+            with self.assertRaises(CnHkFinDataVendorRefusal):
+                fetch_ah_premium(ticker="01398")
+            self.assertIs(module.request_with_retry, original)
+
+    def test_a_library_that_cannot_be_capped_is_refused_before_the_call(self):
+        # Refusing is the safe direction. A silent miss here would reach the
+        # one host that has already demonstrated what happens when it is
+        # pressed, without the cap the approval rests on.
+        seen = []
+        with fake_akshare(self.spot(seen)) as (module, _):
+            del module.request_with_retry
+            with self.assertRaises(CnHkFinDataAdapterError) as caught:
+                fetch_ah_premium(ticker="01398")
+        self.assertIn("uncapped", str(caught.exception))
+        self.assertEqual(seen, [], "the call was made anyway")
+
+    def test_the_page_count_matches_the_universe_the_capture_saw(self):
+        # 204 rows at a hundred a page is three pages, one attempt each, and
+        # the quota's per-unit ceiling is that number rather than a guess.
+        rows = capture("ah-premium")["frames"]["ah"]["row_count"]
+        self.assertEqual(-(-rows // 100), AH_PREMIUM_MAX_PAGES)
+
+
 class CanonicalisationTests(unittest.TestCase):
     def test_a_float_becomes_the_decimal_that_printed(self):
         self.assertEqual(cell_text(1.5), "1.5")
@@ -75,6 +191,22 @@ class CanonicalisationTests(unittest.TestCase):
         for value in (None, float("nan"), "", "  ", "--", "NaT"):
             self.assertIsNone(cell_text(value), repr(value))
         self.assertIsNone(cell_text(math.inf))
+
+    def test_a_missing_timestamp_does_not_become_the_word_nat(self):
+        # ``pandas.NaT`` is a subclass of ``datetime``, so a type check reaches
+        # the date branch and ``isoformat()`` hands back the literal string
+        # "NaT" -- an absent 公告日期 stored as though the vendor had reported
+        # one, and one that no date parser downstream would reject as missing.
+        self.assertIsNone(cell_text(NotATime(2026, 9, 9)))
+
+    def test_the_real_missing_timestamp_behaves_like_the_stand_in(self):
+        pandas = None
+        with contextlib.suppress(ImportError):
+            import pandas  # noqa: PLC0415 - optional, only present with an extra
+        if pandas is None:  # pragma: no cover - depends on the extra
+            self.skipTest("pandas comes with an optional extra")
+        self.assertIsInstance(pandas.NaT, datetime)
+        self.assertIsNone(cell_text(pandas.NaT))
 
     def test_the_same_frame_twice_is_the_same_hash(self):
         frame = Frame(["a", "b"], [{"a": 1.25, "b": "x"}, {"a": None, "b": "y"}])
@@ -217,6 +349,36 @@ class FallbackLabellingTests(unittest.TestCase):
                            Decimal(szse["total_balance"]) * 10_000_000)
         for row in (sse, szse):
             self.assertIn("不可直接相加", row["caliber_note"])
+
+    def test_a_shanghai_total_too_small_for_yuan_is_refused(self):
+        # The unit labels were read off the magnitudes rather than published,
+        # so they have to notice when they stop being true. A Shanghai total
+        # that arrives in 亿元 would be about 13,500 -- it would validate, and
+        # every figure on the row would be out by eight orders.
+        raw = capture("margin-balance-sse")
+        for row in raw["frames"]["margin"]["rows"]:
+            row["融资融券余额"] = "13500.16"
+        with self.assertRaises(CnHkFinDataAdapterError) as caught:
+            wire("margin-balance-sse", raw)
+        self.assertIn(str(MIN_PLAUSIBLE_SSE_YUAN), str(caught.exception))
+
+    def test_a_shenzhen_total_too_large_for_yi_yuan_is_refused(self):
+        raw = capture("margin-balance-szse")
+        for row in raw["frames"]["margin"]["rows"]:
+            row["融资融券余额"] = "1284758000000"
+        with self.assertRaises(CnHkFinDataAdapterError) as caught:
+            wire("margin-balance-szse", raw)
+        self.assertIn(str(MAX_PLAUSIBLE_SZSE_YI_YUAN), str(caught.exception))
+
+    def test_the_bounds_are_far_enough_away_to_pass_the_real_captures(self):
+        sse = wire("margin-balance-sse")["rows"]
+        szse = wire("margin-balance-szse")["rows"]
+        for row in sse:
+            self.assertGreater(Decimal(row["total_balance"]),
+                               MIN_PLAUSIBLE_SSE_YUAN * 1_000_000)
+        for row in szse:
+            self.assertLess(Decimal(row["total_balance"]),
+                            MAX_PLAUSIBLE_SZSE_YI_YUAN / 1_000)
 
     def test_the_hong_kong_statement_admits_it_has_no_currency(self):
         # The main-indicator table on the same host has a CURRENCY of HKD and

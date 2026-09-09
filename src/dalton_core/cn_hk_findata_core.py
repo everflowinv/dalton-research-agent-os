@@ -418,9 +418,17 @@ def invocation_ref(
     """Name one exact call: this approval, these parameters, that raw output.
 
     The same construction the market lane uses. Two runs of the same request
-    against the same approval that returned the same bytes are one invocation;
-    a run whose bytes differ -- a restated quarter, a corrected holder count --
-    is a different one, which is the distinction a version chain has to make.
+    against the same approval that returned the same answer are one
+    invocation; a run whose answer differs -- a restated quarter, a corrected
+    holder count -- is a different one, which is the distinction a version
+    chain has to make.
+
+    That only holds because of what the caller hashes. The capture carries two
+    local clock fields, and while they were inside the hashed bytes every run
+    minted a new artifact hash and so a new invocation ref -- two readings of
+    the same unchanged quarter looked like two different facts. The child
+    lifts them out before hashing (``cn_hk_findata_cli.CLOCK_FIELDS``) and
+    keeps them on the summary and the wire, where when-it-was-read belongs.
     """
 
     return "connector-invocation:cn-hk-findata:" + content_hash({

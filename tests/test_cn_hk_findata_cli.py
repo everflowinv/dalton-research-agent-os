@@ -22,7 +22,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from dalton_core.cn_hk_findata_cli import build_parser, run
+from dalton_core.cn_hk_findata_cli import CLOCK_FIELDS, build_parser, run
 from dalton_core.cn_hk_findata_core import (
     KIND_BY_OPERATION,
     OPERATIONS,
@@ -136,13 +136,18 @@ class ChildTests(unittest.TestCase):
 
     # -- artifact always --------------------------------------------------
 
-    def test_the_artifact_hash_is_the_hash_of_the_canonical_capture(self):
+    def test_the_artifact_hash_is_the_hash_of_what_the_source_said(self):
         name, _ = CASES["northbound_flow"]
         raw = json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
         summary = self.run_child("northbound_flow")
-        expected = hashlib.sha256(
-            canonical_json(raw).encode("utf-8")).hexdigest()
+        expected = hashlib.sha256(canonical_json(
+            {key: value for key, value in raw.items()
+             if key not in CLOCK_FIELDS}
+        ).encode("utf-8")).hexdigest()
         self.assertEqual(summary["artifact"]["content_hash"], expected)
+        # When it was read is still recorded; it is simply not part of what
+        # was read.
+        self.assertEqual(summary["captured_at"], raw["captured_at"])
 
     def test_the_same_capture_twice_is_the_same_artifact(self):
         first = self.run_child("northbound_flow")
@@ -150,6 +155,37 @@ class ChildTests(unittest.TestCase):
         self.assertEqual(first["artifact"]["content_hash"],
                          second["artifact"]["content_hash"])
         self.assertEqual(first["invocation_ref"], second["invocation_ref"])
+
+    def test_reading_the_same_answer_at_a_different_time_is_one_invocation(self):
+        # This is the whole point of the invocation ref. While the clock
+        # fields were inside the hashed bytes, two readings of the same
+        # unchanged quarter minted two artifact hashes and two invocations,
+        # and a version chain reading them could not tell "nothing changed"
+        # from "something changed twice".
+        name, _ = CASES["northbound_flow"]
+        raw = json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+        first = self.run_child("northbound_flow", fixture=self.fixture(name, raw))
+        later = dict(raw)
+        later["captured_at"] = "2026-09-10T02:31:44.000001+00:00"
+        later["observed_on"] = "2026-09-10"
+        second = self.run_child("northbound_flow",
+                                fixture=self.fixture(name, later))
+        self.assertNotEqual(first["captured_at"], second["captured_at"])
+        self.assertEqual(first["artifact"]["content_hash"],
+                         second["artifact"]["content_hash"])
+        self.assertEqual(first["invocation_ref"], second["invocation_ref"])
+
+    def test_a_changed_answer_is_a_different_invocation(self):
+        name, _ = CASES["northbound_flow"]
+        raw = json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+        first = self.run_child("northbound_flow", fixture=self.fixture(name, raw))
+        restated = json.loads(json.dumps(raw))
+        restated["frames"]["flow"]["rows"][0]["资金净流入"] = "1234"
+        second = self.run_child("northbound_flow",
+                                fixture=self.fixture(name, restated))
+        self.assertNotEqual(first["artifact"]["content_hash"],
+                            second["artifact"]["content_hash"])
+        self.assertNotEqual(first["invocation_ref"], second["invocation_ref"])
 
     def test_a_run_that_cannot_be_normalised_still_leaves_its_artifact(self):
         name, _ = CASES["northbound_flow"]
@@ -210,6 +246,53 @@ class ChildTests(unittest.TestCase):
         self.assertEqual(summary["refusal_kind"],
                          "vendor_unavailable_no_substitute")
         self.assertIn("没有比价与溢价", summary["failure_reason"])
+
+    def test_a_replay_cannot_be_relabelled_as_another_company(self):
+        # A capture of 贵州茅台 replayed under a different code would produce a
+        # wire that validates, that names 000001, and that is entirely about
+        # 600519. Nothing further down the chain could notice.
+        name, _ = CASES["buybacks"]
+        summary = self.run_child("buybacks", a_ticker="000001")
+        self.assertEqual(summary["status"], "failed")
+        self.assertIn("different request", summary["failure_reason"])
+        self.assertIn("600519", summary["failure_reason"])
+        self.assertIsNone(summary["artifact"])
+
+    def test_a_replay_that_answers_the_question_asked_is_allowed(self):
+        name, _ = CASES["buybacks"]
+        raw = json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+        raw["parameters"]["a_ticker"] = "000001"
+        summary = self.run_child(
+            "buybacks", a_ticker="000001", fixture=self.fixture(name, raw))
+        self.assertEqual(summary["status"], "succeeded", summary["failure_reason"])
+
+    def test_an_empty_answer_names_no_vendor_rather_than_an_empty_list(self):
+        # Both documented empty answers. They are findings, not failures: this
+        # company announced no buyback, and this code is not half of an A+H
+        # pair. Neither has a vendor, which is not the same as having none of
+        # them -- a cockpit rendering ``[]`` as a vendor is showing a bug.
+        name, _ = CASES["buybacks"]
+        raw = json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+        raw["parameters"]["a_ticker"] = "000001"
+        summary = self.run_child(
+            "buybacks", a_ticker="000001", fixture=self.fixture(name, raw))
+        self.assertEqual(summary["status"], "succeeded")
+        self.assertEqual(summary["row_count"], 0)
+        self.assertIsNone(summary["source_vendor"])
+        self.assertFalse(summary["fallback_used"])
+        self.assertEqual(summary["caliber_notes"], [])
+
+        name, _ = CASES["ah_premium"]
+        raw = json.loads((FIXTURES / f"{name}.json").read_text(encoding="utf-8"))
+        raw["parameters"]["ticker"] = "00700"
+        summary = self.run_child(
+            "ah_premium", ticker="00700", fixture=self.fixture(name, raw))
+        self.assertEqual(summary["status"], "succeeded")
+        self.assertEqual(summary["row_count"], 0)
+        self.assertIsNone(summary["source_vendor"])
+
+    def test_one_vendor_is_reported_as_a_name_and_not_as_a_list(self):
+        self.assertEqual(self.run_child("buybacks")["source_vendor"], "eastmoney")
 
     def test_a_successful_summary_carries_the_caliber_notes(self):
         summary = self.run_child("margin_balance")

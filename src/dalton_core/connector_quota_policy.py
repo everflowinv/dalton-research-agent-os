@@ -159,9 +159,13 @@ _DAILY_QUOTAS = MappingProxyType(
             }
         ),
         # The one operation that must touch 东财's quote cluster -- the host
-        # the 2026-08 incident was about. Two pages cover the whole A+H
-        # universe, and four units a day is deliberately below anything that
-        # could look like probing.
+        # the 2026-08 incident was about. Three pages of one hundred cover the
+        # 204-row A+H universe, which is why the per-unit ceiling is three and
+        # not a round number: the adapter also caps the library's own
+        # three-attempt retry loop to one attempt per page, so three pages is
+        # three GETs and the ceiling is the truth rather than a hope. Four
+        # units a day is deliberately below anything that could look like
+        # probing.
         ("cn-hk-findata", "ah_premium"): MappingProxyType(
             {
                 "quota_unit": "search",

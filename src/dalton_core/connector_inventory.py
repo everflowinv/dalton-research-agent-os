@@ -1161,7 +1161,10 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
         # industry fund flow is an "即时" measure where 东财's is "今日", and a
         # row that does not say which one it is looks exactly like a row that
         # does. So the label travels with the number rather than with the run.
-        decimal = {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$"}
+        #
+        # Every figure is nullable. The vendor drops a line item without
+        # dropping the period around it, and an absent figure has to look
+        # absent rather than like a zero.
         nullable_decimal = {
             "type": ["string", "null"],
             "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
