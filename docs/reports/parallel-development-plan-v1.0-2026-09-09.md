@@ -20,7 +20,17 @@
 | 开发方式 | 主 agent 定计划，Opus 5 subagent 写代码，各自 worktree，主 agent 集成 |
 | 文档 | 每片进度即时写进 PROJECT_STATUS；每个 agent 交付时附自己的报告 |
 
-未决（不挡 Wave 0 / Wave 1）：ADR-0007（thesis 修订候选）、gate 重开策略、解除 `adhoc_research` 硬禁用的边界、投递渠道。这四项在 Wave 2 开工前需要 owner 裁决。
+**owner 第二批裁决（2026-09-09 下午）**：
+
+| 事项 | 决定 |
+| --- | --- |
+| ADR-0007 | **接受**：自动化可提交 thesis 修订候选，人裁决；已核验数字可进 Ledger |
+| gate 重开 | **证据变厚可重出 Initial Screen，但必须版本化**：老版本永不删除，认知迭代要能从版本链上看出来。`gate_passed` 不再是终态，而是某一版的状态 |
+| `adhoc_research` 硬禁用 | **解除**。边界由主 agent 按「对分析师的要求」定：在 mission 预算内、每条专项研究是一个带预算与截止的 `ResearchTask`、写入范围不超过 `may_write`、cockpit 可见 |
+| 周报投递 | **搁置到最后**（P15c / P15e 排到 Wave 3 末尾） |
+| 工作方式 | 主 agent 持续推进不停；遇到问题按分析师要求自行定夺；必须人来解决的问题攒到最后一并提出 |
+
+**主 agent 定的边界（依据 owner 授权）**：`adhoc_research` 解禁后，专项研究任务的单次模型开销上限沿用 `company_model_cli` 的 `MAX_COST_USD` 量级，日累计不超过 mission `max_daily_cost_usd` 的 25%；同一 inquiry 不重复派发（内容哈希去重）；产出只能是 Claim、observation、deliverable 三类既有写入范围。
 
 ## 2. 今日调查结论
 
@@ -108,7 +118,9 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | --- | --- | --- |
 | 09-09 | 调查：yfinance、研报 consensus 素材、接线热点、测试基线 | 完成 |
 | 09-09 | 本计划 v1.0 | 完成 |
-| 09-09 | Wave 0 派出 | 进行中 |
+| 09-09 | Wave 0 派出（worktree `dalton-wave0-lane-registry-worktree`，分支 `wave0-lane-registry`） | 进行中 |
+| 09-09 | owner 第二批裁决记入第 1 节 | 完成 |
+| 09-09 | Wave 1 四线提前派出（不等 Wave 0；lane 登记留到集成） | 进行中 |
 
 ---
 
