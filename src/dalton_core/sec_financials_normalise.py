@@ -166,14 +166,21 @@ def normalise_statement(
                 # as filed, and not something to coerce into one.
                 drop("fact value is not a plain decimal")
                 continue
+            axis = canonical_ref(row.get("dimension_axis"))
             lines.append({
                 "statement": statement,
                 "concept": concept,
                 "label": _text(row.get("label")) or _text(fact.get("label")) or concept,
                 "level": level,
                 "parent_concept": canonical_ref(row.get("parent_concept")),
-                "is_breakdown": bool(row.get("is_breakdown")),
-                "dimension_axis": canonical_ref(row.get("dimension_axis")),
+                # P13an: a line reported along a dimension is a breakdown,
+                # whatever the parser's own flag says. Live, EPAM's revenue
+                # split by timing of transfer came back with the axis set and
+                # the flag clear, so the reported total and its two components
+                # were indistinguishable -- three rows for one quarter, and any
+                # series built from them silently adds a total to its parts.
+                "is_breakdown": bool(row.get("is_breakdown")) or axis is not None,
+                "dimension_axis": axis,
                 "dimension_member": canonical_ref(row.get("dimension_member")),
                 # A quarter and a year to date share an end date; only the
                 # start tells them apart, and a balance-sheet instant has none.

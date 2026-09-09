@@ -555,6 +555,21 @@ def validate_mission_source_discovery(value: Mapping[str, Any]) -> dict[str, Any
     return wire
 
 
+def _statement_line_row(row: Any) -> dict[str, Any]:
+    """One stored line, with its breakdown flag derived rather than trusted.
+
+    P13an: the parser reported some dimensioned lines with the flag clear, so
+    rows already in the ledger carry it wrong. The ledger is append-only and
+    those rows cannot be corrected in place -- but a line filed along a
+    dimension is a breakdown by construction, so it is derived on the way out
+    and every reader, old rows included, sees the truth.
+    """
+
+    wire = dict(row)
+    wire["is_breakdown"] = bool(row["is_breakdown"]) or row["dimension_axis"] is not None
+    return wire
+
+
 def _canonical_record(raw: Any, name: str) -> dict[str, Any]:
     if not isinstance(raw, str):
         raise CoverageMissionConflict(f"{name} record is missing")
@@ -3522,7 +3537,34 @@ class CoverageMissionAuthority:
                 (ingest_id, _vocabulary(statement, ("income", "balance", "cash"),
                                         "statement")),
             ).fetchall()
-        return [{**dict(row), "is_breakdown": bool(row["is_breakdown"])} for row in rows]
+        return [_statement_line_row(row) for row in rows]
+
+    def statement_series_lines(
+        self, company_ref: str, concept: str, *, statement: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Every filed line for one concept, across every filing held.
+
+        Carries ``filed`` and ``accession`` from the filing they came from,
+        because a series has to prefer the most recent statement of a restated
+        quarter and has to be able to name where each figure came from.
+        """
+
+        company_ref = _text(company_ref, "company_ref")
+        concept = _text(concept, "concept")
+        query = (
+            "SELECT l.*, f.accession, f.filed, f.report_date "
+            "FROM coverage_mission_statement_lines l "
+            "JOIN coverage_mission_statement_filings f USING(ingest_id) "
+            "WHERE f.company_ref=? AND l.concept=?"
+        )
+        params: list[Any] = [company_ref, concept]
+        if statement is not None:
+            query += " AND l.statement=?"
+            params.append(_vocabulary(statement, ("income", "balance", "cash"),
+                                      "statement"))
+        query += " ORDER BY f.filed, f.accession, l.ordinal"
+        return [_statement_line_row(row)
+                for row in self.connection.execute(query, params).fetchall()]
 
     def statement_coverage(self, company_ref: str) -> dict[str, Any]:
         """What statements this company already has, for the dispatcher to skip.
