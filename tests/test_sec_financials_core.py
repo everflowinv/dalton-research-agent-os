@@ -40,7 +40,9 @@ from dalton_core.sec_financials_core import (
 )
 
 REPO = Path(__file__).resolve().parents[1]
-RECORD = REPO / "deploy" / "connector-governance" / "sec-financial-statements-v1.json"
+# The record the current contract is covered by. v1 predates period_start and
+# is kept as history, exactly as the three sec-company-facts records are.
+RECORD = REPO / "deploy" / "connector-governance" / "sec-financial-statements-v2.json"
 
 
 class IdentityTests(unittest.TestCase):
@@ -102,7 +104,8 @@ class OutputContractTests(unittest.TestCase):
             "statement": "income", "concept": "us-gaap_Revenues",
             "label": "Revenues", "level": 1, "parent_concept": None,
             "is_breakdown": False, "dimension_axis": None,
-            "dimension_member": None, "period_end": "2026-06-30",
+            "dimension_member": None, "period_start": "2026-04-01",
+            "period_end": "2026-06-30",
             "value": "2814828000", "unit": "USD", "balance": "credit",
         }
         base.update(overrides)
@@ -145,9 +148,27 @@ class OutputContractTests(unittest.TestCase):
             ["properties"]["lines"]["items"]["required"]
         )
         self.assertLessEqual(
-            {"level", "parent_concept", "is_breakdown", "dimension_axis", "period_end"},
+            {"level", "parent_concept", "is_breakdown", "dimension_axis",
+             "period_start", "period_end"},
             required,
         )
+
+    def test_a_quarter_and_a_year_to_date_are_distinguishable(self):
+        # They share an end date; only the start tells them apart, and a
+        # contract without it would let half-years be ingested as quarters.
+        properties = self.schema()["properties"]["filings"]["items"]["properties"]
+        quarter = self.line(period_start="2026-04-01", value="1414767000")
+        year_to_date = self.line(period_start="2026-01-01", value="2814828000")
+        self.check(quarter, properties["lines"]["items"])
+        self.check(year_to_date, properties["lines"]["items"])
+        self.assertNotEqual(quarter["period_start"], year_to_date["period_start"])
+        self.assertEqual(quarter["period_end"], year_to_date["period_end"])
+
+    def test_a_balance_sheet_line_has_no_start(self):
+        # An instant is as-of, not over.
+        properties = self.schema()["properties"]["filings"]["items"]["properties"]
+        self.check(self.line(statement="balance", period_start=None),
+                   properties["lines"]["items"])
 
     def test_every_filing_names_its_accession(self):
         filing = self.schema()["properties"]["filings"]["items"]
@@ -181,10 +202,10 @@ class GovernanceTests(unittest.TestCase):
 
     def test_the_shared_builder_produces_the_same_record(self):
         direct = build_sec_financials_governance_record(
-            approved_by="human:lumos", effective_from="2026-09-09T00:00:00+00:00", version=1)
+            approved_by="human:lumos", effective_from="2026-09-09T00:00:00+00:00", version=2)
         shared = build_governance_record(
             KIND, approved_by="human:lumos", status="proposed",
-            effective_from="2026-09-09T00:00:00+00:00", version=1)
+            effective_from="2026-09-09T00:00:00+00:00", version=2)
         self.assertEqual(direct, shared)
 
     def test_the_shipped_record_is_proposed_and_matches_the_template(self):
@@ -208,7 +229,7 @@ class GovernanceTests(unittest.TestCase):
 
     def test_the_installer_seeds_it(self):
         install = (REPO / "deploy" / "macos" / "install.sh").read_text(encoding="utf-8")
-        self.assertIn("sec-financial-statements-v1.json", install)
+        self.assertIn("sec-financial-statements-${sec_financials_version}.json", install)
 
 
 if __name__ == "__main__":

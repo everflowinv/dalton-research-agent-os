@@ -105,11 +105,18 @@ done
 # so a model can have line items at all. It does not replace reading filings:
 # whatever the parser cannot reach still comes from the original text.
 # Credential-free public HTTPS to two named SEC hosts. Seed once as *proposed*.
-sec_financials_file="$governance_dir/sec-financial-statements-v1.json"
-if [[ ! -f "$sec_financials_file" && -f "$repo_root/deploy/connector-governance/sec-financial-statements-v1.json" ]]; then
-  cp "$repo_root/deploy/connector-governance/sec-financial-statements-v1.json" "$sec_financials_file"
-  chmod 600 "$sec_financials_file"
-fi
+# v2: the v1 contract had no period_start, and a 10-Q reports the quarter and
+# the year to date under the same period_end -- EPAM's Q2 and H1 revenue both
+# end 2026-06-30. Without the start they are one number twice, and half-years
+# would have been ingested as quarters. Caught before any data was taken.
+for sec_financials_version in v1 v2; do
+  sec_financials_file="$governance_dir/sec-financial-statements-${sec_financials_version}.json"
+  repo_record="$repo_root/deploy/connector-governance/sec-financial-statements-${sec_financials_version}.json"
+  if [[ ! -f "$sec_financials_file" && -f "$repo_record" ]]; then
+    cp "$repo_record" "$sec_financials_file"
+    chmod 600 "$sec_financials_file"
+  fi
+done
 # P9d-1: AlphaEngine search_library is a separate governed capability.  Seed
 # the committed *proposed* record once; the owner approves in place with
 # dalton-connector-governance approve.  The discovery plan is a hash-bound

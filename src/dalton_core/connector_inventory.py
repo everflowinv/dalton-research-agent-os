@@ -963,6 +963,13 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "is_breakdown": {"type": "boolean"},
                 "dimension_axis": {"type": ["string", "null"]},
                 "dimension_member": {"type": ["string", "null"]},
+                # P13ag: a 10-Q reports the quarter and the year to date with
+                # the same period_end -- EPAM's Q2 revenue and its H1 revenue
+                # both end 2026-06-30. Without the start they are one number
+                # twice, and the whole 单季 / 累计 discipline rests on telling
+                # them apart. Null on a balance-sheet line, which is an instant
+                # and has no start.
+                "period_start": {"type": ["string", "null"]},
                 # A figure is text on the wire for the same reason every other
                 # figure in this system is: a float is not what was filed.
                 "period_end": _string(),
@@ -976,7 +983,7 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
             (
                 "statement", "concept", "label", "level", "parent_concept",
                 "is_breakdown", "dimension_axis", "dimension_member",
-                "period_end", "value", "unit", "balance",
+                "period_start", "period_end", "value", "unit", "balance",
             ),
         )
         filing = _object_schema(
