@@ -1007,8 +1007,18 @@ class LiveMcpRunnerAdmissionGate(ConnectorRunnerAdmissionGate):
             if request["operation"] == "search_web" and cursor is not None:
                 raise RunnerConflict("web search is a single ranked page; it carries no cursor")
             if request["operation"] in {"search_library", "search_web"}:
+                # S2: a ranked page that came back exactly full is not
+                # evidence that the source held exactly that much. Some
+                # libraries continue with a cursor and some (Guidepoint) have
+                # no cursor at all, so the saturated page is the only signal
+                # there is -- and calling it "complete" tells a reader "this
+                # is everything the source has on the subject", which is
+                # wrong in precisely the cases where the subject is rich.
+                saturated = bool(refs) and len(refs) >= request["max_records"]
                 expected = (
-                    "empty" if not refs else "partial" if cursor is not None else "complete",
+                    "empty" if not refs
+                    else "partial" if (cursor is not None or saturated)
+                    else "complete",
                     "ranked",
                 )
             else:
@@ -1340,8 +1350,19 @@ class AlphaEngineLiveAdapter:
             cursor = page["cursor"]
             completeness = page["completeness"]
             refs = [page["source_record_ref"]]
+        # S2: a saturated ranked page is partial even without a cursor, for
+        # the reason the admission gate now enforces on every mcp_managed
+        # search: a full page has never been evidence that the library held
+        # exactly that much. Document pages are unaffected -- they carry their
+        # own contiguity proof and their own completeness.
+        saturated = (
+            wire["operation"] == "search_library"
+            and bool(refs)
+            and len(refs) >= wire["max_records"]
+        )
         source_status = (
-            "empty" if not refs else "partial" if cursor is not None else "complete"
+            "empty" if not refs
+            else "partial" if (cursor is not None or saturated) else "complete"
         )
         structured = {
             "source_record_refs": refs,

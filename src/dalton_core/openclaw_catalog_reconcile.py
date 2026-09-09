@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from .model_deployment import ADAPTER_REF, openclaw_broker_profiles
-from .model_router import canonical_json
+from .model_router import (
+    RETIRED_REASON_NOT_IN_BROKER,
+    ModelRouter,
+    canonical_hash,
+    canonical_json,
+)
 
 
 _BROKER_PLUGIN_ID = "dalton-openclaw-model-broker"
@@ -345,9 +350,212 @@ def openclaw_broker_profiles_from_config(
     return output
 
 
+def broker_catalog_hash(config: Mapping[str, Any]) -> str:
+    """The digest of exactly what the broker offers, and nothing else.
+
+    A retirement is an assertion about the world -- "the broker stopped
+    offering this" -- and an assertion that carries no evidence cannot be
+    argued with a year later.  So the retired version records the hash of the
+    broker catalog that proved it: profile ids and their model references,
+    sorted, and no configuration, credential or control near them.
+    """
+
+    brokers = _broker_profiles(config)
+    return canonical_hash(
+        [
+            {"id": profile_id, "model": brokers[profile_id]["model_ref"]}
+            for profile_id in sorted(brokers)
+        ]
+    )
+
+
+def _retired_version(
+    latest: Mapping[str, Any], *, checked_at: datetime, catalog_hash: str
+) -> dict[str, Any]:
+    """The next version of a profile, saying it is no longer offered."""
+
+    created = _wire_time(checked_at)
+    retired = {
+        key: copy.deepcopy(value)
+        for key, value in latest.items()
+        if key not in {"content_hash", "status", "retirement"}
+    }
+    version = int(latest["version"]) + 1
+    root, separator, tail = str(latest["profile_version_ref"]).rpartition(":")
+    if separator and tail.isdigit():
+        version_ref = f"{root}:{version}"
+    else:
+        slug = str(latest["id"]).removeprefix("profile:")
+        version_ref = f"model-profile-version:retired-{slug}-{catalog_hash[:16]}:{version}"
+    retired.update({
+        "version": version,
+        "prior_version_ref": latest["profile_version_ref"],
+        "profile_version_ref": version_ref,
+        "created_at": created,
+        # Belt and braces: routing refuses a retired profile outright, and a
+        # reader that only knows about availability still sees it is gone.
+        "availability": {
+            "state": "unavailable",
+            "checked_at": created,
+            "valid_until": _wire_time(checked_at + timedelta(days=7)),
+        },
+        "status": "retired",
+        "retirement": {
+            "reason": RETIRED_REASON_NOT_IN_BROKER,
+            "retired_at": created,
+            "broker_catalog_hash": catalog_hash,
+        },
+    })
+    return retired
+
+
+def _revived_version(
+    latest: Mapping[str, Any], desired: Mapping[str, Any], *, checked_at: datetime
+) -> dict[str, Any]:
+    """The next version of a retired profile, saying it is offered again."""
+
+    revived = {
+        key: copy.deepcopy(value)
+        for key, value in desired.items()
+        if key not in {"content_hash", "status", "retirement"}
+    }
+    version = int(latest["version"]) + 1
+    root, separator, tail = str(latest["profile_version_ref"]).rpartition(":")
+    revived.update({
+        "version": version,
+        "prior_version_ref": latest["profile_version_ref"],
+        "profile_version_ref": (
+            f"{root}:{version}" if separator and tail.isdigit()
+            else f"{desired['profile_version_ref']}-revived-{version}"
+        ),
+        "created_at": _wire_time(checked_at),
+    })
+    return revived
+
+
+def _router_broker_profiles(router: ModelRouter) -> dict[str, dict[str, Any]]:
+    """Every ``profile:`` the router holds, at its latest version.
+
+    Scoped to the broker id namespace on purpose.  The six ``model-profile:``
+    ids are the pre-broker catalog: nothing routes to them, no broker catalog
+    has ever described them, and retiring them against a broker catalog would
+    be asserting something that catalog does not say.
+    """
+
+    return {
+        profile["id"]: profile
+        for profile in router.latest_profiles()
+        if _PROFILE_ID_RE.fullmatch(str(profile.get("id", "")))
+    }
+
+
+def catalog_sync_status(
+    router: ModelRouter,
+    config: Mapping[str, Any],
+    *,
+    checked_at: datetime,
+) -> dict[str, Any]:
+    """Read-only: are the two catalogs the same set, and if not, which way?
+
+    ``catalog_in_sync`` is true when every model the broker offers has a live
+    profile here and every profile here that is not retired is offered by the
+    broker.  Retired profiles are deliberately outside both halves: they are
+    the record of a model that used to be offered, and holding them against the
+    live catalog would make sync unreachable by construction.
+    """
+
+    brokers = _broker_profiles(config)
+    held = _router_broker_profiles(router)
+    live = {
+        profile_id
+        for profile_id, profile in held.items()
+        if profile.get("status") != "retired"
+    }
+    retired = sorted(set(held) - live)
+    missing_here = sorted(set(brokers) - set(held))
+    retired_but_offered = sorted(set(brokers) & set(retired))
+    not_offered = sorted(live - set(brokers))
+    return {
+        "schema_version": "0.1",
+        "checked_at": _wire_time(checked_at),
+        "broker_catalog_hash": broker_catalog_hash(config),
+        "broker_profile_ids": sorted(brokers),
+        "live_profile_ids": sorted(live),
+        "retired_profile_ids": retired,
+        # The two diff sets, by name, that a report or a cockpit panel shows.
+        "missing_static_profile_ids": missing_here + retired_but_offered,
+        "not_in_broker_profile_ids": not_offered,
+        "catalog_in_sync": not missing_here and not retired_but_offered and not not_offered,
+    }
+
+
+def sync_openclaw_model_catalog(
+    router: ModelRouter,
+    config: Mapping[str, Any],
+    *,
+    checked_at: datetime,
+    availability_ttl: timedelta = timedelta(days=7),
+) -> dict[str, Any]:
+    """Make the router's catalog agree with the broker's, append-only.
+
+    Three moves, all of which append a version and none of which deletes one:
+
+    * a broker profile with nothing here gets registered (this is P13l, kept);
+    * a profile here the broker no longer offers gets a *retired* version --
+      the old versions stay exactly as they were, so a route decision from
+      months ago still resolves its profile and the version chain still reads
+      end to end;
+    * a retired profile the broker offers again gets a live version back.
+
+    Idempotent: run it twice and the second run does nothing, because all three
+    moves are conditioned on a difference that no longer exists.
+    """
+
+    catalog_hash = broker_catalog_hash(config)
+    desired = {
+        profile["id"]: profile
+        for profile in openclaw_broker_profiles_from_config(
+            config, checked_at=checked_at, availability_ttl=availability_ttl
+        )
+    }
+    held = _router_broker_profiles(router)
+    added: list[str] = []
+    revived: list[str] = []
+    for profile_id in sorted(desired):
+        current = held.get(profile_id)
+        if current is None:
+            router.register_profile(desired[profile_id])
+            added.append(profile_id)
+        elif current.get("status") == "retired":
+            router.register_profile(
+                _revived_version(current, desired[profile_id], checked_at=checked_at)
+            )
+            revived.append(profile_id)
+    retired: list[str] = []
+    for profile_id in sorted(held):
+        current = held[profile_id]
+        if profile_id in desired or current.get("status") == "retired":
+            continue
+        router.register_profile(
+            _retired_version(current, checked_at=checked_at, catalog_hash=catalog_hash)
+        )
+        retired.append(profile_id)
+    status = catalog_sync_status(router, config, checked_at=checked_at)
+    return {
+        **status,
+        "added_profile_ids": added,
+        "retired_profile_ids_this_run": retired,
+        "revived_profile_ids": revived,
+        "changed": bool(added or retired or revived),
+    }
+
+
 __all__ = [
     "OpenClawCatalogError",
+    "broker_catalog_hash",
+    "catalog_sync_status",
     "load_openclaw_config",
     "openclaw_broker_profiles_from_config",
     "reconcile_openclaw_model_catalog",
+    "sync_openclaw_model_catalog",
 ]

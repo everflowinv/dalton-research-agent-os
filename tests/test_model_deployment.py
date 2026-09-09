@@ -33,7 +33,7 @@ from dalton_core.model_deployment import (
 )
 from dalton_core.model_router import ModelRouter
 
-from dalton_core.model_deployment import _ENDPOINTS
+from dalton_core.model_deployment import _BROKER_V3_ENDPOINT_NAMES, _ENDPOINTS
 
 # Derived, not written down: adding a model to the catalog is a normal
 # change and should not need four counts edited to match.
@@ -78,7 +78,19 @@ class ModelDeploymentTests(unittest.TestCase):
                 ("xai", "grok-4.20-beta-latest-reasoning"),
                 ("xai", "grok-4.20-beta-latest-non-reasoning"),
                 ("openrouter", "stealth/ox-alpha"),
+                # P14-M: the four the broker already offered and Dalton had no
+                # profile for, plus the flash GLM the broker should offer.
+                ("claude-cli-gateway", "claude-fable-5-1"),
+                ("google", "gemini-3.8-flash"),
+                ("zai", "glm-5.3"),
+                ("zai", "glm-5.3-flash"),
             },
+        )
+        # The 0731 route appears twice, once per calibrated thinking level, so
+        # profiles outnumber distinct provider models by exactly that one.
+        self.assertEqual(
+            len({(item["provider"], item["model"]) for item in profiles}),
+            _ENDPOINT_COUNT - 1,
         )
         self.assertTrue(all(item["adapter_ref"] == ADAPTER_REF for item in profiles))
         self.assertTrue(
@@ -115,7 +127,12 @@ class ModelDeploymentTests(unittest.TestCase):
             upgraded = upgrade_openclaw_broker_catalog(path, checked_at=WHEN)
             self.assertEqual(upgraded["policy"]["policy"]["policy_version_ref"], BROKER_POLICY_REF)
             with ModelRouter(path) as router:
-                self.assertEqual(len(router.get_policy(BROKER_POLICY_REF)["filters"]["allowed_profile_ids"]), _ENDPOINT_COUNT)
+                # Shared policy v3 is immutable, so its membership is the set it
+                # froze -- not "whatever is in the catalog today".
+                self.assertEqual(
+                    router.get_policy(BROKER_POLICY_REF)["filters"]["allowed_profile_ids"],
+                    [f"profile:{name}" for name in _BROKER_V3_ENDPOINT_NAMES],
+                )
 
     def test_v2_profile_version_can_advance_without_changing_entity_id(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

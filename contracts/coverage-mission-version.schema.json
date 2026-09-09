@@ -69,7 +69,7 @@
         "may_write": {
           "type": "array",
           "uniqueItems": true,
-          "items": {"type": "string", "enum": ["evidence", "claim", "claim_challenge", "deliverable", "forecast_line", "model_run", "research_question", "observation", "stage_record", "forecast_reconciliation", "source_discovery", "market_price", "consensus_estimate", "valuation", "market_event", "dossier", "debate_map", "forecast_revision_proposal", "thesis_revision_candidate", "research_task", "conviction_call"]}
+          "items": {"type": "string", "enum": ["evidence", "claim", "claim_challenge", "deliverable", "forecast_line", "model_run", "research_question", "observation", "stage_record", "forecast_reconciliation", "source_discovery", "market_price", "consensus_estimate", "valuation", "market_event", "dossier", "debate_map", "forecast_revision_proposal", "thesis_revision_candidate", "research_task", "conviction_call", "claim_index"]}
         },
         "human_checkpoints": {
           "type": "array",

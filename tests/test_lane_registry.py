@@ -67,6 +67,11 @@ LANE_OPERATIONS = frozenset({
     "dispatch_company_model_spec",
     "dispatch_research_plan",
     "dispatch_initial_screen",
+    # S1: the two human / vendor feeds, registered after the migration. They
+    # are listed here rather than exempted, so this stays an exact set and a
+    # lane that appears without anybody meaning it to still fails.
+    "dispatch_sales_notes_feed",
+    "dispatch_company_wiki_feed",
 })
 CORE_DISCOVERY_OPERATIONS = frozenset({
     "dispatch_mission_source_discovery", "mission_source_discovery_status",
@@ -77,8 +82,10 @@ CORE_DISCOVERY_OPERATIONS = frozenset({
     "mission_deliverables",
     "dispatch_mission_sec_quarters", "dispatch_mission_statements",
     "dispatch_company_model_spec",
+    "dispatch_sales_notes_feed", "dispatch_company_wiki_feed",
 })
-# The controller tick's lane order, as run_once ran it before P14-0.
+# The controller tick's lane order, as run_once ran it before P14-0, plus
+# what has been registered since.
 TICK_ORDER = (
     ("dispatch_mission_source_discovery", "mission_source_discovery"),
     ("dispatch_document_extraction", "document_extraction"),
@@ -89,6 +96,8 @@ TICK_ORDER = (
     ("dispatch_company_model_spec", "company_model_spec"),
     ("dispatch_research_plan", "research_plan"),
     ("dispatch_initial_screen", "initial_screen"),
+    ("dispatch_sales_notes_feed", "sales_notes_feed"),
+    ("dispatch_company_wiki_feed", "company_wiki_feed"),
 )
 LANE_PARAM_FIELDS = {
     "dispatch_claim_review": frozenset({"max_claims"}),
@@ -415,7 +424,8 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
 
     def test_the_launcher_lanes_name_the_kwargs_the_writer_took(self) -> None:
         # These four keywords were explicit parameters of WriterServer.__init__
-        # before P14-0; existing callers still pass them by name.
+        # before P14-0; existing callers still pass them by name. Lanes
+        # registered since arrive on keywords that never were.
         self.assertLessEqual(
             {"statement_lane_launcher", "model_spec_launcher",
              "initial_screen_launcher", "research_planner_launcher"},

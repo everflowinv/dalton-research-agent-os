@@ -1,0 +1,56 @@
+{
+  "ok": true,
+  "status": "emails_fetched",
+  "date": "2026-09-08",
+  "period": "AM",
+  "count": 5,
+  "priority_count": 1,
+  "raw_chunks_indexed": 0,
+  "emails": [
+    {
+      "id": "aaaa000000000001",
+      "from": "\"Fenske, Brian\" <brian.fenske@example-bank.test>",
+      "subject": "Accenture (ACN): bookings check into FY26",
+      "date": "Mon, 08 Sep 2026 08:01:02 -0400 (EDT)",
+      "is_priority": true,
+      "body_length": 91,
+      "body": "SYNTHETIC FIXTURE BODY -- ACN note.\r\nNo real correspondence is stored in this repository.\r\n"
+    },
+    {
+      "id": "aaaa000000000002",
+      "from": "\"Macro Desk\" <macro.desk@example-broker.test>",
+      "subject": "Global Rates Weekly: term premium and the September meeting",
+      "date": "Mon, 08 Sep 2026 08:20:00 +0000",
+      "is_priority": false,
+      "body_length": 118,
+      "body": "SYNTHETIC FIXTURE BODY -- macro note with no company in the subject.\r\nIt does discuss IT services demand in passing.\r\n"
+    },
+    {
+      "id": "aaaa000000000003",
+      "from": "\"Jane Analyst\" <jane.analyst@example-bank.test>",
+      "subject": "EPAM Systems: quarter preview",
+      "date": "Mon, 08 Sep 2026 09:05:00 +0000",
+      "is_priority": false,
+      "body_length": 38,
+      "body": "SYNTHETIC FIXTURE BODY -- EPAM note.\r\n"
+    },
+    {
+      "id": "aaaa000000000006",
+      "from": "\"Macro Desk\" <macro.desk@example-broker.test>",
+      "subject": "Korea market open",
+      "date": "Mon, 08 Sep 2026 10:30:00 +0000",
+      "is_priority": false,
+      "body_length": 75,
+      "body": "SYNTHETIC FIXTURE BODY -- an open note about nothing this mission covers.\r\n"
+    },
+    {
+      "id": "aaaa000000000005",
+      "from": "\"Fenske, Brian\" <brian.fenske@example-bank.test>",
+      "subject": "Accenture: a note from before the window",
+      "date": "Sat, 01 Aug 2026 09:00:00 +0000",
+      "is_priority": false,
+      "body_length": 43,
+      "body": "SYNTHETIC FIXTURE BODY -- older ACN note.\r\n"
+    }
+  ]
+}
