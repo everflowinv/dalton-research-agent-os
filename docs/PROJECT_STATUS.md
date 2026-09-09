@@ -4,9 +4,11 @@
 
 ## 下一步（按顺序）
 
-1. **CTSH 的 Initial Screen 是 09-07 写的，早于今天的财报数字**（只带 5 个 figure，其余四家 14–21 个）。
-   它已发布，所以 launcher 报 "nothing to draft"，不会自己重写。要么等它的 earnings_calls 补齐触发重写，
-   要么想清楚"底座变了就该重出交付物"该由什么来判断——目前没有任何东西在判断这件事。
+1. **gate_passed 是终态，所以四家公司的 Initial Screen 永远不会重写。** ACN / EPAM / IBM / DXC 已过闸，
+   selection 第一条规则就把它们跳过（"initial screen already passed"），无论后来多了多少证据、换了多强的模型。
+   CTSH 不受此限（它没过闸），它在等 earnings_calls 补齐（1/4，卡在 AlphaEngine 上限），补齐后会用新模型重写。
+   **要决定的是**：一份在较弱模型、较薄证据下过了闸的 screen，值不值得在证据变厚之后重出一版？
+   重出要花钱、也会给 append-only 的交付物加一个版本；不重出则今天换的模型对这四家永远不起作用。
 2. **ACN 还有 2 份 filing 卡在 3 次上限**（`0001467373-25-000169` / `-25-000222`）。今天撤回的是能归因到三次
    基础设施故障的 20 次尝试；这两份的失败是 plan 执行层的（带 result envelope），归因不到那三次，所以没有撤回。
    要单独查它们的 result envelope 说了什么，再决定是不是也该豁免。
@@ -25,6 +27,19 @@
 7. **contested 指标要能在驾驶舱上看见。** P13y 之后，单位打架的指标不再成立需求，但也不再报错——
    `metric_discovery.contested()` 能说出是谁在哪个单位上分歧（live 5 条，都是 percent/ratio），页面还没读它。
 8. **AlphaEngine 滚动 24h 用量贴着上限**（131/130），是 CTSH 缺电话会的直接约束。
+
+## 2026-09-09（收尾）：交付物由谁来写
+
+**P13ad 交付物有了自己的模型路由。** Initial Screen 一直是用**抽取模型**写的——不是谁选的，是 launcher 被顺手
+传了抽取的 config。那个模型是为"从一份 filing 的一个窗口里便宜地抠出一个数字、重复几千次"选的；写交付物是另一回事，
+而且差别正好落在最吃辩证能力的几节上：live 里 S4（风险与 Anti-thesis）出来是 `dropped_unsourced`，
+S5（Relevance to Universe）发布时**一个 figure 都没有**。
+
+- 交付物现在有自己的 routing policy，理由和 planner 当初一样：两个活共用一条钉死的 policy，就永远不可能不同。
+- policy 那套机制改成**参数化**而不是复制：planner setup 本来就是这套东西，再抄一份只改两个名字没有意义。
+- **不设就什么都不变**：没有 `DALTON_DELIVERABLE_MODEL_PROFILE` 时，screen 仍然用抽取模型，逐字节和以前一样。
+  一份 screen 抽取模型约 $0.013，前沿模型约 $0.6–1.0；小，但是常驻成本，该由 owner 选而不是继承。
+- 已按 owner 的判断启用 `profile:gpt-6-astra`。
 
 ## 2026-09-09（下半）：Initial Screen 第一次真的写出来了
 
