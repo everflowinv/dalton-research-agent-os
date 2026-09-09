@@ -402,7 +402,10 @@ def main(argv: list[str] | None = None) -> int:
         rows = json.loads(args.fake_search_file.read_text(encoding="utf-8"))
         if not isinstance(rows, list):
             parser.error("--fake-search-file must hold a JSON array of Guidepoint rows")
-        handle: Any = FakeGuidepointHandle(rows)
+        # sse=True on purpose: the live proxy answers over text/event-stream,
+        # and a rehearsal that produced plain JSON would be rehearsing a
+        # framing this lane never meets.
+        handle: Any = FakeGuidepointHandle(rows, sse=True)
         transport = "fixture"
     else:
         handle = LoopbackStreamableHttpMcpHandle(

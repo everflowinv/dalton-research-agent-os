@@ -28,6 +28,8 @@ from dalton_core.guidepoint_core import (
 )
 from dalton_core.guidepoint_search import (
     EXCERPT_REF_PREFIX,
+    SEARCH_MAX_RECORDS,
+    count_verbatim_words,
     MAX_VERBATIM_WORDS,
     QUOTE_POLICY,
     SEARCH_CAPABILITY_ID,
@@ -367,6 +369,113 @@ class QuotePolicyTests(unittest.TestCase):
                 "Budgets moved into shorter phased programmes",
                 excerpt={**excerpt, "quote_policy": {"max_verbatim_words": 3}},
             )
+
+
+CHINESE_ROW = {
+    "transcript_name": "Former Delivery Director, China IT Services",
+    "date": "2026-07-01",
+    "inquirer": "Investment Professional",
+    "respondent": {"full_name": "Synthetic Expert D", "title": "Former Director"},
+    "question": "客户预算今年怎么变化？",
+    # Twenty-eight Han characters plus punctuation; synthetic rehearsal text.
+    "answer": "客户预算今年明显收紧，审批层级上移了两级，项目周期被拉长，很多长期改造被拆成短期交付。",
+    "context": None,
+    "reference_url": "https://example.invalid/guidepoint/synthetic/d",
+    "source_attribution": {
+        "description": "Synthetic Guidepoint transcript, rehearsal fixture",
+        "markdown": "[Former Delivery Director, China IT Services (2026-07-01)]"
+                    "(https://example.invalid/guidepoint/synthetic/d)",
+    },
+}
+
+
+class WordCountTests(unittest.TestCase):
+    """The licence gate has to be a gate in every script the library holds."""
+
+    def excerpt(self):
+        return guidepoint_excerpt_records({"data": [CHINESE_ROW]})[0]
+
+    def test_a_chinese_sentence_is_counted_by_character_not_by_space(self) -> None:
+        # Splitting on spaces would call this one word, whatever its length,
+        # which turns the twenty-word licence into no licence at all.
+        answer = CHINESE_ROW["answer"]
+        self.assertEqual(len(answer.split(" ")), 1)
+        self.assertGreater(count_verbatim_words(answer), 20)
+
+    def test_twenty_five_chinese_characters_are_refused_and_fifteen_admitted(self) -> None:
+        excerpt = self.excerpt()
+        text = "".join(ch for ch in CHINESE_ROW["answer"] if ch.strip())
+        long_quote = text[:25]
+        short_quote = text[:15]
+        self.assertEqual(count_verbatim_words(long_quote), 25)
+        self.assertEqual(count_verbatim_words(short_quote), 15)
+        with self.assertRaises(GuidepointQuotePolicyError) as caught:
+            verify_guidepoint_quote(long_quote, excerpt=excerpt)
+        self.assertIn("20 verbatim words", str(caught.exception))
+        self.assertEqual(
+            verify_guidepoint_quote(short_quote, excerpt=excerpt)["word_count"], 15
+        )
+
+    def test_a_mixed_sentence_counts_latin_words_and_han_characters(self) -> None:
+        # Two Latin words plus four Han characters.
+        self.assertEqual(count_verbatim_words("EPAM 的 offshore 交付率"), 6)
+        self.assertEqual(count_verbatim_words("  the   hours came down first "), 5)
+        self.assertEqual(count_verbatim_words("日本語のテキスト"), 8)
+        self.assertEqual(count_verbatim_words("한국어"), 3)
+
+    def test_the_ceiling_can_only_ever_be_lowered(self) -> None:
+        excerpt = self.excerpt()
+        text = "".join(ch for ch in CHINESE_ROW["answer"] if ch.strip())[:25]
+        # A caller asking for a looser ceiling gets the licence's, not theirs.
+        with self.assertRaises(GuidepointQuotePolicyError):
+            verify_guidepoint_quote(text, excerpt=excerpt, max_verbatim_words=500)
+        # And an excerpt dict carrying a loose policy is clamped the same way.
+        with self.assertRaises(GuidepointQuotePolicyError):
+            verify_guidepoint_quote(
+                text, excerpt={**excerpt, "quote_policy": {"max_verbatim_words": 500}}
+            )
+        # The clamp is reported, so a caller cannot believe it got 500.
+        admitted = verify_guidepoint_quote(
+            text[:10], excerpt=excerpt, max_verbatim_words=500
+        )
+        self.assertEqual(admitted["max_verbatim_words"], MAX_VERBATIM_WORDS)
+        for bad in (0, -1, "twenty", True):
+            with self.subTest(bad=bad), self.assertRaises(GuidepointQuotePolicyError):
+                verify_guidepoint_quote(text[:5], excerpt=excerpt, max_verbatim_words=bad)
+
+
+class SaturationTests(unittest.TestCase):
+    def rows(self, count: int) -> list[dict]:
+        return [
+            {**ROWS[0],
+             "transcript_name": f"Synthetic transcript {index}",
+             "question": f"Synthetic question {index}?"}
+            for index in range(count)
+        ]
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+
+    def test_a_page_that_came_back_full_is_partial_not_complete(self) -> None:
+        # There is no cursor to ask for the rest, so a full page is the top of
+        # a ranked list whose depth the lane cannot know. Calling it complete
+        # would tell a reader "this is everything Guidepoint has".
+        h = Harness(self.root, FakeGuidepointHandle(self.rows(SEARCH_MAX_RECORDS)))
+        self.addCleanup(h.close)
+        receipt = h.search.search(h.search.build_request(SPEC))
+        self.assertEqual(receipt["outcome"], "succeeded")
+        self.assertEqual(len(receipt["document_refs"]), SEARCH_MAX_RECORDS)
+        self.assertEqual(receipt["source_status"], "partial")
+
+    def test_a_page_with_room_left_is_complete(self) -> None:
+        short = self.root / "short"
+        short.mkdir()
+        h = Harness(short, FakeGuidepointHandle(self.rows(SEARCH_MAX_RECORDS - 1)))
+        self.addCleanup(h.close)
+        receipt = h.search.search(h.search.build_request(SPEC))
+        self.assertEqual(receipt["source_status"], "complete")
 
 
 class ExecutorTests(unittest.TestCase):

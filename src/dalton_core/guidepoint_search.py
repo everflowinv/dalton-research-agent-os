@@ -49,6 +49,7 @@ import hashlib
 import json
 import os
 import re
+import unicodedata
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -421,6 +422,19 @@ def _normalize_space(value: str) -> str:
     return " ".join(value.split())
 
 
+def _identity_text(value: str) -> str:
+    """Normalized for the purpose of *identifying* a passage, not storing it.
+
+    NFKC folds the cosmetic Unicode variants a transcript pipeline emits --
+    full-width punctuation, compatibility forms, non-breaking spaces -- which
+    would otherwise give the same expert answer two refs and put it in the
+    ledger twice. The stored ``excerpt_text`` is left exactly as returned:
+    what is quoted must be what the provider sent.
+    """
+
+    return _normalize_space(unicodedata.normalize("NFKC", value))
+
+
 def _respondent_name(value: Any) -> str:
     """One stable name for the expert who answered.
 
@@ -431,9 +445,9 @@ def _respondent_name(value: Any) -> str:
     """
 
     if isinstance(value, str):
-        name = _normalize_space(value)
+        name = _identity_text(value)
     elif isinstance(value, Mapping):
-        name = _normalize_space(str(value.get("full_name") or value.get("name") or ""))
+        name = _identity_text(str(value.get("full_name") or value.get("name") or ""))
     else:
         name = ""
     if not name:
@@ -454,11 +468,11 @@ def guidepoint_excerpt_ref(
     """
 
     identity = {
-        "transcript_name": _normalize_space(transcript_name),
+        "transcript_name": _identity_text(transcript_name),
         "date": date,
-        "respondent": _normalize_space(respondent),
+        "respondent": _identity_text(respondent),
         "question_sha256": hashlib.sha256(
-            _normalize_space(question).casefold().encode("utf-8")
+            _identity_text(question).casefold().encode("utf-8")
         ).hexdigest(),
     }
     return EXCERPT_REF_PREFIX + content_hash(identity)
@@ -614,6 +628,53 @@ def guidepoint_provider_request_id(raw_response: bytes) -> str:
 # ---------------------------------------------------------------------------
 # the licence rule, enforced where a citation is made
 # ---------------------------------------------------------------------------
+# Scripts that do not put spaces between words.  Counting a Chinese sentence
+# by splitting on spaces returns 1 no matter how long it is, which turns the
+# licence gate into a no-op for exactly the transcripts most likely to be read
+# in this workspace.  Each codepoint in these ranges counts as one word, which
+# is the convention publishers use for CJK extract limits and is in any case
+# the conservative direction.
+_CJK_RANGES: tuple[tuple[int, int], ...] = (
+    # CJK punctuation counts too. It is not a word in any language, but a
+    # licence gate that discounts it can be walked past by a quotation made
+    # entirely of clauses, and over-counting only ever refuses more.
+    (0x3000, 0x303F),    # CJK symbols and punctuation
+    (0x3040, 0x30FF),    # Hiragana, Katakana
+    (0x3400, 0x4DBF),    # CJK Unified Ideographs Extension A
+    (0x4E00, 0x9FFF),    # CJK Unified Ideographs
+    (0xF900, 0xFAFF),    # CJK Compatibility Ideographs
+    (0xAC00, 0xD7AF),    # Hangul syllables
+    (0x1100, 0x11FF),    # Hangul Jamo
+    (0x20000, 0x2FA1F),  # CJK Extensions B-F and Compatibility Supplement
+    (0xFF01, 0xFF60),    # Fullwidth forms
+)
+
+
+def _is_cjk(char: str) -> bool:
+    point = ord(char)
+    return any(low <= point <= high for low, high in _CJK_RANGES)
+
+
+def count_verbatim_words(text: str) -> int:
+    """Words for licence purposes, in a text that may not use spaces.
+
+    Space-separated runs count once each; every CJK, Kana or Hangul codepoint
+    counts on its own.  A mixed sentence is therefore counted the way a reader
+    would: the Latin words as words and the Chinese characters as characters.
+    """
+
+    total = 0
+    for token in _normalize_space(text).split(" "):
+        if not token:
+            continue
+        cjk = sum(1 for char in token if _is_cjk(char))
+        remainder = len(token) - cjk
+        # A token that is purely CJK contributes its characters; a token with
+        # any Latin left in it contributes those characters as one word more.
+        total += cjk + (1 if remainder else 0)
+    return total
+
+
 def verify_guidepoint_quote(
     quote: str,
     *,
@@ -628,6 +689,13 @@ def verify_guidepoint_quote(
     excerpt is refused because a citation that misquotes its source is worse
     than no citation -- it launders a paraphrase into an expert's mouth.
 
+    The ceiling can only ever be lowered.  ``max_verbatim_words`` and the
+    excerpt's own ``quote_policy`` are both clamped to
+    ``MAX_VERBATIM_WORDS``, because a gate whose limit the caller supplies is
+    not a gate: the licence is a fact about the subscription, not a parameter
+    of the call site, and the manifest validator's refusal of a loose policy
+    would otherwise be bypassable by anyone holding a dict.
+
     The claim and citation modules are not modified for this.  They call this
     helper before attaching a Guidepoint quote, and the refusal is an
     exception, not a flag somebody can forget to read.
@@ -636,21 +704,24 @@ def verify_guidepoint_quote(
     if not isinstance(excerpt, Mapping) or "excerpt_text" not in excerpt:
         raise GuidepointQuotePolicyError("a quote must be verified against an excerpt record")
     policy = excerpt.get("quote_policy") or QUOTE_POLICY
-    ceiling = (
-        int(max_verbatim_words)
+    requested = (
+        max_verbatim_words
         if max_verbatim_words is not None
-        else int(policy.get("max_verbatim_words", MAX_VERBATIM_WORDS))
+        else policy.get("max_verbatim_words", MAX_VERBATIM_WORDS)
     )
-    if ceiling < 1:
+    if isinstance(requested, bool) or not isinstance(requested, int):
+        raise GuidepointQuotePolicyError("the verbatim word ceiling must be an integer")
+    if requested < 1:
         raise GuidepointQuotePolicyError("the verbatim word ceiling must be positive")
+    ceiling = min(requested, MAX_VERBATIM_WORDS)
     if not isinstance(quote, str) or not quote.strip():
         raise GuidepointQuotePolicyError("a quotation must be non-empty text")
     normalized = _normalize_space(quote)
-    words = normalized.split(" ")
-    if len(words) > ceiling:
+    count = count_verbatim_words(normalized)
+    if count > ceiling:
         raise GuidepointQuotePolicyError(
             f"Guidepoint licence permits at most {ceiling} verbatim words; "
-            f"this quotation is {len(words)}"
+            f"this quotation is {count}"
         )
     haystack = _normalize_space(str(excerpt["excerpt_text"]))
     if normalized not in haystack:
@@ -659,7 +730,7 @@ def verify_guidepoint_quote(
         )
     return {
         "quote": normalized,
-        "word_count": len(words),
+        "word_count": count,
         "max_verbatim_words": ceiling,
         "excerpt_ref": excerpt.get("excerpt_ref"),
         "citation_markdown": excerpt.get("source_attribution_markdown"),
@@ -823,17 +894,34 @@ class GuidepointLiveAdapter:
                 provider_status=403 if permission else 502,
                 retry_after_ms=None,
             )
+        # The bytes go to the sink before anything reads them. A payload this
+        # adapter refuses is still a response the provider sent, and the raw
+        # artifact is the only place a human can find out what it actually
+        # said; discarding it because parsing failed destroys the evidence for
+        # the failure. The sink is aborted by the executor when the attempt
+        # does not succeed, so an unread artifact is not promoted either.
+        raw_sink.write(invocation.raw_response)
         payload = _tool_text_payload(result)
         excerpts = guidepoint_excerpt_records(payload)
-        if len(excerpts) > int(arguments["size"]):
+        size = int(arguments["size"])
+        if len(excerpts) > size:
             raise RunnerValidationError("Guidepoint returned more excerpts than size")
-        raw_sink.write(invocation.raw_response)
         refs = [item["excerpt_ref"] for item in excerpts]
         structured = {
             "source_record_refs": refs,
             "next_cursor": None,
             "provider_status": 200,
         }
+        # A page that came back exactly full is not evidence that the library
+        # held exactly that much. There is no cursor to ask for the rest, so
+        # the honest word is ``partial``: the query saw the top of a ranked
+        # list whose depth it cannot know, and a downstream reader that treats
+        # ``complete`` as "this is everything Guidepoint has on the subject"
+        # would be wrong in precisely the cases where the subject is rich.
+        saturated = bool(refs) and len(refs) >= int(wire["max_records"])
+        source_status = (
+            "empty" if not refs else "partial" if saturated else "complete"
+        )
         base = {
             "protocol_version": "0.2",
             "request_hash": wire["content_hash"],
@@ -845,7 +933,7 @@ class GuidepointLiveAdapter:
             "source_record_refs": refs,
             "cursor": None,
             "provider_usage": None,
-            "source_status": "empty" if not refs else "complete",
+            "source_status": source_status,
             "completeness": "ranked",
             "error": None,
         }
@@ -1591,6 +1679,7 @@ __all__ = [
     "SOURCE_REF",
     "TOOL_NAME",
     "count_recent_guidepoint_search_calls",
+    "count_verbatim_words",
     "guidepoint_daily_call_ceiling",
     "guidepoint_excerpt_records",
     "guidepoint_excerpt_ref",

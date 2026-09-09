@@ -59,7 +59,7 @@ _DAILY_QUOTAS = MappingProxyType(
         # reading and explicitly forbids bulk extraction; a lane that can run
         # hundreds of searches a day is one whose traffic pattern stops looking
         # like research. The mission plan is five issuers times two specs plus
-        # five industry queries -- fifteen queries for a complete sweep -- and
+        # four industry queries -- fourteen for a complete sweep -- and
         # the plan's cadence repeats a spec weekly, so steady state is a
         # handful a day. Twenty-five leaves room for one full re-sweep plus
         # retries in a single day and nothing that resembles a crawl. Raising

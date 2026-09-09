@@ -34,7 +34,10 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .guidepoint_launcher import GuidepointSearchLauncher
+from .guidepoint_launcher import (
+    GuidepointAcquisitionLauncher,
+    GuidepointSearchLauncher,
+)
 from .guidepoint_search import (
     SEARCH_DOCUMENT_TYPES,
     SOURCE_REF,
@@ -43,7 +46,11 @@ from .guidepoint_search import (
     guidepoint_search_spec_hash,
     validate_guidepoint_search_spec,
 )
-from .lane_child_launcher import LaneChildConflict
+from .lane_child_launcher import (
+    LaneChildConflict,
+    LaneChildRejected,
+    LaneChildTicketNotFound,
+)
 from .lane_registry import LaneSpec, register_lane
 from .store import canonical_json, content_hash
 
@@ -372,12 +379,18 @@ def guidepoint_plan_queries(plan: Mapping[str, Any], *, as_of: date) -> list[dic
 # coordinator
 # ---------------------------------------------------------------------------
 class GuidepointLaneCoordinator:
-    """One bounded, quota-aware Guidepoint discovery tick.
+    """One bounded, quota-aware Guidepoint tick.
 
     The coordinator never calls Guidepoint itself.  It decides *whether* a
-    call may be spent and *which* query is next, then hands the work to the
+    call may be spent and *which* query is next, then hands the work to a
     child launcher, exactly as ``MissionSourceDiscoveryCoordinator`` does --
     the provider call needs a process main thread for the transport watchdog.
+
+    A tick is four things in order: settle the children the last tick
+    launched, settle finished acquisitions, drain the acquisition queue (free,
+    so it runs even when search quota is gone), and only then spend a search.
+    Settling first is what stops the ledger filling with rows that say
+    ``launched`` about processes that died three days ago.
     """
 
     def __init__(
@@ -387,6 +400,7 @@ class GuidepointLaneCoordinator:
         connection: Any,
         launcher: GuidepointSearchLauncher,
         plan: Mapping[str, Any],
+        acquisition_launcher: Any | None = None,
         mission_version_ref: str | None = None,
         mission_version_hash: str | None = None,
         requested_by: str | None = None,
@@ -395,21 +409,50 @@ class GuidepointLaneCoordinator:
         self.missions = missions
         self.connection = connection
         self.launcher = launcher
+        self.acquisition_launcher = acquisition_launcher
         self.plan = validate_guidepoint_discovery_plan(plan)
-        if mission_version_ref is None or mission_version_hash is None or requested_by is None:
-            # The tick has no caller to name the version, so the lane resolves
-            # the mission the plan is written against. Resolved every tick, not
-            # cached: a new mission version is the mechanism by which an owner
-            # connects or disconnects this source, and a lane holding last
-            # week's version would not notice either.
-            mission = self.missions.active_mission(self.plan["mission_ref"])
-            mission_version_ref = mission_version_ref or mission["id"]
-            mission_version_hash = mission_version_hash or mission["content_hash"]
-            requested_by = requested_by or mission["autonomy"]["automation_principal"]
-        self.mission_version_ref = mission_version_ref
-        self.mission_version_hash = mission_version_hash
-        self.requested_by = requested_by
+        self._mission_version_ref = mission_version_ref
+        self._mission_version_hash = mission_version_hash
+        self._requested_by = requested_by
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    # -- the mission this plan is written against --------------------------
+    def _resolve_mission(self) -> tuple[str, str, str]:
+        """The active mission version, resolved every tick rather than cached.
+
+        Publishing a new mission version is how an owner connects or
+        disconnects this source, so a lane holding last week's version would
+        notice neither.  Resolution is deliberately *not* done in ``__init__``:
+        a Core with no mission at all is an unconfigured writer, not a broken
+        one, and constructing the coordinator must not be the thing that
+        raises.
+        """
+
+        if (
+            self._mission_version_ref is not None
+            and self._mission_version_hash is not None
+            and self._requested_by is not None
+        ):
+            return (self._mission_version_ref, self._mission_version_hash,
+                    self._requested_by)
+        mission = self.missions.active_mission(self.plan["mission_ref"])
+        return (
+            self._mission_version_ref or mission["id"],
+            self._mission_version_hash or mission["content_hash"],
+            self._requested_by or mission["autonomy"]["automation_principal"],
+        )
+
+    @property
+    def mission_version_ref(self) -> str:
+        return self._resolve_mission()[0]
+
+    @property
+    def mission_version_hash(self) -> str:
+        return self._resolve_mission()[1]
+
+    @property
+    def requested_by(self) -> str:
+        return self._resolve_mission()[2]
 
     # -- budget ------------------------------------------------------------
     def budget(self) -> dict[str, int]:
@@ -446,12 +489,13 @@ class GuidepointLaneCoordinator:
         ``observation``.  The lane does not keep its own copy of that answer.
         """
 
+        mission_ref, mission_hash, requested_by = self._resolve_mission()
         return self.missions.authorize_source_discovery(
             company_ref=company_ref,
             source_ref=GUIDEPOINT_SOURCE_REF,
-            requested_by=self.requested_by,
-            mission_version_ref=self.mission_version_ref,
-            mission_version_hash=self.mission_version_hash,
+            requested_by=requested_by,
+            mission_version_ref=mission_ref,
+            mission_version_hash=mission_hash,
         )
 
     # -- cadence -----------------------------------------------------------
@@ -465,7 +509,16 @@ class GuidepointLaneCoordinator:
         return None
 
     def due_queries(self, *, as_of: date | None = None) -> list[dict[str, Any]]:
-        """The plan's queries that the cadence says are due, in plan order."""
+        """The plan's queries the cadence says are due, in plan order.
+
+        Two intervals, because two things can have happened.  A query that
+        returned excerpts waits ``rediscovery_interval_days`` before asking
+        again -- the library does not gain transcripts on a topic every day.
+        A query that returned *nothing* waits ``retry_interval_days``, which
+        is short: an empty page usually means the phrasing missed, and the
+        cheapest correction is to try again soon rather than to leave a hole
+        in the coverage for three weeks.
+        """
 
         now = self.clock()
         today = as_of or now.date()
@@ -480,12 +533,167 @@ class GuidepointLaneCoordinator:
             except ValueError:
                 due.append({**query, "reason": "unreadable_last_run"})
                 continue
-            interval = timedelta(days=query["rediscovery_interval_days"])
-            if now - last.astimezone(timezone.utc) >= interval:
-                due.append({**query, "reason": "cadence_due"})
+            empty = not record.get("document_refs")
+            days = (
+                query["retry_interval_days"] if empty
+                else query["rediscovery_interval_days"]
+            )
+            if now - last.astimezone(timezone.utc) >= timedelta(days=days):
+                due.append({
+                    **query,
+                    "reason": "retry_due" if empty else "cadence_due",
+                })
         return due
 
-    # -- one tick ----------------------------------------------------------
+    # -- settling last tick's children -------------------------------------
+    def settle_dispatches(self) -> list[dict[str, Any]]:
+        """Reconcile every search child this lane has open.
+
+        A launched child whose ticket says ``orphaned`` -- writer restarted,
+        process gone -- is neither a success nor a running job, and a lane that
+        never looked would leave that row ``launched`` forever and block
+        nothing while claiming to be busy.  Success is not inferred from the
+        exit code alone either: the child writes ``discovery_ref`` only when
+        the mission ledger actually accepted the discovery.
+        """
+
+        settled: list[dict[str, Any]] = []
+        for dispatch in self.missions.open_discovery_dispatches(
+            source_ref=GUIDEPOINT_SOURCE_REF
+        ):
+            try:
+                ticket = self.launcher.status(dispatch["ticket_ref"])
+            except LaneChildTicketNotFound:
+                result = self.missions.settle_discovery_dispatch(
+                    dispatch["dispatch_id"], status="failed", reason="ticket is missing"
+                )
+                settled.append(
+                    {"dispatch_ref": dispatch["dispatch_id"], "status": result["status"]}
+                )
+                continue
+            if ticket["status"] == "running":
+                continue
+            summary = ticket.get("summary") or {}
+            if ticket["status"] == "succeeded" and summary.get("discovery_ref"):
+                result = self.missions.settle_discovery_dispatch(
+                    dispatch["dispatch_id"], status="succeeded"
+                )
+            else:
+                reason = (
+                    summary.get("failure_reason")
+                    or f"child ended {ticket['status']} (exit {ticket.get('exit_code')})"
+                )
+                result = self.missions.settle_discovery_dispatch(
+                    dispatch["dispatch_id"], status="failed", reason=str(reason)[:500]
+                )
+            settled.append({
+                "dispatch_ref": dispatch["dispatch_id"],
+                "status": result["status"],
+                "ticket_ref": dispatch["ticket_ref"],
+                "discovery_ref": summary.get("discovery_ref"),
+                "new_document_count": summary.get("new_document_count"),
+            })
+        return settled
+
+    def settle_documents(self) -> list[dict[str, Any]]:
+        """Reconcile finished excerpt acquisitions and open their reviews."""
+
+        settled: list[dict[str, Any]] = []
+        if self.acquisition_launcher is None:
+            return settled
+        for document in self.missions.launched_discovered_documents(
+            source_ref=GUIDEPOINT_SOURCE_REF
+        ):
+            try:
+                ticket = self.acquisition_launcher.status(document["ticket_ref"])
+            except LookupError:
+                result = self.missions.settle_discovered_document(
+                    document["record_id"], status="acquisition_failed",
+                    reason="ticket is missing",
+                )
+                settled.append(
+                    {"record_id": document["record_id"], "status": result["status"]}
+                )
+                continue
+            if ticket.get("status") == "running":
+                continue
+            summary = ticket.get("summary") or {}
+            entry: dict[str, Any] = {
+                "record_id": document["record_id"],
+                "document_ref": document["document_ref"],
+                "ticket_ref": document["ticket_ref"],
+            }
+            if ticket.get("status") == "succeeded" and summary.get("manifest_ref"):
+                result = self.missions.settle_discovered_document(
+                    document["record_id"], status="acquired"
+                )
+                try:
+                    review = self.missions.register_document_review(
+                        document["record_id"],
+                        requested_by=self.missions.mission(
+                            document["mission_version_ref"]
+                        )["autonomy"]["automation_principal"],
+                    )
+                    entry["review_status"] = review["status"]
+                    entry["review_id"] = review["review_id"]
+                except Exception as exc:  # noqa: BLE001 - a refusal, not a crash
+                    entry["review_status"] = f"not_registered:{type(exc).__name__}"
+            else:
+                reason = (
+                    summary.get("failure_reason")
+                    or f"acquisition ended {ticket.get('status')} "
+                       f"(exit {ticket.get('exit_code')})"
+                )
+                result = self.missions.settle_discovered_document(
+                    document["record_id"], status="acquisition_failed",
+                    reason=str(reason)[:500],
+                )
+            entry["status"] = result["status"]
+            settled.append(entry)
+        return settled
+
+    # -- acquisition (free) ------------------------------------------------
+    def launch_acquisition(self) -> dict[str, Any]:
+        """Turn one queued excerpt into a manifest.  Spends no Guidepoint call.
+
+        Which is why it runs before the search and regardless of the quota: a
+        day whose search allowance is gone can still be a day that finishes
+        reading what yesterday found.
+        """
+
+        if self.acquisition_launcher is None:
+            return {"status": "unconfigured",
+                    "reason": "no Guidepoint acquisition launcher on this writer"}
+        if self.missions.launched_discovered_documents(
+            limit=1, source_ref=GUIDEPOINT_SOURCE_REF
+        ):
+            return {"status": "busy", "reason": "an excerpt acquisition is still open"}
+        document = self.missions.next_discovered_document(
+            source_ref=GUIDEPOINT_SOURCE_REF
+        )
+        if document is None:
+            return {"status": "idle", "reason": "no queued excerpt"}
+        discovery = self.missions.discovery_record(document["discovery_ref"])
+        try:
+            ticket = self.acquisition_launcher.start(
+                source_envelope_ref=discovery["source_envelope_ref"],
+                document_ref=document["document_ref"],
+            )
+        except LaneChildConflict as exc:
+            return {"status": "busy", "reason": str(exc)}
+        except LaneChildRejected as exc:
+            return {"status": "rejected", "reason": f"{type(exc).__name__}: {exc}"}
+        self.missions.mark_discovered_document_launched(
+            document["record_id"], ticket["id"]
+        )
+        return {
+            "status": "launched",
+            "record_id": document["record_id"],
+            "document_ref": document["document_ref"],
+            "ticket_ref": ticket["id"],
+        }
+
+    # -- one search tick ---------------------------------------------------
     def launch_discovery(self, *, as_of: date | None = None) -> dict[str, Any]:
         """Launch at most ``launchable`` searches; return what the tick did.
 
@@ -519,13 +727,11 @@ class GuidepointLaneCoordinator:
             try:
                 authorization = self.grant(query["company_ref"])
             except Exception as exc:  # the mission's refusal, recorded not raised
-                result["skipped"].append(
-                    {
-                        "spec_ref": query["spec_ref"],
-                        "company_ref": query["company_ref"],
-                        "reason": f"{type(exc).__name__}: {exc}",
-                    }
-                )
+                result["skipped"].append({
+                    "spec_ref": query["spec_ref"],
+                    "company_ref": query["company_ref"],
+                    "reason": f"{type(exc).__name__}: {exc}",
+                })
                 continue
             try:
                 ticket = self.launcher.start(
@@ -534,7 +740,7 @@ class GuidepointLaneCoordinator:
                     company_ref=query["company_ref"],
                     parameters=query["parameters"],
                     query_hash=query["query_hash"],
-                    requested_by=self.requested_by,
+                    requested_by=authorization["requested_by"],
                     mission_version_ref=authorization["mission_version_ref"],
                     mission_version_hash=authorization["mission_version_hash"],
                     as_of=as_of or self.clock().date(),
@@ -542,28 +748,66 @@ class GuidepointLaneCoordinator:
             except LaneChildConflict:
                 # One child at a time is the lane's contract, not a failure:
                 # the remaining queries are still due on the next tick.
-                result["skipped"].append(
-                    {
-                        "spec_ref": query["spec_ref"],
-                        "company_ref": query["company_ref"],
-                        "reason": "child_slot_busy",
-                    }
-                )
-                break
-            result["launched"].append(
-                {
+                result["skipped"].append({
                     "spec_ref": query["spec_ref"],
                     "company_ref": query["company_ref"],
-                    "kind": query["kind"],
-                    "reason": query["reason"],
-                    "query_hash": query["query_hash"],
-                    "ticket_ref": ticket["id"],
-                }
+                    "reason": "child_slot_busy",
+                })
+                break
+            except LaneChildRejected as exc:
+                # A withdrawn or unapproved record, or a plan that moved under
+                # the coordinator. Not a fault of this tick and not something
+                # to keep retrying at speed, so it is reported and the tick
+                # stops rather than walking the rest of the queue into the
+                # same refusal.
+                result["skipped"].append({
+                    "spec_ref": query["spec_ref"],
+                    "company_ref": query["company_ref"],
+                    "reason": f"{type(exc).__name__}: {exc}",
+                })
+                result["reason"] = "not_approved"
+                break
+            dispatch = self.missions.record_discovery_dispatch(
+                authorization=authorization,
+                discovery_plan_ref=self.plan["id"],
+                discovery_plan_hash=self.plan["content_hash"],
+                spec_ref=query["spec_ref"],
+                query_hash=query["query_hash"],
+                ticket_ref=ticket["id"],
             )
+            result["launched"].append({
+                "spec_ref": query["spec_ref"],
+                "company_ref": query["company_ref"],
+                "kind": query["kind"],
+                "reason": query["reason"],
+                "query_hash": query["query_hash"],
+                "ticket_ref": ticket["id"],
+                "dispatch_ref": dispatch["dispatch_id"],
+            })
         result["status"] = "launched" if result["launched"] else "idle"
-        if not result["launched"] and result["skipped"]:
-            result["reason"] = "all_grants_refused"
+        if not result["launched"] and result["reason"] is None and result["skipped"]:
+            reasons = {item["reason"] for item in result["skipped"]}
+            result["reason"] = (
+                "child_slot_busy" if reasons == {"child_slot_busy"}
+                else "all_grants_refused"
+            )
         return result
+
+    # -- the whole tick ----------------------------------------------------
+    def run_once(self, *, as_of: date | None = None) -> dict[str, Any]:
+        """Settle, acquire, search -- and never raise out of a controller tick."""
+
+        # The mission first: without one there is nothing to settle *for*, and
+        # failing here rather than three calls later is what makes the reason
+        # in the tick summary the actual reason.
+        self._resolve_mission()
+        return {
+            "settled_dispatches": self.settle_dispatches(),
+            "settled_documents": self.settle_documents(),
+            "acquisition": self.launch_acquisition(),
+            **self.launch_discovery(as_of=as_of),
+        }
+
 
 
 # ---------------------------------------------------------------------------
@@ -586,12 +830,25 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     if launcher is None:
         return {"status": "unconfigured",
                 "reason": "no Guidepoint lane on this writer"}
-    return GuidepointLaneCoordinator(
-        missions=server.coverage_mission,
-        connection=server.store.connection,
-        launcher=launcher,
-        plan=launcher.plan,
-    ).launch_discovery()
+    try:
+        coordinator = GuidepointLaneCoordinator(
+            missions=server.coverage_mission,
+            connection=server.store.connection,
+            launcher=launcher,
+            plan=launcher.plan,
+            acquisition_launcher=getattr(launcher, "acquisition_launcher", None),
+        )
+        return coordinator.run_once()
+    except Exception as exc:  # noqa: BLE001
+        # A tick reports; it does not raise. A missing mission, a plan that
+        # was replaced with something malformed, a Core mid-migration -- all of
+        # them mean this lane has nothing it may do right now, and an
+        # exception out of here takes the whole controller tick with it.
+        return {
+            "status": "unconfigured",
+            "reason": f"{type(exc).__name__}: {exc}",
+            "source_ref": GUIDEPOINT_SOURCE_REF,
+        }
 
 
 def add_arguments(parser: Any) -> None:
@@ -619,13 +876,19 @@ def build_launcher(args: Any) -> Any | None:
     if governance is None or plan_path is None:
         return None
     fixture = getattr(args, "guidepoint_fixture", None)
+    state_dir = Path(args.db).expanduser().resolve().parent
     return GuidepointSearchLauncher(
-        state_dir=Path(args.db).expanduser().resolve().parent,
+        state_dir=state_dir,
         governance_path=governance,
         plan_path=plan_path,
         mode_args=() if fixture is not None else ("--allow-network",),
         fake_search_file=fixture,
         mcp_endpoint=getattr(args, "guidepoint_mcp_endpoint", GUIDEPOINT_MCP_ENDPOINT),
+        # The acquisition child rides along on the search lane's single
+        # registry keyword. It is a separate process slot -- acquiring costs
+        # no Guidepoint call and must not wait behind a search -- but it is
+        # the same lane, installed and shut down together.
+        acquisition_launcher=GuidepointAcquisitionLauncher(state_dir=state_dir),
     )
 
 

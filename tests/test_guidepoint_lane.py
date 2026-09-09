@@ -13,7 +13,7 @@ import json
 import os
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import MappingProxyType
 from unittest import mock
@@ -24,8 +24,13 @@ from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.guidepoint_cli import run_acquisition, run_discovery
 from dalton_core.guidepoint_core import SEARCH_KIND
 from dalton_core.guidepoint_launcher import (
+    GuidepointAcquisitionLauncher,
     GuidepointLaunchRejected,
     GuidepointSearchLauncher,
+)
+from dalton_core.lane_child_launcher import (
+    LaneChildConflict,
+    LaneChildTicketNotFound,
 )
 from dalton_core.guidepoint_search import (
     FakeGuidepointHandle,
@@ -34,6 +39,7 @@ from dalton_core.guidepoint_search import (
 )
 from dalton_core.mission_guidepoint_lane import (
     GuidepointLaneCoordinator,
+    dispatch as lane_dispatch,
     GuidepointPlanError,
     build_guidepoint_discovery_plan,
     build_guidepoint_parameters,
@@ -528,6 +534,362 @@ class CoordinatorTests(unittest.TestCase):
         )
         self.assertEqual(status["summary"]["governance_status"], "approved")
         self.assertEqual(status["summary"]["provider_calls"], 0)
+
+
+class StubLauncher:
+    """A launcher whose children have already finished."""
+
+    def __init__(self, tickets):
+        self.tickets = dict(tickets)
+
+    def status(self, ticket_ref):
+        try:
+            return self.tickets[ticket_ref]
+        except KeyError as exc:
+            raise LaneChildTicketNotFound(ticket_ref) from exc
+
+
+class RefusingLauncher(StubLauncher):
+    def start(self, **kwargs):
+        raise GuidepointLaunchRejected(
+            "Guidepoint connector governance record is not approved"
+        )
+
+
+class ReconciliationTests(unittest.TestCase):
+    """What last tick launched has to reach the ledger this tick."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / "state"
+        self.state.mkdir()
+        self.clock = Clock()
+        self.plan = small_plan()
+        self.lane = LaneHarness(self.state, self.clock)
+        self.addCleanup(self.lane.close)
+
+    def coordinator(self, launcher, **overrides):
+        kwargs = dict(
+            missions=self.lane.missions,
+            connection=self.lane.h.core.connection,
+            launcher=launcher,
+            plan=self.plan,
+            clock=self.clock,
+        )
+        kwargs.update(overrides)
+        return GuidepointLaneCoordinator(**kwargs)
+
+    def dispatch_row(self, ticket_ref="guidepoint-search-run:" + "a" * 24):
+        authorization = self.lane.missions.authorize_source_discovery(
+            company_ref=ACN, source_ref=GUIDEPOINT, requested_by=AUTOMATION,
+            mission_version_ref=self.lane.mission["id"],
+            mission_version_hash=self.lane.mission["content_hash"],
+        )
+        return self.lane.missions.record_discovery_dispatch(
+            authorization=authorization,
+            discovery_plan_ref=self.plan["id"],
+            discovery_plan_hash=self.plan["content_hash"],
+            spec_ref="it-services-demand",
+            query_hash="b" * 64,
+            ticket_ref=ticket_ref,
+        )
+
+    def test_an_orphaned_child_is_settled_failed_not_left_launched(self) -> None:
+        # A ticket that still says running with no live process is the shape
+        # that used to sit in the ledger forever after a writer restart.
+        with patched_discovery_sources():
+            dispatch = self.dispatch_row()
+            launcher = StubLauncher({
+                dispatch["ticket_ref"]: {
+                    "status": "orphaned", "exit_code": None, "summary": None,
+                },
+            })
+            settled = self.coordinator(launcher).settle_dispatches()
+            self.assertEqual(len(settled), 1)
+            self.assertEqual(settled[0]["status"], "failed")
+            self.assertEqual(
+                self.lane.missions.open_discovery_dispatches(source_ref=GUIDEPOINT), []
+            )
+
+    def test_a_missing_ticket_is_settled_rather_than_ignored(self) -> None:
+        with patched_discovery_sources():
+            self.dispatch_row()
+            settled = self.coordinator(StubLauncher({})).settle_dispatches()
+            self.assertEqual([item["status"] for item in settled], ["failed"])
+
+    def test_a_running_child_is_left_alone(self) -> None:
+        with patched_discovery_sources():
+            dispatch = self.dispatch_row()
+            launcher = StubLauncher({dispatch["ticket_ref"]: {"status": "running"}})
+            self.assertEqual(self.coordinator(launcher).settle_dispatches(), [])
+            self.assertEqual(
+                len(self.lane.missions.open_discovery_dispatches(source_ref=GUIDEPOINT)), 1
+            )
+
+    def test_a_child_that_exited_zero_without_a_discovery_is_a_failure(self) -> None:
+        # Exit code alone does not prove the mission ledger accepted anything.
+        with patched_discovery_sources():
+            dispatch = self.dispatch_row()
+            launcher = StubLauncher({
+                dispatch["ticket_ref"]: {
+                    "status": "succeeded", "exit_code": 0,
+                    "summary": {"failure_reason": "CoverageMissionConflict: nope",
+                                "discovery_ref": None},
+                },
+            })
+            settled = self.coordinator(launcher).settle_dispatches()
+            self.assertEqual(settled[0]["status"], "failed")
+
+    def test_a_child_that_recorded_a_discovery_is_settled_succeeded(self) -> None:
+        with patched_discovery_sources():
+            dispatch = self.dispatch_row()
+            launcher = StubLauncher({
+                dispatch["ticket_ref"]: {
+                    "status": "succeeded", "exit_code": 0,
+                    "summary": {"discovery_ref": "mission-source-discovery:x",
+                                "new_document_count": 3},
+                },
+            })
+            settled = self.coordinator(launcher).settle_dispatches()
+            self.assertEqual(settled[0]["status"], "succeeded")
+            self.assertEqual(settled[0]["new_document_count"], 3)
+
+    def test_a_launch_refusal_stops_the_tick_and_is_not_an_exception(self) -> None:
+        with patched_discovery_sources():
+            result = self.coordinator(RefusingLauncher({})).launch_discovery(
+                as_of=date(2026, 9, 9)
+            )
+        self.assertEqual(result["status"], "idle")
+        self.assertEqual(result["reason"], "not_approved")
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertIn("not approved", result["skipped"][0]["reason"])
+
+    def test_a_launch_that_records_a_dispatch_reports_its_ref(self) -> None:
+        class OneShot(StubLauncher):
+            def __init__(self):
+                super().__init__({})
+                self.calls = 0
+
+            def start(self, **kwargs):
+                self.calls += 1
+                if self.calls > 1:
+                    raise LaneChildConflict("busy")
+                return {"id": "guidepoint-search-run:" + "c" * 24}
+
+        launcher = OneShot()
+        with patched_discovery_sources():
+            result = self.coordinator(launcher).launch_discovery(as_of=date(2026, 9, 9))
+        self.assertEqual(result["status"], "launched")
+        self.assertEqual(len(result["launched"]), 1)
+        self.assertTrue(result["launched"][0]["dispatch_ref"])
+        self.assertEqual(result["skipped"][0]["reason"], "child_slot_busy")
+        with patched_discovery_sources():
+            open_rows = self.lane.missions.open_discovery_dispatches(source_ref=GUIDEPOINT)
+        self.assertEqual(len(open_rows), 1)
+
+    def test_a_tick_whose_only_skip_is_the_child_slot_says_so(self) -> None:
+        class Busy(StubLauncher):
+            def start(self, **kwargs):
+                raise LaneChildConflict("busy")
+
+        with patched_discovery_sources():
+            result = self.coordinator(Busy({})).launch_discovery(as_of=date(2026, 9, 9))
+        self.assertEqual(result["reason"], "child_slot_busy")
+
+
+class CadenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / "state"
+        self.state.mkdir()
+        self.clock = Clock()
+        self.plan = small_plan()
+        self.lane = LaneHarness(self.state, self.clock)
+        self.addCleanup(self.lane.close)
+
+    def coordinator(self, records):
+        class Missions:
+            def __init__(self, inner, records):
+                self.inner = inner
+                self.records = records
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+            def source_discoveries(self, *args, **kwargs):
+                return [
+                    record for record in self.records
+                    if record["company_ref"] == kwargs.get("company_ref")
+                    and record["spec_ref"] == kwargs.get("spec_ref")
+                ]
+
+        return GuidepointLaneCoordinator(
+            missions=Missions(self.lane.missions, records),
+            connection=self.lane.h.core.connection,
+            launcher=StubLauncher({}),
+            plan=self.plan,
+            mission_version_ref=self.lane.mission["id"],
+            mission_version_hash=self.lane.mission["content_hash"],
+            requested_by=AUTOMATION,
+            clock=self.clock,
+        )
+
+    def record(self, *, spec_ref, company_ref, days_ago, refs):
+        when = self.clock() - timedelta(days=days_ago)
+        return {
+            "company_ref": company_ref, "spec_ref": spec_ref,
+            "source_ref": GUIDEPOINT, "document_refs": refs,
+            "created_at": when.isoformat(timespec="microseconds"),
+        }
+
+    def test_a_query_that_found_nothing_retries_on_the_short_interval(self) -> None:
+        # rediscovery is 14 days, retry is 2. An empty page three days ago is
+        # due again; a page that found something is not.
+        empty = self.record(spec_ref="it-services-demand", company_ref=ACN,
+                            days_ago=3, refs=[])
+        found = self.record(spec_ref="client-demand-and-budgets", company_ref=ACN,
+                            days_ago=3, refs=["guidepoint-excerpt:sha256:" + "0" * 64])
+        due = self.coordinator([empty, found]).due_queries(as_of=date(2026, 9, 9))
+        by_spec = {(item["spec_ref"], item["company_ref"]): item["reason"] for item in due}
+        self.assertEqual(by_spec.get(("it-services-demand", ACN)), "retry_due")
+        self.assertNotIn(("client-demand-and-budgets", ACN), by_spec)
+        # CTSH never ran, so it is due whatever the intervals say.
+        self.assertEqual(by_spec.get(("client-demand-and-budgets", CTSH)), "never_run")
+
+    def test_an_empty_page_inside_the_retry_interval_is_not_due(self) -> None:
+        empty = self.record(spec_ref="it-services-demand", company_ref=ACN,
+                            days_ago=1, refs=[])
+        due = self.coordinator([empty]).due_queries(as_of=date(2026, 9, 9))
+        self.assertNotIn(("it-services-demand", ACN),
+                         {(item["spec_ref"], item["company_ref"]) for item in due})
+
+    def test_a_productive_page_past_the_long_interval_is_due_again(self) -> None:
+        found = self.record(spec_ref="it-services-demand", company_ref=ACN,
+                            days_ago=15,
+                            refs=["guidepoint-excerpt:sha256:" + "0" * 64])
+        due = self.coordinator([found]).due_queries(as_of=date(2026, 9, 9))
+        reasons = {(item["spec_ref"], item["company_ref"]): item["reason"] for item in due}
+        self.assertEqual(reasons.get(("it-services-demand", ACN)), "cadence_due")
+
+
+class DispatchTests(unittest.TestCase):
+    """The controller tick reports; it never raises."""
+
+    class Server:
+        def __init__(self, launcher, missions=None, connection=None):
+            self._launcher = launcher
+            self.coverage_mission = missions
+            self.store = type("S", (), {"connection": connection})()
+
+        def lane_launcher(self, kwarg):
+            return self._launcher
+
+    def test_a_writer_without_the_lane_is_unconfigured(self) -> None:
+        result = lane_dispatch(self.Server(None), {})
+        self.assertEqual(result["status"], "unconfigured")
+
+    def test_a_core_with_no_mission_is_unconfigured_not_an_exception(self) -> None:
+        class NoMission:
+            def active_mission(self, mission_ref):
+                raise LookupError("no active mission for this ref")
+
+        class Launcher(StubLauncher):
+            plan = small_plan()
+            acquisition_launcher = None
+
+        result = lane_dispatch(
+            self.Server(Launcher({}), missions=NoMission(), connection=None), {}
+        )
+        self.assertEqual(result["status"], "unconfigured")
+        self.assertIn("LookupError", result["reason"])
+        self.assertEqual(result["source_ref"], GUIDEPOINT)
+
+
+class AcquisitionLauncherTests(unittest.TestCase):
+    """What extraction reads has to exist and has to agree with itself."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.state = self.root / "state"
+        self.state.mkdir()
+        self.launcher = GuidepointAcquisitionLauncher(state_dir=self.state)
+        self.addCleanup(self.launcher.close)
+        self.document_ref = "guidepoint-excerpt:sha256:" + "1" * 64
+
+    def write_ticket(self, digest, *, status="succeeded", manifest=None, summary=None):
+        directory = self.launcher.tickets_dir / digest
+        directory.mkdir(parents=True, exist_ok=True)
+        ticket = {
+            "schema_version": "0.1",
+            "id": f"guidepoint-acquire-run:{digest}",
+            "document_ref": self.document_ref,
+            "started_at": "2026-09-09T00:00:00.000000+00:00",
+            "status": status,
+        }
+        manifest = manifest if manifest is not None else {
+            "id": "guidepoint-excerpt-acquisition:x",
+            "content_hash": "d" * 64,
+            "document_ref": self.document_ref,
+            "status": "complete",
+            "content_chars": 42,
+        }
+        summary = summary if summary is not None else {
+            "document_ref": self.document_ref,
+            "status": "succeeded",
+            "manifest_ref": manifest["id"],
+            "manifest_hash": manifest["content_hash"],
+            "content_chars": manifest["content_chars"],
+        }
+        for name, value in (("ticket.json", ticket), ("summary.json", summary),
+                            ("manifest.json", manifest)):
+            path = directory / name
+            path.write_text(json.dumps(value), encoding="utf-8")
+            os.chmod(path, 0o600)
+        return ticket["id"]
+
+    def test_a_settled_acquisition_is_readable_by_ticket_and_by_document(self) -> None:
+        ticket_ref = self.write_ticket("e" * 24)
+        manifest = self.launcher.read_completed_manifest(ticket_ref, self.document_ref)
+        self.assertEqual(manifest["document_ref"], self.document_ref)
+        self.assertEqual(
+            self.launcher.locate_completed_manifest(self.document_ref), manifest
+        )
+
+    def test_files_that_disagree_are_refused(self) -> None:
+        # The summary says the excerpt is 42 characters; the manifest says 43.
+        ticket_ref = self.write_ticket(
+            "f" * 24,
+            manifest={"id": "guidepoint-excerpt-acquisition:x",
+                      "content_hash": "d" * 64,
+                      "document_ref": self.document_ref,
+                      "status": "complete", "content_chars": 43},
+            summary={"document_ref": self.document_ref, "status": "succeeded",
+                     "manifest_ref": "guidepoint-excerpt-acquisition:x",
+                     "manifest_hash": "d" * 64, "content_chars": 42},
+        )
+        with self.assertRaises(GuidepointLaunchRejected):
+            self.launcher.read_completed_manifest(ticket_ref, self.document_ref)
+
+    def test_an_unfinished_or_unknown_ticket_is_refused(self) -> None:
+        running = self.write_ticket("0" * 24, status="running")
+        with self.assertRaises(GuidepointLaunchRejected):
+            self.launcher.read_completed_manifest(running, self.document_ref)
+        with self.assertRaises(GuidepointLaunchRejected):
+            self.launcher.read_completed_manifest("not-a-ticket", self.document_ref)
+        with self.assertRaises(GuidepointLaunchRejected):
+            self.launcher.locate_completed_manifest("guidepoint-excerpt:sha256:" + "9" * 64)
+
+    def test_a_world_readable_file_is_refused(self) -> None:
+        ticket_ref = self.write_ticket("1" * 24)
+        os.chmod(self.launcher.tickets_dir / ("1" * 24) / "manifest.json", 0o644)
+        with self.assertRaises(GuidepointLaunchRejected):
+            self.launcher.read_completed_manifest(ticket_ref, self.document_ref)
 
 
 if __name__ == "__main__":

@@ -194,6 +194,110 @@ class LiveFramingTests(unittest.TestCase):
         self.assertIn(ROWS[0]["answer"], text)
 
 
+class ExtractionBranchTests(unittest.TestCase):
+    """The one line document_extraction needed, exercised against real bytes."""
+
+    def test_the_extraction_branch_returns_the_verified_excerpt(self) -> None:
+        import os
+        from types import SimpleNamespace
+
+        from dalton_core.document_extraction import DocumentExtractionService
+        from dalton_core.guidepoint_launcher import GuidepointAcquisitionLauncher
+        from dalton_core.store import canonical_json
+
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        state = root / "state"
+        state.mkdir()
+        harness = Harness(state, FakeGuidepointHandle(ROWS, sse=True))
+        self.addCleanup(harness.close)
+        receipt = harness.search.search(harness.search.build_request(SPEC))
+        reader = ConnectorCompletionReceiptReader(
+            connectors=harness.connectors, observability=harness.observability
+        )
+        document_ref = receipt["document_refs"][0]
+        manifest = acquire_guidepoint_excerpt(
+            core=harness.core, spool=harness.spool, receipt_reader=reader,
+            source_envelope_ref=receipt["source_envelope_ref"],
+            document_ref=document_ref,
+        )
+
+        # A settled acquisition ticket, exactly as the child would leave one.
+        launcher = GuidepointAcquisitionLauncher(state_dir=state)
+        self.addCleanup(launcher.close)
+        digest = "a" * 24
+        directory = launcher.tickets_dir / digest
+        directory.mkdir(parents=True, exist_ok=True)
+        ticket_ref = f"guidepoint-acquire-run:{digest}"
+        files = {
+            "ticket.json": {
+                "schema_version": "0.1", "id": ticket_ref,
+                "document_ref": document_ref, "status": "succeeded",
+                "started_at": "2026-09-09T00:00:00.000000+00:00",
+            },
+            "summary.json": {
+                "document_ref": document_ref, "status": "succeeded",
+                "manifest_ref": manifest["id"],
+                "manifest_hash": manifest["content_hash"],
+                "content_chars": manifest["content_chars"],
+            },
+            "manifest.json": manifest,
+        }
+        for name, value in files.items():
+            path = directory / name
+            path.write_text(canonical_json(value) + "\n", encoding="utf-8")
+            os.chmod(path, 0o600)
+
+        class FakeMissions:
+            def document_review(self, review_id):
+                return {
+                    "review_id": review_id,
+                    "source_ref": GUIDEPOINT_SOURCE_REF,
+                    "document_ref": document_ref,
+                    "discovered_document_ref": "coverage-mission-discovered-document:x",
+                }
+
+        # The ledger row is faked at the connection, not inserted: a trigger
+        # refuses direct writes to the mission tables, and rightly so. What is
+        # under test is the extraction branch, and every other read below --
+        # receipts, raw bytes, the spool object -- goes to the real Core.
+        class LedgerShim:
+            def __init__(self, inner, row):
+                self.inner = inner
+                self.row = row
+
+            def execute(self, sql, *args, **kwargs):
+                if "coverage_mission_discovered_documents" in sql:
+                    return SimpleNamespace(
+                        fetchone=lambda: self.row, fetchall=lambda: [self.row]
+                    )
+                return self.inner.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name):
+                return getattr(self.inner, name)
+
+        store = SimpleNamespace(
+            connection=LedgerShim(harness.core.connection, {"ticket_ref": ticket_ref})
+        )
+
+        writer = SimpleNamespace(
+            coverage_mission=FakeMissions(),
+            store=store,
+            _connectors=harness.connectors,
+            observability=harness.observability,
+            _transcript_spool=harness.spool,
+            lane_launcher=lambda kwarg: SimpleNamespace(acquisition_launcher=launcher),
+        )
+        service = object.__new__(DocumentExtractionService)
+        service.writer = writer
+        text = service._document_text({"review_id": "review:x"})
+        self.assertIn(ROWS[0]["answer"], text)
+        # And the licence gate reads the same text extraction just returned.
+        excerpt = guidepoint_excerpt_records({"data": ROWS})[0]
+        self.assertEqual(text, excerpt["excerpt_text"])
+
+
 class ExtractionDispatchTests(unittest.TestCase):
     def test_the_alphaengine_validator_cannot_stand_in_for_this_manifest(self) -> None:
         # Named here because it is the reason a second verified_* exists: a
