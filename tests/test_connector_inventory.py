@@ -311,6 +311,48 @@ def rebind_proposal_package(package: dict[str, dict]) -> dict[str, dict]:
     return {"profile": profile, "fixture": fixture, "proposal": proposal}
 
 
+class PackagedBytesTests(unittest.TestCase):
+    """The packaged files are regenerated, never hand-edited.
+
+    ``test_packaged_inventory_is_exactly_the_deterministic_build`` compares
+    parsed objects, so a file with the same content and different formatting
+    passes it while still showing up as a diff for whoever merges two
+    connector branches. This compares the bytes the generator would write, and
+    is the check its ``--check`` mode runs.
+    """
+
+    def script(self):
+        import importlib.util
+
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "_build_connector_inventory",
+            root / "scripts" / "build_connector_inventory.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_every_packaged_file_is_byte_for_byte_what_the_generator_writes(self):
+        script = self.script()
+        planned = script.planned_files(build_connector_inventory())
+        self.assertEqual(
+            sorted(planned), sorted(script.existing_files()),
+            "the packaged file set is not the set the definitions render",
+        )
+        for path, text in sorted(planned.items()):
+            with self.subTest(path=path.name):
+                self.assertEqual(
+                    path.read_text(encoding="utf-8"), text,
+                    f"{path.name} is stale; run scripts/build_connector_inventory.py",
+                )
+
+    def test_the_generator_reports_nothing_to_do(self):
+        script = self.script()
+        self.assertEqual(
+            script.summarise(script.planned_files(build_connector_inventory())), [])
+
+
 class ConnectorInventoryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.built = build_connector_inventory()
