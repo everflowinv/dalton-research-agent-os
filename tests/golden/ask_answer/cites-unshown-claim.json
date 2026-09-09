@@ -147,7 +147,8 @@
     2,
     4
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "反例：C4 是真的，C17 与 C23 这次根本没有展示给模型。答案的后半句（印度离岸厂商、AI 原生公司）确有其事，但它引的是不存在的标签。",
  "rubric": "ask_answer",

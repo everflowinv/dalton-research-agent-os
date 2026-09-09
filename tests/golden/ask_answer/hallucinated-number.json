@@ -141,7 +141,8 @@
     1,
     3
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "反例：收入是真的，利润率 15.4% 和 30 个基点是编的——账本里没有任何利润率 Claim。这是最危险的一类错误，因为编出来的数字被真数字夹着，读起来完全可信。",
  "rubric": "ask_answer",

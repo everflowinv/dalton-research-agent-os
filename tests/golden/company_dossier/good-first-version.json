@@ -233,7 +233,8 @@
     3,
     4
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "正例第一版：十节齐备，写了正文的每一节都有引用或数字，估值一节按数字纪律整节留空并写明原因。没有上一版，所以两条版本类检查跳过——这正是一个第一版应有的样子。",
  "rubric": "company_dossier",

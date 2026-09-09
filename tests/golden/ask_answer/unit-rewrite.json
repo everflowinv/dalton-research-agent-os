@@ -141,7 +141,8 @@
     3,
     4
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "反例，而且是最容易被放过的一个：13.53 亿是 USD 1353443000 的正确换算，却不是账本里的任何一个数字。Playbook 的数字纪律要求逐字回指，因为读者要能拿着答案去核对 filing。",
  "rubric": "ask_answer",

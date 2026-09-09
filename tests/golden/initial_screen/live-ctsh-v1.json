@@ -312,7 +312,8 @@
     1,
     2
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "CTSH Initial Screen v1（stage 仍是 entered，未过闸，缺电话会）。只有一处残迹：S5 的「： 指出 GLOB…」——主语随标记一起没了。数字纪律与章节结构都干净。",
  "rubric": "initial_screen",

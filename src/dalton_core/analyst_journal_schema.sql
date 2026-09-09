@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS analyst_journal_entries (
     idempotency_key TEXT,
     record_json TEXT NOT NULL,
     content_hash TEXT NOT NULL,
-    actor_ref TEXT NOT NULL,
+    -- Automation grading itself is the quality score and has its own record.
+    actor_ref TEXT NOT NULL CHECK(actor_ref LIKE 'human:%'),
     created_at TEXT NOT NULL,
     UNIQUE(target_ref, entry_number),
     UNIQUE(target_ref, idempotency_key)

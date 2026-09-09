@@ -374,7 +374,8 @@
     3,
     4
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "反例：第二版把每一节换了说法重写，引用一条没变。蓝图第 6 节的止损规则说得很直接——「dossier 版本必须绑定新证据才能发布；不满足就 duplicate」。这一版就是那条规则要挡的东西。",
  "rubric": "company_dossier",

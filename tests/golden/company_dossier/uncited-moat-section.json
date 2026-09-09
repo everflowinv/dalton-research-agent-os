@@ -229,7 +229,8 @@
     3,
     4
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "反例：竞争位置一节读起来最像研究——句子完整、判断明确、语气笃定——而它一条引用都没有。这是档案层最典型的失败：把「听起来对」的行业常识写成公司的结论。",
  "rubric": "company_dossier",

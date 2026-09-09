@@ -375,7 +375,8 @@
     3,
     4
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "正例第二版：只改了一节，但那一节引了一条新证据（公司停止单独披露 AI 指标），并因此把一个证伪条件改写得更锐利。Constitution 的 output_rubric 说好的研究产出缩小未决问题集合或锐化一个证伪条件——这里锐化的是后者。",
  "rubric": "company_dossier",

@@ -365,7 +365,8 @@
     1,
     3
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "ACN Initial Screen v2（2026-09-09，10 次模型调用，已 gate_passed）。蓝图附录 A 记的三处缺陷全在这里：S7 的残句「、、（同一季度数据重复）显示」、同季收入被三条重复 Claim 并列引用、只有收入一个数字系列。文字本身是真研究文字：S3 识别了 AI/reinvention driver 并说明证据只能支持方向性判断，S4 是完整的「收入增长但需求空心化」反向观点，gaps 列表点名了 bookings、utilization、分部与指引。",
  "rubric": "initial_screen",

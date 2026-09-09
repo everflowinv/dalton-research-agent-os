@@ -364,7 +364,8 @@
     0,
     2
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "IBM Initial Screen v1。六处残迹全部是括号边上的分隔符（「，）」「、）」），即 P13ap 修的第二种形状；数字与章节干净。IBM 的研报素材最薄（只有 RBC 一家）。",
  "rubric": "initial_screen",

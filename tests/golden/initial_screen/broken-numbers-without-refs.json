@@ -365,7 +365,8 @@
     0,
     2
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "把两个账本里不存在的数字（12.4%、1.08）写进 ACN 的 S3。这是数字纪律的直接违反，也是发布路径唯一已经会拒绝的一类缺陷——它在这里是为了钉住检查本身，而不是为了证明发布路径有洞。",
  "rubric": "initial_screen",

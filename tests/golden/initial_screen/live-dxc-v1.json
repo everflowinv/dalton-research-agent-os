@@ -330,7 +330,8 @@
     0,
     2
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "DXC Initial Screen v1，五份里唯一确定性检查全过的一份：没有残迹、没有重复并列引用、章节齐备。它是 golden 集里的正例基线——同一条流水线在同一天可以写出干净的文档。",
  "rubric": "initial_screen",

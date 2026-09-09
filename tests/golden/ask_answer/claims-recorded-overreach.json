@@ -145,7 +145,8 @@
     0,
     0
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "反例：引用与数字都没问题，问题在最后一句——答案声称自己写入了账本并改了 thesis。ADR-0006 说得很清楚：答案是驾驶舱产物，永远不是 Claim，也不进账本。",
  "rubric": "ask_answer",

@@ -152,7 +152,8 @@
     4,
     4
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "正例：逐字引用两条 filing 级 Claim，信心 medium 与证据强度相称，缺口点名。",
  "rubric": "ask_answer",

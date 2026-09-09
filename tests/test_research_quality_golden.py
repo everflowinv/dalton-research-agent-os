@@ -64,6 +64,14 @@ class GoldenSetShapeTests(unittest.TestCase):
                 self.assertTrue(case["note"].strip())
                 self.assertTrue(case["expected"]["rationale"].strip())
 
+    def test_every_case_says_its_ranges_are_calibration_rather_than_measurement(self):
+        # No real judge call has been made against any of these. The ranges are
+        # the author's reading of what a good grader would say; the flag is
+        # there so nobody later mistakes them for observed results.
+        for case in cases():
+            with self.subTest(case=case["case_ref"]):
+                self.assertIs(case["expected"]["score_ranges_are_calibration_only"], True)
+
     def test_every_case_carries_a_range_for_every_criterion(self):
         for case in cases():
             rubric = get_rubric(case["rubric"])
@@ -180,10 +188,13 @@ class JudgedGoldenTests(unittest.TestCase):
                 self.assertEqual(result["status"], "scored", result.get("reason"))
                 self.assertEqual(len(result["scores"]), len(rubric.criterion_ids))
 
-    def test_every_prompt_fits_the_bounds_the_call_is_made_under(self):
-        # The biggest live screen is ~13k characters of body plus its Claims;
-        # if a real document did not fit, the judge would fail at the router
-        # rather than here.
+    def test_every_prompt_fits_the_byte_bound_the_call_is_admitted_under(self):
+        # MAX_INPUT_TOKENS is measured in bytes, not tokens: build_work compares
+        # len(prompt.encode("utf-8")) against it, and the router estimates on
+        # prompt bytes too. The name of the constant is the router's; this
+        # asserts what is actually applied. The biggest live screen is ~13k
+        # characters of body plus its Claims; if a real document did not fit,
+        # the judge would be refused before the call rather than here.
         for case in cases():
             rubric = get_rubric(case["rubric"])
             prompt = build_judge_prompt(case["artefact"], rubric,

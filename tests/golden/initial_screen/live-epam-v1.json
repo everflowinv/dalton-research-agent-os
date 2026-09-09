@@ -406,7 +406,8 @@
     1,
     3
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "EPAM Initial Screen v1。S2 有三处「；显示2025年第三季度收入为…」的丢主语残句，S4 有「（数据来源：、、、）」这一整条空引用与「（管理层的信念，）」的残括号——这是 P13ap 提交信息里引的第二个 live 样本。",
  "rubric": "initial_screen",

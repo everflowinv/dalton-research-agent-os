@@ -137,7 +137,8 @@
     4,
     4
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "正例，且是评分表里唯一一个「答不出来是满分」的案例：证据不足时直说不知道，并点名需要补什么。ADR-0006 的答案只能来自展示过的 Claim，这一条把它推到极端。",
  "rubric": "ask_answer",

@@ -159,7 +159,8 @@
     4,
     4
    ]
-  }
+  },
+  "score_ranges_are_calibration_only": true
  },
  "note": "反例：答案本身是克制且有引用的，但没有给出信心。ADR-0006 的问答契约要求answer / citations / confidence / gaps 四件齐全，缺信心的答案让读者无法判断该把它当结论还是当线索。",
  "rubric": "ask_answer",
