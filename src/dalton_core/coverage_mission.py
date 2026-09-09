@@ -195,6 +195,19 @@ DISCOVERY_SOURCES: Mapping[str, Mapping[str, str]] = MappingProxyType({
         "operation": "search_library",
         "document_ref_prefix": "guidepoint-excerpt:",
     }),
+    # S1: local human / vendor feeds.  For a local feed the acquisition is the
+    # discovery, so the discovery operation is the read itself and one record
+    # names exactly the one document its envelope carries.
+    "source:sales-notes": MappingProxyType({
+        "connector_source_ref": "source:sales-notes",
+        "operation": "get_note",
+        "document_ref_prefix": "sales-note:",
+    }),
+    "source:company-wiki": MappingProxyType({
+        "connector_source_ref": "source:company-wiki",
+        "operation": "get_document",
+        "document_ref_prefix": "company-wiki-doc:sha256:",
+    }),
 })
 DISCOVERED_DOCUMENT_STATUSES: tuple[str, ...] = (
     "discovered", "already_in_authority", "acquisition_launched", "acquired",
