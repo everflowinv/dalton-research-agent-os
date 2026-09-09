@@ -1,0 +1,237 @@
+{
+ "artefact": {
+  "artefact_kind": "company_dossier",
+  "cited_tags": [],
+  "confidence": null,
+  "expected_sections": [
+   "业务与收入构成",
+   "行业特性与周期位置",
+   "长期与短期驱动因素",
+   "竞争位置与壁垒",
+   "管理层与资本配置",
+   "财务画像与质量",
+   "历史股价与估值驱动",
+   "多空辩论焦点",
+   "叙事演绎与催化剂",
+   "跟踪指标与证伪条件"
+  ],
+  "gaps": [
+   "缺重组后的分部收入口径映射表，无法把 FY2025 之前的分部历史接到新结构上",
+   "缺行业级的支出增速第三方序列，现在的周期判断只能靠公司自己的描述",
+   "缺 AI 相关收入的绝对规模与占比，无法给这条替代赛跑记分",
+   "缺 GCC 渗透率的量化数据，也缺 ACN 在具体客户上被内部化的案例",
+   "缺管理层历史 guidance 与实际的对照表，无法评估承诺兑现风格",
+   "缺利润率、现金流、资本开支的季度序列；财务画像目前只有收入一条线",
+   "按数字纪律留空：行情、股本、汇率、利率与 consensus 五类 authority 尚未接入，写任何历史估值区间或股价驱动归因都会是无来源的数字",
+   "缺卖方多空两派的目标价与关键假设，无法定位市场当前站在哪一边",
+   "缺事件日历与业绩日期，催化剂路径现在只能定性描述",
+   "缺 bookings 与 utilization 两条序列，上述证伪条件中有两条现在无法观测"
+  ],
+  "hash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "prior": null,
+  "question": null,
+  "ref": "company-dossier-version:golden-uncited",
+  "sections": [
+   {
+    "body": "Accenture 把自己描述为帮助企业「建数字核心、释放 AI」的全球专业服务公司，2025 年 9 月 1 日起把原先的分部整合进 Reinvention Services，理由是大部分大单本来就跨多个能力域，新模式是为了把 AI 与数据更深地嵌进销售与交付。收入与利润的责任落在地理市场上，由它们负责营收与盈利目标并销售全部服务线。最近一个季度收入为 USD 18718144000。档案层面要记住的是：重组之后，任何按旧分部读出来的历史序列都不再可比。",
+    "claim_refs": [
+     "claim-version:4286c7fd67",
+     "claim-version:3f4910118a",
+     "claim-version:aeff36320a"
+    ],
+    "gaps": [
+     "缺重组后的分部收入口径映射表，无法把 FY2025 之前的分部历史接到新结构上"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter."
+     }
+    ],
+    "title": "业务与收入构成"
+   },
+   {
+    "body": "美国 IT 服务是一个高度分散、竞争激烈的行业，参与者包括大型跨国厂商、印度等低成本离岸供应商、会计师事务所与咨询公司。它不是商品周期行业，但对客户的自由裁量支出高度敏感：公司自己说宏观与地缘波动让预测客户需求变得更难，尤其在咨询侧。把它归到「结构成长 + 支出周期」这一类比归到 compounder 更接近现实。",
+    "claim_refs": [
+     "claim-version:4bebce9419",
+     "claim-version:67a3924c91"
+    ],
+    "gaps": [
+     "缺行业级的支出增速第三方序列，现在的周期判断只能靠公司自己的描述"
+    ],
+    "numbers": [],
+    "title": "行业特性与周期位置"
+   },
+   {
+    "body": "长期驱动是企业把 AI 能力从试点推到生产所需要的重构工作，公司称其 fiscal 2023 的生成式 AI 投入让它有位置去接这部分新增支出。短期驱动则是相反方向的：技术进步已经减少并替代了它一部分历史服务，并可能让客户推迟既有合同下的支出。两个方向同时成立，所以这家公司的关键问题不是「AI 是不是机会」，而是「AI 带来的收入能不能比它替掉的收入来得快」。",
+    "claim_refs": [
+     "claim-version:b71c7cfef9",
+     "claim-version:9b3bb8b300"
+    ],
+    "gaps": [
+     "缺 AI 相关收入的绝对规模与占比，无法给这条替代赛跑记分"
+    ],
+    "numbers": [],
+    "title": "长期与短期驱动因素"
+   },
+   {
+    "body": "Accenture 的壁垒来自规模、全球交付网络与深厚的客户关系，这些在过去二十年里被反复验证，短期内难以被复制。新进入者即使在 AI 上有优势，也需要多年才能建立同等的交付能力，因此公司的竞争位置是稳固的。",
+    "claim_refs": [],
+    "gaps": [
+     "缺 GCC 渗透率的量化数据，也缺 ACN 在具体客户上被内部化的案例"
+    ],
+    "numbers": [],
+    "title": "竞争位置与壁垒"
+   },
+   {
+    "body": "管理层的资本配置记录里最可检验的一项是 fiscal 2023 的生成式 AI 投入，以及 2025 年 9 月生效的组织重组。两件事都由管理层自己描述其理由，账本里还没有第三方对这些决定结果的评估。承诺兑现情况暂时无法评价：档案里没有历史指引与实际的对照。",
+    "claim_refs": [
+     "claim-version:b71c7cfef9",
+     "claim-version:3f4910118a"
+    ],
+    "gaps": [
+     "缺管理层历史 guidance 与实际的对照表，无法评估承诺兑现风格"
+    ],
+    "numbers": [],
+    "title": "管理层与资本配置"
+   },
+   {
+    "body": "最近两个季度收入分别为 USD 18718144000（同比 5.59%）与 USD 18044066000（同比 8.31%），增速在中个位数区间波动。除收入外，账本里没有任何其他季度序列，所以毛利率、经营利润率、现金流与资本开支这一层暂时是空的。",
+    "claim_refs": [],
+    "gaps": [
+     "缺利润率、现金流、资本开支的季度序列；财务画像目前只有收入一条线"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:4485c39d212d5d352b2c5590432e57c48f9851b1446ba12f9e2ab6bc6cd5ea39",
+      "period": "2025-12-01..2026-02-28",
+      "text": "Accenture plc reported Revenues of USD 18044066000 for 2025-12-01..2026-02-28, up 8.31% year over year from USD 16659301000 in the comparable quarter."
+     }
+    ],
+    "title": "财务画像与质量"
+   },
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "按数字纪律留空：行情、股本、汇率、利率与 consensus 五类 authority 尚未接入，写任何历史估值区间或股价驱动归因都会是无来源的数字"
+    ],
+    "numbers": [],
+    "title": "历史股价与估值驱动"
+   },
+   {
+    "body": "多头的说法是 AI 与 reinvention 需求真实且在成熟，公司在大型转型项目上持续获取份额。空头的说法在公司自己的风险披露里写得更清楚：如果现有服务的需求没有被 AI 方案的需求取代，或者新方案的支出规模不足，业绩与利用率都会受损；如果它拿不出反映新技术价值的定价模式，结果同样如此。辩论的焦点因此不是 AI 的方向，而是替代速度与定价权。",
+    "claim_refs": [
+     "claim-version:e9b242ebef",
+     "claim-version:a4535b1db1"
+    ],
+    "gaps": [
+     "缺卖方多空两派的目标价与关键假设，无法定位市场当前站在哪一边"
+    ],
+    "numbers": [],
+    "title": "多空辩论焦点"
+   },
+   {
+    "body": "叙事往下走有两条路径。一条是替代赛跑赢了：AI 相关订单转化为收入，增速回到高个位数，叙事从「防守转型」变成「AI 份额赢家」。另一条是公司自己列出的：需求能见度差、人才争夺激烈，若自由裁量支出进一步收缩，收入增长会被证明来自份额再分配而非行业扩张。催化剂集中在季度业绩与订单披露上。",
+    "claim_refs": [
+     "claim-version:67a3924c91",
+     "claim-version:578cb6925e"
+    ],
+    "gaps": [
+     "缺事件日历与业绩日期，催化剂路径现在只能定性描述"
+    ],
+    "numbers": [],
+    "title": "叙事演绎与催化剂"
+   },
+   {
+    "body": "证伪条件按重要性排：收入同比增速连续两个季度低于本季水平，则「AI 抵消 discretionary 疲软」不成立；利用率与新签订单同时走弱，则替代赛跑输了；若公司恢复单独披露 AI 指标且该指标增速低于总收入，则 AI 叙事本身需要重估。跟踪的最低要求是把 bookings 与 utilization 两条序列接进账本，目前两条都没有。",
+    "claim_refs": [
+     "claim-version:e9b242ebef"
+    ],
+    "gaps": [
+     "缺 bookings 与 utilization 两条序列，上述证伪条件中有两条现在无法观测"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter."
+     }
+    ],
+    "title": "跟踪指标与证伪条件"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "company:sec-cik:0001467373",
+  "title": "company-dossier:0001467373"
+ },
+ "case_ref": "uncited-moat-section",
+ "expected": {
+  "deterministic": {
+   "claim_refs_resolve": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "every_section_cites": {
+    "count": 1,
+    "status": "fail"
+   },
+   "new_version_cites_new_refs": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "numbers_without_refs": {
+    "count": 0,
+    "status": "pass"
+   },
+   "required_sections_present": {
+    "count": 0,
+    "status": "pass"
+   },
+   "restatement_drift": {
+    "count": 0,
+    "status": "skipped"
+   }
+  },
+  "rationale": "every_section_cites 必须是 0。contradictions_surfaced 与 gaps_honest 一并下调：这一节把一个有争议的问题（壁垒是否正在被 GCC 与 AI 原生公司侵蚀）写成了定论，而同一份档案的其他章节引了相反的证据。",
+  "score_ranges": {
+   "contradictions_surfaced": [
+    0,
+    2
+   ],
+   "every_section_cites": [
+    0,
+    0
+   ],
+   "gaps_honest": [
+    0,
+    2
+   ],
+   "new_version_new_evidence": [
+    2,
+    4
+   ],
+   "no_restatement_drift": [
+    2,
+    4
+   ],
+   "numbers_traced": [
+    3,
+    4
+   ],
+   "section_coverage": [
+    3,
+    4
+   ]
+  }
+ },
+ "note": "反例：竞争位置一节读起来最像研究——句子完整、判断明确、语气笃定——而它一条引用都没有。这是档案层最典型的失败：把「听起来对」的行业常识写成公司的结论。",
+ "rubric": "company_dossier",
+ "source": "手写；十节结构取自 research_quality_rubrics.DOSSIER_SECTIONS，每一节的论断都指向 live Core 只读副本 2026-09-09 里的真实 ACN Claim"
+}

@@ -1,0 +1,414 @@
+{
+ "artefact": {
+  "artefact_kind": "initial_screen",
+  "cited_tags": [],
+  "confidence": null,
+  "expected_sections": [
+   "Key Information + Executive Summary",
+   "S1 公司概览（同 IM，无 ESOP 分析）",
+   "S2 行业概览（简版）",
+   "S3 核心 Thesis（简版）",
+   "S4 风险与 Anti-thesis（简版）",
+   "S5 Relevance to Universe（对 universe 内其他标的的多空含义，含跨区域）",
+   "S6 估值（street 预期、框架、event pathway、IRR）",
+   "S7 数据跟踪"
+  ],
+  "gaps": [
+   "缺乏公司对 FY2026 或未来季度的具体收入指引数字",
+   "缺乏按业务线或地域拆分的收入与利润率细分数据",
+   "缺乏订单簿、utilization rate 或 bookings 的量化数据",
+   "缺少公司主营业务收入按业务线或服务类型的细化构成数据",
+   "缺少各行业垂直板块的收入占比或具体金额",
+   "缺少地理分部收入在最近报告期的具体利润数字",
+   "缺少管理层对经营重点的直接引述原文，仅有转述性信息",
+   "行业整体市场规模或增长率数据（如Gartner、IDC预测）缺失；EPAM市场份额数据缺失；主要竞争对手（如Accenture、Cognizant、Infosys等）的近期财务或市场表现数据缺失。",
+   "缺少关于 AI 服务收入的绝对规模或占比的量化数据",
+   "缺少关于市场隐含预期（如目标价、预期增长率）的具体数字",
+   "缺少关于订单（bookings）、利用率（utilization）及利润率的具体历史与预测数据",
+   "缺少关于管理层指引中具体增长或利润率区间的数据",
+   "缺乏EPAM的utilization率、book-to-bill比率、客户内部化案例或AI替代效应的量化数据，以及按地区或垂直行业的收入敞口细分，以验证反向情景的触发条件。",
+   "缺乏EPAM对universe内其他具体公司（如Accenture、Cognizant、EXLS、TaskUs、CI&T）的直接对比性财务数据或市场份额数据，以支持更精确的多空传导分析；需要各公司的收入增长、利润率、bookings或订单趋势等可比指标。",
+   "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与 consensus 五类正式 authority 尚未接入，写任何倍数或目标价都会是无来源的数字。",
+   "剔除收购影响后的有机收入增长口径",
+   "管理层对utilization率的具体季度数值指引",
+   "bookings或订单储备的高频数据",
+   "AI-native收入占总收入比例的量化披露"
+  ],
+  "hash": "e86def0d777d1b1d8ff50620829dcb2d84f8f020a15f4c5198afd31640801392",
+  "prior": null,
+  "question": null,
+  "ref": "mission-deliverable-version:45e773c2d992a2a58f695800e3dcd81a",
+  "sections": [
+   {
+    "body": "EPAM Systems 是一家全球数字转型与软件工程服务提供商，核心业务聚焦于复杂产品开发、云迁移与平台现代化，并正将战略重心转向 AI-native 与数据基础工程，以承接客户从 AI 实验走向生产部署的支出。公司最近一个季度（2026-04-01..2026-06-30）财报显示，扣除增值税后的客户合同收入为 USD 1414767000，同比增长 4.53%，较前两个季度的同比增速有所回落，表明需求仍未见明显加速拐点。我们当前的核心判断是，EPAM 正处在需求软着陆与 AI 相关增量之间拉锯的阶段：管理层强调 AI-native 和基础数据服务的差异化能力，但卖方在 2025 年 8 月普遍下调评级或展望，且公司自身亦披露客户可能因 AI 能力内部化而减少对外部供应商依赖。最需要盯住的两件事，一是北美 go-to-market 转型能否在后续几个季度转化为 bookings 和收入增长，以验证 AI 需求是否抵消 discretionary 下滑；二是管理层对 FY2026 收入指引的下修是否意味着需求疲软将延续至年底，以及低端指引是否过于保守。",
+    "claim_refs": [
+     "claim-version:4a6dc891c8d4093f6e90c407c1ae78eb5321f2a8670499e8c1330f4f8d6fdf16",
+     "claim-version:b3892141c8a0d44cbdcd80b970fdd01ed5195fb41270818be20302082f73b0c4",
+     "claim-version:d3003a44a98c736455ed4ffad9e56e0027f0360245891afb245a5a33d55f9800",
+     "claim-version:90feb5a5b1cdafbe4a7327c07a63c77fe6be1fb2850419b349dc29e491bce9fe",
+     "claim-version:53115af61b0c05fe3a4d889248de112554910748978189e08e6a06582ff7746e",
+     "claim-version:36519c393006580e4d789ab598f288e1163b41702150bd260f118781d8bd3071",
+     "claim-version:93718df30565531df5530459414d7e1c0c4f2fbb1803a2e1463984c7583e1308",
+     "claim-version:10fb4035f0206256f26a7a2afc90d886d9fb5abe75c4c029911f67c06cdac82c",
+     "claim-version:f9e503c372eabb54d5e136b542cd09bc37b70b0c4c9c23c868f84be03a6cf8ee",
+     "claim-version:764024f1422ca20400dd27d4d5bfba6026a44980ba791e086dd9885fa1664026",
+     "claim-version:fa9a067321cf54f2ada351428a220f1f14d2283b2bc758df8ffd7e438cb5ffd4"
+    ],
+    "gaps": [
+     "缺乏公司对 FY2026 或未来季度的具体收入指引数字",
+     "缺乏按业务线或地域拆分的收入与利润率细分数据",
+     "缺乏订单簿、utilization rate 或 bookings 的量化数据"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+      "period": "2026-04-01..2026-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1414767000 for 2026-04-01..2026-06-30, up 4.53% year over year from USD 1353443000 in the comparable quarter."
+     }
+    ],
+    "title": "Key Information + Executive Summary"
+   },
+   {
+    "body": "EPAM Systems, Inc.（EPAM）是一家全球性的数字化转型服务提供商，以先进的软件工程能力著称，业务聚焦于产品开发与数字平台工程。公司业务按地域划分，主要由美洲和欧洲分部构成，并覆盖金融服务业、软件与高科技、生命科学与医疗健康、新兴垂直行业等多个行业板块。根据最近报告期披露，公司于2026年第二季度实现收入1414767000美元，同比增长4.53%，较2026年第一季度的1400061000美元（同比增长7.56%）有所加速，而2025年第三季度和2025年第二季度的收入分别为1394373000美元和1353443000美元，同比增速分别高达19.43%和18.04%，显示近几个季度收入增速在放缓后出现企稳回升迹象。管理层在近期的经营沟通中强调，公司正将战略重点转向AI原生和AI基础性服务，如数据工程、决策智能和平台现代化，认为企业复杂性的增加被广泛低估，而竞争优势将属于能够驾驭这种复杂性并将AI愿景转化为实际成果的企业。管理层表示，2025年以来业务动能有所恢复，这主要得益于对AI原生化及AI基础服务的需求增长，该类收入持续实现双位数环比增长。同时，管理层也承认客户支出仍显疲软，2026年收入指引曾被下调，反映出宏观不确定性下客户对可自由支配咨询类支出的审慎态度。此外，管理层强调公司正在利用AI提升自身销售与交付效率，并将全球交付模式和集中化支持职能视为关键竞争优势，同时客户集中度持续下降，反映出去中心化的客户基础战略。在盈利端，公司警示由于低利润率并购整合、行业定价压力以及波兰政府研发激励减少等因素，利润率面临压缩。管理层对未来增长抱有信心，认为AI将重塑企业竞争格局，客户对定制软件和传统系统现代化的需求将持续上升。",
+    "claim_refs": [
+     "claim-version:4a9b2e44b27529b9955276d425779facd6d29ac0ae0367bce7d77572a07bedd8",
+     "claim-version:7e23cbecf0c85c439d94d003a9f121e0be51e942df4fe0ccd09d85883f98641b",
+     "claim-version:6492c804ac89ff5f8a9e821bf4988ef4b12a15ee1f960209d704450e3303b702",
+     "claim-version:4a6dc891c8d4093f6e90c407c1ae78eb5321f2a8670499e8c1330f4f8d6fdf16",
+     "claim-version:d3003a44a98c736455ed4ffad9e56e0027f0360245891afb245a5a33d55f9800",
+     "claim-version:27fef44de0ca9daf5e803ff202aa6dc0cbf9f501ed75d5ebce8eeacfae478b5d",
+     "claim-version:f76541eebb50a9efdbdb49db7aa99bb6928ad0980e365c907dc056f2cf8c5f62",
+     "claim-version:5ce095311043a1014704c49463310bf63df0872fac352408fd2b546489a3ae48",
+     "claim-version:0017dcb03828c63f22258a524f922c1d282f8b6014ec158e2531b15029dc16e6",
+     "claim-version:862540b085bf0546b40c0b604c541e2f6066edc63579ae027373325f768e7443",
+     "claim-version:2c20cef1bde175d3bfc070f9f35773675b3c3ed5306b576c6b1defcc3e4e4930",
+     "claim-version:7c060607673dffbf7651c5fa3915c4988830f219fc955853ca2f78a7786447b2",
+     "claim-version:31d0235aa1c9378cb3c8ef376ebf3c87aefae28d539d7c0ff70bd65b7701f034"
+    ],
+    "gaps": [
+     "缺少公司主营业务收入按业务线或服务类型的细化构成数据",
+     "缺少各行业垂直板块的收入占比或具体金额",
+     "缺少地理分部收入在最近报告期的具体利润数字",
+     "缺少管理层对经营重点的直接引述原文，仅有转述性信息"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+      "period": "2026-04-01..2026-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1414767000 for 2026-04-01..2026-06-30, up 4.53% year over year from USD 1353443000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:bd29fd0f9a7d5c5fe039d37d2e3b67bc8fe7b12378c3abecb1daa73cba2451e7",
+      "period": "2026-01-01..2026-03-31",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1400061000 for 2026-01-01..2026-03-31, up 7.56% year over year from USD 1301692000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:bae0dda040d7b61134eb79f5267689ff252f62d8faa02ca6d62384bcd4fc8d4b",
+      "period": "2025-07-01..2025-09-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1394373000 for 2025-07-01..2025-09-30, up 19.43% year over year from USD 1167527000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:2005a2babe1e23f4c1259657330151d9c3f411f192d2576b1da80ab8c1c670c0",
+      "period": "2025-04-01..2025-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1353443000 for 2025-04-01..2025-06-30, up 18.04% year over year from USD 1146597000 in the comparable quarter."
+     }
+    ],
+    "title": "S1 公司概览（同 IM，无 ESOP 分析）"
+   },
+   {
+    "body": "美国IT服务业的需求端仍呈现分化态势。管理层认为，企业正通过技术实现差异化，对定制软件和遗留系统现代化的需求将持续上升，这反驳了软件工程师重要性下降的叙事。同时，AI的落地依赖数据质量，客户必须优先进行云迁移、应用栈现代化并构建强大的数据平台，这奠定了基础IT服务需求的必要性；代理式流程的兴起也要求企业具备现代API和重构后的系统，EPAM已在此方面协助客户推进，显示近期项目活动仍在进行。管理层亦警告不应高估AI能力，认为仅靠提示词无法生成完整的企业级应用，因而工程专业知识的持续需求是合理的。然而，需求疲软的信号同样明确：EPAM下调了2026年收入展望，客户支出依然疲软；公司亦承认，在财政2025年及未来，客户期望EPAM利用AI与人工结合以较低成本交付，若AI能以更低成本完成类似服务，客户可能转向其他供应商或要求价格让步；AI及大语言模型也使客户能够内部开发软件，减少对第三方供应商的依赖。一项卖方调查显示，2026年外包水平总体稳定，但部分AI项目因隐私与安全担忧可能内包，而多数企业决策者认为AI将对外部供应商的IT服务总支出产生净正面影响。竞争格局方面，IT服务市场仍然分散，客户倾向多供应商策略，在AI概念验证等专业领域寻求最佳解决方案，同时利用大型供应商获得云迁移的规模效益；EPAM在客户增加支出的意愿调查中与Accenture一同领先，但其在企业IT决策者中的使用率低于Accenture和Cognizant。EPAM自身强调其全球交付模式和集中化支持职能是关键竞争优势，且认为提供端到端AI原生解决方案是其在客户从AI实验转向生产阶段的关键差异化因素。公司报告显示，收入集中度正随时间下降，且预计这一趋势将持续。不过，公司同时面临来自低成本离岸供应商、全球大型咨询与外包公司以及内部IT部门的竞争。从近期财务表现看，EPAM公布的季度收入同比增速已从2025年第二季度的18.04%放缓至2026年第二季度的4.53%。具体而言，显示2025年第二季度收入为USD 1353443000，同比增长18.04%；显示2025年第三季度收入为USD 1394373000，同比增长19.43%；显示2026年第一季度收入为USD 1400061000，同比增长7.56%；显示2026年第二季度收入为USD 1414767000，同比增长4.53%。这一趋势表明，尽管收入绝对额仍保持增长，但同比增速在近几个季度显著放缓，与需求疲软的定性描述一致。EPAM在此行业中的位置可概括为：一家以软件工程能力著称的数字化转型服务商，在AI原生服务需求回升中占据有利地位，但短期内面临需求持续低迷、定价压力及竞争加剧的挑战。",
+    "claim_refs": [
+     "claim-version:7c060607673dffbf7651c5fa3915c4988830f219fc955853ca2f78a7786447b2",
+     "claim-version:2181ee8f9437c93865292074649ccd55c833d43167aafa3024907a606892bd89",
+     "claim-version:1fcc34b9d00d5c582ef0814869ce264c560db7f8c2b413d8fc91d6b76079cdc3",
+     "claim-version:374cf3913f58e42fe1a1e7f1f233979b93da75fd7149e55bdba5b6fba4825f0e",
+     "claim-version:d3003a44a98c736455ed4ffad9e56e0027f0360245891afb245a5a33d55f9800",
+     "claim-version:ce9e1b70d482bcf935afd4c3cb9bbb7ad2e97d253f03c17dd85ac859dac2cf6b",
+     "claim-version:36519c393006580e4d789ab598f288e1163b41702150bd260f118781d8bd3071",
+     "claim-version:50d187ff3b1a91289db85bd80f261fe866367e7889be367b7ee4764a70573ae0",
+     "claim-version:50a903e9cfae12ef97145e81a1054431870093241ed5ab907f598e5a2e16a2fb",
+     "claim-version:db7125ba1710ded32c1c7e3fde5d9f9707970eca8253e4ec6f25103d555ec385",
+     "claim-version:89b42b6222a35f92c041fa044898d6e7b797bff9397e644eb6687b55691a4960",
+     "claim-version:611497192188221d4adec714efecd0a79189cda1199cbe1f2137d571dcaaa335",
+     "claim-version:5ce095311043a1014704c49463310bf63df0872fac352408fd2b546489a3ae48",
+     "claim-version:b3892141c8a0d44cbdcd80b970fdd01ed5195fb41270818be20302082f73b0c4",
+     "claim-version:0017dcb03828c63f22258a524f922c1d282f8b6014ec158e2531b15029dc16e6",
+     "claim-version:4da684ded289c38cc9e41e8acfd2bf1ebc8e90dfafa57a03cd19ba64b8078901",
+     "claim-version:4a9b2e44b27529b9955276d425779facd6d29ac0ae0367bce7d77572a07bedd8",
+     "claim-version:4a6dc891c8d4093f6e90c407c1ae78eb5321f2a8670499e8c1330f4f8d6fdf16"
+    ],
+    "gaps": [
+     "行业整体市场规模或增长率数据（如Gartner、IDC预测）缺失；EPAM市场份额数据缺失；主要竞争对手（如Accenture、Cognizant、Infosys等）的近期财务或市场表现数据缺失。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+      "period": "2026-04-01..2026-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1414767000 for 2026-04-01..2026-06-30, up 4.53% year over year from USD 1353443000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:bd29fd0f9a7d5c5fe039d37d2e3b67bc8fe7b12378c3abecb1daa73cba2451e7",
+      "period": "2026-01-01..2026-03-31",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1400061000 for 2026-01-01..2026-03-31, up 7.56% year over year from USD 1301692000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:bae0dda040d7b61134eb79f5267689ff252f62d8faa02ca6d62384bcd4fc8d4b",
+      "period": "2025-07-01..2025-09-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1394373000 for 2025-07-01..2025-09-30, up 19.43% year over year from USD 1167527000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:2005a2babe1e23f4c1259657330151d9c3f411f192d2576b1da80ab8c1c670c0",
+      "period": "2025-04-01..2025-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1353443000 for 2025-04-01..2025-06-30, up 18.04% year over year from USD 1146597000 in the comparable quarter."
+     }
+    ],
+    "title": "S2 行业概览（简版）"
+   },
+   {
+    "body": "EPAM 的核心论点在于，尽管宏观与客户支出环境仍然疲软，公司正依靠 AI 原生与 AI 基础服务作为结构性增长引擎，这一转型足以推动公司业绩在中期内显著改善，而市场目前对此并未充分定价。管理层明确表示，AI 将重塑企业竞争格局，企业必须通过技术实现差异化，这构成对定制软件与遗留系统现代化的持续需求。同时，EPAM 报告其 AI 原生收入已连续多个季度实现两位数的环比增长，反映出该业务的差异化和相关性，且管理层认为企业复杂性正被广泛低估，能够驾驭这种复杂性并将 AI 愿景转化为实际成果的企业将获得竞争优势。然而，市场对近期的需求疲软仍持悲观态度，多家机构下调评级或目标价，并指出 FY2026 收入指引被下调，客户支出依然疲软，这可能导致市场忽略了公司在 AI 基础服务（如数据工程、平台现代化）上的先发卡位，以及管理层预计的加速收入增长与盈利改善。尽管公司自身也提示 AI 可能使客户自建软件或要求降价，形成需求替代风险，但其将 AI 整合视为竞争必需并持续投入，表明公司正主动应对而非被动承压。从财务数据看，公司收入已呈现连续同比增长态势：2025 年第二季度收入为 1414767000 美元，同比增长 4.53%；2025 年第一季度收入为 1400061000 美元，同比增长 7.56%；而 2024 年第三季度为 1394373000 美元，同比增长 19.43%；2024 年第二季度为 1353443000 美元，同比增长 18.04%。增速的显著波动——从 2024 年的高增长滑落至 2025 年的低个位数增长——恰与宏观需求走弱及公司自身指引下调的叙事吻合，但也为 AI 需求一旦在 2–4 个季度内兑现为收入提供了低基数上的弹性空间。市场的隐含预期可能仍未反映极端情形：若 AI 驱动的服务收入能够抵消 discretionary consulting 下滑并推动利润率回升，则当前估值可能低估了公司的修复潜力；然而，若需求持续疲软或 AI 替代风险加速显现，则下行风险同样存在。因此，核心关注点在于 AI 相关收入是否能从实验阶段迈向生产部署并驱动可见的财务拐点，这需要数个季度的 beat-and-raise 来验证。",
+    "claim_refs": [
+     "claim-version:7c060607673dffbf7651c5fa3915c4988830f219fc955853ca2f78a7786447b2",
+     "claim-version:2181ee8f9437c93865292074649ccd55c833d43167aafa3024907a606892bd89",
+     "claim-version:1fcc34b9d00d5c582ef0814869ce264c560db7f8c2b413d8fc91d6b76079cdc3",
+     "claim-version:d3003a44a98c736455ed4ffad9e56e0027f0360245891afb245a5a33d55f9800",
+     "claim-version:90feb5a5b1cdafbe4a7327c07a63c77fe6be1fb2850419b349dc29e491bce9fe",
+     "claim-version:419ff56a91996339f30a384158dafeb388ec3d169ea2674a10315f09fa2f686b",
+     "claim-version:53115af61b0c05fe3a4d889248de112554910748978189e08e6a06582ff7746e",
+     "claim-version:7e23cbecf0c85c439d94d003a9f121e0be51e942df4fe0ccd09d85883f98641b",
+     "claim-version:ce9e1b70d482bcf935afd4c3cb9bbb7ad2e97d253f03c17dd85ac859dac2cf6b",
+     "claim-version:36519c393006580e4d789ab598f288e1163b41702150bd260f118781d8bd3071",
+     "claim-version:7b1f913024b45f790fd0b475827c5c3669f6d1a329745752512d374404434ea5",
+     "claim-version:4a6dc891c8d4093f6e90c407c1ae78eb5321f2a8670499e8c1330f4f8d6fdf16",
+     "claim-version:6492c804ac89ff5f8a9e821bf4988ef4b12a15ee1f960209d704450e3303b702",
+     "claim-version:cf1fc5098994ba3eb742bc4282bb9f83ce97eb58b1ec557f902ef6c138b84ac4",
+     "claim-version:f9e503c372eabb54d5e136b542cd09bc37b70b0c4c9c23c868f84be03a6cf8ee"
+    ],
+    "gaps": [
+     "缺少关于 AI 服务收入的绝对规模或占比的量化数据",
+     "缺少关于市场隐含预期（如目标价、预期增长率）的具体数字",
+     "缺少关于订单（bookings）、利用率（utilization）及利润率的具体历史与预测数据",
+     "缺少关于管理层指引中具体增长或利润率区间的数据"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+      "period": "2026-04-01..2026-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1414767000 for 2026-04-01..2026-06-30, up 4.53% year over year from USD 1353443000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:bd29fd0f9a7d5c5fe039d37d2e3b67bc8fe7b12378c3abecb1daa73cba2451e7",
+      "period": "2026-01-01..2026-03-31",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1400061000 for 2026-01-01..2026-03-31, up 7.56% year over year from USD 1301692000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:bae0dda040d7b61134eb79f5267689ff252f62d8faa02ca6d62384bcd4fc8d4b",
+      "period": "2025-07-01..2025-09-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1394373000 for 2025-07-01..2025-09-30, up 19.43% year over year from USD 1167527000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:2005a2babe1e23f4c1259657330151d9c3f411f192d2576b1da80ab8c1c670c0",
+      "period": "2025-04-01..2025-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1353443000 for 2025-04-01..2025-06-30, up 18.04% year over year from USD 1146597000 in the comparable quarter."
+     }
+    ],
+    "title": "S3 核心 Thesis（简版）"
+   },
+   {
+    "body": "多头叙事将EPAM定位为AI-native企业重构的受益者，并认为定制软件与遗留系统现代化需求将因企业寻求技术差异化而持续上升。然而，完整的反向观点认为，这一叙事可能高估了EPAM在需求疲软与结构性替代压力下的韧性。首先，关于需求是否见底，空头可以指出EPAM自身已下调2026年收入展望，且客户支出保持疲软，威廉·布莱尔将评级下调至Market Perform，摩根大通亦下调至中性，Wedbush亦观察到年度收入预测被削减。这些行动表明，市场对近端增长的能见度极低，而非周期性底部已确认。要使需求见底的反向条件成立，需要宏观不确定性进一步缓解、 discretionary spending回升，并且EPAM的转化率（book-to-bill）出现连续两个季度以上的环比改善；目前缺乏该数据。其次，更尖锐的反向论点是AI对EPAM核心收入模式的替代风险。公司自身披露，客户可能使用AI工具在内部开发软件，或采用agentic AI替代传统软件，从而减少对第三方供应商的依赖；同时，客户期望AI与人工结合能以更低成本交付，若无法满足，可能转向其他供应商或要求价格让步。这并非遥远的威胁，而是正在发生的结构变化：如果企业AI采用加速，而EPAM未能证明其工程深度在AI-native世界中的不可替代性（管理层的信念，），其收入基础可能被侵蚀。该反向条件成立，需要观察到头部客户的项目规模收缩、内部化案例增加，或EPAM的人均收入增速持续低于AI生产力提升速度；目前至显示收入同比增速在4.53%至19.43%之间（数据来源：、、、），但无分解数据支持替代效应。第三，利润率风险被多头低估。EPAM面临行业性定价压力，2025年调整后营业利润率指引下降，部分源于收购低利润率业务及客户对AI成本节省的预期；成本增速高于收入增速，且若客户终止或推迟项目，未分配员工成本将压缩利润率。反向观点成立需要定价环境持续恶化，即EPAM无法将AI效率转化为自身利润，反而被迫让利给客户；可观察的代理指标是utilization rate的连续下降或调整后营业利润率低于市场预期，但目前缺乏该数据。最后，存在地缘政治尾部风险：乌克兰战争持续对EPAM的人员、交付和客户关系构成实质性不利影响，部分客户已屏蔽乌克兰和白俄罗斯的互联网通信，影响其服务交付能力。这一风险在多头框架中常被忽视，但若冲突升级，可能导致客户终止合同或转向竞争对手。要使该风险情景触发，需要战争进一步升级且EPAM无法迅速将交付转移至其他地区；目前缺乏具体的收入敞口或转移能力数据。综上，若上述条件—需求持续疲软、AI替代加速、定价压力无解、地缘冲突升级—同时或部分成立，EPAM可能面临增长与利润的双重下行，当前市场隐含的AI增长溢价将被证伪。",
+    "claim_refs": [
+     "claim-version:7c060607673dffbf7651c5fa3915c4988830f219fc955853ca2f78a7786447b2",
+     "claim-version:d3003a44a98c736455ed4ffad9e56e0027f0360245891afb245a5a33d55f9800",
+     "claim-version:90feb5a5b1cdafbe4a7327c07a63c77fe6be1fb2850419b349dc29e491bce9fe",
+     "claim-version:53115af61b0c05fe3a4d889248de112554910748978189e08e6a06582ff7746e",
+     "claim-version:419ff56a91996339f30a384158dafeb388ec3d169ea2674a10315f09fa2f686b",
+     "claim-version:36519c393006580e4d789ab598f288e1163b41702150bd260f118781d8bd3071",
+     "claim-version:93718df30565531df5530459414d7e1c0c4f2fbb1803a2e1463984c7583e1308",
+     "claim-version:ce9e1b70d482bcf935afd4c3cb9bbb7ad2e97d253f03c17dd85ac859dac2cf6b",
+     "claim-version:bb2ac24fe23defb375fe707957e539699244572e79cd0f547aa09e78cf6277f0",
+     "claim-version:374cf3913f58e42fe1a1e7f1f233979b93da75fd7149e55bdba5b6fba4825f0e",
+     "claim-version:862540b085bf0546b40c0b604c541e2f6066edc63579ae027373325f768e7443",
+     "claim-version:141f10b21e2b0b2cede9f55b2899bb48fdb175f8595153510b2f4aad08fff8b3",
+     "claim-version:672c78f85d08495eb4e8145a3ef355e191da404673b5bd876c8e3b54c6893f00",
+     "claim-version:7265f390ca60810fbe93378811ba98a92f5fb9453128240f49d8ac06664a964d",
+     "claim-version:1e1021b9c61945954e5da6c68962a29e445d59cf7624e1c2c2809104286fb158",
+     "claim-version:97dd861f6117dbbdd0a748dfea9e787bc17f27f88baea6a0439cc4dbd705ef85"
+    ],
+    "gaps": [
+     "缺乏EPAM的utilization率、book-to-bill比率、客户内部化案例或AI替代效应的量化数据，以及按地区或垂直行业的收入敞口细分，以验证反向情景的触发条件。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+      "period": "2026-04-01..2026-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1414767000 for 2026-04-01..2026-06-30, up 4.53% year over year from USD 1353443000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:bd29fd0f9a7d5c5fe039d37d2e3b67bc8fe7b12378c3abecb1daa73cba2451e7",
+      "period": "2026-01-01..2026-03-31",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1400061000 for 2026-01-01..2026-03-31, up 7.56% year over year from USD 1301692000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:bae0dda040d7b61134eb79f5267689ff252f62d8faa02ca6d62384bcd4fc8d4b",
+      "period": "2025-07-01..2025-09-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1394373000 for 2025-07-01..2025-09-30, up 19.43% year over year from USD 1167527000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:2005a2babe1e23f4c1259657330151d9c3f411f192d2576b1da80ab8c1c670c0",
+      "period": "2025-04-01..2025-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1353443000 for 2025-04-01..2025-06-30, up 18.04% year over year from USD 1146597000 in the comparable quarter."
+     }
+    ],
+    "title": "S4 风险与 Anti-thesis（简版）"
+   },
+   {
+    "body": "对universe内其他标的而言，EPAM自身释放的需求信号是偏空的。显示EPAM下调了2026年收入展望，且客户支出仍然疲软；进一步确认其下调年度收入预测，反映出软件服务需求疲弱。与（J.P. Morgan观点）均指出，EPAM下调后的指引意味着需求可能在年内持续疲软，虽然低端可能略显保守。将该次指引下调归因于北美go-to-market的缺口，即向领域导向销售的转变相对于软件与高科技垂直领域AI交付的爬坡过慢，这暗示需求问题可能部分源于公司自身执行，而非纯行业beta。提到分析师认为EPAM在近期基于调研结果处于最佳位置，但并非对任何覆盖标的构成负面；然而指出EPAM在企业IT决策者中的使用率低于Accenture和Cognizant，这对其作为行业需求的代表信号需打折。从跨区域角度看，显示EPAM欧洲分部增长部分受益于有利汇率，而恒定汇率下增长较低，说明欧洲需求并非如报表那么强劲；则显示美国客户收入增长温和，而其他非主要地区增长显著，暗示美国本土需求偏弱。对universe内其他公司而言，EPAM作为digital-focused的IT服务商，其指引下调预示整个细分领域（特别是依赖 discretionary consulting 和定制软件开发的公司）可能面临类似需求压力，做空同类标的或对其预期下修有参考意义。但与相反地指出，digital-focused公司可能受益于云/数字迁移的持续性工作，而传统基础设施供应商承压，因此EPAM的疲软可能部分归咎于AI相关insourcing对digital服务商构成的潜在温和逆风，以及AI cannibalization的早期迹象（在TaskUs客户上的例子可类比）。总体而言，EPAM的指引与分析师评论为行业需求尚未见底提供了直接证据，对做多同行业务（如纯digital转型服务商）构成谨慎信号，但对AI-native转型领先者（如、中提到的AI咨询）则需区分其收入来源。最后，提到EPAM相对同行在有机恒定汇率增长上表现优异，且利润率可能已触底，说明其相对强弱可能优于部分同行，因此该信号对universe内偏弱的公司（如更多依赖传统外包模式的）更具负面含义。",
+    "claim_refs": [
+     "claim-version:d3003a44a98c736455ed4ffad9e56e0027f0360245891afb245a5a33d55f9800",
+     "claim-version:419ff56a91996339f30a384158dafeb388ec3d169ea2674a10315f09fa2f686b",
+     "claim-version:764024f1422ca20400dd27d4d5bfba6026a44980ba791e086dd9885fa1664026",
+     "claim-version:fa9a067321cf54f2ada351428a220f1f14d2283b2bc758df8ffd7e438cb5ffd4",
+     "claim-version:10fb4035f0206256f26a7a2afc90d886d9fb5abe75c4c029911f67c06cdac82c",
+     "claim-version:6a0cf832000b84967731e9f9f6e517dc1d20928693f968788a644474a8d73018",
+     "claim-version:611497192188221d4adec714efecd0a79189cda1199cbe1f2137d571dcaaa335",
+     "claim-version:61390624469432314a061623a6248b584a218c2bef217ad392161bbd1630fd6b",
+     "claim-version:02eef53775f3db3e60656e0548cf2c4101e5565b951eeaea04e634a222c6a3e5",
+     "claim-version:50d187ff3b1a91289db85bd80f261fe866367e7889be367b7ee4764a70573ae0",
+     "claim-version:d44d9f18fb6c0ca80f08546c068cd5740a8843dd54a614b1622e9e365aafce72",
+     "claim-version:11b20cf98fbb01676c13c1f5423c45f638d4fc3bc4a9d0511b9c954eac59697c",
+     "claim-version:1e6ce079af51b1f189c402ea921bf35889d6b0c068d1caa71e0fe405440b591e"
+    ],
+    "gaps": [
+     "缺乏EPAM对universe内其他具体公司（如Accenture、Cognizant、EXLS、TaskUs、CI&T）的直接对比性财务数据或市场份额数据，以支持更精确的多空传导分析；需要各公司的收入增长、利润率、bookings或订单趋势等可比指标。"
+    ],
+    "numbers": [],
+    "title": "S5 Relevance to Universe（对 universe 内其他标的的多空含义，含跨区域）"
+   },
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与 consensus 五类正式 authority 尚未接入，写任何倍数或目标价都会是无来源的数字。"
+    ],
+    "numbers": [],
+    "title": "S6 估值（street 预期、框架、event pathway、IRR）"
+   },
+   {
+    "body": "为验证或证伪上述关于EPAM需求是否见底、AI/reinvention需求能否抵消discretionary consulting下滑的判断，数据跟踪应聚焦于可观察的高频及定期数据。首要跟踪指标是公司季报中的Revenue from Contract with Customer, Excluding Assessed Tax，因其直接反映收入动能变化；例如2026年第二季度该收入为USD 1414767000，2026年第一季度为USD 1400061000，而2025年第三季度为USD 1394373000，2025年第二季度为USD 1353443000，从这些连续数据点可观察同比增速的走向，以判断需求是否企稳回升或仍在下滑。此外，管理层在定期业绩说明中提及的AI-native收入是否持续实现double-digit sequential growth是验证AI需求兑现为收入的关键口径，需逐季跟踪。另一重要跟踪指标是管理层对全年收入指引的调整方向，因为公司曾在2026财年下调收入展望并称客户支出仍然疲软，且公司因软件服务需求疲弱而下调了年度收入预测，未来若出现指引上修或下修，可作为需求判断的证伪或确认信号。同时应跟踪卖方分析师的评级与目标价变动，例如William Blair将EPAM降级至Market Perform，JPMorgan将其降级至Neutral但维持目标价，HSBC因近期增长不确定性而下调目标倍数并指出宏观恶化影响可自由支配支出、更高定价折扣及强于预期的竞争为下行风险，这些外部观点变化可辅助校准预期。还需关注分析师对需求持续性的判断，如J.P. Morgan认为下调后的FY26收入指引暗示需求在年底前可能保持疲软，但指引低端可能略显保守，以及其认为EPAM需要多个季度的beat-and-raise才能让投资者相信AI是顺风，因此后续季报是否超出指引区间成为关键观测点。对于公司内部执行层面的分化，应跟踪管理层披露的utilization rate变化，公司报告其交付专业人员利用率同比温和上升，以及收入结构中前五大和前十大客户集中度是否持续下降，这反映客户基础多元化进程。最后，鉴于公司2025年收入增长部分由NEORIS和First Derivative等收购驱动，且美洲新兴垂直领域增长主要归因于收购而非有机需求，为辨别有机需求 vs. 收购贡献，应跟踪剔除收购影响后的有机增长口径（此口径来源缺失），否则无法准确判断内生需求的真实拐点。",
+    "claim_refs": [
+     "claim-version:d3003a44a98c736455ed4ffad9e56e0027f0360245891afb245a5a33d55f9800",
+     "claim-version:419ff56a91996339f30a384158dafeb388ec3d169ea2674a10315f09fa2f686b",
+     "claim-version:4a6dc891c8d4093f6e90c407c1ae78eb5321f2a8670499e8c1330f4f8d6fdf16",
+     "claim-version:90feb5a5b1cdafbe4a7327c07a63c77fe6be1fb2850419b349dc29e491bce9fe",
+     "claim-version:53115af61b0c05fe3a4d889248de112554910748978189e08e6a06582ff7746e",
+     "claim-version:6c592e4bd52431393768064f4314c8146c99c4987558b862b2c74b950f943625",
+     "claim-version:2424f099569613f5b3e81f53d7353daf4223339a5c5d8ada3fdf56da5394b623",
+     "claim-version:764024f1422ca20400dd27d4d5bfba6026a44980ba791e086dd9885fa1664026",
+     "claim-version:f9e503c372eabb54d5e136b542cd09bc37b70b0c4c9c23c868f84be03a6cf8ee",
+     "claim-version:88d725aa32957b467c2167fc5681a4dd280f0616a4ce9f94f8ab0929b5ce3638",
+     "claim-version:0017dcb03828c63f22258a524f922c1d282f8b6014ec158e2531b15029dc16e6",
+     "claim-version:c86cd77cd577e33ce627f713104edd8ea26403692286cafe8aa63e98a44e1f1a",
+     "claim-version:41b1bb7f5ba28ef26eb524767a606512c1ac73ff0a9458de21b22c469304fb3c"
+    ],
+    "gaps": [
+     "剔除收购影响后的有机收入增长口径",
+     "管理层对utilization率的具体季度数值指引",
+     "bookings或订单储备的高频数据",
+     "AI-native收入占总收入比例的量化披露"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+      "period": "2026-04-01..2026-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1414767000 for 2026-04-01..2026-06-30, up 4.53% year over year from USD 1353443000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:bd29fd0f9a7d5c5fe039d37d2e3b67bc8fe7b12378c3abecb1daa73cba2451e7",
+      "period": "2026-01-01..2026-03-31",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1400061000 for 2026-01-01..2026-03-31, up 7.56% year over year from USD 1301692000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:bae0dda040d7b61134eb79f5267689ff252f62d8faa02ca6d62384bcd4fc8d4b",
+      "period": "2025-07-01..2025-09-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1394373000 for 2025-07-01..2025-09-30, up 19.43% year over year from USD 1167527000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:2005a2babe1e23f4c1259657330151d9c3f411f192d2576b1da80ab8c1c670c0",
+      "period": "2025-04-01..2025-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1353443000 for 2025-04-01..2025-06-30, up 18.04% year over year from USD 1146597000 in the comparable quarter."
+     }
+    ],
+    "title": "S7 数据跟踪"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "company:sec-cik:0001352010",
+  "title": "mission-deliverable:initial_screen:0001352010"
+ },
+ "case_ref": "live-epam-v1",
+ "expected": {
+  "deterministic": {
+   "claim_refs_resolve": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "duplicate_parallel_citations": {
+    "count": 0,
+    "status": "pass"
+   },
+   "numbers_without_refs": {
+    "count": 0,
+    "status": "pass"
+   },
+   "required_sections_present": {
+    "count": 0,
+    "status": "pass"
+   },
+   "residual_citation_artefacts": {
+    "count": 11,
+    "status": "fail"
+   }
+  },
+  "rationale": "11 处残迹里包含一条完整的空引用括号，读者被告知这里本来有来源却看不到是什么——给 0–1。其余标准按文字判断，EPAM 的证据底座比 ACN 厚（38 份研报），thesis 区间放宽到 2–4。",
+  "score_ranges": {
+   "anti_thesis": [
+    2,
+    4
+   ],
+   "citation_dedupe": [
+    3,
+    4
+   ],
+   "citation_hygiene": [
+    0,
+    1
+   ],
+   "falsifiers_and_tracking": [
+    2,
+    3
+   ],
+   "gaps_honest": [
+    3,
+    4
+   ],
+   "key_driver_thesis": [
+    2,
+    4
+   ],
+   "number_provenance": [
+    3,
+    4
+   ],
+   "required_sections": [
+    3,
+    4
+   ],
+   "source_discipline": [
+    1,
+    3
+   ]
+  }
+ },
+ "note": "EPAM Initial Screen v1。S2 有三处「；显示2025年第三季度收入为…」的丢主语残句，S4 有「（数据来源：、、、）」这一整条空引用与「（管理层的信念，）」的残括号——这是 P13ap 提交信息里引的第二个 live 样本。",
+ "rubric": "initial_screen",
+ "source": "live Core 只读副本 2026-09-09；mission-deliverable-version:45e773c2d992a2a58f695800e3dcd81a（EPAM v1，发布于 2026-09-09T10:24:45）"
+}

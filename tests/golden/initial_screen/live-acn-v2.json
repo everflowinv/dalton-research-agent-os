@@ -1,0 +1,373 @@
+{
+ "artefact": {
+  "artefact_kind": "initial_screen",
+  "cited_tags": [],
+  "confidence": null,
+  "expected_sections": [
+   "Key Information + Executive Summary",
+   "S1 公司概览（同 IM，无 ESOP 分析）",
+   "S2 行业概览（简版）",
+   "S3 核心 Thesis（简版）",
+   "S4 风险与 Anti-thesis（简版）",
+   "S5 Relevance to Universe（对 universe 内其他标的的多空含义，含跨区域）",
+   "S6 估值（street 预期、框架、event pathway、IRR）",
+   "S7 数据跟踪"
+  ],
+  "gaps": [
+   "当前可用数据缺少最新季度新签合同（new bookings）金额及同比变化，无法量化验证需求是否见底；缺少 consulting 与 managed services 的分部收入及利润率数据以评估业务结构变化；缺少公司对下一季度或全年的收入指引原文，无法将实际数据与预期进行比较。",
+   "这一节写了没有来源的数字（30），已丢弃；需要的数字还没有进入账本",
+   "缺乏行业内其他可比公司的收入与订单数据以刻画竞争格局的相对位置",
+   "缺乏订单积压（bookings）与utilization的行业或公司具体数据以判断分化来源",
+   "缺乏来自第三方对行业需求增速的量化预测",
+   "缺少关于新订单（bookings）具体数值、utilization rate、margin、以及分部（咨询vs托管、行业、地区）的收入增速数据",
+   "缺少市场一致预期或目标价信息以量化预期差",
+   "缺少关于AI收入或订单的绝对规模及其占总收入比例的量化数据",
+   "缺少对未来季度指引的具体数值或管理层对需求拐点的明确判断",
+   "缺少ACN新订单金额及其同比增速的数字来源，无法量化订单动能；缺少分业务（咨询vs托管服务、联邦vs商业）的收入明细数字，无法精确评估需求结构性变化；缺少利用率与员工人数变化的量化数据，无法验证成本效率假设；缺少ACN利润率与定价趋势的量化数据来源，无法支撑利润率承压论点",
+   "缺少覆盖范围内其他四家公司的收入、订单、利润率及市场份额数据，无法进行量化对比；缺少ACN与其同业之间的相对增长或份额变化的具体数字；缺少关于其他公司美国政府业务敞口的数据；缺少关于各家公司AI收入转化速度或订单结构的具体信息",
+   "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与 consensus 五类正式 authority 尚未接入，写任何倍数或目标价都会是无来源的数字。",
+   "缺少新签订单的季度金额或同比增速数据，无法量化订单动能；缺少utilization率的具体数值；缺少advanced AI或GenAI相关订单与收入的量化指标；缺少分行业、分地区收入的定期详细数据以跟踪需求分化；缺少联邦业务收入占比及订单变化的量化信息；缺少管理层指引中关于收入增长或利润率的具体数字。"
+  ],
+  "hash": "ab05c760e6afc8324ab0b06a0df054637d808f257fa4bf9c1eee4f0eb49b2c31",
+  "prior": null,
+  "question": null,
+  "ref": "mission-deliverable-version:06e126b45f078b98e1a92d241c0f244f",
+  "sections": [
+   {
+    "body": "Accenture（埃森哲）已完成其“reinvention”重组，将原先五个业务部门整合进 reinvention services，围绕大规模数字化转型重新定位。公司当前最重要的判断是：在各市场总体 discretionary spending 环境未变的背景下，客户仍优先投入大型转型项目，特别是为 AI-ready 做准备，而 AI 需求正在从概念验证走向规模化端到端解决方案，并嵌入公司几乎所有交付中。与此同时，公司明确指出，若现有服务需求未被新的 AI-enabled 解决方案所取代，或新方案支出节奏与规模不足，其经营业绩与利用率将受到不利影响，这是最需要盯住的风险。收入端需跟踪的近期数据为：2026-03-01..2026-05-31 季度收入 USD 18718144000，同比增长 5.59%，而前一季度（2025-12-01..2026-02-28）收入 USD 18044066000，同比增长 8.31%，显示同比增速有所回落。此外，公司停止单独披露高级 AI bookings 与收入指标，因其已嵌入几乎所有业务，投资者需转向整体收入、bookings 与利用率变化来验证 AI 需求对收入的转化。",
+    "claim_refs": [
+     "claim-version:2d9b579ad14b1b4a3e53ffc67bda96fca7dc6f55cc81739c901442b8a66a2ffe",
+     "claim-version:b1760daffbca4039c72b51f2f7a411e5d977ee97d860e11a333bcb6fd21264f1",
+     "claim-version:2da85b8fb36c02eba74ea2532b0a37a6587419879612db1805c6e371ef0754bb",
+     "claim-version:aa3914f94280cc983f6969f458e811187ee73cb709e05238c69894341afa18fc",
+     "claim-version:3b57498d1d1ab6659b642cb5df1b930c19a0aef986213611aa4e8b1d0b1597c6"
+    ],
+    "gaps": [
+     "当前可用数据缺少最新季度新签合同（new bookings）金额及同比变化，无法量化验证需求是否见底；缺少 consulting 与 managed services 的分部收入及利润率数据以评估业务结构变化；缺少公司对下一季度或全年的收入指引原文，无法将实际数据与预期进行比较。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:4485c39d212d5d352b2c5590432e57c48f9851b1446ba12f9e2ab6bc6cd5ea39",
+      "period": "2025-12-01..2026-02-28",
+      "text": "Accenture plc reported Revenues of USD 18044066000 for 2025-12-01..2026-02-28, up 8.31% year over year from USD 16659301000 in the comparable quarter."
+     }
+    ],
+    "title": "Key Information + Executive Summary"
+   },
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "这一节写了没有来源的数字（30），已丢弃；需要的数字还没有进入账本"
+    ],
+    "numbers": [],
+    "title": "S1 公司概览（同 IM，无 ESOP 分析）"
+   },
+   {
+    "body": "美国IT服务行业的需求仍处于结构性分化阶段：一方面，传统咨询类的可自由支配支出未见改善，管理层的描述是“discretionary environment is unchanged”，且咨询业务中较小型、短周期的合同签约节奏和支出水平偏慢，这直接压制了行业收入的回升斜率；另一方面，客户对大型转型项目的优先级并未降低，尤其是围绕AI就绪、数字化核心和数据基础设施的投入，这部分需求正在成为行业增长的主要支撑。行业的需求来源由此可以概括为两类：一类是存量业务的优化与成本削减，另一类是对AI和数据能力的战略性投资，但后者转化为收入的速度受制于企业数据准备度不足以及AI应用尚处早期。从竞争格局看，该行业高度分散且竞争激烈，参与者包括大型跨国IT服务商、印度等低成本离岸供应商、会计师事务所与咨询公司，以及企业自建全球能力中心，此外AI原生公司和科技公司也在通过提供更少集成要求的服务蚕食传统厂商的空间。在需求尚未全面反转的背景下，头部厂商之间的分化主要体现在能否抓住AI相关的转型支出并持续获取市场份额。Accenture在其中采取的战略是组织上的“reinvention”重组和以AI为核心的能力投入，并宣称在滚动四季度基础上对最接近的全球上市竞争对手持续获取市场份额，其行业地位体现在端到端服务能力、全球交付模式和生态伙伴关系上。不过，公司也明确警示，若新AI相关服务的需求不能弥补现有服务需求的下降，或客户对新服务定价模式接受度不足，其收入和利用率将受到不利影响，这构成了行业层面的核心不确定性。财务层面，Accenture最近一个季度（2026-03-01至2026-05-31）报告收入为USD 18718144000，同比增长5.59%，前一季度（2025-12-01至2026-02-28）收入为USD 18044066000，同比增长8.31%，再前一季度（2025-09-01至2025-11-30）收入为USD 18742125000，同比增长5.95%，显示收入增速在个位数区间波动但未出现进一步恶化。行业需求的拐点判断仍需观察可自由支配支出是否从“持平”转为回升，以及AI相关订单能否在更大规模上转化为持续收入。",
+    "claim_refs": [
+     "claim-version:654012175dc0166339c756bbaf3f2aab9ed42c257b5ae3ffc2c4e52fdde0140f",
+     "claim-version:2d9b579ad14b1b4a3e53ffc67bda96fca7dc6f55cc81739c901442b8a66a2ffe",
+     "claim-version:7a3a55151f92004de9a878989ca552e34b750272c38e6d8e8dec607c2c52489c",
+     "claim-version:068fcd6a1cb8e138786993f028a38448200ccbe93e686ee6c326b89bfc89c9e0",
+     "claim-version:fc1c495c0e796d17e23b3e25c998c30037ba7419e9b83036d99c700be63b00bb",
+     "claim-version:9cdfb6aa7ab22cc78e8e2ec9769efaf9b4f37aa2c4e48cef2edd9bb7fd33170f",
+     "claim-version:aa3914f94280cc983f6969f458e811187ee73cb709e05238c69894341afa18fc",
+     "claim-version:14d5c3604f35d539b24703965630daa2239a0c5929761f65e7d14992241d2412",
+     "claim-version:b1760daffbca4039c72b51f2f7a411e5d977ee97d860e11a333bcb6fd21264f1",
+     "claim-version:fa3a1b3bcdfdbc073fb1c64976eb863318c38c32636a842b97e9d24438819fc3",
+     "claim-version:86739790b5dda6c569fd268d42b0001b3822cb3529253ab711b8ee7a5f4572a7",
+     "claim-version:b3eabe8a19409705eced6d2332a99574b9e7852146c5a9d08956e8fbf7fde2d9",
+     "claim-version:ea2e7891a29c874b6a370622a380fafd8c0c3198d99e3e2ec11ba9a05adc08a2",
+     "claim-version:725d9c7fbbe54ac5b13ef8cf41e2d2f6aafbf2e5a0be11548d99934bebce9419",
+     "claim-version:11e67cdd3d93315fa38a3325403142c7908c27580de17fed6e7200e9b242ebef",
+     "claim-version:c53d7741f3bdd3becc256eacdc2f1d8da40c97c0b7544e6c93eb655a504a93d5",
+     "claim-version:4c1527b4c3834392a39e23182a92dcf557232597eb186e5e3877bd17966d9c27"
+    ],
+    "gaps": [
+     "缺乏行业内其他可比公司的收入与订单数据以刻画竞争格局的相对位置",
+     "缺乏订单积压（bookings）与utilization的行业或公司具体数据以判断分化来源",
+     "缺乏来自第三方对行业需求增速的量化预测"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:ba477771a8f016a68bd5cc3b6afb8893642d1dda3a428cf84890641dbd132afe",
+      "period": "2025-09-01..2025-11-30",
+      "text": "Accenture plc reported Revenues of USD 18742125000 for 2025-09-01..2025-11-30, up 5.95% year over year from USD 17689545000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:4485c39d212d5d352b2c5590432e57c48f9851b1446ba12f9e2ab6bc6cd5ea39",
+      "period": "2025-12-01..2026-02-28",
+      "text": "Accenture plc reported Revenues of USD 18044066000 for 2025-12-01..2026-02-28, up 8.31% year over year from USD 16659301000 in the comparable quarter."
+     }
+    ],
+    "title": "S2 行业概览（简版）"
+   },
+   {
+    "body": "核心论点的关键在于识别收入增速的拐点信号及其可持续性。从财务数据看，最近三个季度（2025-09-01至2026-05-31）收入同比增速分别为5.95%、8.31%和5.59%，呈现波动而非单边上行，尚不足以确认需求已趋势性回升。市场可能低估的是，管理层明确表示客户对AI的需求是真实且在快速成熟，AI正嵌入几乎所有交付中，且公司正在大型转型项目上获得市场份额。然而，管理层同时指出，整体支出和可自由支配支出的速度与过去一年持平，需求尚未进一步下探也未明确反转；且企业级AI采用仍处早期，收入转化需要时间。因此，关键driver在于AI与reinvention需求能否在2至4个季度内从大型转型项目转化为收入增长，并抵消discretionary consulting的疲软。市场可能尚未充分反映的是，公司已完成reinvention重组并将AI能力嵌入销售与交付，这可能在2026财年后期推动收入增速持续回升，但当前三个季度的收入增速波动表明该逻辑尚未被数据验证。另一个潜在上行因素是管理层称在滚动四季度基础上对全球上市竞争对手持续获取市场份额，若该趋势延续，公司增速有望跑赢行业。风险方面，美国联邦业务受支出削减影响持续拖累增长，且新订单受少数大额托管合同时间点影响波动大，合同可随时取消也削弱了订单能见度。综上，核心论点是AI驱动的市场份额获取正在推动收入增长，但增速尚未稳定在更高水平，市场对公司能否在FY2026全年维持并加速增长存在分歧；证据目前能够支持“AI是重要增长引擎”的方向性判断，但不足以证明增速已趋势性拐点向上。",
+    "claim_refs": [
+     "claim-version:2d9b579ad14b1b4a3e53ffc67bda96fca7dc6f55cc81739c901442b8a66a2ffe",
+     "claim-version:068fcd6a1cb8e138786993f028a38448200ccbe93e686ee6c326b89bfc89c9e0",
+     "claim-version:b1760daffbca4039c72b51f2f7a411e5d977ee97d860e11a333bcb6fd21264f1",
+     "claim-version:ec02c0f810087a5df5cd24a7be22092c3e915b26208f656f4ec32eb0795ab648",
+     "claim-version:aa0874de23fa6aac1b0b0ee319c3df68720d92b16929b0db03b22958beb9008a",
+     "claim-version:2da85b8fb36c02eba74ea2532b0a37a6587419879612db1805c6e371ef0754bb",
+     "claim-version:5fe8464736b47764db1d451ec566d22a8bbf5b6d66627732a1b30ceab1338dcc",
+     "claim-version:fa3a1b3bcdfdbc073fb1c64976eb863318c38c32636a842b97e9d24438819fc3",
+     "claim-version:d4909aef260ff15ec10a8e94cc520de2ef5b84a83504909494736bbca366b6bd",
+     "claim-version:b3eabe8a19409705eced6d2332a99574b9e7852146c5a9d08956e8fbf7fde2d9",
+     "claim-version:ea2e7891a29c874b6a370622a380fafd8c0c3198d99e3e2ec11ba9a05adc08a2",
+     "claim-version:2df3ab17ec1a7a718d1c65d6f2f3484b15fbc875256ff13c68cab93358daf4c8",
+     "claim-version:0460bfa6fbadfcadd0067690390f41532429a673f1ca1115a9c37f677d5a2380",
+     "claim-version:e1b4feabc47e430c8df3781388cf06cc0ae73d0b995681c211f27a591ec8bcc6",
+     "claim-version:79bdc05722a3f4a3b04459faf4bfdb44005621198182881489ff51d70a3b51d5",
+     "claim-version:93523b66d4565fd1703306dc567bf58982b3ad0fb84c12a58c0bffa2ef618025",
+     "claim-version:9736f3ad856b1510a1644aa52a8ce7ecfb28cfaa5e10ee653168ba3f4910118a"
+    ],
+    "gaps": [
+     "缺少关于新订单（bookings）具体数值、utilization rate、margin、以及分部（咨询vs托管、行业、地区）的收入增速数据",
+     "缺少市场一致预期或目标价信息以量化预期差",
+     "缺少关于AI收入或订单的绝对规模及其占总收入比例的量化数据",
+     "缺少对未来季度指引的具体数值或管理层对需求拐点的明确判断"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:ba477771a8f016a68bd5cc3b6afb8893642d1dda3a428cf84890641dbd132afe",
+      "period": "2025-09-01..2025-11-30",
+      "text": "Accenture plc reported Revenues of USD 18742125000 for 2025-09-01..2025-11-30, up 5.95% year over year from USD 17689545000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:4485c39d212d5d352b2c5590432e57c48f9851b1446ba12f9e2ab6bc6cd5ea39",
+      "period": "2025-12-01..2026-02-28",
+      "text": "Accenture plc reported Revenues of USD 18044066000 for 2025-12-01..2026-02-28, up 8.31% year over year from USD 16659301000 in the comparable quarter."
+     }
+    ],
+    "title": "S3 核心 Thesis（简版）"
+   },
+   {
+    "body": "对ACN而言，最完整的反向观点并非其AI叙事不真实，而是其增长引擎可能正被结构性力量侵蚀，而市场仍将其视为转型赢家。该观点的核心在于：公司近年来的收入增长——如2026-03-01至2026-05-31季度报告的收入为USD 18718144000，同比增长5.59%——可能主要由成本效率、市场份额攫取和并购贡献，而非由终端需求扩张驱动；如果这一判断成立，那么当前估值隐含的持续增长预期将面临向下修正。要令这一反向观点成立，需要几个条件同时具备。第一，需求端必须确证尚未见底甚至进一步走弱。管理层将当前环境描述为'与去年相同的支出节奏'，且咨询业务中较小、较短周期合同的支出步伐与水平更慢，这意味着若经济不确定性加剧，客户的自由裁量支出可能进一步萎缩，而公司明确表示底部尚未到来（指出业务优化成本主要源于压缩时间线内的裁员，而非需求已见底的判断）。第二，AI相关收入必须被证明无法在规模上替代传统咨询收入。公司自身风险披露指出，若现有服务需求未被新的AI解决方案需求取代，或新方案支出水平不足，其业绩和利用率将受不利影响；同时，公司将AI需求描述为'早期局'，企业采用尚在萌芽阶段，且数据准备工作是AI的燃料，预计将占增长的越来越大份额，这表明收入转化路径漫长且不确定。第三，竞争格局必须对ACN造成实质性的定价与市场份额压力。新进入者（AI原生公司、云厂商）能够提供集成度更低的服务或直接替代ACN的交付，而印度离岸服务商及企业内部全球能力中心也在分流需求。若这些竞争对手以更激进定价获取份额，而ACN在部分领域虽见定价改善却不足以抵消量的流失，则其利润率将承压。第四，联邦业务的下行不应被低估。美国联邦支出削减已导致新采购延迟、合同范围缩减及终止，对联邦业务造成不利影响，且公司已披露司法部就AFS服务相关的民事与刑事调查，这不仅是财务风险，更是合规与声誉风险，可能削弱政府客户的信任。最后，从财务结构看，新订单的季度间波动性大，且托管服务订单转化为收入周期较长；更重要的是，大部分合同可被客户短期通知终止而无重大罚金，这意味着订单簿的可见性远低于表面数字。若上述条件中多数成立，则ACN可能正经历'收入增长但需求空心化'的过程——增长来自存量市场份额的再分配而非整体饼的扩大，而这一过程在宏观转弱时将迅速逆转。",
+    "claim_refs": [
+     "claim-version:458ad488c3edaef1665e360694a6ae28cf9fe26fafc56886d306e92c4f3709b9",
+     "claim-version:d4909aef260ff15ec10a8e94cc520de2ef5b84a83504909494736bbca366b6bd",
+     "claim-version:b3eabe8a19409705eced6d2332a99574b9e7852146c5a9d08956e8fbf7fde2d9",
+     "claim-version:034da4c068de707a84ce8d045c4b4d65e46cc2317519a99a75e5d3c440fa6ec6",
+     "claim-version:11e67cdd3d93315fa38a3325403142c7908c27580de17fed6e7200e9b242ebef",
+     "claim-version:14d5c3604f35d539b24703965630daa2239a0c5929761f65e7d14992241d2412",
+     "claim-version:fc1c495c0e796d17e23b3e25c998c30037ba7419e9b83036d99c700be63b00bb",
+     "claim-version:74d5ae0e70916377205a4c581bb2f687fb971a5a9bab254a2fbdabec52d36d94",
+     "claim-version:0d968eba4acf4b751eceda9f3bf9ec47fb6bf7d6c7af6c9a5ecf374ddfd93601",
+     "claim-version:5721272d82a5991c847a5dc1cf3dc1a36a86d06fd36fda1c20372e8a0670103e",
+     "claim-version:0fb3f9c0d51a1b297dfb8868b080760902b77e6707679e14115b566368d0b4bb",
+     "claim-version:ec02c0f810087a5df5cd24a7be22092c3e915b26208f656f4ec32eb0795ab648",
+     "claim-version:aa0874de23fa6aac1b0b0ee319c3df68720d92b16929b0db03b22958beb9008a",
+     "claim-version:84752a6ff3c183c7ce29b5ecdf10b1ee60aca57f9043df786bfc511406e2f887",
+     "claim-version:9b8fdbbdb6d58a4a9050119648e9a87693f5083dc2a11930930b3acc5a807deb",
+     "claim-version:1f6517dece19534a4d0d25f4fbc32abb19531f44a88def1bf425e1f1488907f0"
+    ],
+    "gaps": [
+     "缺少ACN新订单金额及其同比增速的数字来源，无法量化订单动能；缺少分业务（咨询vs托管服务、联邦vs商业）的收入明细数字，无法精确评估需求结构性变化；缺少利用率与员工人数变化的量化数据，无法验证成本效率假设；缺少ACN利润率与定价趋势的量化数据来源，无法支撑利润率承压论点"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter."
+     }
+    ],
+    "title": "S4 风险与 Anti-thesis（简版）"
+   },
+   {
+    "body": "对于覆盖范围内的其他IT服务公司，ACN最近的财务表现与行业需求环境的信号具有直接的多空含义。从收入数据看，ACN在2025年12月至2026年2月期间报告收入同比增长8.31%，而2026年3月至5月期间同比增长5.59%，2025年9月至11月期间同比增长5.95%，显示增长动能并未出现明显加速，这与管理层所描述的“discretionary spending环境与去年相同”以及“客户继续优先考虑大型转型项目”的判断一致。这对同业的含义是，如果连ACN这样的龙头企业收入增速仅维持在中个位数区间，那么对于规模较小、客户集中度更高的二线IT服务公司而言，其增长压力可能更大，空头含义明显。另外，ACN明确指出其市场份额在滚动四个季度基础上对最接近的全球上市竞争对手持续提升，这意味着在整体需求蛋糕没有显著扩大的情况下，ACN的份额增长可能是从其他同业手中夺取的，尤其是那些缺乏同等AI能力和全球交付网络的同行，对它们构成空头信号。同时，ACN提到其新业务中AI项目正在成为核心，且公司不再单独披露高级AI指标，这暗示AI相关需求正在被头部公司以更快的速度吸收，而无法像ACN那样进行大规模AI投入的中小型服务商可能面临在AI转型浪潮中被边缘化的风险。在需求结构上，ACN观察到客户从小的离散咨询合同转向更大、更复杂的长期转型合同，这种合同结构变化有利于拥有大规模交付能力的龙头公司，而不利于依赖短周期、小合同的中小型咨询公司，因为后者在现金流和订单能见度上将面临更大的波动。此外，ACN承认其大量合同可在短时间内被客户终止，且美国联邦政府支出削减已对其联邦业务造成负面影响，这一信号对同样依赖政府客户的其他IT服务公司构成利空，特别是在当前财政环境下，政府端需求的不确定性可能对同业产生类似压力。从跨区域角度看，ACN报告EMEA和亚太地区业务表现强劲，而美洲（尤其联邦业务）受拖累，这意味着具有较高EMEA和亚太收入敞口的非美国IT服务公司可能相对受益，而主要收入依赖美国市场的同行则面临更多逆风。综合而言，ACN的数据和管理层评论支持一种分化逻辑：在整体需求尚未见底但大型转型和AI需求真实存在的环境中，能持续获得市场份额、具备规模和AI能力的头部公司将挤压中等规模同行的生存空间，而依赖短期咨询合同或美国政府业务的公司风险更大。但对于“需求是否已经见底”这一问题，ACN的数据并未给出明确信号，因为其收入增速并未显著加速，且管理层对discretionary环境的描述仍是“保持不变”，因此对同业的空头含义多于多头含义，但我们缺少其他四家公司各自的收入、订单和利润率数据，也缺少ACN与它们之间市场份额变化的量化对比，无法做出更精确的相对强弱判断。",
+    "claim_refs": [
+     "claim-version:1ee264e944791d311e6d0ac6a6434906434dff1ed6fa8f3369ca08f3e1c0bcce",
+     "claim-version:3b57498d1d1ab6659b642cb5df1b930c19a0aef986213611aa4e8b1d0b1597c6",
+     "claim-version:fa3a1b3bcdfdbc073fb1c64976eb863318c38c32636a842b97e9d24438819fc3",
+     "claim-version:d4909aef260ff15ec10a8e94cc520de2ef5b84a83504909494736bbca366b6bd",
+     "claim-version:b1760daffbca4039c72b51f2f7a411e5d977ee97d860e11a333bcb6fd21264f1",
+     "claim-version:93523b66d4565fd1703306dc567bf58982b3ad0fb84c12a58c0bffa2ef618025",
+     "claim-version:93179aaac6495653c56cc75c9337a35ecc7d21ef690223782bd0ef2d6a5966f9",
+     "claim-version:aa0874de23fa6aac1b0b0ee319c3df68720d92b16929b0db03b22958beb9008a",
+     "claim-version:5721272d82a5991c847a5dc1cf3dc1a36a86d06fd36fda1c20372e8a0670103e",
+     "claim-version:357a55184601e40a04eae4d90b3082e5b0fa660e72789e22b561edebf68aad89",
+     "claim-version:1e05d4ec2749b01caa38e491b787f8b58edce65ca3946a3f685a3ac9d320d1c0"
+    ],
+    "gaps": [
+     "缺少覆盖范围内其他四家公司的收入、订单、利润率及市场份额数据，无法进行量化对比；缺少ACN与其同业之间的相对增长或份额变化的具体数字；缺少关于其他公司美国政府业务敞口的数据；缺少关于各家公司AI收入转化速度或订单结构的具体信息"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:ba477771a8f016a68bd5cc3b6afb8893642d1dda3a428cf84890641dbd132afe",
+      "period": "2025-09-01..2025-11-30",
+      "text": "Accenture plc reported Revenues of USD 18742125000 for 2025-09-01..2025-11-30, up 5.95% year over year from USD 17689545000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:4485c39d212d5d352b2c5590432e57c48f9851b1446ba12f9e2ab6bc6cd5ea39",
+      "period": "2025-12-01..2026-02-28",
+      "text": "Accenture plc reported Revenues of USD 18044066000 for 2025-12-01..2026-02-28, up 8.31% year over year from USD 16659301000 in the comparable quarter."
+     }
+    ],
+    "title": "S5 Relevance to Universe（对 universe 内其他标的的多空含义，含跨区域）"
+   },
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与 consensus 五类正式 authority 尚未接入，写任何倍数或目标价都会是无来源的数字。"
+    ],
+    "numbers": [],
+    "title": "S6 估值（street 预期、框架、event pathway、IRR）"
+   },
+   {
+    "body": "为验证或证伪上述关于Accenture需求见底、AI/reinvention需求能否抵消discretionary consulting下滑的核心判断，数据跟踪应聚焦于可观察的高频或定期指标。首先，收入增长轨迹是最直接的验证点：显示2026-03-01..2026-05-31季度收入为USD 18718144000，同比增5.59%；、、（同一季度数据重复）显示2025-09-01..2025-11-30季度收入为USD 18742125000，同比增5.95%；显示2025-12-01..2026-02-28季度收入为USD 18044066000，同比增8.31%；显示2024-12-01..2025-02-28季度收入为USD 16659301000，同比增5.44%。若后续季度收入同比增速持续抬升，则支持需求已见底且AI转化初现的判断；若增速回落或转负，则证伪。其次，新签订单（new bookings）的季度变化是关键领先指标，提到fiscal Q1新签订单在美元口径下温和增长，但指出订单增长被视为乏力，且强调新签订单受少数大单时间点影响波动大，需盯住连续多季的订单趋势及其与收入的比值变化，以分辨分化是需求趋势还是时点噪音。第三，管理层关于discretionary环境的表述是定性验证点：表示支出速度与去年持平、尚未进一步下探，和强调discretionary环境未变而客户优先大型转型，和则反映小型短周期合同支出放缓——若后续季报中管理层口径从“持平”转向明确改善，则是需求见底的早期信号。第四，AI/reinvention是否转化为收入的验证需借助两个维度：一是管理层是否继续披露advanced AI相关指标，和指出这是最后几个季度单独披露AI指标，因AI已嵌入几乎所有业务，若停止披露则需依赖整体收入结构变化推断；二是分行业收入表现，提到Communications, Media & Technology收入同比下降，提到Health and Public Services增长强劲，需跟踪各行业增长分化是否持续。第五，联邦业务风险是特定尾部变量：和指出美国联邦支出削减导致合同终止、价格和范围缩减，需跟踪相关政府采购数据及Accenture Federal Services的订单动态。第六，utilization率与人员调整是内部经营质量的替代指标：指出利用率过高或过低均影响经营，提及Q4启动的减招与增加非自愿裁员的策略，若后续季度人员再平衡且利用率回升，则从供给侧支持盈利韧性。最后，margin路径需与收入同步跟踪：对经营利润率扩张表示满意并重申全年指引，表示定价在多个领域改善，而和显示优化成本与裁员和资产减值有关，需观察后续是否有进一步优化成本或利润率指引变化。关于具体数值，除上述收入外，新签订单金额、utilization率、GenAI订单收入等量化数据在可用材料中未提供，需在原文件中补充。",
+    "claim_refs": [
+     "claim-version:0460bfa6fbadfcadd0067690390f41532429a673f1ca1115a9c37f677d5a2380",
+     "claim-version:0013bf8e5954db74469de0e1e374446952c9b5935776a540f7be1d010d56a125",
+     "claim-version:ec02c0f810087a5df5cd24a7be22092c3e915b26208f656f4ec32eb0795ab648",
+     "claim-version:d4909aef260ff15ec10a8e94cc520de2ef5b84a83504909494736bbca366b6bd",
+     "claim-version:b1760daffbca4039c72b51f2f7a411e5d977ee97d860e11a333bcb6fd21264f1",
+     "claim-version:c53d7741f3bdd3becc256eacdc2f1d8da40c97c0b7544e6c93eb655a504a93d5",
+     "claim-version:458ad488c3edaef1665e360694a6ae28cf9fe26fafc56886d306e92c4f3709b9",
+     "claim-version:4c1527b4c3834392a39e23182a92dcf557232597eb186e5e3877bd17966d9c27",
+     "claim-version:1ee264e944791d311e6d0ac6a6434906434dff1ed6fa8f3369ca08f3e1c0bcce",
+     "claim-version:3b57498d1d1ab6659b642cb5df1b930c19a0aef986213611aa4e8b1d0b1597c6",
+     "claim-version:a4cd06a7f8890af50052f2ce3747006fd5aea60fab930a89af0c85a93b83c815",
+     "claim-version:336649ff1ab2f9f3c30564260de8cbac7a0fd1c3b8512b1d9e7f2ad1389d30e5",
+     "claim-version:5721272d82a5991c847a5dc1cf3dc1a36a86d06fd36fda1c20372e8a0670103e",
+     "claim-version:357a55184601e40a04eae4d90b3082e5b0fa660e72789e22b561edebf68aad89",
+     "claim-version:3f93b9836d671a9d59183165e9c16f13dc348f57c671a4dcb9ea357141792974",
+     "claim-version:4ecfaff96222473014ba7778ca6f36f32cf62678de877c8d22561e03b723159c",
+     "claim-version:054719b8af2e0acdcb0655f8cf7f2f5996781cd1911134b778dc9d009268679b",
+     "claim-version:9b8fdbbdb6d58a4a9050119648e9a87693f5083dc2a11930930b3acc5a807deb",
+     "claim-version:1f6517dece19534a4d0d25f4fbc32abb19531f44a88def1bf425e1f1488907f0",
+     "claim-version:6a46767d58099bd1f5a10673e6d08a6cb1146488e62f5fa481b497d13563ee2b"
+    ],
+    "gaps": [
+     "缺少新签订单的季度金额或同比增速数据，无法量化订单动能；缺少utilization率的具体数值；缺少advanced AI或GenAI相关订单与收入的量化指标；缺少分行业、分地区收入的定期详细数据以跟踪需求分化；缺少联邦业务收入占比及订单变化的量化信息；缺少管理层指引中关于收入增长或利润率的具体数字。"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:ba477771a8f016a68bd5cc3b6afb8893642d1dda3a428cf84890641dbd132afe",
+      "period": "2025-09-01..2025-11-30",
+      "text": "Accenture plc reported Revenues of USD 18742125000 for 2025-09-01..2025-11-30, up 5.95% year over year from USD 17689545000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:4485c39d212d5d352b2c5590432e57c48f9851b1446ba12f9e2ab6bc6cd5ea39",
+      "period": "2025-12-01..2026-02-28",
+      "text": "Accenture plc reported Revenues of USD 18044066000 for 2025-12-01..2026-02-28, up 8.31% year over year from USD 16659301000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:5848e037902febc1e47a2d6e296f18c4a1eeb1ace28eb1764d83aa4e3cd9592e",
+      "period": "2025-09-01..2025-11-30",
+      "text": "Accenture plc reported Revenues of USD 18742125000 for 2025-09-01..2025-11-30, up 5.95% year over year from USD 17689545000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:ef266e8d0a7670640208511e666d3579b3b62cefb61e9b11149e13249b41c5e9",
+      "period": "2025-09-01..2025-11-30",
+      "text": "Accenture plc reported Revenues of USD 18742125000 for 2025-09-01..2025-11-30, up 5.95% year over year from USD 17689545000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:110458c7f988c6ba7a1c3fe793495052c106f0910f3f828a1a7bd7ffb4f1c0d4",
+      "period": "2024-12-01..2025-02-28",
+      "text": "Accenture plc reported Revenues of USD 16659301000 for 2024-12-01..2025-02-28, up 5.44% year over year from USD 15799514000 in the comparable quarter."
+     }
+    ],
+    "title": "S7 数据跟踪"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "company:sec-cik:0001467373",
+  "title": "mission-deliverable:initial_screen:0001467373"
+ },
+ "case_ref": "live-acn-v2",
+ "expected": {
+  "deterministic": {
+   "claim_refs_resolve": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "duplicate_parallel_citations": {
+    "count": 1,
+    "status": "fail"
+   },
+   "numbers_without_refs": {
+    "count": 0,
+    "status": "pass"
+   },
+   "required_sections_present": {
+    "count": 0,
+    "status": "pass"
+   },
+   "residual_citation_artefacts": {
+    "count": 12,
+    "status": "fail"
+   }
+  },
+  "rationale": "引用卫生与去重必须打 0–1：残句和三重并列引用都在已发布正文里。thesis 与 anti-thesis 应得 3–4，因为它们做了判断并说明了成立条件。跟踪一节列了六类指标但没有阈值，且正文被残句破坏，给 2–3。来源纪律给 1–3：数字只有一个系列、关键数字单一来源，管理层原话占比很高。",
+  "score_ranges": {
+   "anti_thesis": [
+    3,
+    4
+   ],
+   "citation_dedupe": [
+    0,
+    1
+   ],
+   "citation_hygiene": [
+    0,
+    1
+   ],
+   "falsifiers_and_tracking": [
+    2,
+    3
+   ],
+   "gaps_honest": [
+    3,
+    4
+   ],
+   "key_driver_thesis": [
+    3,
+    4
+   ],
+   "number_provenance": [
+    3,
+    4
+   ],
+   "required_sections": [
+    3,
+    4
+   ],
+   "source_discipline": [
+    1,
+    3
+   ]
+  }
+ },
+ "note": "ACN Initial Screen v2（2026-09-09，10 次模型调用，已 gate_passed）。蓝图附录 A 记的三处缺陷全在这里：S7 的残句「、、（同一季度数据重复）显示」、同季收入被三条重复 Claim 并列引用、只有收入一个数字系列。文字本身是真研究文字：S3 识别了 AI/reinvention driver 并说明证据只能支持方向性判断，S4 是完整的「收入增长但需求空心化」反向观点，gaps 列表点名了 bookings、utilization、分部与指引。",
+ "rubric": "initial_screen",
+ "source": "live Core 只读副本 2026-09-09；mission-deliverable-version:06e126b45f078b98e1a92d241c0f244f（ACN v2，发布于 2026-09-09T09:13:27）"
+}
