@@ -120,7 +120,12 @@ def render_model_inputs(table: Mapping[str, Any], *, entity_name: str | None = N
     empty = readiness.get("filed_lines_with_no_values") or []
     if empty:
         out.append(f"  resolved but empty (look at this): {', '.join(empty)}")
-    if not (splits or unmet or gaps or empty):
+    unused = readiness.get("filed_income_lines_no_row_uses") or []
+    if unused:
+        out.append("  filed but no model row uses it:")
+        for item in unused:
+            out.append(f"      {item['label'][:40]:40} {item['concept']}")
+    if not (splits or unmet or gaps or empty or unused):
         out.append("  nothing")
     return "\n".join(out)
 

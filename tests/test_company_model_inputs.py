@@ -34,13 +34,25 @@ class FakeMissions:
     def statement_series_lines(self, company_ref, concept, statement=None):
         return [row for row in self.lines if row["concept"] == concept]
 
+    def statement_filings(self, company_ref=None):
+        if not self.lines:
+            return []
+        return [{"ingest_id": "ingest:test", "company_ref": ACN,
+                 "entity_name": "Accenture plc", "accession": "0001467373-26-000032",
+                 "report_date": "2026-05-31", "form": "10-Q", "line_count": len(self.lines)}]
+
+    def statement_lines(self, ingest_id, statement=None):
+        return [row for row in self.lines
+                if statement is None or row["statement"] == statement]
+
 
 def _line(concept, start, end, value, *, statement="income",
-          filed="2026-07-01", accession="0001467373-26-000032"):
+          filed="2026-07-01", accession="0001467373-26-000032", unit="usd",
+          level=1):
     return {
         "concept": concept, "statement": statement, "label": concept.split(":")[-1],
-        "period_start": start, "period_end": end, "value": value, "unit": "USD",
-        "is_breakdown": False, "dimension_axis": None,
+        "period_start": start, "period_end": end, "value": value, "unit": unit,
+        "is_breakdown": False, "dimension_axis": None, "level": level,
         "filed": filed, "accession": accession,
     }
 
@@ -193,6 +205,55 @@ class ModelInputTests(unittest.TestCase):
         line = table["filed_lines"][0]
         self.assertEqual(line["label"], "Revenues")
         self.assertEqual(line["cells"]["2026-05-31"]["value"], "18718144000")
+
+    def test_a_filed_line_no_model_row_uses_is_named(self):
+        # Live: IBM's specification bound every revenue driver to nothing filed
+        # -- adoption, price mix and rate mix genuinely are not in GAAP -- so
+        # the model had no filed top line at all while the filings report
+        # us-gaap:Revenues plainly. No single row was wrong; the omission
+        # existed only between them, which a reviewer cannot see and a derived
+        # list can.
+        ledger = FakeMissions([
+            _line("us-gaap:Revenues", "2026-03-01", "2026-05-31", "18718144000"),
+            _line("us-gaap:GrossProfit", "2026-03-01", "2026-05-31", "6000000000"),
+            _line("us-gaap:CostOfGoodsAndServicesSold",
+                  "2026-03-01", "2026-05-31", "12000000000"),
+        ])
+        spec = _spec(drivers=[{
+            "ref": "billable-capacity", "label": "Billable capacity",
+            "kind": "volume", "basis_concept": None, "unit": "headcount",
+            "because": "Capacity binds delivery revenue.",
+        }])
+        unused = build_model_inputs(ledger, spec)["readiness"][
+            "filed_income_lines_no_row_uses"]
+        concepts = [item["concept"] for item in unused]
+        self.assertIn("us-gaap:Revenues", concepts)
+        self.assertIn("us-gaap:GrossProfit", concepts)
+        # The one a row does draw on is not listed as unused.
+        self.assertNotIn("us-gaap:CostOfGoodsAndServicesSold", concepts)
+
+    def test_per_share_lines_are_not_offered_as_model_rows(self):
+        # Earnings per share and share counts are filed on the income statement
+        # and are not model rows. The data says so without a list of names:
+        # they carry a different unit from the rest of the statement.
+        ledger = FakeMissions([
+            _line("us-gaap:Revenues", "2026-03-01", "2026-05-31", "18718144000"),
+            _line("us-gaap:GrossProfit", "2026-03-01", "2026-05-31", "6000000000"),
+            _line("us-gaap:EarningsPerShareBasic", "2026-03-01", "2026-05-31",
+                  "3.03", unit="usdPerShare"),
+            _line("us-gaap:WeightedAverageNumberOfSharesOutstandingBasic",
+                  "2026-03-01", "2026-05-31", "620000000", unit="shares"),
+        ])
+        unused = build_model_inputs(
+            ledger, _spec(drivers=[], expenses=[
+                {"ref": "cost", "label": "Cost", "basis_concept": None,
+                 "behaviour": "fixed", "driver_ref": None, "because": "x"}],
+            ))["readiness"]["filed_income_lines_no_row_uses"]
+        concepts = [item["concept"] for item in unused]
+        self.assertIn("us-gaap:Revenues", concepts)
+        self.assertNotIn("us-gaap:EarningsPerShareBasic", concepts)
+        self.assertNotIn("us-gaap:WeightedAverageNumberOfSharesOutstandingBasic",
+                         concepts)
 
     def test_operating_metrics_are_never_pretended_to_be_in_the_statements(self):
         spec = _spec(metrics=[

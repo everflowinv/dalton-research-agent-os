@@ -102,6 +102,60 @@ def _series_for(missions: Any, company_ref: str, concept: str) -> dict[str, Any]
     }
 
 
+# How many unused filed lines to name. Enough to notice a missing top line,
+# not so many that the reviewer stops reading the list.
+MAX_UNUSED_REPORTED = 12
+
+
+def _unused_income_lines(
+    missions: Any, company_ref: str, used: set[str],
+) -> list[dict[str, Any]]:
+    """Income-statement lines the company filed that no model row draws on.
+
+    Live, IBM's specification bound every revenue driver to nothing filed --
+    adoption, price mix, conversion, rate mix are genuinely not in GAAP -- with
+    the result that the model had **no filed top line at all**, while the
+    filings report ``us-gaap:Revenues`` plainly. Nothing was wrong with any
+    single row; the omission only existed between them, which is exactly the
+    kind of thing a reviewer cannot see and a derived list can.
+
+    The income statement alone, because that is the one statement the frame
+    always requires, and because listing every unused balance-sheet line would
+    bury the signal in noise.
+    """
+
+    filings = missions.statement_filings(company_ref)
+    if not filings:
+        return []
+    latest = sorted(filings, key=lambda item: (item["report_date"],
+                                               item["accession"]))[-1]
+    lines = missions.statement_lines(latest["ingest_id"], statement="income")
+    # Earnings per share and share counts are filed on this statement and are
+    # not model rows, and the data says so without a list of names to maintain:
+    # they carry a different unit. The money unit is whichever one most of the
+    # statement is in, so a filer reporting in something other than dollars is
+    # read the same way.
+    units: dict[str, int] = {}
+    for row in lines:
+        unit = str(row["unit"])
+        units[unit] = units.get(unit, 0) + 1
+    money = max(units, key=lambda unit: units[unit]) if units else None
+
+    seen: dict[str, dict[str, Any]] = {}
+    for row in lines:
+        if row["is_breakdown"] or row["concept"] in used:
+            continue
+        if money is not None and str(row["unit"]) != money:
+            continue
+        seen.setdefault(str(row["concept"]), {
+            "concept": str(row["concept"]),
+            "label": str(row["label"]),
+            "level": int(row["level"]),
+        })
+    return sorted(seen.values(),
+                  key=lambda item: (item["level"], item["concept"]))[:MAX_UNUSED_REPORTED]
+
+
 def build_model_inputs(
     missions: Any, spec: Mapping[str, Any], *, max_periods: int = MAX_PERIODS,
 ) -> dict[str, Any]:
@@ -230,7 +284,11 @@ def build_model_inputs(
             }
             for item in (spec.get("operating_metrics") or [])
         ],
-        "readiness": readiness(rows, filed_lines, periods),
+        "readiness": {
+            **readiness(rows, filed_lines, periods),
+            "filed_income_lines_no_row_uses": _unused_income_lines(
+                missions, company_ref, set(concepts)),
+        },
     }
 
 
