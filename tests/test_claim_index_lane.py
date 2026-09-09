@@ -25,7 +25,6 @@ from dalton_core.claim_index_authority import (
     ClaimIndexAuthority, current_entries, table_exists,
 )
 from dalton_core.claim_index_cli import (
-    FALLBACK_WRITE_SCOPES,
     WRITE_SCOPE,
     build_parser,
     granted_scope,
@@ -34,7 +33,10 @@ from dalton_core.claim_index_cli import (
 from dalton_core.claim_index_launcher import ClaimIndexLauncher, batch_digest
 from dalton_core.claim_index_tagging import pending_claims
 from dalton_core.cockpit_model import build_work, purposes
-from dalton_core.coverage_mission import CoverageMissionAuthority
+from dalton_core.coverage_mission import (
+    AUTOMATION_WRITE_SCOPES,
+    CoverageMissionAuthority,
+)
 from dalton_core.mission_claim_index_lane import MissionClaimIndexLaneCoordinator
 from dalton_core.store import DaltonStore
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
@@ -71,8 +73,14 @@ class ChildHarness:
         state = bootstrap_method_authorities(self.store)
         self.missions = CoverageMissionAuthority(self.store)
         params = mission_params(state)
-        if may_write is not None:
-            params["autonomy"] = {**params["autonomy"], "may_write": list(may_write)}
+        if may_write is None:
+            # INT1: the live manifest does not grant claim_index yet (the owner
+            # publishes that version), and the fallback to ``claim`` is gone,
+            # so the fixture widens may_write in place -- which is what the
+            # parallel plan says a test should do rather than loosen the
+            # authority.
+            may_write = list(params["autonomy"]["may_write"]) + ["claim_index"]
+        params["autonomy"] = {**params["autonomy"], "may_write": list(may_write)}
         self.mission = self.missions.create_mission(params.pop("mission_ref"), **params)
 
     def add_claims(self):
@@ -104,13 +112,15 @@ class ChildHarness:
 
 
 class WriteScopeTests(unittest.TestCase):
-    def test_the_preferred_word_is_checked_first_and_claim_is_accepted_meanwhile(self):
-        # ``claim_index`` is not in the frozen vocabulary yet. Until it is, a
-        # mission granting ``claim`` may write an index entry -- which is
-        # strictly weaker than the Claim it points at.
+    def test_the_index_has_its_own_word_and_borrows_no_other(self):
+        # INT1: ``claim_index`` joined AUTOMATION_WRITE_SCOPES, so the
+        # temporary fallback to ``claim`` is gone. An index entry is strictly
+        # weaker than the Claim it points at, but ADR-0004 gives an automated
+        # write its own word, and a mission that granted only ``claim`` did not
+        # grant this.
+        self.assertIn(WRITE_SCOPE, AUTOMATION_WRITE_SCOPES)
         self.assertEqual(WRITE_SCOPE, "claim_index")
-        self.assertEqual(FALLBACK_WRITE_SCOPES, ("claim",))
-        self.assertEqual(granted_scope({"autonomy": {"may_write": ["claim"]}}), "claim")
+        self.assertIsNone(granted_scope({"autonomy": {"may_write": ["claim"]}}))
         self.assertEqual(
             granted_scope({"autonomy": {"may_write": ["claim", "claim_index"]}}),
             "claim_index")
@@ -142,7 +152,7 @@ class ChildRunTests(unittest.TestCase):
         summary = self.harness.run()
         self.assertEqual(summary["status"], "succeeded")
         self.assertEqual(summary["index_status"], "dry_run")
-        self.assertEqual(summary["write_scope"], "claim")
+        self.assertEqual(summary["write_scope"], "claim_index")
         self.assertEqual(summary["pending"], 3)
         self.assertEqual(summary["rule_tagged"], 1)
         self.assertEqual(summary["batch_size"], 2)
@@ -404,6 +414,143 @@ class LauncherTests(unittest.TestCase):
         promote = parser.parse_args(
             ["--state-dir", "/tmp/x", "--promote-figures", "--staging-db", "/tmp/s"])
         self.assertTrue(promote.promote_figures)
+
+
+class RegistrationTests(unittest.TestCase):
+    """INT1: the LaneSpec P12b wrote in its report and left out of the code.
+
+    Until this, the index had no tick at all -- `claim_index_cli` was a hand
+    entry point and nothing called it. What is pinned here is this lane's half
+    of the P14-0 contract: the names it claims, that it is off until its model
+    configuration is installed, and that importing it does not drag in the
+    machinery that reads the registry.
+    """
+
+    def test_the_lane_is_registered_under_the_names_it_claims(self):
+        from dalton_core.lane_registry import lane_for_operation
+        from dalton_core.mission_claim_index_lane import LANE, LAUNCHER_KWARG
+
+        spec = lane_for_operation("dispatch_claim_index")
+        self.assertIs(spec, LANE)
+        self.assertEqual(spec.driver_key, "claim_index")
+        self.assertEqual(spec.init_kwarg, LAUNCHER_KWARG)
+        self.assertTrue(spec.core_discovery)
+        # A tick takes no arguments; --company-ref is a hand-run thing.
+        self.assertEqual(spec.param_fields, frozenset())
+
+    def test_it_runs_after_the_plan_and_before_the_initial_screen(self):
+        # The screen drafts from Claims, and drafting from an indexed set is
+        # what stops it citing one quarter's revenue three times over.
+        from dalton_core.lane_registry import registered_lanes
+
+        order = [spec.operation for spec in registered_lanes()]
+        self.assertEqual(
+            order[order.index("dispatch_research_plan") + 1], "dispatch_claim_index")
+        self.assertEqual(
+            order[order.index("dispatch_claim_index") + 1], "dispatch_initial_screen")
+
+    def test_the_writer_derives_the_operation_from_the_registry(self):
+        from dalton_core import writer_server
+
+        self.assertIn("dispatch_claim_index", writer_server.OPERATION_FIELDS)
+        self.assertIn("dispatch_claim_index", writer_server.CORE_DISCOVERY_OPERATIONS)
+        self.assertIn("dispatch_claim_index", writer_server.CORE_OPERATIONS)
+
+    def test_the_controller_tick_drives_it(self):
+        from dalton_core.lane_registry import tick_lanes
+
+        self.assertIn("claim_index", [spec.driver_key for spec in tick_lanes()])
+
+    def test_without_a_model_configuration_there_is_no_launcher_and_no_argv(self):
+        import argparse
+
+        from dalton_core.lane_registry import LaunchAgentContext
+        from dalton_core.mission_claim_index_lane import (
+            CLAIM_INDEX_MODEL_CONFIG, add_arguments, argv_fragment, build_launcher,
+        )
+
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--db")
+        parser.add_argument("--scheduler")
+        add_arguments(parser)
+        args = parser.parse_args(["--db", "/tmp/core.sqlite"])
+        self.assertIsNone(args.claim_index_model_config)
+        self.assertIsNone(build_launcher(args))
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            self.assertEqual(argv_fragment(LaunchAgentContext(state=state)), [])
+            config = state / CLAIM_INDEX_MODEL_CONFIG
+            config.write_text("{}", encoding="utf-8")
+            self.assertEqual(
+                argv_fragment(LaunchAgentContext(state=state)),
+                ["--claim-index-model-config", str(config)])
+
+    def test_the_launcher_is_built_from_the_writer_s_own_arguments(self):
+        import argparse
+
+        from dalton_core.claim_index_launcher import ClaimIndexLauncher
+        from dalton_core.mission_claim_index_lane import add_arguments, build_launcher
+
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory)
+            config = state / "claim-index-model-config.json"
+            config.write_text("{}", encoding="utf-8")
+            parser = argparse.ArgumentParser()
+            parser.add_argument("--db")
+            parser.add_argument("--scheduler")
+            add_arguments(parser)
+            args = parser.parse_args([
+                "--db", str(state / "core.sqlite"),
+                "--scheduler", str(state / "scheduler.sqlite"),
+                "--claim-index-model-config", str(config),
+            ])
+            launcher = build_launcher(args)
+            self.assertIsInstance(launcher, ClaimIndexLauncher)
+            self.assertEqual(launcher.state_dir, state.resolve())
+            self.assertEqual(launcher.model_config_path, config.resolve())
+            self.assertTrue(launcher.configured)
+
+    def test_a_writer_without_the_lane_says_so_rather_than_failing(self):
+        from dalton_core.mission_claim_index_lane import dispatch
+
+        class Server:
+            lane_state: dict = {}
+
+            def lane_launcher(self, kwarg):
+                return None
+
+        result = dispatch(Server(), {})
+        self.assertEqual(result["status"], "unconfigured")
+        self.assertIn("claim index", result["reason"])
+
+    def test_the_coordinator_is_cached_rather_than_rebuilt(self):
+        # The coordinator holds which batch is open and which batches failed.
+        # A fresh one every tick would forget both and re-launch a child for a
+        # batch it had just been told was doomed.
+        from dalton_core.mission_claim_index_lane import LAUNCHER_KWARG, dispatch
+
+        class Coordinator:
+            def __init__(self):
+                self.calls = 0
+
+            def dispatch_once(self):
+                self.calls += 1
+                return {"status": "idle"}
+
+        coordinator = Coordinator()
+
+        class Server:
+            def __init__(self):
+                self.lane_state = {LAUNCHER_KWARG: coordinator}
+
+            def lane_launcher(self, kwarg):
+                return object()
+
+        server = Server()
+        dispatch(server, {})
+        dispatch(server, {})
+        self.assertEqual(coordinator.calls, 2)
+        self.assertIs(server.lane_state[LAUNCHER_KWARG], coordinator)
 
 
 if __name__ == "__main__":  # pragma: no cover
