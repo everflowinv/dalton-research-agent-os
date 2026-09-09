@@ -137,15 +137,20 @@ QUALITY_CHECK_LABELS = {
 # here still appears -- silence about a lane is exactly what this panel exists
 # to end -- under its own key, which is ugly but visible.
 REGISTRY_LANE_LABELS = {
+    "guidepoint_discovery": "找专家访谈纪要",
     "mission_sec_quarters": "取 SEC 季度数字",
     "mission_statements": "取三张报表",
     "mission_market_prices": "取每日股价",
     "company_model_spec": "写公司模型的规格",
     "company_model_forecast": "算预测行",
+    "claim_index": "给结论建索引",
     "research_plan": "决定下一步做什么",
     "initial_screen": "写初步筛选",
     "mission_stage": "记录研究阶段",
     "claim_review": "复核已有结论",
+    "sales_notes_feed": "读 sales note",
+    "company_wiki_feed": "读公司维基与访谈纪要",
+    "research_task": "做专项研究",
 }
 # Already shown by name above the registry rows, with their budgets.
 LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})

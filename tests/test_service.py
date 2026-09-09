@@ -102,13 +102,23 @@ class InstallerSeedTests(unittest.TestCase):
         self.assertIn(
             '"${repo_root}[deploy,pdf,sec-financials,market-data]"', self.script())
 
-    def test_nothing_is_seeded_for_a_lane_that_is_not_on_main(self) -> None:
-        # A governance record for a lane that does not exist leaves the owner
-        # an approval to make about nothing.
-        text = self.script()
+    def test_a_lane_is_seeded_all_or_nothing(self) -> None:
+        # Copying half of what a lane needs gives the owner an approval to make
+        # and a lane that starts and refuses every tick. The feed lanes want a
+        # feed plan and a workspace directory besides their records, and the
+        # Guidepoint lane wants a discovery plan this repo does not ship, so
+        # none of the three is seeded here even though their records exist.
+        # Comments are stripped first: the script explains by name which
+        # connectors it deliberately leaves alone, and that sentence is the
+        # point rather than a violation of it.
+        code = "\n".join(line for line in self.script().splitlines()
+                          if not line.lstrip().startswith("#"))
         for absent in ("xueqiu", "x-xreach", "employee-reviews", "sales-notes",
                        "company-wiki", "cn-hk-findata"):
-            self.assertNotIn(absent, text)
+            self.assertNotIn(absent, code)
+        repo = self.INSTALL.parents[2]
+        self.assertFalse((repo / "deploy" / "discovery-plans").exists())
+        self.assertFalse((repo / "deploy" / "feed-plans").exists())
 
 
 class ServiceTests(unittest.TestCase):

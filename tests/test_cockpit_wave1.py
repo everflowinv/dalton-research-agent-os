@@ -489,6 +489,27 @@ class LaneVocabularyTests(Wave1Case):
         self.assertTrue(expected <= set(lanes))
         self.assertTrue(all(lanes[key]["label"] for key in expected))
 
+    def test_every_registered_lane_is_named_in_the_owner_s_words(self) -> None:
+        # A lane with no name still gets a row -- silence about a lane is what
+        # this panel exists to end -- but it shows its driver key, which is
+        # machine language on a page ADR-0006 says has none. So the moment a
+        # lane is registered without a name here, this says so.
+        from dalton_core.cockpit_plane import (
+            LANES_SHOWN_ELSEWHERE, REGISTRY_LANE_LABELS,
+        )
+        from dalton_core.lane_registry import registered_lanes
+
+        unlabelled = [spec.driver_key for spec in registered_lanes()
+                      if spec.driver_key not in LANES_SHOWN_ELSEWHERE
+                      and spec.driver_key not in REGISTRY_LANE_LABELS]
+        self.assertEqual(unlabelled, [])
+
+    def test_the_claim_index_lane_has_a_row_of_its_own(self) -> None:
+        lanes = self.lanes({"claim_index": {
+            "status": "idle", "reason": "every claim is indexed"}})
+        row = lanes["lane:claim_index"]
+        self.assertEqual((row["status"], row["label"]), ("idle", "给结论建索引"))
+
     def test_ungranted_is_not_idle(self) -> None:
         lanes = self.lanes({
             "mission_market_prices": {

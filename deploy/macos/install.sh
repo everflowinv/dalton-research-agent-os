@@ -145,10 +145,14 @@ for yfinance_kind in yfinance-daily-prices yfinance-analyst-estimates; do
     chmod 600 "$yfinance_file"
   fi
 done
-# Not seeded here: guidepoint's own lane, the crowd sources and the feed
-# connectors. Their records are not on main yet, and an installer that copies
-# a governance record for a lane that does not exist leaves the owner an
-# approval to make about nothing.
+# Not seeded here: the S1 feed connectors (sales-notes, company-wiki) and the
+# Guidepoint lane's own record. Their governance records are in the repo now,
+# but a record alone does not turn any of them on -- the feed lanes also want
+# a feed plan and an OpenClaw workspace directory, and the Guidepoint lane
+# wants a discovery plan this repo does not ship. Copying half of what a lane
+# needs gives the owner an approval to make and a lane that starts and refuses
+# every tick, which reads like a fault rather than an absence. Seeding them is
+# one block each, once whoever owns those lanes says what the other half is.
 # P9d-1: AlphaEngine search_library is a separate governed capability.  Seed
 # the committed *proposed* record once; the owner approves in place with
 # dalton-connector-governance approve.  The discovery plan is a hash-bound

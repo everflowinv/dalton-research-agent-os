@@ -1,7 +1,8 @@
 # INT1：把 Wave 1 四条线接到驾驶舱和安装脚本上 v1.0
 
 日期：2026-09-09
-分支：`int1-cockpit-install`（worktree `~/Projects/dalton-int1-cockpit-install-worktree`），基线 main `61f4255`（2,627 项）
+分支：`int1-cockpit-install`（worktree `~/Projects/dalton-int1-cockpit-install-worktree`），基线 main `61f4255`（2,627 项）；
+2026-09-09 晚合并 main `7708d43`（S1 feeds、S2 Guidepoint、P14e 专项研究、P14-M 模型路由；2,843 项）并做了两项 follow-up，见第 9 节
 角色：并行开发计划第 5 节的集成位。四条 Wave 1 lane 都在自己的报告里写了「集成时要接的线」然后一个字都没动
 驾驶舱，因为那两个文件不归任何一个 lane agent。这一片就是那些线。
 
@@ -178,10 +179,10 @@ live Core 上这四张表一张都没有（四条 lane 还没部署），2,098 �
    live mission 没授予；没授予时 lane 每 tick 返回 `ungranted` 且一次网络调用都不发，页面会如实说。
    同时建议加 `research_task`（词表已有，P14e 要用）。
    C 不需要新版本（`forecast_line` 已在 live manifest 里）。
-3. **`claim_index` 这个词还不在 `AUTOMATION_WRITE_SCOPES` 里**（Wave 0 加的十个词不含它）。
-   `coverage_mission.py` 在我的禁改清单上，所以没加。今天 `claim_index_cli.granted_scope` 会退回
-   `claim` 放行，live mission v13 有 `claim`，所以能跑；要按 ADR-0004 给它自己的词，需要一次
-   `coverage_mission.py` 的加词改动 + 一版新 mission。
+3. **`claim_index` 也要授予**。这个词已经由主 agent 在 main `7708d43` 上加进
+   `AUTOMATION_WRITE_SCOPES`，本片随之删掉了 `claim_index_cli` 里退回 `claim` 的兜底（第 9 节），
+   所以**在新版 mission 授予 `claim_index` 之前，索引 lane 每次都会 `held: not_authorized`
+   并且一次模型调用都不花**。这是刻意的：ADR-0004 说自动化写入要有自己的词。
 4. **figure 准入的策略重签**：发布并签署一版治理 policy，其 `research_candidate_auto_commit.rules`
    列出 `research-auto-commit:mission-verified-figure:v1`
    （常量 `research_verification.MISSION_VERIFIED_FIGURE_RULE_REF`，做法与 ADR-0005 的
@@ -193,11 +194,15 @@ live Core 上这四张表一张都没有（四条 lane 还没部署），2,098 �
 
 ## 7. 没做的 / 留给下一片的
 
-- **B 的 claim-index lane 没有注册**。`mission_claim_index_lane.py` 里没有 `LaneSpec`，
-  `lane_registry.LANE_MODULES` 里也没有它——B 的报告第五节把 LaneSpec 的字段列出来了但没有写进代码。
-  加上它会改动 writer 的操作集与 LaunchAgent argv，超出这一片的交付范围，所以只记在这里：
-  **今天索引没有 tick lane，只有手跑的 `claim_index_cli`**。驾驶舱那一侧已经准备好了——有索引就显示，
-  没有就说没有。
+- ~~**B 的 claim-index lane 没有注册**~~ **已做**，见第 9 节。
+- **install.sh 没有为 S1 feeds 与 Guidepoint lane 种记录**，尽管它们的治理记录已经随 main 进来了
+  （`sales-notes-*`、`company-wiki-*`、`guidepoint-get-transcript-narrowing-v1.json`）。
+  原因写在脚本的注释里：**光有记录开不了这三条 lane**——feed lane 还要一份 feed plan 和一个
+  OpenClaw 工作区目录，Guidepoint lane 还要一份本仓库不发的 discovery plan
+  （`us-it-services-guidepoint-v1.json`；`deploy/discovery-plans/` 目录根本不存在）。
+  只种一半 = 给 owner 一个要批的东西，外加一条每 tick 起一个孩子然后拒绝的 lane，
+  它自己的 docstring 就是这么警告的。**每条各一个块，等这几条 lane 的主人说出另一半是什么。**
+  `tests/test_service.py::test_a_lane_is_seeded_all_or_nothing` 把这个决定钉住了。
 - **模型表没有进 overview 的 JSON**，在自己的路由上（第 1 节 C）。
 - **`tests/test_model_vocabularies.py::test_the_seed_is_what_the_script_tuple_said` 现在依赖类内的
   tearDown 顺序**：它断言注册表等于三个种子名，而 `claim_index_tagging` 一被 import 就会让它变成四个。
@@ -211,19 +216,24 @@ live Core 上这四张表一张都没有（四条 lane 还没部署），2,098 �
 
 `PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`：
 
+合并 main `7708d43` 之后：
+
 ```
-Ran 2671 tests in 298.629s
+Ran 2897 tests in 266.768s
 
 OK (skipped=1)
 ```
 
-基线 main `61f4255` 是 2,627 项，本片 **+44**：
+main `7708d43` 是 2,843 项，本片 **+54**：
 
 | 文件 | 新增 |
 | --- | --- |
-| `tests/test_cockpit_wave1.py`（新） | 39 |
+| `tests/test_cockpit_wave1.py`（新） | 41 |
+| `tests/test_claim_index_lane.py::RegistrationTests` | 8 |
 | `tests/test_service.py::InstallerSeedTests` | 3 |
 | `tests/test_lane_child_launcher.py::OwnerOnlyWriteTests` | 2 |
+
+（合并之前，基线 main `61f4255` 的 2,627 项上是 `Ran 2671 tests ... OK (skipped=1)`，本片 +44。）
 
 `tests/test_cockpit_wave1.py` 覆盖的：老 Core 逐项退化为 `None`（含索引过滤器在无索引 Core 上的
 明确拒绝）、收盘价与盘中价、分位的 basis、模型只计数不打分、模型表走 lane 自己的渲染器、
@@ -232,6 +242,40 @@ OK (skipped=1)
 automation 被拒、五个 lane 状态词各自可分辨且批准之后回落、canonical-only 与三个过滤器、
 未标注的 Claim 显示且排在最后、三个新路由的查询串解析与 CSRF、页面确实说了那些词。
 
-改动过的既有测试两处，都在我的所有权内且原因写在旁边：
+改动过的既有测试，原因都写在旁边：
 `test_cockpit_plane` 的 lane key 断言改成「前四个不变、且注册表 lane 出现在后面」；
-`test_cockpit_figures` 的 helper 改调 `_base_lane_states`（那四行才是有预算的那四行）。
+`test_cockpit_figures` 的 helper 改调 `_base_lane_states`（那四行才是有预算的那四行）；
+`test_claim_index_lane` 的 `WriteScopeTests` 改成断言「只认自己的词」，`ChildHarness` 就地把
+`claim_index` 加进 `may_write`（并行计划第 4 节第 6 条说的就是这个做法）。
+
+---
+
+## 9. 合并 main `7708d43` 之后的两项 follow-up
+
+**(1) 注册 B 的 claim-index lane。** `mission_claim_index_lane.py` 末尾一个 `LaneSpec`，
+`lane_registry.LANE_MODULES` 一行，其它文件一个字没动——writer 的三张表、driver 的 tick 顺序、
+LaunchAgent 的 argv 全部由注册表推导出来（`RegistrationTests` 逐项断言）。
+
+| 字段 | 值 | 为什么 |
+| --- | --- | --- |
+| `operation` | `dispatch_claim_index` | |
+| `order` | **105** | 在研究计划（100）之后、初步筛选（110）之前。筛选是从 Claim 起草的，从**已索引**的集合起草正是让它不再把同一个季度的收入并列引三次的原因 |
+| `driver_key` | `claim_index` | |
+| `init_kwarg` | `claim_index_launcher` | |
+| `param_fields` | `frozenset()` | tick 不带参数；`--company-ref` 只有手跑 child 时才用。B 的报告建议 `{"company_ref"}`，但 `dispatch()` 会忽略它——一个 handler 丢掉的参数比没有这个参数更糟 |
+| 开关 | `state/claim-index-model-config.json` 存在 | 照 model spec lane：没装模型配置就整条 lane 不装，而不是装上以后每个 batch 都 `gated` |
+
+coordinator 建的构造签名照 B 的报告：`MissionClaimIndexLaneCoordinator(store=server.store,
+launcher=…, mission=…)`——是 store 不是 missions 权威，因为它要读的是 `claim_index_snapshot()`。
+lane 模块 import 期不碰任何注册表消费者，`test_lane_registry` 的两条隔离检查（读文件 + 新解释器实跑）
+都覆盖了新模块并通过。
+
+**(2) 删掉 `claim` 兜底。** 主 agent 把 `claim_index` 加进 `AUTOMATION_WRITE_SCOPES` 之后，
+`claim_index_cli` 里的 `FALLBACK_WRITE_SCOPES` 和它上面的 TODO 一起删了，`granted_scope` 现在
+**只查 `claim_index`**；两个词都没有时仍然 `held: not_authorized` 并且在花钱之前就停下（原有测试覆盖）。
+**副作用要知道**：live mission v13 只有 `claim`，所以在 owner 发出授予 `claim_index` 的新版本之前，
+这条 lane 每 tick 都会 held——这正是第 6 节第 3 条。
+
+**(3) 顺手：** 从 main 进来的四条 lane（Guidepoint 检索、sales note、公司维基、专项研究）加上
+claim-index，在驾驶舱的 lane 面板里都有了自己的中文名；新加一条测试断言「注册表里每条 lane 都有名字」，
+否则下一条新 lane 会在 owner 的页面上以 driver key 露面，而 ADR-0006 说这一页没有机器语言。
