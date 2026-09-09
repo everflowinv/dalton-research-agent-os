@@ -127,6 +127,34 @@ AUTOMATION_WRITE_SCOPES: tuple[str, ...] = (
     # connected library holds for a covered company) and the budgeted
     # acquisition of the documents they name.  Never Evidence or Claims.
     "source_discovery",
+    # P14-0 (blueprint line G): the words the analyst layers about to be built
+    # will need, added in one go so that a mission version can be published
+    # once rather than once per slice. No consumer exists for any of them yet
+    # and the live mission grants none; a scope in this tuple is a scope a
+    # mission *may* grant, not one it has.
+    #
+    # Market layer: a day's OHLCV / share count / market capitalisation from a
+    # priced source, the consensus a broker or a free analyst field reports,
+    # the derived multiples and their history, and the dated corporate events
+    # a price move has to be read against.
+    "market_price",
+    "consensus_estimate",
+    "valuation",
+    "market_event",
+    # Reading layer: the ten-section company dossier and the map of what the
+    # market disagrees about, both assembled from Claims rather than authored.
+    "dossier",
+    "debate_map",
+    # Evolution layer: automation may *propose* that a forecast line or a
+    # thesis should change, and may open a research task for itself. It may
+    # never accept any of them -- that is the human checkpoint below, and it
+    # is the whole point of separating the proposal from the decision.
+    "forecast_revision_proposal",
+    "thesis_revision_candidate",
+    "research_task",
+    # The five-word decision at the end of an Active Coverage event, recorded
+    # as its own object so a call can be looked up rather than inferred.
+    "conviction_call",
 )
 DISCOVERY_DISPATCH_STATUSES: tuple[str, ...] = ("launched", "succeeded", "failed", "rejected")
 # Sources a mission may run search-driven discovery against, and the Core
@@ -173,6 +201,15 @@ CHECKPOINT_KINDS: tuple[str, ...] = (
     "forecast_overturn",
     "scope_expansion",
     "budget_expansion",
+    # P14-0 (blueprint line G): the decisions the evolution layer will hand
+    # back. A thesis revision candidate and a conviction call are automation's
+    # proposals and a person's decisions (ADR-0007, proposed); reopening a
+    # gate a company has already passed is the one way a terminal
+    # ``gate_passed`` can move, and it is deliberately a human checkpoint
+    # rather than a rule. No consumer yet; words only.
+    "thesis_revision_candidate",
+    "conviction_call",
+    "gate_reopen",
 )
 # Checkpoints a mission can never drop, in addition to the playbook's
 # human-checkpoint stages.

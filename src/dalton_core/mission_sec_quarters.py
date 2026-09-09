@@ -29,6 +29,8 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from .lane_registry import LaneSpec, register_lane
+
 REQUIRED_QUARTERS = 4
 MAX_QUEUED_PER_RUN = 4
 # A 10-Q's quarterly row spans one quarter; the same filing also carries
@@ -359,12 +361,41 @@ class MissionSecQuartersCoordinator:
         return self.missions.mission(rows[0]["mission_version_id"])["autonomy"]["automation_principal"]
 
 
+def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Controller tick (P10d).
+
+    Queue the filings a company still needs for its four quarters, read out of
+    the company-facts artifact authority already holds; the SEC lane
+    dispatcher drains the queue.  The lane has no launcher of its own, so it
+    is never ``unconfigured``: with no mission it simply queues nothing.
+    """
+
+    return MissionSecQuartersCoordinator(
+        store=server.store,
+        missions=server.coverage_mission,
+        state_dir=server.state_dir,
+        checklist=server.lane_company_checklist(),
+    ).dispatch_once()
+
+
+LANE = register_lane(LaneSpec(
+    operation="dispatch_mission_sec_quarters",
+    order=70,
+    driver_key="mission_sec_quarters",
+    handler=dispatch,
+    note="P10d: the quarters a company still owes, from Core's own "
+         "company-facts artifact.",
+))
+
+
 __all__ = [
+    "LANE",
     "MAX_ATTEMPTS_PER_FILING",
     "MAX_QUEUED_PER_RUN",
     "RECENT_FILINGS",
     "MissionSecQuartersCoordinator",
     "REQUIRED_QUARTERS",
+    "dispatch",
     "quarterly_filings",
     "read_artifact",
 ]

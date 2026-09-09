@@ -17,9 +17,10 @@ import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from .child_tickets import adopt_finished_child
+from .lane_registry import LaneSpec, register_lane
 from .launch_drain import _pid_alive
 from .store import canonical_json
 
@@ -262,12 +263,90 @@ class InitialScreenCoordinator:
         return {**result, "status": "launched", "ticket_ref": ticket["id"]}
 
 
+# P13ad: the deliverable is written, not extracted, and may want its own
+# model. Omit it and the Initial Screen keeps being drafted with the
+# extraction model configuration, which is what it did before anyone chose.
+DELIVERABLE_MODEL_CONFIG = "initial-screen-model-config.json"
+LAUNCHER_KWARG = "initial_screen_launcher"
+
+
+def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Controller tick (P10c): one company's Initial Screen per tick."""
+
+    launcher = server.lane_launcher(LAUNCHER_KWARG)
+    if launcher is None:
+        return {"status": "unconfigured",
+                "reason": "no initial screen lane on this writer"}
+    coordinator = server.lane_state.get(LAUNCHER_KWARG)
+    if coordinator is None:
+        # The mission writes its own Initial Screen, one company per tick, out
+        # of process because each section is a model call.
+        coordinator = InitialScreenCoordinator(
+            store=server.store, launcher=launcher,
+        )
+        server.lane_state[LAUNCHER_KWARG] = coordinator
+    return coordinator.dispatch_once()
+
+
+def add_arguments(parser: Any) -> None:
+    parser.add_argument(
+        "--initial-screen-model-config", type=Path, default=None,
+        help="Deliverable drafting model configuration written by "
+             "deliverable_model_setup. Omit and the Initial Screen is drafted "
+             "with the extraction model configuration.",
+    )
+
+
+def build_launcher(args: Any) -> Any | None:
+    # The lane exists wherever the extraction configuration does: the screen
+    # has always been drafted with that model, and the deliverable's own model
+    # only replaces it when the owner installed one.
+    if args.document_extraction_model_config is None:
+        return None
+    return InitialScreenLauncher(
+        state_dir=Path(args.db).expanduser().resolve().parent,
+        model_config_path=(args.initial_screen_model_config
+                           or args.document_extraction_model_config),
+        scheduler_db=args.scheduler,
+    )
+
+
+def argv_fragment(context: Any) -> list[str]:
+    if context.extraction_model_config_path is None:
+        return []
+    config = context.state / DELIVERABLE_MODEL_CONFIG
+    if not config.is_file():
+        return []
+    return ["--initial-screen-model-config", str(config)]
+
+
+LANE = register_lane(LaneSpec(
+    operation="dispatch_initial_screen",
+    order=110,
+    driver_key="initial_screen",
+    handler=dispatch,
+    init_kwarg=LAUNCHER_KWARG,
+    argparse=add_arguments,
+    launcher_factory=build_launcher,
+    argv_fragment=argv_fragment,
+    note="P10c: the mission writes its own Initial Screen from the Claims the "
+         "Ledger holds, and the Playbook's gate decides whether it passes.",
+))
+
+
 __all__ = [
+    "DELIVERABLE_MODEL_CONFIG",
     "IDLE_HOLD",
+    "LANE",
+    "LAUNCHER_KWARG",
     "InitialScreenCoordinator",
     "InitialScreenLaunchConflict",
     "InitialScreenLaunchError",
     "InitialScreenLaunchRejected",
     "InitialScreenLauncher",
     "TICKET_PREFIX",
+    "add_arguments",
+    "argv_fragment",
+    "build_launcher",
+    "dispatch",
 ]
