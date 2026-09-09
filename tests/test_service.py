@@ -406,6 +406,23 @@ class ServiceTests(unittest.TestCase):
             # the owner installed one. Absent, the Initial Screen keeps being
             # drafted with the extraction configuration, as it always was.
             self.assertNotIn("--initial-screen-model-config", writer_args)
+            # P13ak: the statements lane turns on when its approved record is
+            # on disk and stays off otherwise -- a Core without one runs
+            # exactly as it did.
+            self.assertNotIn("--statement-lane-governance", writer_args)
+            governance = root / "state" / "connector-governance"
+            governance.mkdir(parents=True, exist_ok=True)
+            (governance / "sec-financial-statements-v2.json").write_text(
+                "{}", encoding="utf-8")
+            with_statements = plistlib.loads(Path(render(
+                root / "LaunchAgents", root / "venv" / "bin", root / "state",
+                config, root / "logs",
+            )["writer"]).read_bytes())["ProgramArguments"]
+            self.assertIn("--statement-lane-governance", with_statements)
+            self.assertIn(
+                str((governance / "sec-financial-statements-v2.json").resolve()),
+                with_statements,
+            )
             state_dir = root / "state"
             state_dir.mkdir(parents=True, exist_ok=True)
             raw = json.loads(config.read_text(encoding="utf-8"))

@@ -55,6 +55,15 @@ SEC_RUN_SUCCEEDED = "succeeded"
 # traceback cannot become the largest thing in the ledger.
 MAX_FAILURE_REASON_CHARS = 500
 
+# P13ak: bounds on one statements ingest. A 10-Q parses to a few hundred lines
+# across three statements; EPAM's came to 495. These are ceilings that refuse a
+# runaway parse, not expectations.
+MAX_STATEMENT_FILINGS = 8
+MAX_STATEMENT_LINES = 4000
+# How many times one company's statements run may be re-identified as a
+# fresh attempt. The dispatcher decides when to stop; this bounds the field.
+MAX_STATEMENT_ATTEMPTS = 3
+
 
 def sec_run_failure_reason(summary: Any) -> str | None:
     """Why a SEC lane run failed, from the summary it left behind.
@@ -3061,6 +3070,365 @@ class CoverageMissionAuthority:
             **dict(row), "status": "rejected", "failure_reason": reason,
             "updated_at": now, "authorization": json.loads(row["authorization_json"]),
             "status_marker": "fresh",
+        }
+
+    # -- statement ingest (P13ak) --------------------------------------------
+
+    def queue_statement_dispatch(
+        self, *, authorization: Mapping[str, Any], form: str = "10-Q",
+        filing_limit: int = 1, attempt: int = 0,
+    ) -> dict[str, Any]:
+        """Queue one financial-statements run for a company, idempotently.
+
+        The same company, form, depth and attempt is the same dispatch: asking
+        twice does not produce two children parsing the same filing.
+
+        ``attempt`` is what makes a retry possible at all. Without it the
+        identity is the request, so a dispatch rejected once -- by a governance
+        record that was not yet approved, say -- would be rejected forever, and
+        approving the record afterwards would change nothing. The caller passes
+        how many runs this company has already spent; the cap on those lives
+        with the dispatcher, which is what knows when a company has had enough.
+        """
+
+        authorization = dict(authorization)
+        exact = self.authorize_sec_lane(
+            company_ref=authorization.get("company_ref"),
+            ticker=authorization.get("ticker"),
+            actor_ref=authorization.get("actor_ref"),
+            mission_version_ref=authorization.get("mission_version_ref"),
+            mission_version_hash=authorization.get("mission_version_hash"),
+        )
+        if canonical_json(exact) != canonical_json(authorization):
+            raise CoverageMissionConflict("statement dispatch authorization drifted")
+        if form not in {"10-Q", "10-K"}:
+            raise CoverageMissionValidationError("statement dispatch form must be 10-Q or 10-K")
+        if type(filing_limit) is not int or not 1 <= filing_limit <= MAX_STATEMENT_FILINGS:
+            raise CoverageMissionValidationError(
+                f"statement dispatch limit must be 1..{MAX_STATEMENT_FILINGS}"
+            )
+        if type(attempt) is not int or not 0 <= attempt <= MAX_STATEMENT_ATTEMPTS:
+            raise CoverageMissionValidationError(
+                f"statement dispatch attempt must be 0..{MAX_STATEMENT_ATTEMPTS}"
+            )
+        request = {
+            "mission_version_ref": exact["mission_version_ref"],
+            "mission_version_hash": exact["mission_version_hash"],
+            "company_ref": exact["company_ref"], "ticker": exact["ticker"],
+            "actor_ref": exact["actor_ref"], "form": form,
+            "filing_limit": filing_limit, "attempt": attempt,
+        }
+        request_hash = content_hash(request)
+        dispatch_id = f"mission-statement-dispatch:{request_hash[:32]}"
+        existing = self.connection.execute(
+            "SELECT * FROM coverage_mission_statement_dispatches WHERE dispatch_id=?",
+            (dispatch_id,),
+        ).fetchone()
+        if existing is not None:
+            if existing["request_hash"] != request_hash:
+                raise CoverageMissionConflict("statement dispatch identity drifted")
+            return {**dict(existing),
+                    "authorization": json.loads(existing["authorization_json"]),
+                    "status_marker": "duplicate"}
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_statement_dispatches"
+                "(dispatch_id,mission_version_ref,mission_version_hash,company_ref,ticker,"
+                "actor_ref,form,filing_limit,attempt,authorization_json,request_hash,status,"
+                "ticket_ref,failure_reason,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,'pending',NULL,NULL,?,?)",
+                (
+                    dispatch_id, exact["mission_version_ref"], exact["mission_version_hash"],
+                    exact["company_ref"], exact["ticker"], exact["actor_ref"], form,
+                    filing_limit, attempt, canonical_json(exact), request_hash, now, now,
+                ),
+            )
+        return {
+            **request, "dispatch_id": dispatch_id, "authorization": exact,
+            "request_hash": request_hash, "status": "pending", "ticket_ref": None,
+            "created_at": now, "updated_at": now, "status_marker": "fresh",
+        }
+
+    def _statement_dispatch(self, dispatch_id: str) -> Any:
+        row = self.connection.execute(
+            "SELECT * FROM coverage_mission_statement_dispatches WHERE dispatch_id=?",
+            (_text(dispatch_id, "dispatch_id"),),
+        ).fetchone()
+        if row is None:
+            raise CoverageMissionNotFound("mission statement dispatch was not found")
+        return row
+
+    def pending_statement_dispatches(self, *, limit: int = 1) -> list[dict[str, Any]]:
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise CoverageMissionValidationError("statement dispatch limit must be 1..20")
+        rows = self.connection.execute(
+            "SELECT * FROM coverage_mission_statement_dispatches WHERE status='pending' "
+            "ORDER BY created_at,dispatch_id LIMIT ?", (limit,),
+        ).fetchall()
+        return [{**dict(row), "authorization": json.loads(row["authorization_json"])}
+                for row in rows]
+
+    def launched_statement_dispatches(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise CoverageMissionValidationError("statement dispatch limit must be 1..500")
+        rows = self.connection.execute(
+            "SELECT * FROM coverage_mission_statement_dispatches WHERE status='launched' "
+            "ORDER BY created_at,dispatch_id LIMIT ?", (limit,),
+        ).fetchall()
+        return [{**dict(row), "authorization": json.loads(row["authorization_json"])}
+                for row in rows]
+
+    def mark_statement_dispatch_launched(
+        self, dispatch_id: str, ticket_ref: str
+    ) -> dict[str, Any]:
+        ticket_ref = _text(ticket_ref, "ticket_ref")
+        row = self._statement_dispatch(dispatch_id)
+        if row["status"] == "launched":
+            if row["ticket_ref"] != ticket_ref:
+                raise CoverageMissionConflict("statement dispatch bound another ticket")
+            return {**dict(row), "status_marker": "duplicate"}
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "UPDATE coverage_mission_statement_dispatches SET status='launched',"
+                "ticket_ref=?,updated_at=? WHERE dispatch_id=? AND status='pending'",
+                (ticket_ref, now, row["dispatch_id"]),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("statement dispatch state changed concurrently")
+        return {**dict(row), "status": "launched", "ticket_ref": ticket_ref,
+                "updated_at": now, "status_marker": "fresh"}
+
+    def settle_statement_dispatch(
+        self, dispatch_id: str, *, outcome: str, failure_reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Close a launched dispatch as succeeded or failed.
+
+        Terminal success is a status here rather than a side journal, which is
+        what the SEC filing dispatches needed retrofitting for.
+        """
+
+        if outcome not in ("succeeded", "failed"):
+            raise CoverageMissionValidationError(
+                "statement dispatch outcome must be succeeded or failed"
+            )
+        row = self._statement_dispatch(dispatch_id)
+        if row["status"] in ("succeeded", "failed"):
+            if row["status"] != outcome:
+                raise CoverageMissionConflict("statement dispatch already settled otherwise")
+            return {**dict(row), "status_marker": "duplicate"}
+        if row["status"] != "launched":
+            raise CoverageMissionConflict("only a launched statement dispatch settles")
+        reason = (None if failure_reason is None
+                  else str(failure_reason)[:MAX_FAILURE_REASON_CHARS])
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "UPDATE coverage_mission_statement_dispatches SET status=?,failure_reason=?,"
+                "updated_at=? WHERE dispatch_id=? AND status='launched'",
+                (outcome, reason, now, row["dispatch_id"]),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("statement dispatch state changed concurrently")
+        return {**dict(row), "status": outcome, "failure_reason": reason,
+                "updated_at": now, "status_marker": "fresh"}
+
+    def reject_statement_dispatch(self, dispatch_id: str, reason: str) -> dict[str, Any]:
+        reason = _text(reason, "reason")
+        row = self._statement_dispatch(dispatch_id)
+        if row["status"] == "rejected":
+            if row["failure_reason"] != reason:
+                raise CoverageMissionConflict("statement dispatch has another rejection reason")
+            return {**dict(row), "status_marker": "duplicate"}
+        if row["status"] != "pending":
+            raise CoverageMissionConflict("only a pending statement dispatch is rejected")
+        now = _now()
+        with self._transaction() as cur:
+            cur.execute(
+                "UPDATE coverage_mission_statement_dispatches SET status='rejected',"
+                "failure_reason=?,updated_at=? WHERE dispatch_id=? AND status='pending'",
+                (reason[:MAX_FAILURE_REASON_CHARS], now, row["dispatch_id"]),
+            )
+            if cur.rowcount != 1:
+                raise CoverageMissionConflict("statement dispatch state changed concurrently")
+        return {**dict(row), "status": "rejected",
+                "failure_reason": reason[:MAX_FAILURE_REASON_CHARS],
+                "updated_at": now, "status_marker": "fresh"}
+
+    def record_statement_observation(
+        self, *, dispatch_id: str, observation: Mapping[str, Any],
+        governance_ref: str, governance_hash: str,
+    ) -> dict[str, Any]:
+        """Store one validated statements observation: its filings and lines.
+
+        The observation is what the child already validated against the frozen
+        output contract, so this checks identity and bounds rather than shape.
+        A filing already held for this company is left alone -- re-parsing the
+        same 10-Q is the same filing, not a second copy of its lines.
+        """
+
+        row = self._statement_dispatch(dispatch_id)
+        if row["status"] not in ("launched", "succeeded"):
+            raise CoverageMissionConflict(
+                "statements are recorded against a launched dispatch"
+            )
+        if not isinstance(observation, Mapping):
+            raise CoverageMissionValidationError("statement observation must be an object")
+        observation = dict(observation)
+        cik = _text(observation.get("cik"), "cik")
+        entity_name = _text(observation.get("entity_name"), "entity_name")
+        source_refs = _texts(observation.get("source_record_refs"),
+                             "source_record_refs", nonempty=True)
+        filings = observation.get("filings")
+        if not isinstance(filings, list) or not filings:
+            raise CoverageMissionValidationError("statement observation carries no filing")
+        if len(filings) > MAX_STATEMENT_FILINGS:
+            raise CoverageMissionValidationError(
+                f"statement observation exceeds {MAX_STATEMENT_FILINGS} filings"
+            )
+        company_ref = row["company_ref"]
+        governance_ref = _text(governance_ref, "governance_ref")
+        governance_hash = _sha256(governance_hash, "governance_hash")
+        now = _now()
+        recorded: list[dict[str, Any]] = []
+        for filing in filings:
+            if not isinstance(filing, Mapping):
+                raise CoverageMissionValidationError("statement filing must be an object")
+            accession = _text(filing.get("accession"), "accession")
+            if _ACCESSION_RE.fullmatch(accession) is None:
+                raise CoverageMissionValidationError("statement accession is invalid")
+            form = _vocabulary(filing.get("form"), ("10-Q", "10-K"), "form")
+            lines = filing.get("lines")
+            if not isinstance(lines, list):
+                raise CoverageMissionValidationError("statement filing carries no lines")
+            if len(lines) > MAX_STATEMENT_LINES:
+                raise CoverageMissionValidationError(
+                    f"statement filing exceeds {MAX_STATEMENT_LINES} lines"
+                )
+            held = self.connection.execute(
+                "SELECT * FROM coverage_mission_statement_filings "
+                "WHERE company_ref=? AND accession=?", (company_ref, accession),
+            ).fetchone()
+            if held is not None:
+                recorded.append({**dict(held), "status_marker": "duplicate"})
+                continue
+            identity = {
+                "company_ref": company_ref, "cik": cik, "accession": accession,
+                "form": form, "line_count": len(lines),
+            }
+            ingest_id = f"statement-ingest:{content_hash(identity)[:32]}"
+            body = {
+                **identity, "entity_name": entity_name,
+                "filed": _text(filing.get("filed"), "filed"),
+                "report_date": _text(filing.get("report_date"), "report_date"),
+                "source_record_refs": source_refs,
+                "governance_ref": governance_ref, "governance_hash": governance_hash,
+            }
+            line_hash = content_hash(body)
+            with self._transaction() as cur:
+                cur.execute(
+                    "INSERT INTO coverage_mission_statement_filings"
+                    "(ingest_id,dispatch_id,company_ref,cik,entity_name,accession,form,filed,"
+                    "report_date,line_count,source_record_refs_json,governance_ref,"
+                    "governance_hash,recorded_at,content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        ingest_id, row["dispatch_id"], company_ref, cik, entity_name,
+                        accession, form, body["filed"], body["report_date"], len(lines),
+                        canonical_json(source_refs), governance_ref, governance_hash,
+                        now, line_hash,
+                    ),
+                )
+                for ordinal, line in enumerate(lines):
+                    cur.execute(
+                        "INSERT INTO coverage_mission_statement_lines"
+                        "(line_id,ingest_id,statement,ordinal,concept,label,level,parent_concept,"
+                        "is_breakdown,dimension_axis,dimension_member,period_start,period_end,"
+                        "value,unit,balance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (
+                            f"{ingest_id}#{ordinal}", ingest_id,
+                            _vocabulary(line.get("statement"),
+                                        ("income", "balance", "cash"), "statement"),
+                            ordinal,
+                            _text(line.get("concept"), "concept"),
+                            _text(line.get("label"), "label"),
+                            _non_negative_int(line.get("level"), "level"),
+                            line.get("parent_concept"),
+                            1 if line.get("is_breakdown") else 0,
+                            line.get("dimension_axis"), line.get("dimension_member"),
+                            line.get("period_start"),
+                            _text(line.get("period_end"), "period_end"),
+                            None if line.get("value") is None else str(line["value"]),
+                            _text(line.get("unit"), "unit"),
+                            line.get("balance"),
+                        ),
+                    )
+            recorded.append({
+                **body, "ingest_id": ingest_id, "dispatch_id": row["dispatch_id"],
+                "recorded_at": now, "content_hash": line_hash, "status_marker": "fresh",
+            })
+        return {
+            "dispatch_id": row["dispatch_id"], "company_ref": company_ref,
+            "filings": recorded,
+            "line_count": sum(int(item["line_count"]) for item in recorded),
+        }
+
+    def statement_filings(self, company_ref: str | None = None) -> list[dict[str, Any]]:
+        if company_ref is None:
+            rows = self.connection.execute(
+                "SELECT * FROM coverage_mission_statement_filings "
+                "ORDER BY company_ref,report_date,accession"
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM coverage_mission_statement_filings WHERE company_ref=? "
+                "ORDER BY report_date,accession", (_text(company_ref, "company_ref"),),
+            ).fetchall()
+        return [{**dict(row),
+                 "source_record_refs": json.loads(row["source_record_refs_json"])}
+                for row in rows]
+
+    def statement_lines(
+        self, ingest_id: str, *, statement: str | None = None
+    ) -> list[dict[str, Any]]:
+        ingest_id = _text(ingest_id, "ingest_id")
+        if statement is None:
+            rows = self.connection.execute(
+                "SELECT * FROM coverage_mission_statement_lines WHERE ingest_id=? "
+                "ORDER BY ordinal", (ingest_id,),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT * FROM coverage_mission_statement_lines "
+                "WHERE ingest_id=? AND statement=? ORDER BY ordinal",
+                (ingest_id, _vocabulary(statement, ("income", "balance", "cash"),
+                                        "statement")),
+            ).fetchall()
+        return [{**dict(row), "is_breakdown": bool(row["is_breakdown"])} for row in rows]
+
+    def statement_coverage(self, company_ref: str) -> dict[str, Any]:
+        """What statements this company already has, for the dispatcher to skip.
+
+        Also counts the dispatches still in flight: a company with one running
+        does not need a second, and this is what stops the queue from growing
+        faster than one child at a time can drain it.
+        """
+
+        company_ref = _text(company_ref, "company_ref")
+        held = self.statement_filings(company_ref)
+        open_rows = self.connection.execute(
+            "SELECT status,COUNT(*) AS n FROM coverage_mission_statement_dispatches "
+            "WHERE company_ref=? GROUP BY status", (company_ref,),
+        ).fetchall()
+        by_status = {str(row["status"]): int(row["n"]) for row in open_rows}
+        return {
+            "company_ref": company_ref,
+            "accessions": [item["accession"] for item in held],
+            "forms": sorted({item["form"] for item in held}),
+            "latest_report_date": max((item["report_date"] for item in held), default=None),
+            "line_count": sum(int(item["line_count"]) for item in held),
+            "dispatches": by_status,
+            "open_dispatches": by_status.get("pending", 0) + by_status.get("launched", 0),
         }
 
     # -- stage records -------------------------------------------------------

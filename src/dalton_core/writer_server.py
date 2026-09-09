@@ -413,7 +413,7 @@ CORE_DISCOVERY_OPERATIONS = frozenset({
     "dispatch_mission_stage", "mission_stage_checklist",
     "dispatch_claim_review", "dispatch_initial_screen", "dispatch_research_plan",
     "mission_deliverables",
-    "dispatch_mission_sec_quarters",
+    "dispatch_mission_sec_quarters", "dispatch_mission_statements",
 })
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
     "get_weekly_brief_issue", "render_weekly_brief_markdown",
@@ -517,7 +517,7 @@ CORE_OPERATIONS = frozenset({
     "dispatch_mission_stage", "mission_stage_checklist",
     "dispatch_claim_review", "claim_retirement_challenges",
     "dispatch_initial_screen", "dispatch_research_plan", "mission_deliverables",
-    "dispatch_mission_sec_quarters",
+    "dispatch_mission_sec_quarters", "dispatch_mission_statements",
     "mission_document_reviews",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
@@ -679,6 +679,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "dispatch_initial_screen": frozenset(),
     "dispatch_research_plan": frozenset(),
     "dispatch_mission_sec_quarters": frozenset(),
+    "dispatch_mission_statements": frozenset(),
     "mission_deliverables": frozenset({"mission_version_ref", "kind", "subject_ref"}),
     "claim_retirement_challenges": frozenset({"open_only", "limit"}),
     "decide_claim_retirement": frozenset({
@@ -1024,6 +1025,7 @@ class WriterServer:
         acquisition_launcher: AlphaEngineAcquisitionLauncher | None = None,
         candidate_staging_path: str | Path | None = None,
         sec_lane_launcher: SecLaneLauncher | None = None,
+        statement_lane_launcher: Any | None = None,
         planner_model_config: Mapping[str, Any] | None = None,
         document_extraction_model_config: Mapping[str, Any] | None = None,
         search_launcher: AlphaEngineSearchLauncher | None = None,
@@ -1120,6 +1122,7 @@ class WriterServer:
         self._document_extraction_coordinator: DocumentExtractionCoordinator | None = None
         # S7d: out-of-process SEC company-facts lane runs (human-only ops).
         self._sec_lane_launcher = sec_lane_launcher
+        self._statement_lane_launcher = statement_lane_launcher
         # The same owner-only CandidateStaging file the Cockpit review plane
         # opens as ``research_review.candidate_staging_path``; the writer
         # stages transcript candidates into it and reads status back from it.
@@ -1597,6 +1600,8 @@ class WriterServer:
             self._document_extraction_launcher.close()
         if self._sec_lane_launcher is not None:
             self._sec_lane_launcher.close()
+        if self._statement_lane_launcher is not None:
+            self._statement_lane_launcher.close()
         if self._candidate_review is not None:
             self._candidate_review.close()
             self._candidate_review = None
@@ -2626,6 +2631,27 @@ class WriterServer:
             checklist=checklist,
         ).dispatch_once()
 
+    def _op_dispatch_mission_statements(self, p: Mapping[str, Any]) -> Any:
+        # Controller tick (P13ak). One financial-statements child at a time:
+        # queue the companies the checklist covers, launch one, and record a
+        # finished child's lines into the ledger.
+        if self._statement_lane_launcher is None:
+            return {"status": "unconfigured",
+                    "reason": "no statements lane on this writer"}
+        from .mission_statement_lane import MissionStatementLaneCoordinator
+
+        driver = self._mission_stage_driver()
+
+        def checklist() -> list[Any]:
+            missions = driver.evaluate()["missions"]
+            return missions[0]["companies"] if missions else []
+
+        return MissionStatementLaneCoordinator(
+            missions=self.coverage_mission,
+            launcher=self._statement_lane_launcher,
+            checklist=checklist,
+        ).dispatch_once()
+
     def _op_dispatch_initial_screen(self, p: Mapping[str, Any]) -> Any:
         # Controller tick (P10c).  One company's Initial Screen per tick.
         if self._initial_screen_coordinator is None:
@@ -3649,6 +3675,17 @@ def main(argv: list[str] | None = None) -> int:
         "--sec-lane-rehearsal-approved-by",
         help="rehearsal only: in-memory approved SEC governance principal (tests)",
     )
+    # P13ak: the financial-statements lane. Off unless an approved governance
+    # record is named, like every other connector on this writer.
+    parser.add_argument(
+        "--statement-lane-governance",
+        help="approved sec-financial-statements governance record",
+    )
+    parser.add_argument(
+        "--statement-lane-fixture",
+        help="rehearsal only: replay a captured parse instead of reaching SEC",
+    )
+    parser.add_argument("--statement-lane-user-agent", default=None)
     args = parser.parse_args(argv)
     try:
         principals = load_principals(args.token_config)
@@ -3675,6 +3712,20 @@ def main(argv: list[str] | None = None) -> int:
                 staging_path=args.candidate_staging,
                 mode_args=lane_mode_args,
                 user_agent=args.sec_lane_user_agent,
+            )
+        statement_lane_launcher = None
+        if args.statement_lane_governance is not None:
+            from .sec_financials_launcher import SecFinancialsLauncher
+
+            statement_mode_args = (
+                ("--fixture-file", args.statement_lane_fixture)
+                if args.statement_lane_fixture is not None else ("--allow-network",)
+            )
+            statement_lane_launcher = SecFinancialsLauncher(
+                state_dir=Path(args.db).expanduser().resolve().parent,
+                governance_path=args.statement_lane_governance,
+                mode_args=statement_mode_args,
+                user_agent=args.statement_lane_user_agent,
             )
         if args.connector_governance is not None:
             if args.acquisition_rehearsal_document is not None:
@@ -3838,6 +3889,7 @@ def main(argv: list[str] | None = None) -> int:
             acquisition_launcher=launcher,
             candidate_staging_path=args.candidate_staging,
             sec_lane_launcher=sec_lane_launcher,
+            statement_lane_launcher=statement_lane_launcher,
             planner_model_config=planner_model_config,
             document_extraction_model_config=(None if args.document_extraction_model_config is None
                 else json.loads(Path(args.document_extraction_model_config).read_text(encoding="utf-8"))),

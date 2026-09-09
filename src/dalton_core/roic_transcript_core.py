@@ -9,6 +9,18 @@ one source being busy stopped a company.
 So this is the same requirement served a second way. Public web, no credential:
 a transcript is a page on roic.ai.
 
+**That last sentence is wrong, and nothing here runs.** Probed 2026-09-09,
+every path on ``www.roic.ai`` -- a quote page, a transcript page, the JSON
+endpoints, and ``robots.txt`` itself -- answers 403 with a Cloudflare bot
+challenge. The identity and the two approved governance records below are
+correct as far as they go, but no launcher was written and no lane dispatches
+them, because a credential-free HTTPS client cannot read this source. Getting
+past that gate would mean defeating a bot check the site put there
+deliberately, which is not a thing to build; and with ``robots.txt``
+unreadable, the site's own crawl policy cannot even be consulted. Whether to
+withdraw the approvals or route this through a scraping service is the owner's
+call, not a gap to route around.
+
 Two operations, two capabilities, two approvals -- ``list_transcripts`` says
 what exists, ``get_transcript`` reads one. Same split as AlphaEngine (P9d-1),
 SEC (P10e) and Guidepoint (P13ae), for the same reason: a schema hash binds one

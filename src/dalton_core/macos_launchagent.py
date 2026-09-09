@@ -16,6 +16,12 @@ WRITER_LABEL = "space.lumos.dalton.writer"
 # Operator-visible SEC User-Agent for lane runs (SEC fair-access policy asks
 # for a contact string; no credentials are involved).
 SEC_LANE_USER_AGENT = "Dalton Research Agent OS SEC company-facts lane (owner: lumos)"
+# P13ak: SEC asks a client to say who it is and what it is doing. The
+# statements lane is a different lane hitting different endpoints, so it
+# says so rather than borrowing the facts lane's name.
+STATEMENT_LANE_USER_AGENT = (
+    "Dalton Research Agent OS SEC financial-statements lane (owner: lumos)"
+)
 CONTROLLER_LABEL = "space.lumos.dalton.controller"
 CONTROL_LABEL = "space.lumos.dalton.control"
 THESIS_IMPACT_LABEL = "space.lumos.dalton.thesis-impact"
@@ -66,6 +72,12 @@ def render(
     # staging and those ops answer ``rejected``.
     candidate_staging_path: str | None = None
     extraction_config_path: str | None = None
+    # P13ak: the approved statements record, if this Core has one. Named by
+    # version rather than discovered, so a future v3 is a deliberate edit here
+    # and not something the writer picks up because a file appeared.
+    statement_governance = (
+        state / "connector-governance" / "sec-financial-statements-v2.json"
+    )
     if (
         service_config is not None
         and service_config.control is not None
@@ -185,6 +197,16 @@ def render(
                 "--sec-lane-user-agent", SEC_LANE_USER_AGENT,
             ]
             if candidate_staging_path is not None else []
+        ) + (
+            # P13ak: the statements lane. Independent of the staging file above
+            # -- it writes into the mission ledger, not the Cockpit inbox -- so
+            # it is enabled by its own approved record being present, and stays
+            # off on a Core that does not have one.
+            [
+                "--statement-lane-governance", str(statement_governance),
+                "--statement-lane-user-agent", STATEMENT_LANE_USER_AGENT,
+            ]
+            if statement_governance.is_file() else []
         ) + (
             # P8c-4c: the bounded planner's model call runs inside the writer
             # (it accounts into this Core); derive its broker wiring from the

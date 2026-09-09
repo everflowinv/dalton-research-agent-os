@@ -278,6 +278,14 @@ class BoundedPlannerDriver:
             sec_quarters = self.client.call("dispatch_mission_sec_quarters", {})
         except Exception as exc:
             sec_quarters = {"status": f"unavailable:{type(exc).__name__}"}
+        # P13ak: the statements lane -- one company's quarterly income,
+        # balance and cash statements as filed, structure and all. It is the
+        # substrate a model is built on, which the concept-at-a-time facts lane
+        # above cannot supply.
+        try:
+            mission_statements = self.client.call("dispatch_mission_statements", {})
+        except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
+            mission_statements = {"status": f"unavailable:{type(exc).__name__}"}
         try:
             research_plan = self.client.call("dispatch_research_plan", {})
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
@@ -475,6 +483,7 @@ class BoundedPlannerDriver:
             "initial_screen": initial_screen,
             "research_plan": research_plan,
             "mission_sec_quarters": sec_quarters,
+            "mission_statements": mission_statements,
         }
 
 
