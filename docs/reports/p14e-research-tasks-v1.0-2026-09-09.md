@@ -1,7 +1,7 @@
 # P14e 专项研究派发：inquiry 变成有预算的 BoundedPlannerLoop
 
-日期：2026-09-09
-分支：`p14e-adhoc-research`（基线 main `bd7021f`）
+日期：2026-09-09（v1.1：过 review，已合 main `e6c87b9`）
+分支：`p14e-adhoc-research`
 状态：代码完成，全量测试通过；**live 未启用**，需要 owner 三步（见 §4）
 
 ---
@@ -44,6 +44,10 @@ inquiry** 的 `BoundedPlannerLoop`。派发它的是已经存在的 `bounded_pla
 | `tests/test_research_task.py`、`tests/test_mission_research_task_lane.py` | 33 项 |
 
 **共享文件的改动（全部是加法）**
+
+- `bounded_planner_driver.py`（review 时解禁，只做两处最小改动，见 §9）：探针执行包 try、
+  materialize 失败按「pending_round」如实报、无轮次的 loop 不问付费模型、
+  `DEFAULT_PLANNER_MAX_COST_USD` 命名一次。
 
 - `bounded_planner_loop.py`：新增 `INQUIRY_ADMISSION_SOURCE`、`_validate_admission`、
   `create_loop(admission=...)`、`loop_for_admission()`、`admitted_loops()`。
@@ -89,16 +93,28 @@ live 特有的前置条件：
    `industry:us-it-services` 与 ACN，而最新计划的三条 inquiry 全是 EPAM / IBM / CTSH，
    现在一条都进不来（§7）。缺它 → 每条 `out_of_mandate_scope`。
 
-另外要装 lane：在 state 目录放 `research-task-lane.json`（`{"max_admissions_per_tick": 1}`），
+这三步之外**不需要别的**：ProbeTemplate 发布本身就是「policy version enables it」那一腿
+（人签、版本化、append-only、可按上文三条路撤销），没有第四个开关。
+
+另外要装 lane：在 state 目录放 `research-task-lane.json`
+（`{"max_admissions_per_tick": 1, "retired_templates": []}`），
 `argv_fragment` 才会给 writer 加 `--research-task-lane`。没有这个文件，lane 整个不存在，
 LaunchAgent 的 argv 一字不变（`test_service` 的断言因此不受影响）。
 
-**三个模板里今天只有一个能跑。** `bounded_probe_executor` 只执行 `get_company_facts`，
-`bounded_alphaengine_probe` 只执行 `alphaengine_get_document`；driver 的探针执行**不在
-try 里**，绑一个没人能执行的模板会把整个 controller tick 掀掉。所以
-`bindable_templates()` 只放行 operation 在 `executable_probe_operations()` 里的模板：
-SEC filings index（`get_company_facts`）今天可用，web-search 与 AlphaEngine `search_library`
-是「已入目录、等执行器」。这是本切片最重要的一条安全边界。
+**三个模板里今天只有一个能跑。** `bounded_probe_executor` 只执行
+`(get_company_facts, public_sec_read)`，`bounded_alphaengine_probe` 只执行
+`(alphaengine_get_document, alphaengine_read)`。`bindable_templates()` 按
+**`(operation, permission_scope)` 对**放行（两个执行器都是**先**校验 scope，而
+`permission_scope` 是模板里的自由文本，只比 operation 会让一个把 `public_sec_read` 写成
+`public-sec-read` 的重发版本通过准入、然后在执行处被拒）。SEC filings index 今天可用，
+web-search 与 AlphaEngine `search_library` 是「已入目录、等执行器」。
+
+**撤销**（review S4）：Core 的模板版本是 append-only、没有 status 列，所以撤销有三条路，
+owner 三条都需要——(a) 用一个执行器不接受的 `(operation, permission_scope)` 对重发该模板，
+这是权威层的撤销；(b) 目录层：`ADHOC_PROBE_TEMPLATES` 与部署清单里把 `status` 改成
+`retired`，对所有部署生效；(c) 本机层：`research-task-lane.json` 的 `retired_templates`
+列出模板 ref，今晚就能生效、不用发版。三条任意一条命中，该模板即不可绑；全部模板都不可绑
+时授权自动回到 `no_executable_adhoc_template_published`。
 
 ## 5. 三个 ProbeTemplate
 
@@ -108,18 +124,25 @@ SEC filings index（`get_company_facts`）今天可用，web-search 与 AlphaEng
 | `probe-template:adhoc-alphaengine-search-library:v1` | `alphaengine_search_library` | `alphaengine_read` | `127.0.0.1` | 2 / 1 / 120 | ❌ 等执行器 |
 | `probe-template:adhoc-web-search:v1` | `public_web_search` | `public_web_read` | `*` | 1 / 2 / 60 | ❌ 等执行器 |
 
+每个模板另带 `status`（`active` / `retired`）。
+
 `allowed_hosts` 与 `cost_estimate_usd` 只在清单里（Core 的模板记录是闭合形状，host 白名单由
 执行探针的 transport 强制），清单与 `research_task.ADHOC_PROBE_TEMPLATES` 由测试钉死不许漂。
 
 ## 6. 测试
 
 ```
-Ran 2113 tests in 254.477s
+Ran 2674 tests in 367.366s
 
 OK (skipped=1)
 ```
 
-（基线 2,080 + 本切片 33。命令：`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`）
+（合 main `e6c87b9` 之后：基线 2,627 + 本切片 47。命令：
+`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`）
+
+合并时 `tests/test_lane_registry.py` 取 main 那一侧：那四处字面量在 main 上已改成**包含**
+断言（「P14-0 之前写死过的 lane 仍在」），P14-0 之后新增的 lane 不该出现在那里，
+`dispatch_research_task` 因此从三处集合里撤出，改由本切片自己的测试钉。
 
 覆盖到的每条要求：三条 inquiry 的计划里一条准入、一条同哈希被拒（`already_admitted`）、
 一条出宇宙被拒（`out_of_universe`）；宇宙内但 mandate 外单独一条（`out_of_mandate_scope`）；
@@ -130,6 +153,15 @@ OK (skipped=1)
 cockpit flag 在解析器缺席/抛错时都是否）；人工 loop 仍需 `human:`、且 identity 不变；
 lane 的 launched / busy / held / 一小时后解除 / 失败后 hold / not_granted / 结算；
 LaneSpec 注册与「没有配置就没有这条 lane」。
+
+review 之后补的：scope 写错的重发模板不可绑（B1）；执行契约就是两个执行器各自的那一对；
+模板三条撤销路径各一例，其中 lane 配置撤销会让 lane 在 spawn 之前就停（S4）；
+换行重排的同一问题哈希相同、真改了文本哈希不同（S1）；entry 自带 `ordinal`、
+第一条被拒时子进程仍准入正确的那一条（S2）；`limit` 之外的条目报
+`deferred_to_a_later_tick` 而不是 `pool_exhausted`；已准入的任务可以用 `prior_version_ref`
+升到 v2 而不变成新任务（S3）；driver 的四项（pending_round 不付费、doctrine 故障仍报
+doctrine 故障、没轮次不问付费模型但仍跑免费规划器、单价只写一处）；被执行器拒绝的探针变成
+一轮 `source_unavailable` 且下一轮能继续（B2）。
 
 ## 7. 冒烟（只读，无模型调用）
 
@@ -145,7 +177,26 @@ LaneSpec 注册与「没有配置就没有这条 lane」。
   `max_rounds 2 / max_cost_units 2 / max_seconds 240`，预留 **$1.00** 一条，合计 $3.00，
   占当日池的 12%。
 
-## 8. 开放问题
+## 8. review 之后改了什么（B1 / B2 / S1–S4）
+
+| 编号 | 改动 |
+| --- | --- |
+| B1 | 可绑判定从 operation 改成 `(operation, permission_scope)` 对，从两个执行器模块读 |
+| B2(a) | materialize 失败时区分「round 还挂着」与「doctrine 坏了」；**付费模型调用之前**就知道 loop 的状态；`remaining_budget.rounds_remaining < 1` 的 loop 不问付费模型，但仍跑免费的确定性规划器，好让它能走到终态 |
+| B2(b) | 探针执行包 try：执行器拒绝（scope / operation 不符）不再从 `run_once` 抛出去，而是记一轮 `status: failed` 的 ResultEnvelope → `source_unavailable` outcome。**「loop 永远 pending」这个状态被关掉了**——它原本会让此后每个 tick 都 materialize 失败，而且 summary 里看不出来 |
+| B2(c) | `DEFAULT_PLANNER_MAX_COST_USD` 在 driver 里命名一次，`research_task.default_planner_cost_usd()` 读它，单价不再有第二份 |
+| S1 | inquiry 哈希前 `" ".join(v.split())`：模型换行方式变了不算新问题 |
+| S2 | entry 带 `ordinal`，子进程按 ordinal 取 inquiry（`zip` 在有条目被拒时会错位） |
+| S3 | `prior_version_ref` 指向该哈希的 head 时跳过去重，inquiry loop 可以升版（ADR-0008 的 revise 入口）；`loop_for_admission` 返回 head 而不是首版 |
+| S4 | 模板撤销三条路（见 §4） |
+| nits | `authority.coverage_manifest()` 公开读法取代 `_one`；失败 hold 从**看见失败**的时刻起算而不是从启动起算；`plan_admissions(limit=...)` 只为本轮真会准入的条目扣池 |
+
+**仍然欠着的**：按池归集的**结算**（C2）。loop 的模型提议走 `llm_planner_execute`，那笔钱记在
+mission 级绑定上，不是 `adhoc` 池；池今天是准入闸门，不是结算口径。但「卡住的 loop 每个
+tick 都要计费」这个具体故障已经关掉了：pending 的 loop 不再被问付费问题，而且它根本不会再
+卡住。
+
+## 9. 开放问题
 
 1. **`answer_routing._route_budget` 的硬禁用没有解除。** 那里写着
    「ad-hoc research must remain disabled in S5 v0.2」，且
@@ -161,13 +212,13 @@ LaneSpec 注册与「没有配置就没有这条 lane」。
    `ThesisImpactBudgetStore.admit` 目前只按 `mission_ref` 分组，没有 pool 维度——C2 应该给
    `mission_binding` 加一个 `pool` 字段（或允许 pool 限定的 scope key），这样**实际结算**的
    钱也能按池归集，而不只是准入时的预留。未用份额只允许 `coverage` 借用那条，需要在同一处实现。
-3. **另外两个模板的执行器。** web-search 与 AlphaEngine `search_library` 已入目录但不可绑。
-   要让它们可用，`bounded_probe_executor` 需要按 `metadata.operation` 分派（并把 driver 里
-   那段执行放进 try），或由 writer 侧新增两个 `bounded_*_probe` 操作。这需要碰
-   `bounded_planner_driver.py` / `writer_server.py`，本切片被禁止触碰，故留给集成。
+3. **另外两个模板的执行器还没有。** web-search 与 AlphaEngine `search_library` 已入目录但不可绑。
+   要让它们可用，需在 `bounded_probe_executor` 按 `metadata.operation` 分派，或在 writer 侧
+   新增两个 `bounded_*_probe` 操作（`writer_server.py` 本切片仍禁止触碰）。B2 之后这是
+   「功能缺」而不再是「掀 tick 的安全隐患」。
 4. **一条任务的模型开销现在计在 planner 账上。** loop 的模型提议走
    `llm_planner_execute`（writer 操作），它用的是 mission 级绑定，不是 `adhoc` 池。所以池
-   目前是**准入时的预留闸门**，而不是结算口径；口径统一依赖开放问题②。
+   目前是**准入时的预留闸门**，而不是结算口径；口径统一依赖开放问题 2。
 5. **cockpit 接线。** `AgendaControlPlane(research_task_grant=...)` 的解析器需要一个能读 Core
    的入口；`writer_server.py` 与 cockpit 两个文件本切片禁止触碰，建议集成时加一个只读操作
    （返回 `research_task.read_grant(store)` 的 `granted` 与 `reasons`）并注入。缺省仍是「否」。
