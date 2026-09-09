@@ -438,13 +438,17 @@ class RegistrationTests(unittest.TestCase):
     def test_it_runs_between_the_statements_and_the_model_specification(self):
         from dalton_core.lane_registry import registered_lanes
 
+        # Between, not adjacent to: P14a's tracking lane sits at 87 because an
+        # abnormal move is read off the bars this lane has just published, and
+        # asserting immediate succession would make every later lane insertion
+        # a failure here rather than in its own tests.
         order = [spec.operation for spec in registered_lanes()]
-        self.assertEqual(
-            order[order.index("dispatch_mission_statements") + 1],
-            "dispatch_mission_market_prices")
-        self.assertEqual(
-            order[order.index("dispatch_mission_market_prices") + 1],
-            "dispatch_company_model_spec")
+        self.assertLess(
+            order.index("dispatch_mission_statements"),
+            order.index("dispatch_mission_market_prices"))
+        self.assertLess(
+            order.index("dispatch_mission_market_prices"),
+            order.index("dispatch_company_model_spec"))
 
     def test_without_an_approval_there_is_no_launcher_and_no_argv(self):
         import argparse
