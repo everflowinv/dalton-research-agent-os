@@ -96,7 +96,8 @@ def _read_current(connection: sqlite3.Connection) -> dict[str, Any]:
 
 def build_chain(current: dict[str, Any], *, now: str, add_rules: list[str] | None = None,
                 max_daily_paid_calls: int | None = None,
-                max_alphaengine_calls_24h: int | None = None) -> dict[str, Any]:
+                max_alphaengine_calls_24h: int | None = None,
+                max_daily_cost_usd: float | None = None) -> dict[str, Any]:
     mission = current["mission"]
     budget = dict(mission["budget"])
     if max_alphaengine_calls_24h is not None:
@@ -106,6 +107,12 @@ def build_chain(current: dict[str, Any], *, now: str, add_rules: list[str] | Non
         if not 1 <= max_alphaengine_calls_24h <= 10000:
             raise SystemExit("--max-alphaengine-calls-24h must be 1..10000")
         budget["max_alphaengine_calls_24h"] = int(max_alphaengine_calls_24h)
+    if max_daily_cost_usd is not None:
+        # The cost cap the whole day is measured against. Raising it is the
+        # owner's decision and nothing else in the cascade can exceed it.
+        if not 0 < float(max_daily_cost_usd) <= 1000:
+            raise SystemExit("--max-daily-cost-usd must be 0 < n <= 1000")
+        budget["max_daily_cost_usd"] = float(max_daily_cost_usd)
     if max_daily_paid_calls is not None:
         if not 1 <= max_daily_paid_calls <= 100000:
             raise SystemExit("--max-daily-paid-calls must be 1..100000")
@@ -147,7 +154,7 @@ def build_chain(current: dict[str, Any], *, now: str, add_rules: list[str] | Non
             "effective_until": None, "prior_version_ref": current["policy_id"],
             "change_reason": (
                 CHANGE_REASON if not add_rules and max_daily_paid_calls is None
-            and max_alphaengine_calls_24h is None else
+            and max_alphaengine_calls_24h is None and max_daily_cost_usd is None else
                 "ADR-0005 / P9d-17b: " + "; ".join(filter(None, [
                     "list the mission document qualitative rule so policy may admit automation-drafted "
                     "qualitative Claims bound to exact raw spans" if add_rules else None,
@@ -155,6 +162,8 @@ def build_chain(current: dict[str, Any], *, now: str, add_rules: list[str] | Non
                     if max_daily_paid_calls is not None else None,
                     f"owner raised max_alphaengine_calls_24h to {max_alphaengine_calls_24h}"
                     if max_alphaengine_calls_24h is not None else None,
+                    f"owner raised max_daily_cost_usd to {max_daily_cost_usd}"
+                    if max_daily_cost_usd is not None else None,
                 ])) + "; every other rule unchanged"),
             "content_hash_value": None,
         },
@@ -264,7 +273,8 @@ def _ref_hash(record: dict[str, Any], expected_ref: str) -> tuple[str, str]:
 
 def rehearse(state_dir: Path, target: Path, *, add_rules: list[str] | None = None,
              max_daily_paid_calls: int | None = None,
-             max_alphaengine_calls_24h: int | None = None) -> dict[str, Any]:
+             max_alphaengine_calls_24h: int | None = None,
+             max_daily_cost_usd: float | None = None) -> dict[str, Any]:
     target.mkdir(parents=True, exist_ok=True)
     for name in ("core.sqlite", "core.sqlite-wal", "core.sqlite-shm"):
         source = state_dir / name
@@ -275,6 +285,7 @@ def rehearse(state_dir: Path, target: Path, *, add_rules: list[str] | None = Non
         current = _read_current(store.connection)
         chain = build_chain(current, now=datetime.now(timezone.utc).isoformat(timespec="microseconds"),
                             add_rules=add_rules, max_daily_paid_calls=max_daily_paid_calls,
+                            max_daily_cost_usd=max_daily_cost_usd,
                             max_alphaengine_calls_24h=max_alphaengine_calls_24h)
         agenda = AgendaStore(store)
         constitutions = ResearchConstitutionAuthority(store)
@@ -401,6 +412,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-alphaengine-calls-24h", type=int, default=None,
                         help="owner decision: raise the mission's combined AlphaEngine 24h call "
                              "cap (search_library and get_document share this one window)")
+    parser.add_argument("--max-daily-cost-usd", type=float, default=None,
+                        help="owner decision: raise the mission's daily model-spend cap in USD. "
+                             "The thesis-impact day policy is a separate ceiling above this one; "
+                             "raise it with scripts/raise_day_budget_cap.py")
     parser.add_argument("--add-write-scope", action="append", default=[],
                         help="grant this automation write scope in a new mission version (P10b); "
                              "publishes the mission alone, no policy cascade")
@@ -414,10 +429,12 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=1))
         return 0
     result = (rehearse(args.state_dir, args.rehearse, add_rules=rules, max_daily_paid_calls=args.max_daily_paid_calls,
-            max_alphaengine_calls_24h=args.max_alphaengine_calls_24h)
+            max_alphaengine_calls_24h=args.max_alphaengine_calls_24h,
+        max_daily_cost_usd=args.max_daily_cost_usd)
               if args.rehearse is not None
               else live(args.state_dir, add_rules=rules, max_daily_paid_calls=args.max_daily_paid_calls,
-            max_alphaengine_calls_24h=args.max_alphaengine_calls_24h))
+            max_alphaengine_calls_24h=args.max_alphaengine_calls_24h,
+        max_daily_cost_usd=args.max_daily_cost_usd))
     print(json.dumps(result, ensure_ascii=False, sort_keys=True, indent=1))
     return 0
 

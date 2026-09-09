@@ -279,6 +279,10 @@ class BoundedPlannerDriver:
         except Exception as exc:
             sec_quarters = {"status": f"unavailable:{type(exc).__name__}"}
         try:
+            research_plan = self.client.call("dispatch_research_plan", {})
+        except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
+            research_plan = {"status": f"unavailable:{type(exc).__name__}"}
+        try:
             initial_screen = self.client.call("dispatch_initial_screen", {})
         except Exception as exc:
             initial_screen = {"status": f"unavailable:{type(exc).__name__}"}
@@ -469,6 +473,7 @@ class BoundedPlannerDriver:
             "mission_stage": mission_stage,
             "claim_review": claim_review,
             "initial_screen": initial_screen,
+            "research_plan": research_plan,
             "mission_sec_quarters": sec_quarters,
         }
 

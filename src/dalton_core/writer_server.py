@@ -409,7 +409,8 @@ CORE_DISCOVERY_OPERATIONS = frozenset({
     "mission_source_discoveries", "mission_discovered_documents",
     "dispatch_document_extraction",
     "dispatch_mission_stage", "mission_stage_checklist",
-    "dispatch_claim_review", "dispatch_initial_screen", "mission_deliverables",
+    "dispatch_claim_review", "dispatch_initial_screen", "dispatch_research_plan",
+    "mission_deliverables",
     "dispatch_mission_sec_quarters",
 })
 WEEKLY_BRIEF_READ_OPERATIONS = frozenset({
@@ -513,7 +514,7 @@ CORE_OPERATIONS = frozenset({
     "dispatch_document_extraction",
     "dispatch_mission_stage", "mission_stage_checklist",
     "dispatch_claim_review", "claim_retirement_challenges",
-    "dispatch_initial_screen", "mission_deliverables",
+    "dispatch_initial_screen", "dispatch_research_plan", "mission_deliverables",
     "dispatch_mission_sec_quarters",
     "mission_document_reviews",
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
@@ -674,6 +675,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "mission_stage_checklist": frozenset(),
     "dispatch_claim_review": frozenset({"max_claims"}),
     "dispatch_initial_screen": frozenset(),
+    "dispatch_research_plan": frozenset(),
     "dispatch_mission_sec_quarters": frozenset(),
     "mission_deliverables": frozenset({"mission_version_ref", "kind", "subject_ref"}),
     "claim_retirement_challenges": frozenset({"open_only", "limit"}),
@@ -1035,6 +1037,7 @@ class WriterServer:
         sec_filings_launcher: Any | None = None,
         sec_filings_plan_path: str | Path | None = None,
         initial_screen_launcher: Any | None = None,
+        research_planner_launcher: Any | None = None,
     ):
         if not principals:
             raise WriterServerError("at least one principal is required")
@@ -1107,6 +1110,10 @@ class WriterServer:
         self._alphaengine_owner_call_cap = alphaengine_owner_call_cap
         self._initial_screen_launcher = initial_screen_launcher
         self._initial_screen_coordinator: Any | None = None
+        # P13o: the planner lane. Absent unless the owner pointed the install
+        # at a planner model, and then the whole lane simply is not there.
+        self._research_planner_launcher = research_planner_launcher
+        self._research_planner_coordinator: Any | None = None
         self._mission_deliverables: Any | None = None
         self._document_extraction_coordinator: DocumentExtractionCoordinator | None = None
         # S7d: out-of-process SEC company-facts lane runs (human-only ops).
@@ -1460,6 +1467,12 @@ class WriterServer:
                    else {"numeric_windows_per_tick": self._document_extraction_numeric_windows}),
                 **({} if self._document_extraction_discovery_windows is None
                    else {"discovery_windows_per_tick": self._document_extraction_discovery_windows}),
+            )
+        if self._research_planner_launcher is not None:
+            from .research_planner_launcher import ResearchPlannerCoordinator
+
+            self._research_planner_coordinator = ResearchPlannerCoordinator(
+                store=self._store, launcher=self._research_planner_launcher,
             )
         if self._initial_screen_launcher is not None:
             # P10c: the mission writes its own Initial Screen, one company per
@@ -2617,6 +2630,15 @@ class WriterServer:
             return {"status": "unconfigured", "reason": "no initial screen lane on this writer"}
         return self._initial_screen_coordinator.dispatch_once()
 
+    def _op_dispatch_research_plan(self, p: Mapping[str, Any]) -> Any:
+        # Controller tick (P13o). One planner child at a time; the coordinator
+        # holds when the state has not moved, and the child itself refuses to
+        # pay twice for the same world.
+        if self._research_planner_coordinator is None:
+            return {"status": "unconfigured",
+                    "reason": "no research planner lane on this writer"}
+        return self._research_planner_coordinator.dispatch_once()
+
     def _op_mission_deliverables(self, p: Mapping[str, Any]) -> Any:
         values = dict(p)
         mission_version_ref = values.get("mission_version_ref")
@@ -3575,6 +3597,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     # P11r: the pass that learns what to ask the figures pass for.
     parser.add_argument(
+        "--research-planner-model-config", type=Path, default=None,
+        help="Planner model configuration written by research_planner_setup. Omit and "
+             "the planner lane is absent: it decides what the research works on next, "
+             "and its model is far more expensive than the extraction model.",
+    )
+    parser.add_argument(
         "--alphaengine-owner-call-cap", type=int, default=None,
         help="Safety cap on AlphaEngine calls per 24h (1..2000). The effective cap "
              "is the tighter of this and the mission budget; omit to keep the built-in "
@@ -3748,6 +3776,15 @@ def main(argv: list[str] | None = None) -> int:
                 model_config_path=args.document_extraction_model_config,
                 scheduler_db=args.scheduler,
             )
+        research_planner_launcher = None
+        if args.research_planner_model_config is not None:
+            from .research_planner_launcher import ResearchPlannerLauncher
+
+            research_planner_launcher = ResearchPlannerLauncher(
+                state_dir=Path(args.db).expanduser().resolve().parent,
+                model_config_path=args.research_planner_model_config,
+                scheduler_db=args.scheduler,
+            )
         sec_filings_launcher = None
         if args.sec_filings_governance is not None and args.sec_filings_discovery_plan is not None:
             from .mission_source_discovery import SecFilingsIndexLauncher
@@ -3795,6 +3832,7 @@ def main(argv: list[str] | None = None) -> int:
             web_fetch_launcher=web_fetch_launcher,
             document_extraction_launcher=document_extraction_launcher,
             initial_screen_launcher=initial_screen_launcher,
+            research_planner_launcher=research_planner_launcher,
         )
         server.start()
         def stop(_signum: int, _frame: Any) -> None:

@@ -236,6 +236,13 @@ def render(
             writer["ProgramArguments"].extend(
                 ["--alphaengine-owner-call-cap", str(int(alphaengine_owner_call_cap))]
             )
+        # P13o: the planner lane exists only when its configuration does, which
+        # is only when the owner named a planner model at install time.
+        planner_config = Path(state) / "research-planner-model-config.json"
+        if planner_config.is_file():
+            writer["ProgramArguments"].extend(
+                ["--research-planner-model-config", str(planner_config)]
+            )
     controller = common | {
         "Label": CONTROLLER_LABEL,
         "ProgramArguments": [str(bin_dir / "daltond"), "--config", str(config)],
