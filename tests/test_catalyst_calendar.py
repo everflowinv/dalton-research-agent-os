@@ -10,6 +10,7 @@ from dalton_core.catalyst_calendar import (
     CHANGE_REASONS,
     MAX_PAST_DAYS,
     PREVIEW_LEAD_DAYS,
+    UNCONFIRMED_DATE_CAVEAT,
     CatalystCalendarAuthority,
     CatalystCalendarConflict,
     CatalystCalendarValidationError,
@@ -272,6 +273,21 @@ class ReaderTests(AuthorityTestCase):
         self.assertEqual(found["days_until"], 22)
         self.assertEqual(found["company_ref"], COMPANY)
 
+    def test_a_reader_is_handed_the_caveat_rather_than_asked_to_derive_it(self):
+        # Everything that reads this puts a date in front of a person, and
+        # "T-22" beside a vendor's guess reads exactly like "T-22" beside an
+        # announced date unless something says otherwise.
+        estimated = self.authority.next_catalyst(COMPANY, "2026-09-09")
+        self.assertTrue(estimated["date_unconfirmed"])
+        self.assertEqual(estimated["date_caveat"], UNCONFIRMED_DATE_CAVEAT)
+        confirmed = [item for item in self.authority.entries(COMPANY)
+                     if item["confidence"] == "confirmed"]
+        self.assertTrue(confirmed)
+        for row in self.authority.upcoming("2026-01-01", 400):
+            self.assertEqual(
+                row["date_caveat"],
+                "" if row["confidence"] == "confirmed" else UNCONFIRMED_DATE_CAVEAT)
+
     def test_today_counts_as_forthcoming(self):
         found = self.authority.next_catalyst(COMPANY, "2026-10-01")
         self.assertEqual(found["expected_date"], "2026-10-01")
@@ -332,6 +348,9 @@ class EventWindowTests(unittest.TestCase):
         emitted = self.emit([self.resolved("2026-10-01")], "2026-09-09")
         self.assertEqual([item["window"] for item in emitted], ["preview"])
         self.assertEqual(emitted[0]["days_until"], 22)
+        self.assertEqual(emitted[0]["date_confidence"], "confirmed")
+        self.assertFalse(emitted[0]["date_unconfirmed"])
+        self.assertEqual(emitted[0]["date_caveat"], "")
         self.assertEqual(self.written[0]["kind"], "calendar")
         self.assertEqual(self.written[0]["company_ref"], COMPANY)
         self.assertIn("catalyst-calendar-version:one", self.written[0]["source_refs"])
@@ -352,14 +371,50 @@ class EventWindowTests(unittest.TestCase):
                 emitted = self.emit([self.resolved("2026-10-01")], day)
                 self.assertEqual([item["window"] for item in emitted], expected)
 
-    def test_an_estimated_date_does_not_open_a_preview(self):
-        # The plan's rule: only a confirmed date drives the preview. Four weeks
-        # of an analyst's attention should not be committed to a vendor's guess.
-        self.assertEqual(
-            self.emit([self.resolved("2026-10-01", confidence="estimated")],
-                      "2026-09-09"),
-            [],
-        )
+    def test_an_estimated_date_opens_the_preview_and_says_it_is_unconfirmed(self):
+        # An analyst prepares the preview against the expected date rather than
+        # waiting for the company to confirm it -- by the time the confirmation
+        # arrives most of the month one is preparing in is gone. The caveat
+        # travels with the event so that the work is done against a date that
+        # is labelled, not against one that looks announced.
+        emitted = self.emit(
+            [self.resolved("2026-10-01", confidence="estimated")], "2026-09-09")
+        self.assertEqual([item["window"] for item in emitted], ["preview"])
+        self.assertEqual(emitted[0]["date_confidence"], "estimated")
+        self.assertTrue(emitted[0]["date_unconfirmed"])
+        self.assertEqual(emitted[0]["date_caveat"], UNCONFIRMED_DATE_CAVEAT)
+
+    def test_an_estimated_date_never_opens_a_calibration(self):
+        # A calibration is written about a release. An estimated date says a
+        # report was likely, not that one happened, and calibrating against a
+        # call nobody made is a wrong answer rather than a thin one.
+        for day in ("2026-10-01", "2026-10-02", "2026-10-03"):
+            with self.subTest(today=day):
+                self.written.clear()
+                self.assertEqual(
+                    self.emit(
+                        [self.resolved("2026-10-01", confidence="estimated")], day),
+                    [],
+                )
+                self.assertEqual(self.written, [])
+
+    def test_the_confirmation_of_a_previewed_date_is_its_own_event(self):
+        # The judgement layer planned work against an estimate; when the
+        # company confirms the same day, it needs to be told that the work is
+        # now safe to commit to. That is a second event, not a suppressed one.
+        seen: set[str] = set()
+        first = self.emit(
+            [self.resolved("2026-10-01", confidence="estimated")], "2026-09-09",
+            is_emitted=seen.__contains__)
+        seen.update(item["event_key"] for item in first)
+        second = self.emit(
+            [self.resolved("2026-10-01", confidence="confirmed")], "2026-09-10",
+            is_emitted=seen.__contains__)
+        self.assertEqual([item["date_confidence"] for item in first], ["estimated"])
+        self.assertEqual([item["date_confidence"] for item in second], ["confirmed"])
+        self.assertEqual([item["window"] for item in second], ["preview"])
+        self.assertEqual(second[0]["date_caveat"], "")
+        self.assertEqual(len(self.written), 2)
 
     def test_a_moved_date_is_emitted_whatever_its_confidence(self):
         emitted = self.emit(
@@ -367,7 +422,8 @@ class EventWindowTests(unittest.TestCase):
             moved_entry_refs=["catalyst-entry:one"],
         )
         self.assertEqual([item["window"] for item in emitted], ["date_change"])
-        self.assertEqual(emitted[0]["confidence"], "estimated")
+        self.assertEqual(emitted[0]["date_confidence"], "estimated")
+        self.assertEqual(emitted[0]["date_caveat"], UNCONFIRMED_DATE_CAVEAT)
 
     def test_an_ex_dividend_never_opens_a_preview(self):
         self.assertEqual(
@@ -388,7 +444,7 @@ class EventWindowTests(unittest.TestCase):
 
     def test_a_date_that_moves_reopens_the_window_it_had_closed(self):
         seen = {calendar_event_key(
-            COMPANY, "catalyst-entry:one", "preview", "2026-10-01")}
+            COMPANY, "catalyst-entry:one", "preview", "2026-10-01", "confirmed")}
         emitted = self.emit(
             [self.resolved("2026-10-02")], "2026-09-09",
             is_emitted=seen.__contains__,

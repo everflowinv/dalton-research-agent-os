@@ -330,7 +330,8 @@ class MissionCatalystLaneCoordinator:
                 "company_ref": entry["company_ref"],
                 "event_kind": entry["event_kind"],
                 "expected_date": entry["expected_date"],
-                "confidence": entry["confidence"],
+                "date_confidence": entry["confidence"],
+                "date_caveat": entry["date_caveat"],
                 "disagreement": entry["disagreement"],
                 "days_until": entry["days_until"],
             }

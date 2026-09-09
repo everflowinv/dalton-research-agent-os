@@ -545,12 +545,24 @@ class CatalystCalendarAuthority:
     def _reader_view(
         version: Mapping[str, Any], entry: Mapping[str, Any], today: str
     ) -> dict[str, Any]:
+        """One entry as a caller should show it, caveat included.
+
+        ``date_caveat`` is carried here as well as on the event for the same
+        reason it is carried there: every consumer of this reader is something
+        that puts a date in front of a person, and "T-22 days" next to a date a
+        vendor guessed reads exactly like "T-22 days" next to one the company
+        announced unless something says otherwise.
+        """
+
+        unconfirmed = entry["confidence"] != "confirmed"
         return {
             **{key: value for key, value in entry.items()},
             "company_ref": version["company_ref"],
             "version_ref": version["id"],
             "version_hash": version["content_hash"],
             "version": version["version"],
+            "date_unconfirmed": unconfirmed,
+            "date_caveat": UNCONFIRMED_DATE_CAVEAT if unconfirmed else "",
             "days_until": (
                 date.fromisoformat(entry["expected_date"]) - date.fromisoformat(today)
             ).days,
@@ -824,19 +836,44 @@ CALIBRATION_TRAILING_DAYS = 2
 # guidance update and an investor day each produce something to read.
 WINDOWED_EVENT_KINDS: tuple[str, ...] = ("earnings", "guidance", "investor_day")
 EVENT_WINDOWS: tuple[str, ...] = ("preview", "calibration", "date_change")
+# Windows an unconfirmed date may open.
+#
+# The preview may, and this is how the job is actually done: an analyst writes
+# the preview against the expected date and does not wait for the company to
+# confirm it, because by the time the confirmation arrives most of the month
+# is gone. What that costs is a preview occasionally built against a date that
+# then moves, and the answer to that is to say which kind of date it was
+# rather than to not do the work.
+#
+# The calibration may not. It is written *about* a release, and until the
+# company has reported there is nothing to calibrate against; an estimated
+# date says a report is likely, not that one happened.
+UNCONFIRMED_DATE_WINDOWS: frozenset[str] = frozenset({"preview", "date_change"})
+# What a renderer puts next to an unconfirmed date. Carried on the event rather
+# than left to each consumer to invent, so the caveat cannot be dropped by the
+# one place that forgets it.
+UNCONFIRMED_DATE_CAVEAT = "日期未确认"
 # What ``kind`` these go into the P14a event ledger as.
 RESEARCH_EVENT_KIND = "calendar"
 
 
 def calendar_event_key(
-    company_ref: str, entry_ref: str, window: str, expected_date: str
+    company_ref: str, entry_ref: str, window: str, expected_date: str,
+    confidence: str,
 ) -> str:
-    """One name for "this company, this occurrence, this window, this date".
+    """One name for this company, this occurrence, this window, this date, as
+    well as it was known at the time.
 
     Deterministic on purpose. The lane runs daily and a preview window is open
     for a month, so something has to stop thirty identical events; keying on
-    the date as well means a call that moves genuinely reopens the window
-    rather than being suppressed by the one already emitted.
+    the date means a call that moves genuinely reopens the window rather than
+    being suppressed by the one already emitted.
+
+    ``confidence`` is in the key for the same reason the date is. A preview
+    fired against an estimated date and the same preview once the company has
+    confirmed it are two different pieces of news: the second one tells the
+    judgement layer the work it planned is now safe to commit to, and keying
+    without it would swallow that.
     """
 
     return "calendar-event:" + content_hash({
@@ -844,6 +881,7 @@ def calendar_event_key(
         "entry_ref": _text(entry_ref, "entry_ref"),
         "window": _one_of(window, EVENT_WINDOWS, "window"),
         "expected_date": _iso_date(expected_date, "expected_date"),
+        "confidence": _one_of(confidence, CONFIDENCES, "confidence"),
     })[:32]
 
 
@@ -864,14 +902,29 @@ def emit_calendar_events(
     ``research_event.record_event`` and the tests pass a fake that records what
     it was asked to write.
 
-    **Only a confirmed date opens a preview or a calibration.** Committing four
-    weeks of an analyst's attention to a date a vendor guessed is how the work
-    ends up landing on the wrong week; the plan says only ``confirmed`` drives
-    the preview and this is where that is enforced. A date that *moved* is
-    emitted whatever its confidence, because "Yahoo now thinks a week later" is
-    a fact about the world's expectations even when it is not a fact about the
-    company -- and the judgement layer, not this function, decides what it is
-    worth.
+    **An estimated date opens the preview; only a confirmed one opens the
+    calibration.** This is how the job is done: the preview is written against
+    the expected date, because waiting for the company to confirm spends most
+    of the month one is preparing in. What that costs is the occasional preview
+    built against a date that then moves, and the answer to that is to say
+    which kind of date it was -- ``date_confidence`` and a caveat travel on the
+    event and on anything that renders it -- rather than to skip the work.
+
+    The confirmation is then its own event. When the company's own filing turns
+    an estimate into a confirmed date, the entry's version chain records
+    ``evidence_thicker`` and a second ``preview`` event goes out, so the
+    judgement layer can re-plan against a date that is now safe to commit to.
+    That works because ``confidence`` is part of the event key.
+
+    The calibration is confirmed-only and stays that way. It is written *about*
+    a release; an estimated date says a report was likely, not that one
+    happened, and a calibration of a call nobody made is not a thin answer but
+    a wrong one.
+
+    A date that *moved* is emitted whatever its confidence, because "Yahoo now
+    thinks a week later" is a fact about the world's expectations even when it
+    is not a fact about the company -- and the judgement layer, not this
+    function, decides what it is worth.
     """
 
     today = _as_date(now)
@@ -879,20 +932,26 @@ def emit_calendar_events(
     emitted: list[dict[str, Any]] = []
     for entry in entries:
         expected = entry["expected_date"]
+        confidence = entry["confidence"]
+        unconfirmed = confidence != "confirmed"
         days_until = (
             date.fromisoformat(expected) - date.fromisoformat(today)
         ).days
         windows: list[str] = []
         if entry["entry_ref"] in moved:
             windows.append("date_change")
-        if entry["event_kind"] in WINDOWED_EVENT_KINDS and entry["confidence"] == "confirmed":
+        if entry["event_kind"] in WINDOWED_EVENT_KINDS:
             if 0 < days_until <= PREVIEW_LEAD_DAYS:
                 windows.append("preview")
             elif -CALIBRATION_TRAILING_DAYS <= days_until <= 0:
                 windows.append("calibration")
+        if unconfirmed:
+            windows = [
+                window for window in windows if window in UNCONFIRMED_DATE_WINDOWS
+            ]
         for window in windows:
             key = calendar_event_key(
-                company_ref, entry["entry_ref"], window, expected
+                company_ref, entry["entry_ref"], window, expected, confidence
             )
             if is_emitted is not None and is_emitted(key):
                 continue
@@ -903,7 +962,15 @@ def emit_calendar_events(
                 "event_kind": entry["event_kind"],
                 "subject": entry["subject"],
                 "expected_date": expected,
-                "confidence": entry["confidence"],
+                # Named for what it qualifies. An event ledger will hold other
+                # confidences before long, and a bare "confidence" beside a
+                # date is the kind of field a renderer attaches to the wrong
+                # thing.
+                "date_confidence": confidence,
+                "date_unconfirmed": unconfirmed,
+                # The words to put beside the date, so the caveat cannot be
+                # lost by whichever consumer forgets to derive it.
+                "date_caveat": UNCONFIRMED_DATE_CAVEAT if unconfirmed else "",
                 "disagreement": entry["disagreement"],
                 "disagreeing_dates": list(entry.get("disagreeing_dates") or []),
                 "days_until": days_until,
@@ -939,6 +1006,8 @@ __all__ = [
     "PREVIEW_LEAD_DAYS",
     "PUBLISHING_CHANGES",
     "RESEARCH_EVENT_KIND",
+    "UNCONFIRMED_DATE_CAVEAT",
+    "UNCONFIRMED_DATE_WINDOWS",
     "SCHEMA_VERSION",
     "SOURCE_AUTHORITY",
     "SOURCE_KINDS",

@@ -10,7 +10,7 @@
 
 ## 0. 一句话
 
-Dalton 现在知道每家覆盖公司下一次开口是什么时候，也知道**谁这么说的**：yfinance 的日历给出 `estimated` 的日期，公司自己的 8-K Item 2.02 给出 `confirmed` 的日期，两者不一致时两个日期都留着、都带各自的 confidence、永不取平均；日期一动就出新版本带 `driver_event`，estimate 变 confirmed 出新版本带 `evidence_thicker`。P14f 的两个窗口（T−30 preview、T+0..T+2 calibration）由这条日历触发，**且只由 confirmed 触发**——今天这意味着一个窗口都还没开，原因写在第 6 节，那是本片最需要 owner 裁决的一件事。
+Dalton 现在知道每家覆盖公司下一次开口是什么时候，也知道**谁这么说的**：yfinance 的日历给出 `estimated` 的日期，公司自己的 8-K Item 2.02 给出 `confirmed` 的日期，两者不一致时两个日期都留着、都带各自的 confidence、永不取平均；日期一动就出新版本带 `driver_event`，estimate 变 confirmed 出新版本带 `evidence_thicker`。P14f 的两个窗口由这条日历触发：**T−30 的 preview 不等确认**（分析师本来就是照预期日期备稿的），但事件与所有渲染它的地方都带着 `date_confidence` 与「日期未确认」的字样；公司确认之后再发一次，让判断层重新排期。**T+0..T+2 的 calibration 只认 confirmed**——那是对着一次已经发生的发布写的。ACN 的 10/1 今天就在窗口里，第 6 节有它触发的样子。
 
 ---
 
@@ -86,6 +86,8 @@ Dalton 现在知道每家覆盖公司下一次开口是什么时候，也知道*
 - `next_catalyst(company_ref, now)` → 最近的、还没发生的一条（当天算「还没发生」，calibration 窗口当天就开），带 `days_until`、`confidence`、`disagreement`、`version_ref`。
 - `upcoming(now, horizon_days)` → 所有公司在 horizon 内的条目，按日期排。cockpit 的「下一个催化剂 T−N 天」直接读这两个。
 - `entries()` / `versions()` / `version(ref)`。
+
+两个读者的返回值里都带 `date_unconfirmed` 与 `date_caveat`（未确认时是 `"日期未确认"`，确认后是空串）。**注意语是被携带的，不是让每个消费者自己推的**：读这两个读者的东西全都是要把一个日期摆到人面前的东西，而「T−22 天」摆在 vendor 猜的日期旁边和摆在公司宣布的日期旁边，长得一模一样。
 
 ---
 
@@ -182,7 +184,22 @@ coordinator = MissionCatalystLaneCoordinator(
 record_event(company_ref=..., kind="calendar", occurred_at=..., source_refs=[...], payload={...})
 ```
 
-`payload` 里有 `event_key`（确定性的：`hash(company_ref, entry_ref, window, expected_date)`）、`window ∈ {preview, calibration, date_change}`、`entry_ref`、`event_kind`、`subject`、`expected_date`、`confidence`、`disagreement`、`disagreeing_dates`、`days_until`、`as_of`。`source_refs` 是该条目所有来源的 ref 加上日历版本 ref。
+`payload` 里有 `event_key`（确定性的：`hash(company_ref, entry_ref, window, expected_date, confidence)`）、`window ∈ {preview, calibration, date_change}`、`entry_ref`、`event_kind`、`subject`、`expected_date`、**`date_confidence`**、**`date_unconfirmed`**、**`date_caveat`**、`disagreement`、`disagreeing_dates`、`days_until`、`as_of`。`source_refs` 是该条目所有来源的 ref 加上日历版本 ref。
+
+字段叫 `date_confidence` 而不是 `confidence`：事件账本很快会装下别的 confidence，一个光秃秃的 `confidence` 摆在日期旁边，正是渲染器会挂到错误东西上的那种字段。
+
+### 5.1.1 窗口规则（2026-09-09 下午，主 agent 按分析师实践裁定）
+
+| 窗口 | estimated | confirmed |
+| --- | --- | --- |
+| `preview`（T−30，`0 < days_until ≤ 30`） | **开**，带 `date_caveat` | 开 |
+| `calibration`（T+0..T+2） | **不开** | 开 |
+| `date_change` | 开 | 开 |
+
+- **preview 不等确认**，因为分析师就是这么工作的：等公司确认，要准备的那个月已经过掉大半了。代价是偶尔照一个后来会挪的日期备了稿，而对策是把日期是哪一种说出来，不是不干活。
+- **确认本身是第二个事件。** 公司的 filing 把估计变成确认时，版本链记 `evidence_thicker`，同时再发一次 `preview`，判断层据此重新排期——它之前排的工作现在可以放心投入了。这条能成立，是因为 `confidence` 进了 `event_key`。
+- **calibration 永远只认 confirmed。** 它是对着一次发布写的；estimated 的日期只说明「大概率会报」，不说明「报过了」。对一场没人开过的电话会做校准不是薄，是错。
+- 判据集中在 `emit_calendar_events` 里的 `UNCONFIRMED_DATE_WINDOWS`（`{preview, date_change}`）一个常量上。
 
 **没接上时不会静默丢**：tick summary 里 `settled.events.status == "events_unwired"`，并把本该发出的事件列出来。谁都不用几个月后才发现窗口一直开进了虚空。
 
@@ -278,36 +295,53 @@ IBM 那条 `sec=read/2` 值得单独看一眼——两份 Item 2.02 落在同一
 
 DXC 那条 2020-03-23 的除息日**一条条目都没生成**，这是设计。
 
-### 6.1 待裁决：现在一个 P14f 窗口都开不了
+### 6.1 现在会触发的窗口
 
-五家公司的下一次财报**全是 `estimated`**，因为没有任何公司发过的东西确认过这些日期，而计划写的是「只有 confirmed 驱动 preview」。ACN 的 10/1 已经在 T−22，落在 preview 窗口里，但按规则不发事件。
+按 5.1.1 的规则，把发射器跑在上面这份日历上（`is_emitted` 用一个空集合，即「今天第一次问」）：
 
-也就是说：**P14f 的 preview 在 8-K 正文读取器落地之前不会开火。** 两条路，请 owner 选：
+```
+company:sec-cik:0001467373     preview      2026-10-01 T-22  estimated "日期未确认"
 
-1. **接受，先把 8-K 正文那条路打通**：在 discovery plan 里加一条 `form: 8-K`（一个 plan 版本 + 一个 spec_ref），让 fetch lane 能抓公告正文，再加一个窄到只认「will report ... on \<date\>」的日期读取器，把结果喂进 `announced_next_date_entry`。这是「正确但要一片工作」。
-2. **放宽**：允许 `estimated` 的日期开 preview，但报告抬头必须写明日期是 vendor 估计的、以及它上一次改动是什么时候。这是「今天就能跑，但有把四周注意力押在猜测上的风险」——ACN 的 10/1 从 live 数据看非常可能是对的（Yahoo 的 `earningsTimestampStart == earningsTimestampEnd`，说明它不是一个窗口）。
+-- and the same run again, nothing repeats --
+[]
+```
 
-代码两条都支持：窗口判据集中在 `emit_calendar_events` 里一个 `entry["confidence"] == "confirmed"` 的判断上，放宽是一行加一个理由。**本片按计划的字面实现了第 1 条**（严格），没有替 owner 做这个决定。
+只有 ACN 落在 T−30 里；其余四家在 T−42 到 T−57，还没到。ACN 的日期是 Yahoo 给的估计，所以 preview 照开，事件带着 `date_confidence: estimated` 与「日期未确认」。等 ACN 发出那份 Item 2.02 的 8-K，日历出新版本带 `evidence_thicker`，同一个 preview 窗口以 `confirmed` 再发一次，判断层可以据此把「照估计日期备的稿」升级为「照确认日期投入」。T+0..T+2 的 calibration 要等那份 8-K，这是设计。
 
----
+同一天再问一次什么都不发——`event_key` 是确定性的，进程内那个集合（集成后换成对事件账本的持久查询，见 5.1）挡住了重复。
+
+### 6.2 未做：`form: 8-K` 的 discovery spec 与正文读取器
+
+主 agent 要求「小就顺手做，否则留档」。核查之后是**留档**——它不小，而且要碰本片没有所有权的文件：
+
+| 要动的地方 | 为什么绕不开 |
+| --- | --- |
+| `deploy/phase10/p10-us-it-services-sec-filings-plan-v1.json` → 新一版 plan | plan 是哈希绑定的，加一条 `{"form": "8-K", "spec_ref": ...}` 就是一个新版本文件 |
+| `deploy/macos/install.sh` | 现在把 plan 拷进 `{state}/discovery-plans/`（:176-179）；换版本要改这里，而 install.sh 在本片的 FORBIDDEN 清单上 |
+| `document_figure_grade.GRADE_BY_SPEC` / `ATTRIBUTED_BY_SPEC` | 新 spec_ref 必须登记，否则抓回来的文档没有 grade |
+| `mission_stage.py` 的 `spec_refs` | 阶段推进要认识这条 spec |
+| `sec_public_adapter` 的两条 fail-closed 守卫 | `filings.recent` 只覆盖约一年 / 一千条，而 8-K 密集的发行人（IBM 118 条、DXC 123 条）很容易撞上 `SEC_INDEX_LIMIT = 100` 的「result exceeds the declared limit」，没有翻页。要么收窄 `date_from`，要么这条 spec 要自己的 limit 策略 |
+| 新的日期读取器 | 从公告正文里认「will report ... on \<date\>」，窄到只认这一种句式，产出喂进 `announced_next_date_entry` |
+
+这是一个独立小片的量（大约相当于本片的三分之一），跨了三个别人的文件和一次 plan 发版。本片把接口那一端建好、测好、可达：`sec_earnings_release.announced_next_date_entry(accession=, announced_date=, subject=, filing_date=, note=)`，日期由调用方给，本模块不解析任何正文。
 
 ## 7. 验收
 
 ```
-Ran 2617 tests in 320.331s
+Ran 2621 tests in 309.401s
 OK (skipped=1)
 ```
 
-（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`；基线 main `2fa5934` 是 2,512 项，本片新增 105 项。）
+（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`；基线 main `2fa5934` 是 2,512 项，本片新增 109 项。）
 
 各文件：
 
 ```
-tests/test_catalyst_calendar.py          Ran 34 tests   OK
+tests/test_catalyst_calendar.py          Ran 37 tests   OK
 tests/test_yfinance_calendar_adapter.py  Ran 15 tests   OK
 tests/test_sec_earnings_release.py       Ran 14 tests   OK
 tests/test_catalyst_calendar_cli.py      Ran 15 tests   OK
-tests/test_mission_catalyst_lane.py      Ran 27 tests   OK
+tests/test_mission_catalyst_lane.py      Ran 28 tests   OK
 ```
 
 覆盖到的行为，按交付要求逐条：
@@ -321,7 +355,8 @@ tests/test_mission_catalyst_lane.py      Ran 27 tests   OK
 | duplicate | `test_the_same_reading_twice_is_a_duplicate`、CLI 的同名一条 |
 | `change_reason` 不能被贴错 | `test_a_reason_the_diff_contradicts_is_refused`、`test_the_change_reason_vocabulary_is_adr_0008s`（钉住 = `model_forecast_driver.CHANGE_REASONS`） |
 | next / upcoming | `ReaderTests` 六条 |
-| 事件窗口 | `EventWindowTests` 九条（T−30 边界、T+0..T+2 边界、estimated 不开 preview、除息不开 preview、开着的窗口只发一次、日期一动窗口重开） |
+| 事件窗口 | `EventWindowTests` 十一条（T−30 边界、T+0..T+2 边界、**estimated 开 preview 且带 `date_caveat`**、**estimated 三天都不开 calibration**、**确认之后同一窗口再发一次**、除息不开 preview、开着的窗口只发一次、日期一动窗口重开），加 lane 侧两条（`test_an_estimated_date_opens_a_labelled_preview_from_the_lane_too`、`test_the_tick_strip_carries_the_caveat_an_operator_needs_to_see`） |
+| 注意语被携带而非推导 | `ReaderTests::test_a_reader_is_handed_the_caveat_rather_than_asked_to_derive_it` |
 | lane 注册（新解释器） | `RegistrationTests::test_importing_this_module_does_not_pull_in_the_writer`（subprocess 实跑），另加 order / driver key / argv / unconfigured 四条 |
 | yfinance 适配器（stub） | `FetchTests`（`sys.modules["yfinance"]` 换成 stub；`date` 对象要能过 canonical JSON；来源拒绝是「有理由的缺席」不是崩溃） |
 
@@ -331,7 +366,7 @@ tests/test_mission_catalyst_lane.py      Ran 27 tests   OK
 
 ## 8. 没做什么
 
-- **没有读 8-K 正文**，因此没有公司确认的未来日期。第 3.3 与 6.1 节。
+- **没有读 8-K 正文**，因此没有公司确认的未来日期；preview 照估计日期开并标注，calibration 要等它。第 3.3 与 6.2 节。
 - **没有 guidance / investor_day / filing_due 的产出方。** 三个 `event_kind` 在词表里、能被写入、能开窗口，但目前没有来源填它们。`filing_due` 尤其可惜——10-Q 的法定截止日是可以从 filing 期末加规则算出来的，但那是**推算**，本片不做推算，要做得是另一个显式的、有自己规则冻结的东西。
 - **没有 cockpit 接线**（越界；读者接口已就位）。
 - **没有把 `is_emitted` 做成持久查询**（要等 P14a 的事件账本，见 5.1）。
@@ -341,7 +376,7 @@ tests/test_mission_catalyst_lane.py      Ran 27 tests   OK
 
 ## 9. 开放问题
 
-1. **6.1 的裁决**：preview 等 8-K 正文读取器，还是允许 estimated 开窗（带标注）？——需要 owner。
+1. **`date_caveat` 的字面。** 现在是硬写的 `"日期未确认"`（`UNCONFIRMED_DATE_CAVEAT`），与 `dashboard_projector` 里「结果待确认」同一路数。如果 cockpit 之后要走一套统一的文案表，这个常量是唯一要改的地方。
 2. **`subject` 的季度近似**。跨季边界的改期会产生两条并列条目而不是一次改期。真正的修法是拿到财季（10-Q 的 `fiscal_period`，或 8-K 正文里的「fourth-quarter」），两者都要更多输入。目前的近似方向是安全的（重复而不是错误合并），但值得在 dossier 那一层拿到财季之后回来收掉。
 3. **8-K 行不在 `source_record_refs` 里**这件事。本片的立场是「引用一个日期」和「取一份文档」是两件事，前者靠 accession + `items` + artifact hash 就够，后者必须走 URL authority 而那条路正确地拒绝了。如果集成时认为连引用日期也该要求该行在 envelope 里，那就得在 discovery plan 里加 `form: 8-K` 的 spec——同 6.1 的路径 1，两件事会一起解决。
 4. **`acceptanceDateTime` 没有时区**。SEC 的字段是东部时间不带偏移；本片只在它自带 `Z` 时用它，否则用 `filingDate` 的午夜 UTC。这个值只用于给同一来源的两条陈述排序，`filingDate` 排得对，但如果以后有人拿它当墙上时钟用，这里要先改。

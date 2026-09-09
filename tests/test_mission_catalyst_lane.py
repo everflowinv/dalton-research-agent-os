@@ -11,6 +11,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from dalton_core.catalyst_calendar import UNCONFIRMED_DATE_CAVEAT
 from dalton_core.lane_child_launcher import LaneChildConflict, LaneChildRejected
 from dalton_core.mission_catalyst_lane import (
     MAX_FAILURES_PER_COMPANY,
@@ -43,11 +44,19 @@ class FakeAuthority:
         return self.versions.get(company_ref)
 
     def upcoming(self, now, horizon_days):
+        # Mirrors the real reader's shape, caveat included: the lane consumes
+        # the carried field rather than deriving it, so a fake that omitted it
+        # would be testing a reader that does not exist.
         found = []
         for version in self.versions.values():
             for entry in version["entries"]:
-                found.append({**entry, "company_ref": version["company_ref"],
-                              "days_until": 22})
+                unconfirmed = entry["confidence"] != "confirmed"
+                found.append({
+                    **entry, "company_ref": version["company_ref"],
+                    "date_unconfirmed": unconfirmed,
+                    "date_caveat": UNCONFIRMED_DATE_CAVEAT if unconfirmed else "",
+                    "days_until": 22,
+                })
         return found
 
 
@@ -284,12 +293,28 @@ class EventTests(LaneTestCase):
         self.assertEqual(len(settled["events"]["emitted"]), 1)
         self.assertIn("nothing recorded them", settled["events"]["reason"])
 
-    def test_an_estimated_date_opens_no_preview_from_the_lane_either(self):
+    def test_an_estimated_date_opens_a_labelled_preview_from_the_lane_too(self):
+        written = []
         _, settled = self.settle_with(
             authority=FakeAuthority({ACN: version(ACN, confidence="estimated")}),
-            record_event=lambda **event: None,
+            record_event=lambda **event: written.append(event),
         )
-        self.assertEqual(settled["events"]["emitted"], [])
+        emitted = settled["events"]["emitted"]
+        self.assertEqual([item["window"] for item in emitted], ["preview"])
+        self.assertEqual(emitted[0]["date_confidence"], "estimated")
+        self.assertEqual(written[0]["payload"]["date_caveat"], UNCONFIRMED_DATE_CAVEAT)
+
+    def test_the_tick_strip_carries_the_caveat_an_operator_needs_to_see(self):
+        coordinator = self.coordinator(
+            authority=FakeAuthority({ACN: version(ACN, confidence="estimated")}),
+            mission_value=ONE_COMPANY)
+        launched = coordinator.dispatch_once()
+        self.launcher.finish(launched["ticket_ref"], calendar_status="fresh")
+        coordinator.dispatch_once()
+        idle = coordinator.dispatch_once()
+        self.assertEqual(idle["status"], "idle")
+        self.assertEqual(idle["upcoming"][0]["date_confidence"], "estimated")
+        self.assertEqual(idle["upcoming"][0]["date_caveat"], UNCONFIRMED_DATE_CAVEAT)
 
     def test_a_window_that_stays_open_is_recorded_once_per_process(self):
         written = []
