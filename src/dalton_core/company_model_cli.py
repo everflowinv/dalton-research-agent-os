@@ -73,12 +73,25 @@ def _write_owner_only(path: Path, value: Any) -> None:
 def choose_company(
     missions: CoverageMissionAuthority, mission: dict[str, Any],
     *, company_ref: str | None = None,
-) -> tuple[str | None, str | None]:
-    """The company to decide about, and its ticker.
+) -> tuple[str | None, dict[str, Any] | None]:
+    """The company to decide about, and the disclosure to decide from.
 
     Companies with statements but no current specification come first, oldest
     filing first so the queue drains in the order the lane filled it. A company
     named explicitly is used as given -- that is the hand-run path.
+
+    The *state* is returned rather than rebuilt by the caller, and this is not
+    a convenience. The ticker is part of the state and therefore part of its
+    hash, so a projection built without one hashes differently. The first
+    version selected companies with a tickerless projection while the run
+    stored its specification against a projection with the ticker, so the
+    selector could never see the answer it had just produced.
+
+    What that cost was not money -- the child rebuilt the state with the
+    ticker, found the stored specification and replayed it for nothing. It cost
+    *progress*: the lane relaunched the same company every tick and the other
+    four companies would have waited forever behind it. One projection, one
+    hash, and the lane moves on.
     """
 
     universe = {
@@ -86,18 +99,20 @@ def choose_company(
         for item in (mission.get("universe") or [])
         if isinstance(item, dict)
     }
-    if company_ref is not None:
-        return company_ref, universe.get(company_ref)
-    for filing in missions.statement_filings():
-        held = filing["company_ref"]
-        if held not in universe:
+    refs = ([company_ref] if company_ref is not None
+            else [filing["company_ref"] for filing in missions.statement_filings()])
+    for held in refs:
+        if company_ref is None and held not in universe:
             continue
         try:
-            state = build_company_model_state(missions, held)
+            state = build_company_model_state(missions, held,
+                                              ticker=universe.get(held))
         except CompanyModelStateError:
+            if company_ref is not None:
+                raise
             continue
         if missions.company_model_spec_for_state(held, state["state_hash"]) is None:
-            return held, universe.get(held)
+            return held, state
     return None, None
 
 
@@ -141,30 +156,20 @@ def run_model_spec(
             summary.update({"status": "idle", "spec_status": "no_mission"})
             return summary
         mission = missions.mission(pointer["mission_version_id"])
-        chosen, ticker = choose_company(missions, mission, company_ref=company_ref)
-        if chosen is None:
-            summary.update({"status": "idle", "spec_status": "nothing_to_decide"})
-            return summary
-        summary["company_ref"] = chosen
         try:
-            state = build_company_model_state(missions, chosen, ticker=ticker)
+            chosen, state = choose_company(missions, mission, company_ref=company_ref)
         except CompanyModelStateError as exc:
             summary.update({"status": "idle", "spec_status": "no_statements",
                             "failure_reason": f"{type(exc).__name__}: {exc}"})
             return summary
+        if chosen is None:
+            # Either every company has a current specification, or the one
+            # asked for already does. Both are "nothing to decide".
+            summary.update({"status": "idle", "spec_status": "nothing_to_decide"})
+            return summary
+        summary["company_ref"] = chosen
         summary["state_hash"] = state["state_hash"]
         summary["concepts"] = len(state["concepts"])
-
-        existing = missions.company_model_spec_for_state(chosen, state["state_hash"])
-        if existing is not None:
-            summary.update({
-                "status": "succeeded", "spec_status": "unchanged", "replayed": True,
-                "spec_ref": existing["spec_id"],
-                "revenue_drivers": len(existing["revenue_drivers"]),
-                "expense_lines": len(existing["expense_lines"]),
-                "operating_metrics": len(existing["operating_metrics"]),
-            })
-            return summary
         if dry_run or model_config_path is None:
             summary.update({
                 "status": "succeeded", "spec_status": "gated",

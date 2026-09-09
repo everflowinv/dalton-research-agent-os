@@ -22,7 +22,6 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from .company_model_cli import choose_company
-from .company_model_state import CompanyModelStateError, build_company_model_state
 from .lane_child_launcher import (
     LaneChildConflict,
     LaneChildRejected,
@@ -117,18 +116,18 @@ class MissionModelSpecLaneCoordinator:
             return {"status": "unconfigured", "reason": "no mission",
                     "settled": settled}
         try:
-            company_ref, _ = choose_company(self.missions, mission)
+            company_ref, state = choose_company(self.missions, mission)
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
             return {"status": "unavailable", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
         if company_ref is None:
             return {"status": "idle", "settled": settled,
                     "reason": "every company has a current specification"}
-        try:
-            state = build_company_model_state(self.missions, company_ref)
-        except CompanyModelStateError as exc:
-            return {"status": "idle", "company_ref": company_ref, "settled": settled,
-                    "reason": f"{type(exc).__name__}: {exc}"}
+        # The hash comes from the projection the chooser already built. Two
+        # projections of the same company hash differently if they were built
+        # with different arguments, and the selector disagreeing with the run
+        # about the hash is how this lane first got stuck relaunching one
+        # company while the other four waited behind it.
         state_hash = state["state_hash"]
         held = self._failed.get(f"{company_ref}|{state_hash}")
         if held is not None:
