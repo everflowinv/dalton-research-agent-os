@@ -1,0 +1,226 @@
+{
+ "artefact": {
+  "artefact_kind": "weekly_brief",
+  "cited_tags": [],
+  "confidence": null,
+  "expected_sections": [
+   "本期研究变化",
+   "对现有观点的影响",
+   "预测对账",
+   "公司与 driver 分化",
+   "证据缺口",
+   "关键争议",
+   "下期研究问题",
+   "来源与 authority"
+  ],
+  "gaps": [],
+  "hash": "885164a004f680085d9adda96baebefd3ccdadbf6a71d97dbbfc977f345b8c2e",
+  "prior": null,
+  "question": null,
+  "ref": "weekly-brief-version:9eafec9e9796671cd2ed9fcbae0ef596",
+  "sections": [
+   {
+    "body": "- 新增正式 Claim：1 条。\n- 延续正式 Claim：4 条。\n- 移出当前 pack：0 条。\n- 发生变化的 driver：1 个。\n- 新增 / 已解决证据缺口：0 / 0。\n- 新增 Claim｜DXC｜quarterly_revenue_yoy_growth｜-5.06 percent｜2026-04-01..2026-06-30｜〔ref〕\n- 本季行业整体 operating margin 约 14.7%，较去年同期扩张 60bps。",
+    "claim_refs": [
+     "claim-version:a4d5fb26cbdf5725ff2b12e99fa09af363c9e2d975d2287d54040af485c80b14"
+    ],
+    "gaps": [],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:a4d5fb26cbdf5725ff2b12e99fa09af363c9e2d975d2287d54040af485c80b14",
+      "period": "2026-04-01..2026-06-30",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 2999000000 for 2026-04-01..2026-06-30, down 5.06% year over year from USD 3159000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:a4d5fb26cbdf5725ff2b12e99fa09af363c9e2d975d2287d54040af485c80b14",
+      "period": "2026-04-01..2026-06-30",
+      "text": "-5.06 percent"
+     }
+    ],
+    "title": "本期研究变化"
+   },
+   {
+    "body": "- IBM：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。\n- CTSH：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。\n- EPAM：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。\n- ACN：Large-scale AI and reinvention work plus managed services can offset soft discretionary consulting, allowing Accenture to sustain mid-single-digit local-currency growth without sacrificing operating margin. (confidence=medium; thesis=〔ref〕 ; 本期版本变化=yes)\n- DXC：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [],
+    "title": "对现有观点的影响"
+   },
+   {
+    "body": "### Reported quarterly revenue growth\n\n- ACN：stance=positive；observed=quarterly_revenue_yoy_growth；unresolved=none\n  - 差异：The lane selected the Revenues US-GAAP concept for Accenture's fiscal quarter.\n  - 观察点：Compare subsequent fiscal-quarter claims by reported year-over-year rate rather than calendar-quarter labels.\n- CTSH：stance=positive；observed=quarterly_revenue_yoy_growth；unresolved=none\n  - 差异：The lane's available latest same-filing comparison is calendar Q1 2026.\n  - 观察点：Refresh when a later Cognizant 10-Q is available through the Company Facts lane.\n- EPAM：stance=positive；observed=quarterly_revenue_yoy_growth；unresolved=none\n  - 差异：The lane selected RevenueFromContractWithCustomerExcludingAssessedTax for EPAM.\n  - 观察点：Keep the permitted US-GAAP concept difference visible in cross-company comparisons.\n- IBM：stance=positive；observed=quarterly_revenue_yoy_growth；unresolved=none\n  - 差异：The lane selected the Revenues US-GAAP concept for IBM's calendar quarter.\n  - 观察点：Compare subsequent periods on the same-filing year-over-year basis and keep IBM's broader business mix visible.\n- DXC：stance=negative；observed=quarterly_revenue_yoy_growth；unresolved=none\n  - 差异：DXC's lane period is fiscal Q1 FY2027, filed 2026-07-31 as calendar Q2 2026.\n  - 观察点：Watch whether DXC's year-over-year revenue decline narrows over the next two fiscal quarters.",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [],
+    "title": "公司与 driver 分化"
+   },
+   {
+    "body": "- 当前 issue 的闭合 metric matrix 没有未覆盖单元格。",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [],
+    "title": "证据缺口"
+   },
+   {
+    "body": "- How broad is reported quarterly revenue growth across the lane-covered peer set?（status=open）\n  - supports：ACN and EPAM show positive reported quarterly revenue growth｜claims=〔ref〕 - qualifies：Cognizant supplies a different issuer period and US-GAAP revenue concept｜claims=〔ref〕 - supports：IBM also reported positive quarterly revenue growth in calendar Q2 2026｜claims=〔ref〕 - against：DXC reported a 5.06% year-over-year revenue decline in its fiscal Q1 2027｜claims=〔ref〕",
+    "claim_refs": [
+     "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+     "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+     "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+     "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+     "claim-version:a4d5fb26cbdf5725ff2b12e99fa09af363c9e2d975d2287d54040af485c80b14"
+    ],
+    "gaps": [],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "5.59 percent"
+     },
+     {
+      "claim_version_ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+      "period": "2026-04-01..2026-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1414767000 for 2026-04-01..2026-06-30, up 4.53% year over year from USD 1353443000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+      "period": "2026-04-01..2026-06-30",
+      "text": "4.53 percent"
+     },
+     {
+      "claim_version_ref": "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+      "period": "2026-01-01..2026-03-31",
+      "text": "COGNIZANT TECHNOLOGY SOLUTIONS CORPORATION reported Revenues of USD 5413000000 for 2026-01-01..2026-03-31, up 5.83% year over year from USD 5115000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+      "period": "2026-01-01..2026-03-31",
+      "text": "5.83 percent"
+     },
+     {
+      "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+      "period": "2026-04-01..2026-06-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 17162000000 for 2026-04-01..2026-06-30, up 1.09% year over year from USD 16977000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+      "period": "2026-04-01..2026-06-30",
+      "text": "1.09 percent"
+     },
+     {
+      "claim_version_ref": "claim-version:a4d5fb26cbdf5725ff2b12e99fa09af363c9e2d975d2287d54040af485c80b14",
+      "period": "2026-04-01..2026-06-30",
+      "text": "DXC TECHNOLOGY COMPANY reported Revenues of USD 2999000000 for 2026-04-01..2026-06-30, down 5.06% year over year from USD 3159000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:a4d5fb26cbdf5725ff2b12e99fa09af363c9e2d975d2287d54040af485c80b14",
+      "period": "2026-04-01..2026-06-30",
+      "text": "-5.06 percent"
+     }
+    ],
+    "title": "关键争议"
+   },
+   {
+    "body": "- ACN：Will the next SEC lane run preserve positive reported revenue growth?\n- CTSH：Will the next available quarter change the observed growth rate?\n- EPAM：Will the next SEC lane comparison confirm continued positive revenue growth?\n- IBM：Will IBM's next SEC lane comparison preserve positive reported revenue growth?\n- DXC：Will DXC's revenue decline narrow as cost-optimization demand stabilizes?",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [],
+    "title": "下期研究问题"
+   },
+   {
+    "body": "- source:sec-edgar｜evidence=〔ref〕 - source:sec-edgar｜evidence=〔ref〕 - source:sec-edgar｜evidence=〔ref〕 - source:sec-edgar｜evidence=〔ref〕 - source:sec-edgar｜evidence=〔ref〕",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [],
+    "title": "来源与 authority"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "industry:us-it-services",
+  "title": "weekly-brief:us-it-services"
+ },
+ "case_ref": "broken-unsourced-figure",
+ "expected": {
+  "deterministic": {
+   "claim_refs_resolve": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "duplicate_parallel_citations": {
+    "count": 0,
+    "status": "pass"
+   },
+   "numbers_without_refs": {
+    "count": 2,
+    "status": "fail"
+   },
+   "required_sections_present": {
+    "count": 1,
+    "status": "fail"
+   },
+   "residual_citation_artefacts": {
+    "count": 0,
+    "status": "pass"
+   },
+   "weekly_brief_capability_gate": {
+    "count": 2,
+    "status": "skipped"
+   }
+  },
+  "not_applicable_yet": [
+   "price_performance_attribution",
+   "debate_shifts"
+  ],
+  "rationale": "numbers_without_refs 必须 fail：14.7% 与 60（bps）都不在任何被引 Claim 里。其余检查不受影响，正是这一例要证明的——一处无源数字不会连累引用卫生。",
+  "score_ranges": {
+   "citation_dedupe": [
+    3,
+    4
+   ],
+   "citation_hygiene": [
+    1,
+    2
+   ],
+   "debate_shifts": [
+    1,
+    3
+   ],
+   "forecast_changes": [
+    0,
+    1
+   ],
+   "gaps_named": [
+    0,
+    1
+   ],
+   "next_week_plan": [
+    1,
+    2
+   ],
+   "number_provenance": [
+    0,
+    0
+   ],
+   "price_performance_attribution": [
+    0,
+    2
+   ],
+   "structure_complete": [
+    1,
+    2
+   ],
+   "view_changes": [
+    2,
+    4
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "周报最容易出的一类错：叙事层想给一句总结，于是写了一个账本里没有的数字。这一句读起来完全像研究，数字纪律是唯一能拦住它的东西。",
+ "rubric": "weekly-brief",
+ "source": "live-w36-second-issue 的副本，在「本期研究变化」末尾加了一句没有任何 Claim 承载的行业 margin 数字。"
+}

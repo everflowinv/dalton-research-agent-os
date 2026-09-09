@@ -42,6 +42,7 @@ from .research_quality_score import (
     ResearchQualityError,
     TIMEOUT_SECONDS,
     artefact_from_deliverable,
+    artefact_from_weekly_brief,
     run_deterministic,
     score_artefact,
 )
@@ -82,6 +83,47 @@ def _resolve_deliverable(core: sqlite3.Connection, target: str) -> dict[str, Any
     return json.loads(row["record_json"])
 
 
+def _resolve_weekly_brief(store: DaltonStore, target: str) -> dict[str, Any]:
+    """A published weekly brief issue as a scoreable artefact.
+
+    Q2.  The issue is fetched by version id or by brief ref (its latest), and
+    the body is **re-rendered** rather than read from a stored blob, because
+    the authority does not store one: ``render_markdown`` replays the document
+    from the evidence pack and refuses if the pack has drifted.  So a score is
+    always about a document that still exists in the form it was published in,
+    and a brief whose sources moved underneath it cannot be quietly scored
+    against its new self.
+    """
+
+    from .industry_research import IndustryResearchAuthority
+    from .weekly_brief import WeeklyBriefAuthority
+
+    core = store.connection
+    row = core.execute(
+        "SELECT version_id FROM weekly_brief_issue_versions WHERE version_id=?", (target,),
+    ).fetchone()
+    if row is None:
+        row = core.execute(
+            "SELECT version_id FROM weekly_brief_issue_pointer WHERE brief_ref=?", (target,),
+        ).fetchone()
+    if row is None:
+        raise ResearchQualityError(f"no weekly brief issue found for {target!r}")
+    industry = IndustryResearchAuthority(store)
+    briefs = WeeklyBriefAuthority(store, industry)
+    issue = briefs.issue(row["version_id"])
+    overlays = [item["version_ref"] for item in issue["company_overlay_versions"]]
+    snapshot = industry.industry_brief_snapshot(issue["evidence_pack_version_ref"], overlays)
+    markdown = briefs.render_markdown(issue["id"])
+    names = {
+        item["company_ref"]: item["ticker"]
+        for item in snapshot.get("coverage_universe") or []
+    }
+    return artefact_from_weekly_brief(
+        issue, body=markdown["body"],
+        claim_versions=snapshot.get("claim_versions") or [], company_names=names,
+    )
+
+
 def _mission(store: DaltonStore) -> dict[str, Any]:
     """The active mission, which is what a judge call is billed against."""
 
@@ -100,9 +142,11 @@ def run_score(args: argparse.Namespace) -> dict[str, Any]:
     store = DaltonStore(str(state / "core.sqlite"))
     try:
         core = store.connection
-        record = _resolve_deliverable(core, args.target)
-        art = artefact_from_deliverable(record)
         rubric = get_rubric(args.rubric)
+        if rubric.rubric_ref == "rubric:weekly-brief":
+            art = _resolve_weekly_brief(store, args.target)
+        else:
+            art = artefact_from_deliverable(_resolve_deliverable(core, args.target))
         model = None
         mission = None
         if args.model_config:
@@ -258,7 +302,8 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("--state-dir", required=True)
     score.add_argument("--rubric", required=True, choices=sorted(RUBRIC_ALIASES))
     score.add_argument("--target", required=True,
-                       help="a deliverable version id, or a deliverable ref for its latest version")
+                       help="a deliverable or weekly-brief-issue version id, "
+                            "or a deliverable / brief ref for its latest version")
     score.add_argument("--model-config", help="run the judge layer too; without it, deterministic only")
     score.add_argument("--scheduler-db")
     score.add_argument("--actor-ref", default="automation:coverage-mission")

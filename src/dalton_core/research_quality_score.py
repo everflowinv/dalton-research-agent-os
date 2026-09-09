@@ -47,6 +47,7 @@ from .cockpit_model import CockpitModelError, register_purpose, unwrap_json_obje
 from .mission_deliverable import unsourced_numbers, value_tokens
 from .research_quality_rubrics import (
     DOSSIER_SECTIONS,
+    WEEKLY_BRIEF_SECTIONS,
     PASSING_SCORE,
     SCALE,
     SCORE_MAX,
@@ -65,7 +66,9 @@ _SCHEMA_PATH = Path(__file__).with_name("research_quality_schema.sql")
 # that had already been scored by the broken one.
 SCORER_VERSION = "0.1"
 
-ARTEFACT_KINDS: tuple[str, ...] = ("initial_screen", "ask_answer", "company_dossier")
+ARTEFACT_KINDS: tuple[str, ...] = (
+    "initial_screen", "ask_answer", "company_dossier", "weekly_brief",
+)
 
 # P14-0 registry: a lane names its own purpose from its own module rather than
 # editing a set in ``cockpit_model``.  "quality" is the system reading its own
@@ -302,6 +305,127 @@ def artefact_from_dossier(
         gaps=record.get("gaps") or (),
         expected_sections=DOSSIER_SECTIONS,
         prior=None if prior is None else {"sections": prior.get("sections") or []},
+    )
+
+
+# Q2: what a weekly brief prints that is machinery rather than prose.
+#
+# The rendered brief is a document with a Ledger inside it: every claim, every
+# evidence version, every content hash and every CIK is printed inline, and a
+# figure check run over that raw text would report a CIK as an untraceable
+# number and a content hash as a figure.  So the adapter lifts the machinery
+# out into ``claim_refs`` -- where a citation belongs -- and leaves a visible
+# 〔ref〕 in its place.
+#
+# The marker is not decoration.  Stripping refs silently would hide exactly the
+# thing ``citation_hygiene`` grades on a brief: whether the machine's addresses
+# are carried by the citation fields or smeared through the prose a person has
+# to read.  A judge counting 〔ref〕 per sentence is reading the real defect.
+_BRIEF_CLAIM_REF_RE = re.compile(r"claim-version:[0-9a-f]{64}")
+_BRIEF_COMPANY_REF_RE = re.compile(r"company:[a-z0-9-]+:[0-9]+")
+_BRIEF_MACHINE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"[a-z][a-z0-9-]*-version:[0-9a-zA-Z:._-]+"),
+    re.compile(r"(?:hash|snapshot_hash|content_hash)=[0-9a-f]{16,}"),
+    re.compile(r"(?:retrieved|delivered)=\d{4}-\d{2}-\d{2}T[0-9:.+-]+"),
+    re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?"),
+    re.compile(r"(?<![0-9a-zA-Z])[0-9a-f]{32,}(?![0-9a-zA-Z])"),
+)
+REF_MARKER = "〔ref〕"
+_BRIEF_SECTION_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+
+
+def _brief_prose(text: str, company_names: Mapping[str, str]) -> tuple[str, int]:
+    """One section's prose with machine addresses replaced by a marker."""
+
+    stripped = 0
+
+    def mark(match: "re.Match[str]") -> str:
+        nonlocal stripped
+        stripped += 1
+        return REF_MARKER
+
+    body = _BRIEF_CLAIM_REF_RE.sub(mark, text)
+
+    def name(match: "re.Match[str]") -> str:
+        ref = match.group(0)
+        label = company_names.get(ref)
+        if label:
+            return label
+        nonlocal stripped
+        stripped += 1
+        return REF_MARKER
+
+    body = _BRIEF_COMPANY_REF_RE.sub(name, body)
+    for pattern in _BRIEF_MACHINE_PATTERNS:
+        body = pattern.sub(mark, body)
+    # A run of markers left by "｜ref｜hash｜retrieved" is one marker: the
+    # density that matters is per sentence, not per field.
+    body = re.sub(f"(?:{re.escape(REF_MARKER)}[\\s｜|,，、]*)+", REF_MARKER + " ", body)
+    return body.strip(), stripped
+
+
+def artefact_from_weekly_brief(
+    issue: Mapping[str, Any],
+    *,
+    body: str,
+    claim_versions: Sequence[Mapping[str, Any]] = (),
+    company_names: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """A published ``WeeklyBriefIssueVersion`` as a scoreable artefact.
+
+    ``body`` is the rendered markdown -- ``WeeklyBriefAuthority.render_markdown``
+    replays it from the evidence pack, so it is the document as published and
+    not a copy that can drift.  ``claim_versions`` are the snapshot's Claims,
+    which is where a printed figure has to be traceable to.
+
+    Each cited Claim contributes two source strings: its
+    ``normalized_statement`` (where the figure came from) and the ``value unit``
+    rendering the brief actually prints.  Both are needed because they are not
+    the same token -- the filing says ``up 5.59%`` and the brief prints
+    ``5.59 percent`` -- and a number check that only knew the first would report
+    every figure in every brief as unsourced.
+    """
+
+    names = dict(company_names or {})
+    claims = {str(item.get("claim_version_ref") or item.get("id") or ""): item
+              for item in claim_versions}
+    matches = list(_BRIEF_SECTION_RE.finditer(body or ""))
+    sections: list[dict[str, Any]] = []
+    for index, match in enumerate(matches):
+        title = match.group(1).strip()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        raw = body[match.end():end]
+        refs = list(dict.fromkeys(_BRIEF_CLAIM_REF_RE.findall(raw)))
+        prose, stripped = _brief_prose(raw, names)
+        numbers: list[dict[str, Any]] = []
+        for ref in refs:
+            claim = claims.get(ref)
+            if claim is None:
+                continue
+            period = claim.get("period")
+            statement = str(claim.get("normalized_statement") or "")
+            if statement:
+                numbers.append({"text": statement, "claim_version_ref": ref, "period": period})
+            value = claim.get("value")
+            if value is not None:
+                rendered = f"{value} {claim.get('unit') or ''}".strip()
+                numbers.append({"text": rendered, "claim_version_ref": ref, "period": period})
+        sections.append({
+            "title": title, "body": prose, "claim_refs": refs, "numbers": numbers,
+            "gaps": [],
+            # Kept for the report and for a future hygiene check; the section
+            # shape drops unknown keys, so this rides on the section it
+            # describes rather than inside it.
+        })
+    return artefact(
+        artefact_kind="weekly_brief",
+        ref=str(issue["id"]),
+        hash=str(issue["content_hash"]),
+        title=str(issue.get("brief_ref") or ""),
+        subject_ref=issue.get("industry_ref"),
+        sections=sections,
+        gaps=issue.get("gaps") or (),
+        expected_sections=WEEKLY_BRIEF_SECTIONS,
     )
 
 
@@ -652,6 +776,128 @@ def check_restatement_drift(art: Mapping[str, Any], context: CheckContext) -> di
     )
 
 
+
+# ---------------------------------------------------------------------------
+# Q2: the capability gate
+#
+# Two of the six things the owner's weekly meeting asks for need a layer the
+# system has not been granted.  A brief that does not attribute last week's
+# price move is not a bad brief; it is a brief written by a system that is
+# blind to price.  So the gate is a *deterministic* check and not a judge
+# question: whether the market authority is granted is a fact about the Core,
+# and a model asked to decide it would be guessing about its own installation.
+#
+# Absent unless proven present.  A score run without a Core connection -- the
+# golden set, an offline rescore -- has no evidence that either capability
+# exists, and defaulting to "present" would silently start grading documents
+# against sections nobody can write.
+# ---------------------------------------------------------------------------
+
+# capability -> (table that would hold it, the may_write scope that admits it)
+WEEKLY_BRIEF_CAPABILITY_SOURCES: Mapping[str, tuple[str, str]] = {
+    "market_price": ("market_price_series_versions", "market_price"),
+    "debate_map": ("debate_map_versions", "debate_map"),
+}
+
+
+def _mission_write_scopes(core: sqlite3.Connection) -> set[str] | None:
+    """What the live missions are allowed to write, or None if unreadable."""
+
+    try:
+        rows = core.execute(
+            "SELECT v.record_json AS record_json FROM coverage_mission_pointer p "
+            "JOIN coverage_mission_versions v ON v.mission_version_id=p.mission_version_id"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None
+    scopes: set[str] = set()
+    for row in rows:
+        try:
+            record = json.loads(row["record_json"])
+        except (TypeError, ValueError):
+            continue
+        autonomy = record.get("autonomy") or {}
+        scopes.update(str(scope) for scope in (autonomy.get("may_write") or []))
+    return scopes
+
+
+def weekly_brief_capabilities(core: sqlite3.Connection | None) -> dict[str, dict[str, Any]]:
+    """For each gated capability: is it there, and if not, why not.
+
+    A capability counts as present only when both halves are true -- the
+    authority holds at least one record, and a live mission grants the write
+    scope that admits it.  Either half alone is a half-installed layer: rows
+    nobody may write about, or a permission with nothing behind it.
+    """
+
+    if core is None:
+        return {
+            name: {"present": False,
+                   "reason": "没有 Core 连接，无法确认这一层是否已接入；按未接入处理"}
+            for name in WEEKLY_BRIEF_CAPABILITY_SOURCES
+        }
+    scopes = _mission_write_scopes(core)
+    out: dict[str, dict[str, Any]] = {}
+    for name, (table, scope) in WEEKLY_BRIEF_CAPABILITY_SOURCES.items():
+        try:
+            rows = core.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+        except sqlite3.OperationalError:
+            rows = None
+            present_table = False
+        else:
+            present_table = rows is not None
+        granted = scopes is not None and scope in scopes
+        if present_table and granted:
+            out[name] = {"present": True, "reason": f"{table} 有记录，且 mission 已授予 {scope}"}
+        elif not present_table:
+            out[name] = {"present": False,
+                         "reason": f"{table} 尚无记录：这一层还没有产出任何版本"}
+        else:
+            out[name] = {"present": False,
+                         "reason": f"live mission 的 may_write 未授予 {scope}"}
+    return out
+
+
+def check_weekly_brief_capability_gate(
+    art: Mapping[str, Any], context: CheckContext
+) -> dict[str, Any]:
+    """Which criteria this Core cannot yet hold against a weekly brief.
+
+    Reported as ``skipped`` rather than ``fail``: nothing about the document
+    failed.  ``count`` is the number of criteria withheld, so the golden set
+    pins how much of the rubric is currently unusable -- which is the number
+    that should fall to zero as Wave 1A and Wave 2 land.
+    """
+
+    rubric: Rubric | None = context.get("rubric")
+    capabilities = weekly_brief_capabilities(context.get("core"))
+    findings: list[dict[str, Any]] = []
+    criteria = () if rubric is None else rubric.criteria
+    for criterion in criteria:
+        name = criterion.capability
+        if name is None:
+            continue
+        state = capabilities.get(name)
+        if state is None or state["present"]:
+            continue
+        findings.append({
+            "code": "not_applicable_yet",
+            "criterion_id": criterion.criterion_id,
+            "capability": name,
+            "reason": state["reason"],
+        })
+    if not findings:
+        return _result(
+            "weekly_brief_capability_gate", status="pass",
+            detail="这份评分表的每条标准今天都可评",
+        )
+    return _result(
+        "weekly_brief_capability_gate", status="skipped", findings=findings,
+        detail=(f"{len(findings)} 条标准所依赖的能力尚未接入，按 not_applicable_yet 发布："
+                + "；".join(f"{item['criterion_id']}（{item['reason']}）" for item in findings)),
+    )
+
+
 CHECKS: Mapping[str, Callable[[Mapping[str, Any], CheckContext], dict[str, Any]]] = {
     "numbers_without_refs": check_numbers_without_refs,
     "residual_citation_artefacts": check_residual_citation_artefacts,
@@ -663,6 +909,7 @@ CHECKS: Mapping[str, Callable[[Mapping[str, Any], CheckContext], dict[str, Any]]
     "every_section_cites": check_every_section_cites,
     "new_version_cites_new_refs": check_new_version_cites_new_refs,
     "restatement_drift": check_restatement_drift,
+    "weekly_brief_capability_gate": check_weekly_brief_capability_gate,
 }
 
 
@@ -671,7 +918,10 @@ def run_deterministic(
 ) -> dict[str, Any]:
     """Every check this rubric names, in the rubric's own order."""
 
-    context: CheckContext = {"core": core}
+    # The rubric travels in the context because Q2's capability gate is a
+    # check about the *rubric*: which of its criteria this Core cannot yet
+    # hold against a document. Every other check ignores it.
+    context: CheckContext = {"core": core, "rubric": rubric}
     results = [CHECKS[name](art, context) for name in rubric.deterministic_checks]
     failed = [item["check"] for item in results if item["status"] == "fail"]
     return {
@@ -1334,6 +1584,7 @@ def score_artefact(
 
 __all__ = [
     "ARTEFACT_KINDS",
+    "WEEKLY_BRIEF_CAPABILITY_SOURCES",
     "CHECKS",
     "INITIAL_SCREEN_SECTIONS",
     "JUDGE_MODEL_CONFIG_NAME",
@@ -1356,6 +1607,7 @@ __all__ = [
     "artefact_from_ask_answer",
     "artefact_from_deliverable",
     "artefact_from_dossier",
+    "artefact_from_weekly_brief",
     "build_judge_prompt",
     "build_verifier_prompt",
     "judge",
@@ -1366,4 +1618,5 @@ __all__ = [
     "validate_judge_output",
     "validate_verifier_output",
     "verify",
+    "weekly_brief_capabilities",
 ]

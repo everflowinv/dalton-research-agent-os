@@ -1,0 +1,248 @@
+{
+ "artefact": {
+  "artefact_kind": "weekly_brief",
+  "cited_tags": [],
+  "confidence": null,
+  "expected_sections": [
+   "本期研究变化",
+   "对现有观点的影响",
+   "预测对账",
+   "公司与 driver 分化",
+   "证据缺口",
+   "关键争议",
+   "下期研究问题",
+   "来源与 authority"
+  ],
+  "gaps": [],
+  "hash": "1ee0a2e39bb31e0d696473d72e3a80709329821247f46d748585d616a4bd6b31",
+  "prior": null,
+  "question": null,
+  "ref": "weekly-brief-version:us-it-services:2026-w35",
+  "sections": [
+   {
+    "body": "- 本期是首次基线，不把此前累积的正式 Claim 冒充为本周新增。\n- 基线 Claim｜ACN｜quarterly_revenue_yoy_growth｜5.59 percent｜2026-03-01..2026-05-31｜〔ref〕 - 基线 Claim｜EPAM｜quarterly_revenue_yoy_growth｜4.53 percent｜2026-04-01..2026-06-30｜〔ref〕 - 基线 Claim｜IBM｜quarterly_revenue_yoy_growth｜1.09 percent｜2026-04-01..2026-06-30｜〔ref〕 - 基线 Claim｜CTSH｜quarterly_revenue_yoy_growth｜5.83 percent｜2026-01-01..2026-03-31｜〔ref〕",
+    "claim_refs": [
+     "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+     "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+     "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+     "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0"
+    ],
+    "gaps": [],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "5.59 percent"
+     },
+     {
+      "claim_version_ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+      "period": "2026-04-01..2026-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1414767000 for 2026-04-01..2026-06-30, up 4.53% year over year from USD 1353443000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+      "period": "2026-04-01..2026-06-30",
+      "text": "4.53 percent"
+     },
+     {
+      "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+      "period": "2026-04-01..2026-06-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 17162000000 for 2026-04-01..2026-06-30, up 1.09% year over year from USD 16977000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+      "period": "2026-04-01..2026-06-30",
+      "text": "1.09 percent"
+     },
+     {
+      "claim_version_ref": "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+      "period": "2026-01-01..2026-03-31",
+      "text": "COGNIZANT TECHNOLOGY SOLUTIONS CORPORATION reported Revenues of USD 5413000000 for 2026-01-01..2026-03-31, up 5.83% year over year from USD 5115000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+      "period": "2026-01-01..2026-03-31",
+      "text": "5.83 percent"
+     }
+    ],
+    "title": "本期研究变化"
+   },
+   {
+    "body": "- IBM：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。\n- CTSH：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。\n- EPAM：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。\n- ACN：insufficient——尚无正式当前 ThesisVersion，不能断言本期证据改变了投资观点。",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [],
+    "title": "对现有观点的影响"
+   },
+   {
+    "body": "### Reported quarterly revenue growth\n\n- ACN：stance=positive；observed=quarterly_revenue_yoy_growth；unresolved=none\n  - 差异：The lane selected the Revenues US-GAAP concept for Accenture's fiscal quarter.\n  - 观察点：Compare subsequent fiscal-quarter claims by reported year-over-year rate rather than calendar-quarter labels.\n- CTSH：stance=positive；observed=quarterly_revenue_yoy_growth；unresolved=none\n  - 差异：The lane's available latest same-filing comparison is calendar Q1 2026.\n  - 观察点：Refresh when a later Cognizant 10-Q is available through the Company Facts lane.\n- EPAM：stance=positive；observed=quarterly_revenue_yoy_growth；unresolved=none\n  - 差异：The lane selected RevenueFromContractWithCustomerExcludingAssessedTax for EPAM.\n  - 观察点：Keep the permitted US-GAAP concept difference visible in cross-company comparisons.\n- IBM：stance=positive；observed=quarterly_revenue_yoy_growth；unresolved=none\n  - 差异：The lane selected the Revenues US-GAAP concept for IBM's calendar quarter.\n  - 观察点：Compare subsequent periods on the same-filing year-over-year basis and keep IBM's broader business mix visible.",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [],
+    "title": "公司与 driver 分化"
+   },
+   {
+    "body": "- 当前 issue 的闭合 metric matrix 没有未覆盖单元格。",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [],
+    "title": "证据缺口"
+   },
+   {
+    "body": "- How broad is reported quarterly revenue growth across the lane-covered peer set?（status=open）\n  - supports：ACN and EPAM show positive reported quarterly revenue growth｜claims=〔ref〕 - qualifies：Cognizant supplies a different issuer period and US-GAAP revenue concept｜claims=〔ref〕 - supports：IBM also reported positive quarterly revenue growth in calendar Q2 2026｜claims=〔ref〕",
+    "claim_refs": [
+     "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+     "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+     "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+     "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67"
+    ],
+    "gaps": [],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+      "period": "2026-03-01..2026-05-31",
+      "text": "5.59 percent"
+     },
+     {
+      "claim_version_ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+      "period": "2026-04-01..2026-06-30",
+      "text": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1414767000 for 2026-04-01..2026-06-30, up 4.53% year over year from USD 1353443000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:41a602599fdf16da88b54ba8a14a20df9412fc981f3c56d7be05402bf7a7a025",
+      "period": "2026-04-01..2026-06-30",
+      "text": "4.53 percent"
+     },
+     {
+      "claim_version_ref": "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+      "period": "2026-01-01..2026-03-31",
+      "text": "COGNIZANT TECHNOLOGY SOLUTIONS CORPORATION reported Revenues of USD 5413000000 for 2026-01-01..2026-03-31, up 5.83% year over year from USD 5115000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:74ef310b3054cdc7022e845d22af6d6585ff757c003ab69cee70ab01f33d66a0",
+      "period": "2026-01-01..2026-03-31",
+      "text": "5.83 percent"
+     },
+     {
+      "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+      "period": "2026-04-01..2026-06-30",
+      "text": "INTERNATIONAL BUSINESS MACHINES CORP reported Revenues of USD 17162000000 for 2026-04-01..2026-06-30, up 1.09% year over year from USD 16977000000 in the comparable quarter."
+     },
+     {
+      "claim_version_ref": "claim-version:44332d104e23e7563bfae9dcd9f7b4740ac7c6c749915787265000db53495d67",
+      "period": "2026-04-01..2026-06-30",
+      "text": "1.09 percent"
+     }
+    ],
+    "title": "关键争议"
+   },
+   {
+    "body": "- ACN：Will the next SEC lane run preserve positive reported revenue growth?\n- CTSH：Will the next available quarter change the observed growth rate?\n- EPAM：Will the next SEC lane comparison confirm continued positive revenue growth?\n- IBM：Will IBM's next SEC lane comparison preserve positive reported revenue growth?",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [],
+    "title": "下期研究问题"
+   },
+   {
+    "body": "- source:sec-edgar｜evidence=〔ref〕 - source:sec-edgar｜evidence=〔ref〕 - source:sec-edgar｜evidence=〔ref〕 - source:sec-edgar｜evidence=〔ref〕",
+    "claim_refs": [],
+    "gaps": [],
+    "numbers": [],
+    "title": "来源与 authority"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "industry:us-it-services",
+  "title": "weekly-brief:us-it-services"
+ },
+ "case_ref": "live-w35-baseline",
+ "expected": {
+  "deterministic": {
+   "claim_refs_resolve": {
+    "count": 0,
+    "status": "skipped"
+   },
+   "duplicate_parallel_citations": {
+    "count": 0,
+    "status": "pass"
+   },
+   "numbers_without_refs": {
+    "count": 0,
+    "status": "pass"
+   },
+   "required_sections_present": {
+    "count": 1,
+    "status": "fail"
+   },
+   "residual_citation_artefacts": {
+    "count": 0,
+    "status": "pass"
+   },
+   "weekly_brief_capability_gate": {
+    "count": 2,
+    "status": "skipped"
+   }
+  },
+  "not_applicable_yet": [
+   "price_performance_attribution",
+   "debate_shifts"
+  ],
+  "rationale": "结构缺 预测对账（这一期发布时模板还只有七节），所以 structure_complete 与 forecast_changes 都低。数字纪律干净：四条基线 Claim 的 5.59 / 4.53 / 1.09 / 5.83 percent 全部逐字回指。正文里每一行都拖着一个 〔ref〕，所以 citation_hygiene 不高——机器地址被印进了给人读的句子里。下期研究问题四条全是「下一次跑会不会还是正的」，可执行性低。",
+  "score_ranges": {
+   "citation_dedupe": [
+    3,
+    4
+   ],
+   "citation_hygiene": [
+    1,
+    2
+   ],
+   "debate_shifts": [
+    0,
+    2
+   ],
+   "forecast_changes": [
+    0,
+    1
+   ],
+   "gaps_named": [
+    1,
+    2
+   ],
+   "next_week_plan": [
+    1,
+    2
+   ],
+   "number_provenance": [
+    3,
+    4
+   ],
+   "price_performance_attribution": [
+    0,
+    2
+   ],
+   "structure_complete": [
+    1,
+    2
+   ],
+   "view_changes": [
+    2,
+    3
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "第一期，是基线：change_summary.is_baseline 为真，没有相对上一期的变化可报。它是判断「首期没有 delta 不该扣分」这条 grading note 是否被遵守的那一例。",
+ "rubric": "weekly-brief",
+ "source": "live Core（/private/tmp/dalton-ro/core.sqlite 的 /tmp 副本，2026-09-09），weekly-brief-version:us-it-services:2026-w35，人类 human:lumos 于 2026-08-27 发布并投递至 Discord。正文由 WeeklyBriefAuthority.render_markdown 从 evidence pack 重放，逐字。"
+}

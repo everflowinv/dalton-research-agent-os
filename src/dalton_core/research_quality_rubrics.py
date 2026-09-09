@@ -28,9 +28,20 @@ Three rubrics, one per artefact the system already produces or is about to:
   the dossier layer is restatement drift, and a rubric that arrives after the
   first version has nothing to refuse.
 
-There is deliberately no weekly-brief rubric: the owner deferred the weekly
-brief to the end of the roadmap, and a rubric for an artefact nobody is
-building would be graded by nothing.
+- ``weekly_brief`` -- Q2.  Q1 left this one out on the grounds that the owner
+  had deferred the weekly brief; re-reading the decision, what was deferred is
+  *delivery* (P15c / P15e to the end of Wave 3), not evaluation, and two live
+  issues have already been published and delivered to Discord.  So the rubric
+  grades what the owner's Monday meeting actually asks for -- last week's price
+  performance and its attribution, what changed in the view, where the debate
+  moved, what moved in the forecast, what is still missing and what next week
+  will do -- and it carries a capability gate, because two of those six need a
+  layer the system has not been granted yet.
+
+A criterion that names a ``capability`` is not graded until the system has that
+capability: it is published as ``not_applicable_yet`` with the reason, never as
+a zero.  Grading a brief down for having no price attribution while the market
+layer is ungranted would be grading the roadmap, not the document.
 
 Nothing here scores anything.  ``research_quality_score`` does that; this
 module only says what the standard is.
@@ -79,9 +90,14 @@ class Criterion:
     # a check bounds it and the judge grades what is left.
     layer: str
     checks: tuple[str, ...] = ()
+    # The system capability this criterion presupposes.  When the capability is
+    # absent the criterion is published as ``not_applicable_yet`` with a reason
+    # rather than scored: a brief cannot attribute a price move before a price
+    # authority is granted, and a zero there would grade the roadmap.
+    capability: str | None = None
 
     def body(self) -> dict[str, Any]:
-        return {
+        body: dict[str, Any] = {
             "criterion_id": self.criterion_id,
             "question": self.question,
             "evidence_required": self.evidence_required,
@@ -89,6 +105,14 @@ class Criterion:
             "layer": self.layer,
             "checks": list(self.checks),
         }
+        # Present only when it says something.  The three Q1 rubrics name no
+        # capability, so their bodies -- and therefore the hashes every score
+        # written under them binds -- are byte-identical to what they were
+        # before this field existed.  An always-present ``"capability": null``
+        # would have rewritten three frozen standards to add nothing.
+        if self.capability is not None:
+            body["capability"] = self.capability
+        return body
 
 
 @dataclass(frozen=True)
@@ -521,9 +545,214 @@ COMPANY_DOSSIER = Rubric(
 )
 
 
+# --------------------------------------------------------------------------
+# weekly_brief
+#
+# Six things the owner's Monday meeting asks for (blueprint P15c): last week's
+# price performance and its attribution, what changed in the view, where the
+# debate moved, what moved in the forecast, what is still missing, and what
+# next week will do.  Plus the three defects every published document in this
+# repository has been caught carrying: a number with no source, citation
+# scaffolding left in the prose, one fact cited three times.
+#
+# Two of the six need a layer the system has not been granted: price
+# attribution needs the market authority (Wave 1A built it; the live mission
+# does not grant ``market_price``), and a debate *shift* needs the DebateMap
+# Wave 2 will build -- the live brief's 关键争议 section is the evidence pack's
+# deterministic controversy list, which is a snapshot and not a movement.
+# Those two carry a ``capability`` and are published as ``not_applicable_yet``.
+#
+# What is deliberately *not* gated: forecast changes.  ``forecast_reconciliation``
+# is live and the second published issue already carries a 预测对账 section, so
+# a brief that says nothing about the forecast is a brief that skipped
+# something it could have done.
+# --------------------------------------------------------------------------
+
+# The structure the weekly brief authority already enforces (its own
+# ``ISSUE_SECTIONS``), frozen here so a golden case can be checked without
+# importing the authority.  ``tests/test_research_quality_rubrics.py`` asserts
+# the two tuples agree, so this copy cannot drift away from the object it
+# grades.  The price section is not here: it is a criterion, not a template
+# slot, and it becomes a slot in rubric version 2 when the market layer lands.
+WEEKLY_BRIEF_SECTIONS: tuple[str, ...] = (
+    "本期研究变化",
+    "对现有观点的影响",
+    "预测对账",
+    "公司与 driver 分化",
+    "证据缺口",
+    "关键争议",
+    "下期研究问题",
+    "来源与 authority",
+)
+
+# The capability keys the gate probes.  A key here is a fact about the system,
+# never about the document.
+CAPABILITY_MARKET_PRICE = "market_price"
+CAPABILITY_DEBATE_MAP = "debate_map"
+
+WEEKLY_BRIEF = Rubric(
+    rubric_ref="rubric:weekly-brief",
+    version=1,
+    title="周会简报质量评分表",
+    applies_to="weekly_brief_issue_version",
+    intent=(
+        "周会上 PM 要的是六件事：上周价格表现与归因、观点变化、debate 转向、预测变动、缺口、"
+        "下周计划。这份评分表按这六件事给简报打分，外加三条对所有产出都成立的纪律（每个数字回指、"
+        "没有引用剥离残迹、同一事实不并列引用）与一条结构齐备。"
+        "两件事今天做不了——价格归因要等市场层被 mission 授予，debate 转向要等 Wave 2 的 DebateMap——"
+        "它们由确定性能力闸标成 not_applicable_yet 并附原因，永远不记 0 分。"
+    ),
+    criteria=(
+        Criterion(
+            criterion_id="price_performance_attribution",
+            question="上周每家覆盖公司的价格表现是否被复盘，涨跌是否被归因到具体的 driver、事件或 Claim？",
+            evidence_required=(
+                "每家公司一段：区间涨跌幅回指一版 MarketPriceSeriesVersion；归因指向一个具名事件或 Claim ref；"
+                "无法归因的公司明说无法归因"
+            ),
+            anchors=_anchors(
+                "写了价格判断却没有任何行情 authority 承载它，或者归因只是「市场情绪」「板块轮动」这类事后叙事",
+                "给出了涨跌幅并回指行情，但归因停在复述新闻标题，没有落到 driver 或 thesis 上",
+                "每家的涨跌绑定一版行情，归因指向具体事件或 Claim，并说明它是否改变了持有这个 thesis 的理由；"
+                "归因不了的明说归因不了，而不是补一个故事",
+            ),
+            layer="both",
+            checks=("weekly_brief_capability_gate",),
+            capability=CAPABILITY_MARKET_PRICE,
+        ),
+        Criterion(
+            criterion_id="view_changes",
+            question="观点变化一节是否说清哪几家的 thesis 动了、往哪个方向动、为什么动，没动的又为什么没动？",
+            evidence_required=(
+                "thesis_bindings 里每家的 status 与版本，与 change_summary.changed_thesis_company_refs 的对应；"
+                "每条变化后面的理由句与支撑它的证据 ref"
+            ),
+            anchors=_anchors(
+                "断言「观点变了」却没有任何 ThesisVersion 的变化承载它，或者给一家没有正式 thesis 的公司编一个观点出来",
+                "列出了哪几家的 thesis 版本变了，但没有说方向，也没有说是什么推动了它",
+                "每家给出「变了或没变 + 为什么 + 支撑它的证据 ref」；没有正式 ThesisVersion 的公司明确写 insufficient，"
+                "并说明补什么才能立起一个 thesis",
+            ),
+            layer="judge",
+        ),
+        Criterion(
+            criterion_id="debate_shifts",
+            question="多空辩论的焦点相对上一期有没有移动？移动是被哪一条新证据推动的？",
+            evidence_required=(
+                "本期争议的 supports / against / qualifies 证据集合与上一期的差；移动的那一条要指名推动它的 Claim ref"
+            ),
+            anchors=_anchors(
+                "把一张静态的争议清单原样重印，却称它是「本周的辩论转向」",
+                "争议清单确实更新了，但没有说哪一条移动了、被什么推动、移动之后该盯什么",
+                "指名移动的那一条争议、推动它的证据 ref、以及移动之后哪一个读数能把它定下来；没有移动时明说没有移动",
+            ),
+            layer="both",
+            checks=("weekly_brief_capability_gate",),
+            capability=CAPABILITY_DEBATE_MAP,
+        ),
+        Criterion(
+            criterion_id="forecast_changes",
+            question="预测与对账一节是否说清哪些预测变了、变了多少、是被 actual 取代还是被 driver 事件修订？",
+            evidence_required=(
+                "forecast_reconciliation 记录与预测行版本的差；每条变动的 change_reason 与触发它的证据 refs"
+            ),
+            anchors=_anchors(
+                "声称预测变了却没有任何对账记录或预测版本承载，或者对账数字与 authority 对不上",
+                "列出了对账结果，但没有区分「历史期 estimate 被 actual 取代」与「未来期假设被修订」",
+                "每条变动带 change_reason 与证据 ref，并说明它对 thesis 的含义；本周没有变动时明说没有变动，"
+                "而不是把上周的表再贴一遍",
+            ),
+            layer="judge",
+        ),
+        Criterion(
+            criterion_id="gaps_named",
+            question="证据缺口是否点名了缺什么，以及缺了它这一周哪个问题回答不了？",
+            evidence_required="缺口清单的具体程度，与正文断言强度的一致性",
+            anchors=_anchors(
+                "缺口为空而正文的断言超出了证据，或者缺口只是「需要更多数据」",
+                "缺口点了名，但没有说缺了它答不了哪个问题",
+                "每个缺口对应本期正文里的一处限定，并写明补上它要去哪个来源取什么",
+            ),
+            layer="judge",
+        ),
+        Criterion(
+            criterion_id="next_week_plan",
+            question="下周计划是不是可执行的研究动作，而不是一句「继续跟踪」？",
+            evidence_required="每条计划指向一个具体的公司、driver 或问题，且具体到可以原样登记成一条 backlog 问题",
+            anchors=_anchors(
+                "「继续关注公司经营」这类不可执行也不可证伪的说法",
+                "点了公司与题目，但没有说要取什么材料、要回答哪个问题",
+                "每条是「问题 + 要取的来源 + 什么读数会改变判断」，可以直接登记成一条带 because 与 refs 的 backlog 问题",
+            ),
+            layer="judge",
+        ),
+        Criterion(
+            criterion_id="number_provenance",
+            question="简报里的每个数字，是否都由它引用的 Claim 逐字承载？",
+            evidence_required="正文中的每个数字 token，与本节 numbers 列表里某条 Claim 的陈述中的数字逐字对齐",
+            anchors=_anchors(
+                "正文里有数字既没有被引 Claim 承载，也没有写成缺口",
+                "数字都有来源，但做了单位或量级的改写，读者无法逐字核对回 filing",
+                "每个数字逐字来自一条可解析的 Claim，期间标注与 Claim 的 period 一致；没有数字的地方写明缺口",
+            ),
+            layer="both",
+            checks=("numbers_without_refs", "claim_refs_resolve"),
+        ),
+        Criterion(
+            criterion_id="citation_hygiene",
+            question="引用脚手架被剥离后，正文是否仍然是完整的句子？",
+            evidence_required="正文中不存在残留标记、空引用括号、连续分隔符，也没有丢了主语的残句",
+            anchors=_anchors(
+                "正文里有可见的剥离残迹：连续分隔符、空引用括号或裸露的 C7 / N1",
+                "没有残迹，但有若干句子的主语被省略到读者需要猜",
+                "每一句都有主语，来源在文字里被命名，机器 ref 由 claim_refs 承载而不是散在正文里",
+            ),
+            layer="both",
+            checks=("residual_citation_artefacts",),
+        ),
+        Criterion(
+            criterion_id="citation_dedupe",
+            question="同一个事实，是否只被引用一次？",
+            evidence_required="一节的 numbers 列表里不存在同一 period × 数值的多条 Claim；一句话里同一个数字不重复出现",
+            anchors=_anchors(
+                "同一个季度的同一个数字被多条重复 Claim 并列引用",
+                "存在重复引用但不影响阅读（例如两条同源 Claim 指向同一句话）",
+                "每个事实一条引用；真正的重述（同一期间、不同数值）被分别标注而不是被合并掉",
+            ),
+            layer="both",
+            checks=("duplicate_parallel_citations",),
+        ),
+        Criterion(
+            criterion_id="structure_complete",
+            question="周报 authority 自己声明的八节是否都在，且都不是空壳？",
+            evidence_required="章节标题与 WEEKLY_BRIEF_SECTIONS 的逐一比对；每节要么有正文，要么有缺口说明",
+            anchors=_anchors(
+                "有章节缺失且没有任何说明，或者章节标题与 authority 声明的结构对不上",
+                "八节都在，但有两节以上只是把别节的内容换个说法重讲一遍",
+                "八节都在；本期没有内容的章节写明它为什么是空的（首期基线、本周无对账、无未覆盖单元格）",
+            ),
+            layer="both",
+            checks=("required_sections_present",),
+        ),
+    ),
+    grading_notes=(
+        "带 capability 的标准（价格归因、debate 转向）由确定性能力闸判定是否可评：能力未接入时它们以 "
+        "not_applicable_yet 加原因发布，永远不记 0 分，也不计入均值。判官仍要为它们各返回一条分数——"
+        "回复合同要求每条标准恰好一条——但那一分评的是**这份简报有没有诚实地说明该能力尚未接入**，"
+        "而不是它有没有做到。owner 搁置的是周报投递，不是周报评估。",
+        "首期（baseline）没有「相对上一期的变化」是事实而不是缺陷：change_summary.is_baseline 为真时，"
+        "view_changes、debate_shifts、forecast_changes 按「有没有说清这是首期基线、基线里有什么」来打分。",
+        "「尚无正式 ThesisVersion，因此不能断言本期证据改变了投资观点」是满分行为，不是失败。"
+        "周报永远不产生新的投资断言，它报告别的 authority 已经记下的变化。",
+        "宁可留空并写明缺口，也不要写一个没有 authority 承载的价格或预测数字：无源数字比空白更坏。",
+        "不要因为简报没有回答你想问的问题而扣分；只按下面的标准打分。",
+    ),
+)
+
+
 RUBRICS: Mapping[str, Rubric] = MappingProxyType({
     rubric.rubric_ref: rubric
-    for rubric in (INITIAL_SCREEN, ASK_ANSWER, COMPANY_DOSSIER)
+    for rubric in (INITIAL_SCREEN, ASK_ANSWER, COMPANY_DOSSIER, WEEKLY_BRIEF)
 })
 # The short names the CLI and the golden set use, so nobody has to type
 # "rubric:initial-screen" twice.
@@ -531,6 +760,10 @@ RUBRIC_ALIASES: Mapping[str, str] = MappingProxyType({
     "initial_screen": INITIAL_SCREEN.rubric_ref,
     "ask_answer": ASK_ANSWER.rubric_ref,
     "company_dossier": COMPANY_DOSSIER.rubric_ref,
+    # Hyphenated, unlike the other three: it is what the CLI flag and the
+    # golden directory are called, and three spellings of one rubric is
+    # two spellings too many.
+    "weekly-brief": WEEKLY_BRIEF.rubric_ref,
 })
 
 
@@ -558,6 +791,8 @@ def rubric_hashes() -> dict[str, str]:
 
 __all__ = [
     "ASK_ANSWER",
+    "CAPABILITY_DEBATE_MAP",
+    "CAPABILITY_MARKET_PRICE",
     "COMPANY_DOSSIER",
     "Criterion",
     "DOSSIER_SECTIONS",
@@ -571,6 +806,8 @@ __all__ = [
     "SCORE_MAX",
     "SCORE_MIN",
     "UnknownRubric",
+    "WEEKLY_BRIEF",
+    "WEEKLY_BRIEF_SECTIONS",
     "rubric",
     "rubric_hashes",
 ]
