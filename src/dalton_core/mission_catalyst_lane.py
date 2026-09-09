@@ -178,6 +178,7 @@ class MissionCatalystLaneCoordinator:
             "moved_entry_refs": list(summary.get("moved_entry_refs") or []),
             "published_change_count": summary.get("published_change_count") or 0,
             "sec_status": summary.get("sec_status"),
+            "vendor_status": summary.get("vendor_status"),
             "sec_release_count": summary.get("sec_release_count") or 0,
             "failure_reason": (
                 reason[:MAX_FAILURE_DETAIL_CHARS] if isinstance(reason, str) else None
@@ -196,17 +197,29 @@ class MissionCatalystLaneCoordinator:
         company_ref = settled.get("company_ref")
         if not company_ref:
             return settled
-        if settled.get("status") != "succeeded":
+        status = settled.get("status")
+        if status not in ("succeeded", "partial"):
             self._failures[company_ref] = self._failures.get(company_ref, 0) + 1
             self._failure_reason[company_ref] = (
-                settled.get("failure_reason") or f"last run: {settled.get('status')}"
+                settled.get("failure_reason") or f"last run: {status}"
             )
             # Not marked as asked: a failed run learned nothing, and holding
             # the company for a day on the strength of it would mean a
             # transient error costs a day of the calendar.
             return settled
-        self._failures.pop(company_ref, None)
-        self._failure_reason.pop(company_ref, None)
+        if status == "partial":
+            # The filed half published and the vendor half did not. The day
+            # counts as asked, because the calendar did learn something and
+            # asking again today would not fix Yahoo; the failure counts too,
+            # because a vendor that stays broken must not hide behind a
+            # calendar that keeps almost working.
+            self._failures[company_ref] = self._failures.get(company_ref, 0) + 1
+            self._failure_reason[company_ref] = (
+                settled.get("failure_reason") or "the vendor half failed"
+            )
+        else:
+            self._failures.pop(company_ref, None)
+            self._failure_reason.pop(company_ref, None)
         self._asked[company_ref] = self._today()
         settled["events"] = self._emit(company_ref, settled["moved_entry_refs"])
         return settled
@@ -226,9 +239,24 @@ class MissionCatalystLaneCoordinator:
         recorded: list[dict[str, Any]] = []
 
         def writer(**event: Any) -> Any:
-            recorded.append(event)
+            """Write one event, and remember it the instant it is written.
+
+            Marking the whole batch afterwards was wrong in the case that
+            matters: a company with a preview and a date change gets two, and
+            if the second one raised, the first was recorded and forgotten --
+            so the next day's tick wrote it again. Whatever the writer accepted
+            is marked before anything else can fail.
+            """
+
             if self.record_event is not None:
-                return self.record_event(**event)
+                result = self.record_event(**event)
+                self._emitted.add(event["payload"]["event_key"])
+                recorded.append(event)
+                return result
+            # Nothing was written, so nothing is marked. The windows keep
+            # showing up in the tick summary until a writer is wired, which is
+            # the nagging this state deserves.
+            recorded.append(event)
             return None
 
         try:
@@ -242,10 +270,13 @@ class MissionCatalystLaneCoordinator:
                 is_emitted=self._emitted.__contains__,
             )
         except Exception as exc:  # noqa: BLE001 - one company, not the tick
-            return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}",
-                    "emitted": []}
-        for payload in emitted:
-            self._emitted.add(payload["event_key"])
+            return {
+                "status": "failed", "reason": f"{type(exc).__name__}: {exc}",
+                # What did get written before it broke, so a reader can tell a
+                # run that emitted nothing from one that emitted half.
+                "emitted": [event["payload"] for event in recorded],
+                "recorded_count": len(recorded),
+            }
         return {
             "status": "recorded" if self.record_event is not None else "events_unwired",
             "emitted": emitted,

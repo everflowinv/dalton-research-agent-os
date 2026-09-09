@@ -18,7 +18,6 @@ from dalton_core.sec_earnings_release import (
     submissions_artifacts,
 )
 from dalton_core.store import DaltonStore
-from dalton_core.yfinance_calendar_adapter import quarter_subject
 
 # Accenture's own recent block, in SEC's column-oriented shape and with the two
 # columns the existing normaliser drops -- ``items`` and ``reportDate`` -- which
@@ -105,12 +104,14 @@ class EntryTests(unittest.TestCase):
         releases = earnings_release_filings(submissions(), since="2026-04-01")
         entries = calendar_entries(
             releases, invocation_ref="connector-invocation:sec-filings-index:x",
-            artifact_hash="a" * 64, subject_for=quarter_subject,
+            artifact_hash="a" * 64,
         )
         self.assertEqual(len(entries), 1)
         entry = entries[0]
         self.assertEqual(entry["event_kind"], "earnings")
-        self.assertEqual(entry["subject"], "2026q2")
+        # It names no occurrence: which one this is is the authority's to
+        # decide from how far it sits from what the calendar already holds.
+        self.assertEqual(set(entry), {"event_kind", "sources", "notes"})
         source = entry["sources"][0]
         self.assertEqual(source["kind"], "filing")
         self.assertEqual(source["confidence"], "confirmed")
@@ -125,7 +126,7 @@ class EntryTests(unittest.TestCase):
         # would attach one, and it is confirmed because a company said it.
         entry = announced_next_date_entry(
             accession="0001467373-26-000035", announced_date="2026-10-01",
-            subject="2026q4", filing_date="2026-06-23",
+            filing_date="2026-06-23",
             note="press release: will report Q4 on October 1",
         )
         self.assertEqual(entry["event_kind"], "earnings")
@@ -135,7 +136,7 @@ class EntryTests(unittest.TestCase):
     def test_a_date_that_is_not_a_date_is_refused_at_the_seam(self):
         with self.assertRaises(ValueError):
             announced_next_date_entry(
-                accession="x", announced_date="early October", subject="2026q4",
+                accession="x", announced_date="early October",
                 filing_date="2026-06-23")
 
 
@@ -202,6 +203,42 @@ class SpoolTests(unittest.TestCase):
         self.assertEqual(found["status"], "read")
         self.assertEqual(len(found["releases"]), 3)
         self.assertEqual(found["artifact_hash"], digest)
+
+    def test_bytes_that_do_not_hash_to_their_ref_are_refused_not_ignored(self):
+        # The one failure in this path that means a stored citation does not
+        # point at what it says it does. Returning "unavailable" filed it
+        # beside "this company has no filings index yet", which is a very
+        # different thing to see in a tick summary.
+        digest = self.seed()
+        objects = self.state / "connector-spool" / "connector-spool" / "objects"
+        (objects / digest[:2] / digest).write_text("{}", encoding="utf-8")
+        found = releases_for_issuer(
+            self.store.connection, self.state, issuer="0001467373",
+            today="2026-09-09",
+        )
+        self.assertEqual(found["status"], "tampered")
+        self.assertIn("does not hash to", found["reason"])
+        self.assertEqual(found["releases"], [])
+
+    def test_bytes_that_are_not_json_are_their_own_answer(self):
+        digest = self.seed()
+        objects = self.state / "connector-spool" / "connector-spool" / "objects"
+        path = objects / digest[:2] / digest
+        path.write_bytes(b"not json at all")
+        # Re-point the envelope at the hash of what is actually there, so this
+        # is a parse failure and not the tamper case above.
+        import hashlib as _hashlib
+
+        moved = _hashlib.sha256(b"not json at all").hexdigest()
+        (objects / moved[:2]).mkdir(parents=True, exist_ok=True)
+        (objects / moved[:2] / moved).write_bytes(b"not json at all")
+        self.store.connection.execute(
+            "UPDATE connector_source_envelopes SET raw_response_hash=?", (moved,))
+        found = releases_for_issuer(
+            self.store.connection, self.state, issuer="0001467373",
+            today="2026-09-09",
+        )
+        self.assertEqual(found["status"], "unreadable")
 
     def test_a_company_whose_index_has_not_been_read_says_so(self):
         found = releases_for_issuer(

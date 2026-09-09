@@ -2,7 +2,7 @@
 
 日期：2026-09-09
 分支：`c1-catalyst-calendar`（worktree `~/Projects/dalton-c1-catalyst-calendar-worktree`）
-分叉基线：main `2fa5934`（2,512 项）
+分叉基线：main `2fa5934`；已 `git merge main` 到 `7708d43`（含 Wave 1.5 的 S1 / S2 / P14e / P14-M / P12b）
 依据：[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 3 节 C1 与「Daily tracking」一节、[vision 回顾](vision-review-against-plan-v1.0-2026-09-09.md) C1、蓝图 §5.2 P14f、ADR-0008、[P11a 市场层](p11a-market-layer-v1.0-2026-09-09.md)
 全量测试：见第 7 节，原文粘贴
 
@@ -21,7 +21,7 @@ Dalton 现在知道每家覆盖公司下一次开口是什么时候，也知道*
 | `src/dalton_core/catalyst_calendar.py` + `catalyst_calendar_schema.sql` | `CatalystCalendarVersion` 权威：append-only、`content_hash`、三触发器、读回校验、`next_catalyst` / `upcoming`；以及 P14f 窗口的事件发射器 |
 | `src/dalton_core/yfinance_calendar_adapter.py` | yfinance `calendar` 操作的取数与归一化，以及它变成的日历条目 |
 | `src/dalton_core/sec_earnings_release.py` | 8-K Item 2.02 探测器：读**已经落盘**的 SEC filings index 原始产物，零网络调用 |
-| `src/dalton_core/catalyst_calendar_cli.py` | 子进程：approval first → artifact always → contract last |
+| `src/dalton_core/catalyst_calendar_cli.py` | 子进程：approval first → artifact always → contract last；两半互不牵连 |
 | `src/dalton_core/catalyst_calendar_launcher.py` | `CatalystCalendarLauncher(LaneChildLauncher)` |
 | `src/dalton_core/mission_catalyst_lane.py` | 每天每公司一个有界孩子的无队列 lane + `LaneSpec` 注册 |
 | `deploy/connector-governance/yfinance-calendar-v1.json` | 新治理记录，`status: proposed`，`approved_by: human:lumos` |
@@ -55,8 +55,14 @@ Dalton 现在知道每家覆盖公司下一次开口是什么时候，也知道*
 
 - `event_kind ∈ {earnings, guidance, investor_day, filing_due, ex_dividend, other}`
 - `confidence ∈ {confirmed, estimated}`
-- **`entry_ref` 是「哪一次事件」而不是「哪一天」**：`hash(company_ref, event_kind, subject)`。日期挪了必须还是同一条，否则一次改期会被读成「取消 + 新增」。
-- `subject` 是「occurrence key」，由 `quarter_subject(date)` 给出日历季度（`2026q4`）。两个来源要先同意在说同一件事，才谈得上一致或不一致，而 Yahoo 和 SEC submissions index 谁都不给财季。**这个近似的方向是故意的**：跨季边界的日期会变成两条并列的条目，而不是一次错误的合并——重复在日历上看得见，静默合并看不见。
+- **`entry_ref` 是「哪一次事件」而不是「哪一天」**：`hash(company_ref, event_kind, anchor_date)`，`anchor_date` 是这次事件**第一次被看到的日期**，此后永不改变（`expected_date` 会变）。
+- **「哪一次事件」由权威在合并时判定，不由来源给。** 两条陈述属于同一次事件，当且仅当日期相差不超过 `SAME_OCCURRENCE_DAYS = 45`（`_match()`，按 anchor 而不是按当前 `expected_date` 匹配，否则连续几次改期会让一条条目「走」出去）。45 这个数字坐在它要分开的两件事中间：一次改期是几天到两周；连续两次季报相隔 77 到 92 天（ACN 财年 Q4 在 10/1、Q1 在 12 月中，正好 77）。
+- `subject` 现在**只是一个人看的标签**（`occurrence_label(anchor_date)` → `2026q4`），不是身份。它可以撞——ACN 一个日历 Q4 里报两次——所以任何要 key 的东西必须 key 在 `entry_ref` 上。
+
+**这里改过一次，因为原来的写法两个方向都错。** 原来 `subject` 是日历季度，并且由来源映射器自己算：
+- ACN 的财年 Q4（10/1）与 Q1（12 月中）同属日历 Q4 → 折成一条；filing 压过 vendor，已确认的 10/1 胜出，`expected_date` 成了过去日期，`next_catalyst()` 返回 `None`，**12 月那次 preview 根本不会开**，还附带一个假的 `disagreement`。
+- 反过来，9/30 挪到 10/1 会被判成两次不同的事件。
+- 现在两条都有测试钉住（`OccurrenceTests`）。教训写在 `SAME_OCCURRENCE_DAYS` 的注释里：**身份是权威的，一个能给事件命名的来源映射器就是一个能把两次事件合并掉的映射器。**
 
 `sources[]` 每一项：
 
@@ -68,6 +74,8 @@ Dalton 现在知道每家覆盖公司下一次开口是什么时候，也知道*
 `confidence` 由 `kind` 推导并强制：`filing` → `confirmed`，其余 → `estimated`。调用方传错直接拒（`CatalystCalendarConflict`）。能给 vendor 贴 `confirmed` 的调用方就是能把两个来源的区别整个关掉的调用方，而这个区别是两个来源存在的全部理由。
 
 **冻结的优先级**：`SOURCE_AUTHORITY = {"filing": 2, "connector_invocation": 1}`，同级按 `observed_at` 倒序、再按 ref。条目的 `expected_date` 与 `confidence` 取胜者的；输的那个日期留在 `sources[]` 里，`disagreement` 与 `disagreeing_dates` 把不一致直接说出来。**没有任何一处做平均。**
+
+**一条压过优先级的规则**：**一个说「已经发生过」的来源，不能决定另一个来源说「还没到」的那次事件的日期**（`resolution: forthcoming_over_past`，写在条目里）。这发生在两条陈述近到算同一次事件、却分处今天两侧的时候：三周前一份已确认的发布，旁边是 vendor 已经滚到下一次的估计。filing 压过 vendor，而且它没说错任何事——它在回答另一个问题。让它赢的后果是 `expected_date` 变成过去日期，这次事件直接从 `next_catalyst` 里消失，preview 被静默取消。那条过去的陈述仍在 `sources[]` 与 `disagreeing_dates` 里，只是不再有资格说下一次是什么时候。全都是过去的条目不受影响，仍取已确认的发布日——那正是 calibration 要的。
 
 **一个来源占几个槽**：vendor 一个来源一个槽（明天再读一次 Yahoo 还是 Yahoo，不是第二个证人——否则一个 vendor 靠重复就能压过一份 filing，而且条目会永远和自己的历史「不一致」）；filing 一个 accession 一个槽（8-K 是不可变的公告，同一季度两份就是两次公告——IBM 2026 年 7 月 14 日和 7 月 22 日各发过一份 Item 2.02，合成「SEC 当前的看法」会静悄悄丢掉两个事实里的一个）。
 
@@ -106,9 +114,11 @@ Dalton 现在知道每家覆盖公司下一次开口是什么时候，也知道*
 
 - **契约里没有 consensus 数字。** Yahoo 在同一个块里给 EPS 与收入一致预期，`analyst_estimates` 已经在带这两个了。两个操作声称同一个数字，就是这两个数字后来对不上的成因。
 - **不用 `Ticker.earnings_dates`。** 那个访问器抓的是 `finance.yahoo.com`，不在本连接器的 host allowlist（`query1` / `query2`）里。数据方便不是绕过批准范围的理由。`Ticker.calendar` 是对 `query2` 的一次 `quoteSummary` 请求，配额记 1 次物理调用。
-- **`earnings_dates` 是数组，因为 Yahoo 拿不准时会给一个窗口的两端。** 塌缩成一天就是替来源发明了它没给的精度。
+- **`earnings_dates` 是数组，因为 Yahoo 拿不准时会给一个窗口的两端。** 塌缩成一天就是替来源发明了它没给的精度。**但一个窗口是一次事件，不是两次**：条目层只出**一条**条目、一个来源、取**较早**那一端（日历是用来提前准备的，早准备不花钱），区间写进 `notes`。
+  - 这里原来一个日期出一条条目，错了两次：把公司只会开一次的电话会摆成两次；而且两条条目带的是同一个 vendor，会在权威里折回同一次事件、同一个来源出现两次——**权威直接拒收，于是这家公司每天跑失败，三次之后被 lane 挂起，再也不问了**。有测试（CTSH 形状的两日窗口，跑到发布为止）。
 - **过去的除息日不是将来的事件。** Yahoo 的 `Ex-Dividend Date` / `Dividend Date` 是它最后知道的那一次，不是下一次：live 抓下来 DXC 还报着 2020-03-23，停止分红六年之后；ACN 的是两个月前。wire 原样保留（产物就是那次调用），**条目层只在日期晚于观测日时才生成 `ex_dividend` 条目**。有测试钉住 DXC 那个真实的数。
 - 每个日期都是 `estimated`。Yahoo 不说日期从哪来，来源是「某个 vendor 有这个数」的日期不是公司承诺过的日期。
+- **先定时区再取日期。** `2026-10-01T23:30:00-07:00` 在 UTC 是 10 月 2 日；直接切前十个字符会把财报日提前一天，在月末还会连带把整条条目的季度标签也标错。不带时区的时间戳按它印出来的那天取，不假设成 UTC——那是在发明一个时区。
 
 ### 3.2 SEC 8-K Item 2.02 探测器（零新增网络调用）
 
@@ -126,7 +136,22 @@ core.sqlite: connector_call_specs(operation='list_filings')
 - `items` 按逗号切开后**整项比对**，不做子串匹配（子串会把假想中的 `12.02` 也算进来）。
 - 取 `reportDate`（结果公布那天），缺了才回退 `filingDate`；回退是显式的不是默认的。
 - 老产物没有 `items` 列 → 返回空而不是抛异常：那是更薄的答案，不是坏掉的 lane。有测试。
+- **字节哈希对不上不是「没有」。** 本模块自己校验产物哈希（`read_submissions_artifact`），把「不在盘上」（`absent`）、「哈希对不上」（`tampered`）、「不是 JSON」（`unreadable`）分成三个词。`mission_sec_quarters.read_artifact` 三种都返回 `None`，对它自己的调用方没问题，对这里不行：哈希对不上是这条路径上唯一一种「已存的引用不再指向它自称的东西」的情况，必须以一句人能读的拒绝出现，而不是混进「这家公司还没跑过 discovery」。
 - 探测器**取的是日期，不是文档**。那条 8-K 在字节里但不在该 invocation 的 `source_record_refs` 里（那次调用要的是 10-K），所以它不能被变成 filing URL 去抓——`sec_filings_index.build_sec_filing_url_authorities` 正是拒绝这件事的，而且拒得对。日期与文档是两件不同的请求，这里只提第一件。
+
+### 3.2.1 两半独立失败
+
+子进程先跑 filing 那一半，再跑 vendor 那一半，vendor 那一半整个包在自己的 `try` 里。**两个独立来源要么独立失败，要么就不是两个来源。**原来 SEC 那一半排在 wire 校验之后，于是 Yahoo 返回一个契约描述不了的东西，就把整次运行——连同一个跟 Yahoo 毫无关系、一次调用都没花的、从 filing 读出来的已确认日期——一起丢掉了。
+
+结果多出一个状态词：
+
+| `status` | 含义 | lane 的反应 |
+| --- | --- | --- |
+| `succeeded` | 两半都读到了（或 vendor 读到而 SEC 本就没被要求） | 发事件、记「今天问过」、清零失败计数 |
+| `partial` | filing 那一半发布了，vendor 那一半失败 | 发事件、记「今天问过」，**同时记一次失败** |
+| `failed` | 两半都没产出 | 不记「今天问过」，记一次失败 |
+
+`partial` 两边都记，是因为两件事都真：日历确实学到了东西（今天再问一次不会修好 Yahoo），而一个持续坏掉的 vendor 不该躲在一个「基本还能用」的日历后面——连着三天 `partial`，这家公司被挂起，理由里写着 vendor 的原话。治理记录没批也走这条路：approval 仍然在碰网络之前检查（`artifact` 是 `null`），只是不再把 filing 那一半一起否掉。
 
 ### 3.3 未来日期的那一半：机制在，产出方还没有
 
@@ -157,6 +182,8 @@ core.sqlite: connector_call_specs(operation='list_filings')
 ```
 
 `dispatch_mission_catalyst_calendar` 出现在 `writer_server.CORE_OPERATIONS` / `CORE_DISCOVERY_OPERATIONS` / `OPERATION_FIELDS`（空集）里，`mission_catalyst_calendar` 出现在 driver 的 tick 顺序里。
+
+**order 87 与 P14a 撞号**：注册表会拒绝重号（这是它该做的），主 agent 已定 C1 留在 87、P14a 合并时改号。本片不动。
 
 **动过的一条别人家的测试**：`tests/test_mission_market_price_lane.py::RegistrationTests::test_it_runs_between_the_statements_and_the_model_specification` 原来断言的是「紧挨着」，被放宽为「在前 / 在后」，理由与 Wave 0 把注册表迁移检查从「等于」放宽为「包含」是同一条：它钉住的真实决定是「价格在 filing 之后、在要拿它来读的规格之前」，「而且中间永远不许有别的」从来不是那个决定，却让此后每一条落在这个区间的 lane 变成别人的失败测试。原因写在测试里。
 
@@ -201,7 +228,9 @@ record_event(company_ref=..., kind="calendar", occurred_at=..., source_refs=[...
 - **calibration 永远只认 confirmed。** 它是对着一次发布写的；estimated 的日期只说明「大概率会报」，不说明「报过了」。对一场没人开过的电话会做校准不是薄，是错。
 - 判据集中在 `emit_calendar_events` 里的 `UNCONFIRMED_DATE_WINDOWS`（`{preview, date_change}`）一个常量上。
 
-**没接上时不会静默丢**：tick summary 里 `settled.events.status == "events_unwired"`，并把本该发出的事件列出来。谁都不用几个月后才发现窗口一直开进了虚空。
+**没接上时不会静默丢**：tick summary 里 `settled.events.status == "events_unwired"`，并把本该发出的事件列出来。谁都不用几个月后才发现窗口一直开进了虚空。没写出去就什么都不记，所以窗口会一直出现在 tick summary 里，直到有人把 writer 接上——这个状态就该被这样念叨。
+
+**写一条记一条。** `record_event` 接受了哪一条，就在那一刻记进 `_emitted`，不是整批发完再记。一家公司同时开着 preview 和 date_change 时，如果第二条写失败，整批记录法会让第一条「写出去了但没记住」，第二天再写一次。有测试（一个第二次调用就抛的 writer）。
 
 **去重**：`emit_calendar_events(is_emitted=...)` 收一个谓词。现在由 coordinator 的进程内 `set` 提供，所以 preview 窗口开着的三十天里只发一次；`event_key` 带日期，所以日期真动了窗口会重开。**集成时建议把 `is_emitted` 换成对事件账本的持久查询**（按 `payload.event_key`），否则 writer 重启会重发一次。这是目前唯一一个「进程内状态承担了本该持久的职责」的地方，故意留成一个参数。
 
@@ -250,98 +279,65 @@ fi
 
 ## 6. Smoke：五家公司，只读
 
-`--allow-network` 只对 yfinance；SEC 那一半是把 live 已落盘的五份 submissions 产物**只读复制**到临时 state 里再读（零 SEC 网络调用）。临时目录 `/tmp/c1-smoke-five`，live 状态未被写过。
+`--allow-network` 只对 yfinance；SEC 那一半是把 live 已落盘的五份 submissions 产物**只读复制**到临时 state 里再读（零 SEC 网络调用）。临时目录 `/tmp/c1-smoke-six`，live 状态未被写过。每家公司一次运行，两个来源一起跑。
 
 ```
-PASS 1 -- Yahoo only (network)
-  ACN   succeeded calendar=fresh        yahoo=['2026-10-01'] sec=not_requested/0 next=2026-10-01 entries=1
-  CTSH  succeeded calendar=fresh        yahoo=['2026-10-28'] sec=not_requested/0 next=2026-10-28 entries=1
-  EPAM  succeeded calendar=fresh        yahoo=['2026-11-05'] sec=not_requested/0 next=2026-11-05 entries=1
-  IBM   succeeded calendar=fresh        yahoo=['2026-10-21'] sec=not_requested/0 next=2026-10-21 entries=1
-  DXC   succeeded calendar=fresh        yahoo=['2026-10-29'] sec=not_requested/0 next=2026-10-29 entries=1
+ONE RUN PER COMPANY -- Yahoo (network) plus the filings already held
+  ACN   succeeded vendor=read    yahoo=['2026-10-01'] sec=read/1 entries=2 next=2026-10-01
+  CTSH  succeeded vendor=read    yahoo=['2026-10-28'] sec=read/1 entries=2 next=2026-10-28
+  EPAM  succeeded vendor=read    yahoo=['2026-11-05'] sec=read/1 entries=2 next=2026-11-05
+  IBM   succeeded vendor=read    yahoo=['2026-10-21'] sec=read/2 entries=2 next=2026-10-21
+  DXC   succeeded vendor=read    yahoo=['2026-10-29'] sec=read/1 entries=2 next=2026-10-29
 
-copied 5 spooled SEC submissions artifacts (read-only)
+ENTRIES PER COMPANY
+  ACN   2026-06-18 earnings     confirmed anchor=2026-06-18 label=2026q2 disagreement=False resolution=highest_authority
+  ACN   2026-10-01 earnings     estimated anchor=2026-10-01 label=2026q4 disagreement=False resolution=highest_authority
+  CTSH  2026-07-29 earnings     confirmed anchor=2026-07-29 label=2026q3 disagreement=False resolution=highest_authority
+  CTSH  2026-10-28 earnings     estimated anchor=2026-10-28 label=2026q4 disagreement=False resolution=highest_authority
+  EPAM  2026-08-06 earnings     confirmed anchor=2026-08-06 label=2026q3 disagreement=False resolution=highest_authority
+  EPAM  2026-11-05 earnings     estimated anchor=2026-11-05 label=2026q4 disagreement=False resolution=highest_authority
+  IBM   2026-07-22 earnings     confirmed anchor=2026-07-22 label=2026q3 disagreement=True  resolution=highest_authority
+  IBM   2026-10-21 earnings     estimated anchor=2026-10-21 label=2026q4 disagreement=False resolution=highest_authority
+  DXC   2026-07-30 earnings     confirmed anchor=2026-07-30 label=2026q3 disagreement=False resolution=highest_authority
+  DXC   2026-10-29 earnings     estimated anchor=2026-10-29 label=2026q4 disagreement=False resolution=highest_authority
 
-PASS 2 -- Yahoo plus the company's own Item 2.02 8-Ks (no new SEC call)
-  ACN   succeeded calendar=fresh        yahoo=['2026-10-01'] sec=read/1 next=2026-10-01 entries=2
-  CTSH  succeeded calendar=fresh        yahoo=['2026-10-28'] sec=read/1 next=2026-10-28 entries=2
-  EPAM  succeeded calendar=fresh        yahoo=['2026-11-05'] sec=read/1 next=2026-11-05 entries=2
-  IBM   succeeded calendar=fresh        yahoo=['2026-10-21'] sec=read/2 next=2026-10-21 entries=2
-  DXC   succeeded calendar=fresh        yahoo=['2026-10-29'] sec=read/1 next=2026-10-29 entries=2
-
-THE CALENDAR AS IT STANDS
-  ACN   next=2026-10-01 (estimated, T-22) entries=2 confirmed_past=['2026-06-18']
-  CTSH  next=2026-10-28 (estimated, T-49) entries=2 confirmed_past=['2026-07-29']
-  EPAM  next=2026-11-05 (estimated, T-57) entries=2 confirmed_past=['2026-08-06']
-  IBM   next=2026-10-21 (estimated, T-42) entries=2 confirmed_past=['2026-07-22']
-  DXC   next=2026-10-29 (estimated, T-50) entries=2 confirmed_past=['2026-07-30']
-
-  upcoming(45d):
-    2026-10-01 earnings     estimated T-22  company:sec-cik:0001467373
-    2026-10-21 earnings     estimated T-42  company:sec-cik:0000051143
+WINDOWS OPENING TODAY
+  ACN   preview      2026-10-01 T-22  estimated "日期未确认"
 ```
 
 ACN 的 10/1 与蓝图里「ACN 10/1 业绩实战」对上了。
 
-IBM 那条 `sec=read/2` 值得单独看一眼——两份 Item 2.02 落在同一个季度，日历没有挑一个丢一个：
+三个值得单看的地方：
 
-```
-2026q3 2026-07-22 confirmed disagreement=True ['2026-07-14', '2026-07-22']
-    filing 2026-07-22 sec:filing:0000051143-26-000077
-    filing 2026-07-14 sec:filing:0000051143-26-000070
-2026q4 2026-10-21 estimated disagreement=False []
-    connector_invocation 2026-10-21 connector-invocation:yfinance:1d4992782b293610b0
-```
-
-DXC 那条 2020-03-23 的除息日**一条条目都没生成**，这是设计。
+- **IBM 的 `sec=read/2` 与 `disagreement=True`**：两份 Item 2.02 落在同一次事件（7/14 与 7/22，相距 8 天，在 45 天以内），日历没有挑一个丢一个，两个 accession 都在 `sources[]` 里，条目取较晚那次并把不一致说出来。
+- **每家的两条条目 anchor 不同、label 有的相同**：`2026q3` / `2026q4` 这些标签只是给人看的；身份是 anchor。ACN 今年 12 月中还会报一次，那次的 label 也是 `2026q4`——现在它会是第三条独立的条目，而不是把 10/1 那条覆盖掉。
+- **DXC 那条 2020-03-23 的除息日一条条目都没生成**，这是设计。
 
 ### 6.1 现在会触发的窗口
-
-按 5.1.1 的规则，把发射器跑在上面这份日历上（`is_emitted` 用一个空集合，即「今天第一次问」）：
-
-```
-company:sec-cik:0001467373     preview      2026-10-01 T-22  estimated "日期未确认"
-
--- and the same run again, nothing repeats --
-[]
-```
 
 只有 ACN 落在 T−30 里；其余四家在 T−42 到 T−57，还没到。ACN 的日期是 Yahoo 给的估计，所以 preview 照开，事件带着 `date_confidence: estimated` 与「日期未确认」。等 ACN 发出那份 Item 2.02 的 8-K，日历出新版本带 `evidence_thicker`，同一个 preview 窗口以 `confirmed` 再发一次，判断层可以据此把「照估计日期备的稿」升级为「照确认日期投入」。T+0..T+2 的 calibration 要等那份 8-K，这是设计。
 
 同一天再问一次什么都不发——`event_key` 是确定性的，进程内那个集合（集成后换成对事件账本的持久查询，见 5.1）挡住了重复。
 
-### 6.2 未做：`form: 8-K` 的 discovery spec 与正文读取器
-
-主 agent 要求「小就顺手做，否则留档」。核查之后是**留档**——它不小，而且要碰本片没有所有权的文件：
-
-| 要动的地方 | 为什么绕不开 |
-| --- | --- |
-| `deploy/phase10/p10-us-it-services-sec-filings-plan-v1.json` → 新一版 plan | plan 是哈希绑定的，加一条 `{"form": "8-K", "spec_ref": ...}` 就是一个新版本文件 |
-| `deploy/macos/install.sh` | 现在把 plan 拷进 `{state}/discovery-plans/`（:176-179）；换版本要改这里，而 install.sh 在本片的 FORBIDDEN 清单上 |
-| `document_figure_grade.GRADE_BY_SPEC` / `ATTRIBUTED_BY_SPEC` | 新 spec_ref 必须登记，否则抓回来的文档没有 grade |
-| `mission_stage.py` 的 `spec_refs` | 阶段推进要认识这条 spec |
-| `sec_public_adapter` 的两条 fail-closed 守卫 | `filings.recent` 只覆盖约一年 / 一千条，而 8-K 密集的发行人（IBM 118 条、DXC 123 条）很容易撞上 `SEC_INDEX_LIMIT = 100` 的「result exceeds the declared limit」，没有翻页。要么收窄 `date_from`，要么这条 spec 要自己的 limit 策略 |
-| 新的日期读取器 | 从公告正文里认「will report ... on \<date\>」，窄到只认这一种句式，产出喂进 `announced_next_date_entry` |
-
-这是一个独立小片的量（大约相当于本片的三分之一），跨了三个别人的文件和一次 plan 发版。本片把接口那一端建好、测好、可达：`sec_earnings_release.announced_next_date_entry(accession=, announced_date=, subject=, filing_date=, note=)`，日期由调用方给，本模块不解析任何正文。
+**10 月之后那一段，有测试端到端钉住**（`OccurrenceTests::test_the_whole_accenture_autumn_end_to_end`）：10/1 的已确认发布入库之后，Yahoo 给出 12/17 的估计 → 两条条目而不是一条，`next_catalyst` 在 11 月中返回 12/17（`estimated`，T−32），preview 在 11/17 也就是 T−30 那天开火。这正是原来那个 occurrence key 会静默吞掉的一整次财报。
 
 ## 7. 验收
 
 ```
-Ran 2621 tests in 309.401s
+Ran 2973 tests in 283.279s
 OK (skipped=1)
 ```
 
-（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`；基线 main `2fa5934` 是 2,512 项，本片新增 109 项。）
+（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，合并 main `7708d43` 之后。本片自己的五个测试文件共 130 项；其余增量来自并入的 S1 / S2 / P14e / P14-M / P12b。）
 
 各文件：
 
 ```
-tests/test_catalyst_calendar.py          Ran 37 tests   OK
-tests/test_yfinance_calendar_adapter.py  Ran 15 tests   OK
-tests/test_sec_earnings_release.py       Ran 14 tests   OK
-tests/test_catalyst_calendar_cli.py      Ran 15 tests   OK
-tests/test_mission_catalyst_lane.py      Ran 28 tests   OK
+tests/test_catalyst_calendar.py          Ran 45 tests   OK
+tests/test_yfinance_calendar_adapter.py  Ran 19 tests   OK
+tests/test_sec_earnings_release.py       Ran 16 tests   OK
+tests/test_catalyst_calendar_cli.py      Ran 19 tests   OK
+tests/test_mission_catalyst_lane.py      Ran 31 tests   OK
 ```
 
 覆盖到的行为，按交付要求逐条：
@@ -357,6 +353,11 @@ tests/test_mission_catalyst_lane.py      Ran 28 tests   OK
 | next / upcoming | `ReaderTests` 六条 |
 | 事件窗口 | `EventWindowTests` 十一条（T−30 边界、T+0..T+2 边界、**estimated 开 preview 且带 `date_caveat`**、**estimated 三天都不开 calibration**、**确认之后同一窗口再发一次**、除息不开 preview、开着的窗口只发一次、日期一动窗口重开），加 lane 侧两条（`test_an_estimated_date_opens_a_labelled_preview_from_the_lane_too`、`test_the_tick_strip_carries_the_caveat_an_operator_needs_to_see`） |
 | 注意语被携带而非推导 | `ReaderTests::test_a_reader_is_handed_the_caveat_rather_than_asked_to_derive_it` |
+| **同一次事件 vs 两次事件** | `OccurrenceTests` 八条：相隔一季是两条条目、ACN 秋季端到端（10/1 已确认 + 12/17 估计 → 两条、`next_catalyst` 给 12/17、preview 在 T−30 开火）、窗口内改期是一次 move 且 anchor 不动、跨季一天的滑动仍是同一次、45 天坐在两种情况中间、一次运行的两半互相找到对方、过去的来源不能决定还没到的日期、全是过去的条目仍取已确认的发布日 |
+| **Yahoo 的两日窗口** | `EntryTests::test_a_window_is_one_entry_dated_at_its_earlier_end`、`test_a_windowed_run_publishes_rather_than_failing`（CTSH 形状，跑到发布） |
+| **两半独立失败** | `PublishingTests` 四条：畸形 vendor 响应不丢 filing 那一半（`status: partial`）、治理未批也一样、两半都空才是 `failed`、同一天的两半落在同一次事件上 |
+| **写一条记一条** | `EventTests::test_a_writer_that_fails_halfway_does_not_lose_what_it_wrote`；`partial` 两条（照发事件并记「今天问过」、连三天挂起且理由是 vendor 的） |
+| **产物哈希与时区** | `SpoolTests` 两条（`tampered` / `unreadable` 各自成词）、`WireTests` 两条（带时区先归一化、不带时区按印出来的那天取） |
 | lane 注册（新解释器） | `RegistrationTests::test_importing_this_module_does_not_pull_in_the_writer`（subprocess 实跑），另加 order / driver key / argv / unconfigured 四条 |
 | yfinance 适配器（stub） | `FetchTests`（`sys.modules["yfinance"]` 换成 stub；`date` 对象要能过 canonical JSON；来源拒绝是「有理由的缺席」不是崩溃） |
 
@@ -370,6 +371,7 @@ tests/test_mission_catalyst_lane.py      Ran 28 tests   OK
 - **没有 guidance / investor_day / filing_due 的产出方。** 三个 `event_kind` 在词表里、能被写入、能开窗口，但目前没有来源填它们。`filing_due` 尤其可惜——10-Q 的法定截止日是可以从 filing 期末加规则算出来的，但那是**推算**，本片不做推算，要做得是另一个显式的、有自己规则冻结的东西。
 - **没有 cockpit 接线**（越界；读者接口已就位）。
 - **没有把 `is_emitted` 做成持久查询**（要等 P14a 的事件账本，见 5.1）。
+- **没有用财季判定同一次事件**（见开放问题 2）。
 - **没有 `filings.files` 的翻页**：`filings.recent` 是大约一年 / 一千条的窗口，更老的 8-K 在 `filings.files` 里，而这套系统对那个没有抓取权限。对一个 120 天保留期的日历来说够用。
 
 ---
@@ -377,7 +379,7 @@ tests/test_mission_catalyst_lane.py      Ran 28 tests   OK
 ## 9. 开放问题
 
 1. **`date_caveat` 的字面。** 现在是硬写的 `"日期未确认"`（`UNCONFIRMED_DATE_CAVEAT`），与 `dashboard_projector` 里「结果待确认」同一路数。如果 cockpit 之后要走一套统一的文案表，这个常量是唯一要改的地方。
-2. **`subject` 的季度近似**。跨季边界的改期会产生两条并列条目而不是一次改期。真正的修法是拿到财季（10-Q 的 `fiscal_period`，或 8-K 正文里的「fourth-quarter」），两者都要更多输入。目前的近似方向是安全的（重复而不是错误合并），但值得在 dossier 那一层拿到财季之后回来收掉。
+2. **占位判据是「45 天以内」，不是财季。** 现在两条陈述算不算同一次事件，靠的是日期距离；真正的判据是财季（10-Q 的 `fiscal_period`，或 8-K 正文里的「fourth-quarter」）。45 天在这五家公司的实际节奏上有很宽的余量（改期几天 vs 两季 77 天以上），但一家一年报十次的公司会把这个余量吃掉。等 dossier 那一层拿得到财季，`_match()` 应该先用财季、退化时才用距离——那是一个函数的改动，因为身份的判定已经收在权威里的一处了。
 3. **8-K 行不在 `source_record_refs` 里**这件事。本片的立场是「引用一个日期」和「取一份文档」是两件事，前者靠 accession + `items` + artifact hash 就够，后者必须走 URL authority 而那条路正确地拒绝了。如果集成时认为连引用日期也该要求该行在 envelope 里，那就得在 discovery plan 里加 `form: 8-K` 的 spec——同 6.1 的路径 1，两件事会一起解决。
 4. **`acceptanceDateTime` 没有时区**。SEC 的字段是东部时间不带偏移；本片只在它自带 `Z` 时用它，否则用 `filingDate` 的午夜 UTC。这个值只用于给同一来源的两条陈述排序，`filingDate` 排得对，但如果以后有人拿它当墙上时钟用，这里要先改。
 5. **DXC 的 `company_ref` 是九位**（`company:sec-cik:001688568`），别处已经记过这个疤。本片的 `issuer_for()` 原样返回、`submissions_artifacts()` 用 `lstrip("0")` 比对，两条都有测试；但这个疤该由谁来收，仍然没人认领。

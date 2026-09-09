@@ -206,6 +206,67 @@ class PublishingTests(ChildTestCase):
         self.assertEqual(len(summary["moved_entry_refs"]), 1)
         self.assertEqual(summary["next_catalyst_date"], "2026-10-02")
 
+    def test_a_malformed_vendor_response_does_not_discard_the_filed_half(self):
+        # The two sources fail independently or they are not two sources. A
+        # confirmed earnings date read out of a filing cost no call and had
+        # nothing to do with Yahoo; throwing it away because Yahoo returned
+        # something the contract cannot describe was the whole bug.
+        self.seed_filings()
+        broken = self.root / "broken.json"
+        broken.write_text(json.dumps({
+            "schema_version": "0.1", "operation": "calendar", "ticker": "ACN",
+            "observed_on": "2026-09-09", "captured_at": "2026-09-09T15:00:00+00:00",
+            "calendar": {"Earnings Date": ["not a date at all"]}, "errors": {},
+        }), encoding="utf-8")
+        summary = run(self.args(issuer="0001467373", fixture_file=str(broken)))
+        self.assertEqual(summary["vendor_status"], "failed")
+        self.assertIn("not a YYYY-MM-DD date", summary["vendor_reason"])
+        self.assertEqual(summary["sec_status"], "read")
+        self.assertEqual(summary["calendar_status"], "fresh")
+        # Its own word: the run did its job and lost its forward-looking half.
+        self.assertEqual(summary["status"], "partial")
+        store = DaltonStore(str(self.state / "core.sqlite"))
+        self.addCleanup(store.close)
+        entries = CatalystCalendarAuthority(store).entries(COMPANY)
+        self.assertEqual([item["expected_date"] for item in entries],
+                         ["2026-06-18"])
+
+    def test_an_unapproved_record_still_lets_the_filed_half_through(self):
+        self.seed_filings()
+        self.write_governance(status="proposed")
+        summary = run(self.args(issuer="0001467373"))
+        self.assertEqual(summary["status"], "partial")
+        self.assertIn("not approved", summary["vendor_reason"])
+        self.assertEqual(summary["calendar_status"], "fresh")
+        # And still no artifact: the approval is checked before Yahoo is read.
+        self.assertIsNone(summary["artifact"])
+
+    def test_a_run_with_neither_half_is_a_failure_with_the_vendor_s_reason(self):
+        self.write_governance(status="proposed")
+        summary = run(self.args())
+        self.assertEqual(summary["status"], "failed")
+        self.assertEqual(summary["calendar_status"], "empty")
+        self.assertIn("not approved", summary["failure_reason"])
+
+    def test_the_two_halves_of_one_run_land_on_one_occurrence(self):
+        # The vendor says 18 June and so does the filing. Two mappers, neither
+        # naming an occurrence, one entry with two sources.
+        self.seed_filings()
+        same_day = self.root / "same-day.json"
+        body = json.loads(FIXTURE.read_text(encoding="utf-8"))
+        body["calendar"]["Earnings Date"] = ["2026-06-18"]
+        same_day.write_text(json.dumps(body), encoding="utf-8")
+        summary = run(self.args(issuer="0001467373",
+                                fixture_file=str(same_day)))
+        self.assertEqual(summary["status"], "succeeded")
+        self.assertEqual(summary["entry_count"], 1)
+        store = DaltonStore(str(self.state / "core.sqlite"))
+        self.addCleanup(store.close)
+        entry = CatalystCalendarAuthority(store).entries(COMPANY)[0]
+        self.assertEqual(len(entry["sources"]), 2)
+        self.assertEqual(entry["confidence"], "confirmed")
+        self.assertFalse(entry["disagreement"])
+
     def test_no_publish_validates_without_writing(self):
         summary = run(self.args(no_publish=True))
         self.assertEqual(summary["calendar_status"], "not_published")

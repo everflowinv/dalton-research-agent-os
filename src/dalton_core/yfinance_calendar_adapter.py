@@ -103,25 +103,44 @@ def fetch_calendar(ticker: str) -> dict[str, Any]:
 
 
 def _iso_date(value: Any, name: str) -> str | None:
-    """A date Yahoo printed, or nothing. Never a date this code decided."""
+    """A date Yahoo printed, or nothing. Never a date this code decided.
+
+    The zone is resolved before the day is taken, not after. A stamp of
+    ``2026-10-01T23:30:00-07:00`` is the second of October in UTC, and slicing
+    the first ten characters off it would file an earnings date a day early --
+    which, near a month boundary, also moves the quarter the whole thing gets
+    labelled with.
+    """
 
     if value is None:
         return None
-    if isinstance(value, str):
-        text = value.strip()[:10]
-    elif isinstance(value, datetime):
-        text = value.date().isoformat()
-    elif isinstance(value, date):
-        text = value.isoformat()
-    else:
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return moment.astimezone(timezone.utc).date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if not isinstance(value, str):
         raise MarketDataAdapterError(f"{name} is not a date")
+    text = value.strip()
     if not text:
         return None
     try:
-        date.fromisoformat(text)
-    except ValueError as exc:
-        raise MarketDataAdapterError(f"{name} is not a YYYY-MM-DD date") from exc
-    return text
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        # Not a timestamp. A bare day, then, or nothing this can describe.
+        try:
+            date.fromisoformat(text[:10])
+        except ValueError as exc:
+            raise MarketDataAdapterError(
+                f"{name} is not a YYYY-MM-DD date"
+            ) from exc
+        return text[:10]
+    if parsed.tzinfo is None:
+        # A naive stamp is a day in whatever Yahoo was thinking in. Taken as
+        # written rather than assumed to be UTC: shifting it would be inventing
+        # a zone, and the day it printed is the honest reading.
+        return parsed.date().isoformat()
+    return parsed.astimezone(timezone.utc).date().isoformat()
 
 
 def calendar_wire(
@@ -183,24 +202,6 @@ def calendar_wire(
 # -- becoming calendar entries ---------------------------------------------
 
 
-def quarter_subject(day: str) -> str:
-    """Which occurrence a date belongs to: ``2026q4``.
-
-    Two sources have to agree on *which* event they are talking about before
-    they can be said to agree or disagree about its date, and neither Yahoo nor
-    the SEC submissions index states a fiscal period. The calendar quarter of
-    the date itself is the coarsest thing both can be keyed on.
-
-    It is not perfect and the imperfection is deliberate in its direction: a
-    date that slips across a quarter boundary produces two entries rather than
-    one merged wrongly. Duplication is visible on the strip and a person can
-    see it; a silent merge of two different quarters would not be.
-    """
-
-    parsed = date.fromisoformat(day)
-    return f"{parsed.year}q{(parsed.month - 1) // 3 + 1}"
-
-
 def calendar_entries(
     wire: dict[str, Any], *, invocation_ref: str, note: str = ""
 ) -> list[dict[str, Any]]:
@@ -210,9 +211,18 @@ def calendar_entries(
     from, and a date whose provenance is "a vendor had it" is not a date the
     company has committed to.
 
-    When Yahoo gives two dates it is naming the ends of a window it could not
-    narrow. Both go in, as two entries, so the calendar says "some time in
-    these two days" rather than picking one and looking certain.
+    **A window is one event, not two.** When Yahoo gives two dates it is naming
+    the ends of a range it could not narrow -- one earnings call, somewhere in
+    there. This used to emit an entry per date, which was wrong twice over: it
+    put two results announcements on the strip where the company will make one,
+    and because both carried the same vendor as their source, the two of them
+    folded back into a single occurrence carrying that source twice, which the
+    authority refuses. A company whose date Yahoo could not pin down therefore
+    failed the run every day until the lane gave up on it.
+
+    So one entry, dated at the **earlier** end -- the calendar is about when to
+    be ready and being ready early costs nothing -- and the range said out loud
+    in the note, where a person and the preview both see it.
     """
 
     observed_at = wire["captured_at"]
@@ -229,16 +239,15 @@ def calendar_entries(
             "note": note,
         }
 
-    windowed = len(wire["earnings_dates"]) > 1
-    for day in wire["earnings_dates"]:
+    days = wire["earnings_dates"]
+    if days:
         entries.append({
             "event_kind": "earnings",
-            "subject": quarter_subject(day),
-            "sources": [source(day)],
+            "sources": [source(days[0])],
             "notes": (
-                "Yahoo gave a window rather than a day; both ends are on the "
-                "calendar and neither is the announced date"
-                if windowed else ""
+                f"Yahoo gave a window rather than a day: {days[0]} to "
+                f"{days[-1]}. The earlier end is the date carried."
+                if len(days) > 1 else ""
             ),
         })
 
@@ -249,7 +258,6 @@ def calendar_entries(
         # that on a calendar of expected events would be a fabricated future.
         entries.append({
             "event_kind": "ex_dividend",
-            "subject": quarter_subject(ex_dividend),
             "sources": [source(ex_dividend)],
             "notes": "",
         })
@@ -267,5 +275,4 @@ __all__ = [
     "calendar_entries",
     "calendar_wire",
     "fetch_calendar",
-    "quarter_subject",
 ]

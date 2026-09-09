@@ -50,7 +50,6 @@ from .yfinance_calendar_adapter import (
     calendar_entries as yfinance_calendar_entries,
     calendar_wire,
     fetch_calendar,
-    quarter_subject,
 )
 from .yfinance_core import (
     CALENDAR_OPERATION,
@@ -129,13 +128,18 @@ def _sec_entries(
     summary["sec_status"] = found["status"]
     summary["sec_reason"] = found.get("reason")
     summary["sec_release_count"] = len(found.get("releases") or [])
+    if found["status"] == "tampered":
+        # An artifact whose bytes no longer hash to what authority recorded is
+        # the one failure in this path that means a stored citation does not
+        # point at what it says it does. It is not a company with no filings.
+        summary["sec_status"] = "tampered"
     if found["status"] != "read" or not found["releases"]:
         return []
     summary["sec_invocation_ref"] = found["invocation_ref"]
     summary["sec_artifact_hash"] = found["artifact_hash"]
     return sec_calendar_entries(
         found["releases"], invocation_ref=found["invocation_ref"],
-        artifact_hash=found["artifact_hash"], subject_for=quarter_subject,
+        artifact_hash=found["artifact_hash"],
     )
 
 
@@ -162,6 +166,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "invocation_ref": None,
         "earnings_dates": [],
         "ex_dividend_date": None,
+        "vendor_status": "not_read",
+        "vendor_reason": None,
         "vendor_entry_count": 0,
         "sec_status": "not_read",
         "sec_reason": None,
@@ -189,71 +195,97 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             raise CatalystCalendarRunError(
                 "exactly one of --fixture-file or --allow-network must be chosen"
             )
-        governance = _load_governance(Path(args.governance).expanduser().resolve())
-        summary["governance_ref"] = governance.id
-        summary["governance_hash"] = governance.content_hash
-
-        if args.fixture_file:
-            raw = json.loads(
-                Path(args.fixture_file).expanduser().read_text(encoding="utf-8")
-            )
-        else:
-            raw = fetch_calendar(args.ticker)
-        raw = json_safe(raw)
-        if not isinstance(raw, dict):
-            raise CatalystCalendarRunError(
-                "the library returned something that is not a call"
-            )
-
-        payload = canonical_json(raw).encode("utf-8")
-        digest = hashlib.sha256(payload).hexdigest()
-        spool = RawSpool(str(state / DEFAULT_SPOOL_NAME), max_total_bytes=1_000_000_000)
-        sink = spool.open_sink(f"raw-sink:{digest}", max_response_bytes=MAX_RAW_BYTES)
-        sink.write(payload)
-        artifact = sink.finalize()
-        summary["artifact"] = artifact.to_dict()
-
-        wire = calendar_wire(
-            raw, source_record_refs=[f"raw-sink:{artifact.content_hash}"]
-        )
-        from .authority_resolver import _schema_matches  # noqa: PLC0415 - lazy
-
-        _schema_matches(wire, yfinance_output_schema(CALENDAR_OPERATION), "output")
-        summary["earnings_dates"] = list(wire["earnings_dates"])
-        summary["ex_dividend_date"] = wire["ex_dividend_date"]
-
-        invocation = build_invocation_ref(
-            operation=CALENDAR_OPERATION,
-            governance_ref=governance.id,
-            governance_hash=governance.content_hash,
-            parameters={"ticker": wire["ticker"]},
-            artifact_hash=artifact.content_hash,
-        )
-        summary["invocation_ref"] = invocation
-
-        entries = yfinance_calendar_entries(wire, invocation_ref=invocation)
-        summary["vendor_entry_count"] = len(entries)
-        # One store for both halves: the SEC side is a read of an artifact
+        # One store for both halves: the filed side is a read of an artifact
         # this same database points at, and opening a second connection to the
         # file a publish is about to write is how a lock shows up later.
         store = DaltonStore(str(state / "core.sqlite"))
+
+        # The filed half first, and outside the vendor half's failure.
+        #
+        # It used to run after the wire was validated, which meant a malformed
+        # Yahoo response threw the whole run away -- including a confirmed
+        # earnings date read from a filing that had nothing to do with Yahoo
+        # and cost no call. Two independent sources should fail independently,
+        # so the one that cannot fail for the other's reasons goes first.
         from_sec = _sec_entries(
             store.connection, state, summary, issuer=args.issuer, today=today
         )
         summary["sec_entry_count"] = len(from_sec)
-        entries = _merge(entries, from_sec)
+
+        entries = list(from_sec)
+        invocation = None
+        try:
+            governance = _load_governance(
+                Path(args.governance).expanduser().resolve())
+            summary["governance_ref"] = governance.id
+            summary["governance_hash"] = governance.content_hash
+
+            if args.fixture_file:
+                raw = json.loads(
+                    Path(args.fixture_file).expanduser().read_text(encoding="utf-8")
+                )
+            else:
+                raw = fetch_calendar(args.ticker)
+            raw = json_safe(raw)
+            if not isinstance(raw, dict):
+                raise CatalystCalendarRunError(
+                    "the library returned something that is not a call"
+                )
+
+            payload = canonical_json(raw).encode("utf-8")
+            digest = hashlib.sha256(payload).hexdigest()
+            spool = RawSpool(
+                str(state / DEFAULT_SPOOL_NAME), max_total_bytes=1_000_000_000)
+            sink = spool.open_sink(
+                f"raw-sink:{digest}", max_response_bytes=MAX_RAW_BYTES)
+            sink.write(payload)
+            artifact = sink.finalize()
+            summary["artifact"] = artifact.to_dict()
+
+            wire = calendar_wire(
+                raw, source_record_refs=[f"raw-sink:{artifact.content_hash}"]
+            )
+            from .authority_resolver import _schema_matches  # noqa: PLC0415
+
+            _schema_matches(wire, yfinance_output_schema(CALENDAR_OPERATION), "output")
+            summary["earnings_dates"] = list(wire["earnings_dates"])
+            summary["ex_dividend_date"] = wire["ex_dividend_date"]
+
+            invocation = build_invocation_ref(
+                operation=CALENDAR_OPERATION,
+                governance_ref=governance.id,
+                governance_hash=governance.content_hash,
+                parameters={"ticker": wire["ticker"]},
+                artifact_hash=artifact.content_hash,
+            )
+            summary["invocation_ref"] = invocation
+            vendor = yfinance_calendar_entries(wire, invocation_ref=invocation)
+            summary["vendor_entry_count"] = len(vendor)
+            summary["vendor_status"] = "read"
+            entries.extend(vendor)
+        except (
+            CatalystCalendarRunError, MarketDataAdapterError,
+            ConnectorGovernanceError, Exception,
+        ) as exc:  # noqa: BLE001 - one half, reported not raised
+            summary["vendor_status"] = "failed"
+            summary["vendor_reason"] = f"{type(exc).__name__}: {exc}"
 
         if not entries:
             # Neither source had anything to say about this company's diary.
             # A real answer for a company Yahoo has no calendar for and whose
-            # filings index has not been read.
-            summary.update({"status": "succeeded", "calendar_status": "empty"})
+            # filings index has not been read -- and a failed one when the
+            # vendor is the reason there is nothing.
+            summary.update({
+                "status": "failed" if summary["vendor_status"] == "failed"
+                else "succeeded",
+                "failure_reason": summary["vendor_reason"],
+                "calendar_status": "empty",
+            })
         elif args.no_publish:
             summary.update({"status": "succeeded", "calendar_status": "not_published"})
         else:
-            evidence = [invocation]
-            if summary["sec_invocation_ref"]:
-                evidence.append(summary["sec_invocation_ref"])
+            evidence = [ref for ref in (invocation, summary["sec_invocation_ref"])
+                        if ref]
             authority = CatalystCalendarAuthority(store)
             published = _publish(
                 authority, company_ref=args.company_ref, entries=entries,
@@ -264,7 +296,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 if published["status"] == "fresh" else []
             )
             summary.update({
-                "status": "succeeded",
+                # A run whose filed half published while Yahoo was broken did
+                # its job and lost its forward-looking half. Neither
+                # "succeeded" nor "failed" says that, so it has its own word:
+                # the lane emits and counts the day as asked, and still charges
+                # the failure budget so a vendor that stays broken is not
+                # invisible behind a calendar that keeps almost working.
+                "status": ("partial" if summary["vendor_status"] == "failed"
+                           else "succeeded"),
+                "failure_reason": summary["vendor_reason"],
                 "calendar_status": published["status"],
                 "calendar_version_ref": published["id"],
                 "calendar_version_hash": published["content_hash"],
@@ -298,30 +338,6 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             store.close()
     _write_owner_only(summary_dir / "summary.json", summary)
     return summary
-
-
-def _merge(
-    vendor: list[dict[str, Any]], filed: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """One observation per occurrence, with both sources' sources in it.
-
-    The authority refuses a run that names the same occurrence twice, and it is
-    right to: two entries for one thing in one publish would silently drop one.
-    So the two mappers are folded here, where the merge is one dictionary
-    lookup and visible, rather than inside the authority where it would be a
-    special case for this lane.
-    """
-
-    merged: dict[tuple[str, str], dict[str, Any]] = {}
-    for entry in [*vendor, *filed]:
-        key = (entry["event_kind"], entry["subject"])
-        standing = merged.get(key)
-        if standing is None:
-            merged[key] = {**entry, "sources": list(entry["sources"])}
-            continue
-        standing["sources"].extend(entry["sources"])
-        standing["notes"] = standing["notes"] or entry["notes"]
-    return [merged[key] for key in sorted(merged)]
 
 
 def _publish(
@@ -393,7 +409,8 @@ def main(argv: list[str] | None = None) -> int:
             "status", "failure_reason", "calendar_status", "earnings_dates",
             "sec_status", "sec_release_count", "entry_count",
             "next_catalyst_date", "change_reason", "moved_entry_refs",
-            "invocation_ref", "calendar_version_ref",
+            "vendor_status", "vendor_reason", "invocation_ref",
+            "calendar_version_ref",
         )}, ensure_ascii=False, indent=1))
     return 0 if summary["status"] == "succeeded" else 1
 

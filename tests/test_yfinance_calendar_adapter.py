@@ -16,7 +16,6 @@ from dalton_core.yfinance_calendar_adapter import (
     calendar_entries,
     calendar_wire,
     fetch_calendar,
-    quarter_subject,
 )
 from dalton_core.yfinance_core import CALENDAR_OPERATION, yfinance_output_schema
 
@@ -87,6 +86,22 @@ class WireTests(unittest.TestCase):
         with self.assertRaises(MarketDataAdapterError):
             wire_of(raw(calendar={"Earnings Date": ["next quarter"]}))
 
+    def test_a_zoned_stamp_is_resolved_before_the_day_is_taken(self):
+        # 23:30 on the first, seven hours behind UTC, is the second. Slicing
+        # the first ten characters would file the call a day early -- and near
+        # a month end, into a different quarter's label as well.
+        wire = wire_of(raw(calendar={
+            "Earnings Date": ["2026-10-01T23:30:00-07:00"],
+            "Ex-Dividend Date": "2026-10-08T04:00:00+00:00",
+        }))
+        self.assertEqual(wire["earnings_dates"], ["2026-10-02"])
+        self.assertEqual(wire["ex_dividend_date"], "2026-10-08")
+
+    def test_a_naive_stamp_is_taken_as_the_day_it_printed(self):
+        # No zone is not UTC. Shifting it would be inventing one.
+        wire = wire_of(raw(calendar={"Earnings Date": ["2026-10-01T00:00:00"]}))
+        self.assertEqual(wire["earnings_dates"], ["2026-10-01"])
+
     def test_a_capture_with_no_ticker_is_refused(self):
         with self.assertRaises(MarketDataAdapterError):
             wire_of(raw(ticker=""))
@@ -119,23 +134,59 @@ class EntryTests(unittest.TestCase):
         )
         self.assertEqual([entry["event_kind"] for entry in entries], ["earnings"])
 
-    def test_a_window_becomes_two_entries_that_say_they_are_a_window(self):
+    def test_a_window_is_one_entry_dated_at_its_earlier_end(self):
+        # Cognizant-shaped: Yahoo names a two-day range because it cannot pin
+        # the day down. That is one earnings call, not two. Emitting an entry
+        # per date put two announcements on the strip and -- because both
+        # carried the same vendor -- folded back into one occurrence holding
+        # that vendor twice, which the authority refuses. The run then failed
+        # every day until the lane gave up on the company.
         entries = calendar_entries(
-            wire_of(raw(calendar={"Earnings Date": ["2026-09-30", "2026-10-01"]})),
+            wire_of(raw(calendar={"Earnings Date": ["2026-10-28", "2026-11-02"]})),
             invocation_ref=INVOCATION,
         )
-        self.assertEqual(len(entries), 2)
-        for entry in entries:
-            self.assertIn("window", entry["notes"])
-        # Different quarters, so different occurrences: two visible entries
-        # rather than one silently merged.
-        self.assertEqual({entry["subject"] for entry in entries},
-                         {"2026q3", "2026q4"})
+        earnings = [entry for entry in entries if entry["event_kind"] == "earnings"]
+        self.assertEqual(len(earnings), 1)
+        self.assertEqual(len(earnings[0]["sources"]), 1)
+        self.assertEqual(earnings[0]["sources"][0]["observed_date"], "2026-10-28")
+        self.assertIn("2026-10-28 to 2026-11-02", earnings[0]["notes"])
 
-    def test_the_occurrence_key_is_the_calendar_quarter_of_the_date(self):
-        self.assertEqual(quarter_subject("2026-10-01"), "2026q4")
-        self.assertEqual(quarter_subject("2026-09-30"), "2026q3")
-        self.assertEqual(quarter_subject("2026-01-01"), "2026q1")
+    def test_a_windowed_run_publishes_rather_than_failing(self):
+        import tempfile
+        from pathlib import Path as _Path
+
+        from dalton_core.catalyst_calendar import CatalystCalendarAuthority
+        from dalton_core.store import DaltonStore
+
+        entries = calendar_entries(
+            wire_of(raw(calendar={"Earnings Date": ["2026-10-28", "2026-11-02"]})),
+            invocation_ref=INVOCATION,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            store = DaltonStore(str(_Path(directory) / "core.sqlite"))
+            self.addCleanup(store.close)
+            published = CatalystCalendarAuthority(store).publish(
+                company_ref="company:sec-cik:0001058290", entries=entries,
+                change_reason="evidence_thicker", evidence_refs=[INVOCATION],
+                now="2026-09-09",
+            )
+        self.assertEqual(published["status"], "fresh")
+        self.assertEqual(
+            [item["expected_date"] for item in published["entries"]
+             if item["event_kind"] == "earnings"],
+            ["2026-10-28"],
+        )
+
+    def test_a_single_date_carries_no_window_note(self):
+        entries = calendar_entries(wire_of(raw()), invocation_ref=INVOCATION)
+        earnings = [entry for entry in entries if entry["event_kind"] == "earnings"]
+        self.assertEqual(earnings[0]["notes"], "")
+
+    def test_no_mapper_names_an_occurrence(self):
+        # A mapper that could name an occurrence could merge two of them, which
+        # is exactly what a shared quarter key did.
+        for entry in calendar_entries(wire_of(raw()), invocation_ref=INVOCATION):
+            self.assertEqual(set(entry), {"event_kind", "sources", "notes"})
 
 
 class FetchTests(unittest.TestCase):

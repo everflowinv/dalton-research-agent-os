@@ -112,6 +112,25 @@ PUBLISHING_CHANGES: frozenset[str] = frozenset({
     "added", "date_moved", "confidence_changed",
 })
 
+# How far apart two statements can be and still be about the same event.
+#
+# This is the number that decides whether "Yahoo says the 5th" and "the 8-K
+# says the 2nd" are one occurrence disagreeing or two occurrences, and it is
+# chosen to sit in the gap between the two things it has to tell apart. A
+# rescheduled results date moves by days, occasionally by a fortnight. Two
+# consecutive quarterly reports are seventy-seven to ninety-two days apart --
+# Accenture's fiscal Q4 lands on 1 October and its Q1 in mid-December, which is
+# seventy-seven. Forty-five is comfortably above the first and comfortably
+# below the second.
+#
+# Getting this wrong in the generous direction is what a calendar quarter did:
+# both of Accenture's autumn reports fall in calendar Q4, so keying on the
+# quarter folded a confirmed past date and a forthcoming estimate into one
+# entry, the confirmed one won because filings outrank vendors, and the
+# December preview simply never happened. Erring the other way costs a visible
+# duplicate on the strip, which somebody can see and fix.
+SAME_OCCURRENCE_DAYS = 45
+
 # How long a passed event stays on the current calendar. Long enough that the
 # quarter just reported is still readable beside the one coming -- which is
 # what a calibration wants -- and short enough that the entry list is about
@@ -125,13 +144,12 @@ MAX_NOTE_CHARS = 500
 
 _SCHEMA_PATH = Path(__file__).with_name("catalyst_calendar_schema.sql")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
-_SUBJECT_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 
 _SOURCE_FIELDS = frozenset({
     "kind", "ref", "source_ref", "observed_date", "observed_at", "confidence",
     "note",
 })
-_ENTRY_INPUT_FIELDS = frozenset({"event_kind", "subject", "sources", "notes"})
+_ENTRY_INPUT_FIELDS = frozenset({"event_kind", "sources", "notes"})
 
 
 class CatalystCalendarError(RuntimeError):
@@ -230,36 +248,41 @@ def calendar_ref_for(company_ref: str) -> str:
     return f"catalyst-calendar:{_text(company_ref, 'company_ref')}"
 
 
-def entry_ref_for(company_ref: str, event_kind: str, subject: str) -> str:
-    """The identity of one occurrence, independent of the date it lands on.
+def entry_ref_for(company_ref: str, event_kind: str, anchor_date: str) -> str:
+    """The identity of one occurrence: where it was first seen to be.
 
     A date that moves has to stay the *same* entry, or a rescheduled call would
     read as a cancellation and a new event rather than as the one fact it is.
-    So the ref names the company, what kind of thing it is, and which
-    occurrence -- never the date.
+    So the ref is fixed at the first date anybody gave for this occurrence and
+    never moves again, while ``expected_date`` does.
+
+    Which occurrence a later statement belongs to is not decided here and is
+    not a function of the date alone -- see :func:`_match`. Nothing outside
+    this module can compute an entry ref for an occurrence it has not seen,
+    which is the point: identity is the authority's to assign, and a source
+    mapper that could name an occurrence could merge two of them.
     """
 
     return "catalyst-entry:" + content_hash({
         "company_ref": _text(company_ref, "company_ref"),
         "event_kind": _one_of(event_kind, EVENT_KINDS, "event_kind"),
-        "subject": _subject(subject),
+        "anchor_date": _iso_date(anchor_date, "anchor_date"),
     })[:32]
 
 
-def _subject(value: Any) -> str:
-    """Which occurrence this is: ``fy2026q4``, ``next``, ``2026-analyst-day``.
+def occurrence_label(anchor_date: str) -> str:
+    """A short human name for an occurrence: ``2026q4``.
 
-    Lower-case and slug-shaped because it is half of an identity, and an
-    identity that differs by a capital letter produces two entries for one
-    event.
+    A label and nothing more. It was the identity once, keyed on the calendar
+    quarter, and that is exactly the bug this module now has a test for: two
+    of Accenture's results announcements fall in the same calendar quarter.
+    Kept because "ACN 2026q4" reads better on a strip than a hash, and demoted
+    because two things that are not the same must not share a name that
+    something might key on.
     """
 
-    value = _text(value, "subject").lower()
-    if _SUBJECT_RE.fullmatch(value) is None:
-        raise CatalystCalendarValidationError(
-            "subject must be a lower-case slug of at most 64 characters"
-        )
-    return value
+    parsed = date.fromisoformat(_iso_date(anchor_date, "anchor_date"))
+    return f"{parsed.year}q{(parsed.month - 1) // 3 + 1}"
 
 
 # -- source and entry normalisation ----------------------------------------
@@ -329,9 +352,36 @@ def _invert(value: str) -> str:
     return "".join(chr(0x7E - ord(character)) for character in value)
 
 
-def _resolve(entry_ref: str, event_kind: str, subject: str,
-             sources: Sequence[Mapping[str, Any]], notes: str) -> dict[str, Any]:
-    """Build the entry the readers see from the sources that speak to it."""
+# Why an entry asserts the date it does.
+RESOLUTIONS: tuple[str, ...] = (
+    # The highest-authority source that spoke to this occurrence.
+    "highest_authority",
+    # A source said this had already happened while another said it was still
+    # ahead, and the one still ahead was taken. See :func:`_resolve`.
+    "forthcoming_over_past",
+)
+
+
+def _resolve(entry_ref: str, event_kind: str, anchor_date: str,
+             sources: Sequence[Mapping[str, Any]], notes: str,
+             today: str) -> dict[str, Any]:
+    """Build the entry the readers see from the sources that speak to it.
+
+    Ordinarily the highest-authority source decides, which is how a filing
+    beats a vendor. One case overrides that, and it is not a matter of
+    authority at all: **a source saying an event has already happened may not
+    decide the date of an occurrence some other source says is still ahead.**
+
+    That case arises where two statements are close enough to be the same
+    occurrence but land either side of today -- a confirmed release three weeks
+    back beside a vendor that has already rolled its estimate forward. The
+    filing outranks the vendor and is not wrong about anything; it is simply
+    answering a different question. Letting it win made the entry's
+    ``expected_date`` a past date, which took the occurrence out of
+    ``next_catalyst`` entirely and silently cancelled the preview. The past
+    statement stays in ``sources`` and in ``disagreeing_dates``; it just does
+    not get to say when the next one is.
+    """
 
     ordered = sorted(sources, key=_rank)
     if not ordered:
@@ -342,14 +392,20 @@ def _resolve(entry_ref: str, event_kind: str, subject: str,
         raise CatalystCalendarConflict(
             f"an entry may carry at most {MAX_SOURCES_PER_ENTRY} live sources"
         )
-    winner = ordered[0]
+    forthcoming = [item for item in ordered if item["observed_date"] >= today]
+    if forthcoming and forthcoming[0] is not ordered[0]:
+        winner, resolution = forthcoming[0], "forthcoming_over_past"
+    else:
+        winner, resolution = ordered[0], "highest_authority"
     dates = sorted({item["observed_date"] for item in ordered})
     return {
         "entry_ref": entry_ref,
         "event_kind": event_kind,
-        "subject": subject,
+        "anchor_date": anchor_date,
+        "subject": occurrence_label(anchor_date),
         "expected_date": winner["observed_date"],
         "confidence": winner["confidence"],
+        "resolution": resolution,
         # Said out loud rather than left to be derived by a reader who may not
         # think to. Two sources that disagree about when a company reports is
         # exactly the thing a person should be shown.
@@ -360,13 +416,17 @@ def _resolve(entry_ref: str, event_kind: str, subject: str,
     }
 
 
-def _observation(raw: Any, index: int, company_ref: str) -> dict[str, Any]:
-    """One run's report about one occurrence, before it meets the chain."""
+def _observation(raw: Any, index: int) -> dict[str, Any]:
+    """One run's report about one occurrence, before it meets the chain.
+
+    It names no occurrence, because it cannot know which one it is: that is
+    decided by where its date falls relative to what the calendar already
+    holds. What it carries is a kind, the sources that spoke, and their notes.
+    """
 
     name = f"entries[{index}]"
     item = _closed(raw, _ENTRY_INPUT_FIELDS, name)
     event_kind = _one_of(item["event_kind"], EVENT_KINDS, f"{name}.event_kind")
-    subject = _subject(item["subject"])
     raw_sources = item["sources"]
     if not isinstance(raw_sources, (list, tuple)) or not raw_sources:
         raise CatalystCalendarValidationError(f"{name}.sources must be a non-empty array")
@@ -380,12 +440,43 @@ def _observation(raw: Any, index: int, company_ref: str) -> dict[str, Any]:
             f"{name} names the same source twice; one reading per source"
         )
     return {
-        "entry_ref": entry_ref_for(company_ref, event_kind, subject),
         "event_kind": event_kind,
-        "subject": subject,
         "sources": sources,
         "notes": _optional_text(item["notes"], f"{name}.notes"),
+        # What this observation is about, for matching. The best-ranked source
+        # it carries: a run that hands over a filing and a vendor reading at
+        # once is about where the filing says it is.
+        "observed_date": min(sources, key=_rank)["observed_date"],
     }
+
+
+def _match(
+    observed_date: str, event_kind: str, anchors: Mapping[str, tuple[str, str]]
+) -> str | None:
+    """Which occurrence a statement belongs to, or None for a new one.
+
+    Nearest anchor of the same kind inside :data:`SAME_OCCURRENCE_DAYS`. Ties
+    go to the earlier anchor so that two runs in any order agree.
+
+    The anchor is used rather than the entry's current ``expected_date`` on
+    purpose: matching against a value that moves lets an occurrence walk. Three
+    reschedules of a fortnight each would carry an entry six weeks from where
+    it started, and the next quarter's first estimate would then land inside
+    the window of an entry that is no longer about it.
+    """
+
+    day = date.fromisoformat(observed_date)
+    best: tuple[int, str, str] | None = None
+    for ref, (kind, anchor) in anchors.items():
+        if kind != event_kind:
+            continue
+        distance = abs((date.fromisoformat(anchor) - day).days)
+        if distance > SAME_OCCURRENCE_DAYS:
+            continue
+        candidate = (distance, anchor, ref)
+        if best is None or candidate < best:
+            best = candidate
+    return None if best is None else best[2]
 
 
 # -- the chain -------------------------------------------------------------
@@ -509,7 +600,8 @@ class CatalystCalendarAuthority:
             return None
         entry = min(
             forthcoming,
-            key=lambda item: (item["expected_date"], item["event_kind"], item["subject"]),
+            key=lambda item: (
+                item["expected_date"], item["event_kind"], item["anchor_date"]),
         )
         return self._reader_view(latest, entry, today)
 
@@ -537,7 +629,7 @@ class CatalystCalendarAuthority:
                     found.append(self._reader_view(version, entry, today))
         found.sort(key=lambda item: (
             item["expected_date"], item["company_ref"], item["event_kind"],
-            item["subject"],
+            item["anchor_date"],
         ))
         return found
 
@@ -610,15 +702,11 @@ class CatalystCalendarAuthority:
         refs = [_text(item, "evidence_refs[]") for item in evidence_refs]
         if len(set(refs)) != len(refs):
             raise CatalystCalendarValidationError("evidence_refs are not unique")
-        observed = [
-            _observation(item, index, company_ref)
-            for index, item in enumerate(entries)
-        ]
-        seen = [item["entry_ref"] for item in observed]
-        if len(set(seen)) != len(seen):
-            raise CatalystCalendarValidationError(
-                "two entries in this run name the same occurrence"
-            )
+        # Two observations in one run about the same occurrence are normal and
+        # are merged, not refused: the vendor half and the filed half of a
+        # calendar run are two statements about the same earnings date, and it
+        # is this module's job to notice that rather than the caller's.
+        observed = [_observation(item, index) for index, item in enumerate(entries)]
         today = _as_date(now)
         with self.store._transaction() as cur:
             return self._merge_and_insert(
@@ -645,26 +733,34 @@ class CatalystCalendarAuthority:
             for entry in (latest["entries"] if latest else [])
         }
 
-        merged: dict[str, dict[str, Any]] = {}
+        merged: dict[str, dict[str, Any]] = dict(prior)
+        # Every occurrence this calendar knows about, by the date it was first
+        # seen at. Grows as a run introduces new ones, so two statements in the
+        # same run that are about the same event find each other.
+        anchors: dict[str, tuple[str, str]] = {
+            ref: (entry["event_kind"], entry["anchor_date"])
+            for ref, entry in prior.items()
+        }
+        live_sources: dict[str, dict[tuple[str, str], dict[str, Any]]] = {
+            ref: {_source_slot(source): dict(source) for source in entry["sources"]}
+            for ref, entry in prior.items()
+        }
         changes: list[dict[str, Any]] = []
-        for entry_ref, before in prior.items():
-            merged[entry_ref] = before
+        touched: dict[str, bool] = {}
         for item in observed:
-            entry_ref = item["entry_ref"]
-            before = prior.get(entry_ref)
-            live: dict[tuple[str, str], dict[str, Any]] = {}
-            if before is not None:
-                live = {
-                    _source_slot(source): dict(source)
-                    for source in before["sources"]
-                }
-            added_source = False
+            entry_ref = _match(item["observed_date"], item["event_kind"], anchors)
+            if entry_ref is None:
+                anchor = item["observed_date"]
+                entry_ref = entry_ref_for(company_ref, item["event_kind"], anchor)
+                anchors[entry_ref] = (item["event_kind"], anchor)
+                live_sources.setdefault(entry_ref, {})
+            live = live_sources.setdefault(entry_ref, {})
             for source in item["sources"]:
                 slot = _source_slot(source)
                 standing = live.get(slot)
                 if standing is None:
                     live[slot] = source
-                    added_source = True
+                    touched[entry_ref] = True
                     continue
                 if standing["observed_at"] > source["observed_at"]:
                     # An older reading of a source we already have a newer one
@@ -672,13 +768,17 @@ class CatalystCalendarAuthority:
                     # calendar backwards.
                     continue
                 if standing != source:
-                    added_source = True
+                    touched[entry_ref] = True
                 live[slot] = source
-            after = _resolve(
-                entry_ref, item["event_kind"], item["subject"],
-                list(live.values()), item["notes"] or (before or {}).get("notes", ""),
+            before = prior.get(entry_ref)
+            merged[entry_ref] = _resolve(
+                entry_ref, item["event_kind"], anchors[entry_ref][1],
+                list(live.values()),
+                item["notes"] or (before or {}).get("notes", ""),
+                today,
             )
-            merged[entry_ref] = after
+        for entry_ref, added_source in touched.items():
+            after, before = merged[entry_ref], prior.get(entry_ref)
             if before is None:
                 changes.append(_change(after, "added", None, after["expected_date"]))
                 continue
@@ -735,7 +835,7 @@ class CatalystCalendarAuthority:
                 merged,
                 key=lambda ref: (
                     merged[ref]["expected_date"], merged[ref]["event_kind"],
-                    merged[ref]["subject"],
+                    merged[ref]["anchor_date"],
                 ),
             )
         ]
@@ -803,6 +903,7 @@ def _change(
         "entry_ref": entry["entry_ref"],
         "event_kind": entry["event_kind"],
         "subject": entry["subject"],
+        "anchor_date": entry["anchor_date"],
         "change": _one_of(kind, CHANGE_KINDS, "change"),
         "from": before,
         "to": after,
@@ -960,7 +1061,11 @@ def emit_calendar_events(
                 "window": window,
                 "entry_ref": entry["entry_ref"],
                 "event_kind": entry["event_kind"],
+                # A label and an identity. Two occurrences can share the
+                # label -- Accenture reports twice in calendar Q4 -- so
+                # anything keying on one of these has to key on the ref.
                 "subject": entry["subject"],
+                "anchor_date": entry["anchor_date"],
                 "expected_date": expected,
                 # Named for what it qualifies. An event ledger will hold other
                 # confidences before long, and a bare "confidence" beside a
@@ -1005,6 +1110,8 @@ __all__ = [
     "MAX_SOURCES_PER_ENTRY",
     "PREVIEW_LEAD_DAYS",
     "PUBLISHING_CHANGES",
+    "RESOLUTIONS",
+    "SAME_OCCURRENCE_DAYS",
     "RESEARCH_EVENT_KIND",
     "UNCONFIRMED_DATE_CAVEAT",
     "UNCONFIRMED_DATE_WINDOWS",
@@ -1021,5 +1128,6 @@ __all__ = [
     "calendar_ref_for",
     "emit_calendar_events",
     "entry_ref_for",
+    "occurrence_label",
     "required_change_reason",
 ]

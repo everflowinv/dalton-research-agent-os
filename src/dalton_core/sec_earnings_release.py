@@ -35,6 +35,7 @@ calendar says so rather than implying otherwise.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Mapping, Sequence
@@ -54,6 +55,10 @@ FORM = "8-K"
 # immediately age out.
 DEFAULT_LOOKBACK_DAYS = 120
 MAX_RELEASES = 40
+# The spool roots a Core may have written a connector artifact under. The same
+# three ``mission_sec_quarters`` walks; named here because this module verifies
+# the hash itself rather than delegating a read that cannot say why it failed.
+SPOOL_ROOTS = ("transcript-spool", "connector-spool", "raw-spool")
 
 
 class SecEarningsReleaseError(RuntimeError):
@@ -175,7 +180,6 @@ def calendar_entries(
     *,
     invocation_ref: str,
     artifact_hash: str,
-    subject_for: Any,
 ) -> list[dict[str, Any]]:
     """Turn Item 2.02 filings into confirmed ``earnings`` calendar entries.
 
@@ -185,16 +189,16 @@ def calendar_entries(
     ``estimated`` into ``confirmed`` -- the estimate does not disappear, it sits
     beside the confirmed date and the entry says whether the two agree.
 
-    ``subject_for`` is passed in rather than imported so that both sources use
-    literally the same occurrence key; two mappers with their own copy of that
-    rule is how two sources stop merging.
+    Which occurrence each of these belongs to is not decided here. A mapper
+    that could name an occurrence could merge two of them, and that is exactly
+    the mistake a shared quarter key made; the authority matches on how far
+    apart the dates are and this reports only what it read.
     """
 
     entries: list[dict[str, Any]] = []
     for release in releases:
         entries.append({
             "event_kind": "earnings",
-            "subject": subject_for(release["report_date"]),
             "sources": [{
                 "kind": "filing",
                 # Named by accession, so the citation is the document and not
@@ -219,7 +223,6 @@ def announced_next_date_entry(
     *,
     accession: str,
     announced_date: str,
-    subject: str,
     filing_date: str,
     note: str = "",
     event_kind: str = "earnings",
@@ -239,7 +242,6 @@ def announced_next_date_entry(
     date.fromisoformat(str(filing_date))
     return {
         "event_kind": event_kind,
-        "subject": subject,
         "sources": [{
             "kind": "filing",
             "ref": f"sec:filing:{accession}",
@@ -326,20 +328,21 @@ def releases_for_issuer(
     the lane wants to say so in its tick summary rather than fail.
     """
 
-    from .mission_sec_quarters import read_artifact  # noqa: PLC0415 - lazy
-
     since = (
         date.fromisoformat(today) - timedelta(days=max(0, int(lookback_days)))
     ).isoformat()
     root = Path(state_dir)
     for artifact in submissions_artifacts(connection, issuer=issuer):
-        payload = read_artifact(root, artifact["artifact_hash"])
-        if payload is None:
+        found = read_submissions_artifact(root, artifact["artifact_hash"])
+        if found["status"] == "absent":
             continue
+        if found["status"] != "read":
+            return {"releases": [], "since": since, **found, **artifact}
         try:
-            releases = earnings_release_filings(payload, since=since)
+            releases = earnings_release_filings(found["payload"], since=since)
         except SecEarningsReleaseError as exc:
-            return {"status": "unreadable", "reason": str(exc), **artifact}
+            return {"status": "unreadable", "reason": str(exc),
+                    "releases": [], "since": since, **artifact}
         return {
             "status": "read", "releases": releases, "since": since, **artifact,
         }
@@ -354,6 +357,45 @@ def releases_for_issuer(
     }
 
 
+def read_submissions_artifact(state_dir: Path, content_sha256: str) -> dict[str, Any]:
+    """The exact spooled bytes, and a different word for each way it can fail.
+
+    ``mission_sec_quarters.read_artifact`` returns ``None`` for all three of
+    "not on this disk", "the bytes do not hash to what authority recorded" and
+    "that is not JSON", which is fine where the caller only wants the payload
+    and unhelpful here. The middle one is not an absence: an artifact whose
+    content hash does not match is the one thing in this whole path that would
+    mean a stored citation no longer points at what it says it does, and it has
+    to arrive as a refusal a person reads rather than as a company quietly
+    having no filings index.
+    """
+
+    for name in SPOOL_ROOTS:
+        path = (state_dir / name / "connector-spool" / "objects"
+                / content_sha256[:2] / content_sha256)
+        if not path.is_file():
+            continue
+        raw = path.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != content_sha256:
+            return {
+                "status": "tampered",
+                "reason": (
+                    f"the spooled submissions artifact at {path} does not hash "
+                    f"to {content_sha256}; it is refused rather than read"
+                ),
+            }
+        try:
+            payload = json.loads(raw)
+        except ValueError as exc:
+            return {"status": "unreadable",
+                    "reason": f"spooled artifact is not JSON: {exc}"}
+        if not isinstance(payload, Mapping):
+            return {"status": "unreadable",
+                    "reason": "spooled artifact is not an object"}
+        return {"status": "read", "payload": payload}
+    return {"status": "absent", "reason": "not in any spool root"}
+
+
 __all__ = [
     "DEFAULT_LOOKBACK_DAYS",
     "EARNINGS_RELEASE_ITEM",
@@ -364,7 +406,9 @@ __all__ = [
     "SecEarningsReleaseError",
     "announced_next_date_entry",
     "calendar_entries",
+    "SPOOL_ROOTS",
     "earnings_release_filings",
+    "read_submissions_artifact",
     "releases_for_issuer",
     "submissions_artifacts",
 ]

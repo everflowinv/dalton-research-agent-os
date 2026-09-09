@@ -96,7 +96,7 @@ def version(company_ref, *, day="2026-10-01", confidence="confirmed",
         "company_ref": company_ref,
         "entries": [{
             "entry_ref": entry_ref, "event_kind": "earnings",
-            "subject": "2026q4", "expected_date": day,
+            "subject": "2026q4", "anchor_date": day, "expected_date": day,
             "confidence": confidence, "disagreement": False,
             "disagreeing_dates": [],
             "sources": [{"kind": "filing", "ref": "sec:filing:x",
@@ -332,6 +332,76 @@ class EventTests(LaneTestCase):
         self.assertEqual(len(first["events"]["emitted"]), 1)
         self.assertEqual(second["events"]["emitted"], [])
         self.assertEqual(len(written), 1)
+
+    def test_a_writer_that_fails_halfway_does_not_lose_what_it_wrote(self):
+        # Two windows open at once -- a preview and a date change -- and the
+        # second write raises. Marking the batch afterwards meant the first was
+        # recorded and forgotten, so the next tick wrote it a second time.
+        written = []
+
+        def flaky(**event):
+            if len(written) >= 1:
+                raise RuntimeError("the event ledger refused")
+            written.append(event)
+
+        moved = "catalyst-entry:one"
+        coordinator = self.coordinator(
+            authority=FakeAuthority({ACN: version(ACN)}),
+            record_event=flaky, mission_value=ONE_COMPANY)
+        launched = coordinator.dispatch_once()
+        self.launcher.finish(launched["ticket_ref"], calendar_status="fresh",
+                             moved_entry_refs=[moved])
+        first = coordinator.dispatch_once()["settled"]
+        self.assertEqual(first["events"]["status"], "failed")
+        self.assertEqual(first["events"]["recorded_count"], 1)
+
+        # Next day: the one that was written is not written again.
+        self.now = START + timedelta(days=1)
+        launched = coordinator.dispatch_once()
+        self.launcher.finish(launched["ticket_ref"], calendar_status="fresh",
+                             moved_entry_refs=[moved])
+        coordinator.dispatch_once()
+        self.assertEqual(len(written), 1)
+
+    def test_a_partial_run_still_emits_and_still_charges_the_budget(self):
+        # The filed half published, the vendor half did not. The day counts as
+        # asked -- the calendar learned something -- and the failure counts, so
+        # a vendor that stays broken cannot hide behind it.
+        written = []
+        coordinator = self.coordinator(
+            authority=FakeAuthority({ACN: version(ACN)}),
+            record_event=lambda **event: written.append(event),
+            mission_value=ONE_COMPANY)
+        launched = coordinator.dispatch_once()
+        self.launcher.finish(launched["ticket_ref"], status="partial",
+                             calendar_status="fresh", vendor_status="failed",
+                             failure_reason="Yahoo returned nothing usable")
+        settled = coordinator.dispatch_once()["settled"]
+        self.assertEqual(settled["status"], "partial")
+        self.assertEqual(settled["events"]["status"], "recorded")
+        self.assertEqual(len(written), 1)
+        self.assertFalse(coordinator.due(ACN))
+        self.assertEqual(coordinator._failures[ACN], 1)
+
+    def test_three_partial_days_hold_the_company_with_the_vendor_s_reason(self):
+        coordinator = self.coordinator(
+            authority=FakeAuthority({ACN: version(ACN)}),
+            mission_value=ONE_COMPANY)
+        for day in range(MAX_FAILURES_PER_COMPANY):
+            self.now = START + timedelta(days=day)
+            launched = coordinator.dispatch_once()
+            self.assertEqual(launched["company_ref"], ACN)
+            self.launcher.finish(launched["ticket_ref"], status="partial",
+                                 calendar_status="duplicate",
+                                 vendor_status="failed",
+                                 failure_reason="Yahoo returned nothing usable")
+            coordinator.dispatch_once()
+        self.now = START + timedelta(days=MAX_FAILURES_PER_COMPANY)
+        after = coordinator.dispatch_once()
+        self.assertEqual(after["status"], "idle")
+        held = [row for row in after["skipped"] if row["company_ref"] == ACN]
+        self.assertEqual(held[0]["reason"], "held")
+        self.assertIn("Yahoo returned nothing usable", held[0]["detail"])
 
     def test_a_company_with_no_calendar_yet_emits_nothing_and_says_so(self):
         _, settled = self.settle_with(authority=FakeAuthority())
