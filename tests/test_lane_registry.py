@@ -49,7 +49,12 @@ from dalton_core.macos_launchagent import render
 # What the literals said before the registry derived them.  These are the
 # expected values, spelled out, so a lane that falls out of a set is visible as
 # a diff here rather than as a lane that silently stops being dispatched.
+# S2 appended ``dispatch_guidepoint_discovery`` here and in the three literals
+# below. It is not a migrated lane -- it is the first lane added *through* the
+# registry -- and the point of keeping it in the same literals is that a new
+# lane must show up in all four places or the registry is not doing its job.
 LANE_OPERATIONS = frozenset({
+    "dispatch_guidepoint_discovery",
     "dispatch_mission_source_discovery",
     "dispatch_document_extraction",
     "dispatch_mission_stage",
@@ -61,6 +66,7 @@ LANE_OPERATIONS = frozenset({
     "dispatch_initial_screen",
 })
 CORE_DISCOVERY_OPERATIONS = frozenset({
+    "dispatch_guidepoint_discovery",
     "dispatch_mission_source_discovery", "mission_source_discovery_status",
     "mission_source_discoveries", "mission_discovered_documents",
     "dispatch_document_extraction",
@@ -73,6 +79,7 @@ CORE_DISCOVERY_OPERATIONS = frozenset({
 # The controller tick's lane order, as run_once ran it before P14-0.
 TICK_ORDER = (
     ("dispatch_mission_source_discovery", "mission_source_discovery"),
+    ("dispatch_guidepoint_discovery", "guidepoint_discovery"),
     ("dispatch_document_extraction", "document_extraction"),
     ("dispatch_mission_stage", "mission_stage"),
     ("dispatch_claim_review", "claim_review"),
@@ -410,7 +417,9 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
             {spec.init_kwarg for spec in registered_lanes()
              if spec.init_kwarg is not None},
             {"statement_lane_launcher", "model_spec_launcher",
-             "initial_screen_launcher", "research_planner_launcher"},
+             "initial_screen_launcher", "research_planner_launcher",
+             # S2, arriving through the registry rather than __init__.
+             "guidepoint_search_launcher"},
         )
 
     def test_an_unknown_launcher_keyword_is_refused(self) -> None:

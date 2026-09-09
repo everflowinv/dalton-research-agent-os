@@ -19,10 +19,10 @@ acquisition separately because acquisition costs provider calls.  A Guidepoint
 excerpt arrives inside the search response (see ``guidepoint_acquisition``), so
 the only thing this coordinator has to ration is searches.
 
-What is *not* here is lane registration.  Wave 0 owns ``lane_registry.LaneSpec``
-and this module deliberately does not reach into ``writer_server``,
-``bounded_planner_driver`` or ``macos_launchagent``; the registration line is in
-the S2 report.
+The lane registers itself at the bottom of this file against Wave 0's
+``lane_registry``, which is the whole point of that registry: ``writer_server``,
+``bounded_planner_driver`` and ``macos_launchagent`` are untouched, and adding
+this lane cost one line in ``LANE_MODULES``.
 """
 
 from __future__ import annotations
@@ -35,7 +35,6 @@ from pathlib import Path
 from typing import Any
 
 from .guidepoint_launcher import GuidepointSearchLauncher
-from .lane_child_launcher import LaneChildConflict
 from .guidepoint_search import (
     SEARCH_DOCUMENT_TYPES,
     SOURCE_REF,
@@ -44,6 +43,8 @@ from .guidepoint_search import (
     guidepoint_search_spec_hash,
     validate_guidepoint_search_spec,
 )
+from .lane_child_launcher import LaneChildConflict
+from .lane_registry import LaneSpec, register_lane
 from .store import canonical_json, content_hash
 
 
@@ -386,15 +387,25 @@ class GuidepointLaneCoordinator:
         connection: Any,
         launcher: GuidepointSearchLauncher,
         plan: Mapping[str, Any],
-        mission_version_ref: str,
-        mission_version_hash: str,
-        requested_by: str,
+        mission_version_ref: str | None = None,
+        mission_version_hash: str | None = None,
+        requested_by: str | None = None,
         clock: Any | None = None,
     ) -> None:
         self.missions = missions
         self.connection = connection
         self.launcher = launcher
         self.plan = validate_guidepoint_discovery_plan(plan)
+        if mission_version_ref is None or mission_version_hash is None or requested_by is None:
+            # The tick has no caller to name the version, so the lane resolves
+            # the mission the plan is written against. Resolved every tick, not
+            # cached: a new mission version is the mechanism by which an owner
+            # connects or disconnects this source, and a lane holding last
+            # week's version would not notice either.
+            mission = self.missions.active_mission(self.plan["mission_ref"])
+            mission_version_ref = mission_version_ref or mission["id"]
+            mission_version_hash = mission_version_hash or mission["content_hash"]
+            requested_by = requested_by or mission["autonomy"]["automation_principal"]
         self.mission_version_ref = mission_version_ref
         self.mission_version_hash = mission_version_hash
         self.requested_by = requested_by
@@ -555,16 +566,125 @@ class GuidepointLaneCoordinator:
         return result
 
 
+# ---------------------------------------------------------------------------
+# lane registration (Wave 0's LaneSpec; one line in LANE_MODULES)
+# ---------------------------------------------------------------------------
+LAUNCHER_KWARG = "guidepoint_search_launcher"
+# Named by version rather than discovered, so a future v2 record is a
+# deliberate edit here and not something the writer picks up because a file
+# appeared in the governance directory.
+GUIDEPOINT_LANE_GOVERNANCE = "guidepoint-search-library-v1.json"
+GUIDEPOINT_LANE_PLAN = "us-it-services-guidepoint-v1.json"
+GUIDEPOINT_MCP_ENDPOINT = "http://127.0.0.1:8943/mcp"
+
+
+def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
+    """Controller tick (S2): one bounded, quota-aware Guidepoint sweep."""
+
+    del params
+    launcher = server.lane_launcher(LAUNCHER_KWARG)
+    if launcher is None:
+        return {"status": "unconfigured",
+                "reason": "no Guidepoint lane on this writer"}
+    return GuidepointLaneCoordinator(
+        missions=server.coverage_mission,
+        connection=server.store.connection,
+        launcher=launcher,
+        plan=launcher.plan,
+    ).launch_discovery()
+
+
+def add_arguments(parser: Any) -> None:
+    # Off unless an approved governance record and a plan are both named,
+    # like every other connector lane on this writer.
+    parser.add_argument(
+        "--guidepoint-search-governance",
+        help="approved guidepoint-search-library governance record",
+    )
+    parser.add_argument(
+        "--guidepoint-discovery-plan",
+        help="hash-bound Guidepoint discovery plan "
+             "(deploy/phase9/p9-us-it-services-guidepoint-v1.json)",
+    )
+    parser.add_argument("--guidepoint-mcp-endpoint", default=GUIDEPOINT_MCP_ENDPOINT)
+    parser.add_argument(
+        "--guidepoint-fixture",
+        help="rehearsal only: serve packaged rows instead of reaching the proxy",
+    )
+
+
+def build_launcher(args: Any) -> Any | None:
+    governance = getattr(args, "guidepoint_search_governance", None)
+    plan_path = getattr(args, "guidepoint_discovery_plan", None)
+    if governance is None or plan_path is None:
+        return None
+    fixture = getattr(args, "guidepoint_fixture", None)
+    return GuidepointSearchLauncher(
+        state_dir=Path(args.db).expanduser().resolve().parent,
+        governance_path=governance,
+        plan_path=plan_path,
+        mode_args=() if fixture is not None else ("--allow-network",),
+        fake_search_file=fixture,
+        mcp_endpoint=getattr(args, "guidepoint_mcp_endpoint", GUIDEPOINT_MCP_ENDPOINT),
+    )
+
+
+def argv_fragment(context: Any) -> list[str]:
+    """Both files or nothing.
+
+    The lane writes into the mission ledger rather than the Cockpit inbox, so
+    it is enabled by its own approved record *and* its plan being installed.
+    Either one alone would give a writer a lane that starts and then refuses
+    every tick, which reads like a fault instead of an absence.
+    """
+
+    governance = context.state / "connector-governance" / GUIDEPOINT_LANE_GOVERNANCE
+    plan = context.state / "discovery-plans" / GUIDEPOINT_LANE_PLAN
+    if not governance.is_file() or not plan.is_file():
+        return []
+    return [
+        "--guidepoint-search-governance", str(governance),
+        "--guidepoint-discovery-plan", str(plan),
+        "--guidepoint-mcp-endpoint", GUIDEPOINT_MCP_ENDPOINT,
+    ]
+
+
+LANE = register_lane(LaneSpec(
+    # Right after the three existing discovery coordinators and before
+    # extraction: what this lane queues is what extraction reads.
+    operation="dispatch_guidepoint_discovery",
+    order=35,
+    driver_key="guidepoint_discovery",
+    handler=dispatch,
+    init_kwarg=LAUNCHER_KWARG,
+    argparse=add_arguments,
+    launcher_factory=build_launcher,
+    argv_fragment=argv_fragment,
+    note="S2: expert-network transcript excerpts. One search child at a time, "
+         "bounded by the owner-approved daily quota and the plan's own "
+         "budget; acquisition spends no further call.",
+))
+
+
 __all__ = [
+    "GUIDEPOINT_LANE_GOVERNANCE",
+    "GUIDEPOINT_LANE_PLAN",
+    "GUIDEPOINT_MCP_ENDPOINT",
     "GUIDEPOINT_SOURCE_REF",
+    "LANE",
+    "LAUNCHER_KWARG",
     "GuidepointLaneCoordinator",
     "GuidepointPlanError",
     "MAX_EXCERPTS_PER_QUERY",
     "PLAN_SCHEMA_VERSION",
     "SEARCHES_PER_TICK",
     "SEARCH_WAIT_SECONDS",
+    "add_arguments",
+    "argv_fragment",
     "build_guidepoint_discovery_plan",
     "build_guidepoint_parameters",
+    "build_launcher",
+    "dispatch",
     "guidepoint_plan_queries",
     "guidepoint_plan_spec",
     "guidepoint_query_hash",

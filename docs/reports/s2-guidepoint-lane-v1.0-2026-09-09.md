@@ -1,7 +1,8 @@
 # S2：Guidepoint 专家访谈 lane v1.0
 
 日期：2026-09-09
-分支：`s2-guidepoint-lane`（worktree `~/Projects/dalton-s2-guidepoint-lane-worktree`），基线 main `88c040b`
+分支：`s2-guidepoint-lane`（worktree `~/Projects/dalton-s2-guidepoint-lane-worktree`），
+基线 main `88c040b`，交付前已合并 Wave 0 后的 main `888a814`
 范围：并行开发计划 v1.0 第 3 节 S 线 S2；PROJECT_STATUS 下一步 #10
 
 ---
@@ -11,7 +12,9 @@
 身份与两条治理记录 P13ae 已经批过，缺的是"花掉一次调用"的那一段：本片补上 search 子进程、
 discovery plan、launcher、协调器、摘录级 acquisition 与 ≤20 词逐字引用的合同级拦截；
 `get_transcript` 上游没有对应物，出了一条**新的**收窄提案，v1 一个字节没动。
-接线只差 `coverage_mission.DISCOVERY_SOURCES` 一行与 lane registry 一行。
+lane 已按 Wave 0 的 registry 自行登记（`LANE_MODULES` 一行，`writer_server` / driver /
+launchagent 一行没动）。上线还差的只有 `coverage_mission.DISCOVERY_SOURCES` 一条词表、
+install.sh 的 plan 种子、以及 mission 版本把 `source:guidepoint` 置 connected。
 
 ---
 
@@ -23,10 +26,12 @@ discovery plan、launcher、协调器、摘录级 acquisition 与 ≤20 词逐�
 | `src/dalton_core/guidepoint_acquisition.py` | 摘录级 acquisition manifest、`acquire_guidepoint_excerpt`、`verified_guidepoint_source` |
 | `src/dalton_core/guidepoint_cli.py` | 子进程 CLI：`search` 与 `acquire` |
 | `src/dalton_core/guidepoint_launcher.py` | `GuidepointSearchLauncher(LaneChildLauncher)`（P13aj 的共享 ticket 机制） |
-| `src/dalton_core/mission_guidepoint_lane.py` | discovery plan 校验与编译、cadence、预算、`GuidepointLaneCoordinator` |
+| `src/dalton_core/mission_guidepoint_lane.py` | discovery plan 校验与编译、cadence、预算、`GuidepointLaneCoordinator`，以及文件末尾的 `LaneSpec` 登记（`dispatch_guidepoint_discovery`，order 35） |
 | `deploy/phase9/p9-us-it-services-guidepoint-v1.json` | 5 家 × 2 条公司 spec + 4 条行业 spec = 14 条查询 |
 | `deploy/connector-governance/guidepoint-get-transcript-narrowing-v1.json` | `not_available_upstream` 收窄提案（status `proposed`） |
-| `src/dalton_core/connector_quota_policy.py` | 追加 `("guidepoint","search_library")` 日配额（唯一改动的共享文件，纯追加） |
+| `src/dalton_core/connector_quota_policy.py` | 追加 `("guidepoint","search_library")` 日配额（纯追加） |
+| `src/dalton_core/lane_registry.py` | `LANE_MODULES` 加 `"dalton_core.mission_guidepoint_lane"` 一行 |
+| `tests/test_lane_registry.py`、`tests/test_connector_quota_policy.py` | Wave 0 与配额的字面量断言按新增 lane / 新增配额同步（纯追加，四处） |
 | `tests/test_guidepoint_search_lane.py`、`tests/test_guidepoint_acquisition.py`、`tests/test_guidepoint_lane.py`、`tests/fixtures/guidepoint_search_library_synthetic.json` | 45 项离线测试与合成 fixture |
 
 **没有碰**：`writer_server.py`、`coverage_mission.py`、`coverage_mission_schema.sql`、
@@ -91,32 +96,30 @@ manifest 可以比许可更严（`max_verbatim_words: 3`），**不能更松**�
 `CoverageMissionConflict: source:guidepoint is not a search-driven discovery source`——
 这句话就是整条 lane 还欠的全部。
 
-### 3.2 lane registry（Wave 0 的 `LaneSpec`）
+### 3.2 lane registry —— 已做完
 
-不做接线，按约定只描述登记行。coordinator 与 launcher 已经是子类化好的：
+合并 main（Wave 0，`888a814`）后按新机制自行登记，`writer_server.py`、`bounded_planner_driver.py`、
+`macos_launchagent.py` 一行没动，共享改动只有 `LANE_MODULES` 里的一行 import：
 
-```python
-LaneSpec(
-    operation="guidepoint_search",
-    core_only=False,
-    param_fields=("company_ref", "spec_ref", "as_of"),
-    build_coordinator=lambda writer: GuidepointLaneCoordinator(
-        missions=writer.coverage_mission, connection=writer.store.connection,
-        launcher=writer.guidepoint_launcher, plan=writer.guidepoint_plan,
-        mission_version_ref=..., mission_version_hash=..., requested_by=...),
-    argv_fragment=("--guidepoint-search-governance", "--guidepoint-discovery-plan"),
-    launcher_factory=lambda state, args: GuidepointSearchLauncher(
-        state_dir=state, governance_path=args.guidepoint_search_governance,
-        plan_path=args.guidepoint_discovery_plan,
-        mode_args=("--allow-network",), mcp_endpoint="http://127.0.0.1:8943/mcp"),
-    driver_key="guidepoint_discovery",
-)
-```
+- `mission_guidepoint_lane.py` 末尾 `register_lane(LaneSpec(operation="dispatch_guidepoint_discovery",
+  order=35, driver_key="guidepoint_discovery", handler=dispatch,
+  init_kwarg="guidepoint_search_launcher", argparse=..., launcher_factory=..., argv_fragment=...))`；
+- order 35 = 三条既有 discovery 协调器（30）之后、document extraction（40）之前——这条 lane 排进队列的
+  东西正是抽取层要读的；
+- `lane_registry.LANE_MODULES` 加 `"dalton_core.mission_guidepoint_lane"`；
+- `tests/test_lane_registry.py` 里四处"迁移前字面量"同步加上本 lane（`LANE_OPERATIONS`、
+  `CORE_DISCOVERY_OPERATIONS`、`TICK_ORDER`、launcher kwargs 集合）。这四处一起改正是 registry 的意义：
+  一条新 lane 要么四个地方都出现，要么 registry 没在干活。
 
-`bounded_planner_driver.run_once` 每 tick 调一次 `coordinator.launch_discovery()`；返回值
-`{status, reason, budget, launched, skipped}` 可以直接进 cockpit，`reason` 的封闭词表是
+tick 返回 `{status, reason, budget, launched, skipped}`，可直接进 cockpit；`reason` 的封闭词表是
 `quota_exhausted` / `tick_cap_reached` / `nothing_due` / `all_grants_refused`（`skipped[].reason`
-另有 `child_slot_busy`）。
+另有 `child_slot_busy`）。写 CLI 开关：`--guidepoint-search-governance`、`--guidepoint-discovery-plan`、
+`--guidepoint-mcp-endpoint`、`--guidepoint-fixture`；两个文件都在才开，缺一则 lane 不存在
+（只给一个会得到一条"起来了但每 tick 都拒"的 lane，那看起来像故障而不是缺席）。
+
+协调器在没人指定 mission 版本时自己解析 `missions.active_mission(plan["mission_ref"])`，
+每 tick 解析一次不缓存——owner 连上或断开这个源的机制就是发新 mission 版本，
+攥着上周版本的 lane 两样都看不见。
 
 ### 3.3 `deploy/macos/install.sh`
 
@@ -131,9 +134,10 @@ if [[ ! -f "$gp_plan_file" && -f "$repo_root/deploy/phase9/p9-us-it-services-gui
 fi
 ```
 
-`macos_launchagent.render` 里加 `--guidepoint-discovery-plan
-<state>/discovery-plans/us-it-services-guidepoint-v1.json` 与
-`--guidepoint-search-governance <state>/connector-governance/guidepoint-search-library-v1.json`。
+`macos_launchagent` **不用改**：argv 片段由 `LaneSpec.argv_fragment` 提供，条件是
+`<state>/connector-governance/guidepoint-search-library-v1.json` 与
+`<state>/discovery-plans/us-it-services-guidepoint-v1.json` 两个文件都在。
+所以 install.sh 种下 plan 这一步同时也是打开这条 lane 的开关。
 收窄提案 `guidepoint-get-transcript-narrowing-v1.json` **不种进 state**——它是给 owner 读的裁决材料，
 不是运行时会被加载的记录。
 
@@ -241,12 +245,12 @@ AlphaEngine 的 8950 代理回的是纯 JSON，所以照抄它的 raw 解析在 
 全量：`PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -t .`
 
 ```
-Ran 2079 tests in 178.905s
+Ran 2125 tests in 271.075s
 
 OK (skipped=1)
 ```
 
-基线 2,034 通过 / 1 跳过；本片新增 45 项（19 + 12 + 14）。
+（合并 Wave 0 之后；Wave 0 自身带来 2,034 → 2,080，本片新增 45 项：19 + 12 + 14。）
 
 覆盖到的：审批拒绝（proposed 记录一次调用都不发、Core 里零 invocation）、原始 artifact 哈希与
 从字节重推 refs、输出形状漂移变成失败尝试而非异常、摘录 id 稳定性、quote-policy 拒绝（>20 词与非逐字）、

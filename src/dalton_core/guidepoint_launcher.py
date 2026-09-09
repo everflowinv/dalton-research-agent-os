@@ -93,6 +93,19 @@ class GuidepointSearchLauncher(LaneChildLauncher):
     def networked(self) -> bool:
         return "--allow-network" in self.mode_args
 
+    @property
+    def plan(self) -> dict[str, Any]:
+        """The plan on disk, re-read each time it is asked for.
+
+        Not cached: the file is the authority, and a writer that has been up
+        for a week should not be deciding from a plan that was replaced on
+        Tuesday.  Reading a small JSON file once a tick costs nothing.
+        """
+
+        from .mission_guidepoint_lane import load_guidepoint_discovery_plan
+
+        return load_guidepoint_discovery_plan(self.plan_path)
+
     # -- approval first ----------------------------------------------------
     def load_governance(self) -> GuidepointSearchGovernance:
         """Approval before anything is spawned, not inside the child.
