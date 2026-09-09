@@ -184,6 +184,22 @@ fi
 # config next to the state, and points service.json at it.  No credential is
 # read; the broker key path is referenced.
 "$venv_dir/bin/python" -m dalton_core.document_extraction_setup --config "$config_path"
+# P14-M: make the router's model catalog agree with the broker's, append-only.
+# The two had drifted -- five profiles Dalton offered that the broker no longer
+# did, four the broker offered that Dalton had no profile for -- because
+# nothing in the deploy ever reconciled them and deleting a stale profile would
+# have broken the version chains that old route decisions resolve through.  A
+# profile the broker has dropped now gets a *retired* version instead, and a
+# profile the broker has added gets registered.  Idempotent: a re-install with
+# no drift writes nothing.  Skipped without an OpenClaw config, because a Core
+# installed without the gateway has no catalog to agree with.
+if [[ -f "$HOME/.openclaw/openclaw.json" ]]; then
+  PYTHONPATH="$repo_root/src" "$venv_dir/bin/python" \
+    "$repo_root/scripts/sync_openclaw_model_catalog.py" \
+    --openclaw-config "$HOME/.openclaw/openclaw.json" \
+    --model-router-db "$state_dir/model-router.sqlite" \
+    || echo "warning: model catalog sync did not run; the router keeps the catalog it has" >&2
+fi
 # P13k: the planner's model, only when the owner names one. It decides what the
 # research works on next, so it routes through its own policy rather than
 # sharing extraction's -- which pins a single profile by design. Left unset

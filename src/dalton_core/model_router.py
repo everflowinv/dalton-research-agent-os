@@ -53,6 +53,20 @@ _BUDGET_FIELDS = (
     "max_total_tokens",
     "max_cost_usd",
 )
+# P14-M: a profile the broker no longer offers is retired, not deleted.
+#
+# The catalog drifted because the only two moves available were "leave the
+# stale profile there" and "delete it".  Deleting rewrites history -- a route
+# decision from June names a profile version, and a version chain with a hole
+# in it can no longer be replayed -- so nothing was ever deleted, and Dalton
+# kept five profiles the broker had stopped offering.  Retirement is the third
+# move: a new *version* of the same profile that says "not offered any more,
+# here is why and here is the broker catalog that proved it".  The chain grows
+# forward, every old decision still resolves, and routing refuses the profile
+# from the next call onwards.
+_PROFILE_STATUSES = frozenset({"live", "retired"})
+_RETIREMENT_KEYS = {"reason", "retired_at", "broker_catalog_hash"}
+RETIRED_REASON_NOT_IN_BROKER = "not_in_broker_catalog"
 
 
 class ModelRouterError(Exception):
@@ -225,6 +239,32 @@ def _money_string(value: Decimal) -> str:
     return format(value, ".6f")
 
 
+def _retirement_wire(value: Any) -> dict[str, Any]:
+    """The evidence a retirement carries, so it can be argued with later."""
+
+    obj = _closed(
+        value,
+        allowed=_RETIREMENT_KEYS,
+        required=_RETIREMENT_KEYS,
+        name="profile.retirement",
+    )
+    reason = _token(obj["reason"], "profile.retirement.reason")
+    retired_at = _string(obj["retired_at"], "profile.retirement.retired_at")
+    _parse_time(retired_at, "profile.retirement.retired_at")
+    catalog_hash = _string(
+        obj["broker_catalog_hash"], "profile.retirement.broker_catalog_hash"
+    )
+    if not _HASH_RE.fullmatch(catalog_hash):
+        raise ModelRouterValidationError(
+            "profile.retirement.broker_catalog_hash must be a SHA-256 digest"
+        )
+    return {
+        "reason": reason,
+        "retired_at": retired_at,
+        "broker_catalog_hash": catalog_hash,
+    }
+
+
 def _profile_wire(data: Mapping[str, Any]) -> dict[str, Any]:
     keys = {
         "schema_version",
@@ -245,8 +285,14 @@ def _profile_wire(data: Mapping[str, Any]) -> dict[str, Any]:
         "cost",
         "limits",
         "content_hash",
+        # Optional, and absent means live. Absent rather than "live" so every
+        # profile version written before retirement existed keeps the exact
+        # content hash it was registered under: a hash that moves because a
+        # field was added is a history that no longer verifies.
+        "status",
+        "retirement",
     }
-    required = keys - {"content_hash"}
+    required = keys - {"content_hash", "status", "retirement"}
     obj = _closed(data, allowed=keys, required=required, name="model endpoint profile")
     if obj["schema_version"] != SCHEMA_VERSION:
         raise ModelRouterValidationError("profile schema_version is unsupported")
@@ -341,12 +387,71 @@ def _profile_wire(data: Mapping[str, Any]) -> dict[str, Any]:
             "max_cost_usd": float(limit_cost),
         },
     }
+    status = obj.get("status")
+    retirement = obj.get("retirement")
+    if status is not None:
+        status = _string(status, "profile.status")
+        if status not in _PROFILE_STATUSES:
+            raise ModelRouterValidationError("profile status is invalid")
+    if status == "retired":
+        if retirement is None:
+            raise ModelRouterValidationError(
+                "a retired profile must record why and against which catalog"
+            )
+        wire["status"] = status
+        wire["retirement"] = _retirement_wire(retirement)
+    else:
+        if retirement is not None:
+            raise ModelRouterValidationError(
+                "only a retired profile carries a retirement record"
+            )
+        if status == "live":
+            wire["status"] = status
     digest = canonical_hash(wire)
     asserted = obj.get("content_hash")
     if asserted is not None and asserted != digest:
         raise ModelRouterValidationError("profile content_hash mismatch")
     wire["content_hash"] = digest
     return wire
+
+
+def _fallback_chains_wire(value: Any) -> dict[str, Any]:
+    """Per-purpose-tier chains: which model first, which one after it fails.
+
+    A chain is policy, not code, for the same reason the pinned profile was:
+    two jobs sharing one hard-coded ordering can never differ, and a chain that
+    lives in a module cannot be pinned by version in a lane's configuration.
+    """
+
+    obj = _closed(
+        value,
+        allowed={"tiers", "purpose_tiers"},
+        required={"tiers", "purpose_tiers"},
+        name="policy.fallback_chains",
+    )
+    raw_tiers = obj["tiers"]
+    if not isinstance(raw_tiers, Mapping) or not raw_tiers:
+        raise ModelRouterValidationError("fallback_chains.tiers must be a non-empty object")
+    tiers: dict[str, list[str]] = {}
+    for name, chain in raw_tiers.items():
+        tier = _token(name, "fallback_chains.tiers key")
+        refs = _unique_refs(chain, f"fallback_chains.tiers.{tier}")
+        if not refs:
+            raise ModelRouterValidationError(f"tier {tier} must name at least one profile")
+        tiers[tier] = list(refs)
+    raw_purposes = obj["purpose_tiers"]
+    if not isinstance(raw_purposes, Mapping):
+        raise ModelRouterValidationError("fallback_chains.purpose_tiers must be an object")
+    purpose_tiers: dict[str, str] = {}
+    for purpose, tier in raw_purposes.items():
+        name = _token(purpose, "fallback_chains.purpose_tiers key")
+        target = _token(tier, "fallback_chains.purpose_tiers value")
+        if target not in tiers:
+            raise ModelRouterValidationError(
+                f"purpose {name} is mapped to undeclared tier {target}"
+            )
+        purpose_tiers[name] = target
+    return {"tiers": tiers, "purpose_tiers": purpose_tiers}
 
 
 def _policy_wire(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -360,8 +465,11 @@ def _policy_wire(data: Mapping[str, Any]) -> dict[str, Any]:
         "filters",
         "ordered_preferences",
         "content_hash",
+        # Optional and omitted when absent, so every policy version registered
+        # before chains existed keeps its exact hash.
+        "fallback_chains",
     }
-    required = keys - {"content_hash"}
+    required = keys - {"content_hash", "fallback_chains"}
     obj = _closed(data, allowed=keys, required=required, name="model routing policy")
     if obj["schema_version"] != SCHEMA_VERSION:
         raise ModelRouterValidationError("policy schema_version is unsupported")
@@ -441,6 +549,9 @@ def _policy_wire(data: Mapping[str, Any]) -> dict[str, Any]:
         },
         "ordered_preferences": preferences,
     }
+    chains = obj.get("fallback_chains")
+    if chains is not None:
+        wire["fallback_chains"] = _fallback_chains_wire(chains)
     digest = canonical_hash(wire)
     asserted = obj.get("content_hash")
     if asserted is not None and asserted != digest:
@@ -689,6 +800,124 @@ class ModelRouter:
             ).fetchall()
         return [json.loads(row["decision_json"]) for row in rows]
 
+    def latest_profiles(self) -> list[dict[str, Any]]:
+        """The current version of every profile, retired ones included.
+
+        The catalog reader needs the retired ones: "which models has this Core
+        stopped offering, and against which broker catalog" is exactly the
+        question that went unanswered while the two catalogs drifted.
+        """
+
+        return self._latest_profiles(self.connection)
+
+    def record_chain_link(
+        self,
+        *,
+        work_order_id: str,
+        capability: str,
+        attempt_number: int,
+        purpose: str,
+        tier: str,
+        chain_position: int,
+        profile_id: str,
+        decision_id: str,
+        policy_version_ref: str,
+        served: bool,
+        skip_reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Append one immutable "this link was tried, and this happened" record.
+
+        The route decision itself cannot carry it: its wire shape is validated
+        key-for-key by the broker adapter, and a decision that grew a field
+        would stop being admissible.  So the chain is recorded beside the
+        decisions it is made of, pointing at them, and a replay reads the two
+        together.
+        """
+
+        work_order_id = _string(work_order_id, "work_order_id")
+        capability = _token(capability, "capability")
+        attempt_number = _positive_int(attempt_number, "attempt_number")
+        purpose = _token(purpose, "purpose")
+        tier = _token(tier, "tier")
+        chain_position = _positive_int(chain_position, "chain_position")
+        profile_id = _ref(profile_id, "profile_id")
+        decision_id = _ref(decision_id, "decision_id")
+        policy_version_ref = _ref(policy_version_ref, "policy_version_ref")
+        if not isinstance(served, bool):
+            raise ModelRouterValidationError("served must be a boolean")
+        if served and skip_reason is not None:
+            raise ModelRouterValidationError("a served link has no skip reason")
+        if not served:
+            skip_reason = _token(skip_reason, "skip_reason")
+        now = _timestamp(self._now())
+        link = {
+            "schema_version": SCHEMA_VERSION,
+            "work_order_ref": work_order_id,
+            "capability": capability,
+            "attempt_number": attempt_number,
+            "purpose": purpose,
+            "tier": tier,
+            "chain_position": chain_position,
+            "profile_id": profile_id,
+            "decision_id": decision_id,
+            "policy_version_ref": policy_version_ref,
+            "served": served,
+            "skip_reason": skip_reason,
+            "created_at": now,
+        }
+        link_id = f"route-chain-link:{canonical_hash(link)[:32]}"
+        link["id"] = link_id
+        link["content_hash"] = canonical_hash(link)
+        with self._transaction() as cur:
+            existing = cur.execute(
+                "SELECT link_json FROM model_route_chain_links WHERE link_id=?",
+                (link_id,),
+            ).fetchone()
+            if existing is not None:
+                return {"status": "duplicate", "link": json.loads(existing["link_json"])}
+            cur.execute(
+                "INSERT INTO model_route_chain_links "
+                "(link_id, work_order_id, capability, attempt_number, purpose, tier, "
+                "chain_position, profile_id, decision_id, served, skip_reason, "
+                "policy_version_ref, link_hash, link_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    link_id,
+                    work_order_id,
+                    capability,
+                    attempt_number,
+                    purpose,
+                    tier,
+                    chain_position,
+                    profile_id,
+                    decision_id,
+                    int(served),
+                    skip_reason,
+                    policy_version_ref,
+                    link["content_hash"],
+                    canonical_json(link),
+                    now,
+                ),
+            )
+        return {"status": "fresh", "link": link}
+
+    def chain_links(
+        self, *, work_order_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Every recorded chain link, oldest first."""
+
+        if work_order_id is None:
+            rows = self.connection.execute(
+                "SELECT link_json FROM model_route_chain_links ORDER BY link_sequence"
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                "SELECT link_json FROM model_route_chain_links WHERE work_order_id=? "
+                "ORDER BY link_sequence",
+                (_string(work_order_id, "work_order_id"),),
+            ).fetchall()
+        return [json.loads(row["link_json"]) for row in rows]
+
     @staticmethod
     def _work_wire(work_order: WorkOrder | Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(work_order, WorkOrder):
@@ -850,6 +1079,7 @@ class ModelRouter:
         decision_kind: str = "initial",
         previous_decision_ref: str | None = None,
         producer_family: str | None = None,
+        tier: str | None = None,
     ) -> dict[str, Any]:
         """Persist one deterministic route decision.
 
@@ -894,6 +1124,8 @@ class ModelRouter:
             )
         if producer_family is not None:
             producer_family = _token(producer_family, "producer_family")
+        if tier is not None:
+            tier = _token(tier, "tier")
         request = {
             "work_order_hash": canonical_hash(wire),
             "work_order_ref": wire["id"],
@@ -909,6 +1141,13 @@ class ModelRouter:
             "previous_decision_ref": previous_decision_ref,
             "producer_family": producer_family,
         }
+        if tier is not None:
+            # Part of the request identity -- the same work routed under a
+            # different tier is a different request -- but deliberately not part
+            # of the decision wire, whose shape the broker adapter validates
+            # exactly. Which link of which chain served is recorded next to the
+            # decision, in model_route_chain_links.
+            request["tier"] = tier
         request_hash = canonical_hash(request)
         now_dt = self._now()
         now = _timestamp(now_dt)
@@ -960,6 +1199,17 @@ class ModelRouter:
                 and producer_family is None
             ):
                 global_reasons.append("producer_family_required")
+            chain_positions: dict[str, int] | None = None
+            if tier is not None:
+                chains = policy.get("fallback_chains")
+                declared = (chains or {}).get("tiers", {})
+                if tier not in declared:
+                    global_reasons.append("tier_not_declared_by_policy")
+                else:
+                    chain_positions = {
+                        profile_id: index
+                        for index, profile_id in enumerate(declared[tier])
+                    }
             required_modality_set = set(modalities) | set(filters["required_modalities"])
             supplied_slots = set(slots)
             candidates: list[dict[str, Any]] = []
@@ -968,6 +1218,10 @@ class ModelRouter:
                 reasons = list(global_reasons)
                 if profile["profile_version_ref"] in switch_exclusions:
                     reasons.append("already_tried_in_switch_chain")
+                if profile.get("status") == "retired":
+                    reasons.append("profile_retired")
+                if chain_positions is not None and profile["id"] not in chain_positions:
+                    reasons.append("profile_not_in_tier_chain")
                 if capability not in profile["capabilities"]:
                     reasons.append("capability_not_supported")
                 if not required_modality_set.issubset(set(profile["modalities"])):
@@ -1042,9 +1296,20 @@ class ModelRouter:
             snapshot_hash = canonical_hash(snapshot)
             selected = None
             if candidates:
-                selected = self._sort_candidates(
+                ordered = self._sort_candidates(
                     candidates, policy["ordered_preferences"]
-                )[0]["profile"]
+                )
+                if chain_positions is not None:
+                    # Chain order first, the policy's own preferences only to
+                    # break a tie within one link. A chain whose order were
+                    # decided by cheapest-first would not be a chain: the point
+                    # of naming gpt-6-astra before claude-fable-5-1 is that the
+                    # first one is wanted even though it is not the cheaper.
+                    # sorted() is stable, so the preference order survives.
+                    ordered.sort(
+                        key=lambda item: chain_positions[item["profile"]["id"]]
+                    )
+                selected = ordered[0]["profile"]
             outcome = "selected" if selected is not None else "rejected"
             rejected_reasons = sorted(
                 set(global_reasons)
