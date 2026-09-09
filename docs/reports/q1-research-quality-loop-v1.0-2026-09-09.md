@@ -1,7 +1,7 @@
 # Q 线：研究质量回路 v1.0
 
 日期：2026-09-09
-状态：分支 `wave1d-quality-loop` 已完成，待主 agent code review 与合并
+状态：分支 `wave1d-quality-loop`；第一轮 code review 的六项已修（见第 9 节），待合并
 基线：main `08c66d0`；[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 3 节 Wave 1「D 质量回路」；[能力差距分析与开发蓝图 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) 5.3 Q 线
 数据：live Core 只读副本（`/private/tmp/dalton-ro/core.sqlite`，2026-09-09 12:23），复制到 `/tmp` 后只读打开。**没有写过任何 live 状态，没有部署，没有发过 mission 版本，没有对 live 预算发起过模型调用。**
 
@@ -88,9 +88,11 @@ ADR-0006 那句话逐子句拆开：`cites_only_shown_claims`（只引这次展�
 
 `restatement_drift` 的这条规则是写第三版 golden 案例时改的：逐节判 fail 会让「只改一节但改得对」的诚实修订成为被罚最重的一类。漂移是「一版里什么都没动」，不是「一版里有九节没动」。
 
-每个检查返回 `{check, status: pass|fail|skipped, count, findings[], detail}`，findings 带上出错的章节与原文摘录——「12 处残迹」对修它的人没有用，`「718144000，同比增5.59%；、、（同一季度数据重复）显示2025-0」` 有用。
+每个检查返回 `{check, status: pass|fail|skipped, count, findings[], detail}`，findings 带上出错的章节、匹配位置 `at` 与原文摘录——「12 处残迹」对修它的人没有用，`「718144000，同比增5.59%；、、（同一季度数据重复）显示2025-0」` 有用。
 
 **为什么正则可以承担这件事**：`residual_citation_artefacts` 的每一个模式都是从已发布文档里读出来的，不是想出来的。「，表示」这种普通中文被刻意排除在外（`tests/test_research_quality_score.py::test_ordinary_chinese_prose_is_not_flagged` 钉住了这一点），只有「和指出」「；显示」这类连词或句末后直接接报道动词的形状才算残句——它们在中文里本身就不成句。
+
+**但这个侦测器是给「打分」用的，不是给「放行」用的。** `：反映`、`：披露`、`：认为` 这些在正常中文里成句（「关键驱动因素：反映了行业周期的位置」），侦测器会报它们——**打分时报错一条标准扣一分，放行时报错就是丢一节文档**。起草路径因此有自己的一层过滤，见 5.1。
 
 ### 2.3 第二层：一次有界模型判读
 
@@ -114,9 +116,15 @@ ADR-0006 那句话逐子句拆开：`cites_only_shown_claims`（只引这次展�
 
 一条记录绑定：产物 ref **与 content_hash**、rubric ref 与 hash、`scorer_version`、`model_config_fingerprint`。两层分开存（`deterministic` / `judge` / `verifier` 三个字段），因为一层是关于文档的事实、一层是模型对它的阅读，读者要能在不信任第二层的情况下信任第一层。
 
-**duplicate 规则**：`scoring_identity_hash = H(target_ref, target_hash, rubric_ref, rubric_hash, scorer_version, model_config_fingerprint)`，同一身份第二次打分返回 `duplicate` 且不写新版本（DB 上还有 `UNIQUE(score_ref, scoring_identity_hash)` 兜底）。**分数商店（score shopping）是所有「按需打分」质量闸的失败模式**：分数不好就再问一次。`scorer_version` 进身份，是为了让修好的检查还能重新打一份被坏检查打过的文档。
+**duplicate 规则**：`scoring_identity_hash = H(target_ref, target_hash, rubric_ref, rubric_hash, scorer_version, model_config_fingerprint)`，同一身份第二次打分返回 `duplicate` 且不写新版本。**分数商店（score shopping）是所有「按需打分」质量闸的失败模式**：分数不好就再问一次。`scorer_version` 进身份，是为了让修好的检查还能重新打一份被坏检查打过的文档。
 
-`model_config_fingerprint` 只取 routing policy / budget policy / credential slots / agent id / client id 加上这次的界限，**不含机器本地路径**：同一条路由策略在两台机器上是同一个配置；而输出预算翻倍的判官是另一个判官。
+**指纹由 `record()` 自己从「实际回答的是谁」推导，调用方给不了**（`judge_fingerprint`）：取判读调用记下的 `route_decision_ref` 与 purpose。调用方能声明的指纹就是调用方能声明的身份，而调用方能控制的身份不是去重规则，是绕过去重规则的办法。一次 cockpit 调用按 (purpose, request_id, mission 版本, prompt) 内容寻址，所以同一份文档的重复判读会 replay 同一条 route；换 profile 就是换 route，也就是换一条分数。**scored 的判读层必须带 route_decision_ref**，否则 `record()` 拒绝——一条说不出「谁答的」的分数没有身份。判读层缺席时指纹是 `"none"`（代码单独判定，没有模型可言）。
+
+**判读被拒不会永久占住一个身份**。判读返回不可读的东西（回复不合契约、预算拒绝）时，记录仍然写下来（拒绝是发生过的事），但它**不算「结清」这个身份**：一条真正的判读可以在同一身份下续写成新版本。否则一次畸形回复就会让这份文档在这份评分表下永远不能再被判读。反过来，**第二次拒绝仍然是 duplicate**，所以重试循环填不满版本链。数据库上由一个部分唯一索引承担这条语义：`WHERE judge_status IS NULL OR judge_status = 'scored'`。
+
+**复核的绑定被强制**：`verifier_layer.status == "verified"` 时，`record()` 断言 `judged_scores_hash == content_hash(judge_layer["scores"])`，不符即拒。一条绑在别的分数上的 verdict 与这份判读并排存放，会被读成是关于这份判读的。
+
+**`score_ref` 是内容寻址的**：`quality-score:<rubric>:<content_hash(target_ref)[:32]>`。之前取 target_ref 的尾部 64 字符，两份 ref 尾部相同的文档会共用一条版本链。
 
 ---
 
@@ -185,7 +193,9 @@ ADR-0006 那句话逐子句拆开：`cites_only_shown_claims`（只引这次展�
 
 ### 4.4 分数区间是校准，不是测量
 
-**没有跑过任何一次真实判读调用**。这个 worktree 上没有可达的 broker 配置，而且指令是不要动 live 预算。所以 `expected.score_ranges` 是我作为 golden 集作者写下的校准判断，每例附了理由；它们目前只在假模型下被断言「结构上能对上」，**没有任何证据说明真实模型会落在区间内**。第一次真实判读跑完之后，应该做的是把落在区间外的每一条拿出来，判断是模型错了还是区间错了——这是第 8 节的第一个开放问题。
+**没有跑过任何一次真实判读调用**。这个 worktree 上没有可达的 broker 配置，而且指令是不要动 live 预算。所以 `expected.score_ranges` 是我作为 golden 集作者写下的校准判断，每例附了理由；它们目前只在假模型下被断言「结构上能对上」，**没有任何证据说明真实模型会落在区间内**。
+
+每一份 golden 文件因此带一个显式的 `expected.score_ranges_are_calibration_only: true`，测试逐例断言它——一年后读到这些数字的人不应该需要读本报告才知道它们不是观测结果。第一次真实判读跑完之后，应该做的是把落在区间外的每一条拿出来，判断是模型错了还是区间错了——这是第 8 节的第一个开放问题。
 
 ---
 
@@ -213,9 +223,16 @@ ADR-0006 那句话逐子句拆开：`cites_only_shown_claims`（只引这次展�
 "gaps": ["这一节已丢弃：引用标记剥离后留下了残句（orphan_sentence_start_verb）：：显示2026-03-01.."]
 ```
 
-回归测试用的是**逐字的 live 片段**（`tests/test_initial_screen_citations.py::LiveResidualFragmentTests`，常量 `LIVE_ACN_S7_FRAGMENT`）：断言 `、、` 与 `；、` 被去掉、两个数字与 `同比增5.95%` 原样保留、剥离后剩下的恰好是 `orphan_sentence_start_verb`，以及一句干净改写不会被误报。
+回归测试用的是**逐字的 live 片段**（`tests/test_initial_screen_citations.py::LiveResidualFragmentTests`，常量 `LIVE_ACN_S7_FRAGMENT` 与它剥离前的 `LIVE_ACN_S7_RAW`）：断言 `、、` 与 `；、` 被去掉、两个数字与 `同比增5.95%` 原样保留、剥离后剩下的恰好是 `orphan_sentence_start_verb`，以及一句干净改写不会被误报。
 
-侦测器只有一份定义：`research_quality_score.residual_citation_artefacts`，起草路径与打分器共用。同一个缺陷的定义，既用来防它，也用来给它打分。
+**放行的门槛必须比打分的门槛严**（评审第 1 项）。侦测器只有一份定义（`research_quality_score.residual_citation_artefacts`，起草路径与打分器共用），但起草路径在它外面加了一层过滤（`_actionable_residue`），因为两边的代价不同：打分时误报一条，扣一条标准的分；放行时误报一条，这一节先烧掉一次纠正调用、然后变成空 body 加一条 gap——**落在 S4 上就是 anti-thesis 一节为空，出口门第四问不过，这份 screen 永远过不了闸**。
+
+两条过滤规则：
+
+1. **落在 URL 里的标点就是 URL 的标点**。`https://` 是一个冒号加两条斜杠，会同时触发 `separator_run` 与 `separator_after_sentence_end`。findings 现在带 `at`（匹配位置），起草路径按 URL 的跨度把它们排除。
+2. **只有「剥离动作造出来的」孤儿动词才算残句**。「关键驱动因素：反映了行业周期的位置」「核心风险：披露的合同终止规模」「结论：认为估值已price in」都是正常中文，它们在**剥离前后读起来一模一样**——那个位置上从来没有过标记。而 `：C12显示…` 剥离前不匹配、剥离后匹配，这正是缺陷的形状。所以起草路径拿到剥离前的正文（`raw_section_body`），只接受剥离后新出现的孤儿匹配（按匹配文本比对，因为删掉标记会让其后所有偏移都移位）。
+
+对 live 片段，剥离前只匹配 4 处 `leftover_tag`（会被剥离器删掉），剥离后出现 2 处 `orphan_sentence_start_verb`——两处都是新出现的，两处都被抓住。三句正常中文与四种 URL 形态则一条不报（`ActionableResidueTests`）。
 
 ### 5.2 同季重复 Claim 并列引用
 
@@ -260,6 +277,7 @@ ACN 的 N2 现在是 `…249b41c5e9`（三条里最近记录的那条），一�
 
 1. **预算按系列轮转分配**。旧代码取「最近记录的 40 条」。live 只有一条系列时这没有区别；一旦有第二条系列而它写得比第一条稀疏（这正是一条 lane 的行为），最近的 40 条就全是第一条系列的。现在按 `metric_or_aspect` 分组、组内按 period 倒序、跨组轮转到填满 40 条，**单条系列仍然能吃满整个预算**。
 2. **句子里带数字的 Claim 现在按数字（N 标签）offer，而不是按语句（C 标签）**。起草合同只允许数字经由 N 标签进入正文，所以一条「管理层称本季利用率为 91.2%」的定性 Claim，它的数字此前根本无法被写下来。今天 live 有 0 条这样的 Claim，但抽取侧一旦开始写这类 Claim（Agent B / C 都会），这就是第二条系列进入 screen 的最短路径。
+   **没有被数字预算选中的，回填进语句列表**（评审第 5 项）：否则它会被「提升出语句、又被数字预算裁掉」，从上下文里彻底消失——一次让材料悄悄变少的加宽，正是加宽的反面。回填后每条 Claim 恰好出现在一处：要么是 N，要么是 C，`test_nothing_is_lost_when_the_figure_budget_is_full` 断言两者的并集就是输入全集、交集为空。
 
 另外 `build_claim_context` 现在返回 `series`（这次能看见几条系列），起草 summary 也带上它与 `duplicates_dropped`：**一条系列意味着这份 screen 无论写得多好都只有一条数字系列，这是账本的事实，应该在 lane 的 ticket 上看得见。**
 
@@ -301,16 +319,16 @@ ACN 的 N2 现在是 `…249b41c5e9`（三条里最近记录的那条），一�
 全量测试，`PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -t .`：
 
 ```
-Ran 2176 tests in 248.006s
+Ran 2195 tests in 259.782s
 
 OK (skipped=1)
 ```
 
-基线是 2,034 通过 / 1 跳过，本片新增 **142 项**，没有失败、没有静默跳过。
+基线是 2,034 通过 / 1 跳过，本片新增 **161 项**，没有失败、没有静默跳过。
 
 `golden run` 20 例全部与 golden 一致（退出码 0）。
 
-各模块分项：`test_research_quality_rubrics` 15、`test_research_quality_score` 65、`test_research_quality_golden` 13、`test_analyst_journal` 21、`test_research_quality_cli` 13、`test_initial_screen_citations` 32（P13ap 的 17 项加我新增的 15 项）。
+各模块分项：`test_research_quality_rubrics` 15、`test_research_quality_score` 74、`test_research_quality_golden` 14、`test_analyst_journal` 21、`test_research_quality_cli` 13、`test_initial_screen_citations` 41（P13ap 的 17 项加我新增的 24 项）。
 
 **没做的事**，如实列出：
 
@@ -329,4 +347,26 @@ OK (skipped=1)
 3. **P13ap 的「保留最早一份」被我改成了「filing 级优先、其次最近」。** 理由见 5.2，但代价是重画可能换 ref、从而产生一个内容相同但 body_hash 不同的新版本。如果主 agent 认为 ref 稳定性更重要，改回去是一行；我认为在 Agent B 的索引落地之前，来源层级应该赢。
 4. **同一 agent 写代码、写测试、写报告**，仓库的长期风险项在这一片同样成立——而且更尖锐：**这一片的产出就是「评价质量的标准」，而它的质量没有被第二个人评价过。** 蓝图第 6 节建议每个 Phase 结束由 PM 或第二位分析师做一次盲评；这一片是最该做的那一个。具体建议：owner 拿 `live-acn-v2` 与 `live-dxc-v1` 两份 golden 案例按 `initial_screen` 评分表各打一次分，与我写的区间比对。
 5. **`gate_passed` 是终态，所以四份带伤的文档永远不会被重写。** owner 已裁决「证据变厚可重出 Initial Screen，但必须版本化」（计划第 1 节第二批裁决），实现这条之后，**质量分应当是重出的触发条件之一**：一份 `citation_hygiene` 为 0 的已过闸文档，比一份证据变厚的文档更该被重画。这条我没有实现，因为 gate 重开是 Wave 3 的事。
-6. **评分表升版之后旧分数怎么读。** 现在的答案是「照旧」：一条分数绑定的是它当时那份评分表的哈希，它对那个标准说的话仍然为真。但驾驶舱要展示「这家公司的质量趋势」时，跨 rubric 版本的分数不能直接连成一条线。需要一个显式的规则，我建议是「趋势线按 rubric 版本分段，换版本时画一条竖线」。
+6. **打分侧的侦测器仍然把 URL 的标点当成残迹。** 起草路径已经按 URL 跨度过滤（5.1），但 `residual_citation_artefacts` 本身没有——一份正文里带链接的文档，`citation_hygiene` 会被无端扣分。修它要改侦测器，会动 golden 集里已钉住的计数，所以这一轮按评审意见只改了放行的那一侧。现有五份 live screen 的正文里没有 URL，所以今天的 golden 数字不受影响；**下一份带链接的文档一出现，这就是一个真实的误判**，建议随下一次 rubric 升版一起修（改 detector + 重出 golden 计数 + rubric 版本 +1）。
+
+7. **评分表升版之后旧分数怎么读。** 现在的答案是「照旧」：一条分数绑定的是它当时那份评分表的哈希，它对那个标准说的话仍然为真。但驾驶舱要展示「这家公司的质量趋势」时，跨 rubric 版本的分数不能直接连成一条线。需要一个显式的规则，我建议是「趋势线按 rubric 版本分段，换版本时画一条竖线」。
+
+
+---
+
+## 9. 第一轮 code review 的六项修正
+
+评审复算了本报告的每一个数字、跑了 golden 20/20、逐字比对了 live 正文，并接受了 5.2 里对 P13ap 的反转。以下六项在同一条分支上修完，全量测试重跑。
+
+1. **（blocker）放行的门槛与打分的门槛被分开了。** 侦测器在正常中文上误报（`：反映` / `：披露` / `：认为`）、在 URL 上误报（`https://` 是一个冒号加两条斜杠），而它此前直接门控 live 起草路径：一节正确的文字先烧掉一次纠正调用，然后变成空 body——落在 S4 上就让整份 screen 过不了闸。起草路径现在有自己的一层过滤：URL 跨度内的标点排除；孤儿动词只在**剥离前不匹配、剥离后匹配**时才算数。见 5.1 与 `ActionableResidueTests`。
+2. **被拒的判读不再永久占住一个身份。** 见 2.5：拒绝仍然入账，但不「结清」身份，一次真判读可以在同一身份下续成新版本；第二次拒绝仍是 duplicate。数据库上改成部分唯一索引。
+3. **指纹改为 `record()` 内部从 route decision 推导**，调用方声明不了；scored 的判读层必须带 `route_decision_ref`，否则拒绝。旧的 `model_config_fingerprint(config, bounds=…)` 连同它的测试一起删掉了。
+4. **复核绑定被强制**：`judged_scores_hash` 必须等于本条判读层分数的 `content_hash`，否则拒绝；没有判读层的 verdict 也拒绝。
+5. **数字预算没选中的 figure-bearing Claim 回填进语句列表**，不再从上下文里消失。见 5.3。
+6. **`score_ref` 改为内容寻址**，尾部相同的两份 ref 不再共用版本链。
+
+外加三个 nit：每份 golden 文件带 `score_ranges_are_calibration_only: true` 并逐例断言；analyst journal 表加 `CHECK(actor_ref LIKE 'human:%')`，人闸在数据库上也成立；判读 prompt 的长度测试改名，说清它断言的是字节而不是 token（`MAX_INPUT_TOKENS` 是路由器按字节比的，名字是路由器的）。
+
+两处 schema 改动（部分唯一索引、journal 的 CHECK）都是 `CREATE ... IF NOT EXISTS` 语义下的**新表**，从未部署过，所以不存在迁移问题。
+
+**合并时的一处已知冲突**（评审提示，本轮未处理）：main 已并入 Wave 0，`cockpit_model.PURPOSES` 不再存在，`quality` 这个词要改成 `register_purpose("quality", ...)`。这是一行，由主 agent 在合并时解决。
