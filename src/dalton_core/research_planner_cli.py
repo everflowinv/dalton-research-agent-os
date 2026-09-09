@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from .cockpit_model import CockpitModel, CockpitModelError
+from .scheduler import SchedulerError
 from .coverage_mission import CoverageMissionAuthority
 from .mission_stage import (
     evaluate_industry,
@@ -176,6 +177,15 @@ def run_planner(
                 request_id=state["content_hash"][:32],
                 prompt=build_prompt(state), mission=mission,
             )
+        except SchedulerError as exc:
+            # The work order is keyed by the state hash, so two runs against
+            # the same unchanged world share an id -- a hand-run beside the
+            # tick's child, or a stale lease from one that was killed. Another
+            # attempt already holds it; that is a busy lane, not a failure, and
+            # crashing here loses the summary the parent reads.
+            summary.update({"status": "succeeded", "plan_status": "busy",
+                            "failure_reason": f"{type(exc).__name__}: {exc}"})
+            return summary
         except CockpitModelError as exc:
             summary.update({"status": "succeeded", "plan_status": "model_unavailable",
                             "failure_reason": f"{type(exc).__name__}: {exc}"})

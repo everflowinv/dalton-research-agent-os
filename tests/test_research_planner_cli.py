@@ -108,6 +108,26 @@ class PlannerChildTests(unittest.TestCase):
         self.assertLess(MAX_COST_USD, 0.5)
         self.assertGreater(MAX_COST_USD, 0.33)
 
+    def test_a_lease_another_attempt_holds_is_busy_not_a_crash(self):
+        # The work order is keyed by the state hash, so a hand-run beside the
+        # tick's child shares an id. Crashing loses the summary the parent
+        # reads, which is how the failure first appeared: "unexpected
+        # LeaseRejected" with no plan_status at all.
+        from unittest.mock import patch
+
+        from dalton_core.scheduler import LeaseRejected
+
+        self.publish_mission()
+        config = self.root / "model.json"
+        config.write_text("{}", encoding="utf-8")
+        with patch("dalton_core.research_planner_cli.CockpitModel") as model:
+            model.return_value.call.side_effect = LeaseRejected(
+                "attempt is not the current leased attempt")
+            summary = self.plan(dry_run=False, model_config_path=config)
+        self.assertEqual(summary["status"], "succeeded")
+        self.assertEqual(summary["plan_status"], "busy")
+        self.assertIn("LeaseRejected", summary["failure_reason"])
+
 
 if __name__ == "__main__":
     unittest.main()
