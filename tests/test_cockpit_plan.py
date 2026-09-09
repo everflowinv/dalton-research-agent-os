@@ -129,5 +129,38 @@ class PageTests(unittest.TestCase):
         self.assertIn('d.action==="stop"', html)
 
 
+
+class OverviewPayloadTests(unittest.TestCase):
+    """The page reads o.plan, so the overview must carry it at the top level.
+
+    It did not: the key was nested inside "activity" and the page saw nothing.
+    The projection test passed the whole time because it called _plan directly
+    and never looked at the payload the page actually reads.
+    """
+
+    def setUp(self):
+        from tests.test_cockpit_plane import CockpitHarness
+
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.c = CockpitHarness(Path(self.temp.name))
+        self.addCleanup(self.c.close)
+
+    def test_plan_is_a_top_level_key_of_the_overview(self):
+        view = self.c.plane.overview()
+        self.assertIn("plan", view)
+        self.assertNotIn("plan", view.get("activity", {}))
+
+    def test_a_mission_with_no_plan_yet_carries_a_null_rather_than_nothing(self):
+        # The page hides the block on a falsy value; a missing key would be an
+        # undefined lookup rather than an empty state.
+        self.assertIsNone(self.c.plane.overview()["plan"])
+
+    def test_the_page_reads_the_key_the_overview_writes(self):
+        html = (Path(__file__).resolve().parents[1] / "src" / "dalton_core"
+                / "cockpit_control.html").read_text(encoding="utf-8")
+        self.assertIn("const plan=o.plan", html)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -697,8 +697,10 @@ class CockpitPlane:
             "activity": {
                 "service_state": heartbeat.get("state"), "last_tick_at": heartbeat.get("last_tick_at"),
                 "lanes": self._lane_states(heartbeat, extraction, discovery, mission["budget"]), "running": running,
-            "plan": plan,
             },
+            # P13w: the system's own decision about what to work on next. Top
+            # level, beside the goal it serves -- it is not an activity note.
+            "plan": plan,
             "budgets": budgets,
             "model_available": self._model_status(),
         }
