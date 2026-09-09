@@ -81,6 +81,28 @@ YFINANCE_DAILY_PRICES_CAPABILITY_ID = (
 YFINANCE_ANALYST_ESTIMATES_CAPABILITY_ID = (
     "capability:dalton:connector:yfinance-analyst-estimates"
 )
+# S1: the two human / vendor feeds. Each is split into an index operation and
+# a document operation for the same reason every library here is -- reading
+# what exists and reading one of them are different permissions.
+SALES_NOTES_LIST_KIND = "sales-notes-list-notes"
+SALES_NOTES_GET_KIND = "sales-notes-get-note"
+SALES_NOTES_LIST_CAPABILITY_ID = "capability:dalton:connector:sales-notes-list-notes"
+SALES_NOTES_GET_CAPABILITY_ID = "capability:dalton:connector:sales-notes-get-note"
+COMPANY_WIKI_LIST_KIND = "company-wiki-list-documents"
+COMPANY_WIKI_GET_KIND = "company-wiki-get-document"
+COMPANY_WIKI_LIST_CAPABILITY_ID = (
+    "capability:dalton:connector:company-wiki-list-documents"
+)
+COMPANY_WIKI_GET_CAPABILITY_ID = "capability:dalton:connector:company-wiki-get-document"
+
+# S3 crowd sources. Grouped rather than named one by one at the call site,
+# because "which of these seven is it" is the only question the dispatcher asks.
+XUEQIU_KINDS = frozenset({"xueqiu-search-posts", "xueqiu-get-post", "xueqiu-hot-rank"})
+XREACH_KINDS = frozenset(
+    {"x-xreach-user-timeline", "x-xreach-search", "x-xreach-thread"}
+)
+EMPLOYEE_REVIEWS_KIND = "employee-reviews-blind"
+
 # S4: China / Hong Kong fundamentals through akshare. Six operations, six
 # kinds, six approvals -- reading one company's income statement and reading
 # the whole market's margin balance are not the same permission, and the kind
@@ -374,6 +396,149 @@ def _web_fetch_fixture_hash() -> str:
     return web_fetch_fixture_hash()
 
 
+# S3: the crowd connectors. Seven kinds, because there are seven operations and
+# a schema hash binds exactly one of them -- approving the Xueqiu post search is
+# not approving the Xueqiu post read, and approving either is certainly not
+# approving X. The source hash is shared inside each connector, because the same
+# Xueqiu and the same X are the same sources.
+def _xueqiu_source_hash() -> str:
+    from .xueqiu_core import xueqiu_source_hash
+
+    return xueqiu_source_hash()
+
+
+def _xueqiu_permissions() -> dict[str, Any]:
+    from .xueqiu_core import xueqiu_permissions
+
+    return copy.deepcopy(xueqiu_permissions())
+
+
+def _xueqiu_fixture_hash() -> str:
+    from .xueqiu_core import xueqiu_fixture_hash
+
+    return xueqiu_fixture_hash()
+
+
+def _xueqiu_schema_hash_for(operation: str) -> Callable[[], str]:
+    def hasher() -> str:
+        from .xueqiu_core import xueqiu_schema_hash
+
+        return xueqiu_schema_hash(operation)
+
+    return hasher
+
+
+def _xreach_source_hash() -> str:
+    from .xreach_core import xreach_source_hash
+
+    return xreach_source_hash()
+
+
+def _xreach_permissions() -> dict[str, Any]:
+    from .xreach_core import xreach_permissions
+
+    return copy.deepcopy(xreach_permissions())
+
+
+def _xreach_fixture_hash() -> str:
+    from .xreach_core import xreach_fixture_hash
+
+    return xreach_fixture_hash()
+
+
+def _xreach_schema_hash_for(operation: str) -> Callable[[], str]:
+    def hasher() -> str:
+        from .xreach_core import xreach_schema_hash
+
+        return xreach_schema_hash(operation)
+
+    return hasher
+
+
+def _employee_reviews_source_hash() -> str:
+    from .employee_reviews_core import employee_reviews_source_hash
+
+    return employee_reviews_source_hash()
+
+
+def _employee_reviews_schema_hash() -> str:
+    from .employee_reviews_core import employee_reviews_schema_hash
+
+    return employee_reviews_schema_hash()
+
+
+def _employee_reviews_permissions() -> dict[str, Any]:
+    from .employee_reviews_core import employee_reviews_permissions
+
+    return copy.deepcopy(employee_reviews_permissions())
+
+
+def _employee_reviews_fixture_hash() -> str:
+    from .employee_reviews_core import employee_reviews_fixture_hash
+
+    return employee_reviews_fixture_hash()
+
+
+def _sales_notes_source_hash() -> str:
+    from .sales_notes_core import sales_notes_source_hash
+
+    return sales_notes_source_hash()
+
+
+def _sales_notes_permissions() -> dict[str, Any]:
+    from .sales_notes_core import sales_notes_permissions
+
+    return sales_notes_permissions()
+
+
+def _sales_notes_fixture_hash() -> str:
+    from .sales_notes_core import sales_notes_fixture_hash
+
+    return sales_notes_fixture_hash()
+
+
+def _sales_notes_list_schema_hash() -> str:
+    from .sales_notes_core import LIST_OPERATION, sales_notes_schema_hash
+
+    return sales_notes_schema_hash(LIST_OPERATION)
+
+
+def _sales_notes_get_schema_hash() -> str:
+    from .sales_notes_core import GET_OPERATION, sales_notes_schema_hash
+
+    return sales_notes_schema_hash(GET_OPERATION)
+
+
+def _company_wiki_source_hash() -> str:
+    from .company_wiki_core import company_wiki_source_hash
+
+    return company_wiki_source_hash()
+
+
+def _company_wiki_permissions() -> dict[str, Any]:
+    from .company_wiki_core import company_wiki_permissions
+
+    return company_wiki_permissions()
+
+
+def _company_wiki_fixture_hash() -> str:
+    from .company_wiki_core import company_wiki_fixture_hash
+
+    return company_wiki_fixture_hash()
+
+
+def _company_wiki_list_schema_hash() -> str:
+    from .company_wiki_core import LIST_OPERATION, company_wiki_schema_hash
+
+    return company_wiki_schema_hash(LIST_OPERATION)
+
+
+def _company_wiki_get_schema_hash() -> str:
+    from .company_wiki_core import GET_OPERATION, company_wiki_schema_hash
+
+    return company_wiki_schema_hash(GET_OPERATION)
+
+
 # Capability id is deliberately the dispatch key at load time because it is
 # the only kind identity present in the closed governance record.
 GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
@@ -478,6 +643,62 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         permissions=_roic_permissions,
         fixture_hash=_roic_fixture_hash,
     ),
+    "xueqiu-search-posts": _KindSpec(
+        capability_id="capability:dalton:connector:xueqiu-search-posts",
+        template_key="xueqiu-posts",
+        source_hash=_xueqiu_source_hash,
+        schema_hash=_xueqiu_schema_hash_for("search_posts"),
+        permissions=_xueqiu_permissions,
+        fixture_hash=_xueqiu_fixture_hash,
+    ),
+    "xueqiu-get-post": _KindSpec(
+        capability_id="capability:dalton:connector:xueqiu-get-post",
+        template_key="xueqiu-posts",
+        source_hash=_xueqiu_source_hash,
+        schema_hash=_xueqiu_schema_hash_for("get_post"),
+        permissions=_xueqiu_permissions,
+        fixture_hash=_xueqiu_fixture_hash,
+    ),
+    "xueqiu-hot-rank": _KindSpec(
+        capability_id="capability:dalton:connector:xueqiu-hot-rank",
+        template_key="xueqiu-posts",
+        source_hash=_xueqiu_source_hash,
+        schema_hash=_xueqiu_schema_hash_for("hot_rank"),
+        permissions=_xueqiu_permissions,
+        fixture_hash=_xueqiu_fixture_hash,
+    ),
+    "x-xreach-user-timeline": _KindSpec(
+        capability_id="capability:dalton:connector:x-xreach-user-timeline",
+        template_key="x-xreach-crowd",
+        source_hash=_xreach_source_hash,
+        schema_hash=_xreach_schema_hash_for("user_timeline"),
+        permissions=_xreach_permissions,
+        fixture_hash=_xreach_fixture_hash,
+    ),
+    "x-xreach-search": _KindSpec(
+        capability_id="capability:dalton:connector:x-xreach-search",
+        template_key="x-xreach-crowd",
+        source_hash=_xreach_source_hash,
+        schema_hash=_xreach_schema_hash_for("search"),
+        permissions=_xreach_permissions,
+        fixture_hash=_xreach_fixture_hash,
+    ),
+    "x-xreach-thread": _KindSpec(
+        capability_id="capability:dalton:connector:x-xreach-thread",
+        template_key="x-xreach-crowd",
+        source_hash=_xreach_source_hash,
+        schema_hash=_xreach_schema_hash_for("thread"),
+        permissions=_xreach_permissions,
+        fixture_hash=_xreach_fixture_hash,
+    ),
+    "employee-reviews-blind": _KindSpec(
+        capability_id="capability:dalton:connector:employee-reviews-blind",
+        template_key="employee-reviews",
+        source_hash=_employee_reviews_source_hash,
+        schema_hash=_employee_reviews_schema_hash,
+        permissions=_employee_reviews_permissions,
+        fixture_hash=_employee_reviews_fixture_hash,
+    ),
     # P11a: the market layer's source. Unofficial and free; the quota is small
     # and the approval is per operation.
     YFINANCE_DAILY_PRICES_KIND: _KindSpec(
@@ -495,6 +716,41 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         schema_hash=_yfinance_analyst_estimates_schema_hash,
         permissions=_yfinance_permissions,
         fixture_hash=_yfinance_fixture_hash,
+    ),
+    # S1: the sell-side notes already on this disk, and the human wiki beside
+    # them. Both read files and neither holds a credential, so their
+    # permissions name a host directory and no slot at all.
+    SALES_NOTES_LIST_KIND: _KindSpec(
+        capability_id=SALES_NOTES_LIST_CAPABILITY_ID,
+        template_key="sales-notes",
+        source_hash=_sales_notes_source_hash,
+        schema_hash=_sales_notes_list_schema_hash,
+        permissions=_sales_notes_permissions,
+        fixture_hash=_sales_notes_fixture_hash,
+    ),
+    SALES_NOTES_GET_KIND: _KindSpec(
+        capability_id=SALES_NOTES_GET_CAPABILITY_ID,
+        template_key="sales-notes",
+        source_hash=_sales_notes_source_hash,
+        schema_hash=_sales_notes_get_schema_hash,
+        permissions=_sales_notes_permissions,
+        fixture_hash=_sales_notes_fixture_hash,
+    ),
+    COMPANY_WIKI_LIST_KIND: _KindSpec(
+        capability_id=COMPANY_WIKI_LIST_CAPABILITY_ID,
+        template_key="company-wiki",
+        source_hash=_company_wiki_source_hash,
+        schema_hash=_company_wiki_list_schema_hash,
+        permissions=_company_wiki_permissions,
+        fixture_hash=_company_wiki_fixture_hash,
+    ),
+    COMPANY_WIKI_GET_KIND: _KindSpec(
+        capability_id=COMPANY_WIKI_GET_CAPABILITY_ID,
+        template_key="company-wiki",
+        source_hash=_company_wiki_source_hash,
+        schema_hash=_company_wiki_get_schema_hash,
+        permissions=_company_wiki_permissions,
+        fixture_hash=_company_wiki_fixture_hash,
     ),
 }
 
@@ -705,6 +961,45 @@ def build_governance_record(
             version=version,
         )
 
+    if kind in XUEQIU_KINDS:
+        from .xueqiu_core import KIND_BY_OPERATION as XUEQIU_BY_OPERATION
+        from .xueqiu_core import build_xueqiu_governance_record
+
+        operation = next(op for op, name in XUEQIU_BY_OPERATION.items() if name == kind)
+        return build_xueqiu_governance_record(
+            operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in XREACH_KINDS:
+        from .xreach_core import KIND_BY_OPERATION as XREACH_BY_OPERATION
+        from .xreach_core import build_xreach_governance_record
+
+        operation = next(op for op, name in XREACH_BY_OPERATION.items() if name == kind)
+        return build_xreach_governance_record(
+            operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind == EMPLOYEE_REVIEWS_KIND:
+        from .employee_reviews_core import build_employee_reviews_governance_record
+
+        return build_employee_reviews_governance_record(
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
     if kind in (GUIDEPOINT_SEARCH_KIND, GUIDEPOINT_TRANSCRIPT_KIND):
         from .guidepoint_core import (
             KIND_BY_OPERATION,
@@ -713,6 +1008,38 @@ def build_governance_record(
 
         operation = next(op for op, name in KIND_BY_OPERATION.items() if name == kind)
         return build_guidepoint_governance_record(
+            operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in (SALES_NOTES_LIST_KIND, SALES_NOTES_GET_KIND):
+        from .sales_notes_core import (
+            KIND_BY_OPERATION as SALES_NOTES_KINDS,
+            build_sales_notes_governance_record,
+        )
+
+        operation = next(op for op, name in SALES_NOTES_KINDS.items() if name == kind)
+        return build_sales_notes_governance_record(
+            operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in (COMPANY_WIKI_LIST_KIND, COMPANY_WIKI_GET_KIND):
+        from .company_wiki_core import (
+            KIND_BY_OPERATION as COMPANY_WIKI_KINDS,
+            build_company_wiki_governance_record,
+        )
+
+        operation = next(op for op, name in COMPANY_WIKI_KINDS.items() if name == kind)
+        return build_company_wiki_governance_record(
             operation=operation,
             approved_by=approved_by,
             status=status,
@@ -973,6 +1300,10 @@ __all__ = [
     "WEB_FETCH_CAPABILITY_ID", "WEB_FETCH_KIND",
     "YFINANCE_ANALYST_ESTIMATES_CAPABILITY_ID", "YFINANCE_ANALYST_ESTIMATES_KIND",
     "YFINANCE_DAILY_PRICES_CAPABILITY_ID", "YFINANCE_DAILY_PRICES_KIND",
+    "SALES_NOTES_GET_CAPABILITY_ID", "SALES_NOTES_GET_KIND",
+    "SALES_NOTES_LIST_CAPABILITY_ID", "SALES_NOTES_LIST_KIND",
+    "COMPANY_WIKI_GET_CAPABILITY_ID", "COMPANY_WIKI_GET_KIND",
+    "COMPANY_WIKI_LIST_CAPABILITY_ID", "COMPANY_WIKI_LIST_KIND",
     "SEC_CAPABILITY_ID", "SEC_COMPANY_FACTS_KIND", "build_governance_record",
     "governance_kind_for_capability", "load_connector_governance",
     "write_governance_proposal",

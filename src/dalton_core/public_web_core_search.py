@@ -415,6 +415,12 @@ class GeminiWebSearchLiveAdapter:
         )
         raw_sink.write(invocation.raw_response)
         refs = structured["source_record_refs"]
+        # S2: a ranked page that came back full is the top of a list whose
+        # depth this lane cannot see. The live gate expects "partial" for a
+        # saturated ranked page on every mcp_managed search, and it is the
+        # honest word here too -- Gemini returning exactly ``count`` citations
+        # is not Gemini saying the web holds exactly that many.
+        saturated = bool(refs) and len(refs) >= wire["max_records"]
         base = {
             "protocol_version": "0.2",
             "request_hash": wire["content_hash"],
@@ -426,7 +432,9 @@ class GeminiWebSearchLiveAdapter:
             "source_record_refs": refs,
             "cursor": None,
             "provider_usage": None,
-            "source_status": "empty" if not refs else "complete",
+            "source_status": (
+                "empty" if not refs else "partial" if saturated else "complete"
+            ),
             "completeness": "ranked",
             "error": None,
         }
