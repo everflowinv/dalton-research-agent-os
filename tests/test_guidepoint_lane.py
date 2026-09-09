@@ -491,15 +491,13 @@ class CoordinatorTests(unittest.TestCase):
                 plan_path=self.plan_path, mode_args=(),
             )
 
-    def test_one_tick_spawns_a_child_that_reaches_the_one_missing_vocabulary_entry(self) -> None:
-        """The tick is real: a ticket, a process, a summary, an honest stop.
+    def test_one_tick_spawns_a_child_that_records_a_discovery_end_to_end(self) -> None:
+        """The tick is real: a ticket, a process, a summary, a recorded discovery.
 
-        The child is a separate process, so it cannot see the patched
-        ``DISCOVERY_SOURCES`` the in-process tests use. That makes this the
-        sharpest statement of what integration still owes the lane: everything
-        up to and including the mission grant is wired, and the single thing
-        standing between this ticket and a recorded discovery is one entry in
-        ``coverage_mission.DISCOVERY_SOURCES``.
+        The child is a separate process, so it cannot see any patched
+        ``DISCOVERY_SOURCES``; it reads the real vocabulary. Integration added
+        ``source:guidepoint`` to ``coverage_mission.DISCOVERY_SOURCES``, so the
+        child now runs through the mission grant to a recorded discovery.
         """
 
         launcher = self.launcher()
@@ -526,14 +524,13 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(status["source_ref"], GUIDEPOINT)
         self.assertEqual(status["governance_ref"],
                          "connector-governance:guidepoint-search-library:v1")
-        self.assertEqual(status["status"], "failed")
-        self.assertEqual(
-            status["summary"]["failure_reason"],
-            "CoverageMissionConflict: source:guidepoint is not a search-driven "
-            "discovery source",
-        )
+        self.assertEqual(status["status"], "succeeded")
+        self.assertIsNone(status["summary"]["failure_reason"])
+        self.assertEqual(status["summary"]["discovery_status"], "fresh")
+        self.assertEqual(status["summary"]["new_document_count"], 3)
+        self.assertTrue(status["summary"]["discovery_ref"].startswith("mission-source-discovery:"))
         self.assertEqual(status["summary"]["governance_status"], "approved")
-        self.assertEqual(status["summary"]["provider_calls"], 0)
+        self.assertEqual(status["summary"]["provider_calls"], 1)
 
 
 class StubLauncher:

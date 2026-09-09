@@ -133,7 +133,7 @@ class DiscoveryPlanV2Tests(unittest.TestCase):
             "web spec cannot carry document_type": {
                 **web, "specs": [{**web["specs"][0], "document_type": "news"}],
             },
-            "unknown source": {**web, "source_ref": "source:guidepoint"},
+            "unknown source": {**web, "source_ref": "source:not-a-discovery-source"},
         }
         for label, value in bad_cases.items():
             body = {k: v for k, v in value.items() if k != "content_hash"}
@@ -215,7 +215,7 @@ class WebDiscoveryLedgerTests(unittest.TestCase):
     def test_source_table_and_grant_rules(self) -> None:
         self.assertEqual(
             set(DISCOVERY_SOURCES),
-            {ALPHAENGINE_SOURCE_REF, WEB_SEARCH_SOURCE_REF, "source:sec-edgar"},
+            {ALPHAENGINE_SOURCE_REF, WEB_SEARCH_SOURCE_REF, "source:sec-edgar", "source:guidepoint"},
         )
         params = mission_params(self.state)
         ref = params.pop("mission_ref")
