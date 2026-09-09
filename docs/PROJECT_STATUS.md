@@ -4,6 +4,9 @@
 
 ## 下一步（按顺序）
 
+0. **ACN 还有 2 份 filing 卡在 3 次上限**（`0001467373-25-000169` / `-25-000222`）。今天撤回的是能归因到三次
+   基础设施故障的 20 次尝试；这两份的失败是 plan 执行层的（带 result envelope），归因不到那三次，所以没有撤回。
+   要单独查它们的 result envelope 说了什么，再决定是不是也该豁免。
 1. **模型目录仍未对齐（与大脑无关，但会误导）。** `catalog_in_sync: false`：Dalton 有 5 个 broker 已不提供的静态
    profile（`gemini-3-7-flash` / `gemini-flash-latest` / `glm-5-2` / `gpt-5-5` / `openrouter-ox-alpha`），
    broker 有 4 个 Dalton 没有静态 profile 的。P13l 让部署会补齐"缺的"，但不会清理"多的"——删旧 profile 会改动
@@ -19,6 +22,47 @@
 5. **contested 指标要能在驾驶舱上看见。** P13y 之后，单位打架的指标不再成立需求，但也不再报错——
    `metric_discovery.contested()` 能说出是谁在哪个单位上分歧（live 5 条，都是 percent/ratio），页面还没读它。
 6. **AlphaEngine 滚动 24h 用量贴着上限**（131/130），是 CTSH 缺电话会的直接约束。
+
+## 2026-09-09：SEC 财报抓取停了一整天，五个 bug 叠在一起
+
+**结果**：修完之后，季度财报数字第一次真的入库——IBM 1.46%、ACN 5.95% / 5.44%、CTSH 7.46%、EPAM 18.04%
+（quarterly_revenue_yoy_growth，全部来自 SEC 原始 filing，走完整条权威链）。SEC dispatch 的 `succeeded`
+从 **0 变成 4**；五家公司的 quarterly_financials 从 12/20 变成 14/20 并在继续。
+
+五个 bug 一个挡着一个，每修好一个才露出下一个：
+
+1. **P13z-1 connector profile 冲突（73 次 dispatch 全灭，整整一天）。** company-facts lane 问的是"我是不是这个
+   connector 上最新的 profile"，而 `connector-profile:sec-filings-index:v1` 挂到了同一个 `connector:sec-edgar`
+   上并成了最新——于是每次运行都想在一个**已经钉死旧版本的幂等键**下写一个新 profile 版本。
+   **问题出在问错了问题**：兄弟能力共用一个 connector ref，不构成"给我自己的 profile 分叉一个新版本"的理由。
+   正确的问题是"我存在吗"：存在就原样重放，只有真的是新的才续链。
+2. **P13z-2 修好 connector 也没用，重试预算早就花光了。** 每份 filing 最多试 3 次（每次把窗口放宽一天，因为
+   重排同一个窗口只会重放同一个失败）。这个道理只在"失败属于这份 filing"时成立——而 connector 冲突对**任何**
+   窗口都会同样失败，它把五家公司需要的每一份 filing 的三次机会都花光了，一次都没碰到 filing。
+   现在尝试可以被**作废**（append-only，记下是为哪次故障豁免的；dispatch 本身不删，只撤回它对预算的占用）。
+   **刻意不自动**：猜"这次失败不怪 filing"正是让一份真的取不到的 filing 被永远重试的方式。
+3. **P13z-3 输出契约拒绝了它本该取的 filing。** SEC 只给"最新报告该期间的那份 filing"分配 calendar frame，所以
+   后一份 10-Q 重复的去年同期那一行没有 frame。adapter 早就为此放宽过（注释写着：要求 frame 会让所有历史 filing
+   都不可用），**但冻结的输出契约没跟着放宽**，于是 adapter 吐出 null、resolver 拒绝。
+   与"指标发现漏了闸门"同一类：一个决定只改了一处。放宽契约会移动 schema hash，因此需要 owner 重新批准
+   （`sec-company-facts:v3`，仓库出 proposed、owner 就地 approve），并 republish descriptor。
+4. **P13z-4 plan 绑定契约，契约换版就是另一个 plan。** executor 拒绝 `connector_profile_hash` 与打包模板不符的
+   plan（正确）。但 lane 的运行身份是（lane, 公司, 窗口, run_key），**不含契约**，所以换版之后重跑一个窗口会重放
+   一个永远跑不了的 plan。这一条还和"作废尝试"互相咬：窗口宽度是按尝试次数算的，把预算还回去也把窗口倒回去了。
+5. **P13z-5 问题文本要跟身份一起走。** 身份加了契约版本、backlog 问题文本没加，于是新契约下的运行用新的选择键
+   去选一个旧契约运行已经占掉的问题——"only an open question can be selected"，五家公司同时挂。现在问题文本
+   **由身份派生**，两者按构造一致（靠纪律是守不住的：今天守住了，下次身份再长一个字段就守不住）。
+
+**顺手补上的两个诊断，当天就派上用场：**
+- **settlement 现在记录失败原因。** `outcome` 只回答"跑完了没有"，不回答"成没成"；73 次全死在同一个字符串上，
+  而那个字符串只存在于没人读的 summary 文件里，看起来像 73 个互不相关的失败。现在 `failure_reason` 落库
+  （additive migration，老行是 NULL——现在编一个理由比留空更糟）。修完第一个 bug 后，**下一个 bug 是它直接报出来的**。
+- **`sec_dispatch_outcomes()` 回答"这些到底成了没有"。** live 当时读出来是 **73 settled / 0 succeeded**，
+  而账本看起来一切正常。planner 的状态里按公司带上了这个数——只看 deficit 会读成"还没取"，于是它一遍遍下
+  同样的取数指令，下了一整天。
+
+**教训（今天重复出现三次）**：一个决定只改了一处。adapter 放宽了、契约没放宽；身份加了字段、问题文本没加；
+预算还回去了、窗口没考虑。修法都是**让两者由同一处派生**，而不是记得同时改两处。
 
 ## 2026-09-09：第三条 pass，和一条把整家公司抹掉的异常
 
