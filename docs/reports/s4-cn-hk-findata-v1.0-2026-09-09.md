@@ -2,8 +2,9 @@
 
 日期：2026-09-09
 分支：`s4-cn-hk-findata`（worktree `~/Projects/dalton-s4-cn-hk-findata-worktree`）
-分叉基线：main `61f4255`（2,627 项测试）
-全量测试：`Ran 2709 tests in 365.576s` / `OK (skipped=1)`
+分叉基线：main `61f4255`（2,627 项测试）；已 `git merge main` 至 `60beeb9`（并入 S1 的两条人工投喂、S3 的三条大众源与共用的 `host_tool` runner，inventory 从 13 条 profile 变 19 条）
+全量测试（合并后）：`Ran 3051 tests in 410.407s` / `OK (skipped=1)`
+合并前本片自己：`Ran 2709 tests in 365.576s` / `OK (skipped=1)`
 未推送。未部署。未写 live 状态。未发布 mission 版本。未改 `writer_server.py` / `coverage_mission.py` / `bounded_planner_driver.py` / `macos_launchagent.py` / `install.sh` / `cockpit_*` / `PROJECT_STATUS.md` / `tests/test_service.py` / `tests/test_lane_registry.py`。
 
 ---
@@ -20,7 +21,9 @@ Dalton 现在能读中国公司了：一条 `cn-hk-findata` 连接器，六个�
 | --- | --- |
 | `fd7b325` | 连接器身份、六个操作契约、六条治理记录、配额、共享测试的加项 |
 | `3f3fe09` | 适配器（canonical 化 + 六个 wire）、子进程 CLI、`[cn-hk-data]` extra、八份真实 fixture、两个测试文件 |
-| （本条） | 报告 v1.0 |
+| `bad2237` | 报告 v1.0 |
+| `3145645` | code review 修复：库内重试封顶（阻断项）、NaT、fixture 与 argv 一致、空答案的厂商、时钟字段不进哈希、融资融券单位守卫 |
+| `4f846e8` | `git merge main`（`60beeb9`），index.json 由脚本重生成 |
 
 ---
 
@@ -66,11 +69,16 @@ query.sse.com.cn               www.szse.cn
 
 ### 2.3 「不要批量探测东财」怎么落地
 
-skill 的记录：2026-08-21 连续压 `push2his` 十几次之后，原本正常的 `fflow/daykline` 也被断开，安静数分钟。六个操作里只有 `ah_premium` 必须碰这个集群。落实为三件事：
+skill 的记录：2026-08-21 连续压 `push2his` 十几次之后，原本正常的 `fflow/daykline` 也被断开，安静数分钟。六个操作里只有 `ah_premium` 必须碰这个集群。
 
-1. 配额：`ah_premium` 每日 4 个单位 × 每单位 3 次物理调用。有一条测试断言它是六个里最小的。
-2. `_call` 不重试。上游任何异常直接变成 `CnHkFinDataVendorRefusal`——连接被拒/重置/502/403 对这些主机不是瞬时错误。
-3. `NO_BATCH_PROBE_HOSTS` 在身份模块里列出 `push2` / `push2his` / `33.push2`，测试钉住 `ah_premium` 的主机在这个集合里。
+**v1.0 的第一版在这里是错的，review 抓住了。** 当时写的是「`_call` 不重试」——对这个模块成立，对这个进程不成立。`stock_zh_ah_spot_em` 自己不发请求：它调 `akshare.utils.func.fetch_paginated_data`，后者调 `akshare.utils.request.request_with_retry`，而那个 helper 默认 `max_retries=3`，失败之间还有指数退避加抖动（`base_delay * 2**attempt + uniform(0.5, 1.5)`）。`pz=100` 打 204 行的 A+H 全表是 3 页，所以一个正在拒绝的主机会被压最多 **9 次**、每次之间还睡一会儿——正好是 2026-08-21 那场事故的形状，打的正好是那台主机，而且是被批准的 3 次上限的三倍。
+
+akshare 没给这个参数留口子，所以现在是四件事：
+
+1. **`_one_attempt_per_page`**：在那一次调用期间把 `akshare.utils.func.request_with_retry` 重绑为 `partial(..., max_retries=1)`，`finally` 里恢复（成功、失败、异常都恢复，有测试——否则这个封顶会悄悄改变同进程里其它所有 akshare 调用的行为）。找不到这个 helper 就**拒绝**，不调用：一次静默的 `getattr` miss 与「封顶生效了」在外面看起来一模一样，而代价是在那台主机上不带封顶地跑一遍。
+2. 配额：`ah_premium` 每日 4 个单位 × 每单位 **3** 次物理调用 = `AH_PREMIUM_MAX_PAGES × AH_PREMIUM_MAX_RETRIES`，有测试把配额钉在这个乘积上，而不是让它凑巧在附近。另有一条测试从 fixture 的 204 行反推 `ceil(204/100) == 3`。
+3. `_call` 这一层仍然不重试；上游任何异常直接变成 `CnHkFinDataVendorRefusal`。**另外五个操作查过了**：它们都是直接 `requests.get`，不经过那个 helper（`stock_hsgt_fund_flow_summary_em` 尤其要注意——同一个模块里的 `stock_hsgt_hold_stock_em` 走 `fetch_paginated_data`，但我们绑的那个不走）。
+4. `NO_BATCH_PROBE_HOSTS` 在身份模块里列出 `push2` / `push2his` / `33.push2`，测试钉住 `ah_premium` 的主机在这个集合里。
 
 ### 2.4 `fallback_used` / `source_vendor` / `caliber_note`
 
@@ -92,6 +100,8 @@ skill 的记录：2026-08-21 连续压 `push2his` 十几次之后，原本正常
 **(1) 两所的融资融券单位差一亿倍。** 上交所 `融资融券余额` 返回 `1,350,016,680,402`（元），深交所返回 `12,847.58`（亿元）。融券余量同理：沪市 `3,098,060,345`（股），深市 `11.79`（亿股）。两所都不在 payload 里标单位。契约因此给每行加了 `amount_unit` 与 `volume_unit`，`caliber_note` 写「不可直接相加」。另外沪市把那一列叫「融券余量金额」，深市叫「融券余额」——同一个量，两个名字，归一到 `short_balance_amount`，各自的原名留在口径注里。
 **开放问题**：深市的单位是从量级读出来的（12,847.58 对 1.35e12），不是从上游的单位声明读出来的。请 owner 或后续 canary 用交易所页面确认一次。
 
+**因此加了一道守卫**（`_check_margin_units`）：一个推出来的标签必须能察觉自己什么时候不再成立。沪市的 `total_balance` 低于 100,000 元、或深市高于 100,000,000 亿元，就带理由拒绝。边界故意留得很远而不是很紧——全市场融资余额低于十万元，即便 2010 年试点首日（当天是百万量级）也不可能；十万万亿元（1e16 元）同理。它们抓的是**单位翻转**这一种失效：如果哪天深市改发元，值会变成约 1.28e12，越过上限；如果沪市改发亿元，值会变成约 1.35e4，跌破下限。两个方向都有测试，另有一条测试断言真实 capture 离边界还有六个数量级。
+
 **(2) 港股三表没有币种，也没有会计准则，而且不能从旁边那张表借。** `stock_financial_hk_report_em` 返回的列只有 `SECUCODE / REPORT_DATE / DATE_TYPE_CODE / FISCAL_YEAR / START_DATE / STD_ITEM_CODE / STD_ITEM_NAME / AMOUNT`。同一主机上的主要指标表（`stock_financial_hk_analysis_indicator_em`）确实有 `CURRENCY`，看起来正好补上这个洞——但实测腾讯 FY2025：三表的「营业额」是 `743,689,000,000`，主要指标表的 `OPERATE_INCOME` 是 `751,766,000,000`，`CURRENCY=HKD`、`IS_CNY_CODE=0`。差 1.09%，不是汇率。两张表不是同一次测量，一张的标签不描述另一张。**所以这个调用已经从适配器里删掉了**（省一次物理调用），港股行的 `currency` 与 `account_standard` 一律为 null，`caliber_note` 说明原因。一个错的币种比一个空的币种更糟：空的会让读者停下来，错的不会。
 
 A 股这边相反：`CURRENCY` 就在三表里（`CNY`），`account_standard` 由适配器填 `中国企业会计准则`——不是猜，是这条路由的事实；留空会在 A 行和 H 行并排时被读成「和另一行一样」。
@@ -105,6 +115,7 @@ A 股这边相反：`CURRENCY` 就在三表里（`CNY`），`account_standard` �
 - **`northbound_flow` 的金额单位是 akshare 的，不是东财的**：库把原值除以 10,000 再返回，`amount_unit: 亿元` 写在每行，口径注点名这次除法。这也是把库版本钉死的原因之一。
 - **`northbound_flow` 校验快照日期**：接口不收日期参数，返回它手上那一天。返回的 `交易日` 与请求的 `as_of` 不符 → 拒绝。把陈旧快照记在请求日名下，等于把一个数字标到它并不描述的那个交易日。
 - **`buybacks` / `ah_premium` 带 `universe_row_count`**：上游只有全市场表，没有按代码检索的接口。不说全表有多少行，「这家公司没有回购」和「表回来得短了」就是同一个空答案。
+- **`pandas.NaT` 不会变成字符串 "NaT"**（review 抓的）：`NaT` 是 `datetime` 的**子类**，所以类型判断会走到日期分支、`isoformat()` 交回字面量 `"NaT"`——一个缺失的公告日期被当成 vendor 报了一个日期存下来，而且下游没有任何日期解析器会把它当缺失拒掉。现在缺失在任何类型判断之前就决定：`value != value` 是 NaN 与 NaT 共有、别的值都没有的性质，问这一句不需要 import 这个模块并不依赖的库。
 - **`MAX_PERIODS = 20`**（五年季度）、`MAX_HOLDER_COUNT_ROWS = 200`：超出的期数计入 `dropped_row_count`，不是静默丢掉。茅台的利润表上游有 103 个报告期（1998 年起）。
 
 ---
@@ -129,9 +140,11 @@ A 股这边相反：`CURRENCY` 就在三表里（`CNY`），`account_standard` �
 `src/dalton_core/cn_hk_findata_cli.py`（`dalton-cn-hk-findata`），形状照 `market_price_cli.py`：
 
 - **审批优先**：治理记录必须 `approved`，`capability_id` 必须是这个操作的，`expected_source_hash` / `expected_schema_hash` 必须仍然描述打包契约。任何一条不满足，在读任何东西之前就退出，`artifact` 为 null。一个操作的记录跑不了另一个操作（有测试）。
-- **产物必留**：整份 capture 先 canonical 化（列序保留、每格转文本、无 float）、再 `canonical_json` → sha256 → `RawSpool`。归一化失败的运行照样留产物（有测试）：读不出来的那份正是有人要看的那份。
+- **产物必留**：capture 先 canonical 化（列序保留、每格转文本、无 float）、再 `canonical_json` → sha256 → `RawSpool`。归一化失败的运行照样留产物（有测试）：读不出来的那份正是有人要看的那份。
+- **哈希的是「源说了什么」，不是「我们什么时候问的」**（review 抓的）：capture 里的 `captured_at` 与 `observed_on` 是本机时钟，在被哈希的字节里时，**每一次运行都会铸出一个新的产物哈希，因而是一个新的 `invocation_ref`**——同一个没有变化的季度读两次看起来像两个不同的事实，而 `invocation_ref` 存在的全部意义就是分辨这两者。现在这两个字段在哈希前被摘出去（`CLOCK_FIELDS`），仍然留在 `summary.json` 与 wire 上。有两条测试：同样的字节 + 不同的 `captured_at` → 同一个产物哈希、同一个 invocation；改一个数字 → 两者都变。
+- **replay 必须回答被问的那个问题**（review 抓的）：fixture 模式下，capture 自带的 `parameters` 要与命令行给的逐字相同，不同就拒绝并把两边都印出来。一份 600519 的 capture 在 `--a-ticker 000001` 下重放，会产出一个能过 schema、写着 000001、内容全是 600519 的 wire，链条下游没有任何一环能发现。
 - **契约最后**：wire 先过冻结的 output schema（`authority_resolver._schema_matches`），过不了就一个字节都不落盘（有测试）。
-- **`summary.json` 永远写**，成功失败都写，含 `refusal_kind`、`source_vendor`、`fallback_used`、`caliber_notes[]`、`allowed_hosts`、`invocation_ref`、`artifact`。
+- **`summary.json` 永远写**，成功失败都写，含 `refusal_kind`、`source_vendor`、`fallback_used`、`caliber_notes[]`、`allowed_hosts`、`invocation_ref`、`artifact`。`source_vendor` 一个厂商时是字符串、多个时是列表、**空答案时是 `null` 而不是 `[]`**（review 抓的）：「这家公司没有回购」「这个代码不是 A+H 的一半」都是**结论**不是失败，它们没有厂商，这和「有一个空的厂商列表」不是一回事；cockpit 上渲染出一个 `[]` 是在展示一个 bug。两个有据可查的空答案各有一条测试。
 - 模式二选一：`--allow-network` / `--fixture-file`；`run()` 自己也检查，不依赖 argparse（直接构造 Namespace 的调用方不该因为漏个 flag 就把请求发到东财）。
 - **没有权威消费这些行**（见第 5 节），所以校验过的 wire 写在 summary 旁边（`wire-{operation}.json`，0600）。为了放它而现造半个权威，比说清楚「还没有权威」更糟。
 
@@ -184,7 +197,7 @@ LANE = register_lane(LaneSpec(
    cn-hk-findata-ah-premium-v1.json
    ```
    可以分开批。六个 schema 哈希互不相同，批一个不会顺带批另一个。
-2. **确认深交所融资融券的单位**（见 2.5(1)）：`亿元` / `亿股` 是从量级读出来的。
+2. **确认深交所融资融券的单位**（见 2.5(1)）：`亿元` / `亿股` 是从量级读出来的，不是从上游读出来的。代码里已有一道守卫会在单位翻转时拒绝，但守卫抓的是「标签不再成立」，不能替 owner 确认标签一开始就是对的。
 3. **裁决证据层级**：本连接器的行是 vendor 归一化（东财）或交易所汇总（沪深两所）。建议：交易所那两个（`margin_balance`）算「一手（交易所）」，东财那四个算「vendor」，都不得作为 filing 级数字进 Ledger。
 4. **裁决 source 粒度**（见第 8 节的第一条开放问题）。
 
@@ -192,22 +205,33 @@ LANE = register_lane(LaneSpec(
 
 ## 7. 验收：测试
 
+合并 main（`60beeb9`）之后：
+
+```
+Ran 3051 tests in 410.407s
+OK (skipped=1)
+```
+
+合并之前，本片自己：
+
 ```
 Ran 2709 tests in 365.576s
 OK (skipped=1)
 ```
 
-命令：`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`（worktree 根目录）。基线 main `61f4255` 是 2,627；本片新增 82 项。
+命令：`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`（worktree 根目录）。分叉基线 main `61f4255` 是 2,627，本片自己新增 98 项（v1.0 时 82 项，review 修复又加 16 项）；合并进来的 S1 / S3 / P14e 等再加 342 项。
+
+`scripts/build_connector_inventory.py --check`：合并后重跑脚本，摘要只有 `+ connector:cn-hk-findata` 与顶层 `content_hash`，`--check` 归零。`index.json` 全程由脚本重生成，没有手工合并过一个哈希。
 
 新增文件：
 
 | 文件 | 项数 | 覆盖 |
 | --- | --- | --- |
-| `tests/test_cn_hk_findata_core.py` | 29 | 六个 schema 哈希互异、共享一个 source 哈希、adapter 哈希绑库与版本、主机 allowlist 与操作一一对应、腾讯主机不可达、forbidden route、无 permitted fallback、契约里的厂商枚举等于身份里的、每行都有三个 provenance 字段、配额存在且行情集群那条最小、六份治理记录与 builder 逐字节相同且都是 `proposed`、`build_connector_inventory.py --check` 干净、**cninfo 三个哈希未动（钉死）** |
-| `tests/test_cn_hk_findata_adapter.py` | 36 | canonical 化决定性（同一帧两次同哈希）、列序保留、重名列拒收、float→十进制文本、`1e15` 不出指数形式、缺失即 null、六个操作各自的真实 capture 过冻结契约、每行不是 float、wire 构建两次同字节、跨操作 capture 拒收、**未批准厂商拒收并点名**、**声明回退即拒绝而不重标**、腾讯路由的拒绝理由原样抛出、schema 拦下非法厂商、两所单位标注、港股币种为空且说明原因、A 股准则与币种、累计期起始日、`_YOY` 不入行、超期计数、空回购 / 非 A+H 对为空而非缺失、陈旧北向快照拒收、未 canonical 化的 capture 拒收 |
-| `tests/test_cn_hk_findata_cli.py` | 17 | 未批准 → 无产物、跨操作记录拒收、schema 漂移拒收、source 漂移拒收、产物哈希 = canonical capture 的 sha256、同 capture 两次同产物同 invocation、**归一化失败仍留产物**、六个操作端到端跑通、非法 wire 一个字节不落盘、厂商拒绝单列 `refusal_kind`、summary 带口径注与主机、失败也写 summary、缺参数点名、双模式互斥（两处）、越界操作拒收、`akshare` 不在 `sys.modules` |
+| `tests/test_cn_hk_findata_core.py` | 30 | 六个 schema 哈希互异、共享一个 source 哈希、adapter 哈希绑库与版本、主机 allowlist 与操作一一对应、腾讯主机不可达、forbidden route、无 permitted fallback、契约里的厂商枚举等于身份里的、每行都有三个 provenance 字段、配额存在且行情集群那条最小、六份治理记录与 builder 逐字节相同且都是 `proposed`、`build_connector_inventory.py --check` 干净、**cninfo 三个哈希未动（钉死）**、**`ah_premium` 的每单位物理调用上限 == 页数 × 重试上限** |
+| `tests/test_cn_hk_findata_adapter.py` | 45 | canonical 化决定性（同一帧两次同哈希）、列序保留、重名列拒收、float→十进制文本、`1e15` 不出指数形式、缺失即 null、六个操作各自的真实 capture 过冻结契约、每行不是 float、wire 构建两次同字节、跨操作 capture 拒收、**未批准厂商拒收并点名**、**声明回退即拒绝而不重标**、腾讯路由的拒绝理由原样抛出、schema 拦下非法厂商、两所单位标注、港股币种为空且说明原因、A 股准则与币种、累计期起始日、`_YOY` 不入行、超期计数、空回购 / 非 A+H 对为空而非缺失、陈旧北向快照拒收、未 canonical 化的 capture 拒收、**库内重试被封顶到 1 且事后恢复（成功路径与异常路径各一条）**、**封不住的库在调用前被拒**、**页数与 fixture 的全表行数一致**、**NaT 不变成 "NaT"**（含真实 pandas 的一条，pandas 缺席时跳过）、**两所单位守卫双向拒收且真实 capture 离边界六个数量级** |
+| `tests/test_cn_hk_findata_cli.py` | 23 | 未批准 → 无产物、跨操作记录拒收、schema 漂移拒收、source 漂移拒收、产物哈希 = canonical capture 的 sha256、同 capture 两次同产物同 invocation、**归一化失败仍留产物**、六个操作端到端跑通、非法 wire 一个字节不落盘、厂商拒绝单列 `refusal_kind`、summary 带口径注与主机、失败也写 summary、缺参数点名、双模式互斥（两处）、越界操作拒收、`akshare` 不在 `sys.modules`、**产物哈希 = 去掉时钟字段后的 canonical capture**、**同字节不同时刻 → 同一个 invocation**、**改一个数字 → 换一个 invocation**、**replay 与 argv 不符时拒收（600519 对 000001）且不留产物**、**两个空答案的 `source_vendor` 为 `null`**、**单厂商报成字符串** |
 
-修改的共享测试（加项，未删断言）：`tests/test_connector_inventory.py`（profile 集合与 public 集合各加一个 slug）、`tests/test_connector_quota_policy.py`（精确配额清单加六条）。
+修改的共享测试（加项，未删断言）：`tests/test_connector_inventory.py`（profile 集合与 public 集合各加一个 slug）、`tests/test_connector_quota_policy.py`（精确配额清单加六条）。合并 main 时这两个文件都有冲突，冲突处三边都是「各自加了一块」，按 main 的文本重放本片的加项而不是手工缝中间。
 
 八份 fixture（`tests/fixtures/cn-hk-findata/`，共 568 KB）全部是 2026-09-09 一次性、只读抓下来的真实调用：
 
@@ -225,7 +249,25 @@ OK (skipped=1)
 
 ---
 
-## 8. 开放问题
+## 8. Review 一轮改了什么
+
+主 agent 的 review 判定身份 / 契约 / 拒绝纪律是几条连接器切片里最强的一条，主机与 akshare 1.18.94 逐个对得上，但合并被一个阻断项拦住。六项都在同一轮里做完了：
+
+| # | 事项 | 结果 |
+| --- | --- | --- |
+| 1（阻断） | `ah_premium` 在 akshare 内部会重试，最多 9 次打 `push2.eastmoney.com` | `_one_attempt_per_page` 在调用期间把库的重试封到 1 并恢复；封不住就拒绝；配额上限钉成「页数 × 重试上限」；代码与报告里「不重试」的说法改成准确的（见 2.3） |
+| 2 | `pandas.NaT` canonical 化成字符串 `"NaT"` | 缺失在类型判断之前决定（见 2.6） |
+| 3 | fixture 重放不校验 argv | 不一致即拒绝，600519 对 000001 有测试（见 §4） |
+| 4 | 空 wire 的 `source_vendor` 是 `[]` | 空是 `null`、单个是字符串、多个是列表，两个空答案各一条测试（见 §4） |
+| 5 | `invocation_ref` 的注释说了假话——`captured_at` 在被哈希的字节里 | 时钟字段哈希前摘出，留在 summary 与 wire 上；同字节不同时刻是同一个 invocation（见 §4） |
+| 6 | 融资融券单位没有守卫 | `_check_margin_units` 双向拒绝（见 2.5(1)） |
+| nit | `MINORITY_INTEREST` 加了又减、`decimal` 局部变量没人用、配额注释写「两页」 | 都清了；「两页」改成「三页」并说明为什么是 3 而不是一个整数 |
+
+第 1 项值得单独记一句：这一条的教训不是「忘了关重试」，而是**「本模块不重试」和「本进程不重试」是两句不同的话**，而只有后者是主机会经历的那一句。被包起来的库带着自己的退避循环，它在栈里比这个模块深一层，从这里读代码看不见。另外五个操作逐个查过——它们都直接 `requests.get`——但那是查出来的，不是设计保证的；`_one_attempt_per_page` 因此写成「找不到 helper 就拒绝」，好让下一次库改结构时是一次响亮的失败而不是一次安静的退化。
+
+---
+
+## 9. 开放问题
 
 1. **一个 profile 装了四个厂商，对不对？** CONNECTOR_PROTOCOL 说 connector 是 source / transport / auth / completeness / provenance 的权限边界，严格读下去，东财、上交所、深交所应该是三个 source。计划的 S4 行明确要求「一条 `cn-hk-findata` 连接器 + 每个厂商的主机都要声明 + `fallback_used` 时标口径」，所以按计划做了，并且用每行的 `source_vendor` 枚举 + 每操作的 schema 哈希把边界压回到操作粒度。**如果 owner 更想要三条连接器**（`cn-hk-eastmoney`、`cn-exchange-margin`、…），拆分是机械的：`PROFILE_DEFINITIONS` 拆成三个条目、重跑 build 脚本、重发治理记录，适配器与 CLI 不用动。
 2. **港股覆盖到底有多厚？** 三表能拿到（腾讯 25 个年度期），但**没有币种、没有会计准则**（2.5(2)），也**没有股东**——akshare 里没有港股十大股东的等价函数，`shareholders` 因此在契约层就写死为 A 股（`a_ticker` 是六位数字）。港股的股东与回购要么走 `hkexnews`（skill 那边是 Gemini 检索，不是一手枚举），要么等一个新 source。
