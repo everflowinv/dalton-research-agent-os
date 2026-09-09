@@ -42,7 +42,6 @@ from .research_quality_score import (
     ResearchQualityError,
     TIMEOUT_SECONDS,
     artefact_from_deliverable,
-    model_config_fingerprint,
     run_deterministic,
     score_artefact,
 )
@@ -106,7 +105,6 @@ def run_score(args: argparse.Namespace) -> dict[str, Any]:
         rubric = get_rubric(args.rubric)
         model = None
         mission = None
-        fingerprint = "none"
         if args.model_config:
             from .cockpit_model import CockpitModel
 
@@ -117,9 +115,6 @@ def run_score(args: argparse.Namespace) -> dict[str, Any]:
                 max_input_tokens=MAX_INPUT_TOKENS, max_output_tokens=MAX_OUTPUT_TOKENS,
                 max_cost_usd=MAX_COST_USD, timeout_seconds=TIMEOUT_SECONDS,
             )
-            fingerprint = model_config_fingerprint(config, bounds={
-                "max_output_tokens": MAX_OUTPUT_TOKENS, "max_cost_usd": MAX_COST_USD,
-            })
         scored = score_artefact(
             art, args.rubric, core=core, model=model, mission=mission,
             request_id=f"quality:{rubric.rubric_ref}:{art['ref']}:{art['hash'][:16]}",
@@ -150,8 +145,7 @@ def run_score(args: argparse.Namespace) -> dict[str, Any]:
                 artefact_kind=art["artefact_kind"], target_ref=art["ref"], target_hash=art["hash"],
                 rubric=rubric, deterministic=scored["deterministic"],
                 judge_layer=scored["judge"], verifier_layer=scored["verifier"],
-                model_config_fingerprint=fingerprint, subject_ref=art.get("subject_ref"),
-                actor_ref=args.actor_ref,
+                subject_ref=art.get("subject_ref"), actor_ref=args.actor_ref,
             )
             summary["recorded"] = {
                 "id": written["id"], "score_ref": written["score_ref"],

@@ -38,9 +38,19 @@ CREATE TABLE IF NOT EXISTS research_quality_score_versions (
     content_hash TEXT NOT NULL,
     actor_ref TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    UNIQUE(score_ref, version_number),
-    UNIQUE(score_ref, scoring_identity_hash)
+    UNIQUE(score_ref, version_number)
 );
+
+-- One *settled* score per identity.  A refused judge is not settled: it
+-- returned nothing readable, and letting one malformed reply permanently
+-- occupy an identity would mean the document could never be judged under this
+-- rubric again.  So the uniqueness that enforces the duplicate rule covers
+-- deterministic-only rows (judge_status IS NULL) and scored ones, and leaves
+-- refusals out; `record()` still refuses a second refusal, so a retry loop
+-- cannot fill the chain with them.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_research_quality_settled_identity
+ON research_quality_score_versions(score_ref, scoring_identity_hash)
+WHERE judge_status IS NULL OR judge_status = 'scored';
 
 CREATE INDEX IF NOT EXISTS idx_research_quality_by_target
 ON research_quality_score_versions(target_ref, rubric_ref, created_at);

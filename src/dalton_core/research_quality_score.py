@@ -336,13 +336,19 @@ def _excerpt(body: str, start: int, end: int, *, width: int = 18) -> str:
 
 
 def residual_citation_artefacts(body: str) -> list[dict[str, Any]]:
-    """Everything the tag stripper leaves behind, with the offending excerpt."""
+    """Everything the tag stripper leaves behind, with the offending excerpt.
+
+    Each finding carries ``at``, the offset it was found at, because a caller
+    that gates on these has to be able to ask where -- punctuation inside a URL
+    is punctuation inside a URL, and "https://" is a colon and two slashes.
+    Scoring does not need to ask; ``initial_screen_cli`` does.
+    """
 
     findings: list[dict[str, Any]] = []
     for code, pattern in _ARTEFACT_CODES:
         for match in pattern.finditer(body or ""):
             findings.append({
-                "code": code, "matched": match.group(0).strip(),
+                "code": code, "matched": match.group(0).strip(), "at": match.start(),
                 "excerpt": _excerpt(body, match.start(), match.end()),
             })
     for match in _BRACKET_RE.finditer(body or ""):
@@ -355,7 +361,7 @@ def residual_citation_artefacts(body: str) -> list[dict[str, Any]]:
                     break
         if empty:
             findings.append({
-                "code": "empty_parenthetical", "matched": match.group(0),
+                "code": "empty_parenthetical", "matched": match.group(0), "at": match.start(),
                 "excerpt": _excerpt(body, match.start(), match.end()),
             })
     return findings
@@ -823,23 +829,40 @@ def summarise_scores(scores: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
 
 
-def model_config_fingerprint(config: Mapping[str, Any], *, bounds: Mapping[str, Any] | None = None) -> str:
+# A score with no judge layer was decided by code alone, and code has no model
+# configuration.  Named rather than left as an empty string so a reader of the
+# row can tell "no model was asked" from "we did not record which".
+DETERMINISTIC_ONLY_FINGERPRINT = "none"
+
+
+def judge_fingerprint(judge_layer: Mapping[str, Any] | None) -> str:
     """What "the same model configuration" means for a score's identity.
 
-    Machine-local paths are deliberately out: the same routing policy on two
-    machines is the same configuration.  The bounds are in, because a judge
-    given twice the output budget is a different judge.
+    Derived from the route decision the call actually ran under, not from
+    anything the caller declares.  A caller-declared fingerprint is a caller
+    -declared identity, and an identity a caller controls is not a duplicate
+    rule -- it is a way around one.
+
+    The route decision is stable across a genuine repeat: a cockpit call is
+    content-addressed on (purpose, request_id, mission version, prompt), so
+    asking the same question again replays the same result with the same route.
+    A different profile is a different route and therefore a different score.
+
+    The *outcome* is deliberately not part of it.  A model that answered and a
+    model that answered badly are the same model, so a refusal and the
+    judgement that replaces it share an identity -- which is what makes the
+    replacement a new version of the same score rather than an unrelated one
+    (see ``record``).  A refused judge that never reached a model has no route
+    to name; it still gets a hash, because the identity column holds one shape.
     """
 
-    identity = {
-        "routing_policy_ref": config.get("routing_policy_ref"),
-        "budget_policy_ref": config.get("budget_policy_ref"),
-        "credential_slot_refs": list(config.get("credential_slot_refs") or ()),
-        "expected_agent_id": config.get("expected_agent_id"),
-        "broker_client_id": config.get("broker_client_id"),
-        "bounds": dict(bounds or {}),
-    }
-    return content_hash(identity)
+    if judge_layer is None:
+        return DETERMINISTIC_ONLY_FINGERPRINT
+    model = judge_layer.get("model") or {}
+    return content_hash({
+        "route_decision_ref": model.get("route_decision_ref"),
+        "purpose": model.get("purpose") or JUDGE_PURPOSE,
+    })
 
 
 def judge(
@@ -1112,7 +1135,6 @@ class QualityScoreAuthority:
         deterministic: Mapping[str, Any],
         judge_layer: Mapping[str, Any] | None = None,
         verifier_layer: Mapping[str, Any] | None = None,
-        model_config_fingerprint: str = "none",
         subject_ref: str | None = None,
         actor_ref: str,
     ) -> dict[str, Any]:
@@ -1137,15 +1159,37 @@ class QualityScoreAuthority:
             )
         if judge_layer is not None and judge_layer.get("rubric_hash") not in (None, rubric.content_hash):
             raise ResearchQualityConflict("the judge layer names a different rubric")
+        judge_status = None if judge_layer is None else str(judge_layer.get("status"))
+        if judge_status == "scored" and not (judge_layer.get("model") or {}).get("route_decision_ref"):
+            raise ResearchQualityConflict(
+                "a scored judge layer must name the route decision it ran under; "
+                "without it the score cannot say which model answered"
+            )
+        # The verifier's verdict names the scores it read. If it names other
+        # scores it is a verdict about another judgement, and storing the two
+        # side by side would read as though it were about this one.
+        if verifier_layer is not None and verifier_layer.get("status") == "verified":
+            if judge_layer is None or not judge_layer.get("scores"):
+                raise ResearchQualityConflict("a verifier verdict needs the judgement it verified")
+            if verifier_layer.get("judged_scores_hash") != content_hash(judge_layer["scores"]):
+                raise ResearchQualityConflict(
+                    "the verifier verdict is bound to different scores than the judge layer"
+                )
+        fingerprint = judge_fingerprint(judge_layer)
         identity = ScoringIdentity(
             target_ref=target_ref, target_hash=target_hash,
             rubric_ref=rubric.rubric_ref, rubric_hash=rubric.content_hash,
             scorer_version=SCORER_VERSION,
-            model_config_fingerprint=model_config_fingerprint,
+            model_config_fingerprint=fingerprint,
         )
         digest = identity.digest()
-        slug = target_ref.rsplit(":", 1)[-1][:64]
-        score_ref = f"quality-score:{rubric.rubric_ref.split(':', 1)[-1]}:{slug}"
+        # Content-addressed rather than sliced off the tail of the ref: two
+        # companies whose refs end in the same 64 characters are two documents,
+        # and they were sharing a version chain.
+        score_ref = (
+            f"quality-score:{rubric.rubric_ref.split(':', 1)[-1]}:"
+            f"{content_hash(target_ref)[:32]}"
+        )
         record = {
             "schema_version": SCHEMA_VERSION,
             "score_ref": score_ref,
@@ -1157,7 +1201,7 @@ class QualityScoreAuthority:
             "rubric_version": rubric.version,
             "rubric_hash": rubric.content_hash,
             "scorer_version": SCORER_VERSION,
-            "model_config_fingerprint": model_config_fingerprint,
+            "model_config_fingerprint": fingerprint,
             "scoring_identity_hash": digest,
             # The two layers stay apart on purpose: one is a fact about the
             # document, the other is a reading of it, and a reader has to be
@@ -1170,10 +1214,19 @@ class QualityScoreAuthority:
         }
         with self._transaction() as cur:
             seen = cur.execute(
-                "SELECT version_id FROM research_quality_score_versions "
-                "WHERE score_ref=? AND scoring_identity_hash=?", (score_ref, digest),
+                "SELECT version_id, judge_status FROM research_quality_score_versions "
+                "WHERE score_ref=? AND scoring_identity_hash=? "
+                "ORDER BY version_number DESC LIMIT 1", (score_ref, digest),
             ).fetchone()
-            if seen is not None:
+            # A refusal does not settle an identity. The judge returned nothing
+            # readable -- a malformed reply, a refused budget -- and treating
+            # that as the answer would mean one bad reply permanently blocks
+            # this document from ever being judged under this rubric. A refusal
+            # can therefore be superseded by a real judgement, and by nothing
+            # else: a second refusal is still a duplicate, so a retry loop
+            # cannot fill the chain with them.
+            settled = seen is not None and seen["judge_status"] in (None, "scored")
+            if seen is not None and (settled or judge_status != "scored"):
                 existing = cur.execute(
                     "SELECT record_json FROM research_quality_score_versions WHERE version_id=?",
                     (seen["version_id"],),
@@ -1202,8 +1255,7 @@ class QualityScoreAuthority:
                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (record["id"], score_ref, version, prior, artefact_kind, target_ref, target_hash,
                  subject_ref, rubric.rubric_ref, rubric.content_hash, SCORER_VERSION,
-                 model_config_fingerprint, digest,
-                 None if judge_layer is None else str(judge_layer.get("status")),
+                 fingerprint, digest, judge_status,
                  json.dumps(record, ensure_ascii=False, sort_keys=True), record["content_hash"],
                  actor_ref, record["created_at"]),
             )
@@ -1292,7 +1344,6 @@ __all__ = [
     "build_judge_prompt",
     "build_verifier_prompt",
     "judge",
-    "model_config_fingerprint",
     "residual_citation_artefacts",
     "run_deterministic",
     "score_artefact",

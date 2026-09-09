@@ -24,7 +24,7 @@ from dalton_core.research_quality_score import (
     artefact_from_dossier,
     build_judge_prompt,
     judge,
-    model_config_fingerprint,
+    judge_fingerprint,
     residual_citation_artefacts,
     run_deterministic,
     score_artefact,
@@ -539,6 +539,17 @@ class QualityScoreAuthorityTests(unittest.TestCase):
         params.update(overrides)
         return self.authority.record(**params)
 
+    @staticmethod
+    def judged(*, status="scored", route="route:abc", scores=None):
+        layer = {"status": status, "rubric_hash": SCREEN.content_hash,
+                 "model": {"route_decision_ref": route, "purpose": "quality",
+                           "invocation_ref": "invocation:x"}}
+        if status == "scored":
+            layer["scores"] = scores or full_scores(SCREEN)["scores"]
+        else:
+            layer["reason"] = "the judge did not score every criterion"
+        return layer
+
     def test_a_score_reads_back_and_names_its_rubric_and_its_target(self):
         written = self.record()
         self.assertEqual(written["status"], "fresh")
@@ -564,16 +575,83 @@ class QualityScoreAuthorityTests(unittest.TestCase):
         self.assertEqual(second["version"], 2)
         self.assertEqual(second["prior_version_ref"], first["id"])
 
-    def test_a_different_model_configuration_is_a_different_score(self):
-        self.record()
-        second = self.record(model_config_fingerprint="fingerprint:other")
+    def test_a_different_route_is_a_different_score(self):
+        # The identity is derived from what actually answered, so a judgement
+        # from another profile is another score rather than a duplicate.
+        self.record(judge_layer=self.judged(route="route:one"))
+        second = self.record(judge_layer=self.judged(route="route:two"))
         self.assertEqual(second["status"], "fresh")
         self.assertEqual(second["version"], 2)
 
+    def test_the_same_route_answering_twice_is_still_a_duplicate(self):
+        first = self.record(judge_layer=self.judged())
+        again = self.record(judge_layer=self.judged())
+        self.assertEqual(again["status"], "duplicate")
+        self.assertEqual(again["id"], first["id"])
+
+    def test_a_caller_cannot_declare_its_own_identity(self):
+        # The whole duplicate rule rests on the caller not choosing the
+        # fingerprint, so record() does not accept one.
+        with self.assertRaises(TypeError):
+            self.record(model_config_fingerprint="fingerprint:whatever")
+
+    def test_a_scored_judgement_must_name_the_route_it_ran_under(self):
+        layer = self.judged()
+        layer["model"].pop("route_decision_ref")
+        with self.assertRaises(ResearchQualityConflict) as caught:
+            self.record(judge_layer=layer)
+        self.assertIn("route decision", str(caught.exception))
+
+    def test_a_refusal_does_not_permanently_consume_the_identity(self):
+        # One malformed reply would otherwise block this document from ever
+        # being judged under this rubric again.
+        refused = self.record(judge_layer=self.judged(status="refused"))
+        self.assertEqual(refused["status"], "fresh")
+        scored = self.record(judge_layer=self.judged())
+        self.assertEqual(scored["status"], "fresh")
+        self.assertEqual(scored["version"], 2)
+        self.assertEqual(scored["scoring_identity_hash"], refused["scoring_identity_hash"])
+        # And the refusal is still in the chain: it happened.
+        self.assertEqual([item["judge"]["status"]
+                          for item in self.authority.versions(scored["score_ref"])],
+                         ["refused", "scored"])
+
+    def test_a_second_refusal_is_a_duplicate_so_a_retry_loop_cannot_fill_the_chain(self):
+        first = self.record(judge_layer=self.judged(status="refused"))
+        again = self.record(judge_layer=self.judged(status="refused"))
+        self.assertEqual(again["status"], "duplicate")
+        self.assertEqual(again["id"], first["id"])
+
+    def test_a_settled_score_is_not_superseded_by_another_judgement(self):
+        self.record(judge_layer=self.judged())
+        again = self.record(judge_layer=self.judged())
+        self.assertEqual(again["status"], "duplicate")
+
+    def test_a_verifier_verdict_must_be_bound_to_these_scores(self):
+        judged = self.judged()
+        good = {"status": "verified", "verdict": "pass", "findings": [],
+                "judged_scores_hash": content_hash(judged["scores"])}
+        self.assertEqual(self.record(judge_layer=judged, verifier_layer=good)["status"], "fresh")
+        stray = {**good, "judged_scores_hash": "0" * 64}
+        with self.assertRaises(ResearchQualityConflict) as caught:
+            self.record(judge_layer=self.judged(route="route:two"), verifier_layer=stray)
+        self.assertIn("bound to different scores", str(caught.exception))
+
+    def test_a_verdict_without_a_judgement_is_refused(self):
+        with self.assertRaises(ResearchQualityConflict):
+            self.record(verifier_layer={"status": "verified", "verdict": "pass", "findings": [],
+                                        "judged_scores_hash": "0" * 64})
+
+    def test_two_targets_whose_refs_end_alike_do_not_share_a_chain(self):
+        # Slicing the tail off a ref put two documents in one version chain.
+        tail = "x" * 70
+        first = self.record(target_ref=f"mission-deliverable-version:a{tail}")
+        second = self.record(target_ref=f"mission-deliverable-version:b{tail}")
+        self.assertNotEqual(first["score_ref"], second["score_ref"])
+        self.assertEqual(second["version"], 1)
+
     def test_the_two_layers_are_stored_apart(self):
-        judged = {"status": "scored", "rubric_hash": SCREEN.content_hash,
-                  "scores": full_scores(SCREEN)["scores"], "model": {"invocation_ref": "invocation:x"}}
-        written = self.record(judge_layer=judged, model_config_fingerprint="fingerprint:a")
+        written = self.record(judge_layer=self.judged())
         self.assertEqual(written["deterministic"]["scorer_version"], SCORER_VERSION)
         self.assertEqual(written["judge"]["model"]["invocation_ref"], "invocation:x")
         self.assertIsNone(written["verifier"])
@@ -616,7 +694,7 @@ class QualityScoreAuthorityTests(unittest.TestCase):
 
     def test_scores_for_a_target_come_back_in_order(self):
         self.record()
-        self.record(model_config_fingerprint="fingerprint:b")
+        self.record(judge_layer=self.judged())
         self.assertEqual([item["version"] for item in self.authority.scores_for(self.art["ref"])],
                          [1, 2])
 
@@ -634,16 +712,19 @@ class ScoreArtefactTests(unittest.TestCase):
         with self.assertRaises(ResearchQualityValidationError):
             score_artefact(art, "initial_screen", model=FakeModel("{}"))
 
-    def test_a_fingerprint_ignores_machine_local_paths(self):
-        base = {"routing_policy_ref": "policy:extraction", "budget_policy_ref": "policy:day",
-                "credential_slot_refs": ["slot:a"], "expected_agent_id": "agent",
-                "broker_client_id": "client"}
-        self.assertEqual(
-            model_config_fingerprint({**base, "model_router_db": "/Users/a/router.sqlite"}),
-            model_config_fingerprint({**base, "model_router_db": "/var/lib/router.sqlite"}))
-        self.assertNotEqual(
-            model_config_fingerprint(base),
-            model_config_fingerprint(base, bounds={"max_output_tokens": 4000}))
+    def test_the_fingerprint_comes_from_what_answered_not_from_the_caller(self):
+        scored = {"status": "scored", "model": {"route_decision_ref": "route:a", "purpose": "quality"}}
+        same = {"status": "scored", "model": {"route_decision_ref": "route:a", "purpose": "quality",
+                                              "invocation_ref": "invocation:different"}}
+        other = {"status": "scored", "model": {"route_decision_ref": "route:b", "purpose": "quality"}}
+        self.assertEqual(judge_fingerprint(scored), judge_fingerprint(same))
+        self.assertNotEqual(judge_fingerprint(scored), judge_fingerprint(other))
+        self.assertEqual(judge_fingerprint(None), "none")
+        # The outcome is not part of it: a model that answered and a model that
+        # answered badly are the same model, which is what lets a real
+        # judgement supersede a refusal as a new version of the same score.
+        self.assertEqual(judge_fingerprint(scored),
+                         judge_fingerprint({**scored, "status": "refused"}))
 
 
 class DeliverableAdapterTests(unittest.TestCase):
