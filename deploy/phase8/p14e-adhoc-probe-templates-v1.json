@@ -1,0 +1,122 @@
+{
+  "manifest_ref": "probe-template-publication:p14e-adhoc:v1",
+  "note": "P14e ad-hoc research templates. Publish each with a human actor_ref; only templates whose operation an executor supports become bindable.",
+  "schema_version": "0.1",
+  "status": "proposed",
+  "templates": [
+    {
+      "allowed_hosts": [
+        "data.sec.gov"
+      ],
+      "capability_ref": "capability:dalton:connector:sec-filings-index",
+      "cost": {
+        "cost_units": 1,
+        "max_attempts": 2,
+        "max_seconds": 120
+      },
+      "cost_estimate_usd": "0.00",
+      "declared_side_effects": [
+        "read:public-http"
+      ],
+      "operation": "get_company_facts",
+      "output_contract_ref": "schema:bounded-planner-probe-output:0.1",
+      "parameter_contract": {
+        "allowed_fields": [
+          "source_ref",
+          "locator",
+          "query_terms"
+        ],
+        "constants": {
+          "source_ref": "source:sec-edgar"
+        },
+        "required_fields": [
+          "source_ref",
+          "locator",
+          "query_terms"
+        ]
+      },
+      "permission_scope": "public_sec_read",
+      "runtime_profile_ref": "runner-runtime:sec-public:v1",
+      "source_ref": "source:sec-edgar",
+      "template_ref": "probe-template:adhoc-sec-filings-index:v1",
+      "verifier_ref": "verifier:source-level-coverage:0.1"
+    },
+    {
+      "allowed_hosts": [
+        "127.0.0.1"
+      ],
+      "capability_ref": "capability:dalton:connector:alphaengine-search-library",
+      "cost": {
+        "cost_units": 2,
+        "max_attempts": 1,
+        "max_seconds": 120
+      },
+      "cost_estimate_usd": "0.00",
+      "declared_side_effects": [
+        "read:alphaengine"
+      ],
+      "operation": "alphaengine_search_library",
+      "output_contract_ref": "schema:bounded-planner-probe-output:0.1",
+      "parameter_contract": {
+        "allowed_fields": [
+          "source_ref",
+          "query",
+          "filters",
+          "max_results"
+        ],
+        "constants": {
+          "max_results": 5,
+          "source_ref": "source:alphaengine"
+        },
+        "required_fields": [
+          "source_ref",
+          "query",
+          "max_results"
+        ]
+      },
+      "permission_scope": "alphaengine_read",
+      "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
+      "source_ref": "source:alphaengine",
+      "template_ref": "probe-template:adhoc-alphaengine-search-library:v1",
+      "verifier_ref": "verifier:source-level-coverage:0.1"
+    },
+    {
+      "allowed_hosts": [
+        "*"
+      ],
+      "capability_ref": "capability:dalton:connector:gemini-web-search",
+      "cost": {
+        "cost_units": 1,
+        "max_attempts": 2,
+        "max_seconds": 60
+      },
+      "cost_estimate_usd": "0.01",
+      "declared_side_effects": [
+        "read:public-http"
+      ],
+      "operation": "public_web_search",
+      "output_contract_ref": "schema:bounded-planner-probe-output:0.1",
+      "parameter_contract": {
+        "allowed_fields": [
+          "source_ref",
+          "query_terms",
+          "max_results"
+        ],
+        "constants": {
+          "max_results": 5,
+          "source_ref": "source:public-web"
+        },
+        "required_fields": [
+          "source_ref",
+          "query_terms",
+          "max_results"
+        ]
+      },
+      "permission_scope": "public_web_read",
+      "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
+      "source_ref": "source:public-web",
+      "template_ref": "probe-template:adhoc-web-search:v1",
+      "verifier_ref": "verifier:source-level-coverage:0.1"
+    }
+  ]
+}

@@ -59,6 +59,7 @@ LANE_OPERATIONS = frozenset({
     "dispatch_company_model_spec",
     "dispatch_research_plan",
     "dispatch_initial_screen",
+    "dispatch_research_task",
 })
 CORE_DISCOVERY_OPERATIONS = frozenset({
     "dispatch_mission_source_discovery", "mission_source_discovery_status",
@@ -68,7 +69,7 @@ CORE_DISCOVERY_OPERATIONS = frozenset({
     "dispatch_claim_review", "dispatch_initial_screen", "dispatch_research_plan",
     "mission_deliverables",
     "dispatch_mission_sec_quarters", "dispatch_mission_statements",
-    "dispatch_company_model_spec",
+    "dispatch_company_model_spec", "dispatch_research_task",
 })
 # The controller tick's lane order, as run_once ran it before P14-0.
 TICK_ORDER = (
@@ -81,6 +82,7 @@ TICK_ORDER = (
     ("dispatch_company_model_spec", "company_model_spec"),
     ("dispatch_research_plan", "research_plan"),
     ("dispatch_initial_screen", "initial_screen"),
+    ("dispatch_research_task", "research_task"),
 )
 LANE_PARAM_FIELDS = {
     "dispatch_claim_review": frozenset({"max_claims"}),
@@ -405,12 +407,15 @@ class MigratedLanesMatchTheOldLiteralsTests(unittest.TestCase):
 
     def test_the_launcher_lanes_name_the_kwargs_the_writer_took(self) -> None:
         # These four keywords were explicit parameters of WriterServer.__init__
-        # before P14-0; existing callers still pass them by name.
+        # before P14-0; existing callers still pass them by name.  P14e's is
+        # the first one that was never a parameter -- it arrives through the
+        # registry alone, which is the point of the registry.
         self.assertEqual(
             {spec.init_kwarg for spec in registered_lanes()
              if spec.init_kwarg is not None},
             {"statement_lane_launcher", "model_spec_launcher",
-             "initial_screen_launcher", "research_planner_launcher"},
+             "initial_screen_launcher", "research_planner_launcher",
+             "research_task_launcher"},
         )
 
     def test_an_unknown_launcher_keyword_is_refused(self) -> None:

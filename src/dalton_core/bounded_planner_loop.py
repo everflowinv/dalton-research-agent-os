@@ -35,6 +35,15 @@ CAPITAL_LEASE_PLANNER_HASH = content_hash({
 })
 _SCHEMA_PATH = Path(__file__).with_name("bounded_planner_loop_schema.sql")
 _HUMAN_RE = re.compile(r"^human:[A-Za-z0-9][A-Za-z0-9._/@:-]*$")
+_AUTOMATION_RE = re.compile(r"^automation:[A-Za-z0-9][A-Za-z0-9._/@:-]*$")
+# P14e: where a loop's question came from.  A loop has always been admitted by
+# a person naming a question; an ``inquiry`` loop is admitted by the mission's
+# automation from a research plan's inquiry, under the mission grant, and it
+# carries the inquiry's content hash so the same inquiry is never admitted
+# twice.  The default stays "human", so every loop written before this reads
+# exactly as it did.
+INQUIRY_ADMISSION_SOURCE = "inquiry"
+ADMISSION_SOURCES = frozenset({INQUIRY_ADMISSION_SOURCE})
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CONTROL_EFFECTS = frozenset({
     "focus_coverage_item", "request_replan", "deprioritize",
@@ -186,6 +195,36 @@ def _decode_record(row: sqlite3.Row | None, name: str) -> dict[str, Any]:
     return wire
 
 
+def _automation(value: Any, name: str = "actor_ref") -> str:
+    value = _text(value, name)
+    if _AUTOMATION_RE.fullmatch(value) is None:
+        raise BoundedPlannerValidationError(f"{name} must use the automation: namespace")
+    return value
+
+
+def _validate_admission(value: Any) -> dict[str, Any]:
+    """The closed record of a non-human admission.
+
+    ``content_hash`` is the *inquiry's* hash, not this record's: it is the
+    idempotency key the whole rule rests on.  A re-issued inquiry whose text
+    changed hashes differently and is therefore a different inquiry, which is
+    the intended reading -- the question really did change.
+    """
+
+    obj = _closed(
+        value, {"source", "content_hash", "inquiry_ref", "plan_ref"}, "admission",
+    )
+    source = _text(obj["source"], "admission.source")
+    if source not in ADMISSION_SOURCES:
+        raise BoundedPlannerValidationError("admission source is outside the closed set")
+    return {
+        "source": source,
+        "content_hash": _sha256(obj["content_hash"], "admission.content_hash"),
+        "inquiry_ref": _text(obj["inquiry_ref"], "admission.inquiry_ref"),
+        "plan_ref": _text(obj["plan_ref"], "admission.plan_ref"),
+    }
+
+
 def _validate_budget(value: Any) -> dict[str, int]:
     obj = _closed(value, {"max_rounds", "max_cost_units", "max_seconds"}, "budget")
     return {key: _positive_int(obj[key], f"budget.{key}") for key in obj}
@@ -308,6 +347,28 @@ class BoundedPlannerAuthority:
         ).fetchone()
         return None if row is None else _decode_record(row, "BoundedPlannerTerminalEvent")
 
+    def loop_for_admission(self, admission_content_hash: str) -> dict[str, Any] | None:
+        """The loop already admitted for this admission hash, if there is one."""
+
+        row = self.connection.execute(
+            "SELECT * FROM bounded_planner_loop_versions "
+            "WHERE json_extract(record_json,'$.admission.content_hash')=? "
+            "ORDER BY created_at, version_id LIMIT 1",
+            (_sha256(admission_content_hash, "admission_content_hash"),),
+        ).fetchone()
+        return None if row is None else _decode_record(row, "BoundedPlannerLoopVersion")
+
+    def admitted_loops(self, source: str) -> list[dict[str, Any]]:
+        """Every loop admitted from one source, oldest first."""
+
+        rows = self.connection.execute(
+            "SELECT * FROM bounded_planner_loop_versions "
+            "WHERE json_extract(record_json,'$.admission.source')=? "
+            "ORDER BY created_at, version_id",
+            (_text(source, "source"),),
+        ).fetchall()
+        return [_decode_record(row, "BoundedPlannerLoopVersion") for row in rows]
+
     def active_loops(self) -> list[dict[str, Any]]:
         """Latest version of every loop that has not reached a terminal state."""
 
@@ -421,9 +482,20 @@ class BoundedPlannerAuthority:
         actor_ref: str,
         doctrine_binding: Mapping[str, Any] | None = None,
         prior_version_ref: str | None = None,
+        admission: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         loop_ref = _text(loop_ref, "loop_ref")
-        actor_ref = _human(actor_ref)
+        admission_wire = None if admission is None else _validate_admission(admission)
+        if admission_wire is None:
+            actor_ref = _human(actor_ref)
+        else:
+            # The mission's automation principal admits an inquiry loop; a
+            # person still published every template it may run and still signed
+            # the mission that granted the word.
+            actor_ref = _automation(actor_ref)
+            existing_admission = self.loop_for_admission(admission_wire["content_hash"])
+            if existing_admission is not None:
+                return {"status": "duplicate_admission", **existing_admission}
         question = read_exact_backlog_question_version(
             self.connection.cursor(), _text(question_version_ref, "question_version_ref")
         )
@@ -486,6 +558,10 @@ class BoundedPlannerAuthority:
             "budget": budget_wire,
             "doctrine_binding": None,
         }
+        if admission_wire is not None:
+            # Only an inquiry loop carries this, so every human loop's version
+            # id is the byte-for-byte identity it was before P14e.
+            identity["admission"] = admission_wire
         version_id = _deterministic_ref("bounded-planner-loop-version", identity)
         existing = self.connection.execute(
             "SELECT * FROM bounded_planner_loop_versions WHERE version_id=?", (version_id,)
