@@ -8,6 +8,7 @@ external broker adapter.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -520,27 +521,70 @@ def ensure_broker_profiles(
     broker no longer offers, five the broker offers with no static profile at
     all. A model nobody can route to is a model that silently is not there.
 
-    Only *missing* ids are registered, deliberately. A profile carries an
-    availability timestamp, so re-registering every deploy would append a new
-    version each time and say nothing: the live deepseek profile is at version
-    eleven for exactly that reason. Changing a profile's substance stays an
-    explicit act.
+    Only *missing* or *expired* ids are touched. A profile carries an
+    availability timestamp, so re-registering a current one every deploy would
+    append a version that says nothing -- the live deepseek profile is at
+    version eleven for exactly that reason. Changing a profile's substance
+    stays an explicit act.
+
+    Expired ones are refreshed, and that is not churn: it is the one case where
+    re-registering asserts something new, that the model is still offered as of
+    now. Without it the system deadlocks. Availability was advanced only by a
+    *successful call* (the agenda coordinator does it after each one), and a
+    call requires valid availability -- so a lane that goes quiet for a week
+    can never start again. Live, deepseek-v4-flash expired four hours after the
+    extraction queue emptied, and the whole extraction lane was unable to make
+    the call that would have kept it alive.
     """
 
-    known = {
-        row["profile_id"] for row in router.connection.execute(
-            "SELECT DISTINCT profile_id FROM model_endpoint_profile_versions"
-        ).fetchall()
-    }
-    added = []
+    rows = router.connection.execute(
+        "SELECT profile_id, profile_json FROM model_endpoint_profile_versions "
+        "ORDER BY rowid DESC"
+    ).fetchall()
+    latest: dict[str, Any] = {}
+    for row in rows:
+        latest.setdefault(row["profile_id"], json.loads(row["profile_json"]))
+    added, refreshed = [], []
     for profile in openclaw_broker_profiles(
         checked_at=checked_at, availability_ttl=availability_ttl
     ):
-        if profile["id"] in known:
+        current = latest.get(profile["id"])
+        if current is None:
+            router.register_profile(profile)
+            added.append(profile["id"])
             continue
-        router.register_profile(profile)
-        added.append(profile["id"])
-    return {"added": added, "already_present": sorted(known)}
+        valid_until = (current.get("availability") or {}).get("valid_until")
+        if not _availability_lapsed(valid_until, checked_at):
+            continue
+        # Advance the *existing* profile rather than replacing it: its cost,
+        # limits and capabilities are the curated ones and only its freshness
+        # has lapsed.
+        renewed = dict(current)
+        version_root, separator, prior = renewed["profile_version_ref"].rpartition(":")
+        if not separator or not prior.isdigit():
+            continue
+        renewed["version"] = int(renewed["version"]) + 1
+        renewed["prior_version_ref"] = renewed["profile_version_ref"]
+        renewed["profile_version_ref"] = f"{version_root}:{renewed['version']}"
+        renewed["created_at"] = checked_at.isoformat(timespec="microseconds")
+        renewed["availability"] = dict(profile["availability"])
+        renewed.pop("content_hash", None)
+        router.register_profile(renewed)
+        refreshed.append(profile["id"])
+    return {"added": added, "refreshed": refreshed,
+            "already_current": sorted(set(latest) - set(added) - set(refreshed))}
+
+
+def _availability_lapsed(valid_until: Any, checked_at: datetime) -> bool:
+    """Whether this profile's availability window has closed."""
+
+    if not isinstance(valid_until, str) or not valid_until:
+        return True
+    try:
+        moment = datetime.fromisoformat(valid_until.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return moment <= checked_at
 
 
 def openclaw_broker_policy(*, created_at: datetime) -> dict[str, Any]:

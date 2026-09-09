@@ -165,3 +165,42 @@ class CatalogTests(unittest.TestCase):
         ensure_broker_profiles(self.router, checked_at=NOW)
         self.assertEqual(credential_slots_for(self.router, [ASTRA]),
                          ["credential-slot:openclaw:openai"])
+
+    def test_a_lapsed_profile_is_refreshed_rather_than_left_dead(self):
+        # Availability was advanced only by a *successful call*, and a call
+        # requires valid availability -- so a lane that goes quiet for a week
+        # could never start again. Live, deepseek-v4-flash expired four hours
+        # after the extraction queue emptied and the lane could not make the
+        # call that would have kept it alive.
+        from dalton_core.model_deployment import ensure_broker_profiles
+
+        ensure_broker_profiles(self.router, checked_at=NOW)
+        later = NOW + timedelta(days=30)
+        result = ensure_broker_profiles(self.router, checked_at=later)
+        self.assertEqual(result["added"], [])
+        self.assertIn(ASTRA, result["refreshed"])
+
+    def test_a_current_profile_is_left_alone(self):
+        from dalton_core.model_deployment import ensure_broker_profiles
+
+        ensure_broker_profiles(self.router, checked_at=NOW)
+        soon = ensure_broker_profiles(self.router, checked_at=NOW + timedelta(days=1))
+        self.assertEqual((soon["added"], soon["refreshed"]), ([], []))
+
+    def test_a_refreshed_profile_keeps_its_curated_substance(self):
+        from dalton_core.model_deployment import ensure_broker_profiles
+
+        ensure_broker_profiles(self.router, checked_at=NOW)
+        before = self.router.connection.execute(
+            "SELECT profile_json FROM model_endpoint_profile_versions WHERE profile_id=? "
+            "ORDER BY rowid DESC LIMIT 1", (ASTRA,)).fetchone()
+        ensure_broker_profiles(self.router, checked_at=NOW + timedelta(days=30))
+        after = self.router.connection.execute(
+            "SELECT profile_json FROM model_endpoint_profile_versions WHERE profile_id=? "
+            "ORDER BY rowid DESC LIMIT 1", (ASTRA,)).fetchone()
+        old, new = json.loads(before["profile_json"]), json.loads(after["profile_json"])
+        self.assertEqual(old["capabilities"], new["capabilities"])
+        self.assertEqual(old["cost"], new["cost"])
+        self.assertEqual(new["version"], old["version"] + 1)
+        self.assertEqual(new["prior_version_ref"], old["profile_version_ref"])
+        self.assertGreater(new["availability"]["valid_until"], old["availability"]["valid_until"])

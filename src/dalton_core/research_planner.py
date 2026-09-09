@@ -230,12 +230,22 @@ def build_work(state: Mapping[str, Any], *, created_at: str, state_ref: str) -> 
 
 
 def parse_response(text: Any) -> dict[str, Any]:
+    """The plan a model returned, tolerating how models return things.
+
+    A fence or a sentence around the object is presentation, not disagreement:
+    the extraction path has unwrapped fenced JSON since the first live run, and
+    the first planner reply was refused for exactly this. What is *not*
+    tolerated is anything about the plan's content -- the shape below is closed
+    and a plan that names work outside its state is still refused whole.
+    """
+
     if not isinstance(text, str):
         raise ResearchPlanError("model response must be text")
-    try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ResearchPlanError("model response is not JSON") from exc
+    from .cockpit_model import unwrap_json_object
+
+    payload = unwrap_json_object(text)
+    if payload is None:
+        raise ResearchPlanError("model response is not JSON")
     if not isinstance(payload, Mapping) or set(payload) != {
         "schema_version", "assessment", "directives", "inquiries",
     }:

@@ -421,5 +421,29 @@ class StateHashTests(unittest.TestCase):
                          "2026-09-08T12:00:00+00:00")
 
 
+class ToleranceTests(unittest.TestCase):
+    """A fence around the object is presentation, not disagreement."""
+
+    def body(self):
+        return response(directive())
+
+    def test_a_fenced_object_is_read(self):
+        for wrapped in (f"```json\n{self.body()}\n```", f"```\n{self.body()}\n```",
+                        f"Here is the plan:\n{self.body()}"):
+            plan = plan_from_response(state(), wrapped, created_at=NOW)
+            self.assertEqual(len(plan["directives"]), 1)
+
+    def test_content_is_still_judged_strictly(self):
+        # Tolerating the wrapper must not tolerate the contents.
+        fenced = "```json\n" + response(directive(company_ref="company:sec-cik:9")) + "\n```"
+        with self.assertRaises(ResearchPlanError):
+            plan_from_response(state(), fenced, created_at=NOW)
+
+    def test_something_that_is_not_a_plan_is_still_refused(self):
+        for bad in ("I could not do this.", "```json\nnot json\n```", ""):
+            with self.assertRaises(ResearchPlanError):
+                parse_response(bad)
+
+
 if __name__ == "__main__":
     unittest.main()
