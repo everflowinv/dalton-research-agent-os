@@ -1,0 +1,156 @@
+{
+ "artefact": {
+  "artefact_kind": "ask_answer",
+  "cited_tags": [
+   "C4",
+   "C17",
+   "C23"
+  ],
+  "confidence": "medium",
+  "expected_sections": [
+   "答案"
+  ],
+  "gaps": [
+   "账本里没有 ACN 各竞争对手的份额数据"
+  ],
+  "hash": "eb17b2be42d4c9ecf456349a1c6c85b8b591fd0c476703c62ed2a03d565fd3c1",
+  "prior": null,
+  "question": "ACN 面临的竞争威胁是什么？",
+  "ref": "cockpit-ask:golden:cites-unshown-claim",
+  "sections": [
+   {
+    "body": "Accenture 把大企业自建的全球能力中心（GCC）列为竞争威胁，因为客户可能用自己的资源而不外包。此外公司还提到印度离岸厂商与 AI 原生公司的竞争。",
+    "claim_refs": [
+     "claim-version:ec52d36d94"
+    ],
+    "gaps": [
+     "账本里没有 ACN 各竞争对手的份额数据"
+    ],
+    "numbers": [
+     {
+      "claim_version_ref": "claim-version:ec52d36d94",
+      "period": "fiscal 2025",
+      "text": "Accenture identifies in-house IT departments of large corporations using global capability centers as a competitive threat because clients may use their own resources rather than engage an outside firm."
+     }
+    ],
+    "title": "答案"
+   }
+  ],
+  "shown_claims": [
+   {
+    "metric_or_aspect": "quarterly_revenue_yoy_growth",
+    "period": "2026-03-01..2026-05-31",
+    "ref": "claim-version:1c4f31d84d431ac4aa2cfd5e10624ed9f0ddff0f17844392bc7a76a339adfa05",
+    "statement": "Accenture plc reported Revenues of USD 18718144000 for 2026-03-01..2026-05-31, up 5.59% year over year from USD 17727871000 in the comparable quarter.",
+    "subject_ref": "company:sec-cik:0001467373",
+    "tag": "C1",
+    "unit": "percent",
+    "value": "5.59"
+   },
+   {
+    "metric_or_aspect": "quarterly_revenue_yoy_growth",
+    "period": "2025-12-01..2026-02-28",
+    "ref": "claim-version:4485c39d212d5d352b2c5590432e57c48f9851b1446ba12f9e2ab6bc6cd5ea39",
+    "statement": "Accenture plc reported Revenues of USD 18044066000 for 2025-12-01..2026-02-28, up 8.31% year over year from USD 16659301000 in the comparable quarter.",
+    "subject_ref": "company:sec-cik:0001467373",
+    "tag": "C2",
+    "unit": "percent",
+    "value": "8.31"
+   },
+   {
+    "metric_or_aspect": "Demand replacement and AI monetization risk",
+    "period": "Not specified",
+    "ref": "claim-version:e9b242ebef",
+    "statement": "Accenture states that if demand for existing services is not replaced by demand for new AI-enabled solutions and services, or if the pace and level of spending on new solutions is insufficient, its results of operations and utilization will be adversely affected.",
+    "subject_ref": "company:sec-cik:0001467373",
+    "tag": "C3",
+    "unit": null,
+    "value": null
+   },
+   {
+    "metric_or_aspect": "competitive threat from GCCs",
+    "period": "fiscal 2025",
+    "ref": "claim-version:ec52d36d94",
+    "statement": "Accenture identifies in-house IT departments of large corporations using global capability centers as a competitive threat because clients may use their own resources rather than engage an outside firm.",
+    "subject_ref": "company:sec-cik:0001467373",
+    "tag": "C4",
+    "unit": null,
+    "value": null
+   },
+   {
+    "metric_or_aspect": "quarterly_revenue_yoy_growth",
+    "period": "2025-04-01..2025-06-30",
+    "ref": "claim-version:b8c1c670c0",
+    "statement": "EPAM SYSTEMS, INC. reported Revenue from Contract with Customer, Excluding Assessed Tax of USD 1353443000 for 2025-04-01..2025-06-30, up 18.04% year over year from USD 1146597000 in the comparable quarter.",
+    "subject_ref": "company:sec-cik:0001352010",
+    "tag": "C5",
+    "unit": "percent",
+    "value": "18.04"
+   },
+   {
+    "metric_or_aspect": "utilization of delivery professionals",
+    "period": "years ended December 31, 2025, 2024 and 2023",
+    "ref": "claim-version:29b5ce3638",
+    "statement": "EPAM reports utilization rates of its delivery professionals increased modestly year over year, with a slightly larger increase compared to the prior year, suggesting stable demand.",
+    "subject_ref": "company:sec-cik:0001352010",
+    "tag": "C6",
+    "unit": null,
+    "value": null
+   }
+  ],
+  "subject_ref": null,
+  "title": "ACN 面临的竞争威胁是什么？"
+ },
+ "case_ref": "cites-unshown-claim",
+ "expected": {
+  "deterministic": {
+   "cites_only_shown_claims": {
+    "count": 2,
+    "status": "fail"
+   },
+   "confidence_stated": {
+    "count": 0,
+    "status": "pass"
+   },
+   "numbers_without_refs": {
+    "count": 0,
+    "status": "pass"
+   }
+  },
+  "rationale": "cites_only_shown_claims 必须是 0。答案本身没有数字问题，所以其余标准不应被连坐——评分表的作用之一是把「引用错了」和「说错了」分开。",
+  "score_ranges": {
+   "admits_unknown": [
+    1,
+    3
+   ],
+   "answers_the_question": [
+    2,
+    3
+   ],
+   "cites_only_shown_claims": [
+    0,
+    0
+   ],
+   "confidence_stated": [
+    2,
+    3
+   ],
+   "gaps_named": [
+    2,
+    3
+   ],
+   "no_invented_numbers": [
+    3,
+    4
+   ],
+   "stays_a_cockpit_artifact": [
+    2,
+    4
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "反例：C4 是真的，C17 与 C23 这次根本没有展示给模型。答案的后半句（印度离岸厂商、AI 原生公司）确有其事，但它引的是不存在的标签。",
+ "rubric": "ask_answer",
+ "source": "由 live Core 只读副本 2026-09-09 的真实 ACN / EPAM Claim 构造的问答三元组；问题与答案是手写的，被展示的 Claim 是账本原文"
+}
