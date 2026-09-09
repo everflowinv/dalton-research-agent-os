@@ -131,22 +131,39 @@ def slot_binding_summary(grant: CredentialGrantEnvelope | None) -> dict[str, Any
     }
 
 
+# Exact keys, not substrings. The first version matched substrings, and
+# "auth" is a substring of "author" and "author_id" -- so a single Xueqiu post,
+# whose top level *is* the post, arrived with its author silently deleted. A
+# filter that quietly removes data is worse than no filter: nothing failed, the
+# post was simply anonymous from then on.
+CREDENTIAL_SHAPED_KEYS = frozenset({
+    "cookie", "cookies", "set_cookie", "set-cookie",
+    "token", "auth_token", "authtoken", "auth", "authorization",
+    "ct0", "csrf_token", "session", "session_id",
+    "api_key", "apikey", "secret", "password", "credential", "credentials",
+    "bearer", "access_token", "refresh_token",
+})
+
+
 def redacted(value: Mapping[str, Any]) -> dict[str, Any]:
-    """A shallow copy with anything credential-shaped removed.
+    """A shallow copy with credential-shaped *keys* removed.
 
     Belt and braces for the raw artifact path: the host tools are asked for
     read-only data and do not echo cookies, but a tool that starts doing so
     should not be able to write one into the spool through this lane.
+
+    Matching is on the whole key, case-insensitively. Anything narrower than
+    that deletes real data, and anything wider is not a filter but a guess.
     """
 
-    forbidden = ("cookie", "token", "secret", "password", "auth", "ct0", "api_key")
     return {
         key: item for key, item in value.items()
-        if not any(marker in str(key).lower() for marker in forbidden)
+        if str(key).strip().lower().replace("-", "_") not in CREDENTIAL_SHAPED_KEYS
     }
 
 
 __all__ = [
+    "CREDENTIAL_SHAPED_KEYS",
     "CrowdCredentialSlotUnbound",
     "load_credential_grant",
     "redacted",

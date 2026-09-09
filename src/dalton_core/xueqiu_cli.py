@@ -53,7 +53,6 @@ from .lane_child_launcher import write_owner_only
 from .raw_spool import RawSpool
 
 from .xueqiu_core import (
-    CREDENTIALLED_OPERATIONS,
     CREDENTIAL_SLOT_REF,
     GET_POST_OPERATION,
     HOT_RANK_OPERATION,
@@ -313,18 +312,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         summary["governance_ref"] = governance.id
         summary["governance_hash"] = governance.content_hash
 
-        grant = None
-        if args.credential_grant:
-            grant = load_credential_grant(args.credential_grant)
-        if args.operation in CREDENTIALLED_OPERATIONS:
-            identity = xueqiu_identity(args.operation)
-            summary["credential"] = require_slots(
-                grant, slot_refs=[CREDENTIAL_SLOT_REF],
-                operation=args.operation, target_ref=identity["adapter_ref"],
-            )
-        else:
-            summary["credential"] = slot_binding_summary(grant)
-
+        # Resolve the route *before* the credential check, because the route
+        # is what decides whether a credential is needed.
+        #
+        # The first version keyed the exemption off the operation: `hot_rank`
+        # was listed as credential-free because its fallback is. But `hot_rank`
+        # has two routes, and only one of them is the fallback. Configured with
+        # a primary tool -- which is the normal configuration, since the other
+        # two operations need one -- `hot_rank` went through the host's Xueqiu
+        # channel, which needs the cookie, with no slot check and no expiry
+        # check at all. What is credential-free is the *route*, so that is what
+        # is asked.
         provenance_label = PRIMARY_PROVENANCE_LABEL
         tool = args.tool
         if args.operation == HOT_RANK_OPERATION and not tool and args.fallback_tool:
@@ -333,6 +331,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 raise XueqiuRunError("the template declares no hot_rank fallback")
             tool, provenance_label = args.fallback_tool, fallback["provenance_label"]
         summary["provenance_label"] = provenance_label
+
+        grant = None
+        if args.credential_grant:
+            grant = load_credential_grant(args.credential_grant)
+        if provenance_label == PRIMARY_PROVENANCE_LABEL:
+            identity = xueqiu_identity(args.operation)
+            summary["credential"] = require_slots(
+                grant, slot_refs=[CREDENTIAL_SLOT_REF],
+                operation=args.operation, target_ref=identity["adapter_ref"],
+            )
+        else:
+            summary["credential"] = slot_binding_summary(grant)
 
         if args.fixture_file:
             payload = Path(args.fixture_file).expanduser().read_bytes()
@@ -436,7 +446,16 @@ def main(argv: list[str] | None = None) -> int:
     # The summary is written either way, because a refusal has no wire and
     # still has a reason.
     if args.emit_wire:
-        print(json.dumps(summary["observation"], ensure_ascii=False))
+        # A refusal has no wire and still has a reason. Printing nothing would
+        # leave a runner reading stdout with an exit code and no sentence, and
+        # the sentence is the part a person needs. The refusal document is
+        # distinguishable from a wire by construction: a wire has
+        # `source_record_refs`, this has `status` and `failure_reason`.
+        print(json.dumps(
+            summary["observation"] if summary["status"] == "succeeded"
+            else {"schema_version": SUMMARY_SCHEMA_VERSION, "status": "failed",
+                  "failure_reason": summary["failure_reason"]},
+            ensure_ascii=False))
     elif not args.quiet:
         print(json.dumps({key: summary[key] for key in (
             "status", "failure_reason", "operation", "record_count",

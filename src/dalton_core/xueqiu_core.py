@@ -47,9 +47,16 @@ GET_POST_OPERATION = "get_post"
 HOT_RANK_OPERATION = "hot_rank"
 OPERATIONS = (SEARCH_POSTS_OPERATION, GET_POST_OPERATION, HOT_RANK_OPERATION)
 
-# The operations that cannot run without the host's Xueqiu cookie. The ranking
-# is absent on purpose: its fallback route needs no credential.
+# The operations that have no credential-free route at all. `hot_rank` is
+# absent because it has two routes, not because it is exempt: the cn-hk-findata
+# fallback needs no credential and the primary channel does. Which one a run
+# takes is decided at run time, so the *route* is what the child gates on --
+# see `xueqiu_cli.run`. Keying the exemption off the operation, as the first
+# version did, let a configured primary tool serve `hot_rank` through the
+# cookie with no slot check at all.
 CREDENTIALLED_OPERATIONS = (SEARCH_POSTS_OPERATION, GET_POST_OPERATION)
+# The operations that may reach a credential-free route, and only via that one.
+FALLBACK_ROUTE_OPERATIONS = (HOT_RANK_OPERATION,)
 
 KIND_BY_OPERATION = {
     SEARCH_POSTS_OPERATION: "xueqiu-search-posts",
@@ -157,6 +164,9 @@ def xueqiu_identity(operation: str) -> dict[str, Any]:
         "adapter_hash": xueqiu_adapter_hash(operation),
         "operation": operation,
         "allowed_operations": [operation],
+        # True when *every* route this operation has needs the cookie. An
+        # operation with a credential-free fallback answers False here and is
+        # still gated at run time on the route it actually took.
         "requires_credential_slot": operation in CREDENTIALLED_OPERATIONS,
         "credential_slot_refs": [CREDENTIAL_SLOT_REF],
         "input_schema_ref": contract["input_schema_ref"],
@@ -243,6 +253,7 @@ def build_xueqiu_governance_record(
 __all__ = [
     "CAPABILITY_BY_OPERATION",
     "CREDENTIALLED_OPERATIONS",
+    "FALLBACK_ROUTE_OPERATIONS",
     "CREDENTIAL_SLOT_REF",
     "GET_POST_OPERATION",
     "HOST_SLOT_NAME",

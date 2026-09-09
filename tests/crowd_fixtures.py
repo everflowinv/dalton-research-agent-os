@@ -8,7 +8,7 @@ construction, and the ones built here are made of the word "synthetic".
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -39,6 +39,12 @@ def credential_grant(
         "created_at": _wire_time(now - timedelta(minutes=1)),
         "expires_at": _wire_time(now + timedelta(hours=expires_in_hours)),
         "authority_ref": "credential-authority:synthetic",
+        # Open question for the owner, recorded in the S3 report: the
+        # envelope's `grant_kind` vocabulary is {mcp_managed, https_credential}
+        # and neither word describes a host tool. `mcp_managed` is used here
+        # because the live gate already requires that word for every
+        # non-public transport, but a `host_tool` grant kind would be honest
+        # and this is a placeholder until one exists.
         "grant_kind": "mcp_managed",
         "target_ref": target_ref,
         "connector_profile_ref": "connector-profile:synthetic",
@@ -107,26 +113,28 @@ def xreach_posts(count: int = 2, *, first_id: int = 100) -> dict[str, Any]:
     }
 
 
-def blind_page(*, unlocked: int = 1, locked: int = 1) -> bytes:
+def blind_page(*, unlocked: int = 1, locked: int = 1,
+               accented: bool = False) -> bytes:
     """A synthetic page in the shape the real one has: data in a flight payload."""
 
     rows: list[dict[str, Any]] = []
+    location = "Montréal · 北京" if accented else "Nowhere"
     for index in range(unlocked):
         rows.append({
             "id": f"r{index}",
-            "createdAt": f"2026-09-0{1 + index}T00:00:00Z",
+            "createdAt": f"{date(2026, 9, 1) + timedelta(days=index)}T00:00:00Z",
             "summary": "synthetic summary",
             "overall": 4.0, "career": 3.5, "balance": 3.0,
             "compensation": 4.5, "culture": 3.0, "management": 2.5,
             "pros": "synthetic pros text",
             "cons": "synthetic cons text",
             "jobgroup": "Engineering",
-            "memberLocation": "Nowhere",
+            "memberLocation": location,
         })
     for index in range(locked):
         rows.append({
             "id": f"l{index}",
-            "createdAt": f"2026-08-0{1 + index}T00:00:00Z",
+            "createdAt": f"{date(2026, 8, 1) + timedelta(days=index)}T00:00:00Z",
             "summary": "synthetic locked summary",
             "overall": 2.0, "career": 2.0, "balance": 2.0,
             "compensation": 2.0, "culture": 2.0, "management": 2.0,

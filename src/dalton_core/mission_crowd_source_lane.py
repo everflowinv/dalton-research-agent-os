@@ -15,13 +15,12 @@ grade there. `figure_worthy()` already answers False for a document kind it
 does not know, which is exactly the refusal wanted, and the tests below pin it
 so that adding one later has to be a decision.
 
-What the crowd layer does need is a word for the *claim index*, which ranks
-evidence by importance -- first-hand filing, then management's own words, then
-sell-side, then news. Crowd evidence sorts below all of those. That word is
-`CROWD_IMPORTANCE` here, and the one-line change the integrator makes is to
-map this module's `CROWD_GRADE` to it in the claim index's importance table.
-Until that line exists, nothing here can be sorted *above* anything, because
-nothing here is graded at all by the index.
+The claim index ranks evidence by importance -- filing, management statement,
+sell-side, news, other -- and crowd evidence is `other`, the bottom tier. That
+needs no line anywhere: the index reaches importance through the discovery
+spec and then the connector's source type, and the crowd is deliberately
+absent from both tables, so it falls through to the default. Adding an entry
+is what would raise it.
 
 **The hard rule, stated as code.** No quantitative Claim may rest on a crowd
 source alone. `admissible_as_sole_quantitative_source` answers False for the
@@ -61,9 +60,17 @@ CROWD_QUALIFIER = (
     "sentiment; not a figure and not a statement of fact about the company"
 )
 # Where this sorts in the claim index: below first-hand filings, below
-# management's own words, below sell-side, below news. The word itself is
-# owned here so that the index's table can point at it in one line.
-CROWD_IMPORTANCE = "background"
+# management's own words, below sell-side, below news.
+#
+# It is the index's own lowest tier rather than a new word, and that turns out
+# to need no integration line at all. `claim_index_tagging` reaches importance
+# two ways: the discovery spec that found the document, and failing that the
+# connector's source type. The crowd spec refs are deliberately absent from
+# `SPEC_IMPORTANCE`, and `social_search` / `social_enumeration` are absent from
+# `SOURCE_TYPE_IMPORTANCE`, so a crowd claim falls through both and lands on
+# the default -- which is this. Adding an entry anywhere would be what raised
+# it; leaving them out is what keeps it at the bottom.
+CROWD_IMPORTANCE = "other"
 
 # The document kinds these sources produce. They are deliberately absent from
 # `document_figure_grade.GRADE_BY_SPEC`: a kind with no grade there is a kind
@@ -85,6 +92,18 @@ LANE_GRANTS = frozenset({"observation", "source_discovery"})
 MAX_RECORDS_PER_RUN = 400
 MAX_FAILURE_DETAIL_CHARS = 500
 LEDGER_FILENAME = "crowd-observations.jsonl"
+# How many ticks a company sits out after a failure on one source.
+#
+# The first version never cleared the failure set, so one pass over five
+# companies on a Core whose grant had not been bound left every pair marked and
+# the lane silently idle for the life of the process -- reporting "idle", which
+# is the same word it uses when there is genuinely nothing to do. A cool-off is
+# what makes "we tried and it did not work" different from "we have stopped".
+#
+# Twelve ticks is roughly an hour at the controller's cadence: long enough that
+# a source which is down is not asked once a minute, short enough that a
+# credential bound at lunchtime is picked up in the afternoon.
+FAILURE_COOL_OFF_TICKS = 12
 
 
 class CrowdSourceLaneError(RuntimeError):
@@ -326,7 +345,13 @@ class MissionCrowdSourceLaneCoordinator:
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self._open: dict[str, tuple[str, str, str]] = {}
         self._cursor: dict[str, int] = {}
-        self._failed: dict[str, str] = {}
+        # (source|company) -> (reason, ticks remaining before it is retried).
+        self._failed: dict[str, tuple[str, int]] = {}
+        # What the lane was configured with last tick. A governance record that
+        # changed -- the owner approving one, most likely -- is a change to the
+        # thing that failed, so the cool-off is over immediately rather than in
+        # an hour.
+        self._configuration: str | None = None
 
     # -- gating ------------------------------------------------------------
 
@@ -420,7 +445,7 @@ class MissionCrowdSourceLaneCoordinator:
         summary = ticket.get("summary")
         if ticket.get("status") != "succeeded":
             reason = _failure_reason(summary) or f"lane run {ticket.get('status')}"
-            self._failed[f"{source}|{company_ref}"] = reason
+            self._hold(source, company_ref, reason)
             return {"source": source, "company_ref": company_ref,
                     "outcome": "failed", "failure_reason": reason}
         try:
@@ -433,7 +458,7 @@ class MissionCrowdSourceLaneCoordinator:
             recorded = self.ledger.record(entries)
         except (CrowdSourceLaneError, OSError, KeyError) as exc:
             reason = f"{type(exc).__name__}: {exc}"
-            self._failed[f"{source}|{company_ref}"] = reason
+            self._hold(source, company_ref, reason)
             return {"source": source, "company_ref": company_ref,
                     "outcome": "failed", "failure_reason": reason}
         return {
@@ -467,7 +492,7 @@ class MissionCrowdSourceLaneCoordinator:
                     "reason": f"{type(exc).__name__}: {exc}"}
         except LaneChildRejected as exc:
             reason = f"{type(exc).__name__}: {exc}"
-            self._failed[f"{source}|{company_ref}"] = reason
+            self._hold(source, company_ref, reason)
             return {"source": source, "status": "rejected",
                     "company_ref": company_ref, "reason": reason}
         self._open[source] = (ticket["id"], company_ref, operation)
@@ -476,12 +501,58 @@ class MissionCrowdSourceLaneCoordinator:
 
     # -- the tick ----------------------------------------------------------
 
+    def _hold(self, source: str, company_ref: str, reason: str) -> None:
+        """Sit this pair out for a while, rather than for ever."""
+
+        self._failed[f"{source}|{company_ref}"] = (reason, FAILURE_COOL_OFF_TICKS)
+
+    def _age_holds(self) -> None:
+        """One tick off every hold; a configuration change clears them all.
+
+        The configuration is the governance hashes the runners are carrying. If
+        one moved, the owner approved something or a record was replaced, and
+        whatever the last failure was it was about the old one.
+        """
+
+        configuration = self._configuration_digest()
+        if configuration != self._configuration:
+            self._configuration = configuration
+            self._failed.clear()
+            return
+        self._failed = {
+            key: (reason, remaining - 1)
+            for key, (reason, remaining) in self._failed.items()
+            if remaining > 1
+        }
+
+    def _configuration_digest(self) -> str:
+        parts: list[str] = []
+        for source in sorted(self.runners):
+            runner = self.runners[source]
+            paths = getattr(runner, "governance_paths", {}) or {}
+            for operation in sorted(paths):
+                try:
+                    governance = runner.load_governance(operation)
+                except Exception:  # noqa: BLE001 - unreadable is its own state
+                    parts.append(f"{source}:{operation}:unreadable")
+                    continue
+                parts.append(
+                    f"{source}:{operation}:{getattr(governance, 'content_hash', '')}"
+                )
+        return content_hash(parts)
+
+    def held(self) -> dict[str, str]:
+        """Which pairs are sitting out, and why. For the tick summary."""
+
+        return {key: reason for key, (reason, _ticks) in self._failed.items()}
+
     def dispatch_once(self) -> dict[str, Any]:
         """Settle what finished, then start at most one child per source."""
 
         gated = self._gate()
         if gated is not None:
             return {**gated, "settled": [], "sources": []}
+        self._age_holds()
         connected = self._connected_sources()
         settled = [item for item in
                    (self._settle(source) for source in sorted(self.runners))
@@ -493,6 +564,9 @@ class MissionCrowdSourceLaneCoordinator:
             "status": "launched" if launched else "idle",
             "settled": settled,
             "sources": sources,
+            # Named rather than counted, because "idle" and "everything is
+            # held" look identical from outside and are not the same thing.
+            "held": self.held(),
         }
 
 
@@ -635,16 +709,36 @@ def build_launcher(args: Any) -> Any | None:
     return launchers
 
 
+def approved_records(governance_dir: Path) -> list[str]:
+    """The records on disk that actually say ``approved``.
+
+    Presence is not approval. All seven of these ship ``proposed``, and the
+    installer copies them whether or not the owner has looked at them, so a
+    check for the file existing turns the lane on for records nobody has
+    agreed to -- every child then refuses, once a tick, forever. Read the
+    status.
+    """
+
+    found: list[str] = []
+    for names in GOVERNANCE_FILES.values():
+        for name in names.values():
+            path = governance_dir / name
+            try:
+                wire = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(wire, Mapping) and wire.get("status") == "approved":
+                found.append(name)
+    return found
+
+
 def argv_fragment(context: Any) -> list[str]:
-    # Enabled by the map and at least one approved record being on disk, and
+    # Enabled by the map and at least one *approved* record being on disk, and
     # off on a Core with neither -- which is every Core until the owner
     # approves, because all seven records ship proposed.
     source_map = context.state / "phase9" / CROWD_SOURCE_MAP
     governance = context.state / "connector-governance"
-    approved = [name for names in GOVERNANCE_FILES.values()
-                for name in names.values()
-                if (governance / name).is_file()]
-    if not source_map.is_file() or not approved:
+    if not source_map.is_file() or not approved_records(governance):
         return []
     return ["--crowd-source-map", str(source_map),
             "--crowd-source-governance-dir", str(governance)]
@@ -654,7 +748,9 @@ LANE = register_lane(LaneSpec(
     operation="dispatch_mission_crowd_sources",
     # Last in the tick. The crowd is the least of the evidence, and a tick that
     # runs out of time should run out of it here rather than before a filing.
-    order=120,
+    # 120 belongs to the human-feeds lane; the gap is deliberate room between
+    # lanes that land in the same week.
+    order=140,
     driver_key="mission_crowd_sources",
     handler=dispatch,
     init_kwarg=LAUNCHER_KWARG,
@@ -686,7 +782,9 @@ __all__ = [
     "MAX_RECORDS_PER_RUN",
     "SPEC_REF_BY_SOURCE",
     "CrowdObservationLedger",
+    "approved_records",
     "CrowdSourceLaneError",
+    "FAILURE_COOL_OFF_TICKS",
     "MissionCrowdSourceLaneCoordinator",
     "admissible_as_sole_quantitative_source",
     "crowd_qualify",

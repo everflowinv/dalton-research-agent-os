@@ -153,12 +153,40 @@ class XueqiuChildTests(ChildTestCase):
         self.assertIn("does not allow search_posts",
                       self.summary()["failure_reason"])
 
-    def test_the_ranking_needs_no_credential_at_all(self):
+    def ranking(self) -> dict[str, Any]:
+        return {"ranking": [{"symbol": "SH600519", "name": "n", "rank": 1,
+                             "value": "1.5"}]}
+
+    def test_the_ranking_needs_no_credential_on_its_fallback_route(self):
         code = self.run_child(
             operation="hot_rank",
             governance=self.governance("xueqiu-hot-rank"),
-            fixture={"ranking": [{"symbol": "SH600519", "name": "n", "rank": 1,
-                                  "value": "1.5"}]})
+            fixture=self.ranking(),
+            extra=("--fallback-tool", "/nowhere/cn-hk-findata"))
+        self.assertEqual(code, 0, self.summary().get("failure_reason"))
+        self.assertEqual(self.summary()["observation"]["provenance_label"],
+                         "xueqiu_hot_stock_rank_fallback")
+
+    def test_the_ranking_does_need_the_cookie_on_the_primary_route(self):
+        # The route decides, not the operation. Configured with a primary tool
+        # -- the normal configuration, because the other two operations need
+        # one -- the ranking goes through the host's Xueqiu channel, and that
+        # needs the cookie like everything else on that channel does.
+        code = self.run_child(
+            operation="hot_rank",
+            governance=self.governance("xueqiu-hot-rank"),
+            fixture=self.ranking())
+        self.assertEqual(code, 1)
+        reason = self.summary()["failure_reason"]
+        self.assertIn("CrowdCredentialSlotUnbound", reason)
+        self.assertIn(CREDENTIAL_SLOT_REF, reason)
+
+    def test_the_ranking_runs_on_the_primary_route_with_a_grant(self):
+        code = self.run_child(
+            operation="hot_rank",
+            governance=self.governance("xueqiu-hot-rank"),
+            grant=self.grant(operations=("hot_rank",)),
+            fixture=self.ranking())
         self.assertEqual(code, 0, self.summary().get("failure_reason"))
         self.assertEqual(self.summary()["observation"]["provenance_label"],
                          "xueqiu_agent_reach_channel")
@@ -305,11 +333,15 @@ class EmployeeReviewChildTests(ChildTestCase):
         locked = [row for row in observation["reviews"] if row["body_locked"]]
         self.assertEqual(len(locked), 2)
         for row in locked:
+            # Every prose field goes, including the one-line summary, which
+            # Blind substitutes as readily as the rest.
             self.assertIsNone(row["pros"])
             self.assertIsNone(row["cons"])
+            self.assertIsNone(row["summary"])
+            # What stays is what is real on a locked row.
             self.assertEqual(row["ratings"]["overall"], "2.0")
             self.assertTrue(row["created_at"])
-            self.assertTrue(row["summary"])
+            self.assertTrue(row["jobgroup"])
 
     def test_no_placeholder_text_reaches_the_observation(self):
         self.assertEqual(self.run_child(), 0)
@@ -334,6 +366,32 @@ class EmployeeReviewChildTests(ChildTestCase):
     def test_an_employer_slug_cannot_smuggle_a_path(self):
         with self.assertRaises(employee_reviews_cli.EmployeeReviewsRunError):
             employee_reviews_cli.review_page_url("../../etc", 1)
+
+    def test_a_non_ascii_review_survives_the_payload_decode(self):
+        """`unicode_escape` decodes through latin-1 and mangles silently.
+
+        An accented name or a CJK location came back as mojibake with nothing
+        raised, which is the worst failure a parser has: the review is still
+        there, still counted, and no longer says what it said.
+        """
+
+        self.assertEqual(self.run_child(
+            page=blind_page(unlocked=1, locked=0, accented=True)), 0,
+            self.summary().get("failure_reason"))
+        location = self.summary()["observation"]["reviews"][0]["location"]
+        self.assertEqual(location, "Montréal · 北京")
+
+    def test_rows_past_the_first_page_are_locked_by_position(self):
+        """Position is the half that survives Blind changing its filler."""
+
+        self.assertEqual(self.run_child(
+            page=blind_page(unlocked=40, locked=0)), 0,
+            self.summary().get("failure_reason"))
+        reviews = self.summary()["observation"]["reviews"]
+        self.assertFalse(reviews[0]["body_locked"])
+        self.assertTrue(reviews[30]["body_locked"])
+        self.assertIsNone(reviews[30]["pros"])
+        self.assertTrue(reviews[30]["ratings"]["overall"])
 
     def test_the_library_total_travels_with_the_sample(self):
         self.assertEqual(self.run_child(), 0)
@@ -374,8 +432,22 @@ class GrantEnvelopeTests(ChildTestCase):
                           operation="search_posts", target_ref=XUEQIU_TARGET)
 
     def test_credential_shaped_keys_are_stripped_from_a_tool_response(self):
-        cleaned = redacted({"posts": [], "cookie": "x", "auth_token": "y"})
+        cleaned = redacted({"posts": [], "cookie": "x", "auth_token": "y",
+                            "Set-Cookie": "z", "CT0": "w"})
         self.assertEqual(set(cleaned), {"posts"})
+
+    def test_a_single_post_keeps_its_author(self):
+        """`get_post` returns the post at the top level, and this ran over it.
+
+        The first version matched substrings, and "auth" is a substring of
+        "author" and "author_id". A single post came back anonymous with
+        nothing raised -- a filter that quietly removes data is worse than no
+        filter at all.
+        """
+
+        post = {"id": "1", "author": "someone", "author_id": "42",
+                "text": "a post", "created_at": "2026-09-01 10:00:00"}
+        self.assertEqual(redacted(post), post)
 
 
 class ArgumentTests(unittest.TestCase):

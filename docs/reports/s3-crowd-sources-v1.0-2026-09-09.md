@@ -1,9 +1,11 @@
 # S 线 S3：大众源三条连接器（雪球、X、员工评价）v1.0
 
 日期：2026-09-09
-分支：`s3-crowd-sources`（基于 main `88c040b`，已 cherry-pick `99f6a9b`、已 merge main `888a814`），未 push
+分支：`s3-crowd-sources`（基于 main `88c040b`，已 merge main `61f4255`），未 push
 执行：Opus 5 subagent，worktree `~/Projects/dalton-s3-crowd-sources-worktree`
 验收：见第 9 节（全量测试原文）
+修订：v1.0 交付后按 code review 修了 B1 / B2 / S1 / S2 / S4 与四条 nit，`CROWD_IMPORTANCE`
+按合并进 main 的 claim index 改口径，lane order 120 → 140（120 归 S1）。见第 11 节。
 
 ---
 
@@ -73,7 +75,7 @@
 
 | 逻辑槽 ref | host 自己的名字 | 谁需要 |
 | --- | --- | --- |
-| `credential-slot:xueqiu-cookie` | `xueqiu_cookie`（agent-reach 配置里） | `search_posts`、`get_post`（`hot_rank` **不需要**，它的 fallback 路线免凭证） |
+| `credential-slot:xueqiu-cookie` | `xueqiu_cookie`（agent-reach 配置里） | `search_posts`、`get_post` **总是**；`hot_rank` **看走的哪条路**（见下） |
 | `credential-slot:x-auth-token` / `credential-slot:x-ct0` | `TWITTER_AUTH_TOKEN` / `TWITTER_CT0`（xreach 自己的 store） | X 的全部三个 operation |
 | （无） | — | Blind，auth boundary 就是 `none` |
 
@@ -83,11 +85,20 @@
 检查槽是否被覆盖、operation 是否被允许、target 是否一致、是否过期，然后**在 spawn 之前、取一个字节之前**
 按名字拒绝。拒绝语句本身就是接口：coordinator 读它，人读它就知道该去绑哪一把。
 
+**决定要不要凭证的是路线，不是 operation。** 第一版把豁免挂在 operation 上：`hot_rank` 被列为免凭证，
+因为它的 fallback 免凭证。可是 `hot_rank` 有两条路，只有一条是 fallback。配了主 tool 时
+（这就是正常配置，因为另外两个 operation 必须有主 tool），`hot_rank` 走的是 host 的雪球 channel，
+那条路要 cookie，而当时**既不查槽也不查到期**。现在 child 先解析路线、再按解析出的
+`provenance_label` 决定要不要 `require_slots`：`xueqiu_agent_reach_channel` 要，
+`xueqiu_hot_stock_rank_fallback` 不要。两条路各有一个测试。
+
 新模块 `crowd_credential_grants.py` 是计划外的第七个文件。三个 child 都要这段逻辑，塞进任何一个 core 里
 都会让另外两个 import 它。它只新增、不改动别人的文件。
 
-`redacted()` 是保险丝：host tool 的响应在进 wire 之前先剥掉任何 cookie / token 形状的顶层键。
-这些工具现在不回显 cookie，但一个开始回显的工具不该能借这条 lane 把它写进 spool。
+`redacted()` 是保险丝：host tool 的响应在进 wire 之前先剥掉 cookie / token 形状的顶层键。
+**按整个键比对，不按子串。** 第一版按子串，而 `auth` 是 `author` 和 `author_id` 的子串——
+`get_post` 返回的单帖顶层就是帖子本身，于是作者被静默删掉了。一个会悄悄删数据的过滤器
+比没有过滤器更坏：什么都没报错，帖子从此匿名。现在是一份显式的 `CREDENTIAL_SHAPED_KEYS` 集合。
 
 ## 5. child 的顺序与冻结产物
 
@@ -101,7 +112,8 @@
 4. **合同最后**——归一化后的 wire 过 `_schema_matches` 冻结输出 schema，描述不了的观测直接拒绝。
 
 失败不抛出，写 `summary.json`（`status: failed` + `failure_reason: "TypeName: message"`），退出码 1。
-`--emit-wire` 会把校验过的 wire 作为**一份 JSON 打到 stdout**——这是给 host-tool runner 用的口子（见第 7 节）。
+`--emit-wire` 会把校验过的 wire 作为**一份 JSON 打到 stdout**——这是给 host-tool runner 用的口子（见 7.2）；
+**拒绝时也打一份** `{"status":"failed","failure_reason":...}`，因为只给退出码等于不给理由。
 
 **smoke 时发现的一个真 bug**：`lane_child_launcher.write_owner_only` 不建父目录（`sec_financials_cli`
 自带的那份会建）。launcher 路径下 ticket 目录总是先存在，所以从没被踩到；手工用 `--summary-dir`
@@ -131,32 +143,70 @@
 
 ## 7. 集成时要接的线
 
-1. **host_tool runner（S1 在做）**。仓库今天没有 host_tool runner，所以我的 child 自己 `subprocess`
-   调用 host tool。接口已经按 runner 的口径留好了：child 认 `--emit-wire`（一份 JSON 打 stdout）、
-   summary.json 写在 ticket 目录、原始 stdout 已经进 spool、输出已经过冻结 schema。
-   coordinator 侧的接缝叫 `runners`（构造参数），它只要求每个条目有
-   `SOURCE_REF` / `start(operation=..., actor_ref=..., **params)` / `status(ticket_ref)` 三样；
-   今天传的是 `crowd_source_launcher` 里的 launcher，测试里传的是 fake。
-   **S1 的 runner 落地后，换掉的是 `CrowdSourceLaunchers` 里装的东西，coordinator 一行不用改。**
-   我没有 cherry-pick S1 的分支（交付时它还没落）。
-2. **claim index 的一行**（Agent B）：`mission_crowd_source_lane.CROWD_GRADE`
-   （`"crowd-anonymous-post"`）映射到最低 importance，本模块给的词是 `CROWD_IMPORTANCE = "background"`。
-   在这行存在之前，claim index 根本不认识这个 grade，所以它排不到任何东西之上——失败方向是安全的。
-   **`document_figure_grade.GRADE_BY_SPEC` 不要加条目**：那里没有条目正是「不能取数」的实现方式。
-3. **install.sh 种子**：七条治理记录拷进 `<state>/connector-governance/`，映射文件拷进 `<state>/phase9/`。
+### 7.1 配额今天只是声明，不是执行
+
+**说清楚：我的 child 绕过 `ConnectorStore` 的 rate policy。** 七条日配额进了
+`connector_quota_policy._DAILY_QUOTAS`，是治理输入；但 child 是自己 `subprocess` 调 host tool 的，
+中间没有 reservation、没有 physical attempt、没有 settlement，所以**今天没有任何东西在数这 50 次**。
+真正的边界目前是三条更粗的东西：launcher 一次只跑一个 child、coordinator 每源每 tick 只起一个、
+以及 host tool 自己的限流。这不是「差不多等价」，是「还没接」。
+
+接上它的是 S1 的 `host_tool_runner`（分支 `s1-human-feeds`，`eeeb4b1`，我读了但**没有合并**）。
+它 `governed_daily_quota(connector_slug, operation)` + `apply_governed_quota_to_limits(...)`
+注册 rate policy，`connector_slug` 默认取 `template_key`——我的三个 template key
+（`xueqiu-posts` / `x-xreach-crowd` / `employee-reviews`）与我的配额键**逐字相同**，所以接上去就生效，
+不用改配额表。
+
+### 7.2 接到 S1 的 `HostToolRunner` 要做什么
+
+读过 `src/dalton_core/host_tool_runner.py` 之后，我这边要动的是这些：
+
+1. **stdout 已经对上了。** runner 把「child 只在 stdout 打一份闭合 wire」当契约，我的 `--emit-wire`
+   就是这个。**一处要注意**：拒绝时我现在也打一份 `{"status":"failed","failure_reason":...}`
+   （原来什么都不打，runner 只能拿到退出码）。它和 wire 靠字段区分（wire 有 `source_record_refs`），
+   runner 会在 schema 校验处拒掉它，而字节已经安全落 spool，退出码非零也已经进 `note`。
+2. **command builder 形状**：runner 要 `command(parameters, output_dir) -> argv`。
+   我的 `CrowdSourceLauncher._command(ticket_dir=..., operation=..., params=...)` 只差一个闭包，
+   每条源一行。
+3. **凭证模型不一样，要 owner 知道。** 我的 child 拿 `CredentialGrantEnvelope`（只有 ref 与到期，
+   看不见值）；runner 是**由 writer 解析槽名、把值作为环境变量注进 child**（child 拿不到
+   `os.environ`，只拿到 profile 声明的那几个槽）。两者不冲突：我的 grant 检查是本地那道便宜的闸，
+   runner 的槽解析是让工具真的能跑。我的 child 用 `subprocess.run` 不改 env，所以注进来的槽
+   会继续传给 host tool；`agent-reach` / `xreach` 今天读的是自己的配置文件而不是环境变量，
+   两条路都通。
+4. **重复的工作是幂等的，不用拆。** runner 自己也做批准与哈希校验、也 spool、也校 schema；
+   我的 child 同样做。spool 是内容寻址的（同 hash 命中已存在对象），所以不会写两份；
+   批准检查便宜；child 里的那份要留着，因为 child 是可以被人手工跑的。
+5. **identity 直接可用**：`xueqiu_identity(op)` / `xreach_identity(op)` / `employee_reviews_identity()`
+   返回的就是 runner 要的 `identity`（`capability_id` / `source_hash` / `schema_hash` /
+   `adapter_ref` / `operation`）。
+6. **coordinator 一行不用改。** 接缝叫 `runners`（构造参数），只要求每个条目有
+   `SOURCE_REF` / `start(operation=..., actor_ref=..., **params)` / `status(ticket_ref)` 三样。
+   换掉的是 `CrowdSourceLaunchers` 里装的东西。
+
+### 7.3 其余
+
+1. **claim index：不需要加任何一行。** `claim_index_tagging` 先按 discovery spec 取 importance，
+   取不到再按 connector 的 `source_type` 取，都取不到落到默认 `other`——而 `other` 就是
+   `IMPORTANCE_TIERS` 的最后一档。三个 crowd spec ref 不在 `SPEC_IMPORTANCE` 里，
+   `social_search` / `social_enumeration` 不在 `SOURCE_TYPE_IMPORTANCE` 里，所以大众源**天然排在最底**。
+   `CROWD_IMPORTANCE` 已改为 `"other"`（原来写的 `"background"` 不在这套词表里）。
+   **往这两张表里加条目才是把它抬上去**，所以测试断言的是「这些不在表里」而不是「在表里」。
+   `document_figure_grade.GRADE_BY_SPEC` 同理，不要加。
+2. **install.sh 种子**：七条治理记录拷进 `<state>/connector-governance/`，映射文件拷进 `<state>/phase9/`。
    还要给 writer 传 host tool 路径：`--crowd-source-xueqiu-tool`、`--crowd-source-xueqiu-fallback-tool`、
    `--crowd-source-xreach-tool`、`--crowd-source-credential-grant`。
    **雪球那条需要一个 shim**：host 侧的读取脚本是一个 `.py`，我的 argv 契约是
    `<tool> search <query> --pages N --json` / `<tool> post <id> --json` / `<tool> hot-rank --limit N --stock-type T --json`，
    前两个正是 host 现有脚本的子命令，`hot-rank` 需要 shim 补（或者只配 `--fallback-tool`）。
    `xreach` 不需要 shim，`--json tweets|search|thread` 就是它自己的子命令。
-4. **mission 新版本**（owner 发）：
+3. **mission 新版本**（owner 发）：
    - `autonomy.may_write` 要加 **`source_discovery`**（现在只有 `observation`，lane 会 `gated`）；
    - `source_plan` 要新增三条并置 `connected`：`source:xueqiu`、`source:x`、`source:blind`
      （现在这三个 source ref 在 mission 里根本不存在，lane 会对三条都报 `held`）；
    - 角色描述建议写明「只作趋势与情绪，不作任何定量 Claim 的来源」。
-5. **cockpit**：没做。要展示的话，最小有用面是「每家公司近 30 天的 Blind 六维评分序列 + 被锁行数」。
-6. **owner 批准**：七条 `proposed` 记录，`connector_governance_cli approve` 逐条批。
+4. **cockpit**：没做。要展示的话，最小有用面是「每家公司近 30 天的 Blind 六维评分序列 + 被锁行数」。
+5. **owner 批准**：七条 `proposed` 记录，`connector_governance_cli approve` 逐条批。
    批准是按 operation 的：批了雪球搜帖不等于批了读帖。
 
 ## 8. smoke（只读，各一次，临时 state 目录）
@@ -175,11 +225,11 @@
 全量：`PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -t .`
 
 ```
-Ran 2172 tests in 290.014s
+Ran 2729 tests in 343.991s
 OK (skipped=1)
 ```
 
-（基线 Wave 0 合并后为 2,080；本片新增 92 项。这次运行在第 8 节的 `items` 修正之后。
+（基线 main `61f4255` 为 2,627；本片新增 102 项。
 另外 `PYTHONPATH=src .venv/bin/python scripts/build_connector_inventory.py --check` 输出
 `packaged connector inventory matches the frozen definitions`。）
 
@@ -189,8 +239,13 @@ OK (skipped=1)
 去重（同一帖两次、重启后仍认得）、body_locked（评分留、正文置 null、占位文本不进 observation）、
 grade 映射（三个 crowd spec ref 在 `GRADE_BY_SPEC` 里都不存在、`require_grade` 抛错、
 `admissible_as_sole_quantitative_source(CROWD_GRADE)` 为 False）、
-lane 门控（缺 grant / 缺 mission / 源未 connected / 每源每 tick 一个 child / 失败后换公司）、
-lane 登记（在 tick 末位、空 state 目录下 argv 为空）。
+lane 门控（缺 grant / 缺 mission / 源未 connected / 每源每 tick 一个 child / 失败后换公司 /
+冷却到期后重试 / 治理哈希一变立刻清空 / tick 报 `held`）、
+lane 登记（在 tick 末位、空 state 目录下 argv 为空、**`proposed` 记录不开 lane**）、
+路线凭证（fallback 路免凭证、主路缺 grant 被拒、主路带 grant 通过）、
+整键脱敏（单帖顶层的 `author` / `author_id` 原样留下）、
+非 ASCII 评论（重音与中文原样通过 payload 反转义）、
+按位置锁体（首页之后的行 `body_locked` 为真、评分仍在）。
 
 ## 10. 开放问题
 
@@ -208,3 +263,23 @@ lane 登记（在 tick 末位、空 state 目录下 argv 为空）。
    加 dispatch 表。接到真正的证据写入口之后应该整个删掉。
 6. **`hot_rank` 现在没有被 coordinator 调度**——lane 每 tick 每家公司只问「关于这家公司在说什么」，
    热榜是全市场的，不属于任何一家公司。它的 child 与治理记录都建好了，等一个市场层的调用方。
+
+
+## 11. code review 之后改了什么（v1.0 → 交付版）
+
+| 项 | 改了什么 |
+| --- | --- |
+| **B1** | worktree 的 `.venv` 是指向主 checkout 的**符号链接**，而 `.gitignore` 里写的是 `.venv/`——带斜杠的模式只匹配目录，所以这条机器相关的路径被提交了。`git rm --cached .venv`，并补上不带斜杠的一行。 |
+| **B2** | `hot_rank` 的凭证豁免原来挂在 operation 上，实际决定要不要 cookie 的是**路线**。改成先解析路线、再按 `provenance_label` 判定；两条路各一个测试（fallback 路免凭证并通过、主路缺 grant 被按槽名拒绝、主路带 grant 通过）。 |
+| **S1** | `redacted()` 改为整键比对（`CREDENTIAL_SHAPED_KEYS`），并加了一个直接喂 `get_post` 顶层帖子形状的测试，断言 `author` / `author_id` 原样留下。 |
+| **S2** | `argv_fragment` 原来只看文件在不在，于是**对 `proposed` 记录也开 lane**；现在读 `status == "approved"`。`_failed` 原来永不清空，一轮下来 lane 就永远 `idle` 了；现在是 `FAILURE_COOL_OFF_TICKS = 12` 的冷却，且**治理哈希一变就立刻清空**（owner 批准了就是换了个记录）。tick 结果新增 `held` 字段，因为「闲着」和「全被扣住」从外面看是同一个词。 |
+| **S3** | 见 7.1 / 7.2：配额今天只是声明，接 S1 的 `HostToolRunner` 才会真的计数；接线清单已写。 |
+| **S4** | 锁体检测原来只看 `pros`，且无条件保留 `summary`。现在 (a) `pros` / `cons` / `summary` **任一**命中占位文本即算锁，(b) **超过首页（`PAGE_SIZE`）按位置算锁**——这半条在 Blind 换 lorem ipsum 文案之后仍然成立，(c) 锁行的 `summary` 也置 null。 |
+| nit | `--emit-wire` 拒绝时也打一份带理由的 JSON；Blind 的 16 MB 上限改为**整次读的总预算**而不是每页各 16 MB；flight payload 的反转义从 `unicode_escape`（经 latin-1，静默糟蹋非 ASCII）改成 `json.loads(f'"{chunk}"')`，并加了一个带重音与中文的 fixture 测试；`credential_grant()` fixture 的 `grant_kind` 加了注释，作为下面的 owner 问题。 |
+| 合并 | `tests/test_lane_registry.py` 上的改动**整个撤回**——main 把那些断言改成了子集检查，并写明「P14-0 之后新增的 lane 不该出现在这些字面量里」，所以我的 lane 只在自己模块的测试里钉。`tests/test_connector_quota_policy.py` 按合并后的排序重建了字面量。 |
+
+**新的 owner 问题**：`CredentialGrantEnvelope.grant_kind` 的词表是
+`{mcp_managed, https_credential}`，**没有一个词描述 host tool**。我暂时用 `mcp_managed`
+（live gate 对所有非公开 transport 都要求这个词），但这是个占位。要么加一个 `host_tool` grant kind，
+要么明确 `mcp_managed` 就是「host 拥有的一切」的意思——两者都要改 `credential_authority.py`，
+不在我的范围内。

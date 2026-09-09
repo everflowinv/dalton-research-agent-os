@@ -231,8 +231,32 @@ class GradeTests(unittest.TestCase):
         self.assertTrue(
             admissible_as_sole_quantitative_source("company-filed-document"))
 
-    def test_the_crowd_importance_is_the_lowest_word_this_lane_offers(self):
-        self.assertEqual(CROWD_IMPORTANCE, "background")
+    def test_the_crowd_importance_is_the_claim_index_bottom_tier(self):
+        from dalton_core.claim_index_authority import IMPORTANCE_TIERS
+
+        self.assertEqual(CROWD_IMPORTANCE, IMPORTANCE_TIERS[-1])
+
+    def test_the_index_sorts_the_crowd_last_without_any_entry_being_added(self):
+        """The bottom is where an unlisted source already lands.
+
+        `claim_index_tagging` reaches importance through the discovery spec and
+        then the connector's source type. The crowd is absent from both tables
+        on purpose: absent means `other`, and `other` is the bottom. Adding an
+        entry anywhere is what would raise it, so the tables are asserted empty
+        of these rather than asserted to contain something.
+        """
+
+        from dalton_core.claim_index_tagging import (
+            SOURCE_TYPE_IMPORTANCE,
+            SPEC_IMPORTANCE,
+        )
+
+        for spec_ref in CROWD_SPEC_REFS:
+            self.assertNotIn(spec_ref, SPEC_IMPORTANCE)
+        for source_type in ("social_search", "social_enumeration"):
+            self.assertNotIn(source_type, SOURCE_TYPE_IMPORTANCE)
+            self.assertEqual(
+                SOURCE_TYPE_IMPORTANCE.get(source_type, "other"), CROWD_IMPORTANCE)
 
     def test_a_crowd_statement_says_what_it_is(self):
         qualified = crowd_qualify("sentiment turned negative in March")

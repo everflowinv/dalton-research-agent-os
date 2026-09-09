@@ -382,7 +382,16 @@ def main(argv: list[str] | None = None) -> int:
     # The summary is written either way, because a refusal has no wire and
     # still has a reason.
     if args.emit_wire:
-        print(json.dumps(summary["observation"], ensure_ascii=False))
+        # A refusal has no wire and still has a reason. Printing nothing would
+        # leave a runner reading stdout with an exit code and no sentence, and
+        # the sentence is the part a person needs. The refusal document is
+        # distinguishable from a wire by construction: a wire has
+        # `source_record_refs`, this has `status` and `failure_reason`.
+        print(json.dumps(
+            summary["observation"] if summary["status"] == "succeeded"
+            else {"schema_version": SUMMARY_SCHEMA_VERSION, "status": "failed",
+                  "failure_reason": summary["failure_reason"]},
+            ensure_ascii=False))
     elif not args.quiet:
         print(json.dumps({key: summary[key] for key in (
             "status", "failure_reason", "operation", "record_count",

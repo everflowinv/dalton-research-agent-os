@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime
-from typing import Any
+from typing import Any, Mapping
 
 from .connector_inventory import load_packaged_connector_inventory
 from .store import content_hash
@@ -152,17 +152,44 @@ def employee_reviews_fixture_hash() -> str:
     return template["fixture_manifest_hash"]
 
 
-def body_locked(pros: Any) -> bool:
+def filler(text: Any) -> bool:
+    """Whether one prose field is the site's placeholder rather than writing."""
+
+    if not isinstance(text, str):
+        return False
+    return text.strip().lower().startswith(LOCKED_BODY_PREFIX)
+
+
+def body_locked(row: Any, *, position: int | None = None,
+                page_size: int = 30) -> bool:
     """Whether Blind substituted this row's prose.
 
-    Only the prose is substituted. The ratings and the date on the same row are
-    real, which is why this is a flag on the row rather than a reason to drop
-    it.
+    Two tests, because one is not enough:
+
+    * **Any prose field.** The first version looked only at ``pros``. Blind
+      substitutes the summary and the cons too, and a row whose ``pros``
+      happened to survive would have carried a placeholder one-line summary
+      into a deliverable as if somebody had written it.
+    * **Position.** Blind releases prose for its newest page only, so anything
+      past the first page is locked whether or not the filler text is a string
+      this code recognises. That is the half that survives Blind changing its
+      lorem ipsum, which it is free to do at any time.
+
+    Only the prose is substituted. The ratings, the job group, the location and
+    the date on the same row are real, which is why this is a flag on the row
+    rather than a reason to drop it.
+
+    Accepts a row mapping; a bare string is treated as one prose field, which
+    is what the earlier call sites passed.
     """
 
-    if not isinstance(pros, str):
+    if position is not None and position >= page_size:
+        return True
+    if row is None or isinstance(row, str):
+        return filler(row)
+    if not isinstance(row, Mapping):
         return False
-    return pros.strip().lower().startswith(LOCKED_BODY_PREFIX)
+    return any(filler(row.get(field)) for field in ("pros", "cons", "summary"))
 
 
 def _wire_time(value: datetime) -> str:
@@ -221,6 +248,7 @@ __all__ = [
     "SIDE_EFFECT",
     "TEMPLATE_KEY",
     "body_locked",
+    "filler",
     "build_employee_reviews_governance_record",
     "employee_reviews_adapter_hash",
     "employee_reviews_contract",

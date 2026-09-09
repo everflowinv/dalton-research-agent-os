@@ -422,6 +422,45 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(statuses["x"], "rejected")
         self.assertEqual(statuses["xueqiu"], "launched")
 
+    def test_a_held_company_is_retried_after_the_cool_off(self):
+        """A failure is a pause, not a verdict.
+
+        The first version never cleared the failure set, so one pass over five
+        companies on a Core with no credential bound left the lane reporting
+        `idle` for the life of the process -- the same word it uses when there
+        is genuinely nothing to do.
+        """
+
+        from dalton_core.mission_crowd_source_lane import FAILURE_COOL_OFF_TICKS
+
+        coordinator = self.coordinator(mission())
+        self.launchers["xueqiu"].reject = "the record is not approved"
+        for _ in range(len(self.source_map["companies"])):
+            coordinator.dispatch_once()
+        self.assertEqual(len(coordinator.held()), 5)
+        self.launchers["xueqiu"].reject = None
+        for _ in range(FAILURE_COOL_OFF_TICKS):
+            coordinator.dispatch_once()
+        self.assertEqual(coordinator.held(), {})
+        self.assertTrue(self.launchers["xueqiu"].started)
+
+    def test_a_tick_says_what_is_held_rather_than_only_that_it_is_idle(self):
+        coordinator = self.coordinator(mission())
+        self.launchers["xueqiu"].reject = "the record is not approved"
+        result = coordinator.dispatch_once()
+        self.assertTrue(any(key.startswith("xueqiu|") for key in result["held"]))
+
+    def test_an_approval_clears_the_holds_immediately(self):
+        coordinator = self.coordinator(mission())
+        self.launchers["xueqiu"].reject = "the record is not approved"
+        coordinator.dispatch_once()
+        self.assertTrue(coordinator.held())
+        # A record whose hash moved is a different record; whatever the last
+        # failure was, it was about the old one.
+        coordinator._configuration = "something else entirely"
+        coordinator.dispatch_once()
+        self.assertNotIn("xueqiu|company:sec-cik:0001467373", coordinator.held())
+
     def test_each_source_asks_for_the_thing_the_map_gave_it(self):
         self.coordinator(mission()).dispatch_once()
         self.assertEqual(self.launchers["xueqiu"].started[0]["operation"],
@@ -461,21 +500,38 @@ class LaneRegistrationTests(unittest.TestCase):
             context = type("Context", (), {"state": Path(temp)})()
             self.assertEqual(argv_fragment(context), [])
 
-    def test_an_approved_record_and_a_map_turn_it_on(self):
-        from dalton_core.mission_crowd_source_lane import (
-            CROWD_SOURCE_MAP,
-            argv_fragment,
-        )
+    def seeded(self, temp: str, *, status: str) -> Any:
+        from dalton_core.connector_governance import build_governance_record
+        from dalton_core.mission_crowd_source_lane import CROWD_SOURCE_MAP
+
+        state = Path(temp)
+        (state / "phase9").mkdir()
+        (state / "phase9" / CROWD_SOURCE_MAP).write_text("{}", encoding="utf-8")
+        (state / "connector-governance").mkdir()
+        record = build_governance_record("employee-reviews-blind",
+                                         approved_by="human:tester", status=status)
+        (state / "connector-governance" / "employee-reviews-blind-v1.json").write_text(
+            json.dumps(record, sort_keys=True), encoding="utf-8")
+        return type("Context", (), {"state": state})()
+
+    def test_a_proposed_record_on_disk_does_not_turn_the_lane_on(self):
+        """The installer copies the records; the owner approves them.
+
+        A check for the file existing turns the lane on for records nobody has
+        agreed to, and then every child refuses once a tick forever.
+        """
+
+        from dalton_core.mission_crowd_source_lane import argv_fragment
 
         with TemporaryDirectory() as temp:
-            state = Path(temp)
-            (state / "phase9").mkdir()
-            (state / "phase9" / CROWD_SOURCE_MAP).write_text("{}", encoding="utf-8")
-            (state / "connector-governance").mkdir()
-            (state / "connector-governance"
-             / "employee-reviews-blind-v1.json").write_text("{}", encoding="utf-8")
-            context = type("Context", (), {"state": state})()
-            fragment = argv_fragment(context)
+            self.assertEqual(
+                argv_fragment(self.seeded(temp, status="proposed")), [])
+
+    def test_an_approved_record_and_a_map_turn_it_on(self):
+        from dalton_core.mission_crowd_source_lane import argv_fragment
+
+        with TemporaryDirectory() as temp:
+            fragment = argv_fragment(self.seeded(temp, status="approved"))
             self.assertIn("--crowd-source-map", fragment)
 
     def test_a_writer_without_the_lane_says_so_rather_than_crashing(self):

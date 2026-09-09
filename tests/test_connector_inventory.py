@@ -553,8 +553,9 @@ class ConnectorInventoryTests(unittest.TestCase):
             set(profiles),
             {
                 "cninfo", "sec", "sec-financials", "roic-transcript",
-                "alphaengine", "x-xreach", "x-x-search", "reddit-last30days",
-                "guidepoint", "gemini-web-search", "web-fetch", "xueqiu",
+                "yfinance", "alphaengine", "x-xreach", "x-x-search",
+                "reddit-last30days", "guidepoint", "gemini-web-search",
+                "web-fetch", "xueqiu",
                 # S3: the crowd layer. Each is a new connector rather than a
                 # widened shadow template, so the 2026-08-14 hashes the owner
                 # has seen do not move.
@@ -624,8 +625,8 @@ class ConnectorInventoryTests(unittest.TestCase):
         # S3: `employee-reviews` joins the public set. Blind is plain HTTPS to
         # one host with no credential anywhere, so it carries a host allowlist
         # like the other public connectors and unlike the host-owned ones.
-        public = {"cninfo", "sec", "sec-financials", "roic-transcript", "web-fetch",
-                  "employee-reviews"}
+        public = {"cninfo", "sec", "sec-financials", "roic-transcript",
+                  "yfinance", "web-fetch", "employee-reviews"}
         for slug, profile in self.built["templates"].items():
             with self.subTest(slug=slug):
                 readiness = profile["readiness"]

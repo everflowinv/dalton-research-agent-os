@@ -52,6 +52,9 @@ from .raw_spool import RawSpool
 
 SUMMARY_SCHEMA_VERSION = "0.1"
 DEFAULT_SPOOL_NAME = "connector-spool"
+# The ceiling on one whole read, not on one page. Twenty pages at a per-page
+# ceiling would be twenty times this, and the sink that holds them is sized for
+# this, so the two numbers have to be the same number.
 MAX_RAW_BYTES = 16 * 1024 * 1024
 MAX_PAGES = 20
 MAX_REVIEWS = 1000
@@ -109,8 +112,13 @@ def review_page_url(employer_slug: str, page: int) -> str:
     return base if page <= 1 else f"{base}?page={page}"
 
 
-def fetch_page(url: str, *, deadline_seconds: float) -> bytes:
-    """One page of HTML, with the host checked against the frozen allowlist."""
+def fetch_page(url: str, *, deadline_seconds: float,
+               max_bytes: int = MAX_RAW_BYTES) -> bytes:
+    """One page of HTML, with the host checked against the frozen allowlist.
+
+    ``max_bytes`` is what is left of the read's whole budget, not a fresh
+    allowance per page.
+    """
 
     parsed = urllib.parse.urlsplit(url)
     if parsed.scheme != "https" or parsed.hostname != BLIND_HOST:
@@ -122,7 +130,7 @@ def fetch_page(url: str, *, deadline_seconds: float) -> bytes:
     )
     try:
         with urllib.request.urlopen(request, timeout=deadline_seconds) as response:  # noqa: S310
-            return response.read(MAX_RAW_BYTES)
+            return response.read(max(0, max_bytes))
     except urllib.error.HTTPError as exc:
         if exc.code == 404:
             raise EmployeeReviewsRunError(
@@ -162,7 +170,20 @@ def parse_page(html: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """The reviews and the library counts out of one page's flight payload."""
 
     joined = "".join(_FLIGHT_CHUNK.findall(html))
-    payload = joined.encode("utf-8", "ignore").decode("unicode_escape", errors="ignore")
+    # The chunk is the *inside* of a JavaScript string literal, so unescape it
+    # as one. `unicode_escape` is the obvious shortcut and is wrong here: it
+    # decodes through latin-1, so every non-ASCII character in a review --
+    # an accented name, a currency symbol, anything CJK -- comes back mangled,
+    # and mangled silently. Wrapping it in quotes and handing it to the JSON
+    # parser is both correct and the same one line.
+    try:
+        payload = json.loads(f'"{joined}"')
+    except ValueError:
+        # A chunk this parser cannot read is not a reason to lose the page;
+        # fall back and let the review-list search decide whether anything
+        # usable is in there.
+        payload = joined.encode("utf-8", "ignore").decode(
+            "unicode_escape", errors="ignore")
     start = payload.find(_REVIEWS_KEY)
     if start < 0:
         return [], {}
@@ -197,8 +218,15 @@ def _rating(value: Any) -> str | None:
     return text if re.fullmatch(r"(0|[1-9][0-9]*)([.][0-9]+)?", text) else None
 
 
-def normalise_review(row: Mapping[str, Any]) -> dict[str, Any]:
-    """One review row. Locked prose is nulled; everything real is kept."""
+def normalise_review(row: Mapping[str, Any], *,
+                     position: int | None = None) -> dict[str, Any]:
+    """One review row. Locked prose is nulled; everything real is kept.
+
+    ``position`` is the row's place in the whole read, which is the second
+    half of the lock test: Blind releases prose for its newest page only, so
+    anything past the first page is locked whether or not its filler string is
+    one this code recognises.
+    """
 
     review_id = _text(row.get("review_id") or row.get("id"))
     if not review_id:
@@ -206,11 +234,13 @@ def normalise_review(row: Mapping[str, Any]) -> dict[str, Any]:
     created_at = _text(row.get("created_at") or row.get("createdAt"))
     if not created_at:
         raise EmployeeReviewsRunError(f"review {review_id} arrived without a date")
-    locked = body_locked(row.get("pros"))
+    locked = body_locked(row, position=position, page_size=PAGE_SIZE)
     return {
         "review_id": review_id,
         "created_at": created_at,
-        "summary": _text(row.get("summary")),
+        # The summary is prose too, and Blind substitutes it. A locked row
+        # keeps its ratings and its date, not its words.
+        "summary": None if locked else _text(row.get("summary")),
         "ratings": {name: _rating(row.get(name)) for name in RATING_DIMENSIONS},
         "body_locked": locked,
         "pros": None if locked else _text(row.get("pros")),
@@ -231,8 +261,8 @@ def build_wire(
 ) -> dict[str, Any]:
     reviews: list[dict[str, Any]] = []
     seen: set[str] = set()
-    for row in rows[:MAX_REVIEWS]:
-        review = normalise_review(row)
+    for position, row in enumerate(rows[:MAX_REVIEWS]):
+        review = normalise_review(row, position=position)
         if review["review_id"] in seen:
             continue
         if since and review["created_at"][:10] < since:
@@ -286,10 +316,18 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         if args.fixture_file:
             pages = [Path(args.fixture_file).expanduser().read_bytes()]
         else:
+            budget = MAX_RAW_BYTES
             for page in range(1, args.pages + 1):
                 html = fetch_page(review_page_url(args.employer_slug, page),
-                                  deadline_seconds=args.deadline_seconds)
+                                  deadline_seconds=args.deadline_seconds,
+                                  max_bytes=budget)
                 pages.append(html)
+                budget -= len(html)
+                if budget <= 0:
+                    raise EmployeeReviewsRunError(
+                        f"this employer's pages exceed the {MAX_RAW_BYTES} byte "
+                        "ceiling for one read; ask for fewer pages"
+                    )
                 # Parsed here only to decide whether there is another page.
                 # A short page is the last page; the real parse happens once,
                 # below, after the bytes have been hashed.
@@ -372,7 +410,16 @@ def main(argv: list[str] | None = None) -> int:
     # The summary is written either way, because a refusal has no wire and
     # still has a reason.
     if args.emit_wire:
-        print(json.dumps(summary["observation"], ensure_ascii=False))
+        # A refusal has no wire and still has a reason. Printing nothing would
+        # leave a runner reading stdout with an exit code and no sentence, and
+        # the sentence is the part a person needs. The refusal document is
+        # distinguishable from a wire by construction: a wire has
+        # `source_record_refs`, this has `status` and `failure_reason`.
+        print(json.dumps(
+            summary["observation"] if summary["status"] == "succeeded"
+            else {"schema_version": SUMMARY_SCHEMA_VERSION, "status": "failed",
+                  "failure_reason": summary["failure_reason"]},
+            ensure_ascii=False))
     elif not args.quiet:
         print(json.dumps({key: summary[key] for key in (
             "status", "failure_reason", "record_count", "body_locked_count",

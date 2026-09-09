@@ -33,12 +33,15 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
-                    # S3: the crowd sources are all fifty a day. Fifty is not a
-                    # measurement of anything the sources publish; it is ten
-                    # times what the lane is for, so a retry loop stops at
-                    # breakfast rather than at the point where an account is
-                    # flagged. Sorted here because "employee-reviews" sorts
-                    # between "alphaengine" and "gemini-web-search".
+                    # S3: the crowd sources are all fifty units a day. Fifty is
+                    # not a measurement -- none of the three publishes a rate
+                    # limit -- it is ten times what the lane is for, so a retry
+                    # loop stops at breakfast rather than at the point where an
+                    # account is flagged. The same figure for all seven, because
+                    # a different one for each would imply a measurement behind
+                    # each one. Only the calls-per-unit differ, because paging
+                    # does: one review library is up to twenty page reads, one
+                    # post is one call.
                     "connector_slug": "employee-reviews",
                     "operation": "blind_reviews",
                     "quota_unit": "document",
@@ -126,6 +129,29 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "quota_unit": "search",
                     "daily_unit_limit": 50,
                     "max_physical_calls_per_unit": 5,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    # P11a: Yahoo is an unofficial free source that never
+                    # agreed to serve us. There is no published rate limit to
+                    # stay under and nobody to appeal to, so these ceilings are
+                    # politeness rather than arithmetic -- five covered
+                    # companies ticking daily need five price units.
+                    "connector_slug": "yfinance",
+                    "operation": "analyst_estimates",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 50,
+                    "max_physical_calls_per_unit": 4,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "yfinance",
+                    "operation": "daily_prices",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 200,
+                    "max_physical_calls_per_unit": 2,
                     "window_seconds": 86_400,
                     "reset_timezone": "Asia/Shanghai",
                 },

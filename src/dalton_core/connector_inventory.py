@@ -1188,6 +1188,143 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 "source_record_refs", "next_cursor", "provider_status",
             ),
         )
+    if slug == "yfinance":
+        decimal = {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$"}
+        nullable_decimal = {
+            "type": ["string", "null"],
+            "pattern": "^-?(0|[1-9][0-9]*)([.][0-9]+)?$",
+        }
+        iso_date = {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+        if operation == "daily_prices":
+            # P11a: one row per trading day, and Close and Adj Close in
+            # separate columns.
+            #
+            # This is the lesson the owner's other tooling paid for. Yahoo's
+            # `auto_adjust=True` silently replaces Close with the
+            # split-and-dividend-adjusted series and drops Adj Close, so a
+            # later reader cannot tell which one it is holding -- and anyone
+            # who then adds dividends on top of an adjusted price counts them
+            # twice. Both columns are stored, always, and which is which is a
+            # column name rather than a convention.
+            bar = _object_schema(
+                {
+                    "date": iso_date,
+                    "open": decimal, "high": decimal, "low": decimal,
+                    "close": decimal, "adj_close": decimal,
+                    "volume": decimal,
+                },
+                ("date", "open", "high", "low", "close", "adj_close", "volume"),
+            )
+            # Share count and market capitalisation are not properties of a
+            # trading day: Yahoo reports the latest it knows, once, with no
+            # history behind it. Carrying them as their own dated observations
+            # keeps them from being read as "the shares outstanding on that
+            # bar", which is a claim this source cannot support.
+            observation = _object_schema(
+                {
+                    "observation": {
+                        "type": "string",
+                        "enum": ["shares_outstanding", "market_cap"],
+                    },
+                    "as_of": iso_date,
+                    "value": decimal,
+                    "unit": _string(),
+                },
+                ("observation", "as_of", "value", "unit"),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "ticker": _string(),
+                    "currency": _string(),
+                    "requested_start": iso_date,
+                    "requested_end": iso_date,
+                    # Frozen false on the wire, so a run that adjusted the
+                    # prices cannot be validated as one that did not.
+                    "auto_adjust": {"type": "boolean", "enum": [False]},
+                    # When the source was read. A window that includes today
+                    # returns the last trade so far in the same shape as a
+                    # settled close, and this is the only field that can tell
+                    # a later reader which one it is holding.
+                    "captured_at": _string(),
+                    "bars": {"type": "array", "items": bar},
+                    # Days the source returned with a hole in them. A frame
+                    # that arrives entirely as NaN must not be indistinguishable
+                    # from a genuinely quiet window.
+                    "dropped_row_count": _integer(0),
+                    "observations": {"type": "array", "items": observation},
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                },
+                (
+                    "schema_version", "ticker", "currency", "requested_start",
+                    "requested_end", "auto_adjust", "captured_at", "bars",
+                    "dropped_row_count", "observations",
+                    "source_record_refs", "next_cursor", "provider_status",
+                ),
+            )
+        if operation == "analyst_estimates":
+            # P11a: what sell-side analysts said, which is an opinion with a
+            # date on it and never a fundamental. Every figure is nullable
+            # because Yahoo drops whole blocks without warning, and an absent
+            # estimate has to look absent rather than like a zero.
+            price_target = _object_schema(
+                {
+                    "current": nullable_decimal, "high": nullable_decimal,
+                    "low": nullable_decimal, "mean": nullable_decimal,
+                    "median": nullable_decimal,
+                    "number_of_analysts": {"type": ["integer", "null"], "minimum": 0},
+                },
+                ("current", "high", "low", "mean", "median", "number_of_analysts"),
+            )
+            # Nullable counts. "No analyst rates it a sell" and "Yahoo did not
+            # say how many rate it a sell" are different facts, and a zero can
+            # only express one of them.
+            nullable_count = {"type": ["integer", "null"], "minimum": 0}
+            recommendation = _object_schema(
+                {
+                    "period": _string(),
+                    "strong_buy": nullable_count, "buy": nullable_count,
+                    "hold": nullable_count, "sell": nullable_count,
+                    "strong_sell": nullable_count,
+                },
+                ("period", "strong_buy", "buy", "hold", "sell", "strong_sell"),
+            )
+            estimate = _object_schema(
+                {
+                    "period": _string(),
+                    "avg": nullable_decimal, "low": nullable_decimal,
+                    "high": nullable_decimal,
+                    "year_ago": nullable_decimal,
+                    "growth": nullable_decimal,
+                    "number_of_analysts": {"type": ["integer", "null"], "minimum": 0},
+                    "currency": {"type": ["string", "null"]},
+                },
+                (
+                    "period", "avg", "low", "high", "year_ago", "growth",
+                    "number_of_analysts", "currency",
+                ),
+            )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "ticker": _string(),
+                    "as_of": iso_date,
+                    "price_target": price_target,
+                    "recommendations": {"type": "array", "items": recommendation},
+                    "eps_estimates": {"type": "array", "items": estimate},
+                    "revenue_estimates": {"type": "array", "items": estimate},
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                },
+                (
+                    "schema_version", "ticker", "as_of", "price_target",
+                    "recommendations", "eps_estimates", "revenue_estimates",
+                    "source_record_refs", "next_cursor", "provider_status",
+                ),
+            )
     return _object_schema(
         {
             "source_record_refs": _array_of_strings(),
@@ -1318,6 +1455,42 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
             _operation(
                 "get_transcript", completeness="enumerated",
                 input_fields=("ticker", "fiscal_year", "fiscal_quarter"),
+            ),
+        ),
+        "gate": "recorded_public_reference_shadow",
+    },
+    # P11a: daily prices and street estimates from Yahoo Finance, read through
+    # the `yfinance` library.
+    #
+    # This is an *unofficial* free source: Yahoo publishes no API and no terms
+    # that cover this, the library scrapes endpoints that can move without
+    # notice, and there is nobody to appeal to when they do. That is written
+    # down here rather than discovered later, and it is why the daily quota is
+    # a couple of hundred calls rather than a thousand: politeness towards a
+    # source that has not agreed to serve us.
+    #
+    # Two operations, because a price and an analyst's opinion are not the same
+    # kind of thing and a schema hash binds one operation. Prices are facts a
+    # market printed; estimates are what sell-side analysts said, and they enter
+    # the system as claims about opinion, never as fundamentals. Yahoo also
+    # carries financial statements, and this connector deliberately does not
+    # expose them: SEC is the primary source for a filed figure and a scraped
+    # second-hand copy of one would be a worse number wearing the same clothes.
+    {
+        "slug": "yfinance", "connector_ref": "connector:yahoo-finance",
+        "source_ref": "source:yahoo-finance", "source_type": "market_data",
+        "transport": "public_https", "target": "transport:public-http:0.1",
+        "hosts": ("query1.finance.yahoo.com", "query2.finance.yahoo.com"),
+        "auth": "none",
+        "forbidden": ("route:arbitrary-attachment-url",), "fallbacks": (),
+        "operations": (
+            _operation(
+                "daily_prices", completeness="enumerated",
+                input_fields=("ticker", "start", "end"),
+            ),
+            _operation(
+                "analyst_estimates", completeness="ranked",
+                input_fields=("ticker",),
             ),
         ),
         "gate": "recorded_public_reference_shadow",
@@ -1578,7 +1751,11 @@ def _field_schema(name: str) -> dict[str, Any]:
         }
     if name == "cursor":
         return {"type": ["string", "null"]}
-    if name in {"date_after", "date_before"}:
+    # P11a: ``start`` and ``end`` bound one price window and are dates, not
+    # free text. A window whose ends cannot be parsed is a window nobody can
+    # replay, and replaying the exact window is the whole point of binding a
+    # bar to the invocation that produced it.
+    if name in {"date_after", "date_before", "start", "end"}:
         return {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
     if name == "freshness":
         return {"type": "string", "enum": ["day", "week", "month", "year"]}
