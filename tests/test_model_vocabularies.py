@@ -1,0 +1,133 @@
+"""The two model vocabularies a lane used to have to edit by hand.
+
+A lane that spends money on a model touched two closed lists it had no
+business owning: ``cockpit_model.PURPOSES``, which is what a WorkOrder is
+identified by, and the tuple of installed model configuration file names that
+a day-cap raise repoints. Both are now registries with the old literals as the
+seed, so a lane names its own purpose and its own configuration from its own
+module.
+
+The seeds are pinned here as expected values: making them extensible is only
+safe if dropping one is visible.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import unittest
+from pathlib import Path
+
+from dalton_core import cockpit_model
+from dalton_core.cockpit_model import (
+    CockpitModelError,
+    build_work,
+    purposes,
+    register_purpose,
+)
+from dalton_core.model_configurations import (
+    ModelConfigurationError,
+    model_config_names,
+    register_model_config_name,
+)
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SEED_PURPOSES = frozenset({"ask", "goal", "steer", "draft", "plan", "model_spec"})
+SEED_MODEL_CONFIGS = (
+    "document-extraction-model-config.json",
+    "research-planner-model-config.json",
+    "initial-screen-model-config.json",
+)
+
+
+def work(purpose: str):
+    return build_work(
+        purpose=purpose,
+        request_id="request-1",
+        prompt="how does this company make money",
+        mission_version_ref="coverage-mission-version:us-it-services:1",
+        max_input_tokens=8_000,
+        max_output_tokens=1_000,
+        max_cost_usd=0.5,
+        max_seconds=60,
+        created_at="2026-09-09T00:00:00.000000+00:00",
+    )
+
+
+class ModelPurposeRegistryTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        cockpit_model._PURPOSES.clear()
+        cockpit_model._PURPOSES.update(SEED_PURPOSES)
+        cockpit_model.PURPOSES = frozenset(cockpit_model._PURPOSES)
+
+    def test_the_seed_is_what_the_literal_said(self) -> None:
+        self.assertEqual(purposes(), SEED_PURPOSES)
+        self.assertEqual(cockpit_model.PURPOSES, SEED_PURPOSES)
+
+    def test_an_unregistered_purpose_is_refused(self) -> None:
+        with self.assertRaises(CockpitModelError):
+            work("valuation")
+
+    def test_a_registered_purpose_may_build_work(self) -> None:
+        register_purpose("valuation")
+        self.assertIn("valuation", purposes())
+        self.assertIn("valuation", cockpit_model.PURPOSES)
+        order = work("valuation")
+        self.assertIn("valuation", order.id)
+
+    def test_registering_twice_is_a_no_op(self) -> None:
+        register_purpose("valuation")
+        before = purposes()
+        register_purpose("valuation")
+        self.assertEqual(purposes(), before)
+
+    def test_a_purpose_that_could_not_be_a_work_order_id_is_refused(self) -> None:
+        for bad in ("Valuation", "market price", "", "market/price", 7, "_x"):
+            with self.assertRaises(CockpitModelError):
+                register_purpose(bad)
+
+    def test_the_seed_purposes_still_build_work(self) -> None:
+        for purpose in sorted(SEED_PURPOSES):
+            self.assertIsNotNone(work(purpose))
+
+
+class ModelConfigurationRegistryTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        from dalton_core import model_configurations
+
+        model_configurations._NAMES[:] = list(SEED_MODEL_CONFIGS)
+
+    def test_the_seed_is_what_the_script_tuple_said(self) -> None:
+        self.assertEqual(model_config_names(), SEED_MODEL_CONFIGS)
+
+    def test_a_registered_name_is_appended_once_in_order(self) -> None:
+        register_model_config_name("market-model-config.json")
+        register_model_config_name("market-model-config.json")
+        self.assertEqual(
+            model_config_names(),
+            SEED_MODEL_CONFIGS + ("market-model-config.json",),
+        )
+
+    def test_a_name_that_is_not_a_state_directory_file_is_refused(self) -> None:
+        for bad in ("../escape.json", "Market.json", "market-model-config",
+                    "/abs/path.json", "", 7):
+            with self.assertRaises(ModelConfigurationError):
+                register_model_config_name(bad)
+
+    def test_the_cap_raise_script_repoints_every_registered_name(self) -> None:
+        # The script is the only consumer, and the bug the registry prevents is
+        # a configuration it never visits.
+        spec = importlib.util.spec_from_file_location(
+            "raise_day_budget_cap", ROOT / "scripts" / "raise_day_budget_cap.py"
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertIs(module.model_config_names, model_config_names)
+        source = (ROOT / "scripts" / "raise_day_budget_cap.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("MODEL_CONFIG_NAMES", source)
+
+
+if __name__ == "__main__":
+    unittest.main()
