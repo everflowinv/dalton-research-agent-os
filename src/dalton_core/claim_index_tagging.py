@@ -50,11 +50,17 @@ from .claim_aspect_vocabulary import (
     is_aspect,
 )
 from .claim_index_authority import IMPORTANCE_RANK, IMPORTANCE_TIERS, current_entries
+from .cockpit_model import register_purpose
 from .document_figure_grade import FILED, GRADE_BY_SPEC
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
 TASK_REF = "task:claim-index-aspect-tagging:0.1"
+
+# P14-0's registry: a lane names its own model purpose from its own module
+# rather than editing a set in cockpit_model. Registered at import because the
+# child imports this module before it builds a WorkOrder.
+PURPOSE = register_purpose("claim_index")
 
 # How many claims one model call is allowed to carry, and how much of each
 # statement it sees.  Both are bounds on spend, not on ambition: the router
@@ -486,15 +492,29 @@ def is_industry_subject(subject_ref: Any) -> bool:
     return isinstance(subject_ref, str) and subject_ref.startswith("industry:")
 
 
-def dedupe_group_key(
-    claim: Mapping[str, Any], *, as_of: str | None
-) -> str:
+def dedupe_group_key(claim: Mapping[str, Any]) -> str:
     """What makes two claims the same fact.
 
-    For a number: the same company, the same measure, the same period and the
-    same unit.  This is the ACN complaint precisely -- one quarter's revenue
-    present as three Claims and cited three times side by side in the same
-    Initial Screen paragraph.
+    For a number: the same company, the same measure, the same **period as the
+    claim states it**, the same basis and the same unit.  This is the ACN
+    complaint precisely -- one quarter's revenue present as three Claims and
+    cited three times side by side in the same Initial Screen paragraph.
+
+    Three things this key deliberately is *not*, each of which merged claims
+    that are not the same fact:
+
+    * **not the resolved ``as_of``.**  ``FY2025`` and ``Q4 2025`` both resolve
+      to 2025-12-31 and are different figures; the period key keeps them apart.
+      ``as_of`` orders a group, it does not define one.
+    * **not period-free.**  When the period does not parse, the claim gets its
+      own group and is never merged with anything.  The alternative -- falling
+      back to the date the evidence was fetched -- would have grouped every
+      undated claim about one company and one measure that arrived on the same
+      day, which live is 1,462 of 2,170 claims, and with ``canonical_only``
+      defaulting to true those distinct facts would simply stop being returned.
+    * **not basis-free.**  GAAP and non-GAAP operating margin for one quarter
+      are two numbers a reader must see side by side, not one with the other
+      hidden behind it.
 
     For prose: the same company saying the same sentence.  Exact text after
     folding case and whitespace, and nothing cleverer; two differently worded
@@ -505,10 +525,33 @@ def dedupe_group_key(
 
     subject = claim.get("subject_ref") or ""
     if claim.get("claim_kind") == "quantitative":
-        period = as_of or fold(period_key(claim.get("period")))
+        resolved, _basis = period_as_of(claim.get("period"))
+        if resolved is None:
+            # The period places this figure nowhere -- "current", "ongoing",
+            # "not specified" -- so it is only ever the same fact as itself and
+            # gets a group of one. Keyed on the claim's own identity, so that
+            # two undated numbers can never be merged by accident.
+            identity = (
+                claim.get("claim_version_ref") or claim.get("claim_ref")
+                or canonical_json({
+                    "metric": fold(claim.get("metric_or_aspect")),
+                    "basis": fold(claim.get("basis")),
+                    "unit": fold(claim.get("unit")),
+                    "period": fold(period_key(claim.get("period"))),
+                    "statement": fold(claim.get("normalized_statement")),
+                    "value": str(claim.get("value")),
+                })
+            )
+            return "|".join((
+                "quant-ungrouped", str(subject),
+                hashlib.sha256(str(identity).encode("utf-8")).hexdigest(),
+            ))
+        # The period **as the claim states it**, not the date it resolves to:
+        # FY2025 and Q4 2025 both land on 2025-12-31 and are different figures.
         return "|".join((
             "quant", str(subject), fold(claim.get("metric_or_aspect")),
-            period, fold(claim.get("unit")) or "-",
+            fold(period_key(claim.get("period"))),
+            fold(claim.get("basis")) or "-", fold(claim.get("unit")) or "-",
         ))
     statement = fold(claim.get("normalized_statement"))
     return "|".join((
@@ -556,7 +599,7 @@ def rule_tags(
         "as_of_basis": as_of_basis,
         "importance": provenance.get("importance", "other"),
         "importance_basis": provenance.get("importance_basis", "unknown"),
-        "dedupe_group_key": dedupe_group_key(claim, as_of=as_of),
+        "dedupe_group_key": dedupe_group_key(claim),
         "period_key": period_key(claim.get("period")) or "-",
         "tagger_ref": RULE_TAGGER_REF,
         "tagger_hash": RULE_TAGGER_HASH,
@@ -753,6 +796,10 @@ def pending_claims(
             "period": claim.get("period"),
             "claim_kind": claim.get("claim_kind"),
             "unit": claim.get("unit"),
+            # Part of the dedupe key: GAAP and non-GAAP operating margin for
+            # one quarter are two numbers, not one hiding the other.
+            "basis": claim.get("basis"),
+            "value": claim.get("value"),
             "normalized_statement": claim.get("normalized_statement"),
         })
         if len(pending) >= limit:

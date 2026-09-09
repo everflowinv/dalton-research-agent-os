@@ -97,6 +97,25 @@ class LedgerFixture:
         self.store.close()
 
 
+_BINDING_FIELDS_FOR_TEST = (
+    "claim_version_ref", "claim_version_hash", "claim_ref", "claim_created_at",
+    "subject_ref", "metric_or_aspect", "period_key", "claim_kind", "aspect",
+    "aspect_source", "as_of", "as_of_basis", "importance", "importance_basis",
+    "dedupe_group_ref", "dedupe_group_key", "tagger_ref", "tagger_hash",
+    "actor_ref",
+)
+
+
+def _claim_of(authority, recorded):
+    """The claim identity an entry was recorded against, for a re-record."""
+
+    return {
+        "claim_version_id": recorded["claim_version_ref"],
+        "content_hash": recorded["claim_version_hash"],
+        "claim_ref": recorded["claim_ref"],
+    }
+
+
 def entry_args(claim, **overrides):
     base = {
         "claim_version_ref": claim["claim_version_id"],
@@ -275,6 +294,60 @@ class CanonicalGroupTests(unittest.TestCase):
             "claim_created_at": "2026-01-01", "claim_version_ref": "b"})
         self.assertLess(dated, undated)
 
+    def test_a_retag_that_moves_a_claim_settles_the_group_it_left(self):
+        # A period that now parses, a basis that was missing: the claim moves
+        # to another group, and the group it vacated has to be settled too or
+        # the entry it had displaced stays non-canonical with nothing canonical
+        # above it -- and a canonical-only read returns neither.
+        winner = self.record("mover", importance="filing",
+                             claim_created_at="2026-09-01T00:00:00+00:00")
+        loser = self.record("stayer", importance="news",
+                            claim_created_at="2026-09-02T00:00:00+00:00")
+        self.assertFalse(
+            self.authority.current_entry(loser["claim_version_ref"])["is_canonical"])
+        moved = self.authority.record_entry(**entry_args(
+            self.fixture.store.connection.execute(
+                "SELECT 1").fetchone() and _claim_of(self.authority, winner),
+            dedupe_group_key="quant|elsewhere|revenue|2026-05-31|gaap|percent",
+            importance="filing", claim_created_at="2026-09-01T00:00:00+00:00"))
+        self.assertEqual(moved["version"], 2)
+        self.assertTrue(
+            self.authority.current_entry(loser["claim_version_ref"])["is_canonical"])
+        self.assertIn(
+            self.authority.current_entry(loser["claim_version_ref"])["id"],
+            moved["recanonicalised"])
+
+    def test_an_unchanged_tag_still_settles_the_group_around_it(self):
+        # Recording the same judgement twice is one judgement, but the group
+        # may have changed underneath it, and short-circuiting the write must
+        # not short-circuit the settlement.
+        first = self.record("settle-first", importance="news",
+                            claim_created_at="2026-09-01T00:00:00+00:00")
+        self.assertTrue(first["is_canonical"])
+        # Reach in and leave the group with two canonical members, the state a
+        # crash between the write and the settle would leave behind.
+        second = self.fixture.add_claim("settle-second")
+        args = entry_args(second, importance="news",
+                          claim_created_at="2026-09-02T00:00:00+00:00")
+        body = {field: args[field] for field in _BINDING_FIELDS_FOR_TEST
+                if field != "dedupe_group_ref"}
+        body["dedupe_group_ref"] = group_ref_for(args["dedupe_group_key"])
+        with self.fixture.store._transaction() as cur:
+            self.authority._write(
+                cur, body, version=1, prior_version_ref=None, is_canonical=True,
+                revision_reason="tagged", created_at=NOW)
+        members = self.authority.group_members(group_ref_for(GROUP))
+        self.assertEqual([item["is_canonical"] for item in members], [True, True])
+        again = self.authority.record_entry(**entry_args(
+            self.fixture.store.connection.execute("SELECT 1").fetchone()
+            and _claim_of(self.authority, first),
+            importance="news", claim_created_at="2026-09-01T00:00:00+00:00"))
+        self.assertEqual(again["status"], "duplicate")
+        self.assertEqual(
+            [item["is_canonical"] for item in
+             self.authority.group_members(group_ref_for(GROUP))],
+            [True, False])
+
     def test_different_groups_never_interfere(self):
         one = self.record("group-a")
         two = self.record("group-b", dedupe_group_key="quant|other|revenue|x|percent",
@@ -377,6 +450,28 @@ class ReaderTests(unittest.TestCase):
         untagged = [r for r in rows if r["claim_ref"] == "read-prose"][0]
         self.assertIsNone(untagged["index_aspect"])
         self.assertIsNone(untagged["is_canonical"])
+
+    def test_the_sort_key_is_on_every_joined_row_or_the_list_cannot_be_sorted(self):
+        # It used to appear only on tagged rows under a private name, so a
+        # caller that sorted by it crashed on the first untagged claim.
+        self.index()
+        own = [{"claim_version_ref": self.filing["claim_version_id"]},
+               {"claim_version_ref": self.news["claim_version_id"]},
+               {"claim_version_ref": "claim-version:never-tagged"}]
+        joined = annotate_with_index(
+            self.store.connection, own, canonical_only=False)
+        self.assertEqual(len(joined), 3)
+        for row in joined:
+            self.assertIn("index_order", row)
+        ordered = sorted(joined, key=lambda row: row["index_order"])
+        self.assertEqual(ordered[0]["importance"], "filing")
+        # An untagged claim sorts after every tagged one.
+        self.assertIsNone(ordered[-1]["index_aspect"])
+
+    def test_the_projection_does_not_leak_the_sort_key(self):
+        self.index()
+        for row in query_company_research(self.store, company_ref=ACN):
+            self.assertNotIn("index_order", row)
 
     def test_the_cockpit_can_join_its_own_rows_without_the_projection(self):
         # The answer context reads claim_versions directly; it needs the same

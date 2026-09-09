@@ -67,6 +67,7 @@ def claim(**overrides):
     base = {
         "subject_ref": ACN, "metric_or_aspect": "demand environment",
         "period": "current", "claim_kind": "qualitative", "unit": None,
+        "basis": "management commentary",
         "normalized_statement": "Demand is stable.",
     }
     base.update(overrides)
@@ -273,7 +274,7 @@ class DedupeTests(unittest.TestCase):
     def key(self, name):
         for item in FIXTURE:
             if item[0] == name:
-                return dedupe_group_key(item[1], as_of=item[5])
+                return dedupe_group_key(item[1])
         raise AssertionError(name)
 
     def test_one_quarters_revenue_from_three_documents_is_one_group(self):
@@ -285,15 +286,60 @@ class DedupeTests(unittest.TestCase):
         other = dedupe_group_key(claim(
             metric_or_aspect="quarterly_revenue_yoy_growth", claim_kind="quantitative",
             unit="percent", period="2025-12-01..2026-02-28",
-        ), as_of="2026-02-28")
+        ))
         self.assertNotEqual(other, self.key("acn-revenue-q3"))
 
     def test_a_different_unit_is_a_different_group(self):
         other = dedupe_group_key(claim(
             metric_or_aspect="quarterly_revenue_yoy_growth", claim_kind="quantitative",
             unit="currency", period="2026-03-01..2026-05-31",
-        ), as_of="2026-05-31")
+        ))
         self.assertNotEqual(other, self.key("acn-revenue-q3"))
+
+    def test_a_fiscal_year_is_not_its_fourth_quarter(self):
+        # Both resolve to 2025-12-31 and they are different figures. The key is
+        # the period the claim states, never the date it resolves to; as_of
+        # orders a group, it does not define one.
+        year = claim(metric_or_aspect="operating margin", claim_kind="quantitative",
+                     unit="percent", period="FY2025", basis="gaap-reported")
+        quarter = claim(metric_or_aspect="operating margin", claim_kind="quantitative",
+                        unit="percent", period="Q4 2025", basis="gaap-reported")
+        self.assertEqual(period_as_of(year["period"])[0],
+                         period_as_of(quarter["period"])[0])
+        self.assertNotEqual(dedupe_group_key(year), dedupe_group_key(quarter))
+
+    def test_gaap_and_non_gaap_are_two_numbers_not_one_hiding_the_other(self):
+        gaap = claim(metric_or_aspect="operating margin", claim_kind="quantitative",
+                     unit="percent", period="Q2 2026", basis="gaap-reported")
+        adjusted = claim(metric_or_aspect="operating margin", claim_kind="quantitative",
+                         unit="percent", period="Q2 2026",
+                         basis="non-gaap-reported")
+        self.assertNotEqual(dedupe_group_key(gaap), dedupe_group_key(adjusted))
+
+    def test_a_period_that_parses_nowhere_gets_a_group_of_one(self):
+        # Live this is 1,462 of 2,170 claims. Falling back to the day the
+        # evidence was fetched grouped every undated claim about one company
+        # and one measure that arrived together -- and with canonical_only
+        # defaulting to true, those distinct facts would stop being returned.
+        first = claim(metric_or_aspect="bookings", claim_kind="quantitative",
+                      unit="count", period="current",
+                      claim_version_ref="claim-version:1")
+        second = claim(metric_or_aspect="bookings", claim_kind="quantitative",
+                       unit="count", period="current",
+                       claim_version_ref="claim-version:2")
+        self.assertNotEqual(dedupe_group_key(first), dedupe_group_key(second))
+        self.assertTrue(dedupe_group_key(first).startswith("quant-ungrouped|"))
+
+    def test_the_same_dated_quarter_from_two_documents_is_one_group(self):
+        first = claim(metric_or_aspect="revenue", claim_kind="quantitative",
+                      unit="currency", period="2026-03-01..2026-05-31",
+                      basis="company-filed-document",
+                      claim_version_ref="claim-version:1")
+        second = claim(metric_or_aspect="revenue", claim_kind="quantitative",
+                       unit="currency", period="2026-03-01..2026-05-31",
+                       basis="company-filed-document",
+                       claim_version_ref="claim-version:2")
+        self.assertEqual(dedupe_group_key(first), dedupe_group_key(second))
 
     def test_the_same_sentence_typed_twice_is_one_group(self):
         self.assertEqual(self.key("acn-echo-one"), self.key("acn-echo-two"))
@@ -301,16 +347,15 @@ class DedupeTests(unittest.TestCase):
     def test_the_same_sentence_about_another_company_is_not(self):
         mine = dedupe_group_key(claim(
             subject_ref=EPAM,
-            normalized_statement="Clients are prioritising reinvention programmes."),
-            as_of=None)
+            normalized_statement="Clients are prioritising reinvention programmes."))
         self.assertNotEqual(mine, self.key("acn-echo-one"))
 
     def test_two_different_sentences_stay_two_groups(self):
         # No similarity model: "demand is stable" and "demand is steady" are
         # two claims here, and that is the conservative error on purpose.
         self.assertNotEqual(
-            dedupe_group_key(claim(normalized_statement="Demand is stable."), as_of=None),
-            dedupe_group_key(claim(normalized_statement="Demand is steady."), as_of=None),
+            dedupe_group_key(claim(normalized_statement="Demand is stable.")),
+            dedupe_group_key(claim(normalized_statement="Demand is steady.")),
         )
 
     def test_folding_is_case_and_whitespace_and_nothing_else(self):

@@ -28,6 +28,9 @@ CLAIM_STATUSES = frozenset({
 OPEN_QUESTION_STATES = frozenset({
     "open", "selected", "planned", "in_progress", "blocked",
 })
+# Where an untagged claim sorts among tagged ones: after all of them. Weaker
+# than any importance tier, undated, and last on every tiebreak.
+_UNTAGGED_ORDER = (99, (1, ""), "", "")
 STOP_KINDS = frozenset({
     "claim_committed", "thesis_admitted", "assessment_recorded",
     "verification_recorded", "brief_published", "question_recorded",
@@ -463,6 +466,10 @@ def annotate_with_index(
                 "index_aspect": None, "as_of": None, "as_of_basis": None,
                 "importance": None, "dedupe_group_ref": None,
                 "is_canonical": None, "index_entry_ref": None,
+                # Present on every row or on none: a sort key that exists only
+                # for the rows that happen to be tagged cannot sort a list.
+                # An untagged claim sorts after every tagged one.
+                "index_order": _UNTAGGED_ORDER,
             })
             continue
         if index_aspect is not None and entry["aspect"] != index_aspect:
@@ -484,7 +491,7 @@ def annotate_with_index(
             "dedupe_group_ref": entry["dedupe_group_ref"],
             "is_canonical": entry["is_canonical"],
             "index_entry_ref": entry["id"],
-            "_order": canonical_order_key(entry),
+            "index_order": canonical_order_key(entry),
         })
     return result
 
@@ -558,7 +565,7 @@ def query_company_research(
     indexed = table_exists(store.connection)
     result = []
     for row in joined:
-        row.pop("_order", None)
+        row.pop("index_order", None)
         if not indexed:
             for field in (
                 "index_aspect", "as_of", "as_of_basis", "importance",

@@ -21,7 +21,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from dalton_core.claim_index_authority import ClaimIndexAuthority, current_entries
+from dalton_core.claim_index_authority import (
+    ClaimIndexAuthority, current_entries, table_exists,
+)
 from dalton_core.claim_index_cli import (
     FALLBACK_WRITE_SCOPES,
     WRITE_SCOPE,
@@ -31,7 +33,7 @@ from dalton_core.claim_index_cli import (
 )
 from dalton_core.claim_index_launcher import ClaimIndexLauncher, batch_digest
 from dalton_core.claim_index_tagging import pending_claims
-from dalton_core.cockpit_model import PURPOSES, build_work
+from dalton_core.cockpit_model import build_work, purposes
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.mission_claim_index_lane import MissionClaimIndexLaneCoordinator
 from dalton_core.store import DaltonStore
@@ -135,16 +137,29 @@ class ChildRunTests(unittest.TestCase):
         self.assertEqual((summary["status"], summary["index_status"]),
                          ("idle", "nothing_to_tag"))
 
-    def test_a_dry_run_writes_what_the_rules_settled_and_gates_the_rest(self):
+    def test_a_dry_run_says_what_it_would_do_and_writes_nothing(self):
         self.harness.add_claims()
         summary = self.harness.run()
         self.assertEqual(summary["status"], "succeeded")
-        self.assertEqual(summary["index_status"], "gated")
+        self.assertEqual(summary["index_status"], "dry_run")
         self.assertEqual(summary["write_scope"], "claim")
         self.assertEqual(summary["pending"], 3)
         self.assertEqual(summary["rule_tagged"], 1)
         self.assertEqual(summary["batch_size"], 2)
         self.assertEqual(summary["formal_authority_writes"], 0)
+        self.assertGreater(summary["prompt_bytes"], 0)
+        # Not one entry, and not even the table: "assemble and stop" is what a
+        # dry run is for, and one that had already written half the answer is
+        # not one anybody can look before they leap with.
+        self.assertEqual(current_entries(self.harness.store.connection), {})
+        self.assertFalse(table_exists(self.harness.store.connection))
+
+    def test_without_a_model_the_rules_are_still_written_and_the_rest_gated(self):
+        self.harness.add_claims()
+        summary = self.harness.run(dry_run=False)
+        self.assertEqual(summary["index_status"], "gated")
+        self.assertEqual(summary["failure_reason"], "no model configured")
+        self.assertEqual(summary["rule_tagged"], 1)
         entries = current_entries(self.harness.store.connection)
         self.assertEqual(len(entries), 1)
         [entry] = entries.values()
@@ -152,14 +167,13 @@ class ChildRunTests(unittest.TestCase):
         self.assertEqual(entry["aspect_source"], "rule")
         self.assertEqual(entry["importance"], "filing")
         self.assertEqual(entry["as_of"], "2026-05-31")
-        self.assertGreater(summary["prompt_bytes"], 0)
 
     def test_the_summary_is_written_beside_the_run(self):
         self.harness.add_claims()
         self.harness.run()
         summary = json.loads(
             (self.harness.state_dir / "summary.json").read_text(encoding="utf-8"))
-        self.assertEqual(summary["index_status"], "gated")
+        self.assertEqual(summary["index_status"], "dry_run")
 
     def test_a_canned_model_table_files_the_prose_and_records_the_work_order(self):
         self.harness.add_claims()
@@ -213,7 +227,7 @@ class ChildRunTests(unittest.TestCase):
 
     def test_a_re_run_of_an_unchanged_claim_is_a_duplicate_not_a_new_version(self):
         self.harness.add_claims()
-        first = self.harness.run()
+        first = self.harness.run(dry_run=False)
         self.assertEqual(first["fresh"], 1)
         authority = ClaimIndexAuthority(self.harness.store)
         # pending_claims no longer offers the tagged number, so force the same
@@ -233,8 +247,12 @@ class ChildRunTests(unittest.TestCase):
             created_at="2026-09-20T00:00:00+00:00")
         self.assertEqual(result["status"], "duplicate")
 
-    def test_the_purpose_is_registered_and_builds_a_work_order(self):
-        self.assertIn("claim_index", PURPOSES)
+    def test_the_purpose_is_registered_from_this_lanes_own_module(self):
+        # P14-0: a lane names its purpose by registering it, not by editing a
+        # set in cockpit_model. Importing the tagging module is what does it.
+        import dalton_core.claim_index_tagging  # noqa: F401
+
+        self.assertIn("claim_index", purposes())
         work = build_work(
             purpose="claim_index", request_id="r", prompt="p",
             mission_version_ref="m", max_input_tokens=10, max_output_tokens=1,
@@ -319,6 +337,17 @@ class LaneCoordinatorTests(unittest.TestCase):
         held = self.coordinator.dispatch_once()
         self.assertEqual(held["status"], "held")
         self.assertIn("boom", held["reason"])
+
+    def test_a_transient_outcome_is_not_held_against_the_batch(self):
+        # "the scheduler had this in flight" and "no route right now" are true
+        # of a moment, not of a batch; holding for them parks work the next
+        # tick could do.
+        self.harness.fixture.add_claim("acn-1", subject_ref=ACN)
+        first = self.coordinator.dispatch_once()
+        self.launcher.settle(first["ticket_ref"], index_status="busy")
+        self.coordinator.dispatch_once()
+        again = self.coordinator.dispatch_once()
+        self.assertEqual(again["status"], "launched")
 
     def test_a_mission_that_is_not_there_yet_is_unconfigured_not_a_crash(self):
         coordinator = MissionClaimIndexLaneCoordinator(

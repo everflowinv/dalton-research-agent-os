@@ -487,11 +487,28 @@ class ClaimIndexAuthority:
             None if latest_row is None
             else _decode(latest_row, f"ClaimIndexEntryVersion for {claim_version_ref}")
         )
-        if latest is not None and all(
+        unchanged = latest is not None and all(
             latest[field] == body[field] for field in _BINDING_FIELDS
-        ):
-            return {"status": "duplicate", "recanonicalised": [], **latest}
+        )
+        if unchanged:
+            # An unchanged tag is one judgement, not two -- but the group it
+            # sits in may still be wrong, because a *different* claim may have
+            # joined or left it since. Settling is not the same question as
+            # recording, and short-circuiting the write must not short-circuit
+            # the settlement.
+            recanonicalised = self._settle_only(body["dedupe_group_ref"], created_at)
+            current = self.current_entry(body["claim_version_ref"]) or latest
+            return {"status": "duplicate", "recanonicalised": recanonicalised, **current}
 
+        # A re-tag can move a claim from one group to another -- a period that
+        # now parses, a basis that was missing. The group it leaves has to be
+        # settled too, or the entry it displaced stays non-canonical forever
+        # with nothing canonical above it.
+        vacated = (
+            latest["dedupe_group_ref"]
+            if latest is not None and latest["dedupe_group_ref"] != body["dedupe_group_ref"]
+            else None
+        )
         recanonicalised: list[str] = []
         with self.store._transaction() as cur:
             version = 1 if latest is None else latest["version"] + 1
@@ -508,10 +525,32 @@ class ClaimIndexAuthority:
                 cur, body["dedupe_group_ref"], skip_entry_ref=entry_ref,
                 created_at=created_at,
             )
+            if vacated is not None:
+                recanonicalised += self._settle_group(
+                    cur, vacated, skip_entry_ref=entry_ref, created_at=created_at,
+                )
         stored = self.entry(wire["id"])
         if stored["content_hash"] != wire["content_hash"]:
             raise ClaimIndexConflict("stored ClaimIndexEntryVersion did not read back")
         return {"status": "fresh", "recanonicalised": recanonicalised, **stored}
+
+    def settle_group(self, dedupe_group_ref: str, *, created_at: str) -> list[str]:
+        """Re-settle one group without recording anything about a claim.
+
+        Public because a retirement, a retraction or a rule change can change
+        who should be canonical without any entry being re-tagged, and there
+        has to be a way to say so that is not "write the same tag again".
+        """
+
+        return self._settle_only(_text(dedupe_group_ref, "dedupe_group_ref"), created_at)
+
+    def _settle_only(self, dedupe_group_ref: str, created_at: str) -> list[str]:
+        if not self._group_rows(self.connection, dedupe_group_ref):
+            return []
+        with self.store._transaction() as cur:
+            return self._settle_group(
+                cur, dedupe_group_ref, skip_entry_ref=None, created_at=created_at,
+            )
 
     # -- internals --------------------------------------------------------
 
@@ -584,7 +623,8 @@ class ClaimIndexAuthority:
         return all(mine < canonical_order_key(other) for other in members)
 
     def _settle_group(
-        self, cur: Any, dedupe_group_ref: str, *, skip_entry_ref: str, created_at: str
+        self, cur: Any, dedupe_group_ref: str, *, skip_entry_ref: str | None,
+        created_at: str,
     ) -> list[str]:
         """Re-version any member whose canonicality the new entry changed."""
 

@@ -215,25 +215,36 @@ def run_claim_index(
         settled = [row for row in pending if row["tags"]["aspect"] is not None]
         open_rows = [row for row in pending if row["tags"]["aspect"] is None]
 
+        batch = build_batch(open_rows, max_claims=MAX_CLAIMS_PER_BATCH)
+        summary["batch_size"] = len(batch)
+        summary["rule_tagged"] = len(settled)
+        if dry_run:
+            # A dry run says what it would do and writes nothing at all -- not
+            # the rule tags either. "Assemble and stop" is what a dry run is
+            # for, and a dry run that had already written half the answer is
+            # not one anybody can use to look before they leap.
+            summary.update({
+                "status": "succeeded", "index_status": "dry_run",
+                "prompt_bytes": len(build_prompt(batch).encode("utf-8")) if batch else 0,
+            })
+            return summary
+
         authority = ClaimIndexAuthority(store)
         created_at = _now()
         counts = record_tagged(
             authority, settled, actor_ref=actor_ref, created_at=created_at
         )
-        summary["rule_tagged"] = len(settled)
         summary["fresh"] += counts["fresh"]
         summary["duplicate"] += counts["duplicate"]
         summary["recanonicalised"] += counts["recanonicalised"]
 
-        batch = build_batch(open_rows, max_claims=MAX_CLAIMS_PER_BATCH)
-        summary["batch_size"] = len(batch)
         if not batch:
             summary.update({"status": "succeeded", "index_status": "rules_only"})
             return summary
-        if dry_run or model_config_path is None:
+        if model_config_path is None:
             summary.update({
                 "status": "succeeded", "index_status": "gated",
-                "failure_reason": None if dry_run else "no model configured",
+                "failure_reason": "no model configured",
                 "prompt_bytes": len(build_prompt(batch).encode("utf-8")),
             })
             return summary
@@ -327,6 +338,7 @@ def run_promote_figures(
         "company_ref": company_ref,
         "promoted": [],
         "skipped": [],
+        "truncated": 0,
         "failure_reason": None,
         "formal_authority_writes": 0,
     }
@@ -361,6 +373,7 @@ def run_promote_figures(
             "status": "succeeded",
             "promoted": result["promoted"],
             "skipped": result["skipped"],
+            "truncated": result["truncated"],
         })
         return summary
     except Exception as exc:

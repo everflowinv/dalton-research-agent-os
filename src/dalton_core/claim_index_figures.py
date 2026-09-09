@@ -32,26 +32,35 @@ integrator re-signs the policy that names it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Iterable, Mapping
 
 from .document_numeric_claim import (
     NumericCandidateError,
     verify_numeric_candidate,
 )
 from .research_verification import (
+    FIGURE_ADMISSIBLE_GRADES as _ADMISSIBLE_GRADES,
     FIGURE_ADMISSION_VERIFIED_FIGURE,
     FIGURE_NUMERIC_VERIFIER_HASH,
     FIGURE_NUMERIC_VERIFIER_REF,
+    MISSION_FIGURE_AUTHORITY_MODE,
+    MISSION_FIGURE_SOURCE_VERIFIER_HASH,
+    MISSION_FIGURE_SOURCE_VERIFIER_REF,
+    MISSION_VERIFIED_FIGURE_RULE_REF,
     STATEMENT_LINE_VERIFIER_HASH,
     STATEMENT_LINE_VERIFIER_REF,
     ResearchVerificationConflict,
+    ResearchVerificationError,
     VerificationRejected,
     build_candidate_evidence,
+    figure_candidate_numerics,
     validate_candidate_claim,
     validate_candidate_evidence,
+    validate_source_verification_material,
     validate_verification_bundle,
 )
 from .store import canonical_json, content_hash
@@ -227,23 +236,7 @@ class DocumentFigureResolver:
         recheck_error: str | None = None
         try:
             verify_numeric_candidate(
-                {
-                    "quote_id": held["quote_id"],
-                    "metric_ref": held["metric_ref"],
-                    # Not stored on the row; the attribution check that used it
-                    # happened at write time and is not re-litigated here.  The
-                    # label carries the company's own wording either way.
-                    "subject_as_named": held["as_reported_label"],
-                    "as_reported_label": held["as_reported_label"],
-                    "value": held["value"],
-                    "unit": held["unit"],
-                    "currency": held["currency"],
-                    "period": held["period"],
-                    "basis": held["basis"],
-                    "scale": held["scale"],
-                },
-                {held["quote_id"]: held["citation_text"]},
-            )
+                _numeric_candidate(held), {held["quote_id"]: held["citation_text"]})
         except NumericCandidateError as exc:
             recheck_error = str(exc)
         findings.append(_finding(
@@ -380,58 +373,321 @@ class DocumentFigureResolver:
         return record, validate_verification_bundle(bundle)
 
 
-# -- citation binding lookup ----------------------------------------------
 
-def find_citation_binding(
-    connection: Any, *, document_ref: str, source_manifest_hash: str, quote_id: str
-) -> dict[str, Any] | None:
-    """The smallest claim-eligible citation covering this figure's quote.
 
-    A figure names the span it was read from and a citation binding names the
-    span a Claim may cite; when the second contains the first, the figure's
-    number is inside evidence that has already been admitted.  The *smallest*
-    covering span is chosen so that a broad binding never quietly stands in for
-    a tighter one, and ties break on the binding id so two runs agree.
+# -- the Core chain a figure hangs from ------------------------------------
 
-    ``None`` means this figure has no admitted citation yet.  That is a real
-    state and the promoter reports it rather than minting one: binding a
-    citation is the correction authority's decision, not the promoter's.
+class MissionFigureAuthorityResolver(DocumentFigureResolver):
+    """The `mission_figure_authority` provenance mode (ADR-0007).
+
+    The material is the figure row.  Everything around it is re-derived from
+    Core, and this is the whole chain:
+
+        figure -> mission document review -> discovered document -> the
+        discovery that found it -> the connector SourceEnvelope that
+        enumerated the document -> the raw ArtifactVersion behind it
+
+    Every hop exists in the live Core today for all five surviving figures --
+    checked before this was written, because a provenance mode that only works
+    on a fixture is not a provenance mode.  The envelope is the search that
+    *named* this document, not a fetch of it: what binds the digits to the
+    bytes is the figure's own citation, re-checked here, and what the envelope
+    adds is that the document is a record this connector really returned.
+
+    No transcript citation binding is involved, which is the point.  A figure
+    from a SEC filing has no correction set and never will, and requiring one
+    was what left twelve verified numbers with nowhere to go.
     """
 
-    span = quote_span(quote_id)
-    if span is None:
-        return None
-    start, end = span
-    rows = connection.execute(
-        "SELECT b.* FROM transcript_claim_citation_bindings b "
-        "JOIN transcript_correction_set_versions c "
-        "ON c.version_id=b.correction_set_version_ref "
-        "WHERE b.claim_eligible=1 AND b.source_manifest_hash=? "
-        "AND b.source_start<=? AND b.source_end>=? "
-        "ORDER BY (b.source_end - b.source_start), b.binding_id",
-        (source_manifest_hash, start, end),
-    ).fetchall()
-    for row in rows:
-        correction = connection.execute(
-            "SELECT record_json FROM transcript_correction_set_versions WHERE version_id=?",
-            (row["correction_set_version_ref"],),
+    provenance_mode = MISSION_FIGURE_AUTHORITY_MODE
+    verifier = (MISSION_FIGURE_SOURCE_VERIFIER_REF, MISSION_FIGURE_SOURCE_VERIFIER_HASH)
+
+    # -- the chain --------------------------------------------------------
+
+    def chain(self, figure: Mapping[str, Any]) -> dict[str, Any]:
+        """Resolve every hop, or say which one is missing."""
+
+        review = self._row(
+            "coverage_mission_document_reviews", "review_id", figure["review_ref"],
+            "mission document review")
+        if review["document_ref"] != figure["document_ref"]:
+            raise FigureAdmissionError(
+                "the figure's review names another document")
+        discovered = self._row(
+            "coverage_mission_discovered_documents", "record_id",
+            review["discovered_document_ref"], "discovered document")
+        if discovered["document_ref"] != figure["document_ref"]:
+            raise FigureAdmissionError(
+                "the discovered document names another document")
+        discovery = self._row(
+            "coverage_mission_source_discoveries", "record_id",
+            discovered["discovery_ref"], "source discovery")
+        envelope_row = self._row(
+            "connector_source_envelopes", "source_envelope_id",
+            discovery["source_envelope_ref"], "connector SourceEnvelope")
+        if envelope_row["content_hash"] != discovery["source_envelope_hash"]:
+            raise FigureAdmissionError(
+                "the discovery's SourceEnvelope hash is not the one Core holds")
+        envelope = json.loads(envelope_row["record_json"])
+        artifact_row = self.connection.execute(
+            "SELECT v.version_id, v.content_hash FROM observability_artifact_version_index i "
+            "JOIN observability_artifact_versions_v2 v ON v.version_id=i.version_id "
+            "WHERE i.version_id=?",
+            (envelope.get("raw_artifact_version_ref"),),
         ).fetchone()
-        if correction is None:
-            continue
-        try:
-            record = json.loads(correction["record_json"])
-        except (TypeError, ValueError):
-            continue
-        if record.get("document_ref") != document_ref:
-            continue
+        if artifact_row is None:
+            raise FigureNotFound(
+                "the SourceEnvelope's raw ArtifactVersion is not in this Core")
         return {
-            "binding_id": row["binding_id"],
-            "correction_set_version_ref": row["correction_set_version_ref"],
-            "source_start": row["source_start"],
-            "source_end": row["source_end"],
-            "content_hash": row["content_hash"],
+            "review": review, "discovered": discovered, "discovery": discovery,
+            "envelope": envelope, "envelope_hash": envelope_row["content_hash"],
+            "artifact_ref": artifact_row["version_id"],
+            "artifact_hash": artifact_row["content_hash"],
         }
-    return None
+
+    def _row(self, table: str, column: str, identifier: Any, name: str) -> dict[str, Any]:
+        if not self._table(table):
+            raise FigureNotFound(f"this Core holds no {name}s")
+        row = self.connection.execute(
+            f"SELECT * FROM {table} WHERE {column}=?", (identifier,)
+        ).fetchone()
+        if row is None:
+            raise FigureNotFound(f"{name} {identifier!r} is not in this Core")
+        return {key: row[key] for key in row.keys()}
+
+    # -- the material -----------------------------------------------------
+
+    @staticmethod
+    def figure_projection(figure: Mapping[str, Any]) -> dict[str, Any]:
+        """What the material asserts about the number, and nothing else.
+
+        Deliberately not the whole row: the projection is the number, the
+        measure, the period, the words the filer used and the citation it was
+        read from.  ``observed_by`` and ``review_ref`` are provenance and are
+        checked through the chain instead.
+        """
+
+        return {
+            "figure_id": figure["figure_id"],
+            "figure_content_hash": figure["content_hash"],
+            "company_ref": figure["company_ref"],
+            "document_ref": figure["document_ref"],
+            "metric_ref": figure["metric_ref"],
+            "as_reported_label": figure["as_reported_label"],
+            "period": figure["period"],
+            "value": figure["value"],
+            "unit": figure["unit"],
+            "currency": figure["currency"],
+            "scale": figure["scale"],
+            "basis": figure["basis"],
+            "source_grade": figure["source_grade"],
+            "quote_id": figure["quote_id"],
+            "citation_hash": content_hash({
+                "quote_id": figure["quote_id"], "raw_text": figure["citation_text"],
+            }),
+            "source_manifest_hash": figure["source_manifest_hash"],
+            "verified_by": figure["verified_by"],
+        }
+
+    def build_material(self, figure_id: str) -> dict[str, Any]:
+        """The figure row as an AuthoritySourceVerificationMaterial 0.2."""
+
+        figure = self.figure(figure_id)
+        chain = self.chain(figure)
+        envelope = chain["envelope"]
+        payload = self.figure_projection(figure)
+        lineage = [
+            envelope["source"], envelope["id"], chain["artifact_ref"],
+            figure["document_ref"], figure["figure_id"],
+        ]
+        base = {
+            "schema_version": "0.2",
+            "id": "mission-figure-material:" + content_hash({
+                "figure_id": figure["figure_id"],
+                "figure_hash": figure["content_hash"],
+                "envelope": chain["envelope_hash"],
+            })[:32],
+            "created_at": figure["created_at"],
+            "source_envelope_ref": envelope["id"],
+            "source_envelope_hash": chain["envelope_hash"],
+            "artifact_ref": chain["artifact_ref"],
+            "artifact_hash": chain["artifact_hash"],
+            "source_ref": envelope["source"],
+            "source_type": "official_filing",
+            "operation": envelope["operation"],
+            "provenance_mode": self.provenance_mode,
+            # The explicit provenance edge: this material exists because of
+            # exactly this figure row, at exactly this hash.
+            "authority_resolution_ref": figure["figure_id"],
+            "authority_resolution_hash": figure["content_hash"],
+            "source_record_refs": [figure["document_ref"]],
+            "next_cursor": envelope.get("cursor"),
+            "normalized_payload": payload,
+            "normalized_payload_hash": hashlib.sha256(
+                canonical_json(payload).encode("utf-8")).hexdigest(),
+            "source_schema_hash": envelope["source_schema_hash"],
+            "source_content_hash": figure["source_manifest_hash"],
+            "source_lineage": lineage,
+            "published_at": envelope.get("published_at"),
+            "updated_at": envelope.get("updated_at"),
+            "as_of": envelope.get("as_of"),
+            "retrieved_at": envelope["retrieved_at"],
+            "completeness": "enumerated",
+            "status": "complete",
+        }
+        base["content_hash"] = content_hash(base)
+        return validate_source_verification_material(base)
+
+    # -- the deterministic verifier ---------------------------------------
+
+    def verify_source_material(self, material: Mapping[str, Any]) -> dict[str, Any]:
+        """Re-derive the whole chain from Core and emit a bundle.
+
+        ``CandidateStagingStore.stage(verification_mode="mission_figure_authority")``
+        calls this and requires the caller's bundle to be byte-identical, the
+        same contract the transcript mode has.
+        """
+
+        material_wire = validate_source_verification_material(material)
+        if material_wire.get("provenance_mode") != self.provenance_mode:
+            raise VerificationRejected(
+                f"the mission figure verifier requires {self.provenance_mode} material")
+        findings: list[dict[str, Any]] = []
+
+        def check(code: str, observed: Any, expected: Any, path: str, message: str) -> None:
+            ok = observed == expected
+            findings.append(_finding(
+                code, ok=ok, path=path,
+                expected=canonical_json(expected) if isinstance(expected, (dict, list)) else expected,
+                observed=canonical_json(observed) if isinstance(observed, (dict, list)) else observed,
+                message=message))
+
+        figure = self.figure(material_wire["authority_resolution_ref"])
+        body = {key: figure[key] for key in _FIGURE_COLUMNS}
+        check("figure_content_hash", content_hash(body), figure["content_hash"],
+              "figure.content_hash", "figure row hash recomputes from its own columns")
+        check("figure_authority_hash", material_wire["authority_resolution_hash"],
+              figure["content_hash"], "material.authority_resolution_hash",
+              "material binds the exact figure row")
+        check("figure_not_retracted", self.retracted(figure["figure_id"]), False,
+              "figure.retracted", "figure has not been withdrawn")
+        check("figure_grade_is_filed", figure["source_grade"] in _ADMISSIBLE_GRADES, True,
+              "figure.source_grade",
+              "figure is a company-filed document, not an earnings call")
+        try:
+            verify_numeric_candidate(
+                _numeric_candidate(figure), {figure["quote_id"]: figure["citation_text"]})
+            digits = "present"
+        except NumericCandidateError as exc:
+            digits = str(exc)
+        check("citation_digits_and_label", digits, "present", "figure.citation_text",
+              "figure's digits and as-reported label are in the bytes it cited")
+        check("quote_names_a_span", quote_span(figure["quote_id"]) is not None, True,
+              "figure.quote_id", "the quote id names a span of the original")
+        check("citation_hash", material_wire["normalized_payload"].get("citation_hash"),
+              content_hash({"quote_id": figure["quote_id"],
+                            "raw_text": figure["citation_text"]}),
+              "material.normalized_payload.citation_hash",
+              "material binds the exact citation the digits were checked against")
+        check("figure_projection", material_wire["normalized_payload"],
+              self.figure_projection(figure), "material.normalized_payload",
+              "material projection equals the Core figure row")
+
+        chain = self.chain(figure)
+        envelope = chain["envelope"]
+        check("review_binds_document", chain["review"]["document_ref"],
+              figure["document_ref"], "review.document_ref",
+              "the mission review names this document")
+        check("discovered_binds_document", chain["discovered"]["document_ref"],
+              figure["document_ref"], "discovered_document.document_ref",
+              "the discovered document names this document")
+        check("source_envelope_hash", material_wire["source_envelope_hash"],
+              chain["envelope_hash"], "material.source_envelope_hash",
+              "SourceEnvelope hash is exact Core authority")
+        check("envelope_names_the_document",
+              figure["document_ref"] in (envelope.get("source_record_refs") or []),
+              True, "source.source_record_refs",
+              "the SourceEnvelope enumerated this document")
+        check("artifact_ref", material_wire["artifact_ref"], chain["artifact_ref"],
+              "material.artifact_ref", "raw ArtifactVersion ref is exact")
+        check("artifact_hash", material_wire["artifact_hash"], chain["artifact_hash"],
+              "material.artifact_hash", "raw ArtifactVersion hash is exact")
+        check("raw_response_hash_equals_artifact", envelope.get("raw_response_hash"),
+              self._artifact_content_hash(chain["artifact_ref"]),
+              "source.raw_response_hash",
+              "SourceEnvelope raw hash equals the ArtifactVersion bytes hash")
+        for field, value in (
+            ("source_ref", envelope.get("source")),
+            ("operation", envelope.get("operation")),
+            ("source_schema_hash", envelope.get("source_schema_hash")),
+            ("retrieved_at", envelope.get("retrieved_at")),
+        ):
+            check(f"material_{field}", material_wire[field], value,
+                  f"material.{field}", f"material {field} equals SourceEnvelope")
+        check("source_content_hash", material_wire["source_content_hash"],
+              figure["source_manifest_hash"], "material.source_content_hash",
+              "material binds the manifest of the original the figure was read from")
+        check("source_lineage", material_wire["source_lineage"],
+              [envelope["source"], envelope["id"], chain["artifact_ref"],
+               figure["document_ref"], figure["figure_id"]],
+              "material.source_lineage",
+              "material lineage is source, envelope, artifact, document, figure")
+
+        verdict = "reject" if any(
+            item["status"] == "fail" and item["severity"] == "error" for item in findings
+        ) else "pass"
+        base = {
+            "schema_version": "0.1",
+            "id": "mission-figure-source-verification:" + content_hash({
+                "subject": material_wire["id"],
+                "figure": figure["content_hash"],
+                "findings": [item["content_hash"] for item in findings],
+            }),
+            "created_at": material_wire["retrieved_at"],
+            "kind": "source",
+            "subject_ref": material_wire["id"],
+            "subject_hash": material_wire["content_hash"],
+            "verdict": verdict,
+            # The figure row is the checkpoint of this mode: it is the record
+            # that was admitted, and the thing this verification is *of*.
+            "checkpoint_ref": figure["figure_id"],
+            "checkpoint_hash": figure["content_hash"],
+            "findings": findings,
+            "verifier_ref": self.verifier[0],
+            "verifier_hash": self.verifier[1],
+        }
+        base["content_hash"] = content_hash(base)
+        return validate_verification_bundle(base)
+
+    def _artifact_content_hash(self, artifact_ref: str) -> str | None:
+        row = self.connection.execute(
+            "SELECT record_json FROM observability_artifact_versions_v2 WHERE version_id=?",
+            (artifact_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(row["record_json"]).get("artifact_content_hash")
+        except (TypeError, ValueError):
+            return None
+
+
+def _numeric_candidate(figure: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "quote_id": figure["quote_id"],
+        "metric_ref": figure["metric_ref"],
+        # Not stored on the row; the attribution check that used it happened at
+        # write time and is not re-litigated here. The label carries the
+        # company's own wording either way.
+        "subject_as_named": figure["as_reported_label"],
+        "as_reported_label": figure["as_reported_label"],
+        "value": figure["value"],
+        "unit": figure["unit"],
+        "currency": figure["currency"],
+        "period": figure["period"],
+        "basis": figure["basis"],
+        "scale": figure["scale"],
+    }
 
 
 # -- the promoter ----------------------------------------------------------
@@ -466,68 +722,55 @@ def promote_figure(
     staging: Any,
     *,
     figure: Mapping[str, Any],
-    citation_ref: str,
-    correction_set_ref: str,
     actor_ref: str,
     idempotency_key: str,
-    artifact_reader: Callable[[Mapping[str, Any]], bytes] | None = None,
-    source_kind: str = "alphaengine",
-    resolver: DocumentFigureResolver | None = None,
+    resolver: MissionFigureAuthorityResolver | None = None,
 ) -> dict[str, Any]:
-    """Stage one verified figure as a quantitative candidate.
+    """Stage one company-filed figure as a quantitative candidate.
 
-    Everything except the numeric authority is the transcript path unchanged:
-    the same Core-held material, the same deterministic source verification,
-    the same citation binding on the evidence.  What differs is that the claim
-    carries the figure's value and points its numeric refs at the figure row.
+    No citation binding, no correction set, no transcript: the material is the
+    figure row and its Core chain, which is what ADR-0007 decided and what lets
+    a SEC-filing figure move at all.
+
+    A spoken figure is refused here as well as in the staging store.  Two
+    guards for one rule is on purpose: the store's is the contract and this one
+    is the sentence a caller reads.
     """
 
-    from .transcript_candidate_staging import (
-        SOURCE_KINDS,
-        TranscriptCoreAuthorityResolver,
-        bind_candidate_evidence_to_transcript_citation,
-    )
-
-    figures = resolver if resolver is not None else DocumentFigureResolver(core.connection)
+    figures = resolver if resolver is not None else MissionFigureAuthorityResolver(
+        core.connection)
     held, numeric_bundle = figures.verify_figure(figure)
-
-    authority = TranscriptCoreAuthorityResolver(
-        core, artifact_reader=artifact_reader, source_kind=source_kind
-    )
-    kind = SOURCE_KINDS[source_kind]
-    binding, _correction_set = authority.citation(citation_ref)
-    if binding["correction_set_version_ref"] != correction_set_ref:
+    if held["source_grade"] not in _ADMISSIBLE_GRADES:
         raise FigureAdmissionError(
-            "figure citation does not belong to the requested correction set"
+            f"{held['source_grade']} figures stay qualitative (ADR-0007): "
+            "management said this number, the company did not publish it"
         )
-    material = authority.build_material(citation_ref)
-    source_verification = authority.verify_source_material(material)
+    material = figures.build_material(held["figure_id"])
+    source_verification = figures.verify_source_material(material)
     if source_verification["verdict"] != "pass":
+        failed = [
+            item["code"] for item in source_verification["findings"]
+            if item["severity"] == "error" and item["status"] == "fail"
+        ]
         raise VerificationRejected(
-            "figure candidate source verification did not pass"
-        )
+            "mission figure authority verification rejected: " + ", ".join(failed))
+
     when = material["retrieved_at"]
     semantics = figure_claim_semantics(held)
-    evidence_ref = (
-        f"candidate-evidence:{kind['candidate_prefix']}:" + binding["content_hash"][:32]
-    )
-    claim_ref = "candidate-claim:figure:" + content_hash({
+    numerics = figure_candidate_numerics(held)
+    evidence_ref = "candidate-evidence:mission-figure:" + held["content_hash"][:32]
+    claim_ref = "candidate-claim:mission-figure:" + content_hash({
         "figure_id": held["figure_id"], "figure_hash": held["content_hash"],
     })[:32]
-    evidence = build_candidate_evidence(
+    evidence = validate_candidate_evidence(build_candidate_evidence(
         material, source_verification, candidate_evidence_ref=evidence_ref,
         actor_ref=actor_ref, created_at=when,
-        verification_mode=authority.provenance_mode,
-    )
-    evidence = bind_candidate_evidence_to_transcript_citation(
-        evidence, binding, source_type=kind["evidence_source_type"]
-    )
-    evidence_wire = validate_candidate_evidence(evidence)
+        verification_mode=MISSION_FIGURE_AUTHORITY_MODE,
+    ))
     claim = {
         "schema_version": "0.1",
         "id": "candidate-claim-version:" + content_hash(
-            {"candidate_claim_ref": claim_ref, "version": 1}
-        ),
+            {"candidate_claim_ref": claim_ref, "version": 1}),
         "created_at": when,
         "candidate_claim_ref": claim_ref,
         "version": 1,
@@ -538,13 +781,15 @@ def promote_figure(
         "normalized_statement": semantics["normalized_statement"],
         "semantic_verification_status": "unverified",
         "claim_kind": "quantitative",
-        "value": held["value"],
-        "unit": held["unit"],
-        "currency": held["currency"],
-        "scale": held["scale"],
+        # Built from the row through one mapping, never read off it field by
+        # field: a percentage has no scale word and the contract has no null
+        # scale, and reading held["scale"] straight was a crash.
+        "value": numerics["value"],
+        "unit": numerics["unit"],
+        "currency": numerics["currency"],
+        "scale": numerics["scale"],
         "candidate_evidence_refs": [
-            {"ref": evidence_wire["id"], "hash": evidence_wire["content_hash"]}
-        ],
+            {"ref": evidence["id"], "hash": evidence["content_hash"]}],
         "source_verification_ref": source_verification["id"],
         "source_verification_hash": source_verification["content_hash"],
         # The figure row is the numeric authority; these are its ref and hash.
@@ -560,11 +805,10 @@ def promote_figure(
     staged = staging.stage(
         material=material,
         source_verification=source_verification,
-        evidence=evidence_wire,
+        evidence=evidence,
         claim=claim,
         idempotency_key=idempotency_key,
-        verification_mode=authority.provenance_mode,
-        authority_resolver=authority,
+        verification_mode=MISSION_FIGURE_AUTHORITY_MODE,
         figure_admission_policy=FIGURE_ADMISSION_VERIFIED_FIGURE,
         verified_figure=held,
         figure_resolver=figures,
@@ -573,8 +817,10 @@ def promote_figure(
         "write_status": staged["write_status"],
         "figure_id": held["figure_id"],
         "staging": staged,
+        "material": material,
+        "source_verification": source_verification,
         "claim": claim,
-        "evidence": evidence_wire,
+        "evidence": evidence,
         "numeric_verification": numeric_bundle,
     }
 
@@ -585,56 +831,55 @@ def promote_verified_figures(
     *,
     actor_ref: str,
     company_ref: str | None = None,
-    source_grade: str | None = None,
     limit: int = 25,
-    artifact_reader: Callable[[Mapping[str, Any]], bytes] | None = None,
-    source_kind: str = "alphaengine",
     promoted: Iterable[str] | None = None,
 ) -> dict[str, Any]:
-    """Stage every un-promoted verified figure, and say why the rest were not.
+    """Stage every un-promoted company-filed figure, and say why the rest were not.
 
-    Deterministic: the figures come out of Core in a fixed order, each one's
-    candidate identity is content-addressed on the figure row, and a figure
-    already staged returns ``duplicate`` rather than a second candidate.  Three
-    copies of one quarter's revenue therefore produce three candidates *if* the
-    documents really do report them separately -- and the index puts them in
-    one dedupe group with one canonical member, which is where the collapsing
-    belongs.  Refusing to stage the second and third would throw away the fact
-    that two documents agree.
+    Deterministic: the figures come out of Core in a fixed order, each
+    candidate's identity is content-addressed on the figure row, and a figure
+    already staged returns ``duplicate`` rather than a second candidate.
+
+    **Spoken figures are never swept.**  They are listed in ``skipped`` with
+    the reason, because ADR-0007 kept ADR-0003's finding about transcripts and
+    a sweep that silently walked past half its input would hide that.
+
+    Three copies of one quarter's revenue therefore produce three candidates
+    *if* the documents really do report them separately -- and the index puts
+    them in one dedupe group with one canonical member, which is where the
+    collapsing belongs.  Refusing to stage the second and third would throw
+    away the fact that two documents agree.
     """
 
-    resolver = DocumentFigureResolver(core.connection)
+    resolver = MissionFigureAuthorityResolver(core.connection)
     already = set(promoted or ())
     results: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
-    for held in resolver.figures(company_ref=company_ref, source_grade=source_grade):
+    held_figures = [
+        item for item in resolver.figures(company_ref=company_ref)
+        if item["figure_id"] not in already
+    ]
+    truncated = 0
+    for index, held in enumerate(held_figures):
         if len(results) >= limit:
+            truncated = len(held_figures) - index
             break
-        if held["figure_id"] in already:
-            continue
-        binding = find_citation_binding(
-            core.connection, document_ref=held["document_ref"],
-            source_manifest_hash=held["source_manifest_hash"],
-            quote_id=held["quote_id"],
-        )
-        if binding is None:
+        if held["source_grade"] not in _ADMISSIBLE_GRADES:
             skipped.append({
                 "figure_id": held["figure_id"],
-                "reason": "no claim-eligible citation covers this figure's quote",
+                "reason": (
+                    f"{held['source_grade']} stays qualitative under ADR-0007; "
+                    "management said this number, the company did not publish it"
+                ),
             })
             continue
         try:
             results.append(promote_figure(
-                core, staging, figure=held,
-                citation_ref=binding["binding_id"],
-                correction_set_ref=binding["correction_set_version_ref"],
-                actor_ref=actor_ref,
+                core, staging, figure=held, actor_ref=actor_ref,
                 idempotency_key="figure-promotion:" + held["figure_id"],
-                artifact_reader=artifact_reader, source_kind=source_kind,
                 resolver=resolver,
             ))
-        except (FigureAdmissionError, VerificationRejected,
-                ResearchVerificationConflict) as exc:
+        except (FigureAdmissionError, ResearchVerificationError) as exc:
             skipped.append({
                 "figure_id": held["figure_id"],
                 "reason": f"{type(exc).__name__}: {exc}",
@@ -648,6 +893,9 @@ def promote_verified_figures(
             for item in results
         ],
         "skipped": skipped,
+        # A sweep that stopped at its bound and did not say so reads as
+        # "everything is done".
+        "truncated": truncated,
         "results": results,
     }
 
@@ -656,13 +904,17 @@ __all__ = [
     "FIGURE_KINDS",
     "FIGURE_VERIFIER_HASH",
     "FIGURE_VERIFIER_REF",
+    "MISSION_FIGURE_AUTHORITY_MODE",
+    "MISSION_FIGURE_SOURCE_VERIFIER_HASH",
+    "MISSION_FIGURE_SOURCE_VERIFIER_REF",
+    "MISSION_VERIFIED_FIGURE_RULE_REF",
     "STATEMENT_LINE_VERIFIER_HASH",
     "STATEMENT_LINE_VERIFIER_REF",
     "DocumentFigureResolver",
     "FigureAdmissionError",
     "FigureNotFound",
+    "MissionFigureAuthorityResolver",
     "figure_claim_semantics",
-    "find_citation_binding",
     "promote_figure",
     "promote_verified_figures",
     "quote_span",

@@ -99,6 +99,37 @@ FIGURE_ADMISSION_POLICIES = frozenset({
 })
 FIGURE_ADMISSION_DEFAULT = FIGURE_ADMISSION_REJECT
 
+# ADR-0007 §Decision: the refusal that ADR-0003 B installed keeps applying to
+# ``transcript_core_authority`` and to ``public_web_core_authority``, word for
+# word.  What ADR-0007 adds is a *different* mode whose material is not a cited
+# original at all: it is a row of ``coverage_mission_document_figures``, whose
+# digits and as-reported label were checked against the exact quote before the
+# row was written and can be checked again from the stored quote and hashes.
+#
+# The rule is therefore about the authority the number comes from, not about
+# the fact that the original was cited -- which is what ADR-0003 meant and what
+# it could not yet say.
+MISSION_FIGURE_AUTHORITY_MODE = "mission_figure_authority"
+# The auto-commit rule ref the owner has to publish and sign before any of this
+# is legal (ADR-0007, last paragraph of the Decision).  Named here so the
+# integrator can grep for it and so a policy listing it means exactly one thing.
+MISSION_VERIFIED_FIGURE_RULE_REF = "research-auto-commit:mission-verified-figure:v1"
+MISSION_FIGURE_SOURCE_VERIFIER_REF = "verifier:mission-figure-authority-source:0.1"
+MISSION_FIGURE_SOURCE_VERIFIER_HASH = content_hash({
+    "ref": MISSION_FIGURE_SOURCE_VERIFIER_REF,
+    "rules": [
+        "figure-row-hash", "figure-not-retracted", "citation-digits-and-label",
+        "review-binds-document", "discovered-document-binds-discovery",
+        "discovery-envelope-is-core-authority", "envelope-names-the-document",
+        "artifact-is-core-authority", "quote-names-a-span",
+    ],
+})
+# ADR-0007 §Decision 4: a company-filed document is the company publishing the
+# number; an earnings-call transcript is a record that someone *said* it, and
+# ADR-0003's finding about transcripts was right about transcripts.  A spoken
+# figure stays qualitative.
+FIGURE_ADMISSIBLE_GRADES = frozenset({"company-filed-document"})
+
 # The two numeric verifiers ADR-0007 adds, named here beside the others because
 # the VerificationBundle contract keeps a closed list of who is allowed to have
 # produced one.  A verifier that is not on this list cannot sign a bundle, and
@@ -157,7 +188,10 @@ def _canonical_decimal_text(value: Any) -> str:
     if "." in formatted:
         formatted = formatted.rstrip("0").rstrip(".")
     return "0" if formatted in {"", "-0"} else formatted
-_AUTHORITY_PROVENANCE_MODES = frozenset({"connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE, PUBLIC_WEB_CORE_AUTHORITY_MODE})
+_AUTHORITY_PROVENANCE_MODES = frozenset({
+    "connector_authority", TRANSCRIPT_CORE_AUTHORITY_MODE,
+    PUBLIC_WEB_CORE_AUTHORITY_MODE, "mission_figure_authority",
+})
 PUBLIC_WEB_SOURCE_VERIFIER_REF = "verifier:public-web-core-authority-source:0.1"
 TRANSCRIPT_SOURCE_VERIFIER_REF = "verifier:transcript-core-authority-source:0.1"
 TRANSCRIPT_SOURCE_VERIFIER_HASH = content_hash({
@@ -582,6 +616,7 @@ def validate_verification_bundle(value: Mapping[str, Any]) -> dict[str, Any]:
             (_AUTHORITY_SOURCE_VERIFIER_REF, _AUTHORITY_SOURCE_VERIFIER_HASH),
             (TRANSCRIPT_SOURCE_VERIFIER_REF, TRANSCRIPT_SOURCE_VERIFIER_HASH),
             (PUBLIC_WEB_SOURCE_VERIFIER_REF, PUBLIC_WEB_SOURCE_VERIFIER_HASH),
+            (MISSION_FIGURE_SOURCE_VERIFIER_REF, MISSION_FIGURE_SOURCE_VERIFIER_HASH),
         }
         if wire["kind"] == "source"
         else {
@@ -1283,6 +1318,23 @@ def build_candidate_evidence(
         # This value came from the validated connector profile when the
         # material was built; it is not accepted as a caller label.
         expected_source_type = material_wire["source_type"]
+    elif verification_mode == MISSION_FIGURE_AUTHORITY_MODE:
+        if (
+            material_wire["schema_version"] != "0.2"
+            or material_wire.get("provenance_mode") != MISSION_FIGURE_AUTHORITY_MODE
+        ):
+            raise VerificationRejected(
+                f"{MISSION_FIGURE_AUTHORITY_MODE} evidence requires mission figure material"
+            )
+        if (verification["verifier_ref"], verification["verifier_hash"]) != (
+            MISSION_FIGURE_SOURCE_VERIFIER_REF, MISSION_FIGURE_SOURCE_VERIFIER_HASH
+        ):
+            raise VerificationRejected(
+                f"{MISSION_FIGURE_AUTHORITY_MODE} evidence requires its own Core source verifier"
+            )
+        # Read from the Core chain by the resolver, never a caller label: a
+        # figure taken from a filed document is official_filing evidence.
+        expected_source_type = material_wire["source_type"]
     elif verification_mode in CITED_CORE_AUTHORITY_MODES:
         expected_verifier = (
             (TRANSCRIPT_SOURCE_VERIFIER_REF, TRANSCRIPT_SOURCE_VERIFIER_HASH)
@@ -1521,6 +1573,14 @@ class CandidateStagingStore:
                 f"{FIGURE_ADMISSION_REJECT} rule; ADR-0007 has to be enabled "
                 "deliberately"
             )
+        if verified_figure is not None and verification_mode != MISSION_FIGURE_AUTHORITY_MODE:
+            # ADR-0007 leaves the cited-original refusal exactly where ADR-0003
+            # put it. A figure travels its own mode or it does not travel.
+            raise VerificationRejected(
+                "a verified figure is admitted only through "
+                f"{MISSION_FIGURE_AUTHORITY_MODE}; the cited-original modes "
+                "stay qualitative"
+            )
         material_wire = validate_source_verification_material(material)
         source_wire = self._require_clean_pass(source_verification, "source")
         evidence_wire = validate_candidate_evidence(evidence)
@@ -1572,8 +1632,34 @@ class CandidateStagingStore:
             spec_wire = validate_numeric_verification_spec(numeric_spec)
             numeric_wire = self._require_clean_pass(numeric_verification, "numeric")
 
-        if verification_mode in CITED_CORE_AUTHORITY_MODES:
-            if not qualitative and verified_figure is None:
+        if verification_mode == MISSION_FIGURE_AUTHORITY_MODE:
+            # ADR-0007: the material *is* the figure row, so there is no
+            # checkpoint, no plan and no runner request; the resolver re-derives
+            # the whole chain from Core and this store demands byte equality
+            # with what the caller brought, exactly as the cited modes do.
+            if qualitative:
+                raise VerificationRejected(
+                    f"{MISSION_FIGURE_AUTHORITY_MODE} staging is for a verified "
+                    "number; a semantic candidate has no figure to rest on"
+                )
+            if verified_figure is None:
+                raise VerificationRejected(
+                    f"{MISSION_FIGURE_AUTHORITY_MODE} staging requires the figure row"
+                )
+            if figure_resolver is None or not callable(
+                getattr(figure_resolver, "verify_source_material", None)
+            ):
+                raise VerificationRejected(
+                    f"{MISSION_FIGURE_AUTHORITY_MODE} staging requires a Core figure resolver"
+                )
+            if material_wire.get("provenance_mode") != MISSION_FIGURE_AUTHORITY_MODE:
+                raise VerificationRejected(
+                    f"{MISSION_FIGURE_AUTHORITY_MODE} staging requires matching "
+                    "mission figure material"
+                )
+            recomputed_source = figure_resolver.verify_source_material(material_wire)
+        elif verification_mode in CITED_CORE_AUTHORITY_MODES:
+            if not qualitative:
                 raise VerificationRejected(
                     f"{verification_mode} staging admits qualitative candidates only; "
                     "a cited original is not a numeric authority"
@@ -1632,6 +1718,13 @@ class CandidateStagingStore:
             if canonical_json(figure_wire) != canonical_json(dict(verified_figure)):
                 raise ResearchVerificationConflict(
                     "the supplied figure is not the figure Core holds"
+                )
+            if figure_wire.get("source_grade") not in FIGURE_ADMISSIBLE_GRADES:
+                # ADR-0007 §Decision 4. Enforced here rather than in the
+                # promoter, so that no caller can route a spoken figure in.
+                raise VerificationRejected(
+                    "only a company-filed figure may become a quantitative "
+                    "Claim; an earnings-call figure stays qualitative"
                 )
             numeric_wire = self._require_clean_pass(figure_bundle, "numeric")
             if (
@@ -1860,7 +1953,10 @@ __all__ = [
     "InjectedStagingCrash", "CandidateStagingStore",
     "FIGURE_ADMISSION_DEFAULT", "FIGURE_ADMISSION_POLICIES",
     "FIGURE_ADMISSION_REJECT", "FIGURE_ADMISSION_VERIFIED_FIGURE",
+    "FIGURE_ADMISSIBLE_GRADES",
     "FIGURE_NUMERIC_VERIFIER_HASH", "FIGURE_NUMERIC_VERIFIER_REF",
+    "MISSION_FIGURE_AUTHORITY_MODE", "MISSION_FIGURE_SOURCE_VERIFIER_HASH",
+    "MISSION_FIGURE_SOURCE_VERIFIER_REF", "MISSION_VERIFIED_FIGURE_RULE_REF",
     "STATEMENT_LINE_VERIFIER_HASH", "STATEMENT_LINE_VERIFIER_REF",
     "figure_candidate_numerics",
     "TRANSCRIPT_CORE_AUTHORITY_MODE", "TRANSCRIPT_SOURCE_VERIFIER_REF",

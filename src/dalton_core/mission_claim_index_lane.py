@@ -34,6 +34,9 @@ MAX_FAILURE_DETAIL_CHARS = 500
 # child re-derives its own batch; this bound is only so that a company with a
 # thousand untagged claims does not make the tick's selection read all of them.
 MAX_PENDING_SCANNED = 200
+# Outcomes that say something about this moment rather than about this batch,
+# so the batch is not held back for them.
+TRANSIENT_STATUSES: frozenset[str] = frozenset({"busy", "model_unavailable"})
 
 
 class MissionClaimIndexLaneCoordinator:
@@ -102,8 +105,15 @@ class MissionClaimIndexLaneCoordinator:
         if settled is None or settled.get("status") == "running":
             return settled
         self._open = None
-        failed = settled.get("status") != "succeeded" or settled.get("index_status") in (
-            "refused", "model_unavailable", "busy", "failed", "not_authorized",
+        # ``busy`` is "the scheduler had this request in flight" and
+        # ``model_unavailable`` is "no route right now". Both are true of a
+        # moment, not of a batch, and holding a batch back for them would park
+        # work that the very next tick could do.
+        index_status = settled.get("index_status")
+        failed = (
+            index_status not in TRANSIENT_STATUSES
+            and (settled.get("status") != "succeeded"
+                 or index_status in ("refused", "failed", "not_authorized"))
         )
         company_ref = settled.get("company_ref")
         digest = settled.get("batch_digest")
@@ -174,5 +184,6 @@ class MissionClaimIndexLaneCoordinator:
 __all__ = [
     "MAX_FAILURE_DETAIL_CHARS",
     "MAX_PENDING_SCANNED",
+    "TRANSIENT_STATUSES",
     "MissionClaimIndexLaneCoordinator",
 ]
