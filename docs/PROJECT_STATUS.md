@@ -28,6 +28,33 @@
    `metric_discovery.contested()` 能说出是谁在哪个单位上分歧（live 5 条，都是 percent/ratio），页面还没读它。
 8. **AlphaEngine 滚动 24h 用量贴着上限**（131/130），是 CTSH 缺电话会的直接约束。
 
+## 2026-09-09（findata 第一段）：连接器身份已签，child 还没写
+
+**已完成并部署**：`connector:sec-financial-statements`（第 11 个连接器）的模板、输出契约、身份与
+**owner 已批准**的治理记录；`edgartools` 作为可选依赖 `[sec-financials]` 进入安装。
+
+- **一个来源、两种读法**：与 filings 连接器共用 `source:sec-edgar` 与同一个 source hash；连接器、schema、
+  批准各自独立——与 P10e 拆 `list_filings` / `get_company_facts` 同一条原则。
+- **不取代读原文**（owner 的判断，也确实如此）：parser 够不到的仍然只能从原文取，那条 lane 保留。
+- **上线的是规范化后的 wire，不是 parser 自己的形状**：parser 把每个期间当成一列
+  （`{"2026-06-30": 2814828000}`），键本身是数据，闭合 schema 描述不了。适配器改成
+  每 (statement, concept, period) 一行、显式 `period_end`；数字是**字符串**（float 不是报出来的东西）；
+  `level` / `parent_concept` / `dimension_axis` 是**必填**——能省掉这几项的 wire 就又退回成 company-facts 了。
+- **owner 认下的代价写进了模块而不是暗示**：parser 自己发 HTTP，这些字节没有经过 Dalton 的 transport 验证；
+  原始输出哈希入库、每行带 accession，任何数字都能回到 SEC 复核。
+
+**写 child 之前查到的一件要紧事（会决定 child 怎么写）**：
+`edgartools` 的**报表视图**（`statements.income_statement().to_dataframe()`）有**结构**
+（level、parent_concept、dimension_axis/member），但**没有单位**；
+而**事实视图**（`xbrl.query()`）有**权威的 `unit_ref`**（如 `usd`）、显式 `period_start`/`period_end`、
+`decimals`、以及未经转换的 `value` 字符串，但**没有层级**。
+所以 child 必须把两者按 (concept, period_end, dimension) **join** 起来。
+**不能默认 USD**——那正是这套系统一贯拒绝的"拿推断冒充披露"。
+
+**还没做**：child CLI（join + 规范化 + 契约自校验 + fixture）、launcher、writer 接线；
+以及"数字落到哪里"这个真正的设计决定（Claims 还是 Model Input Ledger）——它和建模那一段是同一个问题，
+留到和 owner 谈建模时一起定。
+
 ## 2026-09-09：OpenClaw 现有 skills 里值得接进来的能力（调研，未实现）
 
 owner 问：现有 82 个 skill 里还有哪些值得做成 connector；以及能不能直接接 findata analyst，

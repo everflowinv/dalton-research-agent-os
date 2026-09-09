@@ -26,7 +26,7 @@ if [[ ! -x "$venv_dir/bin/python" ]]; then
   "$python_source" -m venv "$venv_dir"
 fi
 "$venv_dir/bin/python" -m pip install --disable-pip-version-check --upgrade pip
-"$venv_dir/bin/python" -m pip install --disable-pip-version-check "${repo_root}[deploy,pdf]"
+"$venv_dir/bin/python" -m pip install --disable-pip-version-check "${repo_root}[deploy,pdf,sec-financials]"
 
 # P9d-11: stopping the writer terminates whatever lane child is in flight and
 # the next tick settles it as orphaned, parking that company/spec for a day.
