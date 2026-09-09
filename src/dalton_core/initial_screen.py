@@ -141,6 +141,19 @@ def strip_citation_tags(text: str) -> str:
     return cleaned.strip()
 
 
+def raw_section_body(text: str) -> str:
+    """The body the model wrote, before the citation scaffolding is stripped.
+
+    The drafter needs both halves to tell wreckage from prose: a sentence that
+    reads the same before and after the tags come out was never holding a tag.
+    """
+
+    from .cockpit_model import unwrap_json_object
+
+    body = (unwrap_json_object(text) or {}).get("body")
+    return body if isinstance(body, str) else ""
+
+
 def section_titles(playbook: Mapping[str, Any]) -> list[str]:
     titles = (playbook.get("deliverable_templates") or {}).get(TEMPLATE_KEY) or []
     if not isinstance(titles, list) or not titles:
@@ -332,9 +345,21 @@ def build_claim_context(
     # A figure is identified by what it asserts, not by which row carries it.
     quantitative, dropped_numbers = _dedupe(quantitative, _number_keys)
     qualitative, dropped_claims = _dedupe(qualitative, _statement_keys)
+    selected = _select_numbers(quantitative, limit=MAX_NUMBERS)
+    # A Claim that carries a figure but did not win a place in the figure
+    # budget is still something the company said, and it used to fall out of
+    # the context entirely -- promoted out of the statements and then cut from
+    # the numbers. It goes back into the statements, where it can still be
+    # cited for what it asserts even though its figure cannot be written down.
+    # Oldest first, because that is the order the tags read in.
+    chosen = {item["ref"] for item in selected}
+    statements = sorted(
+        qualitative + [claim for claim in quantitative if claim["ref"] not in chosen],
+        key=lambda claim: str(claim.get("created_at") or ""),
+    )
     tagged_claims, tagged_numbers = [], []
     budget = MAX_CONTEXT_CHARS
-    for claim in qualitative[-max_claims:]:
+    for claim in statements[-max_claims:]:
         line = str(claim.get("statement") or "")
         if budget - len(line) < 0:
             break
@@ -344,7 +369,7 @@ def build_claim_context(
             "period": claim.get("period"), "aspect": claim.get("aspect"),
             "created_at": claim.get("created_at"),
         })
-    for claim in _select_numbers(quantitative, limit=MAX_NUMBERS):
+    for claim in selected:
         tagged_numbers.append({
             "tag": f"N{len(tagged_numbers) + 1}", "ref": claim["ref"],
             "statement": str(claim.get("statement") or ""),
@@ -539,6 +564,7 @@ def assess_exit_gate(
 
 __all__ = [
     "KIND",
+    "raw_section_body",
     "strip_citation_tags",
     "SECTION_GUIDANCE",
     "TEMPLATE_KEY",

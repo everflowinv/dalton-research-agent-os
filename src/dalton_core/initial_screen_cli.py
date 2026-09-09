@@ -21,7 +21,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,7 @@ from .initial_screen import (
     build_claim_context,
     build_section_prompt,
     parse_section_output,
+    raw_section_body,
     section_titles,
 )
 from .mission_deliverable import (
@@ -140,6 +143,51 @@ def _target(
             continue
         return entry, skipped
     return None, skipped
+
+
+# A URL's punctuation is a URL's punctuation: "https://" is a colon and two
+# slashes, and "?a=1&b=2" is not a citation that lost its citations.
+_URL_RE = re.compile(r"(?:https?://|www\.)[^\s，。；、）)】」]+", re.IGNORECASE)
+_ORPHAN_PREFIX = "orphan_"
+
+
+def _actionable_residue(raw_body: str, cleaned_body: str) -> list[dict[str, Any]]:
+    """Which residual-artefact findings the drafter should actually act on.
+
+    The scorer's detector is deliberately broad because it *grades*: a false
+    positive there costs a point on one criterion. Here it *gates* -- a flagged
+    section spends a corrective call and is then dropped to a gap -- so a false
+    positive costs the section, and on S4 it costs the exit gate, permanently.
+    The two filters are the difference between the two jobs.
+
+    **A finding inside a URL is not wreckage.** It is a URL.
+
+    **An orphan verb is only wreckage if stripping the tags created it.**
+    "关键驱动因素：反映了行业周期的位置" is ordinary Chinese: it reads the same
+    before and after the tags come out, so there was never a tag holding that
+    position. "：C12显示…" does not match before and does after, which is the
+    whole shape of the defect -- a sentence whose subject went with the tag.
+    The comparison is by what matched rather than by offset, because removing
+    the tags moves every offset after them.
+    """
+
+    spans = [match.span() for match in _URL_RE.finditer(cleaned_body)]
+    before = Counter(
+        (finding["code"], finding["matched"])
+        for finding in residual_citation_artefacts(raw_body)
+        if finding["code"].startswith(_ORPHAN_PREFIX)
+    )
+    actionable: list[dict[str, Any]] = []
+    for finding in residual_citation_artefacts(cleaned_body):
+        if finding["code"].startswith(_ORPHAN_PREFIX):
+            key = (finding["code"], finding["matched"])
+            if before[key]:
+                before[key] -= 1
+                continue
+        elif any(start <= finding["at"] < end for start, end in spans):
+            continue
+        actionable.append(finding)
+    return actionable
 
 
 def _correction_note(stray: list[str], residue: list[dict[str, Any]]) -> str:
@@ -293,6 +341,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             section = parse_section_output(call["text"], context=context, title=title)
             if call.get("invocation_ref"):
                 invocations.append(call["invocation_ref"])
+            raw = raw_section_body(call["text"])
             # Two defects the publish path cannot catch on its own. The authority
             # refuses the whole document for one unsourced figure, and it accepts
             # citation-strip wreckage without comment -- live, four of the five
@@ -301,7 +350,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             # corrective attempt with both named, then drop its body to a gap so
             # the rest of the document can still be published.
             stray = unsourced_numbers(section["body"], section["numbers"])
-            residue = residual_citation_artefacts(section["body"])
+            residue = _actionable_residue(raw, section["body"])
             retried = False
             if stray or residue:
                 retried = True
@@ -317,7 +366,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     if correction.get("invocation_ref"):
                         invocations.append(correction["invocation_ref"])
                     candidate_stray = unsourced_numbers(candidate["body"], candidate["numbers"])
-                    candidate_residue = residual_citation_artefacts(candidate["body"])
+                    candidate_residue = _actionable_residue(
+                        raw_section_body(correction["text"]), candidate["body"])
                     if candidate["body"] and not candidate_stray and not candidate_residue:
                         section = candidate
                         stray, residue = [], []

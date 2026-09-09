@@ -22,9 +22,14 @@ from dalton_core.initial_screen import (
     MAX_NUMBERS,
     build_claim_context,
     build_section_prompt,
+    raw_section_body,
     strip_citation_tags,
 )
-from dalton_core.initial_screen_cli import _correction_note, _dropped_section
+from dalton_core.initial_screen_cli import (
+    _actionable_residue,
+    _correction_note,
+    _dropped_section,
+)
 from dalton_core.mission_deliverable import GAP_MARKER
 from dalton_core.research_quality_score import residual_citation_artefacts
 
@@ -350,6 +355,37 @@ class NumericContextWidthTests(unittest.TestCase):
         self.assertEqual(len(context["claims"]), 1)
         self.assertEqual(context["duplicates_dropped"]["claims"], 1)
 
+    def test_a_figure_that_missed_the_budget_stays_in_the_statements(self):
+        # Promoted out of the statements and then cut from the numbers, it used
+        # to fall out of the context altogether -- the widening quietly losing
+        # material is the opposite of what it is for.
+        claims = [
+            self.figure("utilisation", f"2026Q{index}", f"管理层称利用率为 9{index}.2%。",
+                        ref=f"claim:util:{index}")
+            for index in range(1, 5)
+        ]
+        context = build_claim_context(claims)
+        selected = {item["ref"] for item in context["numbers"]}
+        statements = {item["ref"] for item in context["claims"]}
+        # Everything offered somewhere, nothing offered twice.
+        self.assertEqual(selected | statements, {claim["ref"] for claim in claims})
+        self.assertEqual(selected & statements, set())
+
+        narrow = build_claim_context(claims, max_claims=120)
+        self.assertTrue(narrow["numbers"])
+
+    def test_nothing_is_lost_when_the_figure_budget_is_full(self):
+        claims = [
+            self.figure("quarterly_revenue", f"20{year:02d}Q1", f"revenue was USD {year}000000",
+                        ref=f"claim:rev:{year}")
+            for year in range(10, 70)
+        ]
+        context = build_claim_context(claims)
+        self.assertEqual(len(context["numbers"]), MAX_NUMBERS)
+        offered = ({item["ref"] for item in context["numbers"]}
+                   | {item["ref"] for item in context["claims"]})
+        self.assertEqual(offered, {claim["ref"] for claim in claims})
+
     def test_a_claim_with_no_figure_is_still_a_statement(self):
         context = build_claim_context([{
             "ref": "claim:demand", "statement": "管理层称 discretionary 支出与去年持平。",
@@ -360,6 +396,75 @@ class NumericContextWidthTests(unittest.TestCase):
         }])
         self.assertEqual(context["numbers"], [])
         self.assertEqual(len(context["claims"]), 1)
+
+
+# What the model wrote before the scaffolding came out, for the fragment above.
+LIVE_ACN_S7_RAW = (
+    "首先，收入增长轨迹是最直接的验证点：N5显示2026-03-01..2026-05-31季度收入为USD "
+    "18718144000，同比增5.59%；N1、N2、N3（同一季度数据重复）显示2025-09-01..2025-11-30"
+    "季度收入为USD 18742125000，同比增5.95%。"
+)
+
+
+class ActionableResidueTests(unittest.TestCase):
+    """The detector grades; this gates. They cannot have the same threshold.
+
+    A section the drafting path flags spends a corrective call and is then
+    dropped to a gap. On S4 that means the anti-thesis section is empty, which
+    fails the Playbook's fourth exit-gate question, which means the screen
+    never passes its gate. So a false positive here does not cost a point on
+    one criterion -- it costs the document.
+    """
+
+    def residue(self, raw, cleaned=None):
+        cleaned = strip_citation_tags(raw) if cleaned is None else cleaned
+        return [(item["code"], item["matched"]) for item in _actionable_residue(raw, cleaned)]
+
+    def test_ordinary_chinese_that_reads_the_same_before_and_after_is_not_wreckage(self):
+        # All three are grammatical Chinese a section legitimately writes, and
+        # all three match the orphan pattern. What tells them apart from
+        # wreckage is that nothing was removed from in front of the verb.
+        for text in ("关键驱动因素：反映了行业周期的位置，而非单季波动。",
+                     "核心风险：披露的合同终止规模远大于账面订单可见度。",
+                     "结论：认为估值已price in了大部分复苏预期。",
+                     "管理层的口径变化值得注意：指出需求持平的说法已连续三个季度未变。"):
+            with self.subTest(text=text):
+                self.assertEqual(self.residue(text), [])
+
+    def test_a_url_is_punctuation_inside_a_url(self):
+        for text in ("来源见 https://www.sec.gov/Archives/edgar/data/1467373/0001.htm 的第 12 页。",
+                     "参见 http://example.com/a/b?x=1&y=2 与季报附注。",
+                     "抓取自 www.accenture.com/us-en/about/company-index 的公司概览。"):
+            with self.subTest(text=text):
+                self.assertEqual(self.residue(text), [])
+
+    def test_the_live_fragment_is_still_caught(self):
+        # Both halves: the sentence the N5 tag was the subject of, and the one
+        # the N1、N2、N3 run was the subject of.
+        self.assertEqual(
+            self.residue(LIVE_ACN_S7_RAW),
+            [("orphan_sentence_start_verb", "：显示"),
+             ("orphan_sentence_start_verb", "；（同一季度数据重复）显示")])
+
+    def test_a_tag_that_was_a_sentences_subject_is_caught(self):
+        self.assertEqual(self.residue("管理层表示需求企稳；C1、C2显示订单回暖。"),
+                         [("orphan_sentence_start_verb", "；显示")])
+
+    def test_a_tag_left_in_the_body_is_caught_wherever_it_is(self):
+        # The stripper is the second line of defence, not the first; if a tag
+        # survives to the body the section is still wrong.
+        residue = self.residue("收入增长（数据来源：N1）是验证点。",
+                               "收入增长（数据来源：N1）是验证点。")
+        self.assertEqual([code for code, _ in residue], ["leftover_tag"])
+
+    def test_a_genuine_orphan_beside_ordinary_prose_is_still_caught(self):
+        raw = "结论：认为估值已price in。另一方面，收入增长；C1、C2显示订单回暖。"
+        self.assertEqual(self.residue(raw), [("orphan_sentence_start_verb", "；显示")])
+
+    def test_the_pre_strip_body_is_what_the_model_wrote(self):
+        text = '{"body": "C1显示收入上升。", "claims": ["C1"], "numbers": [], "gaps": []}'
+        self.assertEqual(raw_section_body(text), "C1显示收入上升。")
+        self.assertEqual(raw_section_body("not json"), "")
 
 
 class DraftingPathCorrectionTests(unittest.TestCase):
