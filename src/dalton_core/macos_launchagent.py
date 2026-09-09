@@ -246,6 +246,14 @@ def render(
             writer["ProgramArguments"].extend(
                 ["--research-planner-model-config", str(planner_config)]
             )
+        # P13ad: same rule for the deliverable's own drafting model -- present
+        # only when the owner named one, and the screen falls back to the
+        # extraction model otherwise.
+        deliverable_config = Path(state) / "initial-screen-model-config.json"
+        if deliverable_config.is_file():
+            writer["ProgramArguments"].extend(
+                ["--initial-screen-model-config", str(deliverable_config)]
+            )
     controller = common | {
         "Label": CONTROLLER_LABEL,
         "ProgramArguments": [str(bin_dir / "daltond"), "--config", str(config)],

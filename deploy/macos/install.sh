@@ -154,6 +154,24 @@ if [[ -n "${DALTON_PLANNER_MODEL_PROFILE:-}" ]]; then
   "$venv_dir/bin/python" -m dalton_core.research_planner_setup \
     --config "$config_path" --profile-ids "$DALTON_PLANNER_MODEL_PROFILE"
 fi
+# P13ad: the deliverable is written, not extracted. Until this was set the
+# Initial Screen was drafted by the extraction model -- the one chosen to pull a
+# figure out of one window of a filing, cheaply, thousands of times. The
+# sections that carry the argument (core thesis, risks and anti-thesis,
+# read-across to the universe) are exactly where that shows: live, the
+# anti-thesis section came back dropped_unsourced and the relevance section
+# published with no figures at all.
+#
+# Unset and nothing changes: the screen keeps using the extraction model. A
+# screen costs about $0.013 on the extraction model and roughly $0.6-1.0 on a
+# frontier one, so this is a real but small standing cost, and it is the
+# owner's to choose rather than to inherit.
+#
+#   DALTON_DELIVERABLE_MODEL_PROFILE=profile:gpt-6-astra
+if [[ -n "${DALTON_DELIVERABLE_MODEL_PROFILE:-}" ]]; then
+  "$venv_dir/bin/python" -m dalton_core.deliverable_model_setup \
+    --config "$config_path" --profile-ids "$DALTON_DELIVERABLE_MODEL_PROFILE"
+fi
 # P9d-18 / ADR-0006: point the cockpit at the Core (read-only), the state
 # directory, the heartbeat, the scheduler and the extraction model config so
 # the owner's page can show progress, answer questions and draft goals.

@@ -63,17 +63,24 @@ def _policy_filters(profile_ids: list[str]) -> dict[str, Any]:
 
 
 def ensure_planner_policy(
-    router: ModelRouter, *, profile_ids: list[str], now: datetime | None = None
+    router: ModelRouter, *, profile_ids: list[str], now: datetime | None = None,
+    policy_id: str = POLICY_ID,
 ) -> dict[str, Any]:
-    """Append a policy version only when the latest one differs; return its ref."""
+    """Append a policy version only when the latest one differs; return its ref.
+
+    ``policy_id`` is a parameter because more than one job wants its own model
+    while wanting exactly this behaviour: pin by profile id, append only on a
+    real change, cheapest-first among the pinned. The alternative was a second
+    copy of the same two hundred lines with two names changed.
+    """
 
     if not profile_ids:
-        raise PlannerSetupError("a planner policy must pin at least one profile")
-    slug = POLICY_ID.split(":", 1)[1]
+        raise PlannerSetupError("a routing policy must pin at least one profile")
+    slug = policy_id.split(":", 1)[1]
     row = router.connection.execute(
         "SELECT policy_json FROM model_routing_policy_versions WHERE policy_id=? "
         "ORDER BY version DESC LIMIT 1",
-        (POLICY_ID,),
+        (policy_id,),
     ).fetchone()
     filters = _policy_filters(profile_ids)
     # Cheapest-first among the pinned profiles, then a stable tiebreak. With one
@@ -93,7 +100,7 @@ def ensure_planner_policy(
         version, prior = 1, None
     wire = {
         "schema_version": "0.1",
-        "id": POLICY_ID,
+        "id": policy_id,
         "policy_version_ref": f"model-routing-policy-version:{slug}:{version}",
         "version": version,
         "created_at": (now or datetime.now(timezone.utc)).isoformat(timespec="microseconds"),
@@ -139,6 +146,8 @@ def install(
     *,
     profile_ids: list[str],
     now: datetime | None = None,
+    policy_id: str = POLICY_ID,
+    config_file_name: str = CONFIG_FILE_NAME,
 ) -> dict[str, Any]:
     config_path = Path(config_path).expanduser().resolve()
     service = json.loads(config_path.read_text(encoding="utf-8"))
@@ -152,7 +161,8 @@ def install(
         # scripts. Register what is missing first, then pin.
         catalog = ensure_broker_profiles(
             router, checked_at=now or datetime.now(timezone.utc))
-        policy = ensure_planner_policy(router, profile_ids=list(profile_ids), now=now)
+        policy = ensure_planner_policy(router, profile_ids=list(profile_ids), now=now,
+                                       policy_id=policy_id)
         slots = credential_slots_for(router, list(profile_ids))
     model_config = validate_model_config({
         "routing_policy_ref": policy["policy_version_ref"],
@@ -165,7 +175,7 @@ def install(
         "budget_db": str(Path(thesis["budget_db"]).resolve()),
         "budget_policy_ref": thesis["budget_policy_version_id"],
     })
-    target = state_dir / CONFIG_FILE_NAME
+    target = state_dir / config_file_name
     changed = (not target.exists()
                or json.loads(target.read_text(encoding="utf-8")) != model_config)
     if changed:

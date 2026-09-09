@@ -3612,6 +3612,15 @@ def main(argv: list[str] | None = None) -> int:
              "the planner lane is absent: it decides what the research works on next, "
              "and its model is far more expensive than the extraction model.",
     )
+    # P13ad: the deliverable is written, not extracted, and may want its own
+    # model. Omit and it keeps being written by the extraction model, which is
+    # what it was doing before anyone chose.
+    parser.add_argument(
+        "--initial-screen-model-config", type=Path, default=None,
+        help="Deliverable drafting model configuration written by "
+             "deliverable_model_setup. Omit and the Initial Screen is drafted "
+             "with the extraction model configuration.",
+    )
     parser.add_argument(
         "--alphaengine-owner-call-cap", type=int, default=None,
         help="Safety cap on AlphaEngine calls per 24h (1..2000). The effective cap "
@@ -3781,9 +3790,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.document_extraction_model_config is not None:
             from .initial_screen_launcher import InitialScreenLauncher
 
+            # P13ad: the deliverable's own model when the owner has chosen one,
+            # otherwise the extraction model it has always used.
             initial_screen_launcher = InitialScreenLauncher(
                 state_dir=Path(args.db).expanduser().resolve().parent,
-                model_config_path=args.document_extraction_model_config,
+                model_config_path=(args.initial_screen_model_config
+                                   or args.document_extraction_model_config),
                 scheduler_db=args.scheduler,
             )
         research_planner_launcher = None

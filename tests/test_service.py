@@ -402,9 +402,28 @@ class ServiceTests(unittest.TestCase):
             # S7d: the SEC lane rides on the same staging file and is only
             # wired when that file is configured.
             self.assertIn("--sec-lane-governance", writer_args)
+            # P13ad: the deliverable's own drafting model is passed only when
+            # the owner installed one. Absent, the Initial Screen keeps being
+            # drafted with the extraction configuration, as it always was.
+            self.assertNotIn("--initial-screen-model-config", writer_args)
+            state_dir = root / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            raw = json.loads(config.read_text(encoding="utf-8"))
+            review = raw["control"]["config"]["research_review"]
+            review["document_extraction_model_config_path"] = str(state_dir / "extract.json")
+            config.write_text(json.dumps(raw), encoding="utf-8")
+            without = plistlib.loads(Path(render(
+                root / "LaunchAgents", root / "venv" / "bin", state_dir,
+                config, root / "logs")["writer"]).read_bytes())["ProgramArguments"]
+            self.assertIn("--document-extraction-model-config", without)
+            self.assertNotIn("--initial-screen-model-config", without)
+            (state_dir / "initial-screen-model-config.json").write_text("{}", encoding="utf-8")
+            with_it = plistlib.loads(Path(render(
+                root / "LaunchAgents", root / "venv" / "bin", state_dir,
+                config, root / "logs")["writer"]).read_bytes())["ProgramArguments"]
             self.assertEqual(
-                writer_args[writer_args.index("--sec-lane-governance") + 1],
-                str((root / "state").resolve() / "connector-governance" / "sec-company-facts-v3.json"),
+                with_it[with_it.index("--initial-screen-model-config") + 1],
+                str((state_dir / "initial-screen-model-config.json").resolve()),
             )
             self.assertIn("--sec-lane-user-agent", writer_args)
             self.assertEqual(
