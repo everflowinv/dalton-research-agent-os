@@ -1,0 +1,32 @@
+{
+  "allowed_permissions": {
+    "core_db": false,
+    "credential_slot_refs": [],
+    "filesystem_read": [],
+    "filesystem_write": [
+      "runner:raw-sink"
+    ],
+    "network": true,
+    "risk_class": "low",
+    "side_effects": [
+      "read:public-http"
+    ]
+  },
+  "approval_ref": "approval:connector-governance:cn-hk-findata-buybacks:v1",
+  "approved_by": "human:lumos",
+  "attestation_ref": "attestation:connector-governance:cn-hk-findata-buybacks:v1",
+  "capability_id": "capability:dalton:connector:cn-hk-findata-buybacks",
+  "content_hash": "8c9efc58632abc22ad70247bbb4d59c5e1c087d465e7d35eef82137db9058fff",
+  "decision_ref": "capability-decision:connector-governance:cn-hk-findata-buybacks:v1",
+  "effective_from": "2026-09-09T00:00:00.000000+00:00",
+  "effective_until": null,
+  "expected_schema_hash": "f0e9eb326c497cb3e231d897ea16b1bb4f57f9303dfbd00d2cbab76d896b75e7",
+  "expected_source_hash": "8208919759b70c8e934c540c560e23b0d0d0c53103419e7e1811d5178be036f0",
+  "id": "connector-governance:cn-hk-findata-buybacks:v1",
+  "max_lease_seconds": 300,
+  "policy_ref": "policy:dalton:connector-governance:cn-hk-findata-buybacks:v1",
+  "principal_ref": "principal:dalton-core-trusted-runner",
+  "registry_revision_ref": "capability:dalton:connector:cn-hk-findata-buybacks@v1",
+  "schema_version": "0.1",
+  "status": "proposed"
+}

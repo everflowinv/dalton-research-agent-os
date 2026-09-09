@@ -106,6 +106,13 @@ XREACH_KINDS = frozenset(
 )
 EMPLOYEE_REVIEWS_KIND = "employee-reviews-blind"
 
+# S4: China / Hong Kong fundamentals through akshare. Six operations, six
+# kinds, six approvals -- reading one company's income statement and reading
+# the whole market's margin balance are not the same permission, and the kind
+# names are derived from the operation so a seventh cannot be typed by hand.
+CN_HK_FINDATA_KIND_BY_OPERATION: dict[str, str] = {}
+CN_HK_FINDATA_CAPABILITY_BY_OPERATION: dict[str, str] = {}
+
 
 class ConnectorGovernanceError(RuntimeError):
     """A malformed, unknown, or inactive connector governance record."""
@@ -284,6 +291,35 @@ def _yfinance_calendar_schema_hash() -> str:
     from .yfinance_core import CALENDAR_OPERATION, yfinance_schema_hash
 
     return yfinance_schema_hash(CALENDAR_OPERATION)
+
+
+def _cn_hk_findata_source_hash() -> str:
+    from .cn_hk_findata_core import cn_hk_findata_source_hash
+
+    return cn_hk_findata_source_hash()
+
+
+def _cn_hk_findata_permissions() -> dict[str, Any]:
+    from .cn_hk_findata_core import cn_hk_findata_permissions
+
+    return copy.deepcopy(cn_hk_findata_permissions())
+
+
+def _cn_hk_findata_fixture_hash() -> str:
+    from .cn_hk_findata_core import cn_hk_findata_fixture_hash
+
+    return cn_hk_findata_fixture_hash()
+
+
+def _cn_hk_findata_schema_hash(operation: str) -> Callable[[], str]:
+    """One thunk per operation, so six kinds do not share a schema hash."""
+
+    def thunk() -> str:
+        from .cn_hk_findata_core import cn_hk_findata_schema_hash
+
+        return cn_hk_findata_schema_hash(operation)
+
+    return thunk
 
 
 def _sec_identity() -> dict[str, Any]:
@@ -736,6 +772,38 @@ GOVERNANCE_KIND_REGISTRY: dict[str, _KindSpec] = {
         fixture_hash=_company_wiki_fixture_hash,
     ),
 }
+
+
+def _register_cn_hk_findata_kinds() -> None:
+    """Register the six China / Hong Kong kinds from the frozen operation list.
+
+    Written as a loop rather than six near-identical literals because the six
+    differ in exactly one thing -- the schema hash -- and a copied block that
+    forgets to change it produces an approval that silently covers the wrong
+    operation. The import is local for the same reason every other identity
+    module's is: ``cn_hk_findata_core`` imports this module's error type.
+    """
+
+    from .cn_hk_findata_core import (
+        CAPABILITY_BY_OPERATION as _CN_HK_CAPABILITIES,
+        KIND_BY_OPERATION as _CN_HK_KINDS,
+    )
+
+    for operation, kind in _CN_HK_KINDS.items():
+        capability_id = _CN_HK_CAPABILITIES[operation]
+        CN_HK_FINDATA_KIND_BY_OPERATION[operation] = kind
+        CN_HK_FINDATA_CAPABILITY_BY_OPERATION[operation] = capability_id
+        GOVERNANCE_KIND_REGISTRY[kind] = _KindSpec(
+            capability_id=capability_id,
+            template_key="cn-hk-findata",
+            source_hash=_cn_hk_findata_source_hash,
+            schema_hash=_cn_hk_findata_schema_hash(operation),
+            permissions=_cn_hk_findata_permissions,
+            fixture_hash=_cn_hk_findata_fixture_hash,
+        )
+
+
+_register_cn_hk_findata_kinds()
 # Public aliases make the registry discoverable without exposing mutable
 # implementation details of a spec.  The old name is useful to callers that
 # treat the set as a connector-kind catalog.
@@ -880,6 +948,21 @@ def build_governance_record(
         operation = next(op for op, name in YFINANCE_KINDS.items() if name == kind)
         return build_yfinance_governance_record(
             operation=operation,
+            approved_by=approved_by,
+            status=status,
+            effective_from=effective_from,
+            max_lease_seconds=max_lease_seconds,
+            version=version,
+        )
+
+    if kind in CN_HK_FINDATA_KIND_BY_OPERATION.values():
+        from .cn_hk_findata_core import (
+            OPERATION_BY_KIND as CN_HK_OPERATIONS,
+            build_cn_hk_findata_governance_record,
+        )
+
+        return build_cn_hk_findata_governance_record(
+            operation=CN_HK_OPERATIONS[kind],
             approved_by=approved_by,
             status=status,
             effective_from=effective_from,

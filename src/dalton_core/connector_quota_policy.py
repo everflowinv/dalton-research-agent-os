@@ -242,6 +242,83 @@ _DAILY_QUOTAS = MappingProxyType(
                 "max_physical_calls_per_unit": 1,
             }
         ),
+        # S4: China / Hong Kong fundamentals. Conservative throughout, and for
+        # a reason with a date on it: on 2026-08-21 the OpenClaw skill pressed
+        # 东方财富's price-history cluster a dozen times in a row and the
+        # neighbouring endpoints -- which had been healthy all along -- were
+        # cut off too, for minutes, with no error that said why. The skill's
+        # standing rule is 「不要批量探测东财」. These ceilings are that rule
+        # expressed as arithmetic.
+        #
+        # One company's statement history per unit. Behind the single library
+        # call are one report-date listing plus one fetch per five periods, so
+        # a decade of quarters is about nine physical calls; the Hong Kong
+        # route is a summary call plus one table call. A statement set changes
+        # four times a year, so twenty companies a day is generous.
+        ("cn-hk-findata", "financial_statements"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 20,
+                "max_physical_calls_per_unit": 12,
+            }
+        ),
+        # One company's holder picture per unit: the top-ten table for one
+        # report date, plus the holder-count history, which the vendor pages
+        # 500 rows at a time and which is short for any one issuer.
+        ("cn-hk-findata", "shareholders"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 20,
+                "max_physical_calls_per_unit": 6,
+            }
+        ),
+        # The most expensive of the six and the smallest allowance because of
+        # it: the vendor publishes one market-wide buyback table and offers no
+        # per-issuer route, so answering "did this company buy back stock"
+        # means reading every page of every company's answer and throwing away
+        # all but one. Four a day, and a lane that wants five companies should
+        # read the table once and filter it five times rather than ask again.
+        ("cn-hk-findata", "buybacks"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 4,
+                "max_physical_calls_per_unit": 40,
+            }
+        ),
+        # One exchange-day per unit, straight from the exchange rather than a
+        # vendor. Two exchanges times one trading day, with room to backfill a
+        # short window, is what 40 buys.
+        ("cn-hk-findata", "margin_balance"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 40,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        # A daily snapshot. Reading it more than a handful of times a day
+        # spends the source's patience on a number that moves once.
+        ("cn-hk-findata", "northbound_flow"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 8,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        # The one operation that must touch 东财's quote cluster -- the host
+        # the 2026-08 incident was about. Three pages of one hundred cover the
+        # 204-row A+H universe, which is why the per-unit ceiling is three and
+        # not a round number: the adapter also caps the library's own
+        # three-attempt retry loop to one attempt per page, so three pages is
+        # three GETs and the ceiling is the truth rather than a hope. Four
+        # units a day is deliberately below anything that could look like
+        # probing.
+        ("cn-hk-findata", "ah_premium"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                "daily_unit_limit": 4,
+                "max_physical_calls_per_unit": 3,
+            }
+        ),
     }
 )
 

@@ -556,6 +556,8 @@ class ConnectorInventoryTests(unittest.TestCase):
                 "yfinance", "alphaengine", "x-xreach", "x-x-search",
                 "reddit-last30days", "guidepoint", "gemini-web-search",
                 "web-fetch", "xueqiu", "sales-notes", "company-wiki",
+                # S4: China and Hong Kong fundamentals through akshare.
+                "cn-hk-findata",
                 # S3: the crowd layer. Each is a new connector rather than a
                 # widened shadow template, so the 2026-08-14 hashes the owner
                 # has seen do not move.
@@ -626,7 +628,7 @@ class ConnectorInventoryTests(unittest.TestCase):
         # one host with no credential anywhere, so it carries a host allowlist
         # like the other public connectors and unlike the host-owned ones.
         public = {"cninfo", "sec", "sec-financials", "roic-transcript",
-                  "yfinance", "web-fetch", "employee-reviews"}
+                  "yfinance", "cn-hk-findata", "web-fetch", "employee-reviews"}
         for slug, profile in self.built["templates"].items():
             with self.subTest(slug=slug):
                 readiness = profile["readiness"]
