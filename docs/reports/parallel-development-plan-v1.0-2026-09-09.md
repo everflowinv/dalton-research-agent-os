@@ -205,7 +205,9 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-09 | connector 打包哈希再生（`build_connector_inventory.py --check`）摘到 main `99f6a9b` | 完成 |
 | 09-09 | **Wave 0 合并** `6e86fe8`：lane registry（加 lane = `LANE_MODULES` 一行）、`*_schema.sql` glob、`register_purpose` / `register_model_config_name`、G 线 13 个词、ADR-0007 / 0008 accepted；review 后修了三个静默失败模式；2,080 项通过 | 完成 |
 | 09-09 | Wave 1A / 1B / 1C / 1D 交付并进入 review；A 与 D 各有一个 blocker 在修 | 进行中 |
-| 09-09 | owner 要求回顾全部 vision 讨论找遗漏；调研 agent 进行中 | 进行中 |
+| 09-09 | vision 回顾完成，8 项补进计划 | 完成 |
+| 09-09 | **Wave 1 全部合并**：A `94f2475`、C `f8737c7`、D `56b0e63`、B `b239ee6`；main 2,627 项通过，已 push | 完成 |
+| 09-09 | 派出：P14e、P14a（daily tracking）、C1、Q2、S4、INT1、模型路由；S1 / S2 / S3 / P14e 在按 review 修 | 进行中 |
 
 ---
 

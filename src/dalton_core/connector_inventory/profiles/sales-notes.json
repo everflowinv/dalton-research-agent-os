@@ -1,0 +1,385 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "connector_ref": "connector:sales-notes",
+  "content_hash": "e1eb0689e7731486a1aee3409ffd870511b932b1d1aa842740b0426f50bc9cf7",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "9289bd7a2149179404fa5fb80fb5c73d082111eaf69f333cc82581392abc87a2",
+  "fixture_manifest_ref": "connector-fixture-manifest:sales-notes:0.1",
+  "id": "connector-profile-template:sales-notes:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "3c20db8b707074cfa8d481e953babc737f1f37c8ef9a6d2bd5846bbd79903da1",
+      "input_schema_ref": "schema:connector-inventory:sales-notes:list_notes:input:0.1",
+      "operation": "list_notes",
+      "output_schema_hash": "097b8a176468fc2a6a621029a7550aeda4faf693cbef9f7cd9818257ba6a4275",
+      "output_schema_ref": "schema:connector-inventory:sales-notes:list_notes:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "list_notes"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "08e0024cd964050303b1a50bff7e643b1f5ea590ad6d40a27260e4aeafe090e8",
+      "input_schema_ref": "schema:connector-inventory:sales-notes:get_note:input:0.1",
+      "operation": "get_note",
+      "output_schema_hash": "ab4925edfd4824497fd6580faa60a8c18f0c9b91984bf2fed686b9ca7a2d86c3",
+      "output_schema_ref": "schema:connector-inventory:sales-notes:get_note:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_note"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "host_tool_runner_v0.2"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "host-tool:market-digest-output"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:gmail-api",
+      "route:market-digest-ai-summary"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sender_domain": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "since": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "until": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "since",
+          "until"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "3c20db8b707074cfa8d481e953babc737f1f37c8ef9a6d2bd5846bbd79903da1",
+      "schema_ref": "schema:connector-inventory:sales-notes:list_notes:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "next_cursor": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "notes": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "analyst_named": {
+                  "type": "boolean"
+                },
+                "body_chars": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "body_sha256": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "digest_ref": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "evidence_tier": {
+                  "enum": [
+                    "sell_side"
+                  ],
+                  "type": "string"
+                },
+                "is_priority": {
+                  "type": "boolean"
+                },
+                "note_id": {
+                  "pattern": "^sales-note:[0-9a-z]{6,40}$",
+                  "type": "string"
+                },
+                "sender": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "sender_address": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "sender_domain": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "sent_at": {
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,6})?[+][0-9]{2}:[0-9]{2}$",
+                  "type": "string"
+                },
+                "subject": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "note_id",
+                "sender",
+                "sender_address",
+                "sender_domain",
+                "subject",
+                "sent_at",
+                "is_priority",
+                "body_sha256",
+                "body_chars",
+                "digest_ref",
+                "evidence_tier",
+                "analyst_named"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "sender_domain": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "since": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "until": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "since",
+          "until",
+          "sender_domain",
+          "notes",
+          "note_count",
+          "truncated",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "097b8a176468fc2a6a621029a7550aeda4faf693cbef9f7cd9818257ba6a4275",
+      "schema_ref": "schema:connector-inventory:sales-notes:list_notes:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "digest_ref": {
+            "pattern": "^market-digest:[0-9]{4}-[0-9]{2}-[0-9]{2}:(AM|PM)$",
+            "type": "string"
+          },
+          "note_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "note_id"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "08e0024cd964050303b1a50bff7e643b1f5ea590ad6d40a27260e4aeafe090e8",
+      "schema_ref": "schema:connector-inventory:sales-notes:get_note:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "additionalProperties": false,
+            "properties": {
+              "analyst_named": {
+                "type": "boolean"
+              },
+              "body_chars": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "body_sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "digest_ref": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "evidence_tier": {
+                "enum": [
+                  "sell_side"
+                ],
+                "type": "string"
+              },
+              "is_priority": {
+                "type": "boolean"
+              },
+              "note_id": {
+                "pattern": "^sales-note:[0-9a-z]{6,40}$",
+                "type": "string"
+              },
+              "sender": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "sender_address": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "sender_domain": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "sent_at": {
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}([.][0-9]{1,6})?[+][0-9]{2}:[0-9]{2}$",
+                "type": "string"
+              },
+              "subject": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "note_id",
+              "sender",
+              "sender_address",
+              "sender_domain",
+              "subject",
+              "sent_at",
+              "is_priority",
+              "body_sha256",
+              "body_chars",
+              "digest_ref",
+              "evidence_tier",
+              "analyst_named"
+            ],
+            "type": "object"
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "schema_version",
+          "note",
+          "body",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "ab4925edfd4824497fd6580faa60a8c18f0c9b91984bf2fed686b9ca7a2d86c3",
+      "schema_ref": "schema:connector-inventory:sales-notes:get_note:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:sales-notes",
+    "source_type": "authenticated_library",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [],
+    "host_policy": "not_applicable",
+    "kind": "host_tool",
+    "target_hash": "9e327856bfdbc7458ddb0e237da4d75b86981d4ef40814173d0e621e675f01dd",
+    "target_ref": "host-tool:market-digest-output"
+  }
+}

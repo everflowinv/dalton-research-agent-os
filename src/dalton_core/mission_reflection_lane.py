@@ -393,10 +393,11 @@ def argv_fragment(context: Any) -> list[str]:
 
 LANE = register_lane(LaneSpec(
     operation="dispatch_mission_reflection",
-    # Last. It reads what every other lane did this week, so running it after
+    # Last, after the S1 feed lanes (120, 130) and the research-task lane
+    # (150). It reads what every other lane did this week, so running it after
     # them costs one tick of freshness at worst and never reads a half-written
     # week; and being last means a slow reflection cannot delay real work.
-    order=120,
+    order=160,
     driver_key="mission_reflection",
     handler=dispatch,
     init_kwarg=LAUNCHER_KWARG,

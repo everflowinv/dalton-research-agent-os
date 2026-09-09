@@ -47,6 +47,7 @@ NEW_SCOPES = (
     "thesis_revision_candidate",
     "research_task",
     "conviction_call",
+    "claim_index",
 )
 NEW_CHECKPOINTS = ("thesis_revision_candidate", "conviction_call", "gate_reopen")
 # What the vocabulary said before P14-0, so an addition is visible as an

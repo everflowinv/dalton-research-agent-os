@@ -1,0 +1,52 @@
+[
+  {
+    "transcript_name": "Former Delivery Director, Large US IT Services Firm",
+    "date": "2026-06-18",
+    "inquirer": "Investment Professional",
+    "respondent": {
+      "full_name": "Synthetic Expert A",
+      "title": "Former Delivery Director",
+      "company": "Undisclosed IT Services Firm"
+    },
+    "question": "How are client budgets for discretionary transformation work trending this year?",
+    "answer": "Synthetic rehearsal text. Budgets moved into shorter phased programmes rather than multi-year transformations, and approvals now sit two levels higher than they did a year ago, which stretched the sales cycle noticeably.",
+    "context": "Synthetic surrounding passage for rehearsal only.",
+    "reference_url": "https://example.invalid/guidepoint/synthetic/a",
+    "source_attribution": {
+      "description": "Synthetic Guidepoint transcript, rehearsal fixture",
+      "markdown": "[Former Delivery Director, Large US IT Services Firm (2026-06-18)](https://example.invalid/guidepoint/synthetic/a)"
+    }
+  },
+  {
+    "transcript_name": "Former Practice Lead, Offshore Delivery",
+    "date": "2026-05-02",
+    "inquirer": "Investment Professional",
+    "respondent": {
+      "full_name": "Synthetic Expert B",
+      "title": "Former Practice Lead",
+      "company": "Undisclosed Offshore Provider"
+    },
+    "question": "What has generative AI done to billable hours on application maintenance engagements?",
+    "answer": "Synthetic rehearsal text. On maintenance towers the hours came down first, and the pricing conversation followed within two quarters, so the revenue effect showed up before the headcount effect did.",
+    "context": null,
+    "reference_url": "https://example.invalid/guidepoint/synthetic/b",
+    "source_attribution": {
+      "description": "Synthetic Guidepoint transcript, rehearsal fixture",
+      "markdown": "[Former Practice Lead, Offshore Delivery (2026-05-02)](https://example.invalid/guidepoint/synthetic/b)"
+    }
+  },
+  {
+    "transcript_name": "Former Vendor Manager, Fortune 100 Buyer",
+    "date": "2026-04-11",
+    "inquirer": "Investment Professional",
+    "respondent": "Synthetic Expert C",
+    "question": "How do large-deal renewals get scoped now compared with the last cycle?",
+    "answer": "Synthetic rehearsal text. Renewals are scoped tighter and split across fewer vendors, and the incumbent has to re-bid against a shortlist rather than roll forward the prior statement of work.",
+    "context": null,
+    "reference_url": null,
+    "source_attribution": {
+      "description": "Synthetic Guidepoint transcript, rehearsal fixture",
+      "markdown": "Former Vendor Manager, Fortune 100 Buyer (2026-04-11)"
+    }
+  }
+]

@@ -89,6 +89,13 @@ python3 scripts/replay_sec_research_plan_canary.py \
 python3 scripts/reconcile_openclaw_model_catalog.py \
   --openclaw-config /ABSOLUTE/PATH/TO/openclaw.json
 
+# 把 router 目录改成与 broker 一致：只追加。broker 新增的 profile 注册进来，
+# broker 已下架的 profile 追加一个 retired 版本（不删除，历史版本链与旧路由决策
+# 仍可解析）。幂等；--check-only 只报告，不同步时退出码 2。安装脚本已自动调用。
+python3 scripts/sync_openclaw_model_catalog.py \
+  --openclaw-config /ABSOLUTE/PATH/TO/openclaw.json \
+  --model-router-db /ABSOLUTE/PATH/TO/model-router.sqlite
+
 # 显式带入当前模型清单跑一个付费 smoke；不会自动调用或自动上线新模型
 dalton-thesis-impact-calibrate-matrix \
   --openclaw-config /ABSOLUTE/PATH/TO/openclaw.json \

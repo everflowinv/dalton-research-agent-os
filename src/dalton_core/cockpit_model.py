@@ -28,7 +28,7 @@ from typing import Any, Callable, Mapping
 from .contracts import ResultEnvelope, WorkOrder
 from .document_extraction import validate_model_config
 from .model_accounting import ModelAccountingError, _route_estimate_micros
-from .model_router import ModelRouter
+from .model_router import ModelRouter, RoutingPolicyNotFound
 from .openclaw_model_adapter import OpenClawModelAdapter, OpenClawModelAdapterError
 from .scheduler import Scheduler
 from .store import content_hash
@@ -237,6 +237,29 @@ class CockpitModel:
                 with ModelRouter(self.config["model_router_db"]) as router, \
                         ThesisImpactBudgetStore(self.config["budget_db"]) as budget:
                     prompt_bytes = len(prompt.encode("utf-8"))
+                    result: ResultEnvelope
+                    tier = self._chain_tier(router, purpose)
+                    if tier is not None:
+                        # P14-M: the pinned policy carries this tier's fallback
+                        # chain, so the call walks it. One provider being down
+                        # stops being a lost call and becomes a second route
+                        # decision on a named alternative.
+                        outcome = self._chained(
+                            router, budget, work=work, purpose=purpose, tier=tier,
+                            attempt=attempt, prompt_bytes=prompt_bytes, scope=scope,
+                        )
+                        result = outcome["result"]
+                        failure = outcome["failure"]
+                        cost_micros, cost_status = outcome["cost_micros"], outcome["cost_status"]
+                        completion = scheduler.complete(
+                            work.id, attempt, WORKER_REF, lease["lease_token"], result,
+                            idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
+                        if completion["status"] == "conflict":
+                            raise CockpitModelError("the request completion conflicted; ask again")
+                        if failure is not None:
+                            raise CockpitModelError(failure)
+                        formal = scheduler.formal_result(work.id)
+                        return self._answer(formal, work, replayed, cost_micros, cost_status)
                     route = router.route(
                         work, attempt_number=attempt, capability="research",
                         policy_version_ref=self.config["routing_policy_ref"],
@@ -245,7 +268,6 @@ class CockpitModel:
                         estimated_input_tokens=prompt_bytes, estimated_output_tokens=self.max_output_tokens,
                         idempotency_key=f"cockpit-route:{work.id}:{attempt}",
                     )["decision"]
-                    result: ResultEnvelope
                     if route["outcome"] != "selected":
                         result = _failure(work, "MODEL_ROUTE_REJECTED", route["id"])
                         failure = "no model route is available right now"
@@ -280,16 +302,171 @@ class CockpitModel:
                     if failure is not None:
                         raise CockpitModelError(failure)
                 formal = scheduler.formal_result(work.id)
-            if formal is None or formal["terminal_state"] != "succeeded":
-                raise CockpitModelError("the model call did not succeed")
-            envelope = formal["result_envelope"]
-            text = envelope.get("outputs", {}).get("text")
-            if not isinstance(text, str):
-                raise CockpitModelError("the model returned no text")
-            return {"text": text, "replayed": replayed, "cost_micros": cost_micros, "cost_status": cost_status,
-                    "work_order_ref": work.id, "result_envelope_ref": formal["result_envelope_id"],
-                    "invocation_ref": envelope.get("invocation_ref"),
-                    "route_decision_ref": envelope.get("metadata", {}).get("route_decision_ref")}
+            return self._answer(formal, work, replayed, cost_micros, cost_status)
+
+    @staticmethod
+    def _answer(formal: Any, work: WorkOrder, replayed: bool, cost_micros: int,
+                cost_status: str) -> dict[str, Any]:
+        if formal is None or formal["terminal_state"] != "succeeded":
+            raise CockpitModelError("the model call did not succeed")
+        envelope = formal["result_envelope"]
+        text = envelope.get("outputs", {}).get("text")
+        if not isinstance(text, str):
+            raise CockpitModelError("the model returned no text")
+        return {"text": text, "replayed": replayed, "cost_micros": cost_micros, "cost_status": cost_status,
+                "work_order_ref": work.id, "result_envelope_ref": formal["result_envelope_id"],
+                "invocation_ref": envelope.get("invocation_ref"),
+                "route_decision_ref": envelope.get("metadata", {}).get("route_decision_ref")}
+
+    def _chain_tier(self, router: ModelRouter, purpose: str) -> str | None:
+        """The tier to walk, or None to route the single-shot way.
+
+        A chain runs only when the *pinned policy version* declares one. That
+        keeps the choice where every other routing choice already is -- in the
+        version a lane pinned -- and it means an installation that has not been
+        repointed at a tier keeps behaving exactly as it did.
+        """
+
+        from .model_fallback_chain import purpose_tiers
+
+        try:
+            policy = router.get_policy(self.config["routing_policy_ref"])
+        except RoutingPolicyNotFound:
+            return None
+        declared = (policy.get("fallback_chains") or {}).get("tiers", {})
+        if not declared:
+            return None
+        tier = purpose_tiers().get(purpose)
+        if tier is None:
+            # The policy offers chains and this purpose has not said which one
+            # it belongs to. Refusing beats guessing: the tier decides what kind
+            # of model answers, and no default is the right default.
+            raise CockpitModelError(
+                f"the purpose {purpose!r} has no model tier; register one before routing"
+            )
+        return tier if tier in declared else None
+
+    def _chain_ceiling(self, router: ModelRouter, tier: str, prompt_bytes: int) -> int:
+        """The most this attempt could cost, whichever link ends up serving.
+
+        The day ledger identifies an admission by (work order, attempt, phase),
+        so one attempt reserves once -- it cannot hold a separate reservation
+        per link without claiming to be a different attempt, which it is not.
+        The reservation is therefore the dearest link the chain could reach, and
+        the *settlement* -- the number that actually moves the day's spend -- is
+        the served link's own rate card. Reserve the ceiling, pay what ran.
+        """
+
+        from .model_fallback_chain import tier_chain
+
+        wanted = set(tier_chain(tier))
+        ceiling = Decimal(0)
+        for profile in router.latest_profiles():
+            if profile["id"] not in wanted or profile.get("status") == "retired":
+                continue
+            cost = profile["cost"]
+            ceiling = max(ceiling, (
+                Decimal(str(cost["input_per_million_usd"])) * prompt_bytes
+                + Decimal(str(cost["output_per_million_usd"])) * self.max_output_tokens
+            ) / Decimal(1_000_000))
+        if ceiling <= 0:
+            ceiling = Decimal(str(self.max_cost_usd))
+        return int((ceiling * 1_000_000).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+    def _chained(self, router: ModelRouter, budget: Any, *, work: WorkOrder, purpose: str,
+                 tier: str, attempt: int, prompt_bytes: int,
+                 scope: Mapping[str, Any]) -> dict[str, Any]:
+        """Walk the tier's chain under one reservation, settled by what served."""
+
+        from .model_fallback_chain import classify_model_failure, execute_chain
+
+        day = self.clock().astimezone(timezone.utc).date().isoformat()
+        ceiling = self._chain_ceiling(router, tier, prompt_bytes)
+        admission: dict[str, Any] | None = None
+        first_route_ref: str | None = None
+        spend: dict[str, tuple[int, str]] = {}
+        refusal: list[str] = []
+
+        def admit(route: Mapping[str, Any], profile: Mapping[str, Any], micros: int) -> Any:
+            nonlocal admission, first_route_ref
+            if admission is not None:
+                # One attempt, one reservation. The later links of a chain run
+                # under the reservation the first one took out.
+                return {"status": "admitted"}
+            try:
+                admission = budget.admit(
+                    policy_version_id=self.config["budget_policy_ref"], day=day,
+                    work_order_ref=work.id, attempt_number=attempt, phase="assessment",
+                    route_decision_ref=route["id"],
+                    reserved_micros=max(ceiling, micros), mission_binding=scope,
+                )
+            except ThesisImpactBudgetError as exc:
+                refusal.append(str(exc))
+                return None
+            first_route_ref = route["id"]
+            return {"status": "admitted"}
+
+        def call(route: Mapping[str, Any], profile: Mapping[str, Any]) -> dict[str, Any]:
+            try:
+                invocation, envelope = self._adapter(router).execute(work, route, profile)
+            except OpenClawModelAdapterError as exc:
+                spend[route["id"]] = (0, "failed")
+                return {"outcome": "failed", "failure_class": classify_model_failure(exc),
+                        "reason": f"the model call failed: {exc}"}
+            if envelope.status != "succeeded":
+                # The broker answered and the answer is a failure. Its error
+                # code, not a guess, decides whether another model may be asked.
+                spend[route["id"]] = (0, "failed")
+                return {"outcome": "failed",
+                        "failure_class": classify_model_failure(envelope.error or {}),
+                        "reason": (envelope.error or {}).get("message", "the model call failed"),
+                        "value": envelope}
+            spend[route["id"]] = _cost_micros(invocation, route, profile, ceiling)
+            return {"outcome": "served", "value": envelope}
+
+        served_micros, served_status = 0, "failed"
+        try:
+            outcome = execute_chain(
+                router, work, purpose=purpose, tier=tier, capability="research",
+                attempt_number=attempt,
+                policy_version_ref=self.config["routing_policy_ref"],
+                credential_slot_refs=self.config["credential_slot_refs"],
+                required_modalities=("text",),
+                required_context_tokens=prompt_bytes + self.max_output_tokens,
+                estimated_input_tokens=prompt_bytes,
+                estimated_output_tokens=self.max_output_tokens,
+                idempotency_prefix=f"cockpit-route:{work.id}:{attempt}",
+                call=call, admit=admit,
+            )
+            if outcome["status"] == "served":
+                served_micros, served_status = spend.get(
+                    outcome["route_decision_ref"], (0, "failed"))
+        finally:
+            # The reservation is released whatever happened: an open one holds
+            # the day's budget against a call that has already finished.
+            if admission is not None:
+                budget.settle(admission["admission_id"], actual_micros=served_micros)
+
+        route_ref = outcome.get("route_decision_ref") or first_route_ref
+        if outcome["status"] == "served":
+            return {"result": outcome["value"], "failure": None,
+                    "cost_micros": served_micros, "cost_status": served_status}
+        if outcome["status"] == "halted" and outcome.get("reason") == "budget_refused":
+            reason = refusal[-1] if refusal else "the day cap is exhausted"
+            return {"result": _failure(work, "BUDGET_REFUSED", route_ref),
+                    "failure": f"today's research budget refused the call: {reason}",
+                    "cost_micros": 0, "cost_status": "failed"}
+        if not outcome["links"]:
+            return {"result": _failure(work, "MODEL_ROUTE_REJECTED", route_ref),
+                    "failure": "no model route is available right now",
+                    "cost_micros": 0, "cost_status": "failed"}
+        skipped = ", ".join(
+            f"{link['profile_id']} ({link['skip_reason']})"
+            for link in outcome["links"] if not link["served"]
+        )
+        return {"result": _failure(work, "MODEL_CHAIN_EXHAUSTED", route_ref),
+                "failure": f"every model in the {tier} chain failed: {skipped}",
+                "cost_micros": 0, "cost_status": "failed"}
 
 
 def unwrap_json_object(text: str) -> dict[str, Any] | None:

@@ -306,7 +306,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         spec = json.loads(completed.stdout)
         self.assertEqual(spec["driver_key"], "mission_reflection")
-        self.assertEqual(spec["order"], 120)
+        self.assertEqual(spec["order"], 160)
         self.assertTrue(spec["core_discovery"])
         self.assertEqual(spec["init_kwarg"], LAUNCHER_KWARG)
         self.assertEqual(spec["fields"], [])

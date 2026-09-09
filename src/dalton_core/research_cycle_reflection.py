@@ -398,14 +398,28 @@ def claims_retired(core: sqlite3.Connection, window: Mapping[str, Any]) -> dict[
     }
 
 
-def planner_inquiries(core: sqlite3.Connection, window: Mapping[str, Any]) -> dict[str, Any]:
+# What P14e requires before an inquiry can become a ResearchTask.  Both are
+# versioned owner acts, which is why a zero here is reported with which of them
+# is missing rather than as a flat "not dispatched".
+RESEARCH_TASK_SCOPE = "research_task"
+
+
+def planner_inquiries(
+    core: sqlite3.Connection,
+    window: Mapping[str, Any],
+    *,
+    write_scopes: Sequence[str] = (),
+) -> dict[str, Any]:
     """How many questions the planner raised, and how many were dispatched.
 
-    Dispatch means a ``BoundedPlannerLoop`` was opened for the inquiry -- D1's
-    ``ResearchTask``.  P14e has not landed, so on today's Core the answer is
-    almost always zero, and the number is reported with the reason rather than
-    left out: *the planner asked eleven questions this week and nothing was
-    sent to answer any of them* is the finding, not a missing row.
+    Dispatch means a ``BoundedPlannerLoop`` was admitted **from an inquiry** --
+    D1's ``ResearchTask``, which P14e landed.  A loop a human opened is not a
+    dispatch, so the count reads ``admission.source`` rather than counting
+    loops, and the two are reported side by side.
+
+    A zero is reported with the reason, and the reason names which of P14e's
+    two gates is shut: *the planner asked eleven questions this week and
+    nothing was sent to answer any of them* is the finding, not a missing row.
     """
 
     if not _table_exists(core, "coverage_mission_research_plans"):
@@ -432,18 +446,43 @@ def planner_inquiries(core: sqlite3.Connection, window: Mapping[str, Any]) -> di
             if isinstance(item, Mapping) and item.get("question"):
                 questions.append(str(item["question"])[:MAX_QUESTION_CHARS])
     dispatched = 0
+    human_loops = 0
     dispatch_reason = None
+    granted = RESEARCH_TASK_SCOPE in set(write_scopes)
+    templates = 0
+    if _table_exists(core, "bounded_probe_template_versions"):
+        templates = int(_rows(
+            core, "SELECT COUNT(*) AS n FROM bounded_probe_template_versions"
+        )[0]["n"])
     if _table_exists(core, "bounded_planner_loop_versions"):
         loops = _rows(core, (
-            "SELECT version_id, question_ref, created_at FROM bounded_planner_loop_versions "
+            "SELECT record_json, created_at FROM bounded_planner_loop_versions "
             "WHERE version_number = 1"
         ))
-        dispatched = sum(1 for row in loops if _in_window(row["created_at"], window))
+        for row in loops:
+            if not _in_window(row["created_at"], window):
+                continue
+            try:
+                record = json.loads(row["record_json"])
+            except (TypeError, ValueError):
+                record = {}
+            source = ((record.get("admission") or {}).get("source"))
+            if source == "inquiry":
+                dispatched += 1
+            else:
+                human_loops += 1
         if dispatched == 0:
+            missing = []
+            if not granted:
+                missing.append(f"mission 的 may_write 没有授予 {RESEARCH_TASK_SCOPE}")
+            if not templates:
+                missing.append("还没有发布任何 ad-hoc ProbeTemplate")
             dispatch_reason = (
-                "本周没有为任何 inquiry 开出 BoundedPlannerLoop。P14e（D1 的 ResearchTask）"
-                "尚未落地，`adhoc_research_enabled` 仍为 False，所以 planner 的问题目前只能"
-                "经由人或下一轮 research plan 被动消化。"
+                "本周没有从 inquiry 开出任何 BoundedPlannerLoop。"
+                + ("P14e 的两道闸里，" + "、".join(missing) + "；两者都是 owner 的版本化动作。"
+                   if missing else
+                   "P14e 的两道闸都开着，所以要么本周没有可派发的 inquiry，"
+                   "要么当日的 ad-hoc 池已经用尽（lane 会报 skipped:pool_exhausted）。")
             )
     else:
         dispatch_reason = "bounded_planner_loop_versions 不在这个 Core 里，派发数按 0 计"
@@ -452,6 +491,12 @@ def planner_inquiries(core: sqlite3.Connection, window: Mapping[str, Any]) -> di
         "plans_recorded": plan_count,
         "inquiries_raised": total,
         "dispatched": dispatched,
+        # A loop a person opened answers a question too, but it is not the
+        # planner's inquiry being acted on, and folding the two together would
+        # make the ad-hoc path look busier than it is.
+        "human_opened_loops": human_loops,
+        "research_task_granted": granted,
+        "probe_templates": templates,
         "dispatch_ratio": round(dispatched / total, 4) if total else None,
         "dispatch_reason": dispatch_reason,
         "sample_questions": questions[:5],
@@ -678,6 +723,7 @@ def compute_metrics(
     *,
     window: Mapping[str, Any],
     budget: Mapping[str, Any] | None = None,
+    write_scopes: Sequence[str] = (),
     tick_summaries: Sequence[Mapping[str, Any]] = (),
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -688,7 +734,7 @@ def compute_metrics(
         "spend": spend_by_pool(core, window, budget=budget),
         "backlog": backlog_movement(core, window),
         "claims": claims_retired(core, window),
-        "planner": planner_inquiries(core, window),
+        "planner": planner_inquiries(core, window, write_scopes=write_scopes),
         "ticks": idle_tick_ratio(tick_summaries),
         "human_checkpoints": open_human_checkpoints(core, window, now=moment),
         "quality_scores": quality_scores_published(core, window),
@@ -951,10 +997,19 @@ def backlog_candidates(metrics: Mapping[str, Any], window: Mapping[str, Any]) ->
             "Q1 建了评分表与打分器但没有建 lane：没有人调用它，它就只是一个能力。",
             [],
         ))
-    if journal.get("available") and not journal.get("partial") and journal["entries"] == 0:
+    if journal.get("available") and journal["entries"] == 0:
+        # Fires even when the count is partial: zero on the table that *is*
+        # installed is still zero, and the missing half is named in the
+        # ``because`` rather than used as a reason to stay quiet.
+        partial = (
+            "（这一周只数得到两处反馈表里的一处，"
+            + "、".join(journal.get("missing_sources") or []) + " 还没有部署）"
+            if journal.get("partial") else ""
+        )
         out.append(_candidate(
             "这一周没有任何人类反馈落到 AnalystJournal 或周报反馈上，缺的是意见还是入口？",
-            "五个词的反馈词表已经存在两处，两处都还没有 UI。没有入口时的沉默读不出任何东西。",
+            "五个词的反馈词表已经存在两处，两处都还没有 UI。没有入口时的沉默读不出任何东西。"
+            + partial,
             [],
         ))
     return out[:MAX_BACKLOG_CANDIDATES]
@@ -1014,6 +1069,7 @@ def build_reflection(
     frame = dict(window or closed_week(moment))
     metrics = compute_metrics(
         core, window=frame, budget=mission.get("budget"),
+        write_scopes=(mission.get("autonomy") or {}).get("may_write") or (),
         tick_summaries=tick_summaries, now=moment,
     )
     mission_ref = _text(mission.get("mission_ref"), "mission.mission_ref")
@@ -1220,6 +1276,7 @@ class ResearchCycleReflectionAuthority:
 
 __all__ = [
     "IDLE_LANE_STATUSES",
+    "RESEARCH_TASK_SCOPE",
     "MAX_BACKLOG_CANDIDATES",
     "MAX_POLICY_SUGGESTIONS",
     "NARRATIVE_TITLE",

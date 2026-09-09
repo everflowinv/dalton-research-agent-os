@@ -110,3 +110,46 @@ CREATE TRIGGER IF NOT EXISTS model_idempotency_no_delete
 BEFORE DELETE ON model_route_idempotency BEGIN
     SELECT RAISE(ABORT, 'model route idempotency rows are append-only');
 END;
+
+-- P14-M: which link of which per-purpose-tier fallback chain served this
+-- attempt, and why the links before it were skipped.  It is a separate table
+-- rather than three more fields on the route decision because the decision's
+-- wire shape is validated key-for-key by the broker adapter: a decision that
+-- grew a field would stop being admissible, and every historical decision hash
+-- would have to be recomputed.  Append-only like everything else here; a
+-- replay reads the links and the decisions they point at together.
+CREATE TABLE IF NOT EXISTS model_route_chain_links (
+    link_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    link_id TEXT NOT NULL UNIQUE,
+    work_order_id TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK (attempt_number > 0),
+    purpose TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    chain_position INTEGER NOT NULL CHECK (chain_position > 0),
+    profile_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL REFERENCES model_route_decisions(decision_id),
+    served INTEGER NOT NULL CHECK (served IN (0, 1)),
+    skip_reason TEXT,
+    policy_version_ref TEXT NOT NULL
+        REFERENCES model_routing_policy_versions(policy_version_ref),
+    link_hash TEXT NOT NULL UNIQUE,
+    link_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    CHECK ((served = 1 AND skip_reason IS NULL) OR (served = 0 AND skip_reason IS NOT NULL)),
+    UNIQUE(work_order_id, capability, attempt_number, chain_position)
+);
+
+CREATE TRIGGER IF NOT EXISTS model_chain_link_insert_authorized
+BEFORE INSERT ON model_route_chain_links
+WHEN dalton_model_router_authorized() != 1 BEGIN
+    SELECT RAISE(ABORT, 'model route chain links require ModelRouter');
+END;
+CREATE TRIGGER IF NOT EXISTS model_chain_link_no_update
+BEFORE UPDATE ON model_route_chain_links BEGIN
+    SELECT RAISE(ABORT, 'model route chain links are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS model_chain_link_no_delete
+BEFORE DELETE ON model_route_chain_links BEGIN
+    SELECT RAISE(ABORT, 'model route chain links are append-only');
+END;

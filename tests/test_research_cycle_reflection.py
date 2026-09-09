@@ -50,6 +50,8 @@ from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests.reflection_fixtures import (
     MISSION,
     add_backlog_event,
+    add_loop,
+    add_probe_template,
     add_journal_entry,
     add_mission_version,
     add_quality_score,
@@ -231,7 +233,35 @@ class MetricTests(unittest.TestCase):
         self.assertEqual(planner["inquiries_raised"], 2)
         self.assertEqual(planner["dispatched"], 0)
         self.assertEqual(planner["dispatch_ratio"], 0.0)
-        self.assertIn("P14e", planner["dispatch_reason"])
+        # P14e landed with two gates, both versioned owner acts. The reason has
+        # to name whichever one is shut rather than say "not implemented".
+        self.assertFalse(planner["research_task_granted"])
+        self.assertEqual(planner["probe_templates"], 0)
+        self.assertIn("research_task", planner["dispatch_reason"])
+        self.assertIn("ProbeTemplate", planner["dispatch_reason"])
+
+    def test_a_loop_admitted_from_an_inquiry_counts_and_a_human_one_does_not(self):
+        add_loop(self.core, loop_ref="loop:inquiry", at=week_of(MONDAY, -2), source="inquiry")
+        add_loop(self.core, loop_ref="loop:human", at=week_of(MONDAY, -2), source="human")
+        planner = compute_metrics(
+            self.core, window=self.window, budget=MISSION["budget"],
+            write_scopes=["research_task"], now=NOW,
+        )["planner"]
+        self.assertEqual(planner["dispatched"], 1)
+        self.assertEqual(planner["human_opened_loops"], 1)
+        self.assertEqual(planner["dispatch_ratio"], 0.5)
+        self.assertIsNone(planner["dispatch_reason"])
+
+    def test_with_both_gates_open_and_nothing_sent_the_reason_says_so(self):
+        add_probe_template(self.core, at=week_of(MONDAY, -20))
+        planner = compute_metrics(
+            self.core, window=self.window, budget=MISSION["budget"],
+            write_scopes=["research_task"], now=NOW,
+        )["planner"]
+        self.assertTrue(planner["research_task_granted"])
+        self.assertEqual(planner["probe_templates"], 1)
+        self.assertIn("两道闸都开着", planner["dispatch_reason"])
+        self.assertIn("pool_exhausted", planner["dispatch_reason"])
 
     def test_a_tick_is_idle_only_when_every_lane_was(self):
         ticks = self.metrics["ticks"]

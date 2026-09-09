@@ -24,15 +24,22 @@ def _config() -> dict:
     for profile in openclaw_broker_profiles(checked_at=NOW):
         provider = profile["provider"]
         providers.setdefault(provider, {"apiKey": "must-not-leak", "models": []})
-        providers[provider]["models"].append({
-            "id": profile["model"],
-            "contextWindow": profile["context"]["max_context_tokens"],
-            "maxTokens": profile["context"]["max_output_tokens"],
-            "cost": {
-                "input": profile["cost"]["input_per_million_usd"],
-                "output": profile["cost"]["output_per_million_usd"],
-            },
-        })
+        # Two broker profiles may name the same provider model -- a low- and an
+        # xhigh-thinking calibration of one route is exactly that -- and the
+        # provider catalog lists it once. The fixture used to emit it twice,
+        # which the loader correctly rejects as a duplicate.
+        if not any(
+            model["id"] == profile["model"] for model in providers[provider]["models"]
+        ):
+            providers[provider]["models"].append({
+                "id": profile["model"],
+                "contextWindow": profile["context"]["max_context_tokens"],
+                "maxTokens": profile["context"]["max_output_tokens"],
+                "cost": {
+                    "input": profile["cost"]["input_per_million_usd"],
+                    "output": profile["cost"]["output_per_million_usd"],
+                },
+            })
         broker_profiles.append({
             "id": profile["id"],
             "model": f"{provider}/{profile['model']}",
@@ -53,6 +60,11 @@ def _config() -> dict:
 from dalton_core.model_deployment import _ENDPOINTS
 
 _ENDPOINT_COUNT = len(_ENDPOINTS)
+# One provider model can carry more than one broker profile, so the two counts
+# are related but not equal.
+_PROVIDER_MODEL_COUNT = len(
+    {(endpoint["provider"], endpoint["model"]) for endpoint in _ENDPOINTS}
+)
 
 
 class OpenClawCatalogReconcileTests(unittest.TestCase):
@@ -62,7 +74,7 @@ class OpenClawCatalogReconcileTests(unittest.TestCase):
         # Derived: the fixture config is built from the static catalog, so a
         # written-down count fails every time a model is added rather than
         # saying anything about sync.
-        self.assertEqual(report["provider_model_count"], _ENDPOINT_COUNT)
+        self.assertEqual(report["provider_model_count"], _PROVIDER_MODEL_COUNT)
         self.assertEqual(report["broker_profile_count"], _ENDPOINT_COUNT)
         serialized = json.dumps(report)
         self.assertNotIn("must-not-leak", serialized)

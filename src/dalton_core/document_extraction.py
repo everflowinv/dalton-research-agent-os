@@ -20,6 +20,10 @@ from .alphaengine_document_acquisition import validate_alphaengine_document_acqu
 from .contracts import WorkOrder, ResultEnvelope, ModelInvocation, InvocationGranularity
 from .connector_authority_port import ConnectorCompletionReceiptReader
 from .live_mcp_connector import alphaengine_document_page_from_raw_response
+from .guidepoint_acquisition import (
+    GUIDEPOINT_SOURCE_REF,
+    verified_guidepoint_source,
+)
 from .public_web_extraction_source import verified_public_web_source
 from .research_verification import ResearchVerificationConflict, ResearchVerificationError
 from .store import canonical_json, content_hash
@@ -999,6 +1003,19 @@ class DocumentExtractionService:
                         if row["ticket_ref"] else
                         launcher.locate_completed_manifest(review["document_ref"]))
             _, text = verified_source(
+                self.writer.store, self.writer._transcript_spool, manifest, reader)
+            return text
+        # S2: Guidepoint excerpts. Before the web-fetch fall-through, because
+        # the fall-through is a default and this is a source with its own
+        # manifest shape -- an excerpt has no pages and no URL.
+        if review["source_ref"] == GUIDEPOINT_SOURCE_REF:
+            launcher = self.writer.lane_launcher(
+                "guidepoint_search_launcher"
+            ).acquisition_launcher
+            manifest = (launcher.read_completed_manifest(row["ticket_ref"], review["document_ref"])
+                        if row["ticket_ref"] else
+                        launcher.locate_completed_manifest(review["document_ref"]))
+            _, text = verified_guidepoint_source(
                 self.writer.store, self.writer._transcript_spool, manifest, reader)
             return text
         launcher = self.writer.web_fetch_launcher

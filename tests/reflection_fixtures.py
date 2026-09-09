@@ -218,6 +218,33 @@ def add_journal_entry(
     )
 
 
+def add_probe_template(core: sqlite3.Connection, *, at: str, ref: str = "probe-template:web") -> None:
+    core.execute(
+        "INSERT INTO bounded_probe_template_versions(version_id,template_ref,version_number,"
+        "prior_version_id,record_json,content_hash,actor_ref,created_at) VALUES(?,?,?,?,?,?,?,?)",
+        (f"{ref}:1", ref, 1, None, "{}", f"hash:{ref}", "human:owner", at),
+    )
+
+
+def add_loop(
+    core: sqlite3.Connection, *, loop_ref: str, at: str, source: str = "inquiry",
+) -> None:
+    """One BoundedPlannerLoop, admitted from an inquiry or opened by a human."""
+
+    record = {"loop_ref": loop_ref, "admission": {
+        "source": source, "content_hash": f"hash:{loop_ref}",
+        "inquiry_ref": f"inquiry:{loop_ref}", "plan_ref": "plan:test",
+    }} if source == "inquiry" else {"loop_ref": loop_ref}
+    core.execute(
+        "INSERT INTO bounded_planner_loop_versions(version_id,loop_ref,version_number,"
+        "prior_version_id,question_ref,question_version_ref,record_json,content_hash,"
+        "actor_ref,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (f"{loop_ref}:1", loop_ref, 1, None, f"question:{loop_ref}",
+         f"question-version:{loop_ref}", json.dumps(record, ensure_ascii=False),
+         f"hash:{loop_ref}", "automation:coverage-mission", at),
+    )
+
+
 def tick_summary(**lanes: str) -> dict[str, Any]:
     """A controller tick summary in ``run_once``'s own shape."""
 
