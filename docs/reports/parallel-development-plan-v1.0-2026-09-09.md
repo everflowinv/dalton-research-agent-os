@@ -161,6 +161,11 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | 09-09 | Wave 0 派出（worktree `dalton-wave0-lane-registry-worktree`，分支 `wave0-lane-registry`） | 进行中 |
 | 09-09 | owner 第二批裁决记入第 1 节 | 完成 |
 | 09-09 | Wave 1 四线提前派出（不等 Wave 0；lane 登记留到集成） | 进行中 |
+| 09-09 | S1 / S2 / S3 三条来源线派出 | 进行中 |
+| 09-09 | connector 打包哈希再生（`build_connector_inventory.py --check`）摘到 main `99f6a9b` | 完成 |
+| 09-09 | **Wave 0 合并** `6e86fe8`：lane registry（加 lane = `LANE_MODULES` 一行）、`*_schema.sql` glob、`register_purpose` / `register_model_config_name`、G 线 13 个词、ADR-0007 / 0008 accepted；review 后修了三个静默失败模式；2,080 项通过 | 完成 |
+| 09-09 | Wave 1A / 1B / 1C / 1D 交付并进入 review；A 与 D 各有一个 blocker 在修 | 进行中 |
+| 09-09 | owner 要求回顾全部 vision 讨论找遗漏；调研 agent 进行中 | 进行中 |
 
 ---
 
