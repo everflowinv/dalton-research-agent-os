@@ -161,7 +161,9 @@ owner 的要求：一家公司完成 Initial Screen 后，默认进入 daily tra
 | Guidepoint、sales note、wiki、员工评价 | 稀疏（周级） | 大脑调 |
 | SEC 8-K / 财报日历（C1） | 每日检查 | 固定 |
 
-落实为三个对象与一条 lane（Wave 3 的 P14a 提前到现在，编号沿用）：
+**owner 补充（同日稍晚）**：(1) 越过 Initial Screen 后 daily tracking 是**常驻任务**，无论大脑此时决定做什么别的（该公司深度覆盖、下一家公司的 Initial Screen、专项研究），tracking 都不停，大脑只调频率不停任务；(2) sales note、wiki 也是 tracking 的信息源，sales note 与推特对获取卖方研报之外的市场看法尤其有用；(3) 大脑要知道每个 connector 能取到什么内容（`SourceCapabilityMap`：connector → 内容类型、证据层级、市场、完备度、配额、基线频率、是否通用），想要某类内容时知道去哪取；web fetch / web search 是通用的。
+
+落实为四个对象与一条 lane（Wave 3 的 P14a 提前到现在，编号沿用）：
 - **`active_coverage` 阶段自动进入**：某公司任一版 Initial Screen `gate_passed` 即写 `active_coverage` 阶段记录（`STAGE_SPINE` 第一次为该阶段非空），tracking lane 只看这个阶段的公司。
 - **`ResearchEvent`**（append-only）：`{event_ref, company_ref, kind ∈ {price_move, news, filing, transcript, rating_change, calendar, reconciliation, claim}, occurred_at, source_refs[], payload_hash, content_hash}`。价格异动（P11d `MarketEvent` 并入此对象）、新文档、新 filing、日历到期、对账结果都变成事件。C1 的 `CatalystCalendarVersion` 以 `kind: calendar` 发事件。
 - **`TrackingCadenceVersion`**（大脑的调配结果，append-only）：company × source → 频率与理由；基线来自 policy，大脑按覆盖厚度与事件密度提出调整，每版带 `because` 与证据 refs。
