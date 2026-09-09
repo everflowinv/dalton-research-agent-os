@@ -55,18 +55,82 @@ VALUATION_GAP = (
 GATE_QUESTION_CHECKS = ("source_base", "number_provenance", "key_driver", "street_and_risk")
 
 
-# The drafter asks the model to cite C/N tags inline.  They are scaffolding the
-# prompt introduced, not reader-facing provenance (the section's claim list is),
-# and their digits would otherwise read as figures.  Stripped at parse time.
-_TAG_GROUP_RE = re.compile(r"[（(\[]\s*(?:[CN]\d+\s*[、,，/;；\s]*)+\s*[)）\]]")
-_BARE_TAG_RE = re.compile(r"(?<![A-Za-z0-9])[CN]\d{1,3}(?![A-Za-z0-9])")
+# C/N tags are scaffolding the prompt introduced, not reader-facing provenance
+# -- the section's claim list is that -- and their digits would otherwise read
+# as figures.  Stripped at parse time.
+#
+# P13ap: stripping them used to wreck the prose it left behind, and the wreckage
+# reached published screens. The model writes tags as sentence constituents
+# ("C12显示本季收入为…") and inside parenthetical source lists with Chinese
+# labels ("（数据来源：N1、N2、N3）"), neither of which the group pattern matched,
+# so the tags vanished and their punctuation stayed:
+#
+#   ；、、（同一季度数据重复）显示2025-09-01..
+#   （数据来源：、、、）
+#
+# The real fix is the prompt below -- tags belong in the JSON arrays and never
+# in the body. This is the second line of defence for text that still arrives
+# with them, and it is deliberately conservative: it deletes what the tags left
+# behind, and it does not attempt to rewrite a sentence back into grammar.
+_BARE_TAG = r"(?<![A-Za-z0-9])[CN]\d{1,3}(?![A-Za-z0-9])"
+_BARE_TAG_RE = re.compile(_BARE_TAG)
+# Tags joined to each other -- "N1、N2、N3", "C1至C4", "C7和C8" -- are removed as
+# one run rather than one at a time. Removing them individually left the joins
+# behind, and "目前C1至C4显示" became "目前至显示".
+_JOIN = r"(?:[、,，/;；·\s]|以及|和|与|及|至|到)"
+_TAG_RUN_RE = re.compile(rf"{_BARE_TAG}(?:{_JOIN}+{_BARE_TAG})*")
+# Any bracketed run, so a source list keeps its Chinese label while it is judged.
+_BRACKET_RE = re.compile(r"[（(\[]([^（()）\[\]]*)[)）\]]")
+_SEPARATORS = "、,，/;；·"
+_SENTENCE_END = "。；！？：:!?"
+
+
+def _has_content(text: str) -> bool:
+    """Does this fragment still say anything, or is it only punctuation?"""
+
+    return any(char.isalnum() for char in text)
+
+
+def _drop_empty_brackets(text: str) -> str:
+    """Delete a parenthetical whose contents the tag removal emptied.
+
+    "（数据来源：N1、N2、N3）" becomes "（数据来源：）", which reads as a citation
+    that lost its citations -- worse than no parenthetical at all, because it
+    tells the reader something was there and does not say what.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        if not _has_content(inner):
+            return ""
+        # A label with nothing after it is an empty citation, whatever the
+        # label says. Judge what follows the last colon, not the whole run.
+        for colon in ("：", ":"):
+            if colon in inner and not _has_content(inner.rsplit(colon, 1)[1]):
+                return ""
+        return match.group(0)
+
+    return _BRACKET_RE.sub(replace, text)
 
 
 def strip_citation_tags(text: str) -> str:
-    """Remove the C/N citation scaffolding from a drafted body."""
+    """Remove the C/N citation scaffolding, and the holes it leaves."""
 
-    without_groups = _TAG_GROUP_RE.sub("", text or "")
-    cleaned = _BARE_TAG_RE.sub("", without_groups)
+    cleaned = _TAG_RUN_RE.sub("", text or "")
+    cleaned = _BARE_TAG_RE.sub("", cleaned)
+    # A separator against a bracket edge was joining the tag to what is still
+    # there: "（调整后，N3）" leaves "（调整后，）". Cleared before the bracket is
+    # judged, so a parenthetical is only dropped when it is genuinely empty.
+    cleaned = re.sub(f"[{_SEPARATORS}\\s]+([)）\\]])", r"\1", cleaned)
+    cleaned = re.sub(f"([（(\\[])[{_SEPARATORS}\\s]+", r"\1", cleaned)
+    cleaned = _drop_empty_brackets(cleaned)
+    # A run of separators is what is left where a list of tags used to be.
+    cleaned = re.sub(f"[{_SEPARATORS}][{_SEPARATORS}\\s]*", lambda m: m.group(0)[0], cleaned)
+    # A separator with nothing before it -- at the start, or straight after a
+    # sentence ended -- was joining tags to each other.
+    cleaned = re.sub(f"^[{_SEPARATORS}\\s]+", "", cleaned)
+    cleaned = re.sub(f"([{_SENTENCE_END}])[{_SEPARATORS}\\s]+", r"\1", cleaned)
+    cleaned = re.sub(f"[{_SEPARATORS}]+([{_SENTENCE_END}])", r"\1", cleaned)
     cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
     cleaned = re.sub(r"\s+([，。、；：）)])", r"\1", cleaned)
     return cleaned.strip()
@@ -79,6 +143,37 @@ def section_titles(playbook: Mapping[str, Any]) -> list[str]:
     return [str(title) for title in titles]
 
 
+def _dedupe(
+    claims: Sequence[Mapping[str, Any]], key: Any,
+) -> tuple[list[dict[str, Any]], int]:
+    """One claim per distinct assertion, earliest kept.
+
+    P13ap: three separate Claims asserted Accenture's 2025Q1 revenue in exactly
+    the same words, so the drafter tagged them N1, N2 and N3 and the model --
+    correctly, given what it was shown -- cited all three and noted the
+    repetition in the published text: "、、（同一季度数据重复）显示…".
+
+    The model was not wrong. The context was. A figure asserted three times is
+    one figure, and offering it three times invites a sentence that says so.
+
+    Earliest kept rather than latest, because identical assertions differ only
+    in when they were recorded, and a stable ref means a redraft cites the same
+    Claim rather than whichever copy happened to be written last. Assertions
+    that genuinely differ -- a restated figure -- have different keys and are
+    both kept; deciding between those is the Ledger's job, not the drafter's.
+    """
+
+    kept: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    for claim in claims:
+        identity = key(claim)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        kept.append(dict(claim))
+    return kept, len(claims) - len(kept)
+
+
 def build_claim_context(
     claims: Sequence[Mapping[str, Any]], *, max_claims: int = MAX_CLAIMS_PER_SECTION
 ) -> dict[str, Any]:
@@ -87,6 +182,14 @@ def build_claim_context(
     qualitative, quantitative = [], []
     for claim in claims:
         (quantitative if claim.get("value") is not None else qualitative).append(claim)
+    # A figure is identified by what it asserts, not by which row carries it.
+    quantitative, dropped_numbers = _dedupe(quantitative, lambda claim: (
+        claim.get("aspect"), claim.get("period"), str(claim.get("value")),
+        str(claim.get("statement") or ""),
+    ))
+    qualitative, dropped_claims = _dedupe(qualitative, lambda claim: (
+        str(claim.get("statement") or "").strip(),
+    ))
     tagged_claims, tagged_numbers = [], []
     budget = MAX_CONTEXT_CHARS
     for claim in qualitative[-max_claims:]:
@@ -106,7 +209,15 @@ def build_claim_context(
             "figures": value_tokens(str(claim.get("statement") or "")),
             "period": claim.get("period"),
         })
-    return {"claims": tagged_claims, "numbers": tagged_numbers}
+    return {
+        "claims": tagged_claims, "numbers": tagged_numbers,
+        # Reported rather than silently absorbed: a company whose Claims
+        # collapse heavily has a Ledger problem, and the drafter is the first
+        # place that shows.
+        "duplicates_dropped": {
+            "claims": dropped_claims, "numbers": dropped_numbers,
+        },
+    }
 
 
 def build_section_prompt(
@@ -126,7 +237,16 @@ def build_section_prompt(
         f"What this section is for: {guidance}",
         "",
         "Hard rules:",
-        "- Use ONLY the tagged material below.  Cite the C tags you rely on.",
+        "- Use ONLY the tagged material below.",
+        # P13ap: the tags are scaffolding, and a body that uses them as words
+        # cannot survive their removal. Published screens carried "（数据来源：、、、）"
+        # and sentences that began "显示本季收入为…" with no subject, because the
+        # model had written "N1、N2、N3" and "C12显示…".
+        "- NEVER write a C or N tag inside the body text -- not as a word, not in",
+        "  brackets, not in a source list. List them in the JSON arrays instead;",
+        "  that is what carries provenance to the reader. A sentence whose subject",
+        "  is a tag becomes a sentence with no subject once the tag is removed, so",
+        "  name the source in words: 管理层、该季报、卖方研报.",
         "- You may write a figure ONLY by citing the N tag that carries it, and the figure must appear",
         f"  in that N tag's text VERBATIM.  Do not convert units or scales (no 亿/万 rewriting, no",
         f"  rounding, no percentage recomputation): copy the digits exactly as the N tag prints them.",
