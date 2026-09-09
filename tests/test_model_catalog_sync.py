@@ -8,7 +8,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from dalton_core.contracts import WorkOrder
-from dalton_core.model_deployment import openclaw_broker_profiles
+from dalton_core.model_deployment import (
+    VERIFIER_POLICY_REF,
+    VERIFIER_PROFILE_ID,
+    openclaw_broker_profiles,
+    openclaw_verifier_policy,
+)
 from dalton_core.model_router import (
     RETIRED_REASON_NOT_IN_BROKER,
     ModelRouter,
@@ -17,6 +22,7 @@ from dalton_core.model_router import (
 from dalton_core.openclaw_catalog_reconcile import (
     broker_catalog_hash,
     catalog_sync_status,
+    openclaw_broker_profiles_from_config,
     sync_openclaw_model_catalog,
 )
 from tests.test_openclaw_catalog_reconcile import _config
@@ -219,6 +225,65 @@ class CatalogSyncTests(unittest.TestCase):
             3,
         )
 
+    def test_the_verifier_phase_pin_fails_closed_once_its_model_is_retired(self) -> None:
+        """The pinned verifier profile is one of the five the broker dropped.
+
+        VERIFIER_POLICY_REF is immutable and pins profile:gemini-3-7-flash, and
+        the broker has not offered that model for some time -- so verification
+        was already going to fail, just at the broker, as an opaque provider
+        error after the call had been admitted and paid for. After the sync it
+        is refused by the router with a reason that says what is wrong.
+        Repointing the pin is the integrator's move, not this one's.
+        """
+
+        self._install(_config())
+        openclaw_verifier_policy_ref = VERIFIER_POLICY_REF
+        with self.assertRaises(Exception):
+            # Sanity: the live config genuinely does not offer it, so the
+            # dynamic catalog cannot build it either.
+            openclaw_broker_profiles_from_config(
+                _drop_broker_profile(_config(), VERIFIER_PROFILE_ID),
+                checked_at=NOW,
+                profile_ids=[VERIFIER_PROFILE_ID],
+            )
+        self.router.register_policy(openclaw_verifier_policy(created_at=NOW))
+        work = _work("work:catalog-sync-verifier", capability="verify")
+        before = self.router.route(
+            work, attempt_number=1, capability="verify",
+            policy_version_ref=openclaw_verifier_policy_ref,
+            credential_slot_refs=["credential-slot:openclaw:google"],
+            required_modalities=["text"], required_context_tokens=2_000,
+            estimated_input_tokens=1_000, estimated_output_tokens=500,
+            idempotency_key="catalog-sync-verifier:1",
+            producer_family="openai-gpt-6",
+        )["decision"]
+        self.assertEqual(before["outcome"], "selected")
+
+        sync_openclaw_model_catalog(
+            self.router, _drop_broker_profile(_config(), VERIFIER_PROFILE_ID),
+            checked_at=LATER,
+        )
+
+        after = self.router.route(
+            work, attempt_number=2, capability="verify",
+            policy_version_ref=openclaw_verifier_policy_ref,
+            credential_slot_refs=["credential-slot:openclaw:google"],
+            required_modalities=["text"], required_context_tokens=2_000,
+            estimated_input_tokens=1_000, estimated_output_tokens=500,
+            idempotency_key="catalog-sync-verifier:2",
+            decision_kind="retry", previous_decision_ref=before["id"],
+            producer_family="openai-gpt-6",
+        )["decision"]
+        self.assertEqual(after["outcome"], "rejected")
+        self.assertIn("profile_retired", after["rejection_reasons"])
+        # The policy itself is untouched: it still pins exactly what it pinned.
+        self.assertEqual(
+            self.router.get_policy(openclaw_verifier_policy_ref)["filters"][
+                "allowed_profile_ids"
+            ],
+            [VERIFIER_PROFILE_ID],
+        )
+
     def test_the_pre_broker_profile_namespace_is_left_alone(self) -> None:
         legacy = dict(openclaw_broker_profiles(checked_at=NOW)[0])
         legacy["id"] = "model-profile:deepseek-v4-flash"
@@ -255,7 +320,7 @@ class CatalogSyncTests(unittest.TestCase):
             self.router.register_profile(profile)
 
 
-def _work(work_id: str) -> WorkOrder:
+def _work(work_id: str, *, capability: str = "research") -> WorkOrder:
     moment = NOW.isoformat(timespec="microseconds")
     return WorkOrder(
         schema_version="0.1",
@@ -263,7 +328,7 @@ def _work(work_id: str) -> WorkOrder:
         created_at=moment,
         updated_at=moment,
         question="which model is still offered?",
-        requested_capabilities=("research",),
+        requested_capabilities=(capability,),
         runtime_profile_ref="runtime-profile:dalton-model-broker:0.1",
         budget={
             "max_input_tokens": 100_000,

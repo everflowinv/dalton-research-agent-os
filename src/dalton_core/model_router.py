@@ -393,6 +393,13 @@ def _profile_wire(data: Mapping[str, Any]) -> dict[str, Any]:
         status = _string(status, "profile.status")
         if status not in _PROFILE_STATUSES:
             raise ModelRouterValidationError("profile status is invalid")
+        if status == "live":
+            # Absent is what live means here, and the two must not both be
+            # sayable: the same profile written once each way would have two
+            # different content hashes and look like two different models.
+            raise ModelRouterValidationError(
+                "a live profile carries no status; omit it"
+            )
     if status == "retired":
         if retirement is None:
             raise ModelRouterValidationError(
@@ -400,13 +407,10 @@ def _profile_wire(data: Mapping[str, Any]) -> dict[str, Any]:
             )
         wire["status"] = status
         wire["retirement"] = _retirement_wire(retirement)
-    else:
-        if retirement is not None:
-            raise ModelRouterValidationError(
-                "only a retired profile carries a retirement record"
-            )
-        if status == "live":
-            wire["status"] = status
+    elif retirement is not None:
+        raise ModelRouterValidationError(
+            "only a retired profile carries a retirement record"
+        )
     digest = canonical_hash(wire)
     asserted = obj.get("content_hash")
     if asserted is not None and asserted != digest:
@@ -416,17 +420,23 @@ def _profile_wire(data: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _fallback_chains_wire(value: Any) -> dict[str, Any]:
-    """Per-purpose-tier chains: which model first, which one after it fails.
+    """Per-tier chains: which model first, which one after it fails.
 
     A chain is policy, not code, for the same reason the pinned profile was:
     two jobs sharing one hard-coded ordering can never differ, and a chain that
     lives in a module cannot be pinned by version in a lane's configuration.
+
+    The *chains* are pinned here and nothing else.  Which purpose belongs to
+    which tier is a mutable registry -- a lane registers its own -- and folding
+    it into the policy content would mean every new lane silently appended a
+    routing-policy version to every policy that carried the map, changing hashes
+    that nothing about routing had actually changed.
     """
 
     obj = _closed(
         value,
-        allowed={"tiers", "purpose_tiers"},
-        required={"tiers", "purpose_tiers"},
+        allowed={"tiers"},
+        required={"tiers"},
         name="policy.fallback_chains",
     )
     raw_tiers = obj["tiers"]
@@ -439,19 +449,7 @@ def _fallback_chains_wire(value: Any) -> dict[str, Any]:
         if not refs:
             raise ModelRouterValidationError(f"tier {tier} must name at least one profile")
         tiers[tier] = list(refs)
-    raw_purposes = obj["purpose_tiers"]
-    if not isinstance(raw_purposes, Mapping):
-        raise ModelRouterValidationError("fallback_chains.purpose_tiers must be an object")
-    purpose_tiers: dict[str, str] = {}
-    for purpose, tier in raw_purposes.items():
-        name = _token(purpose, "fallback_chains.purpose_tiers key")
-        target = _token(tier, "fallback_chains.purpose_tiers value")
-        if target not in tiers:
-            raise ModelRouterValidationError(
-                f"purpose {name} is mapped to undeclared tier {target}"
-            )
-        purpose_tiers[name] = target
-    return {"tiers": tiers, "purpose_tiers": purpose_tiers}
+    return {"tiers": tiers}
 
 
 def _policy_wire(data: Mapping[str, Any]) -> dict[str, Any]:
@@ -850,7 +848,13 @@ class ModelRouter:
         if not served:
             skip_reason = _token(skip_reason, "skip_reason")
         now = _timestamp(self._now())
-        link = {
+        # The identity of a link is what it says, not when it was written.
+        # Hashing the clock into the id meant a replay derived a *different*
+        # id, missed the duplicate check, and fell through to the schema's
+        # UNIQUE(work_order, capability, attempt, position) as a raw
+        # sqlite3.IntegrityError -- so replaying a chain crashed the lane
+        # instead of returning the decision it had already made.
+        identity = {
             "schema_version": SCHEMA_VERSION,
             "work_order_ref": work_order_id,
             "capability": capability,
@@ -863,10 +867,9 @@ class ModelRouter:
             "policy_version_ref": policy_version_ref,
             "served": served,
             "skip_reason": skip_reason,
-            "created_at": now,
         }
-        link_id = f"route-chain-link:{canonical_hash(link)[:32]}"
-        link["id"] = link_id
+        link_id = f"route-chain-link:{canonical_hash(identity)[:32]}"
+        link = {**identity, "id": link_id, "created_at": now}
         link["content_hash"] = canonical_hash(link)
         with self._transaction() as cur:
             existing = cur.execute(
@@ -875,6 +878,20 @@ class ModelRouter:
             ).fetchone()
             if existing is not None:
                 return {"status": "duplicate", "link": json.loads(existing["link_json"])}
+            # The same position of the same attempt, recorded differently, is a
+            # conflict rather than a crash: the schema would refuse it, and a
+            # caller deserves to be told which of the two it is.
+            occupied = cur.execute(
+                "SELECT link_json FROM model_route_chain_links WHERE work_order_id=? "
+                "AND capability=? AND attempt_number=? AND chain_position=?",
+                (work_order_id, capability, attempt_number, chain_position),
+            ).fetchone()
+            if occupied is not None:
+                return {
+                    "status": "conflict",
+                    "reason": "this chain position is already recorded with other content",
+                    "link": json.loads(occupied["link_json"]),
+                }
             cur.execute(
                 "INSERT INTO model_route_chain_links "
                 "(link_id, work_order_id, capability, attempt_number, purpose, tier, "

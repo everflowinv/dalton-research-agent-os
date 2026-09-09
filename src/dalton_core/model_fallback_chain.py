@@ -92,14 +92,15 @@ _TIER_CHAINS: dict[str, tuple[str, ...]] = {
 
 TIERS: tuple[str, ...] = (TIER_BRAIN, TIER_CHEAP, TIER_VERIFIER)
 
-# Every purpose registered today, mapped explicitly.  All six are brain, and
-# that is a statement rather than a default: the cockpit's ask, the goal and
-# steering proposals, the deliverable draft, the planner's decision and the
-# company model specification are all "form a view and argue it".  The cheap
-# tier's work -- extraction windows, claim-index tagging, quality judging,
-# batch classification -- runs in lanes that have their own pinned policies and
-# have not registered cockpit purposes; they get the tier by pinning the cheap
-# policy, and will register a purpose here when they become cockpit-shaped.
+# Every purpose registered today, mapped explicitly.  The six brain ones are a
+# statement rather than a default: the cockpit's ask, the goal and steering
+# proposals, the deliverable draft, the planner's decision and the company
+# model specification are all "form a view and argue it".  The extraction lane
+# is cheap-tier work too but has no cockpit purpose -- it takes the tier by
+# pinning the cheap policy.
+#
+# This map is code with a test, not policy content.  A lane registering its
+# tier must not append a routing-policy version to every pinned policy.
 _PURPOSE_TIERS: dict[str, str] = {
     "ask": TIER_BRAIN,
     "goal": TIER_BRAIN,
@@ -107,6 +108,11 @@ _PURPOSE_TIERS: dict[str, str] = {
     "draft": TIER_BRAIN,
     "plan": TIER_BRAIN,
     "model_spec": TIER_BRAIN,
+    # Wave 1's two: tagging a claim index against a fixed aspect vocabulary and
+    # scoring an artefact against a rubric are both "apply a stated standard to
+    # a lot of items", which is the cheap tier's whole description.
+    "claim_index": TIER_CHEAP,
+    "quality": TIER_CHEAP,
 }
 
 # A link may be skipped for these and only these, and each one means "the
@@ -122,7 +128,101 @@ HALTING_FAILURES: frozenset[str] = frozenset({
     "content_refusal",
     "budget_refused",
     "contract_violation",
+    # What the classifier returns when it does not recognise the failure. It is
+    # a halt, not an exception: a lane that cannot name why the model failed
+    # must not go shopping for one that will answer, and it must not crash the
+    # mission tick either.
+    "unclassified_failure",
 })
+
+# Broker error codes, by what they mean for the chain. The broker's codes are
+# provider-agnostic uppercase tokens; the substrings below are matched against
+# the whole code so a provider-specific suffix still lands in the right class.
+_FAILURE_CODES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("TIMEOUT", "TIMED_OUT", "DEADLINE"), "transport_failure"),
+    (("CONNECTION", "NETWORK", "SOCKET", "TRANSPORT", "BROKEN_PIPE", "EOF"),
+     "transport_failure"),
+    (("MODEL_UNAVAILABLE", "MODEL_NOT_FOUND", "NO_CAPACITY", "OVERLOADED",
+      "CAPACITY", "UNAVAILABLE"), "model_unavailable"),
+    (("RATE_LIMIT", "RATE_LIMITED", "TOO_MANY_REQUESTS", "THROTTLED",
+      "PROVIDER_ERROR", "UPSTREAM", "INTERNAL_ERROR", "SERVER_ERROR",
+      "BAD_GATEWAY", "SERVICE_ERROR"), "provider_failure"),
+    (("CONTENT_REFUSAL", "CONTENT_FILTER", "REFUSED", "SAFETY", "BLOCKED",
+      "MODERATION"), "content_refusal"),
+    (("BUDGET",), "budget_refused"),
+    (("INVALID", "SCHEMA", "CONTRACT", "UNAUTHORIZED", "FORBIDDEN",
+      "AUTH", "IDEMPOTENCY", "MALFORMED", "UNSUPPORTED"), "contract_violation"),
+)
+
+
+def classify_model_failure(failure: Any) -> str:
+    """Name what went wrong, in the vocabulary the chain reasons in.
+
+    Takes whatever the caller has: an adapter exception, a failed
+    ``ResultEnvelope``'s ``error`` mapping, a bare broker error code, or an
+    HTTP status.  Always returns a class -- never raises -- because this runs
+    inside a lane tick, and a classifier that throws turns a recoverable
+    provider outage into a crashed mission.
+
+    The bias is deliberate: only failures we can positively name as "the
+    provider did not answer" earn a fallback.  Everything else halts.
+    """
+
+    from .openclaw_model_adapter import (
+        BrokerBudgetExceeded,
+        BrokerConnectionError,
+        BrokerIdempotencyConflict,
+        BrokerProtocolError,
+        BrokerTimeout,
+        ModelAdmissionError,
+        OpenClawModelAdapterError,
+    )
+
+    if isinstance(failure, BaseException):
+        if isinstance(failure, BrokerTimeout):
+            return "transport_failure"
+        if isinstance(failure, BrokerConnectionError):
+            return "transport_failure"
+        if isinstance(failure, BrokerBudgetExceeded):
+            return "budget_refused"
+        if isinstance(failure, (BrokerIdempotencyConflict, ModelAdmissionError)):
+            return "contract_violation"
+        if isinstance(failure, BrokerProtocolError):
+            # The broker answered, but not in a shape this can trust. That is
+            # the broker or the provider misbehaving, not the model declining.
+            return "provider_failure"
+        if isinstance(failure, (TimeoutError, ConnectionError, OSError)):
+            return "transport_failure"
+        if isinstance(failure, OpenClawModelAdapterError):
+            return "unclassified_failure"
+        return "unclassified_failure"
+
+    status: int | None = None
+    code = ""
+    if isinstance(failure, Mapping):
+        raw = failure.get("code")
+        code = raw.upper() if isinstance(raw, str) else ""
+        raw_status = failure.get("status") or failure.get("http_status")
+        if isinstance(raw_status, int) and not isinstance(raw_status, bool):
+            status = raw_status
+    elif isinstance(failure, int) and not isinstance(failure, bool):
+        status = failure
+    elif isinstance(failure, str):
+        code = failure.upper()
+
+    if code:
+        for needles, outcome in _FAILURE_CODES:
+            if any(needle in code for needle in needles):
+                return outcome
+        digits = "".join(character for character in code if character.isdigit())
+        if len(digits) == 3:
+            status = int(digits)
+    if status is not None:
+        if status == 429 or 500 <= status <= 599:
+            return "provider_failure"
+        if 400 <= status <= 499:
+            return "contract_violation"
+    return "unclassified_failure"
 
 
 def register_purpose_tier(purpose: str, tier: str) -> str:
@@ -181,12 +281,16 @@ def unmapped_purposes() -> tuple[str, ...]:
 
 
 def fallback_chains() -> dict[str, Any]:
-    """The whole tier table, as a routing policy carries it."""
+    """The tier chains, as a routing policy carries them.
 
-    return {
-        "tiers": {tier: list(chain) for tier, chain in _TIER_CHAINS.items()},
-        "purpose_tiers": dict(_PURPOSE_TIERS),
-    }
+    Chains only.  The purpose-to-tier map is deliberately *not* in here: it is a
+    registry a lane adds itself to, and a policy that embedded it would append a
+    new immutable version -- with a new hash, for every pinned lane -- every
+    time some unrelated lane registered a purpose. What is pinned is what
+    routing actually reads.
+    """
+
+    return {"tiers": {tier: list(chain) for tier, chain in _TIER_CHAINS.items()}}
 
 
 def may_fall_back(failure_class: str) -> bool:
@@ -199,6 +303,30 @@ def may_fall_back(failure_class: str) -> bool:
     raise FallbackChainError(
         f"unclassified model failure {failure_class!r}; a chain does not guess"
     )
+
+
+def served_family(router: ModelRouter, decision_ref: str) -> str:
+    """The model family that actually produced something, read from its decision.
+
+    The verifier's independence has to be checked against the model that *ran*,
+    not against whatever the caller believes ran.  A brain-tier call that fell
+    back from gpt-6-astra to claude-fable-5-1 and then told the verifier its
+    producer was OpenAI would let an Anthropic verifier check Anthropic work,
+    and the check would pass.  So the family comes out of the producer's own
+    immutable route decision -- the same record the assessment is bound to --
+    and there is no caller-supplied path to it.
+    """
+
+    decision = router.get_decision(decision_ref)
+    if decision.get("outcome") != "selected":
+        raise FallbackChainError(
+            "a rejected route decision produced nothing to be independent of"
+        )
+    endpoint = decision.get("selected_endpoint") or {}
+    family = endpoint.get("family")
+    if not isinstance(family, str) or not family:
+        raise FallbackChainError("producer route decision names no model family")
+    return family
 
 
 def reserved_micros(route: Mapping[str, Any], profile: Mapping[str, Any]) -> int:
@@ -231,7 +359,7 @@ def execute_chain(
     idempotency_prefix: str,
     call: Callable[[Mapping[str, Any], Mapping[str, Any]], Mapping[str, Any]],
     admit: Callable[[Mapping[str, Any], Mapping[str, Any], int], Any] | None = None,
-    producer_family: str | None = None,
+    producer_decision_ref: str | None = None,
     tier: str | None = None,
 ) -> dict[str, Any]:
     """Walk the chain until one link serves, and record every step of it.
@@ -240,7 +368,12 @@ def execute_chain(
     selected, and returns ``{"outcome": "served", ...}`` or ``{"outcome":
     "failed", "failure_class": ...}``.  ``admit`` -- if given -- is handed the
     same pair plus the served link's own estimated spend, so the day budget is
-    charged for the model that is actually about to run.
+    charged for the model that is actually about to run, and must answer
+    ``{"status": "admitted"}`` for the call to be made.
+
+    ``producer_decision_ref`` is how a verifier says what it is verifying: the
+    producer's model family is read out of that immutable decision rather than
+    taken on the caller's word.
 
     Each link is a real route decision: the first is ``initial``, every one
     after it is a ``switch`` in the same attempt referencing the one before, so
@@ -250,6 +383,13 @@ def execute_chain(
 
     tier = tier or tier_for(purpose)
     chain = tier_chain(tier)
+    # Independence is measured against the producer's own route decision, so a
+    # verification cannot be told a producer it did not have.
+    producer_family = (
+        served_family(router, producer_decision_ref)
+        if producer_decision_ref is not None
+        else None
+    )
     links: list[dict[str, Any]] = []
     previous_decision_ref: str | None = None
     for step in range(1, len(chain) + 1):
@@ -318,7 +458,11 @@ def execute_chain(
         previous_decision_ref = route["id"]
         if admit is not None:
             admission = admit(route, profile, reserved_micros(route, profile))
-            if admission is None or admission is False:
+            # Explicit, not truthy. A budget authority that returns something
+            # this does not understand has not admitted the call, and treating
+            # an unrecognised answer as a yes is how money gets spent by
+            # accident.
+            if not isinstance(admission, Mapping) or admission.get("status") != "admitted":
                 _record(served=False, skip_reason="budget_refused")
                 return {
                     "status": "halted",
@@ -454,8 +598,10 @@ __all__ = [
     "may_fall_back",
     "purpose_tiers",
     "register_purpose_tier",
+    "classify_model_failure",
     "reserved_micros",
     "routing_overview",
+    "served_family",
     "tier_chain",
     "tier_for",
     "unmapped_purposes",

@@ -56,17 +56,22 @@ _LEGACY_ENDPOINT_NAMES = (
 
 
 # P14-M: shared broker policy version 3 is immutable, and it was written as
-# "every endpoint in _ENDPOINTS".  That was true on the day it was registered
-# and stopped being a definition the moment the catalog was allowed to grow: a
-# new endpoint would have silently changed v3's content, and the deployment
-# would then have refused to start against the v3 already in the live router.
-# So the membership v3 actually froze is written down as itself.  A model added
-# after v3 is reachable through the policy its lane pins, not by rewriting a
-# version that shipped.
+# "every endpoint in _ENDPOINTS".  That stopped being a definition the day the
+# catalog changed: a model added to _ENDPOINTS silently rewrote v3's content,
+# and one removed from it silently rewrote it the other way.  Both happened.
+#
+# So the membership is written down as itself, read off the immutable v3 already
+# registered in the live router: twenty-three ids, including
+# profile:qwen-deepseek-v4-pro (which _ENDPOINTS no longer defines) and
+# excluding profile:gpt-6-astra and profile:qwen-deepseek-v4-pro-0813 (which
+# were added to _ENDPOINTS after v3 shipped).  Derived from _ENDPOINTS, this
+# function had already drifted away from the live v3 it claims to be, so
+# upgrade_openclaw_broker_catalog would have raised a policy conflict against
+# live.  A model added after v3 is reachable through the policy its lane pins,
+# not by rewriting a version that shipped.
 _BROKER_V3_ENDPOINT_NAMES = (
     "deepseek-v4-flash",
     "gpt-5-6-sol",
-    "gpt-6-astra",
     "gpt-5-6-terra",
     "gpt-5-6-luna",
     "claude-fable-5",
@@ -78,7 +83,7 @@ _BROKER_V3_ENDPOINT_NAMES = (
     "gemini-3-5-flash-lite",
     "qwen3-8-max",
     "qwen-deepseek-v4-flash-0731",
-    "qwen-deepseek-v4-pro-0813",
+    "qwen-deepseek-v4-pro",
     "glm-5-2",
     "gpt-5-5",
     "deepseek-v4-pro",

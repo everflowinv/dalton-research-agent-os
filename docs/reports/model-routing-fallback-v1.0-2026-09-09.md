@@ -89,15 +89,23 @@ refused at route time.
 | purpose | tier |
 |---|---|
 | `ask`, `goal`, `steer`, `draft`, `plan`, `model_spec` | `brain` |
+| `claim_index`, `quality` | `cheap` |
 
-All six are brain, and that is a statement rather than a default: the cockpit's
-answer, the goal and steering proposals, the deliverable draft, the planner's
-decision and the company model specification are all "form a view and argue it".
-The cheap tier's work — extraction windows, claim-index tagging, quality
-deterministic-assisted judging, batch classification — runs in lanes with their
-own pinned policies that have not registered cockpit purposes; they take the
-tier by pinning the cheap policy. `register_purpose_tier(purpose, tier)`
-registers both at once, so a lane cannot acquire a purpose without a chain.
+The six brain ones are a statement rather than a default: the cockpit's answer,
+the goal and steering proposals, the deliverable draft, the planner's decision
+and the company model specification are all "form a view and argue it". Wave 1's
+two are cheap: tagging a claim index against a fixed aspect vocabulary and
+scoring an artefact against a rubric are both "apply a stated standard to a lot
+of items". The extraction lane is cheap-tier work too but has no cockpit
+purpose; it takes the tier by pinning the cheap policy.
+`register_purpose_tier(purpose, tier)` registers both at once, so a lane cannot
+acquire a purpose without a chain, and `unmapped_purposes()` names any that
+slipped through.
+
+**The map is code, not policy content.** The pinned policy carries the *chains*
+and nothing else. Embedding the purpose map would mean every lane that
+registered a tier appended a new immutable routing-policy version — new hash,
+every pinned policy — for a change routing never reads.
 
 **The chains** (`model_fallback_chain._TIER_CHAINS`):
 
@@ -142,12 +150,51 @@ profile version the decision selected, so a fallback is admitted against the
 model that is about to run. Measured in test: deepseek link = 550 µUSD,
 glm-5.3-flash link = 200 µUSD, for the same 1,000-in/500-out request.
 
-**Policy is a new pinned version.** `ensure_planner_policy(..., tier=...)`
-appends a version carrying `fallback_chains` (optional key, omitted when absent,
-so no existing policy hash moves). `deliverable_model_setup` defaults to the
-`brain` tier; both it and `research_planner_setup` gained `--tier` and now
-register their own model-config file name via `register_model_config_name`
-instead of relying on the seed list in `model_configurations`.
+**Policy is a new pinned version.** `ensure_planner_policy(..., tier=...)` and
+`ensure_extraction_policy(..., tier=...)` append a version carrying
+`fallback_chains` (optional key, omitted when absent, so no existing policy hash
+moves). `research_planner_setup`, `deliverable_model_setup` and
+`document_extraction_setup` all gained `--tier`; the old `--profile-ids` still
+works and still wins. The planner and deliverable setups now register their own
+model-config file name via `register_model_config_name` rather than relying on
+the seed list in `model_configurations`.
+
+## 3b. Who actually walks a chain
+
+`CockpitModel.call` — which is what the cockpit ask/goal/steer, the deliverable
+draft, the planner decision, the company model spec, the claim-index tagger and
+the quality judge all go through — now routes by purpose tier through
+`execute_chain` **when the pinned policy version declares that tier's chain**.
+Otherwise it routes exactly as it did. That keeps the choice where every other
+routing choice already lives: in the version a lane pinned. An installation that
+has not been repointed at a tier behaves identically to before. A purpose with
+no tier under a chain-carrying policy is refused rather than defaulted.
+
+`install.sh` now pins document extraction to `--tier cheap` by default
+(`DALTON_EXTRACTION_MODEL_TIER=` empty restores the single pin), and honours
+`DALTON_PLANNER_MODEL_TIER` / `DALTON_DELIVERABLE_MODEL_TIER` alongside the
+existing `*_MODEL_PROFILE` variables. Extraction's long-standing pin,
+`profile:deepseek-v4-flash`, is the cheap chain's first link, so the model that
+normally reads a window does not change; what changes is that DeepSeek being
+down stops losing the window. The claim-index lane takes `--model-config` from
+whoever launches it: point it at the extraction config and it gets the chain.
+
+**The failure classifier.** `classify_model_failure` takes an adapter
+exception, a failed `ResultEnvelope`'s `error` mapping, a bare broker error code
+or an HTTP status, and always returns a class — it never raises, because it runs
+inside a lane tick. Timeouts and socket failures are `transport_failure`;
+protocol errors, 5xx and 429 are `provider_failure`; `MODEL_UNAVAILABLE`,
+`NO_CAPACITY`, `OVERLOADED` are `model_unavailable`; content refusals, budget
+refusals, 4xx and idempotency/admission errors halt; anything it cannot name
+returns `unclassified_failure`, which is a halt.
+
+**One reservation per attempt, settled by what served.** The day ledger
+identifies an admission by (work order, attempt, phase), so a chain cannot hold
+a separate reservation per link without claiming to be a different attempt,
+which it is not. The reservation is therefore the dearest link the chain could
+reach; the settlement — the number that actually moves the day's spend — is the
+served link's own rate card. Reserve the ceiling, pay what ran. A link that
+failed settles nothing, matching what the single-shot path already did.
 
 ## 4. What changed in `openclaw.json` (keys only)
 
@@ -193,7 +240,13 @@ for either, and adding them would queue two uncalibrated models for a smoke run.
      --model-router-db "$HOME/Library/Application Support/Dalton/state/dalton-core/model-router.sqlite"
    ```
    `--check-only` reports without writing and exits 2 when out of sync.
-3. **Repoint the verifier phase pin.** `VERIFIER_POLICY_REF` pins
+3. **Reload the gateway before or immediately after the install.** The cheap
+   chain's second link is `zai/glm-5.3-flash`, which the broker only offers once
+   it has reloaded. Until then a cheap-tier fallback reaches a model the broker
+   will refuse — the chain records that as a link that did not serve and moves
+   on to `google/gemini-3.5-flash-lite`, so nothing is lost, but the middle link
+   is dead weight until the reload.
+4. **Repoint the verifier phase pin.** `VERIFIER_POLICY_REF` pins
    `profile:gemini-3-7-flash`, which the broker has not offered for some time —
    `upgrade_openclaw_broker_catalog(openclaw_config_path=...)` already fails
    against the live config for exactly this reason. After the sync that profile
@@ -213,14 +266,15 @@ for either, and adding them would queue two uncalibrated models for a smoke run.
 ## 6. Tests
 
 ```
-Ran 2375 tests in 200.587s
+Ran 2741 tests in 368.480s
 
 OK (skipped=1)
 ```
 
 `PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`
-New: `tests/test_model_catalog_sync.py` (8), `tests/test_model_fallback_chain.py`
-(19), both offline against a fake broker. No live model call was made.
+New: `tests/test_model_catalog_sync.py` (9), `tests/test_model_fallback_chain.py`
+(29), `tests/test_cockpit_model_fallback.py` (7), all offline against a fake
+broker. No live model call was made.
 
 ## 7. Open questions
 
@@ -248,3 +302,41 @@ New: `tests/test_model_catalog_sync.py` (8), `tests/test_model_fallback_chain.py
 * **The cheap tier has no registered purpose yet.** The lanes it describes route
   through their own policies. Pointing `document_extraction_setup` at the cheap
   tier is the obvious next step and was out of scope here.
+
+
+## 8. Review round two (what changed after the first pass)
+
+* **Blocker.** `record_chain_link` derived its `link_id` from a hash that
+  included `created_at`, so a replay computed a different id, missed the
+  duplicate check, and fell through to the schema's
+  `UNIQUE(work_order, capability, attempt, position)` as a raw
+  `sqlite3.IntegrityError` — replaying a chain crashed the lane. The id now
+  hashes identity without the clock, and the natural key is checked explicitly
+  so a genuine clash returns `conflict` rather than raising. Tested by replaying
+  a whole chain (`test_replaying_a_chain_returns_the_links_it_already_recorded`)
+  and through the cockpit
+  (`test_the_same_question_replays_the_chain_it_already_walked`).
+* **The chains are wired** through `CockpitModel.call` and the three setup
+  scripts, and `install.sh` passes `--tier` — see §3b.
+* **`_BROKER_V3_ENDPOINT_NAMES` now names what version 3 actually froze**, read
+  off the immutable v3 in the live router: twenty-three ids, including
+  `profile:qwen-deepseek-v4-pro` (which `_ENDPOINTS` no longer defines) and
+  excluding `profile:gpt-6-astra` and `profile:qwen-deepseek-v4-pro-0813` (added
+  to `_ENDPOINTS` after v3 shipped). Deriving it from `_ENDPOINTS` had already
+  drifted: `upgrade_openclaw_broker_catalog` would have raised a policy conflict
+  against the live router. Verified equal to the live v3's semantics.
+* **`admit` must answer `{"status": "admitted"}`.** Anything else — including a
+  truthy object that happens not to say so — refuses the call.
+* **`producer_family` is derived, not supplied.** `execute_chain` takes a
+  `producer_decision_ref` and reads the family out of that immutable decision
+  (`served_family`). A brain call that fell back to Anthropic and then told the
+  verifier its producer was OpenAI would have let an Anthropic verifier pass
+  Anthropic work; now it cannot.
+* **An explicit `status: "live"` is refused.** Absent is what live means, and
+  two ways of saying the same thing would give one profile two content hashes.
+* **`install.sh` fails the install** when the catalog sync fails, instead of
+  printing a warning and carrying on with two catalogs that disagree.
+* **The verifier phase pin has a fail-closed test**
+  (`test_the_verifier_phase_pin_fails_closed_once_its_model_is_retired`): before
+  the sync it routes, after the sync it is rejected with `profile_retired`, and
+  the immutable policy is untouched. Repointing it stays the integrator's move.
