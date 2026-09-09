@@ -65,9 +65,31 @@ research plan、initial screen。
 
 **今日模型开销**：$7.14 / $100 日上限；其中建模规格 lane 约 $2。
 
-**测试**：1,995 通过（1 skip）。已部署，health `ok`。
+**测试**：2,034 通过（1 skip），全量 3 分 03 秒（`python3 -m unittest discover -s tests -t .`）。已部署，health `ok`。
 
-**owner 已定的边界**：AlphaEngine 维持 130 次/24h；建模阶段不进 Excel，导出时才连公式。
+**owner 已定的边界**：AlphaEngine 维持 130 次/24h；建模阶段不进 Excel，导出时才连公式；
+行情走 yfinance（免费源）；consensus 双路都走免费源（研报抽取 + yfinance analyst 字段）。
+
+**并行开发**：分析师蓝图按 [并行开发计划 v1.0](reports/parallel-development-plan-v1.0-2026-09-09.md) 推进：
+主 agent 定计划与集成，Opus 5 subagent 各自 worktree 写代码。进度账在该文档第 6 节。
+
+## 2026-09-09（并行开发准备）：先把「加一条 lane 要碰 23 个共享文件」收成一行
+
+owner 认可了蓝图的分法并定了三件事：行情用 yfinance；consensus 先从已入库研报抽、再用 yfinance
+的 analyst 字段，AlphaEngine 上限不动；计划由主 agent 定，代码由 Opus 5 subagent 写。
+
+**调查结论**。(1) openclaw 的 `stock-move-analyzer` / `sentiment-dashboard` 等 skill 都用 yfinance，
+本机已装 1.2.0，ACN 三年日线、股本、市值一次可取；yfinance 还免费给目标价区间、评级分布与 EPS / 收入
+consensus。(2) live transcript-spool 的 1,015 个 AlphaEngine 对象里 483 个可解析：ACN 8 份、EPAM 8 份、
+CTSH 5 份带目标价的研报，券商四到五家，够做互证；IBM 只有 RBC、DXC 只有 TD / RBC，如实标缺口。
+(3) 全量测试 2,034 项通过，3 分钟。(4) **P13ao 已经做完了蓝图的 P13-M1**（规格 × 序列 join），
+模型层从 M2 起步。(5) 只读调查了 statements / model spec / initial screen 三条 lane 的接线：
+一条新 lane 要改 `writer_server.py` 的 10 个区域外加 13 个共享文件；仓库没有 lane 注册机制，
+唯一的子类化接缝是 P13aj 的 `LaneChildLauncher`。
+
+**因此 Wave 0 是串行的**：建 lane registry（writer / driver / launchagent 三处从它派生）、schema 文件
+改 glob 打包、模型用途与配置名可登记、`may_write` 与 `CHECKPOINT_KINDS` 一次加齐蓝图 G 线的词、
+ADR-0007 草稿。之后 Wave 1 四线并行：市场层、Claim 索引、预测行、质量回路。详见计划文档。
 
 ## 2026-09-09（建模第三段）：报表行变成能用的季度序列
 
