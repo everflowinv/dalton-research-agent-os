@@ -33,10 +33,60 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    "connector_slug": "company-wiki",
+                    "operation": "get_document",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 1_000,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "company-wiki",
+                    "operation": "list_documents",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 500,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
                     "connector_slug": "gemini-web-search",
                     "operation": "search_web",
                     "quota_unit": "search",
                     "daily_unit_limit": 1_000,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    # S2: the smallest search ceiling of any source, because
+                    # the Guidepoint licence permits research reading and
+                    # forbids bulk extraction.
+                    "connector_slug": "guidepoint",
+                    "operation": "search_library",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 25,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    # S1: local file reads, so the ceiling is a loop bound
+                    # rather than a courtesy to an upstream.
+                    "connector_slug": "sales-notes",
+                    "operation": "get_note",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 1_000,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "sales-notes",
+                    "operation": "list_notes",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 500,
                     "max_physical_calls_per_unit": 1,
                     "window_seconds": 86_400,
                     "reset_timezone": "Asia/Shanghai",

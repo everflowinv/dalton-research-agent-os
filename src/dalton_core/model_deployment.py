@@ -55,6 +55,47 @@ _LEGACY_ENDPOINT_NAMES = (
 )
 
 
+# P14-M: shared broker policy version 3 is immutable, and it was written as
+# "every endpoint in _ENDPOINTS".  That stopped being a definition the day the
+# catalog changed: a model added to _ENDPOINTS silently rewrote v3's content,
+# and one removed from it silently rewrote it the other way.  Both happened.
+#
+# So the membership is written down as itself, read off the immutable v3 already
+# registered in the live router: twenty-three ids, including
+# profile:qwen-deepseek-v4-pro (which _ENDPOINTS no longer defines) and
+# excluding profile:gpt-6-astra and profile:qwen-deepseek-v4-pro-0813 (which
+# were added to _ENDPOINTS after v3 shipped).  Derived from _ENDPOINTS, this
+# function had already drifted away from the live v3 it claims to be, so
+# upgrade_openclaw_broker_catalog would have raised a policy conflict against
+# live.  A model added after v3 is reachable through the policy its lane pins,
+# not by rewriting a version that shipped.
+_BROKER_V3_ENDPOINT_NAMES = (
+    "deepseek-v4-flash",
+    "gpt-5-6-sol",
+    "gpt-5-6-terra",
+    "gpt-5-6-luna",
+    "claude-fable-5",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "gemini-3-7-flash",
+    "gemini-flash-latest",
+    "gemini-3-1-pro-preview",
+    "gemini-3-5-flash-lite",
+    "qwen3-8-max",
+    "qwen-deepseek-v4-flash-0731",
+    "qwen-deepseek-v4-pro",
+    "glm-5-2",
+    "gpt-5-5",
+    "deepseek-v4-pro",
+    "grok-4-6",
+    "grok-build-0-1",
+    "grok-4-3",
+    "grok-4-20-beta-reasoning",
+    "grok-4-20-beta-non-reasoning",
+    "openrouter-ox-alpha",
+)
+
+
 _ENDPOINTS: tuple[dict[str, Any], ...] = (
     {
         "name": "deepseek-v4-flash",
@@ -379,6 +420,91 @@ _ENDPOINTS: tuple[dict[str, Any], ...] = (
         "input_cost": 0.0,
         "output_cost": 0.0,
     },
+    # P14-M: the four models the broker offers that Dalton had no static
+    # profile for, plus the one the broker does not offer yet and should.
+    #
+    # Derived profiles were not enough. The reconciler can build a profile for
+    # an unknown broker model out of the public provider catalog, but it comes
+    # out deliberately verify-only and family "unclassified:<provider>" -- so a
+    # fallback chain could not name one, and the independence predicate could
+    # not reason about one. A model that is going to catch a frontier model's
+    # failure has to be curated: somebody has to say what it is trusted to do.
+    {
+        # The brain tier's second link. Same family as claude-fable-5, so it is
+        # independent of any OpenAI producer and never independent of Fable 5.
+        "name": "claude-fable-5-1",
+        "provider": "claude-cli-gateway",
+        "model": "claude-fable-5-1",
+        "family": "anthropic-claude-5",
+        "credential_slot_ref": "credential-slot:openclaw:claude-cli",
+        "capabilities": ["research", "research-hard", "verify", "adjudicate", "code"],
+        "max_context_tokens": 1_000_000,
+        "max_output_tokens": 64_000,
+        "max_input_tokens": 800_000,
+        "input_cost": 10.0,
+        "output_cost": 50.0,
+    },
+    {
+        "name": "gemini-3-8-flash",
+        "provider": "google",
+        "model": "gemini-3.8-flash",
+        "family": "google-gemini-3",
+        "credential_slot_ref": "credential-slot:openclaw:google",
+        "capabilities": ["research", "verify", "code", "summarize", "extract"],
+        "max_context_tokens": 1_048_576,
+        "max_output_tokens": 65_536,
+        "max_input_tokens": 983_040,
+        "input_cost": 0.75,
+        "output_cost": 3.75,
+    },
+    {
+        # The broker's low-thinking twin of the 0731 route. Same model, same
+        # family, a separate profile because the thinking level is part of what
+        # was calibrated and a calibration is not transferable between them.
+        "name": "qwen-deepseek-v4-flash-0731-low-calibration",
+        "provider": "qwen",
+        "model": "deepseek-v4-flash-0731",
+        "family": "deepseek-v4",
+        "credential_slot_ref": "credential-slot:openclaw:qwen",
+        "capabilities": ["verify", "summarize", "extract", "format"],
+        "max_context_tokens": 1_000_000,
+        "max_output_tokens": 393_216,
+        "max_input_tokens": 606_784,
+        "input_cost": 0.22,
+        "output_cost": 0.66,
+    },
+    {
+        # The verifier tier's second link: not OpenAI, not Anthropic, not
+        # Google, so it stays independent of every other chain's first link.
+        "name": "zai-glm-5-3",
+        "provider": "zai",
+        "model": "glm-5.3",
+        "family": "zhipu-glm-5.3",
+        "credential_slot_ref": "credential-slot:openclaw:zai",
+        "capabilities": ["research", "research-hard", "verify", "adjudicate", "code"],
+        "max_context_tokens": 1_000_000,
+        "max_output_tokens": 131_072,
+        "max_input_tokens": 868_928,
+        "input_cost": 1.4,
+        "output_cost": 4.4,
+    },
+    {
+        # The cheap tier's second link. It is in the gateway's own model policy
+        # and in the provider catalog, and it is the one model in this block the
+        # broker plugin does not offer yet -- which is the OpenClaw-side half of
+        # the same drift.
+        "name": "zai-glm-5-3-flash",
+        "provider": "zai",
+        "model": "glm-5.3-flash",
+        "family": "zhipu-glm-5.3",
+        "credential_slot_ref": "credential-slot:openclaw:zai",
+        "capabilities": ["research", "verify", "summarize", "extract", "format"],
+        "max_context_tokens": 1_000_000,
+        "max_output_tokens": 131_072,
+        "max_input_tokens": 868_928,
+        "input_cost": 0.075,
+        "output_cost": 0.25,
+    },
 )
 
 
@@ -595,7 +721,7 @@ def openclaw_broker_policy(*, created_at: datetime) -> dict[str, Any]:
     policy["version"] = 3
     policy["prior_version_ref"] = LEGACY_BROKER_POLICY_REF
     policy["filters"]["allowed_profile_ids"] = [
-        f"profile:{endpoint['name']}" for endpoint in _ENDPOINTS
+        f"profile:{name}" for name in _BROKER_V3_ENDPOINT_NAMES
     ]
     return policy
 

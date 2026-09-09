@@ -720,10 +720,20 @@ def _validate_connector_profile_template(
     if transport["kind"] == "mcp_managed" and auth != host_auth:
         raise ConnectorInventoryError("mcp_managed profiles require host-owned auth")
     if frozen and transport["kind"] == "host_tool":
-        keyless_reddit = transport["target_ref"] == "host-tool:last30days-reddit-keyless"
-        if keyless_reddit != (auth == none_auth):
+        # S1: which host routes need no credential is a declaration, not one
+        # named exception. It was Reddit alone until two feeds arrived that
+        # read bytes a host skill had already written to this disk -- the
+        # credential was spent before Dalton saw them, so there is nothing for
+        # a credential authority to hold. Reading the answer out of the frozen
+        # definitions keeps it in one place; a packaged profile whose auth
+        # disagrees with its own definition is still refused here.
+        keyless_targets = {
+            definition["target"] for definition in PROFILE_DEFINITIONS
+            if definition["transport"] == "host_tool" and definition["auth"] == "none"
+        }
+        if (transport["target_ref"] in keyless_targets) != (auth == none_auth):
             raise ConnectorInventoryError(
-                "only the frozen keyless Reddit host route may omit host-owned auth"
+                "host route auth must match its frozen keyless declaration"
             )
 
     readiness = _closed(
@@ -1191,6 +1201,164 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                     "source_record_refs", "next_cursor", "provider_status",
                 ),
             )
+    # S1: the two human / vendor feeds.
+    #
+    # Both enumerate documents that already exist as bytes on this machine, so
+    # every header row carries the sha256 of the document body. That hash is
+    # the join between "the connector said this note exists" and "the
+    # acquisition wrote these bytes into the spool"; without it a feed row is
+    # a filename and a claim.
+    #
+    # `evidence_tier` is on the wire rather than derived downstream because
+    # the tier is a fact about the source, not about the text.
+    #
+    # `next_cursor` is where a listing admits it did not finish. A local feed
+    # can hold more documents in one window than a bounded response may carry,
+    # and a listing that stopped at its cap is `partial`, never `enumerated`.
+    # The cursor is the day of the oldest row returned: everything before it
+    # is still unread.
+    if slug in {"sales-notes", "company-wiki"}:
+        sha256 = {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        instant = {
+            "type": "string",
+            "pattern": (
+                "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+                "([.][0-9]{1,6})?[+][0-9]{2}:[0-9]{2}$"
+            ),
+        }
+        day = {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+        nullable_day = {"type": ["string", "null"],
+                        "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+        if slug == "sales-notes":
+            note = _object_schema(
+                {
+                    "note_id": {"type": "string", "pattern": "^sales-note:[0-9a-z]{6,40}$"},
+                    "sender": _string(),
+                    "sender_address": _string(),
+                    "sender_domain": _string(),
+                    "subject": {"type": "string"},
+                    "sent_at": instant,
+                    "is_priority": {"type": "boolean"},
+                    "body_sha256": sha256,
+                    "body_chars": _integer(0),
+                    "digest_ref": _string(),
+                    "evidence_tier": {"type": "string", "enum": ["sell_side"]},
+                    "analyst_named": {"type": "boolean"},
+                },
+                (
+                    "note_id", "sender", "sender_address", "sender_domain",
+                    "subject", "sent_at", "is_priority", "body_sha256",
+                    "body_chars", "digest_ref", "evidence_tier", "analyst_named",
+                ),
+            )
+            if operation == "list_notes":
+                return _object_schema(
+                    {
+                        "schema_version": {"type": "string", "enum": ["0.1"]},
+                        "since": day,
+                        "until": day,
+                        "sender_domain": {"type": ["string", "null"]},
+                        "notes": {"type": "array", "items": note},
+                        "note_count": _integer(0),
+                        "truncated": {"type": "boolean"},
+                        "source_record_refs": _array_of_strings(),
+                        "next_cursor": nullable_day,
+                        "provider_status": _integer(100),
+                    },
+                    (
+                        "schema_version", "since", "until", "sender_domain",
+                        "notes", "note_count", "truncated", "source_record_refs",
+                        "next_cursor", "provider_status",
+                    ),
+                )
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "note": note,
+                    "body": {"type": "string"},
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": {"type": ["string", "null"]},
+                    "provider_status": _integer(100),
+                },
+                (
+                    "schema_version", "note", "body", "source_record_refs",
+                    "next_cursor", "provider_status",
+                ),
+            )
+        document = _object_schema(
+            {
+                "document_id": {
+                    "type": "string",
+                    "pattern": "^company-wiki-doc:sha256:[0-9a-f]{64}$",
+                },
+                "doc_type": _string(),
+                "doc_type_key": {
+                    "type": "string",
+                    "enum": [
+                        "management_meeting_minutes", "expert_interview",
+                        "broker_report", "quarterly_note", "ndr",
+                        "buy_side_note", "research_note", "other",
+                    ],
+                },
+                "evidence_tier": {
+                    "type": "string",
+                    "enum": [
+                        "management_statement", "expert", "sell_side",
+                        "internal", "unclassified",
+                    ],
+                },
+                "doc_date": day,
+                "category_type": {"type": "string", "enum": ["company", "sector"]},
+                "category_name": _string(),
+                # An industry note carries no company tag and is not forced
+                # to have one. An empty list here is the honest answer.
+                "company_tags": {"type": "array", "uniqueItems": True, "items": _string()},
+                "sector_tags": {"type": "array", "uniqueItems": True, "items": _string()},
+                "topic_tags": {"type": "array", "uniqueItems": True, "items": _string()},
+                "text_sha256": sha256,
+                "text_chars": _integer(0),
+            },
+            (
+                "document_id", "doc_type", "doc_type_key", "evidence_tier",
+                "doc_date", "category_type", "category_name", "company_tags",
+                "sector_tags", "topic_tags", "text_sha256", "text_chars",
+            ),
+        )
+        if operation == "list_documents":
+            return _object_schema(
+                {
+                    "schema_version": {"type": "string", "enum": ["0.1"]},
+                    "since": day,
+                    "until": day,
+                    "company": {"type": ["string", "null"]},
+                    "industry": {"type": ["string", "null"]},
+                    "documents": {"type": "array", "items": document},
+                    "document_count": _integer(0),
+                    "truncated": {"type": "boolean"},
+                    "source_record_refs": _array_of_strings(),
+                    "next_cursor": nullable_day,
+                    "provider_status": _integer(100),
+                },
+                (
+                    "schema_version", "since", "until", "company", "industry",
+                    "documents", "document_count", "truncated",
+                    "source_record_refs", "next_cursor", "provider_status",
+                ),
+            )
+        return _object_schema(
+            {
+                "schema_version": {"type": "string", "enum": ["0.1"]},
+                "document": document,
+                "text": {"type": "string"},
+                "source_record_refs": _array_of_strings(),
+                "next_cursor": {"type": ["string", "null"]},
+                "provider_status": _integer(100),
+            },
+            (
+                "schema_version", "document", "text", "source_record_refs",
+                "next_cursor", "provider_status",
+            ),
+        )
     return _object_schema(
         {
             "source_record_refs": _array_of_strings(),
@@ -1477,6 +1645,71 @@ PROFILE_DEFINITIONS: tuple[dict[str, Any], ...] = (
         ),
         "gate": "host_tool_runner_v0.2_and_credential_authority",
     },
+    # S1: the two feeds a human already brings into this machine.
+    #
+    # Both read files that are *already on disk*. The sell-side notes were
+    # fetched from Gmail by a host skill hours earlier and written out
+    # verbatim; the wiki is markdown a person wrote or pasted. Dalton never
+    # authenticates to either upstream, which is why the auth boundary is
+    # `none` and `network` is false: the only permission this connector needs
+    # is to read one directory.
+    #
+    # They are `authenticated_library` because that is what they are -- a
+    # curated body of documents behind someone's credential -- even though the
+    # credential was spent before Dalton saw the bytes.
+    {
+        "slug": "sales-notes", "connector_ref": "connector:sales-notes",
+        "source_ref": "source:sales-notes", "source_type": "authenticated_library",
+        "transport": "host_tool", "target": "host-tool:market-digest-output",
+        "hosts": (), "auth": "none",
+        # The digest file also carries a model-written summary of the same
+        # mail. That summary is not the note and must never be cited as one.
+        "forbidden": ("route:gmail-api", "route:market-digest-ai-summary"),
+        "fallbacks": (),
+        "operations": (
+            # `since` and `until` bound one window. Both are required for the
+            # same reason a paged search needs a page: an unbounded listing of
+            # a feed that grows every day cannot be reconciled, and a listing
+            # that silently stops at a record cap is not `enumerated` -- it is
+            # a truncation wearing an enumeration's word.
+            _operation(
+                "list_notes", completeness="enumerated",
+                input_fields=("since", "until", "sender_domain", "limit"),
+                optional_fields=("sender_domain", "limit"),
+            ),
+            # `digest_ref` is an optional locator hint, not a second way to
+            # ask: the run a note first appeared in is already on every
+            # enumerated header, and passing it back turns a scan of every run
+            # into opening one file.
+            _operation(
+                "get_note", completeness="enumerated",
+                input_fields=("note_id", "digest_ref"),
+                optional_fields=("digest_ref",),
+            ),
+        ),
+        "gate": "host_tool_runner_v0.2",
+    },
+    {
+        "slug": "company-wiki", "connector_ref": "connector:company-wiki",
+        "source_ref": "source:company-wiki", "source_type": "authenticated_library",
+        "transport": "host_tool", "target": "host-tool:company-wiki-corpus",
+        "hosts": (), "auth": "none",
+        # The wiki ships an embedding index over the same corpus. Ranked
+        # nearest-neighbour lookup cannot be reconciled against a bounded
+        # window, so it can never be the route for an `enumerated` operation.
+        "forbidden": ("route:wiki-embedding-search", "route:wiki-gemini-tagger"),
+        "fallbacks": (),
+        "operations": (
+            _operation(
+                "list_documents", completeness="enumerated",
+                input_fields=("since", "until", "company", "industry", "limit"),
+                optional_fields=("company", "industry", "limit"),
+            ),
+            _operation("get_document", completeness="enumerated",
+                       input_fields=("document_id",)),
+        ),
+        "gate": "host_tool_runner_v0.2",
+    },
 )
 
 
@@ -1500,8 +1733,14 @@ def _field_schema(name: str) -> dict[str, Any]:
     # free text. A window whose ends cannot be parsed is a window nobody can
     # replay, and replaying the exact window is the whole point of binding a
     # bar to the invocation that produced it.
-    if name in {"date_after", "date_before", "start", "end"}:
+    if name in {"date_after", "date_before", "start", "end", "since", "until"}:
         return {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"}
+    # S1: the run a note first appeared in, ``market-digest:<date>:<AM|PM>``.
+    # A free-text hint would let a caller point the reader at an arbitrary
+    # string; the shape is fixed because the shape is what makes it a locator.
+    if name == "digest_ref":
+        return {"type": "string",
+                "pattern": "^market-digest:[0-9]{4}-[0-9]{2}-[0-9]{2}:(AM|PM)$"}
     if name == "freshness":
         return {"type": "string", "enum": ["day", "week", "month", "year"]}
     if name in {"allowed_handles", "subreddits", "concept_candidates"}:

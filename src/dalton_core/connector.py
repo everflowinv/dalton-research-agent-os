@@ -664,18 +664,27 @@ class ConnectorStore:
             raise ConnectorValidationError("source_hash does not bind source_identity")
         operations = _refs(wire["allowed_operations"], "allowed_operations", nonempty=True)
         auth_mode = _text(wire["auth_mode"], "auth_mode")
-        if auth_mode not in {"none", "credential_slot", "mcp_managed"}:
+        # S1: ``host_tool`` joins the vocabulary for the same reason
+        # ``mcp_managed`` is already in it -- this field is where a profile
+        # says "this is not an HTTP transport, so do not ask me for a host
+        # allowlist or a TLS policy". A connector whose adapter is a child
+        # process on this machine has no host to allow and no scheme to pin,
+        # and declaring a nominal public host to satisfy a check would be a
+        # false statement in the one record an owner reads to decide what this
+        # thing may reach.
+        if auth_mode not in {"none", "credential_slot", "mcp_managed", "host_tool"}:
             raise ConnectorValidationError("auth_mode is invalid")
         wire["auth_mode"] = auth_mode
+        hostless = auth_mode in {"mcp_managed", "host_tool"}
         raw_hosts = _refs(
             wire["allowed_hosts"],
             "allowed_hosts",
-            nonempty=auth_mode != "mcp_managed",
+            nonempty=not hostless,
         )
-        if auth_mode == "mcp_managed":
+        if hostless:
             if raw_hosts:
                 raise ConnectorValidationError(
-                    "mcp_managed profiles cannot declare HTTP host authority"
+                    f"{auth_mode} profiles cannot declare HTTP host authority"
                 )
             hosts: list[str] = []
         else:
@@ -685,7 +694,11 @@ class ConnectorStore:
         slots = _refs(wire["credential_slot_refs"], "credential_slot_refs")
         if auth_mode == "none" and slots:
             raise ConnectorValidationError("auth_mode none cannot declare credential slots")
-        if auth_mode != "none" and not slots:
+        # A host tool may or may not need a credential: reading a directory the
+        # owner already filled needs none, and a host CLI that talks to a
+        # logged-in service needs a slot the host holds. Both are host_tool, so
+        # this is the one auth mode where the slot list is genuinely optional.
+        if auth_mode not in {"none", "host_tool"} and not slots:
             raise ConnectorValidationError("authenticated profiles require credential slots")
         wire["credential_slot_refs"] = slots
         for name in (
@@ -718,10 +731,10 @@ class ConnectorStore:
             pagination["cursor_field"] = _text(pagination["cursor_field"], "cursor_field")
         pagination["max_pages"] = _integer(pagination["max_pages"], "max_pages", minimum=1)
         wire["pagination"] = pagination
-        if auth_mode == "mcp_managed":
+        if hostless:
             if wire["network_policy"] is not None:
                 raise ConnectorValidationError(
-                    "mcp_managed profiles cannot carry public network policy"
+                    f"{auth_mode} profiles cannot carry public network policy"
                 )
         else:
             network = _closed(

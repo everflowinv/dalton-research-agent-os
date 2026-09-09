@@ -1,0 +1,29 @@
+{
+  "ok": true,
+  "status": "emails_fetched",
+  "date": "2026-09-08",
+  "period": "PM",
+  "count": 2,
+  "priority_count": 1,
+  "raw_chunks_indexed": 0,
+  "emails": [
+    {
+      "id": "aaaa000000000001",
+      "from": "\"Fenske, Brian\" <brian.fenske@example-bank.test>",
+      "subject": "Accenture (ACN): bookings check into FY26",
+      "date": "Mon, 08 Sep 2026 08:01:02 -0400 (EDT)",
+      "is_priority": true,
+      "body_length": 91,
+      "body": "SYNTHETIC FIXTURE BODY -- ACN note.\r\nNo real correspondence is stored in this repository.\r\n"
+    },
+    {
+      "id": "aaaa000000000004",
+      "from": "\"Channel Team\" <channel.team@example-broker.test>",
+      "subject": "Cognizant (CTSH) -- channel checks",
+      "date": "Mon, 08 Sep 2026 21:10:00 +0000",
+      "is_priority": false,
+      "body_length": 38,
+      "body": "SYNTHETIC FIXTURE BODY -- CTSH note.\r\n"
+    }
+  ]
+}

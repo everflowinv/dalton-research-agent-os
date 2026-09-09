@@ -1,0 +1,454 @@
+{
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "connector_ref": "connector:company-wiki",
+  "content_hash": "47dd51f923d379710a9a4884c0912ed7fe15d63cddf7e6b95fb5f5095d186bf4",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "f41998992c0ad391c3034328384d9b63bbf6ad860a45ac58693a629e9d07f557",
+  "fixture_manifest_ref": "connector-fixture-manifest:company-wiki:0.1",
+  "id": "connector-profile-template:company-wiki:0.1",
+  "operations": [
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "e986342f2870c8af55cef1138307d8c41d8ee9e287204c73bba864cab52c081e",
+      "input_schema_ref": "schema:connector-inventory:company-wiki:list_documents:input:0.1",
+      "operation": "list_documents",
+      "output_schema_hash": "98aff7e4cd4ddec5ea3c9fb5580b604817d4073531015c8b278e4ea391d42f3f",
+      "output_schema_ref": "schema:connector-inventory:company-wiki:list_documents:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "list_documents"
+    },
+    {
+      "completeness_ceiling": "enumerated",
+      "input_schema_hash": "e6bc44dc692e7cf12a96ace793c310f139a752e011a2f22bb85ed560f55ffc57",
+      "input_schema_ref": "schema:connector-inventory:company-wiki:get_document:input:0.1",
+      "operation": "get_document",
+      "output_schema_hash": "8e3c19c7f7ee00a5bd4295c54b303bddc75e300e9367ba479c34ec015b6f9625",
+      "output_schema_ref": "schema:connector-inventory:company-wiki:get_document:output:0.1",
+      "pagination": {
+        "bounded_window_required": true,
+        "cursor_field": null,
+        "max_pages": 1,
+        "mode": "none"
+      },
+      "side_effects": [
+        "read:recorded-fixture"
+      ],
+      "source_method": "get_document"
+    }
+  ],
+  "readiness": {
+    "lease_eligible": false,
+    "level": "inventory_connected",
+    "live_execution_allowed": false,
+    "required_gate": "host_tool_runner_v0.2"
+  },
+  "route_restrictions": {
+    "allowed_target_refs": [
+      "host-tool:company-wiki-corpus"
+    ],
+    "fallback_routes": [],
+    "forbidden_target_refs": [
+      "route:wiki-embedding-search",
+      "route:wiki-gemini-tagger"
+    ],
+    "provenance_label_required": true
+  },
+  "schema_documents": [
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "company": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "industry": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "limit": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "since": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "until": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "since",
+          "until"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "e986342f2870c8af55cef1138307d8c41d8ee9e287204c73bba864cab52c081e",
+      "schema_ref": "schema:connector-inventory:company-wiki:list_documents:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "company": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "document_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "documents": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "category_name": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "category_type": {
+                  "enum": [
+                    "company",
+                    "sector"
+                  ],
+                  "type": "string"
+                },
+                "company_tags": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "doc_date": {
+                  "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                  "type": "string"
+                },
+                "doc_type": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "doc_type_key": {
+                  "enum": [
+                    "management_meeting_minutes",
+                    "expert_interview",
+                    "broker_report",
+                    "quarterly_note",
+                    "ndr",
+                    "buy_side_note",
+                    "research_note",
+                    "other"
+                  ],
+                  "type": "string"
+                },
+                "document_id": {
+                  "pattern": "^company-wiki-doc:sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "evidence_tier": {
+                  "enum": [
+                    "management_statement",
+                    "expert",
+                    "sell_side",
+                    "internal",
+                    "unclassified"
+                  ],
+                  "type": "string"
+                },
+                "sector_tags": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "text_chars": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "text_sha256": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "topic_tags": {
+                  "items": {
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "type": "array",
+                  "uniqueItems": true
+                }
+              },
+              "required": [
+                "document_id",
+                "doc_type",
+                "doc_type_key",
+                "evidence_tier",
+                "doc_date",
+                "category_type",
+                "category_name",
+                "company_tags",
+                "sector_tags",
+                "topic_tags",
+                "text_sha256",
+                "text_chars"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "industry": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_cursor": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "since": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "until": {
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "since",
+          "until",
+          "company",
+          "industry",
+          "documents",
+          "document_count",
+          "truncated",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "98aff7e4cd4ddec5ea3c9fb5580b604817d4073531015c8b278e4ea391d42f3f",
+      "schema_ref": "schema:connector-inventory:company-wiki:list_documents:output:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "document_id"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "e6bc44dc692e7cf12a96ace793c310f139a752e011a2f22bb85ed560f55ffc57",
+      "schema_ref": "schema:connector-inventory:company-wiki:get_document:input:0.1"
+    },
+    {
+      "document": {
+        "additionalProperties": false,
+        "properties": {
+          "document": {
+            "additionalProperties": false,
+            "properties": {
+              "category_name": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "category_type": {
+                "enum": [
+                  "company",
+                  "sector"
+                ],
+                "type": "string"
+              },
+              "company_tags": {
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array",
+                "uniqueItems": true
+              },
+              "doc_date": {
+                "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+                "type": "string"
+              },
+              "doc_type": {
+                "minLength": 1,
+                "type": "string"
+              },
+              "doc_type_key": {
+                "enum": [
+                  "management_meeting_minutes",
+                  "expert_interview",
+                  "broker_report",
+                  "quarterly_note",
+                  "ndr",
+                  "buy_side_note",
+                  "research_note",
+                  "other"
+                ],
+                "type": "string"
+              },
+              "document_id": {
+                "pattern": "^company-wiki-doc:sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "evidence_tier": {
+                "enum": [
+                  "management_statement",
+                  "expert",
+                  "sell_side",
+                  "internal",
+                  "unclassified"
+                ],
+                "type": "string"
+              },
+              "sector_tags": {
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array",
+                "uniqueItems": true
+              },
+              "text_chars": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "text_sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "topic_tags": {
+                "items": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "type": "array",
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "document_id",
+              "doc_type",
+              "doc_type_key",
+              "evidence_tier",
+              "doc_date",
+              "category_type",
+              "category_name",
+              "company_tags",
+              "sector_tags",
+              "topic_tags",
+              "text_sha256",
+              "text_chars"
+            ],
+            "type": "object"
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "provider_status": {
+            "minimum": 100,
+            "type": "integer"
+          },
+          "schema_version": {
+            "enum": [
+              "0.1"
+            ],
+            "type": "string"
+          },
+          "source_record_refs": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "schema_version",
+          "document",
+          "text",
+          "source_record_refs",
+          "next_cursor",
+          "provider_status"
+        ],
+        "type": "object"
+      },
+      "schema_hash": "8e3c19c7f7ee00a5bd4295c54b303bddc75e300e9367ba479c34ec015b6f9625",
+      "schema_ref": "schema:connector-inventory:company-wiki:get_document:output:0.1"
+    }
+  ],
+  "schema_version": "0.1",
+  "source_identity": {
+    "source_ref": "source:company-wiki",
+    "source_type": "authenticated_library",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport": {
+    "allowed_hosts": [],
+    "host_policy": "not_applicable",
+    "kind": "host_tool",
+    "target_hash": "815d93d090740d812c1e0b786d632b8404aa9509c485c818de55cbfe85e6837a",
+    "target_ref": "host-tool:company-wiki-corpus"
+  }
+}

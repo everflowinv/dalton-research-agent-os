@@ -402,6 +402,27 @@ class BoundedPlannerDriverTests(unittest.TestCase):
             self.config, client=self.core, transport=transport, clock=lambda: NOW,
         )
 
+    def test_a_probe_the_executor_refuses_becomes_a_failed_round(self) -> None:
+        from unittest.mock import patch
+
+        from dalton_core.writer_server import write_token_config
+        write_token_config(self.root / "tokens.json", list(self.server.principals.values()))
+        driver = self._driver(FakeTransport(FakeResponse(200, company_facts_body())))
+        with patch(
+            "dalton_core.bounded_planner_driver.execute_probe_work_order",
+            side_effect=BoundedProbeExecutionError("probe scope is not executable"),
+        ):
+            first = driver.run_once()
+        # The round is spent and recorded, not left admitted with no outcome.
+        self.assertEqual(first["probes_executed"], 1)
+        self.assertEqual(first["executed"][0]["outcome_kind"], "source_unavailable")
+        self.assertIn("probe scope is not executable", first["executed"][0]["probe_refused"])
+        # And the loop is free to move: the next tick proposes again rather
+        # than refusing forever because a round has no outcome.
+        second = driver.run_once()
+        self.assertEqual(second["probes_executed"], 1)
+        self.assertEqual(second["executed"][0]["outcome_kind"], "observed")
+
     def test_driver_runs_loop_to_terminal_one_probe_per_tick(self) -> None:
         from dalton_core.writer_server import write_token_config
         write_token_config(self.root / "tokens.json", list(self.server.principals.values()))
@@ -659,6 +680,100 @@ class BoundedPlannerDriverTests(unittest.TestCase):
         bad = dict(raw, writer_socket="relative/sock")
         with self.assertRaises(BoundedPlannerDriverError):
             BoundedPlannerDriverConfig.from_mapping(bad)
+
+
+class StalledLoopTests(unittest.TestCase):
+    """P14e/B2: a stalled loop must not be paid for, and must not stay stalled.
+
+    Both failures were invisible in the summary.  A probe the executor refuses
+    raised out of ``run_once`` and left the round admitted with no outcome, so
+    the loop was pending forever; and every later tick would have asked a paid
+    planner what to do about a loop that could not act.
+    """
+
+    class _Client:
+        """A writer that answers the tick, and remembers what it was asked."""
+
+        def __init__(self, *, materialize_error: str | None = None,
+                     rounds_remaining: int = 2) -> None:
+            self.materialize_error = materialize_error
+            self.rounds_remaining = rounds_remaining
+            self.calls: list[str] = []
+
+        def call(self, operation, params=None):
+            self.calls.append(operation)
+            if operation == "bounded_planner_active_loops":
+                return {"loops": [{
+                    "loop_version_ref": "bounded-planner-loop-version:1",
+                    "loop_ref": "bounded-loop:1",
+                }]}
+            if operation == "materialize_bounded_planner_context":
+                if self.materialize_error is not None:
+                    raise RuntimeError(self.materialize_error)
+                return {
+                    "id": "planner-context-pack-version:1",
+                    "remaining_budget": {
+                        "rounds_remaining": self.rounds_remaining,
+                        "cost_units_remaining": 4, "seconds_remaining": 600,
+                    },
+                }
+            if operation == "bounded_planner_propose_next_with_context":
+                return {"status": "pending_round"}
+            if operation == "llm_planner_execute":
+                raise AssertionError("the planner model must not be called here")
+            return {"status": "idle"}
+
+    def _config(self, root: Path) -> BoundedPlannerDriverConfig:
+        return BoundedPlannerDriverConfig(
+            writer_socket=root / "writer.sock", token_config=root / "tokens.json",
+            scheduler_db=root / "scheduler.sqlite", user_agent="Dalton Test",
+            max_response_bytes=1_000_000, timeout_seconds=10.0,
+            max_probes_per_tick=1, filed_window_days=400,
+            observation_mandate_version_ref=None,
+            doctrine_pack_version_ref="doctrine-pack-version:1",
+            doctrine_pack_version_hash="d" * 64,
+            planner_routing_policy_ref=None, planner_credential_slot_refs=None,
+            planner_model_router_db=None, planner_broker_socket=None,
+            planner_broker_auth_key=None, planner_broker_client_id="client:dalton-core",
+            planner_expected_agent_id="chem", planner_max_cost_usd=0.5,
+        )
+
+    def _run(self, client) -> dict:
+        with tempfile.TemporaryDirectory() as name:
+            driver = BoundedPlannerDriver(
+                self._config(Path(name)), client=client, transport=object(),
+                clock=lambda: NOW,
+            )
+            return driver.run_once()
+
+    def test_a_pending_round_is_named_and_costs_nothing(self) -> None:
+        client = self._Client(
+            materialize_error="cannot materialize context while a round is pending")
+        result = self._run(client)
+        self.assertEqual(result["skipped"][0]["reason"], "pending_round")
+        self.assertNotIn("llm_planner_execute", client.calls)
+
+    def test_a_doctrine_failure_still_reads_as_a_doctrine_failure(self) -> None:
+        client = self._Client(materialize_error="doctrine pack hash binding failed")
+        result = self._run(client)
+        self.assertEqual(
+            result["skipped"][0]["reason"], "doctrine_context_unavailable:RuntimeError")
+
+    def test_a_loop_with_no_round_left_is_not_asked_a_paid_question(self) -> None:
+        client = self._Client(rounds_remaining=0)
+        result = self._run(client)
+        self.assertNotIn("llm_planner_execute", client.calls)
+        # The free deterministic planner still runs, so the loop can still
+        # reach a terminal state rather than sitting there.
+        self.assertIn("bounded_planner_propose_next_with_context", client.calls)
+        self.assertEqual(result["skipped"][0]["reason"], "pending_round")
+
+    def test_the_default_planner_price_is_named_once(self) -> None:
+        from dalton_core.bounded_planner_driver import DEFAULT_PLANNER_MAX_COST_USD
+        from dalton_core.research_task import default_planner_cost_usd
+
+        self.assertEqual(
+            float(default_planner_cost_usd()), DEFAULT_PLANNER_MAX_COST_USD)
 
 
 if __name__ == "__main__":
