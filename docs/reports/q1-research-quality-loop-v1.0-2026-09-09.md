@@ -1,8 +1,8 @@
 # Q 线：研究质量回路 v1.0
 
 日期：2026-09-09
-状态：分支 `wave1d-quality-loop`；第一轮 code review 的六项已修（见第 9 节），待合并
-基线：main `08c66d0`；[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 3 节 Wave 1「D 质量回路」；[能力差距分析与开发蓝图 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) 5.3 Q 线
+状态：分支 `wave1d-quality-loop`；第一轮 code review 的六项已修（第 9 节），已并入 main `bd7021f`（Wave 0，第 10 节），待合并
+基线：main `08c66d0`，其后并入 main `bd7021f`（Wave 0 lane registry）；[并行开发计划 v1.0](parallel-development-plan-v1.0-2026-09-09.md) 第 3 节 Wave 1「D 质量回路」；[能力差距分析与开发蓝图 v1.0](analyst-onboarding-gap-analysis-and-roadmap-v1.0-2026-09-09.md) 5.3 Q 线
 数据：live Core 只读副本（`/private/tmp/dalton-ro/core.sqlite`，2026-09-09 12:23），复制到 `/tmp` 后只读打开。**没有写过任何 live 状态，没有部署，没有发过 mission 版本，没有对 live 预算发起过模型调用。**
 
 ---
@@ -289,9 +289,9 @@ ACN 的 N2 现在是 `…249b41c5e9`（三条里最近记录的那条），一�
 
 1. **writer op：`record_analyst_journal_entry`**。驾驶舱进程没有 Core 写句柄（ADR-0006），所以 PM 反馈必须走 writer。参数 `{target_ref, target_hash, target_kind, verdict, company_ref?, note?, score_override?, idempotency_key?}`，`actor_ref` 由 writer 从 Tailscale 主体推导并强制 `human:` 前缀（authority 本身也拒非 `human:`）。`writer_server.py` 是我的禁改文件，所以这里只写规格。
 2. **驾驶舱按钮**。每份交付物与每条问答答案下面五个按钮（读过 / 有用 / 证据不够 / 不同意 / 要重写）加一个可选备注框；`idempotency_key = f"cockpit:{login}:{target_ref}:{verdict}"`，重复点击返回 duplicate。答案的 target_ref 用 `artefact_from_ask_answer` 算出的 `cockpit-ask:<job_id>`，target_hash 用它算出的内容哈希——答案没有 Core 记录，这个哈希就是它的身份。
-3. **`quality` 模型用途与配置名**。`cockpit_model.PURPOSES` 我加了一个词（一行，与 Wave 0 的注册表改造会有一行冲突，按计划这是允许的）。还需要：`scripts/raise_day_budget_cap.py` 的 `MODEL_CONFIG_NAMES` 加一项（如果质量判读要独立的模型配置），以及 `deploy/macos/install.sh` 的模型配置块。**建议判读复用 extraction 配置**（和 ask / draft 一样），先不建独立配置：判读一次 ~$0.05–0.60，独立配置只在需要单独限流时才值得。
-4. **打包**。`research_quality_schema.sql` 与 `analyst_journal_schema.sql` 需要进 `pyproject.toml` 的 package-data；Wave 0 改成 `*_schema.sql` 通配之后自动覆盖，在那之前 `PYTHONPATH=src` 能找到。`tests/test_packaging.py` 只断言一份固定清单，所以不会因为新增文件而失败。
-5. **console script**（我不能改 `pyproject.toml`）：`dalton-research-quality = "dalton_core.research_quality_cli:main"`。
+3. ~~**`quality` 模型用途与配置名**~~ **已做**（第 10 节）：`register_purpose("quality")` 在 `research_quality_score` 导入时执行。**不新建模型配置**：判读跑在 `initial-screen-model-config.json` 上——与它评的那份起草同一条 route、同一个 broker、同一本日账，`JUDGE_MODEL_CONFIG_NAME` 把这个决定写在代码里并由测试断言它已在注册表内。独立配置只在判读需要自己的限流时才值得；判读一次 ~$0.05–0.60，今天不值。因此 `deploy/macos/install.sh` 的模型配置块**不需要改**。
+4. ~~**打包**~~ **已做**：Wave 0 把 package-data 改成了 `*_schema.sql` 通配，两份 schema 自动进包，`test_packaging` 现在断言「每个 `*_schema.sql` 都被打包」，两份都在。
+5. ~~**console script**~~ **已做**：`dalton-research-quality = "dalton_core.research_quality_cli:main"` 已加进 `[project.scripts]`。
 6. **要不要建一条 tick lane 重新给每份新交付物打分**。我的建议是**分两步**：
    - **第一步（建议做，成本为零）**：把确定性层直接接进 `initial_screen_cli` 的发布前检查——它已经在那里跑残句检测了，把 `duplicate_parallel_citations` 与 `required_sections_present` 一并跑一遍写进 summary 即可。不需要 lane、不需要模型、不花钱。
    - **第二步（建议等第一次真实校准之后再定）**：判读层的 lane。如果建，coordinator + launcher + CLI 三件我已经有了 CLI，另两件照 `initial_screen_launcher` 抄；registry 那一行大致是：
@@ -319,16 +319,16 @@ ACN 的 N2 现在是 `…249b41c5e9`（三条里最近记录的那条），一�
 全量测试，`PYTHONPATH=src .venv/bin/python -m unittest discover -s tests -t .`：
 
 ```
-Ran 2195 tests in 259.782s
+Ran 2244 tests in 249.891s
 
 OK (skipped=1)
 ```
 
-基线是 2,034 通过 / 1 跳过，本片新增 **161 项**，没有失败、没有静默跳过。
+这是**合并 Wave 0 之后**的全量数。分解：分支基线 2,034 → 本片新增 **164 项** → 2,198；Wave 0 带进来 46 项 → 2,244。没有失败、没有静默跳过。
 
 `golden run` 20 例全部与 golden 一致（退出码 0）。
 
-各模块分项：`test_research_quality_rubrics` 15、`test_research_quality_score` 74、`test_research_quality_golden` 14、`test_analyst_journal` 21、`test_research_quality_cli` 13、`test_initial_screen_citations` 41（P13ap 的 17 项加我新增的 24 项）。
+各模块分项：`test_research_quality_rubrics` 15、`test_research_quality_score` 77、`test_research_quality_golden` 14、`test_analyst_journal` 21、`test_research_quality_cli` 13、`test_initial_screen_citations` 41（P13ap 的 17 项加我新增的 24 项）。
 
 **没做的事**，如实列出：
 
@@ -370,3 +370,28 @@ OK (skipped=1)
 两处 schema 改动（部分唯一索引、journal 的 CHECK）都是 `CREATE ... IF NOT EXISTS` 语义下的**新表**，从未部署过，所以不存在迁移问题。
 
 **合并时的一处已知冲突**（评审提示，本轮未处理）：main 已并入 Wave 0，`cockpit_model.PURPOSES` 不再存在，`quality` 这个词要改成 `register_purpose("quality", ...)`。这是一行，由主 agent 在合并时解决。
+
+---
+
+## 10. 并入 Wave 0（main `bd7021f`）
+
+`git merge main`，一处冲突，三处后续改动。
+
+**冲突：`cockpit_model.py` 的 `PURPOSES`。** 按 Wave 0 的写法整段采用，我那行字面量丢弃——合并后 `cockpit_model.py` 与 main 逐字节相同。`quality` 现在由 `research_quality_score` 在**导入时**注册：
+
+```python
+JUDGE_PURPOSE = register_purpose("quality")
+```
+
+放在导入时而不是调用时，是因为**导入这个模块正是判读变得可达的那一刻**：任何能调用 `judge()` 的代码都已经执行过这一行，而一个比使用它的调用注册得更晚的用途，等于没有注册。`judge()` / `verify()` 里原先的惰性 `from .cockpit_model import ...` 随之改成模块级导入（没有循环：`cockpit_model` 不引用研究层）。
+
+**模型配置名不注册。** `model_configurations.register_model_config_name` 是给「自己装一份配置文件」的 lane 用的；判读复用已在种子里的 `initial-screen-model-config.json`。`JUDGE_MODEL_CONFIG_NAME` 常量把这个选择写进代码，`test_the_judge_runs_on_an_already_installed_model_configuration` 断言它确实在注册表里——这样「复用哪一份」是一个被测试钉住的决定，而不是一句报告里的话。
+
+**console script 已加**：`dalton-research-quality = "dalton_core.research_quality_cli:main"`。两份 schema 由 Wave 0 的 `*_schema.sql` 通配自动打包，`pyproject.toml` 的 package-data 无需再动。
+
+**改了一处 Wave 0 的测试，请评审确认。** `tests/test_model_vocabularies.py::ModelPurposeRegistryTests` 的 `tearDown` 把 `_PURPOSES` 重置回**种子**，而不是恢复成它进来时的样子。第一个真正登记用途的 lane 出现之后，这有两个后果：
+
+1. `test_the_seed_is_what_the_literal_said` 断言 `purposes() == SEED_PURPOSES`，而 discovery 会先导入所有测试模块（于是 `quality` 已被登记）。它今天能过，只是因为同类里字母序更靠前的测试先跑、它们的 tearDown 恰好先把 `quality` 抹掉了——**靠测试顺序侥幸通过**。
+2. 抹掉之后，`quality` 在这个进程的余下时间里都不在注册表内。今天没有测试会因此失败（我的判读测试用假模型，不经 `build_work`），但任何一个真的去建 WorkOrder 的测试都会。
+
+改法是最小的：`setUp` 记下进来时的集合、`tearDown` 恢复它；种子的钉子从「等于活注册表」改成「`_SEED_PURPOSES` 等于字面量，且它是活注册表的子集」——种子少一个仍然可见，多出来的 lane 用途不再是失败。`ModelConfigurationRegistryTests` 有同样的形状（`test_the_seed_is_what_the_script_tuple_said` 断言相等，`test_a_registered_name_is_appended_once_in_order` 断言恰好种子加一），我**没有动它**，因为今天没有 lane 登记配置名；第一个登记的 lane 会踩到它。

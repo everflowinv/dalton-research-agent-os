@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -46,11 +47,15 @@ SCHEMA_VERSION = "0.1"
 # operating metrics the market watches. Named rather than folded into "plan"
 # because it is a judgement about a company, not about this system's own work,
 # and the two are routed and budgeted separately.
-# Q1: "quality" is the research quality loop grading one artefact against a
-# frozen rubric. Named rather than folded into "ask" because it is the system
-# reading its own output against a standard, and a judge that competes with the
-# owner's questions for the same budget line should be visible as its own line.
-PURPOSES = frozenset({"ask", "goal", "steer", "draft", "plan", "model_spec", "quality"})
+# P14-0: the seed. A lane with its own bounded, budgeted, replayable model
+# call registers its purpose from its own module rather than editing this set,
+# which is the whole of what a new lane used to have to do here.
+_PURPOSE_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+_SEED_PURPOSES = ("ask", "goal", "steer", "draft", "plan", "model_spec")
+# Read through purposes(), never as a module constant: a name rebound on every
+# registration is a snapshot waiting to go stale in whoever imported it first.
+_PURPOSES: set[str] = set(_SEED_PURPOSES)
+
 # Room for the completion write after the model answers, so a call that
 # finishes right on its timeout still has a live lease to complete against.
 _LEASE_GRACE_SECONDS = 30.0
@@ -70,6 +75,27 @@ IDENTITY_VERSION = 2
 class CockpitModelError(RuntimeError):
     """The call was refused or failed; the message is safe to show."""
 
+def register_purpose(name: str) -> str:
+    """Name one more thing a cockpit-shaped model call may be for.
+
+    A purpose is not a label: it is what the WorkOrder is identified by and
+    what the day ledger accounts against, so it is a closed vocabulary and a
+    call with an unregistered purpose is refused. Registering the same purpose
+    twice is a no-op; a purpose that is not a plain lowercase identifier is
+    refused, because it ends up in a WorkOrder id.
+    """
+
+    if not isinstance(name, str) or not _PURPOSE_RE.fullmatch(name):
+        raise CockpitModelError("a model purpose is lowercase words joined by _")
+    _PURPOSES.add(name)
+    return name
+
+
+def purposes() -> frozenset[str]:
+    """Every registered purpose, read at call time."""
+
+    return frozenset(_PURPOSES)
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -78,7 +104,7 @@ def _now() -> str:
 def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_ref: str,
                max_input_tokens: int, max_output_tokens: int, max_cost_usd: float, max_seconds: int,
                created_at: str | None = None) -> WorkOrder:
-    if purpose not in PURPOSES:
+    if purpose not in _PURPOSES:
         raise CockpitModelError("unknown cockpit model purpose")
     if len(prompt.encode("utf-8")) > max_input_tokens:
         raise CockpitModelError("the question and its context exceed the model input bound")
@@ -288,4 +314,7 @@ def unwrap_json_object(text: str) -> dict[str, Any] | None:
     return None
 
 
-__all__ = ["CockpitModel", "CockpitModelError", "PURPOSES", "WORKER_REF", "build_work", "unwrap_json_object"]
+__all__ = [
+    "CockpitModel", "CockpitModelError", "WORKER_REF", "build_work",
+    "purposes", "register_purpose", "unwrap_json_object",
+]

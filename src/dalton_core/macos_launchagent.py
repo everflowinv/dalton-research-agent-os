@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
+from .lane_registry import LaunchAgentContext, lane_argv
 from .service import ServiceConfig
 
 
@@ -16,14 +17,6 @@ WRITER_LABEL = "space.lumos.dalton.writer"
 # Operator-visible SEC User-Agent for lane runs (SEC fair-access policy asks
 # for a contact string; no credentials are involved).
 SEC_LANE_USER_AGENT = "Dalton Research Agent OS SEC company-facts lane (owner: lumos)"
-# P13ak: SEC asks a client to say who it is and how to reach it. The statements
-# lane says so in its own name rather than borrowing the facts lane's, and it
-# carries the same contact address this Core already publishes on its outbound
-# public requests -- the parser refuses an identity without one, which is how
-# the first live tick failed.
-STATEMENT_LANE_USER_AGENT = (
-    "Dalton Research Agent OS SEC financial-statements lane everflow@lumos.space"
-)
 CONTROLLER_LABEL = "space.lumos.dalton.controller"
 CONTROL_LABEL = "space.lumos.dalton.control"
 THESIS_IMPACT_LABEL = "space.lumos.dalton.thesis-impact"
@@ -74,16 +67,6 @@ def render(
     # staging and those ops answer ``rejected``.
     candidate_staging_path: str | None = None
     extraction_config_path: str | None = None
-    # P13ak: the approved statements record, if this Core has one. Named by
-    # version rather than discovered, so a future v3 is a deliberate edit here
-    # and not something the writer picks up because a file appeared.
-    statement_governance = (
-        state / "connector-governance" / "sec-financial-statements-v2.json"
-    )
-    # P13ad installed this for the Initial Screen's own drafting model; P13am
-    # runs the company model specification lane on it too, for the same reason
-    # it exists -- both are judgement, not extraction.
-    deliverable_model_config = state / "initial-screen-model-config.json"
     if (
         service_config is not None
         and service_config.control is not None
@@ -204,24 +187,15 @@ def render(
             ]
             if candidate_staging_path is not None else []
         ) + (
-            # P13ak: the statements lane. Independent of the staging file above
-            # -- it writes into the mission ledger, not the Cockpit inbox -- so
-            # it is enabled by its own approved record being present, and stays
-            # off on a Core that does not have one.
-            [
-                "--statement-lane-governance", str(statement_governance),
-                "--statement-lane-user-agent", STATEMENT_LANE_USER_AGENT,
-            ]
-            if statement_governance.is_file() else []
-        ) + (
-            # P13am: the company model specification lane runs on the
-            # deliverable-drafting configuration -- the strongest routed model
-            # -- because deciding that IBM is a mix story and Accenture is a
-            # headcount business is exactly where a weaker model returns
-            # something plausible and generic, which looks like a decision and
-            # is worse than none.
-            ["--model-spec-model-config", str(deliverable_model_config)]
-            if deliverable_model_config.is_file() else []
+            # P14-0: every registered lane says for itself, in its own module,
+            # which arguments turn it on and what has to be on disk first.
+            # This used to be one hand-written block per lane, in this order,
+            # and the order is now the LaneSpec order.
+            lane_argv(LaunchAgentContext(
+                state=state,
+                extraction_model_config_path=extraction_config_path,
+                candidate_staging_path=candidate_staging_path,
+            ))
         ) + (
             # P8c-4c: the bounded planner's model call runs inside the writer
             # (it accounts into this Core); derive its broker wiring from the
@@ -275,21 +249,6 @@ def render(
         if alphaengine_owner_call_cap is not None:
             writer["ProgramArguments"].extend(
                 ["--alphaengine-owner-call-cap", str(int(alphaengine_owner_call_cap))]
-            )
-        # P13o: the planner lane exists only when its configuration does, which
-        # is only when the owner named a planner model at install time.
-        planner_config = Path(state) / "research-planner-model-config.json"
-        if planner_config.is_file():
-            writer["ProgramArguments"].extend(
-                ["--research-planner-model-config", str(planner_config)]
-            )
-        # P13ad: same rule for the deliverable's own drafting model -- present
-        # only when the owner named one, and the screen falls back to the
-        # extraction model otherwise.
-        deliverable_config = Path(state) / "initial-screen-model-config.json"
-        if deliverable_config.is_file():
-            writer["ProgramArguments"].extend(
-                ["--initial-screen-model-config", str(deliverable_config)]
             )
     controller = common | {
         "Label": CONTROLLER_LABEL,

@@ -43,6 +43,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from .cockpit_model import CockpitModelError, register_purpose, unwrap_json_object
 from .mission_deliverable import unsourced_numbers, value_tokens
 from .research_quality_rubrics import (
     DOSSIER_SECTIONS,
@@ -65,7 +66,24 @@ _SCHEMA_PATH = Path(__file__).with_name("research_quality_schema.sql")
 SCORER_VERSION = "0.1"
 
 ARTEFACT_KINDS: tuple[str, ...] = ("initial_screen", "ask_answer", "company_dossier")
-JUDGE_PURPOSE = "quality"
+
+# P14-0 registry: a lane names its own purpose from its own module rather than
+# editing a set in ``cockpit_model``.  "quality" is the system reading its own
+# output against a standard -- named rather than folded into "ask" because a
+# judge competing with the owner's questions for the same budget line should be
+# visible as its own line in the day ledger.
+#
+# Registered at import because importing this module is what makes the judge
+# reachable: anything that can call ``judge()`` has already run this line, and
+# a purpose that is registered later than the call that uses it is a purpose
+# that is not registered.
+JUDGE_PURPOSE = register_purpose("quality")
+# The judge runs on the deliverable-drafting configuration, which is already in
+# the registry: it is the same route, the same broker and the same day ledger
+# as the drafting it grades, and a separate configuration would only be worth
+# its wiring if the judge needed its own rate limit. See the report's
+# integration section.
+JUDGE_MODEL_CONFIG_NAME = "initial-screen-model-config.json"
 
 # Bounded like company_model_cli's constants, and for the same reason: the
 # router estimates on prompt bytes, so a bound that looks frugal buys nothing
@@ -876,8 +894,6 @@ def judge(
 ) -> dict[str, Any]:
     """One bounded call, verified before it is believed."""
 
-    from .cockpit_model import CockpitModelError, unwrap_json_object
-
     prompt = build_judge_prompt(art, rubric, deterministic)
     try:
         call = model.call(purpose=JUDGE_PURPOSE, request_id=request_id, prompt=prompt, mission=mission)
@@ -1013,8 +1029,6 @@ def verify(
     request_id: str,
 ) -> dict[str, Any]:
     """A second, separate call that returns only a verdict on the first."""
-
-    from .cockpit_model import CockpitModelError, unwrap_json_object
 
     if judgement.get("status") != "scored":
         return {"status": "skipped", "reason": "没有可复核的评分"}
@@ -1322,6 +1336,7 @@ __all__ = [
     "ARTEFACT_KINDS",
     "CHECKS",
     "INITIAL_SCREEN_SECTIONS",
+    "JUDGE_MODEL_CONFIG_NAME",
     "JUDGE_PURPOSE",
     "MAX_ARTEFACT_CHARS",
     "MAX_COST_USD",

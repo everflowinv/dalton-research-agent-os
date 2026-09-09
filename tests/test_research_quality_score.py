@@ -14,6 +14,8 @@ import unittest
 
 from dalton_core.research_quality_rubrics import rubric
 from dalton_core.research_quality_score import (
+    JUDGE_MODEL_CONFIG_NAME,
+    JUDGE_PURPOSE,
     QualityScoreAuthority,
     ResearchQualityConflict,
     ResearchQualityValidationError,
@@ -401,6 +403,41 @@ class JudgeValidationTests(unittest.TestCase):
         with self.assertRaises(ResearchQualityValidationError) as caught:
             validate_judge_output(reply, ASK)
         self.assertIn("twice", str(caught.exception))
+
+
+class JudgePurposeRegistrationTests(unittest.TestCase):
+    """P14-0: the lane names its own purpose, from its own module.
+
+    A cockpit call with an unregistered purpose is refused, and the purpose is
+    what the WorkOrder is identified by and what the day ledger accounts
+    against. Importing this module is what makes the judge reachable, so
+    importing it is what registers.
+    """
+
+    def test_importing_the_scorer_registers_the_purpose_it_calls_with(self):
+        from dalton_core.cockpit_model import purposes
+
+        self.assertEqual(JUDGE_PURPOSE, "quality")
+        self.assertIn(JUDGE_PURPOSE, purposes())
+
+    def test_a_work_order_can_actually_be_built_for_it(self):
+        from dalton_core.cockpit_model import build_work
+
+        order = build_work(
+            purpose=JUDGE_PURPOSE, request_id="r", prompt="grade this",
+            mission_version_ref="coverage-mission-version:us-it-services:1",
+            max_input_tokens=8_000, max_output_tokens=1_000, max_cost_usd=0.5,
+            max_seconds=60, created_at="2026-09-09T00:00:00.000000+00:00",
+        )
+        self.assertIn("quality", order.id)
+        self.assertEqual(order.metadata["purpose"], "quality")
+
+    def test_the_judge_runs_on_an_already_installed_model_configuration(self):
+        from dalton_core.model_configurations import model_config_names
+
+        # Reusing the drafting configuration rather than installing another:
+        # same route, same broker, same day ledger as the drafting it grades.
+        self.assertIn(JUDGE_MODEL_CONFIG_NAME, model_config_names())
 
 
 class JudgeCallTests(unittest.TestCase):
