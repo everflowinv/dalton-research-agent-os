@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from dalton_core.public_http_transport import PublicHttpTransport
 from dalton_core.research_auto_commit import (
@@ -30,7 +31,7 @@ from dalton_core.sec_company_facts_lane import (
     US_IT_SERVICES_ISSUERS,
 )
 from dalton_core.sec_public_adapter import SecPublicRouterAdapter
-from dalton_core.store import DaltonStore
+from dalton_core.store import DaltonStore, content_hash
 from tests.test_research_plan_executor import _sec_company_facts_body
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
 from tests.test_forecast_reconciliation import ForecastReconciliationFixture
@@ -409,6 +410,52 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(len(questions), 2)
         self.assertIn("10-Q filed 2025-08-20..2026-08-20", questions[0][0])
         self.assertIn("10-Q filed 2025-09-01..2026-08-20", questions[1][0])
+
+    def test_a_contract_bump_makes_the_same_window_a_different_run(self) -> None:
+        """P13z: the executor refuses a plan frozen to an older contract.
+
+        The window used to be the only thing telling runs apart, so re-running
+        a window after the output contract moved replayed a plan that could
+        never execute again. Live, every SEC retry died on "plan connector
+        profile drifted from the packaged SEC template" -- permanently,
+        because the lane's identity said it was the same plan while the
+        executor said it was not.
+        """
+
+        import dalton_core.sec_company_facts_lane as lane_module
+
+        def identity(tag):
+            with patch.object(lane_module, "sec_template_registry_tag",
+                              return_value=tag):
+                return SecCompanyFactsLane.question_identity(
+                    ISSUER, run_key="run-1", **WINDOW)
+
+        self.assertNotEqual(identity("v2"), identity("v3"))
+        self.assertEqual(identity("v3")["template"], "v3")
+
+    def test_the_first_contract_version_is_spelled_by_omission(self) -> None:
+        # v1 identities predate the template tag and stay byte-identical, the
+        # same way the v1 template refs carry no suffix.
+        import dalton_core.sec_company_facts_lane as lane_module
+
+        with patch.object(lane_module, "sec_template_registry_tag",
+                          return_value="v1"):
+            identity = SecCompanyFactsLane.question_identity(
+                ISSUER, run_key="run-1", **WINDOW)
+        self.assertNotIn("template", identity)
+        self.assertEqual(identity, {
+            "lane": lane_module.LANE_KIND, "company_ref": ISSUER.company_ref,
+            "run_key": "run-1", **WINDOW,
+        })
+
+    def test_the_annual_form_still_separates_itself(self) -> None:
+        # P9b's rule is unchanged: 10-K is its own identity, 10-Q is bare.
+        quarterly = SecCompanyFactsLane.question_identity(
+            ISSUER, run_key="run-1", **WINDOW)
+        annual = SecCompanyFactsLane.question_identity(
+            ISSUER, run_key="run-1", form="10-K", **WINDOW)
+        self.assertNotIn("form", quarterly)
+        self.assertEqual(annual["form"], "10-K")
 
     def test_annual_form_is_refused_when_policy_lists_only_quarterly_rules(self) -> None:
         """P9b: the historical single-rule policy keeps rejecting 10-K plans."""

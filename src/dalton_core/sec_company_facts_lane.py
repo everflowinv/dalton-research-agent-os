@@ -75,6 +75,7 @@ from .research_plan import (
     sec_current_rate_policy_ref,
     sec_current_runner_binding_ref,
     sec_current_runner_environment_ref,
+    sec_template_registry_tag,
 )
 from .research_plan_closure import ResearchPlanClosureCoordinator
 from .research_plan_coordinator import ResearchPlanCoordinator
@@ -577,10 +578,17 @@ class SecCompanyFactsLane:
         if mandate_result.get("status") == "conflict":
             raise AgendaConflict("mandate idempotency conflict")
 
-    def _register_question(
-        self, issuer: Issuer, *, filed_from: str, filed_to: str, run_key: str,
+    @staticmethod
+    def question_identity(
+        issuer: Issuer, *, filed_from: str, filed_to: str, run_key: str,
         form: str = "10-Q",
-    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+    ) -> dict[str, Any]:
+        """What makes one lane run the same run as another.
+
+        Every idempotency key the lane writes is derived from this, so it is
+        the answer to "may this run replay the previous one's records".
+        """
+
         identity: dict[str, Any] = {
             "lane": LANE_KIND, "company_ref": issuer.company_ref,
             "filed_from": filed_from, "filed_to": filed_to, "run_key": run_key,
@@ -590,6 +598,31 @@ class SecCompanyFactsLane:
         # only the annual form adds itself to the identity.
         if form != "10-Q":
             identity["form"] = form
+        # P13z: a plan is bound to a connector contract -- the executor refuses
+        # to run one whose frozen connector_profile_hash is not the packaged
+        # template's -- so the contract version is part of what makes a plan
+        # the same plan. Without this the window was the only thing telling
+        # runs apart, and re-running a window after a contract bump replayed a
+        # plan that could never execute again: live, every SEC retry died on
+        # "plan connector profile drifted from the packaged SEC template",
+        # permanently, because the identity said it was the same plan while the
+        # executor said it was not.
+        #
+        # v1 is spelled by omission, exactly as the template refs are, so
+        # pre-existing v1 identities stay byte-identical.
+        template_tag = sec_template_registry_tag()
+        if template_tag != "v1":
+            identity["template"] = template_tag
+        return identity
+
+    def _register_question(
+        self, issuer: Issuer, *, filed_from: str, filed_to: str, run_key: str,
+        form: str = "10-Q",
+    ) -> tuple[dict[str, Any], dict[str, Any], str]:
+        identity = self.question_identity(
+            issuer, filed_from=filed_from, filed_to=filed_to,
+            run_key=run_key, form=form,
+        )
         suffix = content_hash(identity)[:16]
         # A backlog question's identity is (mandate, company, text) and its
         # state machine is terminal once answered, so one bare question per
