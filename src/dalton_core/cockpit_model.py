@@ -145,8 +145,18 @@ class CockpitModel:
         # refused with "attempt is not the current leased attempt" -- the work
         # was done and paid for, and the answer was thrown away.
         lease_seconds = float(self.timeout_seconds) + _LEASE_GRACE_SECONDS
-        with Scheduler(self.scheduler_db, max_lease_seconds=lease_seconds,
-                       max_total_lease_seconds=lease_seconds * 2) as scheduler:
+        # The lease bounds are a frozen versioned policy: the same
+        # policy_version_id with different settings is a conflict, and the
+        # shared "scheduler-policy-0.1" is sized for calls that finish in
+        # seconds. So this names its own version after the bound it needs --
+        # the id and the settings can never disagree, and the lanes that are
+        # fast keep the policy they have.
+        with Scheduler(
+            self.scheduler_db,
+            policy_version_id=f"scheduler-policy-lease-{int(lease_seconds)}s-0.1",
+            max_lease_seconds=lease_seconds,
+            max_total_lease_seconds=lease_seconds * 2,
+        ) as scheduler:
             if scheduler.enqueue(work)["status"] == "conflict":
                 raise CockpitModelError("this request is bound to different content; ask again")
             formal = scheduler.formal_result(work.id)

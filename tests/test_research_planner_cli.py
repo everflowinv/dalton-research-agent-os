@@ -147,6 +147,10 @@ class PlannerChildTests(unittest.TestCase):
         source = inspect.getsource(cockpit_model.CockpitModel.call)
         self.assertIn("lease_seconds=lease_seconds", source)
         self.assertIn("max_lease_seconds=lease_seconds", source)
+        # The bounds are a frozen versioned policy: reusing the shared id with
+        # different settings is a SchedulerConflict, so the version is named
+        # after the bound it carries and the two can never disagree.
+        self.assertIn("scheduler-policy-lease-", source)
 
 
 if __name__ == "__main__":
