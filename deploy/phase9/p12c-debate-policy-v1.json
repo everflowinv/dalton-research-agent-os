@@ -1,0 +1,185 @@
+{
+ "content_hash": "03eecd28911cbb5d4d844a6393443b76079c584fb38b59e135ad5253a6b5c79b",
+ "counting_bases": [
+  "publisher",
+  "issuer",
+  "host"
+ ],
+ "importance_tier": {
+  "filing": "filing",
+  "management_statement": "management",
+  "news": "news",
+  "other": "other",
+  "sell_side": "sell_side"
+ },
+ "min_claims_per_side": 1,
+ "min_independent_sources_per_side": 2,
+ "negative_cues": [
+  "decelerat",
+  "miss",
+  "deteriorat",
+  "weak",
+  "downside",
+  "headwind",
+  "underperform",
+  "downgrade",
+  "cut",
+  "lower",
+  "decline",
+  "soft",
+  "pressure",
+  "worse than",
+  "below expectations"
+ ],
+ "policy_ref": "debate-policy:p12c:v1",
+ "positive_cues": [
+  "accelerat",
+  "beat",
+  "expand",
+  "improv",
+  "strong",
+  "upside",
+  "tailwind",
+  "outperform",
+  "upgrade",
+  "raise",
+  "raised",
+  "robust",
+  "better than",
+  "ahead of"
+ ],
+ "publishers": [
+  {
+   "patterns": [
+    "td cowen",
+    "td securities",
+    "td bank"
+   ],
+   "publisher": "td",
+   "tier": "sell_side"
+  },
+  {
+   "patterns": [
+    "wells fargo"
+   ],
+   "publisher": "wells-fargo",
+   "tier": "sell_side"
+  },
+  {
+   "patterns": [
+    "deutsche bank",
+    "deutsche"
+   ],
+   "publisher": "deutsche-bank",
+   "tier": "sell_side"
+  },
+  {
+   "patterns": [
+    "wolfe research",
+    "wolfe"
+   ],
+   "publisher": "wolfe",
+   "tier": "sell_side"
+  },
+  {
+   "patterns": [
+    "j.p. morgan",
+    "jp morgan",
+    "jpmorgan"
+   ],
+   "publisher": "jpmorgan",
+   "tier": "sell_side"
+  },
+  {
+   "patterns": [
+    "morgan stanley"
+   ],
+   "publisher": "morgan-stanley",
+   "tier": "sell_side"
+  },
+  {
+   "patterns": [
+    "hsbc"
+   ],
+   "publisher": "hsbc",
+   "tier": "sell_side"
+  },
+  {
+   "patterns": [
+    "rbc capital",
+    "rbc"
+   ],
+   "publisher": "rbc",
+   "tier": "sell_side"
+  },
+  {
+   "patterns": [
+    "bernstein"
+   ],
+   "publisher": "bernstein",
+   "tier": "sell_side"
+  },
+  {
+   "patterns": [
+    "ubs"
+   ],
+   "publisher": "ubs",
+   "tier": "sell_side"
+  },
+  {
+   "patterns": [
+    "barclays"
+   ],
+   "publisher": "barclays",
+   "tier": "sell_side"
+  },
+  {
+   "patterns": [
+    "citigroup",
+    "citi research"
+   ],
+   "publisher": "citi",
+   "tier": "sell_side"
+  },
+  {
+   "patterns": [
+    "goldman sachs",
+    "goldman"
+   ],
+   "publisher": "goldman",
+   "tier": "sell_side"
+  },
+  {
+   "patterns": [
+    "bofa",
+    "bank of america",
+    "merrill"
+   ],
+   "publisher": "bofa",
+   "tier": "sell_side"
+  }
+ ],
+ "source_tiers": [
+  "filing",
+  "management",
+  "sell_side",
+  "expert",
+  "sales_note",
+  "news",
+  "crowd",
+  "other"
+ ],
+ "spec_tier": {
+  "company-wiki": "expert",
+  "competitive-landscape": "news",
+  "earnings-call-transcripts": "management",
+  "employee-reviews": "crowd",
+  "guidepoint": "expert",
+  "industry-demand": "news",
+  "management-changes": "news",
+  "sales-notes": "sales_note",
+  "sell-side-reports": "sell_side",
+  "x-xreach": "crowd",
+  "xueqiu": "crowd"
+ }
+}
