@@ -57,44 +57,14 @@ package-dir = {"" = "src"}
 include-package-data = true
 
 [tool.setuptools.package-data]
+# Every schema file, by pattern. This was a list of thirty-seven names, and a
+# lane that added its own schema had to remember to add a thirty-eighth or
+# ship a wheel whose migration file is simply missing -- a failure that shows
+# up at install time on someone else's machine. "schema.sql" is named
+# separately because it is the Core's own and does not carry the suffix.
 dalton_core = [
   "schema.sql",
-  "capability_schema.sql",
-  "scheduler_schema.sql",
-  "capability_catalog_schema.sql",
-  "openclaw_exporter_schema.sql",
-  "model_router_schema.sql",
-  "observability_schema.sql",
-  "dashboard_schema.sql",
-  "agenda_schema.sql",
-  "connector_schema.sql",
-  "runner_journal_schema.sql",
-  "credential_authority_schema.sql",
-  "research_coordinator_schema.sql",
-  "candidate_staging_schema.sql",
-  "research_review_schema.sql",
-  "human_intent_schema.sql",
-  "document_index_schema.sql",
-  "research_question_backlog_schema.sql",
-  "research_plan_schema.sql",
-  "thesis_impact_schema.sql",
-  "thesis_impact_budget_schema.sql",
-  "model_input_schema.sql",
-  "industry_research_schema.sql",
-  "weekly_brief_schema.sql",
-  "bounded_planner_loop_schema.sql",
-  "research_doctrine_schema.sql",
-  "research_constitution_schema.sql",
-  "research_playbook_schema.sql",
-  "coverage_mission_schema.sql",
-  "claim_retirement_schema.sql",
-  "mission_deliverable_schema.sql",
-  "model_forecast_schema.sql",
-  "forecast_reconciliation_schema.sql",
-  "statement_snapshot_schema.sql",
-  "transcript_polish_schema.sql",
-  "transcript_correction_schema.sql",
-  "answer_routing_schema.sql",
+  "*_schema.sql",
   "connector_inventory/*.json",
   "connector_inventory/profiles/*.json",
   "connector_inventory/fixtures/*.json",
