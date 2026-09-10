@@ -410,6 +410,57 @@ _DAILY_QUOTAS = MappingProxyType(
         # three GETs and the ceiling is the truth rather than a hope. Four
         # units a day is deliberately below anything that could look like
         # probing.
+        # W4: Hong Kong disclosure. Free, public, and published by the
+        # Exchange and the SFC themselves, so these ceilings bound a loop
+        # rather than a relationship -- but they are small anyway, because a
+        # daily tape is exactly the shape of thing a bug turns into a crawl.
+        #
+        # One printed day of the Exchange's share buy-back report per unit, and
+        # one physical call, because it is one workbook with no paging. Twenty
+        # a day is a month of trading days in one tick, which is what a Core
+        # turned on today needs to catch up and nothing beyond it. The report
+        # is market-wide, so a lane covering five Hong Kong names should read
+        # each day once and filter it five times rather than ask five times.
+        ("hkex-filings", "next_day_disclosure_returns"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 20,
+                "max_physical_calls_per_unit": 1,
+            }
+        ),
+        # Two calls per unit: the stock code has to be resolved to HKEXnews'
+        # internal id before the search can be run, and there is no other route
+        # from one to the other.
+        ("hkex-filings", "monthly_returns"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                # A monthly return arrives once a month. Eight a day covers
+                # every covered issuer with room for a re-read.
+                "daily_unit_limit": 8,
+                "max_physical_calls_per_unit": 2,
+            }
+        ),
+        # The most expensive of the four and it is not close: a corporation
+        # lookup, a notice list, and one page per notice. Capped at the
+        # adapter's forty notices plus the two list pages, so the ceiling is
+        # the truth rather than a hope.
+        ("hkex-filings", "disclosure_of_interests"): MappingProxyType(
+            {
+                "quota_unit": "document",
+                "daily_unit_limit": 8,
+                "max_physical_calls_per_unit": 42,
+            }
+        ),
+        ("hkex-filings", "announcements_index"): MappingProxyType(
+            {
+                "quota_unit": "search",
+                # Once a trading day per issuer, after the 20:30 HKT close of
+                # the Hong Kong announcement window, with room for a second
+                # pass. Two calls per unit for the same id lookup.
+                "daily_unit_limit": 20,
+                "max_physical_calls_per_unit": 2,
+            }
+        ),
         ("cn-hk-findata", "ah_premium"): MappingProxyType(
             {
                 "quota_unit": "search",

@@ -956,8 +956,62 @@ def _register_s5_kinds() -> None:
         )
 
 
+# W4: the four Hong Kong disclosure operations.
+#
+# By loop for the third time and for the same reason: the four differ in
+# exactly one thing -- the schema hash -- and a copied block that forgets to
+# change it produces an approval that silently covers the wrong operation.
+HKEX_FILINGS_KIND_BY_OPERATION: dict[str, str] = {}
+
+
+def _hkex_filings_source_hash() -> str:
+    from .hkex_filings_core import hkex_source_hash
+
+    return hkex_source_hash()
+
+
+def _hkex_filings_permissions() -> dict[str, Any]:
+    from .hkex_filings_core import hkex_permissions
+
+    return hkex_permissions()
+
+
+def _hkex_filings_fixture_hash() -> str:
+    from .hkex_filings_core import hkex_fixture_hash
+
+    return hkex_fixture_hash()
+
+
+def _hkex_filings_schema_hash(operation: str) -> Callable[[], str]:
+    def thunk() -> str:
+        from .hkex_filings_core import hkex_schema_hash
+
+        return hkex_schema_hash(operation)
+
+    return thunk
+
+
+def _register_hkex_filings_kinds() -> None:
+    from .hkex_filings_core import (
+        CAPABILITY_BY_OPERATION as _HKEX_CAPABILITIES,
+        KIND_BY_OPERATION as _HKEX_KINDS,
+    )
+
+    for operation, kind in _HKEX_KINDS.items():
+        HKEX_FILINGS_KIND_BY_OPERATION[operation] = kind
+        GOVERNANCE_KIND_REGISTRY[kind] = _KindSpec(
+            capability_id=_HKEX_CAPABILITIES[operation],
+            template_key="hkex-filings",
+            source_hash=_hkex_filings_source_hash,
+            schema_hash=_hkex_filings_schema_hash(operation),
+            permissions=_hkex_filings_permissions,
+            fixture_hash=_hkex_filings_fixture_hash,
+        )
+
+
 _register_cn_hk_findata_kinds()
 _register_s5_kinds()
+_register_hkex_filings_kinds()
 # Public aliases make the registry discoverable without exposing mutable
 # implementation details of a spec.  The old name is useful to callers that
 # treat the set as a connector-kind catalog.

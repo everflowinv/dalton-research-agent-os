@@ -197,6 +197,26 @@ for cn_hk_kind in financial-statements shareholders buybacks margin-balance \
     chmod 600 "$cn_hk_file"
   fi
 done
+# W4: the four Hong Kong disclosure records. All four together, by the INT1
+# all-or-nothing rule: the lane's plist argument is the governance *directory*
+# and the launcher asks that directory which of the four it may run, so seeding
+# three would give the owner a lane that reads the buy-back tape and reports
+# Disclosure of Interests as unapproved for ever without anyone deciding that.
+# Four schema hashes, four separate approvals -- approving what a company
+# bought back is not approving who its directors are.
+#
+# Seeding them does turn the lane on (the directory is what the plist carries),
+# and that is safe: the live mission's universe holds only company:sec-cik:
+# names, so with all four approved the lane reports `idle` with the reason and
+# starts nothing until the owner admits a Hong Kong name to coverage.
+for hkex_kind in hkex-filings-next-day-disclosure-returns hkex-filings-monthly-returns \
+                 hkex-filings-disclosure-of-interests hkex-filings-announcements-index; do
+  hkex_file="$governance_dir/${hkex_kind}-v1.json"
+  if [[ ! -f "$hkex_file" && -f "$repo_root/deploy/connector-governance/${hkex_kind}-v1.json" ]]; then
+    cp "$repo_root/deploy/connector-governance/${hkex_kind}-v1.json" "$hkex_file"
+    chmod 600 "$hkex_file"
+  fi
+done
 # S5: the four SEC ownership records and the two IR-page-watch ones. Two
 # blocks, because they are two lanes' worth of switch even though one lane
 # drives both.

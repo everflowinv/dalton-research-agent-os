@@ -108,6 +108,18 @@ CAPABILITIES: Mapping[str, Mapping[str, Any]] = MappingProxyType({
         "markets": ("US", "EU", "CN"), "generic": False,
         "note": "expert call library; verbatim quotation limited to 20 words by contract",
     }),
+    # W4: the only daily buy-back disclosure in any market, plus the SFC's
+    # Part XV notices and HKEXnews' announcement index. ``filing`` rather than
+    # ``financial_statement``: these are ownership and treasury disclosures and
+    # nothing here may be read for a statement figure (``HKEX_GRADE``).
+    "hkex-filings": MappingProxyType({
+        "content_kinds": ("filing",), "evidence_tier": "primary_filing",
+        "markets": ("HK",), "generic": False,
+        "note": "Hong Kong's next-day share buy-back tape, Disclosure of "
+                "Interests, and the announcement index; the only market that "
+                "discloses buy-backs daily, and the only source here for a "
+                "company:hk-secucode: name",
+    }),
     "yfinance": MappingProxyType({
         "content_kinds": ("price", "consensus", "calendar"),
         "evidence_tier": "market_price", "markets": ("US",), "generic": False,

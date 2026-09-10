@@ -93,6 +93,16 @@ EVENT_KINDS: tuple[str, ...] = (
     "insider_transaction",
     "ownership_change",
     "holdings_change",
+    # W4 (and the US buy-back slice landing beside it).  A company buying its
+    # own shares is the one disclosure that is neither a person trading nor an
+    # institution repositioning: it is the issuer's own capital decision, and
+    # in Hong Kong it arrives *every trading day* under Main Board Rule
+    # 10.06(4)(a).  Its own kind rather than ``filing`` because the judgement
+    # prompt renders these fields -- shares, prices, how much of the company
+    # has now been retired -- and none of them survives a document-shaped
+    # event; and its own kind rather than ``insider_transaction`` because the
+    # buyer is the company, which has no holding to disclose.
+    "buyback_disclosure",
     # A company's own IR page moved.  Not a filing -- nothing was filed with
     # anybody and a marketing page is edited without a revision history -- so
     # it carries a diff hash instead of an accession, and the tier says
@@ -188,12 +198,42 @@ PAYLOAD_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType({
         "security_title", "shares", "price_per_share", "acquired_disposed",
         "shares_owned_following", "direct_or_indirect", "issuer_name",
         "invocation_ref", "artifact_hash", "event_key",
+        # W4.  Hong Kong's Part XV notices carry facts this payload has no
+        # field for -- the SFC capacity code the shares are held under, the
+        # short position beside the long one, the class and the issued count --
+        # and the difference between a director who owns shares and a director
+        # who is a trustee of somebody else's changes what the number means.
+        # The text is composed from the filing, carried in full on the
+        # connector's wire, and named here by its hash so that the ledger stays
+        # an index rather than a second copy of the filing.  Null on every SEC
+        # row, which have no such text.
+        "notes_text_hash",
     }),
     "ownership_change": frozenset({
         "accession", "form", "is_amendment", "amendment_no",
         "reporting_person", "person_cik", "person_type", "percent_of_class",
         "aggregate_shares", "sole_voting_power", "shared_voting_power",
         "event_date", "security_class", "cusip", "purpose_text_hash",
+        "invocation_ref", "artifact_hash", "event_key",
+        # W4: the same field, for the same reason, on the kind a Hong Kong
+        # substantial-shareholder notice becomes.
+        "notes_text_hash",
+    }),
+    # W4.  The field set is shared with the US 10-Q/10-K/8-K buy-back slice, so
+    # that one company's repurchases read the same whichever market disclosed
+    # them; ``market`` is what says which one it was.
+    #
+    # ``cumulative_shares_ytd`` is the one field a Hong Kong row always leaves
+    # null, and deliberately: the Exchange's cumulative column is *since the
+    # resolution granting the current repurchase mandate*, which is not a
+    # calendar year and would be read as one under this name.  The figure is on
+    # the connector's wire verbatim and in its derived context under its own
+    # basis; see ``hkex_filings_adapter.buyback_events``.
+    "buyback_disclosure": frozenset({
+        "accession_or_ref", "form", "market", "disclosed_on", "period_start",
+        "period_end", "shares", "average_price", "price_low", "price_high",
+        "total_paid", "currency", "remaining_authorisation",
+        "cumulative_shares_ytd", "pct_of_issued",
         "invocation_ref", "artifact_hash", "event_key",
     }),
     "holdings_change": frozenset({
@@ -239,6 +279,9 @@ DEFAULT_TIER_BY_KIND: Mapping[str, str] = MappingProxyType({
     "insider_transaction": "primary_filing",
     "ownership_change": "primary_filing",
     "holdings_change": "primary_filing",
+    # Filed with the exchange by the company itself, under a rule that makes
+    # the filing compulsory the next morning.
+    "buyback_disclosure": "primary_filing",
     # The company speaking in its own voice on its own site.
     "ir_page_change": "management_direct",
     # Computed from what was filed and what we had held: derived, like the

@@ -148,6 +148,48 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # W4: Hong Kong disclosure. Sorted between gemini and
+                    # ir-page-watch because the list is sorted by slug.
+                    "connector_slug": "hkex-filings",
+                    "operation": "announcements_index",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 20,
+                    "max_physical_calls_per_unit": 2,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    # A corporation lookup, a notice list and one page per
+                    # notice, capped at the adapter's forty.
+                    "connector_slug": "hkex-filings",
+                    "operation": "disclosure_of_interests",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 8,
+                    "max_physical_calls_per_unit": 42,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    "connector_slug": "hkex-filings",
+                    "operation": "monthly_returns",
+                    "quota_unit": "search",
+                    "daily_unit_limit": 8,
+                    "max_physical_calls_per_unit": 2,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
+                    # One workbook, no paging: the only Hong Kong operation
+                    # that costs exactly one call.
+                    "connector_slug": "hkex-filings",
+                    "operation": "next_day_disclosure_returns",
+                    "quota_unit": "document",
+                    "daily_unit_limit": 20,
+                    "max_physical_calls_per_unit": 1,
+                    "window_seconds": 86_400,
+                    "reset_timezone": "Asia/Shanghai",
+                },
+                {
                     # S5: the IR-page watcher. There is no upstream to be
                     # polite to at all -- changedetection.io is a process on
                     # this machine and it does the fetching -- so these bound a

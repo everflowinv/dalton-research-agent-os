@@ -1,0 +1,84 @@
+{
+  "adapter_package_ref": "inventory-artifact:adapter-contract:hkex-filings:0.1",
+  "adapter_source_hash": "41e1f677553dcb972555d4c2251071e35e531dc42c1383bcf6bce327a4b887ca",
+  "auth_boundary": {
+    "credential_material": "forbidden",
+    "mode": "none",
+    "owner": "none",
+    "use_time_authority": "none"
+  },
+  "builder_ref": "builder:dalton-connector-inventory:0.1",
+  "capability_proposal_ref": "capability-proposal:connector:hkex-filings:0.1",
+  "connector_ref": "connector:hkex-filings",
+  "content_hash": "df370c9e23cb9f7102e4350abf815a51bdcae7fae0a62dc885146c9b4686ebac",
+  "created_at": "2026-08-14T20:00:00.000000+00:00",
+  "fixture_manifest_hash": "1931f13dba71f255e389faf2342373745b7354d5457b3addd74153e2f18d1973",
+  "fixture_manifest_ref": "connector-fixture-manifest:hkex-filings:0.1",
+  "id": "connector-proposal-manifest:hkex-filings:0.2",
+  "inventory_state": "proposal_only",
+  "offline_attestation_policy_ref": "policy:connector-inventory-offline:0.1",
+  "operations": [
+    {
+      "completeness": "enumerated",
+      "input_schema_hash": "d026eccffa5aa69f595939a037ac54068bc64b720730d4f5651fd9b5238f3079",
+      "input_schema_ref": "schema:connector-inventory:hkex-filings:next_day_disclosure_returns:input:0.1",
+      "operation": "next_day_disclosure_returns",
+      "output_schema_hash": "a74a3484d42a85c8261d3b8f54ea6e92e9d18fcc94abd54b6b3fd889906644cb",
+      "output_schema_ref": "schema:connector-inventory:hkex-filings:next_day_disclosure_returns:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "partial",
+      "input_schema_hash": "e161e05a560022a0ad30c2a6ac519d4fad4e952a088df63fec542ef619f0c91b",
+      "input_schema_ref": "schema:connector-inventory:hkex-filings:monthly_returns:input:0.1",
+      "operation": "monthly_returns",
+      "output_schema_hash": "4bde0a9feb5ea719d2c7b398e0a63d395b7d869004221727230ffe3b358733cd",
+      "output_schema_ref": "schema:connector-inventory:hkex-filings:monthly_returns:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "partial",
+      "input_schema_hash": "e161e05a560022a0ad30c2a6ac519d4fad4e952a088df63fec542ef619f0c91b",
+      "input_schema_ref": "schema:connector-inventory:hkex-filings:disclosure_of_interests:input:0.1",
+      "operation": "disclosure_of_interests",
+      "output_schema_hash": "583aa691d58d7c4eaaa81e6830ccb749da0d75cffd03a56c7ad50d7630a9daea",
+      "output_schema_ref": "schema:connector-inventory:hkex-filings:disclosure_of_interests:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    },
+    {
+      "completeness": "partial",
+      "input_schema_hash": "6c0c93af41eba83729a41e2493147770c413685793335da4e9a35c527b440aad",
+      "input_schema_ref": "schema:connector-inventory:hkex-filings:announcements_index:input:0.1",
+      "operation": "announcements_index",
+      "output_schema_hash": "80805d44de41ec87d2ccf22641139bb6faf0cc686af9035b952d72d2b8f6cf4e",
+      "output_schema_ref": "schema:connector-inventory:hkex-filings:announcements_index:output:0.1",
+      "pagination": "none",
+      "side_effects": [
+        "read:recorded-fixture"
+      ]
+    }
+  ],
+  "profile_template_hash": "e8b12a4e07268ed9fa0bb7f53e6cfbacb1962eb27e1c10b36c88e9b19c5ec5b9",
+  "profile_template_ref": "connector-profile-template:hkex-filings:0.1",
+  "promotion_policy_ref": "policy:connector-promotion:0.1",
+  "requested_canary": null,
+  "schema_version": "0.2",
+  "source_identity": {
+    "adapter": "transport:public-http:0.1",
+    "adapter_version": "inventory-0.1",
+    "source": "source:hkex-filings",
+    "source_version": "inventory-2026-08-14"
+  },
+  "transport_kind": "public_https",
+  "transport_target_hash": "71d09e1a98b77407b0946238c596333b74fdbb41ef76208ad3b8c0f8034f3bd1",
+  "transport_target_ref": "transport:public-http:0.1"
+}

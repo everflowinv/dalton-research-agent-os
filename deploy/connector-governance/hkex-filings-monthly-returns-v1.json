@@ -1,0 +1,32 @@
+{
+  "allowed_permissions": {
+    "core_db": false,
+    "credential_slot_refs": [],
+    "filesystem_read": [],
+    "filesystem_write": [
+      "runner:raw-sink"
+    ],
+    "network": true,
+    "risk_class": "low",
+    "side_effects": [
+      "read:public-http"
+    ]
+  },
+  "approval_ref": "approval:connector-governance:hkex-filings-monthly-returns:v1",
+  "approved_by": "human:lumos",
+  "attestation_ref": "attestation:connector-governance:hkex-filings-monthly-returns:v1",
+  "capability_id": "capability:dalton:connector:hkex-filings-monthly-returns",
+  "content_hash": "8ef22398c724bc7f9a3948d85a00c55f55fd5c61ad7206534ddec0357731d31e",
+  "decision_ref": "capability-decision:connector-governance:hkex-filings-monthly-returns:v1",
+  "effective_from": "2026-09-10T00:00:00.000000+00:00",
+  "effective_until": null,
+  "expected_schema_hash": "0e2d01906269515e6b8fb557183cdb06f8c91b6315fe575f16b0683c1685a87b",
+  "expected_source_hash": "af88034399acec7eb6fde36053b94c7b2c3775c8c8dcf5704bebd5450b65ecfd",
+  "id": "connector-governance:hkex-filings-monthly-returns:v1",
+  "max_lease_seconds": 300,
+  "policy_ref": "policy:dalton:connector-governance:hkex-filings-monthly-returns:v1",
+  "principal_ref": "principal:dalton-core-trusted-runner",
+  "registry_revision_ref": "capability:dalton:connector:hkex-filings-monthly-returns@v1",
+  "schema_version": "0.1",
+  "status": "proposed"
+}

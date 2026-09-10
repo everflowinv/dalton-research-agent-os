@@ -35,6 +35,13 @@ market-data = ["yfinance>=0.2.31"]
 # name. A floor would let a `pip install -U` silently change what a number
 # means. This is the version the OpenClaw skill runs.
 cn-hk-data = ["akshare==1.18.94"]
+# W4: reading the Exchange's share buy-back report. HKEXnews publishes that one
+# report as a BIFF workbook and in no other form -- .htm and .csv were both
+# probed and both 404 -- so a workbook reader is the price of the only daily
+# buy-back tape in any market. Optional like every other parser here: without
+# it the run refuses with its reason, and the offline tests never touch it
+# because the fixtures hold the canonical text grid rather than the workbook.
+hk-filings = ["xlrd>=2.0,<3"]
 # W3: reading a prior human Excel model. Optional for the same reason every
 # parser here is: without it the workbook is refused with its reason rather
 # than guessed at, and the renderer identity names the library so swapping it
@@ -67,6 +74,7 @@ dalton-connector-governance = "dalton_core.connector_governance_cli:main"
 dalton-model-inputs = "dalton_core.company_model_report:main"
 dalton-market-price = "dalton_core.market_price_cli:main"
 dalton-cn-hk-findata = "dalton_core.cn_hk_findata_cli:main"
+dalton-hkex-filings = "dalton_core.hkex_filings_cli:main"
 dalton-model-forecast = "dalton_core.company_model_forecast_cli:main"
 dalton-forecast-sensitivity = "dalton_core.forecast_sensitivity_cli:main"
 dalton-research-quality = "dalton_core.research_quality_cli:main"

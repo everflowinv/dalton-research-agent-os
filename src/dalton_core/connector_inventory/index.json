@@ -1,5 +1,5 @@
 {
-  "content_hash": "59a689aa7590c76901062078770b6139abcde3d028e179e40b151713a579fd61",
+  "content_hash": "2f97b70912645b2006959fbb6be7288398059c090f39cb0270557d572c982411",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "id": "connector-inventory:p1-0:0.1",
   "profiles": [
@@ -56,6 +56,15 @@
       "profile_template_ref": "connector-profile-template:cn-hk-findata:0.1",
       "proposal_manifest_hash": "61d62753c2bc8a6b4fe7d39a43f04ac0fc15bb186de9173e1db0db6739249cea",
       "proposal_manifest_ref": "connector-proposal-manifest:cn-hk-findata:0.2"
+    },
+    {
+      "connector_ref": "connector:hkex-filings",
+      "fixture_manifest_hash": "1931f13dba71f255e389faf2342373745b7354d5457b3addd74153e2f18d1973",
+      "fixture_manifest_ref": "connector-fixture-manifest:hkex-filings:0.1",
+      "profile_template_hash": "e8b12a4e07268ed9fa0bb7f53e6cfbacb1962eb27e1c10b36c88e9b19c5ec5b9",
+      "profile_template_ref": "connector-profile-template:hkex-filings:0.1",
+      "proposal_manifest_hash": "df370c9e23cb9f7102e4350abf815a51bdcae7fae0a62dc885146c9b4686ebac",
+      "proposal_manifest_ref": "connector-proposal-manifest:hkex-filings:0.2"
     },
     {
       "connector_ref": "connector:alphaengine-library",
