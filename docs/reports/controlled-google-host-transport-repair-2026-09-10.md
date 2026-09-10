@@ -16,11 +16,16 @@ worst-case cost, pinned output allowance, and proof. Ordinary completions retain
 the pre-bound transport. No proof check or budget is relaxed.
 
 The patch refuses every OpenClaw version except `2026.9.3`, requires exactly one
-known source anchor, is idempotent, and supports `--check`. Its behavioral test
-places the network counter in the pre-bound transport itself. It proves that a
-controlled call never invokes that dependency, that a refused admission stops
-after the count boundary, and that an admitted call produces a proof before one
-generation.
+of each known source anchor, rejects partial and duplicate patched states, checks
+the candidate with `node --check`, replaces the bundle atomically, and is
+idempotent. Its acceptance test copies the installed OpenClaw module and replaces
+only its imports with explicit local seams. Node's permission model denies all
+network access. The test proves that controlled calls skip the bound transport,
+a refused admission stops after counting, an admitted call produces proof before
+one generation, and an ordinary call still uses the bound custom transport. The
+installed `@openclaw/ai` local-server suite separately proves Google countTokens,
+schema refusal before generation, cost/token admission, and proof with zero paid
+calls.
 
 Deployment uses the existing managed patch runner after review:
 
@@ -32,10 +37,16 @@ Deployment uses the existing managed patch runner after review:
 4. Apply through `patch/apply_all.sh` with restart deferred, run the source tests
    plus the patch runner's local-provider transport test, then request the usual
    safe gateway restart only after active work drains.
-5. After restart, run `apply_all.sh --check` before any paid canary. A canary is
-   separate authorization and must retain the exact verifier controls.
+5. After the eventual deferred restart, run `apply_all.sh --check`. No paid
+   canary is needed for this repair; the hermetic copied-module and local-provider
+   lifecycle tests are the acceptance evidence.
 
 This commit does not copy the mutable patch runner into the repository and does
 not alter the managed OpenClaw installation. The repository artifact is the
 reviewable source of the new patch; the runner registration remains an explicit
 deployment step because that workspace contains unrelated operator state.
+
+The operational owner packet (kept outside version control) contains the
+bounded registration and hash-checked rollback scripts. The single diagnostic
+request incident is recorded there without credentials, request headers,
+response content, or mutable configuration.
