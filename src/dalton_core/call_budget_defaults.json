@@ -1,0 +1,149 @@
+{
+  "defaults": {
+    "max_cost_usd": 0.05,
+    "max_input_tokens": 120000,
+    "max_output_tokens": 3000,
+    "timeout_seconds": 120
+  },
+  "purposes": {
+    "claim_index": {
+      "max_cost_usd": 0.6,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 2000,
+      "timeout_seconds": 180
+    },
+    "conviction_call": {
+      "max_cost_usd": 0.6,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 3000,
+      "timeout_seconds": 240
+    },
+    "debate_map": {
+      "max_cost_usd": 0.8,
+      "max_input_tokens": 80000,
+      "max_output_tokens": 4000,
+      "timeout_seconds": 240
+    },
+    "deep_insight_gate": {
+      "max_cost_usd": 0.6,
+      "max_input_tokens": 120000,
+      "max_output_tokens": 3000,
+      "timeout_seconds": 180
+    },
+    "deep_insight_gate_verifier": {
+      "max_cost_usd": 0.6,
+      "max_input_tokens": 120000,
+      "max_output_tokens": 3000,
+      "timeout_seconds": 180
+    },
+    "dossier": {
+      "max_cost_usd": 0.6,
+      "max_input_tokens": 120000,
+      "max_output_tokens": 3000,
+      "timeout_seconds": 180
+    },
+    "dossier_verifier": {
+      "max_cost_usd": 0.6,
+      "max_input_tokens": 120000,
+      "max_output_tokens": 3000,
+      "timeout_seconds": 180
+    },
+    "earnings_calibration": {
+      "max_cost_usd": 0.12,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 2000,
+      "timeout_seconds": 240
+    },
+    "earnings_calibration_verifier": {
+      "max_cost_usd": 0.12,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 2000,
+      "timeout_seconds": 240
+    },
+    "earnings_preview": {
+      "max_cost_usd": 0.12,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 2000,
+      "timeout_seconds": 240
+    },
+    "earnings_preview_verifier": {
+      "max_cost_usd": 0.12,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 2000,
+      "timeout_seconds": 240
+    },
+    "event_judgement": {
+      "max_cost_usd": 1.0,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 1500,
+      "timeout_seconds": 180
+    },
+    "event_judgement_verifier": {
+      "max_cost_usd": 1.0,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 1500,
+      "timeout_seconds": 180
+    },
+    "industry_framework": {
+      "max_cost_usd": 0.6,
+      "max_input_tokens": 120000,
+      "max_output_tokens": 3000,
+      "timeout_seconds": 180
+    },
+    "industry_framework_verifier": {
+      "max_cost_usd": 0.6,
+      "max_input_tokens": 120000,
+      "max_output_tokens": 3000,
+      "timeout_seconds": 180
+    },
+    "model_spec": {
+      "max_cost_usd": 2.5,
+      "max_input_tokens": 120000,
+      "max_output_tokens": 6000,
+      "timeout_seconds": 300
+    },
+    "plan": {
+      "max_cost_usd": 1.5,
+      "max_input_tokens": 120000,
+      "max_output_tokens": 4000,
+      "timeout_seconds": 300
+    },
+    "quality": {
+      "max_cost_usd": 0.6,
+      "max_input_tokens": 120000,
+      "max_output_tokens": 2000,
+      "timeout_seconds": 180
+    },
+    "quality_verifier": {
+      "max_cost_usd": 0.6,
+      "max_input_tokens": 120000,
+      "max_output_tokens": 2000,
+      "timeout_seconds": 180
+    },
+    "thesis_reflection": {
+      "max_cost_usd": 1.0,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 1500,
+      "timeout_seconds": 180
+    },
+    "thesis_reflection_verifier": {
+      "max_cost_usd": 1.0,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 1500,
+      "timeout_seconds": 180
+    },
+    "zero_base_review": {
+      "max_cost_usd": 0.12,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 1800,
+      "timeout_seconds": 180
+    },
+    "zero_base_review_verifier": {
+      "max_cost_usd": 0.12,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 1800,
+      "timeout_seconds": 180
+    }
+  },
+  "schema_version": "0.1"
+}
