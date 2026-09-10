@@ -12,3 +12,13 @@ Concrete post-signature blockers and fixes in progress:
 - Deployment/process ownership: lifetime controller lock and pre-upgrade legacy-resident checks are integrated, with fresh-install/scanner edge cases under review. They prevent the duplicate controller observed during recovery.
 
 These follow-up fixes are not yet deployed. Next: complete integrated tests and a current-state rehearsal, deploy the tested fixes using the already-signed mission receipt, then inspect actual new product records rather than treating queued/stub launches as successful products. Model calls made by the running authorized automation are distinct from the read-only diagnostic work reported here.
+
+## 16:02 UTC checkpoint
+
+The read-only live audit still observes 0/15 products and verifies the same signed mission hash. The integration branch has been pushed through `fb88543`; the external session's four-file main-worktree diff remains unchanged (SHA-256 `43832e8e6d32cec9bf48b59044d200df0d57a99d30598859c23d4c1360207932`).
+
+Controller, installer, dossier, scheduler and child restart integration passes 154 tests in 11.983 seconds. Adopted children now match their recorded command during every status check, preventing an unrelated reused PID from keeping a lane busy forever. The private deployment-wrapper candidate performs the controller ownership check before its backup; it will be bound only after new release acceptance.
+
+The event coordinator now incorporates the judge, verifier and tracking configuration content into its batch identity. A Cockpit route change can retry the same unjudged event after the previous child settles; unchanged configuration remains quiet. Twelve focused coordinator/configuration tests pass. The broader event test run exposed two grouped-evidence regressions in the initial prompt-budget patch; these remain release blockers while the event agent repairs mandatory context preservation and a second agent reviews it.
+
+The [real catalog budget audit](event-live-catalog-budget-review-2026-09-10.md) independently verifies router admission using a live SQLite backup: the 5,000-byte input / 700-token output envelope reserves at most $0.085 for configured brain and independent verifier routes, within the unchanged $0.10 cap. This proves admission only; it does not prove prompt completeness or a successful model response.

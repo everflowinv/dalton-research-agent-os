@@ -91,6 +91,8 @@ class MissionEventJudgementLaneCoordinator:
             return {"status": "unconfigured", "reason": "no mission", "settled": settled}
         try:
             newest = self.pending(mission)
+            signature = getattr(self.launcher, "configuration_signature", None)
+            configuration = signature() if signature is not None else None
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
             return {"status": "unavailable", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
@@ -98,9 +100,14 @@ class MissionEventJudgementLaneCoordinator:
             return {"status": "idle", "settled": settled,
                     "reason": "every event this company has produced has been judged"}
         batch = f"{mission['id']}:{newest}"
+        if configuration is not None:
+            batch += f":configuration:{configuration}"
         if batch == self._last_batch:
             return {"status": "idle", "settled": settled, "batch_ref": batch,
                     "reason": "this batch has already been dispatched"}
+        if self._open is not None:
+            return {"status": "busy", "settled": settled,
+                    "reason": "the previous judgement batch is still running"}
         try:
             ticket = self.launcher.start(batch_ref=batch)
         except LaneChildConflict as exc:

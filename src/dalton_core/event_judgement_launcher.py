@@ -51,6 +51,17 @@ class EventJudgementLauncher(LaneChildLauncher):
 
         return self.judge_model_config.is_file() and self.verifier_model_config.is_file()
 
+    def configuration_signature(self) -> str:
+        """Changing a Cockpit route makes an unjudged batch retryable."""
+        digest = hashlib.sha256(b"event-configuration:1")
+        for path in (self.judge_model_config, self.verifier_model_config, self.policy_path):
+            if path is None:
+                digest.update(b"\0absent")
+            else:
+                digest.update(b"\0file:")
+                digest.update(hashlib.sha256(path.read_bytes()).digest())
+        return digest.hexdigest()
+
     def _command(self, *, ticket_dir: Path) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
