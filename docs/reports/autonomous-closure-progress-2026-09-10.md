@@ -98,3 +98,7 @@ Next: complete scope-stable model/connector capacity and controls validation; fu
 - Private model-selection repair now has a closed hashed candidate, WAL-aware logical database digest, staged backup and rollback; real CLI process detection and copied-state rehearsal are being finalized. No live writes or paid calls during these checks.
 
 Next: freeze final integrated code, full suite + wheel + copied-state rehearsal, deploy under existing owner authorization, then observe genuine scheduled results with mission v14 unchanged.
+
+## 19:53 UTC — methodology clarification preserved
+
+Owner confirmed that long-term business understanding, moat and industry knowledge remain foundational. New <=12-month earnings/revision/rerating analysis is an incremental bridge from that knowledge to investment advice, updated with prices/news through explicit prior/evidence/alternative-explanation/revision records. Initial Screen and the six-stage research process stay intact. Three read-only reviews/design documents are committed; they are not represented as implemented runtime capability. Frozen runtime acceptance continues independently.
