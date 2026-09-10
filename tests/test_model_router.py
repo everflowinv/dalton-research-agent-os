@@ -356,6 +356,15 @@ class ModelRouterTests(unittest.TestCase):
         self.assertEqual(
             decision["selected_profile_version_ref"], second["profile_version_ref"]
         )
+        legacy = self.router.route(
+            work_order(work_id="work:legacy-without-purpose"),
+            **route_args(
+                capability="research", idempotency_key="route-key:legacy-without-purpose"
+            ),
+        )["decision"]
+        self.assertEqual(
+            legacy["selected_profile_version_ref"], first["profile_version_ref"]
+        )
 
     def test_budget_context_auth_and_availability_fail_closed(self) -> None:
         self.router.register_policy(policy())

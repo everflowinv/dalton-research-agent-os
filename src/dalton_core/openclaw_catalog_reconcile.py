@@ -540,11 +540,9 @@ def _metadata_declarations(router: ModelRouter) -> dict[str, dict[str, Any]]:
     if exists is None:
         return {}
     rows = router.connection.execute(
-        "SELECT declaration_json FROM model_profile_metadata_declarations d "
-        "WHERE version=(SELECT MAX(version) FROM model_profile_metadata_declarations "
-        "WHERE profile_id=d.profile_id)"
+        "SELECT DISTINCT profile_id FROM model_profile_metadata_declarations"
     ).fetchall()
-    records = [json.loads(row["declaration_json"]) for row in rows]
+    records = [router.latest_profile_metadata(row["profile_id"]) for row in rows]
     return {record["profile_id"]: record for record in records}
 
 

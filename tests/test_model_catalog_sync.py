@@ -17,6 +17,7 @@ from dalton_core.model_deployment import (
 from dalton_core.model_router import (
     RETIRED_REASON_NOT_IN_BROKER,
     ModelRouter,
+    ModelRouterConflict,
     ModelRouterValidationError,
     independent_families,
 )
@@ -219,6 +220,28 @@ class CatalogSyncTests(unittest.TestCase):
             if row["id"] == "profile:deepseek-v4-flash"
         )
         self.assertTrue(independent_families(explicit["family"], "openai-gpt-6"))
+
+    def test_tampered_metadata_fails_closed_before_profile_write(self) -> None:
+        config = _config()
+        self._install(config)
+        self.router.declare_profile_metadata(
+            declaration_ref="model-profile-metadata:gpt-sol:1",
+            profile_id="profile:gpt-5-6-sol", version=1,
+            prior_declaration_ref=None, provider="openai", model="gpt-5.6-sol",
+            family="openai-gpt-5.6", capabilities=["research", "verify"],
+            actor_ref="human:owner", created_at=LATER.isoformat(timespec="microseconds"),
+        )
+        rows_before = self.router.connection.execute(
+            "SELECT COUNT(*) FROM model_endpoint_profile_versions").fetchone()[0]
+        self.router.connection.execute(
+            "DROP TRIGGER model_profile_metadata_declaration_no_update")
+        self.router.connection.execute(
+            "UPDATE model_profile_metadata_declarations SET family='forged' "
+            "WHERE profile_id='profile:gpt-5-6-sol'")
+        with self.assertRaisesRegex(ModelRouterConflict, "index drifted"):
+            sync_openclaw_model_catalog(self.router, config, checked_at=LATER)
+        self.assertEqual(self.router.connection.execute(
+            "SELECT COUNT(*) FROM model_endpoint_profile_versions").fetchone()[0], rows_before)
 
     def test_a_profile_the_broker_dropped_is_retired_not_deleted(self) -> None:
         config = _config()

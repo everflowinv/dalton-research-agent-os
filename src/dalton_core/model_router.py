@@ -250,6 +250,39 @@ def independent_families(candidate_family: str, producer_family: str) -> bool:
     )
 
 
+def _metadata_declaration_wire(value: Mapping[str, Any]) -> dict[str, Any]:
+    expected = {
+        "schema_version", "declaration_ref", "profile_id", "version",
+        "prior_declaration_ref", "provider", "model", "family", "capabilities",
+        "actor_ref", "created_at", "content_hash",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise ModelRouterValidationError("metadata declaration has an invalid schema")
+    body = {
+        "schema_version": _string(value["schema_version"], "schema_version"),
+        "declaration_ref": _ref(value["declaration_ref"], "declaration_ref"),
+        "profile_id": _ref(value["profile_id"], "profile_id"),
+        "version": _positive_int(value["version"], "version"),
+        "prior_declaration_ref": _ref(
+            value["prior_declaration_ref"], "prior_declaration_ref", nullable=True
+        ),
+        "provider": _token(value["provider"], "provider"),
+        "model": _token(value["model"], "model"),
+        "family": _token(value["family"], "family"),
+        "capabilities": list(_unique_tokens(
+            value["capabilities"], "capabilities", nonempty=True
+        )),
+        "actor_ref": _string(value["actor_ref"], "actor_ref"),
+        "created_at": _string(value["created_at"], "created_at"),
+    }
+    _parse_time(body["created_at"], "created_at")
+    if value["schema_version"] != SCHEMA_VERSION:
+        raise ModelRouterValidationError("metadata declaration schema_version is invalid")
+    if value["content_hash"] != canonical_hash(body):
+        raise ModelRouterConflict("metadata declaration content hash drifted")
+    return {**body, "content_hash": value["content_hash"]}
+
+
 def _retirement_wire(value: Any) -> dict[str, Any]:
     """The evidence a retirement carries, so it can be argued with later."""
 
@@ -926,14 +959,18 @@ class ModelRouter:
             "created_at": _string(created_at, "created_at"),
         }
         _parse_time(body["created_at"], "created_at")
-        record = {**body, "content_hash": canonical_hash(body)}
+        record = _metadata_declaration_wire(
+            {**body, "content_hash": canonical_hash(body)}
+        )
         with self._transaction() as cur:
             existing = cur.execute(
                 "SELECT declaration_json FROM model_profile_metadata_declarations "
                 "WHERE declaration_ref=?", (record["declaration_ref"],),
             ).fetchone()
             if existing is not None:
-                held = json.loads(existing["declaration_json"])
+                held = _metadata_declaration_wire(
+                    json.loads(existing["declaration_json"])
+                )
                 semantic_keys = set(record) - {"created_at", "content_hash"}
                 if any(held.get(key) != record.get(key) for key in semantic_keys):
                     raise ModelRouterConflict("declaration_ref already has different content")
@@ -963,11 +1000,42 @@ class ModelRouter:
 
     def latest_profile_metadata(self, profile_id: str) -> dict[str, Any] | None:
         row = self.connection.execute(
-            "SELECT declaration_json FROM model_profile_metadata_declarations "
+            "SELECT * FROM model_profile_metadata_declarations "
             "WHERE profile_id=? ORDER BY version DESC LIMIT 1",
             (_ref(profile_id, "profile_id"),),
         ).fetchone()
-        return None if row is None else json.loads(row["declaration_json"])
+        if row is None:
+            return None
+        record = _metadata_declaration_wire(json.loads(row["declaration_json"]))
+        indexed = {
+            "declaration_ref": row["declaration_ref"], "profile_id": row["profile_id"],
+            "version": row["version"], "prior_declaration_ref": row["prior_declaration_ref"],
+            "provider": row["provider"], "model": row["model"], "family": row["family"],
+            "capabilities_json": row["capabilities_json"], "actor_ref": row["actor_ref"],
+            "declaration_hash": row["declaration_hash"], "created_at": row["created_at"],
+        }
+        expected = {
+            "declaration_ref": record["declaration_ref"], "profile_id": record["profile_id"],
+            "version": record["version"], "prior_declaration_ref": record["prior_declaration_ref"],
+            "provider": record["provider"], "model": record["model"],
+            "family": record["family"], "capabilities_json": canonical_json(record["capabilities"]),
+            "actor_ref": record["actor_ref"], "declaration_hash": record["content_hash"],
+            "created_at": record["created_at"],
+        }
+        if indexed != expected:
+            raise ModelRouterConflict("metadata declaration index drifted")
+        if record["version"] == 1:
+            if record["prior_declaration_ref"] is not None:
+                raise ModelRouterConflict("first metadata declaration has a prior")
+        else:
+            prior = self.connection.execute(
+                "SELECT declaration_ref FROM model_profile_metadata_declarations "
+                "WHERE profile_id=? AND version=?",
+                (record["profile_id"], record["version"] - 1),
+            ).fetchone()
+            if prior is None or prior["declaration_ref"] != record["prior_declaration_ref"]:
+                raise ModelRouterConflict("metadata declaration chain drifted")
+        return record
 
     def register_policy(self, policy: Mapping[str, Any]) -> dict[str, Any]:
         """Append one routing-policy version with closed filters/preferences."""
