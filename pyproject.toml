@@ -52,6 +52,7 @@ prior-models = ["openpyxl>=3.1,<4"]
 
 [project.scripts]
 dalton-bootstrap = "dalton_core.bootstrap:main"
+dalton-workspace = "dalton_core.workspace:main"
 dalton-health = "dalton_core.health:main"
 dalton-writer = "dalton_core.writer_server:main"
 daltond = "dalton_core.service:main"

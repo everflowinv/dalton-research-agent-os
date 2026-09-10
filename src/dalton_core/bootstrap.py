@@ -199,9 +199,21 @@ def _write_config(path: Path, value: dict) -> None:
         raise
 
 
-def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
+def bootstrap(
+    state_dir: str | Path, config_path: str | Path, *,
+    workspace_manifest: str | Path | None = None,
+) -> dict[str, str]:
     root = Path(state_dir).expanduser().resolve()
     config = Path(config_path).expanduser().resolve()
+    workspace = None
+    if workspace_manifest is not None:
+        from .workspace import WorkspaceError, load_workspace_manifest
+        try:
+            workspace = load_workspace_manifest(workspace_manifest)
+        except WorkspaceError as exc:
+            raise RuntimeError("workspace manifest validation failed") from exc
+        if workspace.state_dir != root or workspace.config_path != config:
+            raise RuntimeError("bootstrap paths do not match the workspace manifest")
     for directory in (root, root / "run", root / "public", root / "perception", root / "backups"):
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(directory, 0o700)
@@ -419,8 +431,14 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
             "interval_seconds": 86400,
         },
     }
+    if workspace is not None:
+        raw["workspace"] = workspace.service_binding()
     if not config.exists():
         _write_config(config, raw)
+    elif workspace is not None:
+        configured = ServiceConfig.from_file(config)
+        if configured.workspace != ServiceConfig.from_mapping(raw).workspace:
+            raise RuntimeError("existing service config belongs to another workspace")
     os.chmod(config, 0o600)
     return {
         "state_dir": str(root),
@@ -439,8 +457,10 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Bootstrap an owner-only Dalton runtime")
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--config", type=Path, required=True)
+    parser.add_argument("--workspace-manifest", type=Path)
     args = parser.parse_args(list(argv) if argv is not None else None)
-    result = bootstrap(args.state_dir, args.config)
+    result = bootstrap(args.state_dir, args.config,
+                       workspace_manifest=args.workspace_manifest)
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 

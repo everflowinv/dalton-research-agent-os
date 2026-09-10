@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import stat
 import sys
@@ -47,6 +48,13 @@ SCHEMA_VERSION = "0.1"
 
 class ServiceConfigError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceBinding:
+    workspace_id: str
+    manifest_path: Path
+    manifest_hash: str
 
 
 def _utc_now() -> str:
@@ -124,6 +132,7 @@ class ServiceConfig:
     # false, so a config that never heard of the retirement gets the
     # retirement.
     legacy_agenda_plane: bool = False
+    workspace: WorkspaceBinding | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ServiceConfig":
@@ -136,7 +145,7 @@ class ServiceConfig:
         optional = {
             "agenda", "weekly_brief", "bounded_planner", "outbox", "control",
             "backup", "thesis_impact", "document_extraction",
-            "alphaengine_owner_call_cap", LEGACY_AGENDA_PLANE_KEY,
+            "alphaengine_owner_call_cap", LEGACY_AGENDA_PLANE_KEY, "workspace",
         }
         if not required.issubset(raw) or set(raw) - required - optional or raw.get("schema_version") != SCHEMA_VERSION:
             raise ServiceConfigError("service config has an invalid shape or schema version")
@@ -346,6 +355,25 @@ class ServiceConfig:
                         "document_extraction.discovery_windows_per_tick must be an integer 0..50"
                     )
                 extraction_discovery_windows = discovery
+        workspace = None
+        workspace_raw = raw.get("workspace")
+        if workspace_raw is not None:
+            if not isinstance(workspace_raw, Mapping) or set(workspace_raw) != {
+                    "workspace_id", "manifest_path", "manifest_hash"}:
+                raise ServiceConfigError("workspace binding has an invalid closed shape")
+            import uuid
+            try:
+                identity = str(uuid.UUID(workspace_raw["workspace_id"]))
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise ServiceConfigError("workspace.workspace_id must be a canonical UUID") from exc
+            if identity != workspace_raw["workspace_id"]:
+                raise ServiceConfigError("workspace.workspace_id must be a canonical UUID")
+            digest = workspace_raw["manifest_hash"]
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise ServiceConfigError("workspace.manifest_hash must be lowercase SHA-256")
+            workspace = WorkspaceBinding(
+                identity, _absolute_path(workspace_raw["manifest_path"],
+                                         "workspace.manifest_path").resolve(), digest)
         return cls(
             document_extraction_max_windows=extraction_max_windows,
             document_extraction_numeric_windows=extraction_numeric_windows,
@@ -361,6 +389,7 @@ class ServiceConfig:
             ),
             heartbeat_path=_absolute_path(raw["heartbeat_path"], "heartbeat_path"),
             writer_socket=_absolute_path(raw["writer_socket"], "writer_socket"),
+            workspace=workspace,
             tick_seconds=_positive_number(raw["tick_seconds"], "tick_seconds"),
             projection_min_interval_seconds=_positive_number(
                 raw["projection_min_interval_seconds"], "projection_min_interval_seconds"
@@ -396,7 +425,32 @@ class ServiceConfig:
             raise ServiceConfigError("service config is unavailable or invalid") from exc
         if not isinstance(raw, Mapping):
             raise ServiceConfigError("service config must be an object")
-        return cls.from_mapping(raw)
+        parsed = cls.from_mapping(raw)
+        if parsed.workspace is not None:
+            from .workspace import (
+                WorkspaceError, load_workspace_manifest, validate_service_mapping_paths,
+            )
+            try:
+                workspace = load_workspace_manifest(parsed.workspace.manifest_path)
+            except WorkspaceError as exc:
+                raise ServiceConfigError("workspace manifest is invalid") from exc
+            if (workspace.workspace_id != parsed.workspace.workspace_id
+                    or workspace.content_hash != parsed.workspace.manifest_hash
+                    or workspace.manifest_path != parsed.workspace.manifest_path
+                    or workspace.config_path != config_path
+                    or workspace.state_dir / "core.sqlite" != parsed.core_db
+                    or workspace.state_dir / "scheduler.sqlite" != parsed.scheduler_db
+                    or workspace.state_dir / "dashboard-projection.sqlite" != parsed.projection_db
+                    or workspace.state_dir / "model-router.sqlite" != parsed.model_router_db
+                    or workspace.writer_socket != parsed.writer_socket
+                    or workspace.state_dir / "run" / "heartbeat.json" != parsed.heartbeat_path):
+                raise ServiceConfigError(
+                    "service config paths do not match the bound workspace manifest")
+            try:
+                validate_service_mapping_paths(raw, workspace)
+            except WorkspaceError as exc:
+                raise ServiceConfigError("service config contains an undeclared external path") from exc
+        return parsed
 
 
 def _file_signature(path: Path | None) -> tuple[Any, ...]:
