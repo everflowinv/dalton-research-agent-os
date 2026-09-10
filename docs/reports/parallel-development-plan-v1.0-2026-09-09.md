@@ -304,7 +304,7 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | w4-zero-base-review | `ZeroBaseReview`（月度 / 财报后，从零重问四件事）+ `no_change` / `revise` 的事后验证指标进 Q2 reflection | 派出 |
 | w4-insider-buyback-tracking（交付 `e529cf5`，5,475 项通过；未合；待审项 F5–F8）| owner 09-10：tracking 要含 filings，尤其管理层减持与回购。Form 4 派生上下文（占持股比、90 日聚合、10b5-1、是否已被预期）进判断层提示；新增 `buyback_disclosure` 事件（10-Q/10-K Item 2、8-K 授权）+ 派生上下文（均价 vs 现价、节奏、趋势、占市值 / FCF、是否只对冲稀释）；ownership 与 filings index 进常驻 daily tracking；capability map 写明美股回购只在 10-Q/10-K/8-K/电话会 | 派出 |
 | w4-hkex-filings（交付，5,534 项通过；未合；待审项 F11–F13，裁决 D4–D5）| 港股 `hkex-filings` 连接器：翌日回购申报、月报表、权益披露（DI）、公告索引；发 `buyback_disclosure` / `insider_transaction` / `ownership_change`；`company:hk-secucode:*` 仅在连接器内引入，universe 扩展留给 owner | 派出 |
-| w4-failure-classes | lane 公共失败分类 dependency_unavailable / content_refused / transient；dependency 类进 cockpit 运维待办并在依赖恢复后自动重试 + cockpit 概览「四格」 | 派出 |
+| w4-failure-classes（交付 `51c4b81`，5,442 项通过；未合；待审项 F14–F15，裁决 D6–D7）| lane 公共失败分类 dependency_unavailable / content_refused / transient；dependency 类进 cockpit 运维待办并在依赖恢复后自动重试 + cockpit 概览「四格」 | 派出 |
 
 ### 6c. 待派修复清单（owner 09-10：agent 返回后只记录、不动手、不派；限额恢复后按此派）
 
@@ -326,6 +326,10 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | F13 | w4-hkex-filings 开放问题 6 | 每日回购 tape 是全市场 xls（`SRRPT{YYYYMMDD}.xls`），现在每家公司各读一次；S4 对 A 股回购表指出过同样的浪费 | subagent：lane 层加「全市场表日缓存」：同一 `YYYYMMDD` 的 xls 只取一次（invocation 一次、artifact 哈希一次），五家公司各自过滤；A 股 `buybacks`（S4）复用同一缓存概念；测试：同日两家公司 = 一次 invocation | 已记录，未派 |
 | D4 | w4-hkex-filings 开放问题 3 | `company:hk-secucode:<code>.HK` 只作引用方案，mission universe 无港股名字，lane 报 `idle` | 并入既有 owner 裁决「mandate 扩展」：是否加入港股覆盖名单、加哪几家 | 待 owner |
 | D5 | w4-hkex-filings 开放问题 5 | 港股回购 / 权益披露行由交易所或证监会自己发布，tier 记 `primary_filing`，但 `HKEX_GRADE` 把它们挡在所有数字路径之外 | 主 agent 建议：翌日回购申报的股数 / 价格 / 金额是交易所发布的原始数字，允许以 filing 级进入回购上下文与 claim（不进财务报表行）；权益披露同理；月报表 PDF 数字继续不读 | 待 owner 点头 |
+| F14 | w4-failure-classes 未迁移项 | 16 条 signature-hold / cool-off lane 的失败已能分类但没接到失败账本，依赖类停摆只在 lane 行详情里可见 | subagent：逐条检查这 16 条 lane 的「hold 理由」是失败还是「输入未变」（后者不进账本）；是失败的走 `LaneFailureBudget` + 账本；每条 lane 一个测试「依赖类失败不消耗预算、依赖恢复即续」；cockpit 四格的停摆数随之覆盖全部 lane | 已记录，未派 |
+| F15 | w4-failure-classes 未映射项 | `gated:<gate_reason>`（document_extraction 的治理拒绝）没有归属，暂落 `transient` | 主 agent 决定：加第四类 `not_permitted`，不重试、不消耗预算、进 cockpit「待授权」而不是「停摆失败」（它本来就是 ungranted / unapproved 的同一件事）；`stop_reason` 契约同步加词并在 `contracts/` 与测试里钉住 | 已记录，未派 |
+| D6 | w4-failure-classes 开放问题 2 | 依赖探测间隔一刀切 30 分钟 | 主 agent 建议分层：配额类 30 分钟自动探测；会话类（AlphaEngine 桌面、Guidepoint 登录）探测一次失败后转 owner 待办、不再自动探测直到 cockpit 标记已恢复；owner 只需确认这个分法 | 待 owner 点头 |
+| D7 | w4-failure-classes 开放问题 3 | statements / sec_quarters 两条 lane 的失败预算在 SQL 里，迁移会改 P13「未归因 → 我们的配置」默认与 `attempt_voids` 语义 | 主 agent 建议：不迁移，只映射词表（作者现状），记入 ADR 备注 | 待 owner 点头 |
 | D1 | w4-insider-buyback 开放问题 2 | 8-K 正文不可取（`sec_earnings_release` 记录了原因），回购授权抽取只在 Core 已持有 8-K 文本时触发；要真正生效需要 `form: 8-K` 的 discovery spec = 新 plan 版本 + owner 发布 | 进 owner 最终裁决清单 | 待 owner |
 | D2 | w4-insider-buyback 开放问题 1 | 10-Q Item 5「Trading Arrangements」（10b5-1 计划的采用 / 终止，含人、日期、窗口、股数）比 Form 144 更强的「预期减持」信号，可解析 | 作为后续切片 W5 候选，不阻塞 | 待排期 |
 | F4 | 我给七个 agent 的恢复消息 | 消息里写的 `pgrep -fc` 在 macOS 不支持 `-c` | 无需修代码；agent 自行改用 `pgrep -f ... \| wc -l`。记录以免误判为环境故障 | 已记录 |
