@@ -6,6 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
 
 from dalton_core.call_budget import CallBudgetError
+from dalton_core.cockpit_model import CockpitModel
 from dalton_core.model_budget_configuration import call_budget_view, set_model_call_budget
 from dalton_core.model_selection import ModelSelectionError
 from tests import test_model_selection as fixtures
@@ -106,6 +107,43 @@ class BudgetConfigurationTests(fixtures.StateDirectoryCase):
                 self.save({"max_cost_usd": 3})
         self.assertEqual(before, self.event.read_bytes())
         self.assertEqual(history, list((self.root / "model-budget-revisions").glob("*.json")))
+
+    def test_five_uncatalogued_purposes_save_and_reach_their_consumer(self):
+        """An absent central default is a placeholder, not a disabled editor."""
+        base = self.root / "installed"
+        state = base / "state" / "dalton-core"
+        state.mkdir(parents=True)
+        config_dir = base / "config"
+        config_dir.mkdir()
+        initial = state / "initial-screen-model-config.json"
+        extraction = state / "document-extraction-model-config.json"
+        initial.write_text(json.dumps(self.model_config))
+        extraction.write_text(json.dumps(self.model_config))
+        (config_dir / "service.json").write_text(json.dumps({
+            "control": {"config": {"cockpit": {
+                "model_config_path": str(initial),
+            }}},
+        }))
+
+        for purpose, path in (
+            ("ask", initial), ("goal", initial), ("steer", initial),
+            ("draft", initial), ("document_extraction", extraction),
+        ):
+            with self.subTest(purpose=purpose):
+                before = json.loads(path.read_text())
+                view = call_budget_view(state, purpose)
+                self.assertTrue(view["editable"], view)
+                self.assertIsNone(view["effective"])
+                result = set_model_call_budget(
+                    state, purpose=purpose, budget={"max_cost_usd": 0.42},
+                    expected_config_hash=view["config_hash"], actor_ref=OWNER,
+                )
+                self.assertEqual(result["status"], "updated")
+                stored = json.loads(path.read_text())
+                self.assertEqual(stored["routing_policy_ref"],
+                                 before["routing_policy_ref"])
+                consumer = CockpitModel(stored, scheduler_db=base / "scheduler.sqlite")
+                self.assertEqual(consumer.budget_for(purpose)["max_cost_usd"], 0.42)
 
 
 class BudgetGovernanceTests(unittest.TestCase):
