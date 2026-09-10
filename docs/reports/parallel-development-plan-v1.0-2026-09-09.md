@@ -379,7 +379,7 @@ owner 已要求继续开发、并行 GPT-5.6 Sol、及时 commit/push。六条�
 | F10 | W5 待排：market-proxy claim 存储与生产者 |
 | F11–F12 | 完成；单一跨市场回购契约、累计期间、四位 .HK 价格路径 |
 | F13 | 可行性审查完成，实现待 acquisition/view 治理身份设计；未上线缓存 |
-| F14 | 16 条 lane 失败账本迁移待后续逐条交付 |
+| F14 | 实盘代码为 13 个未接协调器，已拆三组；见 `resume-failure-ledger-next-2026-09-10.md`，旧估计 16 条仅作历史 |
 | F15 | 完成 document extraction not_permitted；配置/mission/policy 更新恢复，cockpit 单列待授权 |
 | F16–F17 | 完成；30 天/财报触发、独立家族 verifier、在档正文及超限拒绝 |
 | F18–F19 | 完成；inventory 补 source_plan 行、ask 两种启用状态的契约同步 |

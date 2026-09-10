@@ -62,6 +62,8 @@ These need adapters around their existing time semantics rather than one mechani
 3. Research task: classify the failed child separately from the unchanged-plan idle hold. Dependency recovery may retry immediately; the normal idle signature still obeys `IDLE_HOLD` without appearing in ops.
 4. Crowd source: dependency outages park by named source and resume on a successful source probe; transient errors preserve the current finite cooldown; governance-hash change clears the affected authorization/configuration state. A source with no job writes no failure.
 
+Across all three batches, recovery tests must also keep the business-input digest unchanged while the external dependency becomes available: a successful governed probe must release the parked work. Merely testing a changed input signature does not prove recovery from a dependency outage. Missing authorization belongs in the separate `not_permitted` projection when wired, while remaining outside the failure backlog.
+
 ## Boundary to preserve
 
 The shared ledger should record failures, recovery, and terminal content decisions. It should not become a history of every scheduler no-op. In particular, `_quiet_signature`, `already_recorded`, `nothing_new`, no pending company, no due review, queue drained, and “no job for this source” are evidence that the scheduler is current, not evidence that work failed.

@@ -55,6 +55,7 @@ class LauncherCommandTests(unittest.TestCase):
 
 class RecordingLauncher:
     def __init__(self, root: Path) -> None:
+        self.state_dir = root
         self.tickets_dir = root
         self.starts: list[dict] = []
 

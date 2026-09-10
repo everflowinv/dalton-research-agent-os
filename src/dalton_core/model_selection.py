@@ -69,6 +69,8 @@ PURPOSE_LABELS: dict[str, str] = {
     "claim_index": "给结论打标签",
     "quality": "给产出打分",
     "event_judgement": "判断新发生的事",
+    "zero_base_review": "从零复盘研究判断",
+    "zero_base_review_verifier": "核验从零复盘",
     "thesis_reflection": "回看论点还成不成立",
     "dossier": "写公司档案",
     "debate_map": "整理市场在吵什么",

@@ -48,7 +48,7 @@ connector inventory `--check` 通过，`git diff --check` 通过。此前两次�
 
 - F2 补修同一比较期来自多份 filing 时的重复分部累计，按同一份最新 filing 选完整的合并值与分部组。
 - F6 保留 v1 原始字节，新增 v2；F7 月份行保留独立事件、共享一次 producer/verifier 判断，两个 prompt 都包含所有月份；别名费用为 0 并指回 primary，事后评分排除这些别名，避免同一决定重复计分。F8 薄覆盖的未匹配出售计划为 unknown。
-- F15 document extraction 的治理拒绝进入单独待授权账本与 cockpit 区域，重启后仍不重复调用；mission pointer、governance policy pointer 或相关配置文件改变时自动解除 hold 并重新检查。没有将其他十六条 lane 冒充已接失败账本。
+- F15 document extraction 的治理拒绝进入单独待授权账本与 cockpit 区域，重启后仍不重复调用；mission pointer、governance policy pointer 或相关配置文件改变时自动解除 hold 并重新检查。未将其他协调器冒充已接失败账本。
 - F16 以最近复盘后 30 天为周期，未复盘的新财报可提前触发并重置周期；F17 独立家族 verifier 看到在档 thesis/debate/claim 正文，拒绝错误引用、超大上下文或验证失败。producer/verifier 必须成对配置。
 - 主线补回归 277 项（10.077s）与最后的评分/权限恢复 57 项（0.346s）通过。完整主线测试已在 `48cc315` 冻结代码后启动；最终结果在下节记录。
 
@@ -61,7 +61,16 @@ connector inventory `--check` 通过，`git diff --check` 通过。此前两次�
 ## 下一里程碑
 
 1. **运行激活与产品验收优先**：按更新后的 owner runbook，用当前 live 新快照复演，核对 verifier pin、mission grants/checkpoints、producer/verifier switches 和 tracking policy v2；部署后验收五家公司首版 dossier、DebateMap 与一轮判断。历史快照通过不能代替当前 live 核对。
-2. **F14**：逐条迁移仍未接公共失败账本的 16 条 lane，区分输入未变的正常等待与真正依赖失败；依赖恢复回归随每条 lane 交付。
+2. **F14**：按当前代码盘点，逐条迁移 13 个仍未接公共失败账本的协调器（旧估计 16 条，详见 `resume-failure-ledger-next-2026-09-10.md` 的三组任务），区分输入未变的正常等待与真正依赖失败；依赖恢复回归随每条 lane 交付。
 3. **F13**：先定义全市场日 acquisition + 各公司 derived view 的受治理身份，再实现一次 invocation/artifact 缓存；详见 `resume-hk-cache-feasibility-2026-09-10.md`。当前 ticker 是治理请求身份的一部分，不能仅从 hash 中删除来假装去重。
 4. **HK 周分组新增待办**：独立审查指出 payload 的 ISO周+申报日标识不等于周级调度，HK 日披露仍逐事件判断。F11 按原清单保留该标识；下一轮需明确已判断日的新增记录如何增量归组，再实现稳定周级推理单元。简单按周合并未判断行也不能保证一周只调用一次，不以本轮 US 月份分组冒充已解决。
 5. **W5 / D1–D9**：market-proxy producer 与成本侧模板另开切片；HK universe、数字权威边界、60日慢背离等既有待裁决保持显式。周报投递与 Excel 导出仍后排。
+
+## 首次主线全量结果与修复
+
+冻结代码 `48cc315` 的完整 discovery 跑完 6,055 项 / 499.616s，结果为 1 failure、1 error、1 skipped：
+
+- `test_model_selection.PurposeCoverageTests` 找到 ZeroBase producer/verifier 两个新增 purpose 没有中文 label；补入 `model_selection.PURPOSE_LABELS`，避免配置页面显示内部词。
+- `test_extraction_window_settings.CoordinatorTests` 的旧 `RecordingLauncher` 未提供真实 launcher 已有的 `state_dir`，F15 新增持久账本初始化无法运行该测试；补齐 test double 的目录属性，不放宽生产代码要求。
+
+此前聚焦与复演通过不代表主线全量通过。本轮尚未 push，修复后重新运行完整 discovery，最终结果待下节。
