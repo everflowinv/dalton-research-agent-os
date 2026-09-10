@@ -365,6 +365,36 @@ class CockpitPlaneTests(unittest.TestCase):
         self.assertFalse(second["replayed"])
         self.assertEqual(adapter.calls, 2)
 
+    def test_configured_purpose_budget_is_effective_and_changes_work_identity(self) -> None:
+        mission = self.c.h.missions.active_mission("coverage-mission:us-it-services")
+        adapter = _ScriptedAdapter("{}", created_at=self.c.h.h.clock().isoformat())
+        first_config = {**self.c.model_config, "purpose_call_budgets": {
+            "ask": {"max_input_tokens": 90_000, "max_output_tokens": 900,
+                    "max_cost_usd": 0.9, "timeout_seconds": 90},
+            "goal": {"max_output_tokens": 700},
+        }}
+        first_model = CockpitModel(
+            first_config, scheduler_db=self.c.config.scheduler_db,
+            adapter_factory=lambda router: adapter, clock=self.c.h.h.clock)
+        self.assertEqual(first_model.budget_for("ask"), {
+            "max_input_tokens": 90_000, "max_output_tokens": 900,
+            "max_cost_usd": 0.9, "timeout_seconds": 90,
+        })
+        self.assertEqual(first_model.budget_for("goal")["max_output_tokens"], 700)
+        first = first_model.call(purpose="ask", request_id="budgeted", prompt="same",
+                                 mission=mission)
+        changed = {**first_config, "purpose_call_budgets": {
+            **first_config["purpose_call_budgets"],
+            "ask": {**first_config["purpose_call_budgets"]["ask"],
+                    "max_output_tokens": 901},
+        }}
+        second = CockpitModel(
+            changed, scheduler_db=self.c.config.scheduler_db,
+            adapter_factory=lambda router: adapter, clock=self.c.h.h.clock,
+        ).call(purpose="ask", request_id="budgeted", prompt="same", mission=mission)
+        self.assertNotEqual(first["work_order_ref"], second["work_order_ref"])
+        self.assertEqual(adapter.calls, 2)
+
     def test_setup_points_the_service_config_at_the_state(self) -> None:
         root = (self.c.root / "svc").resolve(); root.mkdir()
         config = root / "service.json"

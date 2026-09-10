@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .contracts import ResultEnvelope, WorkOrder
+from .call_budget import budget_fingerprint, resolve_call_budget
 from .document_extraction import validate_model_config
 from .model_accounting import ModelAccountingError, _route_estimate_micros
 from .model_router import ModelRouter, RoutingPolicyNotFound, independent_families
@@ -246,6 +247,7 @@ def _now() -> str:
 
 def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_ref: str,
                max_input_tokens: int, max_output_tokens: int, max_cost_usd: float, max_seconds: int,
+               budget_identity: str | None = None,
                created_at: str | None = None) -> WorkOrder:
     if purpose not in _PURPOSES:
         raise CockpitModelError("unknown cockpit model purpose")
@@ -255,6 +257,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                 "purpose": purpose, "request_id": request_id,
                 "mission_version_ref": mission_version_ref,
                 "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest()}
+    if budget_identity is not None:
+        identity["budget_fingerprint"] = budget_identity
     digest = content_hash(identity)
     at = created_at or _now()
     return WorkOrder(
@@ -322,14 +326,23 @@ class CockpitModel:
         self.max_cost_usd = max_cost_usd
         self.timeout_seconds = timeout_seconds
 
-    def _adapter(self, router: ModelRouter) -> Any:
+    def budget_for(self, purpose: str) -> dict[str, Any]:
+        """The effective immutable budget for one call purpose."""
+        return resolve_call_budget(self.config, purpose, defaults={
+            "max_input_tokens": self.max_input_tokens,
+            "max_output_tokens": self.max_output_tokens,
+            "max_cost_usd": self.max_cost_usd,
+            "timeout_seconds": self.timeout_seconds,
+        })
+
+    def _adapter(self, router: ModelRouter, *, timeout_seconds: int) -> Any:
         if self.adapter_factory is not None:
             return self.adapter_factory(router)
         config = self.config
         return OpenClawModelAdapter(
             config["broker_socket"], route_resolver=router.get_decision, auth_client_id=config["broker_client_id"],
             auth_key_provider=lambda: Path(config["broker_auth_key"]).read_bytes().strip(),
-            expected_agent_id=config["expected_agent_id"], timeout_seconds=float(self.timeout_seconds),
+            expected_agent_id=config["expected_agent_id"], timeout_seconds=float(timeout_seconds),
         )
 
     def call(self, *, purpose: str, request_id: str, prompt: str,
@@ -337,6 +350,19 @@ class CockpitModel:
              producer_route_decision_refs: Sequence[str] = ()) -> dict[str, Any]:
         """Return ``{text, replayed, cost_micros, cost_status, work_order_ref, ...}`` or raise."""
         producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
+        legacy_budget = {
+            "max_input_tokens": self.max_input_tokens,
+            "max_output_tokens": self.max_output_tokens,
+            "max_cost_usd": self.max_cost_usd,
+            "timeout_seconds": self.timeout_seconds,
+        }
+        effective = self.budget_for(purpose)
+        # Preserve the historical identity only when the effective wire is
+        # exactly the constructor contract. A packaged purpose default is a
+        # real budget change even when the installed JSON needs no new field.
+        budget_changed = effective != legacy_budget
+        explicit_budget = (budget_changed or "call_budget" in self.config
+                           or purpose in self.config.get("purpose_call_budgets", {}))
         if producer_refs:
             request_id = f"{request_id}:producer:{content_hash(list(producer_refs))[:16]}"
         # P13aa: the WorkOrder id is content-addressed on (purpose, request_id,
@@ -358,8 +384,9 @@ class CockpitModel:
         # perception snapshot's generated_at for exactly this reason.)
         created_at = mission.get("created_at") or self.clock().isoformat(timespec="microseconds")
         work = build_work(purpose=purpose, request_id=request_id, prompt=prompt, mission_version_ref=mission["id"],
-                          max_input_tokens=self.max_input_tokens, max_output_tokens=self.max_output_tokens,
-                          max_cost_usd=self.max_cost_usd, max_seconds=self.timeout_seconds,
+                          max_input_tokens=effective["max_input_tokens"], max_output_tokens=effective["max_output_tokens"],
+                          max_cost_usd=effective["max_cost_usd"], max_seconds=effective["timeout_seconds"],
+                          budget_identity=(budget_fingerprint(effective) if explicit_budget else None),
                           created_at=created_at)
         scope = {"mission_ref": mission["mission_ref"], "mission_version_ref": mission["id"],
                  "mission_version_hash": mission["content_hash"],
@@ -377,7 +404,7 @@ class CockpitModel:
         # longer than either. When the lease lapsed mid-call the completion was
         # refused with "attempt is not the current leased attempt" -- the work
         # was done and paid for, and the answer was thrown away.
-        lease_seconds = float(self.timeout_seconds) + _LEASE_GRACE_SECONDS
+        lease_seconds = float(effective["timeout_seconds"]) + _LEASE_GRACE_SECONDS
         # The lease bounds are a frozen versioned policy: the same
         # policy_version_id with different settings is a conflict, and the
         # shared "scheduler-policy-0.1" is sized for calls that finish in
@@ -434,6 +461,7 @@ class CockpitModel:
                         outcome = self._chained(
                             router, budget, work=work, purpose=purpose, tier=tier,
                             attempt=attempt, prompt_bytes=prompt_bytes, scope=scope,
+                            call_budget=effective,
                             producer_route_decision_refs=producer_refs,
                         )
                         result = outcome["result"]
@@ -452,8 +480,8 @@ class CockpitModel:
                         work, attempt_number=attempt, capability="research",
                         policy_version_ref=self.config["routing_policy_ref"],
                         credential_slot_refs=self.config["credential_slot_refs"], required_modalities=("text",),
-                        required_context_tokens=prompt_bytes + self.max_output_tokens,
-                        estimated_input_tokens=prompt_bytes, estimated_output_tokens=self.max_output_tokens,
+                        required_context_tokens=prompt_bytes + effective["max_output_tokens"],
+                        estimated_input_tokens=prompt_bytes, estimated_output_tokens=effective["max_output_tokens"],
                         idempotency_key=f"cockpit-route:{work.id}:{attempt}",
                         producer_family=next(iter(producer_families), None),
                     )["decision"]
@@ -472,7 +500,7 @@ class CockpitModel:
                                     work.id, attempt, WORKER_REF, lease["lease_token"], result,
                                     idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
                                 _raise_failure(failure)
-                        reserved = int(Decimal(str(self.max_cost_usd)) * 1_000_000)
+                        reserved = int(Decimal(str(effective["max_cost_usd"])) * 1_000_000)
                         decision = admit_day_ledger(
                             budget,
                             policy_version_id=self.config["budget_policy_ref"],
@@ -494,7 +522,9 @@ class CockpitModel:
                             failure = decision["failure"]
                         if admission is not None:
                             try:
-                                invocation, result = self._adapter(router).execute(work, route, profile)
+                                invocation, result = self._adapter(
+                                    router, timeout_seconds=effective["timeout_seconds"]
+                                ).execute(work, route, profile)
                                 cost_micros, cost_status = _cost_micros(invocation, route, profile, reserved)
                                 failure = None
                             except OpenClawModelAdapterError as exc:
@@ -557,7 +587,7 @@ class CockpitModel:
         return tier if tier in declared or override is not None else None
 
     def _chain_ceiling(self, router: ModelRouter, tier: str, prompt_bytes: int,
-                       *, purpose: str) -> int:
+                       *, purpose: str, call_budget: Mapping[str, Any]) -> int:
         """The most this attempt could cost, whichever link ends up serving.
 
         The day ledger identifies an admission by (work order, attempt, phase),
@@ -585,22 +615,24 @@ class CockpitModel:
             cost = profile["cost"]
             ceiling = max(ceiling, (
                 Decimal(str(cost["input_per_million_usd"])) * prompt_bytes
-                + Decimal(str(cost["output_per_million_usd"])) * self.max_output_tokens
+                + Decimal(str(cost["output_per_million_usd"])) * call_budget["max_output_tokens"]
             ) / Decimal(1_000_000))
         if ceiling <= 0:
-            ceiling = Decimal(str(self.max_cost_usd))
+            ceiling = Decimal(str(call_budget["max_cost_usd"]))
         return int((ceiling * 1_000_000).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
     def _chained(self, router: ModelRouter, budget: Any, *, work: WorkOrder, purpose: str,
                  tier: str, attempt: int, prompt_bytes: int,
                  scope: Mapping[str, Any],
+                 call_budget: Mapping[str, Any],
                  producer_route_decision_refs: Sequence[str] = ()) -> dict[str, Any]:
         """Walk the tier's chain under one reservation, settled by what served."""
 
         from .model_fallback_chain import classify_model_failure, execute_chain
 
         day = self.clock().astimezone(timezone.utc).date().isoformat()
-        ceiling = self._chain_ceiling(router, tier, prompt_bytes, purpose=purpose)
+        ceiling = self._chain_ceiling(
+            router, tier, prompt_bytes, purpose=purpose, call_budget=call_budget)
         admission: dict[str, Any] | None = None
         first_route_ref: str | None = None
         spend: dict[str, tuple[int, str]] = {}
@@ -636,7 +668,9 @@ class CockpitModel:
 
         def call(route: Mapping[str, Any], profile: Mapping[str, Any]) -> dict[str, Any]:
             try:
-                invocation, envelope = self._adapter(router).execute(work, route, profile)
+                invocation, envelope = self._adapter(
+                    router, timeout_seconds=call_budget["timeout_seconds"]
+                ).execute(work, route, profile)
             except OpenClawModelAdapterError as exc:
                 spend[route["id"]] = (0, "failed")
                 return {"outcome": "failed", "failure_class": classify_model_failure(exc),
@@ -660,9 +694,9 @@ class CockpitModel:
                 policy_version_ref=self.config["routing_policy_ref"],
                 credential_slot_refs=self.config["credential_slot_refs"],
                 required_modalities=("text",),
-                required_context_tokens=prompt_bytes + self.max_output_tokens,
+                required_context_tokens=prompt_bytes + call_budget["max_output_tokens"],
                 estimated_input_tokens=prompt_bytes,
-                estimated_output_tokens=self.max_output_tokens,
+                estimated_output_tokens=call_budget["max_output_tokens"],
                 idempotency_prefix=f"cockpit-route:{work.id}:{attempt}",
                 call=call, admit=admit,
                 producer_decision_refs=producer_route_decision_refs,
