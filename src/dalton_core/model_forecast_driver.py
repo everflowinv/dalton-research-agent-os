@@ -2224,6 +2224,13 @@ def validate_forecast_model(value: Mapping[str, Any]) -> dict[str, Any]:
     return wire
 
 
+def _statement_line_proof_row(row: Mapping[str, Any]) -> dict[str, Any]:
+    wire = dict(row)
+    wire["is_breakdown"] = bool(wire.get("is_breakdown")) or wire.get(
+        "dimension_axis") is not None
+    return wire
+
+
 def body_hash(body: Mapping[str, Any]) -> str:
     """What makes two models the same model: everything but when and who asked."""
 
@@ -2325,9 +2332,76 @@ class ForecastModelAuthority:
         # every other line too.
         from .economic_invariants import evaluate_forecast_model, gate
 
-        gate(self.store, evaluate_forecast_model(
-            wire, statement_rows=statement_rows, solver_results=solver_results),
+        invariant_report = evaluate_forecast_model(
+            wire, statement_rows=statement_rows, solver_results=solver_results)
+        gate(self.store, invariant_report,
             mission_version_ref=wire.get("mission_version_ref"))
+        statement_wire = sorted(
+            [dict(row) for row in statement_rows],
+            key=lambda row: (str(row.get("ingest_id") or ""),
+                             int(row.get("ordinal") or 0),
+                             str(row.get("concept") or "")),
+        )
+        proof_rows_are_typed = bool(statement_wire) and all(
+            row.get("ingest_id") is not None for row in statement_wire)
+        if proof_rows_are_typed:
+            ingest_ids = sorted({str(row["ingest_id"]) for row in statement_wire})
+            placeholders = ",".join("?" for _ in ingest_ids)
+            filing_rows = self.connection.execute(
+                "SELECT ingest_id,company_ref,accession FROM "
+                f"coverage_mission_statement_filings WHERE ingest_id IN ({placeholders})",
+                ingest_ids,
+            ).fetchall()
+            found = {str(row["ingest_id"]): row for row in filing_rows}
+            if set(found) != set(ingest_ids):
+                missing = sorted(set(ingest_ids) - set(found))
+                raise ForecastModelValidationError(
+                    f"filing proof statement rows name unknown ingest ids: {missing}")
+            wrong = sorted(ingest for ingest, row in found.items()
+                           if row["company_ref"] != company_ref)
+            if wrong:
+                raise ForecastModelValidationError(
+                    f"filing proof statement rows belong to another company: {wrong}")
+            supplied_accessions = {str(row["accession"]) for row in found.values()}
+            model_accessions = {
+                str(accession)
+                for driver in wire.get("drivers") or []
+                for cell in driver.get("history") or []
+                for accession in cell.get("accessions") or []
+            }
+            unknown_accessions = sorted(model_accessions - supplied_accessions)
+            if unknown_accessions:
+                raise ForecastModelValidationError(
+                    "filing proof model history cites accessions outside its exact "
+                    f"statement rows: {unknown_accessions}")
+            filed_values = {
+                (str(row.get("concept")), row.get("period_start"),
+                 row.get("period_end"), str(row.get("value")))
+                for row in statement_wire
+            }
+            for driver in wire.get("drivers") or []:
+                for cell in driver.get("history") or []:
+                    key = (str(cell.get("concept")), cell.get("period_start"),
+                           cell.get("period_end"), str(cell.get("value")))
+                    if key not in filed_values:
+                        raise ForecastModelValidationError(
+                            "filing reconciliation mismatch "
+                            f"company={company_ref} metric={driver.get('ref')} "
+                            f"period={cell.get('period_end')} value={cell.get('value')} "
+                            f"accessions={cell.get('accessions')}" )
+        statement_rows_hash = content_hash({"statement_rows": statement_wire})
+        filing_proof = None if not proof_rows_are_typed else {
+            "schema_version": "0.1", "model_version_ref": wire["id"],
+            "model_content_hash": wire["content_hash"],
+            "company_ref": company_ref, "inputs_hash": wire["inputs_hash"],
+            "statement_rows_hash": statement_rows_hash,
+            "statement_line_refs": [str(row["line_id"]) for row in statement_wire],
+            "statement_row_count": len(statement_wire),
+            "invariant_report": invariant_report.as_dict(),
+            "created_at": wire["created_at"],
+        }
+        if filing_proof is not None:
+            filing_proof["content_hash"] = content_hash(filing_proof)
         with self._transaction() as cur:
             if cur.execute(
                 "SELECT 1 FROM forecast_model_versions WHERE version_id=?", (version_id,)
@@ -2345,12 +2419,76 @@ class ForecastModelAuthority:
                     wire["created_at"],
                 ),
             )
+            if filing_proof is not None:
+                cur.execute(
+                    "INSERT INTO forecast_model_filing_proofs"
+                    "(model_version_id,company_ref,model_content_hash,inputs_hash,"
+                    "statement_rows_hash,record_json,content_hash,created_at) "
+                    "VALUES(?,?,?,?,?,?,?,?)",
+                    (wire["id"], company_ref, wire["content_hash"], wire["inputs_hash"],
+                     statement_rows_hash, canonical_json(filing_proof),
+                     filing_proof["content_hash"], wire["created_at"]),
+                )
         # Read back through the same path a reader would take, so a record that
         # cannot be read is a failed write rather than a stored surprise.
         stored = self.model(version_id)
         if stored["content_hash"] != wire["content_hash"]:
             raise ForecastModelConflict("forecast model did not read back as written")
         return {**stored, "status": "fresh"}
+
+    def filing_proof(self, version_ref: str) -> dict[str, Any] | None:
+        """The exact deterministic filing check stored with a model, if any."""
+        model = self.model(version_ref)
+        row = self.connection.execute(
+            "SELECT * FROM forecast_model_filing_proofs WHERE model_version_id=?",
+            (version_ref,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            wire = json.loads(row["record_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ForecastModelConflict("filing proof record_json is invalid") from exc
+        base = dict(wire)
+        asserted = base.pop("content_hash", None)
+        if (
+            canonical_json(wire) != row["record_json"]
+            or asserted != content_hash(base)
+            or asserted != row["content_hash"]
+            or wire.get("model_version_ref") != row["model_version_id"]
+            or wire.get("company_ref") != row["company_ref"]
+            or wire.get("model_content_hash") != row["model_content_hash"]
+            or wire.get("inputs_hash") != row["inputs_hash"]
+            or wire.get("statement_rows_hash") != row["statement_rows_hash"]
+            or wire.get("model_content_hash") != model["content_hash"]
+            or wire.get("inputs_hash") != model["inputs_hash"]
+            or (wire.get("invariant_report") or {}).get("output_ref") != model["id"]
+            or (wire.get("invariant_report") or {}).get("company_ref") != model["company_ref"]
+            or (wire.get("invariant_report") or {}).get("status") != "available"
+        ):
+            raise ForecastModelConflict("forecast model filing proof drifted")
+        refs = wire.get("statement_line_refs") or []
+        if not refs:
+            raise ForecastModelConflict("forecast model filing proof names no statement rows")
+        placeholders = ",".join("?" for _ in refs)
+        rows = self.connection.execute(
+            "SELECT * FROM coverage_mission_statement_lines "
+            f"WHERE line_id IN ({placeholders})", refs).fetchall()
+        statement_wire = sorted(
+            [_statement_line_proof_row(row) for row in rows],
+            key=lambda item: (str(item.get("ingest_id") or ""),
+                              int(item.get("ordinal") or 0),
+                              str(item.get("concept") or "")),
+        )
+        if ({str(row["line_id"]) for row in statement_wire} != set(refs)
+                or content_hash({"statement_rows": statement_wire})
+                != wire["statement_rows_hash"]):
+            raise ForecastModelConflict("forecast model filing proof source rows drifted")
+        from .economic_invariants import evaluate_forecast_model
+        replay = evaluate_forecast_model(model, statement_rows=statement_wire)
+        if replay.as_dict() != wire["invariant_report"]:
+            raise ForecastModelConflict("forecast model filing proof does not replay")
+        return wire
 
     def model(self, version_ref: str) -> dict[str, Any]:
         version_ref = _text(version_ref, "version_ref")

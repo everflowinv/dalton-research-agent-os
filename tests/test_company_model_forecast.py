@@ -48,6 +48,8 @@ from dalton_core.model_forecast import (
 )
 from dalton_core.model_forecast_driver import (
     ForecastModelAuthority,
+    ForecastModelConflict,
+    ForecastModelValidationError,
     actualize_model,
     build_forecast_model,
 )
@@ -330,11 +332,73 @@ class LaneStateTests(unittest.TestCase):
 
     def test_a_second_run_with_nothing_new_does_nothing(self):
         self.child()
+        authority = ForecastModelAuthority(self.store)
+        current = authority.latest(ACN)
+        proof = authority.filing_proof(current["id"])
+        self.assertEqual(proof["model_content_hash"], current["content_hash"])
+        self.assertEqual(proof["inputs_hash"], current["inputs_hash"])
+        self.assertEqual(proof["invariant_report"]["status"], "available")
+        self.assertGreater(proof["statement_row_count"], 0)
         summary = self.child()
         self.assertEqual(summary["status"], "idle")
         self.assertEqual(summary["forecast_status"], "nothing_to_model")
         self.assertEqual(
             len(ForecastModelAuthority(self.store).versions(ACN)), 1)
+
+    def test_filing_proof_rejects_unknown_ingest_and_wrong_accession(self):
+        filing = self.missions.statement_filings(ACN)[0]
+        rows = self.missions.statement_lines(filing["ingest_id"])
+        body = build_forecast_model(
+            self.missions.latest_company_model_spec(ACN),
+            build_model_inputs(self.missions, self.missions.latest_company_model_spec(ACN)),
+            mission_version_ref=self.mission["id"])
+        with self.assertRaises(ForecastModelValidationError):
+            ForecastModelAuthority(self.store).publish(
+                body, statement_rows=[{**rows[0], "ingest_id": "unknown"}])
+        body["drivers"][0]["history"][0]["accessions"] = ["wrong-accession"]
+        with self.assertRaises(ForecastModelValidationError):
+            ForecastModelAuthority(self.store).publish(body, statement_rows=rows)
+
+    def test_filing_proof_rejects_wrong_historical_value(self):
+        filing = self.missions.statement_filings(ACN)[0]
+        rows = self.missions.statement_lines(filing["ingest_id"])
+        specification = self.missions.latest_company_model_spec(ACN)
+        body = build_forecast_model(
+            specification, build_model_inputs(self.missions, specification),
+            mission_version_ref=self.mission["id"])
+        body["drivers"][0]["history"][0]["value"] = "999999999999"
+        with self.assertRaises(ForecastModelValidationError) as caught:
+            ForecastModelAuthority(self.store).publish(body, statement_rows=rows)
+        self.assertIn("filing reconciliation mismatch", str(caught.exception))
+        self.assertIn("value=999999999999", str(caught.exception))
+
+    def test_filing_proof_rejects_another_company_ingest(self):
+        filing = self.missions.statement_filings(ACN)[0]
+        rows = self.missions.statement_lines(filing["ingest_id"])
+        specification = self.missions.latest_company_model_spec(ACN)
+        body = build_forecast_model(
+            specification, build_model_inputs(self.missions, specification),
+            mission_version_ref=self.mission["id"])
+        self.store.connection.execute(
+            "DROP TRIGGER coverage_mission_statement_filings_no_update")
+        self.store.connection.execute(
+            "UPDATE coverage_mission_statement_filings SET company_ref=? "
+            "WHERE ingest_id=?", ("company:other", filing["ingest_id"]))
+        with self.assertRaises(ForecastModelValidationError) as caught:
+            ForecastModelAuthority(self.store).publish(body, statement_rows=rows)
+        self.assertIn("belong to another company", str(caught.exception))
+
+    def test_filing_proof_hash_tamper_fails_closed(self):
+        self.child()
+        authority = ForecastModelAuthority(self.store)
+        current = authority.latest(ACN)
+        self.store.connection.execute(
+            "DROP TRIGGER forecast_model_filing_proof_no_update")
+        self.store.connection.execute(
+            "UPDATE forecast_model_filing_proofs SET statement_rows_hash=? "
+            "WHERE model_version_id=?", ("0" * 64, current["id"]))
+        with self.assertRaises(ForecastModelConflict):
+            authority.filing_proof(current["id"])
 
     def test_a_new_claim_does_not_by_itself_produce_a_new_version(self):
         # The rule the owner set: versioning is a mechanism, not a trigger. A
