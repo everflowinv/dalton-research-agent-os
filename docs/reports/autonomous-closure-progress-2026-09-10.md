@@ -162,3 +162,16 @@ Owner reiterated that foundational research must be complete before higher-level
 - Removed two completed temporary rehearsal copies after checking their accepted reports and absence of running rehearsal processes. Reports and copied logs remain under /tmp/dalton-completed-rehearsal-evidence-20260910; no live backups were removed.
 
 Next: independent review, unified frozen acceptance and deployment under existing owner authority, then actual product acceptance. Human research/source checkpoints remain separate.
+
+
+## 21:34 UTC — foundational release preparation
+
+- Integrated controls/credentials/extraction/budget group: 199 tests passed. Integrated issuer/financial/planner group: 333 passed; later issuer missing-proof hardening has another 62 focused pass. Full frozen acceptance is still pending and will bind the final commit.
+- Independent review caught and closed both chain and single-pin paths that still settled unknown failed responses too cheaply. Corrections are append-only, capped at the original reservation, and consumed by daily policy, mission/outer, pool and reporting readers. Additional rollover/report tests pass.
+- Scheduler owned files now use WAL so an independent read snapshot cannot prevent another worker from committing. The three new concurrency/migration tests and 16 existing scheduler tests pass; live still uses DELETE until stopped-window deployment. Backups must use SQLite backup, not copy the main file alone.
+- Source-base review found queue target was treated as transcript issuer. New earnings-specific title-position and source-metadata proof blocks wrong-company material in the gate and all three extraction paths. Missing proof fails before a model call. General industry/multi-company material remains eligible for its existing subject checks.
+- The final readonly source-base evaluation gives CTSH 1/4 (FY2026-Q2), EPAM 2/4, DXC 4/4, ACN/IBM no proven anchor. It supersedes an earlier incomplete CTSH attribution-row audit that reported 0/4. ACN/EPAM/IBM historical passed screens conflict with current prerequisites; exact bound review/reopen packets are being prepared, without rewriting prior gate facts or signing for the owner.
+- Controlled host repair has passed copied real-module/no-network and local native lifecycle tests. The existing managed patch runner's entire predeployment check passed. Private stopped-window install/rollback scripts passed actual-bundle failure injection; original Dalton main/DeepSeek files remain untouched.
+- A deterministic operator redrive tool is being finalized: actual three-artifact installed host hashes, exact old result/work/mission/cost authority, conservative correction before one fresh budgeted request, no bulk cache deletion. Independent review rejected writable dry-run, marker-only host proof, missing bindings and concurrency gaps; those were fixed before acceptance.
+
+Next: final freeze/full suite/wheel/current-copy rehearsal, deploy Dalton and the necessary host transport repair, verify exact bytes plus preserved model choices/budgets/credential admission and mission v14, then use narrowly reviewed recovery records and observe real products. Higher investment methods remain deferred.
