@@ -183,6 +183,8 @@ class CockpitChainTests(unittest.TestCase):
                 ("result_envelope_hash", "0" * 64),
                 ("terminal_state", "succeeded"),
                 ("content_hash", "0" * 64),
+                ("result_envelope_json", "[]"),
+                ("result_envelope_json", "null"),
             ]
             envelope = json.loads(original["result_envelope_json"])
             envelope["work_order_ref"] = "work:cockpit-plan-" + "f" * 32

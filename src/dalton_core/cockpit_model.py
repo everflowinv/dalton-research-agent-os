@@ -157,6 +157,7 @@ def model_failure_trace(exc: BaseException) -> dict[str, Any] | None:
     copied = dict(trace)
     if (
         copied["schema_version"] != "0.1"
+        or not isinstance(copied["purpose"], str)
         or copied["purpose"] not in _PURPOSES
         or not isinstance(copied["base_request_id"], str)
         or not 1 <= len(copied["base_request_id"]) <= 512
@@ -187,6 +188,8 @@ def _failed_work_trace(scheduler: Any, work: WorkOrder, *, purpose: str,
     try:
         formal = dict(row)
         envelope_wire = json.loads(formal["result_envelope_json"])
+        if not isinstance(envelope_wire, Mapping):
+            return None
         envelope_hash = content_hash(envelope_wire)
         formal_wire = {
             "id": formal["result_record_id"],

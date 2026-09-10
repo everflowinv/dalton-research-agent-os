@@ -450,6 +450,15 @@ class VerifierTests(JudgementHarness):
         judged = judge(context, model=model, mission=self.mission, request_id="r1")
         self.assertIsNone(judged["failure_trace"])
 
+        invalid = {"schema_version": "0.1", "purpose": [PURPOSE],
+                   "base_request_id": "r1", "work_request_id": "r1",
+                   "work_order_ref": "work:cockpit-event_judgement-" + "c" * 32,
+                   "work_order_hash": "a" * 64,
+                   "formal_result_envelope_hash": "b" * 64}
+        model = FakeModel([CockpitModelError("host failed", failure_trace=invalid)])
+        judged = judge(context, model=model, mission=self.mission, request_id="r1")
+        self.assertIsNone(judged["failure_trace"])
+
 
 class LedgerTests(JudgementHarness):
     def judged(self, body=None):
