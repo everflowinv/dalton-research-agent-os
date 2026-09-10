@@ -2,18 +2,17 @@
 
 更新日期：2026-09-11
 
-## 下一步（按顺序，2026-09-11 凌晨重写）
+## 下一步（2026-09-10 恢复开发，以本节覆盖此前暂停安排）
 
-详细账在 `docs/reports/parallel-development-plan-v1.0-2026-09-09.md` 第 6 节（6b 切片、6c 待派修复 F1–F19 与待裁决 D1–D9）。
+1. **恢复 W4 集成与修复**：owner 本轮要求继续开发、尽量并行、允许 GPT-5.6 Sol subagent，并及时 commit / push。三个独立新 worktree 分别修 F1–F3（预测）、F6–F8（内幕交易 / 回购）、F16–F17（ZeroBaseReview）；主 agent 审读报告、按 hkex → insider → framework → failure → zero-base → rehearsal-2 集成。
+2. **合并后补契约与运行修复**：F11 回购 payload 统一、F12 港股 ticker、F9 分类先于需求段、F15 治理拒绝分类、F18 来源计划补行、F19 ask policy；F13 日缓存与 F14 lane 失败账本按依赖安排。完整历史清单仍在并行计划 §6c。
+3. **验证后 push**：先 import / 聚焦测试，再合并版本全量测试；仅在全量通过后 push main。已有本地 11 个提交保留。测试日志与交付结果写入本轮报告。
+4. **部署前复演**：合并后的 main 使用 `--source-root` 重跑 fail-closed 复演，再按 owner 步骤 v2 处理部署 / mission / policy。D1–D9 未裁决事项仍保留，不把开发授权当作扩 universe 或重签治理的决定。
+5. **上线后的产品验收**：五家公司各出第一版档案与 DebateMap，判断层跑一轮，优先于 W5 新切片。周报投递与 Excel 导出继续排在最后。
 
-1. **按 6c 派修，先 F1 / F11 / F5 系列。** F1：大脑带外的预测修订传不进 `outside_band` 理由会在发布时被拒；F11：两条线各自定义了 `buyback_disclosure`，契约要统一；F5：五条分支在判断层、cockpit、bootstrap、演练脚本上同文件，合并顺序已写明。
-2. **合并六条 W4 分支与复演 2 分支**（顺序：hkex → insider-buyback → framework → failure-classes → zero-base → rehearsal-2），每次调和后 import 检查，全量绿再 push。
-3. **用 `--source-root` 对合并后的 main 重跑复演**，然后部署；owner 步骤见 `owner-steps-after-deploy-v2.0-2026-09-10.md`（mission 版本、policy 重签、gateway reload 由 owner 签）。
-4. **owner 裁决 D1–D9**（8-K discovery spec、港股覆盖名单与数字准入、AlphaEngine 配额与抽取节奏、探测分层、复盘进 deliverable 等）。
-5. **部署后一周只做一件事：让五家公司各出第一版档案与 DebateMap，判断层真正跑一轮。** 这是 Chem 复盘的第一条教训（`chem-retrospective-implications-v1.0-2026-09-10.md` §3.1）。
-6. **W5 候选**（不阻塞）：market-proxy claims + 成本侧模板（F10 / D3）、10-Q Item 5 交易安排（D2）、F14 十六条 lane 接失败账本。
-7. **沿用的旧待办**：roic 整站 403 的两条治理记录（撤回或换 transport）；ACN 两份卡在 3 次上限的 filing 要看 result envelope；discovery 的公司归属仍是检索准度问题；contested 指标要上 cockpit；三个连接器身份模块的公共描述符。
-8. **owner 搁置到最后**：周报投递（P15c/P15e）、Excel 导出（P13-M5，导出公式而非数值，每个硬编码格一行来源）。
+## 2026-09-10 恢复开发
+
+已详细审读 PROJECT_STATUS、并行计划 §6b/6c、经济不变量报告与 Chem 复盘，继续审读模型选择、既有资料及未合分支报告。原工作区干净，`main=694471c`，fetch 后领先 origin/main 11 个提交。新建独立 worktree 防止接管旧 agent 的写入目录；本轮模型使用 GPT-5.6 Sol，不沿用历史 Claude 作者署名。当前尚未完成合并验证、push 或部署。
 
 ## 当前状态速览（2026-09-09 收盘）
 

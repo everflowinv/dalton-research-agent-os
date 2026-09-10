@@ -250,6 +250,9 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 
 ## 6. 进度账（随时更新）
 
+**2026-09-10 本轮恢复**：owner 要求继续开发，允许 GPT-5.6 Sol 并行；此前“限额恢复前只记录、不动手”暂停结束。主 agent 集成，三个新的隔离 worktree 修 F1–F3、F6–F8、F16–F17；不复用旧 agent 工作区，不使用不实的 Claude commit 署名。全量绿再 push 的门槛保留，D1–D9 仍是待裁决。
+
+
 | 日期 | 事项 | 状态 |
 | --- | --- | --- |
 | 09-09 | 调查：yfinance、研报 consensus 素材、接线热点、测试基线 | 完成 |
