@@ -97,6 +97,7 @@ from .analyst_journal import (
     AnalystJournalError,
     AnalystJournalValidationError,
 )
+from .conviction_call import ConvictionCallAuthority
 from .document_extraction import DocumentExtractionService, validate_model_config
 from .transcript_candidate_staging import (
     stage_transcript_qualitative_candidate, TranscriptCoreAuthorityResolver,
@@ -408,6 +409,14 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     # the authority refuses anything else and the actor is bound here rather
     # than supplied by the caller.
     "record_analyst_journal_entry",
+    # P15d: the owner answers one conviction call. Automation may write the
+    # proposal and may never write the decision, which is the whole of the
+    # separation ADR-0007 draws around a thesis and this slice draws around a
+    # call: the machine says "here is what I think and where I think the
+    # market is wrong", and a person says yes, no, or not yet. Listed here and
+    # nowhere else, so an automation principal is refused before the operation
+    # runs; the authority and the schema refuse a non-``human:`` actor again.
+    "decide_conviction_call",
 })
 # Mission stage bookkeeping is human-governed but must also be reachable by
 # the mission's declared ``automation:`` principal; the CoverageMission
@@ -684,6 +693,12 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "target_ref", "target_hash", "target_kind", "verdict", "company_ref",
         "note", "score_override", "idempotency_key", "actor_ref",
     }),
+    # P15d. ``proposal_hash`` is required rather than optional: a decision is
+    # about the exact bytes it was shown, and a decision that did not name them
+    # could be inherited by something else later.
+    "decide_conviction_call": frozenset({
+        "proposal_ref", "proposal_hash", "decision", "reason", "actor_ref",
+    }),
     "record_backlog_question": frozenset({"mandate_version_ref", "company_ref", "question", "answer_criteria", "source_refs", "actor_ref", "idempotency_key"}),
     "publish_probe_template": frozenset({"template_ref", "capability_ref", "operation", "runtime_profile_ref", "parameter_contract", "output_contract_ref", "verifier_ref", "permission_scope", "declared_side_effects", "cost", "actor_ref", "prior_version_ref"}),
     "create_bounded_planner_loop": frozenset({"loop_ref", "question_version_ref", "template_bindings", "required_coverage_items", "budget", "actor_ref", "prior_version_ref"}),
@@ -936,6 +951,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "stage_document_extraction": "actor_ref",
     "record_mission_stage": "actor_ref",
     "record_analyst_journal_entry": "actor_ref",
+    "decide_conviction_call": "actor_ref",
     "publish_forecast_line": "actor_ref",
     "publish_probe_template": "actor_ref",
     "create_bounded_planner_loop": "actor_ref",
@@ -1251,6 +1267,7 @@ class WriterServer:
         self._weekly_brief: WeeklyBriefAuthority | None = None
         self._research_doctrine: ResearchDoctrineAuthority | None = None
         self._analyst_journal: AnalystJournalAuthority | None = None
+        self._conviction_calls: ConvictionCallAuthority | None = None
         self._model_forecast: ModelForecastAuthority | None = None
         self._forecast_reconciliation: ForecastReconciliationAuthority | None = None
         self._research_constitution: ResearchConstitutionAuthority | None = None
@@ -1529,6 +1546,11 @@ class WriterServer:
         # and nothing else; an entry only ever arrives from a human principal
         # through record_analyst_journal_entry.
         self._analyst_journal = AnalystJournalAuthority(self._store)
+        # P15d: the conviction-call authority. Opening it installs its
+        # append-only schema and nothing else; a proposal only ever arrives
+        # from the lane's child, and a decision only ever from a human
+        # principal through decide_conviction_call.
+        self._conviction_calls = ConvictionCallAuthority(self._store)
         self._model_forecast = ModelForecastAuthority(self._store)
         self._forecast_reconciliation = ForecastReconciliationAuthority(self._store)
         self._research_constitution = ResearchConstitutionAuthority(self._store)
@@ -1750,6 +1772,7 @@ class WriterServer:
         self._weekly_brief = None
         self._research_doctrine = None
         self._analyst_journal = None
+        self._conviction_calls = None
         self._model_forecast = None
         self._forecast_reconciliation = None
         self._research_constitution = None
@@ -2428,6 +2451,20 @@ class WriterServer:
         if self._analyst_journal is None:
             raise WriterServerError("analyst-journal authority is unavailable")
         return self._analyst_journal.add(**dict(p))
+
+    def _op_decide_conviction_call(self, p: Mapping[str, Any]) -> Any:
+        """P15d: one person's answer to one call, bound to the bytes they read.
+
+        ``actor_ref`` has already been replaced by the authenticated
+        principal's, and the operation is human-governance only, so an
+        automation principal is refused before this runs. The authority refuses
+        a non-``human:`` actor a second time and the schema a third, because
+        the object exists to record that a *person* decided.
+        """
+
+        if self._conviction_calls is None:
+            raise WriterServerError("conviction-call authority is unavailable")
+        return self._conviction_calls.decide(**dict(p))
 
     def _op_publish_doctrine_pack(self, p: Mapping[str, Any]) -> Any:
         if self._research_doctrine is None:
