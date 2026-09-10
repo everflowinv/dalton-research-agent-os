@@ -140,6 +140,20 @@ class CockpitChainTests(unittest.TestCase):
                          ["profile:gpt-6-astra", "profile:claude-fable-5-1"])
         self.assertIn("claude", answer["text"])
 
+    def test_single_pin_broker_busy_is_settled_as_not_sent(self) -> None:
+        adapter = BusyThenAvailableAdapter({})
+        with self.assertRaisesRegex(CockpitModelError, "broker concurrency"):
+            self._model(adapter, policy_version_ref=self.pinned_policy).call(
+                purpose="plan", request_id="pinned-busy", prompt="draft",
+                mission=self.mission,
+            )
+        self.assertEqual(adapter.served, ["profile:gpt-6-astra"])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            settlement = ledger.connection.execute(
+                "SELECT actual_micros FROM thesis_impact_day_settlements"
+            ).fetchone()
+        self.assertEqual(settlement[0], 0)
+
     def test_post_send_timeout_halts_and_keeps_the_full_reservation(self) -> None:
         adapter = ChainAdapter({"profile:gpt-6-astra": BrokerTimeout("recv timed out")})
         with self.assertRaises(CockpitModelError):

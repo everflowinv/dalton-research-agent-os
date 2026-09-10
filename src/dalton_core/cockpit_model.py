@@ -769,9 +769,16 @@ class CockpitModel:
                                 if result.status == "succeeded":
                                     failure = None
                                 else:
-                                    if cost_status != "actual":
-                                        cost_micros, cost_status = reserved, "reserved"
                                     error = result.error or {}
+                                    code = str(error.get("code", "")).upper()
+                                    broker_local_not_sent = code in {
+                                        "BUSY", "CONCURRENCY_LIMIT",
+                                        "BROKER_CONCURRENCY_LIMIT",
+                                    }
+                                    if broker_local_not_sent:
+                                        cost_micros, cost_status = 0, "failed"
+                                    elif cost_status != "actual":
+                                        cost_micros, cost_status = reserved, "reserved"
                                     failure = str(error.get("message") or "the model call failed")
                             except OpenClawModelAdapterError as exc:
                                 result = _failure(work, "MODEL_ADAPTER_REJECTED_OR_FAILED", route["id"])
