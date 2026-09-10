@@ -174,6 +174,7 @@ REGISTRY_LANE_LABELS = {
     "mission_catalyst_calendar": "记下公司下次开口的日子",
     "company_model_spec": "写公司模型的规格",
     "company_model_forecast": "算预测行",
+    "forecast_sensitivity": "算哪些假设最要紧、历史上摆到过哪里",
     "claim_index": "给结论建索引",
     "research_plan": "决定下一步做什么",
     "initial_screen": "写初步筛选",

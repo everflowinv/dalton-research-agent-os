@@ -70,6 +70,7 @@ SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
     ("extraction_backlog_schema.sql", None),
     ("forecast_driver_schema.sql", None),
     ("forecast_reconciliation_schema.sql", None),
+    ("forecast_sensitivity_schema.sql", None),
     ("market_price_schema.sql", None),
     ("mission_deliverable_schema.sql", None),
     ("model_forecast_schema.sql", None),

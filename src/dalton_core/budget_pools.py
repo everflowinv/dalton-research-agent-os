@@ -136,6 +136,7 @@ LANE_POOLS: dict[str, str] = {
     "dispatch_mission_market_prices": "coverage",
     "dispatch_company_model_spec": "coverage",
     "dispatch_company_model_forecast": "coverage",
+    "dispatch_forecast_sensitivity": "coverage",
     "dispatch_research_plan": "coverage",
     "dispatch_initial_screen": "coverage",
     "dispatch_sales_notes_feed": "coverage",
