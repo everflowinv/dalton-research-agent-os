@@ -8,10 +8,12 @@ Owner 要求持续开发，不以单个里程碑完成为停点；写代码最�
 
 | 负责人 | 当前代码切片 | 工作分支 |
 | --- | --- | --- |
-| Sol / forecast_fixes | SEC 8-K owner 批准脚本边界修复 | `sec8k-owner-packet` |
-| Sol / zero_base_fixes | DebateMap mission 绑定与零模型重绑定 | `debate-map-mission-binding` |
-| Sol / insider_fixes | 档案逐章节实际输入、只读重建与部分更新验收 | `dossier-input-fingerprint` |
+| Sol / forecast_fixes | Dalton 模型系列声明、目录迁移与真实副本验证 | `dynamic-broker-catalog` |
+| Sol / zero_base_fixes | Cockpit 全环节选择、旧 pin 消费与声明界面 | `cockpit-model-selection` |
+| Sol / insider_fixes | 抽取、thesis-impact 与 agenda 旧调用路径切换 | `debatmap-binding-review` |
 | 主代理 | wave 3 验收 push，wave 4 集成与交叉审查 | `continuous-integration-wave4` |
+
+**当前 wave 4**：动态目录已能迁移同一 profile 的模型别名、价格与容量，保留旧版本；真实 live 副本的 11 项角色配置路由通过，无模型调用。Cockpit 已补生成／校验独立 purpose、13 个配置注册、配置写入失败回滚与重试；旧抽取、thesis-impact、agenda 调用路径及模型系列声明 UI 正在补齐。不能把配置文件重指向等同于实际调用已切换。详见 [wave 4 进度](reports/continuous-wave4-progress-2026-09-10.md)。
 
 **最新验收点 `d21de7d`：6,184 项 / 499.999s 全量通过（1 skip）**；wheel 430 文件匹配。当前 live 副本 67 schemas 通过，但 DeepSeek 不可变 profile route 冲突令 catalog sync 失败，激活/启动按预期跳过，不能称部署通过。详见 [wave 3 验收](reports/continuous-wave3-integration-2026-09-10.md)。原 main 外部改动保留，开发结果推独立分支。
 

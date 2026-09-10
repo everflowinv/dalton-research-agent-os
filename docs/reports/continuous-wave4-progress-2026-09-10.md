@@ -5,3 +5,13 @@ Owner clarification: the other session updates DeepSeek generally; Dalton compat
 In integration: typed artifact audit, DebateMap mission binding, per-unit dossier inputs with read-only reconstruction, and SEC 8-K owner-install helper. In review: truthful DebateMap schema migration, dynamic model catalog semantics/independence, complete Cockpit purpose/config coverage, persisted public metadata declarations, and real copied-state routing checks. Wave 3 remains the latest full-suite checkpoint: d21de7d, 6,184 tests passed, pushed with report456ed54 to continuous-integration-wave3. Wave 4 is not yet full-suite validated or deployed.
 
 Next: merge remaining catalog/Cockpit repairs, run focused real routing and artifact tests, freeze a new full-suite checkpoint, rehearse against the current host catalog, rebuild the owner packet, and request only the concrete signing/deployment actions still required. The old request for the other session to provide a Dalton migration commit is superseded.
+
+## Integrated checkpoint (not a release)
+
+- Current broker route, price, context and credentials now append profile versions; no replacement DeepSeek alias is baked into runtime logic. Catalog observation expiry renews append-only and remains idempotent between expiries.
+- Real live-router backup + current catalog + production setup routed all 11 requested roles without broker/model calls. DeepSeek's new alias has unknown lineage until a route-bound Dalton declaration is approved; see `live-copy-model-route-acceptance-2026-09-10.md`.
+- Cockpit explicitly registers 13 known model config filenames, separates seven additional verifier purposes, preflights all present files, rolls back partial file replacement, and supports retry after immutable publication. Actual producer references determine independence; bootstrap brain defaults no longer prevent valid verifier choices.
+- SEC helper validates exact signed inputs and target conflicts; its 7 tests plus 4 proposal tests were the reported 11. Independent review adds two helper cases and rollback of newly created outputs on late filesystem failure. Prepare only was run against live inputs.
+- Focused integrated artifact/catalog checks: 323 passed; verifier selection/fallback: 109 passed; availability/catalog: 19 passed. These runs precede subsequent metadata/UI/legacy path changes and are not a full-suite claim.
+
+Remaining acceptance: complete route-bound metadata validation + human Cockpit declaration, old single-pin overrides, extraction/thesis-impact/agenda runtime selection, then freeze code for full suite/wheel/current-live activation rehearsal. No live deployment, signing, gateway configuration mutation or paid calls performed.
