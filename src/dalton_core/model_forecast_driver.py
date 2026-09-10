@@ -465,7 +465,11 @@ def build_drivers(table: Mapping[str, Any]) -> list[dict[str, Any]]:
     drivers: dict[str, dict[str, Any]] = {}
     order: list[str] = []
     for row in table.get("rows") or []:
-        kind = "revenue" if row.get("kind") == "revenue_driver" else "expense"
+        kind = (
+            "revenue"
+            if row.get("kind") in ("revenue_driver", "revenue_anchor")
+            else "expense"
+        )
         concept = row.get("basis_concept")
         if not concept:
             ref = f"row:{row['ref']}"

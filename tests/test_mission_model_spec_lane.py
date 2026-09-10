@@ -22,10 +22,11 @@ class FakeLauncher:
         self.started: list[dict] = []
         self.raise_on_start: Exception | None = None
 
-    def start(self, *, company_ref, state_hash):
+    def start(self, *, company_ref, state_hash, task_hash=None):
         if self.raise_on_start is not None:
             raise self.raise_on_start
-        self.started.append({"company_ref": company_ref, "state_hash": state_hash})
+        self.started.append({"company_ref": company_ref, "state_hash": state_hash,
+                             "task_hash": task_hash})
         ticket_id = f"company-model-spec-run:{len(self.started):024d}"
         self.tickets[ticket_id] = {
             "id": ticket_id, "status": "running", "summary": None,
@@ -73,7 +74,7 @@ class FakeMissions:
 
         self.lines[company_ref] = self.lines[company_ref] + [concept]
 
-    def company_model_spec_for_state(self, company_ref, state_hash):
+    def company_model_spec_for_state(self, company_ref, state_hash, *, task_hash=None):
         return self.specs.get((company_ref, state_hash))
 
     def record(self, company_ref, state_hash):

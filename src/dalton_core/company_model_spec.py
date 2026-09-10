@@ -58,8 +58,8 @@ from .driver_template import (
 )
 from .store import content_hash
 
-SCHEMA_VERSION = "0.1"
-TASK_REF = "task:company-model-spec:0.1"
+SCHEMA_VERSION = "0.2"
+TASK_REF = "task:company-model-spec:0.2"
 
 MAX_REVENUE_DRIVERS = 8
 MAX_EXPENSE_LINES = 14
@@ -125,15 +125,23 @@ _BASIS = {
 
 OUTPUT_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "title": "CompanyModelSpecV0.1",
+    "title": "CompanyModelSpecV0.2",
     "type": "object",
     "additionalProperties": False,
     "required": [
-        "schema_version", "assessment", "revenue_drivers", "expense_lines",
+        "schema_version", "assessment", "revenue_anchor_concept",
+        "revenue_drivers", "expense_lines",
         "forecast_statements", "operating_metrics", "horizon",
     ],
     "properties": {
-        "schema_version": {"const": "0.1"},
+        "schema_version": {"const": "0.2"},
+        "revenue_anchor_concept": {
+            "type": "string", "minLength": 1, "maxLength": 160,
+            "description": (
+                "The exact consolidated filed revenue concept used only as "
+                "the deterministic calculation anchor. It is not an economic driver."
+            ),
+        },
         "assessment": {
             "type": "string", "minLength": 1, "maxLength": 1200,
             "description": (
@@ -323,6 +331,9 @@ def build_prompt(state: Mapping[str, Any]) -> str:
         "1. What actually drives this company's revenue? Volume, price, mix, a "
         "segment, a contract book, something outside the company. Not "
         "'revenue' -- what moves it.\n"
+        "Separately, return revenue_anchor_concept: the exact consolidated "
+        "filed revenue concept used to start the arithmetic. It is not an "
+        "economic driver and must not be described as one.\n"
         "2. What are its costs, and how do they behave? Split a filed line "
         "when its parts behave differently; an expense that follows revenue "
         "and one that follows headcount are different lines even when the "
@@ -431,7 +442,7 @@ def spec_from_response(
 
     body = parse_response(response)
     if body.get("schema_version") != SCHEMA_VERSION:
-        raise CompanyModelSpecError("model specification schema_version is not 0.1")
+        raise CompanyModelSpecError("model specification schema_version is not 0.2")
     company_ref = state.get("company_ref")
     if not isinstance(company_ref, str) or not company_ref:
         raise CompanyModelSpecError("company state carries no company_ref")
@@ -443,6 +454,10 @@ def spec_from_response(
         raise CompanyModelSpecError(
             "this company has no filed statements to model against"
         )
+    revenue_anchor = _basis(
+        body.get("revenue_anchor_concept"), concepts, "revenue_anchor_concept")
+    if revenue_anchor is None:
+        raise CompanyModelSpecError("revenue_anchor_concept must name a filed concept")
 
     drivers: list[dict[str, Any]] = []
     driver_refs: set[str] = set()
@@ -602,6 +617,7 @@ def spec_from_response(
         "company_ref": company_ref,
         "state_hash": state.get("state_hash"),
         "assessment": _text(body.get("assessment"), "assessment", limit=1200),
+        "revenue_anchor_concept": revenue_anchor,
         "revenue_drivers": drivers,
         "expense_lines": expenses,
         "forecast_statements": [statements[name] for name in STATEMENTS],

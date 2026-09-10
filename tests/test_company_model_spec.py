@@ -60,7 +60,8 @@ STATE = {
 
 def _spec(**overrides):
     body = {
-        "schema_version": "0.1",
+        "schema_version": "0.2",
+        "revenue_anchor_concept": "us-gaap:Revenues",
         "assessment": (
             "Accenture is a people business: revenue is billable heads times "
             "realised rate, and margin turns on utilisation."
@@ -272,11 +273,27 @@ class CompanyModelSpecTests(unittest.TestCase):
         import json
 
         fenced = "```json\n" + json.dumps(_spec()) + "\n```"
-        self.assertEqual(parse_response(fenced)["schema_version"], "0.1")
+        self.assertEqual(parse_response(fenced)["schema_version"], "0.2")
 
     def test_the_wrong_schema_version_is_refused(self):
         with self.assertRaises(CompanyModelSpecError):
-            self.verify(_spec(schema_version="0.2"))
+            self.verify(_spec(schema_version="0.1"))
+
+    def test_the_calculation_anchor_is_separate_from_economic_drivers(self):
+        body = _spec(revenue_drivers=[{
+            "ref": "heads", "label": "Billable heads", "kind": "volume",
+            "basis_concept": None, "unit": "headcount",
+            "because": "Capacity moves delivered revenue.",
+        }], expense_lines=[{
+            **_spec()["expense_lines"][0], "driver_ref": "heads",
+        }])
+        verified = self.verify(body)
+        self.assertEqual(verified["revenue_anchor_concept"], "us-gaap:Revenues")
+        self.assertIsNone(verified["revenue_drivers"][0]["basis_concept"])
+
+    def test_an_anchor_not_in_the_filed_vocabulary_is_refused(self):
+        with self.assertRaises(CompanyModelSpecError):
+            self.verify(_spec(revenue_anchor_concept="us-gaap:SalesRevenueNet"))
 
     def test_the_prompt_carries_the_frame_and_the_company(self):
         prompt = build_prompt(STATE)
@@ -345,6 +362,14 @@ class CompanyModelSpecStorageTests(unittest.TestCase):
         self.assertEqual(self.record(moved)["status"], "fresh")
         self.assertEqual(len(self.missions.company_model_specs(ACN)), 2)
 
+    def test_a_new_task_contract_gets_a_new_spec_for_the_same_state(self):
+        old = spec_from_response(STATE, _spec(), decided_by=DECIDED_BY)
+        old = {**old, "task_hash": "b" * 64, "content_hash": "c" * 64}
+        self.record(old)
+        current = self.record()
+        self.assertEqual(current["status"], "fresh")
+        self.assertEqual(len(self.missions.company_model_specs(ACN)), 2)
+
     def test_an_incomplete_specification_is_refused(self):
         from dalton_core.coverage_mission import CoverageMissionValidationError
 
@@ -366,3 +391,36 @@ class CompanyModelSpecStorageTests(unittest.TestCase):
             with self.subTest(statement=statement):
                 with self.assertRaises(sqlite3.IntegrityError):
                     self.store.connection.execute(statement)
+
+    def test_legacy_rows_keep_their_identity_and_hash_through_migration(self):
+        from dalton_core.coverage_mission import CoverageMissionAuthority
+        from dalton_core.store import DaltonStore, canonical_json
+
+        legacy = DaltonStore(":memory:")
+        self.addCleanup(legacy.close)
+        legacy.connection.executescript("""
+            CREATE TABLE coverage_mission_company_model_specs (
+                spec_id TEXT PRIMARY KEY, company_ref TEXT NOT NULL,
+                mission_version_ref TEXT NOT NULL, state_hash TEXT NOT NULL,
+                assessment TEXT NOT NULL, revenue_drivers_json TEXT NOT NULL,
+                expense_lines_json TEXT NOT NULL, forecast_statements_json TEXT NOT NULL,
+                operating_metrics_json TEXT NOT NULL, horizon_json TEXT NOT NULL,
+                task_hash TEXT NOT NULL, model_profile_ref TEXT, work_order_ref TEXT,
+                decided_by TEXT NOT NULL, created_at TEXT NOT NULL,
+                content_hash TEXT NOT NULL, UNIQUE(company_ref,state_hash));
+        """)
+        values = (
+            "company-model-spec:legacy", ACN, "coverage-mission-version:legacy",
+            "a" * 64, "legacy assessment", canonical_json([]), canonical_json([]),
+            canonical_json([]), canonical_json([]), canonical_json({}), "b" * 64,
+            None, None, "automation:legacy", "2026-09-09T00:00:00+00:00", "c" * 64,
+        )
+        legacy.connection.execute(
+            "INSERT INTO coverage_mission_company_model_specs VALUES(" +
+            ",".join("?" for _ in values) + ")", values)
+        legacy.connection.commit()
+        authority = CoverageMissionAuthority(legacy)
+        held = authority.latest_company_model_spec(ACN)
+        self.assertEqual(held["spec_id"], "company-model-spec:legacy")
+        self.assertEqual(held["content_hash"], "c" * 64)
+        self.assertNotIn("revenue_anchor_concept", held)

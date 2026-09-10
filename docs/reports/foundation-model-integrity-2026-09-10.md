@@ -23,3 +23,11 @@ The existing governed model-spec lane can produce a new specification when its b
 `PYTHONPATH=src python3 -m unittest tests.test_economic_invariants tests.test_company_model_forecast tests.test_model_forecast_driver`
 
 Result: 156 tests passed. Added regressions cover non-additive XBRL axes, missing single-dimension provenance, collapsed multi-dimensional duplicate members, geographic balance instants, honest `not checked` report text, and retain the complete business-segment mismatch refusal.
+
+## IBM calculation-anchor follow-up
+
+The model specification contract is now v0.2 and separates `revenue_anchor_concept` from `revenue_drivers`. The anchor must exactly name a concept present in the bound filed-state vocabulary. It enters the derived input table solely as `revenue_anchor`; economic drivers remain the model's volume, price, mix, contract-book, or external judgements and are not relabelled as revenue.
+
+Spec storage identity is now `(company_ref, state_hash, task_hash)`. The migration preserves every legacy row, identifier, nullable provenance field, and content hash, while allowing the current contract to append a new decision over unchanged filings. Selection asks specifically for the current `TASK_HASH`; the launcher ticket also includes it, so an old child cannot suppress the v0.2 retry. Same state and same contract remain idempotent.
+
+A representative test uses quarterly filed revenue with an economic volume driver that has no GAAP counterpart. The explicit filed anchor starts deterministic revenue forecasts while the economic driver remains unfiled and clearly marked estimated. An absent or unfiled anchor is refused during verified specification parsing; the downstream no-revenue-history refusal is retained for legacy or malformed callers.

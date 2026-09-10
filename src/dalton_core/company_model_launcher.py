@@ -65,19 +65,24 @@ class CompanyModelSpecLauncher(LaneChildLauncher):
             command += ["--scheduler-db", str(self.scheduler_db)]
         return command
 
-    def start(self, *, company_ref: str, state_hash: str) -> dict[str, Any]:
+    def start(self, *, company_ref: str, state_hash: str,
+              task_hash: str | None = None) -> dict[str, Any]:
         if not isinstance(company_ref, str) or not company_ref.strip():
             raise LaneChildRejected("a model specification run needs a company")
         if not isinstance(state_hash, str) or len(state_hash) != 64:
             raise LaneChildRejected("state_hash must be a sha256 digest")
         company_ref = company_ref.strip()
-        digest = hashlib.sha256(
-            f"{self.TICKET_PREFIX}|{company_ref}|{state_hash}".encode("utf-8")
-        ).hexdigest()[:24]
+        identity = f"{self.TICKET_PREFIX}|{company_ref}|{state_hash}"
+        if task_hash is not None:
+            if not isinstance(task_hash, str) or len(task_hash) != 64:
+                raise LaneChildRejected("task_hash must be a sha256 digest")
+            identity += f"|{task_hash}"
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
         return self.spawn(
             digest=digest,
             record={
                 "company_ref": company_ref, "state_hash": state_hash,
+                "task_hash": task_hash,
                 "model_configured": self.configured,
             },
             company_ref=company_ref,

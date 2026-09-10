@@ -553,6 +553,7 @@ CREATE TABLE IF NOT EXISTS coverage_mission_research_plans (
     mission_version_ref TEXT NOT NULL,
     state_hash TEXT NOT NULL,
     assessment TEXT NOT NULL,
+    revenue_anchor_json TEXT,
     directives_json TEXT NOT NULL,
     inquiries_json TEXT NOT NULL,
     -- P13ai: whether what is held actually answers the stage, which the
@@ -735,7 +736,7 @@ CREATE TABLE IF NOT EXISTS coverage_mission_company_model_specs (
     decided_by TEXT NOT NULL,
     created_at TEXT NOT NULL,
     content_hash TEXT NOT NULL,
-    UNIQUE(company_ref, state_hash)
+    UNIQUE(company_ref, state_hash, task_hash)
 );
 
 CREATE INDEX IF NOT EXISTS idx_coverage_mission_company_model_specs_company

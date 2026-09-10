@@ -58,6 +58,21 @@ class ModelInputError(ValueError):
 
 def _rows_of(spec: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    anchor = spec.get("revenue_anchor_concept")
+    driver_concepts = {
+        str(item.get("basis_concept"))
+        for item in (spec.get("revenue_drivers") or [])
+        if item.get("basis_concept")
+    }
+    if anchor and str(anchor) not in driver_concepts:
+        rows.append({
+            "kind": "revenue_anchor",
+            "ref": "filed-revenue-anchor",
+            "label": "Filed revenue calculation anchor",
+            "basis_concept": str(anchor),
+            "unit": "USD",
+            "because": "Bound separately from the economic revenue drivers.",
+        })
     for item in spec.get("revenue_drivers") or []:
         rows.append({
             "kind": "revenue_driver", "ref": item["ref"], "label": item["label"],

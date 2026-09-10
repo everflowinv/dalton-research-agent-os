@@ -82,10 +82,13 @@ def ledger(series=None):
     return FakeMissions(lines)
 
 
-def spec(*, drivers=None, expenses=None, cash="not_material", quarters=4):
+def spec(*, drivers=None, expenses=None, cash="not_material", quarters=4,
+         revenue_anchor_concept=None):
     return {
         "spec_id": "company-model-spec:test", "company_ref": ACN,
         "state_hash": "a" * 64, "content_hash": "b" * 64,
+        **({"revenue_anchor_concept": revenue_anchor_concept}
+           if revenue_anchor_concept else {}),
         "revenue_drivers": drivers if drivers is not None else [{
             "ref": "top-line", "label": "Client work", "kind": "mix",
             "basis_concept": REVENUE_CONCEPT, "unit": "USD",
@@ -225,6 +228,25 @@ class DriverTests(unittest.TestCase):
                 "ref": "heads", "label": "Billable headcount", "kind": "volume",
                 "basis_concept": None, "unit": "headcount", "because": "Capacity."}]))
         self.assertIn("no revenue driver", str(caught.exception))
+
+    def test_a_filed_anchor_starts_the_model_without_masquerading_as_a_driver(self):
+        specification = spec(
+            revenue_anchor_concept=REVENUE_CONCEPT,
+            drivers=[{
+                "ref": "heads", "label": "Billable heads", "kind": "volume",
+                "basis_concept": None, "unit": "headcount",
+                "because": "Capacity moves delivered revenue.",
+            }],
+        )
+        record = model(ledger(), specification)
+        anchor = revenue_anchor(record["drivers"])
+        self.assertEqual(anchor["concept"], REVENUE_CONCEPT)
+        economic = next(item for item in record["drivers"] if item["ref"] == "row:heads")
+        self.assertIsNone(economic["concept"])
+        self.assertIn("result:revenue", {
+            item["ref"] for item in record["results"]
+            if any(cell.get("status") == "computed" for cell in item["cells"])
+        })
 
     def test_the_forecast_columns_follow_the_last_filed_quarter(self):
         drivers = build_drivers(build_model_inputs(ledger(), spec()))

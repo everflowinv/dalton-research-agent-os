@@ -34,7 +34,8 @@ ACN = "company:sec-cik:0001467373"
 
 def _spec_body():
     return {
-        "schema_version": "0.1",
+        "schema_version": "0.2",
+        "revenue_anchor_concept": "us-gaap:Revenues",
         "assessment": "A people business: billable heads times realised rate.",
         "revenue_drivers": [{
             "ref": "heads", "label": "Billable headcount", "kind": "volume",
@@ -118,6 +119,16 @@ class ChooseCompanyTests(unittest.TestCase):
             spec_from_response(state, _spec_body(), decided_by="automation:x"),
             mission_version_ref=self.mission["id"])
         self.assertEqual(choose_company(self.missions, self.mission), (None, None))
+
+    def test_a_new_spec_contract_reopens_the_same_filed_state(self):
+        _, state = choose_company(self.missions, self.mission)
+        old = spec_from_response(state, _spec_body(), decided_by="automation:x")
+        old = {**old, "task_hash": "d" * 64, "content_hash": "e" * 64}
+        self.missions.record_company_model_spec(
+            old, mission_version_ref=self.mission["id"])
+        company_ref, reopened = choose_company(self.missions, self.mission)
+        self.assertEqual(company_ref, ACN)
+        self.assertEqual(reopened["state_hash"], state["state_hash"])
 
     def test_a_named_company_is_used_as_given(self):
         company_ref, state = choose_company(

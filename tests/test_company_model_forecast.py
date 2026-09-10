@@ -240,7 +240,8 @@ class LaneStateTests(unittest.TestCase):
     def record_spec(self) -> dict:
         state = build_company_model_state(self.missions, ACN, ticker="ACN")
         body = {
-            "schema_version": "0.1",
+            "schema_version": "0.2",
+            "revenue_anchor_concept": REVENUE_CONCEPT,
             "assessment": "Delivery revenue times realised rate, less delivery cost.",
             "revenue_drivers": [{
                 "ref": "top-line", "label": "Client work", "kind": "mix",
@@ -503,8 +504,8 @@ class LaneStateTests(unittest.TestCase):
         })
         current = self.missions.latest_company_model_spec(ACN)
         state = build_company_model_state(self.missions, ACN, ticker="ACN")
-        body = {"schema_version": "0.1", **{key: current[key] for key in (
-            "assessment", "revenue_drivers", "expense_lines", "forecast_statements",
+        body = {"schema_version": "0.2", **{key: current[key] for key in (
+            "assessment", "revenue_anchor_concept", "revenue_drivers", "expense_lines", "forecast_statements",
             "operating_metrics", "horizon")}}
         body["expense_lines"] = [*body["expense_lines"],
             {"ref": "sga", "label": "SG&A",
@@ -683,7 +684,7 @@ class LaneStateTests(unittest.TestCase):
         models = ForecastModelAuthority(self.store)
         missions = self.missions
         spec_row = missions.latest_company_model_spec(ACN)
-        broken = {**spec_row, "revenue_drivers": [
+        broken = {**spec_row, "revenue_anchor_concept": None, "revenue_drivers": [
             {**spec_row["revenue_drivers"][0], "basis_concept": None}]}
         with self.assertRaises(Exception) as caught:
             run_company_forecast(missions, broken, models=models)

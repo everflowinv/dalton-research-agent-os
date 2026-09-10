@@ -849,9 +849,87 @@ class CoverageMissionAuthority:
         self._authorization_flag = authorization_flag(
             self.connection, "dalton_coverage_mission_authorized")
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._migrate_company_model_spec_contract()
         self._migrate_discovered_document_host()
         self._migrate_settlement_failure_reason()
         self._migrate_plan_sufficiency()
+
+    def _migrate_company_model_spec_contract(self) -> None:
+        """Permit a new spec contract over unchanged filed state.
+
+        Legacy rows and their identifiers/hashes are copied byte for byte. The
+        nullable anchor is unknown for those rows; only v0.2 rows populate it.
+        """
+
+        columns = {
+            row[1] for row in self.connection.execute(
+                "PRAGMA table_info(coverage_mission_company_model_specs)"
+            ).fetchall()
+        }
+        table_sql = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='coverage_mission_company_model_specs'"
+        ).fetchone()[0]
+        if ("revenue_anchor_json" in columns
+                and "UNIQUE(company_ref, state_hash, task_hash)" in table_sql):
+            return
+        if self.connection.in_transaction:
+            raise RuntimeError("company model spec migration requires no open transaction")
+        self.connection.executescript(
+            """
+            PRAGMA foreign_keys = OFF;
+            BEGIN IMMEDIATE;
+            DROP TRIGGER IF EXISTS coverage_mission_company_model_specs_authorized_insert;
+            DROP TRIGGER IF EXISTS coverage_mission_company_model_specs_no_update;
+            DROP TRIGGER IF EXISTS coverage_mission_company_model_specs_no_delete;
+            ALTER TABLE coverage_mission_company_model_specs
+                RENAME TO coverage_mission_company_model_specs_legacy;
+            CREATE TABLE coverage_mission_company_model_specs (
+                spec_id TEXT PRIMARY KEY, company_ref TEXT NOT NULL,
+                mission_version_ref TEXT NOT NULL, state_hash TEXT NOT NULL,
+                assessment TEXT NOT NULL, revenue_anchor_json TEXT,
+                revenue_drivers_json TEXT NOT NULL, expense_lines_json TEXT NOT NULL,
+                forecast_statements_json TEXT NOT NULL,
+                operating_metrics_json TEXT NOT NULL, horizon_json TEXT NOT NULL,
+                task_hash TEXT NOT NULL, model_profile_ref TEXT, work_order_ref TEXT,
+                decided_by TEXT NOT NULL, created_at TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                UNIQUE(company_ref, state_hash, task_hash)
+            );
+            INSERT INTO coverage_mission_company_model_specs(
+                spec_id,company_ref,mission_version_ref,state_hash,assessment,
+                revenue_anchor_json,revenue_drivers_json,expense_lines_json,
+                forecast_statements_json,operating_metrics_json,horizon_json,
+                task_hash,model_profile_ref,work_order_ref,decided_by,created_at,
+                content_hash)
+            SELECT spec_id,company_ref,mission_version_ref,state_hash,assessment,
+                NULL,revenue_drivers_json,expense_lines_json,forecast_statements_json,
+                operating_metrics_json,horizon_json,task_hash,model_profile_ref,
+                work_order_ref,decided_by,created_at,content_hash
+            FROM coverage_mission_company_model_specs_legacy;
+            DROP TABLE coverage_mission_company_model_specs_legacy;
+            CREATE INDEX idx_coverage_mission_company_model_specs_company
+                ON coverage_mission_company_model_specs(company_ref, created_at);
+            CREATE TRIGGER coverage_mission_company_model_specs_authorized_insert
+            BEFORE INSERT ON coverage_mission_company_model_specs
+            WHEN dalton_coverage_mission_authorized() = 0 BEGIN
+                SELECT RAISE(ABORT, 'company model spec insert requires CoverageMissionAuthority');
+            END;
+            CREATE TRIGGER coverage_mission_company_model_specs_no_update
+            BEFORE UPDATE ON coverage_mission_company_model_specs BEGIN
+                SELECT RAISE(ABORT, 'company model specs are append-only');
+            END;
+            CREATE TRIGGER coverage_mission_company_model_specs_no_delete
+            BEFORE DELETE ON coverage_mission_company_model_specs BEGIN
+                SELECT RAISE(ABORT, 'company model specs are append-only');
+            END;
+            COMMIT;
+            PRAGMA foreign_keys = ON;
+            """
+        )
+        violations = self.connection.execute("PRAGMA foreign_key_check").fetchall()
+        if violations:
+            raise RuntimeError("company model spec migration broke foreign keys")
 
     def _migrate_plan_sufficiency(self) -> None:
         """P13ai: add the nullable ``sufficiency_json`` column to older ledgers."""
@@ -3307,7 +3385,8 @@ class CoverageMissionAuthority:
         """
 
         required = (
-            "company_ref", "state_hash", "assessment", "revenue_drivers",
+            "company_ref", "state_hash", "assessment", "revenue_anchor_concept",
+            "revenue_drivers",
             "expense_lines", "forecast_statements", "operating_metrics",
             "horizon", "decided_by", "task_hash", "content_hash",
         )
@@ -3320,6 +3399,7 @@ class CoverageMissionAuthority:
         mission_version_ref = _text(mission_version_ref, "mission_version_ref")
         spec_id = _ref("company-model-spec", {
             "company_ref": company_ref, "state_hash": state_hash,
+            "task_hash": spec["task_hash"],
         })
         existing = self.connection.execute(
             "SELECT * FROM coverage_mission_company_model_specs WHERE spec_id=?",
@@ -3332,13 +3412,14 @@ class CoverageMissionAuthority:
             cur.execute(
                 "INSERT INTO coverage_mission_company_model_specs("
                 "spec_id,company_ref,mission_version_ref,state_hash,assessment,"
-                "revenue_drivers_json,expense_lines_json,forecast_statements_json,"
+                "revenue_anchor_json,revenue_drivers_json,expense_lines_json,forecast_statements_json,"
                 "operating_metrics_json,horizon_json,task_hash,model_profile_ref,"
                 "work_order_ref,decided_by,created_at,content_hash) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     spec_id, company_ref, mission_version_ref, state_hash,
                     spec["assessment"],
+                    canonical_json(spec["revenue_anchor_concept"]),
                     canonical_json(spec["revenue_drivers"]),
                     canonical_json(spec["expense_lines"]),
                     canonical_json(spec["forecast_statements"]),
@@ -3359,21 +3440,28 @@ class CoverageMissionAuthority:
     @staticmethod
     def _model_spec_row(row: Any) -> dict[str, Any]:
         wire = dict(row)
+        anchor_json = wire.pop("revenue_anchor_json", None)
+        if anchor_json is not None:
+            wire["revenue_anchor_concept"] = json.loads(anchor_json)
         for field in ("revenue_drivers", "expense_lines", "forecast_statements",
                       "operating_metrics", "horizon"):
             wire[field] = json.loads(wire.pop(f"{field}_json"))
         return wire
 
     def company_model_spec_for_state(
-        self, company_ref: str, state_hash: str
+        self, company_ref: str, state_hash: str, *, task_hash: str | None = None,
     ) -> dict[str, Any] | None:
         """The specification decided from exactly this disclosure, if one was."""
 
-        row = self.connection.execute(
-            "SELECT * FROM coverage_mission_company_model_specs "
-            "WHERE company_ref=? AND state_hash=?",
-            (_text(company_ref, "company_ref"), _text(state_hash, "state_hash")),
-        ).fetchone()
+        params: list[str] = [_text(company_ref, "company_ref"),
+                             _text(state_hash, "state_hash")]
+        sql = ("SELECT * FROM coverage_mission_company_model_specs "
+               "WHERE company_ref=? AND state_hash=?")
+        if task_hash is not None:
+            sql += " AND task_hash=?"
+            params.append(_sha256(task_hash, "task_hash"))
+        sql += " ORDER BY created_at DESC, spec_id DESC LIMIT 1"
+        row = self.connection.execute(sql, params).fetchone()
         return None if row is None else self._model_spec_row(row)
 
     def latest_company_model_spec(self, company_ref: str) -> dict[str, Any] | None:

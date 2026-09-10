@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Any, Callable, Mapping
 
 from .company_model_cli import choose_company
+from .company_model_spec import TASK_HASH
 from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
 from .lane_permission_control import (
@@ -158,7 +159,8 @@ class MissionModelSpecLaneCoordinator:
                     "settled": settled, "reason": held.classification.reason,
                     "failure": held.as_wire()}
         try:
-            ticket = self.launcher.start(company_ref=company_ref, state_hash=state_hash)
+            ticket = self.launcher.start(
+                company_ref=company_ref, state_hash=state_hash, task_hash=TASK_HASH)
         except LaneChildConflict as exc:
             return {"status": "busy", "company_ref": company_ref, "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}

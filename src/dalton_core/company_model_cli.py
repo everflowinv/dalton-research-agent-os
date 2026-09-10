@@ -38,6 +38,7 @@ from typing import Any, Mapping
 
 from .cockpit_model import CockpitModel, CockpitModelError, lane_status_for
 from .company_model_spec import (
+    TASK_HASH,
     CompanyModelSpecError,
     build_prompt,
     spec_from_response,
@@ -147,7 +148,9 @@ def choose_company(
             if company_ref is not None:
                 raise
             continue
-        if missions.company_model_spec_for_state(held, state["state_hash"]) is None:
+        if missions.company_model_spec_for_state(
+            held, state["state_hash"], task_hash=TASK_HASH
+        ) is None:
             return held, state
     return None, None
 
