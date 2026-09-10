@@ -81,6 +81,17 @@ def write_owner_only(path: Path, value: Any) -> None:
     os.replace(tmp, path)
 
 
+def _write_all(descriptor: int, payload: bytes) -> None:
+    """Write an append-only marker completely, or fail before child spawn."""
+    view = memoryview(payload)
+    written = 0
+    while written < len(view):
+        count = os.write(descriptor, view[written:])
+        if count <= 0:
+            raise OSError("controlled reentry marker write made no progress")
+        written += count
+
+
 def pid_alive(pid: Any) -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
@@ -228,7 +239,7 @@ class LaneChildLauncher:
         except FileExistsError as exc:
             raise LaneChildRejected("controlled reentry was already attempted") from exc
         try:
-            os.write(descriptor, record)
+            _write_all(descriptor, record)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)

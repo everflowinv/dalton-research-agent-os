@@ -17,6 +17,7 @@ import os
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from dalton_core.lane_child_launcher import (
@@ -152,6 +153,38 @@ class LauncherTests(unittest.TestCase):
         # operation; there is no claim/spawn gap in which it can take the slot.
         with self.assertRaises(LaneChildConflict):
             launcher.spawn(digest="2" * 24, record={})
+
+    def test_short_marker_write_fails_before_spawn_and_keeps_prior_summary(self):
+        launcher = self.launcher()
+        digest = "3" * 24
+        old = launcher.spawn(digest=digest, record={"signature": "exact-input"})
+        launcher.wait(timeout=30)
+        launcher.status(old["id"])
+        path = launcher._ticket_path(old["id"])
+        prior = b'{"status":"failed","detail":"retained"}\n'
+        path.with_name("summary.json").write_bytes(prior)
+        real_write = os.write
+        calls = 0
+
+        def short_then_zero(descriptor, payload):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                part = bytes(payload[:7])
+                return real_write(descriptor, part)
+            return 0
+
+        with patch("dalton_core.lane_child_launcher.os.write",
+                   side_effect=short_then_zero), patch(
+                       "dalton_core.lane_child_launcher.subprocess.Popen") as popen:
+            with self.assertRaisesRegex(OSError, "made no progress"):
+                launcher.spawn(
+                    digest=digest, record={"signature": "exact-input"},
+                    _controlled_reentry=(old["id"],
+                                         ":operator-recovery:" + "d" * 16),
+                )
+        popen.assert_not_called()
+        self.assertEqual(path.with_name("summary.json").read_bytes(), prior)
 
     def test_a_torn_summary_is_not_a_crash(self):
         launcher = self.launcher()
