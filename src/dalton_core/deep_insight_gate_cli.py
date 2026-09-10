@@ -906,7 +906,10 @@ def run_gate(
             summary.update({"status": "succeeded", "gate_status": "unverified"})
             return summary
         verifier = verifier_factory()
-        verdict = verify(verifier, answers, company=company, mission=mission)
+        verdict = verify(
+            verifier, answers, company=company, mission=mission,
+            producer_route_decision_refs=draft_routes,
+        )
         spent += int((verdict.get("model") or {}).get("cost_micros") or 0)
         summary["cost_micros"] = spent
         check = independence(

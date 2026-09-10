@@ -800,7 +800,10 @@ def run_framework(
             summary.update({"status": "succeeded", "framework_status": "unverified"})
             return summary
         verifier = verifier_factory()
-        verdict = verify(verifier, blocks, industry=industry, mission=mission)
+        verdict = verify(
+            verifier, blocks, industry=industry, mission=mission,
+            producer_route_decision_refs=draft_routes,
+        )
         spent += int((verdict.get("model") or {}).get("cost_micros") or 0)
         summary["cost_micros"] = spent
         check = independence(

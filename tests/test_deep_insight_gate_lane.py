@@ -99,8 +99,11 @@ class FakeModel:
         # Claim instead, which is what a test about a retired Claim needs.
         self.cite_aspect = cite_aspect
         self.prompts: list[str] = []
+        self.producer_route_decision_refs = ()
 
-    def call(self, *, purpose, request_id, prompt, mission):
+    def call(self, *, purpose, request_id, prompt, mission,
+             producer_route_decision_refs=()):
+        self.producer_route_decision_refs = tuple(producer_route_decision_refs)
         self.prompts.append(prompt)
         if prompt.startswith("You are an independent verifier"):
             return self._envelope(json.dumps(
@@ -491,6 +494,15 @@ class MaterialTests(unittest.TestCase):
 
 
 class SubmissionTests(unittest.TestCase):
+    def test_verifier_receives_every_group_draft_route(self):
+        verifier = FakeModel(route="route:verify")
+        summary = self.harness.run(verifier_model_factory=lambda: verifier)
+        self.assertEqual(summary["gate_status"], "submitted")
+        self.assertEqual(
+            verifier.producer_route_decision_refs,
+            ("route:draft", "route:draft", "route:draft", "route:draft"),
+        )
+
     def setUp(self):
         self.harness = Harness()
         self.addCleanup(self.harness.close)

@@ -46,7 +46,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from .cockpit_model import CockpitModelError, unwrap_json_object
+from .cockpit_model import (CockpitModelError, independent_model_call,
+                            unwrap_json_object)
 # The independence predicate and the verifier's reply contract, imported from
 # the dossier's drafter.  D2 is one rule about the system; a second copy of it
 # here would be a second definition of what "a different family" means.
@@ -527,6 +528,7 @@ def verify(
     *,
     industry: Mapping[str, Any],
     mission: Mapping[str, Any],
+    producer_route_decision_refs: Sequence[str | None] = (),
 ) -> dict[str, Any]:
     """A second, separate call that returns only a verdict on the draft."""
 
@@ -535,8 +537,10 @@ def verify(
     digest = draft_hash(blocks)
     prompt = build_verifier_prompt(blocks, industry=industry)
     try:
-        call = model.call(purpose=DRAFT_PURPOSE, request_id=f"verify-{digest[:24]}",
-                          prompt=prompt, mission=mission)
+        call = independent_model_call(
+            model, producer_route_decision_refs=producer_route_decision_refs,
+            purpose=DRAFT_PURPOSE, request_id=f"verify-{digest[:24]}",
+            prompt=prompt, mission=mission)
     except CockpitModelError as exc:
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
     provenance = {

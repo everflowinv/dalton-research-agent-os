@@ -286,9 +286,11 @@ class FakeModel:
         self.replies = list(replies)
         self.calls = []
 
-    def call(self, *, purpose, request_id, prompt, mission):
+    def call(self, *, purpose, request_id, prompt, mission,
+             producer_route_decision_refs=()):
         self.calls.append({"purpose": purpose, "request_id": request_id,
-                           "prompt": prompt})
+                           "prompt": prompt,
+                           "producer_route_decision_refs": tuple(producer_route_decision_refs)})
         text = self.replies.pop(0)
         if isinstance(text, Exception):
             raise text
@@ -369,10 +371,14 @@ class VerifierTests(unittest.TestCase):
         import json
 
         model = FakeModel([json.dumps({"verdict": "pass", "findings": []})])
-        result = verify(model, self.blocks(), industry=INDUSTRY, mission=MISSION)
+        result = verify(
+            model, self.blocks(), industry=INDUSTRY, mission=MISSION,
+            producer_route_decision_refs=["route:draft"],
+        )
         self.assertEqual(result["status"], "verified")
         self.assertEqual(result["verdict"], "pass")
         self.assertEqual(len(result["verified_draft_hash"]), 64)
+        self.assertEqual(model.calls[0]["producer_route_decision_refs"], ("route:draft",))
 
     def test_a_pass_verdict_with_findings_is_refused(self):
         with self.assertRaises(Exception):
