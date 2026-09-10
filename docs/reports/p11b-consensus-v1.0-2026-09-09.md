@@ -3,7 +3,7 @@
 日期：2026-09-09
 分支：`w2-consensus`（worktree `~/Projects/dalton-w2-consensus-worktree`）
 分叉基线：worktree HEAD `eaf48f0`（已含 main `7708d43` 与 `6da8f82`）；交付前 `git merge main`
-全量测试：`Ran 4529 tests in 755.116s` / `OK (skipped=1)`（合并 main `eb8e5fb`、含 owner 的标签别名裁决之后；逐字见 §7）
+全量测试：`Ran 4979 tests in 489.473s` / `OK (skipped=1)`（合并 main、含 owner 裁决与 code review 全部修复之后；逐字见 §7）
 
 ---
 
@@ -414,7 +414,7 @@ tests/test_consensus_estimate_cli.py       11 项
 全量：
 
 ```
-Ran 4529 tests in 755.116s
+Ran 4979 tests in 489.473s
 
 OK (skipped=1)
 ```
