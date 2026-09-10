@@ -142,3 +142,9 @@ Next: complete BUSY recovery, truthful task summaries and extraction retry diagn
 - Capacity audit found a second limit: an extended BUSY episode can exhaust the Scheduler and later replay a terminal result indefinitely. A bounded, configurable recovery extension is being developed separately; it does not delay accepting the already-proven host-contract fix.
 
 Next: finish strict-parser equivalence review, freeze and deploy this runtime boundary repair, preserve owner selections and mission, and observe actual scheduled results. Continue model-integrity and extended-capacity recovery as foundational work; no higher-order investment methods are being implemented.
+
+## 20:45 UTC — runtime boundary release deployed
+
+`c84d076` passed the frozen 6,576-test suite (551.999s, 1 skip), exact 550-file wheel check and 67-schema/40-tick rehearsal. Backup `deploy-backup-20260910T204352Z`, retained source `.release-source.jjkRvl`; installed bytes, all health checks, all 12 config selection/budget blocks and original mission v14 signature verified. Controller 99865 started 20:44:27 UTC. First product audit remains 0/15; new scheduled outcomes are next.
+
+Independent review blocked the first segment-sum correction: unique members did not prove a full single-dimension context, and skipped checks could appear as all passed. Fixes now require explicit dimension provenance and honest not-checked output; source-to-authority provenance and Cockpit presentation are being completed separately. IBM's explicit revenue anchor and append-only spec-contract migration are under a separate Sol review. Configurable long-BUSY recovery is also separate. None of those pending patches is represented as deployed by this receipt.
