@@ -315,6 +315,9 @@ LANE = register_lane(LaneSpec(
     operation="dispatch_research_task",
     order=150,
     driver_key="research_task",
+    # The pool is not declared here: C2's LANE_POOLS already names this lane's
+    # as ``adhoc``, and its own test pins that no registered lane overrides the
+    # table.  Declaring it would be a second answer to a question that has one.
     handler=dispatch,
     init_kwarg=LAUNCHER_KWARG,
     argparse=add_arguments,

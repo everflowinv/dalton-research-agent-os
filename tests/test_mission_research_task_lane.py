@@ -67,7 +67,9 @@ class LaneTests(ResearchTaskFixture):
     def setUp(self) -> None:
         super().setUp()
         self.launcher = FakeLauncher(self.state_dir / "research-tasks")
-        self.now = datetime(2026, 9, 9, 12, 0, tzinfo=timezone.utc)
+        # Noon on the day the authority stamps its loops with, so the lane and
+        # the pool are talking about the same day.
+        self.now = datetime.fromisoformat(f"{DAY}T12:00:00+00:00")
         self.coordinator = ResearchTaskCoordinator(
             store=self.store, launcher=self.launcher, clock=lambda: self.now,
         )
@@ -117,24 +119,50 @@ class LaneTests(ResearchTaskFixture):
         self.assertEqual(held["last"]["status"], "failed")
         self.assertEqual(len(self.launcher.started), 1)
 
-    def test_an_exhausted_pool_is_a_skip_with_the_name_c2_will_generalise(self) -> None:
-        wire = inquiry(question="Do ACN's margins reconcile?")
-        plan = self.record_plan([wire])
-        # Spend the whole day's ad-hoc share.
-        for index in range(10):
+    def test_an_exhausted_pool_is_a_skip_with_the_name_c2_named_after_it(self) -> None:
+        # The arithmetic is the test's own, and it divides exactly: this
+        # fixture's mission allows $20 a day, the ad-hoc pool is a quarter of
+        # that, and one task is two rounds at the driver's per-round price.
+        # Five tasks spend the pool to the cent, with nothing left to round.
+        pool = rt.pool(self.mission)
+        per_task = rt.task_estimate_micros({"max_rounds": 2})
+        self.assertEqual(per_task, 1_000_000)
+        expected = pool["cap_micros"] // per_task
+        self.assertEqual(expected, 5)
+        self.assertEqual(pool["cap_micros"] % per_task, 0)
+
+        admitted = []
+        for index in range(expected + 2):
+            wire = inquiry(question=f"ACN question {index}?")
             entry = self.admissions(
-                self.record_plan(
-                    [inquiry(question=f"ACN question {index}?")],
-                    state_hash=f"{index:064d}",
-                ),
-            )[0]
+                self.record_plan([wire], state_hash=f"{index:064d}"))[0]
             if not entry["admissible"]:
+                self.assertEqual(entry["reason"], "pool_exhausted")
                 break
-            self.admit(plan, entry, inquiry(question=f"ACN question {index}?"))
+            self.assertEqual(entry["estimated_micros"], per_task)
+            admitted.append(self.admit(self.record_plan([wire]), entry, wire))
+        self.assertEqual(len(admitted), expected)
+
+        # Prove the pool is spent before asking the lane about it, so a day
+        # that disagreed would fail here, naming the day, rather than three
+        # lines later as an unexplained "launched".
+        state = rt.pool_state(self.authority, self.mission, day=DAY)
+        self.assertEqual(state["remaining_micros"], 0, state)
+        self.assertEqual(state["day"], DAY)
+
         result = self.coordinator.dispatch_once()
         self.assertEqual(result["status"], "skipped:pool_exhausted")
         self.assertEqual(result["pool"]["remaining_micros"], 0)
         self.assertEqual(self.launcher.started, [])
+
+    def test_the_lane_pool_cap_is_the_one_c2_publishes(self) -> None:
+        from dalton_core.budget_pools import lane_pools, pool_caps
+
+        self.assertEqual(lane_pools()["dispatch_research_task"], rt.POOL_NAME)
+        self.assertEqual(
+            rt.pool(self.mission)["cap_micros"],
+            pool_caps(self.mission["budget"])["caps_micros"][rt.POOL_NAME],
+        )
 
     def test_settlement_reports_what_became_of_the_tasks(self) -> None:
         from dalton_core.bounded_planner_loop import BoundedPlannerControlPlane

@@ -32,7 +32,13 @@ from tests.p9a_fixtures import INDUSTRY, OWNER, bootstrap_method_authorities, mi
 ACN = "company:sec-cik:0001467373"
 EPAM = "company:sec-cik:0001352010"
 OUTSIDE = "company:sec-cik:0000320193"
-DAY = "2026-09-09"
+# The pool's day is the day the loop authority stamps on the loops it creates,
+# which is today in UTC and nothing else.  Writing a date here instead made
+# every pool assertion depend on the wall clock: the tests were written at
+# 2026-09-09 in local time, and the first run after 20:00 EDT -- 00:00 UTC the
+# next day -- reserved against a day no loop had been created on, so the pool
+# read as empty however many tasks had been admitted.
+DAY = datetime.now(timezone.utc).date().isoformat()
 
 
 def inquiry(
