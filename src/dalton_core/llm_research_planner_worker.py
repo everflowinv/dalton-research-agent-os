@@ -594,6 +594,17 @@ class LLMResearchPlannerModelWorker:
                 "error_type": type(exc).__name__,
                 "budget": self._budget_report(admission, 0, "failed"),
             }
+        except BaseException:
+            # C2b: an adapter failure this worker does not model -- a bug, an
+            # interrupt, anything that is not an OpenClawModelAdapterError --
+            # used to propagate with the reservation still open.  An open
+            # reservation counts against the pool at its full reserved amount
+            # until something settles it, and nothing ever would: the pool
+            # would lose that money for the rest of the day, every time it
+            # happened.  Hand it back, then let the exception continue -- this
+            # clause changes what the ledger believes, not what the caller sees.
+            self._settle(admission, 0)
+            raise
         # Settled with the rate card of the link that actually served, exactly
         # as a cockpit call is; a non-succeeded envelope means the broker
         # refused rather than served, and is charged nothing.

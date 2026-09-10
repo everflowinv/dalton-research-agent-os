@@ -2655,16 +2655,24 @@ class WriterServer:
         """
 
         try:
-            pointer = self.store.connection.execute(
+            pointers = self.store.connection.execute(
                 "SELECT mission_version_id FROM coverage_mission_pointer "
-                "ORDER BY mission_ref LIMIT 1"
-            ).fetchone()
+                "ORDER BY mission_ref"
+            ).fetchall()
         except Exception:  # noqa: BLE001 - no mission table is simply no mission
             return None
-        if pointer is None:
+        if not pointers:
             return None
+        if len(pointers) > 1:
+            # Two active missions and no way to say which one's caps this call
+            # belongs to. coverage_mission refuses the same ambiguity rather
+            # than taking the first row, and taking the first row here would
+            # quietly bill one mission for another's research.
+            raise WriterServerError(
+                "planner budgeting requires exactly one active mission"
+            )
         try:
-            return self.coverage_mission.mission(pointer["mission_version_id"])
+            return self.coverage_mission.mission(pointers[0]["mission_version_id"])
         except Exception:  # noqa: BLE001 - an unreadable mission is not a binding
             return None
 

@@ -399,6 +399,69 @@ class PlannerWorkerDayLedgerTests(LLMResearchPlannerWorkerTests):
         self.assertEqual(len(settlements), 1)
         self.assertEqual(settlements[0]["actual_micros"], 0)
 
+    def test_a_dead_broker_still_reports_that_it_was_budgeted(self) -> None:
+        # The fix for the failure that mattered most: reporting the budget
+        # only on success made a budgeted install with a dead broker report
+        # the one word -- "unbudgeted" -- that means the call never reached
+        # the day ledger. That is exactly the moment somebody asks.
+        from dalton_core.openclaw_model_adapter import BrokerConnectionError
+
+        class DeadBroker(FakeAdapter):
+            def execute(self, work, route, selected):
+                raise BrokerConnectionError("the broker socket is not there")
+
+        work = self._work()
+        result = self._budgeted(
+            DeadBroker(self.ACTION), budget_mission()).run_once(work)
+        self.assertEqual(result["status"], "retryable")
+        self.assertEqual(result["budget"]["status"], "settled")
+        self.assertEqual(result["budget"]["pool"], "adhoc")
+        self.assertEqual(result["budget"]["settled_micros"], 0)
+        self.assertNotEqual(result["budget"]["status"], "unbudgeted")
+
+    def test_a_failure_this_worker_does_not_model_still_frees_the_pool(self) -> None:
+        # An open reservation counts against the pool at its full reserved
+        # amount until something settles it. Nothing else would.
+        class Exploding(FakeAdapter):
+            def execute(self, work, route, selected):
+                raise ZeroDivisionError("something nobody modelled")
+
+        work = self._work()
+        with self.assertRaises(ZeroDivisionError):
+            self._budgeted(
+                Exploding(self.ACTION), budget_mission()).run_once(work)
+        settlements = self._rows("thesis_impact_day_settlements")
+        self.assertEqual(len(settlements), 1)
+        self.assertEqual(settlements[0]["actual_micros"], 0)
+
+    def test_a_pre_lease_refusal_is_visible_to_the_cockpit(self) -> None:
+        # admit() records its own rejections, but this gate refuses *before*
+        # admitting, so without recording it here the most common refusal in
+        # the system would be the one nobody could see.
+        from dalton_core.budget_pools import pool_status
+
+        work = self._work()
+        spent = budget_mission(
+            {"coverage": 10.0, "event_response": 0, "adhoc": 0, "maintenance": 0})
+        self._budgeted(FakeAdapter(self.ACTION), spent).run_once(work)
+
+        status = pool_status(
+            self.ledger.connection, day=DAY,
+            mission_ref="coverage-mission:c2b", now=NOW)
+        self.assertTrue(status["pools"]["adhoc"]["exhausted"])
+        self.assertEqual(
+            [item["lane"] for item in status["exhausted_lanes"]],
+            ["llm_planner_execute"])
+
+    def test_the_same_refusal_twice_is_one_row(self) -> None:
+        work = self._work()
+        spent = budget_mission(
+            {"coverage": 10.0, "event_response": 0, "adhoc": 0, "maintenance": 0})
+        for _ in range(3):
+            self._budgeted(FakeAdapter(self.ACTION), spent).run_once(work)
+        self.assertEqual(
+            len(self._rows("model_budget_pool_rejections")), 1)
+
     def test_an_unbudgeted_worker_says_so_rather_than_saying_nothing(self) -> None:
         # The pre-C2b behaviour, kept: a planner configuration without a
         # budget_db still runs.  It reports "unbudgeted" so that "is the

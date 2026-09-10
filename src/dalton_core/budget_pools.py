@@ -224,8 +224,16 @@ def pool_for_purpose(purpose: str) -> str:
 # property of why the loop exists.  P14e's inquiry loops are the ad-hoc
 # research the 25% pool was sized for; every other loop is the coverage work
 # the mission was written to do.
+def _inquiry_admission_source() -> str:
+    # Imported lazily: bounded_planner_loop reads this module for pool names,
+    # and the admission source is one string that must not be two.
+    from .bounded_planner_loop import INQUIRY_ADMISSION_SOURCE
+
+    return INQUIRY_ADMISSION_SOURCE
+
+
 LOOP_ADMISSION_POOLS: dict[str, str] = {
-    "inquiry": "adhoc",
+    _inquiry_admission_source(): "adhoc",
 }
 
 

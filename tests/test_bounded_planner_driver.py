@@ -882,7 +882,27 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
         # the other half -- a projection with no pool sends no pool.
         self.assertIn("pool", OPERATION_FIELDS["llm_planner_execute"])
 
-    def _local(self) -> WriterServer:
+    def _budget_binding(self) -> dict:
+        from dalton_core.budget_pools import mission_pool_scope
+
+        mission = {
+            "mission_ref": "coverage-mission:c2b",
+            "id": "coverage-mission-version:c2b:1",
+            "content_hash": content_hash({"mission": "c2b"}),
+            "budget": {"max_daily_paid_calls": 100, "max_daily_cost_usd": 10.0},
+        }
+        return {
+            "mission_ref": mission["mission_ref"],
+            "mission_version_ref": mission["id"],
+            "mission_version_hash": mission["content_hash"],
+            "max_daily_paid_calls": 100,
+            "max_daily_cost_micros": 10_000_000,
+            **mission_pool_scope(
+                mission, pool="adhoc", lane="llm_planner_execute"),
+        }
+
+    def _local(self, *, budget_db: str | None = None,
+               policy: str | None = None) -> WriterServer:
         """A second server on the same Core, in this thread, with a planner.
 
         The op is read directly rather than over the socket because the wire
@@ -892,10 +912,14 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
         be called from the test.
         """
 
+        config = dict(self.UNBUDGETED)
+        if budget_db is not None:
+            config["budget_db"] = budget_db
+            config["budget_policy_ref"] = policy
         server = WriterServer(
             self.root / "core.sqlite", str(self.root / "local.sock"),
             dict(self.server.principals), scheduler_path=self.scheduler_path,
-            planner_model_config=dict(self.UNBUDGETED),
+            planner_model_config=config,
         )
         server.start()
         self.addCleanup(server.stop)
@@ -936,6 +960,52 @@ class PlannerPoolDerivationTests(BoundedPlannerDriverTests):
         self.assertIsNone(server._store_executor.submit(
             server._planner_budget_binding, "coverage").result(timeout=30))
 
+    def test_the_writer_holds_the_ledger_so_settled_spend_is_readable(
+            self) -> None:
+        """The failure this branch nearly shipped.
+
+        The ledger is WAL and C2's read-only open refuses a database with no
+        sidecars.  Opening it per op meant the sidecars existed only while a
+        planner call was in flight, and P14e's admission lane reads *between*
+        calls -- so ``settled_micros`` would have been zero in every real
+        deployment and the cap enforced would still have been the pre-C2b one.
+        """
+
+        from dalton_core.budget_pools import day_pool_spend_at
+        from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
+
+        budget_db = self.root / "thesis-impact-budget.sqlite"
+        policy = "thesis-impact-day-budget-policy:c2b-writer:1"
+        server = self._local(budget_db=str(budget_db), policy=policy)
+        def book() -> None:
+            # On the store thread, because that is the thread the writer's
+            # ledger connection belongs to -- and the only one an op runs on.
+            ledger = server._planner_budget_ledger()
+            ledger.register_policy(
+                policy_version_id=policy, day_cap_micros=100_000_000)
+            admitted = ledger.admit(
+                policy_version_id=policy, day="2026-08-23",
+                work_order_ref="work:llm-research-planner-held",
+                attempt_number=1, phase="assessment",
+                route_decision_ref="route:1", reserved_micros=500_000,
+                mission_binding=self._budget_binding(),
+            )
+            ledger.settle(admitted["admission_id"], actual_micros=300_000)
+
+        server._store_executor.submit(book).result(timeout=30)
+
+        # No op in flight, and the reading still works -- which is only true
+        # because somebody is holding the ledger open.
+        spend = day_pool_spend_at(
+            budget_db, day="2026-08-23", mission_ref="coverage-mission:c2b")
+        self.assertEqual(spend.get("adhoc"), 300_000)
+
+        # And when the writer lets go, the sidecars go with it: this asserts
+        # the mechanism rather than the wish.
+        server.stop()
+        self.assertEqual(
+            day_pool_spend_at(budget_db, day="2026-08-23"), {})
+
     def test_pool_for_loop_reads_why_the_loop_exists(self) -> None:
         from dalton_core.budget_pools import pool_for_loop
 
@@ -960,9 +1030,10 @@ class PlannerPoolHoldTests(unittest.TestCase):
 
     class _Client:
         def __init__(self, *, pool: str | None = "adhoc",
-                     rejected: bool = True) -> None:
+                     rejected: bool = True, budget: dict | None = None) -> None:
             self.pool = pool
             self.rejected = rejected
+            self.budget = budget
             self.calls: list[str] = []
             self.planner_params: dict | None = None
 
@@ -993,7 +1064,10 @@ class PlannerPoolHoldTests(unittest.TestCase):
                         "pool": "adhoc", "day": "2026-09-09",
                         "spent": 2_500_000, "cap": 2_500_000,
                     }
-                return {"status": "model_failed"}
+                answer = {"status": "model_failed"}
+                if self.budget is not None:
+                    answer["budget"] = self.budget
+                return answer
             if operation in {
                 "bounded_planner_propose_next",
                 "bounded_planner_propose_next_with_context",
@@ -1001,9 +1075,9 @@ class PlannerPoolHoldTests(unittest.TestCase):
                 return {"status": "pending_round"}
             return {"status": "idle"}
 
-    def _run(self, client) -> dict:
+    def _run(self, client, *, root: Path | None = None) -> dict:
         with tempfile.TemporaryDirectory() as name:
-            root = Path(name)
+            root = root or Path(name)
             config = BoundedPlannerDriverConfig(
                 writer_socket=root / "writer.sock",
                 token_config=root / "tokens.json",
@@ -1052,6 +1126,45 @@ class PlannerPoolHoldTests(unittest.TestCase):
         client = self._Client(pool=None, rejected=False)
         self._run(client)
         self.assertNotIn("pool", client.planner_params)
+
+    def test_the_hold_and_the_budget_word_reach_the_tick_ledger(self) -> None:
+        # A summary the next tick overwrites cannot answer "is the 25%
+        # boundary doing anything" or "is the planner on the ledger yet".
+        from dalton_core.tick_ledger import TickLedger
+
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            summary = self._run(self._Client(), root=root)
+
+            reported = summary["planner_budget"]
+            self.assertEqual(reported["pool_holds"], 1)
+            self.assertEqual(reported["held_pools"], ["adhoc"])
+            self.assertEqual(summary["tick_ledger"]["status"], "recorded")
+
+            with TickLedger(root / "tick-ledger.sqlite", read_only=True) as led:
+                row = led.connection.execute(
+                    "SELECT planner_budget_json FROM tick_ledger_ticks"
+                ).fetchone()
+            self.assertEqual(json.loads(row["planner_budget_json"]), reported)
+
+    def test_an_unbudgeted_planner_is_a_standing_condition_the_tick_records(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            summary = self._run(
+                self._Client(pool="coverage", rejected=False,
+                             budget={"status": "unbudgeted"}),
+                root=root)
+            self.assertEqual(summary["planner_budget"]["status"], "unbudgeted")
+            self.assertEqual(summary["planner_budget"]["pool_holds"], 0)
+
+    def test_planner_budget_is_not_mistaken_for_a_lane(self) -> None:
+        # It is a Mapping in the tick summary, and every Mapping in the
+        # summary that is not reserved becomes a lane row -- which would put
+        # the driver's own work into the idle ratio.
+        from dalton_core.lane_registry import RESERVED_DRIVER_KEYS
+
+        self.assertIn("planner_budget", RESERVED_DRIVER_KEYS)
 
     def test_a_model_failure_still_falls_through_to_the_free_planner(self) -> None:
         # The hold is narrow: only "rejected/pool_exhausted" holds. Every
