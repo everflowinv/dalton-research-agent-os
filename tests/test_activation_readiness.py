@@ -16,7 +16,7 @@ class ActivationReadinessTests(unittest.TestCase):
         c.executescript("""
         CREATE TABLE coverage_mission_pointer(mission_ref TEXT,mission_version_id TEXT);
         CREATE TABLE coverage_mission_versions(mission_version_id TEXT,record_json TEXT,content_hash TEXT);
-        CREATE TABLE claim_versions(claim_version_id TEXT,claim_json TEXT,created_at TEXT);
+        CREATE TABLE claim_versions(claim_version_id TEXT,claim_json TEXT,created_at TEXT,claim_ref TEXT,version_number INTEGER);
         CREATE TABLE company_dossier_versions(version_id TEXT,company_ref TEXT,version_number INTEGER,record_json TEXT,content_hash TEXT);
         CREATE TABLE debate_map_versions(version_id TEXT,subject_ref TEXT,subject_kind TEXT,version_number INTEGER,record_json TEXT,content_hash TEXT);
         CREATE TABLE research_events(event_id TEXT,company_ref TEXT,content_hash TEXT);
@@ -28,7 +28,7 @@ class ActivationReadinessTests(unittest.TestCase):
                    "autonomy": {"may_write": ["dossier", "debate_map", "deliverable"]}}
         c.execute("INSERT INTO coverage_mission_pointer VALUES(?,?)", ("mission:x", mission["id"]))
         c.execute("INSERT INTO coverage_mission_versions VALUES(?,?,?)", (mission["id"], json.dumps(mission), mission["content_hash"]))
-        c.execute("INSERT INTO claim_versions VALUES(?,?,?)", ("claim:1", json.dumps({"subject_ref": self.company}), "2026-09-10"))
+        c.execute("INSERT INTO claim_versions VALUES(?,?,?,?,?)", ("claim:1", json.dumps({"subject_ref": self.company}), "2026-09-10", "claim:one", 1))
         self.c = c
 
     def tearDown(self):
@@ -93,6 +93,66 @@ class ActivationReadinessTests(unittest.TestCase):
         with open_readonly(self.db) as ro:
             with self.assertRaises(sqlite3.OperationalError):
                 ro.execute("CREATE TABLE forbidden(x)")
+
+    def test_claim_input_uses_latest_versions_and_producer_limit(self):
+        from dalton_core.activation_readiness import _claims
+        self.c.execute("INSERT INTO claim_versions VALUES(?,?,?,?,?)", (
+            "claim:2", json.dumps({"subject_ref": self.company}), "2026-09-11", "claim:one", 2))
+        self.c.commit()
+        with open_readonly(self.db) as ro:
+            self.assertEqual(_claims(ro, self.company), ["claim:2"])
+        self.c.executemany("INSERT INTO claim_versions VALUES(?,?,?,?,?)", [
+            (f"claim:extra:{i:04}", json.dumps({"subject_ref": self.company}),
+             "2026-09-11", f"extra:{i:04}", 1) for i in range(1001)])
+        self.c.commit()
+        with open_readonly(self.db) as ro:
+            refs = _claims(ro, self.company)
+            self.assertEqual(len(refs), 1000)
+            self.assertNotIn("claim:extra:1000", refs)
+
+    def test_actual_ledger_projection_matches_audit_claim_selection(self):
+        from dalton_core.activation_readiness import _claims
+        from dalton_core.debate_map_draft import subject_claim_refs
+        from tests.test_claim_index_authority import ClaimIndexAuthorityTests
+        fixture = ClaimIndexAuthorityTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.add_claim("claim:parity")
+        self.assertEqual(_claims(fixture.store.connection, "company:fixture"),
+                         subject_claim_refs(fixture.store, "company:fixture"))
+
+    def test_output_refuses_core_state_symlinks_and_duplicate_targets(self):
+        from dalton_core.activation_readiness import main
+        self.c.commit()
+        before = self.db.read_bytes()
+        with tempfile.TemporaryDirectory() as tmp:
+            alias = Path(tmp) / "alias.json"
+            alias.symlink_to(self.db)
+            for output in (self.db, self.state / "config.json", alias):
+                with self.subTest(output=output), self.assertRaises(SystemExit):
+                    main(["--state-dir", str(self.state), "--json-output", str(output)])
+            output = Path(tmp) / "report.json"
+            with self.assertRaises(SystemExit):
+                main(["--state-dir", str(self.state), "--json-output", str(output),
+                      "--markdown-output", str(output)])
+        self.assertEqual(self.db.read_bytes(), before)
+
+    def test_readonly_uri_escapes_filename_and_closes_connection(self):
+        odd = self.state / "core?#.sqlite"
+        sqlite3.connect(odd).close()
+        with open_readonly(odd) as ro:
+            self.assertEqual(ro.execute("SELECT 1").fetchone()[0], 1)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            ro.execute("SELECT 1")
+
+    def test_dossier_reports_invalid_policy_and_missing_input_gates(self):
+        self.configs()
+        self.c.commit()
+        report = audit(core_db=self.db, state_dir=self.state)
+        blockers = report["companies"][0]["products"]["company_dossier"]["blockers"]
+        self.assertIn("invalid_config:p12a-dossier-policy-v1.json", blockers)
+        self.assertIn("no_eligible_input:no_claim_index", blockers)
+        self.assertIn("no_eligible_input:initial_screen_not_passed", blockers)
 
 
 if __name__ == "__main__": unittest.main()

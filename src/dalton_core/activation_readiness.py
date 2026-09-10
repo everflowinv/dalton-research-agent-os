@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -21,11 +22,16 @@ CONFIGS = {
 }
 
 
-def open_readonly(path: Path) -> sqlite3.Connection:
-    connection = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA query_only=ON")
-    return connection
+@contextmanager
+def open_readonly(path: Path):
+    connection = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")  # One consistent snapshot for all audit reads.
+        yield connection
+    finally:
+        connection.close()
 
 
 def _table(c: sqlite3.Connection, name: str) -> bool:
@@ -60,32 +66,22 @@ def _mission(c: sqlite3.Connection, mission_ref: str | None) -> dict[str, Any]:
 def _claims(c: sqlite3.Connection, company_ref: str) -> list[str]:
     if not _table(c, "claim_versions"):
         return []
-    rows = c.execute("SELECT claim_version_id,claim_json FROM claim_versions ORDER BY claim_version_id").fetchall()
-    retired = set()
-    if _table(c, "claim_retirement_decisions"):
-        retired = {r[0] for r in c.execute(
-            "SELECT claim_version_ref FROM claim_retirement_decisions WHERE decision='retired'")}
+    # Match query_company_research/subject_claim_refs: latest version per
+    # claim_ref, canonical index projection, claim_ref order, and 1,000 limit.
+    # Reuse the pure index reader, which validates immutable entry hashes.
+    from .company_research_view import annotate_with_index
+    rows = c.execute(
+        "SELECT v.claim_version_id,v.claim_json FROM claim_versions v "
+        "WHERE NOT EXISTS (SELECT 1 FROM claim_versions x WHERE x.claim_ref=v.claim_ref "
+        "AND (x.version_number>v.version_number OR "
+        "(x.version_number=v.version_number AND x.claim_version_id>v.claim_version_id))) "
+        "ORDER BY v.claim_ref").fetchall()
     found = []
     for row in rows:
-        if row[0] in retired:
-            continue
-        try:
-            body = json.loads(row[1])
-        except (TypeError, json.JSONDecodeError):
-            continue
+        body = json.loads(row["claim_json"])
         if body.get("subject_ref") == company_ref:
-            found.append(row[0])
-    if _table(c, "claim_index_entry_versions"):
-        indexed = {
-            row["claim_version_ref"]: bool(row["is_canonical"])
-            for row in c.execute(
-                "SELECT v.claim_version_ref,v.is_canonical FROM claim_index_entry_versions v "
-                "WHERE v.subject_ref=? AND v.version_number=(SELECT MAX(x.version_number) "
-                "FROM claim_index_entry_versions x WHERE x.entry_ref=v.entry_ref)",
-                (company_ref,))
-        }
-        found = [ref for ref in found if indexed.get(ref, True)]
-    return found
+            found.append({"claim_version_ref": row["claim_version_id"]})
+    return [row["claim_version_ref"] for row in annotate_with_index(c, found)[:1000]]
 
 
 def _digest(refs: list[str]) -> str:
@@ -106,7 +102,8 @@ def _latest(c: sqlite3.Connection, table: str, company_ref: str) -> tuple[dict[s
 
 
 def _blocked_reasons(product: str, mission: dict[str, Any], state: Path,
-                     claim_refs: list[str], unjudged: int) -> list[str]:
+                     claim_refs: list[str], unjudged: int, connection: sqlite3.Connection,
+                     company_ref: str) -> list[str]:
     reasons = []
     may_write = set((mission.get("autonomy") or {}).get("may_write") or ())
     if GRANTS[product] not in may_write:
@@ -122,6 +119,12 @@ def _blocked_reasons(product: str, mission: dict[str, Any], state: Path,
         except (OSError, json.JSONDecodeError):
             invalid.append(name)
             continue
+        if name == "p12a-dossier-policy-v1.json":
+            from .company_dossier import validate_policy
+            try:
+                validate_policy(body)
+            except ValueError:
+                invalid.append(name)
         if name.endswith("model-config.json"):
             ref = body.get("routing_policy_ref") if isinstance(body, dict) else None
             if not isinstance(ref, str) or not ref:
@@ -145,6 +148,22 @@ def _blocked_reasons(product: str, mission: dict[str, Any], state: Path,
             reasons.append(f"model_router_unreadable:{type(exc).__name__}")
     elif route_refs:
         reasons.append("model_router_unreadable:missing_database")
+    if product == "company_dossier":
+        if not _table(connection, "claim_index_entry_versions"):
+            reasons.append("no_eligible_input:no_claim_index")
+        statuses = []
+        if _table(connection, "coverage_mission_stage_records"):
+            for table, status in (("coverage_mission_stage_records", "r.status"),
+                                  ("coverage_mission_stage_reopens", "'reopened'")):
+                if _table(connection, table):
+                    statuses.extend(connection.execute(
+                        f"SELECT r.created_at,r.record_id,{status} AS status FROM {table} r "
+                        "JOIN coverage_mission_versions v ON v.mission_version_id=r.mission_version_ref "
+                        "WHERE v.mission_ref=? AND r.company_ref=? AND r.stage_ref='initial_screen'",
+                        (mission["mission_ref"], company_ref)).fetchall())
+        from .coverage_mission import fold_stage_status
+        if fold_stage_status([row["status"] for row in sorted(statuses, key=lambda r: (r["created_at"], r["record_id"]))]) != "gate_passed":
+            reasons.append("no_eligible_input:initial_screen_not_passed")
     if product in {"company_dossier", "debate_map"} and not claim_refs:
         reasons.append("no_eligible_input:no_current_company_claims")
     if product == "event_judgement" and not unjudged:
@@ -175,7 +194,7 @@ def audit(*, core_db: Path, state_dir: Path, mission_ref: str | None = None) -> 
                 item: dict[str, Any] = {"status": "missing"}
                 if record is None:
                     item["blockers"] = _blocked_reasons(
-                        product, mission, state_dir, claims, unjudged)
+                        product, mission, state_dir, claims, unjudged, c, company_ref)
                     item["reason"] = item["blockers"][0]
                 else:
                     item.update({"status": "present", "ref": record.get("id"),
@@ -233,7 +252,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json-output", type=Path)
     p.add_argument("--markdown-output", type=Path)
     args = p.parse_args(argv)
-    report = audit(core_db=args.core_db or args.state_dir / "core.sqlite",
+    core_db = args.core_db or args.state_dir / "core.sqlite"
+    outputs = [path.resolve() for path in (args.json_output, args.markdown_output) if path]
+    if len(outputs) != len(set(outputs)):
+        p.error("audit output paths must be distinct")
+    for output in outputs:
+        if output.is_relative_to(args.state_dir.resolve()) or output == core_db.resolve():
+            p.error("audit outputs must be outside the source state and Core database")
+    report = audit(core_db=core_db,
                    state_dir=args.state_dir, mission_ref=args.mission_ref)
     encoded = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.json_output: args.json_output.write_text(encoded, encoding="utf-8")

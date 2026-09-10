@@ -23,3 +23,9 @@ PYTHONPATH=src python3 -m unittest tests.test_activation_readiness tests.test_do
 ```
 
 Result: 130 tests passed in 6.359 seconds. Tests cover exact per-company head selection and hashes, mission and input freshness, explicit contract-unverifiable states, actionable missing reasons, Markdown output, and a failed write through the audit's SQLite handle. `git diff --check` passed.
+
+## Integration review follow-up
+
+The audit now uses the producer's latest ClaimVersion per claim_ref and the same pure, hash-validating canonical-index projection, including its 1,000-row limit. Historical versions no longer falsely make a DebateMap stale. Dossier blockers also include a missing Claim index, the folded Initial Screen gate across mission versions (including reopens), and structural policy validation. This is an artifact/configuration audit; route presence alone does not certify runtime availability, budget admission, or a successful verifier call.
+
+The SQLite URI escapes unusual filenames, all Core reads share one read-only transaction, and connections close deterministically. CLI output paths must be distinct and outside the source state/Core, including symlink targets. Regression checks: **13 tests passed / 0.852s**, covering an actual DaltonStore projection, latest versions, the producer limit, rejected source-overwriting outputs, and read-only connection lifetime.

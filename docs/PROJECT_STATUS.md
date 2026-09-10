@@ -8,10 +8,10 @@ Owner 要求持续开发，不以单个里程碑完成为停点；写代码最�
 
 | 负责人 | 当前代码切片 | 工作分支 |
 | --- | --- | --- |
-| Sol / forecast_fixes | SEC Item 5 解析与消费者链路交叉审查 | `item5-cross-review` |
-| Sol / zero_base_fixes | 独立 verifier 在调用前排除所有生产者模型家族 | `verifier-route-independence` |
-| Sol / insider_fixes | SEC 8-K discovery 的可审阅版本化提案 | `sec-8k-discovery-proposal` |
-| 主代理 | 交叉审查、真实子进程回归、签署部署材料、集成验收 | `main` |
+| Sol / forecast_fixes | 授权配置副本演练交叉审查 | `activation-simulation-cross-review` |
+| Sol / zero_base_fixes | SEC plan 持久选择完成，审读剩余 D1–D9 缺口 | `sec-plan-selection` |
+| Sol / insider_fixes | verifier 调用前独立性边界交叉审查 | `verifier-route-cross-review` |
+| 主代理 | 就绪审计修复、独立分支集成与验收、具体部署材料 | `continuous-integration-wave3` |
 
 本轮首个持续开发验收点 `e7e06bb`：**完整 6,114 项 / 495.678s 通过（1 skip）**，当前 live 只读副本全部 12 步复演通过（67 schemas / 35 lanes / 38 entries / 0 escaped），wheel 428 个 Python/SQL 文件逐字匹配。详见 [验收记录](reports/continuous-wave2-integration-2026-09-10.md)。未部署。
 
@@ -32,7 +32,7 @@ W4 六条待合分支与三个 GPT-5.6 Sol 修复 worktree 已集成，最终验
 3. **F13 日缓存与 HK 周调度**：独立 `daily_buyback_tape` 治理提案、跨公司共享 invocation/artifact 的日缓存与重放校验已合入（118 focused + 6 hardening）；新能力默认未批准、未启用。HK closed-week 推理和迟到证据全组重判正在独立开发。
 4. **W5 / D1–D9**：market-proxy 生产→索引→模型规格初版已合入（364 focused），正在补映射版本、权限、故障隔离及部署参数边界；随后接成本侧模板和 Item 5。HK universe、数字权威、慢背离窗口等原待裁决保持显式。周报投递和 Excel 导出继续后排。
 
-本轮详细提交与 next step 见 [持续开发记录](reports/continuous-development-wave2-2026-09-10.md)。当前主线至 `e7e06bb` 已完成全量并进入本次 push；下一批成本模板、Item 5、模型安装和 HK failure ledger 仍在独立分支审查，不包含在 6,114 项结果中。未部署。
+本轮详细提交与 next step 见 [持续开发记录](reports/continuous-development-wave2-2026-09-10.md)。`e7e06bb` 已全量通过并随文档 `1df3a32` 推送 origin/main。下一批成本模板、Item 5、模型安装、HK failure ledger、verifier 预调用独立性、SEC 8-K 提案与激活审计/演练已进入独立集成分支，等待交叉审查后的全量验收，不包含在 6,114 项结果中。原 main 的 DeepSeek 别名/价格改动经 owner 确认属于另一会话，完整保留；未部署。
 ## 2026-09-10 恢复开发背景
 
 已详细审读 PROJECT_STATUS、并行计划 §6b/6c、经济不变量、Chem 复盘、模型选择、既有资料及六份待合分支报告。原工作区干净，`main=694471c`，fetch 后领先 origin/main 11 个提交。以新隔离 worktree 承接 GPT-5.6 Sol 并行工作，避免接管旧 agent 目录；本节与 §6d 覆盖下方历史“只记录不动手”的暂停安排。
