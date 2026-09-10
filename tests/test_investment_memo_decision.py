@@ -77,7 +77,8 @@ class Missions:
     def current_stage_state(self, mission_ref, company_ref):
         history = [row for row in self.rows if row["stage_ref"] == "investment_memo"]
         stages = {"company_model": {"status": self.company_status}}
-        if history: stages["investment_memo"] = {"status": history[-1]["status"]}
+        if history: stages["investment_memo"] = {"status": history[-1]["status"],
+            "history": [{"mission_version_ref": "mission:v14"} for _ in history]}
         active = [row for row in self.rows if row["stage_ref"] == "active_coverage"]
         if active: stages["active_coverage"] = {"status": active[-1]["status"]}
         return {"stages": stages}
@@ -257,16 +258,16 @@ class InvestmentMemoDecisionTests(unittest.TestCase):
     @patch("dalton_core.model_router.ModelRouter", return_value=Router())
     @patch("dalton_core.model_fallback_chain.served_family",
            side_effect=lambda router, ref: "verifier" if ref == "route-decision:v" else "producer")
-    def test_old_active_entry_is_not_reused_for_new_memo_cycle(self, family, router):
+    def test_old_active_entry_is_not_reported_as_new_memo_cycle(self, family, router):
         record = memo(); server = self.server(record)
         server.coverage_mission.rows.append(
             {"id": "active:old", "stage_ref": "active_coverage", "status": "entered",
              "evidence_refs": ["memo:old"]})
-        with self.assertRaisesRegex(WriterServerError, "prior active-coverage cycle"):
-            WriterServer._op_decide_investment_memo(server, {
-                "memo_version_ref": record["id"], "memo_version_hash": record["content_hash"],
-                "decision": "approve", "reason": "yes", "actor_ref": "human:owner"})
-        self.assertEqual(len(server.coverage_mission.rows), 2)
+        result = WriterServer._op_decide_investment_memo(server, {
+            "memo_version_ref": record["id"], "memo_version_hash": record["content_hash"],
+            "decision": "approve", "reason": "yes", "actor_ref": "human:owner"})
+        self.assertIsNone(result["active_coverage_record_ref"])
+        self.assertEqual(len(server.coverage_mission.rows), 4)
 
 
 if __name__ == "__main__": unittest.main()

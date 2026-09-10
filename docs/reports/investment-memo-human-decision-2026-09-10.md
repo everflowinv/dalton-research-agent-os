@@ -71,7 +71,11 @@ draft consumes.
   real DaltonStore, ResearchPlaybook and CoverageMission authority, advances
   every prerequisite stage legally, publishes through the real
   MissionDeliverable authority, validates five real formal calls/routes, and
-  records the human memo pass plus active-coverage entry. Folded-state regressions cover
+  injects a crash after the real memo pass before active coverage, then proves
+  an exact retry completes it. The same real authority test reopens the passed
+  memo gate, publishes a changed head with a new formal verifier result, and
+  approves it without claiming the older active-coverage record as a new
+  cycle. Folded-state regressions cover
   a reopened company-model gate and an unrelated old active-coverage entry.
 
 ## Remaining boundary

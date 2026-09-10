@@ -3028,10 +3028,14 @@ class WriterServer:
             raise WriterServerError("Investment Memo gate does not match verifier formal output")
 
         company_ref = str(memo["subject_ref"])
-        records = self.coverage_mission.stage_records(mission["mission_ref"], company_ref)
-        states = {(item["stage_ref"], item["status"]): item for item in records}
         folded_state = self.coverage_mission.current_stage_state(
             mission["mission_ref"], company_ref).get("stages", {})
+        version_refs = {item["mission_version_ref"] for stage in folded_state.values()
+                        for item in stage.get("history", [])}
+        version_refs.add(mission["id"])
+        records = [item for version_ref in sorted(version_refs)
+                   for item in self.coverage_mission.stage_records(version_ref, company_ref)]
+        states = {(item["stage_ref"], item["status"]): item for item in records}
         if folded_state.get("company_model", {}).get("status") != "gate_passed":
             raise WriterServerError("company_model has not passed")
         requested_status = "gate_passed" if decision == "approve" else "gate_failed"
@@ -3050,17 +3054,14 @@ class WriterServer:
                              if item["stage_ref"] == "active_coverage"
                              and item["status"] == "entered"
                              and ref in item.get("evidence_refs", [])), None)
-        if (decision == "approve" and exact_active is None
-                and folded_state.get("active_coverage", {}).get("status") == "entered"):
-            raise WriterServerError(
-                "the prior active-coverage cycle must be reopened before this memo enters")
         if ("investment_memo", "entered") not in states:
             self.coverage_mission.record_stage(
                 mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
                 company_ref=company_ref, stage_ref="investment_memo", status="entered",
                 evidence_refs=[ref], rationale="Investment Memo submitted for human review.",
                 actor_ref=actor, idempotency_key=f"investment-memo:{ref}:entered")
-            records = self.coverage_mission.stage_records(mission["mission_ref"], company_ref)
+            records = [item for version_ref in sorted(version_refs)
+                       for item in self.coverage_mission.stage_records(version_ref, company_ref)]
             states = {(item["stage_ref"], item["status"]): item for item in records}
         status = requested_status
         exact = next((item for item in exact_decisions if item["status"] == status), None)
@@ -3073,7 +3074,8 @@ class WriterServer:
         else:
             memo_stage = exact
         active_stage = exact_active
-        if decision == "approve" and active_stage is None:
+        if (decision == "approve" and active_stage is None
+                and folded_state.get("active_coverage", {}).get("status") != "entered"):
             active_stage = self.coverage_mission.record_stage(
                 mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
                 company_ref=company_ref, stage_ref="active_coverage", status="entered",
