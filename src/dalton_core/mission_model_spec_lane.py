@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
-from .company_model_cli import choose_company
+from .company_model_cli import choose_company, filed_classifications
 from .company_model_spec import TASK_HASH
 from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
@@ -136,10 +136,14 @@ class MissionModelSpecLaneCoordinator:
                     "settled": settled}
         excluded: set[str] = set()
         held_companies: dict[str, Any] = {}
+        classifications = (
+            filed_classifications(self.missions.store)
+            if getattr(self.missions, "store", None) is not None else {})
         while True:
             try:
                 company_ref, state = choose_company(
                     self.missions, mission,
+                    classifications=classifications,
                     exclude_company_refs=frozenset(excluded))
             except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
                 return {"status": "unavailable", "settled": settled,

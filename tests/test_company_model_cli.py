@@ -23,13 +23,15 @@ import unittest
 from pathlib import Path
 
 from dalton_core.company_model_cli import (
-    choose_company, model_spec_request_id, run_model_spec,
+    choose_company, filed_classifications, model_spec_request_id, run_model_spec,
 )
-from dalton_core.company_model_spec import spec_from_response
+from dalton_core.company_model_spec import TASK_HASH, spec_from_response
+from dalton_core.company_dossier import CompanyDossierAuthority
 from dalton_core.company_model_state import build_company_model_state
 from dalton_core.coverage_mission import CoverageMissionAuthority
 from dalton_core.store import DaltonStore
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
+from tests.test_company_dossier import body as dossier_body, classification
 
 ACN = "company:sec-cik:0001467373"
 
@@ -192,6 +194,34 @@ class ChooseCompanyTests(unittest.TestCase):
             expected_task_hash=TASK_HASH, dry_run=True,
         )
         self.assertEqual(summary["spec_status"], "gated")
+
+    def test_filed_classification_selects_the_same_state_the_child_rebuilds(self):
+        dossiers = CompanyDossierAuthority(self.store)
+        dossiers.publish(dossier_body(
+            drafted_sections={},
+            classification_block=classification(
+                "claim-version:classification",
+                word="contract_compounder"),
+            evidence=[{
+                "kind": "claim", "ref": "claim-version:classification",
+                "text": "合同期限为五年", "period": "2026Q2",
+            }],
+        ))
+        classifications = filed_classifications(self.store)
+        company_ref, selected = choose_company(
+            self.missions, self.mission, classifications=classifications)
+        self.assertEqual(company_ref, ACN)
+        self.assertEqual(selected["industry_classification"],
+                         "contract_compounder")
+        summary = run_model_spec(
+            state_dir=self.state_dir, model_config_path=None,
+            summary_dir=self.state_dir / "classified-summary", scheduler_db=None,
+            company_ref=ACN, expected_state_hash=selected["state_hash"],
+            expected_task_hash=TASK_HASH,
+            dry_run=True,
+        )
+        self.assertEqual(summary["spec_status"], "gated")
+        self.assertEqual(summary["state_hash"], selected["state_hash"])
 
     def test_a_run_with_nothing_to_decide_says_so_rather_than_paying(self):
         _, state = choose_company(self.missions, self.mission)

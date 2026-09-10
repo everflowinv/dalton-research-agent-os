@@ -94,7 +94,13 @@ def filed_classifications(store: Any) -> dict[str, str]:
 
     if not table_exists(store.connection, "company_dossier_versions"):
         return {}
-    dossiers = CompanyDossierAuthority(store)
+    # This is a projection read on the coordinator/child hot path.  Do not run
+    # the authority constructor here: it installs/migrates its schema.  The
+    # table's owning installer does that, while these bound reads still use the
+    # authority's canonical row-validation methods.
+    dossiers = object.__new__(CompanyDossierAuthority)
+    dossiers.store = store
+    dossiers.connection = store.connection
     out: dict[str, str] = {}
     for company_ref in dossiers.companies():
         record = dossiers.latest(company_ref)

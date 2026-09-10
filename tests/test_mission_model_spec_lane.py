@@ -13,6 +13,7 @@ from __future__ import annotations
 import unittest
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 from dalton_core.lane_child_launcher import LaneChildConflict, LaneChildTicketNotFound
 import dalton_core.mission_model_spec_lane as model_spec_lane
@@ -210,6 +211,30 @@ class ModelSpecLaneTests(unittest.TestCase):
         resumed = lane.dispatch_once()
         self.assertEqual(resumed["status"], "launched")
         self.assertEqual(self.launcher.started[-1]["task_hash"], "f" * 64)
+
+    def test_a_new_filed_classification_is_a_new_key_not_the_old_hold(self):
+        missions = FakeMissions([ACN])
+        # A store means the coordinator must obtain the same filed dossier
+        # projection as the child.  Keep this controlled fixture focused on
+        # the changing authority result; choose_company itself remains real.
+        missions.store = object()
+        lane = MissionModelSpecLaneCoordinator(
+            missions=missions, launcher=self.launcher,
+            mission=lambda: self.mission)
+        with mock.patch.object(
+            model_spec_lane, "filed_classifications",
+            side_effect=[{ACN: "contract_compounder"},
+                         {ACN: "structural_growth"}],
+        ):
+            first = lane.dispatch_once()
+            self.launcher.finish(first["ticket_ref"], summary={
+                "spec_status": "refused", "failure_reason": "old classification"})
+            changed = lane.dispatch_once()
+
+        self.assertEqual(changed["status"], "launched")
+        self.assertEqual(changed["company_ref"], ACN)
+        self.assertNotEqual(changed["state_hash"], first["state_hash"])
+        self.assertNotIn(ACN, changed.get("held", {}))
 
     def test_a_child_that_died_without_a_summary_spends_one_transient_retry(self):
         launched = self.lane.dispatch_once()
