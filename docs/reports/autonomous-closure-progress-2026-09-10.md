@@ -67,3 +67,13 @@ Next step：接受完整运行候选后备份部署、health与逐字核对、�
 已按owner授权备份并部署。Backup `deploy-backup-20260910T184938Z`，保留源码 `.release-source.otXCB3`；controller63222，health全部通过；部署后535安装文件与源码/wheel一致。Mission v14真实签署hash不变。首次产品仍0/15，不把启动成功当研究验收。私有packet authoritative release-manifest.json已标deployment complete_runtime_verified，保存postdeploy与health证据。
 
 新增导入79项、HTML权威16项、XLSX+下载+控制面20项集成通过；独立审查继续改跨主体claim图表、来源manifest、财年日历/mission绑定。以上新增代码进入下一次发布，不混入本次6418项验收结论。
+
+## 19:15 UTC — final deliverable regression and workspace integration
+
+- Frozen `78a32f7`: 6,455 tests / 564.276s, one failure. Root cause was a real consumed recovery probe in legacy-governance inspection, fixed across price/consensus/calendar; 154 focused passed. Replacement frozen `7bdccd8` full suite is running independently of workspace changes.
+- Broker journal safe fields prove `REQUIRED_CONTROLS_UNAVAILABLE`, not missing aliases, for verifier failures. Fixing semantic classification/capability matching; no weakening of controls or paid canary.
+- Workspace identity/process/release/control/capacity slices integrated. Review found and is addressing environmental cross-binding, broad read-only allowlists, concurrent create TOCTOU, relocated-venv executable paths, and premature concurrency release after unknown provider completion.
+- Root Cockpit namespace checks reject another workspace before local journal creation; title/identity visible. 17 Cockpit tests passed (one skip), 32 shared-capacity/context tests passed. Wider integrated validation ongoing.
+- Original main worktree and other-session DeepSeek changes remain untouched. Current live code and mission are unchanged from the verified 18:50 deployment.
+
+Next: finish final-deliverable acceptance and publish; then controls repair and complete isolated workspace runtime acceptance. Shared connector/vendor capacity is still an explicit remaining implementation gap.

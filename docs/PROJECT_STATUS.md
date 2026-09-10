@@ -2,17 +2,15 @@
 
 更新日期：2026-09-10（预算配置验收与 Cockpit 复查准备；以下历史记录保留）
 
-## 当前检查点（2026-09-10，18:51 UTC）
+## 当前检查点（2026-09-10，19:15 UTC）
 
-**运行修复与完整Cockpit重构 `299227b` 已自主部署。** 全量6418项/548.500s通过（1 skip）；535运行文件与已审wheel、保留源码逐字一致，67 schema/40 tick entries/0 escaped副本演练通过；部署后health全部通过。Mission v14签署hash仍为 `0bae07a75bf1a7685d3dc9896317502aa3468eaa187e84ba9108c957983e6bb5`，没有重签或自动裁决研究。首次产物复查仍0/15，继续观察新child的真实结果。
+**Live仍为已验收部署的 `299227b`；Mission v14与人类签署hash保持不变。** 运行健康不等于产物齐全。只读broker journal已定位核验阻塞为 `REQUIRED_CONTROLS_UNAVAILABLE`：执行端未声明请求要求的provider controls，三个别名本身均存在；正在修正错误分类、可执行能力匹配，不能放松核验要求。CTSH当前不是AlphaEngine滚动额度阻塞；文档仍待提取，续页存在可重试搜索错误。
 
-最后一批交付正在集成验收：完整prior Office导入（79项通过）；自包含HTML与真实Memo/档案权威读取（16项通过），新增跨主体和资产manifest独立审查修复；基金XLSX公式导出（年度/季度与valuation scenario离线重算通过），正补正常产品入口的财年日历/mission绑定。Cockpit下载入口20项相关测试通过，浏览器验收进行中。这些新增交付代码尚未部署。
+基金交付冻结 `78a32f7` 的6,455项全量发现1处真实回归：旧治理拒绝检查消耗了依赖恢复probe。三条市场lane已修复，154项聚焦通过；修复后的独立冻结 `7bdccd8` 正重新做完整测试、wheel逐字比对和live副本演练。该冻结包含完整Office导入、HTML/XLSX、Cockpit下载入口、DebateMap长度契约和安全broker诊断，尚未部署。
 
-只读核查五家公司价格、consensus、估值仍为空：yfinance三项来源治理为proposed，已准备私有owner审阅材料，未代签。另在修复批准变化后同日错误ticket与旧失败阻塞，治理改变不能绕过网络或内容错误的持久停放。
+“最后的最后”多分析师workspace已进入并行实现：共享不可变release、独立UUID/DB/config/socket/日志/端口/Cockpit；host锁防止并发创建冲突；按workspace停止与drain。共享模型容量原型已接最终broker边界，主审补了未知调用同时保留费用与并发槽；连接器共享额度仍未接入，不得声称整个fleet共享预算已完成。当前正在复验真实CLI、安装后入口可执行性、环境绑定和跨工作区路径拒绝；未创建新的live分析师或迁移旧数据。
 
-Owner最新要求排在最后的最后：共享一份程序、多个隔离workspace（各自行业任务/数据库/进度/Cockpit），共享供应商配额集中协调。完成当前交付后再审计单实例假设、实现并行隔离验收。详见 [持续闭环开发](reports/autonomous-closure-progress-2026-09-10.md)。
-
-Next step：观察已部署版本真实产物；完成导入/HTML/XLSX及下载交互验收并发布；然后做多workspace运行隔离。人类研究与新能力审批仍明确待owner裁决。
+Next step：通过基金交付冻结验收后部署；修复真实provider-controls阻塞；完成workspace独立审查与双工作区端到端验收。新来源/研究checkpoint人工裁决仍使用已准备的具体审阅材料，未代签。
 
 ## 最新部署与当前工作（2026-09-10，17:12 UTC）
 
