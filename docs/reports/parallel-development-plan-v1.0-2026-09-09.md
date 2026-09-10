@@ -301,6 +301,8 @@ P14 演化层（事件流、thesis revision candidate、预测修订提案、gat
 | w4-framework-by-classification | 按 `industry_classification` 的 driver 模板（规格 / 档案 / DebateMap 共用）+ `market_proxy` 证据种类与 `proxy_gap` 理由 | 派出 |
 | w4-economic-invariants | M2 / M3 经济不变量层（符号一致、历史带、率域、分部加总、单批 vs 累计）；失败 = unavailable + 理由 | 派出 |
 | w4-zero-base-review | `ZeroBaseReview`（月度 / 财报后，从零重问四件事）+ `no_change` / `revise` 的事后验证指标进 Q2 reflection | 派出 |
+| w4-insider-buyback-tracking | owner 09-10：tracking 要含 filings，尤其管理层减持与回购。Form 4 派生上下文（占持股比、90 日聚合、10b5-1、是否已被预期）进判断层提示；新增 `buyback_disclosure` 事件（10-Q/10-K Item 2、8-K 授权）+ 派生上下文（均价 vs 现价、节奏、趋势、占市值 / FCF、是否只对冲稀释）；ownership 与 filings index 进常驻 daily tracking；capability map 写明美股回购只在 10-Q/10-K/8-K/电话会 | 派出 |
+| w4-hkex-filings | 港股 `hkex-filings` 连接器：翌日回购申报、月报表、权益披露（DI）、公告索引；发 `buyback_disclosure` / `insider_transaction` / `ownership_change`；`company:hk-secucode:*` 仅在连接器内引入，universe 扩展留给 owner | 派出 |
 | w4-failure-classes | lane 公共失败分类 dependency_unavailable / content_refused / transient；dependency 类进 cockpit 运维待办并在依赖恢复后自动重试 + cockpit 概览「四格」 | 派出 |
 
 ## 附录 A：接线热点清单（Wave 0 要收掉的）
