@@ -29,7 +29,9 @@ Dalton 现在知道街上怎么想：一条 append-only 的 `ConsensusEstimateVe
 | `a862929` | lane 的两项登记：`MigrationSpec` + cockpit lane 标签 |
 | `c24310a` | `git merge main`（迁移清单已按字母序，两条 spec 就位；`bootstrap.py` 同样两行） |
 | `181cd73` | P15d 的 consensus reader 现在能解析到东西（模块级 `latest_consensus`） |
-| （本次）| owner 裁决：按 grade 划定的标签别名表，产出 9 → 15 条 |
+| `f093730` | owner 裁决：按 grade 划定的标签别名表，产出 9 → 15 条 |
+| `872bb93` | P13-M3 的 `report_consensus(store, company_ref)` 适配器 |
+| （本次）| code review 的四条 blocker + 七条 should-fix，见 §9 |
 
 未推送。未部署。未写 live 状态。未发布 mission 版本。未做任何真实模型调用。
 
@@ -129,9 +131,15 @@ Yahoo 只给 `0q / +1q / 0y / +1y`，从不说那是哪个季度。**Accenture �
 | IBM | 12-31 | FY2026Q3 @2026-09-30（进行中） | FY2026Q4 @2026-12-31 | FY2026 @2026-12-31 | FY2027 @2027-12-31 |
 | DXC | 03-31 | FY2027Q2 @2026-09-30 | FY2027Q3 @2026-12-31 | FY2027 @2027-03-31 | FY2028 @2028-03-31 |
 
-ACN 那一行由 fixture 独立佐证：`earnings_estimate["0y"].avg == ["+1y"].yearAgoEps == 13.86199`，即 `0y` 的
-去年正是**最后一个已披露**的财年，所以 `0y = 上一个已披露财年 + 1`。「我们所在的季度」这个更直觉的规则会
-把 ACN 判成 FY2027Q1，错一个季度。
+ACN 那一行由 fixture 独立佐证：`earnings_estimate["0y"].yearAgoEps = 12.93`，而 **ACN 已申报的 FY2025 稀释
+每股收益正是 12.93 美元**——所以 `0y` 的「去年」是最后一个**已披露**的财年，`0y` 本身是它的下一个，即当时
+尚未披露的 FY2026。同一份 fixture 里 `["0y"].avg == ["+1y"].yearAgoEps == 13.86199` 把这条链再接一环。
+「我们所在的季度」这个更直觉的规则会把 ACN 判成 FY2027Q1，错一个季度。
+
+**财年结束日那天不是死区（B1）。** 当 `last_reported_period_end` 恰好等于财年结束日——即 10-K 落地到下一个
+季报之间的那两个月——「取不早于」的规则会答出刚刚披露完的那个财年，而那个财年已经没有人在估了。这里原本
+抛异常，异常又把整版拒掉，于是公司在**街上的次年数字最值钱的那个窗口**里反而完全没有映射。现在按季度分支
+一直在用的那条严格规则向前走一格：`0y` 变成下一个财年。三家公司各有一条测试钉在 `anchor == FYE` 上。
 
 季度端点：若财年结束日是当月最后一天，则每个季度都取当月最后一天（ACN → 11-30 / 02-28 / 05-31 / 08-31）；
 否则取同一日并按月长截断。财年标号 = 结束所在的日历年（`label_basis` 记在每一版上）。
@@ -175,45 +183,33 @@ RBC 研报里的 "Overweight" 是在说别人的评级，记下来就等于把�
 
 ### 4.2 实盘烟测（只读，无模型调用，无网络）
 
-对 live spool 的 AlphaEngine 研报对象跑本片交付的抽取器（`document_code ∈ foreignReport /
-domesticReport / sellSideReport / researchReport`，首页窗口 4,000 字符，quote 按 1,200 字符切）：
+**按 lane 自己构造的 context 形状跑**，不是按 metadata 直读——review 的 B3 说得对：lane 原本给抽取器喂的是
+恒空的 `sources` / `analysts` / `document_companies`，而空的公司名单会**静默关掉多发行人拒绝**，也就是本片
+最值钱的一条规则。所以下面两栏分别是两条真实路径。
 
 ```
 spool 里的研报对象：227 份（名下 0 家公司 26、1 家 171、2 家 14、5 家以上 16）
-提到覆盖池内公司的研报：68 份（单一发行人 50、多公司 18）
-记录的 StreetEstimate：15 条
-拒绝：multi_company_report 18、no_target_price 18、subject_not_named 17
+提到覆盖池内公司的研报：68 份
 ```
 
-| 公司 | 记录数 | 独立券商 | 券商 | 带评级 | report_consensus |
-| --- | --- | --- | --- | --- | --- |
-| ACN | 4 | 4 | td, ubs, citi, wells-fargo | 4 | **成立**：low 173.00 / high 275 / mean 208 USD |
-| EPAM | 7 | 5 | jpmorgan ×2, td ×2, morgan-stanley, citi, guggenheim | 7 | **成立**：low 97 / high 165 / mean 122.6 USD |
-| CTSH | 1 | 1 | wells-fargo | 1 | 不成立（只有一家） |
-| DXC | 2 | 1 | td ×2 | 2 | **不成立**（两份都是 TD Cowen）——互证规则存在的理由 |
-| IBM | 1 | 1 | rbc | 1 | 不成立（只有一家） |
+| | A：有 provenance 记录（抽取吞吐片部署之后） | B：没有 provenance 记录（**今天的 live Core**） |
+| --- | --- | --- |
+| 归属来源 | `document_metadata` 15/15 | `page_text` 14/14 |
+| 记录的 StreetEstimate | **15** | **14** |
+| 拒绝 | multi_company_report 18、no_target_price 18、subject_not_named 17 | subject_not_named 27、no_target_price 14、multi_company_report 9、ambiguous_house 4 |
+| ACN | 4 家券商，173.00–275 USD | 3 家券商，173.00–194.00 USD |
+| EPAM | 5 家券商，97–165 USD | 5 家券商，97–165 USD |
+| CTSH / DXC / IBM | 各 1 家，均不成立 | 各 1 家，均不成立 |
 
-版式分布：`labelled` 8、`inline_reverse` 4、`inline_forward` 3。标签：`price target` 9、`PT` 4、`TP` 2
-（后 6 条**只因为 owner 的别名裁决才读得出来**，见 §4.3）。券商来源一律来自 metadata
-（`document_metadata` 15/15），从未需要解析正文。
+**精度：A 路 15/15、B 路 14/14，目标价与评级都逐条人工核对过所引 quote。** 两路差的那一条是 UBS 的 ACN
+$275：它的首页同时出现了多家券商的名字，B 路按 `ambiguous_house` 拒绝——正是 B3 要的行为，没有 metadata
+时「页面上的字」不构成归属。
 
-**精度：目标价 15/15 正确，评级 15/15 正确（人工逐条核对所抽 quote，样本量 15）。** 6 条别名新增的全部
-逐条看过 quote：RBC「Maintain our OP rating and $270 PT」、Morgan Stanley「Remain EW, PT to $97」、
-Guggenheim「we reiterate our Buy rating and $165 PT」、UBS「Valuation: $275 PT—based on ~16x 2028E EPS」、
-Citi「We reiterate our Neutral rating and $100 TP」、Citi「TP: US$190.00; Recomm: Neutral」——最后一条的
-同一行还独立印着「Fiscal year end 31-Aug」，与 §3 里从申报算出的 ACN 财年端点相符。
+B 路的 `subject_not_named` 从 17 涨到 27，是因为 A 路里先被 `multi_company_report` 拦下的那些文档，在 B 路
+走到了主体检查才被拦：两路的总拒绝数（35 与 36）基本相等，拦截点不同而已。
 
-**召回是被刻意牺牲的。** 计划书 §2 的口径（首 6k 字符有目标价数字）数出 ACN 8 / EPAM 8 / CTSH 5 / DXC 4 /
-IBM 3 共 28 份；本片只记 9 条。差额几乎全在两条规则上：
-
-1. `multi_company_report`：live spool 里共 227 份研报，其中 30 份名下不止一家公司（16 份名下 5 家以上，
-   典型是支付与 IT 服务季度回顾，三十家一份、一家一节、每节自己的 `PT:` 行）。落到覆盖池内的 68 份里有
-   18 份是这种。整份拒绝，不做分节解析：分节解析要在没有页码的纯文本里判断「这一段属于哪家公司」，
-   而判错的代价正是把别人的目标价填给 Accenture。
-2. `label_does_not_name_a_line`：4 份实盘研报只写了 `$270 PT` / `$275 PT` / `$165 PT` / `PT to $97`。
-   `document_numeric_claim._names_a_line` 要求标签命名一条线而不是复述金额，"PT" 两个字母不够。
-   **这条不绕过**：绕过的唯一办法是把研报没印过的词（"price target"）递给核对器，而核对器存在的全部意义
-   就是拦住这件事。见 §6 待决问题。
+版式分布（A 路）：`labelled` 8、`inline_reverse` 4、`inline_forward` 3。标签：`price target` 9、`PT` 4、
+`TP` 2。
 
 ### 4.3 标签别名（owner 裁决，2026-09-10）
 
@@ -434,3 +430,77 @@ OK (skipped=1)
 - 没有向 live state 写入任何东西：烟测全部只读，Route 2 的实跑写在 `mktemp -d` 的临时目录里。
 - 没有提交任何真实研报正文：测试里的三种版式是为测试写的，只用了券商机构名（那是事实，不是受版权保护的
   文本）。
+
+---
+
+## 9. live Core 上今天会发生什么（review 要的现实检查）
+
+把这一节写出来，是因为前面每一节说的都是「代码能做什么」，而这一节说的是「今天部署上去会怎样」——两者
+在几个地方不一样，而且不一样的地方都是我这片自己造成的。
+
+### 9.1 财年日历：原本每一家公司都会被跳过
+
+read-only 副本上 `coverage_mission_statement_filings` 有 **33 行 10-Q、0 行 10-K**。原来的读法只认 10-K 的
+`report_date`，所以路线 2 在今天的 live Core 上对**五家公司全部**返回 `fiscal_calendar_unknown`，一个版本都
+发不出来。
+
+补的办法不是造一张财年表，而是再读一次公司自己的申报：**一家公司从不为哪个季度报 10-Q，哪个季度就是它财年
+结束的季度**（第四季度在 10-K 里报）。三个相隔三个月的季度月份唯一确定第四个。实测（就是上面那 33 行）：
+
+| 公司 | 10-Q 的季度月-日 | 推出的 FYE | 独立佐证 |
+| --- | --- | --- | --- |
+| ACN | 11-30 / 02-28(29) / 05-31 | **08-31** | Citi 研报首页印着「Fiscal year end 31-Aug」 |
+| CTSH | 03-31 / 06-30 / 09-30 | **12-31** | — |
+| EPAM | 03-31 / 06-30 / 09-30 | **12-31** | — |
+| DXC | 06-30 / 09-30 / 12-31 | **03-31** | — |
+| IBM | 06-30（只有一行） | **推不出来** | — |
+
+10-K 在时仍然优先用它（更直接），版本上记 `fiscal_year_end_basis`，所以将来一个错的日历能追到是哪条规则
+给的。少于三个季度、月份不在三个月的网格上、或期末不是月末（52/53 周申报人的年末每年移动几天，本来就写不成
+`MM-DD`），一律返回 `None` 而不是猜。**IBM 今天仍然是 `fiscal_calendar_unknown`，这是诚实的答案**：等它第二、
+第三份 10-Q 入库就自己解决了，不需要任何人做决定。
+
+### 9.2 研报归属：今天走的是「只有页面上的字」那条路
+
+`document_provenance_records` 是抽取吞吐片带来的表，read-only 副本上还**没有**。所以今天 lane 走的是 §4.2
+的 B 路：没有 metadata，归属只能来自首页正文，而那条路要求首页**恰好只出现一家券商**、且**不出现第二家覆盖
+池内的公司**，否则 `ambiguous_house` / `multi_company_report`。实测 14 条、14/14 正确。
+
+抽取吞吐片一部署，同样的 68 份文档会走 A 路，变成 15 条。两条路都不喂恒空列表——这是 B3 的整个要点。
+
+### 9.3 授权与开关
+
+- mission 的 `autonomy.may_write` 里没有 `consensus_estimate` → 每 tick `ungranted`，**两条路都不动**。这是
+  今天的状态，需要 owner 发一版新 mission。
+- `yfinance-analyst-estimates-v1.json` 是 `proposed` → 路线 2 不起孩子。**但路线 1 照跑**（review 的 (b)）：
+  研报已经在库里、已经带哈希，读它既不花配额也不碰网络，没有理由被一个 Yahoo 审批挡住。
+- 配额：lane 自己数着花掉的单位，上限取 `connector_quota_policy` 的 `("yfinance","analyst_estimates")`
+  = 每天 50。孩子在进程外跑，runner 看不见它花钱，所以这个计数在 lane 里；它是对一个从未答应服务我们的源的
+  礼貌上限，重启后从零开始（少问一点，不会多问）。
+
+---
+
+## 10. code review 的处理（blocker 与 should-fix 逐条）
+
+| 项 | 处理 |
+| --- | --- |
+| B1 财年死区 | 已修：严格向前一格，`anchor == FYE` 三家公司各一条测试 |
+| B2 「From $100 To $97」记成旧价 | 已修：同时读 `match.group(0)`；前视从 `match.start(1)` 起算；上一行若自带数字则视为它自己的条目而非本条的标记；两条测试 |
+| B3 lane 喂恒空归属 | 已修：读 `document_provenance` 的持久化归属；无记录时 page-text 只在「恰好一家券商 + 无第二家覆盖公司」时可用，否则 `ambiguous_house` / `multi_company_report`；烟测按 lane 路径重跑（§4.2） |
+| B4 lane order | 已改 89（S5 的 ownership 占 88），`LANE_MODULES` 行移到 tracking/catalyst 之后 |
+| (a) 10-K 缺失 | 已修：季度网格推 FYE，四家公司今天可用，IBM 如实不可用（§9.1） |
+| (b) 免费扫描被 launcher 门控 | 已修：`dispatch` 不再按 launcher 提前返回；`_launch` 自己回 `unconfigured` |
+| (c) gap 读者的测试 | 已加：真模型体 + 真 `_forecast_cells`（只替换体的来源），并用**消费者自己的** `validate_consensus_gap` 校验 |
+| (d) superseded / actual | 已修：跳过带 `superseded_by` 的格；同一期间 actual 优先于 estimate |
+| (e) 配额 | 已加：`connector_quota_policy` 取上限，lane 内计数，跨日重置，两条测试；理由写在代码里 |
+| (f) 轮转 | 已加：扫描按游标轮转 universe，两条测试 |
+| (g) `TASK_HASH` 被重新 key | 已修：`broker-estimate` 移出 `ALLOWED_BASES`，进 `BASES_BY_GRADE`；`document_numeric_extraction.TASK_HASH` 与 main 逐字节相同（`a6c0c1ca…`），有测试 |
+| nit `0y.yearAgoEps` | 已改用 ACN 已申报的 FY2025 EPS 12.93 作佐证（§3） |
+| nit `:404` 陈旧注释 | 已随 `_fiscal_calendar_reader` 重写 |
+| nit 严格 `<` 的并列规则 | 已在三处写明：同一天两篇取调用方列出的第一篇，稳定而非任意 |
+
+**顺带发现：合并 main 时 `research_event.py` 少了一行 `}),`**（`PAYLOAD_FIELDS` 的 `filing_index_change`
+块），整个模块无法 import，因而 `test_conviction_call_lane` 的 22 项全错。不是我改的文件，已从 main 逐字
+恢复。值得主 agent 看一眼：这是一次静默的合并损坏，其它分支合同一批 main 时可能同样中招。
+
+---

@@ -1149,6 +1149,8 @@ def report_consensus(
         # is the rule the range was built under; picking a different one here
         # would make the rows disagree with the range they came from.
         standing = newest.get(broker)
+        # Strict: two notes from one house on one day keep the first the store
+        # returned, which is a stable order rather than an arbitrary one.
         if standing is None or str(standing["published_on"]) < str(item["published_on"]):
             newest[broker] = item
     rows = [

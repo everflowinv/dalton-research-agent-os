@@ -17,6 +17,7 @@ from dalton_core.consensus_estimate import ConsensusEstimateAuthority
 from dalton_core.lane_child_launcher import LaneChildRejected
 from dalton_core.mission_consensus_lane import (
     LANE,
+    _fiscal_calendar_reader,
     LAUNCHER_KWARG,
     REFRESH_SECONDS,
     WRITE_SCOPE,
@@ -303,6 +304,149 @@ class ScanTests(LaneTestCase):
         self.assertEqual(result["scan"]["outcome"], "unreadable")
         self.assertIn("the manifest is gone", result["scan"]["reason"])
         self.assertEqual(result["status"], "launched")
+
+
+class UngatedScanTests(LaneTestCase):
+    """B(b). The report half reaches nothing and must not wait on a Yahoo approval."""
+
+    def coordinator(self):
+        lane = super().coordinator()
+        lane.launcher = None
+        return lane
+
+    def test_a_core_without_the_vendor_connector_still_reads_its_notes(self):
+        self.note("alphaengine-doc:1")
+        result = self.coordinator().dispatch_once()
+        self.assertEqual(result["fetch"]["status"], "unconfigured")
+        self.assertEqual(result["scan"]["outcome"], "recorded")
+        self.assertEqual(len(self.estimates.estimates(ACN)), 1)
+
+
+class QuotaTests(LaneTestCase):
+    """E. The child runs out of process, so the runner cannot see it spend."""
+
+    def test_the_lane_stops_at_the_governed_daily_ceiling(self):
+        from dalton_core.connector_quota_policy import governed_daily_quota
+
+        limit = governed_daily_quota("yfinance", "analyst_estimates")["daily_unit_limit"]
+        lane = self.coordinator()
+        self.assertEqual(lane.daily_unit_limit, limit)
+        for _ in range(limit):
+            lane.dispatch_once()
+            if lane._open:
+                self.launcher.finish(lane._open, consensus_status="duplicate")
+                lane._refreshed.clear()
+        self.assertEqual(len(self.launcher.started), limit)
+        result = lane.dispatch_once()
+        self.assertEqual(result["fetch"]["status"], "quota_exhausted")
+        self.assertIn(str(limit), result["fetch"]["reason"])
+
+    def test_the_count_resets_with_the_day(self):
+        lane = self.coordinator()
+        lane._spent_on = self.now.date().isoformat()
+        lane._spent = lane.daily_unit_limit
+        self.assertEqual(lane.dispatch_once()["fetch"]["status"], "quota_exhausted")
+        self.now = self.now + timedelta(days=1)
+        self.assertEqual(lane.dispatch_once()["fetch"]["status"], "launched")
+
+
+class RoundRobinTests(LaneTestCase):
+    """F. One company must not keep the reader while another waits days."""
+
+    def test_the_scan_moves_on_after_serving_a_company(self):
+        for index in range(3):
+            self.note(f"alphaengine-doc:acn{index}", company_ref=ACN)
+            self.note(f"alphaengine-doc:epam{index}", company_ref=EPAM,
+                      subject_names=["EPAM"],
+                      document_companies=["EPAM Systems, Inc."])
+        lane = self.coordinator()
+        served = []
+        for _ in range(4):
+            scan = lane.dispatch_once()["scan"]
+            served.append(scan["company_ref"])
+        self.assertEqual(served, [ACN, EPAM, ACN, EPAM])
+
+    def test_a_company_with_nothing_left_does_not_stall_the_others(self):
+        self.note("alphaengine-doc:acn0", company_ref=ACN)
+        self.note("alphaengine-doc:epam0", company_ref=EPAM,
+                  subject_names=["EPAM"], document_companies=["EPAM Systems, Inc."])
+        self.note("alphaengine-doc:epam1", company_ref=EPAM,
+                  subject_names=["EPAM"], document_companies=["EPAM Systems, Inc."])
+        lane = self.coordinator()
+        served = [lane.dispatch_once()["scan"]["company_ref"] for _ in range(3)]
+        self.assertEqual(served, [ACN, EPAM, EPAM])
+
+
+class ScanLedgerTests(LaneTestCase):
+    def test_a_refusal_records_the_reader_that_made_it(self):
+        from dalton_core.street_estimate_extraction import EXTRACTOR_REF
+
+        self.note("alphaengine-doc:1",
+                  document_companies=["Accenture PLC", "Cognizant"])
+        self.coordinator().dispatch_once()
+        scan = self.estimates.scans(ACN)[0]
+        self.assertEqual(scan["outcome"], "refused")
+        self.assertEqual(scan["extractor_ref"], EXTRACTOR_REF)
+        # And a later reader can ask for everything an older one refused.
+        self.assertEqual(self.estimates.refused_by("extractor:next:0.2"),
+                         {"alphaengine-doc:1"})
+
+
+class FiscalCalendarReaderTests(unittest.TestCase):
+    """A. The live Core holds thirty-three 10-Q rows and no 10-K at all."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.store = DaltonStore(str(Path(self._dir.name) / "core.sqlite"))
+        self.addCleanup(self.store.close)
+        self.store.connection.executescript(
+            "CREATE TABLE IF NOT EXISTS coverage_mission_statement_filings ("
+            "ingest_id TEXT PRIMARY KEY, company_ref TEXT, form TEXT, "
+            "report_date TEXT);"
+        )
+
+        class Server:
+            store = self.store
+
+        self.read = _fiscal_calendar_reader(Server())
+
+    def file(self, company_ref, form, report_date):
+        self.store.connection.execute(
+            "INSERT INTO coverage_mission_statement_filings VALUES(?,?,?,?)",
+            (f"{company_ref}:{form}:{report_date}", company_ref, form, report_date),
+        )
+
+    def test_an_annual_report_is_the_direct_answer(self):
+        self.file(ACN, "10-K", "2025-08-31")
+        self.file(ACN, "10-Q", "2026-05-31")
+        found = self.read(ACN)
+        self.assertEqual(found["fiscal_year_end"], "08-31")
+        self.assertEqual(found["last_reported_period_end"], "2026-05-31")
+        self.assertEqual(found["fiscal_year_end_basis"], "annual_report")
+
+    def test_the_quarters_answer_when_no_annual_has_been_ingested(self):
+        # Accenture's live shape: eight 10-Q rows, no 10-K. Without this the
+        # lane skips every covered company and route 2 never publishes.
+        for report_date in ("2025-11-30", "2026-02-28", "2026-05-31"):
+            self.file(ACN, "10-Q", report_date)
+        found = self.read(ACN)
+        self.assertEqual(found["fiscal_year_end"], "08-31")
+        self.assertEqual(found["last_reported_period_end"], "2026-05-31")
+        self.assertEqual(found["fiscal_year_end_basis"], "quarterly_grid")
+
+    def test_a_december_filer_comes_out_of_the_same_arithmetic(self):
+        for report_date in ("2026-03-31", "2026-06-30", "2026-09-30"):
+            self.file(EPAM, "10-Q", report_date)
+        self.assertEqual(self.read(EPAM)["fiscal_year_end"], "12-31")
+
+    def test_one_filing_settles_nothing_and_says_so(self):
+        # IBM, live: a single 10-Q. Two quarters cannot name a third.
+        self.file("company:ibm", "10-Q", "2026-06-30")
+        self.assertIsNone(self.read("company:ibm"))
+
+    def test_a_company_with_no_filings_at_all_is_none(self):
+        self.assertIsNone(self.read("company:nobody"))
 
 
 class RegistrationTests(unittest.TestCase):

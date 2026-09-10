@@ -22,11 +22,13 @@ say it may: ``consensus_estimate`` in ``autonomy.may_write``. A mission that
 does not grant it gets ``ungranted`` and no child and no scan, every tick,
 forever -- which is the correct behaviour and not a bug to route around.
 
-**The fiscal calendar is a precondition, not a detail.** A company whose 10-K
-this system has not ingested cannot have Yahoo's ``0q`` placed on its calendar,
-so it is skipped with that reason rather than published against a guess. Live,
-every covered company has filings; the skip exists for the sixth company
-somebody adds on a Tuesday.
+**The fiscal calendar is a precondition, not a detail.** A company whose fiscal
+year end this system cannot derive from its own filings cannot have Yahoo's
+``0q`` placed on a calendar, so it is skipped with that reason rather than
+published against a guess. Two derivations are tried, the annual report first;
+see ``_fiscal_calendar_reader``. Live today that settles four of the five
+covered companies and leaves IBM -- which has exactly one filing ingested --
+honestly unknown.
 """
 
 from __future__ import annotations
@@ -262,8 +264,9 @@ class MissionConsensusLaneCoordinator:
                 # to place them on, and a guess would be filed as a fact.
                 skipped.append({
                     "company_ref": company_ref, "reason": "fiscal_calendar_unknown",
-                    "detail": "no 10-K report date is held for this company, so "
-                              "the vendor's relative periods cannot be placed",
+                    "detail": "this company's fiscal year end cannot be derived "
+                              "from the filings held for it, so the vendor's "
+                              "relative periods cannot be placed",
                 })
                 continue
             try:

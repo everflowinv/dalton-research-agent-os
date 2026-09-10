@@ -796,6 +796,10 @@ def report_consensus(
         if not broker:
             continue
         held = newest.get(broker)
+        # Strict, so a house that published twice on one day keeps the first
+        # note the caller listed rather than the last. Either is defensible;
+        # what matters is that it is the same one every time, because the rows
+        # this range is reported alongside are chosen by the same rule.
         if held is None or str(held["published_on"]) < published:
             newest[broker] = item
     if len(newest) < int(CONSENSUS_POLICY["min_independent_brokers"]):

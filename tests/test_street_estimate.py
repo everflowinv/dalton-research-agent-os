@@ -168,6 +168,37 @@ class LabelAliasTests(unittest.TestCase):
         }, {"q": "Price Target: $270.00 per share"})
         self.assertNotIn("label_grade", verified)
 
+    def test_the_broker_basis_does_not_re_key_another_passs_frozen_task(self):
+        # G. document_numeric_extraction builds its output schema from
+        # ALLOWED_BASES and hashes that schema into its TASK_HASH, so appending
+        # a fifth basis there silently re-keys every work order of a pass that
+        # has nothing to do with broker notes.
+        from dalton_core.document_numeric_claim import ALLOWED_BASES, BASES_BY_GRADE
+        from dalton_core.document_numeric_extraction import OUTPUT_SCHEMA, TASK_HASH
+
+        self.assertNotIn(BASIS, ALLOWED_BASES)
+        self.assertEqual(BASES_BY_GRADE[BROKER_RESEARCH], (BASIS,))
+        self.assertEqual(
+            OUTPUT_SCHEMA["properties"]["figures"]["items"]["properties"]["basis"],
+            {"enum": list(ALLOWED_BASES)},
+        )
+        # The value main computes, pinned so a future append is caught here
+        # rather than in a lane that had no reason to change.
+        self.assertEqual(
+            TASK_HASH,
+            "a6c0c1ca01aaaef004a79fcf8ba2a54e431e9f876e68281ed6e714cad3b04a4f",
+        )
+
+    def test_a_filing_may_not_claim_a_brokers_basis(self):
+        for grade in (None, FILED, SPOKEN):
+            with self.subTest(grade=grade):
+                with self.assertRaises(NumericCandidateError) as caught:
+                    verify_numeric_candidate(
+                        self.candidate(label="Price Target"),
+                        {"q": "Price Target: $270.00 per share"}, grade=grade,
+                    )
+                self.assertIn("basis must be one of", str(caught.exception))
+
     def test_the_table_is_closed_and_names_only_the_broker_grade(self):
         self.assertEqual(set(LABEL_ALIASES_BY_GRADE), {BROKER_RESEARCH})
         self.assertEqual(
