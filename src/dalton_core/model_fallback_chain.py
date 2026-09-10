@@ -383,9 +383,9 @@ def validate_selection(
       routing would refuse it and the owner would have chosen nothing.
     * An unpriced model anywhere but the end of the chain would put a call
       whose cost cannot be estimated in front of models whose cost can.
-    * A verifier stage may not be given the producer's own model family. That
-      constraint is the reason the verifier tier exists, and an override is
-      exactly the move that would quietly undo it.
+    * A verifier needs declared lineage. Independence from the actual producer
+      is checked before routing/admission, against immutable served decisions;
+      bootstrap brain defaults do not identify the owner's current producer.
     """
 
     tier = tier_for(purpose)
@@ -423,18 +423,13 @@ def validate_selection(
                 "resort; put it at the end of the chain or leave it out"
             )
     if tier == TIER_VERIFIER:
-        producers = {
-            held[profile_id]["family"]
-            for profile_id in tier_chain(TIER_BRAIN)
-            if profile_id in held
-        }
-        first = held[links[0]]["family"]
-        if any(not independent_families(first, producer) for producer in producers):
-            raise FallbackChainError(
-                f"{links[0]} is in the {first} family, which is what produces the "
-                "work this stage checks; a verifier from the producer's own family "
-                "is not an independent check -- choose a different family"
-            )
+        for profile_id in links:
+            family = held[profile_id]["family"]
+            if not family or family.startswith("unclassified:"):
+                raise FallbackChainError(
+                    f"{profile_id} has no declared family; declare its lineage "
+                    "before selecting it for independent verification"
+                )
     return {"purpose": purpose, "tier": tier, "mode": "explicit", "chain": links}
 
 

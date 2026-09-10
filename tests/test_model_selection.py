@@ -350,12 +350,21 @@ class UnpricedModelTests(RouterCase):
 
 
 class VerifierIndependenceTests(RouterCase):
-    def test_a_verifier_cannot_be_pointed_at_the_producers_own_family(self) -> None:
-        with self.assertRaisesRegex(FallbackChainError, "not an independent check"):
-            validate_selection(
-                self.router, purpose=VERIFY_PURPOSE, mode="explicit",
-                chain=["profile:claude-fable-5-1", "profile:zai-glm-5-3"],
-            )
+    def test_bootstrap_brain_defaults_do_not_block_a_verifier_selection(self) -> None:
+        checked = validate_selection(
+            self.router, purpose=VERIFY_PURPOSE, mode="explicit",
+            chain=["profile:claude-fable-5-1", "profile:zai-glm-5-3"],
+        )
+        self.assertEqual(checked["chain"][0], "profile:claude-fable-5-1")
+
+    def test_unknown_lineage_cannot_be_selected_for_verification(self) -> None:
+        config = _config()
+        broker = config["plugins"]["entries"]["dalton-openclaw-model-broker"]["config"]["profiles"][0]
+        broker["family"] = "unclassified:fixture"
+        sync_openclaw_model_catalog(self.router, config, checked_at=NOW)
+        with self.assertRaisesRegex(FallbackChainError, "no declared family"):
+            validate_selection(self.router, purpose=VERIFY_PURPOSE, mode="explicit",
+                               chain=[broker["id"]])
 
     def test_a_verifier_from_a_different_family_is_accepted(self) -> None:
         checked = validate_selection(
@@ -618,16 +627,16 @@ class SetSelectionTests(StateDirectoryCase):
         )
         self.assertEqual(chosen["mode"], "explicit")
 
-    def test_a_verifier_pointed_at_the_producer_family_is_refused_with_a_reason(
+    def test_a_verifier_selection_does_not_assume_the_bootstrap_producer(
         self,
     ) -> None:
-        with self.assertRaisesRegex(ModelSelectionError, "not an independent check"):
-            set_model_selection(
-                self.root, purpose=VERIFY_PURPOSE, mode="explicit",
-                chain=["profile:claude-fable-5-1"], now=NOW,
-            )
-        # Nothing moved: a refused selection must not repoint anything.
-        self.assertEqual(self.stored()["routing_policy_ref"], self.policies["brain"])
+        set_model_selection(
+            self.root, purpose=VERIFY_PURPOSE, mode="explicit",
+            chain=["profile:claude-fable-5-1"], now=NOW,
+        )
+        current = self.router.get_policy(self.stored()["routing_policy_ref"])
+        self.assertEqual(current["purpose_overrides"][VERIFY_PURPOSE]["chain"],
+                         ["profile:claude-fable-5-1"])
 
     def test_a_stage_this_core_does_not_have_is_refused(self) -> None:
         with self.assertRaisesRegex(ModelSelectionError, "not a calling stage"):
