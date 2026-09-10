@@ -170,6 +170,16 @@ class LaneTests(unittest.TestCase):
                                                   "validator_contract_hash":
                                                       FORECAST_INVARIANT_CONTRACT_HASH}])
 
+    def test_missing_cost_metadata_is_reported_as_blocked_not_all_current(self):
+        broken = dict(self.spec)
+        broken["expense_lines"] = [dict(row) for row in self.spec["expense_lines"]]
+        broken["expense_lines"][0]["cost_driver_slot"] = "delivery_cost"
+        self.missions.specification = broken
+        outcome = self.lane.dispatch_once()
+        self.assertEqual(outcome["status"], "unavailable")
+        self.assertIn(ACN, outcome["reason"])
+        self.assertIn("cost template metadata", outcome["reason"])
+
     def test_a_child_still_running_is_reported_and_not_replaced(self):
         first = self.lane.dispatch_once()
         second = self.lane.dispatch_once()

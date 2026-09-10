@@ -890,8 +890,19 @@ class CoverageMissionAuthority:
             "SELECT sql FROM sqlite_master WHERE type='table' "
             "AND name='coverage_mission_company_model_specs'"
         ).fetchone()[0]
-        if ("revenue_anchor_json" in columns
-                and "UNIQUE(company_ref, state_hash, task_hash)" in table_sql):
+        current_contract = (
+            "revenue_anchor_json" in columns
+            and "UNIQUE(company_ref, state_hash, task_hash)" in table_sql
+        )
+        if current_contract:
+            if "metadata_json" not in columns:
+                if self.connection.in_transaction:
+                    raise RuntimeError(
+                        "company model spec migration requires no open transaction")
+                self.connection.execute(
+                    "ALTER TABLE coverage_mission_company_model_specs "
+                    "ADD COLUMN metadata_json TEXT"
+                )
             return
         if self.connection.in_transaction:
             raise RuntimeError("company model spec migration requires no open transaction")
@@ -911,6 +922,7 @@ class CoverageMissionAuthority:
                 revenue_drivers_json TEXT NOT NULL, expense_lines_json TEXT NOT NULL,
                 forecast_statements_json TEXT NOT NULL,
                 operating_metrics_json TEXT NOT NULL, horizon_json TEXT NOT NULL,
+                metadata_json TEXT,
                 task_hash TEXT NOT NULL, model_profile_ref TEXT, work_order_ref TEXT,
                 decided_by TEXT NOT NULL, created_at TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
@@ -920,11 +932,11 @@ class CoverageMissionAuthority:
                 spec_id,company_ref,mission_version_ref,state_hash,assessment,
                 revenue_anchor_json,revenue_drivers_json,expense_lines_json,
                 forecast_statements_json,operating_metrics_json,horizon_json,
-                task_hash,model_profile_ref,work_order_ref,decided_by,created_at,
+                metadata_json,task_hash,model_profile_ref,work_order_ref,decided_by,created_at,
                 content_hash)
             SELECT spec_id,company_ref,mission_version_ref,state_hash,assessment,
                 NULL,revenue_drivers_json,expense_lines_json,forecast_statements_json,
-                operating_metrics_json,horizon_json,task_hash,model_profile_ref,
+                operating_metrics_json,horizon_json,NULL,task_hash,model_profile_ref,
                 work_order_ref,decided_by,created_at,content_hash
             FROM coverage_mission_company_model_specs_legacy;
             DROP TABLE coverage_mission_company_model_specs_legacy;
@@ -3429,9 +3441,9 @@ class CoverageMissionAuthority:
                 "INSERT INTO coverage_mission_company_model_specs("
                 "spec_id,company_ref,mission_version_ref,state_hash,assessment,"
                 "revenue_anchor_json,revenue_drivers_json,expense_lines_json,forecast_statements_json,"
-                "operating_metrics_json,horizon_json,task_hash,model_profile_ref,"
+                "operating_metrics_json,horizon_json,metadata_json,task_hash,model_profile_ref,"
                 "work_order_ref,decided_by,created_at,content_hash) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(company_ref,state_hash,task_hash) DO NOTHING",
                 (
                     spec_id, company_ref, mission_version_ref, state_hash,
@@ -3442,6 +3454,8 @@ class CoverageMissionAuthority:
                     canonical_json(spec["forecast_statements"]),
                     canonical_json(spec["operating_metrics"]),
                     canonical_json(spec["horizon"]),
+                    (canonical_json({"cost_driver_template": spec["cost_driver_template"]})
+                     if "cost_driver_template" in spec else None),
                     task_hash,
                     model_profile_ref, work_order_ref,
                     _text(spec["decided_by"], "decided_by"), now,
@@ -3465,6 +3479,12 @@ class CoverageMissionAuthority:
         for field in ("revenue_drivers", "expense_lines", "forecast_statements",
                       "operating_metrics", "horizon"):
             wire[field] = json.loads(wire.pop(f"{field}_json"))
+        metadata_json = wire.pop("metadata_json", None)
+        if metadata_json is not None:
+            metadata = json.loads(metadata_json)
+            if not isinstance(metadata, dict) or set(metadata) - {"cost_driver_template"}:
+                raise CoverageMissionConflict("company model spec metadata is invalid")
+            wire.update(metadata)
         return wire
 
     def company_model_spec_for_state(

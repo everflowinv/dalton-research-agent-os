@@ -731,6 +731,7 @@ CREATE TABLE IF NOT EXISTS coverage_mission_company_model_specs (
     forecast_statements_json TEXT NOT NULL,
     operating_metrics_json TEXT NOT NULL,
     horizon_json TEXT NOT NULL,
+    metadata_json TEXT,
     task_hash TEXT NOT NULL,
     model_profile_ref TEXT,
     work_order_ref TEXT,

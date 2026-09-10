@@ -8,8 +8,12 @@ from dalton_core.driver_template import (
     COST_DRIVER_TEMPLATES, COST_REGISTRY_HASH, cost_prompt_block,
     cost_slot_ids, cost_template_gaps,
 )
-from dalton_core.model_forecast_driver import ForecastModelValidationError, build_drivers
+from dalton_core.model_forecast_driver import (
+    ForecastModelValidationError, build_drivers, build_forecast_model,
+)
 from dalton_core.store import canonical_json
+from dalton_core.store import DaltonStore
+from dalton_core.coverage_mission import CoverageMissionAuthority
 from tests.test_company_model_inputs import FakeMissions, _line
 from tests.test_company_model_spec import DECIDED_BY, STATE, _spec
 
@@ -87,6 +91,31 @@ class CostSpecToForecastTests(unittest.TestCase):
                       if item.get("concept") == "us-gaap:CostOfRevenue")
         self.assertEqual(driver["cost_driver_slots"], ["delivery_cost"])
         self.assertEqual(driver["history"][0]["value"], "70")
+
+    def test_cost_template_survives_authority_roundtrip_into_model_inputs(self):
+        body = _spec()
+        body["expense_lines"][0]["cost_driver_slot"] = "delivery_cost"
+        decided = spec_from_response(self.state(), body, decided_by=DECIDED_BY)
+        store = DaltonStore(":memory:")
+        self.addCleanup(store.close)
+        authority = CoverageMissionAuthority(store)
+        held = authority.record_company_model_spec(
+            decided, mission_version_ref="coverage-mission-version:test:1")
+        self.assertEqual(held["content_hash"], decided["content_hash"])
+        self.assertEqual(held["cost_driver_template"], decided["cost_driver_template"])
+        missions = FakeMissions([
+            _line("us-gaap:Revenues", "2026-03-01", "2026-05-31", "100"),
+            _line("us-gaap:CostOfRevenue", "2026-03-01", "2026-05-31", "70"),
+            _line("us-gaap:SellingGeneralAndAdministrativeExpense",
+                  "2026-03-01", "2026-05-31", "10"),
+        ])
+        table = build_model_inputs(missions, held)
+        cost = next(row for row in table["rows"] if row["ref"] == "cost-of-services")
+        self.assertEqual(cost["cost_driver_slot"], "delivery_cost")
+        forecast = build_forecast_model(held, table)
+        driver = next(item for item in forecast["drivers"]
+                      if item.get("concept") == "us-gaap:CostOfRevenue")
+        self.assertEqual(driver["cost_driver_slots"], ["delivery_cost"])
 
     def test_new_cost_spec_binds_the_registry_and_classification(self):
         body = _spec()

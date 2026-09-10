@@ -126,18 +126,23 @@ def pending_companies(
                        for item in missions.company_model_specs()
                        if str(item["company_ref"]) in universe})
     out: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
+    blocked: list[str] = []
     for ref in refs:
         spec = missions.latest_company_model_spec(ref)
         if spec is None:
             continue
         try:
             table = build_model_inputs(missions, spec)
-        except ModelInputError:
+        except ModelInputError as exc:
             if company_ref is not None:
                 raise
+            blocked.append(f"{ref}: {exc}")
             continue
         if needs_model(models.latest(ref), spec, table) is not None:
             out.append((ref, spec, table))
+    if not out and blocked:
+        raise ForecastModelUnavailable(
+            "company model inputs are blocked: " + "; ".join(blocked))
     return out
 
 

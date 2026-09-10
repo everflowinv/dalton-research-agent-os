@@ -59,7 +59,7 @@ from .driver_template import (
 from .store import content_hash
 
 SCHEMA_VERSION = "0.2"
-TASK_REF = "task:company-model-spec:0.2"
+TASK_REF = "task:company-model-spec:0.3"
 
 MAX_REVENUE_DRIVERS = 8
 MAX_EXPENSE_LINES = 14
@@ -261,6 +261,7 @@ TASK_HASH = content_hash({
     "cost_driver_template_registry": {
         "ref": COST_REGISTRY_REF, "hash": COST_REGISTRY_HASH,
     },
+    "authority_projection": "cost_driver_template_metadata:0.1",
 })
 
 

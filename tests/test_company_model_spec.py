@@ -449,6 +449,7 @@ class CompanyModelSpecStorageTests(unittest.TestCase):
             "PRAGMA table_info(coverage_mission_company_model_specs)")}
         self.assertNotIn("revenue_anchor_json", plan_columns)
         self.assertIn("revenue_anchor_json", spec_columns)
+        self.assertIn("metadata_json", spec_columns)
 
     def test_concurrent_same_contract_inserts_are_idempotent(self):
         from dalton_core.coverage_mission import CoverageMissionAuthority
