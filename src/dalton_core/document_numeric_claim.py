@@ -41,18 +41,28 @@ CANDIDATE_KIND = "quantitative"
 ALLOWED_UNITS: tuple[str, ...] = (
     "percent", "currency", "count", "ratio", "days", "basis_points",
 )
+# The four ways a figure the *company* arrived at can have been arrived at.
+#
+# P11b needed a fifth for a broker's own estimate and it is deliberately not a
+# member of this tuple: ``document_numeric_extraction`` builds its frozen output
+# schema from this list and hashes that schema into its ``TASK_HASH``, so
+# appending here would silently re-key every work order of a pass that has
+# nothing to do with broker notes. See BASES_BY_GRADE.
 ALLOWED_BASES: tuple[str, ...] = (
     "management-reported", "gaap-reported", "non-gaap-reported", "calculated",
-    # P11b: the figure is a broker's own estimate of the company -- a price
-    # target, a forward EPS or revenue number out of a research note.  It needs
-    # its own basis because the four above all describe a figure the *company*
-    # arrived at, and filing a broker's target under "management-reported"
-    # would be a false statement about who said it.  Nothing in this module
-    # treats it differently; the separation that matters is enforced by the
-    # grade (``document_figure_grade.BROKER_RESEARCH``), which is not
-    # admissible as a quantitative Claim.
-    "broker-estimate",
 )
+# P11b: bases that exist only for one kind of document, keyed by its grade.
+#
+# ``broker-estimate`` says the figure is a broker's own number -- a price
+# target, a forward EPS out of a research note. It needs its own basis because
+# the four above all describe a figure the company arrived at, and filing a
+# broker's target under "management-reported" would be a false statement about
+# who said it. Scoped the same way the label aliases below are, and for two
+# reasons: a filing has no business claiming it, and a basis nobody asked for
+# must not appear in another pass's frozen contract.
+BASES_BY_GRADE: Mapping[str, tuple[str, ...]] = {
+    "broker-research-report": ("broker-estimate",),
+}
 MAX_METRIC_CHARS = 200
 MAX_PERIOD_CHARS = 200
 # Scale words a document may use in place of trailing zeros.
@@ -201,8 +211,11 @@ def validate_numeric_candidate(
     if unit not in ALLOWED_UNITS:
         raise NumericCandidateError(f"unit must be one of {list(ALLOWED_UNITS)}")
     basis = value["basis"]
-    if basis not in ALLOWED_BASES:
-        raise NumericCandidateError(f"basis must be one of {list(ALLOWED_BASES)}")
+    allowed = ALLOWED_BASES + (
+        BASES_BY_GRADE.get(grade, ()) if isinstance(grade, str) else ()
+    )
+    if basis not in allowed:
+        raise NumericCandidateError(f"basis must be one of {list(allowed)}")
     currency = value["currency"]
     if unit == "currency":
         if not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency):
@@ -372,6 +385,7 @@ def verify_numeric_candidates(
 __all__ = [
     "ALLOWED_BASES",
     "ALLOWED_UNITS",
+    "BASES_BY_GRADE",
     "LABEL_ALIASES_BY_GRADE",
     "CANDIDATE_KIND",
     "NumericCandidateError",
