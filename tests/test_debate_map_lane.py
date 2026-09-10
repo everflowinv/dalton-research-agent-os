@@ -31,7 +31,8 @@ from dalton_core.lane_registry import (
     lane_for_operation, lane_init_kwargs, registered_lanes, tick_lanes,
 )
 from dalton_core.mission_debate_map_lane import (
-    LAUNCHER_KWARG, MissionDebateMapLaneCoordinator, argv_fragment, build_launcher,
+    LAUNCHER_KWARG, MissionDebateMapLaneCoordinator, _business_key, argv_fragment,
+    build_launcher,
 )
 from dalton_core.store import DaltonStore
 from tests.p9a_fixtures import bootstrap_method_authorities, mission_params
@@ -57,6 +58,16 @@ def draft_reply() -> str:
 
 
 PASS = json.dumps({"verdict": "pass", "findings": []})
+
+
+class ContractRecoveryIdentityTests(unittest.TestCase):
+    def test_contract_change_releases_same_business_input(self):
+        mission = {"id": "mission:v1", "content_hash": "a" * 64}
+        current = _business_key("company:a", "b" * 64, mission)
+        with patch("dalton_core.debate_map_draft.DRAFT_CONTRACT_HASH", "c" * 64):
+            repaired = _business_key("company:a", "b" * 64, mission)
+        self.assertNotEqual(current, repaired)
+        self.assertEqual(current.split("|contract:")[0], repaired.split("|contract:")[0])
 
 
 class FakeModel:

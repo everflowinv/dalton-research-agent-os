@@ -97,12 +97,28 @@ _MARKET_KEYS = frozenset({"available", "lean", "statement", "refs"})
 _OURS_KEYS = frozenset({"state", "side", "statement", "refs"})
 _RESOLUTION_KEYS = frozenset({"reason", "refs"})
 
+# Versioned separately from the DebateMap authority.  This is the exact model
+# output boundary; changing it must release a persisted lane hold and create a
+# new WorkOrder identity without pretending the underlying evidence changed.
+DRAFT_CONTRACT_VERSION = "debate-map-draft-output-0.2"
+DRAFT_CONTRACT_HASH = content_hash({
+    "version": DRAFT_CONTRACT_VERSION,
+    "top_level": ["debates"],
+    "candidate": sorted(_CANDIDATE_KEYS),
+    "side": sorted(_SIDE_KEYS),
+    "market": sorted(_MARKET_KEYS),
+    "ours": sorted(_OURS_KEYS),
+    "resolution": sorted(_RESOLUTION_KEYS),
+})
+
 TASK_HASH = content_hash({
     "task": TASK_REF,
     "policy_ref": POLICY_REF,
     "policy_hash": POLICY_HASH,
     "output": "one JSON object with a debates array in the closed draft shape",
     "authority": "cites_only_shown_row_ids_and_only_shown_debate_refs",
+    "draft_contract_version": DRAFT_CONTRACT_VERSION,
+    "draft_contract_hash": DRAFT_CONTRACT_HASH,
 })
 
 
@@ -275,6 +291,7 @@ def build_prompt(table: Mapping[str, Any]) -> str:
         "is worth and the publisher is who said it:\n"
         "  <row id>\\t<aspect>\\t<tier>\\t<publisher>\\t<as of>\\t<statement>\n"
         f"{claims}\n\n"
+        f"OUTPUT CONTRACT: {DRAFT_CONTRACT_VERSION} ({DRAFT_CONTRACT_HASH}).\n"
         "Rules:\n"
         "* Cite only the row ids above (C..., T...). Never invent one.\n"
         "* Every debate binds at least one driver_ref copied exactly from "
@@ -295,7 +312,9 @@ def build_prompt(table: Mapping[str, Any]) -> str:
         "* resolution is null unless the argument is settled, in which case "
         "it names the rows that settled it.\n"
         "* Return one raw JSON object and nothing else. No prose, no code "
-        "fence.\n\n"
+        "fence. The only top-level key is debates. Do not return "
+        "template_coverage, evidence_limits, commentary, or any other sibling "
+        "key; those fields make the entire answer unusable.\n\n"
         "{\"debates\": [{\"debate_ref\": \"new-1\", \"question\": \"...\",\n"
         "  \"driver_refs\": [\"<driver_ref>\"], \"question_admission_index\": 0,\n"
         "  \"causal_chain_index\": 0,\n"
@@ -1178,6 +1197,8 @@ __all__ = [
     "DebateDraftError",
     "DebateDraftRefused",
     "assemble_debates",
+    "DRAFT_CONTRACT_HASH",
+    "DRAFT_CONTRACT_VERSION",
     "build_input_table",
     "build_prompt",
     "build_verifier_prompt",

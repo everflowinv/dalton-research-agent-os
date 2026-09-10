@@ -89,6 +89,13 @@ class ChainAdapter:
 
 
 class CockpitChainTests(unittest.TestCase):
+    def test_replayed_formal_failure_preserves_its_error_code(self) -> None:
+        formal = {"terminal_state": "failed", "result_envelope": {
+            "error": {"code": "MODEL_CHAIN_EXHAUSTED"}}}
+        with self.assertRaisesRegex(CockpitModelError, "MODEL_CHAIN_EXHAUSTED"):
+            CockpitModel._answer(formal, type("Work", (), {"id": "work:x"})(),
+                                 True, 0, "replayed")
+
     def setUp(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

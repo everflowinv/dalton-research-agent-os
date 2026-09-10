@@ -8,6 +8,8 @@ import unittest
 from dalton_core.cockpit_model import CockpitModelError, purposes
 from dalton_core.debate_map import index_claims
 from dalton_core.debate_map_draft import (
+    DRAFT_CONTRACT_HASH,
+    DRAFT_CONTRACT_VERSION,
     MAX_CLAIM_ROWS,
     MAX_DEBATES,
     MAX_PROMPT_BYTES,
@@ -195,6 +197,19 @@ class ParseDraftTests(unittest.TestCase):
         reply["debates"][0]["confidence"] = "high"
         with self.assertRaises(DebateDraftRefused):
             parse_draft(json.dumps(reply), self.table)
+
+    def test_live_style_top_level_commentary_is_refused_and_contract_is_explicit(self) -> None:
+        reply = json.loads(draft_reply())
+        reply["evidence_limits"] = ["claims are historical"]
+        reply["template_coverage"] = {"covered": True}
+        with self.assertRaisesRegex(
+            DebateDraftRefused, "evidence_limits.*template_coverage"
+        ):
+            parse_draft(json.dumps(reply), self.table)
+        prompt = build_prompt(self.table)
+        self.assertIn(DRAFT_CONTRACT_VERSION, prompt)
+        self.assertIn(DRAFT_CONTRACT_HASH, prompt)
+        self.assertIn("only top-level key is debates", prompt)
 
     def test_prose_around_the_object_refuses_the_whole_draft(self) -> None:
         with self.assertRaises(DebateDraftRefused):

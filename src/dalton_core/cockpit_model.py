@@ -625,7 +625,11 @@ class CockpitModel:
     def _answer(formal: Any, work: WorkOrder, replayed: bool, cost_micros: int,
                 cost_status: str) -> dict[str, Any]:
         if formal is None or formal["terminal_state"] != "succeeded":
-            raise CockpitModelError("the model call did not succeed")
+            envelope = {} if formal is None else formal.get("result_envelope") or {}
+            error = envelope.get("error") or {}
+            code = error.get("code")
+            suffix = f" ({code})" if isinstance(code, str) and code else ""
+            raise CockpitModelError(f"the model call did not succeed{suffix}")
         envelope = formal["result_envelope"]
         text = envelope.get("outputs", {}).get("text")
         if not isinstance(text, str):
