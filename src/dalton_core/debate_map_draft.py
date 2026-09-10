@@ -35,7 +35,12 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
-from .cockpit_model import CockpitModelError, register_purpose, unwrap_json_object
+from .cockpit_model import (
+    CockpitModelError,
+    independent_model_call,
+    register_purpose,
+    unwrap_json_object,
+)
 from .debate_map import (
     CHANGE_REASONS,
     DEBATE_POLICY,
@@ -55,6 +60,7 @@ TASK_REF = "task:debate-map-draft:0.1"
 # The lane names its own purpose from its own module rather than editing a set
 # in cockpit_model (P14-0's registry).
 PURPOSE = register_purpose("debate_map")
+VERIFIER_PURPOSE = register_purpose("debate_map_verifier")
 
 # One company, one call.  The bounds are on spend, not ambition: the router
 # reserves against prompt bytes, so a table that doubles doubles the
@@ -895,8 +901,10 @@ def draft_debate_map(
         result.update({"status": "unverified", "reason": f"{type(exc).__name__}: {exc}"})
         return result
     try:
-        check = model.call(
-            purpose=PURPOSE,
+        check = independent_model_call(
+            model,
+            producer_route_decision_refs=[drafted_by["route_decision_ref"]],
+            purpose=VERIFIER_PURPOSE,
             request_id=content_hash({"verify": [d["debate_ref"] for d in debates],
                                      "subject": table["subject_ref"]})[:32],
             prompt=verifier_prompt, mission=mission,
@@ -1198,6 +1206,7 @@ __all__ = [
     "MAX_PROMPT_BYTES",
     "MAX_STATEMENT_CHARS",
     "PURPOSE",
+    "VERIFIER_PURPOSE",
     "SCHEMA_VERSION",
     "TASK_HASH",
     "TASK_REF",

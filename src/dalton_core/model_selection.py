@@ -63,7 +63,9 @@ PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
     "quality": ("initial-screen-model-config.json",),
     "model_spec": ("initial-screen-model-config.json",),
     "debate_map": ("initial-screen-model-config.json",),
+    "debate_map_verifier": ("initial-screen-model-config.json",),
     "conviction_call": ("initial-screen-model-config.json",),
+    "conviction_call_verifier": ("initial-screen-model-config.json",),
     "event_judgement": ("event-judgement-model-config.json",),
     "event_judgement_verifier": ("event-verifier-model-config.json",),
     "thesis_reflection": ("event-judgement-model-config.json",),
@@ -119,6 +121,7 @@ PURPOSE_LABELS: dict[str, str] = {
     "dossier": "写公司档案",
     "dossier_verifier": "核验公司档案",
     "debate_map": "整理市场在吵什么",
+    "debate_map_verifier": "独立核验市场争议图",
     "deep_insight_gate": "回答深度认知门的十二问",
     "deep_insight_gate_verifier": "核验深度认知门",
     "industry_framework": "写行业框架",
@@ -130,6 +133,7 @@ PURPOSE_LABELS: dict[str, str] = {
     "earnings_calibration": "业绩后对账",
     "earnings_calibration_verifier": "核验业绩对账",
     "conviction_call": "提出值得下注的判断",
+    "conviction_call_verifier": "独立核验投资判断",
     "street_estimate": "读研报里的目标价",
 }
 # The seam the delivery slice attaches to. It is a module-level function rather

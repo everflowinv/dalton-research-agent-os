@@ -16,6 +16,7 @@ from dalton_core.debate_map_draft import (
     MAX_QUESTION_CHARS,
     MAX_STATEMENT_OUT_CHARS,
     PURPOSE,
+    VERIFIER_PURPOSE,
     DebateDraftRefused,
     assemble_debates,
     build_input_table,
@@ -134,7 +135,9 @@ PASS = json.dumps({"verdict": "pass", "findings": []})
 class InputTableTests(unittest.TestCase):
     def test_the_purpose_is_registered_from_this_module(self) -> None:
         self.assertEqual(PURPOSE, "debate_map")
+        self.assertEqual(VERIFIER_PURPOSE, "debate_map_verifier")
         self.assertIn("debate_map", purposes())
+        self.assertIn("debate_map_verifier", purposes())
 
     def test_contested_aspects_come_first_and_rows_are_bounded(self) -> None:
         built = table()
@@ -391,7 +394,7 @@ class DraftRunTests(unittest.TestCase):
         self.assertEqual(result["drafted_by"]["model_family"], "family-a")
         self.assertEqual(result["verified_by"]["model_family"], "family-b")
         self.assertEqual([call["purpose"] for call in model.calls],
-                         ["debate_map", "debate_map"])
+                         ["debate_map", "debate_map_verifier"])
 
     def test_a_deviant_draft_is_refused_whole_and_never_verified(self) -> None:
         model = FakeModel([draft_reply(driver_refs=["driver:invented"]), PASS])

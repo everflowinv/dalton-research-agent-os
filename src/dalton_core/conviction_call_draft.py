@@ -30,7 +30,12 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Callable, Mapping, Sequence
 
-from .cockpit_model import CockpitModelError, register_purpose, unwrap_json_object
+from .cockpit_model import (
+    CockpitModelError,
+    independent_model_call,
+    register_purpose,
+    unwrap_json_object,
+)
 from .conviction_call import (
     CHANGE_REASONS,
     CONFIDENCES,
@@ -56,6 +61,7 @@ TASK_REF = "task:conviction-call-draft:0.1"
 
 # The lane names its own purpose from its own module (P14-0's registry).
 PURPOSE = register_purpose("conviction_call")
+VERIFIER_PURPOSE = register_purpose("conviction_call_verifier")
 
 # One company, one call, two calls' worth of spend.  A conviction call is a
 # page, not a report; the bounds are what keep it one.
@@ -860,8 +866,10 @@ def draft_conviction_call(
         result.update({"status": "unverified", "reason": f"{type(exc).__name__}: {exc}"})
         return result
     try:
-        check = model.call(
-            purpose=PURPOSE,
+        check = independent_model_call(
+            model,
+            producer_route_decision_refs=[drafted_by["route_decision_ref"]],
+            purpose=VERIFIER_PURPOSE,
             request_id=content_hash({"verify": table["company_ref"],
                                      "direction": call["direction"]})[:32],
             prompt=verifier_prompt, mission=mission,
@@ -934,6 +942,7 @@ __all__ = [
     "MAX_PERCENT",
     "MAX_PROMPT_BYTES",
     "PURPOSE",
+    "VERIFIER_PURPOSE",
     "SCHEMA_VERSION",
     "TASK_HASH",
     "TASK_REF",

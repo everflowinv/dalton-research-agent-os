@@ -18,7 +18,19 @@
       "max_output_tokens": 3000,
       "timeout_seconds": 240
     },
+    "conviction_call_verifier": {
+      "max_cost_usd": 0.6,
+      "max_input_tokens": 60000,
+      "max_output_tokens": 3000,
+      "timeout_seconds": 240
+    },
     "debate_map": {
+      "max_cost_usd": 0.8,
+      "max_input_tokens": 80000,
+      "max_output_tokens": 4000,
+      "timeout_seconds": 240
+    },
+    "debate_map_verifier": {
       "max_cost_usd": 0.8,
       "max_input_tokens": 80000,
       "max_output_tokens": 4000,

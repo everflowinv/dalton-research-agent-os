@@ -134,6 +134,7 @@ _PURPOSE_TIERS: dict[str, str] = {
     "dossier": TIER_BRAIN,
     "dossier_verifier": TIER_VERIFIER,
     "debate_map": TIER_BRAIN,
+    "debate_map_verifier": TIER_VERIFIER,
     "deep_insight_gate": TIER_BRAIN,
     "deep_insight_gate_verifier": TIER_VERIFIER,
     "industry_framework": TIER_BRAIN,
@@ -145,6 +146,7 @@ _PURPOSE_TIERS: dict[str, str] = {
     "earnings_calibration": TIER_BRAIN,
     "earnings_calibration_verifier": TIER_VERIFIER,
     "conviction_call": TIER_BRAIN,
+    "conviction_call_verifier": TIER_VERIFIER,
     # W4: asking, from a zero position, whether we would form this view
     # today is the hardest question in the set -- there is no event to
     # anchor it and the whole file argues for the answer we already hold.

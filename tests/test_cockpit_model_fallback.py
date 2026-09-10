@@ -12,6 +12,8 @@ from pathlib import Path
 # Importing the lane is what registers its purpose, exactly as the lane's own
 # child process does before it builds a WorkOrder.
 import dalton_core.claim_index_tagging  # noqa: F401
+import dalton_core.conviction_call_draft  # noqa: F401
+import dalton_core.debate_map_draft  # noqa: F401
 import dalton_core.event_judgement  # noqa: F401
 from dalton_core.cockpit_model import (
     CockpitModel,
@@ -89,6 +91,53 @@ class ChainAdapter:
 
 
 class CockpitChainTests(unittest.TestCase):
+    def test_debate_and_conviction_verifiers_exclude_the_actual_producer_family(self) -> None:
+        for producer_purpose, verifier_purpose in (
+            ("debate_map", "debate_map_verifier"),
+            ("conviction_call", "conviction_call_verifier"),
+        ):
+            with self.subTest(verifier_purpose=verifier_purpose):
+                producer_adapter = ChainAdapter({
+                    "profile:gpt-6-astra": {
+                        "code": "PROVIDER_UNAVAILABLE",
+                        "message": "scripted producer fallback",
+                    },
+                })
+                producer = self._model(
+                    producer_adapter, policy_version_ref=self.chain_policy
+                ).call(
+                    purpose=producer_purpose,
+                    request_id=f"{producer_purpose}-producer-route",
+                    prompt="draft",
+                    mission=self.mission,
+                )
+                verifier_adapter = ChainAdapter({})
+                verifier = self._model(
+                    verifier_adapter,
+                    policy_version_ref=self.verifier_policy,
+                    slots=self.verifier_slots,
+                ).call(
+                    purpose=verifier_purpose,
+                    request_id=f"{producer_purpose}-verifier-route",
+                    prompt='{"verdict":"pass","findings":[]}',
+                    mission=self.mission,
+                    producer_route_decision_refs=[producer["route_decision_ref"]],
+                )
+                with ModelRouter(self.router_db, read_only=True) as router:
+                    producer_route = router.get_decision(producer["route_decision_ref"])
+                    verifier_route = router.get_decision(verifier["route_decision_ref"])
+                    producer_profile = router.get_profile(
+                        producer_route["selected_profile_version_ref"]
+                    )
+                self.assertNotEqual(
+                    producer_route["selected_endpoint"]["family"],
+                    verifier_route["selected_endpoint"]["family"],
+                )
+                self.assertNotIn(
+                    producer_profile["id"],
+                    verifier_adapter.served,
+                )
+
     def test_replayed_formal_failure_preserves_its_error_code(self) -> None:
         formal = {"terminal_state": "failed", "result_envelope": {
             "error": {"code": "MODEL_CHAIN_EXHAUSTED"}}}

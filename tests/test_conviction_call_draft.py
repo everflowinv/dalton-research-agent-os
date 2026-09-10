@@ -11,6 +11,7 @@ from dalton_core.conviction_call_draft import (
     MAX_PERCENT,
     MAX_PROMPT_BYTES,
     PURPOSE,
+    VERIFIER_PURPOSE,
     ConvictionDraftRefused,
     assemble_call,
     build_input_table,
@@ -129,7 +130,9 @@ class FakeModel:
 class InputTableTests(unittest.TestCase):
     def test_the_purpose_is_registered_from_this_module(self):
         self.assertEqual(PURPOSE, "conviction_call")
+        self.assertEqual(VERIFIER_PURPOSE, "conviction_call_verifier")
         self.assertIn("conviction_call", purposes())
+        self.assertIn("conviction_call_verifier", purposes())
 
     def test_the_divergent_debate_comes_first_and_is_labelled(self):
         built = table()
@@ -407,7 +410,7 @@ class RunTests(unittest.TestCase):
         self.assertEqual(result["call"]["direction"], "long")
         self.assertEqual(result["rubric"]["findings"], [])
         self.assertEqual([call["purpose"] for call in model.calls],
-                         ["conviction_call", "conviction_call"])
+                         ["conviction_call", "conviction_call_verifier"])
 
     def test_an_honest_absence_of_a_market_view_ends_the_run_without_verifying(self):
         model = FakeModel([draft_reply(market_view={
