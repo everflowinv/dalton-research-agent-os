@@ -52,6 +52,7 @@ from .cockpit_model import (
     CockpitModelError,
     independent_model_call,
     lane_status_for,
+    model_failure_trace,
     register_purpose,
     unwrap_json_object,
 )
@@ -928,7 +929,8 @@ def reflect(
         )
     except CockpitModelError as exc:
         return {"status": "refused", "reason": f"the reflection call did not succeed: {exc}",
-                "lane_status": lane_status_for(exc, "refused"), "model": None}
+                "lane_status": lane_status_for(exc, "refused"),
+                "failure_trace": model_failure_trace(exc), "model": None}
     provenance = _provenance(call)
     provenance["purpose"] = REFLECTION_PURPOSE
     try:
@@ -1011,6 +1013,7 @@ def verify_reflection(
     except CockpitModelError as exc:
         return {"status": "refused", "model": None,
                 "lane_status": lane_status_for(exc, "refused"),
+                "failure_trace": model_failure_trace(exc),
                 "reason": f"the reflection verifier call did not succeed: {exc}"}
     provenance = _provenance(call)
     provenance["purpose"] = REFLECTION_VERIFIER_PURPOSE
@@ -1171,7 +1174,8 @@ def judge(
         # instead of eight identical refusals that look like an outage.
         return {"status": "refused", "reason": f"the model call did not succeed: {exc}",
                 "lane_status": lane_status_for(exc, "refused"),
-                "prompt_chars": len(prompt), "model": None}
+                "prompt_chars": len(prompt),
+                "failure_trace": model_failure_trace(exc), "model": None}
     provenance = _provenance(call)
     try:
         validated = validate_judge_output(unwrap_json_object(call["text"]), context)
@@ -1225,7 +1229,8 @@ def verify(
         )
     except CockpitModelError as exc:
         return {"status": "refused", "reason": f"the verifier call did not succeed: {exc}",
-                "lane_status": lane_status_for(exc, "refused"), "model": None}
+                "lane_status": lane_status_for(exc, "refused"),
+                "failure_trace": model_failure_trace(exc), "model": None}
     provenance = _provenance(call)
     provenance["purpose"] = VERIFIER_PURPOSE
     verifier_family = family_resolver(provenance.get("route_decision_ref"))

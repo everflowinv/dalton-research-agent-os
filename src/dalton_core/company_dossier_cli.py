@@ -804,6 +804,7 @@ def run_dossier(
         "cost_micros": 0,
         "failure_reason": None,
         "formal_authority_writes": 0,
+        "failed_model_traces": [],
     }
     store = DaltonStore(str(state_dir / "core.sqlite"))
     try:
@@ -1008,6 +1009,8 @@ def run_dossier(
                 profile_table=unit_profile_table,
                 market_view_available=market_view_available,
             )
+            if outcome.get("failure_trace") is not None:
+                summary["failed_model_traces"].append(outcome["failure_trace"])
             spent += int((outcome.get("model") or {}).get("cost_micros") or 0)
             attempted_outcomes.append(str(outcome.get("status") or ""))
             if outcome["status"] != "drafted":
@@ -1069,6 +1072,8 @@ def run_dossier(
             verifier, blocks, company=company, mission=mission,
             producer_route_decision_refs=draft_routes,
         )
+        if verdict.get("failure_trace") is not None:
+            summary["failed_model_traces"].append(verdict["failure_trace"])
         spent += int((verdict.get("model") or {}).get("cost_micros") or 0)
         summary["cost_micros"] = spent
         check = independence(

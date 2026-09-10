@@ -433,6 +433,23 @@ class VerifierTests(JudgementHarness):
         self.assertEqual(judged["status"], "refused")
         self.assertIn("did not succeed", judged["reason"])
 
+    def test_a_model_failure_preserves_its_exact_scheduler_trace(self):
+        context = self.context()
+        trace = {"schema_version": "0.1", "purpose": PURPOSE,
+                 "base_request_id": "r1", "work_order_ref": "work:cockpit-event_judgement-" + "c" * 32,
+                 "work_order_hash": "a" * 64,
+                 "formal_result_envelope_hash": "b" * 64}
+        model = FakeModel([CockpitModelError("host failed", failure_trace=trace)])
+        judged = judge(context, model=model, mission=self.mission, request_id="r1")
+        self.assertEqual(judged["failure_trace"], trace)
+
+    def test_an_unbound_failure_trace_is_not_promoted(self):
+        context = self.context()
+        model = FakeModel([CockpitModelError(
+            "host failed", failure_trace={"work_order_ref": "work:guessed"})])
+        judged = judge(context, model=model, mission=self.mission, request_id="r1")
+        self.assertIsNone(judged["failure_trace"])
+
 
 class LedgerTests(JudgementHarness):
     def judged(self, body=None):

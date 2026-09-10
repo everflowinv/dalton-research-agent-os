@@ -42,7 +42,7 @@ from typing import Any, Callable
 
 from .claim_aspect_vocabulary import DEFINITIONS
 from .cockpit_model import (CockpitModelError, independent_model_call,
-                            register_purpose, unwrap_json_object)
+                            model_failure_trace, register_purpose, unwrap_json_object)
 from .company_dossier import (
     CLASSIFICATION_UNIT,
     MAX_GAPS as MAX_DOSSIER_GAPS,
@@ -515,7 +515,8 @@ def draft_unit(
                           prompt=prompt, mission=mission)
     except CockpitModelError as exc:
         return {"status": "unavailable", "unit": unit,
-                "reason": f"{type(exc).__name__}: {exc}"}
+                "reason": f"{type(exc).__name__}: {exc}",
+                "failure_trace": model_failure_trace(exc)}
     provenance = {
         "work_order_ref": call.get("work_order_ref"),
         "route_decision_ref": call.get("route_decision_ref"),
@@ -714,7 +715,8 @@ def verify(
             purpose=VERIFIER_PURPOSE, request_id=f"verify-{digest[:24]}",
             prompt=prompt, mission=mission)
     except CockpitModelError as exc:
-        return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}"}
+        return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}",
+                "failure_trace": model_failure_trace(exc)}
     provenance = {
         "work_order_ref": call.get("work_order_ref"),
         "route_decision_ref": call.get("route_decision_ref"),

@@ -142,11 +142,17 @@ class CockpitChainTests(unittest.TestCase):
 
     def test_single_pin_broker_busy_is_settled_as_not_sent(self) -> None:
         adapter = BusyThenAvailableAdapter({})
-        with self.assertRaisesRegex(CockpitModelError, "broker concurrency"):
+        with self.assertRaisesRegex(CockpitModelError, "broker concurrency") as raised:
             self._model(adapter, policy_version_ref=self.pinned_policy).call(
                 purpose="plan", request_id="pinned-busy", prompt="draft",
                 mission=self.mission,
             )
+        trace = raised.exception.failure_trace
+        self.assertEqual(trace["purpose"], "plan")
+        self.assertEqual(trace["base_request_id"], "pinned-busy")
+        self.assertRegex(trace["work_order_ref"], r"^work:cockpit-plan-")
+        self.assertRegex(trace["work_order_hash"], r"^[0-9a-f]{64}$")
+        self.assertRegex(trace["formal_result_envelope_hash"], r"^[0-9a-f]{64}$")
         self.assertEqual(adapter.served, ["profile:gpt-6-astra"])
         with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
             settlement = ledger.connection.execute(

@@ -140,6 +140,59 @@ IDENTITY_VERSION = 2
 class CockpitModelError(RuntimeError):
     """The call was refused or failed; the message is safe to show."""
 
+    def __init__(self, message: str, *, failure_trace: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.failure_trace = None if failure_trace is None else dict(failure_trace)
+
+
+def model_failure_trace(exc: BaseException) -> dict[str, Any] | None:
+    """Return the bounded immutable-work binding carried by a model failure."""
+
+    trace = getattr(exc, "failure_trace", None)
+    if not isinstance(trace, Mapping) or set(trace) != {
+        "schema_version", "purpose", "base_request_id", "work_order_ref",
+        "work_order_hash", "formal_result_envelope_hash",
+    }:
+        return None
+    copied = dict(trace)
+    if (
+        copied["schema_version"] != "0.1"
+        or copied["purpose"] not in _PURPOSES
+        or not isinstance(copied["base_request_id"], str)
+        or not 1 <= len(copied["base_request_id"]) <= 512
+        or re.fullmatch(
+            r"work:cockpit-[a-z0-9_]+-[0-9a-f]{32}",
+            str(copied["work_order_ref"]),
+        ) is None
+        or re.fullmatch(r"[0-9a-f]{64}", str(copied["work_order_hash"])) is None
+        or re.fullmatch(
+            r"[0-9a-f]{64}", str(copied["formal_result_envelope_hash"])
+        ) is None
+    ):
+        return None
+    return copied
+
+
+def _failed_work_trace(scheduler: Any, work: WorkOrder, *, purpose: str,
+                       request_id: str) -> dict[str, Any] | None:
+    """Bind a surfaced failure to Scheduler's immutable WorkOrder and result."""
+
+    formal = scheduler.formal_result(work.id)
+    if formal is None or formal.get("terminal_state") != "failed":
+        return None
+    authority = scheduler.work_order_authority(work.id)
+    envelope_hash = formal.get("result_envelope_hash")
+    if authority is None or not isinstance(envelope_hash, str):
+        return None
+    return {
+        "schema_version": "0.1",
+        "purpose": purpose,
+        "base_request_id": request_id,
+        "work_order_ref": work.id,
+        "work_order_hash": authority["work_order_hash"],
+        "formal_result_envelope_hash": envelope_hash,
+    }
+
 
 def independent_model_call(model: Any, *, producer_route_decision_refs: Sequence[str],
                            **kwargs: Any) -> dict[str, Any]:
@@ -167,8 +220,9 @@ class CockpitModelPoolExhausted(CockpitModelError):
 
     lane_status = POOL_EXHAUSTED_STATUS
 
-    def __init__(self, message: str, rejection: Mapping[str, Any]) -> None:
-        super().__init__(message)
+    def __init__(self, message: str, rejection: Mapping[str, Any], *,
+                 failure_trace: Mapping[str, Any] | None = None) -> None:
+        super().__init__(message, failure_trace=failure_trace)
         self.rejection = dict(rejection)
         self.pool = self.rejection.get("pool")
         self.spent = self.rejection.get("spent")
@@ -199,12 +253,13 @@ def _pool_refusal_message(rejection: Mapping[str, Any]) -> str:
     )
 
 
-def _raise_failure(message: str, rejection: Mapping[str, Any] | None) -> None:
+def _raise_failure(message: str, rejection: Mapping[str, Any] | None, *,
+                   failure_trace: Mapping[str, Any] | None = None) -> None:
     """Raise the refusal in the shape that says which kind of no it was."""
 
     if rejection is not None:
-        raise CockpitModelPoolExhausted(message, rejection)
-    raise CockpitModelError(message)
+        raise CockpitModelPoolExhausted(message, rejection, failure_trace=failure_trace)
+    raise CockpitModelError(message, failure_trace=failure_trace)
 
 
 def pool_refusal_message(rejection: Mapping[str, Any]) -> str:
@@ -712,9 +767,19 @@ class CockpitModel:
                         if completion["status"] == "conflict":
                             raise CockpitModelError("the request completion conflicted; ask again")
                         if failure is not None:
-                            _raise_failure(failure, outcome.get("pool_rejection"))
+                            _raise_failure(
+                                failure, outcome.get("pool_rejection"),
+                                failure_trace=_failed_work_trace(
+                                    scheduler, work, purpose=purpose,
+                                    request_id=base_request_id),
+                            )
                         formal = scheduler.formal_result(work.id)
-                        return self._answer(formal, work, replayed, cost_micros, cost_status)
+                        return self._answer(
+                            formal, work, replayed, cost_micros, cost_status,
+                            failure_trace=_failed_work_trace(
+                                scheduler, work, purpose=purpose,
+                                request_id=base_request_id),
+                        )
                     route = router.route(
                         work, attempt_number=attempt,
                         capability=work.requested_capabilities[0],
@@ -739,7 +804,12 @@ class CockpitModel:
                                 completion = scheduler.complete(
                                     work.id, attempt, WORKER_REF, lease["lease_token"], result,
                                     idempotency_key=f"cockpit-complete:{work.id}:{attempt}")
-                                _raise_failure(failure)
+                                _raise_failure(
+                                    failure, None,
+                                    failure_trace=_failed_work_trace(
+                                        scheduler, work, purpose=purpose,
+                                        request_id=base_request_id),
+                                )
                         reserved = int(Decimal(str(effective["max_cost_usd"])) * 1_000_000)
                         decision = admit_day_ledger(
                             budget,
@@ -793,19 +863,32 @@ class CockpitModel:
                     if completion["status"] == "conflict":
                         raise CockpitModelError("the request completion conflicted; ask again")
                     if failure is not None:
-                        _raise_failure(failure, pool_rejection)
+                        _raise_failure(
+                            failure, pool_rejection,
+                            failure_trace=_failed_work_trace(
+                                scheduler, work, purpose=purpose,
+                                request_id=base_request_id),
+                        )
                 formal = scheduler.formal_result(work.id)
-            return self._answer(formal, work, replayed, cost_micros, cost_status)
+            return self._answer(
+                formal, work, replayed, cost_micros, cost_status,
+                failure_trace=_failed_work_trace(
+                    scheduler, work, purpose=purpose, request_id=base_request_id),
+            )
 
     @staticmethod
     def _answer(formal: Any, work: WorkOrder, replayed: bool, cost_micros: int,
-                cost_status: str) -> dict[str, Any]:
+                cost_status: str, *,
+                failure_trace: Mapping[str, Any] | None = None) -> dict[str, Any]:
         if formal is None or formal["terminal_state"] != "succeeded":
             envelope = {} if formal is None else formal.get("result_envelope") or {}
             error = envelope.get("error") or {}
             code = error.get("code")
             suffix = f" ({code})" if isinstance(code, str) and code else ""
-            raise CockpitModelError(f"the model call did not succeed{suffix}")
+            raise CockpitModelError(
+                f"the model call did not succeed{suffix}",
+                failure_trace=failure_trace,
+            )
         envelope = formal["result_envelope"]
         text = envelope.get("outputs", {}).get("text")
         if not isinstance(text, str):

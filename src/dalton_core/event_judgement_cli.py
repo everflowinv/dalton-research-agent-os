@@ -441,6 +441,7 @@ def run_judgement(
         "reflections_refused": 0,
         "followups": [],
         "effects": [],
+        "failed_model_traces": [],
         "failure_reason": None,
         "cost_micros": 0,
         "formal_authority_writes": 0,
@@ -587,6 +588,9 @@ def run_judgement(
                 context, decided, model=verifier_model, mission=mission,
                 request_id=f"v{request_id}"[:31], family_resolver=family_resolver,
             )
+            for outcome in (decided, checked):
+                if outcome.get("failure_trace") is not None:
+                    summary["failed_model_traces"].append(outcome["failure_trace"])
             spent += judgements.record_spend(
                 call=decided.get("model"), purpose="event_judgement",
                 outcome=decided["status"], event_ref=event["id"], mission=mission, day=day,
@@ -665,6 +669,9 @@ def run_judgement(
                     context, thought, model=verifier_model, mission=mission,
                     request_id=f"fv{request_id}"[:30], family_resolver=family_resolver,
                 )
+                for outcome in (thought, reviewed):
+                    if outcome.get("failure_trace") is not None:
+                        summary["failed_model_traces"].append(outcome["failure_trace"])
                 spent += judgements.record_spend(
                     call=thought.get("model"), purpose="thesis_reflection",
                     outcome=thought["status"], event_ref=event["id"], mission=mission,
