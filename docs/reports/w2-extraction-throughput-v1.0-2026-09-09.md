@@ -290,13 +290,17 @@ OK (skipped=1)
 修法两条都对；review 认为更耐用的是**在 admission 记录里写下显式的准入日**，因为它经得起重放。
 **属于 P14e / C2 的切片，本片没有改动它。**上面的失败数就是这一条。
 
-review 另外在同一片池子算术上标了两条本片同样没碰的：
+review 另外在同一片池子算术上标了一条本片同样没碰的：
 `bounded_planner_loop.py:375` 的 `admitted_loops` 返回的是每个 loop 的**所有版本**而非 head
 （`active_loops` 就在它下面，行为相反），而 `day_reserved_micros` / `settle` / `research_task_view`
 都按「一个任务一行」遍历它，所以一旦有人真的走了 `create_loop:504` 有意支持的修订路径，
-同一个任务的预算会被记进池子两次；以及 `research_task.py:64` 的 `POOL_SHARE 0.25`
-对上 $1.00 的单任务最低成本，意味着在仓库里所有 mission fixture 用的 0.5 预算下
-**没有任何 inquiry 可以准入**，车道会永远报 `pool_exhausted` 而一分钱没花。
+同一个任务的预算会被记进池子两次。
+
+**本报告 v1.0 曾在这里多列过一条 `POOL_SHARE 0.25` 的「无任何 inquiry 可准入」，已撤回。**
+那条是从测试 fixture（一律 `max_daily_cost_usd: 0.5`）推出来的，没有对过 live。
+实测 live mission 是 **100.0**，ad-hoc 池 $25.00，单任务 2 轮 × $0.50 = $1.00，
+也就是约 25 个任务/天，池子很宽松。只有配置在约 $4/天以下的部署才会碰到，本部署不是。
+留着这段而不是删干净，是因为一条被引用过的错误结论值得留下它是怎么错的。
 
 新用例覆盖：
 
@@ -453,12 +457,15 @@ reservation used  (route-estimate max × headroom): 10992 micros   (was a flat 5
 5. **main `7011104` 上有一个 ad-hoc 研究池的生产缺陷**（本片只是撞上了它的测试形态）：
    loop 的 `created_at` 没有时钟接缝，分日却用调用方的时钟，所以跨 UTC 午夜的一轮准入
    会把 reservation 记进明天的桶，任务不被计入任何它据以准入的池子。
-   同一片算术上还有两条（`admitted_loops` 返回所有版本导致预算重复计入；
-   `POOL_SHARE 0.25` × $1.00 最低成本使仓库里所有 fixture 预算下无任何 inquiry 可准入）。
+   同一片算术上还有一条（`admitted_loops` 返回所有版本导致预算重复计入）。
    code-review 在同一轮里还确认了 `research_task.py:553` 的 CIK 没有补零：
-   DXC 的 `company:sec-cik:001688568` 是九位，直接拼进要求十位的 SEC companyfacts URL，
-   所以每个 DXC 的专项研究任务从第一天起就 404。这道疤是已知的
-   （C1 用 `lstrip("0")` 绕开、p13-m2 用 `content_hash` 绕开），P14e 是第一个既不绕也不补的消费者。
+   DXC 的 `company:sec-cik:001688568` 是九位（**live 五家里唯一一个九位的**，已对着
+   `/private/tmp/dalton-ro/core.sqlite` 的 v13 universe 逐条核过），直接拼进要求十位的
+   SEC companyfacts URL。这道疤是已知的（C1 用 `lstrip("0")` 绕开、p13-m2 用 `content_hash` 绕开），
+   P14e 是第一个既不绕也不补的消费者。
+   **但今天它没有在坏任何东西**：live 的 `may_write` 里没有 `research_task`、
+   已发布的 ad-hoc 模板是 0，这条车道在两个 owner 动作上都还是停的。
+   它是**授权打开的那一天**才会咬人，咬五家里的一家——值得在开闸前修，不是正在冒烟。
    诊断见第四节，均由 code-review 复核确认，修在 P14e / C2 的切片里。
 
    **注意不要把第 1 条和第 5 条连起来读。** DXC 那 17 份卡在 `discovered` 的研报是
