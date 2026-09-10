@@ -111,12 +111,15 @@ def choose_company(
     missions: CoverageMissionAuthority, mission: dict[str, Any],
     *, company_ref: str | None = None,
     classifications: Mapping[str, str] | None = None,
+    exclude_company_refs: frozenset[str] = frozenset(),
 ) -> tuple[str | None, dict[str, Any] | None]:
     """The company to decide about, and the disclosure to decide from.
 
     Companies with statements but no current specification come first, oldest
     filing first so the queue drains in the order the lane filled it. A company
-    named explicitly is used as given -- that is the hand-run path.
+    named explicitly is used as given -- that is the hand-run path. The lane
+    may exclude exact companies it has already found durably held while it
+    searches the same immutable candidate order for another launchable one.
 
     The *state* is returned rather than rebuilt by the caller, and this is not
     a convenience. The ticker is part of the state and therefore part of its
@@ -140,6 +143,8 @@ def choose_company(
     refs = ([company_ref] if company_ref is not None
             else [filing["company_ref"] for filing in missions.statement_filings()])
     for held in refs:
+        if company_ref is None and held in exclude_company_refs:
+            continue
         if company_ref is None and held not in universe:
             continue
         try:

@@ -11,6 +11,8 @@ the slot every five minutes, and that it goes quiet once every company has one.
 from __future__ import annotations
 
 import unittest
+import tempfile
+from pathlib import Path
 
 from dalton_core.lane_child_launcher import LaneChildConflict, LaneChildTicketNotFound
 import dalton_core.mission_model_spec_lane as model_spec_lane
@@ -152,23 +154,60 @@ class ModelSpecLaneTests(unittest.TestCase):
         self.launcher.finish(launched["ticket_ref"], summary={
             "spec_status": "refused",
             "failure_reason": "CompanyModelSpecError: not a concept"})
+        next_company = self.lane.dispatch_once()
+        self.assertEqual(next_company["status"], "launched")
+        self.assertEqual(next_company["company_ref"], IBM)
+        self.assertIn(ACN, next_company["held"])
+        self.succeed(next_company["ticket_ref"], IBM)
         held = self.lane.dispatch_once()
         self.assertEqual(held["status"], "held")
+        self.assertIn(ACN, held["held"])
         self.assertIn("not a concept", held["reason"])
-        self.assertEqual(held["settled"]["spec_status"], "refused")
-        # And it stays held rather than being retried on the next tick.
-        self.assertEqual(self.lane.dispatch_once()["status"], "held")
-        self.assertEqual(len(self.launcher.started), 1)
+        self.assertEqual(len(self.launcher.started), 2)
+
+    def test_all_pending_companies_held_is_finite_and_reports_each(self):
+        first = self.lane.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], summary={
+            "spec_status": "refused", "failure_reason": "bad first spec"})
+        second = self.lane.dispatch_once()
+        self.launcher.finish(second["ticket_ref"], summary={
+            "spec_status": "refused", "failure_reason": "bad second spec"})
+        held = self.lane.dispatch_once()
+        self.assertEqual(held["status"], "held")
+        self.assertEqual(set(held["held"]), {ACN, IBM})
+        self.assertEqual(len(self.launcher.started), 2)
+
+    def test_configuration_change_releases_only_a_permission_hold(self):
+        missions = FakeMissions([ACN])
+        with tempfile.TemporaryDirectory() as name:
+            config = Path(name) / "model-config.json"
+            config.write_text('{"version":1}', encoding="utf-8")
+            self.launcher.model_config_path = config
+            lane = MissionModelSpecLaneCoordinator(
+                missions=missions, launcher=self.launcher,
+                mission=lambda: self.mission)
+            first = lane.dispatch_once()
+            self.launcher.finish(first["ticket_ref"], summary={
+                "spec_status": "gated", "failure_reason": "not authorized"})
+            self.assertEqual(lane.dispatch_once()["status"], "held")
+            config.write_text('{"version":2}', encoding="utf-8")
+            resumed = lane.dispatch_once()
+            self.assertEqual(resumed["status"], "launched")
+            self.assertEqual(resumed["company_ref"], ACN)
 
     def test_an_old_contract_failure_does_not_hold_a_new_contract(self):
-        launched = self.lane.dispatch_once()
+        missions = FakeMissions([ACN])
+        lane = MissionModelSpecLaneCoordinator(
+            missions=missions, launcher=self.launcher,
+            mission=lambda: self.mission)
+        launched = lane.dispatch_once()
         self.launcher.finish(launched["ticket_ref"], summary={
             "spec_status": "refused", "failure_reason": "old contract"})
-        self.assertEqual(self.lane.dispatch_once()["status"], "held")
+        self.assertEqual(lane.dispatch_once()["status"], "held")
         old_hash = model_spec_lane.TASK_HASH
         self.addCleanup(setattr, model_spec_lane, "TASK_HASH", old_hash)
         model_spec_lane.TASK_HASH = "f" * 64
-        resumed = self.lane.dispatch_once()
+        resumed = lane.dispatch_once()
         self.assertEqual(resumed["status"], "launched")
         self.assertEqual(self.launcher.started[-1]["task_hash"], "f" * 64)
 

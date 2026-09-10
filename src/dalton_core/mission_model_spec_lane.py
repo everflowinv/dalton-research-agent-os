@@ -107,7 +107,7 @@ class MissionModelSpecLaneCoordinator:
             return settled
         self._open = None
         failed = settled.get("status") != "succeeded" or settled.get("spec_status") in (
-            "refused", "model_unavailable", "busy", "failed",
+            "refused", "model_unavailable", "busy", "failed", "gated",
         )
         company_ref = settled.get("company_ref")
         state_hash = settled.get("state_hash")
@@ -133,34 +133,45 @@ class MissionModelSpecLaneCoordinator:
         if mission is None:
             return {"status": "unconfigured", "reason": "no mission",
                     "settled": settled}
-        try:
-            company_ref, state = choose_company(self.missions, mission)
-        except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
-            return {"status": "unavailable", "settled": settled,
-                    "reason": f"{type(exc).__name__}: {exc}"}
-        if company_ref is None:
-            return {"status": "idle", "settled": settled,
-                    "reason": "every company has a current specification"}
-        # The hash comes from the projection the chooser already built. Two
-        # projections of the same company hash differently if they were built
-        # with different arguments, and the selector disagreeing with the run
-        # about the hash is how this lane first got stuck relaunching one
-        # company while the other four waited behind it.
-        state_hash = state["state_hash"]
-        business_key = f"{company_ref}|{state_hash}|{TASK_HASH}"
+        excluded: set[str] = set()
+        held_companies: dict[str, Any] = {}
+        while True:
+            try:
+                company_ref, state = choose_company(
+                    self.missions, mission,
+                    exclude_company_refs=frozenset(excluded))
+            except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
+                return {"status": "unavailable", "settled": settled,
+                        "reason": f"{type(exc).__name__}: {exc}"}
+            if company_ref is None:
+                if held_companies:
+                    result = {"status": "held", "settled": settled,
+                              "reason": "every pending company is durably held",
+                              "held": held_companies}
+                    if len(held_companies) == 1:
+                        ref, failure = next(iter(held_companies.items()))
+                        result.update({"company_ref": ref, "failure": failure,
+                                       "reason": failure["reason"]})
+                    return result
+                return {"status": "idle", "settled": settled,
+                        "reason": "every company has a current specification"}
+            # The hash comes from the projection the chooser already built.
+            # Keeping that exact state beside the company also lets a held
+            # first candidate be skipped without rebuilding a different one.
+            state_hash = state["state_hash"]
+            business_key = f"{company_ref}|{state_hash}|{TASK_HASH}"
 
-        permission = current_permission(
-
-            self.budget, business_key, mission, self.launcher,
+            permission = current_permission(
+                self.budget, business_key, mission, self.launcher,
                 connection=authority_connection(
                     getattr(self, "store", None), getattr(self, "missions", None),
                     getattr(self, "models", None)))
 
-        held = self.budget.blocked(permission) or self.budget.blocked(business_key)
-        if held is not None:
-            return {"status": "held", "company_ref": company_ref,
-                    "settled": settled, "reason": held.classification.reason,
-                    "failure": held.as_wire()}
+            held = self.budget.blocked(permission) or self.budget.blocked(business_key)
+            if held is None:
+                break
+            held_companies[company_ref] = held.as_wire()
+            excluded.add(company_ref)
         try:
             ticket = self.launcher.start(
                 company_ref=company_ref, state_hash=state_hash, task_hash=TASK_HASH)
@@ -174,7 +185,7 @@ class MissionModelSpecLaneCoordinator:
         return {
             "status": "launched", "company_ref": company_ref,
             "state_hash": state_hash, "ticket_ref": ticket["id"],
-            "settled": settled,
+            "settled": settled, "held": held_companies,
         }
 
 
