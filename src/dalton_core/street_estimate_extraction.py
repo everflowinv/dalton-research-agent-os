@@ -218,7 +218,11 @@ def find_targets(page: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 label = match.group(label_group)
                 symbol = match.group(symbol_group)
                 number = match.group(number_group).replace(",", "")
-                lead = text[max(0, match.start() - 40):match.start()]
+                # Only what precedes the match *on its own line*. A window of
+                # fixed width reads back over the line before, so a page that
+                # prints the prior target above the new one marks both -- and
+                # then has no live target at all.
+                lead = text[max(0, match.start() - 60):match.start()].rsplit("\n", 1)[-1]
                 found.append({
                     "quote_id": quote["quote_id"],
                     "pattern": kind,
