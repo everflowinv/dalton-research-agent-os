@@ -79,7 +79,7 @@ class LaneTests(ResearchTaskFixture):
         self.assertEqual(lane.dispatch_once()["status"], "unconfigured")
 
     def test_a_plan_with_an_admissible_inquiry_launches_one_child(self) -> None:
-        plan = self.record_plan([inquiry(question="Do ACN's margins reconcile?")])
+        plan = self.record_plan([inquiry(question="Do ACN's revenues reconcile?")])
         result = self.coordinator.dispatch_once()
         self.assertEqual(result["status"], "launched")
         self.assertEqual(self.launcher.started[0][0], plan["plan_id"])
@@ -87,7 +87,7 @@ class LaneTests(ResearchTaskFixture):
         self.assertEqual(result["running"], 0)
 
     def test_a_running_child_makes_the_lane_busy_not_a_second_child(self) -> None:
-        self.record_plan([inquiry(question="Do ACN's margins reconcile?")])
+        self.record_plan([inquiry(question="Do ACN's revenues reconcile?")])
         first = self.coordinator.dispatch_once()
         self.assertEqual(self.coordinator.dispatch_once()["status"], "busy")
         self.assertEqual(len(self.launcher.started), 1)
@@ -99,7 +99,7 @@ class LaneTests(ResearchTaskFixture):
         self.assertEqual(held["last"]["admitted"], 1)
 
     def test_the_hold_lapses_after_an_hour(self) -> None:
-        self.record_plan([inquiry(question="Do ACN's margins reconcile?")])
+        self.record_plan([inquiry(question="Do ACN's revenues reconcile?")])
         first = self.coordinator.dispatch_once()
         self.launcher.settle(first["ticket_ref"], status="succeeded", summary={
             "status": "succeeded", "admitted": 0, "refused": [],
@@ -109,7 +109,7 @@ class LaneTests(ResearchTaskFixture):
         self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
 
     def test_idle_child_permission_is_not_success_and_config_change_recovers(self):
-        self.record_plan([inquiry(question="Do ACN's margins reconcile?")])
+        self.record_plan([inquiry(question="Do ACN's revenues reconcile?")])
         self.launcher.model_config = self.state_dir / "model.json"
         self.launcher.model_config.write_text("{}")
         first = self.coordinator.dispatch_once()
@@ -122,7 +122,7 @@ class LaneTests(ResearchTaskFixture):
         self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
 
     def test_a_failed_child_is_held_rather_than_respawned_every_tick(self) -> None:
-        self.record_plan([inquiry(question="Do ACN's margins reconcile?")])
+        self.record_plan([inquiry(question="Do ACN's revenues reconcile?")])
         first = self.coordinator.dispatch_once()
         self.launcher.settle(first["ticket_ref"], status="failed", summary={
             "status": "failed", "failure_reason": "the mandate moved",
@@ -133,7 +133,7 @@ class LaneTests(ResearchTaskFixture):
         self.assertEqual(len(self.launcher.started), 1)
 
     def test_dependency_failure_replays_and_same_signature_can_probe(self) -> None:
-        self.record_plan([inquiry(question="Do ACN's margins reconcile?")])
+        self.record_plan([inquiry(question="Do ACN's revenues reconcile?")])
         lane = ResearchTaskCoordinator(
             store=self.store, launcher=self.launcher, clock=lambda: self.now,
             failure_ledger_dir=self.state_dir,
@@ -168,7 +168,7 @@ class LaneTests(ResearchTaskFixture):
 
         admitted = []
         for index in range(expected + 2):
-            wire = inquiry(question=f"ACN question {index}?")
+            wire = inquiry(question=f"ACN revenue question {index}?")
             entry = self.admissions(
                 self.record_plan([wire], state_hash=f"{index:064d}"))[0]
             if not entry["admissible"]:
@@ -204,7 +204,7 @@ class LaneTests(ResearchTaskFixture):
         from dalton_core.observability import ObservabilityStore
         from dalton_core.scheduler import Scheduler
 
-        wire = inquiry(question="Do ACN's margins reconcile?")
+        wire = inquiry(question="Do ACN's revenues reconcile?")
         plan = self.record_plan([wire])
         record = self.admit(plan, self.admissions(plan)[0], wire)
         self.assertEqual(self.coordinator.settle(), {"running": 1, "finished": []})
@@ -238,7 +238,7 @@ class UngrantedLaneTests(ResearchTaskFixture):
     def test_an_ungranted_lane_says_which_owner_act_is_missing(self) -> None:
         launcher = FakeLauncher(self.state_dir / "research-tasks")
         coordinator = ResearchTaskCoordinator(store=self.store, launcher=launcher)
-        self.record_plan([inquiry(question="Do ACN's margins reconcile?")])
+        self.record_plan([inquiry(question="Do ACN's revenues reconcile?")])
         result = coordinator.dispatch_once()
         self.assertEqual(result["status"], "not_granted")
         self.assertEqual(result["reasons"], ["no_executable_adhoc_template_published"])

@@ -42,7 +42,7 @@ class ConfiguredTaskTests(ResearchTaskFixture):
                                       "task_budget": {"max_rounds": 6}}))
         settings = lane_configuration(config)
         self.assertEqual(settings["max_admissions_per_tick"], 8)
-        plan = self.record_plan([inquiry(question=f"Reconcile metric {i}", rank=i)
+        plan = self.record_plan([inquiry(question=f"Reconcile revenue definition {i}", rank=i)
                                  for i in range(5)])
         entries = rt.plan_admissions(self.authority, mission=self.mission, plan=plan,
                                     limit=8, budget_overrides=settings["task_budget"])
