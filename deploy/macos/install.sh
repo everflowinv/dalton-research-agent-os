@@ -614,23 +614,6 @@ if [[ ! -f "$adhoc_templates_file" && -f "$repo_root/deploy/phase8/p14e-adhoc-pr
   cp "$repo_root/deploy/phase8/p14e-adhoc-probe-templates-v1.json" "$adhoc_templates_file"
   chmod 600 "$adhoc_templates_file"
 fi
-# ADR-0005 / P9d-17a: the writer needs an approved extraction model
-# configuration for drafting to run as mission automation.  Idempotent: appends
-# the extraction routing policy only if its filters changed, writes the closed
-# config next to the state, and points service.json at it.  No credential is
-# read; the broker key path is referenced.
-# P14-M: --tier cheap pins extraction to the cheap fallback chain rather than
-# to one profile. Its long-standing pin, profile:deepseek-v4-flash, is that
-# chain's first link, so the model that normally reads a window does not change;
-# what changes is that DeepSeek being down stops losing the window.
-# DALTON_EXTRACTION_MODEL_TIER= (empty) keeps the single pin.
-extraction_tier=${DALTON_EXTRACTION_MODEL_TIER-cheap}
-if [[ -n "$extraction_tier" ]]; then
-  "$venv_dir/bin/python" -m dalton_core.document_extraction_setup \
-    --config "$config_path" --tier "$extraction_tier"
-else
-  "$venv_dir/bin/python" -m dalton_core.document_extraction_setup --config "$config_path"
-fi
 # P14-M: make the router's model catalog agree with the broker's, append-only.
 # The two had drifted -- five profiles Dalton offered that the broker no longer
 # did, four the broker offered that Dalton had no profile for -- because
@@ -663,6 +646,23 @@ if [[ -f "$HOME/.openclaw/openclaw.json" ]]; then
       > "$model_catalog_file"
     chmod 600 "$model_catalog_file"
   fi
+fi
+# ADR-0005 / P9d-17a: the writer needs an approved extraction model
+# configuration for drafting to run as mission automation.  Idempotent: appends
+# the extraction routing policy only if its filters changed, writes the closed
+# config next to the state, and points service.json at it.  No credential is
+# read; the broker key path is referenced.
+# P14-M: --tier cheap pins extraction to the cheap fallback chain rather than
+# to one profile. Its long-standing pin, profile:deepseek-v4-flash, is that
+# chain's first link, so the model that normally reads a window does not change;
+# what changes is that DeepSeek being down stops losing the window.
+# DALTON_EXTRACTION_MODEL_TIER= (empty) keeps the single pin.
+extraction_tier=${DALTON_EXTRACTION_MODEL_TIER-cheap}
+if [[ -n "$extraction_tier" ]]; then
+  "$venv_dir/bin/python" -m dalton_core.document_extraction_setup \
+    --config "$config_path" --tier "$extraction_tier"
+else
+  "$venv_dir/bin/python" -m dalton_core.document_extraction_setup --config "$config_path"
 fi
 # P13k: the planner's model, only when the owner names one. It decides what the
 # research works on next, so it routes through its own policy rather than
