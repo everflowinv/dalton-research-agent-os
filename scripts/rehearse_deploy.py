@@ -535,6 +535,10 @@ INSTALL_SEEDS: tuple[SeedSpec, ...] = (
         "deploy/phase9/p14a-tracking-policy-v1.json",
         "tracking-policy.json",
     ),
+    SeedSpec(
+        "deploy/phase9/p12a-dossier-policy-v1.json",
+        "p12a-dossier-policy-v1.json",
+    ),
     # P12e: the industry-framework policy is that lane's whole switch. One
     # file, so all-or-nothing is automatic, and no model configuration beside
     # it: the comparison table needs none.
@@ -836,7 +840,24 @@ LANE_SWITCHES: tuple[LaneSwitch, ...] = (
     ),
     LaneSwitch(
         "initial_screen", "initial-screen-model-config.json", None, False,
-        "written only when DALTON_DELIVERABLE_MODEL_PROFILE/TIER is set",
+        "written only when DALTON_DELIVERABLE or paired DALTON_DOSSIER model vars are set",
+    ),
+    LaneSwitch(
+        "company_dossier policy", "p12a-dossier-policy-v1.json",
+        "deploy/phase9/p12a-dossier-policy-v1.json", True,
+        "seeded once and never overwrites the owner's runtime policy",
+    ),
+    LaneSwitch(
+        "company_dossier verifier", "dossier-verifier-model-config.json", None, False,
+        "written only together with the dossier producer model configuration",
+    ),
+    LaneSwitch(
+        "earnings_season", "earnings-season-model-config.json", None, False,
+        "written only together with the earnings verifier model configuration",
+    ),
+    LaneSwitch(
+        "earnings_season verifier", "earnings-season-verifier-model-config.json", None, False,
+        "written only together with the earnings producer model configuration",
     ),
     LaneSwitch(
         "research_plan", "research-planner-model-config.json", None, False,

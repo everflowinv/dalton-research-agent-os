@@ -538,6 +538,14 @@ if [[ ! -f "$tracking_policy_file" && -f "$repo_root/deploy/phase9/p14a-tracking
   cp "$repo_root/deploy/phase9/p14a-tracking-policy-v2.json" "$tracking_policy_file"
   chmod 600 "$tracking_policy_file"
 fi
+# P12a: the dossier section policy is an owner-editable runtime decision. Seed
+# the repository default once, beside the model configurations its lane reads,
+# and never replace an existing policy during an upgrade.
+dossier_policy_file="$state_dir/p12a-dossier-policy-v1.json"
+if [[ ! -f "$dossier_policy_file" && -f "$repo_root/deploy/phase9/p12a-dossier-policy-v1.json" ]]; then
+  cp "$repo_root/deploy/phase9/p12a-dossier-policy-v1.json" "$dossier_policy_file"
+  chmod 600 "$dossier_policy_file"
+fi
 # P12e: the industry-framework policy is that lane's whole switch -- it titles
 # the Constitution's causal-chain links, files each driver under a horizon, and
 # carries the gap checklist. One file, so all-or-nothing is automatic. No model
@@ -745,6 +753,60 @@ elif [[ -n "$zero_base_pin" || -n "$zero_base_verifier_pin" ]]; then
   exit 2
 else
   print "note: set producer and verifier tiers to install the zero-base review lane."
+fi
+# P12a: dossier drafting and verification are one deployment choice. The
+# verifier is a separate route because publication checks its selected family
+# against the producer at runtime. Unset leaves both files absent.
+#
+#   DALTON_DOSSIER_MODEL_TIER=brain
+#   DALTON_DOSSIER_VERIFIER_MODEL_TIER=verifier
+dossier_pin="${DALTON_DOSSIER_MODEL_PROFILE:-}${DALTON_DOSSIER_MODEL_TIER:-}"
+dossier_verifier_pin="${DALTON_DOSSIER_VERIFIER_MODEL_PROFILE:-}${DALTON_DOSSIER_VERIFIER_MODEL_TIER:-}"
+if [[ -n "$dossier_pin" && -n "$dossier_verifier_pin" ]]; then
+  if [[ "$dossier_pin" == "$dossier_verifier_pin" ]]; then
+    print -u2 "error: the dossier producer and verifier are pinned to the same model ($dossier_pin)"
+    exit 2
+  fi
+  install_role_model_config \
+    "model-routing-policy:dalton-openclaw-deliverable-drafting" \
+    "initial-screen-model-config.json" \
+    "${DALTON_DOSSIER_MODEL_PROFILE:-}" "${DALTON_DOSSIER_MODEL_TIER:-}"
+  install_role_model_config \
+    "model-routing-policy:dalton-openclaw-dossier-verifier" \
+    "dossier-verifier-model-config.json" \
+    "${DALTON_DOSSIER_VERIFIER_MODEL_PROFILE:-}" "${DALTON_DOSSIER_VERIFIER_MODEL_TIER:-}"
+elif [[ -n "$dossier_pin" || -n "$dossier_verifier_pin" ]]; then
+  print -u2 "error: set both DALTON_DOSSIER_MODEL_* and DALTON_DOSSIER_VERIFIER_MODEL_* or neither"
+  exit 2
+else
+  print "note: set dossier producer and verifier tiers to install the company-dossier lane."
+fi
+# P14f: preview/calibration writing and independent verification likewise ship
+# as a pair. The tracking policy above remains a separately owner-controlled
+# file and is never replaced here.
+#
+#   DALTON_EARNINGS_MODEL_TIER=brain
+#   DALTON_EARNINGS_VERIFIER_MODEL_TIER=verifier
+earnings_pin="${DALTON_EARNINGS_MODEL_PROFILE:-}${DALTON_EARNINGS_MODEL_TIER:-}"
+earnings_verifier_pin="${DALTON_EARNINGS_VERIFIER_MODEL_PROFILE:-}${DALTON_EARNINGS_VERIFIER_MODEL_TIER:-}"
+if [[ -n "$earnings_pin" && -n "$earnings_verifier_pin" ]]; then
+  if [[ "$earnings_pin" == "$earnings_verifier_pin" ]]; then
+    print -u2 "error: the earnings producer and verifier are pinned to the same model ($earnings_pin)"
+    exit 2
+  fi
+  install_role_model_config \
+    "model-routing-policy:dalton-openclaw-earnings-season" \
+    "earnings-season-model-config.json" \
+    "${DALTON_EARNINGS_MODEL_PROFILE:-}" "${DALTON_EARNINGS_MODEL_TIER:-}"
+  install_role_model_config \
+    "model-routing-policy:dalton-openclaw-earnings-season-verifier" \
+    "earnings-season-verifier-model-config.json" \
+    "${DALTON_EARNINGS_VERIFIER_MODEL_PROFILE:-}" "${DALTON_EARNINGS_VERIFIER_MODEL_TIER:-}"
+elif [[ -n "$earnings_pin" || -n "$earnings_verifier_pin" ]]; then
+  print -u2 "error: set both DALTON_EARNINGS_MODEL_* and DALTON_EARNINGS_VERIFIER_MODEL_* or neither"
+  exit 2
+else
+  print "note: set earnings producer and verifier tiers to install the earnings-season lane."
 fi
 # P12b: the claim index. One configuration, so all-or-nothing is automatic.
 # The maintenance pool is the tightest of C2's four at 5% and this is where the

@@ -639,8 +639,8 @@ class MissionAndSwitchTests(unittest.TestCase):
                 self.assertTrue((REPO_ROOT / switch.repo_source).is_file())
 
     def test_the_switch_install_sh_does_write_is_the_one_it_names(self) -> None:
-        # Four now: extraction's model config, P14a's tracking policy, P12e's
-        # framework policy and P14-M2's catalog-sync switch. Each has to be
+        # Five now: extraction's model config, P14a's tracking policy, P12a's
+        # dossier policy, P12e's framework policy and P14-M2's catalog switch. Each has to be
         # traceable to the line in install.sh that writes it -- a switch that
         # claims install seeds a file it does not is worse than a switch that
         # admits it is missing.
@@ -650,16 +650,19 @@ class MissionAndSwitchTests(unittest.TestCase):
         self.assertEqual(
             seeded,
             {"document-extraction-model-config.json", "tracking-policy.json",
+             "p12a-dossier-policy-v1.json",
              "p12e-industry-framework-policy-v1.json",
              "model-catalog-sync.json"},
         )
         self.assertIn("document_extraction_setup", code)
         self.assertIn("p14a-tracking-policy-v2.json", code)
         self.assertIn("p12e-industry-framework-policy-v1.json", code)
+        self.assertIn("p12a-dossier-policy-v1.json", code)
         self.assertIn("model-catalog-sync.json", code)
         states = [spec.state for spec in INSTALL_SEEDS]
         self.assertIn("tracking-policy.json", states)
         self.assertIn("p12e-industry-framework-policy-v1.json", states)
+        self.assertIn("p12a-dossier-policy-v1.json", states)
 
     def test_the_three_model_config_switches_are_written_when_named(self) -> None:
         # INT3: the judgement pair and the claim index were switches nothing
@@ -670,6 +673,9 @@ class MissionAndSwitchTests(unittest.TestCase):
             ("event-judgement-model-config.json", "DALTON_EVENT_JUDGEMENT_MODEL_TIER"),
             ("event-verifier-model-config.json", "DALTON_EVENT_VERIFIER_MODEL_TIER"),
             ("claim-index-model-config.json", "DALTON_CLAIM_INDEX_MODEL_TIER"),
+            ("dossier-verifier-model-config.json", "DALTON_DOSSIER_VERIFIER_MODEL_TIER"),
+            ("earnings-season-model-config.json", "DALTON_EARNINGS_MODEL_TIER"),
+            ("earnings-season-verifier-model-config.json", "DALTON_EARNINGS_VERIFIER_MODEL_TIER"),
         ):
             with self.subTest(switch=name):
                 self.assertIn(name, code)
