@@ -1,9 +1,8 @@
 """P14a: launch the judgement child, one at a time.
 
-Named by the mission version and the newest unjudged event: a tick that fires
-while nothing new has arrived is the same ticket rather than a second child
-paying to re-read a batch it already decided.  (The ledger would refuse the
-second judgement anyway; this is what stops it being paid for first.)
+Named by the selected mission-scoped event group and configuration. Completed
+tickets are adopted after restart so their result can settle into the durable
+failure ledger before a retry is considered.
 """
 
 from __future__ import annotations

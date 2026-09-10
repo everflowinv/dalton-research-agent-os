@@ -232,7 +232,7 @@ def unjudged_event_groups(
     judgements: EventJudgementAuthority,
     *,
     company_ref: str,
-    limit: int,
+    limit: int | None,
     now: datetime | None = None,
     mission_version_refs: tuple[str, ...] | None = None,
     newest_first: bool = False,

@@ -10,8 +10,8 @@ the order is explicit for the reason the registry insists on: an ordering that
 emerged from import order would put the brain before its eyes on the day
 somebody sorted the module list.
 
-The batch ref is the newest unjudged event, so a tick that fires while nothing
-has arrived names the same ticket instead of paying to re-read the same batch.
+Each batch names one mission-scoped event group and its configuration. A held
+group does not prevent the next eligible group from advancing.
 """
 
 from __future__ import annotations
@@ -195,7 +195,7 @@ def newest_unjudged(store: Any, mission: Mapping[str, Any]) -> str | None:
 
 
 def pending_event_groups(store: Any, missions: Any,
-                         mission: Mapping[str, Any]) -> list[dict[str, str]]:
+                         mission: Mapping[str, Any]) -> list[dict[str, Any]]:
     """Mission-scoped eligible groups, newest first, with durable identities."""
     from .event_judgement_cli import (
         buyback_group_key, incremental_group_hash, unjudged_event_groups,
