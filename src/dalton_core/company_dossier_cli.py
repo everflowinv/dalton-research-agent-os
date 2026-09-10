@@ -730,6 +730,53 @@ def dossier_input_fingerprint(value: Mapping[str, Any]) -> str:
     return content_hash(dict(value))
 
 
+def dossier_company_source_fingerprint(connection: Any, company_ref: str) -> str:
+    """Hash the selected authority inputs that can change this company's prompts.
+
+    This reuses the bounded material readers used by ``plan_units``. A lane
+    signature assembled from counts or a second SQL projection would drift
+    when prompt ranking, retirement, or quotas change.
+    """
+
+    view = _ReadOnlyStoreView(connection)
+    claims = {
+        aspect: claim_material(view, company_ref, aspect)
+        for aspect in SECTIONS
+    }
+    figures = []
+    if table_exists(connection, "coverage_mission_document_figures"):
+        figures = [dict(row) for row in connection.execute(
+            "SELECT figure_id,content_hash FROM coverage_mission_document_figures "
+            "WHERE company_ref=? ORDER BY figure_id",
+            (company_ref,),
+        ).fetchall()]
+    forecast = None
+    if table_exists(connection, "forecast_model_versions"):
+        row = connection.execute(
+            "SELECT version_id,content_hash FROM forecast_model_versions "
+            "WHERE company_ref=? ORDER BY version_number DESC LIMIT 1",
+            (company_ref,),
+        ).fetchone()
+        forecast = None if row is None else dict(row)
+    dossier = None
+    if table_exists(connection, "company_dossier_versions"):
+        row = connection.execute(
+            "SELECT version_id,content_hash FROM company_dossier_versions "
+            "WHERE company_ref=? ORDER BY version_number DESC LIMIT 1",
+            (company_ref,),
+        ).fetchone()
+        dossier = None if row is None else dict(row)
+    return dossier_input_fingerprint({
+        "schema_version": "0.1",
+        "company_ref": company_ref,
+        "claims": claims,
+        "numbers": number_material(view, company_ref),
+        "document_figures": figures,
+        "forecast_head": forecast,
+        "dossier_head": dossier,
+    })
+
+
 def stale_units(
     plan: Mapping[str, Any], *, limit: int = MAX_UNITS_PER_RUN,
     revise: Sequence[str] = (),
@@ -1378,6 +1425,7 @@ __all__ = [
     "build_dossier_input",
     "build_parser",
     "claim_material",
+    "dossier_company_source_fingerprint",
     "dossier_input_fingerprint",
     "dossier_freshness",
     "granted_scope",

@@ -1108,6 +1108,79 @@ class CoordinatorTests(unittest.TestCase):
         self.assertNotEqual(
             company_ledger_signature(self.connection, second_company), other_before)
 
+    def test_selected_statement_and_forecast_material_are_company_scoped(self):
+        second_company = "company:sec-cik:0000000002"
+
+        def filed(_connection, company_ref, *, limit):
+            return ([{"kind": "figure", "ref": "statement-line:acn", "text": "filed",
+                      "period": "2026Q1"}] if company_ref == ACN else [])
+
+        def forecast(_connection, company_ref, *, limit):
+            return ([{"kind": "forecast_cell", "ref": "forecast-cell:acn",
+                      "text": "forecast", "period": "2026Q2"}]
+                    if company_ref == ACN else [])
+
+        with patch("dalton_core.company_dossier_cli._statement_line_rows",
+                   side_effect=filed), patch(
+                       "dalton_core.company_dossier_cli._forecast_cell_rows",
+                       side_effect=forecast):
+            acn_with_inputs = company_ledger_signature(self.connection, ACN)
+            other_with_inputs = company_ledger_signature(self.connection, second_company)
+        with patch("dalton_core.company_dossier_cli._statement_line_rows",
+                   return_value=[]), patch(
+                       "dalton_core.company_dossier_cli._forecast_cell_rows",
+                       return_value=[]):
+            self.assertNotEqual(
+                company_ledger_signature(self.connection, ACN), acn_with_inputs)
+            self.assertEqual(
+                company_ledger_signature(self.connection, second_company),
+                other_with_inputs,
+            )
+
+    def test_document_figure_and_claim_retirement_change_only_their_company(self):
+        from dalton_core.claim_retirement import ClaimRetirementAuthority
+
+        second_company = "company:sec-cik:0000000002"
+        other_before = company_ledger_signature(self.connection, second_company)
+        before = company_ledger_signature(self.connection, ACN)
+        self.harness.missions.record_document_figures(
+            company_ref=ACN, review_ref="mission-document-review:dossier-signature",
+            document_ref="sec:filing:0001467373-26-000001",
+            source_manifest_hash="0" * 64, source_grade="company-filed-document",
+            figures=[{"quote_id": "quote:0:100:" + "a" * 16,
+                      "metric_ref": "metric:revenue", "subject_as_named": "Accenture",
+                      "as_reported_label": "Revenue", "value": "17.7",
+                      "unit": "currency", "currency": "USD", "period": "FY2026Q3",
+                      "basis": "gaap-reported", "scale": "billion",
+                      "citation_text": "Revenue was 17.7 billion."}],
+            observed_by=AUTOMATION,
+        )
+        after_figure = company_ledger_signature(self.connection, ACN)
+        self.assertNotEqual(after_figure, before)
+        self.assertEqual(company_ledger_signature(self.connection, second_company), other_before)
+
+        claim_ref = self.harness.tag(
+            "retire-signature", "guidance_style",
+            statement="Management guided revenue growth to 5 percent.",
+        )["claim_version_id"]
+        indexed = company_ledger_signature(self.connection, ACN)
+        claim_hash = self.connection.execute(
+            "SELECT content_hash FROM claim_versions WHERE claim_version_id=?",
+            (claim_ref,),
+        ).fetchone()["content_hash"]
+        retirement = ClaimRetirementAuthority(self.harness.store)
+        challenge = retirement.challenge(
+            claim_version_ref=claim_ref, claim_version_hash=claim_hash,
+            reason_code="human_judgment", rationale="fixture",
+            actor_ref="human:coverage-owner",
+        )
+        retirement.decide(
+            challenge_ref=challenge["id"], challenge_hash=challenge["content_hash"],
+            decision="retired", actor_ref="human:coverage-owner",
+            rationale="fixture",
+        )
+        self.assertNotEqual(company_ledger_signature(self.connection, ACN), indexed)
+
     def test_a_failed_verifier_transport_is_not_mislabeled_as_content(self):
         launcher = self.Launcher(
             ticket_status="failed",

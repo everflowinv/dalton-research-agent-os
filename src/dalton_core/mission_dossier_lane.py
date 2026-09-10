@@ -123,42 +123,12 @@ def ledger_signature(connection: Any) -> str:
 def company_ledger_signature(connection: Any, company_ref: str) -> str:
     """Digest only the authority inputs that can change one company's file."""
     from .cockpit_model import verifier_provider_contract_fingerprint
+    from .company_dossier_cli import dossier_company_source_fingerprint
     from .company_dossier_draft import draft_contract_fingerprint
 
-    parts = [company_ref, verifier_provider_contract_fingerprint("dossier_verifier"),
+    parts = [company_ref, dossier_company_source_fingerprint(connection, company_ref),
+             verifier_provider_contract_fingerprint("dossier_verifier"),
              draft_contract_fingerprint()]
-    try:
-        rows = connection.execute(
-            "SELECT source.entry_ref,source.version_number,source.content_hash,"
-            "source.claim_version_ref,source.claim_version_hash "
-            "FROM claim_index_entry_versions AS source JOIN ("
-            " SELECT entry_ref,MAX(version_number) AS version_number "
-            " FROM claim_index_entry_versions WHERE subject_ref=? GROUP BY entry_ref"
-            ") AS latest ON latest.entry_ref=source.entry_ref "
-            "AND latest.version_number=source.version_number "
-            "WHERE source.subject_ref=? ORDER BY source.entry_ref",
-            (company_ref, company_ref),
-        ).fetchall()
-        parts.extend(
-            f"index:{row['entry_ref']}:{row['version_number']}:"
-            f"{row['content_hash']}:{row['claim_version_ref']}:"
-            f"{row['claim_version_hash']}"
-            for row in rows
-        )
-    except Exception:  # noqa: BLE001 - absent index is valid pre-bootstrap state
-        parts.append("index:none")
-    try:
-        head = connection.execute(
-            "SELECT version_id,version_number,content_hash FROM company_dossier_versions "
-            "WHERE company_ref=? ORDER BY version_number DESC LIMIT 1",
-            (company_ref,),
-        ).fetchone()
-        parts.append(
-            "dossier:none" if head is None else
-            f"dossier:{head['version_id']}:{head['version_number']}:{head['content_hash']}"
-        )
-    except Exception:  # noqa: BLE001 - no dossier table yet is a valid state
-        parts.append("dossier:none")
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
 
 
