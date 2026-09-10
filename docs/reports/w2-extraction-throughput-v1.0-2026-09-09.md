@@ -455,7 +455,16 @@ reservation used  (route-estimate max × headroom): 10992 micros   (was a flat 5
    会把 reservation 记进明天的桶，任务不被计入任何它据以准入的池子。
    同一片算术上还有两条（`admitted_loops` 返回所有版本导致预算重复计入；
    `POOL_SHARE 0.25` × $1.00 最低成本使仓库里所有 fixture 预算下无任何 inquiry 可准入）。
+   code-review 在同一轮里还确认了 `research_task.py:553` 的 CIK 没有补零：
+   DXC 的 `company:sec-cik:001688568` 是九位，直接拼进要求十位的 SEC companyfacts URL，
+   所以每个 DXC 的专项研究任务从第一天起就 404。这道疤是已知的
+   （C1 用 `lstrip("0")` 绕开、p13-m2 用 `content_hash` 绕开），P14e 是第一个既不绕也不补的消费者。
    诊断见第四节，均由 code-review 复核确认，修在 P14e / C2 的切片里。
+
+   **注意不要把第 1 条和第 5 条连起来读。** DXC 那 17 份卡在 `discovered` 的研报是
+   AlphaEngine 取件额度的事（文档发现与抽取那条路），与 CIK 补零无关——后者只影响
+   ad-hoc 循环跑的 SEC companyfacts 探针，而那条车道还没有被授权、一个任务都没准入过。
+   补零修好也不会让那 17 份动起来。
 
 ## 八、接线需求（集成时统一做，本片没碰）
 
