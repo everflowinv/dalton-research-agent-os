@@ -74,9 +74,14 @@ class CompanyDossierLauncher(LaneChildLauncher):
 
         if self.model_config_path is None:
             return None
-        from .document_extraction import validate_model_config
-        config = validate_model_config(json.loads(
-            self.model_config_path.read_text(encoding="utf-8")))
+        try:
+            from .document_extraction import validate_model_config
+            config = validate_model_config(json.loads(
+                self.model_config_path.read_text(encoding="utf-8")))
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            # Child startup owns reporting an absent or malformed model
+            # configuration. Controller construction must remain lane-isolated.
+            return None
         retry = config.get("capacity_retry")
         return None if retry is None else int(retry["cooldown_seconds"])
 

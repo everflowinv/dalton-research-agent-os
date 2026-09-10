@@ -495,9 +495,15 @@ class CockpitModel:
         """Return ``{text, replayed, cost_micros, cost_status, work_order_ref, ...}`` or raise."""
         capacity_retry = _capacity_retry(self.config)
         base_request_id = request_id
-        if ("capacity_retry" in self.config
-                and ":capacity-policy:" not in base_request_id):
-            base_request_id += ":capacity-policy:" + content_hash(capacity_retry)[:16]
+        if "capacity_retry" in self.config:
+            policy_suffix = ":capacity-policy:" + content_hash(capacity_retry)[:16]
+            canonical = re.search(
+                re.escape(policy_suffix)
+                + r"(?::capacity-recovery:\d+:[0-9a-f]{16})?$",
+                base_request_id,
+            )
+            if canonical is None:
+                base_request_id += policy_suffix
             request_id = base_request_id
         producer_refs = tuple(sorted({str(ref) for ref in producer_route_decision_refs}))
         legacy_budget = {

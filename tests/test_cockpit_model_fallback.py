@@ -165,6 +165,20 @@ class CockpitChainTests(unittest.TestCase):
                             "scheduler_max_attempts": 3}).call(**kwargs)
         self.assertNotEqual(changed["work_order_ref"], second["work_order_ref"])
 
+        injected = explicit.call(
+            **{**kwargs, "request_id":
+               "caller:capacity-policy:not-the-current-policy"})
+        self.assertNotEqual(injected["work_order_ref"], second["work_order_ref"])
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            stored = scheduler.work_order_authority(
+                injected["work_order_ref"])["work_order"]
+        expected_retry = {"cooldown_seconds": 60, "max_recovery_epochs": 1,
+                          "scheduler_max_attempts": 3}
+        self.assertIn(
+            ":capacity-policy:" + content_hash(expected_retry)[:16],
+            stored["metadata"]["request_id"],
+        )
+
     def test_a_legacy_terminal_busy_failure_gets_one_versioned_recovery_identity(self) -> None:
         adapter = BusyThenAvailableAdapter({})
         clock = MutableClock()

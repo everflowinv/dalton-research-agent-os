@@ -909,6 +909,19 @@ class LaneWiringTests(unittest.TestCase):
         self.assertEqual(args.verifier_model_config, state / "v.json")
         self.assertEqual(args.dossier_policy, state / "p.json")
 
+    def test_bad_model_config_does_not_break_controller_construction(self):
+        path = self.state / "bad-model.json"
+        path.write_text("{", encoding="utf-8")
+        launcher = CompanyDossierLauncher(state_dir=self.state,
+                                          model_config_path=path)
+        connection = sqlite3.connect(":memory:")
+        try:
+            coordinator = MissionDossierLaneCoordinator(
+                connection=connection, launcher=launcher)
+            self.assertEqual(coordinator.budget.probe_interval_seconds, 1800)
+        finally:
+            connection.close()
+
     def test_the_ticket_is_named_by_the_evidence_the_run_is_about(self):
         first = run_digest(ACN, "signature-a")
         self.assertEqual(first, run_digest(ACN, "signature-a"))
