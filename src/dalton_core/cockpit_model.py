@@ -365,12 +365,13 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
 
 def _failure(work: WorkOrder, code: str, route_ref: str | None,
              *, message: str | None = None,
-             chain_failures: Sequence[Mapping[str, Any]] = ()) -> ResultEnvelope:
+             chain_failures: Sequence[Mapping[str, Any]] = (),
+             status: str = "failed") -> ResultEnvelope:
     identity = {"work_order_ref": work.id, "code": code, "route_ref": route_ref}
     return ResultEnvelope(
         schema_version=SCHEMA_VERSION, id=f"result:cockpit-control-{content_hash(identity)[:32]}",
         created_at=_now(), work_order_ref=work.id,
-        invocation_ref=f"invocation:not-started:{content_hash(identity)[:32]}", status="failed",
+        invocation_ref=f"invocation:not-started:{content_hash(identity)[:32]}", status=status,
         outputs={}, actual_side_effects=(), usage_refs=(), artifact_refs=(),
         error={"code": code, **({} if message is None else {"message": message[:1000]})},
         metadata={"control_plane_failure": True, "route_decision_ref": route_ref,
@@ -853,9 +854,11 @@ class CockpitModel:
             failure = f"every model in the {tier} chain failed: {skipped}"
         if detail_text:
             failure += f"; broker details: {detail_text}"
+        retryable = outcome["status"] == "halted" and outcome.get("reason") == "capacity_busy"
         return {"result": _failure(
                     work, "MODEL_CHAIN_EXHAUSTED", route_ref,
-                    message=failure, chain_failures=details),
+                    message=failure, chain_failures=details,
+                    status="retryable" if retryable else "failed"),
                 "failure": failure,
                 "cost_micros": 0, "cost_status": "failed",
                 "pool_rejection": None}

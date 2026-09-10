@@ -90,7 +90,55 @@ class ChainAdapter:
         )
 
 
+class BusyThenAvailableAdapter(ChainAdapter):
+    def execute(self, work, route, profile):
+        if not self.served:
+            self.served.append(profile["id"])
+            moment = NOW.isoformat(timespec="microseconds")
+            invocation = ModelInvocation(
+                schema_version="0.1", id="invocation:busy-first",
+                created_at=moment, work_order_ref=work.id,
+                profile_ref=profile["profile_version_ref"], granularity="work_order",
+                capability=route["capability"], provider=profile["provider"],
+                model=profile["model"], model_family=profile["family"],
+                input_refs=(), output_refs=(), started_at=moment, completed_at=moment,
+                usage={}, side_effects=(), runtime_ref="runtime:openclaw-model-broker",
+                actor_ref="worker:cockpit-model:0.1",
+            )
+            return invocation, ResultEnvelope(
+                schema_version="0.1", id="result:busy-first", created_at=moment,
+                work_order_ref=work.id, invocation_ref=invocation.id, status="failed",
+                outputs={}, actual_side_effects=(), usage_refs=(), artifact_refs=(),
+                error={"code": "BUSY", "message": "broker concurrency limit reached"},
+                metadata={"route_decision_ref": route["id"]},
+            )
+        return super().execute(work, route, profile)
+
+
 class CockpitChainTests(unittest.TestCase):
+    def test_broker_busy_retries_same_work_without_fallback_or_double_charge(self) -> None:
+        adapter = BusyThenAvailableAdapter({})
+        model = self._model(adapter, policy_version_ref=self.chain_policy)
+        kwargs = {"purpose": "plan", "request_id": "busy-recovery",
+                  "prompt": "what next?", "mission": self.mission}
+        with self.assertRaisesRegex(CockpitModelError, "capacity_busy"):
+            model.call(**kwargs)
+        self.assertEqual(adapter.served, ["profile:gpt-6-astra"])
+        answer = model.call(**kwargs)
+        self.assertEqual(answer["text"], "answered by profile:gpt-6-astra")
+        self.assertEqual(adapter.served,
+                         ["profile:gpt-6-astra", "profile:gpt-6-astra"])
+        with ThesisImpactBudgetStore(self.root / "budget.sqlite") as ledger:
+            rows = list(ledger.connection.execute(
+                "SELECT a.attempt_number,s.actual_micros "
+                "FROM thesis_impact_day_admissions a "
+                "JOIN thesis_impact_day_settlements s ON s.admission_id=a.admission_id "
+                "ORDER BY a.attempt_number"
+            ))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["actual_micros"], 0)
+        self.assertEqual(rows[1]["actual_micros"], answer["cost_micros"])
+
     def test_debate_and_conviction_verifiers_exclude_the_actual_producer_family(self) -> None:
         for producer_purpose, verifier_purpose in (
             ("debate_map", "debate_map_verifier"),

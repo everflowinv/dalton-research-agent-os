@@ -176,6 +176,8 @@ RULES: tuple[Rule, ...] = (
     Rule("rate_limited", "rate_limit", DEPENDENCY_UNAVAILABLE, "quota"),
     Rule("too_many_requests", "429 too many requests",
          DEPENDENCY_UNAVAILABLE, "quota"),
+    Rule("broker_capacity_busy", "capacity_busy",
+         DEPENDENCY_UNAVAILABLE, "model_capacity"),
 
     # -- dependency: the AlphaEngine desktop session, which is Task 62 ------
     Rule("alphaengine_no_module_page", "no_module_page",

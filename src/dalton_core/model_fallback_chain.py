@@ -167,6 +167,9 @@ FALLBACK_FAILURES: frozenset[str] = frozenset({
 # Named rather than "everything else", so an unclassified failure fails closed
 # instead of quietly earning a retry on a second provider.
 HALTING_FAILURES: frozenset[str] = frozenset({
+    # Broker-wide concurrency is not evidence that another profile/provider
+    # can run. Halt this chain attempt and let the Scheduler retry it later.
+    "capacity_busy",
     "content_refusal",
     "budget_refused",
     "contract_violation",
@@ -200,6 +203,7 @@ _FAILURE_CODES: tuple[tuple[tuple[str, ...], str], ...] = (
     # word ``UNAVAILABLE`` in the specific code must never make the chain try
     # another profile that lacks the same mandatory controls.
     (("REQUIRED_CONTROLS_UNAVAILABLE",), "contract_violation"),
+    (("BUSY", "CONCURRENCY_LIMIT"), "capacity_busy"),
     (("TIMEOUT", "TIMED_OUT", "DEADLINE"), "transport_failure"),
     (("CONNECTION", "NETWORK", "SOCKET", "TRANSPORT", "BROKEN_PIPE", "EOF"),
      "transport_failure"),
@@ -630,8 +634,16 @@ def execute_chain(
             }
     links: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
+    prior_decisions = router.list_decisions(work_order_id=work_order.id)
     previous_decision_ref: str | None = None
+    if (prior_decisions
+            and int(prior_decisions[-1]["attempt_number"]) < attempt_number):
+        previous_decision_ref = prior_decisions[-1]["id"]
     for step in range(1, len(chain) + 1):
+        decision_kind = (
+            "initial" if previous_decision_ref is None
+            else ("retry" if step == 1 else "switch")
+        )
         result = router.route(
             work_order,
             attempt_number=attempt_number,
@@ -643,7 +655,7 @@ def execute_chain(
             estimated_input_tokens=estimated_input_tokens,
             estimated_output_tokens=estimated_output_tokens,
             idempotency_key=f"{idempotency_prefix}:{tier}:{step}",
-            decision_kind="initial" if previous_decision_ref is None else "switch",
+            decision_kind=decision_kind,
             previous_decision_ref=previous_decision_ref,
             producer_family=producer_family,
             tier=tier,

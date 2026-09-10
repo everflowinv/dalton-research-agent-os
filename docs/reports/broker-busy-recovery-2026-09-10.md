@@ -1,0 +1,29 @@
+# Broker BUSY recovery
+
+Date: 2026-09-10
+
+## Production failure
+
+The broker's closed `BUSY` response (`broker concurrency limit reached`) crossed the OpenClaw adapter correctly, but `classify_model_failure` did not recognize the code. It became `unclassified_failure`, halted the brain chain, and Cockpit committed the content-addressed Scheduler work as terminal `failed`. Re-running the unchanged dossier request therefore replayed that failure forever.
+
+## Correction
+
+`BUSY` and `CONCURRENCY_LIMIT` are now the closed `capacity_busy` class. It halts the current chain without trying another profile because the broker concurrency limit is global and another model is not evidence of more host capacity. Cockpit records that attempt as Scheduler `retryable`, settles its budget reservation at zero, and raises the existing actionable failure to the lane. The next lane tick can claim the same work as the next Scheduler attempt after capacity returns.
+
+The retry remains bounded by the Scheduler policy (`max_attempts`, currently three for this Cockpit scheduler). Each attempt gets a distinct route decision and budget admission; the failed BUSY attempt settles at zero and the successful attempt settles once at measured or governed fallback cost. Unknown broker codes remain `unclassified_failure` and terminal. Lane failure classification parks `capacity_busy` against `model_capacity`, using the existing dependency probe cadence rather than a busy loop.
+
+No live model call, configuration change, deployment, or budget increase was made.
+
+## Verification
+
+Focused command:
+
+```text
+PYTHONPATH=src python3 -m unittest \
+  tests.test_openclaw_model_adapter \
+  tests.test_model_fallback_chain \
+  tests.test_cockpit_model_fallback \
+  tests.test_lane_failure_classes
+```
+
+Coverage includes a real Unix-socket adapter stub carrying the signed BUSY error, exact classification, no same-attempt profile switch, a later successful attempt on the same profile, two settled admissions with zero charged to BUSY and one charge for success, chain replay behavior, and unchanged fail-closed handling for unknown errors.

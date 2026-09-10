@@ -1287,6 +1287,8 @@ process.on("SIGTERM",async()=>{await server.stop();process.exit(0)});
         self.assertEqual(result.status, "failed")
         self.assertEqual(result.error["source"], "openclaw-model-broker")
         self.assertEqual(invocation.usage["measurement_status"], "unavailable")
+        from dalton_core.model_fallback_chain import classify_model_failure
+        self.assertEqual(classify_model_failure(result.error), "capacity_busy")
         self.assertNotIn(self.work.question, canonical_json(result.to_dict()))
         with self.assertRaisesRegex(BrokerProtocolError, "unsafe"):
             self.run_with(
