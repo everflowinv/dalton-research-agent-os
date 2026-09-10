@@ -122,6 +122,50 @@ class FiscalMappingTests(unittest.TestCase):
         self.assertEqual(map_estimate_period("0q", cal)["period_end"], "2026-08-31")
         self.assertEqual(map_estimate_period("0y", cal)["period_end"], "2027-02-28")
 
+    def test_the_day_the_annual_lands_is_not_a_dead_zone(self):
+        # B1. When the last reported period end *is* the fiscal year end -- the
+        # two months a year between the 10-K and the quarter after it -- an
+        # on-or-after rule answers with the year just reported, which nobody is
+        # estimating any more. That used to raise and take the whole version
+        # with it, leaving the company unmapped in the window where the
+        # street's next-year number is most worth having.
+        for label, fye in (("ACN", "08-31"), ("IBM", "12-31"), ("DXC", "03-31")):
+            with self.subTest(company=label):
+                anchor = f"2026-{fye}"
+                cal = fiscal_calendar(
+                    fiscal_year_end=fye, last_reported_period_end=anchor
+                )
+                year = map_estimate_period("0y", cal)
+                self.assertEqual(year["fiscal_year"], 2027)
+                self.assertGreater(year["period_end"], anchor)
+                self.assertEqual(map_estimate_period("+1y", cal)["fiscal_year"], 2028)
+                # And the quarter branch, which always used a strict
+                # comparison, still agrees with it.
+                quarter = map_estimate_period("0q", cal)
+                self.assertEqual(quarter["fiscal_year"], 2027)
+                self.assertEqual(quarter["fiscal_quarter"], 1)
+                self.assertGreater(quarter["period_end"], anchor)
+
+    def test_a_version_publishes_on_the_day_the_annual_lands(self):
+        # The dead zone was only visible through the authority: the mapping
+        # raised, so nothing was published at all.
+        authority = ConsensusEstimateAuthority(
+            DaltonStore(str(Path(tempfile.mkdtemp()) / "core.sqlite"))
+        )
+        self.addCleanup(authority.store.close)
+        published = authority.publish_consensus(
+            company_ref=ACN, wire=wire(), fiscal_year_end="08-31",
+            last_reported_period_end="2026-08-31",
+            invocation_ref=INVOCATION, artifact_hash=ARTIFACT,
+            governance_ref=GOVERNANCE, governance_hash=GOVERNANCE_HASH,
+            captured_at=CAPTURED,
+        )
+        self.assertEqual(published["status"], "fresh")
+        self.assertEqual(
+            [row["label"] for row in published["eps_estimates"]],
+            ["FY2027Q1", "FY2027Q2", "FY2027", "FY2028"],
+        )
+
     def test_an_unknown_fiscal_year_end_is_refused_rather_than_guessed(self):
         with self.assertRaises(FiscalMappingError) as caught:
             fiscal_calendar(fiscal_year_end=None, last_reported_period_end="2026-05-31")
@@ -414,6 +458,170 @@ class ResolvedByNameTests(AuthorityTestCase):
         self.publish()
         # The street is held; ours is not. An absence, never agreement.
         self.assertEqual(latest_consensus(self.store, ACN), {"metrics": []})
+
+
+class ForecastGapTests(AuthorityTestCase):
+    """The gap rows, checked by the contract the consumer will check them with.
+
+    C. ``latest_consensus`` feeds a slice that is on the other side of a name
+    lookup, so "the shape is right" is not something either side can see. Two
+    things follow. The forecast model is stood up as a real model body and
+    parsed by the real ``_forecast_cells`` -- only the *source* of the body is
+    replaced, never the reading of it, so these tests fail when the reading
+    breaks. And the rows are run through ``validate_consensus_gap``, the
+    consumer's own validator, rather than compared with a dict written by hand
+    in this file, which would only prove the file agrees with itself.
+    """
+
+    def line(self, label, unit, cells, role="revenue"):
+        return {"ref": f"result:{label}", "role": role, "label": label,
+                "unit": unit, "formula": None, "driver_ref": None,
+                "status": "computed", "reason": None, "cells": cells}
+
+    def cell(self, end, value, kind="estimate", superseded_by=None, status="computed"):
+        return {"ref": f"cell:{end}:{kind}", "period": {"end": end},
+                "kind": kind, "status": status, "value": value,
+                "reason": None, "superseded_by": superseded_by,
+                "assumption_refs": [], "input_cell_refs": [], "result_refs": []}
+
+    def install_forecast(self, results):
+        """A real model body, read by the real reader."""
+
+        from unittest.mock import patch
+
+        from dalton_core.model_forecast_driver import ForecastModelAuthority
+
+        model = {"id": "forecast-model-version:acn:3", "company_ref": ACN,
+                 "results": results}
+        patcher = patch.object(
+            ForecastModelAuthority, "latest", autospec=True,
+            return_value=model,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return model
+
+    def test_the_rows_satisfy_the_consumers_own_validator(self):
+        from dalton_core.consensus_estimate import latest_consensus
+        from dalton_core.conviction_call import validate_consensus_gap
+
+        # The default fixture quotes revenue for the current year only, so
+        # give the street a next-year revenue number to be compared against.
+        self.publish(wire=wire(revenue_estimates=[
+            estimate_row("0y", "73587678730"),
+            estimate_row("+1y", "76583683960"),
+        ]))
+        self.install_forecast([
+            self.line("Net revenue", "USD", [self.cell("2027-08-31", "80000000000")]),
+            self.line("Diluted EPS", "USD",
+                      [self.cell("2027-08-31", "16.00")], role="eps"),
+        ])
+        found = latest_consensus(self.store, ACN)
+        gap = validate_consensus_gap(
+            {"status": "available", "reason": None, "metrics": found["metrics"]}
+        )
+        self.assertEqual(len(gap["metrics"]), 2)
+        self.assertEqual({row["period"] for row in gap["metrics"]}, {"FY2027"})
+        self.assertEqual(
+            {row["metric"] for row in gap["metrics"]},
+            {"Net revenue", "Diluted EPS"},
+        )
+        for row in gap["metrics"]:
+            # Every row points back at both sides of its own arithmetic.
+            self.assertIn("forecast-model-version:acn:3", row["refs"])
+            self.assertTrue(any(ref.startswith("consensus-estimate-version:")
+                                for ref in row["refs"]))
+
+    def test_the_gap_is_a_percentage_of_the_street(self):
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.publish()
+        # The street's FY2027 EPS is 14.65516; ours is exactly double.
+        self.install_forecast([
+            self.line("Diluted EPS", "USD",
+                      [self.cell("2027-08-31", "29.31032")], role="eps"),
+        ])
+        row = latest_consensus(self.store, ACN)["metrics"][0]
+        self.assertEqual(row["consensus"], "14.65516")
+        self.assertEqual(row["ours"], "29.31032")
+        self.assertEqual(row["gap_percent"], "100.00")
+
+    def test_a_superseded_cell_is_not_our_number_any_more(self):
+        # D. The owner's versioning rule keeps a superseded estimate rather
+        # than overwriting it, so it is still on the model and still looks like
+        # a forecast. Reading it would compare the street to a number we no
+        # longer hold.
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.publish()
+        self.install_forecast([
+            self.line("Diluted EPS", "USD", [
+                self.cell("2027-08-31", "11.00", superseded_by="cell:later"),
+            ], role="eps"),
+        ])
+        self.assertEqual(latest_consensus(self.store, ACN), {"metrics": []})
+
+    def test_an_actualised_period_is_read_as_the_actual(self):
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.publish()
+        self.install_forecast([
+            self.line("Diluted EPS", "USD", [
+                self.cell("2027-08-31", "11.00", superseded_by="cell:actual"),
+                self.cell("2027-08-31", "15.00", kind="actual"),
+            ], role="eps"),
+        ])
+        row = latest_consensus(self.store, ACN)["metrics"][0]
+        self.assertEqual(row["ours"], "15.00")
+
+    def test_a_cell_that_could_not_be_computed_is_not_a_number(self):
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.publish()
+        self.install_forecast([
+            self.line("Diluted EPS", "USD", [
+                self.cell("2027-08-31", None, status="unavailable"),
+            ], role="eps"),
+        ])
+        self.assertEqual(latest_consensus(self.store, ACN), {"metrics": []})
+
+    def test_a_period_the_street_does_not_cover_produces_no_row(self):
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.publish()
+        self.install_forecast([
+            self.line("Diluted EPS", "USD",
+                      [self.cell("2031-08-31", "20.00")], role="eps"),
+        ])
+        self.assertEqual(latest_consensus(self.store, ACN), {"metrics": []})
+
+    def test_a_line_that_is_neither_eps_nor_revenue_is_not_compared(self):
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.publish()
+        self.install_forecast([
+            self.line("Headcount", "count",
+                      [self.cell("2027-08-31", "800000")], role="operating"),
+        ])
+        self.assertEqual(latest_consensus(self.store, ACN), {"metrics": []})
+
+    def test_no_forecast_at_all_is_an_absence_never_agreement(self):
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.publish()
+        self.assertEqual(latest_consensus(self.store, ACN), {"metrics": []})
+
+    def test_a_zero_street_number_is_not_a_percentage_of_anything(self):
+        from dalton_core.consensus_estimate import _gap_percent
+
+        self.assertIsNone(_gap_percent("1", "0"))
+        self.assertIsNone(_gap_percent("1", "not a number"))
+        # A negative street number still has a magnitude to divide by, and
+        # dividing by the magnitude rather than the signed value is what keeps
+        # the sign meaning "we are above the street": a loss of 1 against an
+        # expected loss of 2 is us being 50% better, not 50% worse.
+        self.assertEqual(_gap_percent("-1", "-2"), "50.00")
+        self.assertEqual(_gap_percent("-3", "-2"), "-50.00")
 
 
 class ReportConsensusBlockTests(AuthorityTestCase):

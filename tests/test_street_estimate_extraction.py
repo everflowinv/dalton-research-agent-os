@@ -192,6 +192,45 @@ class RevisionTests(unittest.TestCase):
         self.assertIsNone(result["refusal"])
         self.assertEqual(result["estimate"]["target_price"]["value"], "173.00")
 
+    def test_a_revision_written_on_one_line_never_yields_the_old_target(self):
+        # B2. "Price Target From $100.00 To $97.00" is one span: the word that
+        # marks the old number sits *between* the label and the figure, so a
+        # rule that only looked before the label read the superseded target as
+        # the live one and stored it. Every check downstream passes on a price
+        # the house has just moved away from, which is the worst thing this
+        # extractor can do.
+        text = (
+            "EPAM Systems Inc\nMorgan Stanley & Co. LLC\n"
+            "Price Target From $100.00 To $97.00\n"
+        )
+        rows = find_targets(quotes(text))
+        self.assertTrue(rows, "the old target must be seen in order to be rejected")
+        self.assertTrue(all(row["superseded"] for row in rows))
+        self.assertNotIn("100.00", {row["value"] for row in rows
+                                    if not row["superseded"]})
+        result = extract(context(
+            text, subject_names=["EPAM"], document_companies=["EPAM Systems, Inc."],
+            sources=["Morgan Stanley & Co. LLC"],
+        ))
+        self.assertEqual(result["refusal"], "no_target_price")
+        self.assertEqual(result["superseded_values"], ["100.00"])
+        self.assertIsNone(result["estimate"])
+
+    def test_a_prior_line_above_the_new_one_still_marks_only_the_old(self):
+        # B2's other half, and the one the off-by-one broke: the masthead
+        # pattern begins at the newline, so measuring the lead from the match
+        # start read the line before the one that mattered.
+        text = (
+            "Accenture PLC\nTD SECURITIES (USA) LLC\n"
+            "Prior Price Target: $100.00\nPrice Target: $97.00\n"
+        )
+        rows = find_targets(quotes(text))
+        live = {row["value"] for row in rows if not row["superseded"]}
+        self.assertEqual(live, {"97.00"})
+        result = extract(context(text))
+        self.assertIsNone(result["refusal"])
+        self.assertEqual(result["estimate"]["target_price"]["value"], "97.00")
+
     def test_a_prior_target_is_marked_rather_than_counted(self):
         # Two labelled targets, the first introduced as the one being replaced.
         # Without the mark this page would look like it says two things and be

@@ -310,7 +310,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(LANE.operation, "dispatch_mission_consensus")
         self.assertEqual(LANE.driver_key, "mission_consensus")
         self.assertEqual(LANE.init_kwarg, LAUNCHER_KWARG)
-        self.assertEqual(LANE.order, 88)
+        self.assertEqual(LANE.order, 89)
         self.assertEqual(LANE.param_fields, frozenset())
 
     def test_the_writer_derives_the_operation_from_the_registry(self):

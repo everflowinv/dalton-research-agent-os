@@ -52,6 +52,7 @@ from dalton_core.street_estimate import (
 
 ACN = "company:sec-cik:0001467373"
 MANIFEST = "9" * 64
+EXTRACTOR_REF = "extractor:street-estimate-page-one:0.1"
 QUOTE = (
     "Accenture PLC\nSeptember 2, 2026\nPrice: $186.53 (09/01/2026)\n"
     "Price Target: $173.00\nHOLD (2)\nModel Update\n"
@@ -66,7 +67,7 @@ def figure(value="173.00", metric=TARGET_METRIC, label="Price Target",
         "subject_as_named": "Accenture", "as_reported_label": label,
         "value": value, "unit": unit, "currency": currency, "period": period,
         "basis": BASIS, "scale": scale,
-    }, {"quote:0:1200:abc": quote})
+    }, {"quote:0:1200:abc": quote}, grade=BROKER_RESEARCH)
 
 
 def estimate(**overrides):
@@ -341,6 +342,7 @@ class StoreTests(StoreTestCase):
         self.estimates.record_scan(
             company_ref=ACN, document_ref="alphaengine-doc:9", outcome="refused",
             reason="multi_company_report", extraction_method="deterministic",
+            extractor_ref=EXTRACTOR_REF,
         )
         self.assertEqual(
             self.estimates.scanned_document_refs(ACN), {"alphaengine-doc:9"}
@@ -351,17 +353,37 @@ class StoreTests(StoreTestCase):
         with self.assertRaises(StreetEstimateValidationError):
             self.estimates.record_scan(
                 company_ref=ACN, document_ref="d", outcome="refused",
-                extraction_method="deterministic",
+                extraction_method="deterministic", extractor_ref=EXTRACTOR_REF,
             )
+
+    def test_a_refusal_names_the_reader_that_made_it(self):
+        # So a note refused by a reader that has since been fixed can be given
+        # to the new one. Without it the ledger's "never read twice" rule makes
+        # every fix to the extractor unreachable.
+        self.estimates.record_scan(
+            company_ref=ACN, document_ref="alphaengine-doc:1", outcome="refused",
+            reason="label_does_not_name_a_line",
+            extraction_method="deterministic", extractor_ref="extractor:old:0.1",
+        )
+        self.estimates.record_scan(
+            company_ref=ACN, document_ref="alphaengine-doc:2", outcome="refused",
+            reason="multi_company_report",
+            extraction_method="deterministic", extractor_ref=EXTRACTOR_REF,
+        )
+        self.assertEqual(
+            self.estimates.refused_by(EXTRACTOR_REF), {"alphaengine-doc:1"}
+        )
 
     def test_scanning_the_same_document_twice_is_a_duplicate(self):
         self.estimates.record_scan(
             company_ref=ACN, document_ref="d", outcome="refused",
             reason="no_target_price", extraction_method="deterministic",
+            extractor_ref=EXTRACTOR_REF,
         )
         again = self.estimates.record_scan(
             company_ref=ACN, document_ref="d", outcome="refused",
             reason="no_target_price", extraction_method="deterministic",
+            extractor_ref=EXTRACTOR_REF,
         )
         self.assertEqual(again["status"], "duplicate")
 

@@ -50,7 +50,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from .model_forecast_driver import CHANGE_REASONS
+from .model_forecast_driver import CELL_KINDS, CHANGE_REASONS
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -278,6 +278,57 @@ def fiscal_calendar(
     }
 
 
+def fiscal_year_end_from_quarters(report_dates: Sequence[Any]) -> str | None:
+    """The fiscal year end a company's quarterly filings give away.
+
+    A filer reports three quarters on a 10-Q and the fourth inside the 10-K, so
+    the quarter it *never* files a 10-Q for is the quarter its fiscal year ends
+    in. Three distinct quarter months, each three apart, name the fourth
+    exactly, and no guess is involved: it is arithmetic on the company's own
+    filing dates.
+
+    This exists because the live Core holds thirty-three 10-Q rows and no 10-K
+    at all, so the annual-report route -- the direct one, and still the one
+    preferred when it is available -- answers ``unknown`` for every covered
+    company. On that data this derives 12-31 for Cognizant and EPAM, 03-31 for
+    DXC and 08-31 for Accenture, the last of which a Citi note independently
+    prints as "Fiscal year end 31-Aug" on its first page.
+
+    ``None`` rather than a guess when the filings do not settle it: fewer than
+    three distinct quarters (IBM, with one filing), months that are not on a
+    three-month grid, or period ends that are not month ends -- a 52/53-week
+    filer's year end moves by a few days each year and is not an ``MM-DD`` at
+    all, so it must not be written as one.
+    """
+
+    months: dict[int, list[date]] = {}
+    for value in report_dates or ():
+        try:
+            parsed = date.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            continue
+        months.setdefault(parsed.month, []).append(parsed)
+    if len(months) != 3:
+        return None
+    if any(
+        moment.day != _month_end(moment.year, moment.month)
+        for group in months.values() for moment in group
+    ):
+        # Not month ends. A 52/53-week filer, or a date this rule cannot read.
+        return None
+    present = sorted(months)
+    # The four slots of the grid the three observed months belong to.
+    for start in present:
+        grid = sorted(((start - 1 + step) % 12) + 1 for step in (0, 3, 6, 9))
+        if set(present) <= set(grid):
+            missing = [month for month in grid if month not in months]
+            if len(missing) != 1:
+                return None
+            month = missing[0]
+            return f"{month:02d}-{_month_end(2001, month):02d}"
+    return None
+
+
 def _period_end(cal: Mapping[str, Any], year: int, month: int) -> date:
     if cal["ends_on_month_end"]:
         return date(year, month, _month_end(year, month))
@@ -285,9 +336,32 @@ def _period_end(cal: Mapping[str, Any], year: int, month: int) -> date:
 
 
 def _fiscal_year_end_on_or_after(cal: Mapping[str, Any], moment: date) -> date:
+    """The fiscal year this date falls in, for finding its quarters."""
+
     month = int(cal["fiscal_year_end_month"])
     candidate = _period_end(cal, moment.year, month)
     if candidate < moment:
+        candidate = _period_end(cal, moment.year + 1, month)
+    return candidate
+
+
+def _fiscal_year_end_after(cal: Mapping[str, Any], moment: date) -> date:
+    """The first fiscal year that ends *strictly* after this date.
+
+    Strict, and the day it matters is the day a 10-K lands. Then the last
+    reported period end is exactly the fiscal year end, and an on-or-after
+    rule answers with the year that was just reported -- which is not a year
+    anyone is still estimating. Refusing there, as this did until B1, took the
+    whole version down and left the company unmapped for the two months
+    between the annual filing and the first quarter after it: a dead zone once
+    a year, in the window where the street's next-year number is most worth
+    having. The quarter branch has always used a strict comparison; this is
+    the same rule, written once more.
+    """
+
+    month = int(cal["fiscal_year_end_month"])
+    candidate = _period_end(cal, moment.year, month)
+    if candidate <= moment:
         candidate = _period_end(cal, moment.year + 1, month)
     return candidate
 
@@ -339,9 +413,7 @@ def map_estimate_period(key: str, cal: Mapping[str, Any]) -> dict[str, Any]:
             "period_end": end.isoformat(),
             "label": f"FY{fiscal_year}Q{quarter}",
         }
-    year_end = _fiscal_year_end_on_or_after(cal, anchor)
-    if year_end <= anchor:  # pragma: no cover - guarded by the helper above
-        raise FiscalMappingError("no fiscal year follows the last reported period")
+    year_end = _fiscal_year_end_after(cal, anchor)
     if key == "+1y":
         year, month = _shift(year_end.year, year_end.month, 12)
         year_end = _period_end(cal, year, month)
@@ -940,20 +1012,38 @@ def _forecast_cells(store: Any, company_ref: str) -> tuple[dict[str, Any], str |
         for cell in line.get("cells") or ():
             if not isinstance(cell, Mapping):
                 continue
-            # An actual is not a forecast, and a cell that could not be
-            # computed is not a number.
-            if cell.get("kind") != "estimate" or cell.get("status") != "computed":
+            # A cell that could not be computed is not a number.
+            if cell.get("status") != "computed":
+                continue
+            # D: a superseded cell is the estimate an actual replaced. The
+            # owner's versioning rule keeps it rather than overwriting it, so
+            # it is still on the model and still looks like a forecast; reading
+            # it would compare the street to a number we ourselves no longer
+            # hold.
+            if cell.get("superseded_by"):
                 continue
             period = cell.get("period")
             end = period.get("end") if isinstance(period, Mapping) else None
             value = cell.get("value")
-            if not isinstance(end, str) or value is None:
+            kind = cell.get("kind")
+            if not isinstance(end, str) or value is None or kind not in CELL_KINDS:
                 continue
-            found.setdefault((metric, end), {
+            key = (metric, end)
+            standing = found.get(key)
+            # D: prefer the actualised cell. Once a period has been reported,
+            # our number for it is what happened, not what we expected -- and
+            # the street's estimate beside it is then a record of what the
+            # street expected, which is the more interesting row of the two.
+            if standing is not None and not (
+                kind == "actual" and standing["kind"] == "estimate"
+            ):
+                continue
+            found[key] = {
                 "value": str(value),
                 "unit": str(line.get("unit") or ""),
                 "label": str(line.get("label") or metric),
-            })
+                "kind": kind,
+            }
     return found, str(latest.get("id") or latest.get("version_ref") or "") or None
 
 
@@ -965,6 +1055,9 @@ def _gap_percent(ours: str, street: str) -> str | None:
     if not theirs.is_finite() or not mine.is_finite() or theirs == 0:
         # A gap against zero is not a percentage of anything.
         return None
+    # Divided by the magnitude, not the signed value, so a positive gap always
+    # means "we are above the street" -- including where both are losses, where
+    # dividing by a negative would flip the sign and read as the opposite.
     gap = ((mine - theirs) / abs(theirs) * 100).quantize(Decimal("0.01"))
     return f"{gap:f}"
 
@@ -1154,6 +1247,7 @@ __all__ = [
     "consensus_ref_for",
     "MAX_GAP_METRICS",
     "fiscal_calendar",
+    "fiscal_year_end_from_quarters",
     "latest_consensus",
     "map_estimate_period",
     "report_consensus",

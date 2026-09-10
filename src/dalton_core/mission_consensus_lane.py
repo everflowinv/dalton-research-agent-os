@@ -127,6 +127,36 @@ class MissionConsensusLaneCoordinator:
         self._refreshed: dict[str, datetime] = {}
         # Companies whose notes have all been read, so the scan stops asking.
         self._scanned_out: set[str] = set()
+        # F: where the scan starts looking. Without it the first company in
+        # mission order keeps the reader to itself until every note it holds
+        # has been read, and the fifth company waits days for its first target.
+        self._scan_cursor = 0
+        # E: units spent against the vendor's governed daily quota, and the day
+        # they were spent on. The runner accounts for this properly when a
+        # request goes through it; this lane starts its children out of process
+        # and would otherwise be invisible to that accounting, so it counts its
+        # own and stops at the same ceiling. A counter in the lane, not a
+        # ledger: it is a politeness bound on a source that never agreed to
+        # serve us, and a restart erring on the side of asking less is fine.
+        self._spent_on: str | None = None
+        self._spent = 0
+
+    @property
+    def daily_unit_limit(self) -> int:
+        """The owner-approved ceiling for this operation, read at call time."""
+
+        try:
+            from .connector_quota_policy import governed_daily_quota
+
+            return int(governed_daily_quota("yfinance", "analyst_estimates")[
+                "daily_unit_limit"])
+        except Exception:  # noqa: BLE001 - no policy is no lane
+            return 0
+
+    def _quota_left(self, day: str) -> int:
+        if self._spent_on != day:
+            self._spent_on, self._spent = day, 0
+        return self.daily_unit_limit - self._spent
 
     # -- settling ----------------------------------------------------------
 
@@ -197,6 +227,16 @@ class MissionConsensusLaneCoordinator:
     def _launch(self, universe: Sequence[Mapping[str, str]]) -> dict[str, Any]:
         skipped: list[dict[str, Any]] = []
         day = self.clock().astimezone(timezone.utc).date().isoformat()
+        if self.launcher is None:
+            # B: the vendor half is not installed on this Core. The report scan
+            # costs nothing and reaches nothing, so it runs anyway.
+            return {"status": "unconfigured", "skipped": skipped,
+                    "reason": "no approved consensus connector on this writer"}
+        if self._quota_left(day) <= 0:
+            return {"status": "quota_exhausted", "skipped": skipped,
+                    "reason": (
+                        f"this lane has spent its {self.daily_unit_limit} governed "
+                        "units against yfinance/analyst_estimates today")}
         for company in universe:
             company_ref = company["company_ref"]
             if self._failures.get(company_ref, 0) >= MAX_FAILURES_PER_COMPANY:
@@ -243,8 +283,10 @@ class MissionConsensusLaneCoordinator:
                 return {"status": "rejected", "company_ref": company_ref,
                         "skipped": skipped, "reason": reason}
             self._open = ticket["id"]
+            self._spent += 1
             return {
                 "status": "launched", "company_ref": company_ref,
+                "quota_left": self._quota_left(day),
                 "ticker": company["ticker"], "ticket_ref": ticket["id"],
                 "fiscal_year_end": calendar["fiscal_year_end"],
                 "last_reported_period_end": calendar["last_reported_period_end"],
@@ -259,7 +301,12 @@ class MissionConsensusLaneCoordinator:
         from .street_estimate import report_consensus
         from .street_estimate_extraction import extract
 
-        for company in universe:
+        if not universe:
+            return None
+        start = self._scan_cursor % len(universe)
+        order = [universe[(start + step) % len(universe)]
+                 for step in range(len(universe))]
+        for company in order:
             company_ref = company["company_ref"]
             if company_ref in self._scanned_out:
                 continue
@@ -275,6 +322,9 @@ class MissionConsensusLaneCoordinator:
                 # acquisition arrives with a restart or with the next hour.
                 self._scanned_out.add(company_ref)
                 continue
+            self._scan_cursor = (
+                [row["company_ref"] for row in universe].index(company_ref) + 1
+            )
             result = extract(context)
             document_ref = str(context["document_ref"])
             if result["refusal"] is not None:
@@ -282,6 +332,7 @@ class MissionConsensusLaneCoordinator:
                     company_ref=company_ref, document_ref=document_ref,
                     outcome="refused", reason=result["refusal"],
                     extraction_method=result["extraction_method"],
+                    extractor_ref=result["extractor_ref"],
                 )
                 return {"company_ref": company_ref, "document_ref": document_ref,
                         "outcome": "refused", "reason": result["refusal"]}
@@ -290,6 +341,7 @@ class MissionConsensusLaneCoordinator:
                 company_ref=company_ref, document_ref=document_ref,
                 outcome="recorded", estimate_id=recorded["id"],
                 extraction_method=result["extraction_method"],
+                extractor_ref=result["extractor_ref"],
             )
             scan = {
                 "company_ref": company_ref, "document_ref": document_ref,
@@ -376,30 +428,60 @@ def _fiscal_calendar_reader(server: Any) -> Callable[[str], dict[str, str] | Non
     """The company's own filings, read for the two dates the mapping needs.
 
     Not a table of fiscal year ends. There is no citable fiscal calendar in
-    this repository and adding one would be a second, unciteable copy of
+    this repository and adding one would be a second, uncitable copy of
     something the filings already say -- ``claim_index_tagging`` refuses the
-    same temptation for the same reason. The newest 10-K's report date *is* the
-    fiscal year end, and the newest filing of either form is the last period
-    actually reported.
+    same temptation for the same reason.
+
+    Two routes to the year end, in order of directness:
+
+    1. The newest 10-K's report date *is* the fiscal year end.
+    2. Failing that, the quarter the company never files a 10-Q for is the
+       quarter its year ends in -- see
+       ``consensus_estimate.fiscal_year_end_from_quarters``. This is not a
+       nicety: the live Core holds thirty-three 10-Q rows and no 10-K at all,
+       so without it every covered company is ``fiscal_calendar_unknown`` and
+       route 2 never publishes anything.
+
+    The last reported period end is the newest filing of either form, which
+    needs no derivation.
     """
 
     def read(company_ref: str) -> dict[str, str] | None:
+        from .consensus_estimate import fiscal_year_end_from_quarters
+
         connection = server.store.connection
-        annual = connection.execute(
-            "SELECT report_date FROM coverage_mission_statement_filings "
-            "WHERE company_ref=? AND form='10-K' ORDER BY report_date DESC LIMIT 1",
-            (company_ref,),
-        ).fetchone()
         newest = connection.execute(
             "SELECT report_date FROM coverage_mission_statement_filings "
             "WHERE company_ref=? ORDER BY report_date DESC LIMIT 1",
             (company_ref,),
         ).fetchone()
-        if annual is None or newest is None:
+        if newest is None:
+            return None
+        annual = connection.execute(
+            "SELECT report_date FROM coverage_mission_statement_filings "
+            "WHERE company_ref=? AND form='10-K' ORDER BY report_date DESC LIMIT 1",
+            (company_ref,),
+        ).fetchone()
+        if annual is not None:
+            year_end = str(annual["report_date"])[5:10]
+            basis = "annual_report"
+        else:
+            quarters = [
+                str(row["report_date"]) for row in connection.execute(
+                    "SELECT report_date FROM coverage_mission_statement_filings "
+                    "WHERE company_ref=? AND form='10-Q'", (company_ref,),
+                )
+            ]
+            year_end = fiscal_year_end_from_quarters(quarters)
+            basis = "quarterly_grid"
+        if not year_end:
             return None
         return {
-            "fiscal_year_end": str(annual["report_date"])[5:10],
+            "fiscal_year_end": year_end,
             "last_reported_period_end": str(newest["report_date"]),
+            # Which of the two routes answered, so a wrong calendar is
+            # traceable to the rule that produced it rather than guessed at.
+            "fiscal_year_end_basis": basis,
         }
 
     return read
@@ -413,10 +495,25 @@ def _context_reader(server: Any) -> Callable[[str, set[str]], dict[str, Any] | N
     recorded. ``require_open=False`` because a note that has already been read
     for prose is exactly the note whose price target is still unread -- the
     same reason the metric-discovery pass reads closed reviews.
+
+    **The attribution comes from the persisted provenance record**, not from
+    empty lists. It was empty lists until B3, and that was worse than useless:
+    an empty ``document_companies`` silently disabled the multi-issuer refusal
+    -- the single most valuable rule in the extractor -- so the lane would have
+    admitted the industry recaps the smoke measured itself refusing. The
+    extraction-throughput slice already persists the house, the authors, the
+    named companies and the publication date per document; this reads them.
+
+    When no provenance record exists the lists stay empty *and the extractor is
+    told so by their emptiness*: it falls back to page text for the house, and
+    that path now demands page one name exactly one house and no second covered
+    company. ``other_subject_names`` is what makes the second half of that check
+    possible, so it is supplied either way.
     """
 
     def read(company_ref: str, scanned: set[str]) -> dict[str, Any] | None:
         from .document_extraction import DocumentExtractionService
+        from .extraction_backlog import DocumentProvenanceStore
         from .store import content_hash
         from .street_estimate import SELL_SIDE_SPEC_REFS
 
@@ -429,11 +526,21 @@ def _context_reader(server: Any) -> Callable[[str, set[str]], dict[str, Any] | N
         mission_ref = pointer["mission_version_id"]
         mission = server.coverage_mission.mission(mission_ref)
         specs = server.coverage_mission.document_spec_refs(mission_ref)
-        member = next(
-            (row for row in mission["universe"]
-             if row.get("company_ref") == company_ref), {}
-        )
-        names = [name for name in (member.get("name"), member.get("ticker")) if name]
+        names: list[str] = []
+        others: list[str] = []
+        for row in mission["universe"]:
+            row_names = [
+                value for value in (row.get("name"), row.get("ticker"))
+                if isinstance(value, str) and value.strip()
+            ]
+            if row.get("company_ref") == company_ref:
+                names.extend(row_names)
+            else:
+                others.extend(row_names)
+        try:
+            provenance = DocumentProvenanceStore(server.store.connection)
+        except Exception:  # noqa: BLE001 - a Core without the table has none
+            provenance = None
         service = DocumentExtractionService(server)
         for review in server.coverage_mission.document_reviews(
             mission_ref, company_ref=company_ref, limit=500
@@ -446,6 +553,12 @@ def _context_reader(server: Any) -> Callable[[str, set[str]], dict[str, Any] | N
             spec_ref = specs.get(document_ref)
             if spec_ref not in SELL_SIDE_SPEC_REFS:
                 continue
+            held: Mapping[str, Any] = {}
+            if provenance is not None:
+                try:
+                    held = provenance.get(document_ref) or {}
+                except Exception:  # noqa: BLE001 - one document, not the tick
+                    held = {}
             context = service.context(
                 review["review_id"], content_hash(review), 0,
                 "automation:coverage-mission", require_open=False,
@@ -455,20 +568,47 @@ def _context_reader(server: Any) -> Callable[[str, set[str]], dict[str, Any] | N
                 "document_ref": document_ref,
                 "spec_ref": spec_ref,
                 "source_manifest_hash": context["source_manifest_hash"],
-                # The acquisition recorded when the note was published; the
-                # review's own creation date is when this system saw it, which
-                # is a different fact and not the one a target price is dated
-                # by. Falling back to it is better than refusing the note.
-                "published_on": str(review["created_at"])[:10],
+                "published_on": _published_on(held, review),
                 "subject_names": names,
-                "sources": [],
-                "analysts": [],
-                "document_companies": [],
+                "other_subject_names": others,
+                "sources": _sources(held),
+                "analysts": _analysts(held),
+                "document_companies": list(held.get("named_companies") or ()),
                 "quotes": context["quotes"],
             }
         return None
 
     return read
+
+
+def _published_on(held: Mapping[str, Any], review: Mapping[str, Any]) -> str:
+    """When the note was published, and only failing that when we first saw it.
+
+    The difference matters because the consensus window is ninety days from
+    publication, not from acquisition; a note read a month late would otherwise
+    look a month fresher than it is.
+    """
+
+    published = held.get("published_at")
+    if isinstance(published, str) and len(published) >= 10:
+        return published[:10]
+    return str(review["created_at"])[:10]
+
+
+def _sources(held: Mapping[str, Any]) -> list[str]:
+    return [
+        str(value) for value in (held.get("sources"), held.get("broker"))
+        if isinstance(value, str) and value.strip()
+    ]
+
+
+def _analysts(held: Mapping[str, Any]) -> list[str]:
+    authors = held.get("authors")
+    if not isinstance(authors, str) or not authors.strip():
+        return []
+    return [part.strip() for part in authors.split(";") if part.strip()] or [
+        authors.strip()
+    ]
 
 
 def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -482,10 +622,11 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     to leave alone.
     """
 
+    # B: deliberately not gated on the launcher. The vendor half needs an
+    # approved connector; the report half reads notes this Core already holds,
+    # costs nothing and reaches nothing, and there is no reason for it to be
+    # switched off by the absence of a Yahoo approval.
     launcher = server.lane_launcher(LAUNCHER_KWARG)
-    if launcher is None:
-        return {"status": "unconfigured",
-                "reason": "no approved consensus connector on this writer"}
     coordinator = server.lane_state.get(LAUNCHER_KWARG)
     if coordinator is None:
         from .consensus_estimate import ConsensusEstimateAuthority
@@ -546,8 +687,9 @@ LANE = register_lane(LaneSpec(
     # After the price lane and its neighbours, before the model specification:
     # what the street expects is read against what the shares trade at, and
     # both of them want the tick's single child slot less than a filing does.
-    # 88 is free; 85-87 are prices, tracking and the catalyst calendar.
-    order=88,
+    # 85-87 are prices, tracking and the catalyst calendar; 88 is S5's
+    # ownership lane, which registered it first.
+    order=89,
     driver_key="mission_consensus",
     handler=dispatch,
     init_kwarg=LAUNCHER_KWARG,

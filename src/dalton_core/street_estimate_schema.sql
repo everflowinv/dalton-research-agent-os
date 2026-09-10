@@ -80,6 +80,11 @@ CREATE TABLE IF NOT EXISTS street_estimate_document_scans (
     reason TEXT,
     estimate_id TEXT REFERENCES street_estimates(estimate_id),
     extraction_method TEXT NOT NULL,
+    -- Which extractor said so. Without it a refusal recorded by a version of
+    -- the reader that has since been fixed is indistinguishable from one that
+    -- would be refused again, and the scan ledger's whole purpose -- never
+    -- read the same note twice -- would make the fix unreachable.
+    extractor_ref TEXT NOT NULL,
     scanned_at TEXT NOT NULL,
     UNIQUE(company_ref, document_ref)
 );

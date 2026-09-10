@@ -75,6 +75,7 @@ from .store import content_hash
 from .document_figure_grade import BROKER_RESEARCH
 from .street_estimate import (
     BASIS,
+    BROKERS,
     EPS_METRIC,
     RATING_SCALES,
     REVENUE_METRIC,
@@ -120,6 +121,7 @@ REFUSALS: tuple[str, ...] = (
     "label_does_not_name_a_line",
     "no_currency",
     "digits_not_in_citation",
+    "ambiguous_house",
 )
 
 _SYMBOL_CURRENCY = {"$": "USD", "US$": "USD", "€": "EUR", "£": "GBP"}
@@ -190,6 +192,18 @@ def _page_one(quotes: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return page
 
 
+def houses_in(page: Sequence[Mapping[str, Any]]) -> set[str]:
+    """Every house page one names. More than one is not an attribution."""
+
+    found: set[str] = set()
+    for quote in page:
+        lowered = quote["raw_text"].lower()
+        for slug, patterns in BROKERS:
+            if any(pattern in lowered for pattern in patterns):
+                found.add(slug)
+    return found
+
+
 def find_broker(
     sources: Any, page: Sequence[Mapping[str, Any]]
 ) -> tuple[str | None, str | None, str | None]:
@@ -213,6 +227,48 @@ def find_broker(
     return None, None, None
 
 
+def _is_superseded(text: str, match: Any, label_group: int) -> bool:
+    """Whether this target is the one being replaced rather than the new one.
+
+    Two places say so, and B2 was the discovery that one is not enough.
+
+    *Inside the match.* "Price Target From $100.00 To $97.00" is one span: the
+    word that marks the old number sits between the label and the figure, so a
+    rule that only looked *before* the label read the superseded target as the
+    live one and stored it silently. That is the single most damaging thing
+    this extractor can do -- every check downstream passes on a target the
+    house has just moved away from.
+
+    *Before the label, on its own line.* "Prior" on the line above, which is
+    how the same revision is printed when it is set as a block. Measured from
+    the start of the *label group* rather than of the match: the masthead
+    pattern begins at the newline, so measuring from the match start reads the
+    line before the one that matters. One trailing newline is stripped first,
+    so a label at the start of its line still sees the line above it.
+    """
+
+    if _SUPERSEDED_RE.search(match.group(0)):
+        return True
+    start = match.start(label_group)
+    window = text[max(0, start - 60):start]
+    same_line = window.rsplit("\n", 1)[-1]
+    if _SUPERSEDED_RE.search(same_line):
+        return True
+    if same_line.strip():
+        # The label is not at the start of its line, so whatever is on the
+        # line above belongs to something else.
+        return False
+    previous = window[:len(window) - len(same_line)].rstrip("\n").rsplit("\n", 1)[-1]
+    if any(character.isdigit() for character in previous):
+        # A line carrying its own figure is its own entry, not a marker for
+        # this one. "Prior Price Target: $100.00" above "Price Target: $97.00"
+        # is the old target stated in full; "Prior" alone above it is a label
+        # for the line below. Reading the first as a marker would mark the new
+        # target superseded and leave the page with no live target at all.
+        return False
+    return _SUPERSEDED_RE.search(previous) is not None
+
+
 def find_targets(page: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """Every live price target on page one, with the quote each came from.
 
@@ -229,11 +285,6 @@ def find_targets(page: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                 label = match.group(label_group)
                 symbol = match.group(symbol_group)
                 number = match.group(number_group).replace(",", "")
-                # Only what precedes the match *on its own line*. A window of
-                # fixed width reads back over the line before, so a page that
-                # prints the prior target above the new one marks both -- and
-                # then has no live target at all.
-                lead = text[max(0, match.start() - 60):match.start()].rsplit("\n", 1)[-1]
                 found.append({
                     "quote_id": quote["quote_id"],
                     "pattern": kind,
@@ -242,7 +293,7 @@ def find_targets(page: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                     "currency": _SYMBOL_CURRENCY.get(
                         "US$" if symbol.upper() == "US$" else symbol
                     ),
-                    "superseded": _SUPERSEDED_RE.search(lead) is not None,
+                    "superseded": _is_superseded(text, match, label_group),
                     "start": match.start(),
                 })
             if found and kind == "labelled":
@@ -371,9 +422,39 @@ def extract(context: Mapping[str, Any]) -> dict[str, Any]:
     broker, broker_as_named, broker_basis = find_broker(context.get("sources"), page)
     if broker is None:
         return refuse("broker_unknown")
+    if broker_basis == "page_text":
+        # B3. The acquisition metadata did not name the house, so the only
+        # evidence is the words on the page -- and words on a page are not an
+        # attribution when there are two houses' worth of them. A note that
+        # quotes a competitor's target, or a comparison table, names several
+        # houses and belongs to none of them here.
+        houses = houses_in(page)
+        if len(houses) != 1:
+            return refuse("ambiguous_house", houses=sorted(houses))
+        # The same doubt applies to the subject. With no metadata company list
+        # there is nothing to run the multi-company check against except the
+        # page itself, so a page naming a second covered company is refused on
+        # the same grounds a multi-issuer note is.
+        others = [
+            name for name in (context.get("other_subject_names") or [])
+            if isinstance(name, str) and name.strip() and name != subject
+        ]
+        named = _names_subject(page, others)
+        if named is not None:
+            return refuse("multi_company_report", also_named=named)
 
-    targets = [row for row in find_targets(page) if not row["superseded"]]
+    all_targets = find_targets(page)
+    targets = [row for row in all_targets if not row["superseded"]]
     if not targets:
+        if all_targets:
+            # A page that prints only the target it has moved away from has
+            # not told us the new one. Said out loud, because "no target" and
+            # "only a superseded target" are different things to fix.
+            return refuse(
+                "no_target_price",
+                detail="every target on page one is marked as superseded",
+                superseded_values=sorted({row["value"] for row in all_targets}),
+            )
         return refuse("no_target_price")
     values = {row["value"] for row in targets}
     if len(values) > 1:
@@ -575,7 +656,8 @@ def verify_estimate_table(
             "scale": row.get("scale"),
         }
         try:
-            verified.append(verify_numeric_candidate(candidate, quotes))
+            verified.append(verify_numeric_candidate(
+                candidate, quotes, grade=BROKER_RESEARCH))
         except NumericCandidateError as exc:
             raise StreetEstimateExtractionError(
                 f"the estimates table is refused whole: {exc}"
@@ -601,6 +683,7 @@ __all__ = [
     "extract",
     "find_broker",
     "find_horizon",
+    "houses_in",
     "find_rating",
     "find_targets",
     "verify_estimate_table",

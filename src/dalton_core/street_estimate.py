@@ -592,6 +592,22 @@ class StreetEstimateStore:
         ).fetchall()
         return {row["document_ref"] for row in rows}
 
+    def refused_by(self, extractor_ref: str) -> set[str]:
+        """Notes an older reader refused, so a fixed one can be given them again.
+
+        The scan ledger exists so a note is never read twice, which would make
+        every fix to the extractor unreachable if the ledger could not say
+        *which* reader refused. This is the reverse query: everything refused by
+        something other than the reader asking.
+        """
+
+        rows = self.connection.execute(
+            "SELECT company_ref,document_ref FROM street_estimate_document_scans "
+            "WHERE outcome='refused' AND extractor_ref<>?",
+            (_text(extractor_ref, "extractor_ref"),),
+        ).fetchall()
+        return {row["document_ref"] for row in rows}
+
     def scans(self, company_ref: str, *, limit: int = 1000) -> list[dict[str, Any]]:
         return [dict(row) for row in self.connection.execute(
             "SELECT * FROM street_estimate_document_scans WHERE company_ref=? "
@@ -669,6 +685,7 @@ class StreetEstimateStore:
         document_ref: str,
         outcome: str,
         extraction_method: str,
+        extractor_ref: str,
         reason: str | None = None,
         estimate_id: str | None = None,
     ) -> dict[str, Any]:
@@ -684,6 +701,7 @@ class StreetEstimateStore:
             raise StreetEstimateValidationError(
                 f"extraction_method must be one of {list(EXTRACTION_METHODS)}"
             )
+        extractor_ref = _text(extractor_ref, "extractor_ref")
         if outcome == "refused" and not reason:
             raise StreetEstimateValidationError(
                 "a refused scan records why; a figure that silently never "
@@ -703,16 +721,17 @@ class StreetEstimateStore:
             cur.execute(
                 "INSERT INTO street_estimate_document_scans("
                 "scan_id,company_ref,document_ref,outcome,reason,estimate_id,"
-                "extraction_method,scanned_at) VALUES(?,?,?,?,?,?,?,?)",
+                "extraction_method,extractor_ref,scanned_at) VALUES(?,?,?,?,?,?,?,?,?)",
                 (scan_id, company_ref, document_ref, outcome,
                  _optional_text(reason, "reason"),
-                 _optional_text(estimate_id, "estimate_id"), extraction_method, now),
+                 _optional_text(estimate_id, "estimate_id"), extraction_method,
+                 extractor_ref, now),
             )
         return {
             "status": "fresh", "scan_id": scan_id, "company_ref": company_ref,
             "document_ref": document_ref, "outcome": outcome, "reason": reason,
             "estimate_id": estimate_id, "extraction_method": extraction_method,
-            "scanned_at": now,
+            "extractor_ref": extractor_ref, "scanned_at": now,
         }
 
 
