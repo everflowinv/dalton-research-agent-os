@@ -106,14 +106,29 @@ def _provider_models(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
             )
             max_tokens = _positive_int(model.get("maxTokens"), f"{model_ref}.maxTokens")
             cost = _mapping(model.get("cost", {}), f"{model_ref}.cost")
+            # P14-M2: a model the gateway offers with no published rate card is
+            # read, marked, and registered anyway.  Refusing to parse it would
+            # make the whole catalog unreadable because of one entry -- and the
+            # entry we would be hiding is exactly the one worth seeing.  What
+            # the mark buys is a routing rule: an unpriced model may only ever
+            # be a chain's last link, because a call whose cost cannot be
+            # estimated cannot be admitted against a day budget honestly.
+            unpriced = cost.get("input") is None or cost.get("output") is None
             output[model_ref] = {
                 "provider": provider,
                 "model": model_id,
                 "model_ref": model_ref,
                 "context_window": context_window,
                 "max_output_tokens": max_tokens,
-                "input_cost": _nonnegative_number(cost.get("input"), f"{model_ref}.cost.input"),
-                "output_cost": _nonnegative_number(cost.get("output"), f"{model_ref}.cost.output"),
+                "unpriced": unpriced,
+                "input_cost": (
+                    0.0 if unpriced
+                    else _nonnegative_number(cost.get("input"), f"{model_ref}.cost.input")
+                ),
+                "output_cost": (
+                    0.0 if unpriced
+                    else _nonnegative_number(cost.get("output"), f"{model_ref}.cost.output")
+                ),
             }
     return output
 
@@ -293,6 +308,10 @@ def openclaw_broker_profiles_from_config(
                 "checked_at": created,
                 "valid_until": valid_until,
             }
+            if provider_model["unpriced"]:
+                profile["unpriced"] = True
+            else:
+                profile.pop("unpriced", None)
             output.append(profile)
             continue
 
@@ -309,10 +328,11 @@ def openclaw_broker_profiles_from_config(
             "max_output_tokens": max_output,
             "input_cost": provider_model["input_cost"],
             "output_cost": provider_model["output_cost"],
+            "unpriced": provider_model["unpriced"],
         }
         digest = hashlib.sha256(canonical_json(public_snapshot).encode("utf-8")).hexdigest()[:16]
         slug = profile_id.removeprefix("profile:")
-        output.append({
+        dynamic: dict[str, Any] = {
             "schema_version": "0.1",
             "profile_version_ref": f"model-profile-version:dynamic-{slug}-{digest}:1",
             "id": profile_id,
@@ -346,7 +366,10 @@ def openclaw_broker_profiles_from_config(
                 "max_total_tokens": context_window,
                 "max_cost_usd": 250.0,
             },
-        })
+        }
+        if provider_model["unpriced"]:
+            dynamic["unpriced"] = True
+        output.append(dynamic)
     return output
 
 

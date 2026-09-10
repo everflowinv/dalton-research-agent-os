@@ -153,3 +153,38 @@ CREATE TRIGGER IF NOT EXISTS model_chain_link_no_delete
 BEFORE DELETE ON model_route_chain_links BEGIN
     SELECT RAISE(ABORT, 'model route chain links are append-only');
 END;
+
+-- P14-M2: the owner let one more of the gateway's models through to Dalton.
+-- Writing the broker's plugin subtree in ~/.openclaw/openclaw.json is a change
+-- to a file outside this repository's authorities, so the record of it has to
+-- live somewhere that cannot be quietly edited: which model, who decided, what
+-- the backup was called, and exactly which keys moved.  It sits in the router's
+-- own database because that is where the consequence lands -- the catalog lane
+-- registers a profile for the model on its next run -- and because a new
+-- database would be a new schema file for a table with a handful of rows.
+CREATE TABLE IF NOT EXISTS model_openclaw_allow_decisions (
+    decision_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id TEXT NOT NULL UNIQUE,
+    model_ref TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    actor_ref TEXT NOT NULL,
+    config_path TEXT NOT NULL,
+    backup_path TEXT NOT NULL,
+    decision_hash TEXT NOT NULL UNIQUE,
+    decision_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS model_allow_decision_insert_authorized
+BEFORE INSERT ON model_openclaw_allow_decisions
+WHEN dalton_model_router_authorized() != 1 BEGIN
+    SELECT RAISE(ABORT, 'openclaw allow decisions require ModelRouter');
+END;
+CREATE TRIGGER IF NOT EXISTS model_allow_decision_no_update
+BEFORE UPDATE ON model_openclaw_allow_decisions BEGIN
+    SELECT RAISE(ABORT, 'openclaw allow decisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS model_allow_decision_no_delete
+BEFORE DELETE ON model_openclaw_allow_decisions BEGIN
+    SELECT RAISE(ABORT, 'openclaw allow decisions are append-only');
+END;
