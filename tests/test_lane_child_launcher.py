@@ -125,6 +125,28 @@ class LauncherTests(unittest.TestCase):
         with self.assertRaises(LaneChildConflict):
             fresh.spawn(digest="8" * 24, record={})
 
+    def test_adopted_ticket_does_not_follow_a_reused_pid_forever(self):
+        launcher = self.launcher("import time; time.sleep(30)")
+        ticket = launcher.spawn(digest="b" * 24, record={})
+        fresh = self.launcher("import time; time.sleep(30)")
+        fresh.spawn(digest="b" * 24, record={})
+        path = fresh._ticket_path(ticket["id"])
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["pid"] = os.getpid()
+        record["command"] = ["definitely-not-this-test-process"]
+        path.write_text(json.dumps(record), encoding="utf-8")
+        self.assertEqual(fresh.status(ticket["id"])["status"], "orphaned")
+
+    def test_legacy_running_ticket_keeps_its_pid_liveness_contract(self):
+        launcher = self.launcher()
+        ticket_id = "probe-run:" + "c" * 24
+        path = launcher._ticket_path(ticket_id)
+        write_owner_only(path, {
+            "schema_version": "0.1", "id": ticket_id, "pid": os.getpid(),
+            "status": "running", "exit_code": None, "completed_at": None,
+        })
+        self.assertEqual(launcher.status(ticket_id)["status"], "running")
+
     def test_dead_ticket_and_reused_pid_do_not_freeze_future_work(self):
         launcher = self.launcher()
         old = launcher.spawn(digest="9" * 24, record={})

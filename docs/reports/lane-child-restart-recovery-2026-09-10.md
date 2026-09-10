@@ -14,6 +14,12 @@ opening its log. A matching different digest raises the existing
 `LaneChildConflict`. A dead PID or a live PID running another command marks the
 stale ticket orphaned and does not block new work.
 
+`status()` applies the same identity check to an adopted ticket. It therefore
+cannot remain `running` forever if its original child exits and the operating
+system reuses that PID for another command. Legacy tickets without recorded
+argv retain their prior PID-liveness behavior because they contain no sound
+process identity to compare.
+
 The ticket remains the authority after adoption; no process handle is invented
 and `close()` therefore never signals a child the restarted launcher did not
 create. Tickets written before the argv field existed retain the prior orphan
@@ -22,7 +28,7 @@ runtime.
 
 ```text
 PYTHONPATH=src python3 -m unittest tests.test_lane_child_launcher
-Ran 16 tests in 0.217s — OK
+Ran 18 tests in 0.231s — OK
 ```
 
 The regressions use real sleeping subprocesses and verify same-digest adoption,

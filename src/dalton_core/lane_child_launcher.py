@@ -252,10 +252,19 @@ class LaneChildLauncher:
                         record["completed_at"] = wire_time(self.clock())
                         record["status"] = "succeeded" if code == 0 else "failed"
                         write_owner_only(path, record)
-                elif not pid_alive(record.get("pid")):
-                    record["status"] = "orphaned"
-                    record["completed_at"] = wire_time(self.clock())
-                    write_owner_only(path, record)
+                else:
+                    command = record.get("command")
+                    # New tickets carry enough identity to distinguish their
+                    # child from an unrelated process that reused the PID.
+                    # Legacy tickets did not; retain their historical liveness
+                    # rule rather than retroactively orphaning a real child.
+                    alive = (process_matches(record.get("pid"), command)
+                             if isinstance(command, list)
+                             else pid_alive(record.get("pid")))
+                    if not alive:
+                        record["status"] = "orphaned"
+                        record["completed_at"] = wire_time(self.clock())
+                        write_owner_only(path, record)
         summary_path = path.with_name("summary.json")
         summary = None
         if record["status"] != "running" and summary_path.is_file():
