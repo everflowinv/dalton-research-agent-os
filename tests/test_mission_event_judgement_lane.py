@@ -11,6 +11,7 @@ from dalton_core.event_judgement import EventJudgementAuthority, pool_state
 from dalton_core.event_judgement_cli import (
     MAX_COST_USD,
     config_fingerprint,
+    group_evidence_events,
     missing_write_scopes,
     run_judgement,
     same_routing_policy,
@@ -29,7 +30,7 @@ from dalton_core.mission_event_judgement_lane import (
     newest_unjudged,
 )
 from dalton_core.model_configurations import model_config_names
-from dalton_core.research_event import ResearchEventAuthority, record_event
+from dalton_core.research_event import PAYLOAD_FIELDS, ResearchEventAuthority, record_event
 from dalton_core.tracking_cadence import POLICY_PATH
 from tests.p14a_fixtures import ACN, AUTOMATION, CTSH, P14aHarness
 from tests.test_event_judgement import (
@@ -273,12 +274,37 @@ class ChildTests(P14aHarness):
             mission=self.mission, actor_ref=AUTOMATION,
         )
 
+    def hk_buyback(self, day: str, week: str, *, company_ref=ACN):
+        payload = {field: None for field in PAYLOAD_FIELDS["buyback_disclosure"]}
+        payload.update({
+            "disclosure_kind": "next_day_return", "accession": day,
+            "filing_date": day, "period_start": day, "period_end": day,
+            "period_label": day, "shares_purchased": "230000",
+            "average_price_paid": "600.00", "total_paid": "138000000",
+            "currency": "HKD", "market": "HK", "source_ref": "source:hkex",
+            "excerpt": f"{day} 230000 shares", "excerpt_hash": day.replace("-", "") * 4,
+            "invocation_ref": f"connector-invocation:hkex:{day}",
+            "artifact_hash": (day.replace("-", "") * 7)[:64],
+            "event_key": f"hk:{company_ref}:{day}",
+            "cumulative_shares": "44382700", "cumulative_basis": "since_mandate",
+            "cluster_key": f"{week}:{day}",
+        })
+        return record_event(
+            self.events, company_ref=company_ref, kind="buyback_disclosure",
+            occurred_at=f"{day}T00:00:00+08:00",
+            source_refs=[payload["invocation_ref"]], payload=payload,
+            mission=self.mission, actor_ref=AUTOMATION,
+        )
+
     def run_child(self, *, judge_replies=None, verifier_replies=None, **kwargs):
+        judge_model = kwargs.pop(
+            "judge_model", FakeModel(judge_replies or [decision()], route=JUDGE_ROUTE))
+        verifier_model = kwargs.pop(
+            "verifier_model", FakeModel(verifier_replies or [PASS], route=VERIFIER_ROUTE))
         return run_judgement(
             state_dir=self.state_dir, summary_dir=self.state_dir / "judge",
             policy_path=POLICY_PATH, now=NOW,
-            judge_model=FakeModel(judge_replies or [decision()], route=JUDGE_ROUTE),
-            verifier_model=FakeModel(verifier_replies or [PASS], route=VERIFIER_ROUTE),
+            judge_model=judge_model, verifier_model=verifier_model,
             family_resolver=resolver(), **kwargs,
         )
 
@@ -341,6 +367,73 @@ class ChildTests(P14aHarness):
         self.assertEqual([row["cost_micros"] for row in alias_costs], [0, 0])
         self.assertEqual(
             unjudged_events(self.events, self.judgements, company_ref=ACN, limit=5), []
+        )
+
+    def test_hk_week_waits_until_closed_then_late_input_rejudges_full_week(self):
+        # NOW is Wednesday in W37. Daily W37 rows remain raw and unjudged.
+        self.hk_buyback("2026-09-08", "2026-W37")
+        self.hk_buyback("2026-09-09", "2026-W37")
+        waiting_judge = FakeModel([decision()], route=JUDGE_ROUTE)
+        waiting = self.run_child(judge_model=waiting_judge,
+                                 verifier_replies=[PASS])
+        self.assertEqual(waiting["judgement_status"], "nothing_unjudged")
+        self.assertEqual(waiting_judge.prompts, [])
+
+        first = self.hk_buyback("2026-09-01", "2026-W36")
+        second = self.hk_buyback("2026-09-02", "2026-W36")
+        judge_model = FakeModel([decision()], route=JUDGE_ROUTE)
+        verifier_model = FakeModel([PASS], route=VERIFIER_ROUTE)
+        summary = self.run_child(judge_model=judge_model,
+                                 verifier_model=verifier_model)
+        self.assertEqual(summary["judged"], 1)
+        self.assertIn(first["id"], judge_model.prompts[0])
+        self.assertIn(second["id"], judge_model.prompts[0])
+        self.assertIn("HK daily rows in this closed ISO week", judge_model.prompts[0])
+        self.assertIn(second["id"], verifier_model.prompts[0])
+        first_work = self.store.connection.execute(
+            "SELECT json_extract(record_json,'$.model.work_order_ref') AS ref "
+            "FROM event_judgements WHERE event_ref=?", (first["id"],),
+        ).fetchone()["ref"]
+
+        late = self.hk_buyback("2026-09-03", "2026-W36")
+        late_judge = FakeModel([decision()], route=JUDGE_ROUTE)
+        late_verifier = FakeModel([PASS], route=VERIFIER_ROUTE)
+        again = self.run_child(judge_model=late_judge,
+                               verifier_model=late_verifier)
+        self.assertEqual(again["judged"], 1)
+        for event in (first, second, late):
+            self.assertIn(event["id"], late_judge.prompts[0])
+            self.assertIn(event["id"], late_verifier.prompts[0])
+        late_work = self.store.connection.execute(
+            "SELECT json_extract(record_json,'$.model.work_order_ref') AS ref "
+            "FROM event_judgements WHERE event_ref=?", (late["id"],),
+        ).fetchone()["ref"]
+        self.assertNotEqual(first_work, late_work)
+        self.assertEqual(len(self.events.events(company_ref=ACN, limit=20)), 5)
+        rows = self.store.connection.execute(
+            "SELECT cost_micros, json_extract(record_json,'$.effect.kind') AS kind "
+            "FROM event_judgements WHERE event_ref IN (?,?,?)",
+            (first["id"], second["id"], late["id"]),
+        ).fetchall()
+        self.assertEqual(sum(row["cost_micros"] for row in rows), 80_000)
+        self.assertEqual([row["cost_micros"] for row in rows
+                          if row["kind"] == "grouped_judgement"], [0])
+
+    def test_hk_week_groups_are_isolated_by_company_and_week(self):
+        a_w35 = self.hk_buyback("2026-08-26", "2026-W35")
+        a_w36 = self.hk_buyback("2026-09-01", "2026-W36")
+        b_w36 = self.hk_buyback("2026-09-02", "2026-W36", company_ref=CTSH)
+        acn = unjudged_event_groups(
+            self.events, self.judgements, company_ref=ACN, limit=3, now=NOW)
+        ctsh = unjudged_event_groups(
+            self.events, self.judgements, company_ref=CTSH, limit=3, now=NOW)
+        self.assertEqual([[row["id"] for row in group] for group in acn],
+                         [[a_w35["id"]], [a_w36["id"]]])
+        self.assertEqual([[row["id"] for row in group] for group in ctsh],
+                         [[b_w36["id"]]])
+        self.assertEqual(
+            [row["company_ref"] for row in group_evidence_events(self.events, ctsh[0])],
+            [CTSH],
         )
 
     def test_a_verifier_rejection_leaves_the_event_unjudged_and_the_reason_visible(self):

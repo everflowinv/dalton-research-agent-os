@@ -240,13 +240,19 @@ def build_judge_prompt(context: Mapping[str, Any]) -> str:
     ]
     grouped = context.get("grouped_events") or ()
     if len(grouped) > 1:
-        lines.extend(["", "## Other monthly rows in this filing (same judgement)"])
+        market = ((event.get("payload") or {}).get("market"))
+        label = ("## HK daily rows in this closed ISO week (same judgement)"
+                 if market == "HK"
+                 else "## Other monthly rows in this filing (same judgement)")
+        lines.extend(["", label])
         for row in grouped[1:]:
             payload = row.get("payload") or {}
             lines.append(
                 f"- ref: {row['id']}; period_label={payload.get('period_label')}; "
+                f"period_end={payload.get('period_end')}; "
                 f"shares_purchased={payload.get('shares_purchased')}; "
                 f"average_price_paid={payload.get('average_price_paid')}; "
+                f"total_paid={payload.get('total_paid')}; "
                 f"shares_purchased_under_plans="
                 f"{payload.get('shares_purchased_under_plans')}; "
                 f"remaining_authorisation={payload.get('remaining_authorisation')}"
@@ -938,13 +944,19 @@ def build_verifier_prompt(context: Mapping[str, Any], judgement: Mapping[str, An
     ]
     grouped = context.get("grouped_events") or ()
     if len(grouped) > 1:
-        lines.extend(["", "Other monthly rows in this filing (same judgement):"])
+        market = ((event.get("payload") or {}).get("market"))
+        label = ("HK daily rows in this closed ISO week (same judgement):"
+                 if market == "HK"
+                 else "Other monthly rows in this filing (same judgement):")
+        lines.extend(["", label])
         for row in grouped[1:]:
             payload = row.get("payload") or {}
             lines.append(
                 f"- ref: {row['id']}; period_label={payload.get('period_label')}; "
+                f"period_end={payload.get('period_end')}; "
                 f"shares_purchased={payload.get('shares_purchased')}; "
                 f"average_price_paid={payload.get('average_price_paid')}; "
+                f"total_paid={payload.get('total_paid')}; "
                 f"shares_purchased_under_plans="
                 f"{payload.get('shares_purchased_under_plans')}; "
                 f"remaining_authorisation={payload.get('remaining_authorisation')}"

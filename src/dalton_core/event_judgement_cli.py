@@ -29,6 +29,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .budget_pools import POOL_EXHAUSTED_STATUS
 from .cockpit_model import CockpitModel
@@ -67,6 +68,61 @@ MAX_COST_USD = 0.10
 TIMEOUT_SECONDS = 180
 MAX_EVENTS_PER_COMPANY = 3
 MAX_EVENTS_PER_RUN = 8
+HK_TIMEZONE = ZoneInfo("Asia/Hong_Kong")
+
+
+def buyback_group_key(event: dict[str, Any]) -> tuple[str, ...] | None:
+    payload = event.get("payload") or {}
+    if event.get("kind") != "buyback_disclosure":
+        return None
+    if payload.get("market") == "HK":
+        cluster = str(payload.get("cluster_key") or "")
+        week = cluster.split(":", 1)[0]
+        try:
+            datetime.strptime(f"{week}-1", "%G-W%V-%u")
+        except ValueError:
+            return None
+        else:
+            return ("hk_week", str(event.get("company_ref")), week)
+    accession = payload.get("accession")
+    if (payload.get("disclosure_kind") == "issuer_purchases_table"
+            and isinstance(accession, str) and accession):
+        return ("us_filing", accession)
+    return None
+
+
+def _closed_hk_week(group_key: tuple[str, ...] | None, now: datetime) -> bool:
+    if group_key is None or group_key[0] != "hk_week":
+        return True
+    local = now.astimezone(HK_TIMEZONE)
+    year, week, _ = local.isocalendar()
+    return group_key[2] < f"{year:04d}-W{week:02d}"
+
+
+def group_evidence_events(
+    events: ResearchEventAuthority, event_group: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """All evidence in an HK week; only new rows are judgement aliases."""
+
+    key = buyback_group_key(event_group[0])
+    if key is None or key[0] != "hk_week":
+        return event_group
+    rows = events.connection.execute(
+        "SELECT event_id FROM research_events WHERE company_ref=? "
+        "AND kind='buyback_disclosure' ORDER BY occurred_at, event_id",
+        (event_group[0]["company_ref"],),
+    ).fetchall()
+    matching = [event for row in rows if buyback_group_key(
+        event := events.event(row["event_id"])) == key]
+    primary = event_group[0]
+    return [primary, *(event for event in matching if event["id"] != primary["id"])]
+
+
+def incremental_group_hash(event_group: list[dict[str, Any]]) -> str:
+    return content_hash({"events": [
+        {"id": event["id"], "content_hash": event.get("content_hash")}
+        for event in sorted(event_group, key=lambda item: item["id"])
+    ]})
 
 
 def _write_owner_only(path: Path, value: dict[str, Any]) -> None:
@@ -134,14 +190,16 @@ def unjudged_event_groups(
     *,
     company_ref: str,
     limit: int,
+    now: datetime | None = None,
 ) -> list[list[dict[str, Any]]]:
-    """Oldest unjudged events, with one issuer-purchases filing per slot.
+    """Oldest eligible events, grouped by one filing or closed HK ISO week.
 
     A US 10-Q normally contributes three monthly rows. They remain three
     immutable events because the month in which purchases stopped is evidence,
     but the analyst reads their common accession as one table and makes one
-    judgement. Other kinds, including Form 4 insider transactions, retain one
-    slot each.
+    judgement. HK daily rows remain raw while the current Hong Kong week is
+    open, then share one company/week judgement slot. Other kinds, including
+    Form 4 insider transactions, retain one slot each.
     """
 
     rows = events.connection.execute(
@@ -152,17 +210,14 @@ def unjudged_event_groups(
         (company_ref,),
     ).fetchall()
     groups: list[list[dict[str, Any]]] = []
-    positions: dict[tuple[str, str], int] = {}
+    positions: dict[tuple[str, ...], int] = {}
+    moment = now or datetime.now(timezone.utc)
     for row in rows:
         event = events.event(row["event_id"])
-        payload = event.get("payload") or {}
-        accession = payload.get("accession")
-        grouped = (
-            event.get("kind") == "buyback_disclosure"
-            and payload.get("disclosure_kind") == "issuer_purchases_table"
-            and isinstance(accession, str) and accession
-        )
-        key = (str(event.get("kind")), accession) if grouped else ("event", event["id"])
+        grouped_key = buyback_group_key(event)
+        if not _closed_hk_week(grouped_key, moment):
+            continue
+        key = grouped_key or ("event", event["id"])
         if key in positions:
             groups[positions[key]].append(event)
             continue
@@ -354,7 +409,8 @@ def run_judgement(
         for ref in tracked:
             batch.extend(
                 unjudged_event_groups(
-                    events, judgements, company_ref=ref, limit=per_company
+                    events, judgements, company_ref=ref, limit=per_company,
+                    now=moment,
                 )
             )
         batch = batch[:max_events]
@@ -435,8 +491,9 @@ def run_judgement(
                 price=prices.get(event["company_ref"]),
                 market_cap=market_caps.get(event["company_ref"]),
             )
-            context["grouped_events"] = event_group
-            request_id = f"{fingerprint}{event['id'].split(':', 1)[-1]}"[:32]
+            evidence_group = group_evidence_events(events, event_group)
+            context["grouped_events"] = evidence_group
+            request_id = f"{fingerprint}{incremental_group_hash(evidence_group)[:24]}"
             decided = judge(
                 context, model=judge_model, mission=mission, request_id=request_id
             )
