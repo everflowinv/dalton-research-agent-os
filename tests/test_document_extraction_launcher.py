@@ -69,6 +69,8 @@ class CoordinatorTests(unittest.TestCase):
     def _awaiting_review(self) -> None:
         params = mission_params(self.state); ref = params.pop("mission_ref")
         mission = self.missions.create_mission(ref, **params)
+        self.mission = mission
+        self.mission_ref = ref
         # A review row is the queue; register one directly through the ledger.
         with self.missions._transaction() as cur:
             cur.execute(
@@ -145,6 +147,29 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(len(self.launcher.starts), starts)
         self.launcher.connector_governance.write_text('{"changed":true}', encoding="utf-8")
         self.assertEqual(restarted.dispatch_once()["status"], "launched")
+
+    def test_a_new_active_mission_grant_resumes_in_process_and_after_restart(self) -> None:
+        self._awaiting_review()
+        self.coordinator.dispatch_once()
+        self.launcher.finish(
+            {"status": "succeeded", "drafted": [],
+             "stop_reason": "gated:mission does not grant document_extraction writes",
+             "reviews_complete": 0}, completed_at=self.clock().isoformat())
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "ungranted")
+        restarted = DocumentExtractionCoordinator(
+            missions=self.missions, launcher=self.launcher, clock=self.clock)
+        self.assertEqual(restarted.dispatch_once()["status"], "ungranted")
+        params = mission_params(self.state)
+        params.pop("mission_ref")
+        params.update({
+            "version_id": "coverage-mission-version:us-it-services:permission-granted",
+            "prior_version_ref": self.mission["id"],
+            "idempotency_key": "coverage-mission:us-it-services:permission-granted",
+        })
+        self.missions.create_mission(self.mission_ref, **params)
+        self.assertEqual(restarted.dispatch_once()["status"], "idle")
+        self.assertIsNone(restarted.failure_budget.blocked(
+            "document-extraction:authorization"))
 
 
 class LauncherTests(unittest.TestCase):

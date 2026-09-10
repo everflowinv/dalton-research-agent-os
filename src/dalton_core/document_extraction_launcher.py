@@ -71,6 +71,12 @@ def _write_owner_only(path: Path, value: Any) -> None:
     os.replace(tmp, path)
 
 
+def _frozen_signature(value: Any) -> Any:
+    if isinstance(value, (list, tuple)):
+        return tuple(_frozen_signature(item) for item in value)
+    return value
+
+
 class DocumentExtractionLauncher:
     def __init__(
         self,
@@ -279,8 +285,13 @@ class DocumentExtractionCoordinator:
             "document_extraction", state_dir=launcher.state_dir, clock=self.clock)
 
     def _permission_signature(self) -> tuple[Any, ...]:
-        """Cheap evidence that a grant/configuration may have changed."""
+        """Exact active grants plus installed policy/configuration identities."""
 
+        mission_bindings = tuple(
+            tuple(row) for row in self.missions.connection.execute(
+                "SELECT mission_ref, mission_version_id FROM coverage_mission_pointer "
+                "ORDER BY mission_ref").fetchall()
+        )
         paths = (self.launcher.model_config_path,
                  self.launcher.connector_governance,
                  self.launcher.web_fetch_governance)
@@ -294,7 +305,7 @@ class DocumentExtractionCoordinator:
                 signature.append((stat.st_mtime_ns, stat.st_size))
             except OSError:
                 signature.append((None, None))
-        return tuple(signature)
+        return (mission_bindings, *signature)
 
     def _latest(self) -> dict[str, Any] | None:
         try:
@@ -318,8 +329,7 @@ class DocumentExtractionCoordinator:
             current = self._permission_signature()
             recorded = self._permission_signature_at_refusal
             if recorded is None and latest is not None and latest.get("permission_signature"):
-                recorded = tuple(tuple(item) if isinstance(item, list) else item
-                                 for item in latest["permission_signature"])
+                recorded = _frozen_signature(latest["permission_signature"])
             if current == recorded:
                 return {**result, "status": "ungranted", "reason": blocked.classification.reason,
                         "failure_class": blocked.classification.failure_class}
