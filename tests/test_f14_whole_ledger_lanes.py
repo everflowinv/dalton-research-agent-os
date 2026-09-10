@@ -183,6 +183,44 @@ class WholeLedgerFailureTests(unittest.TestCase):
         with LaneFailureLedger(default_path(self.state), read_only=True) as ledger:
             self.assertEqual(ledger.parked_by_dependency(now=NOW)["permission_count"], 0)
 
+    def test_dossier_mission_change_before_settlement_does_not_poison_new_grant(self):
+        from dalton_core.company_dossier_launcher import run_digest
+        connection = self.connection("dossier")
+        connection.execute("CREATE TABLE coverage_mission_pointer "
+                           "(mission_ref TEXT, mission_version_id TEXT)")
+        connection.execute("INSERT INTO coverage_mission_pointer VALUES ('m', 'mv1')")
+        launcher = Launcher(self.state, "dossier_status", "nothing_new", "published")
+        lane = self.coordinator("dossier", MissionDossierLaneCoordinator,
+                                launcher, connection)
+        old = lane.dispatch_once()
+        connection.execute("UPDATE coverage_mission_pointer SET mission_version_id='mv2'")
+        launcher.settle(old["ticket_ref"], status="succeeded", outcome="not_authorized")
+        retry = lane.dispatch_once()
+        self.assertEqual(retry["status"], "launched")
+        self.assertNotEqual(old["signature"], retry["signature"])
+        self.assertNotEqual(run_digest(None, old["signature"]),
+                            run_digest(None, retry["signature"]))
+        self.assertEqual(lane.budget.permission_items(), [])
+        launcher.settle(retry["ticket_ref"], status="succeeded", outcome="not_authorized")
+        self.assertEqual(lane.dispatch_once()["status"], "not_permitted")
+        self.assertEqual(lane.budget.permission_items()[0]["item_key"], retry["signature"])
+
+    def test_dossier_old_unbound_permission_is_retired_after_upgrade(self):
+        from dalton_core.mission_dossier_lane import ledger_signature, permission_key
+        connection = self.connection("dossier")
+        launcher = Launcher(self.state, "dossier_status", "nothing_new", "published")
+        lane = self.coordinator("dossier", MissionDossierLaneCoordinator,
+                                launcher, connection)
+        old_key = permission_key(connection, launcher, ledger_signature(connection)).replace(
+            "|permission:v2:", "|permission:")
+        lane.budget.record(old_key, status="gated:not permitted",
+                           reason="gated:mission does not grant dossier")
+        self.assertEqual(lane.dispatch_once()["status"], "launched")
+        self.assertEqual(lane.budget.permission_items(), [])
+        with LaneFailureLedger(default_path(self.state), read_only=True) as ledger:
+            events = ledger.events()
+        self.assertTrue(any(row["item_key"] == old_key for row in events))
+
     def test_new_business_signature_retires_old_permission_projection(self):
         for kind, cls, summary_key, quiet, success in self.cases():
             with self.subTest(kind=kind):

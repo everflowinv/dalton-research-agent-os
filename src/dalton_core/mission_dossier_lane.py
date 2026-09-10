@@ -71,7 +71,7 @@ def permission_key(connection: Any, launcher: Any, signature: str) -> str:
             parts.append(f"{name}:{hashlib.sha256(path.read_bytes()).hexdigest()}")
         except OSError:
             parts.append(f"{name}:missing")
-    return f"{signature}|permission:{hashlib.sha256('|'.join(parts).encode()).hexdigest()[:16]}"
+    return f"{signature}|permission:v2:{hashlib.sha256('|'.join(parts).encode()).hexdigest()[:16]}"
 
 
 def clear_obsolete_permissions(budget: Any, current: str, signature: str) -> None:
@@ -163,7 +163,7 @@ class MissionDossierLaneCoordinator:
         signature = settled.get("signature")
         status = str(settled.get("dossier_status") or "")
         if status == "not_authorized" and signature:
-            self.budget.record(permission_key(self.connection, self.launcher, str(signature)),
+            self.budget.record(str(signature),
                                status="gated:not permitted",
                                reason="gated:mission does not grant dossier")
         elif settled.get("status") != "succeeded" and settled.get("status") != "orphaned":
@@ -184,17 +184,18 @@ class MissionDossierLaneCoordinator:
         if self._open is not None:
             return {"status": "running", "ticket_ref": self._open, "settled": settled}
         try:
-            signature = ledger_signature(self.connection)
+            # Bind ticket identity before launch. A child may finish after a
+            # new mission is signed; its refusal belongs to its launch state.
+            signature = permission_key(
+                self.connection, self.launcher, ledger_signature(self.connection))
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
             return {"status": "unavailable", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
         if signature == self._quiet_signature:
             return {"status": "idle", "settled": settled, "signature": signature,
                     "reason": "nothing has moved since the last run found nothing"}
-        permission = permission_key(self.connection, self.launcher, signature)
-        clear_obsolete_permissions(self.budget, permission, signature)
-        held = (self.budget.blocked(permission)
-                or self.budget.blocked(signature))
+        clear_obsolete_permissions(self.budget, signature, signature)
+        held = self.budget.blocked(signature)
         if held is not None:
             return {"status": held.action, "settled": settled, "signature": signature,
                     "reason": held.classification.reason,
