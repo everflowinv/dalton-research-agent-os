@@ -406,6 +406,22 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     "mission_deliverables",
     "mission_document_evidence", "generate_document_extraction", "stage_document_extraction",
     "document_extraction_preflight",
+    # P14-M2: which model each calling stage uses, and letting one more of the
+    # gateway's models through to Dalton. Both are the owner's, for the same
+    # reason and by two different routes. Choosing the model that produces a
+    # Claim is a judgement about how the work gets done, not a step in doing
+    # it; and letting a model through writes the broker's subtree of a host
+    # configuration file this repository does not own, which nothing automatic
+    # may ever do. Listed here and nowhere else, so an automation principal is
+    # refused before either operation runs.
+    "set_model_selection",
+    "allow_openclaw_model",
+    # And the third: reading a notice that a model a stage was using has gone.
+    # Acknowledging is a person saying "I have seen this and I am leaving it as
+    # it fell", which is a decision, so automation may not make it -- otherwise
+    # the tick that noticed the model had gone could also clear the notice
+    # about it, and nobody would ever be told.
+    "acknowledge_model_fallback_notice",
     # Q1 / INT1: the PM's own verdict on something they have just read. The
     # cockpit process holds no Core write handle (ADR-0006), so the feedback
     # buttons come back through the writer as the owner's Tailscale-derived
@@ -715,6 +731,15 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "target_ref", "target_hash", "target_kind", "verdict", "company_ref",
         "note", "score_override", "idempotency_key", "actor_ref",
     }),
+    # P14-M2. ``chain`` is only meaningful with ``mode: "explicit"``; the
+    # selection validator refuses the two together in the other direction, so
+    # a page that sent both would be told which one it meant.
+    "set_model_selection": frozenset({"purpose", "mode", "chain", "actor_ref"}),
+    # No path parameter. The file this writes is named by the writer's own
+    # ``--model-catalog-config``, not by the caller: an operation that took the
+    # path to write would be an operation that writes anywhere.
+    "allow_openclaw_model": frozenset({"model_ref", "actor_ref"}),
+    "acknowledge_model_fallback_notice": frozenset({"notice_id", "actor_ref"}),
     "decide_deep_insight_gate": frozenset({
         "gate_version_ref", "gate_version_hash", "decision", "reason", "actor_ref",
     }),
@@ -991,6 +1016,9 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "stage_document_extraction": "actor_ref",
     "record_mission_stage": "actor_ref",
     "record_analyst_journal_entry": "actor_ref",
+    "set_model_selection": "actor_ref",
+    "allow_openclaw_model": "actor_ref",
+    "acknowledge_model_fallback_notice": "actor_ref",
     "decide_deep_insight_gate": "actor_ref",
     "decide_conviction_call": "actor_ref",
     "decide_thesis_revision_candidate": "actor_ref",
@@ -2552,6 +2580,138 @@ class WriterServer:
         if self._analyst_journal is None:
             raise WriterServerError("analyst-journal authority is unavailable")
         return self._analyst_journal.add(**dict(p))
+
+    def _op_set_model_selection(self, p: Mapping[str, Any]) -> Any:
+        """P14-M2: the owner chooses which models one calling stage uses.
+
+        Not a new authority.  The selection is published as a new pinned
+        routing-policy version -- append-only, the previous content untouched,
+        rollback being the same operation with the old choice -- and every
+        registered model configuration is repointed at it, which is the move a
+        day-budget cap raise already makes.  So the change is in force on the
+        next call rather than on the next restart, and a route decision months
+        from now still names the exact policy hash it routed under.
+
+        Human-governance only, and the actor has already been replaced by the
+        authenticated principal's: automation may not choose the model that
+        produces a Claim.
+        """
+
+        from .model_selection import ModelSelectionError, set_model_selection
+
+        values = dict(p)
+        mode = values.get("mode")
+        chain = values.get("chain") or []
+        if not isinstance(chain, list) or any(
+            not isinstance(item, str) for item in chain
+        ):
+            raise WriterServerError("chain must be a list of profile ids")
+        try:
+            return set_model_selection(
+                self.state_dir,
+                purpose=str(values["purpose"]),
+                mode=str(mode),
+                chain=chain,
+                actor_ref=str(values["actor_ref"]),
+            )
+        except (ModelSelectionError, KeyError, ValueError) as exc:
+            raise WriterServerError(str(exc)) from exc
+
+    def _model_router_db(self) -> str:
+        """Where this Core's model catalog lives, read off what pins it.
+
+        The model configurations name it, and they are the same files a
+        selection repoints, so asking them means the operation and the lanes
+        can never disagree about which catalog is Dalton's.
+        """
+
+        from .model_selection import ModelSelectionError, model_configs
+
+        try:
+            configs = model_configs(self.state_dir)
+        except ModelSelectionError as exc:
+            raise WriterServerError(str(exc)) from exc
+        for item in configs:
+            path = item["config"].get("model_router_db")
+            if isinstance(path, str) and Path(path).is_file():
+                return path
+        raise WriterServerError("this Core has no model router database")
+
+    def _op_acknowledge_model_fallback_notice(self, p: Mapping[str, Any]) -> Any:
+        """P14-M2: the owner has read one "the model you were using has gone".
+
+        Acknowledging does not change any routing.  The chain has already
+        fallen to its next link -- that happened the moment the profile was
+        retired -- and this only stops the notice being shown.  Re-selecting is
+        the other way to clear it, and it is the one that changes something.
+        """
+
+        from .model_router import ModelRouter
+
+        values = dict(p)
+        with ModelRouter(self._model_router_db()) as router:
+            result = router.acknowledge_fallback_notice(
+                notice_id=str(values["notice_id"]),
+                actor_ref=str(values["actor_ref"]),
+            )
+        if result["status"] == "unknown":
+            raise WriterServerError(result["reason"])
+        return result
+
+    def _op_allow_openclaw_model(self, p: Mapping[str, Any]) -> Any:
+        """P14-M2: let one more of the gateway's models through to Dalton.
+
+        This writes a file the repository does not own, so the shape of it is
+        deliberately narrow.  The *path* comes from the writer's own
+        ``--model-catalog-config``, never from the caller -- an operation that
+        took the path to write would be an operation that writes anywhere --
+        and a Core that is not following a gateway configuration refuses
+        instead of guessing at one.  Only the broker plugin's subtree changes,
+        a timestamped backup exists before the write does, and the landed file
+        is read back and compared before this returns.
+
+        The decision is recorded append-only next to the catalog it affects,
+        with the backup path and the keys that moved, and the answer carries
+        the reload instruction: the broker reads its plugin configuration at
+        gateway start, so until the owner reloads it the model is a name in a
+        file.  Reloading the gateway is not something this does.
+        """
+
+        from .mission_model_catalog_lane import LAUNCHER_KWARG, load_lane_config
+        from .model_router import ModelRouter
+        from .openclaw_allow_patch import AllowPatchError, apply_allow_patch
+
+        launcher = self.lane_launcher(LAUNCHER_KWARG)
+        if launcher is None:
+            raise WriterServerError(
+                "this Core is not following an OpenClaw configuration; there is "
+                "nothing to let a model through into"
+            )
+        try:
+            settings = load_lane_config(launcher.config_path)
+            result = apply_allow_patch(
+                settings["openclaw_config_path"], str(dict(p)["model_ref"])
+            )
+        except (AllowPatchError, RuntimeError, KeyError) as exc:
+            raise WriterServerError(str(exc)) from exc
+        if result["status"] != "applied":
+            return result
+        with ModelRouter(settings["model_router_db"]) as router:
+            record = router.record_allow_decision(
+                model_ref=result["model_ref"],
+                profile_id=result["profile_id"],
+                actor_ref=str(dict(p)["actor_ref"]),
+                config_path=result["config_path"],
+                backup_path=result["backup_path"],
+                diff={
+                    "changed_paths": result["changed_paths"],
+                    "allowed_models_add": result["allowed_models_add"],
+                    "profiles_add": result["profiles_add"],
+                },
+                reload_instruction=result["reload_instruction"],
+            )
+        return {**result, "decision_ref": record["decision"]["id"],
+                "decision_status": record["status"]}
 
     def _deep_insight_gates(self) -> Any:
         """The gate authority, opened on first use.

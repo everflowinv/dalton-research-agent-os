@@ -284,6 +284,7 @@ pre.table{overflow:auto;font-family:var(--mono);font-size:12px;line-height:1.45;
       <div class="fb">
         <button class="ghost" id="open-sources">看每个来源能取什么</button>
         <button class="ghost" id="open-reflection">每周回头看</button>
+        <button class="ghost" id="open-models">模型</button>
       </div>
     </div>
 
@@ -592,6 +593,68 @@ function renderSources(sheet,r){sheet.replaceChildren(readerClose(),node("h2","�
       `（这里缺：${m.catalog.missing_here.join("、")||"无"}；网关没有：${m.catalog.not_in_broker.join("、")||"无"}）`);
     box.append(c)}
   else if(m.catalog_note)box.append(node("div",m.catalog_note,"hint"));
+  sheet.append(box)}
+/* P14-M2: the 模型 page. Per calling stage: what kind of judgement it is, the
+   chain it will actually reach, what answered last time and what that cost,
+   and a selector. Below it the gateway's catalog in three columns, with a
+   放行 button on the one column an owner can act on. */
+$("open-models").onclick=openModels;
+async function openModels(){$("reader").classList.add("show");const sheet=$("reader-sheet");
+  sheet.replaceChildren(node("div","正在读取…","empty"));
+  try{renderModels(sheet,await getJson("/v1/cockpit/models"))}
+  catch(e){sheet.replaceChildren(readerClose(),node("div",e.message,"empty"))}}
+function renderModels(sheet,r){sheet.replaceChildren(readerClose(),node("h2","每个环节用哪个模型"),
+  node("div","第一行是主选，后面的是它答不上时接手的。改了以后不用重启：下一次调用就按新的走；想回到原来的，把原来的再选一次。","meta"));
+  if(!r.available){sheet.append(node("div",r.reason,"empty"));return}
+  (r.notices||[]).filter(n=>!n.acknowledged).forEach(n=>{
+    const d=node("div",null,"gap");d.append(node("b","模型变动"),node("div",n.message,"raw"));
+    const b=node("button","知道了","ghost");b.onclick=async()=>{b.disabled=true;
+      try{await postJson("/v1/cockpit/model_notice_ack",{ref:n.ref});toast("已记下");openModels();loadApprovals()}
+      catch(e){b.disabled=false;toast(e.message)}};
+    d.append(b);sheet.append(d)});
+  const stages=node("section");stages.append(node("h3","环节"));
+  r.purposes.forEach(pp=>{const d=node("div",null,"lane");d.append(node("span",null,"st on"));
+    const c=node("div");c.append(node("b",`${pp.label} · ${pp.tier_label}`));
+    c.append(node("small",`现在：${pp.mode_label} — `+pp.chain.map(l=>`${l.position}. ${l.model}${l.note?"（"+l.note+"）":""}`).join(" → ")));
+    c.append(node("small",pp.last_served?`上一次：${pp.last_served.model} · ${pp.last_served_note}`:pp.last_served_note,"raw"));
+    if(pp.superseded_note)c.append(node("small",pp.superseded_note,"raw"));
+    const row=node("div",null,"actions");
+    const mode=document.createElement("select");
+    r.modes.forEach(m=>{const o=document.createElement("option");o.value=m.value;o.textContent=m.label;
+      if(m.value===(pp.mode==="explicit"?"explicit":"tier"))o.selected=true;mode.append(o)});
+    const picked=document.createElement("input");picked.type="text";picked.placeholder="按顺序写模型 id，用逗号分隔";
+    picked.value=pp.mode==="explicit"?pp.chain.map(l=>l.model).join(", "):"";
+    picked.style.minWidth="260px";
+    picked.disabled=mode.value!=="explicit";
+    mode.onchange=()=>{picked.disabled=mode.value!=="explicit"};
+    const save=node("button","保存","primary"),st=node("span","","status");
+    save.onclick=async()=>{save.disabled=true;st.className="status";st.textContent="正在发布新的模型选择…";
+      const chain=picked.value.split(",").map(x=>x.trim()).filter(Boolean);
+      try{await postJson("/v1/cockpit/model_select",{purpose:pp.purpose,mode:mode.value,chain});
+        st.className="status ok";st.textContent="已生效，下一次调用就用它";toast("模型选择已生效");openModels()}
+      catch(e){st.className="status err";st.textContent=e.message;save.disabled=false}};
+    row.append(mode,picked,save,st);c.append(row);
+    d.append(c);stages.append(d)});
+  sheet.append(stages);
+  const avail=node("section");avail.append(node("h3","可以选的模型"));
+  avail.append(node("div",r.choices.map(c=>`${c.model}${c.unpriced?"（未定价）":""}`).join("、")||"没有","raw"));
+  sheet.append(avail);
+  const cat=r.catalog,box=node("section");box.append(node("h3","网关上有什么"));
+  if(!cat.available){box.append(node("div",cat.reason,"empty"));sheet.append(box);return}
+  box.append(node("div",cat.in_sync?"这台机器的模型目录和网关一致。":"这台机器的模型目录和网关不一致，下面三列说明差在哪。","meta"));
+  const col=(title,names,note,allow)=>{const d=node("div",null,"lane");d.append(node("span",null,"st"+(names.length?" wait":" on")));
+    const c=node("div");c.append(node("b",`${title}（${names.length}）`));c.append(node("small",note));
+    if(!names.length)c.append(node("small","没有","raw"));
+    names.forEach(name=>{const line=node("div",null,"raw");line.append(node("span",name,"figv"));
+      if(allow){const b=node("button","放行","ghost");b.onclick=async()=>{b.disabled=true;
+        try{const out=await postJson("/v1/cockpit/model_allow",{model_ref:name});
+          toast(out.reload_instruction||"已放行");openModels()}
+        catch(e){b.disabled=false;toast(e.message)}};line.append(b)}
+      c.append(line)});
+    d.append(c);box.append(d)};
+  col("网关有、还没放行给 Dalton",cat.in_openclaw_not_allowed,cat.in_openclaw_not_allowed_note,true);
+  col("已放行、这台机器还没登记",cat.allowed_not_in_dalton,cat.allowed_not_in_dalton_note,false);
+  col("这台机器还留着、网关已经没有",cat.dalton_not_in_openclaw,cat.dalton_not_in_openclaw_note,false);
   sheet.append(box)}
 /* Q2: 每周回头看. Prose and table both derived from counted things; no model
    wrote either, which is why they are shown verbatim. */

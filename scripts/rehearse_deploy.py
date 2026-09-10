@@ -730,6 +730,12 @@ LANE_SWITCHES: tuple[LaneSwitch, ...] = (
         "INT2 seed block; one file, so all-or-nothing is automatic",
     ),
     LaneSwitch(
+        "catalog_sync (P14-M2)", "model-catalog-sync.json", None, True,
+        "P14-M2 seed block, beside the catalog sync itself; one file naming the "
+        "gateway config to follow and the router to follow it into, written "
+        "only when ~/.openclaw/openclaw.json is there",
+    ),
+    LaneSwitch(
         "event_judgement (P14a)", "event-judgement-model-config.json", None, False,
         "INT3: written when DALTON_EVENT_JUDGEMENT_MODEL_PROFILE/TIER is set, "
         "and only together with the verifier",

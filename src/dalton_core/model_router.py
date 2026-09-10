@@ -292,8 +292,17 @@ def _profile_wire(data: Mapping[str, Any]) -> dict[str, Any]:
         # field was added is a history that no longer verifies.
         "status",
         "retirement",
+        # P14-M2: optional, and absent means "this model has a rate card".
+        # A model the gateway offers with no published price can still be
+        # registered -- refusing to register it would make it invisible -- but
+        # it may only ever be the last link of a chain, because a call whose
+        # cost cannot be estimated cannot be admitted against a day budget
+        # honestly.  Absent rather than ``unpriced: false`` for the same reason
+        # ``status`` is absent on a live profile: one way to say a thing, so
+        # one content hash.
+        "unpriced",
     }
-    required = keys - {"content_hash", "status", "retirement"}
+    required = keys - {"content_hash", "status", "retirement", "unpriced"}
     obj = _closed(data, allowed=keys, required=required, name="model endpoint profile")
     if obj["schema_version"] != SCHEMA_VERSION:
         raise ModelRouterValidationError("profile schema_version is unsupported")
@@ -388,6 +397,13 @@ def _profile_wire(data: Mapping[str, Any]) -> dict[str, Any]:
             "max_cost_usd": float(limit_cost),
         },
     }
+    unpriced = obj.get("unpriced")
+    if unpriced is not None:
+        if unpriced is not True:
+            raise ModelRouterValidationError(
+                "profile.unpriced is either absent or true; a priced profile omits it"
+            )
+        wire["unpriced"] = True
     status = obj.get("status")
     retirement = obj.get("retirement")
     if status is not None:
@@ -453,6 +469,145 @@ def _fallback_chains_wire(value: Any) -> dict[str, Any]:
     return {"tiers": tiers}
 
 
+PURPOSE_OVERRIDE_MODES: frozenset[str] = frozenset({"tier", "explicit"})
+_PURPOSE_RE = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+
+
+def _purpose_overrides_wire(value: Any) -> dict[str, Any]:
+    """P14-M2: which models one calling stage uses, when the owner has said.
+
+    The tier chains answer "what kind of judgement is this"; an override
+    answers "and for *this* stage, use these models, in this order".  It lives
+    in the policy content rather than in a table of its own for the same reason
+    the chains do: a lane pins a policy version, so a selection that is part of
+    that version is a selection the lane's next call reads, and every earlier
+    version -- the previous selection -- stays byte-identical.  Publishing the
+    old content again is the whole of rollback.
+
+    Two modes and no third.  ``tier`` is "follow the tier", written down rather
+    than left absent so the page can show that the owner looked and chose to
+    follow; ``explicit`` names the chain, first choice first.
+    """
+
+    if not isinstance(value, Mapping) or not value:
+        raise ModelRouterValidationError("purpose_overrides must be a non-empty object")
+    overrides: dict[str, Any] = {}
+    for name, raw in value.items():
+        if not isinstance(name, str) or not _PURPOSE_RE.fullmatch(name):
+            raise ModelRouterValidationError(
+                "a purpose_overrides key is lowercase words joined by _"
+            )
+        entry = _closed(
+            raw,
+            # ``actor_ref`` is optional and is who chose this. It is in the
+            # policy content rather than beside it because the content is what
+            # a route decision hashes: "who had selected this model when this
+            # Claim was produced" is then answerable from the decision alone,
+            # which is the whole reason the selection is a version at all.
+            allowed={"mode", "chain", "actor_ref"},
+            required={"mode"},
+            name=f"purpose_overrides.{name}",
+        )
+        mode = _string(entry["mode"], f"purpose_overrides.{name}.mode")
+        if mode not in PURPOSE_OVERRIDE_MODES:
+            raise ModelRouterValidationError(
+                f"purpose_overrides.{name}.mode is tier or explicit"
+            )
+        actor = entry.get("actor_ref")
+        chosen: dict[str, Any] = {"mode": mode}
+        if mode == "tier":
+            if "chain" in entry:
+                raise ModelRouterValidationError(
+                    f"purpose_overrides.{name} follows its tier and names no chain"
+                )
+        else:
+            refs = _unique_refs(entry.get("chain"), f"purpose_overrides.{name}.chain")
+            if not refs:
+                raise ModelRouterValidationError(
+                    f"purpose_overrides.{name} must name at least one profile"
+                )
+            chosen["chain"] = list(refs)
+        if actor is not None:
+            chosen["actor_ref"] = _string(actor, f"purpose_overrides.{name}.actor_ref")
+        overrides[name] = chosen
+    return {key: overrides[key] for key in sorted(overrides)}
+
+
+def policy_chain(
+    policy: Mapping[str, Any], *, tier: str | None, purpose: str | None = None
+) -> dict[str, Any] | None:
+    """The chain this pinned policy actually runs for one purpose, or ``None``.
+
+    One reader, used by the router when it filters candidates and by the chain
+    walker when it decides what to try next, because two readers of the same
+    rule is how a selection ends up meaning one thing to the filter and another
+    to the walk.  An explicit selection wins over the tier's chain; ``tier``
+    mode is the same answer as no override at all, which is what makes
+    "follow the tier" a real choice rather than the absence of one.
+    """
+
+    overrides = policy.get("purpose_overrides") or {}
+    entry = overrides.get(purpose) if isinstance(purpose, str) else None
+    if isinstance(entry, Mapping) and entry.get("mode") == "explicit":
+        return {"mode": "explicit", "tier": tier, "chain": tuple(entry["chain"])}
+    declared = (policy.get("fallback_chains") or {}).get("tiers", {})
+    if tier is None or tier not in declared:
+        return None
+    return {"mode": "tier", "tier": tier, "chain": tuple(declared[tier])}
+
+
+def live_links(
+    chain: Sequence[str], profiles: Mapping[str, Mapping[str, Any]]
+) -> list[str]:
+    """The links of a chain this Core could actually route to right now."""
+
+    return [
+        profile_id for profile_id in chain
+        if profile_id in profiles and profiles[profile_id].get("status") != "retired"
+    ]
+
+
+def resolve_chain(
+    policy: Mapping[str, Any],
+    *,
+    tier: str | None,
+    purpose: str | None,
+    profiles: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """The chain, after retirement has been taken into account.
+
+    The owner's rule: when the gateway drops a model Dalton was using, the
+    stage falls to the next link by itself.  Most of that is free -- a retired
+    profile is refused as a candidate, so a chain whose *first* link is retired
+    selects its second without anybody doing anything.
+
+    The case that is not free is an explicit selection whose models have *all*
+    gone.  Refusing the call would be silent-by-another-name: the owner chose
+    two models a month ago, the gateway dropped both, and the stage stops.  So
+    the selection is superseded by the tier's own chain -- which is what the
+    stage would have run had nobody selected anything -- and the fact that it
+    happened is carried in ``superseded_chain`` so the notice and the page can
+    both say so.  The selection itself is untouched: it is content of an
+    immutable policy version, and re-selecting is the owner's move.
+    """
+
+    resolved = policy_chain(policy, tier=tier, purpose=purpose)
+    if resolved is None:
+        return None
+    if resolved["mode"] != "explicit" or live_links(resolved["chain"], profiles):
+        return resolved
+    declared = (policy.get("fallback_chains") or {}).get("tiers", {})
+    fallback = tuple(declared.get(tier) or ()) if tier is not None else ()
+    if not fallback or not live_links(fallback, profiles):
+        return resolved
+    return {
+        "mode": "tier_after_retirement",
+        "tier": tier,
+        "chain": fallback,
+        "superseded_chain": list(resolved["chain"]),
+    }
+
+
 def _policy_wire(data: Mapping[str, Any]) -> dict[str, Any]:
     keys = {
         "schema_version",
@@ -467,8 +622,11 @@ def _policy_wire(data: Mapping[str, Any]) -> dict[str, Any]:
         # Optional and omitted when absent, so every policy version registered
         # before chains existed keeps its exact hash.
         "fallback_chains",
+        # P14-M2: the owner's per-stage selection.  Same rule -- omitted when
+        # absent, so no policy version written before selection existed moves.
+        "purpose_overrides",
     }
-    required = keys - {"content_hash", "fallback_chains"}
+    required = keys - {"content_hash", "fallback_chains", "purpose_overrides"}
     obj = _closed(data, allowed=keys, required=required, name="model routing policy")
     if obj["schema_version"] != SCHEMA_VERSION:
         raise ModelRouterValidationError("policy schema_version is unsupported")
@@ -551,6 +709,9 @@ def _policy_wire(data: Mapping[str, Any]) -> dict[str, Any]:
     chains = obj.get("fallback_chains")
     if chains is not None:
         wire["fallback_chains"] = _fallback_chains_wire(chains)
+    overrides = obj.get("purpose_overrides")
+    if overrides is not None:
+        wire["purpose_overrides"] = _purpose_overrides_wire(overrides)
     digest = canonical_hash(wire)
     asserted = obj.get("content_hash")
     if asserted is not None and asserted != digest:
@@ -936,6 +1097,247 @@ class ModelRouter:
             ).fetchall()
         return [json.loads(row["link_json"]) for row in rows]
 
+    def record_allow_decision(
+        self,
+        *,
+        model_ref: str,
+        profile_id: str,
+        actor_ref: str,
+        config_path: str,
+        backup_path: str,
+        diff: Mapping[str, Any],
+        reload_instruction: str,
+    ) -> dict[str, Any]:
+        """P14-M2: append the record of one model being let through the broker.
+
+        Content-addressed on what the decision *is* -- who let which model
+        through which file, and what changed -- and not on the clock, so
+        replaying the same governance call after a dropped reply returns the
+        row that is already there instead of writing a second one.  The backup
+        path is part of the record rather than a log line: the one question
+        anybody asks afterwards is "what did this look like before", and the
+        answer has to be findable from the record itself.
+        """
+
+        model_ref = _string(model_ref, "model_ref")
+        profile_id = _ref(profile_id, "profile_id")
+        actor_ref = _string(actor_ref, "actor_ref")
+        config_path = _string(config_path, "config_path")
+        backup_path = _string(backup_path, "backup_path")
+        reload_instruction = _string(reload_instruction, "reload_instruction")
+        if not isinstance(diff, Mapping):
+            raise ModelRouterValidationError("diff must be an object")
+        identity = {
+            "model_ref": model_ref,
+            "profile_id": profile_id,
+            "actor_ref": actor_ref,
+            "config_path": config_path,
+            "backup_path": backup_path,
+            "diff": json.loads(canonical_json(diff)),
+        }
+        decision_id = f"openclaw-allow-decision:{canonical_hash(identity)[:32]}"
+        now = _timestamp(self._now())
+        record = {
+            "schema_version": SCHEMA_VERSION,
+            "id": decision_id,
+            "created_at": now,
+            "reload_instruction": reload_instruction,
+            **identity,
+        }
+        record["content_hash"] = canonical_hash(record)
+        with self._transaction() as cur:
+            existing = cur.execute(
+                "SELECT decision_json FROM model_openclaw_allow_decisions "
+                "WHERE decision_id=?",
+                (decision_id,),
+            ).fetchone()
+            if existing is not None:
+                return {
+                    "status": "duplicate",
+                    "decision": json.loads(existing["decision_json"]),
+                }
+            cur.execute(
+                "INSERT INTO model_openclaw_allow_decisions "
+                "(decision_id, model_ref, profile_id, actor_ref, config_path, "
+                "backup_path, decision_hash, decision_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    decision_id,
+                    model_ref,
+                    profile_id,
+                    actor_ref,
+                    config_path,
+                    backup_path,
+                    record["content_hash"],
+                    canonical_json(record),
+                    now,
+                ),
+            )
+        return {"status": "fresh", "decision": record}
+
+    def record_fallback_notice(
+        self,
+        *,
+        profile_id: str,
+        purpose: str,
+        tier: str,
+        replacement_profile_id: str | None,
+        reason: str,
+        message: str,
+        detail: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """P14-M2: say once that a stage lost the model it was pointed at.
+
+        Keyed on (model, stage) and on nothing else, deliberately.  The lane
+        that writes this runs every hour and will see the same retirement every
+        hour for as long as the profile stays retired; a notice keyed on the
+        moment would become an hourly alarm, and an alarm that repeats is an
+        alarm that gets muted.  ``duplicate`` is therefore the normal answer
+        after the first hour.
+        """
+
+        profile_id = _ref(profile_id, "profile_id")
+        purpose = _string(purpose, "purpose")
+        tier = _token(tier, "tier")
+        reason = _token(reason, "reason")
+        message = _string(message, "message")
+        if replacement_profile_id is not None:
+            replacement_profile_id = _ref(
+                replacement_profile_id, "replacement_profile_id"
+            )
+        notice_id = ("model-fallback-notice:"
+                     + canonical_hash({"profile_id": profile_id, "purpose": purpose})[:32])
+        now = _timestamp(self._now())
+        notice = {
+            "schema_version": SCHEMA_VERSION,
+            "id": notice_id,
+            "profile_id": profile_id,
+            "purpose": purpose,
+            "tier": tier,
+            "replacement_profile_id": replacement_profile_id,
+            "reason": reason,
+            "message": message,
+            "detail": json.loads(canonical_json(dict(detail or {}))),
+            "created_at": now,
+        }
+        notice["content_hash"] = canonical_hash(notice)
+        with self._transaction() as cur:
+            existing = cur.execute(
+                "SELECT notice_json FROM model_fallback_notices WHERE notice_id=?",
+                (notice_id,),
+            ).fetchone()
+            if existing is not None:
+                return {"status": "duplicate",
+                        "notice": json.loads(existing["notice_json"])}
+            cur.execute(
+                "INSERT INTO model_fallback_notices "
+                "(notice_id, profile_id, purpose, tier, replacement_profile_id, "
+                "reason, notice_hash, notice_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    notice_id,
+                    profile_id,
+                    purpose,
+                    tier,
+                    replacement_profile_id,
+                    reason,
+                    notice["content_hash"],
+                    canonical_json(notice),
+                    now,
+                ),
+            )
+        return {"status": "fresh", "notice": notice}
+
+    def acknowledge_fallback_notice(
+        self, *, notice_id: str, actor_ref: str
+    ) -> dict[str, Any]:
+        """The owner has read one notice.  A second acknowledgement is a no-op."""
+
+        notice_id = _ref(notice_id, "notice_id")
+        actor_ref = _string(actor_ref, "actor_ref")
+        now = _timestamp(self._now())
+        with self._transaction() as cur:
+            row = cur.execute(
+                "SELECT notice_json FROM model_fallback_notices WHERE notice_id=?",
+                (notice_id,),
+            ).fetchone()
+            if row is None:
+                return {"status": "unknown",
+                        "reason": f"there is no notice {notice_id}"}
+            existing = cur.execute(
+                "SELECT actor_ref, created_at FROM model_fallback_notice_acks "
+                "WHERE notice_id=?",
+                (notice_id,),
+            ).fetchone()
+            if existing is not None:
+                return {
+                    "status": "duplicate",
+                    "notice": json.loads(row["notice_json"]),
+                    "acknowledged_by": existing["actor_ref"],
+                    "acknowledged_at": existing["created_at"],
+                }
+            cur.execute(
+                "INSERT INTO model_fallback_notice_acks "
+                "(notice_id, actor_ref, created_at) VALUES (?, ?, ?)",
+                (notice_id, actor_ref, now),
+            )
+        return {
+            "status": "acknowledged",
+            "notice": json.loads(row["notice_json"]),
+            "acknowledged_by": actor_ref,
+            "acknowledged_at": now,
+        }
+
+    def fallback_notices(self, *, open_only: bool = False) -> list[dict[str, Any]]:
+        """Every notice, newest first, each carrying its acknowledgement.
+
+        A database opened read-only never runs the schema script, so a router
+        written before these tables existed does not have them.  "No table" is
+        answered as "no notices" rather than as an error, because the caller is
+        the owner's page and a page that fails on an older installation is a
+        page that says nothing about the models either.
+        """
+        try:
+            rows = self.connection.execute(
+                "SELECT n.notice_json, a.actor_ref AS ack_actor, "
+                "a.created_at AS ack_at FROM model_fallback_notices n "
+                "LEFT JOIN model_fallback_notice_acks a ON a.notice_id=n.notice_id "
+                "ORDER BY n.notice_sequence DESC"
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            return []
+        notices: list[dict[str, Any]] = []
+        for row in rows:
+            if open_only and row["ack_actor"] is not None:
+                continue
+            notices.append({
+                **json.loads(row["notice_json"]),
+                "acknowledged_by": row["ack_actor"],
+                "acknowledged_at": row["ack_at"],
+            })
+        return notices
+
+    def allow_decisions(self, *, limit: int | None = None) -> list[dict[str, Any]]:
+        """Every recorded allow decision, newest first."""
+
+        sql = ("SELECT decision_json FROM model_openclaw_allow_decisions "
+               "ORDER BY decision_sequence DESC")
+        parameters: tuple[Any, ...] = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            parameters = (_positive_int(limit, "limit"),)
+        try:
+            rows = self.connection.execute(sql, parameters).fetchall()
+        except sqlite3.OperationalError as exc:
+            # Same reasoning as fallback_notices: a router from before this
+            # table existed has no decisions rather than an error.
+            if "no such table" not in str(exc):
+                raise
+            return []
+        return [json.loads(row["decision_json"]) for row in rows]
+
     @staticmethod
     def _work_wire(work_order: WorkOrder | Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(work_order, WorkOrder):
@@ -1098,6 +1500,7 @@ class ModelRouter:
         previous_decision_ref: str | None = None,
         producer_family: str | None = None,
         tier: str | None = None,
+        purpose: str | None = None,
     ) -> dict[str, Any]:
         """Persist one deterministic route decision.
 
@@ -1144,6 +1547,11 @@ class ModelRouter:
             producer_family = _token(producer_family, "producer_family")
         if tier is not None:
             tier = _token(tier, "tier")
+        if purpose is not None:
+            if not _PURPOSE_RE.fullmatch(_string(purpose, "purpose")):
+                raise ModelRouterValidationError(
+                    "a purpose is lowercase words joined by _"
+                )
         request = {
             "work_order_hash": canonical_hash(wire),
             "work_order_ref": wire["id"],
@@ -1166,10 +1574,37 @@ class ModelRouter:
             # exactly. Which link of which chain served is recorded next to the
             # decision, in model_route_chain_links.
             request["tier"] = tier
-        request_hash = canonical_hash(request)
         now_dt = self._now()
         now = _timestamp(now_dt)
         with self._transaction() as cur:
+            # The policy is read before the request identity is settled,
+            # because whether the purpose belongs in that identity depends on
+            # what the policy says about it -- see below.
+            policy_row = cur.execute(
+                "SELECT policy_json FROM model_routing_policy_versions "
+                "WHERE policy_version_ref=?",
+                (policy_version_ref,),
+            ).fetchone()
+            if policy_row is None:
+                raise RoutingPolicyNotFound(str(policy_version_ref))
+            policy = json.loads(policy_row["policy_json"])
+            if purpose is not None and (
+                policy.get("purpose_overrides") or {}
+            ).get(purpose) is not None:
+                # P14-M2. The purpose joins the request identity only when this
+                # policy version actually carries a selection for it, and then
+                # for a reason: the same work under a different selection is a
+                # different request, and without this the idempotency cache
+                # would answer the new selection with the old model.
+                #
+                # Only *then*, though. Adding it unconditionally would change
+                # the identity of every route request ever made, so replaying a
+                # work order from before selection existed would hash
+                # differently, come back ``conflict``, and stop a lane that had
+                # done nothing wrong. A policy with no override for this purpose
+                # routes exactly as it did before selection existed.
+                request["purpose"] = purpose
+            request_hash = canonical_hash(request)
             prior_idempotency = cur.execute(
                 "SELECT request_hash, result_json FROM model_route_idempotency "
                 "WHERE idempotency_key=?",
@@ -1184,14 +1619,6 @@ class ModelRouter:
                     "status": "conflict",
                     "reason": "idempotency key already belongs to another route request",
                 }
-            policy_row = cur.execute(
-                "SELECT policy_json FROM model_routing_policy_versions "
-                "WHERE policy_version_ref=?",
-                (policy_version_ref,),
-            ).fetchone()
-            if policy_row is None:
-                raise RoutingPolicyNotFound(str(policy_version_ref))
-            policy = json.loads(policy_row["policy_json"])
             _previous, switch_exclusions = self._assert_transition(
                 cur,
                 decision_kind=decision_kind,
@@ -1218,21 +1645,26 @@ class ModelRouter:
             ):
                 global_reasons.append("producer_family_required")
             chain_positions: dict[str, int] | None = None
+            live_chain: list[str] = []
+            latest_profiles = self._latest_profiles(cur)
+            by_id = {profile["id"]: profile for profile in latest_profiles}
             if tier is not None:
-                chains = policy.get("fallback_chains")
-                declared = (chains or {}).get("tiers", {})
-                if tier not in declared:
+                resolved = resolve_chain(
+                    policy, tier=tier, purpose=purpose, profiles=by_id
+                )
+                if resolved is None:
                     global_reasons.append("tier_not_declared_by_policy")
                 else:
                     chain_positions = {
                         profile_id: index
-                        for index, profile_id in enumerate(declared[tier])
+                        for index, profile_id in enumerate(resolved["chain"])
                     }
+                    live_chain = live_links(resolved["chain"], by_id)
             required_modality_set = set(modalities) | set(filters["required_modalities"])
             supplied_slots = set(slots)
             candidates: list[dict[str, Any]] = []
             snapshot: list[dict[str, Any]] = []
-            for profile in self._latest_profiles(cur):
+            for profile in latest_profiles:
                 reasons = list(global_reasons)
                 if profile["profile_version_ref"] in switch_exclusions:
                     reasons.append("already_tried_in_switch_chain")
@@ -1240,6 +1672,21 @@ class ModelRouter:
                     reasons.append("profile_retired")
                 if chain_positions is not None and profile["id"] not in chain_positions:
                     reasons.append("profile_not_in_tier_chain")
+                if profile.get("unpriced"):
+                    # P14-M2. A model with no published rate card is registered
+                    # at a declared ceiling rather than at its real price, so it
+                    # is allowed exactly one place: the end of a chain, where
+                    # the choice is between an over-reserved answer and no
+                    # answer at all.
+                    #
+                    # "The end" means the end of what can still be reached.
+                    # Measured over the declared chain instead, an unpriced
+                    # model sitting in front of a retired one would be refused
+                    # for not being last while being the only thing left.
+                    if chain_positions is None:
+                        reasons.append("unpriced_model_requires_chain")
+                    elif not live_chain or profile["id"] != live_chain[-1]:
+                        reasons.append("unpriced_model_not_last_link")
                 if capability not in profile["capabilities"]:
                     reasons.append("capability_not_supported")
                 if not required_modality_set.issubset(set(profile["modalities"])):

@@ -37,7 +37,7 @@ from typing import Any
 
 from .cockpit_model import purposes, register_purpose
 from .model_accounting import ModelAccountingError, _route_estimate_micros
-from .model_router import ModelRouter
+from .model_router import ModelRouter, live_links, policy_chain, resolve_chain
 
 
 class FallbackChainError(RuntimeError):
@@ -308,6 +308,118 @@ def fallback_chains() -> dict[str, Any]:
     return {"tiers": {tier: list(chain) for tier, chain in _TIER_CHAINS.items()}}
 
 
+def profile_families(router: ModelRouter) -> dict[str, dict[str, Any]]:
+    """Every profile id this Core holds, at its latest version, by id."""
+
+    return {profile["id"]: profile for profile in router.latest_profiles()}
+
+
+def effective_chain(
+    policy: Mapping[str, Any],
+    purpose: str,
+    *,
+    tier: str | None = None,
+    profiles: Mapping[str, Mapping[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """What this purpose actually runs under this pinned policy version.
+
+    ``mode`` is ``explicit`` when the owner named the models for this stage and
+    ``tier`` when the stage follows its tier's chain -- which is also what an
+    unselected stage does, so the page can say "跟随档位" without having to
+    distinguish "nobody looked" from "somebody looked and left it".
+
+    Given ``profiles`` -- this Core's catalog at its latest versions -- a third
+    mode is reachable: ``tier_after_retirement``, when every model the owner
+    selected has been retired and the stage has fallen back to its tier's own
+    chain rather than stopping.
+    """
+
+    tier = tier or tier_for(purpose)
+    resolved = (
+        policy_chain(policy, tier=tier, purpose=purpose) if profiles is None
+        else resolve_chain(policy, tier=tier, purpose=purpose, profiles=profiles)
+    )
+    if resolved is None:
+        # The policy carries no chain for this tier: the single-shot path.
+        return {"mode": "tier", "tier": tier, "chain": list(tier_chain(tier)),
+                "declared": False, "superseded_chain": None}
+    return {"mode": resolved["mode"], "tier": tier,
+            "chain": list(resolved["chain"]), "declared": True,
+            "superseded_chain": resolved.get("superseded_chain")}
+
+
+def validate_selection(
+    router: ModelRouter,
+    *,
+    purpose: str,
+    mode: str,
+    chain: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Refuse a selection that would be dishonest, and say why in one sentence.
+
+    Three refusals, each of which is a property of the *selection* rather than
+    of the call it will later make, which is why they are checked here rather
+    than being discovered at three in the morning by a lane.
+
+    * A model this Core has no profile for, or has retired, cannot be chosen:
+      routing would refuse it and the owner would have chosen nothing.
+    * An unpriced model anywhere but the end of the chain would put a call
+      whose cost cannot be estimated in front of models whose cost can.
+    * A verifier stage may not be given the producer's own model family. That
+      constraint is the reason the verifier tier exists, and an override is
+      exactly the move that would quietly undo it.
+    """
+
+    tier = tier_for(purpose)
+    if mode not in {"tier", "explicit"}:
+        raise FallbackChainError("a selection either follows the tier or names a chain")
+    if mode == "tier":
+        if chain:
+            raise FallbackChainError(
+                "following the tier means not naming models; clear the list or "
+                "choose to name them"
+            )
+        return {"purpose": purpose, "tier": tier, "mode": "tier",
+                "chain": list(tier_chain(tier))}
+    links = [str(item) for item in chain]
+    if not links:
+        raise FallbackChainError("name at least one model, first choice first")
+    if len(set(links)) != len(links):
+        raise FallbackChainError("the same model twice in one chain is not a fallback")
+    held = profile_families(router)
+    for profile_id in links:
+        profile = held.get(profile_id)
+        if profile is None:
+            raise FallbackChainError(
+                f"{profile_id} has no profile on this machine; the catalog lane "
+                "registers a model before it can be chosen"
+            )
+        if profile.get("status") == "retired":
+            raise FallbackChainError(
+                f"{profile_id} has been retired -- the gateway no longer offers it"
+            )
+    for position, profile_id in enumerate(links, start=1):
+        if held[profile_id].get("unpriced") and position != len(links):
+            raise FallbackChainError(
+                f"{profile_id} has no published price, so it can only be the last "
+                "resort; put it at the end of the chain or leave it out"
+            )
+    if tier == TIER_VERIFIER:
+        producers = {
+            held[profile_id]["family"]
+            for profile_id in tier_chain(TIER_BRAIN)
+            if profile_id in held
+        }
+        first = held[links[0]]["family"]
+        if first in producers:
+            raise FallbackChainError(
+                f"{links[0]} is in the {first} family, which is what produces the "
+                "work this stage checks; a verifier from the producer's own family "
+                "is not an independent check -- choose a different family"
+            )
+    return {"purpose": purpose, "tier": tier, "mode": "explicit", "chain": links}
+
+
 def may_fall_back(failure_class: str) -> bool:
     """Whether this failure lets the chain try the next link."""
 
@@ -397,7 +509,19 @@ def execute_chain(
     """
 
     tier = tier or tier_for(purpose)
-    chain = tier_chain(tier)
+    # P14-M2: the chain comes out of the pinned policy version, so an owner's
+    # selection is in force on the next call rather than on the next restart --
+    # and so the chain the walk follows is the same one the router filters
+    # against.  A policy that declares no chain for this tier leaves the code's
+    # own chain in place, which is what every installation did before selection
+    # existed.
+    try:
+        policy = router.get_policy(policy_version_ref)
+    except Exception:  # noqa: BLE001 - route() raises the readable error below
+        policy = {}
+    held = profile_families(router)
+    resolved = resolve_chain(policy, tier=tier, purpose=purpose, profiles=held)
+    chain = tuple(resolved["chain"]) if resolved is not None else tier_chain(tier)
     # Independence is measured against the producer's own route decision, so a
     # verification cannot be told a producer it did not have.
     producer_family = (
@@ -405,6 +529,45 @@ def execute_chain(
         if producer_decision_ref is not None
         else None
     )
+    if producer_family is not None:
+        # The router refuses a same-family candidate one at a time, which for a
+        # chain whose every link is the producer's family reads as "no link is
+        # routable" -- true, and useless. Said once, in front, it reads as what
+        # it is: this stage was pointed at the family it is supposed to check.
+        #
+        # Measured against the links that are still *live*, because the case
+        # this has to catch is the one the owner named: the gateway drops the
+        # only independent verifier and the remaining links are all the
+        # producer's family. Falling through to them would leave the work
+        # verified in name only, which is worse than not verified at all.
+        available = live_links(chain, held)
+        independent = [
+            profile_id for profile_id in available
+            if (held.get(profile_id) or {}).get("family") != producer_family
+        ]
+        if not independent:
+            gone = [profile_id for profile_id in chain if profile_id not in available]
+            return {
+                "status": "refused",
+                "tier": tier,
+                "purpose": purpose,
+                "reason": "verifier_not_independent",
+                "message": (
+                    f"no model left for {purpose} is independent of the "
+                    f"{producer_family} family that produced the work being "
+                    "checked"
+                    + (
+                        f"; {', '.join(gone)} has been retired" if gone
+                        else ""
+                    )
+                    + " -- choose a model from a different family on the cockpit's "
+                    "model page"
+                ),
+                "chain": list(chain),
+                "retired_links": gone,
+                "links": [],
+                "served": None,
+            }
     links: list[dict[str, Any]] = []
     previous_decision_ref: str | None = None
     for step in range(1, len(chain) + 1):
@@ -423,6 +586,7 @@ def execute_chain(
             previous_decision_ref=previous_decision_ref,
             producer_family=producer_family,
             tier=tier,
+            purpose=purpose,
         )
         if result.get("status") == "conflict":
             raise FallbackChainError(result.get("reason", "route request conflicted"))
@@ -526,12 +690,93 @@ def execute_chain(
     }
 
 
+def _link_cost_usd(router: ModelRouter, link: Mapping[str, Any]) -> str | None:
+    """What the served link's own route decision estimated it would cost.
+
+    Read off the decision's candidate snapshot rather than recomputed, so the
+    number on the page is the number the budget was admitted against.
+    """
+
+    try:
+        decision = router.get_decision(str(link["decision_id"]))
+    except Exception:  # noqa: BLE001 - a missing decision is a blank cell
+        return None
+    selected = decision.get("selected_profile_version_ref")
+    for item in decision.get("candidate_snapshot") or []:
+        if item.get("profile_version_ref") == selected:
+            return item.get("estimated_cost_usd")
+    return None
+
+
+def purpose_selection(
+    router: ModelRouter,
+    *,
+    policy: Mapping[str, Any] | None = None,
+    links: Sequence[Mapping[str, Any]] = (),
+) -> list[dict[str, Any]]:
+    """P14-M2: one row per calling stage -- tier, effective chain, last served.
+
+    This is the table the owner picks from, so it answers the three questions
+    a choice needs: what kind of judgement this stage is (its tier), which
+    models it will actually reach and in what order (the effective chain, which
+    is the tier's unless the owner has said otherwise), and what happened last
+    time, including which link answered and what that link cost.
+    """
+
+    held = profile_families(router)
+    served_by_purpose: dict[str, Mapping[str, Any]] = {}
+    for link in links:
+        if link.get("served"):
+            served_by_purpose[str(link["purpose"])] = link
+    rows: list[dict[str, Any]] = []
+    for purpose, tier in sorted(_PURPOSE_TIERS.items()):
+        resolved = (
+            effective_chain(policy, purpose, tier=tier, profiles=held)
+            if policy is not None
+            else {"mode": "tier", "tier": tier, "chain": list(tier_chain(tier)),
+                  "declared": False, "superseded_chain": None}
+        )
+        chain = resolved["chain"]
+        served = served_by_purpose.get(purpose)
+        rows.append({
+            "purpose": purpose,
+            "tier": tier,
+            "mode": resolved["mode"],
+            # What the owner had selected, when every model in it has been
+            # retired and the stage has fallen back to its tier's chain.
+            "superseded_chain": resolved.get("superseded_chain"),
+            "live_chain": live_links(chain, held),
+            "chain": [
+                {
+                    "position": position,
+                    "profile_id": profile_id,
+                    "registered": profile_id in held,
+                    "status": (held.get(profile_id) or {}).get("status", "live"),
+                    "family": (held.get(profile_id) or {}).get("family"),
+                    "unpriced": bool((held.get(profile_id) or {}).get("unpriced")),
+                }
+                for position, profile_id in enumerate(chain, start=1)
+            ],
+            "last_served": (
+                None if served is None else {
+                    "profile_id": served["profile_id"],
+                    "chain_position": served["chain_position"],
+                    "decision_id": served["decision_id"],
+                    "created_at": served["created_at"],
+                    "estimated_cost_usd": _link_cost_usd(router, served),
+                }
+            ),
+        })
+    return rows
+
+
 def routing_overview(
     router: ModelRouter,
     *,
     openclaw_config: Mapping[str, Any] | None = None,
     checked_at: datetime | None = None,
     work_order_id: str | None = None,
+    policy_version_ref: str | None = None,
 ) -> dict[str, Any]:
     """What the cockpit or a report shows: tiers, chains, last served, sync.
 
@@ -582,12 +827,23 @@ def routing_overview(
                 if link["tier"] == tier and not link["served"]
             ],
         }
+    policy: dict[str, Any] | None = None
+    if policy_version_ref is not None:
+        try:
+            policy = router.get_policy(policy_version_ref)
+        except Exception:  # noqa: BLE001 - an unreadable pin is an empty column
+            policy = None
     overview: dict[str, Any] = {
         "schema_version": "0.1",
         "purpose_tiers": dict(_PURPOSE_TIERS),
         "unmapped_purposes": list(unmapped_purposes()),
         "tiers": tiers,
         "catalog": None,
+        # P14-M2: the per-stage view, and the pin it was resolved against, so a
+        # reader can tell "the owner chose this" from "this is the tier".
+        "policy_version_ref": policy_version_ref,
+        "purpose_overrides": dict((policy or {}).get("purpose_overrides") or {}),
+        "purposes": purpose_selection(router, policy=policy, links=links),
     }
     if openclaw_config is not None:
         from .openclaw_catalog_reconcile import catalog_sync_status
@@ -611,8 +867,12 @@ __all__ = [
     "execute_chain",
     "fallback_chains",
     "may_fall_back",
+    "purpose_selection",
     "purpose_tiers",
+    "effective_chain",
+    "profile_families",
     "register_purpose_tier",
+    "validate_selection",
     "classify_model_failure",
     "reserved_micros",
     "routing_overview",

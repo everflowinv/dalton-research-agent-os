@@ -802,6 +802,15 @@ class AgendaControlApplication:
         # Tailscale-derived principal, like every other cockpit decision.
         if action == "feedback":
             return plane.record_feedback(login, value)
+        # P14-M2: the three model decisions. All three go back out through the
+        # writer as the owner's principal; the cockpit process holds no write
+        # handle to the Core or to the host configuration (ADR-0006).
+        if action == "model_select":
+            return plane.select_model(login, value)
+        if action == "model_allow":
+            return plane.allow_model(login, value)
+        if action == "model_notice_ack":
+            return plane.acknowledge_model_notice(login, value)
         raise CockpitError("unknown cockpit action")
 
     def cockpit_view(self, path: str, login: str, query: Mapping[str, str]) -> dict[str, Any]:
@@ -840,6 +849,10 @@ class AgendaControlApplication:
         # the model side. The owner asked for the first table by name.
         if path == "/v1/cockpit/sources":
             return {**plane.sources(), "enabled": True}
+        # P14-M2: which model each calling stage uses, what the gateway has that
+        # Dalton has not been let at, and what changed underneath us.
+        if path == "/v1/cockpit/models":
+            return {**plane.models(), "enabled": True}
         # INT2 / Q2: 每周回头看 -- the latest week's "我们把时间花在哪".
         if path == "/v1/cockpit/reflection":
             return {**plane.cycle_reflection(), "enabled": True}

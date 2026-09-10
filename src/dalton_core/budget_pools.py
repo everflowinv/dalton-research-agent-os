@@ -163,9 +163,13 @@ LANE_POOLS: dict[str, str] = {
     # Keeping the shelves tidy.
     "dispatch_claim_review": "maintenance",
     "dispatch_claim_index": "maintenance",
+    # P14-M2: following the gateway's model catalog. Maintenance because it is
+    # bookkeeping -- it makes no model call at all -- and because the day a
+    # provider outage makes the coverage pool precious is exactly the day this
+    # lane must still be able to notice a model has gone.
+    "dispatch_catalog_sync": "maintenance",
     # -- not registered yet -------------------------------------------------
     "dispatch_market_events": "event_response",
-    "dispatch_catalog_sync": "maintenance",
     "dispatch_research_reflection": "maintenance",
     "dispatch_claim_retirement": "maintenance",
 }

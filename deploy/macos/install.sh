@@ -560,6 +560,20 @@ if [[ -f "$HOME/.openclaw/openclaw.json" ]]; then
     echo "Fix the OpenClaw config or the router, then re-run install.sh." >&2
     exit 1
   fi
+  # P14-M2: the hourly catalog lane's switch, and its whole configuration. It
+  # is one file for the same reason the tracking policy is: all-or-nothing is
+  # then automatic, and a Core installed without the gateway has nothing to
+  # follow and gets no lane. Both paths are named rather than derived, because
+  # a Dalton process must not go looking for the host's OpenClaw configuration
+  # on its own. Idempotent: an existing file is left exactly as it is, so an
+  # owner who repointed it at another gateway config keeps their edit.
+  model_catalog_file="$state_dir/model-catalog-sync.json"
+  if [[ ! -f "$model_catalog_file" ]]; then
+    printf '{\n  "model_router_db": "%s",\n  "openclaw_config_path": "%s"\n}\n' \
+      "$state_dir/model-router.sqlite" "$HOME/.openclaw/openclaw.json" \
+      > "$model_catalog_file"
+    chmod 600 "$model_catalog_file"
+  fi
 fi
 # P13k: the planner's model, only when the owner names one. It decides what the
 # research works on next, so it routes through its own policy rather than

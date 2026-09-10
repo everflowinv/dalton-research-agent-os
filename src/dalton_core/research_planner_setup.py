@@ -118,8 +118,14 @@ def ensure_planner_policy(
         {"field": "estimated_cost_usd", "direction": "asc"},
         {"field": "profile_version_ref", "direction": "asc"},
     ]
+    overrides = None
     if row is not None:
         latest = json.loads(row["policy_json"])
+        # P14-M2: the owner's per-stage selection rides forward. This runs
+        # again on every deploy, and rebuilding the content from the code's
+        # defaults would drop ``purpose_overrides`` -- so re-running the
+        # installer would quietly undo every model choice the owner had made.
+        overrides = latest.get("purpose_overrides")
         if canonical_json(latest["filters"]) == canonical_json(filters) and \
                 canonical_json(latest["ordered_preferences"]) == canonical_json(preferences) and \
                 canonical_json(latest.get("fallback_chains")) == canonical_json(chains):
@@ -140,6 +146,8 @@ def ensure_planner_policy(
     }
     if chains is not None:
         wire["fallback_chains"] = chains
+    if overrides:
+        wire["purpose_overrides"] = overrides
     wire["content_hash"] = content_hash(wire)
     result = router.register_policy(wire)
     return {"status": result.get("status", "fresh"),

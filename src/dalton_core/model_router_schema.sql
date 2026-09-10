@@ -153,3 +153,96 @@ CREATE TRIGGER IF NOT EXISTS model_chain_link_no_delete
 BEFORE DELETE ON model_route_chain_links BEGIN
     SELECT RAISE(ABORT, 'model route chain links are append-only');
 END;
+
+-- P14-M2: the owner let one more of the gateway's models through to Dalton.
+-- Writing the broker's plugin subtree in ~/.openclaw/openclaw.json is a change
+-- to a file outside this repository's authorities, so the record of it has to
+-- live somewhere that cannot be quietly edited: which model, who decided, what
+-- the backup was called, and exactly which keys moved.  It sits in the router's
+-- own database because that is where the consequence lands -- the catalog lane
+-- registers a profile for the model on its next run -- and because a new
+-- database would be a new schema file for a table with a handful of rows.
+CREATE TABLE IF NOT EXISTS model_openclaw_allow_decisions (
+    decision_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    decision_id TEXT NOT NULL UNIQUE,
+    model_ref TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    actor_ref TEXT NOT NULL,
+    config_path TEXT NOT NULL,
+    backup_path TEXT NOT NULL,
+    decision_hash TEXT NOT NULL UNIQUE,
+    decision_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS model_allow_decision_insert_authorized
+BEFORE INSERT ON model_openclaw_allow_decisions
+WHEN dalton_model_router_authorized() != 1 BEGIN
+    SELECT RAISE(ABORT, 'openclaw allow decisions require ModelRouter');
+END;
+CREATE TRIGGER IF NOT EXISTS model_allow_decision_no_update
+BEFORE UPDATE ON model_openclaw_allow_decisions BEGIN
+    SELECT RAISE(ABORT, 'openclaw allow decisions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS model_allow_decision_no_delete
+BEFORE DELETE ON model_openclaw_allow_decisions BEGIN
+    SELECT RAISE(ABORT, 'openclaw allow decisions are append-only');
+END;
+
+-- P14-M2: the gateway stopped offering a model a calling stage was pointed at,
+-- and the chain fell to the next link on its own.  Falling over silently is the
+-- failure mode this table exists to prevent: the work carries on, so nothing
+-- breaks, and six weeks later a Claim was produced by a model nobody chose.
+-- One row per (model, stage) -- the id is derived from exactly that pair, so an
+-- hourly lane that sees the same retirement every hour writes it once.
+CREATE TABLE IF NOT EXISTS model_fallback_notices (
+    notice_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    notice_id TEXT NOT NULL UNIQUE,
+    profile_id TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    tier TEXT NOT NULL,
+    replacement_profile_id TEXT,
+    reason TEXT NOT NULL,
+    notice_hash TEXT NOT NULL UNIQUE,
+    notice_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(profile_id, purpose)
+);
+
+-- Acknowledgement is a second row rather than a column, because every other
+-- table in this database is append-only and a notice that could be updated in
+-- place would be the one record here whose history is erasable.
+CREATE TABLE IF NOT EXISTS model_fallback_notice_acks (
+    ack_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    notice_id TEXT NOT NULL UNIQUE REFERENCES model_fallback_notices(notice_id),
+    actor_ref TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS model_fallback_notice_insert_authorized
+BEFORE INSERT ON model_fallback_notices
+WHEN dalton_model_router_authorized() != 1 BEGIN
+    SELECT RAISE(ABORT, 'model fallback notices require ModelRouter');
+END;
+CREATE TRIGGER IF NOT EXISTS model_fallback_notice_no_update
+BEFORE UPDATE ON model_fallback_notices BEGIN
+    SELECT RAISE(ABORT, 'model fallback notices are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS model_fallback_notice_no_delete
+BEFORE DELETE ON model_fallback_notices BEGIN
+    SELECT RAISE(ABORT, 'model fallback notices are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS model_fallback_ack_insert_authorized
+BEFORE INSERT ON model_fallback_notice_acks
+WHEN dalton_model_router_authorized() != 1 BEGIN
+    SELECT RAISE(ABORT, 'model fallback acknowledgements require ModelRouter');
+END;
+CREATE TRIGGER IF NOT EXISTS model_fallback_ack_no_update
+BEFORE UPDATE ON model_fallback_notice_acks BEGIN
+    SELECT RAISE(ABORT, 'model fallback acknowledgements are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS model_fallback_ack_no_delete
+BEFORE DELETE ON model_fallback_notice_acks BEGIN
+    SELECT RAISE(ABORT, 'model fallback acknowledgements are append-only');
+END;
