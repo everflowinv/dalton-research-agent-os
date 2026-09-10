@@ -3,7 +3,7 @@
 日期：2026-09-09
 分支：`w2-consensus`（worktree `~/Projects/dalton-w2-consensus-worktree`）
 分叉基线：worktree HEAD `eaf48f0`（已含 main `7708d43` 与 `6da8f82`）；交付前 `git merge main`
-全量测试：见 §7，`Ran N ... / OK` 逐字粘在那一节
+全量测试：`Ran 4521 tests in 585.006s` / `OK (skipped=1)`（合并 main `eb8e5fb` 之后；逐字见 §7）
 
 ---
 
@@ -25,7 +25,10 @@ Dalton 现在知道街上怎么想：一条 append-only 的 `ConsensusEstimateVe
 | `c09b3c5` | `StreetEstimateClaim` + schema + 首页抽取 + 第三种 grade + `broker-estimate` basis |
 | `29ae3ef` | lane + 子进程 CLI + launcher + `model_input` 的 consensus 角色 |
 | `b3a6f39` | 测试（四个文件） |
-| （本报告）| CLI 测试与报告 |
+| `426b13a` | CLI 测试与本报告 |
+| `a862929` | lane 的两项登记：`MigrationSpec` + cockpit lane 标签 |
+| `c24310a` | `git merge main`（迁移清单已按字母序，两条 spec 就位；`bootstrap.py` 同样两行） |
+| `181cd73` | P15d 的 consensus reader 现在能解析到东西（模块级 `latest_consensus`） |
 
 未推送。未部署。未写 live 状态。未发布 mission 版本。未做任何真实模型调用。
 
@@ -281,7 +284,25 @@ enum，`TASK_HASH` 由 schema 哈希得来。因此该 pass 的 task hash 变一
 - 研报抽取的拒绝分布本身是有信息量的：`multi_company_report` 占多数说明素材以行业报告为主，这直接支持
   「AlphaEngine 配额要不要调」这个决定。
 
-### 5.7 模型路径（未接线）
+### 5.7 P15d 的 conviction call 现在读得到 consensus（已完成）
+
+P15d 的 `conviction_call_cli.consensus_gap` 是在本片还不存在时写的：它**按名字**在调用时查
+`dalton_core.consensus_estimate.latest_consensus(store, company_ref)`，而不是 import，「这样这条 lane 会在那个
+权威落地的当天自己开始工作」。那一天到了，所以函数写在本片而不是去改那条 lane。
+
+它回答的是「我们的预测 vs 街上的预测」，需要两边。街上那边是本片；我们那边是 forecast model，两者用**唯一
+一件不需要共享词表就能对上的东西**连接：**财季/财年的结束日**——本片从公司自己的申报算出它，forecast model
+的每个 cell 上都带着它。用标签匹配不行：`FY2027` 在本片有精确含义，而它不是 forecast model 给自己的列起的
+名字，按猜测连接就是把 gap 算到错误的年份上。
+
+没有预测、或没有重叠期间，报成**缺失**而绝不报成一致——一份 conviction call 如果 consensus 段落悄悄消失，
+读起来就是「我们和街上看法一致」，而那正是它绝不能不小心说出口的一句话。
+
+那条 lane 的三个测试随之移动：一个原本断言理由里写着「P11b 还不存在」，现在写的是「这家公司还没有
+consensus」——同一个答案、同一个理由；另外两个把假模块只塞进 `sys.modules`，在真模块不存在时够用，在它存在
+的当天就不够了（`from . import consensus_estimate` 走的是 package 属性），改成两处一起替换。
+
+### 5.8 模型路径（未接线）
 
 `street_estimate_extraction` 交付了 estimates table 的模型面（`build_request` / `build_prompt` /
 `verify_estimate_table`，冻结 `TASK_HASH`，purpose `street_estimate`——`model_fallback_chain` 里已有
@@ -350,7 +371,9 @@ tests/test_consensus_estimate_cli.py       11 项
 全量：
 
 ```
-PASTE_FULL_SUITE_HERE
+Ran 4521 tests in 585.006s
+
+OK (skipped=1)
 ```
 
 ---
