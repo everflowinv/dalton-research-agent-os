@@ -131,3 +131,14 @@ Next: accept final full-suite receipt, deploy and verify installed bytes/mission
 - Old thesis-impact policy supersession remains a separate human decision. Advanced investment/narrative/Bayesian capability remains design-only until foundational research works end to end.
 
 Next: complete BUSY recovery, truthful task summaries and extraction retry diagnosis, then accept a new frozen release and observe genuine scheduled products. Preserve original main worktree's unrelated DeepSeek edits. Completed temporary rehearsal state was removed to free disk; reports and live backups retained.
+
+## 20:34 UTC — actual adapter boundary and foundational product gaps
+
+- Integrated extraction config-fingerprint recovery, truthful dossier/event/debate/conviction failure summaries, exact BUSY classification and one-time recovery of legacy misclassified terminal work. Root integration: 254 model/adapter/dossier/event tests and 89 extraction tests passed. A real Cockpit→router→Unix-socket adapter→Scheduler replay regression now verifies provider contracts across the full local boundary.
+- Offline installer-style policy append preserves all 11 selected verifier chains and their override wires (83 tests); a private read-only predeployment snapshot captures 12 configs' purpose selections and budget overrides for comparison after the next install.
+- Actual installed Google host validator rejected unsupported schema keywords before network, surfacing only HOST_COMPLETION_FAILED. Portable contracts are now integrated and passed the installed validator at a fake countTokens seam. Domain constraints remain mandatory; final equivalence review is in progress before freeze.
+- New 20:30 UTC product audit still finds 0/15. Five current model specs do not mean five forecast models: forecast_model_versions is empty. ACN/CTSH/EPAM/DXC have statement dimension/segment integrity holds; IBM lacks a quarterly-history filed revenue driver. Sol is investigating representative data/selection causes without relaxing accounting invariants.
+- CTSH remains at 1/4 consecutive qualifying earnings periods. The unrefreshed extraction hold is code-repaired but not live yet. Price, consensus and valuation remain absent; three yfinance capabilities are still proposed, not approved. Human source decisions remain distinct from deployment authorization.
+- Capacity audit found a second limit: an extended BUSY episode can exhaust the Scheduler and later replay a terminal result indefinitely. A bounded, configurable recovery extension is being developed separately; it does not delay accepting the already-proven host-contract fix.
+
+Next: finish strict-parser equivalence review, freeze and deploy this runtime boundary repair, preserve owner selections and mission, and observe actual scheduled results. Continue model-integrity and extended-capacity recovery as foundational work; no higher-order investment methods are being implemented.
