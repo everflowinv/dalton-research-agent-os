@@ -163,6 +163,11 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(held["status"], "held")
         self.assertIn("model_run", held["reason"])
         self.assertEqual(len(self.launcher.started), 1)
+        self.assertEqual(
+            held["settled"]["failure"]["failure_class"], "not_permitted")
+        self.mission = {**self.mission, "id": self.mission["id"] + ":updated"}
+        self.assertEqual(self.lane.dispatch_once()["status"], "launched")
+        self.assertEqual(self.lane.budget.permission_items(), [])
 
     def test_a_failed_child_with_no_summary_spends_one_transient_retry(self):
         first = self.lane.dispatch_once()

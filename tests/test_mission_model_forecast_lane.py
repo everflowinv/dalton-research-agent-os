@@ -173,6 +173,11 @@ class LaneTests(unittest.TestCase):
         self.assertEqual(held["status"], "held")
         self.assertIn("forecast_line", held["reason"])
         self.assertEqual(len(self.launcher.started), 1)
+        self.assertEqual(
+            held["settled"]["failure"]["failure_class"], "not_permitted")
+        self.mission = {**self.mission, "id": self.mission["id"] + ":updated"}
+        self.assertEqual(self.lane.dispatch_once()["status"], "launched")
+        self.assertEqual(self.lane.budget.permission_items(), [])
 
     def test_an_economic_invariant_refusal_is_held_like_any_other_refusal(self):
         # P17b. The run *succeeded*: the gate refused, the reasons are on the

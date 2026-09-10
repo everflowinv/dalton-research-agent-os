@@ -75,10 +75,9 @@ def permission_key(connection: Any, launcher: Any, signature: str) -> str:
 
 
 def clear_obsolete_permissions(budget: Any, current: str, signature: str) -> None:
-    prefix = f"{signature}|permission:"
     for row in budget.permission_items():
-        if row["item_key"].startswith(prefix) and row["item_key"] != current:
-            budget.clear(row["item_key"])
+        if row["item_key"] != current:
+            budget.retire(row["item_key"])
 
 
 def ledger_signature(connection: Any) -> str:
@@ -174,6 +173,7 @@ class MissionDossierLaneCoordinator:
             self.budget.record(str(signature), status=f"content_refused:{status}",
                                reason=settled.get("failure_reason") or status)
         elif status in QUIET_STATUSES and signature:
+            settled["resumed"] = self.budget.clear(str(signature))
             self._quiet_signature = str(signature)
         elif signature:
             self.budget.clear(str(signature))

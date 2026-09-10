@@ -129,6 +129,29 @@ class WholeLedgerFailureTests(unittest.TestCase):
             with LaneFailureLedger(default_path(self.state), read_only=True) as ledger:
                 self.assertEqual(ledger.events(), [])
 
+    def test_quiet_dependency_probe_clears_the_persisted_ops_item(self):
+        for kind, cls, summary_key, quiet, success in self.cases():
+            with self.subTest(kind=kind):
+                connection = self.connection(kind)
+                lane_state = self.state / kind
+                lane_state.mkdir()
+                launcher = Launcher(lane_state, summary_key, quiet, success)
+                kwargs = dict(connection=connection, launcher=launcher,
+                              failure_ledger_dir=lane_state,
+                              failure_clock=lambda: NOW)
+                if kind == "industry":
+                    kwargs.update(clock=lambda: 0.0, min_interval_seconds=0)
+                coordinator = cls(**kwargs)
+                first = coordinator.dispatch_once()
+                launcher.settle(first["ticket_ref"],
+                                reason="model_unavailable: provider is down")
+                coordinator._settle_open()
+                probe = coordinator.dispatch_once()
+                launcher.settle(probe["ticket_ref"], status="succeeded", outcome=quiet)
+                settled = coordinator._settle_open()
+                self.assertEqual(settled["resumed"], [first["signature"]])
+                self.assertEqual(coordinator.budget.parked_items(), [])
+
     def test_policy_pointer_change_releases_persisted_permission_hold(self):
         connection = self.connection("dossier")
         connection.execute("CREATE TABLE coverage_mission_pointer "
@@ -159,6 +182,35 @@ class WholeLedgerFailureTests(unittest.TestCase):
         self.assertEqual(restarted.budget.permission_items(), [])
         with LaneFailureLedger(default_path(self.state), read_only=True) as ledger:
             self.assertEqual(ledger.parked_by_dependency(now=NOW)["permission_count"], 0)
+
+    def test_new_business_signature_retires_old_permission_projection(self):
+        for kind, cls, summary_key, quiet, success in self.cases():
+            with self.subTest(kind=kind):
+                connection = self.connection(kind)
+                lane_state = self.state / f"permission-{kind}"
+                lane_state.mkdir()
+                launcher = Launcher(lane_state, summary_key, quiet, success)
+                kwargs = dict(connection=connection, launcher=launcher,
+                              failure_ledger_dir=lane_state,
+                              failure_clock=lambda: NOW)
+                if kind == "industry":
+                    kwargs.update(clock=lambda: 0.0, min_interval_seconds=0)
+                coordinator = cls(**kwargs)
+                launched = coordinator.dispatch_once()
+                denied = ("no_checkpoint" if kind == "deep"
+                          else "not_authorized")
+                launcher.settle(
+                    launched["ticket_ref"], status="succeeded", outcome=denied)
+                coordinator._settle_open()
+                self.assertEqual(len(coordinator.budget.permission_items()), 1)
+                if kind == "deep":
+                    connection.execute(
+                        "INSERT INTO company_dossier_versions VALUES ('d:new', 1)")
+                else:
+                    connection.execute(
+                        "INSERT INTO claim_versions VALUES ('new', '2026-09-10')")
+                self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+                self.assertEqual(coordinator.budget.permission_items(), [])
 
 
 if __name__ == "__main__":

@@ -32,7 +32,9 @@ from .lane_child_launcher import (
 )
 from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
-from .lane_failure_class import Classification, CONTENT_REFUSED
+from .lane_permission_control import (
+    authority_connection, current_permission, record_controlled_failure,
+)
 
 MAX_FAILURE_DETAIL_CHARS = 500
 DRIVER_KEY = "mission_model_forecast"
@@ -109,12 +111,12 @@ class MissionModelForecastLaneCoordinator:
         if failed and company_ref and digest:
             key = f"{company_ref}|{digest}"
             reason = settled.get("failure_reason") or f"last run: {status or settled.get('status')}"
-            classification = (Classification(CONTENT_REFUSED, reason, "lane_refusal",
-                                              status=status)
-                              if status.startswith(("refused:", "unavailable:")) else None)
-            settled["failure"] = self.budget.record(
-                key, reason=reason, status=status or settled.get("status"),
-                classification=classification).as_wire()
+            settled["failure"] = record_controlled_failure(
+                self.budget, key, self.mission() or {}, self.launcher,
+                reason=reason, connection=authority_connection(
+                    getattr(self, "store", None), getattr(self, "missions", None),
+                    getattr(self, "models", None)), status=str(status or settled.get("status")),
+            ).as_wire()
         elif company_ref and digest:
             settled["resumed"] = self.budget.clear(f"{company_ref}|{digest}")
         return settled
@@ -146,7 +148,14 @@ class MissionModelForecastLaneCoordinator:
         company_ref = spec = table = digest = None
         for candidate, candidate_spec, candidate_table in pending:
             candidate_digest = model_digest(candidate_spec, candidate_table)
-            decision = self.budget.blocked(f"{candidate}|{candidate_digest}")
+            business_key = f"{candidate}|{candidate_digest}"
+            permission = current_permission(
+                self.budget, business_key, mission, self.launcher,
+                connection=authority_connection(
+                    getattr(self, "store", None), getattr(self, "missions", None),
+                    getattr(self, "models", None)))
+            decision = (self.budget.blocked(permission)
+                        or self.budget.blocked(business_key))
             if decision is not None:
                 held[candidate] = decision.classification.reason
                 continue

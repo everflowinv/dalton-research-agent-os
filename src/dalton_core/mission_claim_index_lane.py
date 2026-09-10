@@ -30,7 +30,9 @@ from .lane_child_launcher import (
 )
 from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
-from .lane_failure_class import Classification, CONTENT_REFUSED
+from .lane_permission_control import (
+    authority_connection, current_permission, record_controlled_failure,
+)
 
 MAX_FAILURE_DETAIL_CHARS = 500
 # One tick looks at this many pending claims per company before deciding.  The
@@ -123,12 +125,12 @@ class MissionClaimIndexLaneCoordinator:
         if failed and company_ref and digest:
             key = f"{company_ref}|{digest}"
             reason = settled.get("failure_reason") or f"last run: {index_status or settled.get('status')}"
-            classification = (Classification(CONTENT_REFUSED, reason, "lane_refusal",
-                                              status=str(index_status))
-                              if index_status == "refused" else None)
-            settled["failure"] = self.budget.record(
-                key, reason=reason, status=index_status or settled.get("status"),
-                classification=classification).as_wire()
+            settled["failure"] = record_controlled_failure(
+                self.budget, key, self.mission() or {}, self.launcher,
+                reason=reason, connection=authority_connection(
+                    getattr(self, "store", None), getattr(self, "missions", None),
+                    getattr(self, "models", None)), status=str(index_status or settled.get("status")),
+            ).as_wire()
         elif company_ref and digest:
             settled["resumed"] = self.budget.clear(f"{company_ref}|{digest}")
         return settled
@@ -168,7 +170,16 @@ class MissionClaimIndexLaneCoordinator:
         from .claim_index_launcher import batch_digest
 
         digest = batch_digest(company_ref, refs)
-        held = self.budget.blocked(f"{company_ref}|{digest}")
+        business_key = f"{company_ref}|{digest}"
+
+        permission = current_permission(
+
+            self.budget, business_key, mission, self.launcher,
+                connection=authority_connection(
+                    getattr(self, "store", None), getattr(self, "missions", None),
+                    getattr(self, "models", None)))
+
+        held = self.budget.blocked(permission) or self.budget.blocked(business_key)
         if held is not None:
             return {"status": "held", "company_ref": company_ref,
                     "settled": settled, "reason": held.classification.reason,

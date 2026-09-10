@@ -24,7 +24,9 @@ from typing import Any, Callable, Mapping
 from .company_model_cli import choose_company
 from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
-from .lane_failure_class import Classification, CONTENT_REFUSED
+from .lane_permission_control import (
+    authority_connection, current_permission, record_controlled_failure,
+)
 from .lane_child_launcher import (
     LaneChildConflict,
     LaneChildRejected,
@@ -111,12 +113,12 @@ class MissionModelSpecLaneCoordinator:
             key = f"{company_ref}|{state_hash}"
             spec_status = settled.get("spec_status")
             reason = settled.get("failure_reason") or f"last run: {spec_status or settled.get('status')}"
-            classification = (Classification(CONTENT_REFUSED, reason, "lane_refusal",
-                                              status=str(spec_status))
-                              if spec_status == "refused" else None)
-            settled["failure"] = self.budget.record(
-                key, reason=reason, status=spec_status or settled.get("status"),
-                classification=classification).as_wire()
+            settled["failure"] = record_controlled_failure(
+                self.budget, key, self.mission() or {}, self.launcher,
+                reason=reason, connection=authority_connection(
+                    getattr(self, "store", None), getattr(self, "missions", None),
+                    getattr(self, "models", None)), status=str(spec_status or settled.get("status")),
+            ).as_wire()
         elif company_ref and state_hash:
             settled["resumed"] = self.budget.clear(f"{company_ref}|{state_hash}")
         return settled
@@ -141,7 +143,16 @@ class MissionModelSpecLaneCoordinator:
         # about the hash is how this lane first got stuck relaunching one
         # company while the other four waited behind it.
         state_hash = state["state_hash"]
-        held = self.budget.blocked(f"{company_ref}|{state_hash}")
+        business_key = f"{company_ref}|{state_hash}"
+
+        permission = current_permission(
+
+            self.budget, business_key, mission, self.launcher,
+                connection=authority_connection(
+                    getattr(self, "store", None), getattr(self, "missions", None),
+                    getattr(self, "models", None)))
+
+        held = self.budget.blocked(permission) or self.budget.blocked(business_key)
         if held is not None:
             return {"status": "held", "company_ref": company_ref,
                     "settled": settled, "reason": held.classification.reason,

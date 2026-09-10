@@ -32,7 +32,9 @@ from .lane_child_launcher import (
 )
 from .lane_registry import LaneSpec, register_lane
 from .lane_failure_ledger import lane_budget
-from .lane_failure_class import Classification, CONTENT_REFUSED
+from .lane_permission_control import (
+    authority_connection, current_permission, record_controlled_failure,
+)
 
 MAX_FAILURE_DETAIL_CHARS = 500
 DRIVER_KEY = "mission_debate_map"
@@ -134,12 +136,12 @@ class MissionDebateMapLaneCoordinator:
         if hold and subject_ref and fingerprint:
             key = f"{subject_ref}|{fingerprint}"
             reason = settled.get("failure_reason") or f"last run: {map_status or settled.get('status')}"
-            classification = (Classification(CONTENT_REFUSED, reason, "lane_refusal",
-                                              status=str(map_status))
-                              if map_status in ("refused", "duplicate") else None)
-            settled["failure"] = self.budget.record(
-                key, reason=reason, status=map_status or settled.get("status"),
-                classification=classification).as_wire()
+            settled["failure"] = record_controlled_failure(
+                self.budget, key, self.mission() or {}, self.launcher,
+                reason=reason, connection=authority_connection(
+                    getattr(self, "store", None), getattr(self, "missions", None),
+                    getattr(self, "models", None)), status=str(map_status or settled.get("status")),
+            ).as_wire()
         elif subject_ref and fingerprint:
             settled["resumed"] = self.budget.clear(f"{subject_ref}|{fingerprint}")
         return settled
@@ -187,7 +189,18 @@ class MissionDebateMapLaneCoordinator:
             current = authority.current(subject_ref)
             if current is not None and current["evidence_fingerprint"] == fingerprint:
                 continue
-            decision = self.budget.blocked(f"{subject_ref}|{fingerprint}")
+            business_key = f"{subject_ref}|{fingerprint}"
+
+            permission = current_permission(
+
+                self.budget, business_key, mission, self.launcher,
+                connection=authority_connection(
+                    getattr(self, "store", None), getattr(self, "missions", None),
+                    getattr(self, "models", None)))
+
+            decision = (self.budget.blocked(permission)
+
+                        or self.budget.blocked(business_key))
             if decision is not None:
                 blocked = blocked or (subject_ref, fingerprint,
                                       decision.classification.reason)
