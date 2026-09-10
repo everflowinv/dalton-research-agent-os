@@ -43,6 +43,12 @@ from typing import Any, Callable, Mapping, Sequence
 from .lane_registry import LaneSpec, register_lane
 from .lane_child_launcher import LaneChildRejected
 from .lane_failure_ledger import lane_budget
+from .lane_permission_control import (
+    authority_connection,
+    clear_obsolete_permissions,
+    permission_key,
+    record_controlled_failure,
+)
 from .store import canonical_json, content_hash
 
 SCHEMA_VERSION = "0.1"
@@ -436,13 +442,14 @@ class MissionCrowdSourceLaneCoordinator:
             max_transient_failures=FAILURE_COOL_OFF_TICKS,
         )
         self._cursor: dict[str, int] = {}
-        # (source|company) -> (reason, ticks remaining before it is retried).
+        # Exact job input -> (reason, ticks remaining before it is retried).
         self._failed: dict[str, tuple[str, int]] = {}
         # What the lane was configured with last tick. A governance record that
         # changed -- the owner approving one, most likely -- is a change to the
         # thing that failed, so the cool-off is over immediately rather than in
         # an hour.
         self._configuration: str | None = None
+        self._mission_snapshot: Mapping[str, Any] = {}
 
     # -- gating ------------------------------------------------------------
 
@@ -457,18 +464,28 @@ class MissionCrowdSourceLaneCoordinator:
         if not mission:
             return {"status": "unconfigured",
                     "reason": "no active mission version on this writer"}
+        self._mission_snapshot = mission
         may_write = set((mission.get("autonomy") or {}).get("may_write") or ())
         missing = sorted(self.GRANTS - may_write)
         if missing:
-            permission = self.failure_budget.record(
-                f"permission|{mission.get('id') or mission.get('mission_ref')}",
-                status="gated:mission does not grant " + ",".join(missing),
+            business = "permission|top|crowd_source"
+            launcher = next(iter(self.runners.values()), self)
+            connection = authority_connection(*self.runners.values())
+            current = permission_key(business, mission, launcher, connection=connection)
+            clear_obsolete_permissions(
+                self.failure_budget, current, scope_prefix="permission|top|")
+            blocked = self.failure_budget.blocked(current)
+            permission = blocked or record_controlled_failure(
+                self.failure_budget, business, mission, launcher,
+                reason="mission does not grant " + ",".join(missing),
+                status="gated", connection=connection,
             )
             return {"status": "gated",
                     "reason": f"mission does not grant {missing}",
                     "failure": permission.as_wire()}
         for row in self.failure_budget.permission_items():
-            self.failure_budget.clear(row["item_key"])
+            if row["item_key"].startswith("permission|top|"):
+                self.failure_budget.clear(row["item_key"])
         return None
 
     def _connected_sources(self) -> set[str]:
@@ -496,14 +513,48 @@ class MissionCrowdSourceLaneCoordinator:
             job = self._job_for(source, company)
             if job is None:
                 continue
-            key = f"{source}|{company['company_ref']}"
+            parameters = {key: value for key, value in job.items()
+                          if key != "operation" and value}
+            key = self._job_key(source, company["company_ref"],
+                                job["operation"], parameters)
+            prefix = f"{source}|{company['company_ref']}|input:"
+            self._retire_superseded(prefix, key)
             if key in self._failed:
                 continue
-            if self.failure_budget.blocked(key) is not None:
+            execution = self.runners[source]
+            permission = permission_key(
+                key, self._mission_snapshot, execution,
+                connection=authority_connection(execution),
+            )
+            clear_obsolete_permissions(
+                self.failure_budget, permission, scope_prefix=key + "|permission:")
+            if (self.failure_budget.blocked(key) is not None
+                    or self.failure_budget.blocked(permission) is not None):
                 continue
             self._cursor[source] = index + 1
             return {"company_ref": company["company_ref"], **job}
         return None
+
+    def _job_key(self, source: str, company_ref: str, operation: str,
+                 parameters: Mapping[str, Any]) -> str:
+        return f"{source}|{company_ref}|input:" + content_hash({
+            "source": source, "company_ref": company_ref,
+            "operation": operation, "parameters": dict(parameters),
+        })[:24]
+
+    def _retire_superseded(self, prefix: str, current: str) -> None:
+        rows = (self.failure_budget.parked_items()
+                + self.failure_budget.terminal_items()
+                + self.failure_budget.permission_items())
+        for row in rows:
+            key = row["item_key"]
+            if key.startswith(prefix) and not key.startswith(current):
+                self.failure_budget.retire(key)
+                self._failed.pop(key, None)
+        for key in tuple(self._failed):
+            if key.startswith(prefix) and key != current:
+                self.failure_budget.retire(key)
+                self._failed.pop(key, None)
 
     def _job_for(self, source: str, company: Mapping[str, Any]) -> dict[str, Any] | None:
         if source == "xueqiu":
@@ -548,6 +599,7 @@ class MissionCrowdSourceLaneCoordinator:
         company_ref = job.pop("company_ref")
         operation = job.pop("operation")
         parameters = {key: value for key, value in job.items() if value}
+        item_key = self._job_key(source, company_ref, operation, parameters)
         try:
             outcome = execution.execute(
                 operation=operation, parameters=parameters,
@@ -555,14 +607,15 @@ class MissionCrowdSourceLaneCoordinator:
             )
         except Exception as exc:  # noqa: BLE001 - one read, reported not raised
             reason = f"{type(exc).__name__}: {exc}"[:MAX_FAILURE_DETAIL_CHARS]
-            failure = self._hold(source, company_ref, reason)
+            failure = self._hold(item_key, execution, reason, "failed")
             return {"source": source, "status": "failed",
                     "company_ref": company_ref, "operation": operation,
                     "reason": reason, "failure": failure}
         if outcome.get("status") != "succeeded":
             reason = str(outcome.get("failure_reason")
                          or "the read failed without a reason")[:MAX_FAILURE_DETAIL_CHARS]
-            failure = self._hold(source, company_ref, reason)
+            failure = self._hold(item_key, execution, reason,
+                                 str(outcome.get("status") or "failed"))
             return {"source": source, "status": "failed",
                     "company_ref": company_ref, "operation": operation,
                     "reason": reason, "ticket_ref": outcome.get("ticket_ref"),
@@ -577,11 +630,11 @@ class MissionCrowdSourceLaneCoordinator:
             recorded = self.ledger.record(entries)
         except (CrowdSourceLaneError, OSError, KeyError) as exc:
             reason = f"{type(exc).__name__}: {exc}"[:MAX_FAILURE_DETAIL_CHARS]
-            failure = self._hold(source, company_ref, reason)
+            failure = self._hold(item_key, execution, reason, "failed")
             return {"source": source, "status": "failed",
                     "company_ref": company_ref, "operation": operation,
                     "reason": reason, "failure": failure}
-        resumed = self.failure_budget.clear(f"{source}|{company_ref}")
+        resumed = self.failure_budget.clear(item_key)
         return {
             "source": source, "status": "recorded", "company_ref": company_ref,
             "operation": operation, "ticket_ref": outcome.get("ticket_ref"),
@@ -593,29 +646,35 @@ class MissionCrowdSourceLaneCoordinator:
 
     # -- the tick ----------------------------------------------------------
 
-    def _hold(self, source: str, company_ref: str, reason: str) -> dict[str, Any]:
+    def _hold(self, key: str, execution: Any, reason: str,
+              status: str) -> dict[str, Any]:
         """Sit this pair out for a while, rather than for ever."""
 
-        key = f"{source}|{company_ref}"
-        decision = self.failure_budget.record(key, reason=reason, status="failed")
+        decision = record_controlled_failure(
+            self.failure_budget, key, self._mission_snapshot, execution,
+            reason=reason, status=status,
+            connection=authority_connection(execution),
+        )
         if decision.action == "retry":
             self._failed[key] = (reason, FAILURE_COOL_OFF_TICKS)
         return decision.as_wire()
 
     def _age_holds(self) -> None:
-        """One tick off every hold; a configuration change clears them all.
+        """One tick off transient holds; observe configuration changes.
 
         The configuration is the governance hashes the runners are carrying. If
-        one moved, the owner approved something or a record was replaced, and
-        whatever the last failure was it was about the old one.
+        one moved, the owner approved something or a record was replaced.
+        Persistent authorization holds use their own control fingerprints and
+        are retired only when the matching business input is reconsidered.
         """
 
         configuration = self._configuration_digest()
+        if self._configuration is None:
+            self._configuration = configuration
+            return
         if configuration != self._configuration:
             self._configuration = configuration
             self._failed.clear()
-            for row in self.failure_budget.permission_items():
-                self.failure_budget.clear(row["item_key"])
             return
         self._failed = {
             key: (reason, remaining - 1)

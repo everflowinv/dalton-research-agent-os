@@ -46,8 +46,9 @@ MAP_PATH = ROOT / "deploy" / "phase9" / "p9-us-it-services-crowd-sources-v1.json
 
 
 def mission(*, may_write=None, connected=("source:xueqiu", "source:x",
-                                          "source:blind")) -> dict[str, Any]:
+                                          "source:blind"), mission_id="mission:v1") -> dict[str, Any]:
     return {
+        "id": mission_id,
         "autonomy": {"may_write": list(
             may_write if may_write is not None else sorted(LANE_GRANTS))},
         "source_plan": [{"source_ref": ref, "status": "connected"}
@@ -355,10 +356,12 @@ class CoordinatorTests(unittest.TestCase):
         }
         self.source_map = load_crowd_source_map(MAP_PATH)
 
-    def coordinator(self, mission_value: Any) -> MissionCrowdSourceLaneCoordinator:
+    def coordinator(self, mission_value: Any, *, since: str | None = None,
+                    source_map: Mapping[str, Any] | None = None) -> MissionCrowdSourceLaneCoordinator:
         return MissionCrowdSourceLaneCoordinator(
             mission=lambda: mission_value, runners=self.launchers,
-            source_map=self.source_map, ledger=self.ledger,
+            source_map=source_map or self.source_map, ledger=self.ledger,
+            since=since, failure_ledger_dir=self.root / "failure-ledger",
             clock=lambda: datetime(2026, 9, 9, tzinfo=timezone.utc))
 
     def test_the_lane_needs_both_write_scopes(self):
@@ -485,6 +488,68 @@ class CoordinatorTests(unittest.TestCase):
             self.launchers["employee-reviews"].started[0]["employer_slug"],
             "Accenture")
 
+    def test_content_refusal_is_terminal_only_for_the_exact_input(self):
+        one_company = {**self.source_map,
+                       "companies": self.source_map["companies"][:1]}
+        coordinator = self.coordinator(mission(), since="2026-09-01",
+                                       source_map=one_company)
+        self.launchers["xueqiu"].reject = "content_refused: unusable response"
+        coordinator.dispatch_once()
+        coordinator.dispatch_once()
+        self.assertEqual(len(self.launchers["xueqiu"].started), 1)
+        coordinator.since = "2026-09-02"
+        coordinator.dispatch_once()
+        self.assertEqual(len(self.launchers["xueqiu"].started), 2)
+        terminal = coordinator.failure_budget.terminal_items()
+        self.assertEqual(len(terminal), 1)
+        self.assertIn("2026-09-02", self.launchers["xueqiu"].started[-1]["since"])
+        events = coordinator.failure_budget.ledger.events(lane="crowd_source")
+        self.assertTrue(any(row["event"] == "superseded" for row in events))
+        self.assertFalse(any(row["event"] == "dependency_ok" for row in events))
+
+    def test_terminal_inputs_are_isolated_between_companies(self):
+        two_companies = {**self.source_map,
+                         "companies": self.source_map["companies"][:2]}
+        coordinator = self.coordinator(mission(), source_map=two_companies)
+        self.launchers["xueqiu"].reject = "content_refused: unusable response"
+        coordinator.dispatch_once()
+        coordinator.dispatch_once()
+        asked = [row["company_ref"] for row in self.launchers["xueqiu"].started]
+        self.assertEqual(len(asked), 2)
+        self.assertNotEqual(asked[0], asked[1])
+
+    def test_child_permission_hold_survives_restart_and_control_change_retries(self):
+        one_company = {**self.source_map,
+                       "companies": self.source_map["companies"][:1]}
+        self.launchers["xueqiu"].reject = "gated:governance record is not approved"
+        self.coordinator(mission(), source_map=one_company).dispatch_once()
+        self.assertEqual(len(self.launchers["xueqiu"].started), 1)
+        restarted = self.coordinator(mission(), source_map=one_company)
+        restarted.dispatch_once()
+        self.assertEqual(len(self.launchers["xueqiu"].started), 1)
+        changed = self.coordinator(mission(mission_id="mission:v2"),
+                                   source_map=one_company)
+        changed.dispatch_once()
+        self.assertEqual(len(self.launchers["xueqiu"].started), 2)
+        self.assertEqual(len(changed.failure_budget.permission_items()), 1)
+
+    def test_top_permission_is_deduplicated_and_does_not_clear_child_holds(self):
+        missing = mission(may_write=["observation"])
+        first = self.coordinator(missing)
+        first.dispatch_once()
+        first.dispatch_once()
+        self.assertEqual(len(first.failure_budget.permission_items()), 1)
+        child_key = "xueqiu|company:test|input:" + "a" * 24
+        from dalton_core.lane_permission_control import record_controlled_failure
+        record_controlled_failure(
+            first.failure_budget, child_key, missing, self.launchers["xueqiu"],
+            reason="gated:not permitted", status="gated")
+        granted = self.coordinator(mission())
+        granted.dispatch_once()
+        keys = {row["item_key"] for row in granted.failure_budget.permission_items()}
+        self.assertTrue(any(key.startswith(child_key) for key in keys))
+        self.assertFalse(any(key.startswith("permission|top|") for key in keys))
+
 
 class LaneRegistrationTests(unittest.TestCase):
     """The lane is registered, and it is off on a Core that has not approved.
@@ -604,7 +669,8 @@ class ExecutionTests(unittest.TestCase):
         path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
         return path
 
-    def execution(self, *, status: str = "approved", fail: bool = False) -> Any:
+    def execution(self, *, status: str = "approved", fail: bool = False,
+                  failure: Exception | None = None) -> Any:
         from dalton_core.crowd_source_launcher import EmployeeReviewsLauncher
         from dalton_core.mission_crowd_source_lane import CrowdSourceExecution
 
@@ -621,6 +687,8 @@ class ExecutionTests(unittest.TestCase):
                 outer.commands.append(launcher.child_command(
                     operation="blind_reviews", output_dir=output_dir,
                     context={}, **parameters))
+                if failure is not None:
+                    raise failure
                 if fail:
                     raise RuntimeError("the host tool is gone")
                 return type("Receipt", (), {
@@ -683,6 +751,26 @@ class ExecutionTests(unittest.TestCase):
              / outcome["ticket_ref"].split(":")[-1] / "ticket.json"
              ).read_text(encoding="utf-8"))
         self.assertEqual(ticket["status"], "failed")
+
+    def test_real_execution_failure_reason_drives_dependency_classification(self):
+        execution = self.execution(failure=ConnectionError(
+            "source_unavailable: blind transport disconnected"))
+        coordinator = MissionCrowdSourceLaneCoordinator(
+            mission=lambda: mission(connected=("source:blind",)),
+            runners={"employee-reviews": execution},
+            source_map={"companies": [{
+                "company_ref": "company:x", "ticker": "X", "xueqiu_query": None,
+                "x_handles": [], "employer_slug": "SyntheticCo",
+            }]},
+            ledger=CrowdObservationLedger(self.root / "observations.jsonl"),
+            failure_ledger_dir=self.root / "failures",
+            clock=lambda: datetime(2026, 9, 9, tzinfo=timezone.utc),
+        )
+        result = coordinator.dispatch_once()
+        failure = result["sources"][0]["failure"]
+        self.assertEqual(failure["failure_class"], "dependency_unavailable")
+        self.assertEqual(failure["action"], "parked")
+        self.assertIn("ConnectionError", result["sources"][0]["reason"])
 
     def test_the_runner_is_bound_to_the_slug_the_quota_table_uses(self):
         """The declared fifty a day is only real if these two strings match."""
