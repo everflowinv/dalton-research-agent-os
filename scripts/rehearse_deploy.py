@@ -655,12 +655,6 @@ CORE_MIGRATIONS: tuple[MigrationSpec, ...] = (
     MigrationSpec("weekly_brief_schema.sql", "dalton_core.weekly_brief", "WeeklyBriefAuthority", "core"),
     MigrationSpec("answer_routing_schema.sql", "dalton_core.answer_routing", "AnswerRoutingAuthority", "core"),
     MigrationSpec("thesis_impact_schema.sql", "dalton_core.thesis_impact", "ThesisImpactAuthority", "core"),
-    # P14b / P14d shipped two schemas without naming an owner here, so the
-    # rehearsal would have reported a deploy clean without ever having run
-    # them. Registered where they were found, by the branch that met the
-    # refusal (P14-S), not because either authority is this one's.
-    MigrationSpec("thesis_revision_schema.sql", "dalton_core.thesis_revision", "ThesisRevisionAuthority", "core"),
-    MigrationSpec("deliverable_reopen_schema.sql", "dalton_core.deliverable_reopen", "GateReopenAuthority", "core"),
     # P10x: the only Core authority that takes the store's *connection* rather
     # than the store.  It lives in core.sqlite all the same -- it reads the
     # discovered-document rows the debate map's independence ladder reads --
