@@ -162,6 +162,39 @@ def config_fingerprint(*paths: Path | None) -> str:
     return content_hash({"configs": material})[:8]
 
 
+def earnings_window_input_fingerprint(
+    store: DaltonStore, missions: Any, mission: Mapping[str, Any],
+    occurrence: Mapping[str, Any], *, policy_path: Path | None = None,
+) -> str:
+    """Digest the exact company authorities from which a window context is built."""
+
+    from .model_forecast_driver import ForecastModelAuthority
+    from .research_event import ResearchEventAuthority
+
+    company_ref = str(occurrence["company_ref"])
+    forecast = ForecastModelAuthority(store).latest(company_ref)
+    payload: dict[str, Any] = {
+        "schema_version": "0.1", "occurrence": dict(occurrence),
+        "mission": {"ref": mission["id"], "hash": mission["content_hash"]},
+        "forecast": forecast,
+        "theses": company_theses(store.connection, company_ref),
+        "claims": recent_claims(store.connection, company_ref),
+        "guidance_profile": guidance_profile_for(store, company_ref),
+        "consensus": consensus_reader_for(store)(company_ref),
+    }
+    if occurrence["window"] == "preview":
+        payload["debates"] = open_debates_for(store, company_ref)
+    else:
+        events = ResearchEventAuthority(store)
+        payload.update({
+            "input_table": input_table_for(missions, company_ref),
+            "reconciliations": reconcile_for(store, mission, company_ref),
+            "market_view": market_view_rows(events.events(company_ref=company_ref, limit=40)),
+            "source_keys": _source_keys(policy_path),
+        })
+    return content_hash(payload)
+
+
 def same_routing_policy(writer: Path | None, verifier: Path | None) -> str | None:
     """The cheap pre-check: two configurations that route the same way."""
 
@@ -297,6 +330,8 @@ def run_earnings_season(
     policy_path: Path | None = None,
     scheduler_db: Path | None = None,
     company_ref: str | None = None,
+    occurrence_ref: str | None = None,
+    window: str | None = None,
     max_occurrences: int = MAX_OCCURRENCES_PER_RUN,
     dry_run: bool = False,
     writer_model: Any = None,
@@ -357,6 +392,10 @@ def run_earnings_season(
         due = due_occurrences(store, missions, mission, now=moment)
         if company_ref is not None:
             due = [row for row in due if row["company_ref"] == company_ref]
+        if occurrence_ref is not None:
+            due = [row for row in due if row["occurrence_ref"] == occurrence_ref]
+        if window is not None:
+            due = [row for row in due if row["window"] == window]
         due.sort(key=lambda row: (row["window"] != "calibration", row["expected_date"]))
         due = due[:max(1, int(max_occurrences))]
         summary["candidates_seen"] = len(due)
@@ -801,6 +840,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tracking-policy", type=Path)
     parser.add_argument("--scheduler", type=Path)
     parser.add_argument("--company-ref")
+    parser.add_argument("--occurrence-ref")
+    parser.add_argument("--window", choices=("preview", "calibration"))
     parser.add_argument("--max-occurrences", type=int, default=MAX_OCCURRENCES_PER_RUN)
     parser.add_argument("--dry-run", action="store_true",
                         help="say what is due and stop; no calls")
@@ -818,6 +859,8 @@ def main(argv: list[str] | None = None) -> int:
         policy_path=args.tracking_policy,
         scheduler_db=args.scheduler,
         company_ref=args.company_ref,
+        occurrence_ref=args.occurrence_ref,
+        window=args.window,
         max_occurrences=args.max_occurrences,
         dry_run=args.dry_run,
     )
@@ -833,6 +876,7 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
 __all__ = [
     "MAX_COST_USD",
     "MAX_OCCURRENCES_PER_RUN",
+    "earnings_window_input_fingerprint",
     "OPTIONAL_SCOPES",
     "REQUIRED_SCOPES",
     "VERIFIER_MODEL_CONFIG",

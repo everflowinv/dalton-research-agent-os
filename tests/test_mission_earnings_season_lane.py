@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
 import textwrap
 import unittest
 from unittest.mock import patch
@@ -27,12 +28,16 @@ from tests.test_earnings_season import TODAY, calendar_entry
 
 class FakeLauncher:
     def __init__(self) -> None:
+        self._temp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self._temp.name)
         self.started: list[str] = []
         self.tickets: dict[str, dict] = {}
 
-    def start(self, *, batch_ref):
+    def start(self, *, batch_ref, company_ref=None, occurrence_ref=None, window=None):
         self.started.append(batch_ref)
         ticket = {"id": f"ticket:{len(self.started)}", "batch_ref": batch_ref,
+                  "signature": batch_ref, "company_ref": company_ref,
+                  "occurrence_ref": occurrence_ref, "window": window,
                   "status": "running", "summary": {}}
         self.tickets[ticket["id"]] = ticket
         return ticket
@@ -50,6 +55,7 @@ class CoordinatorTests(unittest.TestCase):
 
     def coordinator(self, pending):
         self.launcher = FakeLauncher()
+        self.addCleanup(self.launcher._temp.cleanup)
         return lane.MissionEarningsSeasonLaneCoordinator(
             launcher=self.launcher, mission=lambda: self.mission,
             pending=lambda _mission: pending,
@@ -91,6 +97,7 @@ class CoordinatorTests(unittest.TestCase):
 
     def test_a_failing_selector_does_not_take_the_tick_with_it(self):
         launcher = FakeLauncher()
+        self.addCleanup(launcher._temp.cleanup)
 
         def explode(_mission):
             raise sqlite_error()
@@ -100,6 +107,51 @@ class CoordinatorTests(unittest.TestCase):
         result = coordinator.dispatch_once()
         self.assertEqual(result["status"], "unavailable")
         self.assertIn("RuntimeError", result["reason"])
+
+    def test_refused_first_window_does_not_starve_another_company(self):
+        rows = [
+            {"company_ref": "company:A", "occurrence_ref": "occurrence:A",
+             "window": "preview", "input_hash": "a" * 64},
+            {"company_ref": "company:B", "occurrence_ref": "occurrence:B",
+             "window": "preview", "input_hash": "b" * 64},
+        ]
+        coordinator = self.coordinator(rows)
+        first = coordinator.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], season_status="refused", windows=[{
+            "company_ref": "company:A", "occurrence_ref": "occurrence:A",
+            "window": "preview", "status": "refused", "reason": "refused: unsupported",
+        }])
+        second = coordinator.dispatch_once()
+        self.assertEqual(second["company_ref"], "company:B")
+        self.assertIn("occurrence:A:preview", second["held"])
+
+    def test_persisted_window_hold_survives_restart(self):
+        row = {"company_ref": "company:A", "occurrence_ref": "occurrence:A",
+               "window": "preview", "input_hash": "a" * 64}
+        coordinator = self.coordinator([row])
+        first = coordinator.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], season_status="refused", windows=[{
+            **row, "status": "refused", "reason": "refused: unsupported",
+        }])
+        self.assertEqual(coordinator.dispatch_once()["status"], "held")
+        restarted = lane.MissionEarningsSeasonLaneCoordinator(
+            launcher=self.launcher, mission=lambda: self.mission,
+            pending=lambda _mission: [row],
+        )
+        self.assertEqual(restarted.dispatch_once()["status"], "held")
+        self.assertEqual(len(self.launcher.started), 1)
+
+    def test_input_change_releases_only_the_affected_window(self):
+        rows = [{"company_ref": "company:A", "occurrence_ref": "occurrence:A",
+                 "window": "preview", "input_hash": "a" * 64}]
+        coordinator = self.coordinator(rows)
+        first = coordinator.dispatch_once()
+        self.launcher.finish(first["ticket_ref"], season_status="refused", windows=[{
+            **rows[0], "status": "refused", "reason": "refused: unsupported",
+        }])
+        self.assertEqual(coordinator.dispatch_once()["status"], "held")
+        rows[0] = {**rows[0], "input_hash": "c" * 64}
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
 
 
 def sqlite_error() -> RuntimeError:
@@ -186,6 +238,23 @@ class RegistrationTests(unittest.TestCase):
 
     def test_the_module_is_in_the_registry_list(self):
         self.assertIn("dalton_core.mission_earnings_season_lane", LANE_MODULES)
+
+    def test_launcher_targets_one_exact_occurrence_window(self):
+        from dalton_core.earnings_season_launcher import EarningsSeasonLauncher
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            launcher = EarningsSeasonLauncher(
+                state_dir=root, writer_model_config=root / "writer.json",
+                verifier_model_config=root / "verifier.json",
+            )
+            command = launcher._command(
+                ticket_dir=root / "ticket", company_ref="company:A",
+                occurrence_ref="occurrence:A", window="calibration",
+            )
+        self.assertEqual(command[command.index("--company-ref") + 1], "company:A")
+        self.assertEqual(command[command.index("--occurrence-ref") + 1], "occurrence:A")
+        self.assertEqual(command[command.index("--window") + 1], "calibration")
 
     def test_it_spends_from_the_event_response_pool(self):
         self.assertEqual(

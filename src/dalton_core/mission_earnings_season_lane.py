@@ -29,6 +29,8 @@ from .lane_child_launcher import (
 )
 from .lane_registry import LaneSpec, register_lane
 from .cockpit_model import verifier_provider_contract_fingerprint
+from .lane_failure_ledger import lane_budget
+from .store import content_hash
 
 MAX_FAILURE_DETAIL_CHARS = 500
 LAUNCHER_KWARG = "earnings_season_launcher"
@@ -45,13 +47,14 @@ class MissionEarningsSeasonLaneCoordinator:
         *,
         launcher: Any,
         mission: Callable[[], dict[str, Any] | None],
-        pending: Callable[[Mapping[str, Any]], str | None],
+        pending: Callable[[Mapping[str, Any]], Any],
     ) -> None:
         self.launcher = launcher
         self.mission = mission
         self.pending = pending
         self._open: str | None = None
-        self._last_batch: str | None = None
+        self._quiet: set[str] = set()
+        self.budget = lane_budget("earnings_season", state_dir=launcher.state_dir)
 
     def _settle(self, ticket_ref: str) -> dict[str, Any] | None:
         try:
@@ -74,6 +77,7 @@ class MissionEarningsSeasonLaneCoordinator:
             "candidates": summary.get("candidates"),
             "forecast_proposals": summary.get("forecast_proposals"),
             "pool": summary.get("pool"),
+            "windows": summary.get("windows") or [],
         }
         reason = summary.get("failure_reason")
         if reason:
@@ -86,6 +90,22 @@ class MissionEarningsSeasonLaneCoordinator:
         settled = self._settle(self._open)
         if settled is None or settled.get("status") == "running":
             return settled
+        ticket = self.launcher.status(self._open)
+        signature = str(ticket.get("signature") or ticket.get("batch_ref") or "")
+        windows = settled.get("windows") or []
+        if signature and windows:
+            outcome = windows[0]
+            if outcome.get("status") == "published":
+                self.budget.clear(signature)
+            elif outcome.get("status") not in ("waiting", "queued", "ungranted"):
+                self.budget.record_settled(signature, {
+                    "status": outcome.get("status"),
+                    "failure_reason": outcome.get("reason") or "earnings window refused",
+                })
+        elif signature and not windows:
+            # Compatibility for pre-window summaries: the historical lane
+            # dispatched one opaque batch and suppressed that exact batch.
+            self._quiet.add(signature)
         self._open = None
         return settled
 
@@ -95,32 +115,49 @@ class MissionEarningsSeasonLaneCoordinator:
         if mission is None:
             return {"status": "unconfigured", "reason": "no mission", "settled": settled}
         try:
-            newest = self.pending(mission)
+            pending = self.pending(mission)
         except Exception as exc:  # noqa: BLE001 - one lane's failure is not the tick's
             return {"status": "unavailable", "settled": settled,
                     "reason": f"{type(exc).__name__}: {exc}"}
-        if newest is None:
+        if pending is None or pending == []:
             return {"status": "idle", "settled": settled,
                     "reason": "no covered company has an unwritten preview or "
                               "calibration window open"}
         contract = verifier_provider_contract_fingerprint(
             "earnings_preview_verifier", "earnings_calibration_verifier")
-        batch = f"{mission['id']}:{newest}:{contract}"
-        if batch == self._last_batch:
-            return {"status": "idle", "settled": settled, "batch_ref": batch,
-                    "reason": "this batch has already been dispatched"}
-        try:
-            ticket = self.launcher.start(batch_ref=batch)
-        except LaneChildConflict as exc:
-            return {"status": "busy", "settled": settled,
-                    "reason": f"{type(exc).__name__}: {exc}"}
-        except LaneChildRejected as exc:
-            return {"status": "rejected", "settled": settled,
-                    "reason": f"{type(exc).__name__}: {exc}"}
-        self._open = ticket["id"]
-        self._last_batch = batch
-        return {"status": "launched", "ticket_ref": ticket["id"],
-                "batch_ref": batch, "settled": settled}
+        rows = ([{"occurrence_ref": str(pending).rsplit(":", 1)[0],
+                  "window": str(pending).rsplit(":", 1)[-1], "company_ref": None}]
+                if isinstance(pending, str) else list(pending))
+        held = {}
+        for row in rows:
+            company_ref = row.get("company_ref")
+            occurrence_ref = str(row["occurrence_ref"])
+            window = str(row["window"])
+            source_hash = str(row.get("input_hash") or content_hash(dict(row)))
+            batch = f"{mission['id']}:{occurrence_ref}:{window}:{source_hash}:{contract}"
+            if batch in self._quiet:
+                continue
+            decision = self.budget.blocked(batch)
+            if decision is not None:
+                held[f"{occurrence_ref}:{window}"] = decision.classification.reason
+                continue
+            try:
+                ticket = self.launcher.start(
+                    batch_ref=batch, company_ref=company_ref,
+                    occurrence_ref=occurrence_ref, window=window)
+            except LaneChildConflict as exc:
+                return {"status": "busy", "settled": settled,
+                        "reason": f"{type(exc).__name__}: {exc}"}
+            except LaneChildRejected as exc:
+                return {"status": "rejected", "settled": settled,
+                        "reason": f"{type(exc).__name__}: {exc}"}
+            self._open = ticket["id"]
+            return {"status": "launched", "ticket_ref": ticket["id"],
+                    "batch_ref": batch, "company_ref": company_ref,
+                    "occurrence_ref": occurrence_ref, "window": window,
+                    "held": held, "settled": settled}
+        return {"status": "held" if held else "idle", "settled": settled,
+                "held": held, "reason": "all due earnings windows are held"}
 
 
 def due_occurrences(
@@ -197,6 +234,7 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
     if coordinator is None:
         from .mission_deliverable import MissionDeliverableAuthority
         from .research_event import ResearchEventAuthority
+        from .earnings_season_cli import earnings_window_input_fingerprint
 
         # Constructing the two authorities is what installs their schemas and,
         # for the deliverable authority, what widens the kind CHECK on a Core
@@ -213,11 +251,22 @@ def dispatch(server: Any, params: Mapping[str, Any]) -> dict[str, Any]:
             return (None if pointer is None
                     else server.coverage_mission.mission(pointer["mission_version_id"]))
 
+        def pending(active: Mapping[str, Any]) -> list[dict[str, Any]]:
+            rows = due_occurrences(server.store, server.coverage_mission, active)
+            for row in rows:
+                row["input_hash"] = earnings_window_input_fingerprint(
+                    server.store, server.coverage_mission, active, row,
+                    policy_path=getattr(launcher, "policy_path", None),
+                )
+            rows.sort(key=lambda row: (
+                row["window"] != "calibration", row["expected_date"],
+                row["company_ref"], row["occurrence_ref"],
+            ))
+            return rows
+
         coordinator = MissionEarningsSeasonLaneCoordinator(
             launcher=launcher, mission=mission,
-            pending=lambda active: newest_due(
-                server.store, server.coverage_mission, active
-            ),
+            pending=pending,
         )
         server.lane_state[LAUNCHER_KWARG] = coordinator
     return coordinator.dispatch_once()

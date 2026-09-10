@@ -52,7 +52,8 @@ class EarningsSeasonLauncher(LaneChildLauncher):
 
         return self.writer_model_config.is_file() and self.verifier_model_config.is_file()
 
-    def _command(self, *, ticket_dir: Path) -> list[str]:
+    def _command(self, *, ticket_dir: Path, company_ref: str | None = None,
+                 occurrence_ref: str | None = None, window: str | None = None) -> list[str]:
         command = [
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
@@ -64,9 +65,16 @@ class EarningsSeasonLauncher(LaneChildLauncher):
             command += ["--tracking-policy", str(self.policy_path)]
         if self.scheduler_db is not None:
             command += ["--scheduler", str(self.scheduler_db)]
+        if company_ref is not None:
+            command += ["--company-ref", company_ref]
+        if occurrence_ref is not None:
+            command += ["--occurrence-ref", occurrence_ref]
+        if window is not None:
+            command += ["--window", window]
         return command
 
-    def start(self, *, batch_ref: str) -> dict[str, Any]:
+    def start(self, *, batch_ref: str, company_ref: str | None = None,
+              occurrence_ref: str | None = None, window: str | None = None) -> dict[str, Any]:
         if not isinstance(batch_ref, str) or not batch_ref.strip():
             raise LaneChildRejected("an earnings-season run needs a batch ref")
         if not self.configured:
@@ -79,7 +87,9 @@ class EarningsSeasonLauncher(LaneChildLauncher):
         digest = hashlib.sha256(
             f"{self.TICKET_PREFIX}|{batch_ref.strip()}|{provider_contract}".encode("utf-8")
         ).hexdigest()[:24]
-        return self.spawn(digest=digest, record={"batch_ref": batch_ref.strip()})
+        return self.spawn(digest=digest, record={"batch_ref": batch_ref.strip(),
+            "company_ref": company_ref, "occurrence_ref": occurrence_ref, "window": window},
+            company_ref=company_ref, occurrence_ref=occurrence_ref, window=window)
 
 
 __all__ = ["TICKET_PREFIX", "EarningsSeasonLauncher"]
