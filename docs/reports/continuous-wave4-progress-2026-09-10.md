@@ -15,3 +15,11 @@ Next: merge remaining catalog/Cockpit repairs, run focused real routing and arti
 - Focused integrated artifact/catalog checks: 323 passed; verifier selection/fallback: 109 passed; availability/catalog: 19 passed. These runs precede subsequent metadata/UI/legacy path changes and are not a full-suite claim.
 
 Remaining acceptance: complete route-bound metadata validation + human Cockpit declaration, old single-pin overrides, extraction/thesis-impact/agenda runtime selection, then freeze code for full suite/wheel/current-live activation rehearsal. No live deployment, signing, gateway configuration mutation or paid calls performed.
+
+## Frozen acceptance in progress
+
+Code frozen at `61f56759c5e249be150623844df3ee4550a5ee65` in a detached acceptance worktree. Full `unittest discover` is running against that unchanged source. Final pre-freeze focused checks: 195 passed. Wheel verification passed: 430 Python/SQL files byte-identical; SHA-256 `097f7554c7b8ce8f489c844c6db73e55c2ce790269d2812c7d2d414f03b563ec`. Cockpit JavaScript syntax passed.
+
+The latest integration now covers cross-provider credential references, exact-purpose routing for legacy workers, quality's independent verifier, owner metadata binding/deduplication/application status, and truthful legacy pin displays. Resident service choices explicitly report that a restart is needed. A preliminary current-live-copy activation rehearsal passed 13 steps, 67 schemas and 38 tick entries with zero escaped calls; the final frozen-code rehearsal is separate and still being recorded.
+
+Private deployment review includes a guarded deploy script and the accepted wheel. Its release manifest deliberately remains pending until full-suite, final rehearsal and runtime acceptance results are complete. The script has only been syntax-checked; neither deployment nor any owner signature has run.
