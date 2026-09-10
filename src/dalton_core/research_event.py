@@ -764,12 +764,33 @@ def document_event_candidates(
         "ORDER BY d.created_at ASC, d.record_id ASC LIMIT ?",
         (company_ref, since, mission_ref, int(limit)),
     ).fetchall()
-    seen: set[str] = set()
-    candidates: list[dict[str, Any]] = []
+    latest_reviews: dict[str, str] = {}
+    for review in connection.execute(
+        "SELECT document_ref, state FROM coverage_mission_document_reviews "
+        "WHERE company_ref=? AND mission_version_ref IN "
+        "(SELECT mission_version_id FROM coverage_mission_versions WHERE mission_ref=?) "
+        "ORDER BY updated_at, review_id",
+        (company_ref, mission_ref),
+    ).fetchall():
+        latest_reviews[review["document_ref"]] = review["state"]
+
+    # Pick the strongest specific classification for a document. Connectors
+    # can return one external id under several specs; row order must not turn
+    # an earnings-call transcript into generic news.
+    chosen: dict[str, tuple[tuple[int, int], Any]] = {}
     for row in rows:
-        if row["document_ref"] in seen:
+        if latest_reviews.get(row["document_ref"]) == "dismissed":
             continue
-        seen.add(row["document_ref"])
+        kind, tier = classify_document(row["spec_ref"], row["source_ref"])
+        rank = (
+            EVIDENCE_TIERS.index(tier),
+            0 if row["spec_ref"] in SPEC_EVENT_KINDS else 1,
+        )
+        current = chosen.get(row["document_ref"])
+        if current is None or rank < current[0]:
+            chosen[row["document_ref"]] = (rank, row)
+    candidates: list[dict[str, Any]] = []
+    for _rank, row in chosen.values():
         kind, tier = classify_document(row["spec_ref"], row["source_ref"])
         candidates.append({
             "kind": kind,

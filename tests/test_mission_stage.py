@@ -98,6 +98,36 @@ class StageHarness(unittest.TestCase):
 
 
 class SourceBaseTests(StageHarness):
+    def test_shared_document_attribution_is_per_company_and_dismissal_wins(self) -> None:
+        document_ref = self.document(ACN, TRANSCRIPTS, "acquired", read=True)
+        params = dict(self.params)
+        params.update({"version_id": "coverage-mission-version:us-it-services:2",
+                       "prior_version_ref": self.mission["id"],
+                       "idempotency_key": "coverage-mission:us-it-services:2"})
+        second = self.missions.create_mission(self.mission_ref, **params)
+        discovery_ref = self.discovery(CTSH, TRANSCRIPTS)
+        with self.missions._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_discovered_documents("
+                "record_id,mission_version_ref,company_ref,source_ref,document_ref,discovery_ref,status,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                ("mission-discovered-document:shared", second["id"], CTSH,
+                 "source:alphaengine", document_ref, discovery_ref, "acquired",
+                 "2026-09-09T00:00:00+00:00", "2026-09-09T00:00:00+00:00"),
+            )
+            cur.execute(
+                "INSERT INTO coverage_mission_document_reviews("
+                "review_id,mission_version_ref,company_ref,source_ref,document_ref,"
+                "discovered_document_ref,state,registered_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                ("mission-document-review:shared", second["id"], CTSH,
+                 "source:alphaengine", document_ref, "mission-discovered-document:shared",
+                 "dismissed", AUTOMATION, "2026-09-09T01:00:00+00:00",
+                 "2026-09-09T01:00:00+00:00"),
+            )
+        companies = self.evaluate()
+        self.assertEqual(self.item(companies, ACN, "earnings_calls")["have"], 1)
+        self.assertEqual(self.item(companies, CTSH, "earnings_calls")["have"], 0)
+
     def test_the_checklist_counts_the_playbook_readings_by_the_spec_that_found_them(self) -> None:
         for _ in range(4):
             self.document(ACN, TRANSCRIPTS, "acquired", read=True)

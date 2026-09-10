@@ -44,3 +44,12 @@ These should be corrected with explicit company/spec/review semantics and target
 ## Next step
 
 After the AlphaEngine budget resets, acquire and review two additional CTSH-specific earnings-call transcripts. Re-evaluate the Initial Screen against four distinct valid documents. Once CTSH receives a `passed` stage transition, the existing tracking lane will scan it and create idempotent document/claim events; only then should the event-judgement lane be expected to have CTSH work.
+
+## Deterministic attribution follow-up
+
+A separate follow-up patch fixes the two latent defects above without changing the four-call requirement or admitting dismissed evidence:
+
+- Stage counts now deduplicate by company, spec, and external document. The latest review for a company/document controls eligibility; `dismissed` documents contribute neither acquired nor read counts.
+- Event candidate selection ignores a company/document whose latest review is dismissed. If the same external document was discovered under multiple specs across mission versions, it deterministically selects the strongest specifically declared evidence classification, so an earnings transcript cannot become generic news because of row order.
+
+Focused regressions reproduce cross-company reuse, dismissal through an alias spec, and cross-spec ordering. `PYTHONPATH=src python3 -m unittest tests.test_mission_stage tests.test_research_event` passed 51 tests.

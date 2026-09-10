@@ -267,7 +267,22 @@ def _document_counts(
         )
         review_params = (row["mission_ref"],)
 
-    best: dict[str, tuple[str, str, str]] = {}
+    latest_reviews: dict[tuple[str, str], tuple[str, str]] = {}
+    for review in connection.execute(
+        "SELECT company_ref, document_ref, state, updated_at, review_id "
+        "FROM coverage_mission_document_reviews "
+        f"WHERE {review_scope.replace('r.', '')} ORDER BY updated_at, review_id",
+        review_params,
+    ).fetchall():
+        latest_reviews[(review["company_ref"], review["document_ref"])] = (
+            review["state"], review["review_id"]
+        )
+
+    # A source can return the same external document for several companies or
+    # specs.  Those are separate attribution claims.  Deduplicating on the
+    # external id alone made an equal-rank row belong to whichever company
+    # SQLite happened to return first.
+    best: dict[tuple[str, str, str], str] = {}
     for entry in connection.execute(
         "SELECT d.document_ref AS document_ref, d.company_ref AS company_ref, "
         "s.spec_ref AS spec_ref, d.status AS status "
@@ -277,11 +292,14 @@ def _document_counts(
         params,
     ).fetchall():
         document_ref, status = entry["document_ref"], entry["status"]
+        if latest_reviews.get((entry["company_ref"], document_ref), (None, None))[0] == "dismissed":
+            continue
+        key = (entry["company_ref"], entry["spec_ref"], document_ref)
         rank = _STATUS_RANK.get(status, 0)
-        current = best.get(document_ref)
-        if current is None or rank > _STATUS_RANK.get(current[2], 0):
-            best[document_ref] = (entry["company_ref"], entry["spec_ref"], status)
-    for company_ref, spec_ref, status in best.values():
+        current = best.get(key)
+        if current is None or rank > _STATUS_RANK.get(current, 0):
+            best[key] = status
+    for (company_ref, spec_ref, _document_ref), status in best.items():
         entry_counts = bucket(company_ref, spec_ref)
         if status in ACQUIRED_STATUSES:
             entry_counts["acquired"] += 1
@@ -290,7 +308,7 @@ def _document_counts(
         elif status == "acquisition_failed":
             entry_counts["failed"] += 1
 
-    read_docs: dict[str, tuple[str, str]] = {}
+    read_docs: set[tuple[str, str, str]] = set()
     for entry in connection.execute(
         "SELECT d.document_ref AS document_ref, d.company_ref AS company_ref, "
         "s.spec_ref AS spec_ref FROM coverage_mission_document_reviews r "
@@ -299,8 +317,10 @@ def _document_counts(
         f"WHERE {review_scope} AND r.state=?",
         (*review_params, READ_REVIEW_STATE),
     ).fetchall():
-        read_docs[entry["document_ref"]] = (entry["company_ref"], entry["spec_ref"])
-    for company_ref, spec_ref in read_docs.values():
+        key = (entry["company_ref"], entry["document_ref"])
+        if latest_reviews.get(key, (None, None))[0] == READ_REVIEW_STATE:
+            read_docs.add((entry["company_ref"], entry["spec_ref"], entry["document_ref"]))
+    for company_ref, spec_ref, _document_ref in read_docs:
         bucket(company_ref, spec_ref)["read"] += 1
     return counts
 

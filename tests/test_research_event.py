@@ -16,6 +16,7 @@ from dalton_core.research_event import (
     ResearchEventValidationError,
     claim_event_candidates,
     classify_document,
+    document_event_candidates,
     day_start,
     event_ref_for,
     payload_hash,
@@ -194,7 +195,7 @@ class LedgerTests(P14aHarness):
         written = self.record()
         forged = dict(written)
         forged["kind"] = "filing"
-        with self.store._transaction() as cur:
+        with self.missions._transaction() as cur:
             cur.execute("PRAGMA writable_schema=OFF")
         # Rewriting the row is impossible through the triggers, so the drift is
         # simulated by inserting a second row whose json disagrees with its
@@ -253,6 +254,59 @@ class ClaimEmitterTests(P14aHarness):
         self.assertEqual(
             claim_event_candidates(self.store.connection, company_ref=ACN, now=NOW), []
         )
+
+
+class DocumentEmitterAttributionTests(P14aHarness):
+    def _document(self, record_id, discovery_id, spec_ref, *, review=None):
+        with self.missions._transaction() as cur:
+            cur.execute(
+                "INSERT INTO coverage_mission_source_discoveries("
+                "record_id,mission_version_ref,mission_version_hash,company_ref,source_ref,"
+                "discovery_plan_ref,discovery_plan_hash,spec_ref,query_hash,connector_invocation_ref,"
+                "source_envelope_ref,source_envelope_hash,actor_ref,requested_by,record_json,content_hash,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (discovery_id, self.mission["id"], self.mission["content_hash"], ACN,
+                 "source:alphaengine", "plan", "0" * 64, spec_ref, "1" * 64,
+                 f"invocation:{discovery_id}", f"envelope:{discovery_id}", "2" * 64,
+                 AUTOMATION, AUTOMATION, "{}", "3" * 64,
+                 "2026-09-09T10:00:00+00:00"),
+            )
+            cur.execute(
+                "INSERT INTO coverage_mission_discovered_documents("
+                "record_id,mission_version_ref,company_ref,source_ref,document_ref,discovery_ref,status,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (record_id, self.mission["id"], ACN, "source:alphaengine", "doc:shared",
+                 discovery_id, "acquired", "2026-09-09T10:00:00+00:00", "2026-09-09T10:00:00+00:00"),
+            )
+            if review:
+                cur.execute(
+                    "INSERT INTO coverage_mission_document_reviews("
+                    "review_id,mission_version_ref,company_ref,source_ref,document_ref,"
+                    "discovered_document_ref,state,registered_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (f"review:{record_id}", self.mission["id"], ACN, "source:alphaengine",
+                     "doc:shared", record_id, review, AUTOMATION,
+                     "2026-09-09T11:00:00+00:00", "2026-09-09T11:00:00+00:00"),
+                )
+
+    def test_same_document_uses_strongest_spec_independent_of_row_order(self):
+        self._document("doc-row:1", "discovery:1", "sell-side-reports")
+        self.mission = self.grant(*self.grants)
+        self._document("doc-row:2", "discovery:2", "earnings-call-transcripts")
+        rows = document_event_candidates(
+            self.store.connection, company_ref=ACN,
+            mission_ref=self.mission_ref, now=NOW,
+        )
+        self.assertEqual([(row["kind"], row["payload"]["spec_ref"]) for row in rows],
+                         [("transcript", "earnings-call-transcripts")])
+
+    def test_dismissed_document_is_not_emitted_through_an_alias_spec(self):
+        self._document("doc-row:1", "discovery:1", "earnings-call-transcripts")
+        self.mission = self.grant(*self.grants)
+        self._document("doc-row:2", "discovery:2", "sell-side-reports", review="dismissed")
+        self.assertEqual(document_event_candidates(
+            self.store.connection, company_ref=ACN,
+            mission_ref=self.mission_ref, now=NOW,
+        ), [])
 
 
 if __name__ == "__main__":  # pragma: no cover
