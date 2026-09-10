@@ -205,6 +205,14 @@ def bootstrap(
 ) -> dict[str, str]:
     root = Path(state_dir).expanduser().resolve()
     config = Path(config_path).expanduser().resolve()
+    from .workspace_runtime import ENVIRONMENT_KEY, validate_runtime_context
+    runtime_workspace = validate_runtime_context(state_dir=root)
+    if runtime_workspace is not None:
+        if workspace_manifest is None:
+            raise RuntimeError(
+                f"workspace bootstrap requires --workspace-manifest when {ENVIRONMENT_KEY} is set")
+        if Path(workspace_manifest).expanduser().resolve() != runtime_workspace.manifest_path:
+            raise RuntimeError("bootstrap manifest differs from the runtime workspace")
     workspace = None
     if workspace_manifest is not None:
         from .workspace import WorkspaceError, load_workspace_manifest

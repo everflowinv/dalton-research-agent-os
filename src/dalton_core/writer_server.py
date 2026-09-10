@@ -42,6 +42,7 @@ from .lane_registry import (
     lane_operations,
     registered_lanes,
 )
+from .workspace_runtime import WorkspaceRuntimeError, validate_runtime_context
 from .mission_source_discovery import (
     ALPHAENGINE_SOURCE_REF,
     AlphaEngineSearchLauncher,
@@ -1275,6 +1276,12 @@ class WriterServer:
         sec_filings_plan_path: str | Path | None = None,
         **lane_launchers: Any,
     ):
+        try:
+            validate_runtime_context(
+                state_dir=Path(db_path).expanduser().resolve().parent,
+                core_db=db_path, writer_socket=socket_path)
+        except WorkspaceRuntimeError as exc:
+            raise WriterServerError(str(exc)) from exc
         # P14-0: a registered lane's launcher arrives on the keyword its
         # LaneSpec named, and is kept by that name.  Adding a lane used to
         # mean a new keyword here, a new instance attribute, a line in
@@ -4794,6 +4801,9 @@ def main(argv: list[str] | None = None) -> int:
     add_lane_arguments(parser)
     args = parser.parse_args(argv)
     try:
+        validate_runtime_context(
+            state_dir=Path(args.db).expanduser().resolve().parent,
+            core_db=args.db, writer_socket=args.socket)
         principals = load_principals(args.token_config)
         launcher = None
         sec_lane_launcher = None
@@ -4993,7 +5003,7 @@ def main(argv: list[str] | None = None) -> int:
         server.serve_forever()
         server.stop()
         return 0
-    except WriterServerError:
+    except (WriterServerError, WorkspaceRuntimeError):
         return 2
 
 

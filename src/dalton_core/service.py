@@ -41,6 +41,7 @@ from .weekly_brief_coordinator import (
     WeeklyBriefCoordinator,
     WeeklyBriefCoordinatorConfig,
 )
+from .workspace_runtime import WorkspaceRuntimeError, validate_runtime_context
 
 
 SCHEMA_VERSION = "0.1"
@@ -914,6 +915,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     parser.add_argument("--once", action="store_true", help="run one forced maintenance cycle")
     args = parser.parse_args(list(argv) if argv is not None else None)
     try:
+        validate_runtime_context(config_path=args.config)
         with ControllerOwnership(args.config):
             config = ServiceConfig.from_file(args.config)
             service = DaltonService(config)
@@ -932,6 +934,10 @@ def main(argv: Iterable[str] | None = None) -> int:
         print(json.dumps({"status": "refused", "reason": exc.reason,
                           "controller_pids": exc.pids}, sort_keys=True), file=sys.stderr)
         return 1
+    except WorkspaceRuntimeError as exc:
+        print(json.dumps({"status": "refused", "reason": str(exc)}, sort_keys=True),
+              file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

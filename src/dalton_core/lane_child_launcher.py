@@ -147,6 +147,11 @@ class LaneChildLauncher:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self.state_dir = Path(state_dir).expanduser().resolve()
+        from .workspace_runtime import WorkspaceRuntimeError, validate_cli_state
+        try:
+            validate_cli_state(self.state_dir)
+        except WorkspaceRuntimeError as exc:
+            raise LaneChildError(str(exc)) from exc
         if not self.state_dir.is_dir():
             raise LaneChildError("lane state directory is missing")
         self.python_executable = python_executable or sys.executable
@@ -196,8 +201,16 @@ class LaneChildLauncher:
                 persisted["status"] = "orphaned"
                 persisted["completed_at"] = wire_time(self.clock())
                 write_owner_only(path, persisted)
-            ticket_dir = secure_dir(self.tickets_dir / digest)
+            # Constructing argv must be pure. Validate its workspace binding
+            # before making the per-run directory or truncating its log.
+            ticket_dir = self.tickets_dir / digest
             command = self._command(ticket_dir=ticket_dir, **command_kwargs)
+            from .workspace_runtime import WorkspaceRuntimeError, validate_child_command
+            try:
+                validate_child_command(command, state_dir=self.state_dir)
+            except WorkspaceRuntimeError as exc:
+                raise LaneChildRejected(str(exc)) from exc
+            ticket_dir = secure_dir(ticket_dir)
             log_path = ticket_dir / "run.log"
             log_fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             try:
