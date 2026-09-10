@@ -299,7 +299,9 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                budget_identity: str | None = None,
                created_at: str | None = None,
                verifier_provider_contract: str | None = None,
-               verifier_provider_schema_hash: str | None = None) -> WorkOrder:
+               verifier_provider_schema_hash: str | None = None,
+               mission_version_hash: str | None = None,
+               producer_route_decision_refs: Sequence[str] = ()) -> WorkOrder:
     if purpose not in _PURPOSES:
         raise CockpitModelError("unknown cockpit model purpose")
     if len(prompt.encode("utf-8")) > max_input_tokens:
@@ -313,6 +315,10 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
     if verifier_provider_contract is not None:
         identity["verifier_provider_contract"] = verifier_provider_contract
         identity["verifier_provider_schema_hash"] = verifier_provider_schema_hash
+    if mission_version_hash is not None:
+        identity["mission_version_hash"] = mission_version_hash
+    if producer_route_decision_refs:
+        identity["producer_route_decision_refs"] = list(producer_route_decision_refs)
     digest = content_hash(identity)
     at = created_at or _now()
     return WorkOrder(
@@ -324,7 +330,11 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                 "max_cost_usd": max_cost_usd, "max_seconds": max_seconds},
         idempotency_key=f"cockpit:{purpose}:{digest}", declared_side_effects=(), status="ready",
         input_refs=(), metadata={"control_plane": "cockpit", "purpose": purpose, "request_id": request_id,
-                                 "mission_version_ref": mission_version_ref,
+                                     "mission_version_ref": mission_version_ref,
+                                 **({} if mission_version_hash is None else {
+                                     "mission_version_hash": mission_version_hash}),
+                                 **({} if not producer_route_decision_refs else {
+                                     "producer_route_decision_refs": list(producer_route_decision_refs)}),
                                  **({} if verifier_provider_contract is None else {
                                      "verifier_output_schema_version": "0.1",
                                      "verifier_provider_contract": verifier_provider_contract,
@@ -451,7 +461,10 @@ class CockpitModel:
                           verifier_provider_contract=(
                               provider_contract[0] if provider_contract else None),
                           verifier_provider_schema_hash=(
-                              provider_contract[1] if provider_contract else None))
+                              provider_contract[1] if provider_contract else None),
+                          mission_version_hash=(mission["content_hash"] if purpose in {
+                              "investment_memo", "investment_memo_verifier"} else None),
+                          producer_route_decision_refs=producer_refs)
         scope = {"mission_ref": mission["mission_ref"], "mission_version_ref": mission["id"],
                  "mission_version_hash": mission["content_hash"],
                  "max_daily_paid_calls": int(mission["budget"]["max_daily_paid_calls"]),

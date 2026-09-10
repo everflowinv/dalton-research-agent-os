@@ -18,6 +18,7 @@ from dalton_core.cockpit_model import (
     CockpitModelError,
     build_work,
     independent_model_call,
+    register_purpose,
 )
 from dalton_core.contracts import ModelInvocation, ResultEnvelope
 from dalton_core.model_fallback_chain import register_purpose_tier, tier_chain
@@ -105,6 +106,8 @@ class CockpitChainTests(unittest.TestCase):
             )["policy_version_ref"]
             self.cheap_slots = credential_slots_for(router, list(tier_chain("cheap")))
             register_purpose_tier("p14m_route_verify", "verifier")
+            register_purpose_tier(register_purpose("investment_memo_verifier"), "verifier")
+            register_purpose_tier(register_purpose("investment_memo"), "brain")
             self.verifier_policy = ensure_planner_policy(
                 router, tier="verifier", now=NOW,
                 policy_id="model-routing-policy:p14m-cockpit-verifier",
@@ -285,6 +288,41 @@ class CockpitChainTests(unittest.TestCase):
             created_at=self.mission["created_at"],
         )
         self.assertNotEqual(verifier["work_order_ref"], legacy.id)
+
+    def test_memo_writer_reads_real_scheduler_work_and_router_route(self) -> None:
+        from dalton_core.writer_server import WriterServer
+
+        producer = self._model(
+            ChainAdapter({}), policy_version_ref=self.chain_policy
+        ).call(purpose="investment_memo", request_id="memo-real-authority",
+               prompt="draft", mission=self.mission)
+        verifier = self._model(
+            ChainAdapter({}), policy_version_ref=self.verifier_policy,
+            slots=self.verifier_slots,
+        ).call(purpose="investment_memo_verifier", request_id="memo-real-authority",
+               prompt='{"verdict":"pass"}', mission=self.mission,
+               producer_route_decision_refs=[producer["route_decision_ref"]])
+        server = object.__new__(WriterServer)
+        server._scheduler = Scheduler(self.root / "scheduler.sqlite")
+        self.addCleanup(server._scheduler.close)
+        with ModelRouter(self.router_db, read_only=True) as router:
+            producer_route = router.get_decision(producer["route_decision_ref"])
+            verifier_route = router.get_decision(verifier["route_decision_ref"])
+        producer_call = {"work_order_ref": producer["work_order_ref"],
+                         "result_envelope_ref": producer["result_envelope_ref"],
+                         "invocation_ref": producer["invocation_ref"]}
+        envelope = WriterServer._verify_memo_formal_call(
+            server, producer_call, producer_route, purpose="investment_memo",
+            mission=self.mission)
+        self.assertEqual(envelope["status"], "succeeded")
+        verifier_call = {"work_order_ref": verifier["work_order_ref"],
+                         "result_envelope_ref": verifier["result_envelope_ref"],
+                         "invocation_ref": verifier["invocation_ref"]}
+        envelope = WriterServer._verify_memo_formal_call(
+            server, verifier_call, verifier_route, purpose="investment_memo_verifier",
+            mission=self.mission,
+            producer_routes=[producer["route_decision_ref"]])
+        self.assertEqual(envelope["status"], "succeeded")
 
     def test_unknown_producer_route_fails_before_adapter_or_budget_charge(self) -> None:
         adapter = ChainAdapter({})

@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .lane_registry import (
     LaneRegistryError,
@@ -3001,7 +3001,8 @@ class WriterServer:
                 route = router.get_decision(str(call["route_decision_ref"]))
                 if route.get("outcome") != "selected" or route.get("work_order_ref") != call["work_order_ref"]:
                     raise WriterServerError("Investment Memo producer route/work-order binding failed")
-                self._verify_memo_formal_call(call, route)
+                self._verify_memo_formal_call(
+                    call, route, purpose="investment_memo", mission=mission)
                 family = served_family(router, str(call["route_decision_ref"]))
                 if not family:
                     raise WriterServerError("Investment Memo producer family is unresolved")
@@ -3009,7 +3010,9 @@ class WriterServer:
             route = router.get_decision(str(verifier["route_decision_ref"]))
             if route.get("outcome") != "selected" or route.get("work_order_ref") != verifier["work_order_ref"]:
                 raise WriterServerError("Investment Memo verifier route/work-order binding failed")
-            verifier_envelope = self._verify_memo_formal_call(verifier, route)
+            verifier_envelope = self._verify_memo_formal_call(
+                verifier, route, purpose="investment_memo_verifier", mission=mission,
+                producer_routes=verifier["producer_route_decision_refs"])
             verifier_family = served_family(router, str(verifier["route_decision_ref"]))
             if not verifier_family or verifier_family in producer_families:
                 raise WriterServerError("Investment Memo verifier is not independent")
@@ -3027,7 +3030,9 @@ class WriterServer:
         company_ref = str(memo["subject_ref"])
         records = self.coverage_mission.stage_records(mission["mission_ref"], company_ref)
         states = {(item["stage_ref"], item["status"]): item for item in records}
-        if ("company_model", "gate_passed") not in states:
+        folded_state = self.coverage_mission.current_stage_state(
+            mission["mission_ref"], company_ref).get("stages", {})
+        if folded_state.get("company_model", {}).get("status") != "gate_passed":
             raise WriterServerError("company_model has not passed")
         requested_status = "gate_passed" if decision == "approve" else "gate_failed"
         opposite_status = "gate_failed" if decision == "approve" else "gate_passed"
@@ -3035,13 +3040,20 @@ class WriterServer:
                            if item["stage_ref"] == "investment_memo"
                            and ref in item.get("evidence_refs", [])
                            and item["status"] in {"gate_passed", "gate_failed"}]
-        current_memo_state = self.coverage_mission.current_stage_state(
-            mission["mission_ref"], company_ref).get("stages", {}).get("investment_memo", {})
+        current_memo_state = folded_state.get("investment_memo", {})
         if current_memo_state.get("status") == "gate_passed" and not exact_decisions:
             raise WriterServerError(
                 "the prior Investment Memo gate must be reopened before deciding a new memo")
         if any(item["status"] == opposite_status for item in exact_decisions):
             raise WriterServerError("the Investment Memo already has the opposite human decision")
+        exact_active = next((item for item in records
+                             if item["stage_ref"] == "active_coverage"
+                             and item["status"] == "entered"
+                             and ref in item.get("evidence_refs", [])), None)
+        if (decision == "approve" and exact_active is None
+                and folded_state.get("active_coverage", {}).get("status") == "entered"):
+            raise WriterServerError(
+                "the prior active-coverage cycle must be reopened before this memo enters")
         if ("investment_memo", "entered") not in states:
             self.coverage_mission.record_stage(
                 mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
@@ -3060,7 +3072,7 @@ class WriterServer:
                 idempotency_key=f"investment-memo:{ref}:{decision}")
         else:
             memo_stage = exact
-        active_stage = states.get(("active_coverage", "entered"))
+        active_stage = exact_active
         if decision == "approve" and active_stage is None:
             active_stage = self.coverage_mission.record_stage(
                 mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"],
@@ -3073,11 +3085,23 @@ class WriterServer:
                 "active_coverage_record_ref": None if active_stage is None else active_stage["id"]}
 
     def _verify_memo_formal_call(
-        self, call: Mapping[str, Any], route: Mapping[str, Any]
+        self, call: Mapping[str, Any], route: Mapping[str, Any], *, purpose: str,
+        mission: Mapping[str, Any], producer_routes: Sequence[str] = (),
     ) -> Mapping[str, Any]:
         """Resolve one claimed memo model call through Scheduler's formal authority."""
         if self._scheduler is None:
             raise WriterServerError("Investment Memo decision needs the Scheduler authority")
+        authority = self._scheduler.work_order_authority(str(call["work_order_ref"]))
+        if authority is None:
+            raise WriterServerError("Investment Memo model work is absent from Scheduler")
+        work = authority["work_order"]
+        metadata = work.get("metadata") or {}
+        if (metadata.get("purpose") != purpose
+                or metadata.get("mission_version_ref") != mission["id"]
+                or metadata.get("mission_version_hash") != mission["content_hash"]
+                or list(metadata.get("producer_route_decision_refs") or []) != list(producer_routes)
+                or route.get("work_order_hash") != authority["work_order_hash"]):
+            raise WriterServerError("Investment Memo WorkOrder authority binding failed")
         formal = self._scheduler.formal_result(str(call["work_order_ref"]))
         if formal is None or formal.get("terminal_state") != "succeeded":
             raise WriterServerError("Investment Memo model work has no successful formal result")

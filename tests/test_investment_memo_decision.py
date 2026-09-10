@@ -70,12 +70,17 @@ class Missions:
         self.rows = [{"id": "company-pass", "stage_ref": "company_model",
                       "status": "gate_passed"}]
         self.fail_active_once = False
+        self.company_status = "gate_passed"
     def mission(self, ref):
         return {"id": ref, "mission_ref": "mission:coverage", "content_hash": "a" * 64}
     def stage_records(self, mission_ref, company_ref): return list(self.rows)
     def current_stage_state(self, mission_ref, company_ref):
         history = [row for row in self.rows if row["stage_ref"] == "investment_memo"]
-        return {"stages": {"investment_memo": {"status": history[-1]["status"]}}} if history else {"stages": {}}
+        stages = {"company_model": {"status": self.company_status}}
+        if history: stages["investment_memo"] = {"status": history[-1]["status"]}
+        active = [row for row in self.rows if row["stage_ref"] == "active_coverage"]
+        if active: stages["active_coverage"] = {"status": active[-1]["status"]}
+        return {"stages": stages}
     def record_stage(self, **p):
         if p["stage_ref"] == "active_coverage" and self.fail_active_once:
             self.fail_active_once = False
@@ -96,7 +101,8 @@ class Router:
     def get_decision(self, ref):
         suffix = ref.split(":")[-1]
         work = "work:v" if suffix == "v" else f"work:{suffix}"
-        return {"id": ref, "outcome": "selected", "work_order_ref": work}
+        return {"id": ref, "outcome": "selected", "work_order_ref": work,
+                "work_order_hash": f"hash:{work}"}
 
 
 class Scheduler:
@@ -115,6 +121,13 @@ class Scheduler:
                     "work_order_ref": work, "invocation_ref": f"invocation:{suffix}",
                     "outputs": {"text": __import__('json').dumps(output)},
                     "metadata": {"route_decision_ref": route}}}
+    def work_order_authority(self, work):
+        verifier = work == "work:v"
+        return {"work_order_hash": f"hash:{work}", "work_order": {
+            "metadata": {"purpose": "investment_memo_verifier" if verifier else "investment_memo",
+                         "mission_version_ref": "mission:v14", "mission_version_hash": "a" * 64,
+                         **({"producer_route_decision_refs": [f"route-decision:{i}" for i in range(4)]}
+                            if verifier else {})}}}
 
 
 class Playbooks:
@@ -228,6 +241,32 @@ class InvestmentMemoDecisionTests(unittest.TestCase):
                 "memo_version_ref": record["id"], "memo_version_hash": record["content_hash"],
                 "decision": "approve", "reason": "yes", "actor_ref": "human:owner"})
         self.assertEqual(len(server.coverage_mission.rows), 1)
+
+    @patch("dalton_core.model_router.ModelRouter", return_value=Router())
+    @patch("dalton_core.model_fallback_chain.served_family",
+           side_effect=lambda router, ref: "verifier" if ref == "route-decision:v" else "producer")
+    def test_reopened_company_model_blocks_memo_despite_historical_pass(self, family, router):
+        record = memo(); server = self.server(record)
+        server.coverage_mission.company_status = "reopened"
+        with self.assertRaisesRegex(WriterServerError, "company_model has not passed"):
+            WriterServer._op_decide_investment_memo(server, {
+                "memo_version_ref": record["id"], "memo_version_hash": record["content_hash"],
+                "decision": "approve", "reason": "yes", "actor_ref": "human:owner"})
+        self.assertEqual(len(server.coverage_mission.rows), 1)
+
+    @patch("dalton_core.model_router.ModelRouter", return_value=Router())
+    @patch("dalton_core.model_fallback_chain.served_family",
+           side_effect=lambda router, ref: "verifier" if ref == "route-decision:v" else "producer")
+    def test_old_active_entry_is_not_reused_for_new_memo_cycle(self, family, router):
+        record = memo(); server = self.server(record)
+        server.coverage_mission.rows.append(
+            {"id": "active:old", "stage_ref": "active_coverage", "status": "entered",
+             "evidence_refs": ["memo:old"]})
+        with self.assertRaisesRegex(WriterServerError, "prior active-coverage cycle"):
+            WriterServer._op_decide_investment_memo(server, {
+                "memo_version_ref": record["id"], "memo_version_hash": record["content_hash"],
+                "decision": "approve", "reason": "yes", "actor_ref": "human:owner"})
+        self.assertEqual(len(server.coverage_mission.rows), 2)
 
 
 if __name__ == "__main__": unittest.main()

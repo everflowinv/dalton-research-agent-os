@@ -31,6 +31,9 @@ decision it verifies:
 - Scheduler has the exact successful formal result, result envelope,
   invocation, and route for all five calls; the verifier's persisted output is
   an exact pass over the memo's verified body hash with no findings;
+- Scheduler's immutable WorkOrder has the exact memo producer/verifier purpose,
+  mission version and hash, and (for the verifier) the four producer routes;
+  the router's frozen work hash must equal Scheduler's WorkOrder hash;
 - `company_model` has passed in the mission's folded stage ledger.
 
 Approval appends `investment_memo: entered`, then `gate_passed`, then
@@ -52,7 +55,7 @@ draft consumes.
 
 - `python3 -m py_compile` passed for the shared contract, writer, and Cockpit
   modules.
-- 89 focused contract/decision/writer/Cockpit tests passed, with one existing
+- 106 focused contract/decision/writer/Cockpit tests passed, with one existing
   skip, across `test_investment_memo_contract`,
   `test_investment_memo_decision`, `test_writer_service`,
   `test_cockpit_plane`, and `test_cockpit_int2`.
@@ -62,7 +65,10 @@ draft consumes.
   nonhuman actors, hash drift, producer/verifier family collision, and an
   attempted reversal of a settled human verdict. Further regressions cover a
   selected but unexecuted route, a formal verifier body-hash mismatch, and an
-  older failed memo followed by a new head.
+  older failed memo followed by a new head. A real Scheduler and ModelRouter
+  test executes producer and verifier calls through their authorities, then
+  exercises the same Writer validation helper. Folded-state regressions cover
+  a reopened company-model gate and an unrelated old active-coverage entry.
 
 ## Remaining boundary
 
