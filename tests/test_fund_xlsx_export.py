@@ -38,7 +38,8 @@ class FundXlsxExportTests(unittest.TestCase):
 
     def calendar(self):
         value = {"calendar_ref": "fiscal-calendar:acn:2026-09-10",
-                 "as_of": "2026-09-10", "fiscal_year_end_month": 8}
+                 "source_hash": "1" * 64, "as_of": "2026-09-10",
+                 "fiscal_year_end_month": 8}
         return {**value, "content_hash": content_hash(value)}
 
     def export(self, *, scenario=None):

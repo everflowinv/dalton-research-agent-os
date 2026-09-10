@@ -146,7 +146,8 @@ def _calendar_binding(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
     if value is None:
         return None
     binding = dict(value)
-    allowed = {"calendar_ref", "as_of", "fiscal_year_end_month", "content_hash"}
+    allowed = {"calendar_ref", "source_hash", "as_of",
+               "fiscal_year_end_month", "content_hash"}
     if set(binding) != allowed:
         raise FundWorkbookExportError("fiscal calendar binding has an invalid closed shape")
     asserted = binding.pop("content_hash")
@@ -183,6 +184,7 @@ def export_fund_workbook(
     inputs: Mapping[str, Any], valuation: Mapping[str, Any] | None = None,
     valuation_scenario: Mapping[str, Any] | None = None,
     calendar_binding: Mapping[str, Any] | None = None,
+    mission_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Export verified authority records without changing any authority."""
     model_wire = dict(model)
@@ -410,6 +412,10 @@ def export_fund_workbook(
         ["ModelInput", model["inputs_hash"], model["inputs_hash"], ""],
         ["Formula", model["formula_ref"], model["formula_hash"], ""],
     ]
+    if mission_binding:
+        source_rows.append(["CoverageMission", mission_binding["ref"],
+                            mission_binding["content_hash"],
+                            mission_binding["created_at"]])
     if valuation:
         source_rows.append(["ValuationSnapshot", valuation["id"], valuation["content_hash"], valuation["as_of"]])
     if valuation_scenario:
@@ -474,6 +480,7 @@ def export_company_workbook(
     core_db: Path, company_ref: str, output: Path,
     *, valuation_scenario: Mapping[str, Any] | None = None,
     calendar_binding: Mapping[str, Any] | None = None,
+    mission_ref: str | None = None,
 ) -> dict[str, Any]:
     """Read one exact Core snapshot and export without opening it writable."""
     source_path = Path(core_db).expanduser().resolve()
@@ -493,6 +500,26 @@ def export_company_workbook(
         with DaltonStore(copied) as store:
             models = ForecastModelAuthority(store)
             missions = CoverageMissionAuthority(store)
+            if mission_ref is None:
+                active = []
+                rows = store.connection.execute(
+                    "SELECT mission_ref FROM coverage_mission_pointer "
+                    "ORDER BY mission_ref").fetchall()
+                for row in rows:
+                    candidate = missions.active_mission(row["mission_ref"])
+                    if company_ref in {
+                            member["company_ref"] for member in candidate["universe"]}:
+                        active.append(candidate)
+                if len(active) != 1:
+                    raise FundWorkbookExportError(
+                        "company must belong to exactly one active mission; pass mission_ref")
+                mission = active[0]
+            else:
+                mission = missions.active_mission(mission_ref)
+                if company_ref not in {
+                        member["company_ref"] for member in mission["universe"]}:
+                    raise FundWorkbookExportError(
+                        "company is outside the requested active mission")
             model = models.latest(company_ref)
             if model is None:
                 raise FundWorkbookExportError("company has no current model")
@@ -504,12 +531,45 @@ def export_company_workbook(
                 raise FundWorkbookExportError(
                     "forecast model's exact specification is unavailable")
             spec = missions._model_spec_row(spec_row)
+            if spec["mission_version_ref"] != mission["id"]:
+                raise FundWorkbookExportError(
+                    "latest forecast model is not bound to the current mission version")
             inputs = build_model_inputs(missions, spec)
+            if calendar_binding is None:
+                annual_filings = [item for item in missions.statement_filings(company_ref)
+                                  if item["form"] == "10-K"]
+                if annual_filings:
+                    filing = max(
+                        annual_filings,
+                        key=lambda item: (item["report_date"], item["accession"]))
+                    body = {
+                        "company_ref": filing["company_ref"], "cik": filing["cik"],
+                        "accession": filing["accession"], "form": filing["form"],
+                        "line_count": filing["line_count"],
+                        "entity_name": filing["entity_name"], "filed": filing["filed"],
+                        "report_date": filing["report_date"],
+                        "source_record_refs": filing["source_record_refs"],
+                        "governance_ref": filing["governance_ref"],
+                        "governance_hash": filing["governance_hash"],
+                    }
+                    if content_hash(body) != filing["content_hash"]:
+                        raise FundWorkbookExportError(
+                            "annual filing authority hash is invalid")
+                    base = {
+                        "calendar_ref": filing["ingest_id"],
+                        "source_hash": filing["content_hash"],
+                        "as_of": filing["report_date"],
+                        "fiscal_year_end_month": int(filing["report_date"][5:7]),
+                    }
+                    calendar_binding = {**base, "content_hash": content_hash(base)}
             valuation = ValuationSnapshotAuthority(store).latest_version(company_ref)
             return export_fund_workbook(
                 output, model=model, spec=spec, inputs=inputs,
                 valuation=valuation, valuation_scenario=valuation_scenario,
-                calendar_binding=calendar_binding)
+                calendar_binding=calendar_binding,
+                mission_binding={"ref": mission["id"],
+                                 "content_hash": mission["content_hash"],
+                                 "created_at": mission["created_at"]})
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -519,6 +579,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--valuation-scenario", type=Path)
     parser.add_argument("--calendar-binding", type=Path)
+    parser.add_argument("--mission-ref")
     args = parser.parse_args(argv)
     output = args.output.expanduser().resolve()
     protected = {args.state_dir.expanduser().resolve() / "core.sqlite"}
@@ -535,7 +596,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         calendar = json.loads(args.calendar_binding.read_text(encoding="utf-8"))
     result = export_company_workbook(
         args.state_dir / "core.sqlite", args.company_ref, output,
-        valuation_scenario=scenario, calendar_binding=calendar)
+        valuation_scenario=scenario, calendar_binding=calendar,
+        mission_ref=args.mission_ref)
     print(canonical_json(result))
     return 0
 
