@@ -128,6 +128,34 @@ def _latest(c: sqlite3.Connection, table: str, company_ref: str) -> tuple[dict[s
     return record, row["content_hash"], issues
 
 
+def _dossier_evidence(c: sqlite3.Connection, record: dict[str, Any]) -> dict[str, Any]:
+    """Resolve typed immutable citations; unversioned cells stay unverifiable."""
+    rows = []
+    for item in record.get("evidence_refs") or ():
+        kind, ref = item.get("kind"), item.get("ref")
+        valid: bool | None = False
+        reason = "unsupported_reference"
+        lookup = None
+        if kind == "claim":
+            lookup = ("claim_versions", "claim_version_id", ref)
+        elif kind == "figure" and isinstance(ref, str):
+            if ref.startswith("statement-line:"):
+                lookup = ("coverage_mission_statement_lines", "line_id", ref.split(":", 1)[1])
+            elif ref.startswith("mission-document-figure:"):
+                lookup = ("coverage_mission_document_figures", "figure_id", ref)
+        elif kind == "forecast_cell":
+            valid, reason = None, "cell_ref_has_no_immutable_model_version_binding"
+        if lookup is not None:
+            table, column, value = lookup
+            valid = _table(c, table) and c.execute(
+                f"SELECT 1 FROM {table} WHERE {column}=?", (value,)).fetchone() is not None
+            reason = "immutable_ref_exists" if valid else "immutable_ref_missing"
+        rows.append({"kind": kind, "ref": ref, "valid": valid, "reason": reason})
+    validity = [row["valid"] for row in rows]
+    return {"bound_refs_valid": (False if False in validity else None if None in validity else True),
+            "references": rows}
+
+
 def _blocked_reasons(product: str, mission: dict[str, Any], state: Path,
                      claim_refs: list[str], unjudged: int, connection: sqlite3.Connection,
                      company_ref: str) -> list[str]:
@@ -232,14 +260,10 @@ def audit(*, core_db: Path, state_dir: Path, mission_ref: str | None = None) -> 
                     if product == "company_dossier":
                         bound = ((record.get("bindings") or {}).get("mission_version_ref"))
                         item["mission_binding"] = {"ref": bound, "fresh": bound == mission.get("id")}
-                        cited = {r.get("ref") for r in record.get("evidence_refs") or [] if isinstance(r, dict)}
-                        existing = ({row[0] for row in c.execute(
-                            "SELECT claim_version_id FROM claim_versions")}
-                                    if _table(c, "claim_versions") else set())
                         item["input_binding"] = {
                             "method": "evidence_scope_only",
                             "fresh": None,
-                            "bound_refs_valid": cited.issubset(existing),
+                            **_dossier_evidence(c, record),
                             "reason": ("CompanyDossierVersion persists cited evidence but no exact "
                                        "producer input fingerprint; current-input freshness is not provable")}
                     elif product == "debate_map":

@@ -70,7 +70,7 @@ class ActivationReadinessTests(unittest.TestCase):
         dossier = sealed({"id": "dossier:v1", "version": 1, "company_ref": self.company,
                    "created_at": "2026-09-10T01:00:00+00:00",
                    "bindings": {"mission_version_ref": "mission-version:2"},
-                   "evidence_refs": [{"ref": "claim:1"}]})
+                   "evidence_refs": [{"kind": "claim", "ref": "claim:1"}]})
         fingerprint = __import__("hashlib").sha256(
             json.dumps({"claim_version_refs": ["claim:1"]}, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
         debate = sealed({"id": "debate:v1", "version": 1, "subject_ref": self.company,
@@ -136,7 +136,7 @@ class ActivationReadinessTests(unittest.TestCase):
         dossier = sealed({"id": "dossier:v1", "version": 1, "company_ref": self.company,
                           "created_at": "2026-09-10T01:00:00+00:00",
                           "bindings": {"mission_version_ref": "mission-version:2"},
-                          "evidence_refs": [{"ref": "claim:1"}]})
+                          "evidence_refs": [{"kind": "claim", "ref": "claim:1"}]})
         self.c.execute("INSERT INTO company_dossier_versions VALUES(?,?,?,?,?)",
                        (dossier["id"], self.company, 1, json.dumps(dossier), dossier["content_hash"]))
         self.c.execute("INSERT INTO claim_versions VALUES(?,?,?,?,?)",
@@ -189,6 +189,23 @@ class ActivationReadinessTests(unittest.TestCase):
         self.assertIn("invalid_config:p12a-dossier-policy-v1.json", blockers)
         self.assertIn("no_eligible_input:no_claim_index", blockers)
         self.assertIn("no_eligible_input:initial_screen_not_passed", blockers)
+
+    def test_dossier_refs_resolve_their_own_authorities_and_do_not_guess_cells(self):
+        from dalton_core.activation_readiness import _dossier_evidence
+        self.c.executescript("""
+        CREATE TABLE coverage_mission_statement_lines(line_id TEXT);
+        CREATE TABLE coverage_mission_document_figures(figure_id TEXT);
+        INSERT INTO coverage_mission_statement_lines VALUES('filed:one');
+        INSERT INTO coverage_mission_document_figures VALUES('mission-document-figure:one');
+        """)
+        refs = [{"kind": "claim", "ref": "claim:1"},
+                {"kind": "figure", "ref": "statement-line:filed:one"},
+                {"kind": "figure", "ref": "mission-document-figure:one"}]
+        self.assertTrue(_dossier_evidence(self.c, {"evidence_refs": refs})["bound_refs_valid"])
+        refs.append({"kind": "forecast_cell", "ref": "cell:unversioned"})
+        self.assertIsNone(_dossier_evidence(self.c, {"evidence_refs": refs})["bound_refs_valid"])
+        refs.append({"kind": "figure", "ref": "statement-line:missing"})
+        self.assertFalse(_dossier_evidence(self.c, {"evidence_refs": refs})["bound_refs_valid"])
 
 
 if __name__ == "__main__": unittest.main()
