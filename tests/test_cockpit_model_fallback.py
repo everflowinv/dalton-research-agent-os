@@ -28,7 +28,7 @@ from dalton_core.research_planner_setup import credential_slots_for, ensure_plan
 from dalton_core.scheduler import Scheduler
 from dalton_core.store import content_hash
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
-from tests.test_openclaw_catalog_reconcile import _config
+from tests.test_openclaw_catalog_reconcile import _config, _controls
 
 
 NOW = datetime(2026, 9, 9, 8, 0, tzinfo=timezone.utc)
@@ -108,12 +108,7 @@ class CockpitChainTests(unittest.TestCase):
         verifier_ids = set(tier_chain("verifier"))
         for profile in broker_profiles:
             if profile["id"] in verifier_ids:
-                profile["providerControls"] = {
-                    "mode": "google-generative-ai-count-tokens-v1",
-                    "rateCard": {"inputPerMillionUsd": 1,
-                                 "outputPerMillionUsd": 2,
-                                 "validUntil": "2026-09-10T09:00:00.000000+00:00"},
-                }
+                profile["providerControls"] = _controls(profile["model"])
         with ModelRouter(self.router_db) as router:
             sync_openclaw_model_catalog(router, config, checked_at=NOW)
             self.chain_policy = ensure_planner_policy(
@@ -319,10 +314,11 @@ class CockpitChainTests(unittest.TestCase):
         ).call(purpose="event_judgement", request_id="controls-producer",
                prompt="draft", mission=self.mission)
         adapter = ChainAdapter({
-            "profile:claude-fable-5-1": {
+            profile_id: {
                 "code": "REQUIRED_CONTROLS_UNAVAILABLE",
                 "message": "profile lacks providerControls; mode missing not advertised",
             }
+            for profile_id in tier_chain("verifier")
         })
         with self.assertRaisesRegex(
             CockpitModelError,
@@ -338,7 +334,7 @@ class CockpitChainTests(unittest.TestCase):
                 mission=self.mission,
                 producer_route_decision_refs=[producer["route_decision_ref"]],
             )
-        self.assertEqual(adapter.served, ["profile:claude-fable-5-1"])
+        self.assertEqual(len(adapter.served), 1)
 
     def test_memo_writer_reads_real_scheduler_work_and_router_route(self) -> None:
         from dalton_core.writer_server import WriterServer

@@ -68,7 +68,7 @@ from dalton_core.openclaw_catalog_reconcile import (
 from dalton_core.openclaw_model_discovery import discover_models, summarise
 from dalton_core.research_planner_setup import credential_slots_for, ensure_planner_policy
 from tests.test_model_fallback_chain import FakeBroker, _work
-from tests.test_openclaw_catalog_reconcile import _config
+from tests.test_openclaw_catalog_reconcile import _config, _controls
 
 # In the past, deliberately: a profile registered "now" has an availability
 # check the router reads as being in the future, and refuses.
@@ -175,12 +175,7 @@ class RouterCase(unittest.TestCase):
                 "profile:gemini-3-8-flash",
                 "profile:gemini-3-1-pro-preview",
             }:
-                profile["providerControls"] = {
-                    "mode": "google-generative-ai-count-tokens-v1",
-                    "rateCard": {"inputPerMillionUsd": "1",
-                                 "outputPerMillionUsd": "2",
-                                 "validUntil": "2026-09-10T09:00:00.000000+00:00"},
-                }
+                profile["providerControls"] = _controls(profile["model"])
         return config
 
     def policy(self, tier: str = "brain") -> dict:
