@@ -1,7 +1,7 @@
 # W3 既有资料的入职处理 v1.0
 
 日期：2026-09-10
-分支：`w3-prior-research`（worktree `~/Projects/dalton-w3-prior-research-worktree`），基线 main `189ab19`
+分支：`w3-prior-research`（worktree `~/Projects/dalton-w3-prior-research-worktree`），基线 main `189ab19`，已 merge main `86121a3`（含 planner 日账本、consensus、P12d、S5、业绩季）
 规格：[并行开发计划 v1.0 §「既有资料的入职处理」](parallel-development-plan-v1.0-2026-09-09.md)、ADR-0005 / 0007 / 0008
 owner 的话：**有些公司我们已有资料。新分析师先读它——能省一周——然后仍然自己写一版，因为资料可能过时，市场在问的问题已经变了。**
 
@@ -48,6 +48,11 @@ prior view 是唯一一种全部内容就是「我们当时这么想」的 claim
   所以改阈值会让受影响的条目重新出版本，而不是拿新规则默默复用旧答案。
 - 降级：`STALE_DOWNGRADE = {"internal_prior": "sell_side"}`——一格，写成表而不是算出来的，
   因为「降一格」是实现，「一份过期的内部观点和卖方研报同级」是一个应该能被反驳的决定。
+- **时点**：降级在**打标签时**决定，不会自己重算。索引 lane 只给「还没有条目」的 claim 打标签，
+  所以一条在过期前打过标签的 claim 会保留原层级直到有东西重新给它打标签。
+  这是真实的缺口，且是有意留的：靠时钟重出版本会让索引在没有新证据的情况下改变，
+  而那正是 ADR-0008 唯一拒绝的事。修法属于判断层（一个决定要重打标签并说明理由的 tick），
+  `stale_due_at()` 是它该用的日期，有测试把这个限制钉住。
 - 落点：`importance_basis` 追加 `;may_be_stale:<age>d><threshold>d:<原层级>`。
   没有新加布尔列：`importance_basis` 本来就是「这条 claim 为什么是这个分量」那一栏，
   而条目契约的字段集是封闭的——加一个 flag 是为了说一句原因串已经说了的话而改 schema。
@@ -74,7 +79,10 @@ figure 表的 SQL CHECK 也只认那两个词。所以 prior 文档可以被定�
 | 规则 | 在哪里拒绝 |
 | --- | --- |
 | v0 必须带 `change_reason: imported_prior`，且这个词只在 v0 合法 | `mission_deliverable.publish` |
-| 一条链只能开始一次 | `publish`（v0 遇到已有 pointer 就是 `MissionDeliverableConflict`） |
+| `imported_prior` 不进 ADR-0008 的五词表 | `deliverable_change_reasons()`（见下） |
+| 同一份文档重复导入是 `duplicate`（lane 每个 tick 都会再次提供它） | `publish`（body hash / idempotency key 命中即返回） |
+| **另一份**旧文档进入已开始的链是 `MissionDeliverableConflict` | `publish`（链只能开始一次；第二份文档是证据，不是起点） |
+| v0 不能自称过闸 | `publish`（`as_version_zero` + `gate.passed` → 拒绝，不是 assert：`-O` 下 assert 会消失） |
 | v0 什么都不主张：正文里的数字记成 gap，不是拒绝 | `validate_section(imported=True)` |
 | v0 永不过闸：自评每一项 `imported` | `prior_screen_import.imported_gate` |
 
@@ -85,6 +93,12 @@ v0 是「某份文档这么说」的记录，绑着文档的 ref 与 hash。
 
 第四条同理：拿本基金的出口门四问去评判一份 2024 年的文档，无论答「是」还是「否」都是编造。
 所以有第三个词 `imported`（`GATE_ITEM_STATUSES = ("passed", "failed", "imported")`）。
+
+**`imported_prior` 不是第六个 change_reason。** 那五个词是「某一版为什么变了」的理由；
+这一版什么都没变——它是一份本来就存在的文档被放到链头。catalyst calendar、tracking cadence 这些 authority
+永远产不出这个词，把它加进共享词表只会让它们接受一个对自己毫无意义的词。
+封闭词表值钱正是因为里面每个词都可达，所以它落在 `mission_deliverable.deliverable_change_reasons()`——
+唯一能写出它的地方。`model_forecast_driver.CHANGE_REASONS` 仍然是五个，三份字面副本原样不动。
 
 **选择规则显式清掉 v0**（`initial_screen_cli._target`：`published.get("version") == 0` → 当作没有）。
 按版本号，不按日期，故意的：否则「把旧 screen 导进来」这个动作本身就成了「新 screen 不会被写」的原因，
@@ -147,7 +161,36 @@ M2 的 assumption 行是**承重的算术**——它指的 driver 之所以存�
 所以空区间是常态，返回的是带理由的空区间而不是一个静默的 0。
 **不给均值也不给中位数**：三年里手打的四个数不是一个分布，给它一个集中趋势是把四个数打扮成一个统计量。
 
-### 1.7 带日期的 `prior_view`
+### 1.7 lane 的 per-source 分支，与 feed plan 的版本
+
+`FeedDiscoveryCoordinator` 有五处按 source 分叉的地方（triage、attribute、spec_refs、
+document_spec_ref、decide），本线补齐了 prior-research 的分支。没有它第一次 acquisition 就会在
+`doc_type_key` 上 `KeyError`，而且 `SPEC_IMPORTANCE["prior-research"]` 永远到不了——
+整条线赖以成立的那个层级是不可达的。
+
+- **一个 spec，不是每种 kind 一个**（wiki 是后者）。spec 是承载证据层级的东西，
+  而这条 feed 的每一种 kind 都是同一个层级：旧 screen、memo、工作笔记，都是「我们，以前」。
+  kind 仍然在 wire 上并决定**阅读顺序**（screen → memo → notes → model → other，
+  这是分析师真正会先打开的顺序），但它不决定证据强度，因为这里只有一种来源。
+- **归属就是公司文件夹，没有第二候选**。owner 把这份文件放进了某一家的文件夹；
+  一份关于 Accenture 的旧观点不同时是关于 Cognizant 的旧观点，
+  所以不像可以带五个 tag 的 wiki 笔记，这里一份文档最多归一家。
+  文件夹不在 universe 内的文档直接 `dropped`，也不再去正文里找行业词——
+  不覆盖的公司的旧研究就是不覆盖的公司的旧研究。
+
+**feed plan 升到 v2**。种子是 copy-once 的（`install.sh` 只在目标不存在时拷），
+所以一份**内容**变了的 plan 永远不会落到已经装过旧版的 Core 上——lane 会被装上却没有 plan，
+每个 tick 都拒绝。修法是给 plan 升版本而不是「hash 不同就重拷」：
+覆盖 state 目录等于脚本去撤销一次手改，而一份多写了一个 source 的 plan 本来就是新的一版。
+三条 feed lane 都按常量指向 v2；只有 v1 在盘上的 Core 在重跑 `install.sh` 之前不起 feed lane，
+而重跑 install.sh 正是部署 runbook 已有的那一步。
+
+**`--feed-discovery-plan` 这条 lane 会自己发**。原先 wiki 的 fragment 把自己前两项切掉，
+假定 sales-note lane 先跑过。这个假定在调用点看不见、在有 lane 排到它前面时就不成立（order 32 正是），
+而且会让一台只设了 `DALTON_PRIOR_RESEARCH_DIR` 的 Core 唯一装上的 lane 没有 plan。
+改法放在重复该被处理的地方：`lane_registry.lane_argv` 现在把完全相同的 `--flag value` 只写一次。
+
+### 1.8 带日期的 `prior_view`
 
 DebateMap 的 debate 形状和 ThesisReflection 的契约各新增一个**可选**的 `prior_view`。
 放在 `market_view_vs_ours` 旁边而不是里面：街上的立场和我们自己以前的立场是两个不同的争论对象，
@@ -248,7 +291,19 @@ DebateMap 的 debate 形状和 ThesisReflection 的契约各新增一个**可选
    两者分开检查，所以只授予前两个的 mission 照样会把 notes 与 memo 读进来，
    screen 导入等下一版 mission。
 
-6. **要装 Excel 支持**：`pip install -e ".[prior-models]"`（或把 `prior-models` 加进 install.sh 的 extras 串）。
+6. **认下哪一份是「上一版」**。lane 会把语料读成 Claim；把其中一份提升为版本 0 或一份 PriorModelVersion
+   是一次判断，所以是手动的两条命令（ADR-0008：存储层不替你做这个决定）：
+
+   ```sh
+   dalton-prior-research import-screen --db <core.sqlite> \
+     --corpus-root ~/Documents/dalton-prior-research \
+     --document-id prior-research-doc:sha256:... --company-ref company:sec-cik:0001467373
+   dalton-prior-research import-model  --db <core.sqlite> ... --document-id ...
+   ```
+
+   manifest 里 kind 不对的会被拒绝并说明你写的是哪个词。重复导入同一份是 `duplicate`，不是错误。
+
+7. **要装 Excel 支持**：`pip install -e ".[prior-models]"`（或把 `prior-models` 加进 install.sh 的 extras 串）。
    不装的话工作簿会带理由被拒绝，其它文档照读。
 
 ---
@@ -258,95 +313,105 @@ DebateMap 的 debate 形状和 ThesisReflection 的契约各新增一个**可选
 全量：`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`
 
 ```
-Ran 4454 tests in 666.119s
+Ran 5123 tests in 472.909s
 
 OK (skipped=1)
 ```
 
-本线新增 `tests/test_prior_research.py`，60 项。逐条：
+本线新增 `tests/test_prior_research.py`，68 项。逐条：
 
 ```
-ManifestTests
-  test_an_entry_with_no_as_of_is_refused_with_its_reason
-  test_a_bad_entry_does_not_take_the_folder_with_it
-  test_a_manifest_that_will_not_parse_is_not_partial
-  test_the_kinds_are_the_owner_s_five
-  test_a_duplicate_path_is_refused_rather_than_read_twice
-  test_the_root_is_declared_by_an_environment_variable
-  test_age_is_counted_in_whole_months
+ChildTests
+  test_a_document_acquires_with_a_manifest_dated_by_the_owner
+  test_a_listing_lands_with_its_tier_its_as_of_and_its_refusals
+  test_an_unapproved_or_wrong_capability_record_stops_the_run
+CoordinatorTests
+  test_a_folder_outside_the_universe_is_dropped_not_attributed
+  test_a_tick_reads_a_prior_document_into_an_internal_prior_discovery
+  test_the_triage_reads_a_screen_before_a_memo
 CorpusTests
-  test_a_window_enumerates_the_dated_and_refuses_the_rest
   test_a_document_reads_back_verbatim_under_its_own_id
   test_a_path_that_leaves_its_company_folder_is_refused
+  test_a_window_enumerates_the_dated_and_refuses_the_rest
   test_an_unreadable_format_is_refused_with_its_suffix
+DeliverableV0Tests
+  test_a_chain_can_only_start_once
+  test_a_gate_with_no_prior_says_so_rather_than_guessing
+  test_a_prior_figure_is_a_recorded_gap_not_a_refusal
+  test_a_prior_screen_becomes_v0_and_dalton_writes_v1
+  test_a_real_v1_does_stop_the_next_draft
+  test_a_screen_with_no_headings_arrives_as_one_section
+  test_a_v0_needs_the_import_reason
+  test_a_version_zero_may_not_claim_it_passed
+  test_an_imported_v0_still_counts_as_no_screen_yet
+  test_imported_prior_is_a_deliverable_word_and_only_on_a_v0
+  test_no_prior_version_means_no_block_at_all
+  test_re_importing_the_same_document_is_a_duplicate
+  test_the_cli_promotes_a_screen_and_a_model_and_refuses_the_wrong_kind
+  test_the_drafting_context_carries_the_prior_block_and_the_instruction
+  test_the_exit_gate_reports_the_delta_and_never_fails_on_it
+  test_the_imported_gate_names_the_document_it_did_not_check
+  test_the_v0_gate_marks_every_item_imported
 GovernanceTests
-  test_the_committed_records_are_proposed_and_match_the_builder
   test_one_approval_covers_one_operation
-ChildTests
-  test_a_listing_lands_with_its_tier_its_as_of_and_its_refusals
-  test_a_document_acquires_with_a_manifest_dated_by_the_owner
-  test_an_unapproved_or_wrong_capability_record_stops_the_run
-ImportanceTests
-  test_internal_prior_sits_between_management_and_the_sell_side
-  test_the_feed_spec_carries_the_tier
-  test_a_prior_view_is_downgraded_exactly_at_the_threshold
-  test_only_the_prior_tier_ages
-  test_an_undated_prior_claim_is_not_aged
-  test_the_rule_tagger_reads_the_threshold
+  test_the_committed_records_are_proposed_and_match_the_builder
 GradeTests
-  test_the_prior_grade_exists_and_is_never_a_figure
   test_it_still_tells_a_reader_what_it_is
+  test_the_prior_grade_exists_and_is_never_a_figure
+ImportanceTests
+  test_a_prior_view_is_downgraded_exactly_at_the_threshold
+  test_an_undated_prior_claim_is_not_aged
+  test_internal_prior_sits_between_management_and_the_sell_side
+  test_only_the_prior_tier_ages
+  test_staleness_is_decided_at_tag_time_and_says_when_it_is_due
+  test_the_feed_spec_carries_the_tier
+  test_the_rule_tagger_reads_the_threshold
+LaneTests
+  test_install_seeds_the_lane_all_or_nothing
+  test_it_is_in_the_budget_pool_and_the_cockpit_label_map
+  test_the_feed_plan_names_this_source
+  test_the_grants_it_needs_are_words_a_mission_can_hold
+  test_the_lane_is_registered_at_order_thirty_two
+  test_the_lane_refuses_until_the_authority_knows_the_source
+  test_the_schema_is_bootstrapped_and_rehearsed
+ManifestTests
+  test_a_bad_entry_does_not_take_the_folder_with_it
+  test_a_duplicate_path_is_refused_rather_than_read_twice
+  test_a_manifest_that_will_not_parse_is_not_partial
+  test_age_is_counted_in_whole_months
+  test_an_entry_with_no_as_of_is_refused_with_its_reason
+  test_the_kinds_are_the_owner_s_five
+  test_the_root_is_declared_by_an_environment_variable
 PriorModelTests
-  test_a_workbook_keeps_its_formulas_verbatim_and_its_values_as_text
-  test_no_float_survives_into_the_record
-  test_every_imported_cell_is_prior_human_and_nothing_else
-  test_the_chain_reads_back_and_an_unchanged_workbook_is_a_duplicate
+  test_a_band_across_units_refuses_rather_than_averaging
   test_a_band_is_a_range_with_its_rows_and_its_unit
   test_a_label_nothing_carries_is_an_empty_band_with_a_reason
-  test_a_band_across_units_refuses_rather_than_averaging
-  test_the_prior_model_is_not_reachable_from_the_number_paths
-  test_decimals_are_exact_text_and_a_boolean_is_not_a_number
   test_a_unit_it_cannot_be_sure_of_is_no_unit
-DeliverableV0Tests
-  test_imported_prior_is_in_the_vocabulary_and_only_on_a_v0
-  test_a_v0_needs_the_import_reason
-  test_a_prior_screen_becomes_v0_and_dalton_writes_v1
-  test_a_chain_can_only_start_once
-  test_the_v0_gate_marks_every_item_imported
-  test_a_prior_figure_is_a_recorded_gap_not_a_refusal
-  test_an_imported_v0_still_counts_as_no_screen_yet
-  test_a_real_v1_does_stop_the_next_draft
-  test_the_drafting_context_carries_the_prior_block_and_the_instruction
-  test_no_prior_version_means_no_block_at_all
-  test_the_exit_gate_reports_the_delta_and_never_fails_on_it
-  test_a_gate_with_no_prior_says_so_rather_than_guessing
-  test_the_imported_gate_names_the_document_it_did_not_check
-  test_a_screen_with_no_headings_arrives_as_one_section
+  test_a_workbook_keeps_its_formulas_verbatim_and_its_values_as_text
+  test_decimals_are_exact_text_and_a_boolean_is_not_a_number
+  test_every_imported_cell_is_prior_human_and_nothing_else
+  test_no_float_survives_into_the_record
+  test_the_chain_reads_back_and_an_unchanged_workbook_is_a_duplicate
+  test_the_closure_walks_further_than_one_hop
+  test_the_prior_model_is_not_reachable_from_the_number_paths
 PriorViewTests
-  test_a_debate_map_reads_back_without_the_field
   test_a_dated_prior_view_is_accepted_and_an_undated_one_is_not
-  test_the_field_is_attached_when_there_is_material_and_absent_otherwise
+  test_a_debate_map_reads_back_without_the_field
   test_no_prior_material_on_this_core_is_an_empty_list
+  test_the_field_is_attached_when_there_is_material_and_absent_otherwise
   test_the_reflection_accepts_a_dated_prior_view_and_refuses_a_stray_ref
-LaneTests
-  test_the_lane_is_registered_at_order_thirty_two
-  test_the_grants_it_needs_are_words_a_mission_can_hold
-  test_it_is_in_the_budget_pool_and_the_cockpit_label_map
-  test_the_schema_is_bootstrapped_and_rehearsed
-  test_install_seeds_the_lane_all_or_nothing
-  test_the_lane_refuses_until_the_authority_knows_the_source
-  test_the_feed_plan_names_this_source
 ```
 
-改到的既有测试，三处，都是「精确集合」型断言：
+改到的既有测试，都是「精确集合」型断言，**没有一处放松了既有约束**：
 
-- `tests/test_model_forecast_driver.py` 的 `test_the_change_reasons_are_the_owner_s_five`
-  改名为 `..._plus_the_import`，同时钉住前五个仍是 ADR-0008 的五个词、顺序不变。
 - `tests/test_connector_inventory.py` 的连接器 slug 集合、`tests/test_connector_quota_policy.py` 的配额清单
   各加两行（配额清单是按字母序的）。
 - `tests/test_service.py` 的 `LANE_SEEDS` 加一条 `prior_research`，走的是同一个「放全就亮、少一个就灭」的断言。
 - `tests/test_s1_human_feeds.py` 的 feed-source 形状断言加了一个显式的
-  `AWAITING_AUTHORITY_ROW = {"source:prior-research"}`——见 §5。
+  `AWAITING_AUTHORITY_ROW = {"source:prior-research"}`，并断言这一条**还不在**权威表里——
+  集成补上那一行之后这个测试会要求把名字删掉（见 §5）。
+- `tests/test_model_forecast_driver.py` 的 `test_the_change_reasons_are_the_owner_s_five`
+  **原样保留**：`imported_prior` 不在那五个词里。
 
 ---
 
@@ -371,15 +436,21 @@ LaneTests
    `cockpit_control.html` 本线未碰。值得给 owner 看的两样东西还没有面板：
    一条链上的 v0 与 v1 并排，以及某公司 prior-research 文档的拒绝清单（缺日期的那些）。
 
-3. **`REQUIRED_WRITE_SCOPES`（`scripts/rehearse_deploy.py`）** 未加行：本线用的三个词
+3. **feed plan v2 要随部署落地**。`deploy/phase9/p9-us-it-services-feeds-v2.json` 取代了 v1，
+   三条 feed lane 都按 v2 的名字找它。live Core 上已有的 v1 不会被覆盖也不会被读；
+   owner 重跑一次 `install.sh` 之后 v2 落地，三条 lane 一起回来。
+   **在那之前 sales-notes 与 company-wiki 也不起**——这是版本化换来的代价，
+   换到的是「plan 内容变了却永远装不上」不再可能发生。
+
+4. **`REQUIRED_WRITE_SCOPES`（`scripts/rehearse_deploy.py`）** 未加行：本线用的三个词
    （`source_discovery` / `observation` / `deliverable`）live mission 已经授予，没有新词要 owner 发版本。
 
-4. **`document_provenance.TIER_BY_SPEC` 与 `deploy/phase9/p12c-debate-policy-v1.json` 的 `spec_tier`**
+5. **`document_provenance.TIER_BY_SPEC` 与 `deploy/phase9/p12c-debate-policy-v1.json` 的 `spec_tier`**
    都没有 `prior-research` 条目，因此抽取队列会把它当 `other`（最后读）、DebateMap 的独立性阶梯也不认它。
    前者是个可以商量的排序问题；后者是**对的**——`prior_view` 是我们自己的观点，
    本来就不该计入「几家独立来源在争」。建议只补前者，且由 W2 抽取那条线定值。
 
-5. **`install.sh` 的 extras 串**没加 `prior-models`（改它要同步改 `tests/test_service.py:107` 的断言）。
+6. **`install.sh` 的 extras 串**没加 `prior-models`（改它要同步改 `tests/test_service.py:107` 的断言）。
    现状：Excel 导入在 live 上会带理由拒绝。要不要装由 owner 定——见开放问题 3。
 
 ---
@@ -417,9 +488,12 @@ LaneTests
 - **不做「旧模型 vs actual 的自我校准对账」**（计划 §4 提到的后半句）。
   `prior_assumption_bands` 是原料；对账要读 `forecast_reconciliation`，那是 M3 的读侧，
   而本模块的依赖箭头是单向的（M3 可以 import 本模块，反过来不行）。
+- **不把导入放进 tick**。`import-screen` / `import-model` 是 owner 手动跑的两条命令。
+  读语料是自动化的活（它是一个受治理的来源），但**认下**哪一份文档是本基金对这家公司的上一版观点，
+  是一次判断，ADR-0008 说存储层不做这个决定。
 - **不让模型来填 `prior_view`**。契约、校验、材料读取都在了；
   debate map drafter 与 reflection 的提示词都会拿到材料，但 `attach_prior_views` 的确定性版本
-  挂的是「整家公司最新那一条」，不做逐条 debate 的匹配（理由见 §1.7）。
+  挂的是「整家公司最新那一条」，不做逐条 debate 的匹配（理由见 §1.8）。
 - **不改 cockpit HTML、不发 mission 版本、不部署、不写 live 状态目录。**
 
 ---
@@ -441,7 +515,10 @@ LaneTests
 5. **同一家公司有多份旧 screen 怎么办？** 现在「一条链只能开始一次」，所以只有最早/被选中的那一份能当 v0，
    其余以 Claim 形式进来。也可以让它们按 `as_of` 成为 v0、v-1……但负数版本号会把
    `version_number >= 0` 这条刚放宽的约束再撕开一次。建议保持现状：最老的那份是链的起点，其余是证据。
-6. **`prior_view` 要不要逐条 debate 匹配？** 见 §1.7。要做的话是一次模型调用，
+6. **过期重打标签谁来触发？** 现在只在打标签那一刻判定（见 §1.2）。
+   判断层加一个「到期重打」的 tick 是对的修法，`stale_due_at()` 已经把日期算好；
+   要不要做、多久跑一次，需要和 P14a 事件流那条线一起定。
+7. **`prior_view` 要不要逐条 debate 匹配？** 见 §1.8。要做的话是一次模型调用，
    应该在 debate map drafter 的契约里加一个 key，并让 verifier 也看到它——那是 P12c 那条线的改动。
 
 ---
@@ -451,22 +528,25 @@ LaneTests
 新增：
 `src/dalton_core/prior_research_core.py`、`prior_research_cli.py`、`prior_research_launcher.py`、
 `prior_model_import.py`、`prior_model_schema.sql`、`prior_screen_import.py`、
-`mission_prior_research_lane.py`、`tests/test_prior_research.py`、
+`mission_prior_research_lane.py`、`prior_research_launcher.py`、`tests/test_prior_research.py`、
+`deploy/phase9/p9-us-it-services-feeds-v2.json`（取代 v1）、
 `deploy/connector-governance/prior-research-{list-documents,get-document}-v1.json`、
 `src/dalton_core/connector_inventory/{profiles,fixtures,proposals}/prior-research.json`。
 
 共享文件的增量改动：
 `connector_inventory.py`（一个 profile + 一段 output schema）、`connector_quota_policy.py`（两行）、
 `connector_governance.py`（两个 kind）、`feed_acquisition.py`（一个 source ref、一个 tier）、
-`mission_feed_lane.py`（`FEED_IDENTITY` / `FEED_DISCOVERY_SOURCES` 各一行）、
+`mission_feed_lane.py`（`FEED_IDENTITY` / `FEED_DISCOVERY_SOURCES` 各一行，
+per-source 分支五处，triage / attribution 两个函数）、`lane_registry.lane_argv`（重复参数去重）、
 `claim_index_authority.py`（一个 tier + 一个迁移）、`claim_index_schema.sql`、
 `claim_index_tagging.py`（一个 spec 行 + 时效规则）、`document_figure_grade.py`（一个 grade）、
 `debate_map.py` / `event_judgement.py`（`prior_view`）、
-`model_forecast_driver.py` + 三份字面副本 + `cockpit_plane.CHANGE_REASON_LABELS`（`imported_prior`）、
+`cockpit_plane.CHANGE_REASON_LABELS`（`imported_prior` 的中文标签；
+`model_forecast_driver.CHANGE_REASONS` 与三份字面副本**未动**）、
 `mission_deliverable.py` / `mission_deliverable_schema.sql`（v0）、
 `initial_screen.py` / `initial_screen_cli.py`（上一版块、`delta_vs_prior`、选择规则）、
 `lane_registry.py`、`budget_pools.py`、`cockpit_plane.py`、`bootstrap.py`、
-`scripts/rehearse_deploy.py`、`deploy/macos/install.sh`、`deploy/phase9/p9-us-it-services-feeds-v1.json`、
+`scripts/rehearse_deploy.py`、`deploy/macos/install.sh`、`deploy/phase9/p9-us-it-services-feeds-v2.json`、
 `pyproject.toml`。
 
 未碰（禁区）：`writer_server.py`、`coverage_mission.py`(+schema)、`bounded_planner_driver.py`、
