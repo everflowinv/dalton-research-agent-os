@@ -24,7 +24,8 @@ from .bounded_probe_executor import (
     execute_probe_work_order,
 )
 from .bounded_alphaengine_search_probe import (
-    BoundedAlphaEngineSearchProbeError, execute_alphaengine_search_probe,
+    BoundedAlphaEngineSearchProbeError, BoundedAlphaEngineSearchProbePending,
+    execute_alphaengine_search_probe,
 )
 from .budget_pools import POOL_EXHAUSTED_REASON, POOL_EXHAUSTED_STATUS
 from .lane_registry import RESERVED_DRIVER_KEYS, tick_lanes
@@ -431,6 +432,8 @@ class BoundedPlannerDriver:
                             filed_window_days=int(self.config.filed_window_days),
                             clock=self.clock,
                         )
+                except BoundedAlphaEngineSearchProbePending:
+                    return {"kind": "hold", "reason": "probe_child_pending"}
                 except (BoundedProbeExecutionError, BoundedAlphaEngineSearchProbeError) as exc:
                     # The executor read the WorkOrder and refused it: wrong
                     # scope, wrong operation, unusable locator.  That is a

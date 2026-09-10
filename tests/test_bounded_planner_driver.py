@@ -425,7 +425,7 @@ class BoundedPlannerDriverTests(unittest.TestCase):
         self.assertEqual(second["probes_executed"], 1)
         self.assertEqual(second["executed"][0]["outcome_kind"], "observed")
 
-    def test_a_transient_transport_failure_holds_the_round_and_resumes(self) -> None:
+    def test_a_pending_discovery_child_holds_the_round_and_resumes(self) -> None:
         # The AlphaEngine branch of the probe is a writer RPC, so "the writer
         # is busy or restarting" arrives here as an ordinary exception.  It
         # used to be recorded as a refused probe, which made a coverage item
@@ -433,18 +433,21 @@ class BoundedPlannerDriverTests(unittest.TestCase):
         # later.
         from unittest.mock import patch
 
+        from dalton_core.bounded_alphaengine_search_probe import (
+            BoundedAlphaEngineSearchProbePending,
+        )
         from dalton_core.writer_server import write_token_config
         write_token_config(self.root / "tokens.json", list(self.server.principals.values()))
         driver = self._driver(FakeTransport(FakeResponse(200, company_facts_body())))
         with patch(
             "dalton_core.bounded_planner_driver.execute_probe_work_order",
-            side_effect=RuntimeError("writer socket is restarting"),
+            side_effect=BoundedAlphaEngineSearchProbePending("discovery child still runs"),
         ):
             first = driver.run_once()
         self.assertEqual(first["probes_executed"], 0)
         self.assertEqual(first["executed"], [])
         held = first["skipped"][0]
-        self.assertEqual(held["reason"], "probe_transport_unavailable:RuntimeError")
+        self.assertEqual(held["reason"], "probe_child_pending")
         store = DaltonStore(str(self.root / "core.sqlite"))
         self.addCleanup(store.close)
         authority = BoundedPlannerAuthority(store)
