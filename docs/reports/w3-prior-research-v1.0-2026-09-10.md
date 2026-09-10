@@ -1,7 +1,7 @@
 # W3 既有资料的入职处理 v1.0
 
 日期：2026-09-10
-分支：`w3-prior-research`（worktree `~/Projects/dalton-w3-prior-research-worktree`），基线 main `189ab19`，已 merge main `86121a3`（含 planner 日账本、consensus、P12d、S5、业绩季）
+分支：`w3-prior-research`（worktree `~/Projects/dalton-w3-prior-research-worktree`），基线 main `189ab19`，已 merge main `f6b9a9b`（含 planner 日账本、consensus、P12d、S5、业绩季、P12e 行业框架、P13-M3）
 规格：[并行开发计划 v1.0 §「既有资料的入职处理」](parallel-development-plan-v1.0-2026-09-09.md)、ADR-0005 / 0007 / 0008
 owner 的话：**有些公司我们已有资料。新分析师先读它——能省一周——然后仍然自己写一版，因为资料可能过时，市场在问的问题已经变了。**
 
@@ -84,12 +84,16 @@ figure 表的 SQL CHECK 也只认那两个词。所以 prior 文档可以被定�
 | **另一份**旧文档进入已开始的链是 `MissionDeliverableConflict` | `publish`（链只能开始一次；第二份文档是证据，不是起点） |
 | v0 不能自称过闸 | `publish`（`as_version_zero` + `gate.passed` → 拒绝，不是 assert：`-O` 下 assert 会消失） |
 | v0 什么都不主张：正文里的数字记成 gap，不是拒绝 | `validate_section(imported=True)` |
+| v0 仍然不能引不存在的 Claim、不能引解析不出的 cell、不能两个都引 | `validate_section`（P12e 的 `numbers[]` 合同原样适用） |
 | v0 永不过闸：自评每一项 `imported` | `prior_screen_import.imported_gate` |
 
 第三条值得多说一句。figure 规则的存在是为了阻止**这个系统**写它引不出处的数字；
 v0 是「某份文档这么说」的记录，绑着文档的 ref 与 hash。
 为了让旧 screen 能过闸而把里面的数字剥掉，会毁掉正在被导入的那个东西本身。
 所以数字留在正文，并在 `gaps` 里留一条「上一版里的数字，未在本系统重新核对」。
+`imported` 只放松这**一条**：P12e 的 `numbers[]` 合同（一条数字恰好引 `claim_version_ref`
+或 `cell` 之一，cell 必须在发布时还解析得出）对 v0 一字不改地适用。
+v0 能做的只是把自己的数字不加引用地带进来——一份在别处写成的文档本来就是这样。
 
 第四条同理：拿本基金的出口门四问去评判一份 2024 年的文档，无论答「是」还是「否」都是编造。
 所以有第三个词 `imported`（`GATE_ITEM_STATUSES = ("passed", "failed", "imported")`）。
@@ -313,7 +317,7 @@ DebateMap 的 debate 形状和 ThesisReflection 的契约各新增一个**可选
 全量：`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`
 
 ```
-Ran 5123 tests in 472.909s
+Ran 5381 tests in 490.810s
 
 OK (skipped=1)
 ```
