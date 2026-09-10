@@ -545,6 +545,26 @@ class StateDirectoryCase(RouterCase):
 
 
 class SetSelectionTests(StateDirectoryCase):
+    def test_cross_provider_selection_adds_slot_and_the_actual_route_selects_it(self) -> None:
+        self.model_config["credential_slot_refs"] = ["credential-slot:openai:dalton"]
+        self.config_path.write_text(json.dumps(self.model_config), encoding="utf-8")
+        set_model_selection(
+            self.root, purpose="plan", mode="explicit",
+            chain=["profile:claude-fable-5-1"], now=NOW)
+        config = self.stored()
+        self.assertIn("credential-slot:openclaw:claude-cli-gateway",
+                      config["credential_slot_refs"])
+        decision = self.router.route(
+            _work("work:cross-provider-selection"), attempt_number=1,
+            capability="research", policy_version_ref=config["routing_policy_ref"],
+            credential_slot_refs=config["credential_slot_refs"],
+            required_modalities=["text"], required_context_tokens=2_000,
+            estimated_input_tokens=1_000, estimated_output_tokens=500,
+            idempotency_key="route:cross-provider-selection", purpose="plan",
+        )["decision"]
+        self.assertEqual(decision["selected_endpoint"]["provider"],
+                         "claude-cli-gateway")
+
     def test_plan_selection_atomically_repoints_the_resident_service_pin(self) -> None:
         state = self.root / "state" / "dalton-core"
         state.mkdir(parents=True)
@@ -555,7 +575,10 @@ class SetSelectionTests(StateDirectoryCase):
         service = {
             "model_router_db": str(self.root / "model-router.sqlite"),
             "bounded_planner": {"config": {
-                "routing_policy_ref": self.policies["brain"]}},
+                "planner_model_router_db": str(self.root / "model-router.sqlite"),
+                "planner_routing_policy_ref": self.policies["brain"],
+                "planner_credential_slot_refs": ["credential-slot:openai:dalton"],
+            }},
         }
         service_path.write_text(json.dumps(service), encoding="utf-8")
         result = set_model_selection(
@@ -563,10 +586,14 @@ class SetSelectionTests(StateDirectoryCase):
             chain=["profile:claude-fable-5-1"], now=NOW)
         updated = json.loads(service_path.read_text(encoding="utf-8"))
         self.assertNotEqual(
-            updated["bounded_planner"]["config"]["routing_policy_ref"],
+            updated["bounded_planner"]["config"]["planner_routing_policy_ref"],
             self.policies["brain"])
+        self.assertIn(
+            "credential-slot:openclaw:claude-cli-gateway",
+            updated["bounded_planner"]["config"]["planner_credential_slot_refs"],
+        )
         self.assertTrue(result["requires_restart"])
-        self.assertIn("service.json#bounded_planner.routing_policy_ref",
+        self.assertIn("service.json#bounded_planner.planner_routing_policy_ref",
                       result["model_configs_repointed"])
 
     def test_registry_covers_every_installed_role_configuration(self) -> None:

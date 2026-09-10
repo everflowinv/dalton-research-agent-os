@@ -214,23 +214,29 @@ def _runtime_policy_config(state_dir: str | Path, purpose: str) -> dict[str, Any
         return None
     service = json.loads(path.read_text(encoding="utf-8"))
     locations = {
-        "plan": ("bounded_planner", "routing_policy_ref"),
-        "agenda_planning": ("agenda", "routing_policy_ref"),
-        "thesis_impact_assessment": ("thesis_impact", "assessment_routing_policy_ref"),
-        "thesis_impact_verifier": ("thesis_impact", "verifier_routing_policy_ref"),
+        "plan": ("bounded_planner", "planner_routing_policy_ref",
+                 "planner_credential_slot_refs", "planner_model_router_db"),
+        "agenda_planning": ("agenda", "routing_policy_ref",
+                            "credential_slot_refs", "model_router_db"),
+        "thesis_impact_assessment": ("thesis_impact", "assessment_routing_policy_ref",
+                                     "credential_slot_refs", "model_router_db"),
+        "thesis_impact_verifier": ("thesis_impact", "verifier_routing_policy_ref",
+                                   "credential_slot_refs", "model_router_db"),
     }
     location = locations.get(purpose)
     if location is None:
         return None
-    section, field = location
+    section, field, slots_field, router_field = location
     block = service.get(section)
     config = block.get("config") if isinstance(block, Mapping) else None
     if not isinstance(config, Mapping) or not isinstance(config.get(field), str):
-        return None
-    router_db = service.get("model_router_db") or config.get("model_router_db")
+        raise ModelSelectionError(
+            f"service.json does not configure the {purpose} runtime policy pin")
+    router_db = config.get(router_field) or service.get("model_router_db")
     return {"name": f"service.json#{section}.{field}", "path": path,
             "config": service, "runtime_config": config, "field": field,
-            "router_db": router_db, "routing_policy_ref": config[field]}
+            "slots_field": slots_field, "router_db": router_db,
+            "routing_policy_ref": config[field]}
 
 
 def _next_version_ref(latest: Mapping[str, Any]) -> str:
@@ -411,11 +417,19 @@ def set_model_selection(
                     raise ModelSelectionError(str(exc)) from exc
         outcome = published[key]
         new_ref = outcome["policy_version_ref"]
-        if new_ref == policy_ref:
-            unchanged.append(item["name"])
-            continue
+        changed = new_ref != policy_ref
         config[item.get("field", "routing_policy_ref")] = new_ref
-        repointed.append(item["name"])
+        with ModelRouter(router_db, read_only=True) as router:
+            profiles = {row["id"]: row for row in router.latest_profiles()}
+        selected_slots = [profiles[profile_id]["credential_slot_ref"]
+                          for profile_id in outcome["chain"]]
+        slots_field = item.get("slots_field", "credential_slot_refs")
+        prior_slots = list(config.get(slots_field) or [])
+        merged_slots = list(dict.fromkeys([*prior_slots, *selected_slots]))
+        if merged_slots != prior_slots:
+            config[slots_field] = merged_slots
+            changed = True
+        (repointed if changed else unchanged).append(item["name"])
     _write_configs_atomically([
         (item["path"], item["config"])
         for item in configs if item["name"] in repointed
