@@ -1626,6 +1626,8 @@ class CockpitModelPageTests(unittest.TestCase):
         self.assertTrue(row["label"] and row["tier_label"])
         self.assertTrue(view["choices"])
         self.assertIn("family", view["choices"][0])
+        self.assertIn("provider", view["choices"][0])
+        self.assertIn("model_ref", view["choices"][0])
         self.assertIsInstance(view["choices"][0]["capabilities"], list)
         catalog = view["catalog"]
         self.assertTrue(catalog["available"])
@@ -1633,6 +1635,63 @@ class CockpitModelPageTests(unittest.TestCase):
                     "dalton_not_in_openclaw"):
             self.assertIsInstance(catalog[key], list)
             self.assertTrue(catalog[f"{key}_note"])
+
+    def test_page_reads_each_stage_from_its_actual_consumer_config(self) -> None:
+        with ModelRouter(self.router_db) as router:
+            sync_openclaw_model_catalog(router, _allowing_config(), checked_at=NOW)
+            profile_ids = [item["id"] for item in router.latest_profiles()][:4]
+            refs = []
+            for number, profile_id in enumerate(profile_ids, 1):
+                refs.append(ensure_planner_policy(
+                    router, profile_ids=[profile_id], now=NOW,
+                    policy_id=f"model-routing-policy:actual-binding-{number}",
+                )["policy_version_ref"])
+        base = {
+            "model_router_db": str(self.router_db),
+            "credential_slot_refs": [],
+        }
+        state = self.root / "install" / "state" / "dalton-core"
+        state.mkdir(parents=True)
+        paths = [
+            self.root / "cockpit.json",
+            state / "research-planner-model-config.json",
+            state / "dossier-model-config.json",
+            state / "company-dossier-verifier-model-config.json",
+        ]
+        for path, ref in zip(paths, refs, strict=True):
+            path.write_text(json.dumps({**base, "routing_policy_ref": ref}),
+                            encoding="utf-8")
+        service_path = self.root / "install" / "config" / "service.json"
+        service_path.parent.mkdir()
+        service_path.write_text(json.dumps({
+            "model_router_db": str(self.router_db),
+            "bounded_planner": {"config": {
+                "planner_routing_policy_ref": refs[1],
+            }},
+        }), encoding="utf-8")
+        plane = self.plane(with_model_config=False)
+        object.__setattr__(plane.config, "model_config_path", paths[0])
+        object.__setattr__(plane.config, "state_dir", state)
+        view = plane.models()
+        rows = {row["purpose"]: row for row in view["purposes"]}
+        self.assertEqual(rows["ask"]["policy_version_ref"], refs[0])
+        self.assertEqual(rows["plan"]["policy_version_ref"], refs[1])
+        self.assertEqual(rows["dossier"]["policy_version_ref"], refs[2])
+        self.assertEqual(rows["dossier_verifier"]["policy_version_ref"], refs[3])
+        self.assertEqual(
+            [Path(rows[name]["configuration_source"]).name for name in
+             ("ask", "plan", "dossier", "dossier_verifier")],
+            ["cockpit.json", "service.json#bounded_planner.config.planner_routing_policy_ref",
+             "dossier-model-config.json",
+             "company-dossier-verifier-model-config.json"],
+        )
+        self.assertEqual(
+            [rows[name]["chain"][0]["model"] for name in
+             ("ask", "plan", "dossier", "dossier_verifier")],
+            profile_ids,
+        )
+        self.assertEqual(rows["debate_map"]["configuration_status"],
+                         "unconfigured")
 
     def test_the_page_reads_without_a_gateway_configuration(self) -> None:
         self.install()

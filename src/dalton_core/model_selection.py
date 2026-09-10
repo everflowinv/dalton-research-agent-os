@@ -56,6 +56,36 @@ from .model_router import (
 from .store import content_hash
 
 SELECTION_MODES: tuple[str, ...] = ("tier", "explicit")
+PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
+    "draft": ("initial-screen-model-config.json",),
+    "document_extraction": ("document-extraction-model-config.json",),
+    "claim_index": ("claim-index-model-config.json",),
+    "quality": ("initial-screen-model-config.json",),
+    "event_judgement": ("event-judgement-model-config.json",),
+    "event_judgement_verifier": ("event-verifier-model-config.json",),
+    "thesis_reflection": ("event-judgement-model-config.json",),
+    "thesis_reflection_verifier": ("event-verifier-model-config.json",),
+    "zero_base_review": ("zero-base-review-model-config.json",),
+    "zero_base_review_verifier": ("zero-base-review-verifier-model-config.json",),
+    "dossier": ("dossier-model-config.json", "initial-screen-model-config.json"),
+    "dossier_verifier": ("company-dossier-verifier-model-config.json",
+                         "dossier-verifier-model-config.json"),
+    "deep_insight_gate": ("dossier-model-config.json", "initial-screen-model-config.json"),
+    "deep_insight_gate_verifier": ("company-dossier-verifier-model-config.json",
+                                   "dossier-verifier-model-config.json"),
+    "industry_framework": ("initial-screen-model-config.json",),
+    "industry_framework_verifier": ("dossier-verifier-model-config.json",),
+    "earnings_preview": ("earnings-season-model-config.json",),
+    "earnings_calibration": ("earnings-season-model-config.json",),
+    "earnings_preview_verifier": ("earnings-season-verifier-model-config.json",),
+    "earnings_calibration_verifier": ("earnings-season-verifier-model-config.json",),
+}
+_SERVICE_PURPOSE_PINS = {
+    "plan": ("bounded_planner", "planner_routing_policy_ref"),
+    "agenda_planning": ("agenda", "routing_policy_ref"),
+    "thesis_impact_assessment": ("thesis_impact", "assessment_routing_policy_ref"),
+    "thesis_impact_verifier": ("thesis_impact", "verifier_routing_policy_ref"),
+}
 # Each calling stage in the owner's words. One map, used both by the cockpit's
 # model page and by the text of a fallback notice, so the owner reads the same
 # name for a stage wherever it appears.
@@ -124,6 +154,83 @@ _VERSION_KEYS = frozenset({"policy_version_ref", "version", "created_at",
 
 class ModelSelectionError(RuntimeError):
     """The selection cannot be published as asked."""
+
+
+def purpose_policy_bindings(
+    state_dir: str | Path, *, cockpit_model_config_path: str | Path | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Resolve each stage to the policy pin its actual consumer reads.
+
+    Missing dynamic launch arguments remain visibly unconfigured.  They must
+    never inherit the cockpit extraction pin merely because it is available.
+    """
+
+    directory = Path(state_dir).expanduser().resolve()
+    result: dict[str, dict[str, Any]] = {}
+
+    def file_binding(purpose: str, candidates: Sequence[Path]) -> None:
+        for path in candidates:
+            if not path.is_file():
+                continue
+            raw = _read_model_binding(path)
+            result[purpose] = {"status": "configured", "source": str(path),
+                               "policy_version_ref": raw["routing_policy_ref"],
+                               "model_router_db": raw.get("model_router_db")}
+            return
+        result[purpose] = {"status": "unconfigured", "source": str(candidates[0]),
+                           "policy_version_ref": None, "model_router_db": None}
+
+    if cockpit_model_config_path is not None:
+        cockpit = Path(cockpit_model_config_path).expanduser().resolve()
+        for purpose in ("ask", "goal", "steer"):
+            file_binding(purpose, (cockpit,))
+    else:
+        for purpose in ("ask", "goal", "steer"):
+            result[purpose] = {"status": "unconfigured", "source": "cockpit.model_config_path",
+                               "policy_version_ref": None, "model_router_db": None}
+    for purpose, names in PURPOSE_MODEL_CONFIGS.items():
+        file_binding(purpose, tuple(directory / name for name in names))
+
+    service_path = directory.parents[1] / "config" / "service.json"
+    service = _load_model_json(service_path) if service_path.is_file() else None
+    for purpose, (section, field) in _SERVICE_PURPOSE_PINS.items():
+        block = service.get(section) if isinstance(service, Mapping) else None
+        nested = block.get("config") if isinstance(block, Mapping) else None
+        ref = nested.get(field) if isinstance(nested, Mapping) else None
+        result[purpose] = {
+            "status": "configured" if isinstance(ref, str) else "unconfigured",
+            "source": f"{service_path}#{section}.config.{field}",
+            "policy_version_ref": ref if isinstance(ref, str) else None,
+            "model_router_db": ((nested.get("model_router_db") or service.get("model_router_db"))
+                                if isinstance(nested, Mapping) and isinstance(service, Mapping)
+                                else None),
+            "requires_restart": True,
+        }
+    if result["plan"]["status"] == "unconfigured":
+        file_binding("plan", (directory / "research-planner-model-config.json",))
+    # These consumers receive a path at launch time.  No installed path in the
+    # cockpit contract means there is no truthful resident pin to display.
+    for purpose in ("model_spec", "quality_verifier", "debate_map",
+                    "conviction_call", "street_estimate"):
+        result.setdefault(purpose, {
+            "status": "unconfigured", "source": "dynamic launch argument",
+            "policy_version_ref": None, "model_router_db": None,
+        })
+    return result
+
+
+def _load_model_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ModelSelectionError(f"{path} cannot be read: {exc}") from exc
+
+
+def _read_model_binding(path: Path) -> Mapping[str, Any]:
+    raw = _load_model_json(path)
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("routing_policy_ref"), str):
+        raise ModelSelectionError(f"{path} names no routing policy version")
+    return raw
 
 
 def _write_owner_only(path: Path, value: Any) -> None:

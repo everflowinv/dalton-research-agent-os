@@ -3452,17 +3452,22 @@ class CockpitPlane:
         (ADR-0006).
         """
 
-        from .model_selection import PURPOSE_LABELS, SELECTION_MODES
+        from .model_selection import (
+            ModelSelectionError, PURPOSE_LABELS, SELECTION_MODES,
+            purpose_policy_bindings,
+        )
 
         path = self._model_router_db()
         if path is None:
             return {"available": False,
                     "reason": "这台机器上还没有模型路由库，所以没有可选的模型"}
-        policy_ref = None
-        config = (_load_json(self.config.model_config_path)
-                  if self.config.model_config_path is not None else None)
-        if isinstance(config, dict):
-            policy_ref = config.get("routing_policy_ref")
+        try:
+            bindings = purpose_policy_bindings(
+                self.config.state_dir,
+                cockpit_model_config_path=self.config.model_config_path,
+            )
+        except (ModelSelectionError, OSError, ValueError) as exc:
+            return {"available": False, "reason": f"模型配置读不出来：{_reason(exc)}"}
         broker = (None if self.config.openclaw_config_path is None
                   else _load_json(self.config.openclaw_config_path))
         broker = broker if isinstance(broker, Mapping) else None
@@ -3473,9 +3478,17 @@ class CockpitPlane:
         try:
             with closing(ModelRouter(path, read_only=True)) as router:
                 overview = routing_overview(
-                    router, openclaw_config=broker, checked_at=self.clock(),
-                    policy_version_ref=policy_ref,
-                )
+                    router, openclaw_config=broker, checked_at=self.clock())
+                policy_overviews = {}
+                policies = {}
+                for binding in bindings.values():
+                    ref = binding.get("policy_version_ref")
+                    if isinstance(ref, str) and ref not in policy_overviews:
+                        policies[ref] = router.get_policy(ref)
+                        policy_overviews[ref] = routing_overview(
+                            router, openclaw_config=broker,
+                            checked_at=self.clock(), policy_version_ref=ref,
+                        )
                 discovery = (
                     {} if broker is None
                     else discover_models(broker, router=router,
@@ -3488,7 +3501,36 @@ class CockpitPlane:
         except (FallbackChainError, sqlite3.Error, OSError, ValueError) as exc:
             return {"available": False, "reason": f"模型目录读不出来：{_reason(exc)}"}
         purposes = []
-        for row in overview["purposes"]:
+        default_rows = {row["purpose"]: row for row in overview["purposes"]}
+        for purpose in sorted(default_rows):
+            binding = bindings.get(purpose, {
+                "status": "unconfigured", "source": "dynamic launch argument",
+                "policy_version_ref": None,
+            })
+            policy_ref = binding.get("policy_version_ref")
+            selected = policy_overviews.get(policy_ref)
+            if selected is None:
+                row = {**default_rows[purpose], "mode": "unconfigured", "chain": [],
+                       "superseded_chain": [], "last_served": None}
+            else:
+                row = next(item for item in selected["purposes"]
+                           if item["purpose"] == purpose)
+                pinned = policies[policy_ref]
+                override = (pinned.get("purpose_overrides") or {}).get(purpose)
+                tiers = (pinned.get("fallback_chains") or {}).get("tiers")
+                allowed = (pinned.get("filters") or {}).get("allowed_profile_ids") or []
+                # Legacy policies are direct pins: their consumer calls the
+                # router without a tier chain.  Showing the global tier here
+                # would advertise models this policy will actually reject.
+                if not isinstance(override, Mapping) and not tiers and allowed:
+                    row = {**row, "mode": "pinned", "superseded_chain": None,
+                           "chain": [{
+                               "position": position, "profile_id": profile_id,
+                               "registered": profile_id in catalogue,
+                               "status": (catalogue.get(profile_id) or {}).get("status", "live"),
+                               "family": (catalogue.get(profile_id) or {}).get("family"),
+                               "unpriced": bool((catalogue.get(profile_id) or {}).get("unpriced")),
+                           } for position, profile_id in enumerate(allowed, 1)]}
             chain = [{
                 "position": link["position"], "model": link["profile_id"],
                 "family": link["family"], "unpriced": link["unpriced"],
@@ -3508,8 +3550,13 @@ class CockpitPlane:
                 "tier_label": MODEL_TIER_LABELS.get(row["tier"], row["tier"]),
                 "mode": row["mode"],
                 "mode_label": MODEL_SELECTION_MODE_LABELS.get(
-                    row["mode"], row["mode"]
+                    row["mode"], ({"unconfigured": "未配置", "pinned": "固定策略"}
+                                  .get(row["mode"], row["mode"]))
                 ),
+                "configuration_status": binding["status"],
+                "configuration_source": binding["source"],
+                "policy_version_ref": policy_ref,
+                "requires_restart": bool(binding.get("requires_restart")),
                 "chain": chain,
                 "superseded_chain": row["superseded_chain"],
                 "superseded_note": (
@@ -3537,6 +3584,8 @@ class CockpitPlane:
             (
                 {
                     "model": profile_id,
+                    "provider": profile.get("provider"),
+                    "model_ref": profile.get("model"),
                     "profile_version_ref": profile.get("profile_version_ref"),
                     "profile_hash": profile.get("content_hash"),
                     "family": profile.get("family"),
@@ -3558,7 +3607,7 @@ class CockpitPlane:
             "available": True,
             "as_of": _iso(self.clock()),
             "schema_version": SCHEMA_VERSION,
-            "policy_version_ref": policy_ref,
+            "policy_version_ref": None,
             "purposes": purposes,
             "modes": [{"value": mode,
                        "label": MODEL_SELECTION_MODE_LABELS.get(mode, mode)}
