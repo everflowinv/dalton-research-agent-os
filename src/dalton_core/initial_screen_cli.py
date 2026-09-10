@@ -26,9 +26,11 @@ import sys
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any
 
 from .claim_retirement import ClaimRetirementAuthority
+from .deliverable_reopen import CHANGE_REASON_EVIDENCE, approved_reopen
 from .cockpit_model import CockpitModel, CockpitModelError, lane_status_for
 from .coverage_mission import CoverageMissionAuthority, CoverageMissionError
 from .initial_screen import (
@@ -109,16 +111,27 @@ def _playbook(store: DaltonStore, mission: dict[str, Any]) -> dict[str, Any]:
 def _target(
     *, mission: dict[str, Any], stage_rows: list[dict[str, Any]],
     deliverables: dict[str, dict[str, Any]], claims: dict[str, list[dict[str, Any]]],
+    reopens: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    """The next company to draft, in mission priority order, and why the rest wait."""
+    """The next company to draft, in mission priority order, and why the rest wait.
 
+    P14d: ``gate_passed`` used to end the sentence.  ADR-0008 says it is the
+    state of a *version*, so it now ends the sentence unless a person approved
+    a ``gate_reopen`` for this company and no version has spent it yet.  The
+    approval also defeats the staleness rule below, because the whole finding
+    that produced it is that the evidence base thickened in ways no new Claim
+    of this company's records -- 10,023 filed statement lines are not Claims.
+    """
+
+    approved = dict(reopens or {})
     skipped: list[dict[str, Any]] = []
     for entry in stage_rows:
         company_ref = entry["company_ref"]
+        reopen = approved.get(company_ref)
         if entry["stage"] != "initial_screen":
             skipped.append({"company_ref": company_ref, "reason": f"stage is {entry['stage']}"})
             continue
-        if entry["stage_status"] == "gate_passed":
+        if entry["stage_status"] == "gate_passed" and reopen is None:
             skipped.append({"company_ref": company_ref, "reason": "initial screen already passed"})
             continue
         own = claims.get(company_ref) or []
@@ -138,11 +151,36 @@ def _target(
             })
             continue
         published = deliverables.get(company_ref)
-        if published is not None and published["created_at"] >= own[-1]["created_at"]:
+        if (
+            reopen is None
+            and published is not None
+            and published["created_at"] >= own[-1]["created_at"]
+        ):
             skipped.append({"company_ref": company_ref, "reason": "nothing new since the last version"})
             continue
-        return entry, skipped
+        return {**entry, "reopen": reopen}, skipped
     return None, skipped
+
+
+def reopen_revision(reopen: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Turn an approved gate reopen into the version's ``revision`` block.
+
+    The refs are the proposal's -- the statement filings, figures and Claims
+    that flipped an item from 缺 to 有 -- plus the approval itself, so a reader
+    of version N+1 can get from "why does this exist" to the exact diff and the
+    person who said yes without leaving the record.
+    """
+
+    if reopen is None:
+        return None
+    proposal = reopen.get("proposal") or {}
+    refs = list(proposal.get("evidence_refs") or ())
+    refs = [reopen["id"], reopen["proposal_ref"], proposal.get("passed_version_ref"), *refs]
+    return {
+        "change_reason": proposal.get("change_reason") or CHANGE_REASON_EVIDENCE,
+        "evidence_refs": [ref for ref in refs if ref],
+        "reopen_ref": reopen["proposal_ref"],
+    }
 
 
 # A URL's punctuation is a URL's punctuation: "https://" is a colon and two
@@ -281,8 +319,17 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             record["subject_ref"]: record
             for record in deliverable_authority.deliverables(mission["id"], kind=KIND)
         }
+        reopens = {
+            row["company_ref"]: row
+            for row in (
+                approved_reopen(store.connection, member["company_ref"])
+                for member in mission["universe"]
+            )
+            if row is not None
+        }
         entry, skipped = _target(
             mission=mission, stage_rows=stage_rows, deliverables=published, claims=claims,
+            reopens=reopens,
         )
         summary["skipped"] = skipped
         if entry is None:
@@ -408,6 +455,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 gaps=[gap for section in sections for gap in section["gaps"]],
                 model_invocation_refs=invocations,
                 actor_ref=mission["autonomy"]["automation_principal"],
+                revision=reopen_revision(entry.get("reopen")),
             )
         except MissionDeliverableError as exc:
             summary["status"] = "failed"
