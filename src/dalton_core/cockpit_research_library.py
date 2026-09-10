@@ -6,9 +6,11 @@ import json
 import sqlite3
 from typing import Any, Mapping
 
-from .company_dossier import CompanyDossierAuthority, section_body
-from .debate_map import DebateMapAuthority
-from .industry_framework import IndustryFrameworkAuthority, deliverable_sections
+from .company_dossier import CompanyDossierAuthority, CompanyDossierError, section_body
+from .coverage_mission import CoverageMissionAuthority
+from .debate_map import DebateMapAuthority, DebateMapError
+from .industry_framework import (IndustryFrameworkAuthority, IndustryFrameworkError,
+                                 deliverable_sections)
 from .store import content_hash
 
 
@@ -37,6 +39,9 @@ def _sections(kind: str, record: Mapping[str, Any]) -> list[dict[str, Any]]:
                 sections.append({"title": f"{debate['question']} · {label}",
                                  "body": position.get("statement") or "尚未形成判断",
                                  "sources": list(position.get("claim_refs") or position.get("refs") or []),
+                                 "position": ({key: position.get(key) for key in
+                                               ("available", "lean", "state", "side")
+                                               if key in position}),
                                  "gaps": [], "debate_status": debate.get("status"),
                                  "last_shift_reason": debate.get("last_shift_reason")})
         return sections
@@ -59,7 +64,9 @@ def research_library(connection: sqlite3.Connection, mission: Mapping[str, Any],
         ("initial_screen", "初步筛选", "mission_deliverable_versions"),
         ("investment_memo", "投资备忘录", "mission_deliverable_versions"),
     ):
+        subject_ref = mission["industry_ref"] if kind == "industry_framework" else company_ref
         item: dict[str, Any] = {"kind": kind, "label": label, "status": "missing",
+                                "subject_ref": subject_ref,
                                 "sections": [], "gaps": []}
         products.append(item)
         if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
@@ -95,9 +102,46 @@ def research_library(connection: sqlite3.Connection, mission: Mapping[str, Any],
                         mission_version_ref=bound,
                         mission_binding="current" if bound == mission["id"] else "historical",
                         sections=_sections(kind, record), gaps=list(record.get("gaps") or []))
-            # Publication is not a human stage decision. The reader makes no
-            # claim that an available Memo has been approved.
-        except (ValueError, KeyError, TypeError, sqlite3.Error) as exc:
+            if kind == "investment_memo":
+                item["approval"] = _memo_approval(
+                    connection, mission, company_ref, record)
+            else:
+                item["approval"] = {"status": "not_applicable"}
+        except (ValueError, KeyError, TypeError, sqlite3.Error,
+                CompanyDossierError, DebateMapError, IndustryFrameworkError) as exc:
             item.update(status="invalid", reason=str(exc), sections=[], gaps=[])
     return {"company_ref": company_ref, "industry_ref": mission["industry_ref"],
             "mission_version_ref": mission["id"], "products": products}
+
+
+def _memo_approval(connection: sqlite3.Connection, mission: Mapping[str, Any],
+                   company_ref: str, record: Mapping[str, Any]) -> dict[str, Any]:
+    """Human decision for these exact memo bytes, never publication status."""
+    if record.get("mission_version_ref") != mission.get("id"):
+        return {"status": "historical", "decision_record_ref": None}
+    state = _reader(connection, CoverageMissionAuthority).current_stage_state(
+        mission["mission_ref"], company_ref)
+    stage = state.get("stages", {}).get("investment_memo") or {}
+    record_ref = stage.get("record_ref")
+    if stage.get("status") not in {"gate_passed", "gate_failed"} or not record_ref:
+        return {"status": "pending_human_decision", "decision_record_ref": None}
+    row = connection.execute(
+        "SELECT record_json,content_hash FROM coverage_mission_stage_records WHERE record_id=?",
+        (record_ref,),
+    ).fetchone()
+    if row is None:
+        raise ValueError("memo stage decision record is missing")
+    decision = json.loads(row["record_json"])
+    if decision.get("content_hash") != row["content_hash"] or content_hash(
+            {key: value for key, value in decision.items() if key != "content_hash"}
+    ) != row["content_hash"]:
+        raise ValueError("memo stage decision integrity check failed")
+    if record["id"] not in (decision.get("evidence_refs") or []):
+        return {"status": "pending_human_decision", "decision_record_ref": None,
+                "reason": "current stage decision belongs to another memo version"}
+    return {
+        "status": ("approved" if stage["status"] == "gate_passed" else "rejected"),
+        "decision_record_ref": record_ref,
+        "actor_ref": decision.get("actor_ref"),
+        "decided_at": decision.get("created_at"),
+    }
