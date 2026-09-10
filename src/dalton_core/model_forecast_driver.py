@@ -57,7 +57,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
@@ -2296,7 +2296,11 @@ class ForecastModelAuthority:
             "SELECT * FROM forecast_model_versions WHERE model_ref=? "
             "ORDER BY version_number DESC LIMIT 1", (model_ref,),
         ).fetchone()
-        if latest is not None and latest["body_hash"] == digest:
+        duplicate_existing = latest is not None and latest["body_hash"] == digest
+        if duplicate_existing and self.connection.execute(
+            "SELECT 1 FROM forecast_model_filing_proofs WHERE model_version_id=?",
+            (latest["version_id"],),
+        ).fetchone() is not None:
             return {**self.model(latest["version_id"]), "status": "duplicate"}
         # Lost update. A caller computed this from some version; if the chain
         # has moved since, appending it would quietly undo whatever moved it --
@@ -2323,6 +2327,11 @@ class ForecastModelAuthority:
         record.setdefault("decision", None)
         record["content_hash"] = content_hash(record)
         wire = validate_forecast_model(record)
+        if duplicate_existing:
+            # Preserve the immutable legacy model byte for byte.  Only the
+            # separately stored, replayable filing proof is being backfilled.
+            wire = self.model(str(latest["version_id"]))
+            version_id = wire["id"]
         # P17b. The structural validation above says the record is well formed;
         # this says the company it describes could exist. Chem's workbook
         # passed forty-two of the first kind and shipped a loss scenario as a
@@ -2398,15 +2407,54 @@ class ForecastModelAuthority:
                     matches = [row for row in statement_wire
                                if str(found[str(row["ingest_id"])]["accession"])
                                in cell_accessions]
-                    exact = any(
-                        str(row.get("concept")) == str(cell.get("concept"))
-                        and row.get("period_start") == cell.get("period_start")
-                        and row.get("period_end") == cell.get("period_end")
-                        and str(row.get("value")) == str(cell.get("value"))
+                    candidates = [
+                        row for row in matches
+                        if str(row.get("concept")) == str(cell.get("concept"))
                         and str(row.get("unit")) == str(driver.get("unit"))
                         and row.get("dimension_axis") is None
                         and row.get("dimension_member") is None
-                        for row in matches)
+                    ]
+                    if cell.get("basis") == "derived_from_cumulative":
+                        source_rows = []
+                        for earlier in candidates:
+                            for later in candidates:
+                                try:
+                                    adjacent = (
+                                        date.fromisoformat(str(earlier["period_end"]))
+                                        + timedelta(days=1)
+                                        == date.fromisoformat(str(cell["period_start"]))
+                                    )
+                                except (KeyError, TypeError, ValueError):
+                                    adjacent = False
+                                if (earlier is not later and adjacent
+                                        and earlier.get("period_start") == later.get("period_start")
+                                        and later.get("period_end") == cell.get("period_end")):
+                                    source_rows = [earlier, later]
+                                    break
+                            if source_rows:
+                                break
+                        exact = False
+                        if len(source_rows) == 2:
+                            from decimal import Decimal, InvalidOperation
+                            try:
+                                exact = (
+                                    {str(found[str(row["ingest_id"])]["accession"])
+                                     for row in source_rows} == cell_accessions
+                                    and
+                                    Decimal(str(source_rows[1]["value"]))
+                                    - Decimal(str(source_rows[0]["value"]))
+                                    == Decimal(str(cell.get("value")))
+                                )
+                            except (InvalidOperation, ValueError):
+                                exact = False
+                    else:
+                        exact = any(
+                            row.get("period_start") == cell.get("period_start")
+                            and row.get("period_end") == cell.get("period_end")
+                            and str(row.get("value")) == str(cell.get("value"))
+                            and cell_accessions == {
+                                str(found[str(row["ingest_id"])]["accession"])}
+                            for row in candidates)
                     if not exact:
                         raise ForecastModelValidationError(
                             "filing reconciliation mismatch "
@@ -2432,12 +2480,13 @@ class ForecastModelAuthority:
         if filing_proof is not None:
             filing_proof["content_hash"] = content_hash(filing_proof)
         with self._transaction() as cur:
-            if cur.execute(
-                "SELECT 1 FROM forecast_model_versions WHERE version_id=?", (version_id,)
-            ).fetchone():
-                raise ForecastModelConflict("forecast model version id already exists")
-            cur.execute(
-                "INSERT INTO forecast_model_versions"
+            if not duplicate_existing:
+                if cur.execute(
+                    "SELECT 1 FROM forecast_model_versions WHERE version_id=?", (version_id,)
+                ).fetchone():
+                    raise ForecastModelConflict("forecast model version id already exists")
+                cur.execute(
+                    "INSERT INTO forecast_model_versions"
                 "(version_id,model_ref,version_number,prior_version_id,company_ref,"
                 "spec_ref,inputs_hash,body_hash,record_json,content_hash,actor_ref,"
                 "created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -2446,8 +2495,8 @@ class ForecastModelAuthority:
                     wire["spec_ref"], wire["inputs_hash"], digest,
                     canonical_json(wire), wire["content_hash"], wire["actor_ref"],
                     wire["created_at"],
-                ),
-            )
+                    ),
+                )
             if filing_proof is not None:
                 cur.execute(
                     "INSERT INTO forecast_model_filing_proofs"
@@ -2463,7 +2512,7 @@ class ForecastModelAuthority:
         stored = self.model(version_id)
         if stored["content_hash"] != wire["content_hash"]:
             raise ForecastModelConflict("forecast model did not read back as written")
-        return {**stored, "status": "fresh"}
+        return {**stored, "status": "duplicate" if duplicate_existing else "fresh"}
 
     def filing_proof(self, version_ref: str) -> dict[str, Any] | None:
         """The exact deterministic filing check stored with a model, if any."""
