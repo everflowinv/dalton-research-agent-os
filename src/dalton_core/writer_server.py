@@ -408,6 +408,15 @@ HUMAN_GOVERNANCE_OPERATIONS = frozenset({
     # the authority refuses anything else and the actor is bound here rather
     # than supplied by the caller.
     "record_analyst_journal_entry",
+    # P12d: the Deep Insight Gate is a human checkpoint, and this is the only
+    # door through which it is decided.  ``record_mission_stage`` already covers
+    # the *ladder* half -- and this operation calls it rather than reimplementing
+    # it -- but the ladder has three statuses and no way to bind a decision to
+    # the exact draft the owner read, which is what makes a gate verdict mean
+    # anything.  ``actor_ref`` is replaced by the authenticated principal here
+    # and the authority refuses a non-``human:`` actor a second time.
+    "decide_deep_insight_gate",
+    "deep_insight_gate_draft", "deep_insight_gate_submissions",
 })
 # Mission stage bookkeeping is human-governed but must also be reachable by
 # the mission's declared ``automation:`` principal; the CoverageMission
@@ -684,6 +693,11 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
         "target_ref", "target_hash", "target_kind", "verdict", "company_ref",
         "note", "score_override", "idempotency_key", "actor_ref",
     }),
+    "decide_deep_insight_gate": frozenset({
+        "gate_version_ref", "gate_version_hash", "decision", "reason", "actor_ref",
+    }),
+    "deep_insight_gate_draft": frozenset({"version_ref"}),
+    "deep_insight_gate_submissions": frozenset(),
     "record_backlog_question": frozenset({"mandate_version_ref", "company_ref", "question", "answer_criteria", "source_refs", "actor_ref", "idempotency_key"}),
     "publish_probe_template": frozenset({"template_ref", "capability_ref", "operation", "runtime_profile_ref", "parameter_contract", "output_contract_ref", "verifier_ref", "permission_scope", "declared_side_effects", "cost", "actor_ref", "prior_version_ref"}),
     "create_bounded_planner_loop": frozenset({"loop_ref", "question_version_ref", "template_bindings", "required_coverage_items", "budget", "actor_ref", "prior_version_ref"}),
@@ -936,6 +950,7 @@ OPERATION_ACTOR_FIELDS: dict[str, str] = {
     "stage_document_extraction": "actor_ref",
     "record_mission_stage": "actor_ref",
     "record_analyst_journal_entry": "actor_ref",
+    "decide_deep_insight_gate": "actor_ref",
     "publish_forecast_line": "actor_ref",
     "publish_probe_template": "actor_ref",
     "create_bounded_planner_loop": "actor_ref",
@@ -2428,6 +2443,131 @@ class WriterServer:
         if self._analyst_journal is None:
             raise WriterServerError("analyst-journal authority is unavailable")
         return self._analyst_journal.add(**dict(p))
+
+    def _deep_insight_gates(self) -> Any:
+        """The gate authority, opened on first use.
+
+        Lazily rather than in ``__init__`` because opening it only creates its
+        two tables, and a writer that never sees a gate decision has no reason
+        to carry the object.  The authority is stateless between calls; its
+        write guard is a per-instance flag around one transaction.
+        """
+
+        from .deep_insight_gate import DeepInsightGateAuthority
+
+        return DeepInsightGateAuthority(self.store)
+
+    def _op_decide_deep_insight_gate(self, p: Mapping[str, Any]) -> Any:
+        """P12d: the owner's one verdict on one exact gate draft.
+
+        Two writes, in this order and for this reason.  The mission stage record
+        goes first, through ``CoverageMission.record_stage`` -- the ladder this
+        repository already has, not a second one -- keyed idempotently on the
+        draft and the decision, so a retry after a crash re-derives the same row
+        rather than a second one.  The decision goes second, naming the stage
+        record it produced.  A crash between them leaves a passed stage with no
+        decision, which the next call heals; the opposite order would leave a
+        decided gate whose company never entered the next stage, and nothing
+        would ever notice.
+
+        ``return_for_more_work`` writes no stage record at all: a returned draft
+        is not a failed gate, it is a gate the owner has asked a better question
+        of, and the lane redrafts it when the evidence moves (ADR-0008).
+        """
+
+        from .deep_insight_gate import (
+            DECISION_STAGE_STATUS, DeepInsightGateNotFound, STAGE_REF,
+        )
+
+        values = dict(p)
+        gate_version_ref = values["gate_version_ref"]
+        decision = values["decision"]
+        actor_ref = values["actor_ref"]
+        gates = self._deep_insight_gates()
+        try:
+            draft = gates.gate(gate_version_ref)
+        except DeepInsightGateNotFound as exc:
+            raise WriterServerError(str(exc)) from exc
+        company_ref = draft["company_ref"]
+        mission_version_ref = (draft.get("bindings") or {}).get("mission_version_ref")
+        stage_record_ref = None
+        status = DECISION_STAGE_STATUS.get(decision)
+        if status is not None:
+            if not mission_version_ref:
+                raise WriterServerError(
+                    "this gate draft names no mission version, so its decision "
+                    "cannot be written to the stage ladder"
+                )
+            mission = self.coverage_mission.mission(mission_version_ref)
+            state = {
+                (record["stage_ref"], record["status"])
+                for record in self.coverage_mission.stage_records(
+                    mission["id"], company_ref)
+            }
+            if (STAGE_REF, "entered") not in state:
+                # The gate stage has to be entered before its gate is decided,
+                # and nothing enters it: the drafting lane holds no stage_record
+                # grant, and giving it one would let automation walk the ladder.
+                # The person deciding enters it, in the same breath, under their
+                # own principal.
+                self.coverage_mission.record_stage(
+                    mission_version_ref=mission["id"],
+                    mission_version_hash=mission["content_hash"],
+                    company_ref=company_ref, stage_ref=STAGE_REF, status="entered",
+                    evidence_refs=[gate_version_ref],
+                    rationale="P12d：深度认知门十二问草稿已提交，进入本阶段并由人裁决。",
+                    actor_ref=actor_ref,
+                    idempotency_key=f"deep-insight-gate:{gate_version_ref}:entered",
+                )
+                state.add((STAGE_REF, "entered"))
+            if (STAGE_REF, status) not in state:
+                record = self.coverage_mission.record_stage(
+                    mission_version_ref=mission["id"],
+                    mission_version_hash=mission["content_hash"],
+                    company_ref=company_ref, stage_ref=STAGE_REF, status=status,
+                    evidence_refs=[gate_version_ref],
+                    rationale=str(values["reason"])[:2000],
+                    actor_ref=actor_ref,
+                    idempotency_key=f"deep-insight-gate:{gate_version_ref}:{decision}",
+                )
+                stage_record_ref = record["id"]
+        return {
+            **gates.decide(**values, stage_record_ref=stage_record_ref),
+            "company_ref": company_ref,
+            "stage_status": status,
+        }
+
+    def _op_deep_insight_gate_draft(self, p: Mapping[str, Any]) -> Any:
+        """One gate draft in full, so the owner can read what they are deciding."""
+
+        from .deep_insight_gate import DeepInsightGateNotFound
+
+        gates = self._deep_insight_gates()
+        try:
+            draft = gates.gate(dict(p)["version_ref"])
+        except DeepInsightGateNotFound as exc:
+            raise WriterServerError(str(exc)) from exc
+        return {**draft, "decision": gates.decision_for(draft["id"])}
+
+    def _op_deep_insight_gate_submissions(self, p: Mapping[str, Any]) -> Any:
+        """Every gate draft waiting for a person, oldest first."""
+
+        gates = self._deep_insight_gates()
+        return {
+            "projection_kind": "deep_insight_gate_submissions",
+            "drafts": [
+                {
+                    "version_ref": draft["id"],
+                    "content_hash": draft["content_hash"],
+                    "company_ref": draft["company_ref"],
+                    "version": draft["version"],
+                    "created_at": draft["created_at"],
+                    "classification": draft["classification"],
+                    "answers": draft["answers"],
+                }
+                for draft in gates.undecided()
+            ],
+        }
 
     def _op_publish_doctrine_pack(self, p: Mapping[str, Any]) -> Any:
         if self._research_doctrine is None:

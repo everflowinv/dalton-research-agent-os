@@ -175,6 +175,7 @@ REGISTRY_LANE_LABELS = {
     "research_task": "做专项研究",
     "mission_reflection": "每周回头看时间花在哪",
     "company_dossier": "写公司档案",
+    "deep_insight_gate": "回答深度认知门的十二问，交给你裁决",
 }
 # Already shown by name above the registry rows, with their budgets.
 LANES_SHOWN_ELSEWHERE = frozenset({"mission_source_discovery", "document_extraction"})
@@ -1502,6 +1503,20 @@ class CockpitPlane:
             raise
 
     def approvals(self) -> dict[str, Any]:
+        from .deep_insight_gate import answer_body as _gate_body
+
+        def _gate_answer(item: Mapping[str, Any]) -> dict[str, Any]:
+            answered = item["status"] == "answered"
+            return {
+                "问题": item["question"],
+                "回答": (_gate_body(item) if answered
+                         else "未答：" + item["unknown"]["missing"]),
+                "信心": item["confidence"],
+                "下一步": (None if answered
+                           else item["unknown"]["evidence_that_would_answer"]),
+                "引用": [source["ref"] for source in item["sources"]],
+            }
+
         items: list[dict[str, Any]] = []
         with self._core() as core:
             mission = self._mission(core)
@@ -1570,6 +1585,39 @@ class CockpitPlane:
                     "summary": record.get("summary") or f"{row['period_start']} 至 {row['period_end']} 的实际值超出了预测线的容忍带。",
                     "details": {"偏离": record.get("deviation"), "预测线": row["forecast_line_ref"]},
                     "actions": [{"decision": "keep_forecast", "label": "维持预测"}, {"decision": "revise_forecast", "label": "修订预测"}],
+                    "needs_rationale": True,
+                })
+            # P12d: the Deep Insight Gate's twelve answers, waiting for you.
+            # It is the Playbook's own human checkpoint between a first screen
+            # and full coverage, and automation never passes it: approving is
+            # what writes the ``gate_passed`` stage record and lets the company
+            # go on. The answers travel with the item because a gate you have to
+            # open another view to read is a gate you decide without reading.
+            for row in self._rows(core,
+                "SELECT v.* FROM deep_insight_gate_versions v "
+                "LEFT JOIN deep_insight_gate_decisions d "
+                "ON d.gate_version_ref=v.version_id "
+                "WHERE d.decision_id IS NULL ORDER BY v.created_at",
+            ):
+                record = json.loads(row["record_json"])
+                answered = [item for item in record["answers"]
+                            if item["status"] == "answered"]
+                items.append({
+                    "kind": "deep_insight_gate", "ref": row["version_id"],
+                    "hash": row["content_hash"], "at": row["created_at"],
+                    "title": "深度认知门十二问：是否让这家公司进入完整覆盖",
+                    "who": self._label(members, row["company_ref"]),
+                    "summary": (f"第 {row['version_number']} 版；十二问答了 "
+                                f"{len(answered)} 问，其余写明缺什么、下一步取什么。"),
+                    "details": {
+                        "行业分类": record["classification"],
+                        "十二问": [_gate_answer(item) for item in record["answers"]],
+                        "档案版本": record["bindings"]["dossier_version_ref"],
+                        "争议图版本": record["bindings"]["debate_map_version_ref"],
+                    },
+                    "actions": [{"decision": "approve", "label": "通过"},
+                                {"decision": "return_for_more_work", "label": "退回补充"},
+                                {"decision": "reject", "label": "否决"}],
                     "needs_rationale": True,
                 })
         with self._core() as core:
@@ -1653,6 +1701,17 @@ class CockpitPlane:
                 "challenge_ref": ref, "challenge_hash": digest, "decision": decision,
                 "rationale": rationale.strip() or ("你确认退役这条结论" if decision == "retired" else "你确认保留这条结论")}
             title = ("退役了一条结论" if decision == "retired" else "保留了一条被标记的结论")
+        elif kind == "deep_insight_gate":
+            if decision not in {"approve", "return_for_more_work", "reject"}:
+                raise CockpitError(
+                    "decision must be approve, return_for_more_work or reject")
+            if not rationale.strip():
+                raise CockpitError("请写一句理由")
+            operation, params = "decide_deep_insight_gate", {
+                "gate_version_ref": ref, "gate_version_hash": digest,
+                "decision": decision, "reason": rationale.strip()}
+            title = {"approve": "通过了深度认知门", "return_for_more_work": "把深度认知门退回补充",
+                     "reject": "否决了深度认知门"}[decision] + f"：{ref.split(':', 1)[-1]}"
         elif kind == "forecast":
             if decision not in {"keep_forecast", "revise_forecast"}:
                 raise CockpitError("decision must be keep_forecast or revise_forecast")
