@@ -8,6 +8,7 @@ import os
 import sqlite3
 import tempfile
 from collections import defaultdict
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -208,6 +209,52 @@ def _fiscal_groups(periods: Sequence[str], binding: Mapping[str, Any] | None,
     return groups
 
 
+def _four_quarter_flow_cells(
+    by_period: Mapping[str, Mapping[str, Any]], group: Sequence[str]
+) -> bool:
+    """Prove that a fiscal-year aggregate contains four duration quarters."""
+
+    if len(group) != 4:
+        return False
+    prior_end: date | None = None
+    for period_end in group:
+        cell = by_period.get(period_end)
+        period = cell.get("period") if isinstance(cell, Mapping) else None
+        if not isinstance(period, Mapping):
+            return False
+        if (
+            period.get("kind") != "quarter"
+            or period.get("end") != period_end
+            or not isinstance(period.get("start"), str)
+        ):
+            return False
+        try:
+            start = date.fromisoformat(period["start"])
+            end = date.fromisoformat(period_end)
+        except ValueError:
+            return False
+        if start > end or (prior_end is not None and start <= prior_end):
+            return False
+        prior_end = end
+    return True
+
+
+def _duration_quarter_cell(cell: Mapping[str, Any], period_end: str) -> bool:
+    period = cell.get("period")
+    if not isinstance(period, Mapping):
+        return False
+    if (
+        period.get("kind") != "quarter"
+        or period.get("end") != period_end
+        or not isinstance(period.get("start"), str)
+    ):
+        return False
+    try:
+        return date.fromisoformat(period["start"]) <= date.fromisoformat(period_end)
+    except ValueError:
+        return False
+
+
 def export_fund_workbook(
     output: Path, *, model: Mapping[str, Any], spec: Mapping[str, Any],
     inputs: Mapping[str, Any], valuation: Mapping[str, Any] | None = None,
@@ -265,6 +312,7 @@ def export_fund_workbook(
         driver.cell(4, ci, value)
     history_cells: dict[tuple[str, str], str] = {}
     history_values: dict[tuple[str, str], Decimal] = {}
+    history_flow_periods: set[tuple[str, str]] = set()
     row = 5
     for item in model["drivers"]:
         values = {c["period_end"]: c for c in item.get("history") or []}
@@ -283,6 +331,8 @@ def export_fund_workbook(
                 history_cells[(item["ref"], period)] = f"'Driver'!{_col(ci)}{row}"
                 history_values[(item.get("concept"), period)] = Decimal(str(value["value"]))
                 history_values[(item["ref"], period)] = Decimal(str(value["value"]))
+                if isinstance(value.get("period_start"), str):
+                    history_flow_periods.add((item["ref"], period))
         row += 1
     assumption_cells: dict[str, str] = {}
     assumption_values: dict[str, Decimal] = {}
@@ -308,6 +358,7 @@ def export_fund_workbook(
         financials.cell(4, ci, value)
     result_rows = {item["ref"]: 5 + i for i, item in enumerate(model["results"])}
     result_cells: dict[tuple[str, str], str] = {}
+    result_flow_periods: set[tuple[str, str]] = set()
     result_values = {
         (result["ref"], cell["period"]["end"]): Decimal(str(cell["value"]))
         for result in model["results"] for cell in result["cells"]
@@ -336,6 +387,8 @@ def export_fund_workbook(
                 if source:
                     formula = f"={source}"
                     model_cell_ref = result["driver_ref"]
+                    if (result["driver_ref"], period) in history_flow_periods:
+                        result_flow_periods.add((result["ref"], period))
             elif period in history:
                 components: list[str] = []
                 if result["ref"] == "result:gross_profit":
@@ -352,6 +405,16 @@ def export_fund_workbook(
                 if components and all(components):
                     formula = f"={components[0]}-SUM({','.join(components[1:])})"
                     model_cell_ref = "historical-derived"
+                    component_refs = (
+                        ["result:revenue", "result:cost_of_revenue"]
+                        if result["ref"] == "result:gross_profit"
+                        else ["result:gross_profit", *expense_refs]
+                        if result["ref"] == "result:operating_income"
+                        else ["result:operating_income", "result:income_tax_expense"]
+                    )
+                    if all((ref, period) in result_flow_periods
+                           for ref in component_refs):
+                        result_flow_periods.add((result["ref"], period))
             elif cell is not None and cell["status"] == "computed":
                 formula = _formula_for(result, cell, period, result_cells,
                                        assumption_cells, history_cells)
@@ -360,6 +423,8 @@ def export_fund_workbook(
                     _verify_translated_value(
                         result, cell, result_values, assumption_values,
                         history_values)
+                    if _duration_quarter_cell(cell, period):
+                        result_flow_periods.add((result["ref"], period))
             if formula is None:
                 if cell is not None:
                     reason = cell.get("reason") if cell["status"] != "computed" else result["formula"]
@@ -379,7 +444,14 @@ def export_fund_workbook(
             quarter_cols = [period_columns[p] for p in group
                             if (result["ref"], p) in result_cells]
             target = financials.cell(rr, annual_i)
-            if len(group) == 4 and len(quarter_cols) == 4 and result["unit"] != "ratio":
+            flow_proven = all(
+                (result["ref"], period) in result_flow_periods for period in group
+            )
+            if (
+                flow_proven
+                and len(quarter_cols) == 4
+                and result["unit"] != "ratio"
+            ):
                 target.value = f"=SUM({_col(quarter_cols[0])}{rr}:{_col(quarter_cols[-1])}{rr})"
                 target.font = Font(name="Arial", color="000000")
                 target.number_format = _number_format(result["unit"])
@@ -389,40 +461,18 @@ def export_fund_workbook(
                 formula_map.append({"cell": f"Financials!{target.coordinate}",
                                     "model_cell_ref": None, "formula": target.value,
                                     "model_formula": "annual_from_four_fiscal_quarters"})
-            elif len(group) == 4 and len(quarter_cols) == 4 and result["unit"] == "ratio":
-                quarter_cells = [by_period.get(period) for period in group]
-                component_refs = [
-                    [item.get("ref") for item in (cell or {}).get("result_refs") or []]
-                    for cell in quarter_cells
-                ]
-                stable_components = (
-                    len(component_refs[0]) == 2
-                    and all(refs == component_refs[0] for refs in component_refs)
-                )
-                numerator = result_cells.get((component_refs[0][0], label)) if stable_components else None
-                denominator = result_cells.get((component_refs[0][1], label)) if stable_components else None
-                if numerator and denominator:
-                    target.value = f"={numerator}/{denominator}"
-                    target.font = Font(name="Arial", color="000000")
-                    target.number_format = _number_format("ratio")
-                    result_cells[(result["ref"], label)] = (
-                        f"'Financials'!{target.coordinate}"
-                    )
-                    formula_map.append({
-                        "cell": f"Financials!{target.coordinate}",
-                        "model_cell_ref": None,
-                        "formula": target.value,
-                        "model_formula": "annual_ratio_from_bound_components",
-                    })
-                else:
-                    gaps.append(
-                        f"{result['ref']} {label}: annual unavailable; "
-                        "ratio lacks two stable annual component bindings"
-                    )
             else:
                 target.value = None
                 target.comment = None
-                reason = "ratio requires recomputation" if result["unit"] == "ratio" else f"{len(quarter_cols)}/{len(group)} supported quarters"
+                if result["unit"] == "ratio":
+                    reason = (
+                        "ratio lacks an explicit frozen numerator/denominator "
+                        "formula contract"
+                    )
+                elif not flow_proven:
+                    reason = "four typed duration-quarter cells are not proven"
+                else:
+                    reason = f"{len(quarter_cols)}/{len(group)} supported quarters"
                 gaps.append(f"{result['ref']} {label}: annual unavailable; {reason}")
     for ws in (driver, financials):
         for col in range(2, len(headers) + 1):

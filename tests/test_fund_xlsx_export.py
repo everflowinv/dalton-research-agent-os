@@ -9,6 +9,7 @@ from pathlib import Path
 from dalton_core.company_model_inputs import build_model_inputs
 from dalton_core.fund_xlsx_export import (
     FundWorkbookExportError,
+    _four_quarter_flow_cells,
     export_company_workbook,
     export_fund_workbook,
 )
@@ -85,6 +86,24 @@ class FundXlsxExportTests(unittest.TestCase):
         self.assertTrue(sheet.cell(5, headers["FY2026A/E"]).value.startswith("=SUM("))
         self.assertTrue(sheet.cell(5, headers["FY2027E"]).value.startswith("=SUM("))
         self.assertTrue(any("FY2025A: annual unavailable" in gap for gap in result["gaps"]))
+
+    def test_annual_sum_requires_four_typed_duration_quarters(self):
+        ends = ["2025-11-30", "2026-02-28", "2026-05-31", "2026-08-31"]
+        starts = ["2025-09-01", "2025-12-01", "2026-03-01", "2026-06-01"]
+        cells = {
+            end: {"period": {"start": start, "end": end,
+                             "kind": "quarter", "calendar": "company:fiscal"}}
+            for start, end in zip(starts, ends)
+        }
+        self.assertTrue(_four_quarter_flow_cells(cells, ends))
+        instant = {key: {"period": dict(value["period"])}
+                   for key, value in cells.items()}
+        instant[ends[2]]["period"]["start"] = None
+        self.assertFalse(_four_quarter_flow_cells(instant, ends))
+        wrong_kind = {key: {"period": dict(value["period"])}
+                      for key, value in cells.items()}
+        wrong_kind[ends[2]]["period"]["kind"] = "instant"
+        self.assertFalse(_four_quarter_flow_cells(wrong_kind, ends))
 
     def test_fund_layout_and_formula_roles_are_explicit(self):
         from openpyxl import load_workbook
