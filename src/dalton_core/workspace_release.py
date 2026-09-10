@@ -87,8 +87,16 @@ def _relocate(staging: Path, final: Path) -> None:
     for path in [staging / "pyvenv.cfg", *(staging / "bin").glob("*")]:
         if path.is_file() and not path.is_symlink():
             raw = path.read_bytes()
+            first, separator, rest = raw.partition(b"\n")
+            if path.parent.name == "bin" and first.startswith(b"#!") and old in first:
+                raw = (
+                    b"#!/bin/sh\n'''exec' \"$(dirname \"$0\")/python\" \"$0\" \"$@\" # '''\n"
+                    + rest
+                )
             if old in raw:
                 path.write_bytes(raw.replace(old, new))
+            elif raw != first + separator + rest:
+                path.write_bytes(raw)
 
 
 def _verify_wheel_payload(wheel: Path, venv: Path) -> None:
