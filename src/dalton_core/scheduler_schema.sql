@@ -197,3 +197,19 @@ CREATE TRIGGER IF NOT EXISTS scheduler_completion_idempotency_no_delete
 BEFORE DELETE ON scheduler_completion_idempotency BEGIN
     SELECT RAISE(ABORT, 'scheduler idempotency keys are immutable');
 END;
+
+CREATE TABLE IF NOT EXISTS controlled_failure_redrives (
+    recovery_id TEXT PRIMARY KEY,
+    old_work_order_ref TEXT NOT NULL UNIQUE,
+    record_json TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS controlled_failure_redrive_no_update
+BEFORE UPDATE ON controlled_failure_redrives BEGIN
+    SELECT RAISE(ABORT, 'controlled failure redrives are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS controlled_failure_redrive_no_delete
+BEFORE DELETE ON controlled_failure_redrives BEGIN
+    SELECT RAISE(ABORT, 'controlled failure redrives are immutable');
+END;

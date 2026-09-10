@@ -592,6 +592,23 @@ class CockpitModel:
             if scheduler.enqueue(work)["status"] == "conflict":
                 raise CockpitModelError("this request is bound to different content; ask again")
             formal = scheduler.formal_result(work.id)
+            if formal is not None and ":operator-recovery:" not in base_request_id:
+                from .controlled_failure_redrive import approved_request
+
+                recovery_suffix = approved_request(
+                    self.scheduler_db,
+                    old_work_order_ref=work.id,
+                    formal=formal,
+                    mission=mission,
+                )
+                if recovery_suffix is not None:
+                    return self.call(
+                        purpose=purpose,
+                        request_id=base_request_id + recovery_suffix,
+                        prompt=prompt,
+                        mission=mission,
+                        producer_route_decision_refs=producer_refs,
+                    )
             from .model_route_recovery import route_recovery_request
             recovery_request = route_recovery_request(
                 formal, work_order_ref=work.id, request_id=base_request_id,

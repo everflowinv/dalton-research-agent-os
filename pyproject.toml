@@ -84,6 +84,7 @@ dalton-sales-notes = "dalton_core.sales_notes_cli:main"
 dalton-company-wiki = "dalton_core.company_wiki_cli:main"
 dalton-prior-research = "dalton_core.prior_research_cli:main"
 dalton-fund-xlsx = "dalton_core.fund_xlsx_export:main"
+dalton-controlled-redrive = "dalton_core.controlled_failure_redrive_cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
