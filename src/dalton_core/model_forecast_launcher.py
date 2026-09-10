@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .lane_child_launcher import LaneChildLauncher, LaneChildRejected
+from .economic_invariants import FORECAST_INVARIANT_CONTRACT_HASH
 
 TICKET_PREFIX = "model-forecast-run"
 
@@ -41,6 +42,7 @@ class ModelForecastLauncher(LaneChildLauncher):
             self.python_executable, "-m", self.CHILD_MODULE,
             "--state-dir", str(self.state_dir),
             "--company-ref", company_ref,
+            "--validator-contract-hash", FORECAST_INVARIANT_CONTRACT_HASH,
             "--summary-dir", str(ticket_dir), "--quiet",
         ]
 
@@ -56,6 +58,9 @@ class ModelForecastLauncher(LaneChildLauncher):
                 or len(validator_contract_hash) != 64):
             raise LaneChildRejected(
                 "validator_contract_hash must be a sha256 digest")
+        if validator_contract_hash != FORECAST_INVARIANT_CONTRACT_HASH:
+            raise LaneChildRejected(
+                "validator_contract_hash is not the installed forecast validator contract")
         company_ref = company_ref.strip()
         digest = hashlib.sha256(
             f"{self.TICKET_PREFIX}|{company_ref}|{model_digest}|"

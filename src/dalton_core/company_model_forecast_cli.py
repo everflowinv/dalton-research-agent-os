@@ -55,7 +55,10 @@ from .model_forecast_driver import (
     ForecastModelError,
     ForecastModelUnavailable,
 )
-from .economic_invariants import EconomicInvariantRefused
+from .economic_invariants import (
+    EconomicInvariantRefused,
+    FORECAST_INVARIANT_CONTRACT_HASH,
+)
 from .store import DaltonStore, canonical_json
 
 SUMMARY_SCHEMA_VERSION = "0.1"
@@ -287,6 +290,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-dir", type=Path, required=True)
     parser.add_argument("--summary-dir", type=Path, help="defaults to the state dir")
     parser.add_argument("--company-ref", help="model this company rather than the next")
+    parser.add_argument("--validator-contract-hash", required=True,
+                        help="exact installed economic-invariant contract hash")
     parser.add_argument("--dry-run", action="store_true",
                         help="choose and stop; no writes")
     parser.add_argument("--quiet", action="store_true")
@@ -295,6 +300,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.validator_contract_hash != FORECAST_INVARIANT_CONTRACT_HASH:
+        raise SystemExit(
+            "STOP: ticket validator contract does not match the installed contract")
     summary = run_model_forecast(
         state_dir=args.state_dir,
         summary_dir=args.summary_dir if args.summary_dir is not None else args.state_dir,

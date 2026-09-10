@@ -20,6 +20,10 @@ The economic-invariant layer now exports a closed, explicit validator contract
 reference and content hash. The forecast lane binds that hash into only the
 durable failure business key and child ticket identity. The published forecast
 model digest remains byte-for-byte governed by the existing model inputs.
+The contract's additive-axis list is derived from the evaluator's actual closed
+allowlist. The launcher accepts only the installed hash, passes it in child
+argv, and the child refuses a mismatch before opening state or writing a
+summary.
 
 Consequences:
 
@@ -39,7 +43,7 @@ is then eligible once; their old ticket and summary bytes remain intact.
 
 `PYTHONPATH=src python3 -m unittest tests.test_company_model_forecast tests.test_economic_invariants tests.test_model_forecast_driver tests.test_mission_model_forecast_lane`
 
-Result: 182 tests passed. The recovery test proves identical model inputs resume
+Result after the binding follow-up: 184 tests passed. The recovery test proves identical model inputs resume
 under a changed validator contract, while the existing current-contract hold,
 new-spec recovery, dependency probe, starvation, and successful publication
 tests remain green.

@@ -16,7 +16,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from dalton_core.company_model_forecast import model_digest
-from dalton_core.economic_invariants import FORECAST_INVARIANT_CONTRACT_HASH
+from dalton_core.company_model_forecast_cli import main as forecast_cli_main
+from dalton_core.economic_invariants import (
+    ADDITIVE_SEGMENT_AXES,
+    FORECAST_INVARIANT_CONTRACT,
+    FORECAST_INVARIANT_CONTRACT_HASH,
+)
 from dalton_core.company_model_inputs import build_model_inputs
 from dalton_core.lane_child_launcher import (
     LaneChildConflict,
@@ -342,6 +347,8 @@ class LauncherTests(unittest.TestCase):
         command = launcher._command(ticket_dir=self.state, company_ref=ACN)
         self.assertIn("dalton_core.company_model_forecast_cli", command)
         self.assertIn(ACN, command)
+        self.assertIn("--validator-contract-hash", command)
+        self.assertIn(FORECAST_INVARIANT_CONTRACT_HASH, command)
         self.assertNotIn("--model-config", command)
         # Nothing to configure, so nothing to be gated on.
         self.assertTrue(launcher.configured)
@@ -349,30 +356,32 @@ class LauncherTests(unittest.TestCase):
     def test_the_same_company_and_inputs_is_the_same_ticket(self):
         launcher = self.launcher()
         first = launcher.start(company_ref=ACN, model_digest=DIGEST,
-                               validator_contract_hash="c" * 64)
+                               validator_contract_hash=FORECAST_INVARIANT_CONTRACT_HASH)
         launcher.wait(timeout=30)
         again = launcher.start(company_ref=ACN, model_digest=DIGEST,
-                               validator_contract_hash="c" * 64)
+                               validator_contract_hash=FORECAST_INVARIANT_CONTRACT_HASH)
         launcher.wait(timeout=30)
         self.assertEqual(first["id"], again["id"])
         moved = launcher.start(company_ref=ACN, model_digest="b" * 64,
-                               validator_contract_hash="c" * 64)
+                               validator_contract_hash=FORECAST_INVARIANT_CONTRACT_HASH)
         launcher.wait(timeout=30)
         self.assertNotEqual(moved["id"], first["id"])
-        changed_contract = launcher.start(
-            company_ref=ACN, model_digest="b" * 64,
-            validator_contract_hash="d" * 64)
-        launcher.wait(timeout=30)
-        self.assertNotEqual(changed_contract["id"], moved["id"])
+
+    def test_the_contract_names_the_evaluators_actual_additive_axes(self):
+        self.assertEqual(
+            FORECAST_INVARIANT_CONTRACT["segment_sum"]["additive_axes"],
+            sorted(ADDITIVE_SEGMENT_AXES),
+        )
 
     def test_the_ticket_records_what_the_run_was_about(self):
         launcher = self.launcher()
         ticket = launcher.start(company_ref=ACN, model_digest=DIGEST,
-                                validator_contract_hash="c" * 64)
+                                validator_contract_hash=FORECAST_INVARIANT_CONTRACT_HASH)
         launcher.wait(timeout=30)
         self.assertEqual(ticket["company_ref"], ACN)
         self.assertEqual(ticket["model_digest"], DIGEST)
-        self.assertEqual(ticket["validator_contract_hash"], "c" * 64)
+        self.assertEqual(ticket["validator_contract_hash"],
+                         FORECAST_INVARIANT_CONTRACT_HASH)
         self.assertEqual(launcher.status(ticket["id"])["model_digest"], DIGEST)
 
     def test_a_request_that_names_nothing_is_refused_before_spawning(self):
@@ -384,10 +393,26 @@ class LauncherTests(unittest.TestCase):
                        {"company_ref": ACN, "model_digest": None,
                         "validator_contract_hash": "c" * 64},
                        {"company_ref": ACN, "model_digest": DIGEST,
-                        "validator_contract_hash": "short"}):
+                        "validator_contract_hash": "short"},
+                       {"company_ref": ACN, "model_digest": DIGEST,
+                        "validator_contract_hash": "f" * 64}):
             with self.subTest(kwargs=kwargs):
                 with self.assertRaises(LaneChildRejected):
                     launcher.start(**kwargs)
+
+    def test_the_child_refuses_a_mismatched_contract_before_opening_state(self):
+        missing_state = self.state / "not-created"
+        with patch(
+            "dalton_core.company_model_forecast_cli.run_model_forecast"
+        ) as run:
+            with self.assertRaisesRegex(SystemExit, "installed contract"):
+                forecast_cli_main([
+                    "--state-dir", str(missing_state),
+                    "--validator-contract-hash", "f" * 64,
+                    "--quiet",
+                ])
+        run.assert_not_called()
+        self.assertFalse(missing_state.exists())
 
 
 class RegistrationTests(unittest.TestCase):
