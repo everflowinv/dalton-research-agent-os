@@ -2,6 +2,19 @@
 
 更新日期：2026-09-10（恢复开发；以下历史时间记录保留）
 
+## 持续开发中（2026-09-10，owner 最新指令）
+
+Owner 要求持续开发，不以单个里程碑完成为停点；写代码最大化使用 GPT-5.6 Sol 并行，需要签署/部署时提交具体项给 owner。当前工具允许主代理加三个同时活跃子代理；三个新隔离 worktree 已满额工作。
+
+| 负责人 | 当前代码切片 | 工作分支 |
+| --- | --- | --- |
+| Sol / forecast_fixes | F14 六个 company/subject fingerprint 协调器 | `f14-fingerprint` |
+| Sol / zero_base_fixes | F14 dossier / deep insight / industry framework 三个协调器 | `f14-ledger` |
+| Sol / insider_fixes | F14 reflection / ZeroBase / research task / crowd 四个协调器 | `f14-cadence` |
+| 主代理 | 共享接口协调、HK 全市场 acquisition/view 设计与缓存、签署部署材料、集成验收 | `main` |
+
+本轮基线 `4c28816`（已推送、完整 6,055 项通过）。各切片完成即接后续 HK 周调度、W5 market-proxy / 成本模板及 Item 5 交易计划；共享文件先协调归属，聚焦绿分批 commit，集成完整验证后 push。授权材料完成后及时发给 owner，签署不阻塞独立开发。
+
 ## 本轮交付（2026-09-10）
 
 W4 六条待合分支与三个 GPT-5.6 Sol 修复 worktree 已集成，最终验证代码为 `2f64b3a`。完成预测不变量接线、分部 filing 去重、跨 US/HK 回购契约与港股行情、月度回购判断分组及费用/评分去重、首版档案先分类、独立 ZeroBase verifier、待授权分类及恢复、来源计划补行与 ask 契约。详见 [本轮集成报告](reports/resume-w4-integration-2026-09-10.md) 与 [清单当前状态 §6d](reports/parallel-development-plan-v1.0-2026-09-09.md#6d-2026-09-10-恢复后的集成进度覆盖-6b--6c-历史状态)。
