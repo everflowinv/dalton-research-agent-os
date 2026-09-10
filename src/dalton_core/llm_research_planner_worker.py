@@ -274,10 +274,20 @@ class LLMResearchPlannerModelWorker:
         )
 
     def _next_attempt_number(self, work_order_id: str) -> int:
+        """The attempt number ``claim`` would hand out, read without claiming.
+
+        The Scheduler numbers forward: ``enqueue`` writes the first event
+        already carrying attempt 1, and a requeue writes the next one carrying
+        the number after the attempt that just finished.  So the latest event's
+        own number *is* the next attempt, and adding one to it would make the
+        pre-lease gate reserve under an attempt number the admission never
+        uses.
+        """
+
         history = self.scheduler.attempt_history(work_order_id)
-        return max(
-            (int(event["attempt_number"]) for event in history), default=0
-        ) + 1
+        if not history:
+            return 1
+        return int(history[-1]["attempt_number"])
 
     def _pool_gate(self, work: WorkOrder) -> dict[str, Any] | None:
         """Refuse a spent pool *before* the WorkOrder is leased, or return None.
