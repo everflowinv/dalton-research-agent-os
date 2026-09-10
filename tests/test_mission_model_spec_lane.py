@@ -236,6 +236,18 @@ class ModelSpecLaneTests(unittest.TestCase):
         self.assertNotEqual(changed["state_hash"], first["state_hash"])
         self.assertNotIn(ACN, changed.get("held", {}))
 
+    def test_an_unreadable_filed_classification_does_not_launch(self):
+        self.missions.store = object()
+        with mock.patch.object(
+            model_spec_lane, "filed_classifications",
+            side_effect=RuntimeError("dossier authority drifted"),
+        ):
+            result = self.lane.dispatch_once()
+
+        self.assertEqual(result["status"], "unavailable")
+        self.assertIn("dossier authority drifted", result["reason"])
+        self.assertEqual(self.launcher.started, [])
+
     def test_a_child_that_died_without_a_summary_spends_one_transient_retry(self):
         launched = self.lane.dispatch_once()
         self.launcher.finish(launched["ticket_ref"], status="failed", summary=None)

@@ -136,9 +136,13 @@ class MissionModelSpecLaneCoordinator:
                     "settled": settled}
         excluded: set[str] = set()
         held_companies: dict[str, Any] = {}
-        classifications = (
-            filed_classifications(self.missions.store)
-            if getattr(self.missions, "store", None) is not None else {})
+        try:
+            classifications = (
+                filed_classifications(self.missions.store)
+                if getattr(self.missions, "store", None) is not None else {})
+        except Exception as exc:  # noqa: BLE001 - authority drift cannot break the tick
+            return {"status": "unavailable", "settled": settled,
+                    "reason": f"{type(exc).__name__}: {exc}"}
         while True:
             try:
                 company_ref, state = choose_company(
