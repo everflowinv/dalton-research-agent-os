@@ -90,6 +90,7 @@ MODEL_CONFIG_NAME = "initial-screen-model-config.json"
 # the lane retire a terminal refusal after a reviewed contract repair without
 # pretending that the underlying company evidence changed.
 DRAFT_CONTRACT_VERSION = "company-dossier-draft-contract:0.2"
+VERIFIER_PROMPT_CONTRACT_VERSION = "company-dossier-verifier-prompt-contract:0.2"
 
 
 def draft_contract_fingerprint() -> str:
@@ -101,6 +102,17 @@ def draft_contract_fingerprint() -> str:
         "max_sources": MAX_SOURCES_PER_SECTION,
         "slot_sentence_cap": SLOT_SENTENCE_CAP,
         "section_sentence_cap": SECTION_SENTENCE_CAP,
+    })
+
+
+def verifier_prompt_contract_fingerprint() -> str:
+    """Identity of the evidence projection shown to the verifier."""
+
+    return content_hash({
+        "version": VERIFIER_PROMPT_CONTRACT_VERSION,
+        "source_fields": ["kind", "period", "text"],
+        "max_row_chars": MAX_ROW_CHARS,
+        "finding_codes": list(VERIFIER_FINDING_CODES),
     })
 
 # Bounded like ``company_model_cli``'s constants and for the same reason: the
@@ -578,7 +590,16 @@ def build_verifier_prompt(blocks: Mapping[str, Any], *, company: Mapping[str, An
                     source = next((item for item in block.get("sources") or []
                                    if item["ref"] == ref), None)
                     if source is not None:
-                        lines.append(f"    cites: {source['text'][:MAX_ROW_CHARS]}")
+                        # These are the exact closed source fields persisted in
+                        # the draft.  The producer saw period as a separate
+                        # material column; omitting it here made a date backed
+                        # only by that column look invented to the verifier.
+                        lines.append(
+                            "    cites: "
+                            f"kind={source['kind']} | "
+                            f"period={source.get('period') or '-'} | "
+                            f"text={source['text'][:MAX_ROW_CHARS]}"
+                        )
         lines.append("")
     return "\n".join(lines)
 
@@ -712,7 +733,9 @@ def verify(
     try:
         call = independent_model_call(
             model, producer_route_decision_refs=producer_route_decision_refs,
-            purpose=VERIFIER_PURPOSE, request_id=f"verify-{digest[:24]}",
+            purpose=VERIFIER_PURPOSE,
+            request_id=(f"verify-{digest[:24]}-"
+                        f"{verifier_prompt_contract_fingerprint()[:16]}"),
             prompt=prompt, mission=mission)
     except CockpitModelError as exc:
         return {"status": "unavailable", "reason": f"{type(exc).__name__}: {exc}",
@@ -775,6 +798,7 @@ __all__ = [
     "build_verifier_prompt",
     "draft_hash",
     "draft_contract_fingerprint",
+    "verifier_prompt_contract_fingerprint",
     "draft_unit",
     "independence",
     "independence_precheck",

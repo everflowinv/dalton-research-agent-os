@@ -1213,6 +1213,38 @@ class CoordinatorTests(unittest.TestCase):
             after = ledger_signature(self.connection)
         self.assertNotEqual(before, after)
 
+    def test_a_verifier_prompt_contract_change_releases_the_company_hold(self):
+        before = company_ledger_signature(self.connection, ACN)
+        with patch(
+            "dalton_core.company_dossier_draft.verifier_prompt_contract_fingerprint",
+            return_value="e" * 64,
+        ):
+            after = company_ledger_signature(self.connection, ACN)
+        self.assertNotEqual(before, after)
+
+    def test_a_reviewed_verifier_contract_gets_a_new_ticket_after_cached_reject(self):
+        launcher = self.Launcher(
+            ticket_status="failed",
+            summary={"dossier_status": "verification_failed",
+                     "failure_reason": "date absent from the cited source",
+                     "verification": {"status": "verified", "verdict": "reject"}},
+        )
+        coordinator = MissionDossierLaneCoordinator(
+            connection=self.connection, launcher=launcher, companies=lambda: [ACN])
+        first = coordinator.dispatch_once()
+        held = coordinator.dispatch_once()
+        self.assertEqual(held["status"], "terminal")
+
+        with patch(
+            "dalton_core.company_dossier_draft.verifier_prompt_contract_fingerprint",
+            return_value="e" * 64,
+        ):
+            retried = coordinator.dispatch_once()
+        self.assertEqual(retried["status"], "launched")
+        self.assertNotEqual(retried["signature"], first["signature"])
+        self.assertNotEqual(retried["ticket_ref"], first["ticket_ref"])
+        self.assertEqual(launcher.started_companies, [ACN, ACN])
+
     def test_configured_model_capacity_cooldown_controls_lane_probe(self):
         now = [datetime(2026, 9, 10, tzinfo=timezone.utc)]
         launcher = self.Launcher(

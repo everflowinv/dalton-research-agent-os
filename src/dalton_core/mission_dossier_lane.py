@@ -95,13 +95,14 @@ def ledger_signature(connection: Any) -> str:
     """
 
     from .cockpit_model import verifier_provider_contract_fingerprint
-    from .company_dossier_draft import draft_contract_fingerprint
+    from .company_dossier_draft import (draft_contract_fingerprint,
+                                        verifier_prompt_contract_fingerprint)
     row = connection.execute(
         "SELECT COUNT(*) AS n, MAX(created_at) AS newest FROM claim_versions"
     ).fetchone()
     parts = [str(row["n"]), str(row["newest"] or "-"),
              verifier_provider_contract_fingerprint("dossier_verifier"),
-             draft_contract_fingerprint()]
+             draft_contract_fingerprint(), verifier_prompt_contract_fingerprint()]
     try:
         heads = connection.execute(
             "SELECT dossier_ref, MAX(version_number) AS v "
@@ -124,11 +125,12 @@ def company_ledger_signature(connection: Any, company_ref: str) -> str:
     """Digest only the authority inputs that can change one company's file."""
     from .cockpit_model import verifier_provider_contract_fingerprint
     from .company_dossier_cli import dossier_company_source_fingerprint
-    from .company_dossier_draft import draft_contract_fingerprint
+    from .company_dossier_draft import (draft_contract_fingerprint,
+                                        verifier_prompt_contract_fingerprint)
 
     parts = [company_ref, dossier_company_source_fingerprint(connection, company_ref),
              verifier_provider_contract_fingerprint("dossier_verifier"),
-             draft_contract_fingerprint()]
+             draft_contract_fingerprint(), verifier_prompt_contract_fingerprint()]
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:32]
 
 

@@ -38,6 +38,7 @@ from dalton_core.company_dossier_draft import (
     parse_unit_output,
     render_material,
     validate_verifier_output,
+    verifier_prompt_contract_fingerprint,
     verify,
 )
 from dalton_core.cockpit_model import purposes
@@ -80,10 +81,12 @@ class FakeModel:
         self.route = route
         self.prompts: list[str] = []
         self.purposes: list[str] = []
+        self.request_ids: list[str] = []
 
     def call(self, *, purpose, request_id, prompt, mission):
         self.prompts.append(prompt)
         self.purposes.append(purpose)
+        self.request_ids.append(request_id)
         text = self.texts.pop(0) if self.texts else "{}"
         return {"text": text, "replayed": False, "cost_micros": 4321,
                 "work_order_ref": f"work:cockpit-dossier-{len(self.prompts)}",
@@ -322,8 +325,51 @@ class VerifierTests(unittest.TestCase):
     def test_the_verifier_sees_the_sentences_and_the_rows_they_cite(self):
         blocks = {"demand_drivers": self.block()}
         prompt = build_verifier_prompt(blocks, company=COMPANY)
-        self.assertIn("cites: 管理层说预订量在本季转正", prompt)
+        self.assertIn(
+            "cites: kind=claim | period=2026Q2 | text=管理层说预订量在本季转正",
+            prompt,
+        )
         self.assertIn("(unknown)", prompt)
+
+    def test_the_verifier_sees_a_date_carried_only_by_the_source_period(self):
+        rows = material_rows([{
+            "ref": "claim-version:dated",
+            "text": "Revenue grew across every geography.",
+            "period": "fiscal Q1 ended Nov 30, 2025",
+            "importance": "filing",
+        }])
+        block = parse_unit_output(
+            reply([one_sentence(
+                "causal_chain:0", refs=("C1",),
+                text="截至 Nov 30, 2025，各地域收入均增长。",
+            ), {"slot_id": "causal_chain:1", "unknown": "没有材料"}]),
+            unit="demand_drivers", structure=STRUCTURE, material=rows,
+        )
+        prompt = build_verifier_prompt({"demand_drivers": block}, company=COMPANY)
+        self.assertIn(
+            "cites: kind=claim | period=fiscal Q1 ended Nov 30, 2025 | "
+            "text=Revenue grew across every geography.", prompt)
+
+    def test_the_verifier_does_not_invent_a_missing_source_period(self):
+        block = self.block()
+        block["sources"][0]["period"] = None
+        prompt = build_verifier_prompt({"demand_drivers": block}, company=COMPANY)
+        self.assertIn("kind=claim | period=- | text=", prompt)
+        finding = validate_verifier_output({
+            "verdict": "reject",
+            "findings": [{"unit": "demand_drivers",
+                          "code": "number_not_in_source",
+                          "detail": "The date is absent from the cited source."}],
+        })
+        self.assertEqual(finding["verdict"], "reject")
+
+    def test_verifier_request_identity_binds_the_reviewed_prompt_contract(self):
+        blocks = {"demand_drivers": self.block()}
+        model = FakeModel(json.dumps({"verdict": "pass", "findings": []}))
+        verify(model, blocks, company=COMPANY, mission=MISSION,
+               producer_route_decision_refs=["route:producer"])
+        self.assertTrue(model.request_ids[0].endswith(
+            verifier_prompt_contract_fingerprint()[:16]))
 
     def test_a_pass_with_findings_is_not_a_verdict(self):
         with self.assertRaises(DossierDraftRefused):
