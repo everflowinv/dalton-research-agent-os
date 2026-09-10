@@ -264,6 +264,21 @@ def audit(*, core_db: Path, state_dir: Path, mission_ref: str | None = None) -> 
                             **_dossier_evidence(c, record),
                             "reason": ("CompanyDossierVersion persists cited evidence but no exact "
                                        "producer input fingerprint; current-input freshness is not provable")}
+                        if record.get("input_fingerprints") is not None:
+                            from .company_dossier import load_policy
+                            from .company_dossier_cli import dossier_freshness
+                            try:
+                                freshness = dossier_freshness(c, record, mission,
+                                    load_policy(state_dir / "p12a-dossier-policy-v1.json"))
+                                item["input_binding"].update({
+                                    "method": "per_unit_producer_inputs", "state": freshness,
+                                    "fresh": {"fresh": True, "stale": False, "unknown": None}[freshness],
+                                    "reason": ("Current inputs match all produced units" if freshness == "fresh"
+                                               else "Changed inputs" if freshness == "stale"
+                                               else "Partial or inherited units lack proven current inputs")})
+                            except (OSError, ValueError, RuntimeError, sqlite3.Error) as exc:
+                                item["input_binding"].update({"method": "per_unit_producer_inputs",
+                                    "fresh": None, "state": "unverifiable", "reason": str(exc)})
                     elif product == "debate_map":
                         current = _digest(claims)
                         if "mission_version_ref" in record or "mission_version_hash" in record:

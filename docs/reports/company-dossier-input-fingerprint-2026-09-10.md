@@ -60,3 +60,11 @@ that remains unknown because it carries older drafted units, exact prompt
 material sensitivity, legacy reads, tamper refusal, plural migration alongside
 the abandoned singular column, and read-only reconstruction. No live state,
 model configuration, deployment state, or network service was changed.
+
+## Integration review
+
+Read-only reconstruction now reuses the audit's existing `query_only` transaction without committing it, while the default Ledger snapshot API still rejects nesting in writable transactions. Forecast-cell material continues through the existing pure version validator instead of bypassing its integrity checks. Reconstruction mirrors the producer's prior-body handling for classification and variant calls.
+
+A first partial dossier can still have draftable sections skipped by the run quota. Those sections now make whole-dossier freshness `unknown`; fresh inputs for the three produced sections do not qualify the remaining sections. The child reports recomputed freshness, and the readiness CLI consumes per-unit hashes in one read-only snapshot. Mixed typed citations remain separately validated. **108 focused tests / 7.861s passed**, including real full and partial publications and end-to-end read-only audit reconstruction.
+
+Carried sections without an exact per-unit producer predecessor remain conservative `unknown`. No metadata-only duplicate receipt has been introduced; a duplicate cannot silently claim updated provenance.

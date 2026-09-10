@@ -339,7 +339,7 @@ class PublishTests(unittest.TestCase):
         self.assertTrue(record["evidence_refs"])
 
     def test_a_real_new_version_reconstructs_fresh_then_uncited_input_is_stale(self):
-        first = self.harness.run(max_units=3)
+        first = self.harness.run(max_units=12)
         record = self.authority.latest(ACN)
         policy = json.loads(self.harness.policy_path.read_text(encoding="utf-8"))
         self.assertEqual(dossier_freshness(
@@ -350,6 +350,11 @@ class PublishTests(unittest.TestCase):
                          statement="This uncited row still changes the next producer prompt.")
         self.assertEqual(dossier_freshness(
             self.harness.store.connection, record, self.harness.mission, policy), "stale")
+
+    def test_first_partial_dossier_with_ready_undrafted_units_is_not_fresh(self):
+        summary = self.harness.run(max_units=3)
+        self.assertEqual(summary["dossier_status"], "published")
+        self.assertEqual(summary["input_freshness"], "unknown")
 
     def test_reconstruction_is_select_only_on_a_read_only_database(self):
         self.harness.run(max_units=3)

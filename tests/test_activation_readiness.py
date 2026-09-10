@@ -229,5 +229,41 @@ class ActivationReadinessTests(unittest.TestCase):
             item = audit(core_db=self.db, state_dir=self.state)["companies"][0]["products"]["debate_map"]
             self.assertEqual(item["mission_binding"]["fresh"], expected)
 
+    def test_claim_snapshot_reuses_audit_transaction_without_ending_it(self):
+        from dalton_core.company_dossier_cli import _ReadOnlyStoreView
+        from tests.test_claim_index_authority import ClaimIndexAuthorityTests
+        fixture = ClaimIndexAuthorityTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        claim = fixture.add_claim("claim:readonly-transaction")
+        connection = fixture.store.connection
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        try:
+            snapshot = _ReadOnlyStoreView(connection).claim_index_snapshot()
+            self.assertEqual(snapshot["latest_claim_version_refs"]["claim:readonly-transaction"],
+                             claim["claim_version_id"])
+            self.assertTrue(connection.in_transaction)
+            with self.assertRaisesRegex(RuntimeError, "inside a transaction"):
+                fixture.store.claim_index_snapshot()
+        finally:
+            connection.rollback()
+            connection.execute("PRAGMA query_only=OFF")
+
+    def test_actual_dossier_audit_reconstructs_inside_one_readonly_snapshot(self):
+        from tests.test_dossier_lane import Harness
+        harness = Harness()
+        self.addCleanup(harness.close)
+        standard_policy = harness.state_dir / "p12a-dossier-policy-v1.json"
+        standard_policy.write_bytes(harness.policy_path.read_bytes())
+        result = harness.run(max_units=12)
+        self.assertEqual(result["dossier_status"], "published")
+        report = audit(core_db=harness.state_dir / "core.sqlite", state_dir=harness.state_dir)
+        company = next(row for row in report["companies"]
+                       if row["company_ref"] == harness.mission["universe"][0]["company_ref"])
+        binding = company["products"]["company_dossier"]["input_binding"]
+        self.assertEqual(binding["method"], "per_unit_producer_inputs")
+        self.assertTrue(binding["fresh"])
+
 
 if __name__ == "__main__": unittest.main()

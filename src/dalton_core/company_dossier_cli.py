@@ -307,12 +307,13 @@ def _forecast_cell_rows(
 ) -> list[dict[str, Any]]:
     if limit <= 0 or not table_exists(connection, "forecast_model_versions"):
         return []
-    from .model_forecast_driver import cell_ref
+    from .model_forecast_driver import ForecastModelAuthority, cell_ref
     row = connection.execute(
-        "SELECT record_json FROM forecast_model_versions WHERE company_ref=? "
+        "SELECT version_id FROM forecast_model_versions WHERE company_ref=? "
         "ORDER BY version_number DESC LIMIT 1", (company_ref,),
     ).fetchone()
-    model = None if row is None else json.loads(row["record_json"])
+    model = (None if row is None else ForecastModelAuthority.model(
+        _ReadOnlyStoreView(connection), row["version_id"]))
     rows: list[dict[str, Any]] = []
     for line in (model or {}).get("results") or []:
         for cell in line.get("cells") or []:
@@ -636,7 +637,8 @@ class _ReadOnlyStoreView:
     def claim_index_snapshot(self, *, created_at: str | None = None) -> dict[str, Any]:
         # This DaltonStore reader only consumes ``connection``. Calling the
         # unbound method avoids constructing an authority (and therefore DDL).
-        return DaltonStore.claim_index_snapshot(self, created_at=created_at)
+        return DaltonStore.claim_index_snapshot(
+            self, created_at=created_at, reuse_read_transaction=True)
 
 
 def _json_row(connection: Any, query: str, params: Sequence[Any]) -> dict[str, Any] | None:
@@ -682,10 +684,6 @@ def reconstruct_dossier_input(
     for unit in UNITS:
         entry = plan[unit]
         held = prior_sections.get(unit)
-        if unit == CLASSIFICATION_UNIT:
-            held = (prior or {}).get("industry_classification")
-        elif unit == VARIANT_UNIT:
-            held = (prior or {}).get("variant_view")
         material = material_rows(
             [row for row in entry.get("material", []) if "kind" not in row],
             [row for row in entry.get("material", []) if "kind" in row])
@@ -711,8 +709,18 @@ def dossier_freshness(connection: Any, record: Mapping[str, Any],
     for unit, fingerprint in stored.items():
         if fingerprint is not None and current[unit] != fingerprint:
             return "stale"
+    # A draftable section skipped by the per-run quota is incomplete, even
+    # though every section actually produced this run used fresh input.
+    binding = current_mission["bindings"]["constitution_version"]
+    constitution = _json_row(connection,
+        "SELECT record_json FROM research_constitution_versions WHERE constitution_version_id=?",
+        (binding["ref"],))
+    plan = plan_units(store=_ReadOnlyStoreView(connection),
+                      company_ref=record["company_ref"], constitution=constitution,
+                      policy=policy, prior=record)
     return "unknown" if any(
-        stored[unit] is None and _unit_was_drafted(record, unit)
+        stored[unit] is None and (_unit_was_drafted(record, unit)
+                                 or plan[unit]["status"] == "ready")
         for unit in UNITS) else "fresh"
 
 
@@ -1126,8 +1134,8 @@ def run_dossier(
             "version_ref": published["id"],
             "version_status": published["status"],
             "duplicate_reason": published.get("duplicate_reason"),
-            "input_freshness": authority.input_freshness(
-                published["id"], input_fingerprints),
+            "input_freshness": dossier_freshness(
+                store.connection, published, mission, policy),
             **summarise_blocks(blocks),
         })
         return summary

@@ -2219,7 +2219,7 @@ class DaltonStore:
         return projected("proposed")
 
     def claim_index_snapshot(
-        self, *, created_at: str | None = None
+        self, *, created_at: str | None = None, reuse_read_transaction: bool = False
     ) -> dict[str, Any]:
         """Read one consistent, status-free Ledger snapshot for ClaimIndex.
 
@@ -2228,15 +2228,20 @@ class DaltonStore:
         version.  It is read under one SQLite snapshot and carries a Core-
         derived ref/hash; callers cannot provide either authority value.
         """
-        if self.connection.in_transaction:
-            raise RuntimeError("claim_index_snapshot cannot run inside a transaction")
+        owns_transaction = not self.connection.in_transaction
+        if not owns_transaction:
+            if not reuse_read_transaction or not self.connection.execute("PRAGMA query_only").fetchone()[0]:
+                raise RuntimeError("claim_index_snapshot cannot run inside a transaction")
+        # Read-only audits may hold a wider snapshot spanning mission/products.
+        # Reuse it without committing or rolling it back on the caller's behalf.
 
         def snapshot_timestamp(value: str) -> str:
             return _parse_rfc3339(value, "claim index snapshot timestamp").isoformat(
                 timespec="microseconds"
             )
 
-        self.connection.execute("BEGIN")
+        if owns_transaction:
+            self.connection.execute("BEGIN")
         try:
             claim_rows = self.connection.execute(
                 "SELECT claim_version_id,claim_ref,version_number,claim_json,content_hash,created_at "
@@ -2314,10 +2319,12 @@ class DaltonStore:
                 "id": f"ledger-snapshot:claim-index:{identity_hash}",
             }
             snapshot["content_hash"] = content_hash(snapshot)
-            self.connection.commit()
+            if owns_transaction:
+                self.connection.commit()
             return snapshot
         except BaseException:
-            self.connection.rollback()
+            if owns_transaction:
+                self.connection.rollback()
             raise
 
     def get_claim(self, claim_version_id: str) -> dict[str, Any] | None:
