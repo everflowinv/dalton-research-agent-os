@@ -5,6 +5,13 @@ import unittest
 from pathlib import Path
 
 from dalton_core.activation_readiness import audit, markdown, open_readonly
+from dalton_core.store import content_hash
+
+
+def sealed(body):
+    body = dict(body)
+    body["content_hash"] = content_hash(body)
+    return body
 
 
 class ActivationReadinessTests(unittest.TestCase):
@@ -14,7 +21,7 @@ class ActivationReadinessTests(unittest.TestCase):
         self.db = self.state / "core.sqlite"
         c = sqlite3.connect(self.db)
         c.executescript("""
-        CREATE TABLE coverage_mission_pointer(mission_ref TEXT,mission_version_id TEXT);
+        CREATE TABLE coverage_mission_pointer(mission_ref TEXT,mission_version_id TEXT,content_hash TEXT);
         CREATE TABLE coverage_mission_versions(mission_version_id TEXT,record_json TEXT,content_hash TEXT);
         CREATE TABLE claim_versions(claim_version_id TEXT,claim_json TEXT,created_at TEXT,claim_ref TEXT,version_number INTEGER);
         CREATE TABLE company_dossier_versions(version_id TEXT,company_ref TEXT,version_number INTEGER,record_json TEXT,content_hash TEXT);
@@ -23,10 +30,10 @@ class ActivationReadinessTests(unittest.TestCase):
         CREATE TABLE event_judgements(judgement_id TEXT,event_ref TEXT,company_ref TEXT,created_at TEXT,record_json TEXT,content_hash TEXT);
         """)
         self.company = "company:one"
-        mission = {"id": "mission-version:2", "mission_ref": "mission:x", "content_hash": "m"*64,
+        mission = sealed({"id": "mission-version:2", "mission_ref": "mission:x",
                    "universe": [{"company_ref": self.company, "ticker": "ONE"}],
-                   "autonomy": {"may_write": ["dossier", "debate_map", "deliverable"]}}
-        c.execute("INSERT INTO coverage_mission_pointer VALUES(?,?)", ("mission:x", mission["id"]))
+                   "autonomy": {"may_write": ["dossier", "debate_map", "deliverable"]}})
+        c.execute("INSERT INTO coverage_mission_pointer VALUES(?,?,?)", ("mission:x", mission["id"], mission["content_hash"]))
         c.execute("INSERT INTO coverage_mission_versions VALUES(?,?,?)", (mission["id"], json.dumps(mission), mission["content_hash"]))
         c.execute("INSERT INTO claim_versions VALUES(?,?,?,?,?)", ("claim:1", json.dumps({"subject_ref": self.company}), "2026-09-10", "claim:one", 1))
         self.c = c
@@ -60,20 +67,23 @@ class ActivationReadinessTests(unittest.TestCase):
 
     def test_exact_refs_hashes_and_freshness_are_per_company(self):
         self.configs()
-        dossier = {"id": "dossier:v1", "created_at": "2026-09-10T01:00:00+00:00",
+        dossier = sealed({"id": "dossier:v1", "version": 1, "company_ref": self.company,
+                   "created_at": "2026-09-10T01:00:00+00:00",
                    "bindings": {"mission_version_ref": "mission-version:2"},
-                   "evidence_refs": [{"ref": "claim:1"}]}
+                   "evidence_refs": [{"ref": "claim:1"}]})
         fingerprint = __import__("hashlib").sha256(
             json.dumps({"claim_version_refs": ["claim:1"]}, separators=(",", ":"), sort_keys=True).encode()).hexdigest()
-        debate = {"id": "debate:v1", "created_at": "2026-09-10T02:00:00+00:00",
-                  "evidence_fingerprint": fingerprint}
-        event = {"id": "judgement:1", "created_at": "2026-09-10T03:00:00+00:00",
+        debate = sealed({"id": "debate:v1", "version": 1, "subject_ref": self.company,
+                  "created_at": "2026-09-10T02:00:00+00:00",
+                  "evidence_fingerprint": fingerprint})
+        event = sealed({"id": "judgement:1", "company_ref": self.company,
+                 "created_at": "2026-09-10T03:00:00+00:00",
                  "event_ref": "event:1", "event_hash": "e"*64,
-                 "mission_version_ref": "mission-version:2"}
-        self.c.execute("INSERT INTO company_dossier_versions VALUES(?,?,?,?,?)", ("dossier:v1", self.company, 1, json.dumps(dossier), "d"*64))
-        self.c.execute("INSERT INTO debate_map_versions VALUES(?,?,?,?,?,?)", ("debate:v1", self.company, "company", 1, json.dumps(debate), "b"*64))
+                 "mission_version_ref": "mission-version:2"})
+        self.c.execute("INSERT INTO company_dossier_versions VALUES(?,?,?,?,?)", ("dossier:v1", self.company, 1, json.dumps(dossier), dossier["content_hash"]))
+        self.c.execute("INSERT INTO debate_map_versions VALUES(?,?,?,?,?,?)", ("debate:v1", self.company, "company", 1, json.dumps(debate), debate["content_hash"]))
         self.c.execute("INSERT INTO research_events VALUES(?,?,?)", ("event:1", self.company, "e"*64))
-        self.c.execute("INSERT INTO event_judgements VALUES(?,?,?,?,?,?)", ("judgement:1", "event:1", self.company, event["created_at"], json.dumps(event), "j"*64))
+        self.c.execute("INSERT INTO event_judgements VALUES(?,?,?,?,?,?)", ("judgement:1", "event:1", self.company, event["created_at"], json.dumps(event), event["content_hash"]))
         self.c.commit()
         report = audit(core_db=self.db, state_dir=self.state)
         products = report["companies"][0]["products"]
@@ -83,7 +93,7 @@ class ActivationReadinessTests(unittest.TestCase):
         self.assertTrue(products["company_dossier"]["input_binding"]["bound_refs_valid"])
         self.assertTrue(products["debate_map"]["input_binding"]["fresh"])
         self.assertTrue(products["event_judgement"]["input_binding"]["fresh"])
-        self.assertEqual(products["company_dossier"]["hash"], "d"*64)
+        self.assertEqual(products["company_dossier"]["hash"], dossier["content_hash"])
         self.assertIsNone(products["debate_map"]["mission_binding"]["fresh"])
         self.assertIn("DebateMapVersion has no mission", products["debate_map"]["mission_binding"]["reason"])
         self.assertIn("| ONE | company_dossier | present | dossier:v1 |", markdown(report))
@@ -120,6 +130,32 @@ class ActivationReadinessTests(unittest.TestCase):
         fixture.add_claim("claim:parity")
         self.assertEqual(_claims(fixture.store.connection, "company:fixture"),
                          subject_claim_refs(fixture.store, "company:fixture"))
+
+    def test_superseded_dossier_evidence_remains_a_valid_immutable_ref(self):
+        self.configs()
+        dossier = sealed({"id": "dossier:v1", "version": 1, "company_ref": self.company,
+                          "created_at": "2026-09-10T01:00:00+00:00",
+                          "bindings": {"mission_version_ref": "mission-version:2"},
+                          "evidence_refs": [{"ref": "claim:1"}]})
+        self.c.execute("INSERT INTO company_dossier_versions VALUES(?,?,?,?,?)",
+                       (dossier["id"], self.company, 1, json.dumps(dossier), dossier["content_hash"]))
+        self.c.execute("INSERT INTO claim_versions VALUES(?,?,?,?,?)",
+                       ("claim:2", json.dumps({"subject_ref": self.company}),
+                        "2026-09-11", "claim:one", 2))
+        self.c.commit()
+        item = audit(core_db=self.db, state_dir=self.state)["companies"][0]["products"]["company_dossier"]
+        self.assertTrue(item["input_binding"]["bound_refs_valid"])
+
+    def test_corrupt_latest_product_is_not_reported_present(self):
+        bad = {"id": "dossier:wrong", "company_ref": self.company,
+               "created_at": "2026-09-10T01:00:00+00:00", "content_hash": "x" * 64}
+        self.c.execute("INSERT INTO company_dossier_versions VALUES(?,?,?,?,?)",
+                       ("dossier:v1", self.company, 1, json.dumps(bad), "d" * 64))
+        self.c.commit()
+        item = audit(core_db=self.db, state_dir=self.state)["companies"][0]["products"]["company_dossier"]
+        self.assertEqual(item["status"], "corrupt")
+        self.assertIn("record_id_drift", item["blockers"])
+        self.assertIn("content_hash_drift", item["blockers"])
 
     def test_output_refuses_core_state_symlinks_and_duplicate_targets(self):
         from dalton_core.activation_readiness import main

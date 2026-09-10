@@ -9,6 +9,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .store import content_hash
+
 PRODUCTS = ("company_dossier", "debate_map", "event_judgement")
 GRANTS = {"company_dossier": "dossier", "debate_map": "debate_map",
           # A judgement row itself is the lane ledger; ``deliverable`` is the
@@ -51,7 +53,8 @@ def _record(row: sqlite3.Row | None) -> dict[str, Any] | None:
 def _mission(c: sqlite3.Connection, mission_ref: str | None) -> dict[str, Any]:
     where, args = ("WHERE p.mission_ref=?", (mission_ref,)) if mission_ref else ("", ())
     rows = c.execute(
-        "SELECT p.mission_ref,p.mission_version_id,v.record_json,v.content_hash "
+        "SELECT p.mission_ref,p.mission_version_id,p.content_hash AS pointer_hash,"
+        "v.record_json,v.content_hash "
         "FROM coverage_mission_pointer p JOIN coverage_mission_versions v "
         "ON v.mission_version_id=p.mission_version_id " + where + " ORDER BY p.mission_ref", args).fetchall()
     if len(rows) != 1:
@@ -59,6 +62,13 @@ def _mission(c: sqlite3.Connection, mission_ref: str | None) -> dict[str, Any]:
     mission = _record(rows[0])
     if mission is None:
         raise ValueError("current mission record_json is invalid")
+    body = {key: value for key, value in mission.items() if key != "content_hash"}
+    if (mission.get("id") != rows[0]["mission_version_id"]
+            or mission.get("mission_ref") != rows[0]["mission_ref"]
+            or mission.get("content_hash") != rows[0]["content_hash"]
+            or rows[0]["pointer_hash"] != rows[0]["content_hash"]
+            or content_hash(body) != rows[0]["content_hash"]):
+        raise ValueError("current mission pointer/version/hash binding drifted")
     mission["_stored_hash"] = rows[0]["content_hash"]
     return mission
 
@@ -89,16 +99,33 @@ def _digest(refs: list[str]) -> str:
     return hashlib.sha256(wire.encode()).hexdigest()
 
 
-def _latest(c: sqlite3.Connection, table: str, company_ref: str) -> tuple[dict[str, Any] | None, str | None]:
+def _latest(c: sqlite3.Connection, table: str, company_ref: str) -> tuple[dict[str, Any] | None, str | None, list[str]]:
     if not _table(c, table):
-        return None, None
+        return None, None, []
     if table == "company_dossier_versions":
-        row = c.execute("SELECT record_json,content_hash FROM company_dossier_versions WHERE company_ref=? ORDER BY version_number DESC LIMIT 1", (company_ref,)).fetchone()
+        row = c.execute("SELECT * FROM company_dossier_versions WHERE company_ref=? ORDER BY version_number DESC LIMIT 1", (company_ref,)).fetchone()
     elif table == "debate_map_versions":
-        row = c.execute("SELECT record_json,content_hash FROM debate_map_versions WHERE subject_ref=? AND subject_kind='company' ORDER BY version_number DESC LIMIT 1", (company_ref,)).fetchone()
+        row = c.execute("SELECT * FROM debate_map_versions WHERE subject_ref=? AND subject_kind='company' ORDER BY version_number DESC LIMIT 1", (company_ref,)).fetchone()
     else:
-        row = c.execute("SELECT record_json,content_hash FROM event_judgements WHERE company_ref=? ORDER BY created_at DESC,judgement_id DESC LIMIT 1", (company_ref,)).fetchone()
-    return _record(row), None if row is None else row["content_hash"]
+        row = c.execute("SELECT * FROM event_judgements WHERE company_ref=? ORDER BY created_at DESC,judgement_id DESC LIMIT 1", (company_ref,)).fetchone()
+    record = _record(row)
+    if row is None:
+        return None, None, []
+    issues = []
+    if record is None:
+        return None, row["content_hash"], ["record_json_invalid"]
+    expected_id = row["version_id"] if table != "event_judgements" else row["judgement_id"]
+    if record.get("id") != expected_id:
+        issues.append("record_id_drift")
+    if table != "event_judgements" and record.get("version") != row["version_number"]:
+        issues.append("version_number_drift")
+    if record.get("company_ref", record.get("subject_ref")) != company_ref:
+        issues.append("company_binding_drift")
+    asserted = record.get("content_hash")
+    computed = content_hash({key: value for key, value in record.items() if key != "content_hash"})
+    if asserted != row["content_hash"] or computed != row["content_hash"]:
+        issues.append("content_hash_drift")
+    return record, row["content_hash"], issues
 
 
 def _blocked_reasons(product: str, mission: dict[str, Any], state: Path,
@@ -190,9 +217,12 @@ def audit(*, core_db: Path, state_dir: Path, mission_ref: str | None = None) -> 
             for product, table in (("company_dossier", "company_dossier_versions"),
                                    ("debate_map", "debate_map_versions"),
                                    ("event_judgement", "event_judgements")):
-                record, stored_hash = _latest(c, table, company_ref)
+                record, stored_hash, integrity = _latest(c, table, company_ref)
                 item: dict[str, Any] = {"status": "missing"}
-                if record is None:
+                if integrity:
+                    item.update({"status": "corrupt", "hash": stored_hash,
+                                 "blockers": integrity, "reason": integrity[0]})
+                elif record is None:
                     item["blockers"] = _blocked_reasons(
                         product, mission, state_dir, claims, unjudged, c, company_ref)
                     item["reason"] = item["blockers"][0]
@@ -203,10 +233,13 @@ def audit(*, core_db: Path, state_dir: Path, mission_ref: str | None = None) -> 
                         bound = ((record.get("bindings") or {}).get("mission_version_ref"))
                         item["mission_binding"] = {"ref": bound, "fresh": bound == mission.get("id")}
                         cited = {r.get("ref") for r in record.get("evidence_refs") or [] if isinstance(r, dict)}
+                        existing = ({row[0] for row in c.execute(
+                            "SELECT claim_version_id FROM claim_versions")}
+                                    if _table(c, "claim_versions") else set())
                         item["input_binding"] = {
                             "method": "evidence_scope_only",
                             "fresh": None,
-                            "bound_refs_valid": cited.issubset(set(claims)),
+                            "bound_refs_valid": cited.issubset(existing),
                             "reason": ("CompanyDossierVersion persists cited evidence but no exact "
                                        "producer input fingerprint; current-input freshness is not provable")}
                     elif product == "debate_map":
