@@ -28,7 +28,7 @@ driver 模型（P13-M2）把每条假设摆得一样重，但真实公司里一�
 | `bootstrap.SCHEMA_DATABASES` | 改（一行） | `forecast_sensitivity_schema.sql` |
 | `scripts/rehearse_deploy.CORE_MIGRATIONS` | 改（一行） | 同上的 `MigrationSpec` |
 | `pyproject.toml` `[project.scripts]` | 改（一行） | `dalton-forecast-sensitivity` |
-| `tests/test_forecast_sensitivity.py`、`tests/test_consensus_bridge.py`、`tests/test_mission_sensitivity_lane.py` | 新增 | 95 项（43 / 28 / 24） |
+| `tests/test_forecast_sensitivity.py`、`tests/test_consensus_bridge.py`、`tests/test_mission_sensitivity_lane.py` | 新增 | 107 项（49 / 33 / 25） |
 | `src/dalton_core/research_event.py` | 改（**不是本片的文件**，见 §9） | 补回 main `427f684` 合并时丢掉的一个 `}),` |
 
 **没有碰**：`writer_server.py`、`coverage_mission.py`（及其 schema）、`bounded_planner_driver.py`、`macos_launchagent.py`、`install.sh`、`cockpit_control.html`、`PROJECT_STATUS.md`、`tests/test_service.py`、`tests/test_lane_registry.py` 的字面量、`model_forecast_driver.py`（一个字没改——`compute_results` / `chain_base` 就是接缝）、其他 agent 的模块。
@@ -48,9 +48,11 @@ CTSH  D&A    份额 +1pp → 净利润 -312,533,819.07133687
 
 这不是巧合，是恒等式：这个模型里每条费用假设都是**同一条预测收入的份额**，所以一个百分点就是收入的一个百分点，对所有费用 driver 是同一个数。按弹性排序等于按最后一位的舍入噪声排序——一个既确定又毫无意义的顺序。
 
-把成本和折旧分开的不是斜率，是**幅度**：CTSH 的 SG&A 份额三年里走过 13.28%–17.35（4.07 个点），D&A 走过 2.49%–2.75%（0.26 个点）。所以**排序按 swing**：把这条 driver 放到它自己的历史谷、再放到历史峰，看底线相差多少。弹性照样算、照样进记录（`impact.delta` / `delta_per_unit`），但排名由 `swing` 决定。规则连同这段理由写死在 `SELECTION_RULE` 里并进 `SELECTION_RULE_HASH`，测试 `test_every_share_driver_has_the_same_unit_elasticity` 把这个恒等式钉住，所以没有人能在没有一条红测试解释原因的情况下把规则「简化」回弹性。
+把成本和折旧分开的不是斜率，是**幅度**：CTSH 的 SG&A 份额三年里走过 13.28%–17.35（4.07 个点），D&A 走过 2.49%–2.75%（0.26 个点）。所以**排序按 swing**：把这条 driver 放到它自己的历史谷、再放到历史峰，看底线相差多少。弹性照样算、照样进记录（`impact.delta` / `delta_per_unit`），但排名由 `swing` 决定。规则连同这段理由写死在 `SELECTION_RULE` 里并进 `SELECTION_RULE_HASH`，ref 是 `rule:swing-rank:1`（**不是** `elasticity-rank`——按弹性排出来的 projection 绝不能和按 swing 排出来的混为一谈）。测试 `test_every_share_driver_has_the_same_unit_elasticity` 把这个恒等式钉住，所以没有人能在没有一条红测试解释原因的情况下把规则「简化」回弹性。
 
-没有历史带的 driver **不与有带的混在一个刻度上排**：它排在所有有带的之后，彼此之间按弹性。给它编一个幅度去和别人比大小，正是这一片要从 filing 里取幅度的原因。
+没有历史带的 driver **不与有带的混在一个刻度上排**：它被**降级而不是剔除**——排在所有有带的之后，彼此之间按弹性。给它编一个幅度去和别人比大小，正是这一片要从 filing 里取幅度的原因。只有**两个数都没有**的 driver 才会被丢掉；丢一个只是缺其中一个数的 driver，等于对读者只字不提它，而只字不提会被读成「它不要紧」。
+
+**弹性要求这条假设在整个预测期是一个数。** 一条只被改过某一个季度的 driver 没有「那个水平」可以加一个百分点；拿第一季的值去加，等于把其余季度压平到它上面、再把压平的效果报成敏感性。这条 driver 的 `impact` 是 `unavailable` 并说明理由，但它照样按 swing 参与排序（`test_a_driver_with_no_single_level_gets_no_elasticity`、`test_a_driver_with_no_elasticity_is_still_ranked_on_its_swing`）。
 
 排序用的指标是**这个模型算得出来的最靠下的那条线**，precedence 冻结为 `free_cash_flow → net_income → operating_income → revenue`。按收入排会让顶线在每家公司都是第一——这是构造出来的，不是发现。
 
@@ -59,6 +61,8 @@ CTSH  D&A    份额 +1pp → 净利润 -312,533,819.07133687
 带取在**假设自己的 measure** 上，不是水平值：`quarterly_growth` 取相邻季度环比（相邻判定沿用 M2 的 80–100 天，因为 10-Q 拼出来的历史每第四季是个洞，跨洞两季当一季就把两季增速塞进一季的率里），`revenue_share` / `operating_income_share` 取逐季比值。水平值的带没法代进假设里，代不进去的带就是装饰。
 
 每个极值带**它发生在哪个季度**和 accession。「峰值 70.14%」是个数字；「70.14%，2025 年 2 月那个季度，0001467373-26-000014」是个可以去查的事实。并列极值归给**最早**达到它的季度（有测试），两台机器不能对「哪个季度是峰」有分歧。
+
+每个极值还带 **runner_up**：往里数第一个**不同**取值的观测和它的季度。CTSH 的税率峰 70.79% 和第二高之间隔着一大截——那个峰是一次性事件，不是税率。要替读者判断哪些极值是异常就得有一条剔除规则，而没有原则的剔除就是挑数；把第二个数印在旁边不花什么代价，人自己就能看见那道缝（`test_each_extreme_carries_the_next_observation_in`）。取「不同取值」是为了让两个并列在峰上的季度不会互相当 runner-up 而把真实的缝藏起来。
 
 `latest` 和三个统计量并排，因为带本身会引诱读者把我们的估计放进区间里就算完；**这条 measure 最近在哪**才是估计要被拿去辩护的那个数，而且经常就在某一端。
 
@@ -69,6 +73,8 @@ CTSH  D&A    份额 +1pp → 净利润 -312,533,819.07133687
 ### 2.3 what-if：每一格追到它替换掉的那条假设
 
 四个情景 `trough / mean / ours / peak`，四条线 `revenue → operating_income → net_income → free_cash_flow`，逐季度加区间合计。每格带 `replaced_assumption_refs`（本模型里被换掉的那几条假设的 ref）和 `input_refs`（情景值来自哪几个 filing 格，带 accession）。
+
+**每一列都是把那个水平在所有未实现季度上摊平持有，不是一条路径**，而且每一行自己说出来（`held_flat`、`quarters_held`），`SELECTION_RULE` 里说、渲染视图的「HOW TO READ IT」里也说。「谷」不是「谷那个季度再来一次」，是「整段预测期都待在那儿」——这是个更狠的问题，读者必须知道被问的是这个。不知道的人读到的是一张比眼前这张温和得多的表。
 
 **`ours` 走同一条路重算，不是从记录里抄出来的。** 如果重算我们自己的估计算不出模型本身，其余三列就是在一个不是模型的基线上量出来的——而且看不出来，因为印出来的那个数还是我们的。测试 `test_our_own_column_reproduces_the_stored_model` 逐格比对。
 
@@ -86,8 +92,8 @@ CTSH  D&A    份额 +1pp → 净利润 -312,533,819.07133687
 
 三条设计：
 
-- **读者按名字解析**（`latest_consensus`、`report_consensus`），不 import。P11b 在 `w2-consensus` 分支上还没并。今天 live 上如实报 `unavailable: this Core has no consensus authority (P11b is not built yet)`；那个模块落地当天这条桥自己就开始工作，这边一个字不用改。签名两种都试（`(store, company_ref)` 与 `(company_ref)`），因为定义它的分支没并，猜错看起来和「没有 consensus」一模一样。
-- **两家券商，否则不算 consensus**。vendor 那一行没数字时 `report_consensus` 可以顶上，但必须来自 ≥2 家**不同**券商，给区间与中点、带两家的 refs。一份 note 是一个分析师，把它叫作「街上」正是 variant view 被凭空造出来的方式。同一家券商两份 note 仍然是一家（有测试）。
+- **读者按名字解析**（`latest_consensus`、`report_consensus`），不 import。P11b 在 `w2-consensus` 分支上还没并。今天 live 上如实报 `unavailable: this Core has no consensus authority (P11b is not built yet)`；那个模块落地当天这条桥自己就开始工作，这边一个字不用改。签名**按 `inspect.signature` 读**，两种写法（`(store, company_ref)` 与 `(company_ref)`）都能用。原来是先调一次、`TypeError` 了再换个调法——但读者内部抛出的 `TypeError`（比如拿字符串和 Decimal 比大小）和「参数个数不对」长得一模一样，于是一个本来能用的读者会被用错的参数再调一次，报出来的是第二次的失败。签名是事实，调用抛出的异常是猜测（`test_a_type_error_from_inside_the_reader_is_not_read_as_an_arity_mismatch`）。P11b 已确认是 `latest_consensus(store, company_ref)` 与 `report_consensus(store, company)`。
+- **两家券商，否则不算 consensus**。vendor 那一行没数字时 `report_consensus` 可以顶上，但必须来自 ≥2 家**不同**券商，给区间与中点、带两家的 refs。一份 note 是一个分析师，把它叫作「街上」正是 variant view 被凭空造出来的方式。**计数只在「既有券商名、又有数字」的行上做**：review 抓到的 blocker 是这里原本分两次数——券商名在所有行上数、数字在有值的行上数——于是「Alpha 两份 note + Beta 一份没数字」同时满足两个条件，发出一个两端都是 Alpha 的区间，还叫作 consensus。现在只有一份名单，`test_two_notes_from_one_house_plus_a_valueless_second_is_one_house` 钉住那个确切形状。
 - **缺就是缺，从不编**。整段消失会被读成「我们和 street 一致」，那是这个对象唯一绝不能不小心说出口的话。
 
 **EPS 今天桥不了**，而且说明理由而不是悄悄跳过：driver 模型没有稀释股数（M2 §9 开放问题 5c）。目标价要 P11a 的估值快照里真有一条 target price 才桥；没有就说「没有估值快照绑到这家公司」。
@@ -177,7 +183,7 @@ Ran 4905 tests in 681.099s
 OK (skipped=1)
 ```
 
-（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，并入 main `427f684` 之后的本分支。并入前、基线 `62b54fd` 上是 `Ran 4489 tests in 592.590s / OK (skipped=1)`，其中本片 +95：`test_forecast_sensitivity` 43、`test_consensus_bridge` 28、`test_mission_sensitivity_lane` 24。）
+（`PYTHONPATH=$PWD/src .venv/bin/python -m unittest discover -s tests -t .`，并入 main `427f684` 之后的本分支。并入前、基线 `62b54fd` 上是 `Ran 4489 tests in 592.590s / OK (skipped=1)`，其中本片 +107：`test_forecast_sensitivity` 49、`test_consensus_bridge` 33、`test_mission_sensitivity_lane` 25。）
 
 fixture 是八个季度的手算算术：收入按 +20% / -10% / +10% 循环，成本份额按 80% / 82% / 78% 循环，**SG&A 恰好是收入的十分之一、税恰好是营业利润的四分之一**——后两条是故意的：两条历史带宽度为零的 driver，逼排序去破平局，而且必须在每台机器上以同样方式破（按 driver ref）。带的期望值都是手算出来写全的。
 
@@ -225,3 +231,19 @@ fixture 是八个季度的手算算术：收入按 +20% / -10% / +10% 循环，�
 1. **`bootstrap.SCHEMA_DATABASES` 缺 `conviction_call_schema.sql`**（P15d 合并时只登记了 `rehearse_deploy` 的 `MigrationSpec`）。基线 `62b54fd` 上 6 项测试因此失败——`test_service` 的 INT3 守卫加 5 个 `bootstrap(...)` 调用者。这条守卫存在的全部理由就是「没被应用的 schema 不会让安装失败，它会在几分钟后让某一条 lane 在没人看的心跳里报 OperationalError」，所以让守卫红着就等于把守卫关掉。**主 agent 确认 main 当时已自行修复**，并入时我丢掉了自己那一行。
 
 2. **main `427f684` 不能解析**。`research_event.PAYLOAD_FIELDS` 里 S5 的 `"ir_page_change": frozenset({…` 丢了收尾的 `}),`，于是 P14f 的 `"calibration"` 落进它里面、整个 `MappingProxyType({` 再也没闭合。两个 merge 父节点各自都能解析，括号是在解决冲突时丢的。补之前先验过「丢的真的只是一个分隔符」：修好后 `PAYLOAD_FIELDS` 17 个 kind，`EVENT_KINDS` 与它互为满射，两个父节点都没有贡献被合并丢掉的 kind——两边确实都留住了，只是少了个界符。主 agent 已在 main 上落同一行修复；本分支这一条并回去应是 no-op。
+
+## 10. review 之后改了什么（第二轮）
+
+| # | 改动 | 为什么 |
+| --- | --- | --- |
+| 1（blocker） | `report_consensus` 只数「有券商名**且**有数字」的行 | 两次分开的计数会让「Alpha 两份 + Beta 无值」发出一个两端都是 Alpha 的区间并叫它 consensus |
+| 2 | 假设在预测期内不是一个数时 `impact` 为 `unavailable` | 拿第一季的值加一个点，等于把其余季度压平到它上面，再把压平报成弹性 |
+| 2b（连带） | 排序改成「swing 或 elasticity 有其一即入选」 | 否则第 2 条会把一条被改过的 driver 整个踢出排名，而它可能正是最要紧的那条 |
+| 3 | `held_flat` / `quarters_held` + `SELECTION_RULE` 与视图明说 | 「谷」不是谷那个季度再来一次，是整段预测期都待在那儿 |
+| 4 | 每个极值带 `runner_up` | 让 CTSH 那种一次性极值看得见，而不需要一条没人同意的剔除规则 |
+| 5 | `SELECTION_RULE_REF` = `rule:swing-rank:1` | ref 要说出它按什么排 |
+| nit | `content_hash` 改为对**校验后**的 wire 取 | 校验器会规范化（P15d 的 `_text` 会 strip），否则存进去的哈希不是它旁边那段 JSON 的哈希，而回读校验就变成拿一个数和它自己比 |
+| nit | `inspect.signature` 取代 `except TypeError` 重试 | 见 §3 |
+| nit | `open_periods` 去掉 realised 过滤 | `actualize_model` 会把已实现季度移出 `forecast_periods`，`validate_forecast_model` 也拒绝同时出现在两边的记录——那个过滤只会在一个存不进去的记录上生效。**顺带发现我原来的两条测试就是建在那种非法形状上的**，已改成 authority 真会产生的形状，并加一条断言证明重叠的记录会被 `publish` 拒绝 |
+
+这些改动都动了 `SELECTION_RULE_HASH`，因此也动了每条 projection 的 `content_hash`——今天不要紧，live 上一条都还没发。

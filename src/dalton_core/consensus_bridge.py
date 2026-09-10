@@ -36,6 +36,7 @@ stays byte-for-byte what P15d closed over.
 
 from __future__ import annotations
 
+import inspect
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 from typing import Any, Mapping
 
@@ -100,6 +101,33 @@ def unavailable(reason: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _wants_store(reader: Any) -> bool:
+    """Whether this reader takes the store as its first argument.
+
+    Decided by looking at the signature rather than by calling and catching
+    ``TypeError``. A ``TypeError`` raised *inside* the reader -- comparing a
+    string with a Decimal, say -- is indistinguishable from an arity mismatch
+    at the call site, and the retry would then call a working reader a second
+    time with the wrong arguments and report the second failure. Signatures are
+    a fact; exceptions from a call are a guess.
+
+    Unreadable signatures (a C function, a mock) default to taking the store,
+    which is what P11b's ``latest_consensus(store, company_ref)`` and
+    ``report_consensus(store, company)`` both do.
+    """
+
+    try:
+        names = list(inspect.signature(reader).parameters)
+    except (TypeError, ValueError):
+        return True
+    if not names:
+        return False
+    first = names[0]
+    if first in ("self", "cls") and len(names) > 1:
+        first = names[1]
+    return first in ("store", "core", "connection", "db")
+
+
 def _module() -> Any | None:
     try:
         from . import consensus_estimate  # type: ignore[attr-defined]
@@ -127,19 +155,12 @@ def read_consensus(store: Any, company_ref: str) -> dict[str, Any]:
         return {"status": "unavailable", "payload": None,
                 "reason": "the consensus module on this Core exposes no "
                           "latest_consensus reader"}
+    # The blueprint names this reader ``latest_consensus(company)``; P11b and
+    # the conviction call both spell it ``(store, company_ref)``. Read off the
+    # signature, so a reader written either way works and neither is guessed.
     try:
-        found = reader(store, company_ref)
-    except TypeError:
-        # The blueprint names this reader ``latest_consensus(company)``; the
-        # conviction call already calls it ``(store, company_ref)``. Both are
-        # tried rather than picked, because the branch that defines it is not
-        # merged and guessing wrong would look exactly like "no consensus".
-        try:
-            found = reader(company_ref)
-        except Exception as exc:  # noqa: BLE001
-            return {"status": "unavailable", "payload": None,
-                    "reason": f"the consensus authority could not be read: "
-                              f"{type(exc).__name__}: {exc}"}
+        found = (reader(store, company_ref) if _wants_store(reader)
+                 else reader(company_ref))
     except Exception as exc:  # noqa: BLE001
         return {"status": "unavailable", "payload": None,
                 "reason": f"the consensus authority could not be read: "
@@ -166,22 +187,23 @@ def report_consensus(store: Any, company_ref: str, metric: str,
         return {"status": "unavailable", "value": None, "refs": [],
                 "reason": "no broker-note consensus reader is installed on this Core"}
     try:
-        points = reader(store, company_ref, metric, period)
-    except TypeError:
-        try:
-            points = reader(company_ref, metric, period)
-        except Exception as exc:  # noqa: BLE001
-            return {"status": "unavailable", "value": None, "refs": [],
-                    "reason": f"the broker-note reader could not be read: "
-                              f"{type(exc).__name__}: {exc}"}
+        points = (reader(store, company_ref, metric, period)
+                  if _wants_store(reader) else reader(company_ref, metric, period))
     except Exception as exc:  # noqa: BLE001
         return {"status": "unavailable", "value": None, "refs": [],
                 "reason": f"the broker-note reader could not be read: "
                           f"{type(exc).__name__}: {exc}"}
     rows = [dict(item) for item in (points or []) if isinstance(item, Mapping)]
-    brokers = {str(item.get("broker")) for item in rows if item.get("broker")}
-    numbered = [item for item in rows if item.get("value") is not None]
-    if len(brokers) < MIN_BROKERS or len(numbered) < MIN_BROKERS:
+    # One list, and the count is taken off it. Counting houses over every row
+    # and numbers over the valued ones was two counts that could both pass on
+    # different rows: two notes from Alpha plus a Beta row with no number gave
+    # "two brokers, two numbers" and published a range whose ends were both
+    # Alpha's. The only rows that count are the ones that carry a house *and* a
+    # number, because that pair is what a broker point is.
+    numbered = [item for item in rows
+                if item.get("value") is not None and item.get("broker")]
+    brokers = {str(item["broker"]) for item in numbered}
+    if len(brokers) < MIN_BROKERS:
         return {"status": "unavailable", "value": None, "refs": [],
                 "reason": f"only {len(brokers)} broker(s) carry a {metric} number "
                           f"for {period}; {MIN_BROKERS} are needed before a range "

@@ -154,11 +154,78 @@ class ReportConsensusTests(FakeConsensus):
         found = cb.report_consensus(FakeStore(), "company:x", "revenue", "2026-08-31")
         self.assertEqual(found["status"], "unavailable")
 
+    def test_two_notes_from_one_house_plus_a_valueless_second_is_one_house(self):
+        # The exact shape the two counts used to let through: Alpha twice with
+        # numbers, Beta once without one. Counting houses over every row and
+        # numbers over the valued rows gave "two brokers, two numbers" and
+        # published a range whose ends were both Alpha's, under the word
+        # consensus. Only rows carrying a house *and* a number count.
+        install(latest_consensus=lambda store, company_ref: None,
+                report_consensus=lambda store, company, metric, period: [
+                    {"broker": "Alpha", "value": "100", "refs": ["claim:a1"]},
+                    {"broker": "Alpha", "value": "110", "refs": ["claim:a2"]},
+                    {"broker": "Beta", "value": None, "refs": ["claim:b1"]},
+                ])
+        found = cb.report_consensus(FakeStore(), "company:x", "revenue", "2026-08-31")
+        self.assertEqual(found["status"], "unavailable")
+        self.assertIn("1 broker", found["reason"])
+        self.assertIsNone(found["value"])
+
+    def test_a_row_with_a_number_but_no_house_does_not_count_either(self):
+        install(latest_consensus=lambda store, company_ref: None,
+                report_consensus=lambda store, company, metric, period: [
+                    {"broker": "Alpha", "value": "100", "refs": ["claim:a1"]},
+                    {"broker": None, "value": "140", "refs": ["claim:anon"]},
+                ])
+        found = cb.report_consensus(FakeStore(), "company:x", "revenue", "2026-08-31")
+        self.assertEqual(found["status"], "unavailable")
+        self.assertIn("1 broker", found["reason"])
+
+    def test_the_range_is_taken_only_over_rows_that_counted(self):
+        install(latest_consensus=lambda store, company_ref: None,
+                report_consensus=lambda store, company, metric, period: [
+                    {"broker": "Alpha", "value": "100", "refs": ["claim:a1"]},
+                    {"broker": "Beta", "value": "140", "refs": ["claim:b1"]},
+                    {"broker": None, "value": "9999", "refs": ["claim:anon"]},
+                ])
+        found = cb.report_consensus(FakeStore(), "company:x", "revenue", "2026-08-31")
+        self.assertEqual(found["status"], "available")
+        self.assertEqual((found["low"], found["high"], found["value"]),
+                         ("100", "140", "120"))
+        self.assertEqual(found["brokers"], ["Alpha", "Beta"])
+        self.assertNotIn("claim:anon", found["refs"])
+
     def test_no_broker_reader_at_all_is_a_reason_not_a_crash(self):
         install(latest_consensus=lambda *a: None)
         found = cb.report_consensus(FakeStore(), "company:x", "revenue", "2026-08-31")
         self.assertEqual(found["status"], "unavailable")
         self.assertIn("no broker-note consensus reader", found["reason"])
+
+
+class SignatureTests(FakeConsensus):
+    def test_a_type_error_from_inside_the_reader_is_not_read_as_an_arity_mismatch(self):
+        # The reason the arity retry went: a TypeError raised *inside* a
+        # working reader looks exactly like calling it with the wrong number of
+        # arguments, and retrying would call it a second time with the wrong
+        # ones and report that failure instead of this one.
+        calls = []
+
+        def reader(store, company_ref):
+            calls.append(company_ref)
+            raise TypeError("'<' not supported between str and Decimal")
+
+        install(latest_consensus=reader)
+        found = cb.read_consensus(FakeStore(), "company:x")
+        self.assertEqual(found["status"], "unavailable")
+        self.assertIn("not supported between", found["reason"])
+        self.assertEqual(len(calls), 1)
+
+    def test_the_signature_decides_which_way_to_call(self):
+        self.assertTrue(cb._wants_store(lambda store, company_ref: None))
+        self.assertFalse(cb._wants_store(lambda company_ref: None))
+        # P11b's spelling, which is the one that matters.
+        self.assertTrue(cb._wants_store(
+            lambda store, company_ref, metric, period: None))
 
 
 class BridgeTests(FakeConsensus):

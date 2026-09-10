@@ -382,6 +382,16 @@ def render_sensitivity(
                 f"({band['latest']['period_end']})")
             out.append(f"      over {band.get('count')} filed quarters "
                        f"{band.get('first_period')} .. {band.get('last_period')}")
+            # The next observation in from each end, printed where a reader
+            # looking at the extreme will see it. A peak far above its own
+            # runner-up was one quarter and probably one event, and a scenario
+            # run at it is a scenario about that event.
+            for edge in ("trough", "peak"):
+                runner = (band.get(edge) or {}).get("runner_up")
+                if runner is not None:
+                    out.append(
+                        f"      next {edge} in: {_percent(runner['value'])} "
+                        f"({runner['period_end']})")
         else:
             out.append(f"      band unavailable: {band.get('reason')}")
         if ours.get("value") is not None:
@@ -488,6 +498,13 @@ def render_sensitivity(
     out.append("  revenue and a one-point move in each is the same number. Every")
     out.append("  column is the model recomputed in memory: none of them was ever")
     out.append("  published as a forecast, and our own column is the model itself.")
+    out.append("")
+    out.append("  EVERY COLUMN HOLDS ITS LEVEL FLAT ACROSS ALL THE QUARTERS SHOWN.")
+    out.append("  None of them is a path. The trough column is not the trough")
+    out.append("  quarter happening once -- it is the whole horizon spent there.")
+    out.append("  Where an extreme sits far from the next observation, that peak")
+    out.append("  or trough was one quarter and probably one event; the runner-up")
+    out.append("  is printed beside it so you can see the gap and judge it.")
     return "\n".join(out)
 
 

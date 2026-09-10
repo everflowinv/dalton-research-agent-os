@@ -30,7 +30,11 @@ This slice answers three questions and refuses to answer anything else:
 3. **What the model says at each of those.** The income chain recomputed at the
    historical trough, the mean, the peak, and at our own estimate, so the four
    numbers sit beside each other and the reader can see whether our estimate is
-   near an edge of the range the company has actually lived in.
+   near an edge of the range the company has actually lived in. Each column
+   **holds that one level across every open quarter** and says so; none of them
+   is a path. "The trough" is not the trough quarter happening once, it is the
+   whole horizon at that level -- a harsher question, and one the reader has to
+   know is being asked.
 
 Plus a bridge from those numbers to the street's, which is
 :mod:`consensus_bridge`.
@@ -132,7 +136,7 @@ WHAT_IF_LINES: tuple[str, ...] = (
     "result:free_cash_flow",
 )
 
-SELECTION_RULE_REF = "rule:elasticity-rank:1"
+SELECTION_RULE_REF = "rule:swing-rank:1"
 BAND_RULE_REF = "rule:historical-band:1"
 
 #: The rule itself, hashed into every projection. Changing any word of this
@@ -144,11 +148,21 @@ SELECTION_RULE: dict[str, Any] = {
     "unit_move": format(UNIT_MOVE, "f"),
     "metric_precedence": [ref for ref, _ in IMPACT_PRECEDENCE],
     "horizon": "the forecast quarters this model has not yet had filed",
-    "measure": "the absolute change in the metric summed over the horizon",
-    "rank_by": "swing: the metric at this driver's historical peak against the "
-               "metric at its historical trough",
-    "rank_fallback": "a driver with no historical band ranks below every driver "
-                     "that has one, and among those by its unit-move elasticity",
+    "measure": "the absolute change in the metric summed over the horizon, "
+               "with the driver's assumption held at one level in every quarter "
+               "of that horizon",
+    "held_flat": "every scenario and every elasticity holds one level across "
+                 "all open quarters; none of them is a path. A driver whose "
+                 "live assumption already differs quarter to quarter therefore "
+                 "gets no elasticity, because there is no single level to add a "
+                 "point to",
+    "rank_by": "swing: the metric with this driver held flat at its historical "
+               "peak, against the metric with it held flat at its historical "
+               "trough",
+    "rank_fallback": "a driver with no historical band is demoted, not excluded: "
+                     "it ranks below every driver that has one, and among those "
+                     "by its unit-move elasticity. A driver with neither a swing "
+                     "nor an elasticity is the only one dropped",
     "order": "largest swing first; ties broken by driver ref",
     "why_not_elasticity": "a one-point move ranks every share driver identically, "
                           "because each is a share of the same revenue and one "
@@ -163,6 +177,9 @@ SELECTION_RULE: dict[str, Any] = {
     "band_min_points": MIN_BAND_POINTS,
     "band_statistics": ["trough", "mean", "peak", "latest"],
     "band_mean": "the arithmetic mean of the observations, quantised to 1e-12",
+    "band_runner_up": "each extreme carries the next distinct observation and "
+                      "its quarter, so a one-quarter extreme is visible without "
+                      "an exclusion rule nobody agreed to",
     "scenarios": list(SCENARIOS),
     "lines": list(WHAT_IF_LINES),
     "note": "every scenario is recomputed in memory with the model's own "
@@ -371,6 +388,16 @@ def historical_band(series: Mapping[str, Any]) -> dict[str, Any]:
     reader to place our estimate inside it; where the measure *most recently
     was* is the number our estimate has to be argued against, and it is often
     at one end.
+
+    Each extreme also carries its **runner-up**: the next most extreme
+    observation, with its quarter. Cognizant's tax share peaks at 70.79% in one
+    quarter and the next highest is far below it -- that peak is an event, not
+    a rate, and a scenario run at it is a scenario about a one-off charge.
+    Deciding *for* the reader which extremes are outliers would need an
+    exclusion rule, and an exclusion rule with no principle behind it is
+    picking numbers; showing the second one costs nothing and lets a person see
+    the gap. ``None`` when every observation is the same value, because then
+    there is no second one to show.
     """
 
     empty = {
@@ -395,6 +422,18 @@ def historical_band(series: Mapping[str, Any]) -> dict[str, Any]:
         worst = min(item[0] for item in values)
         peak = next(item for item in values if item[0] == best)
         trough = next(item for item in values if item[0] == worst)
+        # The runner-up is the first quarter at the next distinct level, by the
+        # same rule as the extreme itself: distinct so that two quarters tied at
+        # the peak do not report each other and hide a real gap, first so that
+        # two machines agree on the quarter.
+        below = [item for item in values if item[0] < best]
+        above = [item for item in values if item[0] > worst]
+        runner_peak = (next(item for item in values
+                            if item[0] == max(pair[0] for pair in below))
+                       if below else None)
+        runner_trough = (next(item for item in values
+                              if item[0] == min(pair[0] for pair in above))
+                         if above else None)
         total = sum((item[0] for item in values), Decimal(0))
         mean = total / Decimal(len(values))
         latest = values[-1]
@@ -412,9 +451,15 @@ def historical_band(series: Mapping[str, Any]) -> dict[str, Any]:
         "first_period": str(points[0]["period_end"]),
         "last_period": str(points[-1]["period_end"]),
         "peak": {"value": _rate(peak[0]), "period_end": peak[1]["period_end"],
-                 "refs": list(peak[1]["refs"])},
+                 "refs": list(peak[1]["refs"]),
+                 "runner_up": None if runner_peak is None else {
+                     "value": _rate(runner_peak[0]),
+                     "period_end": runner_peak[1]["period_end"]}},
         "trough": {"value": _rate(trough[0]), "period_end": trough[1]["period_end"],
-                   "refs": list(trough[1]["refs"])},
+                   "refs": list(trough[1]["refs"]),
+                   "runner_up": None if runner_trough is None else {
+                       "value": _rate(runner_trough[0]),
+                       "period_end": runner_trough[1]["period_end"]}},
         "mean": {"value": _rate(mean), "period_end": None, "refs": refs},
         "latest": {"value": _rate(latest[0]), "period_end": latest[1]["period_end"],
                    "refs": list(latest[1]["refs"])},
@@ -432,11 +477,18 @@ def open_periods(record: Mapping[str, Any]) -> list[dict[str, str]]:
     Sensitivity is about what is still ahead. A quarter this model estimated
     and the company has since reported is settled: moving an assumption over it
     would produce a scenario for a number everyone can already look up.
+
+    Which is already true of ``forecast_periods`` and does not need filtering
+    here. ``actualize_model`` moves a settled quarter out of that list and into
+    ``realised_periods``, and ``validate_forecast_model`` refuses a record where
+    a quarter is in both. A filter against ``realised_periods`` would therefore
+    only ever fire on a record the authority would not have stored -- which is
+    worse than useless: it would make this function *appear* covered by a test
+    built on a shape that cannot exist, and quietly accept a malformed record
+    instead of letting it fail.
     """
 
-    realised = {str(item["end"]) for item in (record.get("realised_periods") or [])}
-    return [dict(item) for item in (record.get("forecast_periods") or [])
-            if str(item["end"]) not in realised]
+    return [dict(item) for item in (record.get("forecast_periods") or [])]
 
 
 def live_assumptions(record: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -572,6 +624,23 @@ def driver_impact(
                 "metric_ref": metric["result_ref"], "unit_move": _rate(UNIT_MOVE),
                 "base_total": base_value, "moved_total": None, "delta": None,
                 "delta_per_unit": None, "percent_of_base": None}
+    # An elasticity is "the answer moves this much when *this* assumption moves
+    # one point". A scenario column holds one level flat across the horizon,
+    # which is fine for a scenario -- it is a stated hypothetical -- but a
+    # driver whose live assumption differs quarter to quarter has no single
+    # level to add a point to. Taking the first quarter's would flatten the
+    # other quarters onto it and report the flattening as elasticity: on a
+    # driver revised for one quarter only, most of the "delta" would be the
+    # revision being undone. The same guard the ``ours`` column already makes.
+    values = {str(item["value"]) for item in live}
+    if len(values) > 1:
+        return {"status": "unavailable",
+                "reason": "this driver's assumption is not one number across the "
+                          "horizon, so there is no single level a unit move could "
+                          "be added to",
+                "metric_ref": metric["result_ref"], "unit_move": _rate(UNIT_MOVE),
+                "base_total": base_value, "moved_total": None, "delta": None,
+                "delta_per_unit": None, "percent_of_base": None}
     with localcontext() as ctx:
         ctx.prec = _PRECISION
         moved_value = _decimal(live[0]["value"], "assumption value") + UNIT_MOVE
@@ -703,24 +772,34 @@ def select_drivers(record: Mapping[str, Any]) -> dict[str, Any]:
     skipped: list[str] = []
     for driver in considered:
         ref = str(driver["ref"])
-        impact = driver_impact(record, ref, metric)
-        if impact["status"] != "computed":
-            skipped.append(f"{ref}: {impact['reason']}")
-            continue
         measure = _measure_of(record, ref)
         band = historical_band(measure_series(record, ref, str(measure)))
+        impact = driver_impact(record, ref, metric)
+        swing = driver_swing(record, ref, band, metric)
+        # Dropped only when neither number exists. The two are independently
+        # unavailable for independent reasons -- a driver with too little
+        # history has no swing, a driver revised for one quarter has no single
+        # level to take an elasticity at -- and either one is enough to place
+        # it. A driver dropped for want of one of them would be a driver the
+        # reader is told nothing about, which reads as a driver that does not
+        # matter.
+        if impact["status"] != "computed" and swing["status"] != "computed":
+            skipped.append(f"{ref}: {swing['reason'] or impact['reason']}")
+            continue
         ranked.append({"driver": driver, "impact": impact, "measure": measure,
-                       "band": band,
-                       "swing": driver_swing(record, ref, band, metric)})
+                       "band": band, "swing": swing})
     # Two classes, never mixed on one scale. A driver whose band could not be
     # read is not a driver that moves little; it is a driver we cannot say how
     # far moves, and putting a number on it to sort it beside the others would
-    # be inventing the very range this slice exists to source from filings.
+    # be inventing the very range this slice exists to source from filings. So
+    # it is *demoted* -- ranked below every driver that has a swing, and among
+    # those by elasticity -- rather than excluded.
     ranked.sort(key=lambda item: (
         0 if item["swing"]["status"] == "computed" else 1,
         -abs(_decimal(item["swing"]["swing"], "swing"))
         if item["swing"]["status"] == "computed"
-        else -abs(_decimal(item["impact"]["delta"], "delta")),
+        else (-abs(_decimal(item["impact"]["delta"], "delta"))
+              if item["impact"]["status"] == "computed" else Decimal(0)),
         str(item["driver"]["ref"]),
     ))
     chosen = ranked[:MAX_DRIVERS]
@@ -813,6 +892,13 @@ def what_if(
     of our own estimate did not reproduce the model, every other column would
     be measured against a baseline that is not the model -- and the difference
     would be invisible, because the number printed would still be ours.
+
+    **Every column holds one level flat across every open quarter**, which each
+    row states (``held_flat``, ``quarters_held``). None of them is a path. "The
+    trough" is not what would happen if the trough quarter repeated once; it is
+    what the model says if this driver sat at that level for the whole horizon,
+    which is a harsher and more useful question, and one the reader has to know
+    is being asked.
     """
 
     rows: list[dict[str, Any]] = []
@@ -828,6 +914,7 @@ def what_if(
                     "reason": "this driver's assumption is not one number across "
                               "the horizon, so it has no single column here",
                     "assumption_value": None, "from_period": None,
+                    "held_flat": False, "quarters_held": 0,
                     "replaced_assumption_refs": [], "input_refs": source_refs,
                     "lines": [],
                 })
@@ -838,6 +925,7 @@ def what_if(
                     "scenario": scenario, "status": "unavailable",
                     "reason": str(band.get("reason") or "no historical band"),
                     "assumption_value": None, "from_period": None,
+                    "held_flat": False, "quarters_held": 0,
                     "replaced_assumption_refs": [], "input_refs": [], "lines": [],
                 })
                 continue
@@ -850,6 +938,10 @@ def what_if(
         rows.append({
             "scenario": scenario, "status": "computed", "reason": None,
             "assumption_value": shown, "from_period": period,
+            # True for ``ours`` as well: our own assumption is one number across
+            # the horizon whenever this row computes at all, so that column is
+            # a flat hold too, and saying so keeps the four columns comparable.
+            "held_flat": True, "quarters_held": len(ends),
             "replaced_assumption_refs": replaced,
             "input_refs": source_refs,
             "lines": scenario_lines(record, results, ends),
@@ -1110,8 +1202,17 @@ class SensitivityProjectionAuthority:
             "prior_projection_ref": prior,
             "body_hash": digest,
         }
-        record["content_hash"] = content_hash(record)
+        # Validate first, then hash what validation produced. The validator
+        # normalises -- ``validate_bridge`` runs every gap row through P15d's
+        # ``_text``, which strips -- so hashing the draft and storing the wire
+        # would put a hash in the row that is not the hash of the JSON beside
+        # it, and the read-back check below would be comparing a number with
+        # itself rather than with the bytes. The hash still covers everything
+        # except itself, which is what it covered before.
+        record["content_hash"] = None
         wire = validate_projection(record)
+        wire["content_hash"] = content_hash(
+            {key: value for key, value in wire.items() if key != "content_hash"})
         with self._transaction() as cur:
             if cur.execute(
                 "SELECT 1 FROM sensitivity_projections WHERE projection_id=?",

@@ -14,6 +14,7 @@ drifted.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import unittest
 from decimal import Decimal
@@ -50,6 +51,7 @@ from dalton_core.forecast_sensitivity import (
 )
 from dalton_core.model_forecast_driver import (
     ForecastModelAuthority,
+    ForecastModelValidationError,
     build_forecast_model,
     revise_assumptions,
 )
@@ -200,6 +202,27 @@ class BandTests(unittest.TestCase):
         self.assertEqual(band["mean"]["value"], "0.802500000000")
         self.assertEqual(band["latest"]["value"], "0.820000000000")
 
+    def test_each_extreme_carries_the_next_observation_in(self):
+        # Cognizant's tax share peaks at 70.79% in one quarter and the next
+        # highest is far below it: that peak is an event, not a rate. Deciding
+        # which extremes are outliers would need an exclusion rule nobody has
+        # agreed; showing the second one lets a person see the gap.
+        band = historical_band(
+            measure_series(model(), COST_DRIVER, "revenue_share"))
+        self.assertEqual(band["peak"]["value"], "0.820000000000")
+        self.assertEqual(band["peak"]["runner_up"]["value"], "0.800000000000")
+        self.assertEqual(band["trough"]["value"], "0.780000000000")
+        self.assertEqual(band["trough"]["runner_up"]["value"], "0.800000000000")
+        # The runner-up is the first quarter at the next *distinct* level, so
+        # two quarters tied at the peak do not report each other and hide a gap.
+        self.assertEqual(band["peak"]["runner_up"]["period_end"], "2024-08-31")
+
+    def test_a_band_with_no_width_has_no_runner_up(self):
+        band = historical_band(measure_series(model(), SGA_DRIVER, "revenue_share"))
+        self.assertEqual(band["status"], "available")
+        self.assertIsNone(band["peak"]["runner_up"])
+        self.assertIsNone(band["trough"]["runner_up"])
+
     def test_a_band_with_no_width_is_still_a_band(self):
         band = historical_band(measure_series(model(), SGA_DRIVER, "revenue_share"))
         self.assertEqual(band["status"], "available")
@@ -299,12 +322,21 @@ class RankingTests(unittest.TestCase):
         self.assertLessEqual(len(select_drivers(model())["ranked"]), MAX_DRIVERS)
 
     def test_the_rule_is_frozen_and_its_hash_is_the_hash_of_its_words(self):
+        # The ref says what the rule ranks by. It is not "elasticity-rank":
+        # a projection computed under a rule that ranked by elasticity must
+        # never be mistakable for one computed under this rule.
+        self.assertEqual(SELECTION_RULE_REF, "rule:swing-rank:1")
         self.assertEqual(SELECTION_RULE["ref"], SELECTION_RULE_REF)
         self.assertEqual(SELECTION_RULE_HASH, content_hash(SELECTION_RULE))
         self.assertEqual(SELECTION_RULE["unit_move"], "0.01")
         self.assertEqual(SELECTION_RULE["metric_precedence"][0],
                          "result:free_cash_flow")
         self.assertEqual(SELECTION_RULE["scenarios"], list(SCENARIOS))
+        # The rule states that every column is a flat hold, not a path, and
+        # that a driver without a band is demoted rather than dropped.
+        self.assertIn("held", SELECTION_RULE["measure"])
+        self.assertIn("none of them is a path", SELECTION_RULE["held_flat"])
+        self.assertIn("demoted, not excluded", SELECTION_RULE["rank_fallback"])
 
 
 class WhatIfTests(unittest.TestCase):
@@ -400,6 +432,24 @@ class WhatIfTests(unittest.TestCase):
         self.assertEqual(total["status"], "unavailable")
         self.assertIsNone(total["value"])
 
+    def test_every_computed_column_says_it_holds_its_level_flat(self):
+        # "The trough" is not the trough quarter happening once; it is the
+        # whole horizon spent there. A reader who does not know that reads a
+        # far milder table than the one in front of them.
+        record = model()
+        projection = build_projection(record)
+        quarters = len(open_periods(record))
+        for driver in projection["drivers"]:
+            for row in driver["what_if"]:
+                if row["status"] != "computed":
+                    self.assertFalse(row["held_flat"])
+                    self.assertEqual(row["quarters_held"], 0)
+                    continue
+                self.assertTrue(row["held_flat"])
+                self.assertEqual(row["quarters_held"], quarters)
+                for line in row["lines"]:
+                    self.assertEqual(len(line["cells"]), quarters)
+
     def test_the_four_lines_are_the_four_the_rule_names(self):
         projection = build_projection(model())
         for driver in projection["drivers"]:
@@ -410,12 +460,30 @@ class WhatIfTests(unittest.TestCase):
 
 class HorizonTests(unittest.TestCase):
     def test_a_quarter_the_filings_have_answered_is_not_a_scenario(self):
+        # Shaped the way ``actualize_model`` leaves a record: the settled
+        # quarter moves *out* of forecast_periods and into realised_periods.
+        # ``validate_forecast_model`` refuses a record holding a quarter in
+        # both, so that is the only realised state a stored model can be in.
         record = model()
-        record["realised_periods"] = [dict(record["forecast_periods"][0])]
+        settled = dict(record["forecast_periods"][0])
+        record["realised_periods"] = [settled]
+        record["forecast_periods"] = [dict(item)
+                                      for item in record["forecast_periods"][1:]]
+        # And the overlapping shape the filter used to guard against is one
+        # the authority refuses outright, which is why filtering for it here
+        # would only ever fire on a record that cannot be stored.
+        authority = ForecastModelAuthority(store())
+        overlapping = {key: value for key, value in record.items()
+                       if key != "id" and key != "content_hash"}
+        overlapping["forecast_periods"] = (
+            [settled] + list(overlapping["forecast_periods"]))
+        with self.assertRaises(ForecastModelValidationError) as refused:
+            authority.publish(overlapping)
+        self.assertIn("both realised and forecast", str(refused.exception))
         ends = [item["end"] for item in open_periods(record)]
-        self.assertNotIn(record["forecast_periods"][0]["end"], ends)
+        self.assertNotIn(settled["end"], ends)
         projection = build_projection(record)
-        self.assertEqual(len(projection["horizon"]), len(record["forecast_periods"]) - 1)
+        self.assertEqual(len(projection["horizon"]), len(ends))
         for driver in projection["drivers"]:
             for row in driver["what_if"]:
                 for line in row["lines"]:
@@ -423,8 +491,14 @@ class HorizonTests(unittest.TestCase):
                                      ends)
 
     def test_a_model_with_nothing_still_ahead_is_refused_whole(self):
+        # Every quarter settled: forecast_periods is empty and realised holds
+        # them, which is a record the authority accepts and this slice cannot
+        # be sensitive about.
         record = model()
-        record["realised_periods"] = [dict(item) for item in record["forecast_periods"]]
+        record["realised_periods"] = [dict(item)
+                                      for item in record["forecast_periods"]]
+        record["forecast_periods"] = []
+        self.assertEqual(open_periods(record), [])
         with self.assertRaises(SensitivityUnavailable) as caught:
             build_projection(record)
         self.assertIn("already been filed", str(caught.exception))
@@ -454,6 +528,62 @@ class HorizonTests(unittest.TestCase):
         self.assertIn("not one number", ours["reason"])
         # The band is unaffected: it is filed history, not our view of it.
         self.assertEqual(cost["band"]["peak"]["value"], "0.820000000000")
+
+    def revised(self):
+        """The fixture with cost of revenue moved for one quarter only."""
+
+        record = model()
+        end = record["forecast_periods"][0]["end"]
+        out = revise_assumptions(
+            record,
+            [{"driver": COST_DRIVER, "period": end, "value": "0.900000000000",
+              "because": "A person decided delivery cost is about to jump."}],
+            change_reason="human_revision",
+            evidence_refs=[{"kind": "human_decision", "ref": "human:pm",
+                            "concept": None, "period_end": None, "accession": None}],
+            actor_ref="human:pm")
+        out["id"] = record["id"]
+        out["content_hash"] = record["content_hash"]
+        return out
+
+    def test_a_driver_with_no_single_level_gets_no_elasticity(self):
+        # An elasticity is "the answer moves this much when this assumption
+        # moves one point". A driver revised for one quarter has no single
+        # level to add a point to, and taking the first quarter's would flatten
+        # the other quarters onto it and report the flattening as sensitivity.
+        record = self.revised()
+        impact = driver_impact(record, COST_DRIVER, impact_metric(record))
+        self.assertEqual(impact["status"], "unavailable")
+        self.assertIn("not one number across the horizon", impact["reason"])
+        self.assertIsNone(impact["delta"])
+        self.assertIsNone(impact["delta_per_unit"])
+
+    def test_a_driver_with_no_elasticity_is_still_ranked_on_its_swing(self):
+        # Demoted, not excluded -- and here not even demoted, because its band
+        # is intact and the swing is what ranks. A driver dropped for want of an
+        # elasticity would be a driver the reader is told nothing about, which
+        # reads as a driver that does not matter.
+        record = self.revised()
+        picked = select_drivers(record)
+        refs = [item["driver"]["ref"] for item in picked["ranked"]]
+        self.assertIn(COST_DRIVER, refs)
+        self.assertEqual(picked["selection"]["status"], "available")
+        entry = next(item for item in picked["ranked"]
+                     if item["driver"]["ref"] == COST_DRIVER)
+        self.assertEqual(entry["impact"]["status"], "unavailable")
+        self.assertEqual(entry["swing"]["status"], "computed")
+
+    def test_a_driver_with_neither_number_is_the_only_one_dropped(self):
+        # Too little history for a band, and no single level for an elasticity.
+        short = {concept: values[:3] for concept, values in SERIES.items()}
+        record = model(ledger(short))
+        picked = select_drivers(record)
+        for entry in picked["ranked"]:
+            self.assertEqual(entry["band"]["status"], "unavailable")
+            self.assertEqual(entry["swing"]["status"], "unavailable")
+            # Kept because the elasticity places it, and ranked below any
+            # driver that had a band -- here there are none.
+            self.assertEqual(entry["impact"]["status"], "computed")
 
 
 class ProjectionTests(unittest.TestCase):
@@ -558,6 +688,22 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual([item["version"] for item in self.authority.versions(ACN)],
                          [1, 2])
 
+    def test_the_stored_hash_is_the_hash_of_the_stored_bytes(self):
+        # The validator normalises -- every gap row goes through P15d's _text,
+        # which strips -- so hashing the draft and storing the wire would put a
+        # number in the row that is not the hash of the JSON beside it, and the
+        # read-back check would be comparing that number with itself.
+        stored = self.authority.publish(self.body())
+        row = self.store.connection.execute(
+            "SELECT record_json, content_hash FROM sensitivity_projections "
+            "WHERE projection_id=?", (stored["id"],)).fetchone()
+        written = json.loads(row["record_json"])
+        self.assertEqual(
+            row["content_hash"],
+            content_hash({key: value for key, value in written.items()
+                          if key != "content_hash"}))
+        self.assertEqual(written["content_hash"], row["content_hash"])
+
     def test_a_projection_cannot_be_updated_or_deleted(self):
         stored = self.authority.publish(self.body())
         with self.assertRaises(sqlite3.DatabaseError):
@@ -605,6 +751,9 @@ class RenderTests(unittest.TestCase):
         # An unavailable line prints its reason where its number would be.
         self.assertIn("not_material", text)
         self.assertIn("this is what ranks it", text)
+        # The reader is told the columns are flat holds, not paths.
+        self.assertIn("HOLDS ITS LEVEL FLAT", text)
+        self.assertIn("next peak in:", text)
 
     def test_the_view_says_where_our_estimate_sits_in_the_band(self):
         projection = build_projection(model())
