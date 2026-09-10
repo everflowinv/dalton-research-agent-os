@@ -203,7 +203,14 @@ _DAILY_QUOTAS = MappingProxyType(
                 # holders of one covered company inside the filing window
                 # without ever making this the reason SEC starts refusing.
                 "daily_unit_limit": 8,
-                "max_physical_calls_per_unit": 2,
+                # Three, because a 13F is three documents and not one: the
+                # cover page (`primary_doc.xml`), the filing's own index --
+                # which is the only thing that knows what the holdings
+                # document is called, since the filer chooses that name -- and
+                # the information table itself. Reading only the first is how
+                # this operation once reported a successful read of an empty
+                # book.
+                "max_physical_calls_per_unit": 3,
             }
         ),
         # S5: the IR-page watcher. There is no upstream to be polite to at

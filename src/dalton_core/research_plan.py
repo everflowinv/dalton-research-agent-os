@@ -226,7 +226,7 @@ SEC_TEMPLATE_REGISTRY: tuple[tuple[str, dict[str, Any]], ...] = (
         "v4",
         {
             "connector_profile_hash": (
-                "7cfd91c03a2a9bfefef46eb5b63931954ab51dc17c78c5de0cd9c3f3ea7997ad"
+                "72c49020093cea5dbd900c5731e1feeaf6fb20a9487b37a55040ff96ad68ceaa"
             ),
             "output_contract_hashes": {
                 "list_filings": (

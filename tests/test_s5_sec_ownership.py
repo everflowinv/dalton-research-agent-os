@@ -505,26 +505,62 @@ class Form13FTests(unittest.TestCase):
         )
         self.assertEqual(old["quarter"], "2022Q4")
         self.assertEqual(old["value_unit"], "thousands")
-        self.assertEqual(old["value_unit_basis"], "pre_2023_rule")
+        # One row at a ratio of 0.267 -- a $267 stock reported in thousands --
+        # is exactly the case the ratio cannot settle, so the period rule
+        # carries the number alone and the basis says the check did not
+        # confirm it.
+        self.assertEqual(old["value_unit_basis"], "ambiguous")
         row = old["holdings"][0]
         # Both. The digits as filed, and the dollars they mean.
         self.assertEqual(row["value_as_filed"], "720000")
         self.assertEqual(row["value_usd"], "720000000")
 
-    def test_the_ratio_overrules_the_rule_and_says_that_it_did(self) -> None:
-        # A filer who kept reporting thousands after the rule changed. The
-        # period says dollars; a value-to-share ratio of 0.27 says otherwise,
-        # and being wrong by a factor of a thousand is the worst thing this
-        # parser could do.
-        holdings = [
-            {"shares_or_principal_amount": "2700000", "value_as_filed": "720000"},
-        ]
+    def sh(self, shares: str, value: str) -> dict[str, str]:
+        return {
+            "shares_or_principal_amount": shares, "value_as_filed": value,
+            "shares_or_principal_type": "SH",
+        }
+
+    def test_a_decisive_ratio_overrules_the_rule_and_says_that_it_did(self) -> None:
+        # A filer who kept reporting thousands after the rule changed, on a
+        # book of $30 stocks: the ratio is 0.03, which no whole-dollar book can
+        # produce, so the ratio wins and the basis says so.
         self.assertEqual(
-            decide_value_unit(holdings, "2026-06-30"),
+            decide_value_unit([self.sh("1000000", "30000")], "2026-06-30"),
             ("thousands", "ratio_heuristic"),
         )
+        # And the other way: a pre-2023 period whose ratio is plainly a share
+        # price.
+        self.assertEqual(
+            decide_value_unit([self.sh("1000000", "42000000")], "2022-12-31"),
+            ("usd", "ratio_heuristic"),
+        )
 
-    def test_a_book_with_no_shares_falls_back_to_the_period_rule(self) -> None:
+    def test_a_sub_dollar_holding_is_not_multiplied_by_a_thousand(self) -> None:
+        # The bug the decisive band exists to prevent. A genuine 40-cent stock
+        # reported in whole dollars has a ratio of 0.4; the old
+        # ``median < 1 means thousands`` rule read that as thousands and would
+        # have reported a $4m position as $4bn.
+        self.assertEqual(
+            decide_value_unit([self.sh("10000000", "4000000")], "2026-06-30"),
+            ("usd", "ambiguous"),
+        )
+
+    def test_principal_rows_do_not_vote_on_the_unit(self) -> None:
+        # A bond line's value-to-principal ratio is cents on the dollar of face
+        # value and is near 1 for every bond in every filing; mixed into the
+        # median it drags an ordinary equity book into the ambiguous band.
+        equities = [self.sh("1000", "318000"), self.sh("2000", "150000")]
+        bonds = [{
+            "shares_or_principal_amount": "5000000",
+            "value_as_filed": "4800000", "shares_or_principal_type": "PRN",
+        }] * 5
+        self.assertEqual(
+            decide_value_unit(equities + bonds, "2026-06-30"),
+            ("usd", "post_2023_rule"),
+        )
+
+    def test_a_book_with_no_share_rows_falls_back_to_the_period_rule(self) -> None:
         self.assertEqual(decide_value_unit([], "2026-06-30"), ("usd", "post_2023_rule"))
         self.assertEqual(
             decide_value_unit([], "2022-12-31"), ("thousands", "pre_2023_rule")
@@ -911,6 +947,254 @@ class SpoolReaderTests(unittest.TestCase):
         )
         self.assertEqual(found["status"], "tampered")
         self.assertEqual(found["filings"], [])
+
+
+
+class ReviewDefectTests(unittest.TestCase):
+    """The two silent-data-loss defects the review found, and the split position."""
+
+    def setUp(self) -> None:
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.state = Path(self._dir.name)
+
+    # -- B2: a joint filing loses no filer -----------------------------------
+
+    def test_a_joint_form4_gives_one_event_per_owner_per_row(self) -> None:
+        from dalton_core.connector_governance import build_governance_record
+
+        record = build_governance_record(
+            KIND_BY_OPERATION[FORM4_OPERATION], approved_by="human:test-owner",
+            status="approved",
+        )
+        path = self.state / "f4.json"
+        path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+        summary = run_child(argparse.Namespace(
+            state_dir=str(self.state), governance=str(path),
+            operation=FORM4_OPERATION, company_ref=ACN,
+            accession="0001467373-26-000050", form_type="4", issuer=ACN_CIK,
+            holder_cik=None, quarter=None, filed_at="2026-08-14",
+            company_cusips=None, cover_file=None, prior_file=None,
+            prior_cover_file=None, prior_accession=None,
+            summary_dir=str(self.state / "joint"), actor_ref="core:test",
+            user_agent="test", allow_network=False,
+            fixture_file=str(FIXTURES / "form4-joint.xml"), quiet=True,
+        ))
+        self.assertEqual(summary["status"], "succeeded", summary["failure_reason"])
+        # Two owners times three rows. Keyed on the row alone, the second
+        # owner's three were duplicates the ledger would have dropped without
+        # a word.
+        self.assertEqual(summary["event_count"], 6)
+        keys = [event["payload"]["event_key"] for event in summary["events"]]
+        self.assertEqual(len(set(keys)), 6)
+        owners = {event["payload"]["owner_name"] for event in summary["events"]}
+        self.assertEqual(owners, {
+            "SYNTHETIC PARTNERS FUND LP", "SYNTHETIC PARTNERS GP LLC",
+        })
+
+    # -- 3: a split position is one position ---------------------------------
+
+    def test_a_position_split_across_lines_is_summed_not_overwritten(self) -> None:
+        current = parse_form13f(
+            fixture("form13f-table-2026q2-split.xml"),
+            accession="0001900002-26-000090",
+            artifact_hash=digest("form13f-table-2026q2-split.xml"),
+            holder_cik=HOLDER, primary_text=fixture("form13f-cover-2026q2.xml"),
+        )
+        self.assertEqual(len(current["holdings"]), 2)
+        prior = parse_form13f(
+            fixture("form13f-table-2026q1.xml"), accession="0001900002-26-000030",
+            artifact_hash=digest("form13f-table-2026q1.xml"), holder_cik=HOLDER,
+            primary_text=fixture("form13f-cover-2026q1.xml"),
+        )
+        found = compare_holdings(current, prior)
+        acn = next(row for row in found["changes"] if row["cusip"] == "G1151C101")
+        # 2,000,000 + 1,000,000 against a prior 2,500,000. Keeping only the
+        # last line would have compared 1,000,000 and reported a 1.5m trim
+        # that never happened.
+        self.assertEqual(acn["shares"], "3000000")
+        self.assertEqual(acn["prior_shares"], "2500000")
+        self.assertEqual(acn["action"], "add")
+        self.assertEqual(acn["share_change"], "500000")
+        self.assertEqual(acn["value_usd"], "955000000")
+        # And it can still be taken back to each filed line.
+        self.assertEqual(len(acn["record_hashes"]), 2)
+        self.assertEqual(
+            set(acn["record_hashes"]),
+            {row["record_hash"] for row in current["holdings"]},
+        )
+
+    def test_the_position_name_is_a_function_of_the_lines_it_summed(self) -> None:
+        from dalton_core.sec_ownership_adapter import aggregate_holdings, position_ref
+
+        current = parse_form13f(
+            fixture("form13f-table-2026q2-split.xml"),
+            accession="0001900002-26-000090",
+            artifact_hash=digest("form13f-table-2026q2-split.xml"),
+            holder_cik=HOLDER,
+        )
+        aggregated = aggregate_holdings(current["holdings"])
+        row = aggregated[("G1151C101", None)]
+        self.assertEqual(row["line_count"], 2)
+        self.assertEqual(row["record_hash"], position_ref(row["record_hashes"]))
+
+    def test_a_first_reading_of_a_split_book_counts_the_position_once(self) -> None:
+        current = parse_form13f(
+            fixture("form13f-table-2026q2-split.xml"),
+            accession="0001900002-26-000090",
+            artifact_hash=digest("form13f-table-2026q2-split.xml"),
+            holder_cik=HOLDER,
+        )
+        found = compare_holdings(current, None)
+        self.assertEqual(found["status"], "prior_absent")
+        self.assertEqual(found["first_reading_count"], 1)
+
+    # -- B1: the 13F reads the information table, or it fails ----------------
+
+    def governance(self, operation: str) -> Path:
+        from dalton_core.connector_governance import build_governance_record
+
+        record = build_governance_record(
+            KIND_BY_OPERATION[operation], approved_by="human:test-owner",
+            status="approved",
+        )
+        path = self.state / f"{operation}.json"
+        path.write_text(json.dumps(record, sort_keys=True), encoding="utf-8")
+        return path
+
+    def thirteen_f(self, **overrides: object) -> argparse.Namespace:
+        values = {
+            "state_dir": str(self.state),
+            "governance": str(self.governance(FORM13F_OPERATION)),
+            "operation": FORM13F_OPERATION, "company_ref": ACN,
+            "accession": "0001900002-26-000090", "form_type": "13F-HR",
+            "issuer": None, "holder_cik": HOLDER, "quarter": "2026Q2",
+            "filed_at": "2026-08-14", "company_cusips": None,
+            "cover_file": str(FIXTURES / "form13f-cover-2026q2.xml"),
+            "prior_file": None, "prior_cover_file": None, "prior_accession": None,
+            "summary_dir": str(self.state / "13f"), "actor_ref": "core:test",
+            "user_agent": "test", "allow_network": False,
+            "fixture_file": str(FIXTURES / "form13f-table-2026q2.xml"),
+            "quiet": True,
+        }
+        values.update(overrides)
+        return argparse.Namespace(**values)
+
+    def test_a_13f_hr_that_parsed_to_nothing_is_never_succeeded(self) -> None:
+        # This is what the network path used to do: fetch the cover page,
+        # parse it for holdings, find none, and report success. An empty book
+        # from a holdings report is a document that was not read.
+        summary = run_child(self.thirteen_f(
+            fixture_file=str(FIXTURES / "form13f-cover-2026q2.xml"),
+            summary_dir=str(self.state / "cover-as-table"),
+        ))
+        self.assertEqual(summary["status"], "failed")
+        self.assertIn("zero holdings", summary["failure_reason"])
+        # The bytes are still recoverable.
+        self.assertIsNotNone(summary["artifact"])
+
+    def test_a_13f_nt_is_the_honest_empty_case(self) -> None:
+        notice = self.state / "notice.xml"
+        notice.write_text("<informationTable/>", encoding="utf-8")
+        cover = self.state / "nt-cover.xml"
+        cover.write_text(
+            '<edgarSubmission><headerData><submissionType>13F-NT'
+            "</submissionType></headerData><formData><coverPage>"
+            "<reportCalendarOrQuarter>2026-06-30</reportCalendarOrQuarter>"
+            "<filingManager><name>SYNTHETIC ASSET MANAGEMENT LLC</name>"
+            "</filingManager></coverPage></formData></edgarSubmission>",
+            encoding="utf-8",
+        )
+        summary = run_child(self.thirteen_f(
+            form_type="13F-NT", fixture_file=str(notice), cover_file=str(cover),
+            summary_dir=str(self.state / "nt"),
+        ))
+        self.assertEqual(summary["status"], "succeeded", summary["failure_reason"])
+        self.assertEqual(summary["holdings_status"], "notice_only")
+        self.assertEqual(summary["event_count"], 0)
+
+    def test_13f_nt_amendments_are_read_by_the_same_operation(self) -> None:
+        self.assertIn("13F-NT/A", FORMS_BY_OPERATION[FORM13F_OPERATION])
+
+    def test_the_information_table_is_named_by_the_filing_s_own_index(self) -> None:
+        from dalton_core.sec_ownership_core import (
+            document_url, information_table_name,
+        )
+
+        payload = json.loads(
+            (FIXTURES / "form13f-filing-index.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(information_table_name(payload), "infotable.xml")
+        self.assertEqual(
+            document_url(HOLDER, "0001900002-26-000090", "infotable.xml"),
+            "https://www.sec.gov/Archives/edgar/data/1900002/"
+            "000190000226000090/infotable.xml",
+        )
+
+    def test_a_directory_this_cannot_resolve_refuses_rather_than_guesses(self) -> None:
+        from dalton_core.sec_ownership_core import information_table_name
+
+        with self.assertRaises(SecOwnershipError) as caught:
+            information_table_name({"directory": {"item": [
+                {"name": "primary_doc.xml"}, {"name": "one.xml"}, {"name": "two.xml"},
+            ]}})
+        self.assertIn("candidates are", str(caught.exception))
+        with self.assertRaises(SecOwnershipError):
+            information_table_name({"directory": {"item": [{"name": "primary_doc.xml"}]}})
+
+    def test_a_document_name_cannot_climb_out_of_the_filing(self) -> None:
+        from dalton_core.sec_ownership_core import document_url, information_table_name
+
+        # The one name in this connector that comes from outside it.
+        for name in ("../../secrets.xml", "a/b.xml", "evil.xml.sh", ""):
+            with self.assertRaises(SecOwnershipError):
+                document_url(HOLDER, "0001900002-26-000090", name)
+        self.assertEqual(
+            information_table_name({"directory": {"item": [
+                {"name": "primary_doc.xml"}, {"name": "../../etc/passwd"},
+                {"name": "infotable.xml"},
+            ]}}),
+            "infotable.xml",
+        )
+
+    # -- 5: an exit event cites the filing it came from -----------------------
+
+    def test_a_prior_file_without_its_accession_is_refused(self) -> None:
+        summary = run_child(self.thirteen_f(
+            prior_file=str(FIXTURES / "form13f-table-2026q1.xml"),
+            prior_cover_file=str(FIXTURES / "form13f-cover-2026q1.xml"),
+            prior_accession=None,
+            summary_dir=str(self.state / "no-prior-accession"),
+        ))
+        self.assertEqual(summary["status"], "failed")
+        self.assertIn("--prior-accession", summary["failure_reason"])
+
+    def test_an_exit_event_is_bound_to_the_prior_filing_not_this_one(self) -> None:
+        summary = run_child(self.thirteen_f(
+            prior_file=str(FIXTURES / "form13f-table-2026q1.xml"),
+            prior_cover_file=str(FIXTURES / "form13f-cover-2026q1.xml"),
+            prior_accession="0001900002-26-000030",
+            company_cusips="459200101",
+            summary_dir=str(self.state / "exit"),
+        ))
+        self.assertEqual(summary["status"], "succeeded", summary["failure_reason"])
+        exited = next(
+            event for event in summary["events"]
+            if event["payload"]["action"] == "exit"
+        )
+        # The position is only in the prior filing, so the row hash it is named
+        # by has to have been computed against that accession.
+        prior = parse_form13f(
+            fixture("form13f-table-2026q1.xml"), accession="0001900002-26-000030",
+            artifact_hash=digest("form13f-table-2026q1.xml"), holder_cik=HOLDER,
+            primary_text=fixture("form13f-cover-2026q1.xml"),
+        )
+        ibm = next(
+            row for row in prior["holdings"] if row["cusip"] == "459200101"
+        )
+        from dalton_core.sec_ownership_adapter import position_ref
+
+        self.assertEqual(exited["payload"]["event_key"], position_ref([ibm["record_hash"]]))
 
 
 if __name__ == "__main__":

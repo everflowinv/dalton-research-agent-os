@@ -6,7 +6,7 @@
     "use_time_authority": "none"
   },
   "connector_ref": "connector:sec-edgar",
-  "content_hash": "7cfd91c03a2a9bfefef46eb5b63931954ab51dc17c78c5de0cd9c3f3ea7997ad",
+  "content_hash": "72c49020093cea5dbd900c5731e1feeaf6fb20a9487b37a55040ff96ad68ceaa",
   "created_at": "2026-08-14T20:00:00.000000+00:00",
   "fixture_manifest_hash": "2990cae1c02494c1742fe70e4c4c664280880ba3c4540dc4a885a9ea57cb3456",
   "fixture_manifest_ref": "connector-fixture-manifest:sec:0.1",
@@ -161,7 +161,7 @@
       "input_schema_hash": "776e9855fbbdd673a7366b609ca5e3a7197cbe94edabe44b4b9376c07b4c80b9",
       "input_schema_ref": "schema:connector-inventory:sec:form13f_holdings:input:0.1",
       "operation": "form13f_holdings",
-      "output_schema_hash": "1b0aeb842539cd13fc247e0eec7943d88bcf12f14f55f4bd2a264f8e87859dc8",
+      "output_schema_hash": "52ba40ce89c2ae271e192b608963c82fa3bcc39aac7c72d3c7bf311e02a1e7bb",
       "output_schema_ref": "schema:connector-inventory:sec:form13f_holdings:output:0.1",
       "pagination": {
         "bounded_window_required": true,
@@ -1780,7 +1780,7 @@
               ],
               "type": "object"
             },
-            "maxItems": 4000,
+            "maxItems": 12000,
             "type": "array"
           },
           "is_amendment": {
@@ -1850,6 +1850,7 @@
               "post_2023_rule",
               "pre_2023_rule",
               "ratio_heuristic",
+              "ambiguous",
               "declared_by_filer"
             ],
             "type": "string"
@@ -1877,7 +1878,7 @@
         ],
         "type": "object"
       },
-      "schema_hash": "1b0aeb842539cd13fc247e0eec7943d88bcf12f14f55f4bd2a264f8e87859dc8",
+      "schema_hash": "52ba40ce89c2ae271e192b608963c82fa3bcc39aac7c72d3c7bf311e02a1e7bb",
       "schema_ref": "schema:connector-inventory:sec:form13f_holdings:output:0.1"
     }
   ],

@@ -25,7 +25,8 @@ because this lane learns dated facts about covered companies;
 granting one and not the other gets ``ungranted`` and no child, every tick,
 which is correct rather than something to route around.
 
-**The IR watcher rides along.** Once a day, after the filings, the lane asks
+**The IR watcher rides along.** Once a day, before the filing decision, the
+lane asks
 the local changedetection.io what moved on the declared IR pages. It is in this
 lane rather than its own because it is the same job -- what happened to this
 company today that nobody filed a statement about -- and because a lane whose
@@ -339,7 +340,6 @@ class MissionOwnershipLaneCoordinator:
             found = self.ir_watch()
         except Exception as exc:  # noqa: BLE001 - one source, not the tick
             return {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
-        self._ir_watched_on = self._today()
         recorded: list[dict[str, Any]] = []
         for change in found.get("changes") or []:
             key = change["payload"].get("event_key")
@@ -363,6 +363,11 @@ class MissionOwnershipLaneCoordinator:
                 if key:
                     self._emitted.add(key)
             recorded.append(change["payload"])
+        # Marked watched only once every change has been written. Marking it
+        # before the loop meant a writer that raised halfway lost the rest of
+        # the day's changes until tomorrow -- and the sweep is idempotent, so
+        # there is nothing to be saved by marking it early.
+        self._ir_watched_on = self._today()
         return {
             "status": found.get("status", "watched"),
             "reason": found.get("reason"),
@@ -394,16 +399,25 @@ class MissionOwnershipLaneCoordinator:
                     "work around"
                 ),
             }
+        # Before the launch decision, not only on the way out of it. The IR
+        # pages were swept only on the ``idle`` branch, so a Core with a
+        # backlog of unread filings -- which is every Core on its first day,
+        # and any Core after a week off -- never reached the sweep at all and
+        # the watcher looked broken rather than starved. The once-a-day guard
+        # is what bounds it; there is no reason for the filings queue to gate
+        # it as well.
+        ir_pages = self._watch_ir_pages(mission)
         if not self.launcher.approved_operations():
             return {
                 "status": "unconfigured", "settled": settled,
+                "ir_pages": ir_pages,
                 "reason": (
                     "this writer holds no approved sec ownership record; the "
                     "four operations are approved one at a time"
                 ),
             }
         if self._open is not None:
-            return {"status": "busy", "settled": settled,
+            return {"status": "busy", "settled": settled, "ir_pages": ir_pages,
                     "reason": "an ownership child is still running"}
         # Imported here rather than at module scope: a lane module is imported
         # while the registry is loading, and its expensive imports stay inside
@@ -455,25 +469,27 @@ class MissionOwnershipLaneCoordinator:
             except LaneChildConflict as exc:
                 return {"status": "busy", "company_ref": company_ref,
                         "settled": settled, "skipped": skipped,
+                        "ir_pages": ir_pages,
                         "reason": f"{type(exc).__name__}: {exc}"}
             except LaneChildRejected as exc:
                 reason = f"{type(exc).__name__}: {exc}"
                 self._failures[company_ref] = self._failures.get(company_ref, 0) + 1
                 self._failure_reason[company_ref] = reason
                 return {"status": "rejected", "company_ref": company_ref,
-                        "settled": settled, "skipped": skipped, "reason": reason}
+                        "settled": settled, "skipped": skipped,
+                        "ir_pages": ir_pages, "reason": reason}
             self._open = ticket["id"]
             return {
                 "status": "launched", "company_ref": company_ref,
                 "operation": filing["operation"], "accession": filing["accession"],
                 "form_type": filing["form"], "filed_at": filing["filing_date"],
                 "ticket_ref": ticket["id"], "settled": settled, "skipped": skipped,
-                "pending_count": len(found["filings"]),
+                "ir_pages": ir_pages, "pending_count": len(found["filings"]),
             }
         return {
             "status": "idle", "settled": settled, "skipped": skipped,
             "reason": "every ownership filing in the window has been read",
-            "ir_pages": self._watch_ir_pages(mission),
+            "ir_pages": ir_pages,
         }
 
 

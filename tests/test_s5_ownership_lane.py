@@ -315,10 +315,7 @@ class CoordinatorTests(unittest.TestCase):
         self.assertEqual(emission["recorded_count"], 1)
         self.assertIn("nothing recorded them", emission["reason"])
 
-    def test_the_ir_sweep_runs_once_a_day_when_there_is_nothing_to_read(self) -> None:
-        self.candidates = {}
-        calls: list[int] = []
-
+    def ir_watch(self, calls: list) -> object:
         def watch() -> dict:
             calls.append(1)
             return {
@@ -341,7 +338,12 @@ class CoordinatorTests(unittest.TestCase):
                 }],
             }
 
-        self.coordinator.ir_watch = watch
+        return watch
+
+    def test_the_ir_sweep_runs_once_a_day_when_there_is_nothing_to_read(self) -> None:
+        self.candidates = {}
+        calls: list[int] = []
+        self.coordinator.ir_watch = self.ir_watch(calls)
         first = self.coordinator.dispatch_once()
         self.assertEqual(first["ir_pages"]["recorded_count"], 1)
         self.assertEqual(first["ir_pages"]["undeclared_count"], 1)
@@ -349,6 +351,40 @@ class CoordinatorTests(unittest.TestCase):
         second = self.coordinator.dispatch_once()
         self.assertEqual(second["ir_pages"]["status"], "watched_today")
         self.assertEqual(len(calls), 1)
+
+    def test_the_ir_sweep_is_not_starved_by_a_backlog_of_filings(self) -> None:
+        # The sweep used to run only on the ``idle`` branch, so a Core with
+        # unread filings -- which is every Core on its first day -- never
+        # reached it and the watcher looked broken rather than starved.
+        calls: list[int] = []
+        self.coordinator.ir_watch = self.ir_watch(calls)
+        launched = self.coordinator.dispatch_once()
+        self.assertEqual(launched["status"], "launched")
+        self.assertEqual(launched["ir_pages"]["recorded_count"], 1)
+        self.assertEqual(len(calls), 1)
+        # And it is still once a day: the busy tick does not sweep again.
+        busy = self.coordinator.dispatch_once()
+        self.assertEqual(busy["status"], "busy")
+        self.assertEqual(busy["ir_pages"]["status"], "watched_today")
+        self.assertEqual(len(calls), 1)
+
+    def test_a_failed_event_write_leaves_the_day_unwatched(self) -> None:
+        # Marking the day watched before the records land lost the rest of the
+        # day's changes to one raising writer.
+        calls: list[int] = []
+        self.coordinator.ir_watch = self.ir_watch(calls)
+        self.candidates = {}
+
+        def boom(**event) -> None:
+            raise RuntimeError("the ledger said no")
+
+        self.coordinator.record_event = boom
+        first = self.coordinator.dispatch_once()
+        self.assertEqual(first["ir_pages"]["status"], "failed")
+        self.coordinator.record_event = lambda **event: self.recorded.append(event)
+        second = self.coordinator.dispatch_once()
+        self.assertEqual(second["ir_pages"]["recorded_count"], 1)
+        self.assertEqual(len(calls), 2)
 
     def test_no_watcher_is_reported_rather_than_failing(self) -> None:
         self.candidates = {}

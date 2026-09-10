@@ -53,7 +53,18 @@ MAX_DOCUMENT_BYTES = 32 * 1024 * 1024
 MAX_TRANSACTIONS = 200
 MAX_REPORTING_PERSONS = 40
 MAX_NOTICES = 50
-MAX_HOLDINGS = 4000
+# A large manager's book. BlackRock files on the order of seven thousand
+# lines; twelve thousand is the largest filing anyone has and a bound on what
+# a malformed document can cost.
+#
+# Beyond it the read is *refused*, with the count and the ceiling in the
+# reason, and the raw bytes stay in the spool. Truncating instead was the
+# tempting repair and is the one thing that must not happen here: a book
+# truncated at twelve thousand rows, compared against a prior quarter
+# truncated at a different boundary, fabricates ``new`` and ``exit`` events
+# for positions that never moved. A refusal an operator reads is recoverable;
+# an invented divestment is not.
+MAX_HOLDINGS = 12_000
 MAX_FOOTNOTES = 40
 MAX_TEXT_CHARS = 512
 
@@ -753,9 +764,29 @@ def quarter_of(period_end: str | None) -> str | None:
     return f"{year}Q{(month - 1) // 3 + 1}"
 
 
+# Below this, a book's median value-to-share ratio can only be thousands: it
+# would otherwise be a book whose median holding trades under five cents.
+# Above it, only whole dollars: a thousands-reported book would have to have a
+# median holding over twenty thousand dollars a share.  Between the two the
+# ratio says nothing -- a dollar stock in whole dollars and a thousand-dollar
+# stock in thousands land in the same place -- and pretending otherwise is how
+# a heuristic becomes a factor-of-a-thousand error.
+DECISIVE_THOUSANDS_BELOW = Decimal("0.05")
+DECISIVE_USD_ABOVE = Decimal("20")
+# ``PRN`` rows report a principal amount, not a share count, so their
+# value-to-amount ratio is cents on the dollar of face value and is near 1 for
+# every bond in every filing.  Mixed into the median they drag a book of
+# ordinary equities towards the ambiguous band for no reason at all.
+SHARE_AMOUNT_TYPE = "SH"
+
+
 def _median_value_per_share(holdings: Sequence[Mapping[str, Any]]) -> Decimal | None:
+    """Median value-to-share ratio over the *share* rows, or None."""
+
     ratios: list[Decimal] = []
     for row in holdings:
+        if row.get("shares_or_principal_type") != SHARE_AMOUNT_TYPE:
+            continue
         shares, value = row.get("shares_or_principal_amount"), row.get("value_as_filed")
         if not shares or not value:
             continue
@@ -783,10 +814,19 @@ def decide_value_unit(
     price when the values are dollars and near a thousandth of one when they
     are thousands.
 
-    The rule decides unless the ratio contradicts it, and then the ratio wins
-    and says so -- filers were inconsistent across the boundary, and a number
-    wrong by a factor of a thousand is the single worst thing this parser
-    could emit.
+    The rule decides unless the ratio *decisively* contradicts it, and then the
+    ratio wins and says so -- filers were inconsistent across the boundary, and
+    a number wrong by a factor of a thousand is the single worst thing this
+    parser could emit.
+
+    "Decisively" is the whole of the repair.  The original test was
+    ``median < 1 means thousands``, taken from ``13f-tracker``, and it is wrong
+    for any book whose holdings trade under a dollar: a genuine sub-$1 position
+    reported in whole dollars has a ratio of 0.4, and that rule would have
+    multiplied it by a thousand.  So the ratio only speaks outside the band
+    where the two readings overlap, and inside it the basis is ``ambiguous`` --
+    the period rule still decides the number, and the wire says the check did
+    not confirm it rather than implying that it did.
     """
 
     by_rule = (
@@ -798,7 +838,12 @@ def decide_value_unit(
     median = _median_value_per_share(holdings)
     if median is None:
         return by_rule, rule_basis
-    by_ratio = "thousands" if median < 1 else "usd"
+    if median < DECISIVE_THOUSANDS_BELOW:
+        by_ratio = "thousands"
+    elif median > DECISIVE_USD_ABOVE:
+        by_ratio = "usd"
+    else:
+        return by_rule, "ambiguous"
     if by_ratio == by_rule:
         return by_rule, rule_basis
     return by_ratio, "ratio_heuristic"
@@ -902,7 +947,11 @@ def parse_form13f(
         })
     if len(holdings) > MAX_HOLDINGS:
         raise SecOwnershipParseError(
-            f"{len(holdings)} holdings exceeds the frozen ceiling of {MAX_HOLDINGS}"
+            f"this information table has {len(holdings)} rows and the frozen "
+            f"ceiling is {MAX_HOLDINGS}; the read is refused rather than "
+            "truncated, because a book truncated here and compared against a "
+            "prior quarter truncated elsewhere invents holdings changes. The "
+            "raw bytes are in the spool."
         )
     unit, basis = decide_value_unit(holdings, period_end)
     for row in holdings:
@@ -939,6 +988,77 @@ def parse_form13f(
 HOLDING_ACTIONS: tuple[str, ...] = ("new", "exit", "add", "trim", "unchanged")
 
 
+def position_ref(record_hashes: Sequence[str]) -> str:
+    """One name for the filed rows a position was summed from."""
+
+    return content_hash({"record_hashes": sorted(record_hashes)})
+
+
+def aggregate_holdings(
+    holdings: Sequence[Mapping[str, Any]]
+) -> dict[tuple[str, Any], dict[str, Any]]:
+    """One row per ``(cusip, put_call)``, with the filed rows summed.
+
+    A manager may report the same security on several lines -- one per
+    sub-adviser, one per fund, one per discretion category -- and a filing
+    that does so is not unusual. Keying a dict on ``(cusip, put_call)``
+    therefore kept whichever line happened to be last and silently threw the
+    rest away, so a position split across three lines was compared against
+    a third of itself and produced a fabricated ``trim``.
+
+    Summed rather than de-duplicated, because the lines are *parts* of one
+    position and the sum is the position. Every filed row's ``record_hash``
+    is kept, so the aggregate can still be taken back to each line it came
+    from.
+    """
+
+    found: dict[tuple[str, Any], dict[str, Any]] = {}
+    for row in holdings:
+        key = (row["cusip"], row.get("put_call"))
+        held = found.get(key)
+        if held is None:
+            found[key] = {
+                "cusip": row["cusip"],
+                "put_call": row.get("put_call"),
+                "name_of_issuer": row["name_of_issuer"],
+                "title_of_class": row.get("title_of_class"),
+                "shares_or_principal_amount": row.get("shares_or_principal_amount"),
+                "shares_or_principal_type": row.get("shares_or_principal_type"),
+                "value_as_filed": row.get("value_as_filed"),
+                "value_usd": row.get("value_usd"),
+                "line_count": 1,
+                "record_hashes": [row["record_hash"]],
+            }
+            continue
+        held["line_count"] += 1
+        held["record_hashes"].append(row["record_hash"])
+        for field in (
+            "shares_or_principal_amount", "value_as_filed", "value_usd",
+        ):
+            held[field] = _sum_filed(held.get(field), row.get(field))
+    for row in found.values():
+        row["record_hashes"] = sorted(row["record_hashes"])
+        row["record_hash"] = position_ref(row["record_hashes"])
+    return found
+
+
+def _sum_filed(one: Any, two: Any) -> str | None:
+    """Two filed figures added, or None when neither side has one.
+
+    A line with no figure does not zero a line that has one: an absent number
+    is a number the filer did not give, and reading it as zero would report a
+    position smaller than the filing does.
+    """
+
+    left, right = _decimal_or_none(one), _decimal_or_none(two)
+    if left is None and right is None:
+        return None
+    total = (left or Decimal(0)) + (right or Decimal(0))
+    text = format(total.normalize(), "f")
+    return "0" if text in {"-0", "0E+0"} else text
+
+
+
 def compare_holdings(
     current: Mapping[str, Any], prior: Mapping[str, Any] | None
 ) -> dict[str, Any]:
@@ -964,14 +1084,10 @@ def compare_holdings(
             ),
             "prior_quarter": None,
             "changes": [],
-            "first_reading_count": len(current.get("holdings") or []),
+            "first_reading_count": len(aggregate_holdings(current.get("holdings") or [])),
         }
-    before = {
-        (row["cusip"], row.get("put_call")): row for row in (prior.get("holdings") or [])
-    }
-    after = {
-        (row["cusip"], row.get("put_call")): row for row in (current.get("holdings") or [])
-    }
+    before = aggregate_holdings(prior.get("holdings") or [])
+    after = aggregate_holdings(current.get("holdings") or [])
     changes: list[dict[str, Any]] = []
     for key in sorted(set(before) | set(after), key=lambda item: (item[0], item[1] or "")):
         old, new = before.get(key), after.get(key)
@@ -996,7 +1112,8 @@ def compare_holdings(
             delta = format(new_shares.normalize(), "f")
         elif old_shares is not None and new is None:
             delta = format((-old_shares).normalize(), "f")
-        source = new or old
+        source = new if new is not None else old
+        hashes = list((new if new is not None else old)["record_hashes"])
         changes.append({
             "cusip": key[0],
             "put_call": key[1],
@@ -1008,7 +1125,11 @@ def compare_holdings(
             "share_change": delta,
             "value_usd": (new or {}).get("value_usd"),
             "prior_value_usd": (old or {}).get("value_usd"),
-            "record_hash": (new or old)["record_hash"],
+            # Every filed row this position was summed from, and one name for
+            # the set of them. A split position is one change, and the change
+            # can still be taken back to each row it came from.
+            "record_hashes": hashes,
+            "record_hash": position_ref(hashes),
         })
     return {
         "status": "compared",
@@ -1030,6 +1151,8 @@ def _decimal_or_none(value: Any) -> Decimal | None:
 
 __all__ = [
     "HOLDING_ACTIONS",
+    "aggregate_holdings",
+    "position_ref",
     "MAX_DOCUMENT_BYTES",
     "MAX_HOLDINGS",
     "MAX_NOTICES",
@@ -1037,6 +1160,9 @@ __all__ = [
     "MAX_TRANSACTIONS",
     "PROVIDER_STATUS",
     "SCHEMA_VERSION",
+    "DECISIVE_THOUSANDS_BELOW",
+    "DECISIVE_USD_ABOVE",
+    "SHARE_AMOUNT_TYPE",
     "THOUSANDS_RULE_LAST_DAY",
     "TRANSACTION_CODE_MEANINGS",
     "SecOwnershipParseError",

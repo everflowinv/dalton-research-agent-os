@@ -47,6 +47,7 @@ from .raw_spool import RawSpool
 from .sec_ownership_adapter import (
     TRANSACTION_CODE_MEANINGS,
     SecOwnershipParseError,
+    aggregate_holdings,
     compare_holdings,
     parse_beneficial_ownership,
     parse_form13f,
@@ -55,6 +56,7 @@ from .sec_ownership_adapter import (
 )
 from .sec_ownership_core import (
     BENEFICIAL_OWNERSHIP_OPERATION,
+    FILING_INDEX_DOCUMENT,
     FORM13F_OPERATION,
     FORM144_OPERATION,
     FORM4_OPERATION,
@@ -62,12 +64,15 @@ from .sec_ownership_core import (
     OPERATIONS,
     OWNERSHIP_EVIDENCE_TIER,
     SecOwnershipError,
+    document_url,
+    filing_index_url,
+    information_table_name,
     invocation_ref as build_invocation_ref,
     ownership_identity,
     ownership_output_schema,
     primary_document_url,
 )
-from .store import canonical_json
+from .store import canonical_json, content_hash
 
 SUMMARY_SCHEMA_VERSION = "0.1"
 DEFAULT_SPOOL_NAME = "connector-spool"
@@ -80,6 +85,7 @@ MAX_RAW_BYTES = 32 * 1024 * 1024
 # named in the summary rather than silently dropped.
 MAX_EVENTS_PER_RUN = 40
 DEFAULT_USER_AGENT = "Dalton Research Agent OS SEC ownership lane (owner: lumos)"
+PRIMARY_DOCUMENT_LABEL = "primary_doc.xml"
 
 KIND_BY_OPERATION = {
     FORM4_OPERATION: "insider_transaction",
@@ -153,6 +159,69 @@ def _read_source(
     return fetch_document(url_path, user_agent=args.user_agent)
 
 
+def _spool(spool: RawSpool, raw: bytes) -> Any:
+    """Bytes into the raw sink, before anything is read out of them."""
+
+    if len(raw) > MAX_RAW_BYTES:
+        raise SecOwnershipRunError("the document exceeds the spool byte ceiling")
+    digest = hashlib.sha256(raw).hexdigest()
+    sink = spool.open_sink(f"raw-sink:{digest}", max_response_bytes=MAX_RAW_BYTES)
+    sink.write(raw)
+    return sink.finalize()
+
+
+def form13f_documents(
+    args: argparse.Namespace, spool: RawSpool
+) -> tuple[str | None, bytes, list[dict[str, Any]]]:
+    """The cover page and the information table of one 13F, both spooled.
+
+    A 13F is not one document. ``primary_doc.xml`` is the cover page -- the
+    manager's name, the period, the totals -- and the holdings live in a
+    second file whose name the filer chooses and whose name only the filing's
+    own ``index.json`` knows. Fetching the cover page and parsing *that* for
+    holdings is how this returned a successful read of zero positions, which is
+    the worst shape a bug can take here: a filing that says nothing changed.
+
+    Three GETs, which is what the quota is set for: cover page, filing index,
+    information table. All three are spooled before anything is parsed; the
+    information table is the artifact every holding binds to, and the other two
+    are companions the summary names.
+
+    A ``13F-NT`` is the exception and is not a hole: it is a notice that
+    another manager reports these holdings, it has no information table, and
+    saying so is the correct outcome rather than an empty book.
+    """
+
+    if args.fixture_file:
+        cover = (
+            Path(args.cover_file).expanduser().read_text(encoding="utf-8")
+            if args.cover_file else None
+        )
+        return cover, Path(args.fixture_file).expanduser().read_bytes(), []
+
+    companions: list[dict[str, Any]] = []
+    cover_raw = fetch_document(
+        primary_document_url(args.holder_cik, args.accession),
+        user_agent=args.user_agent,
+    )
+    cover_object = _spool(spool, cover_raw)
+    companions.append({
+        "document": PRIMARY_DOCUMENT_LABEL, **cover_object.to_dict(),
+    })
+    index_raw = fetch_document(
+        filing_index_url(args.holder_cik, args.accession), user_agent=args.user_agent
+    )
+    index_object = _spool(spool, index_raw)
+    companions.append({
+        "document": FILING_INDEX_DOCUMENT, **index_object.to_dict(),
+    })
+    name = information_table_name(json.loads(index_raw.decode("utf-8", "replace")))
+    table_raw = fetch_document(
+        document_url(args.holder_cik, args.accession, name), user_agent=args.user_agent
+    )
+    return cover_raw.decode("utf-8", "replace"), table_raw, companions
+
+
 def _day(value: str | None) -> str | None:
     return None if not value else f"{value}T00:00:00+00:00"
 
@@ -194,10 +263,17 @@ def _form4_events(
                     "issuer_name": wire["issuer_name"],
                     "invocation_ref": invocation,
                     "artifact_hash": artifact_hash,
-                    # The row, in this filing, in these bytes -- already
-                    # computed by the adapter, and reused rather than
-                    # recomputed so the event and the wire cannot disagree.
-                    "event_key": row["record_hash"],
+                    # The row *and the owner it is reported for*. A joint
+                    # filing -- two spouses, a fund and its general partner --
+                    # names several reporting owners against the same
+                    # transaction rows, and keying on the row alone made every
+                    # owner after the first a duplicate the ledger silently
+                    # dropped. The row hash is the adapter's, so the event and
+                    # the wire still cannot disagree about the numbers.
+                    "event_key": content_hash({
+                        "row": row["record_hash"],
+                        "owner": owner["owner_cik"] or owner["owner_name"],
+                    }),
                 },
             })
     return events
@@ -314,7 +390,9 @@ def _form13f_events(
             "share_change": None, "value_usd": row["value_usd"],
             "prior_value_usd": None, "record_hash": row["record_hash"],
         }
-        for row in wire["holdings"]
+        # Through the same aggregation the comparison uses, so a position the
+        # filer split across three lines is one first reading here too.
+        for row in aggregate_holdings(wire["holdings"]).values()
     ]
     events: list[dict[str, Any]] = []
     for row in rows:
@@ -381,6 +459,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:  # noqa: PLR0915 - one line
         "prior_quarter": None,
         "value_unit": None,
         "value_unit_basis": None,
+        # The 13F cover page and filing index, spooled beside the information
+        # table that the holdings actually bind to.
+        "companion_artifacts": [],
+        "holdings_status": None,
     }
     try:
         if args.operation not in OPERATIONS:
@@ -404,22 +486,30 @@ def run(args: argparse.Namespace) -> dict[str, Any]:  # noqa: PLR0915 - one line
         summary["governance_ref"] = governance.id
         summary["governance_hash"] = governance.content_hash
 
-        filer = args.holder_cik if args.operation == FORM13F_OPERATION else args.issuer
-        raw = _read_source(
-            args,
-            fixture=args.fixture_file,
-            url_path=(
-                None if args.fixture_file
-                else primary_document_url(filer, args.accession)
-            ),
-        )
-        if len(raw) > MAX_RAW_BYTES:
-            raise SecOwnershipRunError("the document exceeds the spool byte ceiling")
-        digest = hashlib.sha256(raw).hexdigest()
         spool = RawSpool(str(state / DEFAULT_SPOOL_NAME), max_total_bytes=1_000_000_000)
-        sink = spool.open_sink(f"raw-sink:{digest}", max_response_bytes=MAX_RAW_BYTES)
-        sink.write(raw)
-        artifact = sink.finalize()
+        cover_text: str | None = None
+        if args.operation == FORM13F_OPERATION:
+            if args.prior_file and not args.prior_accession:
+                # Without it every ``exit`` event would cite the *current*
+                # filing as the source of a position that is only in the prior
+                # one -- a citation that points at bytes which do not contain
+                # the number it is offered for.
+                raise SecOwnershipRunError(
+                    "--prior-file needs --prior-accession; a prior quarter with "
+                    "no accession of its own cannot be cited"
+                )
+            cover_text, raw, companions = form13f_documents(args, spool)
+            summary["companion_artifacts"] = companions
+        else:
+            raw = _read_source(
+                args,
+                fixture=args.fixture_file,
+                url_path=(
+                    None if args.fixture_file
+                    else primary_document_url(args.issuer, args.accession)
+                ),
+            )
+        artifact = _spool(spool, raw)
         summary["artifact"] = artifact.to_dict()
 
         invocation = build_invocation_ref(
@@ -467,20 +557,31 @@ def run(args: argparse.Namespace) -> dict[str, Any]:  # noqa: PLR0915 - one line
             )
             summary["parsed_row_count"] = len(wire["notices"])
         else:
-            cover = (
-                Path(args.cover_file).expanduser().read_text(encoding="utf-8")
-                if args.cover_file else None
-            )
             wire = parse_form13f(
                 text, accession=args.accession, artifact_hash=artifact.content_hash,
-                holder_cik=args.holder_cik, primary_text=cover, quarter=args.quarter,
-                source_record_refs=refs,
+                holder_cik=args.holder_cik, primary_text=cover_text,
+                quarter=args.quarter, source_record_refs=refs,
             )
+            # A 13F-HR that parsed to nothing is not an institution that sold
+            # everything. It is a document this run did not read -- the cover
+            # page instead of the information table, a schema this parser does
+            # not know, an empty response. Reporting it as a successful read of
+            # zero positions is the one outcome that would put a fabricated
+            # liquidation into the ledger, so it is a failure with the count in
+            # the reason. A 13F-NT is the honest empty case and says so.
+            if not wire["holdings"]:
+                if wire["form_type"] != "13F-NT":
+                    raise SecOwnershipRunError(
+                        f"{wire['form_type']} {args.accession} parsed to zero "
+                        "holdings; a holdings report with no holdings is a "
+                        "document that was not read, not a book that is empty"
+                    )
+                summary["holdings_status"] = "notice_only"
             prior = None
             if args.prior_file:
                 prior = parse_form13f(
                     Path(args.prior_file).expanduser().read_text(encoding="utf-8"),
-                    accession=args.prior_accession or args.accession,
+                    accession=args.prior_accession,
                     artifact_hash=hashlib.sha256(
                         Path(args.prior_file).expanduser().read_bytes()
                     ).hexdigest(),
@@ -570,6 +671,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("choose --fixture-file or --allow-network")
     if args.operation == FORM13F_OPERATION and not args.holder_cik:
         parser.error("--holder-cik is required for form13f_holdings")
+    if args.prior_file and not args.prior_accession:
+        parser.error("--prior-file needs --prior-accession")
     if args.operation != FORM13F_OPERATION and not args.issuer:
         parser.error("--issuer is required for the issuer-keyed operations")
     summary = run(args)
@@ -578,7 +681,7 @@ def main(argv: list[str] | None = None) -> int:
             "status", "failure_reason", "operation", "accession",
             "parsed_row_count", "event_count", "events_over_cap",
             "comparison_status", "prior_quarter", "value_unit",
-            "value_unit_basis", "invocation_ref",
+            "value_unit_basis", "holdings_status", "invocation_ref",
         )}, ensure_ascii=False, indent=1))
     return 0 if summary["status"] == "succeeded" else 1
 
@@ -589,6 +692,7 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
 
 __all__ = [
     "DEFAULT_USER_AGENT",
+    "form13f_documents",
     "KIND_BY_OPERATION",
     "MAX_EVENTS_PER_RUN",
     "MAX_RAW_BYTES",

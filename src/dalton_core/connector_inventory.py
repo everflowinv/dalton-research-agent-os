@@ -1436,14 +1436,21 @@ def _output_schema(slug: str, operation: str) -> dict[str, Any]:
                 # check alone is not honest. Both are recorded.
                 "value_unit": {"type": "string",
                                "enum": ["usd", "thousands"]},
+                # How the unit above was decided. ``ambiguous`` is a real
+                # answer and the most common one for a small book: the
+                # value-to-share ratio only separates dollars from thousands
+                # outside the band where a cheap stock in dollars and an
+                # expensive one in thousands overlap, and inside that band the
+                # period rule carries the number alone.
                 "value_unit_basis": {
                     "type": "string",
                     "enum": ["post_2023_rule", "pre_2023_rule",
-                             "ratio_heuristic", "declared_by_filer"],
+                             "ratio_heuristic", "ambiguous",
+                             "declared_by_filer"],
                 },
                 "table_entry_total": {"type": ["integer", "null"], "minimum": 0},
                 "table_value_total_as_filed": filed_number,
-                "holdings": {"type": "array", "maxItems": 4000, "items": holding},
+                "holdings": {"type": "array", "maxItems": 12000, "items": holding},
                 "source_record_refs": _array_of_strings(),
                 "next_cursor": {"type": ["string", "null"]},
                 "provider_status": _integer(100),

@@ -47,6 +47,7 @@ second, so nothing here is ever parsed into one.
 from __future__ import annotations
 
 import copy
+import re
 from datetime import datetime
 from typing import Any, Sequence
 
@@ -97,7 +98,7 @@ FORMS_BY_OPERATION: dict[str, tuple[str, ...]] = {
         "SC 13D", "SC 13G", "SC 13D/A", "SC 13G/A",
     ),
     FORM144_OPERATION: ("144", "144/A"),
-    FORM13F_OPERATION: ("13F-HR", "13F-HR/A", "13F-NT"),
+    FORM13F_OPERATION: ("13F-HR", "13F-HR/A", "13F-NT", "13F-NT/A"),
 }
 ALL_OWNERSHIP_FORMS: frozenset[str] = frozenset(
     form for forms in FORMS_BY_OPERATION.values() for form in forms
@@ -365,6 +366,80 @@ def filing_index_url(cik: str, accession: str) -> str:
     return f"{archive_directory_url(cik, accession)}/{FILING_INDEX_DOCUMENT}"
 
 
+# The one name in this whole connector that comes from outside it. It is
+# checked against this shape before it is put in a path, because "the filing
+# names its own document" stops being safe the moment the name can contain a
+# slash or a pair of dots.
+_DOCUMENT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.xml$")
+# EDGAR renders every XML filing through a stylesheet and lists the rendered
+# copy in the same directory. It is the same data wearing HTML, and reading it
+# instead of the source would be reading a presentation of a filing.
+_RENDERED_PREFIXES = ("xsl", "r")
+_INFORMATION_TABLE_HINTS = ("infotable", "informationtable", "information_table",
+                            "table", "holding")
+
+
+def information_table_name(index_payload: Any) -> str:
+    """Which document in this filing is the 13F information table.
+
+    A 13F is two documents: ``primary_doc.xml`` is the cover page and the
+    holdings live in a second file whose name the filer chooses. The filing's
+    own ``index.json`` lists it, so the name is read from the filing rather
+    than guessed at or handed in.
+
+    Ambiguity is a refusal, not a guess. Reading the wrong document here would
+    produce a wire that validates, holdings that are somebody else's, and
+    nothing anywhere that could notice -- so a directory this cannot resolve
+    to exactly one candidate names its candidates and stops.
+    """
+
+    from collections.abc import Mapping as _Mapping
+
+    directory = (
+        index_payload.get("directory") if isinstance(index_payload, _Mapping) else None
+    )
+    items = directory.get("item") if isinstance(directory, _Mapping) else None
+    if not isinstance(items, list):
+        raise SecOwnershipError("filing index has no directory listing")
+    names: list[str] = []
+    for item in items:
+        name = item.get("name") if isinstance(item, _Mapping) else None
+        if not isinstance(name, str) or not _DOCUMENT_NAME_RE.match(name):
+            continue
+        lowered = name.lower()
+        if lowered == PRIMARY_DOCUMENT:
+            continue
+        if lowered.startswith(_RENDERED_PREFIXES):
+            continue
+        names.append(name)
+    if not names:
+        raise SecOwnershipError(
+            "this filing directory holds no information table; a 13F-HR with "
+            "no holdings document is not a filing this operation can read"
+        )
+    if len(names) == 1:
+        return names[0]
+    hinted = [
+        name for name in names
+        if any(hint in name.lower() for hint in _INFORMATION_TABLE_HINTS)
+    ]
+    if len(hinted) == 1:
+        return hinted[0]
+    raise SecOwnershipError(
+        "cannot tell which document is the information table; candidates are "
+        f"{sorted(names)}. Reading the wrong one would be holdings nobody could "
+        "check, so this is refused rather than guessed"
+    )
+
+
+def document_url(cik: str, accession: str, name: str) -> str:
+    """One document of one filing, named by that filing's own index."""
+
+    if not isinstance(name, str) or not _DOCUMENT_NAME_RE.match(name):
+        raise SecOwnershipError(f"{name!r} is not a document name in a filing")
+    return f"{archive_directory_url(cik, accession)}/{name}"
+
+
 # -- what is already on disk ------------------------------------------------
 #
 # C1 established that the governed ``list_filings`` call returns the issuer's
@@ -463,7 +538,20 @@ def ownership_filings(
             ),
         })
     found.sort(key=lambda row: (row["filing_date"], row["accession"]), reverse=True)
-    return found[: max(0, int(limit))]
+    # The cap is per form, not over the whole list. A company files a hundred
+    # Form 4s for every 13D, so a single ceiling over everything means the one
+    # 13D -- the filing anybody would actually want to see -- falls off the end
+    # of a list of routine option exercises and is never chosen.
+    ceiling = max(0, int(limit))
+    per_form: dict[str, int] = {}
+    kept: list[dict[str, Any]] = []
+    for row in found:
+        seen = per_form.get(row["form"], 0)
+        if seen >= ceiling:
+            continue
+        per_form[row["form"]] = seen + 1
+        kept.append(row)
+    return kept
 
 
 def ownership_filings_for_issuer(
@@ -556,7 +644,9 @@ __all__ = [
     "SecOwnershipError",
     "archive_directory_url",
     "build_sec_ownership_governance_record",
+    "document_url",
     "filing_index_url",
+    "information_table_name",
     "invocation_ref",
     "ownership_adapter_hash",
     "ownership_contract",

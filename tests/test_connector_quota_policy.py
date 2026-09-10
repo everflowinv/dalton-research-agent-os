@@ -32,6 +32,10 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "window_seconds": 86_400,
                     "reset_timezone": "Asia/Shanghai",
                 },
+                # S4: the six China / Hong Kong fundamentals operations. Sorted
+                # before gemini-web-search. Conservative throughout, and the
+                # smallest allowance is the one operation that has to touch
+                # 东财's quote cluster: 「不要批量探测东财」 as arithmetic.
                 {
                     "connector_slug": "cn-hk-findata",
                     "operation": "ah_premium",
@@ -105,6 +109,15 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # S3: the crowd sources are all fifty units a day. Fifty is
+                    # not a measurement -- none of the three publishes a rate
+                    # limit -- it is ten times what the lane is for, so a retry
+                    # loop stops at breakfast rather than at the point where an
+                    # account is flagged. The same figure for all seven, because
+                    # a different one for each would imply a measurement behind
+                    # each one. Only the calls-per-unit differ, because paging
+                    # does: one review library is up to twenty page reads, one
+                    # post is one call.
                     "connector_slug": "employee-reviews",
                     "operation": "blind_reviews",
                     "quota_unit": "document",
@@ -123,6 +136,9 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # S2: the smallest search ceiling of any source, because
+                    # the Guidepoint licence permits research reading and
+                    # forbids bulk extraction.
                     "connector_slug": "guidepoint",
                     "operation": "search_library",
                     "quota_unit": "search",
@@ -132,6 +148,13 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # S5: the IR-page watcher. There is no upstream to be
+                    # polite to at all -- changedetection.io is a process on
+                    # this machine and it does the fetching -- so these bound a
+                    # loop rather than a relationship. Declared anyway, because
+                    # admission refuses a route with no governed policy rather
+                    # than inventing an unlimited one. Three calls per diff:
+                    # the watch, and the two snapshots the tool serves apart.
                     "connector_slug": "ir-page-watch",
                     "operation": "get_watch_diff",
                     "quota_unit": "document",
@@ -150,6 +173,8 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # S1: local file reads, so the ceiling is a loop bound
+                    # rather than a courtesy to an upstream.
                     "connector_slug": "sales-notes",
                     "operation": "get_note",
                     "quota_unit": "document",
@@ -168,6 +193,19 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # S5: the four ownership filings, sorted before the filings
+                    # index above. One filing per unit, and the unit is a
+                    # document because that is what one of these reads: a
+                    # single primary document at a path derived from a single
+                    # accession.
+                    #
+                    # The numbers are what the covered universe generates times
+                    # a margin, not round numbers chosen for looking
+                    # reasonable. The five issuers filed 587 Form 3/4/5 in the
+                    # last twelve months -- under two a day -- so twenty is a
+                    # fortnight of them in one tick and a bound on what a bug
+                    # can cost against a free government service that publishes
+                    # a ten-per-second limit. A 13D/G or a 144 is rarer still.
                     "connector_slug": "sec",
                     "operation": "beneficial_ownership",
                     "quota_unit": "document",
@@ -177,11 +215,16 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # Quarterly, in a burst forty-five days after quarter end.
+                    # Three calls per unit because a 13F is three documents:
+                    # the cover page, the filing's own index -- the only thing
+                    # that knows what the holdings document is called -- and
+                    # the information table.
                     "connector_slug": "sec",
                     "operation": "form13f_holdings",
                     "quota_unit": "document",
                     "daily_unit_limit": 8,
-                    "max_physical_calls_per_unit": 2,
+                    "max_physical_calls_per_unit": 3,
                     "window_seconds": 86_400,
                     "reset_timezone": "Asia/Shanghai",
                 },
@@ -204,6 +247,7 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # P10p: the SEC filings index. Sorted before web-fetch.
                     "connector_slug": "sec",
                     "operation": "list_filings",
                     "quota_unit": "search",
@@ -276,6 +320,11 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # P11a: Yahoo is an unofficial free source that never
+                    # agreed to serve us. There is no published rate limit to
+                    # stay under and nobody to appeal to, so these ceilings are
+                    # politeness rather than arithmetic -- five covered
+                    # companies ticking daily need five price units.
                     "connector_slug": "yfinance",
                     "operation": "analyst_estimates",
                     "quota_unit": "search",
@@ -285,6 +334,10 @@ class ConnectorQuotaPolicyTests(unittest.TestCase):
                     "reset_timezone": "Asia/Shanghai",
                 },
                 {
+                    # C1: one company's dated corporate events. Sorted between
+                    # the two above. Smaller and single-call: an earnings date
+                    # is announced once and then does not move, so the lane
+                    # asks once a day per covered company.
                     "connector_slug": "yfinance",
                     "operation": "calendar",
                     "quota_unit": "search",
