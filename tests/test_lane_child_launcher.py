@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -101,6 +102,44 @@ class LauncherTests(unittest.TestCase):
         launcher.spawn(digest="e" * 24, record={})
         with self.assertRaises(LaneChildConflict):
             launcher.spawn(digest="f" * 24, record={})
+
+    def test_restart_adopts_same_digest_without_relaunch_or_log_truncation(self):
+        launcher = self.launcher(
+            "import time; print('original', flush=True); time.sleep(30)")
+        ticket = launcher.spawn(digest="6" * 24, record={"generation": 1})
+        log = launcher._ticket_path(ticket["id"]).with_name("run.log")
+        for _ in range(100):
+            if log.is_file() and "original" in log.read_text(encoding="utf-8"):
+                break
+            time.sleep(0.01)
+        fresh = self.launcher("raise SystemExit('must not launch')")
+        adopted = fresh.spawn(digest="6" * 24, record={"generation": 2})
+        self.assertEqual(adopted["pid"], ticket["pid"])
+        self.assertEqual(adopted["generation"], 1)
+        self.assertIn("original", log.read_text(encoding="utf-8"))
+
+    def test_restart_refuses_a_different_digest_while_child_is_alive(self):
+        launcher = self.launcher("import time; time.sleep(30)")
+        launcher.spawn(digest="7" * 24, record={})
+        fresh = self.launcher()
+        with self.assertRaises(LaneChildConflict):
+            fresh.spawn(digest="8" * 24, record={})
+
+    def test_dead_ticket_and_reused_pid_do_not_freeze_future_work(self):
+        launcher = self.launcher()
+        old = launcher.spawn(digest="9" * 24, record={})
+        launcher.wait(timeout=30)
+        path = launcher._ticket_path(old["id"])
+        record = json.loads(path.read_text(encoding="utf-8"))
+        # A live but unrelated PID exercises the PID-reuse boundary.
+        record["pid"] = os.getpid()
+        record["command"] = ["definitely-not-this-test-process"]
+        path.write_text(json.dumps(record), encoding="utf-8")
+        fresh = self.launcher()
+        started = fresh.spawn(digest="a" * 24, record={})
+        self.assertEqual(started["status"], "running")
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["status"],
+                         "orphaned")
 
     def test_a_ticket_ref_from_another_lane_is_refused(self):
         launcher = self.launcher()

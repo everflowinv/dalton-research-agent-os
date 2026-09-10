@@ -92,6 +92,42 @@ def pid_alive(pid: Any) -> bool:
     return True
 
 
+def process_matches(pid: Any, expected: Any) -> bool:
+    """Whether a live PID still runs the exact child argv recorded at launch."""
+
+    if not pid_alive(pid) or not isinstance(expected, list) or not expected:
+        return False
+    try:
+        proc = Path(f"/proc/{pid}/cmdline")
+        if proc.is_file():
+            actual = [part.decode() for part in proc.read_bytes().split(b"\0") if part]
+        else:
+            completed = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="], capture_output=True,
+                text=True, timeout=2, check=False)
+            if completed.returncode != 0:
+                return False
+            # BSD ps renders argv joined by spaces rather than preserving the
+            # original quoting. Compare that rendering to the recorded argv;
+            # splitting it would incorrectly split a Python ``-c`` program.
+            rendered = completed.stdout.strip()
+            executable, separator, arguments = rendered.partition(" ")
+            expected_executable = Path(str(expected[0])).name.lower()
+            actual_executable = Path(executable).name.lower()
+            executable_matches = (
+                actual_executable == expected_executable
+                or (actual_executable.startswith("python")
+                    and expected_executable.startswith("python"))
+            )
+            return (executable_matches and separator
+                    and arguments == " ".join(str(part) for part in expected[1:]))
+    except (OSError, UnicodeError, ValueError, subprocess.SubprocessError):
+        return False
+    expected = [str(part) for part in expected]
+    return bool(actual) and Path(actual[0]).name == Path(expected[0]).name \
+        and actual[1:] == expected[1:]
+
+
 class LaneChildLauncher:
     """One child at a time for one lane, with tickets a restart cannot confuse.
 
@@ -145,6 +181,21 @@ class LaneChildLauncher:
         with self._lock:
             if self._current is not None and self._current[1].poll() is None:
                 raise LaneChildConflict(f"{self.TICKET_PREFIX} child is already running")
+            for path in sorted(self.tickets_dir.glob("*/ticket.json")):
+                try:
+                    persisted = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if persisted.get("status") != "running":
+                    continue
+                if process_matches(persisted.get("pid"), persisted.get("command")):
+                    if persisted.get("id") == ticket_id:
+                        return dict(persisted)
+                    raise LaneChildConflict(
+                        f"{self.TICKET_PREFIX} child is already running")
+                persisted["status"] = "orphaned"
+                persisted["completed_at"] = wire_time(self.clock())
+                write_owner_only(path, persisted)
             ticket_dir = secure_dir(self.tickets_dir / digest)
             command = self._command(ticket_dir=ticket_dir, **command_kwargs)
             log_path = ticket_dir / "run.log"
@@ -163,6 +214,7 @@ class LaneChildLauncher:
                 **dict(record),
                 "started_at": wire_time(self.clock()),
                 "pid": process.pid,
+                "command": command,
                 "status": "running",
                 "exit_code": None,
                 "completed_at": None,
@@ -245,6 +297,7 @@ __all__ = [
     "LaneChildTicketNotFound",
     "TICKET_SCHEMA_VERSION",
     "pid_alive",
+    "process_matches",
     "secure_dir",
     "wire_time",
     "write_owner_only",
