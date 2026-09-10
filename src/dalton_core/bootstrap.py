@@ -6,8 +6,10 @@ import argparse
 import json
 import os
 import secrets
+import sqlite3
+import tempfile
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from .model_input import ModelInputLedger
 from .industry_research import IndustryResearchAuthority
@@ -29,6 +31,143 @@ from .writer_server import (
     replace_token_config,
     write_token_config,
 )
+
+
+#: INT3: which database each packaged ``*_schema.sql`` belongs to.
+#:
+#: ``dalton-bootstrap`` used to open five authorities.  The other forty-seven
+#: schemas were applied the first time the writer or a lane constructed their
+#: authority -- which on a live Core is several minutes *after* ``install.sh``
+#: has already exited zero.  A deploy that broke a schema therefore did not
+#: fail at install time; it failed on the first tick that touched that table,
+#: as one lane reporting ``unavailable:OperationalError`` in a heartbeat nobody
+#: was watching.  Applying them all here moves that failure to the install.
+#:
+#: The value is ``None`` for the shared Core database, or the sidecar's file
+#: name relative to the state directory.  Order matters twice and both cases
+#: are pairs sharing one file: the review authority's tables sit beside the
+#: candidate-staging tables, and C2's pool columns beside the day ledger.
+SCHEMA_DATABASES: tuple[tuple[str, str | None], ...] = (
+    ("schema.sql", None),
+    ("observability_schema.sql", None),
+    ("agenda_schema.sql", None),
+    ("model_input_schema.sql", None),
+    ("industry_research_schema.sql", None),
+    ("analyst_journal_schema.sql", None),
+    ("answer_routing_schema.sql", None),
+    ("bounded_planner_loop_schema.sql", None),
+    ("capability_schema.sql", None),
+    ("catalyst_calendar_schema.sql", None),
+    ("claim_index_schema.sql", None),
+    ("claim_retirement_schema.sql", None),
+    ("company_dossier_schema.sql", None),
+    ("connector_schema.sql", None),
+    ("coverage_mission_schema.sql", None),
+    ("credential_authority_schema.sql", None),
+    ("debate_map_schema.sql", None),
+    ("event_judgement_schema.sql", None),
+    ("extraction_backlog_schema.sql", None),
+    ("forecast_driver_schema.sql", None),
+    ("forecast_reconciliation_schema.sql", None),
+    ("market_price_schema.sql", None),
+    ("mission_deliverable_schema.sql", None),
+    ("model_forecast_schema.sql", None),
+    ("research_constitution_schema.sql", None),
+    ("research_cycle_reflection_schema.sql", None),
+    ("research_doctrine_schema.sql", None),
+    ("research_event_schema.sql", None),
+    ("research_plan_schema.sql", None),
+    ("research_playbook_schema.sql", None),
+    ("research_quality_schema.sql", None),
+    ("research_question_backlog_schema.sql", None),
+    ("runner_journal_schema.sql", None),
+    ("statement_snapshot_schema.sql", None),
+    ("thesis_impact_schema.sql", None),
+    ("tracking_cadence_schema.sql", None),
+    ("transcript_correction_schema.sql", None),
+    ("transcript_polish_schema.sql", None),
+    ("valuation_snapshot_schema.sql", None),
+    ("weekly_brief_schema.sql", None),
+    ("scheduler_schema.sql", "scheduler.sqlite"),
+    ("model_router_schema.sql", "model-router.sqlite"),
+    ("dashboard_schema.sql", "dashboard-projection.sqlite"),
+    ("capability_catalog_schema.sql", "catalog.sqlite"),
+    ("document_index_schema.sql", "document-index.sqlite"),
+    ("human_intent_schema.sql", "human-intent.sqlite"),
+    ("openclaw_exporter_schema.sql", "openclaw-exporter.sqlite"),
+    ("research_coordinator_schema.sql", "research-coordinator.sqlite"),
+    ("candidate_staging_schema.sql", "research-review/candidate-staging.sqlite"),
+    ("research_review_schema.sql", "research-review/candidate-staging.sqlite"),
+    ("tick_ledger_schema.sql", "tick-ledger.sqlite"),
+    ("thesis_impact_budget_schema.sql", "thesis-impact-budget.sqlite"),
+    ("budget_pools_schema.sql", "thesis-impact-budget.sqlite"),
+)
+
+
+def packaged_schema_files(package: Path | None = None) -> tuple[str, ...]:
+    """Every ``*.sql`` shipped in this package, sorted."""
+
+    directory = package or Path(__file__).parent
+    return tuple(sorted(path.name for path in directory.glob("*.sql")))
+
+
+def apply_packaged_schemas(
+    state_dir: str | Path,
+    *,
+    package: Path | None = None,
+    schemas: Sequence[tuple[str, str | None]] | None = None,
+) -> dict[str, int]:
+    """Apply every packaged schema so a broken one fails here, not on a tick.
+
+    The loader is the one every authority uses -- ``executescript`` over the
+    packaged ``.sql`` -- rather than fifty imports, so this cannot drift from
+    what the authorities actually run.  It is safe to repeat and safe on a live
+    Core: every statement in every schema is ``CREATE ... IF NOT EXISTS`` or
+    ``INSERT OR IGNORE``, so applying one to a populated database is a no-op.
+    The ``ALTER``-and-rebuild migrations still belong to their authority's
+    constructor; this is about the schema *existing* and being valid SQL.
+
+    A sidecar the Core does not have yet is applied into a scratch database
+    that is thrown away, so this creates no database the deploy would not have
+    created and leaves an operator nothing to explain.
+    """
+
+    root = Path(state_dir).expanduser().resolve()
+    package = package or Path(__file__).parent
+    declared = tuple(SCHEMA_DATABASES if schemas is None else schemas)
+    known = dict(declared)
+    unowned = [name for name in packaged_schema_files(package) if name not in known]
+    if unowned:
+        raise RuntimeError(
+            "these packaged schemas name no database in SCHEMA_DATABASES, so "
+            "the install would exit zero without ever applying them: "
+            + ", ".join(unowned)
+        )
+    applied = scratch = 0
+    with tempfile.TemporaryDirectory(prefix="dalton-schema-probe-") as probe:
+        connections: dict[str, sqlite3.Connection] = {}
+        try:
+            for name, database in declared:
+                if database is None:
+                    target = root / "core.sqlite"
+                else:
+                    target = root / database
+                    if not target.exists():
+                        target = Path(probe) / Path(database).name
+                        scratch += 1
+                key = str(target)
+                if key not in connections:
+                    target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+                    connections[key] = sqlite3.connect(key)
+                connections[key].executescript(
+                    (package / name).read_text(encoding="utf-8")
+                )
+                connections[key].commit()
+                applied += 1
+        finally:
+            for connection in connections.values():
+                connection.close()
+    return {"schemas_applied": applied, "schemas_applied_to_scratch": scratch}
 
 
 def _write_config(path: Path, value: dict) -> None:
@@ -88,6 +227,10 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
     if not paths["model_router_db"].exists():
         with ModelRouter(paths["model_router_db"]):
             pass
+    # INT3: the five authorities above are not the schema set.  Apply the rest
+    # now, so a schema that does not parse fails the install rather than one
+    # lane, several minutes later, on the first tick that touches its table.
+    schemas = apply_packaged_schemas(root)
     if not paths["token_config"].exists():
         initial_principals = [
             Principal(
@@ -273,6 +416,8 @@ def bootstrap(state_dir: str | Path, config_path: str | Path) -> dict[str, str]:
         "model_router_db": str(paths["model_router_db"]),
         "writer_socket": str(paths["writer_socket"]),
         "token_config": str(paths["token_config"]),
+        "schemas_applied": str(schemas["schemas_applied"]),
+        "schemas_applied_to_scratch": str(schemas["schemas_applied_to_scratch"]),
     }
 
 

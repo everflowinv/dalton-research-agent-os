@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import plistlib
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -227,15 +228,9 @@ class InstallerSeedTests(unittest.TestCase):
             self.assertIn("--crowd-source-map", self.lane_argv(state))
 
     def test_the_lanes_this_script_will_not_install(self) -> None:
-        # Three deliberate absences, each for the same reason: the installer
-        # cannot supply the other half.
+        # Deliberate absences: the installer cannot supply the other half.
         code = "\n".join(line for line in self.script().splitlines()
                           if not line.lstrip().startswith("#"))
-        # P14a's judgement lane wants two model configurations pointing at
-        # different model families; a judge verified by its own model is not
-        # verified, and which two is the owner's decision.
-        self.assertNotIn("event-judgement-model-config", code)
-        self.assertNotIn("event-verifier-model-config", code)
         # P14e's lane switch, withheld until a template has been published.
         self.assertNotIn("research-task-lane.json", code)
         # S4 has no lane in this wave at all, so its six records switch
@@ -313,6 +308,264 @@ class InstallerSeedTests(unittest.TestCase):
             result = subprocess.run(
                 [shell, "-n", str(self.INSTALL)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class DeliberatelyUnseededTests(unittest.TestCase):
+    """INT3: no committed governance record can be forgotten.
+
+    Nineteen committed records were seeded by nothing, four of them on purpose
+    and the script said so in a comment. A comment is not a check: the other
+    fifteen -- ``yfinance-calendar-v1.json`` among them, one block away from
+    turning the catalyst lane on -- read exactly the same from outside.
+
+    So the rule is now checkable. Every record in ``deploy/connector-governance``
+    is either copied into the runtime governance directory by its lane's block,
+    or named in the ``DELIBERATELY_UNSEEDED`` array with the reason beside it.
+    A record that is in neither fails here rather than becoming a lane that
+    reports ``unconfigured`` for ever with nobody having decided that.
+    """
+
+    INSTALL = Path(__file__).resolve().parents[1] / "deploy" / "macos" / "install.sh"
+    REPO = Path(__file__).resolve().parents[1]
+
+    def sets(self) -> tuple[frozenset[str], frozenset[str], frozenset[str]]:
+        from scripts.rehearse_deploy import (
+            committed_governance_records,
+            deliberately_unseeded_records,
+            install_seeded_records,
+        )
+
+        return (
+            committed_governance_records(self.REPO),
+            install_seeded_records(self.INSTALL),
+            deliberately_unseeded_records(self.INSTALL),
+        )
+
+    def test_committed_equals_seeded_plus_deliberately_unseeded(self) -> None:
+        committed, seeded, named = self.sets()
+        self.assertEqual(
+            committed - seeded - named, frozenset(),
+            "seed these in their lane's all-or-nothing block, or name them in "
+            "DELIBERATELY_UNSEEDED in install.sh with the reason",
+        )
+        self.assertEqual(
+            named - committed, frozenset(),
+            "DELIBERATELY_UNSEEDED names a record the repo does not carry",
+        )
+        self.assertEqual(seeded & named, frozenset())
+
+    def test_every_deliberate_absence_carries_a_reason(self) -> None:
+        # The array is read by nothing at runtime; its whole value is that the
+        # reason sits next to the decision. An entry with no comment above it
+        # is the comment-only state this replaced.
+        text = self.INSTALL.read_text(encoding="utf-8")
+        body = text.split("DELIBERATELY_UNSEEDED=(", 1)[1].split("\n)", 1)[0]
+        lines = [line.strip() for line in body.splitlines() if line.strip()]
+        previous = None
+        for line in lines:
+            kind = "comment" if line.startswith("#") else "name"
+            if kind == "name" and previous != "name":
+                self.assertEqual(previous, "comment",
+                                 f"{line} starts a group with no reason above it")
+            previous = kind
+        self.assertEqual(previous, "name", "the array ends on a dangling comment")
+
+    def test_the_reasons_are_the_ones_that_were_decided(self) -> None:
+        _, _, named = self.sets()
+        self.assertEqual(
+            named,
+            frozenset({
+                "roic-list-transcripts-v1.json",
+                "roic-get-transcript-v1.json",
+                "guidepoint-get-transcript-narrowing-v1.json",
+            }),
+        )
+
+    def test_the_calendar_record_is_seeded_now(self) -> None:
+        # The one that mattered: C1's lane was a single block away and the
+        # record had been committed for a day.
+        _, seeded, _ = self.sets()
+        self.assertIn("yfinance-calendar-v1.json", seeded)
+
+
+class FilingsIndexRecoveryTests(unittest.TestCase):
+    """INT3: ``sec-filings-index-v1.json`` existed on one machine.
+
+    The writer's plist names it unconditionally, so a Core rebuilt from scratch
+    got ``--sec-filings-governance`` pointing at a path with no file behind it.
+    The record is recovered from the live Core, and what makes that safe to
+    commit is that it is not a copy of somebody's disk: it re-derives from the
+    packaged SEC template, hash for hash.
+    """
+
+    REPO = Path(__file__).resolve().parents[1]
+    RECORD = REPO / "deploy" / "connector-governance" / "sec-filings-index-v1.json"
+
+    def record(self) -> dict:
+        return json.loads(self.RECORD.read_text(encoding="utf-8"))
+
+    def test_the_record_is_committed(self) -> None:
+        self.assertTrue(self.RECORD.is_file())
+
+    def test_it_re_derives_from_the_packaged_contract(self) -> None:
+        from dalton_core.sec_filings_index import (
+            build_filings_index_governance_record,
+        )
+        from dalton_core.store import canonical_json
+
+        live = self.record()
+        built = build_filings_index_governance_record(
+            approved_by=live["approved_by"],
+            status=live["status"],
+            effective_from=live["effective_from"],
+            max_lease_seconds=live["max_lease_seconds"],
+        )
+        self.assertEqual(canonical_json(built), canonical_json(live))
+        self.assertEqual(built["content_hash"], live["content_hash"])
+
+    def test_its_own_content_hash_verifies(self) -> None:
+        from dalton_core.store import content_hash
+
+        live = self.record()
+        base = {key: value for key, value in live.items() if key != "content_hash"}
+        self.assertEqual(content_hash(base), live["content_hash"])
+
+    def test_the_approved_status_is_preserved_and_has_precedent(self) -> None:
+        # Seeding is copy-once, so re-proposing this here would take the
+        # owner's own approval away on the next rebuild rather than ask for
+        # one. Two committed records already carry an approval for the same
+        # reason -- they were approved before the repo carried them.
+        self.assertEqual(self.record()["status"], "approved")
+        self.assertTrue(self.record()["approved_by"].startswith("human:"))
+        for precedent in ("alphaengine-get-document-v1.json",
+                          "sec-company-facts-v1.json"):
+            other = json.loads(
+                (self.RECORD.parent / precedent).read_text(encoding="utf-8"))
+            self.assertEqual(other["status"], "approved")
+
+    def test_the_bytes_are_the_canonical_form(self) -> None:
+        from dalton_core.store import canonical_json
+
+        raw = self.RECORD.read_bytes()
+        self.assertEqual(
+            raw, (canonical_json(json.loads(raw)) + "\n").encode("utf-8"))
+
+    def test_install_seeds_it_with_the_lane_plan(self) -> None:
+        from scripts.rehearse_deploy import install_seeded_records
+
+        install = self.REPO / "deploy" / "macos" / "install.sh"
+        self.assertIn("sec-filings-index-v1.json", install_seeded_records(install))
+        # All or nothing: the record and the lane's plan are one block.
+        text = install.read_text(encoding="utf-8")
+        block = text.split("sec_filings_governance_file=", 1)[1].split("\nfi\n", 1)[0]
+        self.assertIn("p10-us-it-services-sec-filings-plan-v1.json", block)
+
+    def test_the_writer_plist_argument_now_has_a_file_behind_it(self) -> None:
+        from scripts.rehearse_deploy import INSTALL_SEEDS
+
+        self.assertIn(
+            "connector-governance/sec-filings-index-v1.json",
+            [spec.state for spec in INSTALL_SEEDS],
+        )
+
+
+class BootstrapSchemaTests(unittest.TestCase):
+    """INT3: every packaged schema is applied by ``dalton-bootstrap``.
+
+    It used to open five authorities. The other forty-seven schemas ran the
+    first time the writer or a lane constructed their authority, which on a
+    live Core is several minutes after ``install.sh`` has already exited zero:
+    a deploy that broke a schema did not fail the install, it failed one lane
+    on one tick, in a heartbeat nobody was reading.
+    """
+
+    def test_every_packaged_schema_names_a_database(self) -> None:
+        from dalton_core.bootstrap import SCHEMA_DATABASES, packaged_schema_files
+
+        self.assertEqual(
+            frozenset(packaged_schema_files()) - frozenset(dict(SCHEMA_DATABASES)),
+            frozenset(),
+            "a new *_schema.sql needs an entry, or the install would exit zero "
+            "without ever applying it",
+        )
+        self.assertEqual(
+            frozenset(dict(SCHEMA_DATABASES)) - frozenset(packaged_schema_files()),
+            frozenset(),
+        )
+
+    def test_the_pairs_that_share_a_file_stay_in_order(self) -> None:
+        from dalton_core.bootstrap import SCHEMA_DATABASES
+
+        order = [name for name, _ in SCHEMA_DATABASES]
+        self.assertLess(order.index("candidate_staging_schema.sql"),
+                        order.index("research_review_schema.sql"))
+        self.assertLess(order.index("thesis_impact_budget_schema.sql"),
+                        order.index("budget_pools_schema.sql"))
+
+    def test_bootstrap_applies_them_all_and_repeats_cleanly(self) -> None:
+        from dalton_core.bootstrap import bootstrap, packaged_schema_files
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = bootstrap(root / "state", root / "service.json")
+            self.assertEqual(
+                int(first["schemas_applied"]), len(packaged_schema_files()))
+            second = bootstrap(root / "state", root / "service.json")
+            self.assertEqual(first, second)
+
+    def test_it_creates_no_database_the_deploy_would_not(self) -> None:
+        # A sidecar the Core does not have is applied into a scratch database
+        # and thrown away: the SQL still runs, and an operator is not left with
+        # an empty document-index.sqlite to explain.
+        from dalton_core.bootstrap import bootstrap
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            result = bootstrap(root / "state", root / "service.json")
+            self.assertGreater(int(result["schemas_applied_to_scratch"]), 0)
+            names = {path.name for path in (root / "state").glob("*.sqlite")}
+            self.assertEqual(
+                names, {"core.sqlite", "scheduler.sqlite", "model-router.sqlite"})
+            self.assertFalse((root / "state" / "research-review").exists())
+
+    def test_a_broken_schema_fails_here(self) -> None:
+        # The whole point: this is a sqlite3 error raised out of
+        # dalton-bootstrap, so install.sh exits non-zero under `set -e`.
+        # Before, it was one lane on one tick, minutes after the install had
+        # already reported success.
+        from dalton_core.bootstrap import apply_packaged_schemas
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+            package = Path(directory) / "package"
+            root.mkdir()
+            package.mkdir()
+            (package / "good_schema.sql").write_text(
+                "CREATE TABLE IF NOT EXISTS good(id TEXT PRIMARY KEY);",
+                encoding="utf-8")
+            (package / "broken_schema.sql").write_text(
+                "CREATE TABLE IF NOT EXISTS broken(", encoding="utf-8")
+            with self.assertRaises(sqlite3.Error):
+                apply_packaged_schemas(
+                    root, package=package,
+                    schemas=(("good_schema.sql", None),
+                             ("broken_schema.sql", None)))
+
+    def test_a_schema_with_no_declared_database_is_refused(self) -> None:
+        # A new *_schema.sql nobody added to the table would otherwise be
+        # skipped in silence, which is the state this whole change is about.
+        from dalton_core.bootstrap import apply_packaged_schemas
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "state"
+            package = Path(directory) / "package"
+            root.mkdir()
+            package.mkdir()
+            (package / "brand_new_schema.sql").write_text(
+                "CREATE TABLE IF NOT EXISTS x(id TEXT);", encoding="utf-8")
+            with self.assertRaises(RuntimeError) as caught:
+                apply_packaged_schemas(root, package=package, schemas=())
+        self.assertIn("brand_new_schema.sql", str(caught.exception))
 
 
 class LegacyAgendaPlaneRetirementTests(unittest.TestCase):
