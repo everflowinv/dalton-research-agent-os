@@ -510,6 +510,81 @@ class OpenClawModelAdapterTests(unittest.TestCase):
         )
         self.assertEqual(invocation.granularity.value, "verification")
 
+    def test_event_verifier_uses_its_own_allowlisted_provider_schema(self) -> None:
+        verifier = WorkOrder.from_dict({
+            **self.work.to_dict(),
+            "id": "work:event-verification-1",
+            "question": "Verify the event judgement",
+            "requested_capabilities": ["verify"],
+            "idempotency_key": "work-key:event-verification-1",
+            "metadata": {
+                "purpose": "event_judgement_verifier",
+                "verifier_output_schema_version": "0.1",
+                "verifier_provider_contract":
+                    "event-judgement-verifier-provider-output-0.1",
+            },
+        })
+        routed = self.router.route(
+            verifier, attempt_number=1, capability="verify",
+            policy_version_ref="model-routing-policy-version:default:1",
+            credential_slot_refs=["credential-slot:openai:dalton"],
+            required_modalities=["text"], required_context_tokens=1_000,
+            estimated_input_tokens=500, estimated_output_tokens=250,
+            producer_family="anthropic-claude",
+            idempotency_key="route-key:event-verification-1",
+        )["decision"]
+        (_, result), broker = self.run_with(success_response, work=verifier, route=routed)
+        broker.close()
+        structured = broker.requests[0]["requiredControls"]["structuredOutput"]
+        self.assertEqual(structured["schemaName"],
+                         "event_judgement_verifier_provider_output_v0_1")
+        self.assertEqual(set(structured["jsonSchema"]["required"]),
+                         {"verdict", "findings"})
+        self.assertNotIn("assessment_ref", structured["jsonSchema"]["properties"])
+        self.assertTrue(result.metadata["required_provider_controls"])
+
+    def test_unknown_verifier_provider_contract_fails_before_transport(self) -> None:
+        verifier = WorkOrder.from_dict({
+            **self.work.to_dict(), "id": "work:unknown-verification-1",
+            "requested_capabilities": ["verify"],
+            "idempotency_key": "work-key:unknown-verification-1",
+            "metadata": {"verifier_output_schema_version": "0.1",
+                         "verifier_provider_contract": "caller-file.json"},
+        })
+        routed = self.router.route(
+            verifier, attempt_number=1, capability="verify",
+            policy_version_ref="model-routing-policy-version:default:1",
+            credential_slot_refs=["credential-slot:openai:dalton"],
+            required_modalities=["text"], required_context_tokens=1_000,
+            estimated_input_tokens=500, estimated_output_tokens=250,
+            producer_family="anthropic-claude",
+            idempotency_key="route-key:unknown-verification-1",
+        )["decision"]
+        with self.assertRaisesRegex(ModelAdmissionError, "contract is unsupported"):
+            self.run_with(success_response, work=verifier, route=routed)
+
+    def test_event_provider_contract_refuses_a_different_purpose(self) -> None:
+        verifier = WorkOrder.from_dict({
+            **self.work.to_dict(), "id": "work:wrong-purpose-verification-1",
+            "requested_capabilities": ["verify"],
+            "idempotency_key": "work-key:wrong-purpose-verification-1",
+            "metadata": {"purpose": "company_dossier_verifier",
+                         "verifier_output_schema_version": "0.1",
+                         "verifier_provider_contract":
+                             "event-judgement-verifier-provider-output-0.1"},
+        })
+        routed = self.router.route(
+            verifier, attempt_number=1, capability="verify",
+            policy_version_ref="model-routing-policy-version:default:1",
+            credential_slot_refs=["credential-slot:openai:dalton"],
+            required_modalities=["text"], required_context_tokens=1_000,
+            estimated_input_tokens=500, estimated_output_tokens=250,
+            producer_family="anthropic-claude",
+            idempotency_key="route-key:wrong-purpose-verification-1",
+        )["decision"]
+        with self.assertRaisesRegex(ModelAdmissionError, "does not match its purpose"):
+            self.run_with(success_response, work=verifier, route=routed)
+
     def test_verifier_thinking_level_binds_into_controls_and_identity(self) -> None:
         verifier = WorkOrder.from_dict({
             **self.work.to_dict(),

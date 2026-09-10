@@ -59,6 +59,14 @@ ProviderControlMode = Literal[
     "provider-controlled-v1",
     "calibration-posthoc-v1",
 ]
+_VERIFIER_PROVIDER_CONTRACTS = {
+    "event-judgement-verifier-provider-output-0.1": (
+        "0.1",
+        "event-judgement-verifier-provider-output-v0.1.schema.json",
+        "event_judgement_verifier_provider_output_v0_1",
+        frozenset({"event_judgement_verifier", "thesis_reflection_verifier"}),
+    ),
+}
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _BROKER_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 _ERROR_CODE_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -589,13 +597,28 @@ def _required_provider_controls(
 
     if route["constraints"]["producer_family"] is None:
         return None
-    if (
-        work.metadata.get("verifier_output_schema_version")
-        != VERIFIER_OUTPUT_SCHEMA_VERSION
-    ):
-        raise ModelAdmissionError(
-            "independent verifier WorkOrder lacks the required output schema version"
-        )
+    contract_ref = work.metadata.get("verifier_provider_contract")
+    if contract_ref is not None:
+        contract = _VERIFIER_PROVIDER_CONTRACTS.get(contract_ref)
+        if contract is None:
+            raise ModelAdmissionError("independent verifier provider contract is unsupported")
+        schema_version, schema_resource, schema_name, allowed_purposes = contract
+        if work.metadata.get("purpose") not in allowed_purposes:
+            raise ModelAdmissionError(
+                "independent verifier provider contract does not match its purpose"
+            )
+        if work.metadata.get("verifier_output_schema_version") != schema_version:
+            raise ModelAdmissionError(
+                "independent verifier WorkOrder output schema version does not match its contract"
+            )
+    else:
+        if (
+            work.metadata.get("verifier_output_schema_version")
+            != VERIFIER_OUTPUT_SCHEMA_VERSION
+        ):
+            raise ModelAdmissionError(
+                "independent verifier WorkOrder lacks the required output schema version"
+            )
     if provider_control_mode == PROVIDER_CONTROL_MODE_CALIBRATION_POSTHOC:
         if (
             work.metadata.get("phase") != "verification-calibration"
@@ -607,7 +630,12 @@ def _required_provider_controls(
             )
         return None
     binding_mode = work.metadata.get("verifier_binding_mode")
-    if binding_mode == VERIFIER_BINDING_MODE:
+    if contract_ref is not None:
+        if binding_mode is not None:
+            raise ModelAdmissionError(
+                "purpose provider contracts cannot also select a verifier binding mode"
+            )
+    elif binding_mode == VERIFIER_BINDING_MODE:
         if (
             work.metadata.get("verifier_decision_schema_version")
             != VERIFIER_DECISION_SCHEMA_VERSION

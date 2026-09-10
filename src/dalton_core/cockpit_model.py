@@ -59,6 +59,14 @@ _SEED_PURPOSES = ("ask", "goal", "steer", "draft", "plan", "model_spec")
 # registration is a snapshot waiting to go stale in whoever imported it first.
 _PURPOSES: set[str] = set(_SEED_PURPOSES)
 
+# Provider-enforced output contracts for independent Cockpit verifiers.  The
+# adapter resolves these opaque allowlisted refs to packaged schemas; callers
+# can never supply a filesystem path or arbitrary JSON schema.
+_VERIFIER_PROVIDER_CONTRACTS = {
+    "event_judgement_verifier": "event-judgement-verifier-provider-output-0.1",
+    "thesis_reflection_verifier": "event-judgement-verifier-provider-output-0.1",
+}
+
 # Room for the completion write after the model answers, so a call that
 # finishes right on its timeout still has a live lease to complete against.
 _LEASE_GRACE_SECONDS = 30.0
@@ -248,7 +256,8 @@ def _now() -> str:
 def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_ref: str,
                max_input_tokens: int, max_output_tokens: int, max_cost_usd: float, max_seconds: int,
                budget_identity: str | None = None,
-               created_at: str | None = None) -> WorkOrder:
+               created_at: str | None = None,
+               verifier_provider_contract: str | None = None) -> WorkOrder:
     if purpose not in _PURPOSES:
         raise CockpitModelError("unknown cockpit model purpose")
     if len(prompt.encode("utf-8")) > max_input_tokens:
@@ -259,6 +268,8 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                 "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest()}
     if budget_identity is not None:
         identity["budget_fingerprint"] = budget_identity
+    if verifier_provider_contract is not None:
+        identity["verifier_provider_contract"] = verifier_provider_contract
     digest = content_hash(identity)
     at = created_at or _now()
     return WorkOrder(
@@ -270,7 +281,11 @@ def build_work(*, purpose: str, request_id: str, prompt: str, mission_version_re
                 "max_cost_usd": max_cost_usd, "max_seconds": max_seconds},
         idempotency_key=f"cockpit:{purpose}:{digest}", declared_side_effects=(), status="ready",
         input_refs=(), metadata={"control_plane": "cockpit", "purpose": purpose, "request_id": request_id,
-                                 "mission_version_ref": mission_version_ref},
+                                 "mission_version_ref": mission_version_ref,
+                                 **({} if verifier_provider_contract is None else {
+                                     "verifier_output_schema_version": "0.1",
+                                     "verifier_provider_contract": verifier_provider_contract,
+                                 })},
     )
 
 
@@ -387,7 +402,10 @@ class CockpitModel:
                           max_input_tokens=effective["max_input_tokens"], max_output_tokens=effective["max_output_tokens"],
                           max_cost_usd=effective["max_cost_usd"], max_seconds=effective["timeout_seconds"],
                           budget_identity=(budget_fingerprint(effective) if explicit_budget else None),
-                          created_at=created_at)
+                          created_at=created_at,
+                          verifier_provider_contract=(
+                              _VERIFIER_PROVIDER_CONTRACTS.get(purpose) if producer_refs else None
+                          ))
         scope = {"mission_ref": mission["mission_ref"], "mission_version_ref": mission["id"],
                  "mission_version_hash": mission["content_hash"],
                  "max_daily_paid_calls": int(mission["budget"]["max_daily_paid_calls"]),

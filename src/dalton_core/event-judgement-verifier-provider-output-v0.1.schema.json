@@ -1,0 +1,31 @@
+{
+  "$id": "https://dalton.local/schemas/event-judgement-verifier-provider-output-v0.1.schema.json",
+  "title": "EventJudgementVerifierProviderOutputV0.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "findings"],
+  "properties": {
+    "verdict": {"enum": ["pass", "reject"]},
+    "findings": {
+      "type": "array",
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "detail"],
+        "properties": {
+          "code": {
+            "enum": [
+              "decision_not_supported_by_the_event",
+              "action_does_not_follow_from_the_decision",
+              "citation_does_not_say_what_is_claimed",
+              "evidence_tier_overweighted",
+              "driver_or_thesis_link_is_asserted_not_shown"
+            ]
+          },
+          "detail": {"type": "string", "minLength": 1, "maxLength": 500}
+        }
+      }
+    }
+  }
+}

@@ -12,9 +12,11 @@ from pathlib import Path
 # Importing the lane is what registers its purpose, exactly as the lane's own
 # child process does before it builds a WorkOrder.
 import dalton_core.claim_index_tagging  # noqa: F401
+import dalton_core.event_judgement  # noqa: F401
 from dalton_core.cockpit_model import (
     CockpitModel,
     CockpitModelError,
+    build_work,
     independent_model_call,
 )
 from dalton_core.contracts import ModelInvocation, ResultEnvelope
@@ -22,6 +24,7 @@ from dalton_core.model_fallback_chain import register_purpose_tier, tier_chain
 from dalton_core.model_router import ModelRouter
 from dalton_core.openclaw_catalog_reconcile import sync_openclaw_model_catalog
 from dalton_core.research_planner_setup import credential_slots_for, ensure_planner_policy
+from dalton_core.scheduler import Scheduler
 from dalton_core.store import content_hash
 from dalton_core.thesis_impact_budget import ThesisImpactBudgetStore
 from tests.test_openclaw_catalog_reconcile import _config
@@ -253,6 +256,34 @@ class CockpitChainTests(unittest.TestCase):
         )
         self.assertFalse(second["replayed"])
         self.assertEqual(another.served, ["profile:claude-fable-5-1"])
+
+    def test_event_verifier_work_order_binds_provider_contract_into_identity(self) -> None:
+        producer = self._model(
+            ChainAdapter({}), policy_version_ref=self.chain_policy
+        ).call(purpose="event_judgement", request_id="event-provider-contract",
+               prompt="draft", mission=self.mission)
+        verifier = self._model(
+            ChainAdapter({}), policy_version_ref=self.verifier_policy,
+            slots=self.verifier_slots,
+        ).call(
+            purpose="event_judgement_verifier", request_id="event-provider-contract",
+            prompt='{"verdict":"pass","findings":[]}', mission=self.mission,
+            producer_route_decision_refs=[producer["route_decision_ref"]],
+        )
+        with Scheduler(self.root / "scheduler.sqlite") as scheduler:
+            stored = scheduler.work_order_authority(verifier["work_order_ref"])
+        metadata = stored["work_order"]["metadata"]
+        self.assertEqual(metadata["verifier_output_schema_version"], "0.1")
+        self.assertEqual(metadata["verifier_provider_contract"],
+                         "event-judgement-verifier-provider-output-0.1")
+        legacy = build_work(
+            purpose="event_judgement_verifier", request_id="event-provider-contract",
+            prompt='{"verdict":"pass","findings":[]}',
+            mission_version_ref=self.mission["id"], max_input_tokens=120_000,
+            max_output_tokens=500, max_cost_usd=0.5, max_seconds=120,
+            created_at=self.mission["created_at"],
+        )
+        self.assertNotEqual(verifier["work_order_ref"], legacy.id)
 
     def test_unknown_producer_route_fails_before_adapter_or_budget_charge(self) -> None:
         adapter = ChainAdapter({})
