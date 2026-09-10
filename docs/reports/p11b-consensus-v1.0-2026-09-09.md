@@ -333,7 +333,20 @@ P15d 的 `conviction_call_cli.consensus_gap` 是在本片还不存在时写的�
 consensus」——同一个答案、同一个理由；另外两个把假模块只塞进 `sys.modules`，在真模块不存在时够用，在它存在
 的当天就不够了（`from . import consensus_estimate` 走的是 package 属性），改成两处一起替换。
 
-### 5.8 模型路径（未接线）
+### 5.8 P13-M3 的 sensitivity 也按名字解析本模块（已完成）
+
+除 §5.7 的 `latest_consensus` 外，P13-M3（`w3-sensitivity`）按名字要
+`consensus_estimate.report_consensus(store, company_ref)`，期望**每家券商一行**的
+`{broker, value, refs}`，不足两家独立券商时给空。已交付为 `street_estimate.report_consensus` 的薄适配器：
+规则仍然只有一处（按不同**券商**计数、90 天窗口、混币种不成立），同一家在窗口内发两篇取最新那篇——与它所
+依据的那个 range 保持一致。**每行恰好三个键**，因为按名字解析的调用方如果封闭了形状，多一个键就会被拒；
+币种不在其中也不需要在：混币种的 range 本来就不成立，所以每一行都在同一个币种里。
+
+两个按名字解析的读者都不抛异常：读不出来的街就是没有街，不是一次故障。`tests/test_consensus_estimate.py`
+的 `ResolvedByNameTests` 把两个签名与两个形状都钉住了——它们是与看不见它们的代码之间的合同，正是那种会
+悄悄坏掉的合同。
+
+### 5.9 模型路径（未接线）
 
 `street_estimate_extraction` 交付了 estimates table 的模型面（`build_request` / `build_prompt` /
 `verify_estimate_table`，冻结 `TASK_HASH`，purpose `street_estimate`——`model_fallback_chain` 里已有
@@ -377,7 +390,7 @@ consensus」——同一个答案、同一个理由；另外两个把假模块�
 新增四个测试文件 + 一个 CLI 测试文件，全部离线：
 
 ```
-tests/test_consensus_estimate.py           34 项
+tests/test_consensus_estimate.py           41 项
 tests/test_street_estimate.py              37 项
 tests/test_street_estimate_extraction.py   30 项
 tests/test_mission_consensus_lane.py       23 项

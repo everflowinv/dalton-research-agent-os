@@ -331,6 +331,91 @@ class ImmutabilityTests(AuthorityTestCase):
             ConsensusEstimateAuthority(store).latest_version(ACN)
 
 
+class ResolvedByNameTests(AuthorityTestCase):
+    """The two readers other slices look up by name, and the shapes they expect.
+
+    P15d's conviction call and P13-M3's sensitivity work both resolve this
+    module at call time rather than importing it, so that they would start
+    working the day it landed. That makes these two signatures a contract with
+    code that cannot see them, which is exactly the kind that breaks quietly.
+    """
+
+    def street(self):
+        from dalton_core.street_estimate import StreetEstimateStore
+
+        return StreetEstimateStore(self.store)
+
+    def note(self, broker, value, document, published_on="2026-09-02"):
+        from tests.test_street_estimate import estimate, figure
+
+        return self.street().record(estimate(
+            company_ref=ACN, broker=broker, broker_as_named=broker,
+            document_ref=document, published_on=published_on, rating=None,
+            target_price={"value": value, "currency": "USD", "horizon": None,
+                          "quote_id": "quote:0:1200:abc"},
+            figures=[figure(value=value, quote=(
+                "Accenture PLC\nSeptember 2, 2026\nPrice Target: $%s\n" % value))],
+        ))
+
+    def test_report_consensus_returns_one_row_per_house(self):
+        from dalton_core.consensus_estimate import report_consensus
+
+        self.note("td", "173.00", "alphaengine-doc:1")
+        self.note("wells-fargo", "194.00", "alphaengine-doc:2")
+        rows = report_consensus(self.store, ACN, as_of="2026-09-09")
+        self.assertEqual([row["broker"] for row in rows], ["td", "wells-fargo"])
+        self.assertEqual([row["value"] for row in rows], ["173.00", "194.00"])
+        for row in rows:
+            # Exactly three keys: a caller that closed the shape would refuse
+            # a fourth.
+            self.assertEqual(set(row), {"broker", "value", "refs"})
+            self.assertEqual(len(row["refs"]), 2)
+            self.assertTrue(all(isinstance(ref, str) and ref for ref in row["refs"]))
+
+    def test_one_house_twice_is_not_a_range_here_either(self):
+        from dalton_core.consensus_estimate import report_consensus
+
+        self.note("td", "11.00", "alphaengine-doc:1")
+        self.note("td", "11.00", "alphaengine-doc:2")
+        self.assertEqual(report_consensus(self.store, ACN, as_of="2026-09-09"), [])
+
+    def test_a_house_publishing_twice_contributes_its_newest_note(self):
+        from dalton_core.consensus_estimate import report_consensus
+
+        self.note("td", "151.00", "alphaengine-doc:1", published_on="2026-07-01")
+        self.note("td", "173.00", "alphaengine-doc:2", published_on="2026-09-02")
+        self.note("wells-fargo", "194.00", "alphaengine-doc:3")
+        rows = {row["broker"]: row for row in
+                report_consensus(self.store, ACN, as_of="2026-09-09")}
+        self.assertEqual(rows["td"]["value"], "173.00")
+        self.assertEqual(rows["td"]["refs"][1], "alphaengine-doc:2")
+
+    def test_a_company_with_no_notes_is_an_empty_list_not_an_error(self):
+        from dalton_core.consensus_estimate import report_consensus
+
+        self.assertEqual(report_consensus(self.store, ACN, as_of="2026-09-09"), [])
+
+    def test_a_core_with_no_street_table_is_an_empty_list_not_an_outage(self):
+        from dalton_core.consensus_estimate import report_consensus
+
+        class Bare:
+            connection = None
+
+        self.assertEqual(report_consensus(Bare(), ACN), [])
+
+    def test_latest_consensus_is_none_until_this_company_has_a_chain(self):
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.assertIsNone(latest_consensus(self.store, ACN))
+
+    def test_latest_consensus_has_no_gap_without_a_forecast_to_compare(self):
+        from dalton_core.consensus_estimate import latest_consensus
+
+        self.publish()
+        # The street is held; ours is not. An absence, never agreement.
+        self.assertEqual(latest_consensus(self.store, ACN), {"metrics": []})
+
+
 class ReportConsensusBlockTests(AuthorityTestCase):
     BLOCK = {
         "metric": "metric:price-target", "period": "current",

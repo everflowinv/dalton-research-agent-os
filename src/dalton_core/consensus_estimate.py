@@ -1004,6 +1004,72 @@ def latest_consensus(store: Any, company_ref: str) -> dict[str, Any] | None:
     return {"metrics": rows[:MAX_GAP_METRICS]}
 
 
+def report_consensus(
+    store: Any, company_ref: str, *, as_of: str | None = None
+) -> list[dict[str, Any]]:
+    """The sell-side range as one row per house, or nothing when there is none.
+
+    The second reader resolved by name against this module -- P13-M3's
+    sensitivity work asks for ``{broker, value, refs}`` per house and expects
+    two distinct houses or nothing. It is a thin adapter over
+    ``street_estimate.report_consensus``, which is where the rule lives and
+    where it stays: corroboration is counted in distinct houses, never in
+    notes, so two notes from one house come back as nothing at all rather than
+    as a range of one opinion with itself.
+
+    Exactly three keys per row, because a caller that closed the shape would
+    refuse a fourth. The currency is not among them and does not need to be:
+    the rule below refuses a range that mixes two, so every row here is in the
+    same one.
+
+    An empty list is the honest answer for a company the street has published
+    one view on, and for a Core with no street estimates at all. Nothing here
+    raises: an unreadable street is no street, not an outage.
+    """
+
+    try:
+        from .street_estimate import (
+            StreetEstimateStore,
+            report_consensus as street_range,
+        )
+
+        held = StreetEstimateStore(store).estimates(_text(company_ref, "company_ref"))
+    except Exception:  # noqa: BLE001 - no notes here is no range
+        return []
+    if not held:
+        return []
+    day = as_of or datetime.now(timezone.utc).date().isoformat()
+    try:
+        block = street_range(held, as_of=day)
+    except Exception:  # noqa: BLE001
+        return []
+    if not block:
+        return []
+    counted = set(block["brokers"])
+    newest: dict[str, Mapping[str, Any]] = {}
+    for item in held:
+        broker = str(item.get("broker") or "")
+        target = item.get("target_price")
+        if broker not in counted or not isinstance(target, Mapping):
+            continue
+        # The same house inside the window contributes its newest note, which
+        # is the rule the range was built under; picking a different one here
+        # would make the rows disagree with the range they came from.
+        standing = newest.get(broker)
+        if standing is None or str(standing["published_on"]) < str(item["published_on"]):
+            newest[broker] = item
+    rows = [
+        {
+            "broker": broker,
+            "value": str(item["target_price"]["value"]),
+            "refs": [str(item["id"]), str(item["document_ref"])],
+        }
+        for broker, item in newest.items()
+    ]
+    rows.sort(key=lambda row: row["broker"])
+    return rows
+
+
 def validate_report_consensus(value: Any) -> dict[str, Any]:
     """The closed shape of a range computed from sell-side reports."""
 
@@ -1090,6 +1156,7 @@ __all__ = [
     "fiscal_calendar",
     "latest_consensus",
     "map_estimate_period",
+    "report_consensus",
     "map_recommendation_period",
     "validate_report_consensus",
 ]
