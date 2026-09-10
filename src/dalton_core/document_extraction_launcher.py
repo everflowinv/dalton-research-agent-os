@@ -77,6 +77,20 @@ def _frozen_signature(value: Any) -> Any:
     return value
 
 
+def _configuration_fingerprint(path: Path) -> str:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ExtractionLaunchRejected(
+            f"document extraction model configuration is unreadable: {exc}"
+        ) from exc
+    if not isinstance(value, dict):
+        raise ExtractionLaunchRejected(
+            "document extraction model configuration must be an object"
+        )
+    return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
 class DocumentExtractionLauncher:
     def __init__(
         self,
@@ -108,6 +122,10 @@ class DocumentExtractionLauncher:
 
     def _ticket_path(self, ticket_id: str) -> Path:
         return self.tickets_dir / ticket_id.split(":", 1)[1] / "ticket.json"
+
+    def configuration_fingerprint(self) -> str:
+        """Hash the canonical model configuration the child will consume."""
+        return _configuration_fingerprint(self.model_config_path)
 
     def _command(self, *, requested_by: str | None, max_windows: int,
                  ticket_dir: Path, max_numeric_windows: int = 0,
@@ -156,8 +174,7 @@ class DocumentExtractionLauncher:
         if (not isinstance(max_discovery_windows, int) or isinstance(max_discovery_windows, bool)
                 or not 0 <= max_discovery_windows <= 50):
             raise ExtractionLaunchRejected("max_discovery_windows must be 0..50")
-        if not self.model_config_path.is_file():
-            raise ExtractionLaunchRejected("document extraction model configuration is missing")
+        config_fingerprint = self.configuration_fingerprint()
         with self._lock:
             if self._current is not None and self._current[1].poll() is None:
                 raise ExtractionLaunchConflict(f"extraction {self._current[0]} is still running")
@@ -186,6 +203,7 @@ class DocumentExtractionLauncher:
                 "schema_version": TICKET_SCHEMA_VERSION, "id": ticket_id,
                 "requested_by": requested_by, "max_windows": max_windows,
                 "model_config_path": str(self.model_config_path),
+                "model_config_fingerprint": config_fingerprint,
                 "started_at": started_at, "pid": process.pid,
                 "status": "running", "exit_code": None, "completed_at": None,
             }
@@ -340,6 +358,18 @@ class DocumentExtractionCoordinator:
                         "failure_class": blocked.classification.failure_class}
             self.failure_budget.clear(self._permission_item)
             permission_changed = True
+        if result["awaiting"] == 0:
+            return {**result, "status": "idle"}
+        try:
+            config_fingerprint = _configuration_fingerprint(
+                Path(self.launcher.model_config_path)
+            )
+        except Exception as exc:
+            return {
+                **result,
+                "status": "rejected",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
         if latest is not None:
             try:
                 ticket = self.launcher.status(latest["ticket"])
@@ -370,11 +400,10 @@ class DocumentExtractionCoordinator:
                               "secondary_fresh": secondary,
                               "completed_at": ticket.get("completed_at"), "awaiting_at_launch": latest.get("awaiting_at_launch")}
                     _write_owner_only(self._latest_path, latest)
-        if result["awaiting"] == 0:
-            return {**result, "status": "idle"}
         if latest is not None and latest.get("settled") and latest.get("stop_reason") in ("nothing_to_draft",) \
                 and latest.get("awaiting_at_launch") == result["awaiting"] \
-                and not latest.get("secondary_fresh"):
+                and not latest.get("secondary_fresh") \
+                and latest.get("model_config_fingerprint") == config_fingerprint:
             completed = latest.get("completed_at")
             if completed and self.clock() - datetime.fromisoformat(completed) < IDLE_HOLD:
                 return {**result, "status": "held", "reason": "nothing to draft or read since the last run; queue unchanged"}
@@ -400,8 +429,12 @@ class DocumentExtractionCoordinator:
         except Exception as exc:
             name = type(exc).__name__
             return {**result, "status": "busy" if name.endswith("Conflict") else "rejected", "reason": f"{name}: {exc}"}
-        _write_owner_only(self._latest_path, {"ticket": ticket["id"], "settled": False,
-                                              "awaiting_at_launch": result["awaiting"]})
+        _write_owner_only(self._latest_path, {
+            "ticket": ticket["id"],
+            "settled": False,
+            "awaiting_at_launch": result["awaiting"],
+            "model_config_fingerprint": ticket["model_config_fingerprint"],
+        })
         return {**result, "status": "launched", "ticket_ref": ticket["id"],
                 "max_windows": self.max_windows_per_tick,
                 "max_numeric_windows": self.numeric_windows_per_tick,

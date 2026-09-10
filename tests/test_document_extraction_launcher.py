@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -41,7 +42,14 @@ class FakeLauncher:
                             "max_numeric_windows": max_numeric_windows,
                             "max_discovery_windows": max_discovery_windows})
         self.tickets[ticket] = {"id": ticket, "status": "running", "summary": None, "completed_at": None}
-        return {"id": ticket, "status": "running"}
+        return {"id": ticket, "status": "running",
+                "model_config_fingerprint": self.configuration_fingerprint()}
+
+    def configuration_fingerprint(self):
+        from dalton_core.store import canonical_json
+        import hashlib
+        value = json.loads(self.model_config_path.read_text(encoding="utf-8"))
+        return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
     def finish(self, summary: dict, *, completed_at: str) -> None:
         ticket = self.tickets[self.starts and list(self.tickets)[-1]]
@@ -187,8 +195,49 @@ class CoordinatorTests(unittest.TestCase):
                         ("2026-09-10T12:34:56.000000+00:00",))
         self.assertEqual(restarted.dispatch_once()["status"], "launched")
 
+    def test_model_configuration_change_breaks_idle_hold_across_restart(self) -> None:
+        self._awaiting_review()
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
+        self.launcher.finish(
+            {"status": "succeeded", "drafted": [],
+             "stop_reason": "nothing_to_draft", "reviews_complete": 0},
+            completed_at=self.clock().isoformat(),
+        )
+        self.assertEqual(self.coordinator.dispatch_once()["status"], "held")
+        restarted = DocumentExtractionCoordinator(
+            missions=self.missions, launcher=self.launcher, clock=self.clock
+        )
+        self.assertEqual(restarted.dispatch_once()["status"], "held")
+        self.launcher.model_config_path.write_text(
+            '{"routing_policy_ref":"policy:new"}', encoding="utf-8"
+        )
+        self.assertEqual(restarted.dispatch_once()["status"], "launched")
+        self.assertEqual(len(self.launcher.starts), 2)
+
 
 class LauncherTests(unittest.TestCase):
+    def test_ticket_persists_the_canonical_launch_configuration_fingerprint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "cfg.json"
+            config.write_text('{"routing_policy_ref":"policy:one"}', encoding="utf-8")
+            process = type("Process", (), {"pid": 12345, "poll": lambda self: None,
+                                            "terminate": lambda self: None,
+                                            "wait": lambda self, timeout=None: 0})()
+            launcher = DocumentExtractionLauncher(
+                state_dir=root, model_config_path=config
+            )
+            self.addCleanup(launcher.close)
+            with patch("dalton_core.document_extraction_launcher.subprocess.Popen",
+                       return_value=process):
+                ticket = launcher.start()
+            stored = json.loads(launcher._ticket_path(ticket["id"]).read_text())
+            self.assertRegex(stored["model_config_fingerprint"], r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                stored["model_config_fingerprint"],
+                launcher.configuration_fingerprint(),
+            )
+
     def test_launcher_refuses_before_spawning(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); (root / "cfg.json").write_text("{}")
@@ -208,6 +257,13 @@ class LauncherTests(unittest.TestCase):
             missing = DocumentExtractionLauncher(state_dir=root, model_config_path=root / "absent.json")
             with self.assertRaises(ExtractionLaunchRejected):
                 missing.start()
+            malformed_path = root / "malformed.json"
+            malformed_path.write_text("{", encoding="utf-8")
+            malformed = DocumentExtractionLauncher(
+                state_dir=root, model_config_path=malformed_path
+            )
+            with self.assertRaisesRegex(ExtractionLaunchRejected, "unreadable"):
+                malformed.start()
             self.assertEqual(list((root / "extractions").iterdir()), [])
 
 
@@ -225,6 +281,17 @@ class _OneAwaiting:
                 @staticmethod
                 def fetchone():
                     return [1]
+            return Row()
+
+
+class _OneHundredOneAwaiting(_OneAwaiting):
+    class connection:
+        @staticmethod
+        def execute(*_args):
+            class Row:
+                @staticmethod
+                def fetchone():
+                    return [101]
             return Row()
 
 
@@ -287,3 +354,24 @@ class SecondaryWorkHoldTests(unittest.TestCase):
                      "reviews_complete": 0, "numeric_fresh": 0, "discovery_fresh": 0})
         self.now += timedelta(hours=2)
         self.assertEqual(self.coordinator.dispatch_once()["status"], "launched")
+
+    def test_legacy_101_item_hold_without_config_hash_launches_once(self):
+        coordinator = DocumentExtractionCoordinator(
+            missions=_OneHundredOneAwaiting(), launcher=self.launcher,
+            clock=lambda: self.now,
+        )
+        coordinator._latest_path.write_text(json.dumps({
+            "ticket": "document-extraction:" + "f" * 24,
+            "settled": True,
+            "status": "succeeded",
+            "stop_reason": "nothing_to_draft",
+            "secondary_fresh": 0,
+            "awaiting_at_launch": 101,
+            "completed_at": self.now.isoformat(),
+        }), encoding="utf-8")
+        self.assertEqual(coordinator.dispatch_once()["status"], "launched")
+        self.assertEqual(len(self.launcher.starts), 1)
+        self.assertIn(
+            "model_config_fingerprint",
+            json.loads(coordinator._latest_path.read_text(encoding="utf-8")),
+        )

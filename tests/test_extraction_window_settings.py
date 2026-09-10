@@ -57,11 +57,16 @@ class RecordingLauncher:
     def __init__(self, root: Path) -> None:
         self.state_dir = root
         self.tickets_dir = root
+        self.model_config_path = root / "model-config.json"
+        self.model_config_path.write_text("{}", encoding="utf-8")
         self.starts: list[dict] = []
 
     def start(self, **kwargs):
+        from dalton_core.document_extraction_launcher import _configuration_fingerprint
         self.starts.append(kwargs)
-        return {"id": "document-extraction:" + "a" * 24, "status": "running"}
+        return {"id": "document-extraction:" + "a" * 24, "status": "running",
+                "model_config_fingerprint": _configuration_fingerprint(
+                    self.model_config_path)}
 
 
 class CoordinatorTests(unittest.TestCase):
