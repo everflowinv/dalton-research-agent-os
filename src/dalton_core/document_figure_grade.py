@@ -41,6 +41,13 @@ SCHEMA_VERSION = "0.1"
 
 FILED = "company-filed-document"
 SPOKEN = "earnings-call-transcript"
+# W3: a document this fund wrote itself, earlier -- an old Initial Screen, a
+# memo, a maintained Excel model. It is graded so that a reader of one claim
+# is told what the claim is a claim of, and it is graded *out* of every figure
+# path: our own model's revenue estimate for FY26 is not a figure about
+# Accenture, it is a figure about what we assumed in 2024. See
+# ``NON_FIGURE_GRADES`` below for how that exclusion is spelled.
+INTERNAL_PRIOR = "internal-prior-document"
 
 # The document kinds a figure may be taken from, and what taking one means.
 # Anything absent is not read for figures; see the module docstring for why
@@ -59,6 +66,7 @@ GRADE_BY_SPEC: Mapping[str, str] = {
 BASIS_BY_GRADE: Mapping[str, str] = {
     FILED: "company-filed-document",
     SPOKEN: "earnings-call-transcript-spoken",
+    INTERNAL_PRIOR: "internal-prior-document",
 }
 
 # The sentence a claim adds about itself. Short, because it is appended to a
@@ -67,9 +75,22 @@ QUALIFIER_BY_GRADE: Mapping[str, str] = {
     FILED: "as published by the company in this document",
     SPOKEN: "as spoken on the earnings call and recorded in this transcript; "
             "not read from a filed statement",
+    INTERNAL_PRIOR: "as written in this fund's own earlier work on the date "
+                    "that document carries; not a figure the company published",
 }
 
+#: The grades a figure row may carry. ``INTERNAL_PRIOR`` is deliberately not
+#: here, and this tuple is the enforcement: ``record_document_figures`` refuses
+#: a ``source_grade`` outside it, and the figure table's SQL CHECK names the
+#: same two words. So a prior document can be graded -- a reader is told what
+#: it is -- and can never become a ``coverage_mission_document_figures`` row,
+#: which is the row a quantitative Claim is promoted from.
 GRADES: tuple[str, ...] = (FILED, SPOKEN)
+
+#: Graded, and graded as not-a-figure-source. A separate tuple rather than a
+#: comment, so that "is this excluded on purpose or did someone forget" has an
+#: answer a test can read.
+NON_FIGURE_GRADES: tuple[str, ...] = (INTERNAL_PRIOR,)
 
 # P12h: whether the document is *known to be about the company* it was filed
 # under, and how.
@@ -178,6 +199,8 @@ def qualify(statement: str, grade: str) -> str:
 __all__ = [
     "ATTRIBUTED_BY_SPEC",
     "BASIS_BY_GRADE",
+    "INTERNAL_PRIOR",
+    "NON_FIGURE_GRADES",
     "FILED",
     "GRADES",
     "GRADE_BY_SPEC",

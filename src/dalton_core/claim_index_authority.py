@@ -48,11 +48,22 @@ _SCHEMA_PATH = Path(__file__).with_name("claim_index_schema.sql")
 #   filing               the company published it (10-K/10-Q/press release,
 #                        or SEC XBRL through the statements lane)
 #   management_statement management said it (earnings call, IR event)
+#   internal_prior       this fund wrote it, earlier -- an old Initial Screen,
+#                        a memo, a maintained model (W3)
 #   sell_side            a broker wrote it
 #   news                 a public-web page said it
 #   other                the provenance chain does not reach a graded document
+#
+# ``internal_prior`` sits above the sell side and below management for the
+# reason the owner gave when they asked for it: our own earlier work is often
+# the best thing in the building and is still not the company speaking. It is
+# also the only tier with an age rule -- see ``STALE_AFTER_DAYS`` in
+# ``claim_index_tagging`` -- because it is the only tier whose whole meaning is
+# "this is what we thought", and what we thought two years ago about a company
+# that has filed eight quarters since is a different kind of claim.
 IMPORTANCE_TIERS: tuple[str, ...] = (
-    "filing", "management_statement", "sell_side", "news", "other",
+    "filing", "management_statement", "internal_prior", "sell_side", "news",
+    "other",
 )
 IMPORTANCE_RANK: Mapping[str, int] = {
     tier: index for index, tier in enumerate(IMPORTANCE_TIERS)
@@ -359,6 +370,95 @@ class ClaimIndexAuthority:
         self.store = store
         self.connection: sqlite3.Connection = store.connection
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
+        self._widen_importance_check()
+
+    def _widen_importance_check(self) -> None:
+        """W3: admit ``internal_prior`` on a Core built before that tier existed.
+
+        ``CREATE TABLE IF NOT EXISTS`` does nothing to a table that is already
+        there, so a Core created under the five-tier CHECK would keep refusing
+        the sixth for ever -- and it would refuse it with an ``IntegrityError``
+        from the constraint rather than with the readable message the Python
+        vocabulary check gives, which is the failure mode that makes this worth
+        a rebuild. Follows ``MissionDeliverableAuthority._widen_kind_check``
+        exactly, including the foreign-key check afterwards.
+        """
+
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            f"AND name='{TABLE}'"
+        ).fetchone()
+        if row is None or "'internal_prior'" in (row["sql"] or ""):
+            return
+        if self.connection.in_transaction:
+            raise ClaimIndexConflict(
+                "the claim index importance migration requires no open transaction"
+            )
+        self.connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.connection.executescript(
+                """
+                BEGIN IMMEDIATE;
+                DROP TRIGGER IF EXISTS claim_index_entry_insert_guard;
+                DROP TRIGGER IF EXISTS claim_index_entry_no_update;
+                DROP TRIGGER IF EXISTS claim_index_entry_no_delete;
+                CREATE TABLE claim_index_entry_versions_v2 (
+                    version_id TEXT PRIMARY KEY,
+                    entry_ref TEXT NOT NULL,
+                    version_number INTEGER NOT NULL CHECK(version_number >= 1),
+                    prior_version_id TEXT REFERENCES claim_index_entry_versions_v2(version_id),
+                    claim_version_ref TEXT NOT NULL,
+                    claim_version_hash TEXT NOT NULL,
+                    claim_ref TEXT NOT NULL,
+                    subject_ref TEXT NOT NULL,
+                    aspect TEXT NOT NULL,
+                    as_of TEXT,
+                    as_of_basis TEXT NOT NULL,
+                    importance TEXT NOT NULL CHECK(importance IN (
+                        'filing', 'management_statement', 'internal_prior',
+                        'sell_side', 'news', 'other')),
+                    dedupe_group_ref TEXT NOT NULL,
+                    is_canonical INTEGER NOT NULL CHECK(is_canonical IN (0, 1)),
+                    tagger_ref TEXT NOT NULL,
+                    record_json TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    actor_ref TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(entry_ref, version_number)
+                );
+                INSERT INTO claim_index_entry_versions_v2
+                SELECT * FROM claim_index_entry_versions;
+                DROP TABLE claim_index_entry_versions;
+                ALTER TABLE claim_index_entry_versions_v2
+                RENAME TO claim_index_entry_versions;
+                CREATE INDEX IF NOT EXISTS claim_index_entries_by_claim
+                ON claim_index_entry_versions(claim_version_ref, version_number);
+                CREATE INDEX IF NOT EXISTS claim_index_entries_by_subject
+                ON claim_index_entry_versions(subject_ref, aspect, as_of);
+                CREATE INDEX IF NOT EXISTS claim_index_entries_by_group
+                ON claim_index_entry_versions(dedupe_group_ref, version_number);
+                CREATE TRIGGER claim_index_entry_insert_guard
+                BEFORE INSERT ON claim_index_entry_versions
+                WHEN dalton_authorized() = 0 BEGIN
+                    SELECT RAISE(ABORT, 'claim index entry insert requires DaltonStore');
+                END;
+                CREATE TRIGGER claim_index_entry_no_update
+                BEFORE UPDATE ON claim_index_entry_versions BEGIN
+                    SELECT RAISE(ABORT, 'claim index entries are immutable');
+                END;
+                CREATE TRIGGER claim_index_entry_no_delete
+                BEFORE DELETE ON claim_index_entry_versions BEGIN
+                    SELECT RAISE(ABORT, 'claim index entries are immutable');
+                END;
+                COMMIT;
+                """
+            )
+        finally:
+            self.connection.execute("PRAGMA foreign_keys = ON")
+        if self.connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise ClaimIndexConflict(
+                "the claim index importance migration broke foreign keys"
+            )
 
     # -- reads ------------------------------------------------------------
 
