@@ -178,6 +178,25 @@ ADHOC_PROBE_TEMPLATES: tuple[dict[str, Any], ...] = (
         "source_ref": "source:alphaengine",
     },
     {
+        "template_ref": "probe-template:inquiry-alphaengine-discovery-refresh:v1",
+        "status": ACTIVE_STATUS,
+        "capability_ref": "capability:dalton:connector:alphaengine-search-library",
+        "operation": "alphaengine_discovery_refresh",
+        "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
+        "parameter_contract": {
+            "allowed_fields": ["source_ref", "spec_ref", "inquiry_hash", "discovery_plan_ref", "discovery_plan_hash"],
+            "required_fields": ["source_ref", "spec_ref", "inquiry_hash", "discovery_plan_ref", "discovery_plan_hash"],
+            "constants": {"source_ref": "source:alphaengine", "discovery_plan_ref": "alphaengine-discovery-plan:5company:v1", "discovery_plan_hash": "c46327669fb2909c47fda784f1d09a027103a4538b0ec3eea0e01a68f8e64af2"},
+        },
+        "output_contract_ref": "schema:bounded-planner-probe-output:0.1",
+        "verifier_ref": "verifier:source-level-coverage:0.1",
+        "permission_scope": "alphaengine_read",
+        "declared_side_effects": ["read:alphaengine"],
+        "cost": {"cost_units": 2, "max_attempts": 1, "max_seconds": 120},
+        "allowed_hosts": ["127.0.0.1"], "cost_estimate_usd": "0.00",
+        "source_ref": "source:alphaengine",
+    },
+    {
         "template_ref": "probe-template:adhoc-web-search:v1",
         # Retired, not active: a template whose operation no executor runs and
         # whose parameters ``_parameters_for`` cannot build is not a capability
@@ -244,6 +263,10 @@ def executable_probe_contracts() -> frozenset[tuple[str, str]]:
         PROBE_OPERATION as ALPHAENGINE_OPERATION,
         PROBE_PERMISSION_SCOPE as ALPHAENGINE_SCOPE,
     )
+    from .bounded_alphaengine_search_probe import (
+        PROBE_OPERATION as ALPHAENGINE_SEARCH_OPERATION,
+        PROBE_PERMISSION_SCOPE as ALPHAENGINE_SEARCH_SCOPE,
+    )
     from .bounded_probe_executor import (
         PROBE_OPERATION as SEC_OPERATION,
         PROBE_PERMISSION_SCOPE as SEC_SCOPE,
@@ -252,6 +275,7 @@ def executable_probe_contracts() -> frozenset[tuple[str, str]]:
     return frozenset({
         (SEC_OPERATION, SEC_SCOPE),
         (ALPHAENGINE_OPERATION, ALPHAENGINE_SCOPE),
+        (ALPHAENGINE_SEARCH_OPERATION, ALPHAENGINE_SEARCH_SCOPE),
     })
 
 
@@ -743,6 +767,7 @@ def _bindings_for(
     inquiry_hash: str,
     company_ref: str,
     templates: Mapping[str, Mapping[str, Any]],
+    inquiry: Mapping[str, Any],
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """The probes this inquiry may run, parameterised deterministically."""
 
@@ -752,7 +777,8 @@ def _bindings_for(
         template = templates.get(template_ref)
         if template is None:
             continue
-        parameters = _parameters_for(template, company_ref)
+        parameters = _parameters_for(template, company_ref, inquiry=inquiry,
+                                     inquiry_hash=inquiry_hash)
         if parameters is None:
             continue
         refs.append(template_ref)
@@ -765,10 +791,14 @@ def _bindings_for(
 
 
 def _parameters_for(
-    template: Mapping[str, Any], company_ref: str
+    template: Mapping[str, Any], company_ref: str, *, inquiry: Mapping[str, Any],
+    inquiry_hash: str,
 ) -> dict[str, Any] | None:
     operation = template["operation"]
     if operation == "get_company_facts":
+        intent = _collapse(f"{inquiry.get('question', '')} {inquiry.get('wants', '')}").lower()
+        if not any(term in intent for term in ("revenue", "sales", "营收", "收入")):
+            return None
         matched = _CIK_RE.fullmatch(company_ref)
         if matched is None:
             # An industry-wide inquiry has no CIK, so the filings index has
@@ -787,6 +817,24 @@ def _parameters_for(
                 "10-Q",
             ],
         }
+    if operation == "alphaengine_discovery_refresh":
+        intent = _collapse(f"{inquiry.get('question', '')} {inquiry.get('wants', '')}").lower()
+        transcript_terms = ("earnings", "call", "guidance", "margin", "arr", "nnarr",
+                            "reconcil", "业绩", "电话会", "指引", "利润率")
+        research_terms = ("consensus", "estimate", "valuation", "rating", "target price",
+                          "共识", "估值", "评级", "目标价")
+        if any(term in intent for term in transcript_terms):
+            spec_ref = "earnings-call-transcripts"
+        elif any(term in intent for term in research_terms):
+            spec_ref = "sell-side-reports"
+        else:
+            return None
+        if company_ref != "company:sec-cik:0001467373":
+            return None
+        return {"source_ref": "source:alphaengine", "spec_ref": spec_ref,
+                "inquiry_hash": inquiry_hash,
+                "discovery_plan_ref": template["parameter_contract"]["constants"]["discovery_plan_ref"],
+                "discovery_plan_hash": template["parameter_contract"]["constants"]["discovery_plan_hash"]}
     # Every other operation in the catalogue is retired for exactly this
     # reason: there is no parameter this module could build that any executor
     # would accept.  A branch here without an executor would only move the
@@ -898,7 +946,7 @@ def plan_admissions(
             results.append({**entry, "admissible": False, "reason": refusal})
             continue
         entry["subject_ref"] = company_ref
-        bindings, template_refs = _bindings_for(digest, company_ref, templates)
+        bindings, template_refs = _bindings_for(digest, company_ref, templates, inquiry)
         if not bindings:
             # Two different facts, and reporting them as one sent the reader
             # looking for a missing template that is not missing.  An

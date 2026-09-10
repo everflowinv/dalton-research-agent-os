@@ -134,7 +134,7 @@ class AdmissionTests(ResearchTaskFixture):
     daily_cost_usd = 20.0
 
     def test_a_plan_of_three_admits_one_and_says_why_for_the_other_two(self) -> None:
-        first = inquiry(question="Do ACN's three adjusted margin definitions reconcile?")
+        first = inquiry(question="Do ACN's three adjusted revenue definitions reconcile?")
         plan = self.record_plan([
             first,
             # Same content, re-ranked: the planner's ordering is not part of
@@ -156,7 +156,7 @@ class AdmissionTests(ResearchTaskFixture):
         self.assertEqual(self.admissions(plan)[0]["reason"], "out_of_mandate_scope")
 
     def test_an_admitted_inquiry_is_never_admitted_again(self) -> None:
-        wire = inquiry(question="Do ACN's margin definitions reconcile?")
+        wire = inquiry(question="Do ACN's revenue definitions reconcile?")
         plan = self.record_plan([wire])
         record = self.admit(plan, self.admissions(plan)[0], wire)
         self.assertEqual(record["status"], "fresh")
@@ -165,10 +165,10 @@ class AdmissionTests(ResearchTaskFixture):
         self.assertEqual(self.admissions(again)[0]["reason"], "already_admitted")
 
     def test_changing_the_question_makes_a_new_task(self) -> None:
-        wire = inquiry(question="Do ACN's margin definitions reconcile?")
+        wire = inquiry(question="Do ACN's revenue definitions reconcile?")
         plan = self.record_plan([wire])
         self.admit(plan, self.admissions(plan)[0], wire)
-        reissued = inquiry(question="Do ACN's margin definitions reconcile after FY26 Q3?")
+        reissued = inquiry(question="Do ACN's revenue definitions reconcile after FY26 Q3?")
         later = self.record_plan([reissued], state_hash="c" * 64)
         entry = self.admissions(later)[0]
         self.assertTrue(entry["admissible"])
@@ -177,7 +177,7 @@ class AdmissionTests(ResearchTaskFixture):
         )
 
     def test_the_loop_is_the_record_and_carries_the_inquiry_hash(self) -> None:
-        wire = inquiry(question="Do ACN's margin definitions reconcile?")
+        wire = inquiry(question="Do ACN's revenue definitions reconcile?")
         plan = self.record_plan([wire])
         record = self.admit(plan, self.admissions(plan)[0], wire)
         loop = self.authority.loop(record["loop_version_ref"])
@@ -226,8 +226,8 @@ class PoolTests(ResearchTaskFixture):
         )
 
     def test_a_second_task_past_the_pool_is_refused_not_borrowed(self) -> None:
-        first = inquiry(question="Do ACN's margin definitions reconcile?")
-        second = inquiry(question="What drove ACN's bookings mix in FY26?", rank=1)
+        first = inquiry(question="Do ACN's revenue definitions reconcile?")
+        second = inquiry(question="What drove ACN's sales mix in FY26?", rank=1)
         plan = self.record_plan([first, second])
         entries = self.admissions(plan)
         # $5 mission day, $1.25 pool, $0.50 a round, two rounds a task.
@@ -280,7 +280,7 @@ class PoolTests(ResearchTaskFixture):
         # reservation was for -- never reached the ledger. C2b admits them, so
         # there is finally a settled number to subtract.
         day = datetime.now(timezone.utc).date().isoformat()
-        wire = inquiry(question="Do ACN's margin definitions reconcile?")
+        wire = inquiry(question="Do ACN's revenue definitions reconcile?")
         plan = self.record_plan([wire])
         self.admit(plan, self.admissions(plan)[0], wire)
         budget_db = self._ledger_spend(500_000, day=day, settle=300_000)
@@ -326,7 +326,7 @@ class PoolTests(ResearchTaskFixture):
             absent, rt.pool_state(self.authority, self.mission, day=day))
 
     def test_yesterdays_tasks_do_not_spend_todays_pool(self) -> None:
-        wire = inquiry(question="Do ACN's margin definitions reconcile?")
+        wire = inquiry(question="Do ACN's revenue definitions reconcile?")
         plan = self.record_plan([wire])
         self.admit(plan, self.admissions(plan)[0], wire)
         today = rt.pool_state(
@@ -351,7 +351,8 @@ class TemplateSubsetTests(ResearchTaskFixture):
         # company facts and AlphaEngine document reads, and admitting a loop
         # bound to anything else would raise out of the controller tick.
         self.assertEqual(
-            set(bindable), {"probe-template:adhoc-sec-filings-index:v1"},
+            set(bindable), {"probe-template:adhoc-sec-filings-index:v1",
+                            "probe-template:inquiry-alphaengine-discovery-refresh:v1"},
         )
         for template in bindable.values():
             self.assertIn(
@@ -377,7 +378,7 @@ class TemplateSubsetTests(ResearchTaskFixture):
             cost={"cost_units": 1, "max_attempts": 2, "max_seconds": 120},
             actor_ref="human:p14e-test-owner",
         )
-        wire = inquiry(question="Do ACN's margin definitions reconcile?")
+        wire = inquiry(question="What is ACN revenue?")
         plan = self.record_plan([wire])
         entry = self.admissions(plan)[0]
         self.assertEqual(entry["template_refs"], ["probe-template:adhoc-sec-filings-index:v1"])
@@ -413,7 +414,10 @@ class TemplateSubsetTests(ResearchTaskFixture):
         # All three are published in this fixture, and the projection still
         # only tells the cockpit about the one that can run.
         view = rt.research_task_view(self.store, day=DAY, mission=self.mission)
-        self.assertEqual(view["templates"], ["probe-template:adhoc-sec-filings-index:v1"])
+        self.assertEqual(view["templates"], [
+            "probe-template:adhoc-sec-filings-index:v1",
+            "probe-template:inquiry-alphaengine-discovery-refresh:v1",
+        ])
         self.assertEqual(view["grant"]["template_refs"], view["templates"])
 
     def test_the_deploy_manifest_says_what_the_adapter_publishes(self) -> None:
@@ -464,7 +468,8 @@ class ExecutorContractTests(ResearchTaskFixture):
 
         self.assertEqual(
             rt.executable_probe_contracts(),
-            frozenset({(SEC_OPERATION, SEC_SCOPE), (AE_OPERATION, AE_SCOPE)}),
+            frozenset({(SEC_OPERATION, SEC_SCOPE), (AE_OPERATION, AE_SCOPE),
+                       ("alphaengine_discovery_refresh", "alphaengine_read")}),
         )
 
 
@@ -509,7 +514,7 @@ class RetirementTests(ResearchTaskFixture):
                 self.started.append(_kwargs)
                 raise AssertionError("a retired catalogue must not spawn a child")
 
-        self.record_plan([inquiry(question="Do ACN's margins reconcile?")])
+        self.record_plan([inquiry(question="Do ACN's revenues reconcile?")])
         Launcher.tickets_dir.mkdir(parents=True, exist_ok=True)
         result = ResearchTaskCoordinator(
             store=self.store, launcher=Launcher(),
@@ -519,8 +524,8 @@ class RetirementTests(ResearchTaskFixture):
 
 class IdentityNormalisationTests(ResearchTaskFixture):
     def test_a_rewrapped_question_is_the_same_question(self) -> None:
-        wrapped = inquiry(question="Do ACN's three adjusted\n  margin definitions\treconcile?")
-        flat = inquiry(question="Do ACN's three adjusted margin definitions reconcile?")
+        wrapped = inquiry(question="Do ACN's three adjusted\n  revenue definitions\treconcile?")
+        flat = inquiry(question="Do ACN's three adjusted revenue definitions reconcile?")
         self.assertEqual(
             rt.inquiry_content_hash(wrapped), rt.inquiry_content_hash(flat),
         )
@@ -532,8 +537,8 @@ class IdentityNormalisationTests(ResearchTaskFixture):
 
     def test_a_different_question_is_still_a_different_hash(self) -> None:
         self.assertNotEqual(
-            rt.inquiry_content_hash(inquiry(question="Do ACN's margins reconcile?")),
-            rt.inquiry_content_hash(inquiry(question="Do ACN's margins reconcile now?")),
+            rt.inquiry_content_hash(inquiry(question="Do ACN's revenues reconcile?")),
+            rt.inquiry_content_hash(inquiry(question="Do ACN's revenues reconcile now?")),
         )
 
 
@@ -541,7 +546,7 @@ class RevisionTests(ResearchTaskFixture):
     daily_cost_usd = 20.0
 
     def test_an_admitted_task_can_be_revised_without_becoming_a_new_one(self) -> None:
-        wire = inquiry(question="Do ACN's margins reconcile?")
+        wire = inquiry(question="Do ACN's revenues reconcile?")
         plan = self.record_plan([wire])
         entry = self.admissions(plan)[0]
         first = self.admit(plan, entry, wire)
@@ -571,8 +576,8 @@ class DeferralTests(ResearchTaskFixture):
 
     def test_only_what_this_pass_admits_spends_the_day(self) -> None:
         plan = self.record_plan([
-            inquiry(question="Do ACN's margins reconcile?"),
-            inquiry(question="What drove ACN's bookings mix?", rank=1),
+            inquiry(question="Do ACN's revenues reconcile?"),
+            inquiry(question="What drove ACN's sales mix?", rank=1),
         ])
         entries = self.admissions(plan)
         self.assertEqual([entry["admissible"] for entry in entries], [True, True])
@@ -587,7 +592,7 @@ class DeferralTests(ResearchTaskFixture):
     def test_entries_name_their_own_inquiry(self) -> None:
         plan = self.record_plan([
             inquiry(question="What is Apple's services margin?", company_ref=OUTSIDE),
-            inquiry(question="Do ACN's margins reconcile?", rank=1),
+            inquiry(question="Do ACN's revenues reconcile?", rank=1),
         ])
         entries = self.admissions(plan)
         self.assertEqual([entry["ordinal"] for entry in entries], [0, 1])
@@ -601,7 +606,7 @@ class DeferralTests(ResearchTaskFixture):
         view = rt.research_task_view(self.store, day=DAY, mission=self.mission)
         self.assertEqual(
             view["companies"][0]["tasks"][0]["question"],
-            "Do ACN's margins reconcile?",
+            "Do ACN's revenues reconcile?",
         )
         self.assertEqual(record["subject_ref"], ACN)
 
@@ -744,7 +749,7 @@ class AdmissionSourceTests(ResearchTaskFixture):
         self.assertNotIn("admission", loop)
 
     def test_a_second_loop_for_the_same_inquiry_is_refused_by_the_authority(self) -> None:
-        wire = inquiry(question="Do ACN's margin definitions reconcile?")
+        wire = inquiry(question="Do ACN's revenue definitions reconcile?")
         plan = self.record_plan([wire])
         entry = self.admissions(plan)[0]
         first = self.admit(plan, entry, wire)
@@ -767,7 +772,7 @@ class TerminalGateTests(ResearchTaskFixture):
         )
 
     def test_a_task_the_owner_drops_reads_back_as_a_conclusion(self) -> None:
-        wire = inquiry(question="Do ACN's margin definitions reconcile?")
+        wire = inquiry(question="Do ACN's revenue definitions reconcile?")
         plan = self.record_plan([wire])
         record = self.admit(plan, self.admissions(plan)[0], wire)
         loop_ref = record["loop_version_ref"]
@@ -791,7 +796,7 @@ class TerminalGateTests(ResearchTaskFixture):
         self.assertEqual(task["gap"], "已排队，尚未开跑")
 
     def test_a_terminal_that_the_gate_does_not_support_is_refused(self) -> None:
-        wire = inquiry(question="Do ACN's margin definitions reconcile?")
+        wire = inquiry(question="Do ACN's revenue definitions reconcile?")
         plan = self.record_plan([wire])
         record = self.admit(plan, self.admissions(plan)[0], wire)
         proposal = self.authority.submit_proposal(
@@ -813,7 +818,7 @@ class ChildTests(ResearchTaskFixture):
     def test_the_child_admits_one_and_reports_the_refusals(self) -> None:
         from dalton_core.research_task_cli import run_admissions
 
-        first = inquiry(question="Do ACN's margin definitions reconcile?")
+        first = inquiry(question="Do ACN's revenue definitions reconcile?")
         self.record_plan([
             first,
             inquiry(question="What is Apple's services margin?",
@@ -840,7 +845,7 @@ class UngrantedChildTests(ResearchTaskFixture):
     def test_the_child_writes_nothing_when_the_owner_has_not_granted_it(self) -> None:
         from dalton_core.research_task_cli import run_admissions
 
-        wire = inquiry(question="Do ACN's margin definitions reconcile?")
+        wire = inquiry(question="Do ACN's revenue definitions reconcile?")
         self.record_plan([wire])
         self.store.close()
         summary = run_admissions(state_dir=self.state_dir, summary_dir=self.state_dir)
@@ -861,8 +866,29 @@ class CikPaddingTests(unittest.TestCase):
         from dalton_core.research_task import _parameters_for
 
         template = {"operation": "get_company_facts", "id": "probe-template:sec:1"}
-        params = _parameters_for(template, "company:sec-cik:000167...".replace("...", "8925"))
+        params = _parameters_for(template, "company:sec-cik:000167...".replace("...", "8925"), inquiry=inquiry(question="Revenue?"), inquiry_hash="a" * 64)
         self.assertIsNotNone(params)
         self.assertEqual(params["locator"], "company-facts/CIK0001678925")
-        ten = _parameters_for(template, "company:sec-cik:0001467373")
+        ten = _parameters_for(template, "company:sec-cik:0001467373", inquiry=inquiry(question="Revenue?"), inquiry_hash="b" * 64)
         self.assertEqual(ten["locator"], "company-facts/CIK0001467373")
+
+class InquiryDirectedDiscoveryTests(ResearchTaskFixture):
+    publishes = ("probe-template:inquiry-alphaengine-discovery-refresh:v1",)
+    daily_cost_usd = 20.0
+
+    def test_current_acn_margin_inquiry_binds_transcript_refresh(self):
+        wire = inquiry(question="How does ACN reconcile adjusted margin guidance?")
+        plan = self.record_plan([wire])
+        entry = self.admissions(plan)[0]
+        self.assertTrue(entry["admissible"], entry)
+        self.assertEqual(entry["bindings"][0]["parameters"]["spec_ref"],
+                         "earnings-call-transcripts")
+        self.assertEqual(entry["bindings"][0]["parameters"]["inquiry_hash"],
+                         entry["inquiry_hash"])
+
+    def test_unmapped_intent_and_other_company_fail_closed(self):
+        unknown = self.record_plan([inquiry(question="What should we learn next?")])
+        self.assertEqual(self.admissions(unknown)[0]["reason"], "no_bindable_template")
+        other = self.record_plan([inquiry(
+            question="How does EPAM reconcile margin guidance?", company_ref=EPAM)])
+        self.assertEqual(self.admissions(other)[0]["reason"], "no_bindable_template")

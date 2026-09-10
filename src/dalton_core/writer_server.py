@@ -597,6 +597,7 @@ CORE_OPERATION_LITERALS = frozenset({
     "bounded_planner_active_loops", "materialize_bounded_planner_context",
     "bounded_planner_propose_next_with_context", "llm_planner_prepare",
     "llm_planner_advance", "llm_planner_execute", "bounded_alphaengine_probe",
+    "start_bounded_source_discovery",
     "record_weekly_brief_feedback", "weekly_brief_feedback",
     "weekly_brief_integrity_report",
     "intent_context_bindings", "admit_intent_question", "issue_intent_directive",
@@ -829,6 +830,7 @@ OPERATION_FIELDS: dict[str, frozenset[str]] = {
     "llm_planner_prepare": frozenset({"context_pack_ref", "max_input_tokens", "max_output_tokens", "max_cost_usd", "max_seconds"}),
     "llm_planner_advance": frozenset({"context_pack_ref", "work_order"}),
     "bounded_alphaengine_probe": frozenset({"work_order"}),
+    "start_bounded_source_discovery": frozenset({"work_order"}),
     "publish_forecast_line": frozenset({"line_ref", "subject_ref", "metric_or_aspect", "period", "unit", "currency", "value", "value_kind", "scenario_version_ref", "scenario_version_hash", "actor_ref", "rationale", "version_id", "prior_version_ref", "idempotency_key"}),
     "get_forecast_line": frozenset({"version_ref"}),
     "extend_growth_forecast": frozenset({"base_input_version_ref", "growth_input_version_ref", "periods", "line_ref_prefix", "model_run_ref", "idempotency_key"}),
@@ -3971,6 +3973,64 @@ class WriterServer:
             connection=self.store.connection,
             max_calls_per_window=min(total_cap, probe_cap),
         )
+
+    def _op_start_bounded_source_discovery(self, p: Mapping[str, Any]) -> Any:
+        """Launch an admitted inquiry through the existing governed search plan."""
+        work = dict(dict(p)["work_order"])
+        authoritative = self._scheduler.work_order_authority(work.get("id"))
+        if authoritative is None or authoritative["work_order"] != work:
+            raise WriterServerError("bounded discovery work does not match Scheduler authority")
+        metadata = work.get("metadata") or {}
+        if metadata.get("operation") != "alphaengine_discovery_refresh" \
+                or metadata.get("permission_scope") != "alphaengine_read":
+            raise WriterServerError("bounded discovery work is outside AlphaEngine search scope")
+        loop = self.bounded_planner.loop(metadata.get("bounded_loop_version_ref"))
+        if loop["content_hash"] != metadata.get("bounded_loop_version_hash"):
+            raise WriterServerError("bounded discovery loop binding drifted")
+        binding = next((row for row in loop["template_bindings"]
+                        if row["coverage_item_ref"] == metadata.get("coverage_item_ref")), None)
+        if binding is None or binding["template_version_ref"] != metadata.get("probe_template_version_ref") \
+                or binding["template_version_hash"] != metadata.get("probe_template_version_hash") \
+                or binding["parameters"] != metadata.get("parameters"):
+            raise WriterServerError("bounded discovery template binding drifted")
+        mission = self.coverage_mission.mission(metadata.get("mission_version_ref"))
+        if mission["content_hash"] != metadata.get("mission_version_hash"):
+            raise WriterServerError("bounded discovery mission binding drifted")
+        parameters = metadata["parameters"]
+        coordinator, launcher = self._discovery_for_source(parameters["source_ref"])
+        if (coordinator.plan["mission_ref"] != mission["mission_ref"]
+                or coordinator.plan["id"] != parameters["discovery_plan_ref"]
+                or coordinator.plan["content_hash"] != parameters["discovery_plan_hash"]):
+            raise WriterServerError("bounded discovery plan is not the exact bound mission plan")
+        if parameters["inquiry_hash"] != loop["admission"]["content_hash"]:
+            raise WriterServerError("bounded discovery inquiry binding drifted")
+        authorization = self.coverage_mission.authorize_source_discovery(
+            company_ref=loop["subject_ref"], source_ref=parameters["source_ref"],
+            requested_by="automation:bounded-planner",
+            mission_version_ref=mission["id"], mission_version_hash=mission["content_hash"])
+        compiled = build_discovery_parameters(
+            coordinator.plan, spec_ref=parameters["spec_ref"], company_ref=loop["subject_ref"],
+            as_of=datetime.now(timezone.utc).date())
+        query_hash = discovery_query_hash(coordinator.plan, compiled)
+        # The writer request may time out while the governed child continues.
+        # Reuse the exact mission/company/spec/query dispatch so retrying the
+        # same admitted WorkOrder never starts or accounts for a second call.
+        prior = next((row for row in self.coverage_mission.discovery_dispatches(
+            mission["id"], company_ref=loop["subject_ref"],
+            spec_ref=parameters["spec_ref"], limit=100)
+            if row["query_hash"] == query_hash
+            and row["discovery_plan_ref"] == coordinator.plan["id"]
+            and row["discovery_plan_hash"] == coordinator.plan["content_hash"]), None)
+        if prior is not None:
+            ticket = launcher.status(prior["ticket_ref"])
+            return {**ticket, "dispatch_ref": prior["dispatch_id"], "parameters": compiled,
+                    "status": "duplicate" if ticket.get("status") == "running" else ticket.get("status")}
+        ticket = launcher.start(authorization=authorization, spec_ref=parameters["spec_ref"])
+        dispatch = self.coverage_mission.record_discovery_dispatch(
+            authorization=authorization, discovery_plan_ref=coordinator.plan["id"],
+            discovery_plan_hash=coordinator.plan["content_hash"], spec_ref=parameters["spec_ref"],
+            query_hash=query_hash, ticket_ref=ticket["id"])
+        return {**ticket, "dispatch_ref": dispatch["dispatch_id"], "parameters": compiled}
 
     def _op_bounded_planner_propose_next_with_context(self, p: Mapping[str, Any]) -> Any:
         return self.bounded_planner.propose_next_with_context(

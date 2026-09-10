@@ -85,6 +85,50 @@
     },
     {
       "allowed_hosts": [
+        "127.0.0.1"
+      ],
+      "capability_ref": "capability:dalton:connector:alphaengine-search-library",
+      "cost": {
+        "cost_units": 2,
+        "max_attempts": 1,
+        "max_seconds": 120
+      },
+      "cost_estimate_usd": "0.00",
+      "declared_side_effects": [
+        "read:alphaengine"
+      ],
+      "operation": "alphaengine_discovery_refresh",
+      "output_contract_ref": "schema:bounded-planner-probe-output:0.1",
+      "parameter_contract": {
+        "allowed_fields": [
+          "source_ref",
+          "spec_ref",
+          "inquiry_hash",
+          "discovery_plan_ref",
+          "discovery_plan_hash"
+        ],
+        "constants": {
+          "discovery_plan_hash": "c46327669fb2909c47fda784f1d09a027103a4538b0ec3eea0e01a68f8e64af2",
+          "discovery_plan_ref": "alphaengine-discovery-plan:5company:v1",
+          "source_ref": "source:alphaengine"
+        },
+        "required_fields": [
+          "source_ref",
+          "spec_ref",
+          "inquiry_hash",
+          "discovery_plan_ref",
+          "discovery_plan_hash"
+        ]
+      },
+      "permission_scope": "alphaengine_read",
+      "runtime_profile_ref": "runtime:dalton-core-trusted-runner:0.1",
+      "source_ref": "source:alphaengine",
+      "status": "active",
+      "template_ref": "probe-template:inquiry-alphaengine-discovery-refresh:v1",
+      "verifier_ref": "verifier:source-level-coverage:0.1"
+    },
+    {
+      "allowed_hosts": [
         "*"
       ],
       "capability_ref": "capability:dalton:connector:gemini-web-search",

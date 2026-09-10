@@ -23,6 +23,9 @@ from .bounded_probe_executor import (
     BoundedProbeExecutionError,
     execute_probe_work_order,
 )
+from .bounded_alphaengine_search_probe import (
+    BoundedAlphaEngineSearchProbeError, execute_alphaengine_search_probe,
+)
 from .budget_pools import POOL_EXHAUSTED_REASON, POOL_EXHAUSTED_STATUS
 from .lane_registry import RESERVED_DRIVER_KEYS, tick_lanes
 from .public_http_transport import PublicHttpTransport
@@ -414,6 +417,10 @@ class BoundedPlannerDriver:
                         envelope = self.client.call("bounded_alphaengine_probe", {
                             "work_order": work,
                         })
+                    elif operation == "alphaengine_discovery_refresh":
+                        envelope = execute_alphaengine_search_probe(
+                            work, client=self.client,
+                            timeout_seconds=float(self.config.timeout_seconds))
                     else:
                         envelope = execute_probe_work_order(
                             work,
@@ -424,7 +431,7 @@ class BoundedPlannerDriver:
                             filed_window_days=int(self.config.filed_window_days),
                             clock=self.clock,
                         )
-                except BoundedProbeExecutionError as exc:
+                except (BoundedProbeExecutionError, BoundedAlphaEngineSearchProbeError) as exc:
                     # The executor read the WorkOrder and refused it: wrong
                     # scope, wrong operation, unusable locator.  That is a
                     # decision about this probe and it will not change on a
