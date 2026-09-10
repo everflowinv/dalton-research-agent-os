@@ -159,6 +159,10 @@ class YfinanceGovernanceRecoveryTests(unittest.TestCase):
                 )
                 again = coordinator()
                 again._retire_legacy_permission(company)
+                again._retire_legacy_permission(company)
+                # Read-only governance inspection cannot consume the one
+                # actual recovery probe, including after ledger restart.
+                self.assertIsNone(again.budget.blocked(company))
                 self.assertIsNotNone(again.budget.blocked(company))
 
 

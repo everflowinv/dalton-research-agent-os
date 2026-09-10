@@ -161,8 +161,11 @@ class MissionConsensusLaneCoordinator:
         return f"permission|{company_ref}|governance:{identity}"
 
     def _retire_legacy_permission(self, company_ref: str) -> None:
-        blocked = self.budget.blocked(company_ref)
-        if blocked is None or "yfinance analyst-estimates governance record is not approved" not in blocked.classification.reason:
+        # blocked() consumes a dependency probe; inspecting old permission
+        # history must never spend the next real transport attempt.
+        refusal = next((row for row in self.budget.permission_items()
+                        if row["item_key"] == company_ref), None)
+        if refusal is None or "yfinance analyst-estimates governance record is not approved" not in refusal["reason"]:
             return
         loader = getattr(self.launcher, "load_governance", None)
         if loader is not None:
