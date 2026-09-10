@@ -3521,7 +3521,10 @@ class CockpitPlane:
                 except (FallbackChainError, ModelRouterError, sqlite3.Error,
                         OSError, ValueError) as exc:
                     binding_error = _reason(exc)
-            if selected is None:
+            if binding.get("status") == "deterministic":
+                row = {**default_rows[purpose], "mode": "deterministic", "chain": [],
+                       "superseded_chain": [], "last_served": None}
+            elif selected is None:
                 row = {**default_rows[purpose], "mode": "unconfigured", "chain": [],
                        "superseded_chain": [], "last_served": None}
             else:
@@ -3562,7 +3565,8 @@ class CockpitPlane:
                 "tier_label": MODEL_TIER_LABELS.get(row["tier"], row["tier"]),
                 "mode": row["mode"],
                 "mode_label": MODEL_SELECTION_MODE_LABELS.get(
-                    row["mode"], ({"unconfigured": "未配置", "pinned": "固定模型",
+                    row["mode"], ({"unconfigured": "未配置", "deterministic": "确定性处理",
+                                   "pinned": "固定模型",
                                    "candidate_set": "策略候选集合"}
                                   .get(row["mode"], row["mode"]))
                 ),

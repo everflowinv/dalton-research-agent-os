@@ -29,6 +29,7 @@ from dalton_core.mission_industry_framework_lane import (
     FRAMEWORK_MODEL_CONFIG,
     FRAMEWORK_POLICY,
     FRAMEWORK_VERIFIER_MODEL_CONFIG,
+    LEGACY_FRAMEWORK_VERIFIER_MODEL_CONFIG,
     LAUNCHER_KWARG,
     MIN_INTERVAL_SECONDS,
     QUIET_STATUSES,
@@ -92,6 +93,19 @@ class ArgvTests(unittest.TestCase):
             FRAMEWORK_POLICY, FRAMEWORK_MODEL_CONFIG, FRAMEWORK_VERIFIER_MODEL_CONFIG))
         self.assertIn("--industry-framework-model-config", argv)
         self.assertIn("--industry-framework-verifier-model-config", argv)
+
+    def test_the_paired_dossier_verifier_precedes_the_legacy_fallback(self):
+        context = self.context(FRAMEWORK_POLICY, FRAMEWORK_VERIFIER_MODEL_CONFIG,
+                               LEGACY_FRAMEWORK_VERIFIER_MODEL_CONFIG)
+        argv = argv_fragment(context)
+        selected = argv[argv.index("--industry-framework-verifier-model-config") + 1]
+        self.assertEqual(Path(selected).name, FRAMEWORK_VERIFIER_MODEL_CONFIG)
+
+    def test_the_legacy_verifier_remains_a_fallback(self):
+        argv = argv_fragment(self.context(FRAMEWORK_POLICY,
+                                          LEGACY_FRAMEWORK_VERIFIER_MODEL_CONFIG))
+        selected = argv[argv.index("--industry-framework-verifier-model-config") + 1]
+        self.assertEqual(Path(selected).name, LEGACY_FRAMEWORK_VERIFIER_MODEL_CONFIG)
 
     def test_the_fragment_reaches_the_launchagent_argv(self):
         argv = lane_argv(self.context(FRAMEWORK_POLICY))

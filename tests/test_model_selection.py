@@ -1661,6 +1661,8 @@ class CockpitModelPageTests(unittest.TestCase):
         for path, ref in zip(paths, refs, strict=True):
             path.write_text(json.dumps({**base, "routing_policy_ref": ref}),
                             encoding="utf-8")
+        (state / "initial-screen-model-config.json").write_text(
+            json.dumps({**base, "routing_policy_ref": refs[2]}), encoding="utf-8")
         service_path = self.root / "install" / "config" / "service.json"
         service_path.parent.mkdir()
         service_path.write_text(json.dumps({
@@ -1691,8 +1693,16 @@ class CockpitModelPageTests(unittest.TestCase):
              ("ask", "plan", "dossier", "dossier_verifier")],
             profile_ids,
         )
-        self.assertEqual(rows["debate_map"]["configuration_status"],
+        for purpose in ("model_spec", "debate_map", "conviction_call"):
+            self.assertEqual(rows[purpose]["policy_version_ref"], refs[2])
+            self.assertEqual(Path(rows[purpose]["configuration_source"]).name,
+                             "initial-screen-model-config.json")
+        self.assertEqual(rows["quality_verifier"]["configuration_status"],
                          "unconfigured")
+        self.assertEqual(rows["street_estimate"]["configuration_status"],
+                         "deterministic")
+        self.assertEqual(rows["street_estimate"]["mode"], "deterministic")
+        self.assertFalse(rows["street_estimate"]["editable"])
 
     def test_page_reads_a_binding_from_its_own_router_even_when_refs_match(self) -> None:
         primary_profile = secondary_profile = None

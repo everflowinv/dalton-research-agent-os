@@ -61,6 +61,9 @@ PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
     "document_extraction": ("document-extraction-model-config.json",),
     "claim_index": ("claim-index-model-config.json",),
     "quality": ("initial-screen-model-config.json",),
+    "model_spec": ("initial-screen-model-config.json",),
+    "debate_map": ("initial-screen-model-config.json",),
+    "conviction_call": ("initial-screen-model-config.json",),
     "event_judgement": ("event-judgement-model-config.json",),
     "event_judgement_verifier": ("event-verifier-model-config.json",),
     "thesis_reflection": ("event-judgement-model-config.json",),
@@ -74,7 +77,8 @@ PURPOSE_MODEL_CONFIGS: dict[str, tuple[str, ...]] = {
     "deep_insight_gate_verifier": ("company-dossier-verifier-model-config.json",
                                    "dossier-verifier-model-config.json"),
     "industry_framework": ("initial-screen-model-config.json",),
-    "industry_framework_verifier": ("dossier-verifier-model-config.json",),
+    "industry_framework_verifier": ("company-dossier-verifier-model-config.json",
+                                      "dossier-verifier-model-config.json"),
     "earnings_preview": ("earnings-season-model-config.json",),
     "earnings_calibration": ("earnings-season-model-config.json",),
     "earnings_preview_verifier": ("earnings-season-verifier-model-config.json",),
@@ -213,12 +217,18 @@ def purpose_policy_bindings(
         file_binding("plan", (directory / "research-planner-model-config.json",))
     # These consumers receive a path at launch time.  No installed path in the
     # cockpit contract means there is no truthful resident pin to display.
-    for purpose in ("model_spec", "quality_verifier", "debate_map",
-                    "conviction_call", "street_estimate"):
+    for purpose in ("quality_verifier",):
         result.setdefault(purpose, {
             "status": "unconfigured", "source": "dynamic launch argument",
             "policy_version_ref": None, "model_router_db": None,
         })
+    # The installed consensus lane parses broker notes deterministically.  A
+    # registered future model purpose must not make that look like a missing,
+    # selectable runtime model today.
+    result["street_estimate"] = {
+        "status": "deterministic", "source": "mission_consensus_lane",
+        "policy_version_ref": None, "model_router_db": None, "editable": False,
+    }
     return result
 
 

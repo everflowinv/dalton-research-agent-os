@@ -317,7 +317,8 @@ def build_launcher(args: Any) -> Any | None:
 # cross-company table computed and reported every week -- which is exactly the
 # state the live Core is in until the deliverable scope is granted.
 FRAMEWORK_MODEL_CONFIG = "initial-screen-model-config.json"
-FRAMEWORK_VERIFIER_MODEL_CONFIG = "dossier-verifier-model-config.json"
+FRAMEWORK_VERIFIER_MODEL_CONFIG = "company-dossier-verifier-model-config.json"
+LEGACY_FRAMEWORK_VERIFIER_MODEL_CONFIG = "dossier-verifier-model-config.json"
 FRAMEWORK_POLICY = "p12e-industry-framework-policy-v1.json"
 
 
@@ -329,9 +330,12 @@ def argv_fragment(context: Any) -> list[str]:
     config = context.state / FRAMEWORK_MODEL_CONFIG
     if config.is_file():
         argv += ["--industry-framework-model-config", str(config)]
-    verifier = context.state / FRAMEWORK_VERIFIER_MODEL_CONFIG
-    if verifier.is_file():
-        argv += ["--industry-framework-verifier-model-config", str(verifier)]
+    for name in (FRAMEWORK_VERIFIER_MODEL_CONFIG,
+                 LEGACY_FRAMEWORK_VERIFIER_MODEL_CONFIG):
+        verifier = context.state / name
+        if verifier.is_file():
+            argv += ["--industry-framework-verifier-model-config", str(verifier)]
+            break
     return argv
 
 
@@ -356,6 +360,7 @@ __all__ = [
     "FRAMEWORK_MODEL_CONFIG",
     "FRAMEWORK_POLICY",
     "FRAMEWORK_VERIFIER_MODEL_CONFIG",
+    "LEGACY_FRAMEWORK_VERIFIER_MODEL_CONFIG",
     "LANE",
     "LAUNCHER_KWARG",
     "MAX_FAILURE_DETAIL_CHARS",
