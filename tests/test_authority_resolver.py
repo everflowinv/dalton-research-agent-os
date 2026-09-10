@@ -272,6 +272,45 @@ class AuthorityResolverTests(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             connection.execute("DELETE FROM research_completion_receipts")
 
+    def _history_with_shared_capacity(self, resolver, request_ref, *, mismatch: bool = False):
+        history = copy.deepcopy(
+            resolver.runner_journal.history(request_ref)
+        )
+        shared_ref = "shared-connector-capacity-reservation:" + "a" * 32
+        for event in history:
+            if event["state"] in {"reserved", "transport_started"}:
+                event["payload"]["shared_capacity_reservation_ref"] = (
+                    shared_ref + "x" if mismatch and event["state"] == "transport_started"
+                    else shared_ref
+                )
+                event["content_hash"] = resolver._journal_event_hash(event)
+                event["id"] = "runner-journal-event:" + content_hash({
+                    "runner_request_ref": event["runner_request_ref"],
+                    "request_ordinal": event["request_ordinal"],
+                    "content_hash": event["content_hash"],
+                })
+        return history
+
+    def test_shared_capacity_journal_binding_resolves_when_exact(self) -> None:
+        resolver, original = self.resolve()
+        history = self._history_with_shared_capacity(
+            resolver, original.summary["actual_runner_request_ref"])
+        source_ref = self.harness.checkpoint["source_envelopes"][0]["ref"]
+        with patch.object(resolver.runner_journal, "history", return_value=history):
+            resolved = resolver.resolve(
+                source_ref, checkpoint_ref=self.harness.checkpoint["id"]
+            )
+        self.assertEqual(resolved.summary["source_envelope_ref"], source_ref)
+
+    def test_shared_capacity_journal_binding_must_match_both_barriers(self) -> None:
+        resolver, original = self.resolve()
+        history = self._history_with_shared_capacity(
+            resolver, original.summary["actual_runner_request_ref"], mismatch=True)
+        source_ref = self.harness.checkpoint["source_envelopes"][0]["ref"]
+        with patch.object(resolver.runner_journal, "history", return_value=history), \
+                self.assertRaisesRegex(AuthorityResolutionConflict, "shared-capacity"):
+            resolver.resolve(source_ref, checkpoint_ref=self.harness.checkpoint["id"])
+
 
 class CompanyFactsFrameContractTests(unittest.TestCase):
     """P13z: a repeated prior-year quarter has no calendar frame.

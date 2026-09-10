@@ -375,15 +375,20 @@ class ConnectorTransportExecutor:
                     reservation["id"], "settle-released"))
             raise
         self._barrier("after_quota_reserved")
+        reserved_payload = {
+            "reservation_ref": reservation["id"],
+            "reservation_hash": reservation["content_hash"],
+            "physical_attempt_number": reservation["physical_attempt_number"],
+        }
+        # Preserve the byte-level legacy journal contract when this workspace
+        # has no shared capacity authority.  A null field is still a schema
+        # change to closed replay consumers.
+        if shared_reservation_ref is not None:
+            reserved_payload["shared_capacity_reservation_ref"] = shared_reservation_ref
         self._journal.append(
             admission.request["id"],
             "reserved",
-            {
-                "reservation_ref": reservation["id"],
-                "reservation_hash": reservation["content_hash"],
-                "physical_attempt_number": reservation["physical_attempt_number"],
-                "shared_capacity_reservation_ref": shared_reservation_ref,
-            },
+            reserved_payload,
         )
         self._barrier("after_reserved")
 
@@ -421,19 +426,21 @@ class ConnectorTransportExecutor:
 
         started_at = _wire_time(self._clock())
         shared_capacity.dispatched()
+        transport_payload = {
+            "reservation_ref": reservation["id"],
+            "reservation_hash": reservation["content_hash"],
+            "physical_attempt_number": reservation["physical_attempt_number"],
+            "adapter_request": adapter_request,
+            "adapter_request_hash": adapter_request["content_hash"],
+            "started_at": started_at,
+            "raw_sink_ref": adapter_request["raw_sink_ref"],
+        }
+        if shared_reservation_ref is not None:
+            transport_payload["shared_capacity_reservation_ref"] = shared_reservation_ref
         self._journal.append(
             admission.request["id"],
             "transport_started",
-            {
-                "reservation_ref": reservation["id"],
-                "reservation_hash": reservation["content_hash"],
-                "physical_attempt_number": reservation["physical_attempt_number"],
-                "adapter_request": adapter_request,
-                "adapter_request_hash": adapter_request["content_hash"],
-                "started_at": started_at,
-                "raw_sink_ref": adapter_request["raw_sink_ref"],
-                "shared_capacity_reservation_ref": shared_reservation_ref,
-            },
+            transport_payload,
             event_at=started_at,
         )
         self._barrier("after_transport_started")

@@ -1,0 +1,7 @@
+# Connector journal shared-capacity compatibility repair
+
+The shared connector capacity integration wrote `shared_capacity_reservation_ref: null` into every legacy `reserved` and `transport_started` runner-journal payload. `AuthorityResolver` deliberately treats these payloads as closed authority records, so all successful legacy connector runs became unresolvable. The broad failures in research execution, review, closure, SEC facts, thesis impact, and answer refresh were downstream manifestations of that single shape drift.
+
+The executor now omits the field entirely when no shared capacity reservation exists, preserving the historical wire bytes. For a governed shared-capacity run, the resolver accepts the additive field only when both barriers carry the same nonempty `shared-connector-capacity-reservation:` reference. A missing counterpart, wrong namespace, mismatch, or any unrelated extra field remains rejected.
+
+Validation used no live state or transport. The focused authority, connector, research execution/review/closure, SEC facts, and thesis suites passed 99 substantive tests; the command also named one nonexistent test module and therefore exited with that isolated loader error. The correctly named answer-refresh canary plus shared-capacity and thesis-production suites passed 15 tests. The dedicated authority suite passed 10 tests, including exact shared binding success and mismatch rejection.

@@ -666,20 +666,36 @@ class ConnectorAuthorityResolver:
             adapter_request = validate_connector_adapter_request(transport_payload["adapter_request"])
         except Exception as exc:
             raise AuthorityResolutionConflict("transport barrier lacks a valid AdapterRequest") from exc
-        if (
-            set(transport_payload) != {
+        legacy_transport_keys = {
                 "adapter_request", "adapter_request_hash", "physical_attempt_number",
                 "raw_sink_ref", "reservation_hash", "reservation_ref", "started_at",
             }
+        legacy_reserved_keys = {
+                "physical_attempt_number", "reservation_hash", "reservation_ref"
+            }
+        shared_key = "shared_capacity_reservation_ref"
+        shared_reserved = reserved_payload.get(shared_key)
+        shared_transport = transport_payload.get(shared_key)
+        shared = shared_reserved is not None or shared_transport is not None
+        if shared and (
+            not isinstance(shared_reserved, str)
+            or not shared_reserved.startswith("shared-connector-capacity-reservation:")
+            or shared_transport != shared_reserved
+        ):
+            raise AuthorityResolutionConflict(
+                "runner journal shared-capacity reservation binding is invalid"
+            )
+        expected_transport_keys = legacy_transport_keys | ({shared_key} if shared else set())
+        expected_reserved_keys = legacy_reserved_keys | ({shared_key} if shared else set())
+        if (
+            set(transport_payload) != expected_transport_keys
             or set(observed_payload) != {
                 "adapter_request_hash", "attempt_outcome", "commit_context",
                 "completed_at", "error", "observation", "physical_attempt_number",
                 "raw_object", "reservation_hash", "reservation_ref", "retry_at",
                 "started_at",
             }
-            or set(reserved_payload) != {
-                "physical_attempt_number", "reservation_hash", "reservation_ref"
-            }
+            or set(reserved_payload) != expected_reserved_keys
             or set(responded_payload) != {"reservation_ref", "response"}
         ):
             raise AuthorityResolutionConflict("runner journal payload shape drifted")
