@@ -9,6 +9,7 @@ already done, and failing to name work that is not.
 from __future__ import annotations
 
 import subprocess
+import sqlite3
 import sys
 import tempfile
 import textwrap
@@ -171,6 +172,43 @@ class CoordinatorTests(unittest.TestCase):
             }])
         ninth = coordinator.dispatch_once()
         self.assertEqual(ninth["company_ref"], "company:8")
+
+    def test_more_than_forty_calendar_revisions_do_not_hide_an_open_occurrence(self):
+        connection = sqlite3.connect(":memory:")
+        self.addCleanup(connection.close)
+        connection.row_factory = sqlite3.Row
+        connection.execute(
+            "CREATE TABLE research_events(event_id TEXT,company_ref TEXT,kind TEXT,"
+            "occurred_at TEXT)"
+        )
+        records = {}
+        for number in range(41):
+            ref = f"event:new:{number:02d}"
+            connection.execute(
+                "INSERT INTO research_events VALUES(?,?,?,?)",
+                (ref, "company:A", "calendar", f"2026-09-10T00:{number:02d}:00Z"),
+            )
+            records[ref] = {"occurrence_ref": "occurrence:revised", "window": "preview"}
+        connection.execute(
+            "INSERT INTO research_events VALUES(?,?,?,?)",
+            ("event:older-open", "company:A", "calendar", "2026-09-09T00:00:00Z"),
+        )
+        records["event:older-open"] = {
+            "occurrence_ref": "occurrence:older-open", "window": "preview"}
+
+        class Events:
+            def event(self, ref):
+                return records[ref]
+
+        with patch("dalton_core.earnings_season.occurrence_of",
+                   side_effect=lambda event, now=None: dict(event)), patch(
+                       "dalton_core.earnings_season.already_done", return_value=False):
+            found = season.open_occurrences(
+                connection, Events(), company_refs=["company:A"], limit=None)
+        self.assertEqual(
+            [row["occurrence_ref"] for row in found],
+            ["occurrence:revised", "occurrence:older-open"],
+        )
 
     def test_model_configuration_change_releases_the_exact_window(self):
         row = {"company_ref": "company:A", "occurrence_ref": "occurrence:A",

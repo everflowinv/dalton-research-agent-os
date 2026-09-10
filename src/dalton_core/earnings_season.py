@@ -397,9 +397,18 @@ def open_occurrences(
     out: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for company_ref in company_refs:
-        for event in events.events(
-            company_ref=company_ref, kind="calendar", limit=40
-        ):
+        # Read the finite authority set directly. A fixed newest-N slice can
+        # contain repeated calendar revisions and hide an older occurrence
+        # whose window is still open; the caller cannot repair that by asking
+        # for ``limit=None`` after the truncation already happened here.
+        event_refs = connection.execute(
+            "SELECT event_id FROM research_events WHERE company_ref=? AND kind='calendar' "
+            "ORDER BY occurred_at DESC,event_id DESC", (company_ref,),
+        ).fetchall()
+        for ref in event_refs:
+            event = events.event(ref["event_id"])
+            if event is None:
+                continue
             occurrence = occurrence_of(event, now=now)
             if occurrence is None:
                 continue
