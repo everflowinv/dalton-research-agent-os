@@ -1,0 +1,138 @@
+{
+ "artefact": {
+  "artefact_kind": "conviction_call",
+  "cited_tags": [],
+  "confidence": "medium",
+  "expected_sections": [
+   "我们的看法",
+   "市场的看法",
+   "市场错在哪",
+   "靠拢路径",
+   "预期差",
+   "可观察信号",
+   "风险回报",
+   "证伪条件"
+  ],
+  "hash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "prior": null,
+  "question": null,
+  "ref": "conviction-call-proposal:golden-pathway-without-observables",
+  "sections": [
+   {
+    "body": "订单转收入的时滞被市场低估，FY27 增速会高于街上的建模",
+    "claim_refs": [
+     "thesis-version:golden-acn-1"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "我们的看法"
+   },
+   {
+    "body": "卖方多数把 FY27 收入增速建在 5% 附近，理由是 discretionary 支出还在收缩；DebateMap 记的 market_position 是 bear",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "市场的看法"
+   },
+   {
+    "body": "街上把 bookings 与收入建成同期，忽略了两到四个季度的时滞",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "市场错在哪"
+   },
+   {
+    "body": "随着时间推移，市场会认识到时滞的存在并重新定价",
+    "claim_refs": [
+     "catalyst-entry:golden-acn-earnings-2026-09-25"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "靠拢路径"
+   },
+   {
+    "body": "",
+    "claim_refs": [],
+    "gaps": [
+     "这个 Core 上还没有 consensus authority（P11b 未建），所以我们的预测与街上的差没有办法逐项算出来"
+    ],
+    "numbers": [],
+    "title": "预期差"
+   },
+   {
+    "body": "2026-09-25：市场情绪转向对 ACN 更积极\n日期未知：卖方逐步上调 FY27 预测",
+    "claim_refs": [
+     "catalyst-entry:golden-acn-earnings-2026-09-25",
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "可观察信号"
+   },
+   {
+    "body": "上行：重新定价带来约 55% 上行\n下行：时滞假设错，约 20% 下行\n对照 Playbook 标准：met——55% upside against a 50% standard",
+    "claim_refs": [
+     "debate:golden-bookings"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "风险回报"
+   },
+   {
+    "body": "连续两个季度 book-to-bill 低于 1.0",
+    "claim_refs": [
+     "thesis-version:golden-acn-1"
+    ],
+    "gaps": [],
+    "numbers": [],
+    "title": "证伪条件"
+   }
+  ],
+  "shown_claims": [],
+  "subject_ref": "company:sec-cik:0001467373",
+  "title": "company:sec-cik:0001467373 long (6_12_months)"
+ },
+ "case_ref": "pathway-without-observables",
+ "expected": {
+  "deterministic": {},
+  "rationale": "分歧本身是好的（时滞是一个可争论的机制），但路径全是「市场会认识到」与「卖方会上调」——后者是结果不是原因，前者不可观测。pathway_is_observable 低，variant_view_is_variant 仍然可以给 3。",
+  "score_ranges": {
+   "consensus_gap_named": [
+    3,
+    4
+   ],
+   "falsifiers_bound_to_a_thesis": [
+    3,
+    4
+   ],
+   "horizon_matches_the_direction": [
+    3,
+    4
+   ],
+   "not_a_paraphrase_of_the_price": [
+    2,
+    3
+   ],
+   "pathway_is_observable": [
+    0,
+    1
+   ],
+   "risk_reward_against_the_standard": [
+    2,
+    3
+   ],
+   "variant_view_is_variant": [
+    3,
+    4
+   ]
+  },
+  "score_ranges_are_calibration_only": true
+ },
+ "note": "反例：一个真的分歧配上一条不可观测的路径。机械检查只能看到「有一步挂了日历行」，看不出那一步说的是情绪；判官必须看得出来。",
+ "rubric": "conviction_call",
+ "source": "手写；用 conviction_call.conviction_call_artefact 从手写的 ConvictionCallProposal 记录渲染，论断取自 live Core 只读副本 2026-09-09 里 ACN 的真实材料（订单时滞、GCC 内部化）"
+}
