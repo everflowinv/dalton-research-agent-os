@@ -131,6 +131,7 @@ CHANGE_REASON_LABELS = {
     "assumption_review": "复核了假设",
     "evidence_thicker": "证据变厚了",
     "human_revision": "人改的",
+    "imported_prior": "从以前的资料导入的",
 }
 ASSUMPTION_KIND_LABELS = {"estimate": "模型估的", "human": "人写的", "actual": "已报实际"}
 QUALITY_CHECK_LABELS = {

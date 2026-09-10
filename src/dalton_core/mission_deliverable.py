@@ -52,6 +52,9 @@ DELIVERABLE_KINDS: tuple[str, ...] = (
     # rule that a figure with no live Claim behind it is refused.
     "event_note",
 )
+#: The one ``change_reason`` a version zero may carry, and the only version it
+#: may be carried on. Named here so the two rules read as one thing.
+IMPORT_CHANGE_REASON = "imported_prior"
 MAX_SECTIONS = 24
 MAX_BODY_CHARS = 6000
 GAP_MARKER = "缺来源"
@@ -206,10 +209,28 @@ def validate_revision(value: Any) -> dict[str, Any] | None:
     }
 
 
+#: The gap a figure in an imported prior document is recorded as. It is not a
+#: refusal, because an import asserts nothing: the figure rule exists to stop
+#: *this system* writing a number it cannot cite, and a v0 is a record of what
+#: a document said, bound to that document by ref and hash.
+IMPORTED_FIGURE_GAP = "上一版里的数字，未在本系统重新核对"
+
+
 def validate_section(
-    section: Mapping[str, Any], *, live_claim_refs: set[str] | None = None
+    section: Mapping[str, Any],
+    *,
+    live_claim_refs: set[str] | None = None,
+    imported: bool = False,
 ) -> dict[str, Any]:
-    """One closed section: a title, a body or a gap, and traceable numbers."""
+    """One closed section: a title, a body or a gap, and traceable numbers.
+
+    ``imported`` relaxes exactly one rule and no others: a figure in the body
+    with no Claim behind it becomes a recorded gap instead of a refusal. An
+    imported v0 is a prior document, not an assertion this system is making,
+    and the alternative -- stripping the numbers out of an old screen so it
+    would pass -- would destroy the thing being imported. Every other check
+    still applies, and a v0 still may not cite a Claim that does not exist.
+    """
 
     if not isinstance(section, Mapping):
         raise MissionDeliverableValidationError("section must be an object")
@@ -272,14 +293,17 @@ def validate_section(
     ):
         raise MissionDeliverableValidationError("section.gaps must be a list of short strings")
     stray = unsourced_numbers(body, checked)
-    if stray:
+    if stray and not imported:
         raise MissionDeliverableConflict(
             f"section「{title}」carries figures with no Claim behind them: {stray[:5]}；"
             f"写 {GAP_MARKER} 而不是猜一个数字"
         )
+    recorded = [gap.strip()[:300] for gap in gaps]
+    if stray and imported:
+        recorded.append(f"{IMPORTED_FIGURE_GAP}：{'、'.join(stray[:5])}")
     return {
         "title": title, "body": body.strip(), "claim_refs": list(dict.fromkeys(claim_refs)),
-        "numbers": checked, "gaps": [gap.strip()[:300] for gap in gaps],
+        "numbers": checked, "gaps": recorded[:20],
     }
 
 
@@ -296,6 +320,80 @@ class MissionDeliverableAuthority:
         )
         self.connection.executescript(_SCHEMA_PATH.read_text(encoding="utf-8"))
         self._widen_kind_check()
+        self._admit_version_zero()
+
+    def _admit_version_zero(self) -> None:
+        """W3: admit v0 on a Core built when 1 was the floor.
+
+        Same shape and the same reason as ``_widen_kind_check`` above: the
+        constraint lives in the table, ``CREATE TABLE IF NOT EXISTS`` does not
+        revisit a table that exists, and an unmigrated Core would refuse the
+        import with an ``IntegrityError`` rather than a sentence. Sentinelled
+        on the constraint text itself, so this runs at most once.
+        """
+
+        row = self.connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' "
+            "AND name='mission_deliverable_versions'"
+        ).fetchone()
+        if row is None or "version_number >= 0" in (row["sql"] or ""):
+            return
+        if self.connection.in_transaction:
+            raise MissionDeliverableConflict(
+                "the deliverable version-zero migration requires no open transaction"
+            )
+        self.connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            self.connection.executescript(
+                """
+                BEGIN IMMEDIATE;
+                DROP TRIGGER IF EXISTS mission_deliverables_authorized_insert;
+                DROP TRIGGER IF EXISTS mission_deliverables_no_update;
+                DROP TRIGGER IF EXISTS mission_deliverables_no_delete;
+                CREATE TABLE mission_deliverable_versions_v3 (
+                    version_id TEXT PRIMARY KEY,
+                    deliverable_ref TEXT NOT NULL,
+                    version_number INTEGER NOT NULL CHECK(version_number >= 0),
+                    prior_version_ref TEXT REFERENCES mission_deliverable_versions_v3(version_id),
+                    mission_version_ref TEXT NOT NULL REFERENCES coverage_mission_versions(mission_version_id),
+                    mission_version_hash TEXT NOT NULL,
+                    playbook_version_ref TEXT NOT NULL,
+                    playbook_version_hash TEXT NOT NULL,
+                    kind TEXT NOT NULL CHECK(kind IN (
+                        'industry_framework','initial_screen','industry_model','company_model',
+                        'forecast_lines','investment_memo','weekly_brief','event_note'
+                    )),
+                    subject_ref TEXT NOT NULL,
+                    record_json TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    actor_ref TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(deliverable_ref, version_number)
+                );
+                INSERT INTO mission_deliverable_versions_v3 SELECT * FROM mission_deliverable_versions;
+                DROP TABLE mission_deliverable_versions;
+                ALTER TABLE mission_deliverable_versions_v3 RENAME TO mission_deliverable_versions;
+                CREATE INDEX IF NOT EXISTS idx_mission_deliverables_by_subject
+                ON mission_deliverable_versions(mission_version_ref, subject_ref, kind, created_at);
+                CREATE TRIGGER mission_deliverables_authorized_insert
+                BEFORE INSERT ON mission_deliverable_versions
+                WHEN dalton_mission_deliverable_authorized() = 0 BEGIN
+                    SELECT RAISE(ABORT, 'mission deliverable insert requires MissionDeliverableAuthority'); END;
+                CREATE TRIGGER mission_deliverables_no_update
+                BEFORE UPDATE ON mission_deliverable_versions BEGIN
+                    SELECT RAISE(ABORT, 'mission deliverables are append-only'); END;
+                CREATE TRIGGER mission_deliverables_no_delete
+                BEFORE DELETE ON mission_deliverable_versions BEGIN
+                    SELECT RAISE(ABORT, 'mission deliverables are append-only'); END;
+                COMMIT;
+                """
+            )
+        finally:
+            self.connection.execute("PRAGMA foreign_keys = ON")
+        if self.connection.execute("PRAGMA foreign_key_check").fetchall():
+            raise MissionDeliverableConflict(
+                "the deliverable version-zero migration broke foreign keys"
+            )
 
     def _widen_kind_check(self) -> None:
         """P14a: admit ``event_note`` on a Core built before that kind existed.
@@ -455,7 +553,18 @@ class MissionDeliverableAuthority:
         actor_ref: str,
         idempotency_key: str | None = None,
         revision: Mapping[str, Any] | None = None,
+        as_version_zero: bool = False,
+        gate: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
+        """Store the next version of one deliverable chain.
+
+        ``as_version_zero`` is W3's import: this document existed before the
+        system did, so it goes in at 0 and the first thing the system writes
+        goes in at 1 pointing back at it. It is refused on a chain that
+        already has a version, because a chain can only start once, and it
+        requires ``change_reason: imported_prior``.
+        """
+
         if kind not in DELIVERABLE_KINDS:
             raise MissionDeliverableValidationError(f"kind must be one of {list(DELIVERABLE_KINDS)}")
         subject_ref = _text(subject_ref, "subject_ref", maximum=256)
@@ -475,8 +584,22 @@ class MissionDeliverableAuthority:
             raise MissionDeliverableConflict("subject is not in the mission universe")
         if not isinstance(sections, Sequence) or not 1 <= len(sections) <= MAX_SECTIONS:
             raise MissionDeliverableValidationError(f"sections must be 1..{MAX_SECTIONS} entries")
+        if as_version_zero:
+            reason = (revision or {}).get("change_reason")
+            if reason != IMPORT_CHANGE_REASON:
+                raise MissionDeliverableValidationError(
+                    f"a version zero must carry change_reason {IMPORT_CHANGE_REASON!r}: "
+                    "it is not a revision of anything, it is where the chain starts"
+                )
+        elif (revision or {}).get("change_reason") == IMPORT_CHANGE_REASON:
+            raise MissionDeliverableValidationError(
+                f"{IMPORT_CHANGE_REASON!r} is only legal on an imported version zero"
+            )
         live = self.live_claim_version_refs()
-        checked = [validate_section(section, live_claim_refs=live) for section in sections]
+        checked = [
+            validate_section(section, live_claim_refs=live, imported=as_version_zero)
+            for section in sections
+        ]
         if not any(section["body"] for section in checked):
             raise MissionDeliverableConflict("a deliverable with no written section is an empty shell")
         summary = _text(summary, "summary", maximum=2000)
@@ -505,6 +628,13 @@ class MissionDeliverableAuthority:
             # passed and names the refs that occasioned it.
             "revision": validate_revision(revision),
         }
+        if gate is not None:
+            # P10c's exit-gate self-assessment, stored rather than left to
+            # live as one line of prose in a stage record's rationale. Out of
+            # the body hash below on purpose: a gate is a reading of a
+            # document, not part of it, and re-reading it must not mint a
+            # version.
+            record["gate"] = json.loads(json.dumps(dict(gate), ensure_ascii=False))
         # What the document says, without its version number or timestamp: an
         # unchanged body is a duplicate, not a new version.
         #
@@ -524,8 +654,16 @@ class MissionDeliverableAuthority:
                 "SELECT version_id, version_number, content_hash FROM mission_deliverable_pointer "
                 "WHERE deliverable_ref=?", (deliverable_ref,),
             ).fetchone()
-            version = 1 if pointer is None else int(pointer["version_number"]) + 1
-            prior = None if pointer is None else pointer["version_id"]
+            if as_version_zero and pointer is not None:
+                raise MissionDeliverableConflict(
+                    "this chain already has a version; a prior document can "
+                    "only be imported into a chain that has not started"
+                )
+            if as_version_zero:
+                version, prior = 0, None
+            else:
+                version = 1 if pointer is None else int(pointer["version_number"]) + 1
+                prior = None if pointer is None else pointer["version_id"]
             record["version"] = version
             record["prior_version_ref"] = prior
             record["id"] = f"mission-deliverable-version:{content_hash({'ref': deliverable_ref, 'version': version})[:32]}"
@@ -580,6 +718,8 @@ class MissionDeliverableAuthority:
 __all__ = [
     "DELIVERABLE_KINDS",
     "GAP_MARKER",
+    "IMPORTED_FIGURE_GAP",
+    "IMPORT_CHANGE_REASON",
     "MissionDeliverableAuthority",
     "MissionDeliverableConflict",
     "MissionDeliverableError",

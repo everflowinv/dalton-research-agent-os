@@ -8,7 +8,11 @@
 CREATE TABLE IF NOT EXISTS mission_deliverable_versions (
     version_id TEXT PRIMARY KEY,
     deliverable_ref TEXT NOT NULL,
-    version_number INTEGER NOT NULL CHECK(version_number >= 1),
+    -- 0 is legal and means one thing only: a document that already existed
+    -- before this system did, imported so that the chain starts where the
+    -- fund's thinking started (W3). Every version this system writes is 1 or
+    -- above, and v1 points back at v0 like any other successor.
+    version_number INTEGER NOT NULL CHECK(version_number >= 0),
     prior_version_ref TEXT REFERENCES mission_deliverable_versions(version_id),
     mission_version_ref TEXT NOT NULL REFERENCES coverage_mission_versions(mission_version_id),
     mission_version_hash TEXT NOT NULL,

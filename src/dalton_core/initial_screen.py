@@ -53,11 +53,30 @@ SECTION_GUIDANCE: tuple[str, ...] = (
     "",  # valuation: never drafted, see VALUATION_GAP
     "写数据跟踪：应该盯住哪些可观察的高频或定期数据来验证或证伪上面的判断。",
 )
+#: How much of one prior section the drafter is shown. Enough to judge, not
+#: enough to copy comfortably, and bounded so a long old memo cannot crowd out
+#: the Claims the new version has to be written from.
+MAX_PRIOR_SECTION_CHARS = 1200
 VALUATION_GAP = (
     "估值一节按 Playbook 的数字纪律留空：市场价格、股本、汇率、利率与 consensus 五类正式 authority "
     "尚未接入，写任何倍数或目标价都会是无来源的数字。"
 )
 GATE_QUESTION_CHECKS = ("source_base", "number_provenance", "key_driver", "street_and_risk")
+#: What one gate item can say about itself. ``passed`` / ``failed`` are the
+#: structural checks below; ``imported`` is W3's third word and means the item
+#: was never checked because the document was not written here -- it is a
+#: prior screen brought in as v0, and answering the fund's exit gate about
+#: somebody's 2024 document would be a fabrication either way it came out.
+GATE_ITEM_STATUSES = ("passed", "failed", "imported")
+#: The standing instruction the drafter is given when there is a prior version.
+#: The whole of W3 in three sentences: read it, judge it, do not copy it.
+PRIOR_REFERENCE_INSTRUCTION = (
+    "上一版是我们自己以前的判断，不是事实，也不是本版的结论。逐条处理它的关注点与 debate："
+    "仍然成立 / 已经变了 / 已经有答案，每一条都要用下面的 C、N 材料说明依据；"
+    "拿不出依据的，写成本版的未决问题。"
+    "不要照抄上一版的结论、措辞或数字——上一版的数字没有在本系统里核对过，"
+    "本版的每个数字只能来自 N 标签。"
+)
 
 
 # C/N tags are scaffolding the prompt introduced, not reader-facing provenance
@@ -398,7 +417,18 @@ def build_section_prompt(
     mission: Mapping[str, Any],
     context: Mapping[str, Any],
     checklist: Sequence[Mapping[str, Any]] = (),
+    prior_reference: Mapping[str, Any] | None = None,
 ) -> str:
+    """One section's prompt, and optionally the previous version beside it.
+
+    ``prior_reference`` is W3's block: what this fund said about this company
+    last time, with its date and its age, and the standing instruction to
+    judge each prior question rather than restate it. It is appended last, so
+    the hard rules above -- and in particular "a figure only by citing an N
+    tag" -- are read before the prior text is, and it carries its own
+    reminder that the prior document's numbers were never verified here.
+    """
+
     lines = [
         "You are drafting one section of an equity research Initial Screen for a fund's own file.",
         "Write in Chinese, in full sentences, for a portfolio manager who knows the sector.",
@@ -445,7 +475,41 @@ def build_section_prompt(
     lines.append(f"Statements available ({len(context['claims'])}):")
     for item in context["claims"]:
         lines.append(f"{item['tag']} [{item['period']}] {item['statement']}")
+    lines.extend(render_prior_reference(prior_reference))
     return "\n".join(lines)
+
+
+def render_prior_reference(prior_reference: Mapping[str, Any] | None) -> list[str]:
+    """The 「上一版（内部，YYYY-MM）」 block, or nothing at all.
+
+    Nothing at all when there is no prior version, and that absence is the
+    normal case: most companies have no earlier file, and a heading that says
+    "previous version: none" is noise the model has to read past.
+    """
+
+    if not prior_reference:
+        return []
+    as_of = str(prior_reference.get("as_of") or "")
+    months = prior_reference.get("age_months")
+    age = f"，距今约 {months} 个月" if isinstance(months, int) else ""
+    lines = [
+        "",
+        f"上一版（内部，{as_of[:7]}{age}）——参考，不是结论：",
+        PRIOR_REFERENCE_INSTRUCTION,
+    ]
+    for section in prior_reference.get("sections") or ():
+        title = str(section.get("title") or "").strip()
+        body = str(section.get("body") or "").strip()
+        if not title and not body:
+            continue
+        lines.append(f"【{title}】{body[:MAX_PRIOR_SECTION_CHARS]}")
+        gaps = [str(gap).strip() for gap in (section.get("gaps") or ()) if str(gap).strip()]
+        if gaps:
+            lines.append("  当时未决：" + "、".join(gaps[:5]))
+    refs = [str(ref) for ref in (prior_reference.get("refs") or ())][:8]
+    if refs:
+        lines.append("上一版出处：" + "、".join(refs))
+    return lines
 
 
 def parse_section_output(
@@ -496,12 +560,20 @@ def assess_exit_gate(
     playbook: Mapping[str, Any],
     checklist_entry: Mapping[str, Any],
     sections: Sequence[Mapping[str, Any]],
+    delta_vs_prior: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The Playbook's four questions, answered by structural checks only.
 
     Nothing here asks a model whether its own document is good.  Two questions
     are facts about the mission's source base and the publish-time number
     check; two are facts about which sections were actually written.
+
+    ``delta_vs_prior`` is W3's fifth block and is deliberately **not** a fifth
+    answer: it is reported, never a trigger. What changed since the previous
+    version is the question the owner asked to see on every re-issue, and it
+    is also a question whose right answer is often "nothing much" -- a gate
+    that failed on a quiet quarter would be a gate that punishes an honest
+    document. So it sits beside ``answers`` where ``all()`` never sees it.
     """
 
     stage = next(
@@ -547,7 +619,11 @@ def assess_exit_gate(
         },
     ]
     answers = [
-        {**item, "question": questions[index] if index < len(questions) else item["check"]}
+        {**item, "question": questions[index] if index < len(questions) else item["check"],
+         # The same fact as ``answer``, in the vocabulary an imported gate
+         # also speaks. A reader comparing a v0 to a v1 needs one word list,
+         # not a boolean here and a status there.
+         "status": "passed" if item["answer"] else "failed"}
         for index, item in enumerate(structural)
     ]
     passed = all(item["answer"] for item in answers)
@@ -555,6 +631,8 @@ def assess_exit_gate(
         "schema_version": SCHEMA_VERSION,
         "passed": passed,
         "answers": answers,
+        "delta_vs_prior": None if delta_vs_prior is None
+                          else json.loads(json.dumps(dict(delta_vs_prior), ensure_ascii=False)),
         "rationale": (
             "四问全部为是，文档非空壳，数字零无源" if passed
             else "；".join(item["basis"] for item in answers if not item["answer"])

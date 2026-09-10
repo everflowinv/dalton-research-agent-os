@@ -67,6 +67,10 @@ FIRST_STAGE = "initial_screen"
 CHANGE_REASONS: tuple[str, ...] = (
     "filing_actual", "driver_event", "assumption_review", "evidence_thicker",
     "human_revision",
+    # W3: an imported prior document, legal only on a deliverable v0. Never
+    # produced by this authority; here because the vocabulary is one word list
+    # and a test pins the copies to the canonical tuple.
+    "imported_prior",
 )
 
 MIN_INTERVAL_SECONDS = 60

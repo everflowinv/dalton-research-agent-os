@@ -189,6 +189,14 @@ CHANGE_REASONS: tuple[str, ...] = (
     "evidence_thicker",
     # A person overrode what the system computed.
     "human_revision",
+    # W3: this version is not a revision at all -- it is a document that
+    # already existed, imported so that the chain starts where the fund's
+    # thinking actually started. It is legal on exactly one kind of version:
+    # the v0 of a deliverable chain that has no other version, written by
+    # ``MissionDeliverableAuthority.import_prior``. Nothing computes with an
+    # imported version and nothing may revise one; the next version is the
+    # first thing this system wrote, and it points back here.
+    "imported_prior",
 )
 # How many realised quarters a model keeps beside its forecast. Enough to see a
 # pattern of misses; the version chain holds the rest.

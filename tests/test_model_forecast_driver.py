@@ -822,8 +822,17 @@ class FrozenContractTests(unittest.TestCase):
             DRIVER_FORMULA_HASH,
             "908b13eede153e0fe64717249f01f24ac008a7d7fe8b412c0b6a1425b368fa25")
 
-    def test_the_change_reasons_are_the_owner_s_five(self):
+    def test_the_change_reasons_are_the_owner_s_five_plus_the_import(self):
+        # The owner's five, in ADR-0008's order, and then W3's sixth. The
+        # sixth is not a reason a version changed -- it is a version that
+        # never changed anything, because it is a document that already
+        # existed being put at the head of the chain so the chain starts
+        # where the fund's thinking started. It is legal only on a
+        # deliverable v0; nothing in this module ever writes it.
         self.assertEqual(CHANGE_REASONS, (
+            "filing_actual", "driver_event", "assumption_review",
+            "evidence_thicker", "human_revision", "imported_prior"))
+        self.assertEqual(CHANGE_REASONS[:5], (
             "filing_actual", "driver_event", "assumption_review",
             "evidence_thicker", "human_revision"))
 
