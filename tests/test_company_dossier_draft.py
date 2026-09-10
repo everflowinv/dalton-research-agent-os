@@ -37,6 +37,8 @@ from dalton_core.company_dossier_draft import (
     verify,
 )
 from dalton_core.cockpit_model import purposes
+from dalton_core.company_dossier import load_policy
+from dalton_core.company_dossier_cli import build_dossier_input, dossier_input_fingerprint
 
 COMPANY = {"company_ref": "company:sec-cik:0001467373", "ticker": "ACN"}
 MISSION = {"id": "mission-version:1", "mission_ref": "mission:x",
@@ -85,6 +87,25 @@ class FakeModel:
 
 
 class PromptTests(unittest.TestCase):
+    def test_uncited_prompt_material_changes_the_input_fingerprint(self):
+        plan = {"business_model": {
+            "unit": "business_model", "status": "ready", "reason": None,
+            "structure": ["state"], "new_refs": 1, "stale": True,
+            "material": [{"kind": "claim", "ref": "claim-version:a",
+                          "text": "visible but not cited", "created_at": "2026-09-01"}],
+        }}
+        inputs = dict(
+            company=COMPANY,
+            constitution={"id": "constitution:1", "content_hash": "b" * 64},
+            policy=load_policy(),
+            prior=None, profile=None, model_spec=None,
+        )
+        first = dossier_input_fingerprint(build_dossier_input(plan=plan, **inputs))
+        changed = json.loads(json.dumps(plan))
+        changed["business_model"]["material"][0]["text"] = "changed prompt input"
+        second = dossier_input_fingerprint(build_dossier_input(plan=changed, **inputs))
+        self.assertNotEqual(first, second)
+
     def test_the_purpose_is_registered_by_importing_the_drafter(self):
         self.assertEqual(DRAFT_PURPOSE, "dossier")
         self.assertIn("dossier", purposes())

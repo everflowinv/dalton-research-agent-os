@@ -365,6 +365,30 @@ class AuthorityTests(unittest.TestCase):
         self.assertEqual(again["content_hash"], first["content_hash"])
         self.assertEqual(self.authority.latest(ACN)["id"], first["id"])
 
+    def test_input_fingerprint_has_fresh_stale_and_legacy_unknown_states(self):
+        legacy = self.publish(drafted_sections={
+            "business_model": drafted("business_model", "claim-version:a")})
+        self.assertEqual(self.authority.input_freshness(legacy["id"], "a" * 64), "unknown")
+        candidate = body(drafted_sections={
+            "business_model": drafted("business_model", "claim-version:a"),
+            "segments_and_mix": drafted("segments_and_mix", "claim-version:b")},
+            prior_ref=legacy["id"])
+        candidate["input_fingerprint"] = "d" * 64
+        second = self.authority.publish(candidate)
+        self.assertEqual(second["schema_version"], "0.2")
+        self.assertEqual(self.authority.input_freshness(second["id"], "d" * 64), "fresh")
+        self.assertEqual(self.authority.input_freshness(second["id"], "e" * 64), "stale")
+
+    def test_input_fingerprint_is_bound_by_the_record_hash(self):
+        candidate = body(drafted_sections={
+            "business_model": drafted("business_model", "claim-version:a")})
+        candidate["input_fingerprint"] = "d" * 64
+        published = self.authority.publish(candidate)
+        forged = {key: value for key, value in published.items() if key != "status"}
+        forged["input_fingerprint"] = "e" * 64
+        with self.assertRaises(CompanyDossierConflict):
+            validate_dossier_version(forged)
+
     def test_a_version_citing_nothing_new_is_a_duplicate(self):
         first = self.publish(drafted_sections={
             "business_model": drafted("business_model", "claim-version:a")})

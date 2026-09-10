@@ -600,6 +600,33 @@ def plan_units(
     return plan
 
 
+def build_dossier_input(
+    *, company: Mapping[str, Any], plan: Mapping[str, Any],
+    constitution: Mapping[str, Any], policy: Mapping[str, Any],
+    prior: Mapping[str, Any] | None, profile: Mapping[str, Any] | None,
+    model_spec: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Canonical producer input, reusable by publication and freshness audit."""
+
+    return {
+        "company": dict(company),
+        "units": {unit: dict(plan[unit]) for unit in sorted(plan)},
+        "constitution": {"ref": constitution["id"], "hash": constitution["content_hash"]},
+        "policy": {"ref": policy["policy_ref"], "hash": policy_hash(policy)},
+        "prior": None if prior is None else {
+            "ref": prior["id"], "hash": prior["content_hash"],
+            "classification": prior.get("industry_classification"),
+        },
+        "guidance_profile": profile,
+        "company_model_spec": None if model_spec is None else dict(model_spec),
+    }
+
+
+def dossier_input_fingerprint(value: Mapping[str, Any]) -> str:
+    from .store import content_hash
+    return content_hash(dict(value))
+
+
 def stale_units(
     plan: Mapping[str, Any], *, limit: int = MAX_UNITS_PER_RUN,
     revise: Sequence[str] = (),
@@ -818,6 +845,12 @@ def run_dossier(
             guides, actuals = guidance_material(store, chosen)
             profile = build_profile(company_ref=chosen, guides=guides, actuals=actuals)
             profile_table = render_profile_table(profile)
+        frozen_input = build_dossier_input(
+            company=company, plan=plan, constitution=constitution, policy=policy,
+            prior=prior, profile=profile,
+            model_spec=missions.latest_company_model_spec(chosen),
+        )
+        input_fingerprint = dossier_input_fingerprint(frozen_input)
 
         held_classification = str(
             ((prior or {}).get("industry_classification") or {}).get("classification")
@@ -970,6 +1003,7 @@ def run_dossier(
                     "status": "succeeded", "dossier_status": "unresolvable_refs",
                     "failure_reason": json.dumps(still[:5], ensure_ascii=False)})
                 return summary
+        record["input_fingerprint"] = input_fingerprint
         gate = rubric_gate(store.connection, record, prior=prior)
         summary["rubric"] = gate["summary"]
         if gate["failed"]:
@@ -994,6 +1028,8 @@ def run_dossier(
             "version_ref": published["id"],
             "version_status": published["status"],
             "duplicate_reason": published.get("duplicate_reason"),
+            "input_freshness": authority.input_freshness(
+                published["id"], input_fingerprint),
             **summarise_blocks(blocks),
         })
         return summary
@@ -1186,8 +1222,10 @@ if __name__ == "__main__":  # pragma: no cover - exercised as a subprocess
 __all__ = [
     "HARD_CHECKS",
     "assemble",
+    "build_dossier_input",
     "build_parser",
     "claim_material",
+    "dossier_input_fingerprint",
     "granted_scope",
     "guidance_material",
     "main",

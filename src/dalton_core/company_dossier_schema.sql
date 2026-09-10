@@ -20,6 +20,9 @@ CREATE TABLE IF NOT EXISTS company_dossier_versions (
     -- this version cite something the last one did not" is a read rather than
     -- a walk over the record.
     evidence_scope_hash TEXT NOT NULL,
+    -- 0.2: exact producer input; NULL means a legacy 0.1 version whose
+    -- freshness cannot be reconstructed.
+    input_fingerprint TEXT,
     record_json TEXT NOT NULL,
     content_hash TEXT NOT NULL,
     actor_ref TEXT NOT NULL,
