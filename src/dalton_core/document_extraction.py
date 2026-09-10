@@ -79,12 +79,13 @@ TASK_HASH = content_hash({"task": TASK_REF, "output": OUTPUT_SCHEMA, "window_cha
 
 def validate_model_config(value):
     """Pure closed installation shape check; never reads a credential file."""
-    fields = {"routing_policy_ref", "credential_slot_refs", "model_router_db", "broker_socket",
-              "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"}
+    required = {"routing_policy_ref", "credential_slot_refs", "model_router_db", "broker_socket",
+                "broker_auth_key", "broker_client_id", "expected_agent_id", "budget_db", "budget_policy_ref"}
+    optional = {"call_budget", "purpose_call_budgets"}
     if not isinstance(value, Mapping):
         raise ResearchVerificationError("invalid document extraction model configuration")
     config = dict(value)
-    if set(config) != fields or any(not isinstance(config[k], str) or not config[k] for k in fields - {"credential_slot_refs"}):
+    if set(config) - optional != required or any(not isinstance(config[k], str) or not config[k] for k in required - {"credential_slot_refs"}):
         raise ResearchVerificationError("invalid document extraction model configuration")
     if not isinstance(config["credential_slot_refs"], list) or not config["credential_slot_refs"] or any(
         not isinstance(v, str) or not v for v in config["credential_slot_refs"]):
@@ -94,6 +95,14 @@ def validate_model_config(value):
         raise ResearchVerificationError("invalid broker client or dedicated agent identity syntax")
     if any(not Path(config[k]).is_absolute() for k in ("model_router_db", "budget_db", "broker_socket", "broker_auth_key")):
         raise ResearchVerificationError("document extraction authority and broker paths must be absolute")
+    from .call_budget import CallBudgetError, resolve_call_budget
+    try:
+        resolve_call_budget(config, "validation", defaults={
+            "max_input_tokens": 1, "max_output_tokens": 1,
+            "max_cost_usd": 1.0, "timeout_seconds": 1,
+        })
+    except CallBudgetError as exc:
+        raise ResearchVerificationError(f"invalid model call budget: {exc}") from exc
     return config
 
 
